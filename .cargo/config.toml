@@ -1,0 +1,5 @@
+# Project overrides only. The machine-wide sccache wrapper and `jobs = 8` come from
+# ~/.cargo/config.toml and must not be overridden here (Luke's CLAUDE.md).
+[env]
+# ts-rs writes the generated TypeScript for the editor here (`cargo test -p canvas-proto`).
+TS_RS_EXPORT_DIR = { value = "app/web/src/proto", relative = true }

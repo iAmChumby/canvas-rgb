@@ -1,0 +1,10 @@
+[package]
+name = "canvas-core"
+description = "canvas-rgb engine: canvas, layout, sampling, render loop."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+canvas-proto.workspace = true
+tracing.workspace = true

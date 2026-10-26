@@ -1,0 +1,10 @@
+[package]
+name = "poison-compare"
+description = "Statistical comparison of the Poison port against SignalRGB's effect.html."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+canvas-proto.workspace = true
+canvas-effects.workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "canvas-svc"
+description = "canvas-rgb-svc.exe: Windows service for fans (PawnIO, NCT6687D-R) and the OpenRGB server."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "canvas-rgb-svc"
+path = "src/main.rs"
+
+[dependencies]
+canvas-proto.workspace = true

@@ -1,0 +1,31 @@
+[package]
+name = "canvas-daemon"
+description = "canvas-rgbd.exe (API, render, OpenRGB, capture) and canvas-rgb-cli.exe."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "canvas-rgbd"
+path = "src/main.rs"
+
+[[bin]]
+name = "canvas-rgb-cli"
+path = "src/bin/cli.rs"
+
+[dependencies]
+canvas-proto.workspace = true
+canvas-core.workspace = true
+canvas-effects.workspace = true
+canvas-adapters.workspace = true
+tokio.workspace = true
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+rand.workspace = true

@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/canvas-proto",
+    "crates/canvas-core",
+    "crates/canvas-effects",
+    "crates/canvas-adapters",
+    "crates/canvas-daemon",
+    "crates/canvas-svc",
+    "tools/poison-compare",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+rust-version = "1.85"
+
+[workspace.dependencies]
+canvas-proto = { path = "crates/canvas-proto" }
+canvas-core = { path = "crates/canvas-core" }
+canvas-effects = { path = "crates/canvas-effects" }
+canvas-adapters = { path = "crates/canvas-adapters" }
+
+tokio = { version = "1.45", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+axum = { version = "0.8", features = ["ws"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+ts-rs = { version = "12", features = ["serde-compat"] }
+async-trait = "0.1"
+thiserror = "2"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+rand = "0.8"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = true
