@@ -81,6 +81,11 @@ pub fn openrgb_config_dir() -> PathBuf {
     machine_data_dir().join("openrgb")
 }
 
+/// `%APPDATA%\canvas-rgb\effects\`: user HTML effects (`*.html`, id = file stem).
+pub fn user_effects_dir() -> PathBuf {
+    user_config_dir().join("effects")
+}
+
 pub fn token_path() -> PathBuf {
     user_config_dir().join(TOKEN_FILE)
 }

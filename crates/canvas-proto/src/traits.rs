@@ -4,6 +4,10 @@
 //! - `canvas_core::spawn(settings: EngineSettings) -> std::sync::Arc<dyn Engine>`
 //! - `canvas_effects::registry() -> Vec<EffectFactory>` (exactly the 12 in `EFFECT_IDS`)
 //! - `canvas_effects::create(id: &str) -> Option<Box<dyn Effect>>`
+//! - `canvas_html::HtmlEffect::from_source(id, html, default_overrides) -> Result<HtmlEffect, HtmlError>`
+//!   (implements [`Effect`]; runs SignalRGB-format `effect.html` with an embedded JS engine and
+//!   a Rust Canvas 2D. No browser engine.) Poison ships as SignalRGB's original file through it.
+//!   User HTML effects load from `%APPDATA%\canvas-rgb\effects\*.html` (id = file stem).
 //! - `canvas_adapters::openrgb::OpenRgbAdapter::new(host: &str, port: u16) -> OpenRgbAdapter`
 //!   (implements [`DeviceAdapter`])
 //! - `canvas_adapters::fake::FakeOpenRgbServer::start(devices) -> FakeOpenRgbServer`

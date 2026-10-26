@@ -1,0 +1,10 @@
+[package]
+name = "canvas-html"
+description = "Runs SignalRGB-format HTML effects natively: meta properties, embedded JS, Canvas 2D in Rust. No browser engine."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+canvas-proto.workspace = true
+thiserror.workspace = true

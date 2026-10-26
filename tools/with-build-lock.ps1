@@ -4,21 +4,24 @@
   so only one heavy build runs at a time across every agent (Luke's CLAUDE.md rule).
 
 .EXAMPLE
-  powershell -File tools/with-build-lock.ps1 cargo check -p canvas-core
-  powershell -File tools/with-build-lock.ps1 npm --prefix app/web run build
+  powershell -NoProfile -File tools/with-build-lock.ps1 cargo check -p canvas-core
+  powershell -NoProfile -File tools/with-build-lock.ps1 npm --prefix app/web run build
 
   Never pass -j / --jobs, and never set CARGO_BUILD_JOBS or RUSTC_WRAPPER: the machine's
   sccache wrapper, jobs = 8 and Below Normal priority stay in force.
 #>
-param(
-    [Parameter(Mandatory = $true, ValueFromRemainingArguments = $true)]
-    [string[]] $Command
-)
+# Deliberately no param() block: an advanced script would swallow cargo's `-p` as
+# PowerShell's -PipelineVariable. Every argument passes through in $args untouched.
 
 $ErrorActionPreference = 'Stop'
+$Command = @($args)
+if ($Command.Length -eq 0) {
+    Write-Error 'with-build-lock: usage: with-build-lock.ps1 <command> [args...]'
+    exit 2
+}
 
 foreach ($a in $Command) {
-    if ($a -match '^(-j\d*|--jobs(=.*)?)$') {
+    if ("$a" -match '^(-j\d*|--jobs(=.*)?)$') {
         Write-Error "with-build-lock: '$a' is not allowed; the machine caps jobs at 8."
         exit 2
     }
@@ -56,9 +59,11 @@ try {
     $exe = $Command[0]
     $rest = @()
     if ($Command.Length -gt 1) { $rest = $Command[1..($Command.Length - 1)] }
+    $ErrorActionPreference = 'Continue'
     & $exe @rest
-    exit $LASTEXITCODE
+    $code = $LASTEXITCODE
 } finally {
     if ($held) { $mutex.ReleaseMutex() }
     $mutex.Dispose()
 }
+exit $code

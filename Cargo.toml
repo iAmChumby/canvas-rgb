@@ -4,6 +4,7 @@ members = [
     "crates/canvas-proto",
     "crates/canvas-core",
     "crates/canvas-effects",
+    "crates/canvas-html",
     "crates/canvas-adapters",
     "crates/canvas-daemon",
     "crates/canvas-svc",
@@ -20,6 +21,7 @@ rust-version = "1.85"
 canvas-proto = { path = "crates/canvas-proto" }
 canvas-core = { path = "crates/canvas-core" }
 canvas-effects = { path = "crates/canvas-effects" }
+canvas-html = { path = "crates/canvas-html" }
 canvas-adapters = { path = "crates/canvas-adapters" }
 
 tokio = { version = "1.45", features = ["full"] }
