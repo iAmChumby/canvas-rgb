@@ -32,7 +32,9 @@ if ($env:CARGO_BUILD_JOBS) {
 }
 
 # Global\ so agents in different sessions share it. Same name across Luke's projects.
-$mutex = New-Object System.Threading.Mutex($false, 'Global\agent-heavy-build')
+$lockName = 'Global\agent-heavy-build'
+if ($env:BUILD_LOCK_NAME) { $lockName = $env:BUILD_LOCK_NAME }  # tests only
+$mutex = New-Object System.Threading.Mutex($false, $lockName)
 $waitStart = Get-Date
 $held = $false
 try {
@@ -59,9 +61,39 @@ try {
     $exe = $Command[0]
     $rest = @()
     if ($Command.Length -gt 1) { $rest = $Command[1..($Command.Length - 1)] }
+    # A command may hold the lock for at most this long; then its own process tree is ended
+    # so one runaway (e.g. a debug benchmark) cannot stall every other agent's build.
+    $limitSeconds = 20 * 60
+    if ($env:BUILD_LOCK_LIMIT_SECONDS) { $limitSeconds = [int]$env:BUILD_LOCK_LIMIT_SECONDS }
     $ErrorActionPreference = 'Continue'
-    & $exe @rest
-    $code = $LASTEXITCODE
+    $job = Start-Job -ScriptBlock {
+        param($e, $r, $dir)
+        Set-Location $dir
+        & $e @r 2>&1 | ForEach-Object { "$_" }
+        "__EXIT__$LASTEXITCODE"
+    } -ArgumentList $exe, $rest, (Get-Location).Path
+    $deadline = (Get-Date).AddSeconds($limitSeconds)
+    $code = 1
+    while ($true) {
+        foreach ($line in (Receive-Job $job -ErrorAction SilentlyContinue)) {
+            if ("$line" -match '^__EXIT__(-?\d+)$') { $code = [int]$Matches[1] } else { Write-Host $line }
+        }
+        if ($job.State -ne 'Running') { break }
+        if ((Get-Date) -gt $deadline) {
+            Write-Host "with-build-lock: TIMEOUT after $limitSeconds s; ending '$($Command -join ' ')'"
+            # Start-Job runs in a child powershell.exe of this process; end that tree only.
+            $kids = Get-CimInstance Win32_Process -Filter "ParentProcessId = $PID" | Where-Object { $_.Name -eq 'powershell.exe' }
+            foreach ($k in $kids) { & taskkill.exe /T /F /PID $k.ProcessId 2>&1 | Out-Null }
+            Stop-Job $job -ErrorAction SilentlyContinue
+            $code = 124
+            break
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    foreach ($line in (Receive-Job $job -ErrorAction SilentlyContinue)) {
+        if ("$line" -match '^__EXIT__(-?\d+)$') { $code = [int]$Matches[1] } else { Write-Host $line }
+    }
+    Remove-Job $job -Force
 } finally {
     if ($held) { $mutex.ReleaseMutex() }
     $mutex.Dispose()
