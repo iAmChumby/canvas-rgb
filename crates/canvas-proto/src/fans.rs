@@ -119,11 +119,14 @@ pub enum FanValidationError {
 }
 
 /// The lowest percent a header may be set to (what the API rejects below with 422).
+/// The configured floor can only raise the default: a floor below
+/// [`DEFAULT_FLOOR_PERCENT`] from an imported file, a config edit or a pipe peer is ignored.
 pub fn floor_for(header: &str, configured_floor: u8) -> u8 {
+    let floor = configured_floor.max(DEFAULT_FLOOR_PERCENT);
     if header == CPU_FAN_HEADER {
-        configured_floor.max(CPU_FAN_MIN_PERCENT)
+        floor.max(CPU_FAN_MIN_PERCENT)
     } else {
-        configured_floor
+        floor
     }
 }
 
@@ -187,6 +190,10 @@ mod tests {
         assert_eq!(floor_for("sys_fan1", 20), 20);
         assert_eq!(floor_for(CPU_FAN_HEADER, 20), 30);
         assert_eq!(floor_for(CPU_FAN_HEADER, 40), 40);
+        // A floor below the default (e.g. from an imported file) is ignored.
+        assert_eq!(floor_for("sys_fan1", 0), DEFAULT_FLOOR_PERCENT);
+        assert!(validate_mode("sys_fan1", &FanMode::Fixed { percent: 5 }, 0).is_err());
+        assert_eq!(runtime_floor("sys_fan1", 0, None), DEFAULT_FLOOR_PERCENT);
         assert!(validate_mode("sys_fan1", &FanMode::Fixed { percent: 19 }, 20).is_err());
         assert!(validate_mode("sys_fan1", &FanMode::Fixed { percent: 20 }, 20).is_ok());
         assert!(validate_mode(CPU_FAN_HEADER, &FanMode::Fixed { percent: 29 }, 20).is_err());
