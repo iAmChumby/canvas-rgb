@@ -178,7 +178,7 @@ pub async fn run(boot: Boot, deps: Deps, stop: impl Future<Output = ()>) -> io::
     let core = Arc::new(AsyncMutex::new(build_core(&boot, deps)));
     let pipe_core = Arc::clone(&core);
     tokio::spawn(async move {
-        if let Err(e) = pipe_server::serve(pipe_core, name, first).await {
+        if let Err(e) = pipe_server::serve(pipe_core, name, first, pipe_server::win_peers()).await {
             tracing::error!(error = %e, "pipe server stopped");
         }
     });

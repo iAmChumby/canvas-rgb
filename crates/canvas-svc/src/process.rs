@@ -8,6 +8,8 @@ pub trait ChildProcess: Send {
     /// `Some(exit_code)` once the process has exited, `None` while it runs.
     fn try_wait(&mut self) -> io::Result<Option<i32>>;
     fn kill(&mut self) -> io::Result<()>;
+    /// The OS process ID. The pipe server checks the connecting client against it.
+    fn id(&self) -> u32;
 }
 
 pub trait ProcessSpawner: Send {
@@ -50,5 +52,9 @@ impl ChildProcess for StdChild {
 
     fn kill(&mut self) -> io::Result<()> {
         self.0.kill()
+    }
+
+    fn id(&self) -> u32 {
+        self.0.id()
     }
 }

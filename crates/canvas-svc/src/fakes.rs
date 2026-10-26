@@ -354,16 +354,19 @@ impl FakeProcesses {
             return Err(io::Error::other("fake spawn failure"));
         }
         let exited = Arc::new(AtomicBool::new(false));
-        self.spawns
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .push((exe.to_path_buf(), args.to_vec(), Arc::clone(&exited)));
-        Ok(Box::new(FakeChild { exited }))
+        let pid = {
+            let mut spawns = self.spawns.lock().unwrap_or_else(|p| p.into_inner());
+            let pid = 4000 + spawns.len() as u32;
+            spawns.push((exe.to_path_buf(), args.to_vec(), Arc::clone(&exited)));
+            pid
+        };
+        Ok(Box::new(FakeChild { exited, pid }))
     }
 }
 
 struct FakeChild {
     exited: Arc<AtomicBool>,
+    pid: u32,
 }
 
 impl ChildProcess for FakeChild {
@@ -374,6 +377,10 @@ impl ChildProcess for FakeChild {
     fn kill(&mut self) -> io::Result<()> {
         self.exited.store(true, Ordering::SeqCst);
         Ok(())
+    }
+
+    fn id(&self) -> u32 {
+        self.pid
     }
 }
 

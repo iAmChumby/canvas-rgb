@@ -85,6 +85,12 @@ impl DaemonSupervisor {
         self.quitting = true;
     }
 
+    /// The PID of the daemon this service launched, while that process is running. `None` when
+    /// no daemon is running, so the pipe server then admits any client in the console session.
+    pub fn daemon_pid(&self) -> Option<u32> {
+        self.child.as_ref().map(|c| c.id())
+    }
+
     /// True while a daemon process is running and its heartbeat is fresh.
     pub fn is_connected(&self, now: Instant) -> bool {
         self.child.is_some()
@@ -223,13 +229,14 @@ mod windows_launcher {
                     return Err(error);
                 }
                 CloseHandle(info.hThread);
-                Ok(Box::new(WinChild { process: info.hProcess }))
+                Ok(Box::new(WinChild { process: info.hProcess, pid: info.dwProcessId }))
             }
         }
     }
 
     struct WinChild {
         process: HANDLE,
+        pid: u32,
     }
 
     // SAFETY: the process handle is only used by the supervising thread that owns this child.
@@ -259,6 +266,10 @@ mod windows_launcher {
                 return Err(io::Error::last_os_error());
             }
             Ok(())
+        }
+
+        fn id(&self) -> u32 {
+            self.pid
         }
     }
 
