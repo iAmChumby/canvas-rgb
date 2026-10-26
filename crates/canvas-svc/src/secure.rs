@@ -72,6 +72,9 @@ pub trait FsAcl: Send {
     fn create_dir_protected(&mut self, p: &Path) -> io::Result<()>;
     /// Replaces the DACL of `p` with [`SECURE_SDDL`]'s protected DACL. The owner is not changed.
     fn apply_protected_dacl(&mut self, p: &Path) -> io::Result<()>;
+    /// True if the entry's DACL has any ACCESS_ALLOWED ACE granting a write-class right to any SID other
+    /// than SYSTEM (`S-1-5-18`) and Administrators (`S-1-5-32-544`). A NULL DACL counts as true.
+    fn has_nonadmin_write(&self, p: &Path) -> io::Result<bool>;
 }
 
 /// Secures a directory and reports whether a path can be trusted.
@@ -108,6 +111,12 @@ fn check_tree(fs: &dyn FsAcl, dir: &Path) -> io::Result<()> {
             Ok(true) => {}
             Ok(false) => return Err(offending(&child, "an entry is owned by someone other than SYSTEM or Administrators")),
             Err(e) => return Err(offending(&child, &format!("its owner cannot be read ({e})"))),
+        }
+        // Check for non-admin write permissions
+        match fs.has_nonadmin_write(&child) {
+            Ok(true) => return Err(offending(&child, "an entry has write access granted to a non-admin principal")),
+            Ok(false) => {}
+            Err(e) => return Err(offending(&child, &format!("cannot check write permissions ({e})"))),
         }
         if fs.is_dir(&child)? {
             check_tree(fs, &child)?;
@@ -411,6 +420,233 @@ impl FsAcl for WinFs {
         }
         Ok(())
     }
+
+    fn has_nonadmin_write(&self, p: &Path) -> io::Result<bool> {
+        dacl_grants_nonadmin_write(p)
+    }
+}
+
+/// `ACCESS_ALLOWED_ACE_TYPE`: the only ACE type that grants rights.
+#[cfg(windows)]
+const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+/// `INHERIT_ONLY_ACE`: the ACE applies to children only, not to the object itself.
+#[cfg(windows)]
+const INHERIT_ONLY_ACE_FLAG: u8 = 0x08;
+#[cfg(windows)]
+const GENERIC_WRITE_BIT: u32 = 0x4000_0000;
+#[cfg(windows)]
+const GENERIC_ALL_BIT: u32 = 0x1000_0000;
+/// Write-class rights: FILE_WRITE_DATA (= FILE_ADD_FILE), FILE_APPEND_DATA (= FILE_ADD_SUBDIRECTORY),
+/// FILE_WRITE_EA, FILE_DELETE_CHILD, FILE_WRITE_ATTRIBUTES, DELETE, WRITE_DAC, WRITE_OWNER.
+#[cfg(windows)]
+const WRITE_CLASS_RIGHTS: u32 = 0x0000_0002
+    | 0x0000_0004
+    | 0x0000_0010
+    | 0x0000_0040
+    | 0x0000_0100
+    | 0x0001_0000
+    | 0x0004_0000
+    | 0x0008_0000;
+
+/// The string form of a SID (`S-1-5-32-545`, ...).
+#[cfg(windows)]
+fn sid_string(sid: *mut std::ffi::c_void) -> io::Result<String> {
+    use std::ffi::c_void;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+
+    let mut text: *mut u16 = std::ptr::null_mut();
+    // SAFETY: `sid` points at a valid SID inside a descriptor the caller keeps alive; `text` receives a LocalAlloc'd string.
+    if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut len = 0usize;
+    // SAFETY: the converted string is NUL-terminated.
+    let result = unsafe {
+        while *text.add(len) != 0 {
+            len += 1;
+        }
+        String::from_utf16_lossy(std::slice::from_raw_parts(text, len))
+    };
+    // SAFETY: `text` came from ConvertSidToStringSidW and is freed once.
+    unsafe {
+        LocalFree(text as *mut c_void);
+    }
+    Ok(result)
+}
+
+/// True if the ACL has an ALLOWED ACE that is not inherit-only, grants a write-class right
+/// (or GENERIC_WRITE / GENERIC_ALL), and names a SID other than SYSTEM or Administrators.
+#[cfg(windows)]
+fn acl_grants_nonadmin_write(dacl: *mut windows_sys::Win32::Security::ACL) -> io::Result<bool> {
+    use std::ffi::c_void;
+    use windows_sys::Win32::Security::{GetAce, ACCESS_ALLOWED_ACE, ACE_HEADER};
+
+    // SAFETY: `dacl` is a valid ACL from GetNamedSecurityInfoW, alive while the caller holds its descriptor.
+    let count = unsafe { (*dacl).AceCount };
+    for index in 0..u32::from(count) {
+        let mut ace: *mut c_void = std::ptr::null_mut();
+        // SAFETY: `ace` receives a pointer into the ACL, which is alive.
+        if unsafe { GetAce(dacl, index, &mut ace) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let header = ace as *const ACE_HEADER;
+        // SAFETY: GetAce returned a valid ACE, so its header is readable.
+        let (ace_type, ace_flags) = unsafe { ((*header).AceType, (*header).AceFlags) };
+        if ace_type != ACCESS_ALLOWED_ACE_TYPE || ace_flags & INHERIT_ONLY_ACE_FLAG != 0 {
+            continue;
+        }
+        let allowed = ace as *const ACCESS_ALLOWED_ACE;
+        // SAFETY: an ACCESS_ALLOWED ACE has this layout; the SID starts at `SidStart`.
+        let mask = unsafe { (*allowed).Mask };
+        if mask & (WRITE_CLASS_RIGHTS | GENERIC_WRITE_BIT | GENERIC_ALL_BIT) == 0 {
+            continue;
+        }
+        // SAFETY: `SidStart` is inside the ACE, which is inside the ACL.
+        let sid = unsafe { std::ptr::addr_of!((*allowed).SidStart) } as *mut c_void;
+        if !owner_is_trusted_sid(&sid_string(sid)?) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The DACL check for `p`. A NULL DACL grants everyone everything, so it counts as true.
+#[cfg(windows)]
+fn dacl_grants_nonadmin_write(p: &Path) -> io::Result<bool> {
+    use std::ffi::c_void;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, ACL};
+
+    let target = wide(p.as_os_str());
+    let mut dacl: *mut ACL = std::ptr::null_mut();
+    let mut descriptor: *mut c_void = std::ptr::null_mut();
+    // SAFETY: `target` is NUL-terminated; only the DACL is requested; `dacl` points into `descriptor`,
+    // which is freed below after the DACL has been read.
+    let status = unsafe {
+        GetNamedSecurityInfoW(
+            target.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut dacl,
+            std::ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    let result = if dacl.is_null() { Ok(true) } else { acl_grants_nonadmin_write(dacl) };
+    // SAFETY: `descriptor` came from GetNamedSecurityInfoW and is freed once; `dacl` is not used after this.
+    unsafe {
+        LocalFree(descriptor);
+    }
+    result
+}
+
+#[cfg(all(test, windows))]
+mod win_tests {
+    use super::*;
+    use std::ffi::c_void;
+    use windows_sys::core::BOOL;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SetNamedSecurityInfoW, SE_FILE_OBJECT,
+    };
+    use windows_sys::Win32::Security::{
+        GetSecurityDescriptorDacl, ACL, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+    };
+
+    /// Puts the protected DACL described by `sddl` (`D:P(...)`) on `path`. The owner is not changed.
+    fn set_dacl(path: &Path, sddl: &str) -> io::Result<()> {
+        let text: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
+        let mut descriptor: *mut c_void = std::ptr::null_mut();
+        // SAFETY: `text` is NUL-terminated; `descriptor` receives a LocalAlloc'd buffer freed below.
+        let ok = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(text.as_ptr(), 1, &mut descriptor, std::ptr::null_mut())
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let result = (|| -> io::Result<()> {
+            let mut present: BOOL = 0;
+            let mut dacl: *mut ACL = std::ptr::null_mut();
+            let mut defaulted: BOOL = 0;
+            // SAFETY: `descriptor` is valid until LocalFree below; the out-pointers are valid locals.
+            if unsafe { GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let target = wide(path.as_os_str());
+            // SAFETY: `target` is NUL-terminated; `dacl` points into `descriptor`, alive for the call.
+            let status = unsafe {
+                SetNamedSecurityInfoW(
+                    target.as_ptr(),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    dacl,
+                    std::ptr::null(),
+                )
+            };
+            if status != 0 {
+                return Err(io::Error::from_raw_os_error(status as i32));
+            }
+            Ok(())
+        })();
+        // SAFETY: `descriptor` came from the conversion above and is freed once.
+        unsafe {
+            LocalFree(descriptor);
+        }
+        result
+    }
+
+    /// Restores a DACL that gives the owner full control, so the temp directory can be deleted.
+    /// Declared after the TempDir in each test, so it runs first.
+    struct Restore<'a>(&'a Path);
+
+    impl Drop for Restore<'_> {
+        fn drop(&mut self) {
+            let _ = set_dacl(self.0, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)");
+        }
+    }
+
+    /// A temp directory with a DACL set from `sddl`, checked with the real Win32 path.
+    fn check(sddl: &str) -> io::Result<bool> {
+        let dir = tempfile::tempdir()?;
+        let _restore = Restore(dir.path());
+        set_dacl(dir.path(), sddl)?;
+        has_nonadmin_write_on(dir.path())
+    }
+
+    fn has_nonadmin_write_on(p: &Path) -> io::Result<bool> {
+        dacl_grants_nonadmin_write(p)
+    }
+
+    #[test]
+    fn a_dacl_of_only_system_and_administrators_has_no_nonadmin_write() {
+        assert!(!check("D:P(A;;FA;;;SY)(A;;FA;;;BA)").unwrap());
+    }
+
+    #[test]
+    fn an_allowed_add_file_ace_for_users_is_nonadmin_write() {
+        // FILE_ADD_FILE (0x2) for BUILTIN\Users (S-1-5-32-545).
+        assert!(check("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x2;;;BU)").unwrap());
+    }
+
+    #[test]
+    fn an_inherit_only_users_write_ace_does_not_count() {
+        // IO = INHERIT_ONLY_ACE: it applies to children, not to this directory.
+        assert!(!check("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;OIIO;FW;;;BU)").unwrap());
+    }
+
+    #[test]
+    fn a_users_read_only_ace_is_not_write() {
+        assert!(!check("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;BU)").unwrap());
+    }
 }
 
 #[cfg(test)]
@@ -440,6 +676,8 @@ mod tests {
         /// When set, the node at this path gets a new file ID the moment its DACL is applied,
         /// as if the home had been swapped for another directory during the step.
         swap_id_on: Option<PathBuf>,
+        /// Tracks which paths have non-admin write permissions (for testing)
+        nonadmin_write_on: Vec<PathBuf>,
     }
 
     impl FakeFs {
@@ -521,6 +759,15 @@ mod tests {
                 }
             }
             Ok(())
+        }
+
+        fn has_nonadmin_write(&self, p: &Path) -> io::Result<bool> {
+            // Check if this path has non-admin write permissions (for testing)
+            if self.nonadmin_write_on.contains(&p.to_path_buf()) {
+                Ok(true)
+            } else {
+                Ok(false)
+            }
         }
     }
 
@@ -696,5 +943,47 @@ mod tests {
         assert!(SECURE_SDDL.contains("(A;OICI;FA;;;BA)"));
         assert!(SECURE_SDDL.contains("(A;OICI;0x1200a9;;;BU)"));
         assert!(!SECURE_SDDL.contains(";;;WD)"), "no Everyone grant");
+    }
+
+    #[test]
+    fn a_trusted_owner_child_with_nonadmin_write_fails_closed_unchanged() {
+        let mut fs = FakeFs::default()
+            .with(HOME, dir(true))
+            .with(&under_home("trusted.txt"), file(true));
+        // Mark the child as having non-admin write permissions
+        fs.nonadmin_write_on.push(PathBuf::from(under_home("trusted.txt")));
+        let before = fs.snapshot();
+        let err = secure_home(&mut fs, Path::new(HOME)).unwrap_err();
+        assert!(err.to_string().contains(&under_home("trusted.txt")), "{err}");
+        assert!(err.to_string().contains("non-admin principal"), "{err}");
+        assert_eq!(fs.snapshot(), before, "the tree is unchanged");
+        assert!(!fs.touched(), "nothing created or locked down");
+    }
+
+    #[test]
+    fn a_grandchild_with_nonadmin_write_fails_closed() {
+        let mut fs = FakeFs::default()
+            .with(HOME, dir(true))
+            .with(&under_home("subdir"), dir(true))
+            .with(&under_home(r"subdir\file.txt"), file(true));
+        // Mark the grandchild as having non-admin write permissions
+        fs.nonadmin_write_on.push(PathBuf::from(under_home(r"subdir\file.txt")));
+        let err = secure_home(&mut fs, Path::new(HOME)).unwrap_err();
+        assert!(err.to_string().contains(&under_home(r"subdir\file.txt")), "{err}");
+        assert!(err.to_string().contains("non-admin principal"), "{err}");
+    }
+
+    #[test]
+    fn a_trusted_tree_with_no_nonadmin_write_passes() {
+        let mut fs = FakeFs::default()
+            .with(HOME, dir(true))
+            .with(&under_home("file.txt"), file(true));
+        // Ensure no non-admin write permissions
+        let path_str = under_home("file.txt");
+        let path = Path::new(&path_str);
+        let has_write = fs.has_nonadmin_write(path).unwrap();
+        assert!(!has_write, "no non-admin write permissions");
+        secure_home(&mut fs, Path::new(HOME)).unwrap();
+        assert!(fs.touched(), "the tree was secured");
     }
 }
