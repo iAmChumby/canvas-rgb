@@ -235,7 +235,12 @@ pub fn restore_bios_now(home: &Path, secure: Box<dyn SecureDir>) -> io::Result<u
         tracing::error!(error = ?boot.secure_error(), "restoring BIOS without a secured home (auto-only writes)");
     }
     let mut chip = hardware::open_chip().map_err(io::Error::other)?;
-    FanController::restore_from_file(home, chip.as_mut())
+    if boot.secured() {
+        FanController::restore_from_file(home, chip.as_mut())
+    } else {
+        // The home may be a junction: no file operation there, chip writes only.
+        FanController::restore_chip_only(chip.as_mut())
+    }
 }
 
 /// Production restore, with the real ACL step.

@@ -39,7 +39,16 @@ impl NvmlSource {
     /// Loads NVML, initialises it and opens GPU 0. Any failure is an `Err`, not a panic.
     pub fn open() -> io::Result<Self> {
         // SAFETY: loading a DLL runs its initialiser; `nvml.dll` is the NVIDIA driver library.
-        let library = unsafe { libloading::Library::new("nvml.dll") }.map_err(|e| unavailable("load", e))?;
+        // Only from System32 (where the NVIDIA driver installs it), never the DLL search path:
+        // this runs as LocalSystem, and a PATH directory may be user-writable.
+        let library: libloading::Library = unsafe {
+            libloading::os::windows::Library::load_with_flags(
+                "nvml.dll",
+                libloading::os::windows::LOAD_LIBRARY_SEARCH_SYSTEM32,
+            )
+        }
+        .map_err(|e| unavailable("load", e))?
+        .into();
         // SAFETY: each symbol is looked up under the documented name and signature from nvml.h;
         // the copied function pointers are used only while `library` is alive.
         let (init, handle, temperature, shutdown) = unsafe {

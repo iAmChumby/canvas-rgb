@@ -221,6 +221,14 @@ impl FanController {
     /// Restores BIOS for the headers the saved state names. Used by `--restore-bios`
     /// and by the panic hook, which run without a controller. Returns how many were restored.
     pub fn restore_from_file(home: &std::path::Path, chip: &mut dyn FanChip) -> io::Result<usize> {
+        let count = Self::restore_chip_only(chip)?;
+        store::remove_bios_state(&paths::bios_state_path(home)).map_err(|e| io::Error::other(e.to_string()))?;
+        Ok(count)
+    }
+
+    /// Hands every controllable header to auto and touches no file. Used when the machine home
+    /// could not be secured (it may be a junction), so no file operation happens there.
+    pub fn restore_chip_only(chip: &mut dyn FanChip) -> io::Result<usize> {
         // The saved state is not read here: every controllable header is set to auto regardless.
         let mut count = 0;
         for (ch, spec) in chip.channels().iter().enumerate() {
@@ -229,9 +237,8 @@ impl FanController {
             }
             chip.set_manual(ch, false)?;
             count += 1;
-            tracing::info!(header = spec.id, "restored BIOS control from file");
+            tracing::info!(header = spec.id, "restored BIOS control");
         }
-        store::remove_bios_state(&paths::bios_state_path(home)).map_err(|e| io::Error::other(e.to_string()))?;
         Ok(count)
     }
 
