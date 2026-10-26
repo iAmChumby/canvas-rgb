@@ -1,0 +1,143 @@
+/*
+ * Design tokens. Every color, size, radius and motion value in the editor comes from here.
+ * Palette, type, radius and motion scales are taken from onn-stick's packages/ui/src/tokens.css
+ * (graphite page, five accents, status colours, Schibsted Grotesk + JetBrains Mono, 6-10 px
+ * radii, cubic-bezier(0.2,0.8,0.2,1)). The dot texture is portfolio-site's globals.css.
+ *
+ * Dark is the default. Light applies with data-theme="light", or with the system preference
+ * when the page has no data-theme attribute (Settings > Appearance > System).
+ */
+
+:root {
+  color-scheme: dark;
+
+  /* surfaces */
+  --g1: #0e0f11;          /* page */
+  --sunk: #0a0b0d;        /* wells: the preview frame, input tracks */
+  --panel: #15171a;       /* panels */
+  --raised: #1c1f23;      /* controls at rest */
+  --line: rgba(255, 255, 255, 0.08);
+  --line-2: rgba(255, 255, 255, 0.16);
+  --hover: rgba(255, 255, 255, 0.06);
+  --press: rgba(255, 255, 255, 0.11);
+  --dot: rgba(255, 255, 255, 0.055);
+  --scrim: rgba(0, 0, 0, 0.55);
+
+  /* ink */
+  --ink: #f2f3f5;
+  --dim: #b9bdc3;
+  --mute: #8a8f98;
+  --on-accent: #0e0f11;
+
+  /* accents: five real hues, one per device family and per control role */
+  --a1: #8fb4e8;          /* blue: primary actions, focus */
+  --a2: #b49cf0;          /* violet: profiles, curves */
+  --a3: #5fd0c0;          /* teal: connected devices, fans */
+  --a4: #f08a9a;          /* rose: DRAM */
+  --a5: #e8b98a;          /* peach: keyboard */
+
+  /* status: never an accent hue */
+  --ok: #2fb36b;
+  --work: #4f8cff;
+  --warn: #e8c02c;
+  --down: #e5484d;
+
+  /* live: the hue of the running preview, written by the page at <= 2 Hz */
+  --live-h: 215;
+  --live: hsl(var(--live-h) 78% 72%);
+  --live-soft: hsl(var(--live-h) 55% 55% / 0.16);
+
+  /* type: Schibsted Grotesk for UI and display, JetBrains Mono for every figure */
+  --fu: "Schibsted Grotesk Variable", "Schibsted Grotesk", sans-serif;
+  --fm: "JetBrains Mono Variable", "JetBrains Mono", monospace;
+  --t14: 14px;
+  --t15: 15px;
+  --t16: 16px;
+  --t20: 20px;
+  --t28: 28px;
+  --t40: 40px;
+
+  /* space */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 20px;
+  --s6: 24px;
+  --s8: 32px;
+
+  /* radius: 6-10 px on panels and controls; 20 px only for a rare large surface */
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 10px;
+  --r-xl: 20px;
+
+  /* motion: snappy, 120-260 ms, one curve */
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --dur-fast: 120ms;
+  --dur: 180ms;
+  --dur-slow: 260ms;
+
+  /* focus ring: 2 px accent outline, 3 px offset; the live accent, like every primary action */
+  --focus: var(--live);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --g1: #f3f4f6;
+  --sunk: #e7e9ee;
+  --panel: #ffffff;
+  --raised: #f0f1f4;
+  --line: rgba(15, 18, 24, 0.09);
+  --line-2: rgba(15, 18, 24, 0.2);
+  --hover: rgba(15, 18, 24, 0.05);
+  --press: rgba(15, 18, 24, 0.1);
+  --dot: rgba(15, 18, 24, 0.07);
+  --scrim: rgba(15, 18, 24, 0.35);
+  --ink: #15171a;
+  --dim: #3c4149;
+  --mute: #5f6571;
+  --on-accent: #ffffff;
+  --a1: #2f6fbf;
+  --a2: #6a4bc4;
+  --a3: #13877a;
+  --a4: #c2415a;
+  --a5: #a8612e;
+  --ok: #17894d;
+  --work: #2563eb;
+  --warn: #9a6b00;
+  --down: #c8283a;
+  --live: hsl(var(--live-h) 70% 42%);
+  --live-soft: hsl(var(--live-h) 60% 50% / 0.14);
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+    --g1: #f3f4f6;
+    --sunk: #e7e9ee;
+    --panel: #ffffff;
+    --raised: #f0f1f4;
+    --line: rgba(15, 18, 24, 0.09);
+    --line-2: rgba(15, 18, 24, 0.2);
+    --hover: rgba(15, 18, 24, 0.05);
+    --press: rgba(15, 18, 24, 0.1);
+    --dot: rgba(15, 18, 24, 0.07);
+    --scrim: rgba(15, 18, 24, 0.35);
+    --ink: #15171a;
+    --dim: #3c4149;
+    --mute: #5f6571;
+    --on-accent: #ffffff;
+    --a1: #2f6fbf;
+    --a2: #6a4bc4;
+    --a3: #13877a;
+    --a4: #c2415a;
+    --a5: #a8612e;
+    --ok: #17894d;
+    --work: #2563eb;
+    --warn: #9a6b00;
+    --down: #c8283a;
+    --live: hsl(var(--live-h) 70% 42%);
+    --live-soft: hsl(var(--live-h) 60% 50% / 0.14);
+  }
+}

@@ -1,0 +1,207 @@
+// The editor's one shared snapshot: daemon status, fans, devices, effects, layouts, render
+// and settings, plus the last 60 one-second RPM samples per fan header. Polling runs only while
+// the document is visible (status and fans every 1 s; the rest every 4 s), and an
+// `canvas://state-changed` event refetches everything.
+
+import { useSyncExternalStore } from "react";
+import { api } from "@/lib/endpoints";
+import { messageOf } from "@/lib/errors";
+import { onStateChanged } from "@/lib/host";
+import type { Status } from "@/proto/Status";
+import type { FansStatus } from "@/proto/FansStatus";
+import type { DeviceInfo } from "@/proto/DeviceInfo";
+import type { EffectSummary } from "@/proto/EffectSummary";
+import type { Layout } from "@/proto/Layout";
+import type { RenderState } from "@/proto/RenderState";
+import type { Settings } from "@/proto/Settings";
+
+export const RPM_HISTORY = 60;
+
+export interface Snap {
+  status: Status | null;
+  statusError: string | null;
+  fans: FansStatus | null;
+  fansError: string | null;
+  devices: DeviceInfo[] | null;
+  devicesError: string | null;
+  effects: EffectSummary[] | null;
+  effectsError: string | null;
+  layouts: Layout[] | null;
+  activeLayout: string | null;
+  layoutsError: string | null;
+  render: RenderState | null;
+  settings: Settings | null;
+  settingsError: string | null;
+  rpm: Record<string, number[]>;
+}
+
+let snap: Snap = {
+  status: null,
+  statusError: null,
+  fans: null,
+  fansError: null,
+  devices: null,
+  devicesError: null,
+  effects: null,
+  effectsError: null,
+  layouts: null,
+  activeLayout: null,
+  layoutsError: null,
+  render: null,
+  settings: null,
+  settingsError: null,
+  rpm: {},
+};
+
+const listeners = new Set<() => void>();
+
+export function getSnap(): Snap {
+  return snap;
+}
+
+function subscribe(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
+export function patchSnap(partial: Partial<Snap>): void {
+  snap = { ...snap, ...partial };
+  for (const l of listeners) l();
+}
+
+/** Reads one field of the snapshot. Selectors must return existing references, not new objects. */
+export function useSnap<T>(select: (s: Snap) => T): T {
+  return useSyncExternalStore(
+    subscribe,
+    () => select(snap),
+    () => select(snap),
+  );
+}
+
+// ---- refreshers ----
+
+export async function refreshStatus(): Promise<void> {
+  try {
+    patchSnap({ status: await api.status(), statusError: null });
+  } catch (e) {
+    patchSnap({ statusError: messageOf(e) });
+  }
+}
+
+export async function refreshFans(): Promise<void> {
+  try {
+    const fans = await api.fans();
+    const rpm = { ...snap.rpm };
+    for (const h of fans.headers) {
+      const prev = rpm[h.id] ?? [];
+      rpm[h.id] = [...prev.slice(-(RPM_HISTORY - 1)), h.rpm ?? 0];
+    }
+    patchSnap({ fans, fansError: null, rpm });
+  } catch (e) {
+    patchSnap({ fansError: messageOf(e) });
+  }
+}
+
+export async function refreshDevices(): Promise<void> {
+  try {
+    patchSnap({ devices: (await api.devices()).devices, devicesError: null });
+  } catch (e) {
+    patchSnap({ devicesError: messageOf(e) });
+  }
+}
+
+export async function refreshEffects(): Promise<void> {
+  try {
+    const r = await api.effects();
+    patchSnap({ effects: r.effects, effectsError: null });
+  } catch (e) {
+    patchSnap({ effectsError: messageOf(e) });
+  }
+}
+
+export async function refreshLayouts(): Promise<void> {
+  try {
+    const r = await api.layouts();
+    patchSnap({ layouts: r.layouts, activeLayout: r.active, layoutsError: null });
+  } catch (e) {
+    patchSnap({ layoutsError: messageOf(e) });
+  }
+}
+
+export async function refreshRender(): Promise<void> {
+  try {
+    patchSnap({ render: await api.render() });
+  } catch {
+    // The status error already says whether the daemon answers.
+  }
+}
+
+export async function refreshSettings(): Promise<void> {
+  try {
+    patchSnap({ settings: await api.settings(), settingsError: null });
+  } catch (e) {
+    patchSnap({ settingsError: messageOf(e) });
+  }
+}
+
+export async function refreshAll(): Promise<void> {
+  await Promise.all([
+    refreshStatus(),
+    refreshFans(),
+    refreshDevices(),
+    refreshEffects(),
+    refreshLayouts(),
+    refreshRender(),
+    refreshSettings(),
+  ]);
+}
+
+// ---- sync loop ----
+
+function visible(): boolean {
+  return typeof document === "undefined" || document.visibilityState === "visible";
+}
+
+/** Starts polling and event listening. Returns a stop function. */
+export function startSync(): () => void {
+  let fast: ReturnType<typeof setInterval> | null = null;
+  let slow: ReturnType<typeof setInterval> | null = null;
+  let unlisten: (() => void) | null = null;
+  let stopped = false;
+
+  const tickFast = () => {
+    if (!visible()) return;
+    void refreshStatus();
+    void refreshFans();
+  };
+  const tickSlow = () => {
+    if (!visible()) return;
+    void refreshDevices();
+    void refreshEffects();
+    void refreshRender();
+  };
+  const onVisibility = () => {
+    if (visible()) void refreshAll();
+  };
+
+  void refreshAll();
+  fast = setInterval(tickFast, 1000);
+  slow = setInterval(tickSlow, 4000);
+  document.addEventListener("visibilitychange", onVisibility);
+  void onStateChanged(() => {
+    void refreshAll();
+  }).then((u) => {
+    if (stopped) u();
+    else unlisten = u;
+  });
+
+  return () => {
+    stopped = true;
+    if (fast) clearInterval(fast);
+    if (slow) clearInterval(slow);
+    document.removeEventListener("visibilitychange", onVisibility);
+    if (unlisten) unlisten();
+  };
+}
