@@ -1,0 +1,70 @@
+<head>
+  <title>Generic Test Effect</title>
+  <meta description="A gradient, a rectangle and an arc, for the canvas-html tests." />
+  <meta
+    property="speedRaw"
+    label="Speed"
+    type="number"
+    min="0"
+    max="100"
+    default="20"
+  />
+  <meta
+    property="showArc"
+    label="Show Arc"
+    type="boolean"
+    default="true"
+  />
+  <meta
+    property="primary"
+    label="Primary"
+    type="color"
+    default="#2050ff"
+  />
+  <meta
+    property="secondary"
+    label="Secondary"
+    type="color"
+    default="#ff20a0"
+  />
+</head>
+
+<body style="margin: 0; padding: 0">
+  <canvas id="exCanvas" width="320" height="200"></canvas>
+</body>
+
+<script>
+  var c = document.getElementById("exCanvas");
+  var ctx = c.getContext("2d");
+  var width = 320;
+  var height = 200;
+  var frame = 0;
+
+  function draw() {
+    // A background gradient from the primary to the secondary color.
+    var gradient = ctx.createLinearGradient(0, 0, width, height);
+    gradient.addColorStop(0, primary);
+    gradient.addColorStop(1, secondary);
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, width, height);
+
+    // A translucent rectangle that moves with the frame.
+    var offset = (frame * speedRaw) % width;
+    ctx.fillStyle = "#ffffff22";
+    ctx.fillRect(offset, 40, 60, height - 80);
+
+    // An optional arc in the middle.
+    if (showArc) {
+      ctx.strokeStyle = "#ffffffff";
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(width / 2, height / 2, 40, 0, 2 * Math.PI);
+      ctx.stroke();
+    }
+
+    frame++;
+    window.requestAnimationFrame(draw);
+  }
+
+  window.requestAnimationFrame(draw);
+</script>
