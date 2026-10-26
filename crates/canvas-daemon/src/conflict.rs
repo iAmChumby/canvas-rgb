@@ -1,6 +1,6 @@
 //! The SignalRGB conflict check.
 //!
-//! Every 5 s the daemon looks for `SignalRgb.exe` and for the `SignalRgbService` service.
+//! Every 5 s the daemon looks for `SignalRgb.exe` and for the `SignalRgb.Service` service.
 //! Either one running means SignalRGB is still driving the hardware, which the editor
 //! shows as a banner and `canvas-rgb status` prints as a CONFLICT line.
 
@@ -56,7 +56,7 @@ pub fn signalrgb_process_running() -> bool {
     false
 }
 
-/// Whether the `SignalRgbService` service exists and is running.
+/// Whether the `SignalRgb.Service` service exists and is running.
 #[cfg(windows)]
 pub fn signalrgb_service_running() -> bool {
     use windows::core::PCWSTR;
@@ -158,6 +158,6 @@ mod tests {
         let text = describe(&conflicts);
         assert_eq!(text.len(), 1);
         assert!(text[0].contains("SignalRgb.exe"));
-        assert!(text[0].contains("SignalRgbService"));
+        assert!(text[0].contains("SignalRgb.Service"));
     }
 }

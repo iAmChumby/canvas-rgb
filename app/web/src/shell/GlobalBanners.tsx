@@ -52,7 +52,7 @@ export function GlobalBanners() {
           title="SignalRGB is running: it will fight canvas-rgb for the lights"
         >
           Detected:{" "}
-          {[conflict.process ? "SignalRgb.exe" : null, conflict.service ? "SignalRgbService" : null]
+          {[conflict.process ? "SignalRgb.exe" : null, conflict.service ? "SignalRgb.Service" : null]
             .filter(Boolean)
             .join(" and ")}
           .

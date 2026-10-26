@@ -99,7 +99,7 @@ pub enum Power {
 #[ts(export)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum Conflict {
-    /// SignalRgb.exe or the SignalRgbService service is running.
+    /// SignalRgb.exe or the SignalRgb.Service service is running.
     SignalRgb { process: bool, service: bool },
 }
 

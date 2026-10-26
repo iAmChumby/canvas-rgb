@@ -48,7 +48,8 @@ pub const TOKEN_BYTES: usize = 32;
 
 /// Processes and services that mean SignalRGB is running (conflict banner).
 pub const SIGNALRGB_PROCESS: &str = "SignalRgb.exe";
-pub const SIGNALRGB_SERVICE: &str = "SignalRgbService";
+/// The service name on this PC (`Get-Service SignalRgb.Service`; the exe is SignalRgbService.exe).
+pub const SIGNALRGB_SERVICE: &str = "SignalRgb.Service";
 
 fn env_dir(var: &str) -> PathBuf {
     std::env::var_os(var)
