@@ -12,8 +12,14 @@ Adapted files (layouts and packet encoders rewritten in Rust, not copied line by
   protocol version constants)
 - hypercolor-openrgb-sdk/src/types.rs   -> crates/canvas-adapters/src/openrgb.rs
   (OpenRGB device-type and zone-type raw mapping)
+- hypercolor-windows-pawnio/src/windows.rs -> crates/canvas-svc/src/pawnio.rs
+  (PawnIO C entry-point names and argument shapes; THM_TCON_CUR_TMP decode constants)
 - The DeviceAdapter trait shape (crates/canvas-proto/src/traits.rs) follows Hypercolor's
   DeviceBackend.
+
+Facts only, no code copied (cited in comments): register addresses for the Nuvoton NCT6687D-R
+from the nct6687d Linux driver (GPL) and LibreHardwareMonitor's Nct677X.cs (MPL-2.0); PawnIO
+LpcIO module ioctl names from PawnIO.Modules (GPL-2.0), used through PawnIO's IOCTL interface.
 
 Third-party content not covered by this repository's license:
 
