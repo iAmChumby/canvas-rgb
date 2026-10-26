@@ -15,6 +15,7 @@ pub mod pipe_client;
 pub mod power;
 pub mod state;
 pub mod storage;
+pub mod thumbnail;
 pub mod token;
 pub mod user_effects;
 
@@ -23,18 +24,26 @@ use std::sync::Arc;
 
 use crate::state::App;
 
+/// A fresh instance of the effect with this id. User HTML effects (`html:<stem>`) come from
+/// the effects folder; everything else from the built-in registry.
+///
+/// Returns an error when the id is unknown or the effect fails to build.
+pub fn create_effect(
+    user: &user_effects::UserEffects,
+    id: &str,
+) -> Result<Box<dyn canvas_proto::traits::Effect>, String> {
+    match user.create(id) {
+        Some(made) => made,
+        None => canvas_effects::create(id).ok_or_else(|| format!("no effect with the id {id}")),
+    }
+}
+
 /// Creates the effect and hands it to the engine, starting and stopping the captures to
 /// match what the effect needs.
 ///
-/// User HTML effects (`html:<stem>`) come from the effects folder; everything else from
-/// the built-in registry.
-///
 /// Returns an error when the effect id is unknown.
 pub async fn apply_effect(app: &Arc<App>, id: &str, props: &Props) -> Result<(), String> {
-    let mut effect = match app.user_effects.create(id) {
-        Some(made) => made?,
-        None => canvas_effects::create(id).ok_or_else(|| format!("no effect with the id {id}"))?,
-    };
+    let mut effect = create_effect(&app.user_effects, id)?;
     effect.init(props);
 
     // The captures follow the effect's `needs`.

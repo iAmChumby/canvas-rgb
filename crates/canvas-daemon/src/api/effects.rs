@@ -1,6 +1,7 @@
 //! The effect routes: list, detail, activate, props and favourites.
 
 use axum::extract::{Path, State};
+use axum::response::IntoResponse;
 use axum::Json;
 use canvas_proto::api::{
     ActivateEffect, EffectDetail, EffectSummary, EffectsResponse, SetFavorite,
@@ -254,6 +255,48 @@ pub async fn put_effect(
             .map_err(|e| ApiFailure::internal(format!("could not save the effects: {e}")))?;
     }
     Ok(Json(serde_json::json!({ "ok": true, "id": schema.id })))
+}
+
+/// `GET /api/v1/effects/{id}/thumbnail`.
+///
+/// The effect is rendered headless at its schema defaults, on a blocking thread, and cached
+/// until the user-effects set changes. The body is the binary format in
+/// [`crate::thumbnail`].
+pub async fn thumbnail(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+) -> ApiResult<axum::response::Response> {
+    let schema = find_schema(&app.user_effects, &id)
+        .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id or name {id}")))?;
+    let generation = app.user_effects.generation();
+
+    if let Some(bytes) = app.thumbnails.get(generation, &schema.id) {
+        return Ok(binary_response(&bytes));
+    }
+
+    let user = app.user_effects.clone();
+    let effect_id = schema.id.clone();
+    let props = schema.defaults();
+    let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+        let mut effect = crate::create_effect(&user, &effect_id)?;
+        Ok(crate::thumbnail::render(effect.as_mut(), &props))
+    })
+    .await
+    .map_err(|e| ApiFailure::internal(format!("the thumbnail render stopped: {e}")))?
+    .map_err(|e| ApiFailure::internal(format!("could not render the thumbnail: {e}")))?;
+
+    let bytes = Arc::new(bytes);
+    app.thumbnails.put(generation, &schema.id, bytes.clone());
+    Ok(binary_response(&bytes))
+}
+
+fn binary_response(bytes: &[u8]) -> axum::response::Response {
+    (
+        axum::http::StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+        bytes.to_vec(),
+    )
+        .into_response()
 }
 
 /// The saved presets for every effect, for the editor.

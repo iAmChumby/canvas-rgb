@@ -61,22 +61,41 @@ pub enum PipeError {
     Json(#[from] serde_json::Error),
 }
 
-/// Sends one request to the service over a fresh pipe connection.
+/// One request to the service and its answer. The daemon's [`App`] holds one of these, so
+/// the tests can put a fake service behind the API.
 ///
-/// The pipe is opened, greeted with `Hello`, then the request is sent. A missing pipe is
-/// reported as an error, which the API turns into 503 `service_unavailable`.
+/// [`App`]: crate::state::App
+#[async_trait::async_trait]
+pub trait PipeLink: Send + Sync {
+    async fn exchange(&self, request: &PipeRequest) -> Result<PipeResponse, PipeError>;
+}
+
+/// The real service pipe: a fresh connection per request, greeted with `Hello`.
+pub struct ServicePipe;
+
+#[async_trait::async_trait]
+impl PipeLink for ServicePipe {
+    async fn exchange(&self, request: &PipeRequest) -> Result<PipeResponse, PipeError> {
+        let mut client = PipeClient::connect().await?;
+        let hello = PipeRequest::Hello {
+            protocol: canvas_proto::pipe::PROTOCOL_VERSION,
+            daemon_pid: std::process::id(),
+        };
+        client.request(&hello).await?;
+        client.request(request).await
+    }
+}
+
+/// Sends one request to the service through the app's pipe.
+///
+/// A missing pipe is reported as an error, which the API turns into 503
+/// `service_unavailable`.
 pub async fn send(
     app: &std::sync::Arc<crate::state::App>,
     request: &PipeRequest,
 ) -> Result<PipeResponse, PipeError> {
-    let mut client = PipeClient::connect().await?;
-    let hello = PipeRequest::Hello {
-        protocol: canvas_proto::pipe::PROTOCOL_VERSION,
-        daemon_pid: std::process::id(),
-    };
-    client.request(&hello).await?;
-    let response = client.request(request).await?;
-    // The pipe is up, so the service is up.
+    let response = app.pipe.exchange(request).await?;
+    // The pipe answered, so the service is up.
     app.service_down_ms.store(0, std::sync::atomic::Ordering::SeqCst);
     Ok(response)
 }

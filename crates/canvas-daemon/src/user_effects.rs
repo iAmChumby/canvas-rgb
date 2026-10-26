@@ -10,6 +10,7 @@ use canvas_proto::props::{Props, PropertySchema};
 use canvas_proto::traits::Effect;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, SystemTime};
 
@@ -55,11 +56,19 @@ struct State {
 pub struct UserEffects {
     builder: Builder,
     state: RwLock<State>,
+    /// Bumped whenever a rescan changes the set of user effects, so caches keyed on it
+    /// (the thumbnails) know to drop their entries.
+    generation: AtomicU64,
 }
 
 impl UserEffects {
     pub fn new(builder: Builder) -> Self {
-        Self { builder, state: RwLock::new(State::default()) }
+        Self { builder, state: RwLock::new(State::default()), generation: AtomicU64::new(0) }
+    }
+
+    /// The current generation. It changes exactly when a rescan changes the set.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
     }
 
     /// The schemas of the loaded user effects, sorted by name (case-insensitive).
@@ -170,6 +179,9 @@ impl UserEffects {
         state.failed.retain(|path, _| listing.contains_key(path));
         if state.loaded.len() + state.failed.len() != before {
             changed = true;
+        }
+        if changed {
+            self.generation.fetch_add(1, Ordering::SeqCst);
         }
         changed
     }

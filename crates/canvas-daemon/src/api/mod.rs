@@ -39,6 +39,7 @@ pub fn router(app: Arc<App>) -> Router {
             get(effects::get_effect).put(effects::put_effect),
         )
         .route(routes::EFFECT_ACTIVATE, post(effects::activate))
+        .route(routes::EFFECT_THUMBNAIL, get(effects::thumbnail))
         .route(routes::EFFECT_ACTIVE_PROPS, patch(effects::patch_active_props))
         .route(routes::EFFECT_FAVORITE, put(effects::put_favorite))
         .route(routes::LAYOUTS, get(layouts::list_layouts))
@@ -47,7 +48,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route(routes::FANS, get(fans::get_fans))
         .route(routes::FAN_HEADER, patch(fans::patch_header))
         .route(routes::FAN_PROFILE, get(fans::get_profile).patch(fans::patch_profile))
-        .route(routes::FAN_PROFILES, put(fans::put_profile))
+        .route(routes::FAN_PROFILES, put(fans::put_profile).delete(fans::delete_profile))
         .route(routes::SETTINGS, get(settings::get_settings).put(settings::put_settings))
         .route(routes::DISMISS_ZONE_PANEL, post(settings::dismiss_zone_panel))
         .route(routes::CONFIG_EXPORT, get(settings::config_export))

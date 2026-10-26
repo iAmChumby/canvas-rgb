@@ -102,6 +102,61 @@ pub async fn patch_profile(
     Ok(Json(request))
 }
 
+/// `DELETE /api/v1/fans/profiles/{name}`.
+///
+/// The service refuses the active profile and the last remaining one with `conflict`, which
+/// is 409 here. An unknown name is 404 and a service that is down is 503.
+pub async fn delete_profile(
+    State(app): State<Arc<App>>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let response = crate::pipe_client::send(
+        &app,
+        &canvas_proto::pipe::PipeRequest::DeleteProfile { name: name.clone() },
+    )
+    .await
+    .map_err(|e| ApiFailure::service_unavailable(format!("the fan service is not reachable: {e}")))?;
+
+    match response {
+        canvas_proto::pipe::PipeResponse::Ok => {}
+        canvas_proto::pipe::PipeResponse::Error { code, message } => {
+            return Err(service_failure(&code, message));
+        }
+        _ => {
+            return Err(ApiFailure::internal("the fan service gave an unexpected answer"));
+        }
+    }
+
+    // Keep the daemon's copy of the fans file in step, as `put_profile` does.
+    {
+        let home = app.store.read().await.home.clone();
+        let mut guard = app.fans_last.write().await;
+        if let Some(fans) = guard.as_mut() {
+            fans.profiles.retain(|p| p.name != name);
+            let _ = crate::storage::save_fans_last(&home, fans);
+        }
+    }
+
+    tracing::info!(profile = %name, "the fan profile was deleted");
+    Ok(Json(serde_json::json!({ "ok": true, "name": name })))
+}
+
+/// Maps a service error code to the API's status: `conflict` 409, `not_found` 404,
+/// `service_unavailable` 503. Any other code is an internal error.
+fn service_failure(code: &str, message: String) -> ApiFailure {
+    use canvas_proto::api::error_codes;
+    match code {
+        error_codes::CONFLICT => ApiFailure::new(
+            axum::http::StatusCode::CONFLICT,
+            error_codes::CONFLICT,
+            message,
+        ),
+        error_codes::NOT_FOUND => ApiFailure::not_found(message),
+        error_codes::SERVICE_UNAVAILABLE => ApiFailure::service_unavailable(message),
+        _ => ApiFailure::internal(message),
+    }
+}
+
 /// `PUT /api/v1/fans/profiles/{name}`.
 ///
 /// Creates or replaces a profile. The profile is validated first.

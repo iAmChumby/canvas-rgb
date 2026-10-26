@@ -470,6 +470,175 @@ async fn a_user_html_effect_can_be_detailed_and_activated() {
     assert_eq!(body.get("id").and_then(|v| v.as_str()), Some("html:fancy"));
 }
 
+/// The body of a response, as bytes.
+async fn body_bytes(response: axum::response::Response) -> Vec<u8> {
+    axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("the body is read")
+        .to_vec()
+}
+
+/// Checks the header of a thumbnail body and returns its length.
+fn assert_thumbnail_format(bytes: &[u8]) {
+    use canvas_daemon::thumbnail::{FRAMES, HEIGHT, WIDTH};
+    assert!(bytes.len() >= 6, "the header is there");
+    assert_eq!(u16::from_le_bytes([bytes[0], bytes[1]]), WIDTH);
+    assert_eq!(u16::from_le_bytes([bytes[2], bytes[3]]), HEIGHT);
+    assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), FRAMES);
+    let expected = 6 + FRAMES as usize * WIDTH as usize * HEIGHT as usize * 3;
+    assert_eq!(bytes.len(), expected, "the body is the header plus every frame");
+}
+
+#[tokio::test]
+async fn the_thumbnail_of_solid_has_the_binary_format() {
+    let (router, _app, _home) = build();
+    let response = router
+        .oneshot(request("GET", "/api/v1/effects/solid/thumbnail"))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("content-type").and_then(|v| v.to_str().ok()),
+        Some("application/octet-stream")
+    );
+    assert_thumbnail_format(&body_bytes(response).await);
+}
+
+#[tokio::test]
+async fn the_thumbnail_of_poison_has_the_binary_format() {
+    let (router, _app, _home) = build();
+    let response = router
+        .oneshot(request("GET", "/api/v1/effects/poison/thumbnail"))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = body_bytes(response).await;
+    assert_thumbnail_format(&bytes);
+    // Poison is not a flat colour after a second of warm-up.
+    let first = &bytes[6..6 + 3];
+    assert!(bytes[6..].chunks(3).any(|px| px != first), "the frames are not all one colour");
+}
+
+#[tokio::test]
+async fn the_thumbnail_is_served_identically_from_the_cache() {
+    let (router, app, _home) = build();
+    let first = router
+        .clone()
+        .oneshot(request("GET", "/api/v1/effects/solid/thumbnail"))
+        .await
+        .expect("the router answers");
+    let first = body_bytes(first).await;
+    assert_eq!(app.thumbnails.len(), 1, "the render is cached");
+
+    let second = router
+        .oneshot(request("GET", "/api/v1/effects/solid/thumbnail"))
+        .await
+        .expect("the router answers");
+    assert_eq!(body_bytes(second).await, first, "the cached bytes are identical");
+}
+
+#[tokio::test]
+async fn the_thumbnail_of_an_unknown_effect_is_a_404() {
+    let (router, _app, _home) = build();
+    let response = router
+        .oneshot(request("GET", "/api/v1/effects/not-an-effect/thumbnail"))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+/// A fake service. It answers every request the same way.
+struct FakePipe {
+    reply: FakeReply,
+}
+
+#[derive(Clone, Copy)]
+enum FakeReply {
+    Ok,
+    Error(&'static str),
+    Down,
+}
+
+#[async_trait::async_trait]
+impl canvas_daemon::pipe_client::PipeLink for FakePipe {
+    async fn exchange(
+        &self,
+        _request: &canvas_proto::pipe::PipeRequest,
+    ) -> Result<canvas_proto::pipe::PipeResponse, canvas_daemon::pipe_client::PipeError> {
+        match self.reply {
+            FakeReply::Ok => Ok(canvas_proto::pipe::PipeResponse::Ok),
+            FakeReply::Error(code) => Ok(canvas_proto::pipe::PipeResponse::Error {
+                code: code.to_string(),
+                message: format!("the service said {code}"),
+            }),
+            FakeReply::Down => Err(canvas_daemon::pipe_client::PipeError::Io(
+                std::io::Error::new(std::io::ErrorKind::NotFound, "the pipe is not up"),
+            )),
+        }
+    }
+}
+
+/// The app with a fake service behind it.
+fn build_with_pipe(reply: FakeReply) -> (axum::Router, Arc<App>, TempHome) {
+    let home = TempHome::new();
+    let store = canvas_daemon::storage::Store::at(&home.path);
+    let engine = Arc::new(FakeEngine::default());
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(
+        store,
+        engine,
+        Box::new(FakeAdapter::default()),
+        TOKEN.to_string(),
+        "0.1.0-test".to_string(),
+        tx,
+    );
+    app.pipe = Arc::new(FakePipe { reply });
+    let app = Arc::new(app);
+    (api::router(app.clone()), app, home)
+}
+
+#[tokio::test]
+async fn deleting_a_fan_profile_the_service_removes_is_200() {
+    let (router, _app, _home) = build_with_pipe(FakeReply::Ok);
+    let response = router
+        .oneshot(request("DELETE", "/api/v1/fans/profiles/quiet"))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn deleting_the_active_or_last_fan_profile_is_a_409() {
+    let (router, _app, _home) = build_with_pipe(FakeReply::Error("conflict"));
+    let response = router
+        .oneshot(request("DELETE", "/api/v1/fans/profiles/balanced"))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = json(response).await;
+    assert_eq!(body.get("error").and_then(|v| v.as_str()), Some("conflict"));
+}
+
+#[tokio::test]
+async fn deleting_an_unknown_fan_profile_is_a_404() {
+    let (router, _app, _home) = build_with_pipe(FakeReply::Error("not_found"));
+    let response = router
+        .oneshot(request("DELETE", "/api/v1/fans/profiles/nope"))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn deleting_a_fan_profile_with_the_service_down_is_a_503() {
+    let (router, _app, _home) = build_with_pipe(FakeReply::Down);
+    let response = router
+        .oneshot(request("DELETE", "/api/v1/fans/profiles/quiet"))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
 #[tokio::test]
 async fn an_unknown_effect_is_a_404() {
     let (router, _app, _home) = build();

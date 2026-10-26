@@ -79,6 +79,10 @@ pub struct App {
     pub user_effects: Arc<crate::user_effects::UserEffects>,
     /// The OpenRGB server the daemon started (milestone 1). The quit path stops it.
     pub openrgb_child: Mutex<Option<crate::openrgb_supervisor::ServerProcess>>,
+    /// The link to the service. Every fan request goes through it.
+    pub pipe: Arc<dyn crate::pipe_client::PipeLink>,
+    /// The effect thumbnails rendered so far.
+    pub thumbnails: crate::thumbnail::ThumbnailCache,
 }
 
 /// The fan config the daemon keeps a copy of.
@@ -120,6 +124,8 @@ impl App {
                 crate::user_effects::html_builder(),
             )),
             openrgb_child: Mutex::new(None),
+            pipe: Arc::new(crate::pipe_client::ServicePipe),
+            thumbnails: crate::thumbnail::ThumbnailCache::default(),
         }
     }
 
