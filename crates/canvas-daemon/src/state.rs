@@ -77,6 +77,8 @@ pub struct App {
     pub quit_tx: tokio::sync::mpsc::UnboundedSender<()>,
     /// The user HTML effects found in `%APPDATA%\canvas-rgb\effects\`.
     pub user_effects: Arc<crate::user_effects::UserEffects>,
+    /// The OpenRGB server the daemon started (milestone 1). The quit path stops it.
+    pub openrgb_child: Mutex<Option<crate::openrgb_supervisor::ServerProcess>>,
 }
 
 /// The fan config the daemon keeps a copy of.
@@ -117,6 +119,7 @@ impl App {
             user_effects: Arc::new(crate::user_effects::UserEffects::new(
                 crate::user_effects::html_builder(),
             )),
+            openrgb_child: Mutex::new(None),
         }
     }
 

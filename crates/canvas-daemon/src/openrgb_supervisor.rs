@@ -51,13 +51,13 @@ pub fn exe_dir() -> std::path::PathBuf {
 ///
 /// The server binds 127.0.0.1 only: nothing in canvas-rgb listens on a non-loopback
 /// address.
-pub fn openrgb_args() -> Vec<String> {
+pub fn openrgb_args(port: u16) -> Vec<String> {
     vec![
         "--server".into(),
         "--server-host".into(),
         canvas_proto::consts::OPENRGB_HOST.into(),
         "--server-port".into(),
-        canvas_proto::consts::OPENRGB_PORT.to_string(),
+        port.to_string(),
         "--noautoconnect".into(),
         "--config".into(),
         crate::paths::openrgb_config_dir().to_string_lossy().into_owned(),
@@ -222,7 +222,7 @@ pub async fn service_owns_openrgb() -> Option<OpenRgbServerState> {
 /// Starts the OpenRGB server, unless the service owns it or something already answers.
 ///
 /// Returns the process when the daemon started it; the caller kills it on quit.
-pub async fn ensure_openrgb_running() -> Option<ServerProcess> {
+pub async fn ensure_openrgb_running(port: u16) -> Option<ServerProcess> {
     // The service owns OpenRGB in milestone 3: it is already running.
     if let Some(state) = service_owns_openrgb().await {
         if state == OpenRgbServerState::Running {
@@ -233,14 +233,14 @@ pub async fn ensure_openrgb_running() -> Option<ServerProcess> {
 
     // Something else already answers on the port: connect to it, do not start a second
     // server.
-    if port_is_open(canvas_proto::consts::OPENRGB_HOST, canvas_proto::consts::OPENRGB_PORT).await {
+    if port_is_open(canvas_proto::consts::OPENRGB_HOST, port).await {
         tracing::info!("OpenRGB is already running on the port");
         return None;
     }
 
     // Milestone 1: the daemon starts OpenRGB itself, non-elevated.
     let exe = openrgb_exe_path();
-    let args = openrgb_args();
+    let args = openrgb_args(port);
     match start_server(&exe, &args) {
         Ok(process) => {
             tracing::info!(exe = %exe.display(), "the daemon started the OpenRGB server");
@@ -375,7 +375,7 @@ mod tests {
 
     #[test]
     fn openrgb_binds_loopback_only() {
-        let args = openrgb_args();
+        let args = openrgb_args(6742);
         assert!(args.windows(2).any(|w| w == ["--server-host", "127.0.0.1"]));
         assert!(args.windows(2).any(|w| w == ["--server-port", "6742"]));
         assert!(args.iter().any(|a| a == "--noautoconnect"));

@@ -39,11 +39,25 @@ fn main() -> std::process::ExitCode {
         }
     };
 
-    runtime.block_on(daemon_main())
+    let code = runtime.block_on(daemon_main());
+    // A task still blocked must not hold the daemon up (G3): the runtime gets a short
+    // grace, then it is dropped without waiting for blocked workers.
+    runtime.shutdown_timeout(RUNTIME_GRACE);
+    // Dropping the guard flushes the log file before the process ends.
+    drop(_log_guard);
+    std::process::exit(code)
 }
 
-/// The daemon's main loop.
-async fn daemon_main() -> std::process::ExitCode {
+/// The quit path's bounds (G3). The whole path ends well inside `QUIT_DEADLINE`.
+const QUIT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+const ON_QUIT_LIMIT: std::time::Duration = std::time::Duration::from_millis(500);
+const BLACK_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
+const SERVICE_NOTICE_LIMIT: std::time::Duration = std::time::Duration::from_millis(300);
+const ENGINE_STOP_LIMIT: std::time::Duration = std::time::Duration::from_millis(500);
+const RUNTIME_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// The daemon's main loop. Returns the process exit code.
+async fn daemon_main() -> i32 {
     // A snapshot before anything is changed (G10).
     if let Err(e) = canvas_daemon::storage::snapshot(&canvas_daemon::paths::home(), "startup") {
         tracing::warn!(error = %e, "could not take the startup snapshot");
@@ -54,7 +68,7 @@ async fn daemon_main() -> std::process::ExitCode {
         Ok(token) => token,
         Err(e) => {
             tracing::error!(error = %e, "could not create the API token");
-            return std::process::ExitCode::from(1);
+            return 1;
         }
     };
 
@@ -68,10 +82,10 @@ async fn daemon_main() -> std::process::ExitCode {
         brightness: settings.brightness,
     });
 
-    // The OpenRGB adapter.
+    // The OpenRGB adapter, on the port the config names.
     let adapter = canvas_adapters::openrgb::OpenRgbAdapter::new(
         canvas_proto::consts::OPENRGB_HOST,
-        canvas_proto::consts::OPENRGB_PORT,
+        store.config.openrgb_port,
     );
 
     let (quit_tx, mut quit_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
@@ -117,7 +131,7 @@ async fn daemon_main() -> std::process::ExitCode {
         Ok(listener) => listener,
         Err(e) => {
             tracing::error!(error = %e, address = %address, "could not bind the API");
-            return std::process::ExitCode::from(1);
+            return 1;
         }
     };
     tracing::info!(address = %address, "the API is listening");
@@ -129,40 +143,102 @@ async fn daemon_main() -> std::process::ExitCode {
         }
     });
 
-    // Wait for the quit signal, Ctrl+C or the API's quit route.
+    // Wait for the quit signal: Ctrl+C, console close, or the API's quit route.
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
             tracing::info!(reason = "ctrl-c", "the daemon was asked to stop");
+        }
+        _ = console_close() => {
+            tracing::info!(reason = "console-close", "the daemon was asked to stop");
         }
         Some(()) = quit_rx.recv() => {
             tracing::info!(reason = "api", "the daemon was asked to stop");
         }
     }
 
-    // G3: the daemon applies `on_quit` and tells the service it is going.
-    apply_on_quit(&app).await;
+    // The process ends within QUIT_DEADLINE of this point, whatever is still running.
+    arm_exit_watchdog(QUIT_DEADLINE);
 
-    app.shutting_down.store(1, Ordering::SeqCst);
-    engine.shutdown();
+    quit_sequence(&app).await;
     server.abort();
 
     tracing::info!("canvas-rgbd has stopped");
-    std::process::ExitCode::SUCCESS
+    0
 }
 
-/// G3: write black (or leave the last frame) and tell the service.
-async fn apply_on_quit(app: &Arc<App>) {
+/// The quit path (G3), in order. Each step has a bound, so no step holds the daemon up.
+async fn quit_sequence(app: &Arc<App>) {
+    app.shutting_down.store(1, Ordering::SeqCst);
+
+    // 1. `on_quit`: black, or the last frame left in place.
+    if tokio::time::timeout(ON_QUIT_LIMIT, write_on_quit(app)).await.is_err() {
+        tracing::warn!("the on-quit write did not finish in time");
+    }
+
+    // 2. Tell the service, if it is up.
+    let notice = canvas_daemon::pipe_client::notify_quitting(app);
+    if tokio::time::timeout(SERVICE_NOTICE_LIMIT, notice).await.is_err() {
+        tracing::warn!("the service was not told about the quit in time");
+    }
+
+    // 3. Stop the render loop. Its thread is joined on a blocking thread, so a stuck
+    // join cannot hold the daemon.
+    let engine = app.engine.clone();
+    let stop = tokio::task::spawn_blocking(move || engine.shutdown());
+    if tokio::time::timeout(ENGINE_STOP_LIMIT, stop).await.is_err() {
+        tracing::warn!("the render loop did not stop in time");
+    }
+
+    // 4. The OpenRGB server the daemon started.
+    kill_openrgb_server(app);
+}
+
+/// `on_quit`: black, or the last frame left in place. Black is queued to the device
+/// tasks, which write it on their own; the grace gives them time to take it before the
+/// process ends.
+async fn write_on_quit(app: &Arc<App>) {
     let on_quit = app.store.read().await.config.settings.on_quit;
     match on_quit {
         canvas_proto::config::OnQuit::Black => {
             app.engine.write_solid(canvas_proto::Rgb8::BLACK);
             tracing::info!(reason = "quit", "wrote black to every device");
+            tokio::time::sleep(BLACK_GRACE).await;
         }
         canvas_proto::config::OnQuit::LeaveLastFrame => {
             tracing::info!(reason = "quit", "leaving the last frame on the devices");
         }
     }
-    canvas_daemon::pipe_client::notify_quitting(app).await;
+}
+
+/// Stops the OpenRGB server the daemon started (milestone 1). Nothing is stopped when the
+/// service owns the server or something else already answered the port.
+fn kill_openrgb_server(app: &App) {
+    let mut slot = app.openrgb_child.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(mut server) = slot.take() {
+        server.kill();
+        tracing::info!(reason = "quit", "stopped the OpenRGB server the daemon started");
+    }
+}
+
+/// The backstop: after `after`, the process ends whatever is still running.
+fn arm_exit_watchdog(after: std::time::Duration) {
+    std::thread::spawn(move || {
+        std::thread::sleep(after);
+        tracing::warn!("the quit deadline passed; ending the process");
+        std::process::exit(0);
+    });
+}
+
+/// Console close, logoff and shutdown: the same quit as Ctrl+C.
+async fn console_close() {
+    #[cfg(windows)]
+    {
+        if let Ok(mut close) = tokio::signal::windows::ctrl_close() {
+            close.recv().await;
+            return;
+        }
+    }
+    std::future::pending::<()>().await
 }
 
 /// Reads the zone sizes from `zones.json`.
@@ -190,8 +266,16 @@ fn spawn_openrgb_supervisor(app: Arc<App>) {
     let zones = app_for_supervisor.zones.clone();
     tokio::spawn(async move {
         // Milestone 1: the daemon starts the OpenRGB server itself when the service does
-        // not own it. It is killed when the daemon stops.
-        let server = canvas_daemon::openrgb_supervisor::ensure_openrgb_running().await;
+        // not own it. The app keeps it, and the quit path stops it.
+        let port = app_for_supervisor.store.read().await.config.openrgb_port;
+        if let Some(server) =
+            canvas_daemon::openrgb_supervisor::ensure_openrgb_running(port).await
+        {
+            *app_for_supervisor
+                .openrgb_child
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(server);
+        }
         let _restarts = canvas_daemon::openrgb_supervisor::RestartBudget::default();
 
         canvas_daemon::openrgb_supervisor::supervise(
@@ -226,9 +310,6 @@ fn spawn_openrgb_supervisor(app: Arc<App>) {
             stop_rx,
         )
         .await;
-
-        // The daemon started OpenRGB: it is killed when this task ends.
-        drop(server);
     });
     // The supervisor stops when the daemon quits.
     tokio::spawn(async move {
@@ -356,10 +437,13 @@ fn spawn_power_watcher(app: Arc<App>) {
     {
         let _ = tx;
     }
-    tokio::spawn(async move {
+    // The events come over a std channel that blocks in `recv`. It runs on a blocking
+    // thread: a runtime worker parked in `recv` could never be released at quit.
+    let handle = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
         let mut watcher = canvas_daemon::power::PowerWatcher::new();
         while let Ok(event) = rx.recv() {
-            let action = canvas_daemon::power::handle(&app, &mut watcher, event).await;
+            let action = handle.block_on(canvas_daemon::power::handle(&app, &mut watcher, event));
             tracing::info!(?event, ?action, "a power event was handled");
         }
     });
