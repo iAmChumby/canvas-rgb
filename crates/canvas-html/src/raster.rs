@@ -131,8 +131,13 @@ impl Default for State {
 /// The rasterizer: a pixmap plus the state stack and the current path.
 pub struct Context {
     pixmap: Pixmap,
+    /// The device pixmap's size. It follows the render scale; see `set_device_size`.
     width: u32,
     height: u32,
+    /// The canvas size the script sees (the file's `<canvas>` size). Coordinates the script
+    /// uses, and the image-data calls, are in these units.
+    logical_width: u32,
+    logical_height: u32,
     state: State,
     stack: Vec<State>,
     /// The current path, in user space.
@@ -151,9 +156,22 @@ pub struct Context {
 }
 
 impl Context {
-    /// Creates a context with a transparent-black backing store.
+    /// Creates a context with a transparent-black backing store, one device pixel per
+    /// logical pixel.
     pub fn new(width: u32, height: u32) -> Self {
-        let mut pixmap = match Pixmap::new(width.max(1), height.max(1)) {
+        Self::with_logical(width, height, width, height)
+    }
+
+    /// Creates a context whose script-visible canvas is `logical_width` x `logical_height`,
+    /// backed by a device pixmap of `device_width` x `device_height`. Every user transform
+    /// sits on top of the scale between the two.
+    pub fn with_logical(
+        logical_width: u32,
+        logical_height: u32,
+        device_width: u32,
+        device_height: u32,
+    ) -> Self {
+        let mut pixmap = match Pixmap::new(device_width.max(1), device_height.max(1)) {
             Some(pixmap) => pixmap,
             // A size the pixmap cannot hold falls back to 1x1. The stored size follows the
             // pixmap, so the buffer and the size the caller reads always agree.
@@ -165,6 +183,8 @@ impl Context {
             pixmap,
             width,
             height,
+            logical_width: logical_width.max(1),
+            logical_height: logical_height.max(1),
             state: State::default(),
             stack: Vec::new(),
             path: PathBuilder::new(),
@@ -188,6 +208,52 @@ impl Context {
     /// The RGBA8 pixels, row-major, 4 bytes per pixel.
     pub fn pixels(&self) -> &[u8] {
         self.pixmap.data()
+    }
+
+    /// Device pixels per logical pixel, horizontally.
+    pub fn scale_x(&self) -> f32 {
+        self.width as f32 / self.logical_width as f32
+    }
+
+    /// Device pixels per logical pixel, vertically.
+    pub fn scale_y(&self) -> f32 {
+        self.height as f32 / self.logical_height as f32
+    }
+
+    /// Resizes the device pixmap, keeping the drawing: the old pixels are resampled
+    /// (nearest) into the new size, so a trail survives a change of render scale. A size
+    /// the pixmap cannot hold leaves the context as it was.
+    pub fn set_device_size(&mut self, width: u32, height: u32) {
+        let (width, height) = (width.max(1), height.max(1));
+        if (width, height) == (self.width, self.height) {
+            return;
+        }
+        let Some(mut next) = Pixmap::new(width, height) else {
+            return;
+        };
+        let (old_w, old_h) = (self.width as usize, self.height as usize);
+        let (new_w, new_h) = (width as usize, height as usize);
+        let old = self.pixmap.pixels();
+        let new = next.pixels_mut();
+        for y in 0..new_h {
+            let sy = (y * old_h / new_h).min(old_h - 1);
+            for x in 0..new_w {
+                let sx = (x * old_w / new_w).min(old_w - 1);
+                new[y * new_w + x] = old[sy * old_w + sx];
+            }
+        }
+        self.pixmap = next;
+        self.width = width;
+        self.height = height;
+    }
+
+    /// The transform from the script's user space to device pixels: the current user
+    /// transform, then the render scale. The scale sits under every user transform, so
+    /// `setTransform` and `resetTransform` keep it.
+    fn device_transform(&self) -> Transform {
+        let (sx, sy) = (self.scale_x(), self.scale_y());
+        let t = self.state.transform;
+        Transform::from_row(sx * t.sx, sy * t.ky, sx * t.kx, sy * t.sy, sx * t.tx, sy * t.ty)
     }
 
     // ------------------------------------------------------------ state
@@ -495,7 +561,7 @@ impl Context {
             return;
         };
         let paint = self.make_paint(&self.state.fill_style.clone());
-        self.pixmap.fill_path(&path, &paint, FillRule::Winding, self.state.transform, None);
+        { let t = self.device_transform(); self.pixmap.fill_path(&path, &paint, FillRule::Winding, t, None); }
     }
 
     pub fn stroke_rect(&mut self, x: f32, y: f32, w: f32, h: f32) {
@@ -517,7 +583,7 @@ impl Context {
             if self.state.line_width <= 0.0 {
                 stroke.width = 0.0;
             }
-            self.pixmap.stroke_path(&path, &paint, &stroke, self.state.transform, None);
+            { let t = self.device_transform(); self.pixmap.stroke_path(&path, &paint, &stroke, t, None); }
         }
     }
 
@@ -535,13 +601,8 @@ impl Context {
                 anti_alias: false,
                 force_hq_pipeline: false,
             };
-            self.pixmap.fill_path(
-                &path,
-                &paint,
-                FillRule::Winding,
-                self.state.transform,
-                None,
-            );
+            let t = self.device_transform();
+            self.pixmap.fill_path(&path, &paint, FillRule::Winding, t, None);
         }
     }
 
@@ -552,7 +613,7 @@ impl Context {
             return;
         };
         let paint = self.make_paint(&self.state.fill_style.clone());
-        self.pixmap.fill_path(&path, &paint, FillRule::Winding, self.state.transform, None);
+        { let t = self.device_transform(); self.pixmap.fill_path(&path, &paint, FillRule::Winding, t, None); }
     }
 
     /// Strokes the current path.
@@ -573,27 +634,26 @@ impl Context {
         if self.state.line_width <= 0.0 {
             stroke.width = 0.0;
         }
-        self.pixmap.stroke_path(&path, &paint, &stroke, self.state.transform, None);
-    }
-
-    /// Whether the transform is a translation, the identity included (no scale, no skew).
-    fn translate_only(&self) -> bool {
-        let t = self.state.transform;
-        t.sx == 1.0 && t.sy == 1.0 && t.kx == 0.0 && t.ky == 0.0
+        { let t = self.device_transform(); self.pixmap.stroke_path(&path, &paint, &stroke, t, None); }
     }
 
     /// Strokes the current full circle as an anti-aliased annulus, without tiny-skia's
     /// stroker. Returns `false`, painting nothing, when the stroke needs the general path:
     /// the fast path is off, the composite is not source-over, the style is a gradient,
-    /// the transform scales or rotates, the width or radius is zero.
+    /// the device transform is not a uniform scale plus translation (a skew or two
+    /// different axis scales turns the circle into an ellipse), or the width or radius is
+    /// zero.
     fn stroke_circle_fast(&mut self, cx: f32, cy: f32, r: f32) -> bool {
         if !self.fast_annulus
             || self.state.composite != Composite::SourceOver
-            || !self.translate_only()
             || self.state.line_width.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater)
             || r.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater)
             || !r.is_finite()
         {
+            return false;
+        }
+        let t = self.device_transform();
+        if t.kx != 0.0 || t.ky != 0.0 || t.sx != t.sy || t.sx.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
             return false;
         }
         let FillStyle::Solid(c) = &self.state.stroke_style else {
@@ -602,15 +662,16 @@ impl Context {
         let c = *c;
         self.fast_strokes += 1;
         let alpha = (c.a * self.state.global_alpha).clamp(0.0, 1.0);
-        // A translate moves the centre and leaves the radius alone.
-        let t = self.state.transform;
-        let half = self.state.line_width * 0.5;
+        // With a uniform scale the centre maps by the translation part, the radius and the
+        // width by the scale.
+        let scale = t.sx;
+        let half = self.state.line_width * scale * 0.5;
         paint_annulus(
             &mut self.pixmap,
-            cx + t.tx,
-            cy + t.ty,
-            (r - half).max(0.0),
-            r + half,
+            cx * scale + t.tx,
+            cy * scale + t.ty,
+            (r * scale - half).max(0.0),
+            r * scale + half,
             [c.r, c.g, c.b],
             alpha,
         );
@@ -660,24 +721,26 @@ impl Context {
 
     // ------------------------------------------------------------ image data
 
-    /// `getImageData(x, y, w, h)`: RGBA bytes, straight (not premultiplied) alpha,
-    /// row-major, with the canvas origin at (0, 0).
+    /// `getImageData(x, y, w, h)` in the script's (logical) pixels: RGBA bytes, straight
+    /// (not premultiplied) alpha, row-major. Each logical pixel reads the device pixel
+    /// under its centre, so the call works at any render scale.
     pub fn get_image_data(&self, x: i32, y: i32, w: i32, h: i32) -> Vec<u8> {
         let w = w.max(0) as u32;
         let h = h.max(0) as u32;
         let mut out = vec![0u8; (w as usize) * (h as usize) * 4];
         let pixels = self.pixmap.pixels();
+        let (sx, sy) = (self.scale_x(), self.scale_y());
         for row in 0..h {
-            let sy = y + row as i32;
-            if sy < 0 || sy >= self.height as i32 {
+            let dy = ((y as f32 + row as f32 + 0.5) * sy).floor() as i32;
+            if dy < 0 || dy >= self.height as i32 {
                 continue;
             }
             for col in 0..w {
-                let sx = x + col as i32;
-                if sx < 0 || sx >= self.width as i32 {
+                let dx = ((x as f32 + col as f32 + 0.5) * sx).floor() as i32;
+                if dx < 0 || dx >= self.width as i32 {
                     continue;
                 }
-                let src = &pixels[(sy as u32 * self.width + sx as u32) as usize];
+                let src = &pixels[(dy as u32 * self.width + dx as u32) as usize];
                 // `src` is premultiplied; demultiply to get straight alpha.
                 let c = src.demultiply();
                 let dst = &mut out[((row * w + col) as usize) * 4..][..4];
@@ -690,20 +753,23 @@ impl Context {
         out
     }
 
-    /// `putImageData(data, x, y)`: replaces pixels outright (no blending). The image's
-    /// own width is needed to know the stride, so the caller supplies it.
+    /// `putImageData(data, x, y)` in the script's (logical) pixels: replaces the pixels
+    /// outright (no blending). Each image pixel writes the device pixel under its logical
+    /// centre. The image's own width is needed to know the stride, so the caller supplies it.
     pub fn put_image_data_with_width(&mut self, data: &[u8], x: i32, y: i32, img_width: u32) {
         let img_width = img_width.max(1);
         let img_height = (data.len() / 4) as u32 / img_width;
+        let (sx, sy) = (self.scale_x(), self.scale_y());
+        let (dev_w, dev_h) = (self.width as i32, self.height as i32);
         let pixels = self.pixmap.pixels_mut();
         for row in 0..img_height {
-            let dy = y + row as i32;
-            if dy < 0 || dy >= self.height as i32 {
+            let dy = ((y as f32 + row as f32 + 0.5) * sy).floor() as i32;
+            if dy < 0 || dy >= dev_h {
                 continue;
             }
             for col in 0..img_width {
-                let dx = x + col as i32;
-                if dx < 0 || dx >= self.width as i32 {
+                let dx = ((x as f32 + col as f32 + 0.5) * sx).floor() as i32;
+                if dx < 0 || dx >= dev_w {
                     continue;
                 }
                 let si = ((row * img_width + col) as usize) * 4;
@@ -1112,6 +1178,30 @@ mod tests {
 
         assert!(fe >= 99.0, "fast vs exact: only {fe:.3}% of bytes within 2 levels");
         assert!(fast_vs_exact.2 <= 16, "fast vs exact: worst byte differs by {}", fast_vs_exact.2);
+    }
+
+    #[test]
+    fn the_render_scale_sits_under_the_user_transform() {
+        // An 8x8 logical canvas at 4x4 device pixels: a logical fillRect(0,0,4,4) covers
+        // device pixels (0,0) and (1,1), and nothing beyond.
+        let mut ctx = Context::with_logical(8, 8, 4, 4);
+        ctx.set_fill_style(FillStyle::Solid(CssColor::from_rgba8(255, 0, 0, 1.0)));
+        ctx.fill_rect(0.0, 0.0, 4.0, 4.0);
+        let alpha = |ctx: &Context, x: usize, y: usize| ctx.pixels()[(y * ctx.width() as usize + x) * 4 + 3];
+        assert_eq!(alpha(&ctx, 1, 1), 255);
+        assert_eq!(alpha(&ctx, 2, 2), 0);
+
+        // getImageData takes logical coordinates: logical (0,0) is opaque, (4,4) is clear.
+        let data = ctx.get_image_data(0, 0, 8, 8);
+        assert_eq!(data[3], 255);
+        assert_eq!(data[((4 * 8 + 4) * 4) + 3], 0);
+
+        // A device resize keeps the drawing: 4 -> 8 doubles each device pixel, so the old
+        // (1,1) block now covers device (2..3, 2..3).
+        ctx.set_device_size(8, 8);
+        assert_eq!(ctx.width(), 8);
+        assert_eq!(alpha(&ctx, 3, 3), 255);
+        assert_eq!(alpha(&ctx, 4, 4), 0);
     }
 
     #[test]

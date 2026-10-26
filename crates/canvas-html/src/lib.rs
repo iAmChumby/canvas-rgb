@@ -542,6 +542,9 @@ impl Effect for HtmlEffect {
         self.time += dt as f64;
         if let Ok(mut host) = self.runtime.host.lock() {
             host.now_ms = self.time * 1000.0;
+            // The device pixmap follows the render scale: its size is the incoming canvas.
+            // The script still sees the file's size; the transform maps between them.
+            host.raster.set_device_size(canvas.width, canvas.height);
         }
 
         // The effect runs at its own rate; the accumulator turns the engine's variable

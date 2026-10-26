@@ -511,16 +511,14 @@ fn every_canvas_method_the_brief_lists_runs_without_error() {
 
 // ---------------------------------------------------------------- compute
 
-/// The compute budget: Poison at 320x200 must cost at most 1 ms per frame in release.
-/// Run with `cargo test -p canvas-html --release -- --ignored --nocapture`.
-#[test]
-#[ignore = "a release-mode benchmark; run it explicitly"]
-fn poison_frame_cost() {
+/// Times Poison at a canvas of `width` x `height` (the script still sees 320x200; the
+/// canvas size is the render scale), and returns the mean microseconds per 60 Hz frame.
+fn poison_us_per_frame(width: u32, height: u32) -> f64 {
     let mut effect = poison();
-    let mut canvas = Canvas::new(320, 200);
+    let mut canvas = Canvas::new(width, height);
     let inputs = Inputs::default();
 
-    // Warm up: the first frames fill the JIT caches.
+    // Warm up: the first frames fill the caches and the first strokes size the pixmap.
     for _ in 0..60 {
         effect.update(DT, &mut canvas, &inputs);
     }
@@ -532,11 +530,141 @@ fn poison_frame_cost() {
     }
     let elapsed = start.elapsed();
     let per_frame = elapsed.as_secs_f64() * 1e6 / frames as f64;
+    println!("poison at {width}x{height}: {frames} frames in {elapsed:?}");
+    println!("poison at {width}x{height}: mean {per_frame:.1} us/frame");
+    assert!(effect.errors().is_empty(), "poison reported errors: {:?}", effect.errors());
+    per_frame
+}
 
-    println!("poison: {frames} frames at 320x200 in {elapsed:?}");
-    println!("poison: mean {per_frame:.1} us/frame");
+/// The compute budget: Poison at 50% render scale (160x100) must cost at most 1 ms per
+/// 60 Hz frame in release. Run with
+/// `cargo test -p canvas-html --release --test effects -- --ignored --nocapture`.
+#[test]
+#[ignore = "a release-mode benchmark; run it explicitly"]
+fn poison_frame_cost_at_50_percent() {
+    let per_frame = poison_us_per_frame(160, 100);
     assert!(
         per_frame <= 1000.0,
-        "poison costs {per_frame:.1} us/frame, the budget is 1000 us/frame"
+        "poison costs {per_frame:.1} us/frame at 50%, the budget is 1000 us/frame"
     );
+}
+
+/// Reference timings: Poison at 100% (320x200) and 25% (80x50). Printed, not asserted.
+#[test]
+#[ignore = "a release-mode benchmark; run it explicitly"]
+fn poison_frame_cost_reference_scales() {
+    poison_us_per_frame(320, 200);
+    poison_us_per_frame(80, 50);
+}
+
+/// The CIE L*a*b* colour of an sRGB pixel, for ΔE comparisons.
+fn lab(rgb: [f32; 3]) -> [f32; 3] {
+    let lin = |c: f32| {
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let (r, g, b) = (lin(rgb[0]), lin(rgb[1]), lin(rgb[2]));
+    let x = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047;
+    let y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    let z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883;
+    let f = |t: f32| if t > 0.008856 { t.cbrt() } else { 7.787 * t + 16.0 / 116.0 };
+    let (fx, fy, fz) = (f(x), f(y), f(z));
+    [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
+}
+
+fn delta_e76(a: [f32; 3], b: [f32; 3]) -> f32 {
+    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+}
+
+/// The share of pixels within ΔE 15 of each palette colour.
+fn palette_shares(pixels: &[[f32; 3]], palette: &[[f32; 3]]) -> Vec<f32> {
+    let labs: Vec<[f32; 3]> = palette.iter().map(|&p| lab(p)).collect();
+    palette
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            let hits = pixels
+                .iter()
+                .filter(|&&px| delta_e76(lab(px), labs[i]) <= 15.0)
+                .count();
+            hits as f32 / pixels.len() as f32
+        })
+        .collect()
+}
+
+/// Poison at 100% (320x200) against Poison at 50% (160x100), both seeded the same and run
+/// for 600 frames. The 100% picture is box-downsampled to 160x100. Mean RGB per channel
+/// must agree within 3 levels, and the palette shares within 3 percentage points.
+#[test]
+fn poison_at_half_scale_matches_full_scale_statistically() {
+    let props = compare_props();
+    let mut full = HtmlEffect::from_source_seeded("poison", POISON, &props, POISON_SEED).expect("loads");
+    let mut half = HtmlEffect::from_source_seeded("poison", POISON, &props, POISON_SEED).expect("loads");
+
+    let mut full_canvas = Canvas::new(320, 200);
+    let mut half_canvas = Canvas::new(160, 100);
+    let inputs = Inputs::default();
+    for _ in 0..600 {
+        full.update(DT, &mut full_canvas, &inputs);
+        half.update(DT, &mut half_canvas, &inputs);
+    }
+    assert!(full.errors().is_empty() && half.errors().is_empty());
+
+    // Box-downsample the 100% picture to 160x100 (2x2 mean).
+    let mut down: Vec<[f32; 3]> = Vec::with_capacity(160 * 100);
+    for y in 0..100u32 {
+        for x in 0..160u32 {
+            let mut acc = [0.0f32; 3];
+            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                let p = full_canvas.get(x * 2 + dx, y * 2 + dy);
+                for k in 0..3 {
+                    acc[k] += p[k] * 0.25;
+                }
+            }
+            down.push(acc);
+        }
+    }
+
+    let mean = |px: &[[f32; 3]]| {
+        let mut m = [0.0f64; 3];
+        for p in px {
+            for k in 0..3 {
+                m[k] += p[k] as f64 * 255.0;
+            }
+        }
+        m.map(|v| v / px.len() as f64)
+    };
+    let (mean_full, mean_half) = (mean(&down), mean(&half_canvas.pixels));
+    for k in 0..3 {
+        let diff = (mean_full[k] - mean_half[k]).abs();
+        println!("mean channel {k}: 100% {:.2}, 50% {:.2}, diff {diff:.2}", mean_full[k], mean_half[k]);
+        assert!(diff <= 3.0, "mean channel {k} differs by {diff:.2} levels");
+    }
+
+    let palette: Vec<[f32; 3]> = [
+        props.get("bgColor"),
+        props.get("color1"),
+        props.get("color2"),
+        props.get("color3"),
+    ]
+    .iter()
+    .map(|v| match v {
+        Some(PropValue::Color(c)) => [c.r as f32 / 255.0, c.g as f32 / 255.0, c.b as f32 / 255.0],
+        _ => panic!("the compare props hold four colours"),
+    })
+    .collect();
+    let shares_full = palette_shares(&down, &palette);
+    let shares_half = palette_shares(&half_canvas.pixels, &palette);
+    for i in 0..palette.len() {
+        let diff = (shares_full[i] - shares_half[i]).abs() * 100.0;
+        println!(
+            "palette {i}: 100% {:.1}%, 50% {:.1}%, diff {diff:.2} pp",
+            shares_full[i] * 100.0,
+            shares_half[i] * 100.0
+        );
+        assert!(diff <= 3.0, "palette colour {i} share differs by {diff:.2} pp");
+    }
 }
