@@ -479,3 +479,14 @@ fn a_fans_file_with_another_schema_is_refused() {
     let err = store::load_fans(&path).err().unwrap();
     assert!(matches!(err, store::StoreError::Schema { found: 99, .. }), "{err}");
 }
+#[test]
+fn a_profile_can_be_deleted_but_not_the_active_or_last_one() {
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    // Default is active; Quiet is not.
+    assert!(matches!(r.fans.delete_profile("Default"), Err(FanError::Conflict(_))));
+    assert!(matches!(r.fans.delete_profile("Nope"), Err(FanError::NotFound(_))));
+    r.fans.delete_profile("Quiet").unwrap();
+    assert_eq!(r.fans.status().profiles, vec!["Default".to_string()]);
+    assert!(matches!(r.fans.delete_profile("Default"), Err(FanError::Conflict(_))), "active and last");
+}

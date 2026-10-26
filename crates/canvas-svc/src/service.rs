@@ -24,6 +24,7 @@ fn fan_error(e: FanError) -> PipeResponse {
         FanError::Validation(m) => error(error_codes::VALIDATION, m),
         FanError::NotFound(m) => error(error_codes::NOT_FOUND, m),
         FanError::Unavailable(m) => error(error_codes::SERVICE_UNAVAILABLE, m),
+        FanError::Conflict(m) => error(error_codes::CONFLICT, m),
         FanError::Store(s) => error(error_codes::INTERNAL, s.to_string()),
     }
 }
@@ -81,6 +82,7 @@ impl Core {
             PipeRequest::SetHeaderMode { header, mode } => ok_or(self.fans.set_header_mode(&header, mode, now)),
             PipeRequest::SetProfile { name } => ok_or(self.fans.set_profile(&name, now)),
             PipeRequest::PutProfile { profile } => ok_or(self.fans.put_profile(profile, now)),
+            PipeRequest::DeleteProfile { name } => ok_or(self.fans.delete_profile(&name)),
             PipeRequest::PutFanConfig { config } => ok_or(self.fans.put_config(config, now)),
             PipeRequest::OpenRgbState => PipeResponse::OpenRgb {
                 state: self.openrgb.state(),

@@ -25,6 +25,11 @@ pub mod routes {
     pub const EFFECT: &str = "/api/v1/effects/{id}";
     pub const EFFECT_ACTIVATE: &str = "/api/v1/effects/{id}/activate";
     pub const EFFECT_ACTIVE_PROPS: &str = "/api/v1/effects/active/props";
+    /// `GET`: a short looping preview of the effect at its default props, rendered headless by
+    /// the daemon (no devices touched). Binary: `u16 LE width, u16 LE height, u16 LE frames`, then
+    /// frames x width x height x 3 RGB bytes. 64x40, 24 frames at 12 fps. Cached per effect id
+    /// until the effect set changes.
+    pub const EFFECT_THUMBNAIL: &str = "/api/v1/effects/{id}/thumbnail";
     /// `PUT` with `{ "favorite": bool }`.
     pub const EFFECT_FAVORITE: &str = "/api/v1/effects/{id}/favorite";
     pub const LAYOUTS: &str = "/api/v1/layouts";
@@ -34,7 +39,8 @@ pub mod routes {
     pub const FANS: &str = "/api/v1/fans";
     pub const FAN_HEADER: &str = "/api/v1/fans/headers/{h}";
     pub const FAN_PROFILE: &str = "/api/v1/fans/profile";
-    /// `PUT` a [`crate::fans::FanProfile`] to create or replace it.
+    /// `PUT` a [`crate::fans::FanProfile`] to create or replace it. `DELETE` removes it
+    /// (409 `conflict` for the active profile or the last remaining one).
     pub const FAN_PROFILES: &str = "/api/v1/fans/profiles/{name}";
     /// `GET` / `PUT` a [`crate::config::Settings`].
     pub const SETTINGS: &str = "/api/v1/settings";
@@ -73,6 +79,8 @@ pub mod error_codes {
     pub const VALIDATION: &str = "validation";
     /// 503, e.g. the service pipe is down
     pub const SERVICE_UNAVAILABLE: &str = "service_unavailable";
+    /// 409, e.g. deleting the active fan profile
+    pub const CONFLICT: &str = "conflict";
     /// 500
     pub const INTERNAL: &str = "internal";
 }

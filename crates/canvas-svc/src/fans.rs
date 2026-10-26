@@ -41,6 +41,8 @@ pub enum FanError {
     #[error("fan chip unavailable: {0}")]
     Unavailable(String),
     #[error("{0}")]
+    Conflict(String),
+    #[error("{0}")]
     Store(#[from] StoreError),
 }
 
@@ -481,6 +483,23 @@ impl FanController {
         if active {
             self.apply_profile(now);
         }
+        Ok(())
+    }
+
+    /// Removes a saved profile. The active profile and the last remaining one can't be removed.
+    pub fn delete_profile(&mut self, name: &str) -> Result<(), FanError> {
+        if !self.config.profiles.iter().any(|p| p.name == name) {
+            return Err(FanError::NotFound(format!("no fan profile named {name:?}")));
+        }
+        if name == self.config.active_profile {
+            return Err(FanError::Conflict(format!("{name:?} is the active profile; switch to another one first")));
+        }
+        if self.config.profiles.len() <= 1 {
+            return Err(FanError::Conflict("the last fan profile can't be removed".into()));
+        }
+        self.config.profiles.retain(|p| p.name != name);
+        self.persist()?;
+        tracing::info!(profile = name, "fan profile deleted");
         Ok(())
     }
 

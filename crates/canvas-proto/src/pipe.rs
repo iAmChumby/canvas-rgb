@@ -23,6 +23,8 @@ pub enum PipeRequest {
     SetHeaderMode { header: HeaderId, mode: FanMode },
     SetProfile { name: String },
     PutProfile { profile: FanProfile },
+    /// Refused with `conflict` for the active profile or the last one.
+    DeleteProfile { name: String },
     /// Replaces `%ProgramData%\canvas-rgb\fans.toml` (daemon is the writer).
     PutFanConfig { config: FansFile },
     OpenRgbState,

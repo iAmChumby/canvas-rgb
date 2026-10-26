@@ -11,6 +11,8 @@ export const routes = {
   effect: (id: string) => `/api/v1/effects/${id}`,
   effectActivate: (id: string) => `/api/v1/effects/${id}/activate`,
   effectActiveProps: "/api/v1/effects/active/props",
+  // GET binary: u16 LE w, u16 LE h, u16 LE frames, then frames*w*h*3 RGB (64x40, 24 frames, 12 fps).
+  effectThumbnail: (id: string) => `/api/v1/effects/${encodeURIComponent(id)}/thumbnail`,
   effectFavorite: (id: string) => `/api/v1/effects/${id}/favorite`,
   layouts: "/api/v1/layouts",
   layout: (id: string) => `/api/v1/layouts/${encodeURIComponent(id)}`,
@@ -18,6 +20,7 @@ export const routes = {
   fans: "/api/v1/fans",
   fanHeader: (h: string) => `/api/v1/fans/headers/${h}`,
   fanProfile: "/api/v1/fans/profile",
+  // PUT a FanProfile; DELETE removes it (409 for the active or last profile).
   fanProfiles: (name: string) => `/api/v1/fans/profiles/${encodeURIComponent(name)}`,
   settings: "/api/v1/settings",
   dismissZonePanel: "/api/v1/first-run/dismiss-zone-panel",
