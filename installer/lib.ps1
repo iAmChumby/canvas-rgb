@@ -75,6 +75,11 @@ function Get-PathOwnerSid {
 function Assert-MachineHomeSafe {
     param([string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) { return }
+    $item = Get-Item -LiteralPath $Path -Force
+    if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+        throw ("STOP: '$Path' is a junction or symbolic link. " +
+               "The installer never follows, deletes or takes over it. Tell Luke; he decides what to do with it.")
+    }
     $sid = Get-PathOwnerSid -Path $Path
     if (-not (Test-OwnerSidAllowed -Sid $sid)) {
         throw ("STOP: '$Path' already exists and is owned by $sid, not SYSTEM or Administrators. " +
@@ -89,8 +94,9 @@ function Initialize-MachineHome {
     $sec = New-MachineHomeSecurity
     if (-not (Test-Path -LiteralPath $Path)) {
         # Created already protected, so there is no window where it carries ProgramData's
-        # inherited (user-writable) ACL. An entry that appeared since the check above is caught
-        # by the re-check at the end.
+        # inherited (user-writable) ACL. If something else created it first, CreateDirectory
+        # returns the existing folder, and the check below (before any ACL change) refuses it
+        # when it isn't ours.
         try {
             [System.IO.Directory]::CreateDirectory($Path, $sec) | Out-Null
         } catch {
@@ -99,6 +105,9 @@ function Initialize-MachineHome {
             [System.IO.Directory]::CreateDirectory($Path, $dsec) | Out-Null
         }
     }
+    # Check BEFORE changing any ACL: Set-Acl may rewrite the owner, so a check afterwards
+    # could not tell our folder from one an attacker planted.
+    Assert-MachineHomeSafe -Path $Path
     try {
         Set-Acl -LiteralPath $Path -AclObject $sec -ErrorAction Stop
         Write-Step "  ProgramData folder locked with the full SDDL (owner SYSTEM)." $LogFile
@@ -110,9 +119,6 @@ function Initialize-MachineHome {
         Set-Acl -LiteralPath $Path -AclObject $dacl -ErrorAction Stop
         Write-Step "  ProgramData folder locked (DACL only; owner stays Administrators because: $($_.Exception.Message))." $LogFile
     }
-    # Re-check after locking: owner must be SYSTEM or Administrators and it must not be a
-    # reparse point, or setup stops here (never deleting or taking over the folder).
-    Assert-MachineHomeSafe -Path $Path
 }
 
 # ---------------------------------------------------------------- PATH editing

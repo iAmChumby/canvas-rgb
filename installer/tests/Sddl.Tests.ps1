@@ -59,4 +59,21 @@ Test-Case 'Assert-MachineHomeSafe stops on an existing folder with a disallowed 
     } finally { Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
+Test-Case 'Assert-MachineHomeSafe stops on a junction and leaves it and its target alone' {
+    $target = Join-Path $env:TEMP ("canvas-rgb-junction-target-" + [guid]::NewGuid().ToString('N'))
+    $link = Join-Path $env:TEMP ("canvas-rgb-junction-" + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $target | Out-Null
+    try {
+        & cmd.exe /c mklink /J "$link" "$target" | Out-Null
+        Assert-True (Test-Path -LiteralPath $link) 'the junction must exist for the test'
+        Assert-Throws { Assert-MachineHomeSafe -Path $link } 'STOP:.*junction or symbolic link'
+        Assert-True (Test-Path -LiteralPath $link) 'the junction must still exist'
+        Assert-True (Test-Path -LiteralPath $target) 'the target must still exist'
+    } finally {
+        # rmdir on a junction removes the link only, never the target's contents.
+        if (Test-Path -LiteralPath $link) { & cmd.exe /c rmdir "$link" | Out-Null }
+        Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Complete-Tests 'Sddl'
