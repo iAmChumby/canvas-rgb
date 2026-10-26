@@ -86,10 +86,19 @@ function Assert-MachineHomeSafe {
 function Initialize-MachineHome {
     param([string]$Path, [string]$LogFile)
     Assert-MachineHomeSafe -Path $Path
-    if (-not (Test-Path -LiteralPath $Path)) {
-        New-Item -ItemType Directory -Path $Path -Force | Out-Null
-    }
     $sec = New-MachineHomeSecurity
+    if (-not (Test-Path -LiteralPath $Path)) {
+        # Created already protected, so there is no window where it carries ProgramData's
+        # inherited (user-writable) ACL. An entry that appeared since the check above is caught
+        # by the re-check at the end.
+        try {
+            [System.IO.Directory]::CreateDirectory($Path, $sec) | Out-Null
+        } catch {
+            $dsec = New-Object System.Security.AccessControl.DirectorySecurity
+            $dsec.SetSecurityDescriptorSddlForm($script:CanvasConst.MachineHomeSddl, [System.Security.AccessControl.AccessControlSections]::Access)
+            [System.IO.Directory]::CreateDirectory($Path, $dsec) | Out-Null
+        }
+    }
     try {
         Set-Acl -LiteralPath $Path -AclObject $sec -ErrorAction Stop
         Write-Step "  ProgramData folder locked with the full SDDL (owner SYSTEM)." $LogFile
@@ -101,6 +110,9 @@ function Initialize-MachineHome {
         Set-Acl -LiteralPath $Path -AclObject $dacl -ErrorAction Stop
         Write-Step "  ProgramData folder locked (DACL only; owner stays Administrators because: $($_.Exception.Message))." $LogFile
     }
+    # Re-check after locking: owner must be SYSTEM or Administrators and it must not be a
+    # reparse point, or setup stops here (never deleting or taking over the folder).
+    Assert-MachineHomeSafe -Path $Path
 }
 
 # ---------------------------------------------------------------- PATH editing
