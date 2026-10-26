@@ -1,0 +1,12 @@
+{
+  "name": "poison-compare-js",
+  "private": true,
+  "description": "Renders SignalRGB's original Poison effect.html headless for tools/poison-compare.",
+  "type": "module",
+  "scripts": {
+    "render": "node render.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.64.1"
+  }
+}
