@@ -555,6 +555,23 @@ impl Context {
         let Some(rect) = normalized_rect(x, y, w, h) else {
             return;
         };
+        // A solid fill of whole device pixels is fully covered inside, so it is written pixel
+        // by pixel in the browser's arithmetic (this is the full-canvas background every frame).
+        if let FillStyle::Solid(c) = self.state.fill_style {
+            if self.state.composite == Composite::SourceOver {
+                if let Some((x0, y0, x1, y1)) = self.device_pixel_rect(&rect) {
+                    let src = SolidSource::new(c, self.state.global_alpha);
+                    let (width, height) = (self.width as i32, self.height as i32);
+                    let pixels = self.pixmap.pixels_mut();
+                    for py in y0.max(0)..y1.min(height) {
+                        for px in x0.max(0)..x1.min(width) {
+                            blend_skia(&mut pixels[(py * width + px) as usize], src, 255);
+                        }
+                    }
+                    return;
+                }
+            }
+        }
         let mut pb = PathBuilder::new();
         pb.push_rect(rect);
         let Some(path) = pb.finish() else {
@@ -562,6 +579,27 @@ impl Context {
         };
         let paint = self.make_paint(&self.state.fill_style.clone());
         { let t = self.device_transform(); self.pixmap.fill_path(&path, &paint, FillRule::Winding, t, None); }
+    }
+
+    /// The device pixel rectangle `[x0, x1) x [y0, y1)` a user-space rectangle covers, when
+    /// its edges land exactly on whole device pixels under the device transform (no skew).
+    fn device_pixel_rect(&self, rect: &tiny_skia::Rect) -> Option<(i32, i32, i32, i32)> {
+        let t = self.device_transform();
+        if t.kx != 0.0 || t.ky != 0.0 {
+            return None;
+        }
+        let (a, b) = (t.sx * rect.left() + t.tx, t.sx * rect.right() + t.tx);
+        let (c, d) = (t.sy * rect.top() + t.ty, t.sy * rect.bottom() + t.ty);
+        let whole = |v: f32| {
+            let r = v.round();
+            ((v - r).abs() < 1e-3).then_some(r as i32)
+        };
+        Some((
+            whole(a.min(b))?,
+            whole(c.min(d))?,
+            whole(a.max(b))?,
+            whole(c.max(d))?,
+        ))
     }
 
     pub fn stroke_rect(&mut self, x: f32, y: f32, w: f32, h: f32) {
@@ -656,12 +694,18 @@ impl Context {
         if t.kx != 0.0 || t.ky != 0.0 || t.sx != t.sy || t.sx.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
             return false;
         }
+        // A circle whose radius is under half the line width is stroked with a hole in the
+        // middle. The browser draws that hole (its stroker and tiny-skia's agree), so such
+        // circles take the general stroker rather than the annulus.
+        if r * t.sx < self.state.line_width * t.sx * 0.5 {
+            return false;
+        }
         let FillStyle::Solid(c) = &self.state.stroke_style else {
             return false;
         };
         let c = *c;
         self.fast_strokes += 1;
-        let alpha = (c.a * self.state.global_alpha).clamp(0.0, 1.0);
+        let src = SolidSource::new(c, self.state.global_alpha);
         // With a uniform scale the centre maps by the translation part, the radius and the
         // width by the scale.
         let scale = t.sx;
@@ -672,8 +716,7 @@ impl Context {
             cy * scale + t.ty,
             (r * scale - half).max(0.0),
             r * scale + half,
-            [c.r, c.g, c.b],
-            alpha,
+            src,
         );
         true
     }
@@ -807,8 +850,7 @@ fn paint_annulus(
     cy: f32,
     inner: f32,
     outer: f32,
-    rgb: [f32; 3],
-    alpha: f32,
+    src: SolidSource,
 ) {
     let width = pixmap.width() as i32;
     let height = pixmap.height() as i32;
@@ -855,11 +897,11 @@ fn paint_annulus(
                     continue;
                 }
                 let coverage = pixel_band_coverage(px as f32, py as f32, cx, cy, inner, outer);
-                let src_alpha = coverage * alpha;
-                if src_alpha <= 0.0 {
+                let cov8 = (coverage * 255.0).round().clamp(0.0, 255.0) as u8;
+                if cov8 == 0 {
                     continue;
                 }
-                blend_source_over(&mut pixels[(py * width + px) as usize], rgb, src_alpha);
+                blend_skia(&mut pixels[(py * width + px) as usize], src, cov8);
             }
         }
     }
@@ -910,20 +952,47 @@ fn interval_overlap(a: f32, b: f32, c: f32, d: f32) -> f32 {
     (b.min(d) - a.max(c)).max(0.0)
 }
 
-/// Source-over of a straight-alpha color at `alpha` onto one premultiplied pixel.
-fn blend_source_over(dst: &mut PremultipliedColorU8, rgb: [f32; 3], alpha: f32) {
-    let keep = 1.0 - alpha;
-    let to_byte = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
-    let out_a = alpha + dst.alpha() as f32 / 255.0 * keep;
-    let out_r = rgb[0] * alpha + dst.red() as f32 / 255.0 * keep;
-    let out_g = rgb[1] * alpha + dst.green() as f32 / 255.0 * keep;
-    let out_b = rgb[2] * alpha + dst.blue() as f32 / 255.0 * keep;
-    let a = to_byte(out_a);
-    // Rounding can push a channel past alpha, which a premultiplied pixel forbids.
-    let r = to_byte(out_r).min(a);
-    let g = to_byte(out_g).min(a);
-    let b = to_byte(out_b).min(a);
-    if let Some(pixel) = PremultipliedColorU8::from_rgba(r, g, b, a) {
+/// Skia's 8-bit `SkMulDiv255Round`: `a * b / 255`, rounded.
+fn mul_div255_round(a: u32, b: u32) -> u32 {
+    let prod = a * b + 128;
+    (prod + (prod >> 8)) >> 8
+}
+
+/// A solid colour as the browser's canvas stores it: its alpha byte (with `globalAlpha`
+/// applied) and its colour premultiplied by that alpha, both rounded to bytes.
+#[derive(Debug, Clone, Copy)]
+struct SolidSource {
+    alpha: u8,
+    pm: [u8; 3],
+}
+
+impl SolidSource {
+    fn new(c: CssColor, global_alpha: f32) -> Self {
+        let alpha = (c.a * global_alpha * 255.0).round().clamp(0.0, 255.0) as u8;
+        let byte = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u32;
+        let pm = [byte(c.r), byte(c.g), byte(c.b)]
+            .map(|v| mul_div255_round(v, alpha as u32).min(255) as u8);
+        Self { alpha, pm }
+    }
+}
+
+/// Source-over of a solid colour onto one premultiplied pixel, with coverage `cov` (0..=255),
+/// in Skia's 8-bit arithmetic: the source is scaled by its coverage as Skia's blitter scales
+/// it (`v * (cov + 1) >> 8`), then `dst' = src + (dst * (256 - src_a)) >> 8`. A browser's
+/// canvas stores pixels this way, so a repeated fill settles where the browser's does.
+fn blend_skia(dst: &mut PremultipliedColorU8, src: SolidSource, cov: u8) {
+    let scale = cov as u32 + 1;
+    let src_a = (src.alpha as u32 * scale) >> 8;
+    if src_a == 0 {
+        return;
+    }
+    let keep = 256 - src_a;
+    let mix = |s: u8, d: u8| (((s as u32 * scale) >> 8) + ((d as u32 * keep) >> 8)).min(255) as u8;
+    let a = (src_a + ((dst.alpha() as u32 * keep) >> 8)).min(255) as u8;
+    let r = mix(src.pm[0], dst.red());
+    let g = mix(src.pm[1], dst.green());
+    let b = mix(src.pm[2], dst.blue());
+    if let Some(pixel) = PremultipliedColorU8::from_rgba(r.min(a), g.min(a), b.min(a), a) {
         *dst = pixel;
     }
 }
@@ -1129,18 +1198,15 @@ mod tests {
                         ctx.stroke();
                     }
                     circles += 1;
-                    assert_eq!(fast.fast_strokes, 1, "the fast path must run for a full circle");
                     assert_eq!(slow.fast_strokes, 0);
-
+                    // A radius under half the width leaves a hole, which the general stroker
+                    // draws (as the browser does), so the fast path declines those circles.
                     if r < w / 2.0 {
-                        let (px, py) = (cx.floor() as i32, cy.floor() as i32);
-                        if (0..W as i32).contains(&px) && (0..W as i32).contains(&py) {
-                            let i = ((py * W as i32 + px) * 4 + 3) as usize;
-                            assert_eq!(fast.pixels()[i], 136, "the disc is solid at ({px},{py})");
-                        }
+                        assert_eq!(fast.fast_strokes, 0, "a holed circle must not take the fast path");
                         discs += 1;
                         continue;
                     }
+                    assert_eq!(fast.fast_strokes, 1, "the fast path must run for a full circle");
 
                     let (inner, outer) = ((r - w / 2.0).max(0.0), r + w / 2.0);
                     for y in 0..W {

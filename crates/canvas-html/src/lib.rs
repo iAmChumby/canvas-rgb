@@ -355,10 +355,9 @@ impl HtmlEffect {
     /// Copies the rendered pixels into the engine's canvas, resampling if the render
     /// target is a different size than the effect's canvas.
     ///
-    /// The raster stores premultiplied alpha, so the copied color is the canvas composited
-    /// over black: a pixel with alpha 0.5 of white reads as 0.5 grey. That is what the
-    /// original effect shows on a black page, and the choice is part of the comparison
-    /// with the Chromium reference.
+    /// The raster stores premultiplied alpha. The copied colour is straight (demultiplied),
+    /// as `getImageData` reads a browser canvas, so the comparison with the Chromium
+    /// reference uses the same convention.
     fn blit(&mut self, canvas: &mut Canvas) {
         let Ok(host) = self.runtime.host.lock() else { return };
         let raster = &host.raster;
@@ -390,11 +389,19 @@ impl HtmlEffect {
             let dst_row = &mut canvas.pixels[y * dst_w..(y + 1) * dst_w];
             for (dst, &sx) in dst_row.iter_mut().zip(&self.blit_cols) {
                 let si = sx * 4;
-                *dst = [
-                    lut[src_row[si] as usize],
-                    lut[src_row[si + 1] as usize],
-                    lut[src_row[si + 2] as usize],
-                ];
+                let a = src_row[si + 3];
+                *dst = if a == 255 {
+                    [lut[src_row[si] as usize], lut[src_row[si + 1] as usize], lut[src_row[si + 2] as usize]]
+                } else if a == 0 {
+                    [0.0; 3]
+                } else {
+                    // The pixmap is premultiplied; a canvas read back (getImageData) is straight.
+                    let straight = |v: u8| -> f32 {
+                        let a = a as u32;
+                        ((v as u32 * 255 + a / 2) / a).min(255) as f32 / 255.0
+                    };
+                    [straight(src_row[si]), straight(src_row[si + 1]), straight(src_row[si + 2])]
+                };
             }
         }
     }

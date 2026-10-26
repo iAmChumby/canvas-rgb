@@ -99,12 +99,12 @@ impl Rng {
     }
 
     /// mulberry32, the generator the reference Chromium harness uses.
-    pub fn next_f32(&mut self) -> f32 {
+    pub fn next_unit(&mut self) -> f64 {
         self.state = self.state.wrapping_add(0x6d2b_79f5);
         let mut t = self.state;
         t = (t ^ (t >> 15)).wrapping_mul(t | 1);
         t ^= t.wrapping_add((t ^ (t >> 7)).wrapping_mul(t | 61));
-        ((t ^ (t >> 14)) as f32) / 4_294_967_296.0
+        ((t ^ (t >> 14)) as f64) / 4_294_967_296.0
     }
 }
 
@@ -168,7 +168,7 @@ pub fn setup<'js>(
     let random_fn = Function::new(ctx.clone(), move || -> f64 {
         random_host
             .lock()
-            .map(|mut host| host.rng.next_f32() as f64)
+            .map(|mut host| host.rng.next_unit())
             .unwrap_or(0.0)
     })?;
     math.set("random", random_fn)?;

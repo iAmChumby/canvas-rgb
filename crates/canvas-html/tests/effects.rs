@@ -668,3 +668,25 @@ fn poison_at_half_scale_matches_full_scale_statistically() {
         assert!(diff <= 3.0, "palette colour {i} share differs by {diff:.2} pp");
     }
 }
+
+/// Writes Poison's picture after `POISON_DUMP_FRAMES` frames (default 600), seed 1000 (the
+/// seed `tools/poison-compare/js/render.mjs` gives its first run), as raw RGB bytes to the
+/// path in `POISON_DUMP`. The Chromium-comparison dump; ignored by default.
+#[test]
+#[ignore = "writes a comparison dump; set POISON_DUMP"]
+fn dump_poison_seed_1000() {
+    let path = std::env::var("POISON_DUMP").expect("set POISON_DUMP");
+    let frames: usize = std::env::var("POISON_DUMP_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(600);
+    let mut effect =
+        HtmlEffect::from_source_seeded("poison", POISON, &compare_props(), 1000).expect("loads");
+    let canvas = run(&mut effect, frames);
+    let mut bytes = Vec::with_capacity(canvas.pixels.len() * 3);
+    for px in &canvas.pixels {
+        let c = canvas_proto::Rgb8::from_f32(*px);
+        bytes.extend_from_slice(&[c.r, c.g, c.b]);
+    }
+    std::fs::write(&path, bytes).expect("write the dump");
+}
