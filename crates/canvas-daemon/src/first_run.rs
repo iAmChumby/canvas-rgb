@@ -377,7 +377,7 @@ pub fn build_default_layout(devices: &[DeviceInfo]) -> Layout {
     Layout {
         id: "default".into(),
         name: "Default".into(),
-        render_scale: RenderScale::P100,
+        render_scale: RenderScale::default(),
         sampling: SamplingMode::AreaAverage,
         zones,
         effect: None,

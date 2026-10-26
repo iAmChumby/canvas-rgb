@@ -20,14 +20,16 @@ pub enum SamplingMode {
 }
 
 /// Render scale as a percentage of the logical canvas. Only 25, 50 and 100 are valid.
+/// Default 50%, Artemis's default: a quarter of the pixels, and LEDs are area-averaged over
+/// cells several render pixels wide, so the lights barely change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(try_from = "u8", into = "u8")]
 #[ts(type = "25 | 50 | 100")]
 pub enum RenderScale {
     P25,
-    P50,
     #[default]
+    P50,
     P100,
 }
 
