@@ -23,6 +23,7 @@ export const routes = {
   dismissZonePanel: "/api/v1/first-run/dismiss-zone-panel",
   configExport: "/api/v1/config/export",
   configImport: "/api/v1/config/import",
+  quit: "/api/v1/quit",
   diagReadback: "/api/v1/diag/readback",
   // WebSocket; binary frames: u16 LE width, u16 LE height, width*height*3 RGB bytes.
   // Browsers cannot set headers on a WebSocket: pass the token as `?token=`.

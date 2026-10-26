@@ -42,6 +42,9 @@ pub mod routes {
     pub const DISMISS_ZONE_PANEL: &str = "/api/v1/first-run/dismiss-zone-panel";
     pub const CONFIG_EXPORT: &str = "/api/v1/config/export";
     pub const CONFIG_IMPORT: &str = "/api/v1/config/import";
+    /// `POST`, no body: the daemon applies `on_quit` (G3: black by default), tells the
+    /// service it is quitting on purpose (`PipeRequest::DaemonQuitting`), and exits.
+    pub const QUIT: &str = "/api/v1/quit";
     /// Diagnostics: current colors as the adapter reads them back from the hardware.
     pub const DIAG_READBACK: &str = "/api/v1/diag/readback";
     /// WebSocket. Binary messages: `u16 LE width, u16 LE height, width*height*3 RGB bytes`,
