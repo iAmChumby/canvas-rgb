@@ -308,6 +308,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "canvas-rgb-tray"
+version = "0.1.0"
+dependencies = [
+ "canvas-proto",
+]
+
+[[package]]
 name = "canvas-svc"
 version = "0.1.0"
 dependencies = [

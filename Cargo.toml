@@ -9,6 +9,7 @@ members = [
     "crates/canvas-daemon",
     "crates/canvas-svc",
     "tools/poison-compare",
+    "app/src-tauri",
 ]
 
 [workspace.package]

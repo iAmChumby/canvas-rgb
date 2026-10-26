@@ -1,0 +1,13 @@
+[package]
+name = "canvas-rgb-tray"
+description = "canvas-rgb.exe: Tauri 2 tray app hosting the editor. Spine stub; the Shell area fills it in."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "canvas-rgb"
+path = "src/main.rs"
+
+[dependencies]
+canvas-proto.workspace = true
