@@ -38,8 +38,31 @@ fn compare_props() -> Props {
     props
 }
 
+/// The seed the thresholded Poison tests run with, so their numbers reproduce.
+const POISON_SEED: u32 = 0x9e37_79b9;
+
 fn poison() -> HtmlEffect {
-    HtmlEffect::from_source("poison", POISON, &Props::new()).expect("poison loads")
+    HtmlEffect::from_source_seeded("poison", POISON, &Props::new(), POISON_SEED)
+        .expect("poison loads")
+}
+
+#[test]
+fn two_production_instances_of_poison_draw_different_pictures() {
+    // `from_source` seeds from entropy, so each activation gets its own sequence.
+    let mut first = HtmlEffect::from_source("poison", POISON, &Props::new()).expect("loads");
+    let mut second = HtmlEffect::from_source("poison", POISON, &Props::new()).expect("loads");
+    let a = run(&mut first, 120);
+    let b = run(&mut second, 120);
+    assert!(a.pixels != b.pixels, "two instances drew the same random sequence");
+}
+
+#[test]
+fn two_instances_with_the_same_seed_draw_identical_pictures() {
+    let mut first = HtmlEffect::from_source_seeded("poison", POISON, &Props::new(), 7).expect("loads");
+    let mut second = HtmlEffect::from_source_seeded("poison", POISON, &Props::new(), 7).expect("loads");
+    let a = run(&mut first, 120);
+    let b = run(&mut second, 120);
+    assert!(a.pixels == b.pixels, "the same seed must reproduce the picture");
 }
 
 /// Runs the effect for `frames` frames on a fresh canvas and returns the canvas.

@@ -80,6 +80,17 @@ impl HtmlEffect {
     /// `<title>` and `<meta>` tags. `default_overrides` replace the file's declared
     /// defaults for the keys given (keys are the file's `property` names, e.g. `speedRaw`).
     pub fn from_source(id: &str, html: &str, default_overrides: &Props) -> Result<Self, HtmlError> {
+        Self::from_source_seeded(id, html, default_overrides, entropy_seed())
+    }
+
+    /// The same as [`HtmlEffect::from_source`], with the random seed given. Two instances
+    /// built with the same seed draw the same random sequence, so their pictures match.
+    pub fn from_source_seeded(
+        id: &str,
+        html: &str,
+        default_overrides: &Props,
+        seed: u32,
+    ) -> Result<Self, HtmlError> {
         let parsed = parse::parse(html);
 
         if parsed.scripts.is_empty() {
@@ -139,7 +150,7 @@ impl HtmlEffect {
         };
         apply_overrides(&mut schema, default_overrides);
 
-        // The JS engine. The seed makes a run reproducible; the tests rely on it.
+        // The JS engine. `Math.random` is seeded from `seed`.
         let runtime = JsRuntime::new(width, height).map_err(|e| HtmlError::Script(e.to_string()))?;
         runtime
             .context
@@ -151,7 +162,7 @@ impl HtmlEffect {
                     &canvas_id,
                     width,
                     height,
-                    0x9e37_79b9,
+                    seed,
                 )
             })
             .map_err(|e| HtmlError::Script(e.to_string()))?;
@@ -297,8 +308,12 @@ impl HtmlEffect {
             // Drain the zero-delay timers. The queue is swapped for an empty one first, so a
             // timer that queues another runs in the next frame rather than being dropped.
             let timers = globals.get::<_, rquickjs::Array<'_>>(js::TIMEOUT_SLOT)?;
-            globals.set(js::TIMEOUT_SLOT, rquickjs::Array::new(ctx.clone()))?;
             let count = timers.len();
+            // No queued timers (the usual case): nothing to swap, so no allocation.
+            if count == 0 {
+                return Ok(());
+            }
+            globals.set(js::TIMEOUT_SLOT, rquickjs::Array::new(ctx.clone()))?;
             for i in 0..count {
                 let timer = timers.get::<Value<'_>>(i)?;
                 if let Some(func) = timer.as_function() {
@@ -383,6 +398,23 @@ impl HtmlEffect {
             }
         }
     }
+}
+
+/// A seed for one instance's `Math.random`. The clock's nanoseconds are mixed with a
+/// process-wide counter, so two instances created back to back never share a seed. The
+/// mix is splitmix64.
+fn entropy_seed() -> u32 {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut x = nanos ^ n.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^= x >> 31;
+    (x ^ (x >> 32)) as u32
 }
 
 /// Builds a property's kind from its `<meta>` tag.

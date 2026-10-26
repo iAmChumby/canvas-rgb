@@ -9,7 +9,7 @@
 use crate::color::CssColor;
 use tiny_skia::{
     BlendMode, FillRule, GradientStop, LinearGradient, Paint, PathBuilder, Pixmap, Point,
-    RadialGradient, Shader, SpreadMode, Stroke, Transform,
+    PremultipliedColorU8, RadialGradient, Shader, SpreadMode, Stroke, Transform,
 };
 
 /// Default canvas size when the file declares none.
@@ -140,6 +140,14 @@ pub struct Context {
     /// The current path's "is empty" flag, tracked separately because `PathBuilder` has
     /// no way to ask.
     path_has_content: bool,
+    /// The centre and radius of the current path when it is exactly one full-turn `arc`
+    /// (in user space). A stroke of such a path takes the annulus fast path.
+    circle: Option<(f32, f32, f32)>,
+    /// Whether a stroke of a full circle may take the annulus fast path. On by default;
+    /// the tests turn it off to compare against tiny-skia's stroker.
+    pub fast_annulus: bool,
+    /// How many strokes took the annulus fast path.
+    pub fast_strokes: u64,
 }
 
 impl Context {
@@ -161,6 +169,9 @@ impl Context {
             stack: Vec::new(),
             path: PathBuilder::new(),
             path_has_content: false,
+            circle: None,
+            fast_annulus: true,
+            fast_strokes: 0,
         }
     }
 
@@ -269,6 +280,7 @@ impl Context {
     pub fn begin_path(&mut self) {
         self.path = PathBuilder::new();
         self.path_has_content = false;
+        self.circle = None;
     }
 
     pub fn close_path(&mut self) {
@@ -278,11 +290,13 @@ impl Context {
     }
 
     pub fn move_to(&mut self, x: f32, y: f32) {
+        self.circle = None;
         self.path.move_to(x, y);
         self.path_has_content = true;
     }
 
     pub fn line_to(&mut self, x: f32, y: f32) {
+        self.circle = None;
         // A `lineTo` with no current point starts a new subpath, as in a browser.
         if !self.path_has_content {
             self.path.move_to(x, y);
@@ -293,6 +307,7 @@ impl Context {
     }
 
     pub fn quadratic_curve_to(&mut self, cx: f32, cy: f32, x: f32, y: f32) {
+        self.circle = None;
         if !self.path_has_content {
             self.path.move_to(cx, cy);
         }
@@ -301,6 +316,7 @@ impl Context {
     }
 
     pub fn bezier_curve_to(&mut self, c1x: f32, c1y: f32, c2x: f32, c2y: f32, x: f32, y: f32) {
+        self.circle = None;
         if !self.path_has_content {
             self.path.move_to(c1x, c1y);
         }
@@ -332,6 +348,12 @@ impl Context {
         }
         // A full turn (or more) is drawn as a closed circle.
         let full = sweep.abs() >= std::f32::consts::TAU - 1e-6;
+        // The path is exactly this circle only when the arc is a full turn on an empty path.
+        self.circle = if full && !self.path_has_content {
+            Some((x, y, radius))
+        } else {
+            None
+        };
 
         // The arc starts at its start point: a line joins it to the current point when the
         // path has one (as a browser does), otherwise the path starts there.
@@ -400,6 +422,7 @@ impl Context {
         end: f32,
         counterclockwise: bool,
     ) {
+        self.circle = None;
         if !radius_x.is_finite() || !radius_y.is_finite() || radius_x < 0.0 || radius_y < 0.0 {
             return;
         }
@@ -446,6 +469,7 @@ impl Context {
 
     /// Adds a rectangle as a closed subpath.
     pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32) {
+        self.circle = None;
         if !self.path_has_content {
             self.path.move_to(x, y);
         } else {
@@ -533,6 +557,11 @@ impl Context {
 
     /// Strokes the current path.
     pub fn stroke(&mut self) {
+        if let Some((cx, cy, r)) = self.circle {
+            if self.stroke_circle_fast(cx, cy, r) {
+                return;
+            }
+        }
         let Some(path) = self.path.clone().finish() else {
             return;
         };
@@ -545,6 +574,47 @@ impl Context {
             stroke.width = 0.0;
         }
         self.pixmap.stroke_path(&path, &paint, &stroke, self.state.transform, None);
+    }
+
+    /// Whether the transform is a translation, the identity included (no scale, no skew).
+    fn translate_only(&self) -> bool {
+        let t = self.state.transform;
+        t.sx == 1.0 && t.sy == 1.0 && t.kx == 0.0 && t.ky == 0.0
+    }
+
+    /// Strokes the current full circle as an anti-aliased annulus, without tiny-skia's
+    /// stroker. Returns `false`, painting nothing, when the stroke needs the general path:
+    /// the fast path is off, the composite is not source-over, the style is a gradient,
+    /// the transform scales or rotates, the width or radius is zero.
+    fn stroke_circle_fast(&mut self, cx: f32, cy: f32, r: f32) -> bool {
+        if !self.fast_annulus
+            || self.state.composite != Composite::SourceOver
+            || !self.translate_only()
+            || self.state.line_width.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater)
+            || r.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater)
+            || !r.is_finite()
+        {
+            return false;
+        }
+        let FillStyle::Solid(c) = &self.state.stroke_style else {
+            return false;
+        };
+        let c = *c;
+        self.fast_strokes += 1;
+        let alpha = (c.a * self.state.global_alpha).clamp(0.0, 1.0);
+        // A translate moves the centre and leaves the radius alone.
+        let t = self.state.transform;
+        let half = self.state.line_width * 0.5;
+        paint_annulus(
+            &mut self.pixmap,
+            cx + t.tx,
+            cy + t.ty,
+            (r - half).max(0.0),
+            r + half,
+            [c.r, c.g, c.b],
+            alpha,
+        );
+        true
     }
 
     /// Builds the `tiny-skia` paint for a style, honouring `globalAlpha`.
@@ -652,6 +722,143 @@ impl Context {
                 .unwrap_or(*dst);
             }
         }
+    }
+}
+
+/// How far the band's coverage can reach past an edge: half a pixel diagonal.
+const EDGE_MARGIN: f32 = std::f32::consts::FRAC_1_SQRT_2;
+
+/// Source-over paint of an anti-aliased annulus into a premultiplied pixmap.
+///
+/// Coverage is the band's overlap with each pixel, approximated as a linear ramp one pixel
+/// wide at each edge: 1 inside the band, 0 outside. Pixels whose centres sit at least half
+/// a pixel inside both edges are full coverage, and that test uses squared distances, so
+/// only edge pixels take a square root. Each row visits only the columns the band can
+/// touch, and skips the hole the band surrounds.
+fn paint_annulus(
+    pixmap: &mut Pixmap,
+    cx: f32,
+    cy: f32,
+    inner: f32,
+    outer: f32,
+    rgb: [f32; 3],
+    alpha: f32,
+) {
+    let width = pixmap.width() as i32;
+    let height = pixmap.height() as i32;
+    let pixels = pixmap.pixels_mut();
+
+    // Pixel centres within half a pixel of an edge can still have coverage.
+    let r_out = outer + EDGE_MARGIN;
+    let r_in = inner - EDGE_MARGIN;
+    let hole = r_in > 0.0;
+    let ro2 = r_out * r_out;
+    let ri2 = r_in * r_in;
+
+    let y0 = ((cy - r_out).floor() as i32).max(0);
+    let y1 = ((cy + r_out).ceil() as i32).min(height - 1);
+    for py in y0..=y1 {
+        let dy = py as f32 + 0.5 - cy;
+        let dy2 = dy * dy;
+        if dy2 >= ro2 {
+            continue;
+        }
+        let xo = (ro2 - dy2).sqrt();
+        // The spans of this row that the band can touch: the whole outer span, or the two
+        // sides of the hole when the row crosses it.
+        let mut spans = [(0.0f32, 0.0f32); 2];
+        let mut count = 1;
+        spans[0] = (cx - xo, cx + xo);
+        if hole && dy2 < ri2 {
+            let xi = (ri2 - dy2).sqrt();
+            spans[0] = (cx - xo, cx - xi);
+            spans[1] = (cx + xi, cx + xo);
+            count = 2;
+        }
+        // The margins of the two spans can overlap when the hole is narrow; a pixel is
+        // visited once, so each span starts after the columns already visited.
+        let mut next_free = 0i32;
+        for &(lo, hi) in &spans[..count] {
+            let x0 = (((lo - 1.0).floor() as i32).max(0)).max(next_free);
+            let x1 = ((hi + 1.0).ceil() as i32).min(width - 1);
+            next_free = x1 + 1;
+            for px in x0..=x1 {
+                let dx = px as f32 + 0.5 - cx;
+                let d2 = dx * dx + dy2;
+                if d2 >= ro2 || (hole && d2 <= ri2) {
+                    continue;
+                }
+                let coverage = pixel_band_coverage(px as f32, py as f32, cx, cy, inner, outer);
+                let src_alpha = coverage * alpha;
+                if src_alpha <= 0.0 {
+                    continue;
+                }
+                blend_source_over(&mut pixels[(py * width + px) as usize], rgb, src_alpha);
+            }
+        }
+    }
+}
+
+/// Slices per edge pixel for the coverage integral.
+const COVERAGE_SLICES: usize = 8;
+
+/// The exact area of the pixel `[x0, x0+1] x [y0, y0+1]` covered by the annulus of radii
+/// `[inner, outer]` centred on `(cx, cy)`, as a fraction in 0..1.
+///
+/// A pixel whose nearest corner is outside the band, or whose farthest corner is inside the
+/// hole, is decided with squared distances. Any other pixel is integrated over x in
+/// `COVERAGE_SLICES` slices: within a slice the band is two y-intervals, measured exactly.
+fn pixel_band_coverage(x0: f32, y0: f32, cx: f32, cy: f32, inner: f32, outer: f32) -> f32 {
+    let x1 = x0 + 1.0;
+    let y1 = y0 + 1.0;
+    let ro2 = outer * outer;
+    let ri2 = inner * inner;
+    let nx = cx.clamp(x0, x1);
+    let ny = cy.clamp(y0, y1);
+    let near2 = (nx - cx) * (nx - cx) + (ny - cy) * (ny - cy);
+    let fx = if cx >= (x0 + x1) * 0.5 { x0 } else { x1 };
+    let fy = if cy >= (y0 + y1) * 0.5 { y0 } else { y1 };
+    let far2 = (fx - cx) * (fx - cx) + (fy - cy) * (fy - cy);
+    if near2 >= ro2 || far2 <= ri2 {
+        return 0.0;
+    }
+    if far2 <= ro2 && near2 >= ri2 {
+        return 1.0;
+    }
+    let mut total = 0.0;
+    for k in 0..COVERAGE_SLICES {
+        let x = x0 + (k as f32 + 0.5) / COVERAGE_SLICES as f32;
+        let u = (x - cx) * (x - cx);
+        if u >= ro2 {
+            continue;
+        }
+        let yo = (ro2 - u).sqrt();
+        let yi = if u < ri2 { (ri2 - u).sqrt() } else { 0.0 };
+        total += interval_overlap(cy + yi, cy + yo, y0, y1) + interval_overlap(cy - yo, cy - yi, y0, y1);
+    }
+    total / COVERAGE_SLICES as f32
+}
+
+/// The length of `[a, b]` inside `[c, d]`.
+fn interval_overlap(a: f32, b: f32, c: f32, d: f32) -> f32 {
+    (b.min(d) - a.max(c)).max(0.0)
+}
+
+/// Source-over of a straight-alpha color at `alpha` onto one premultiplied pixel.
+fn blend_source_over(dst: &mut PremultipliedColorU8, rgb: [f32; 3], alpha: f32) {
+    let keep = 1.0 - alpha;
+    let to_byte = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+    let out_a = alpha + dst.alpha() as f32 / 255.0 * keep;
+    let out_r = rgb[0] * alpha + dst.red() as f32 / 255.0 * keep;
+    let out_g = rgb[1] * alpha + dst.green() as f32 / 255.0 * keep;
+    let out_b = rgb[2] * alpha + dst.blue() as f32 / 255.0 * keep;
+    let a = to_byte(out_a);
+    // Rounding can push a channel past alpha, which a premultiplied pixel forbids.
+    let r = to_byte(out_r).min(a);
+    let g = to_byte(out_g).min(a);
+    let b = to_byte(out_b).min(a);
+    if let Some(pixel) = PremultipliedColorU8::from_rgba(r, g, b, a) {
+        *dst = pixel;
     }
 }
 
@@ -790,6 +997,121 @@ mod tests {
         let px = &ctx.pixels()[0..4];
         assert_eq!(px[3], 128);
         assert_eq!(px[0], 128);
+    }
+
+    /// The exact area fraction of pixel `(x0, y0)` inside the annulus, by dense point
+    /// sampling. It is the reference the browser-like output is measured against.
+    fn exact_area(x0: usize, y0: usize, cx: f32, cy: f32, inner: f32, outer: f32) -> f32 {
+        const N: usize = 64;
+        let (ri2, ro2) = (inner * inner, outer * outer);
+        let mut hit = 0usize;
+        for j in 0..N {
+            let y = y0 as f32 + (j as f32 + 0.5) / N as f32;
+            for i in 0..N {
+                let x = x0 as f32 + (i as f32 + 0.5) / N as f32;
+                let d2 = (x - cx) * (x - cx) + (y - cy) * (y - cy);
+                if d2 >= ri2 && d2 < ro2 {
+                    hit += 1;
+                }
+            }
+        }
+        hit as f32 / (N * N) as f32
+    }
+
+    /// The annulus fast path against an exact-area reference and against tiny-skia's
+    /// stroker. Full circles with several radii, widths 1..11, colour alpha 0x88, centres
+    /// partly off the canvas. Each circle is drawn on a fresh canvas by each path.
+    /// Circles with radius under half the width are the whole disc (every point within
+    /// w/2 of the path), checked separately.
+    #[test]
+    fn annulus_fast_path_matches_exact_coverage() {
+        const W: usize = 48;
+        let centres = [(10.3f32, 12.7f32), (-4.0, 20.0), (44.5, 46.0), (24.0, 0.0)];
+        let radii = [1.5f32, 3.0, 5.0, 8.5, 12.0, 16.0, 21.0];
+        let widths = [1.0f32, 2.0, 3.0, 4.0, 5.0, 7.0, 9.0, 11.0];
+        let color = [255.0f32, 64.0, 128.0];
+        let alpha = 136.0f32 / 255.0;
+
+        let mut circles = 0u64;
+        let mut discs = 0u64;
+        // Per comparison: bytes within 2 levels, total bytes, worst difference.
+        let mut fast_vs_exact = (0usize, 0usize, 0i32);
+        let mut tiny_vs_exact = (0usize, 0usize, 0i32);
+        let mut fast_vs_tiny = (0usize, 0usize, 0i32);
+        let tally = |acc: &mut (usize, usize, i32), a: u8, b: u8| {
+            let d = (a as i32 - b as i32).abs();
+            acc.1 += 1;
+            if d <= 2 {
+                acc.0 += 1;
+            }
+            acc.2 = acc.2.max(d);
+        };
+
+        for &(cx, cy) in &centres {
+            for &r in &radii {
+                for &w in &widths {
+                    let mut fast = Context::new(W as u32, W as u32);
+                    let mut slow = Context::new(W as u32, W as u32);
+                    slow.fast_annulus = false;
+                    for ctx in [&mut fast, &mut slow] {
+                        ctx.set_stroke_style(FillStyle::Solid(CssColor::from_rgba8(
+                            255, 64, 128, alpha,
+                        )));
+                        ctx.set_line_width(w);
+                        ctx.begin_path();
+                        ctx.arc(cx, cy, r, 0.0, std::f32::consts::TAU, false);
+                        ctx.stroke();
+                    }
+                    circles += 1;
+                    assert_eq!(fast.fast_strokes, 1, "the fast path must run for a full circle");
+                    assert_eq!(slow.fast_strokes, 0);
+
+                    if r < w / 2.0 {
+                        let (px, py) = (cx.floor() as i32, cy.floor() as i32);
+                        if (0..W as i32).contains(&px) && (0..W as i32).contains(&py) {
+                            let i = ((py * W as i32 + px) * 4 + 3) as usize;
+                            assert_eq!(fast.pixels()[i], 136, "the disc is solid at ({px},{py})");
+                        }
+                        discs += 1;
+                        continue;
+                    }
+
+                    let (inner, outer) = ((r - w / 2.0).max(0.0), r + w / 2.0);
+                    for y in 0..W {
+                        for x in 0..W {
+                            let cov = exact_area(x, y, cx, cy, inner, outer);
+                            let i = (y * W + x) * 4;
+                            let reference = [
+                                (color[0] * alpha * cov).round() as u8,
+                                (color[1] * alpha * cov).round() as u8,
+                                (color[2] * alpha * cov).round() as u8,
+                                (alpha * 255.0 * cov).round() as u8,
+                            ];
+                            for (k, &expected) in reference.iter().enumerate() {
+                                let f = fast.pixels()[i + k];
+                                let s = slow.pixels()[i + k];
+                                tally(&mut fast_vs_exact, f, expected);
+                                tally(&mut tiny_vs_exact, s, expected);
+                                tally(&mut fast_vs_tiny, f, s);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let report = |name: &str, acc: (usize, usize, i32)| {
+            let pct = acc.0 as f64 / acc.1 as f64 * 100.0;
+            eprintln!("{name}: {:.3}% of {} bytes within 2 levels, worst {}", pct, acc.1, acc.2);
+            pct
+        };
+        eprintln!("annulus: {circles} circles, {discs} disc cases checked separately");
+        let fe = report("fast vs exact area", fast_vs_exact);
+        report("tiny-skia vs exact area", tiny_vs_exact);
+        report("fast vs tiny-skia", fast_vs_tiny);
+
+        assert!(fe >= 99.0, "fast vs exact: only {fe:.3}% of bytes within 2 levels");
+        assert!(fast_vs_exact.2 <= 16, "fast vs exact: worst byte differs by {}", fast_vs_exact.2);
     }
 
     #[test]
