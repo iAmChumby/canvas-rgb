@@ -1,0 +1,23 @@
+canvas-rgb
+Copyright 2026 Luke Edwards
+
+This product includes software adapted from Hypercolor
+(https://github.com/hyperb1iss/hypercolor), licensed under the Apache License, Version 2.0.
+Adapted files (layouts and packet encoders rewritten in Rust, not copied line by line):
+
+- hypercolor-openrgb-sdk/src/parser.rs  -> crates/canvas-adapters/src/protocol.rs
+  (OpenRGB controller-data field order; mode, zone and segment layouts; v4/v5 conditionals)
+- hypercolor-openrgb-sdk/src/packet.rs  -> crates/canvas-adapters/src/protocol.rs
+  (packet ids; UPDATELEDS, RESIZEZONE, SET_CLIENT_NAME, REQUEST_PROTOCOL_VERSION payloads;
+  protocol version constants)
+- hypercolor-openrgb-sdk/src/types.rs   -> crates/canvas-adapters/src/openrgb.rs
+  (OpenRGB device-type and zone-type raw mapping)
+- The DeviceAdapter trait shape (crates/canvas-proto/src/traits.rs) follows Hypercolor's
+  DeviceBackend.
+
+Third-party content not covered by this repository's license:
+
+- crates/canvas-effects/assets/poison/effect.html and
+  crates/canvas-html/tests/fixtures/poison.html: SignalRGB's "Poison" effect (publisher
+  SignalRGB, catalog id -Mir7bKkFQmd2LF_9Leg), copied unmodified at the owner's request for
+  personal use. All rights remain with its authors.

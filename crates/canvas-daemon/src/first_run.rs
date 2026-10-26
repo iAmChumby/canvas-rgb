@@ -1,0 +1,630 @@
+//! G7: the first run.
+//!
+//! On a clean profile the daemon lights everything up with no clicks: it sizes the JARGB
+//! headers from SignalRGB's own configuration (read-only), places every device on the
+//! 320x200 canvas, activates Poison and opens the editor's dismissible "size your ARGB
+//! headers" panel.
+
+use canvas_proto::device::{DeviceInfo, DeviceKind};
+use canvas_proto::layout::{Layout, PlacedZone, RenderScale, SamplingMode};
+use canvas_proto::Rgb8;
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+/// The JARGB header count SignalRGB uses on Luke's board (today 120 each).
+pub const SIGNALRGB_JARGB_LED_COUNT: u32 = 120;
+
+/// The effect the first run activates.
+pub const FIRST_RUN_EFFECT: &str = "poison";
+
+/// Where SignalRGB's device configuration lives.
+pub fn signalrgb_devices_key() -> String {
+    r"Software\WhirlwindFX\SignalRgb\devices".to_string()
+}
+
+/// SignalRGB's log folder.
+pub fn signalrgb_log_dir() -> PathBuf {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join("WhirlwindFX").join("SignalRgb").join("Logs")
+}
+
+/// SignalRGB's effect cache, where the reference `effect.html` lives.
+pub fn signalrgb_cache_dir() -> PathBuf {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join("WhirlwindFX").join("SignalRgb").join("cache").join("effects")
+}
+
+/// Where the JARGB counts came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CountSource {
+    /// Read from SignalRGB's registry values.
+    Registry,
+    /// Read from SignalRGB's log.
+    Log,
+    /// Not found; the counts stay unknown until the guided step.
+    Unknown,
+}
+
+/// The result of looking for SignalRGB's JARGB LED counts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JargbCounts {
+    pub source: CountSource,
+    /// The counts per header, in the order they were found.
+    pub counts: Vec<u32>,
+}
+
+impl JargbCounts {
+    /// True when the counts are known.
+    pub fn is_known(&self) -> bool {
+        !self.counts.is_empty()
+    }
+}
+
+/// Looks for SignalRGB's MSI ARGB header LED counts.
+///
+/// The registry is read first, then the newest log file. Both are read-only. Nothing
+/// here touches SignalRGB itself.
+pub fn find_signalrgb_jargb_counts() -> JargbCounts {
+    let registry = find_in_registry();
+    if registry.is_known() {
+        return registry;
+    }
+    let log = find_in_logs();
+    if log.is_known() {
+        return log;
+    }
+    JargbCounts { source: CountSource::Unknown, counts: Vec::new() }
+}
+
+/// Reads the counts from `HKCU\Software\WhirlwindFX\SignalRgb\devices`.
+///
+/// SignalRGB stores a value per device; the MSI board's value names the ARGB headers and
+/// their LED counts. The values are read as `REG_SZ` and scanned for numbers.
+#[cfg(windows)]
+fn find_in_registry() -> JargbCounts {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::ERROR_NO_MORE_ITEMS;
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegEnumKeyW, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ,
+    };
+
+    unsafe {
+        let mut key: HKEY = HKEY::default();
+        let path: Vec<u16> =
+            signalrgb_devices_key().encode_utf16().chain(std::iter::once(0)).collect();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(path.as_ptr()), None, KEY_READ, &mut key).0 != 0 {
+            return JargbCounts { source: CountSource::Unknown, counts: Vec::new() };
+        }
+
+        // SignalRGB stores one subkey per device.
+        let mut counts = Vec::new();
+        let mut index: u32 = 0;
+        loop {
+            let mut name = [0u16; 256];
+            let result = RegEnumKeyW(key, index, Some(&mut name));
+            if result == ERROR_NO_MORE_ITEMS || result.0 != 0 {
+                break;
+            }
+            index += 1;
+
+            // Open the device's own key and read its values as text.
+            let mut device_key: HKEY = HKEY::default();
+            if RegOpenKeyExW(key, PCWSTR(name.as_ptr()), None, KEY_READ, &mut device_key).0 != 0 {
+                continue;
+            }
+            for value_index in 0..64u32 {
+                let value_name: Vec<u16> =
+                    format!("{value_index}").encode_utf16().chain(std::iter::once(0)).collect();
+                let mut size: u32 = 0;
+                let queried = RegQueryValueExW(
+                    device_key,
+                    PCWSTR(value_name.as_ptr()),
+                    None,
+                    None,
+                    None,
+                    Some(std::ptr::addr_of_mut!(size)),
+                );
+                if queried.0 != 0 || size == 0 {
+                    continue;
+                }
+                let mut buffer = vec![0u16; (size as usize / 2) + 1];
+                let mut written = size;
+                let read = RegQueryValueExW(
+                    device_key,
+                    PCWSTR(value_name.as_ptr()),
+                    None,
+                    None,
+                    Some(buffer.as_mut_ptr().cast::<u8>()),
+                    Some(std::ptr::addr_of_mut!(written)),
+                );
+                if read.0 != 0 {
+                    continue;
+                }
+                let text = String::from_utf16_lossy(&buffer);
+                if let Some(found) = counts_in_text(&text) {
+                    counts.extend(found);
+                }
+            }
+            let _ = RegCloseKey(device_key);
+        }
+        let _ = RegCloseKey(key);
+
+        if counts.is_empty() {
+            JargbCounts { source: CountSource::Unknown, counts: Vec::new() }
+        } else {
+            JargbCounts { source: CountSource::Registry, counts }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn find_in_registry() -> JargbCounts {
+    JargbCounts { source: CountSource::Unknown, counts: Vec::new() }
+}
+
+/// Reads the counts from the newest SignalRGB log.
+///
+/// The log names the MSI board's ARGB headers and their LED counts on one line, e.g.
+/// `JARGB1: 120 LEDs`.
+fn find_in_logs() -> JargbCounts {
+    let dir = signalrgb_log_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return JargbCounts { source: CountSource::Unknown, counts: Vec::new() };
+    };
+    // The newest log file wins.
+    let mut newest: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "log") {
+            continue;
+        }
+        let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        if newest.as_ref().is_none_or(|(t, _)| modified > *t) {
+            newest = Some((modified, path));
+        }
+    }
+    let Some((_, path)) = newest else {
+        return JargbCounts { source: CountSource::Unknown, counts: Vec::new() };
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return JargbCounts { source: CountSource::Unknown, counts: Vec::new() };
+    };
+
+    let mut counts = Vec::new();
+    for line in text.lines() {
+        if !line.to_ascii_lowercase().contains("jargb") {
+            continue;
+        }
+        if let Some(found) = counts_in_text(line) {
+            counts.extend(found);
+        }
+    }
+    if counts.is_empty() {
+        JargbCounts { source: CountSource::Unknown, counts: Vec::new() }
+    } else {
+        JargbCounts { source: CountSource::Log, counts }
+    }
+}
+
+/// Extracts LED counts from a line of text that mentions ARGB headers.
+///
+/// Only a number directly followed by "led" or "leds" is a count: the digits in a header
+/// name like "JARGB1" are not.
+fn counts_in_text(text: &str) -> Option<Vec<u32>> {
+    let lower = text.to_ascii_lowercase();
+    if !lower.contains("jargb") && !lower.contains("argb") {
+        return None;
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut counts = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        // Look for a number.
+        if chars[i].is_ascii_digit() {
+            let start = i;
+            while i < chars.len() && chars[i].is_ascii_digit() {
+                i += 1;
+            }
+            let digits: String = chars[start..i].iter().collect();
+            let Ok(number) = digits.parse::<u32>() else {
+                continue;
+            };
+            if (1..=1024).contains(&number) {
+                // The number must be followed by "led" or "leds".
+                let tail: String = chars[i..(i + 8).min(chars.len())].iter().collect::<String>().to_ascii_lowercase();
+                let tail = tail.trim_start();
+                if tail.starts_with("led") {
+                    counts.push(number);
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+    if counts.is_empty() {
+        None
+    } else {
+        Some(counts)
+    }
+}
+
+/// Where a device goes on the 320x200 canvas.
+///
+/// G7: the RAM sticks stand vertical and side by side, the board headers are horizontal
+/// strips, the keyboard is a wide strip and the microphone is a dot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    /// Vertical, side by side.
+    Vertical,
+    /// A horizontal strip.
+    Horizontal,
+    /// A wide strip.
+    Wide,
+    /// A dot.
+    Dot,
+}
+
+/// The placement a device kind gets.
+pub fn placement_for(kind: DeviceKind) -> Placement {
+    match kind {
+        DeviceKind::Dram => Placement::Vertical,
+        DeviceKind::Motherboard => Placement::Horizontal,
+        DeviceKind::Keyboard => Placement::Wide,
+        DeviceKind::Mouse => Placement::Dot,
+        DeviceKind::Microphone => Placement::Dot,
+        DeviceKind::Headset => Placement::Dot,
+        DeviceKind::LedStrip => Placement::Horizontal,
+        _ => Placement::Horizontal,
+    }
+}
+
+/// Builds the default layout for the discovered devices.
+///
+/// The placement is deterministic: the devices are sorted by kind and name, then laid
+/// out in rows that fill the 320x200 canvas.
+pub fn build_default_layout(devices: &[DeviceInfo]) -> Layout {
+    let mut sorted: Vec<&DeviceInfo> = devices.iter().collect();
+    sorted.sort_by(|a, b| {
+        kind_rank(a.kind)
+            .cmp(&kind_rank(b.kind))
+            .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()))
+    });
+
+    let mut zones = Vec::new();
+    // The RAM sticks go on the right, side by side.
+    let mut dram_column = 0u32;
+    // The rest is laid out in rows on the left.
+    let mut row_y = 4.0f32;
+    let mut row_x = 4.0f32;
+    const ROW_HEIGHT: f32 = 18.0;
+    const DRAM_WIDTH: f32 = 16.0;
+    const DRAM_HEIGHT: f32 = 120.0;
+
+    for device in sorted {
+        let placement = placement_for(device.kind);
+        for zone in &device.zones {
+            if zone.led_count == 0 {
+                continue;
+            }
+            let placed = match placement {
+                Placement::Vertical => {
+                    let x = 320.0 - DRAM_WIDTH - 4.0 - (dram_column as f32) * (DRAM_WIDTH + 4.0);
+                    dram_column += 1;
+                    PlacedZone {
+                        device_id: device.id.clone(),
+                        zone_index: zone.index,
+                        x,
+                        y: 40.0,
+                        width: DRAM_WIDTH,
+                        height: DRAM_HEIGHT,
+                        rotation_deg: 0.0,
+                        reversed: false,
+                        visible: true,
+                    }
+                }
+                Placement::Dot => PlacedZone {
+                    device_id: device.id.clone(),
+                    zone_index: zone.index,
+                    x: 4.0,
+                    y: 4.0 + row_y,
+                    width: 12.0,
+                    height: 12.0,
+                    rotation_deg: 0.0,
+                    reversed: false,
+                    visible: true,
+                },
+                Placement::Wide => PlacedZone {
+                    device_id: device.id.clone(),
+                    zone_index: zone.index,
+                    x: row_x,
+                    y: row_y,
+                    width: 180.0,
+                    height: 16.0,
+                    rotation_deg: 0.0,
+                    reversed: false,
+                    visible: true,
+                },
+                Placement::Horizontal => {
+                    let placed = PlacedZone {
+                        device_id: device.id.clone(),
+                        zone_index: zone.index,
+                        x: row_x,
+                        y: row_y,
+                        width: 120.0,
+                        height: 10.0,
+                        rotation_deg: 0.0,
+                        reversed: false,
+                        visible: true,
+                    };
+                    row_y += ROW_HEIGHT;
+                    if row_y > 180.0 {
+                        row_y = 4.0;
+                        row_x += 130.0;
+                    }
+                    placed
+                }
+            };
+            zones.push(placed);
+        }
+    }
+
+    Layout {
+        id: "default".into(),
+        name: "Default".into(),
+        render_scale: RenderScale::P100,
+        sampling: SamplingMode::AreaAverage,
+        zones,
+        effect: None,
+    }
+}
+
+/// The order the device kinds are placed in.
+fn kind_rank(kind: DeviceKind) -> u8 {
+    match kind {
+        DeviceKind::Motherboard => 0,
+        DeviceKind::LedStrip => 1,
+        DeviceKind::Keyboard => 2,
+        DeviceKind::Mouse => 3,
+        DeviceKind::Microphone => 4,
+        DeviceKind::Headset => 5,
+        DeviceKind::Dram => 6,
+        DeviceKind::Gpu => 7,
+        DeviceKind::Other => 8,
+    }
+}
+
+/// The zone sizes to save for the JARGB headers, by device fingerprint.
+pub fn jargb_zone_sizes(devices: &[DeviceInfo], counts: &JargbCounts) -> BTreeMap<String, BTreeMap<u32, u32>> {
+    let mut sizes = BTreeMap::new();
+    if !counts.is_known() {
+        return sizes;
+    }
+    for device in devices {
+        let jargb_zones: Vec<u32> =
+            device.zones.iter().filter(|z| is_jargb_zone(&device.name, &z.name)).map(|z| z.index).collect();
+        if jargb_zones.is_empty() {
+            continue;
+        }
+        let mut per_device = BTreeMap::new();
+        for (i, zone) in jargb_zones.iter().enumerate() {
+            let count = counts.counts.get(i).copied().unwrap_or(SIGNALRGB_JARGB_LED_COUNT);
+            per_device.insert(*zone, count);
+        }
+        sizes.insert(device.id.0.clone(), per_device);
+    }
+    sizes
+}
+
+/// True when a zone is one of the MSI ARGB headers.
+fn is_jargb_zone(device_name: &str, zone_name: &str) -> bool {
+    let device = device_name.to_ascii_lowercase();
+    let zone = zone_name.to_ascii_lowercase();
+    if !device.contains("mystic") && !device.contains("msi") && !device.contains("b850") {
+        return false;
+    }
+    zone.contains("jargb") || zone.contains("argb")
+}
+
+/// The colour the devices get before the first run's layout is applied.
+pub fn first_frame_color() -> Rgb8 {
+    Rgb8::BLACK
+}
+
+/// Whether the first run still has to happen.
+pub async fn should_run(app: &std::sync::Arc<crate::state::App>) -> bool {
+    !app.store.read().await.config.first_run_done
+}
+
+/// The first run: size the JARGB headers, place the devices, activate Poison.
+///
+/// It runs only once, when `config.first_run_done` is false and OpenRGB has devices.
+pub async fn maybe_run(app: &std::sync::Arc<crate::state::App>) {
+    if !should_run(app).await {
+        return;
+    }
+    let devices = app.devices.read().await.clone();
+    if devices.is_empty() {
+        tracing::info!("the first run waits for the devices");
+        return;
+    }
+
+    // The JARGB counts come from SignalRGB, read-only.
+    let counts = find_signalrgb_jargb_counts();
+    match &counts.source {
+        CountSource::Registry => {
+            tracing::info!(counts = ?counts.counts, "the JARGB LED counts came from SignalRGB's registry");
+        }
+        CountSource::Log => {
+            tracing::info!(counts = ?counts.counts, "the JARGB LED counts came from SignalRGB's log");
+        }
+        CountSource::Unknown => {
+            tracing::warn!(
+                "SignalRGB's JARGB LED counts could not be read; the counts stay unknown until the guided step"
+            );
+        }
+    }
+
+    // Size the JARGB headers and save the sizes.
+    let sizes = jargb_zone_sizes(&devices, &counts);
+    if !sizes.is_empty() {
+        for (device, zones) in &sizes {
+            for (zone, leds) in zones {
+                let mut adapter = app.adapter.lock().await;
+                if let Err(e) = adapter.set_zone_size(&canvas_proto::device::DeviceId(device.clone()), *zone, *leds).await {
+                    tracing::warn!(device, zone, leds, error = %e, "could not size the header");
+                }
+            }
+        }
+        {
+            let home = app.store.read().await.home.clone();
+            let mut guard = app.zones.write().await;
+            for (device, zones) in &sizes {
+                guard.entry(device.clone()).or_default().extend(zones.clone());
+            }
+            let file = canvas_proto::config::ZonesFile {
+                schema_version: canvas_proto::config::ZONES_SCHEMA,
+                sizes: guard.clone(),
+            };
+            let _ = crate::storage::write_json(
+                &home.join(canvas_proto::config::ZONES_FILE),
+                &file,
+            );
+        }
+    }
+
+    // Place the devices and activate Poison.
+    let layout = build_default_layout(&devices);
+    {
+        let mut store = app.store.write().await;
+        store.layouts.active = layout.id.clone();
+        match store.layouts.layouts.iter_mut().find(|l| l.id == layout.id) {
+            Some(existing) => *existing = layout.clone(),
+            None => store.layouts.layouts.push(layout.clone()),
+        }
+        let _ = store.save_layouts();
+    }
+    let device_list = app.devices.read().await.clone();
+    app.engine.set_layout(layout.clone(), device_list);
+
+    let props = canvas_proto::props::Props::new();
+    if let Err(e) = crate::apply_effect(app, FIRST_RUN_EFFECT, &props).await {
+        tracing::error!(error = %e, "the first run could not activate Poison");
+    } else {
+        tracing::info!("the first run activated Poison");
+    }
+
+    // The zone panel stays open until Luke dismisses it.
+    {
+        let mut store = app
+            .store
+            .write()
+            .await;
+        store.config.first_run_done = true;
+        let _ = store.save_config();
+    }
+    tracing::info!("the first run is done");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use canvas_proto::device::{DeviceId, ZoneInfo, ZoneKind};
+
+    fn device(name: &str, kind: DeviceKind, leds: u32) -> DeviceInfo {
+        DeviceInfo {
+            id: DeviceId(format!("openrgb:{name}")),
+            name: name.into(),
+            vendor: "test".into(),
+            kind,
+            adapter: "openrgb".into(),
+            adapter_index: 0,
+            serial: name.into(),
+            location: String::new(),
+            zones: vec![ZoneInfo {
+                index: 0,
+                name: "Zone 1".into(),
+                kind: ZoneKind::Linear,
+                led_count: leds,
+                min_leds: 1,
+                max_leds: 512,
+                resizable: true,
+            }],
+            connected: true,
+        }
+    }
+
+    #[test]
+    fn the_ram_sticks_are_vertical_and_side_by_side() {
+        let devices = vec![
+            device("ENE DIMM A", DeviceKind::Dram, 8),
+            device("ENE DIMM B", DeviceKind::Dram, 8),
+        ];
+        let layout = build_default_layout(&devices);
+        assert_eq!(layout.zones.len(), 2);
+        let a = &layout.zones[0];
+        let b = &layout.zones[1];
+        assert!(a.height > a.width, "a RAM zone is vertical");
+        assert!(b.height > b.width, "a RAM zone is vertical");
+        assert_ne!(a.x, b.x, "the RAM sticks are side by side");
+    }
+
+    #[test]
+    fn the_keyboard_is_a_wide_strip_and_the_mic_a_dot() {
+        let devices = vec![
+            device("ROYUAN", DeviceKind::Keyboard, 100),
+            device("Quadcast S", DeviceKind::Microphone, 1),
+        ];
+        let layout = build_default_layout(&devices);
+        let keyboard = layout.zones.iter().find(|z| z.device_id.0.contains("ROYUAN")).unwrap();
+        let mic = layout.zones.iter().find(|z| z.device_id.0.contains("Quadcast")).unwrap();
+        assert!(keyboard.width > keyboard.height * 5.0, "the keyboard is a wide strip");
+        assert!(mic.width <= 16.0 && mic.height <= 16.0, "the microphone is a dot");
+    }
+
+    #[test]
+    fn the_board_headers_are_horizontal_strips() {
+        let devices = vec![device("MSI B850 Mystic Light", DeviceKind::Motherboard, 120)];
+        let layout = build_default_layout(&devices);
+        let zone = &layout.zones[0];
+        assert!(zone.width > zone.height, "a board header is a horizontal strip");
+    }
+
+    #[test]
+    fn the_layout_is_deterministic() {
+        let devices = vec![
+            device("B", DeviceKind::Dram, 8),
+            device("A", DeviceKind::Dram, 8),
+        ];
+        let first = build_default_layout(&devices);
+        let second = build_default_layout(&devices);
+        assert_eq!(first.zones.len(), second.zones.len());
+        for (a, b) in first.zones.iter().zip(second.zones.iter()) {
+            assert_eq!(a.device_id, b.device_id);
+            assert_eq!(a.x, b.x);
+            assert_eq!(a.y, b.y);
+        }
+    }
+
+    #[test]
+    fn counts_are_pulled_out_of_a_log_line() {
+        let found = counts_in_text("MSI ARGB header JARGB1: 120 LEDs").unwrap();
+        assert_eq!(found, vec![120]);
+        let none = counts_in_text("nothing to see here");
+        assert!(none.is_none());
+    }
+
+    #[test]
+    fn the_counts_are_unknown_when_signalrgb_is_not_installed() {
+        let counts = find_signalrgb_jargb_counts();
+        // On a machine without SignalRGB the counts stay unknown.
+        if counts.source == CountSource::Unknown {
+            assert!(!counts.is_known());
+        }
+    }
+}

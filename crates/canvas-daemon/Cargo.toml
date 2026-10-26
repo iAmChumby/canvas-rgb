@@ -17,15 +17,62 @@ path = "src/bin/cli.rs"
 canvas-proto.workspace = true
 canvas-core.workspace = true
 canvas-effects.workspace = true
+canvas-html.workspace = true
 canvas-adapters.workspace = true
 tokio.workspace = true
-axum.workspace = true
+axum = { version = "0.8", features = ["ws", "json", "macros"] }
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
-clap.workspace = true
+clap = { version = "4", features = ["derive", "env"] }
 anyhow.workspace = true
 rand.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+futures-util = "0.3"
+bytes = "1"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+zip = { version = "9", default-features = false, features = ["deflate", "time"] }
+rustfft = "6"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+    "Win32_System_Console",
+    "Win32_System_Power",
+    "Win32_System_Services",
+    "Win32_System_LibraryLoader",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
+    "Win32_System_Memory",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_System_Registry",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_RemoteDesktop",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Media_Audio",
+    "Win32_Media_Audio_Endpoints",
+    "Win32_Media_KernelStreaming",
+    "Win32_Media_Multimedia",
+    "Win32_Media",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+] }
+
+[target.'cfg(windows)'.dependencies]
+windows-core = "0.62"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

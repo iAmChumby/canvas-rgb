@@ -252,6 +252,7 @@ dependencies = [
  "canvas-adapters",
  "canvas-core",
  "canvas-effects",
+ "canvas-html",
  "canvas-proto",
  "clap",
  "futures-util",
@@ -276,8 +277,12 @@ dependencies = [
 name = "canvas-effects"
 version = "0.1.0"
 dependencies = [
+ "canvas-html",
  "canvas-proto",
  "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]

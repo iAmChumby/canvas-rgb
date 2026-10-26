@@ -3,4 +3,5 @@
 
 pub mod fake;
 pub mod openrgb;
+mod protocol;
 pub mod zones;
