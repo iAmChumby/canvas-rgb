@@ -2,5 +2,7 @@
 
 /**
  * Render scale as a percentage of the logical canvas. Only 25, 50 and 100 are valid.
+ * Default 50%, Artemis's default: a quarter of the pixels, and LEDs are area-averaged over
+ * cells several render pixels wide, so the lights barely change.
  */
 export type RenderScale = 25 | 50 | 100;
