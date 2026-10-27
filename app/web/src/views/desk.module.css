@@ -207,9 +207,10 @@
 }
 
 /*
- * A microphone: the capsule, which is the zone itself, on a stand under it. A zone is only a
- * few units across, so the capsule is the whole box and the stand is the only thing that says
- * "microphone" - it is drawn just under the zone, where the desk is empty.
+ * A microphone: the capsule, which is the zone itself, with its stand inside it. A zone is
+ * only a few units across, so the capsule is the whole box and the stand is the only thing
+ * that says "microphone" - it is drawn inside the box, under the lamp, so a silhouette never
+ * reaches out of the zone it belongs to.
  */
 .desk .zone[data-shape="microphone"] {
   border-radius: 50%;
@@ -223,16 +224,16 @@
   content: "";
   position: absolute;
   left: 50%;
-  top: 100%;
-  width: 90%;
-  height: 45%;
+  top: 58%;
+  width: 44%;
+  height: 30%;
   transform: translateX(-50%);
   background:
     /* the base of the stand */
     linear-gradient(
       to bottom,
-      transparent 0 calc(100% - 2px),
-      var(--dev-line) calc(100% - 2px) 100%,
+      transparent 0 calc(100% - 1px),
+      var(--dev-line) calc(100% - 1px) 100%,
       transparent 100%
     ),
     /* the stem of the stand */
@@ -588,13 +589,13 @@
 
 /* ---------- the now playing panel ---------- */
 
-/* The effect's name in the panel's head: it is the one thing a reader wants to know before
-   they touch anything. */
-.nowEffectName {
+/* The effect's name: it is the one thing a reader wants to know before they touch anything. */
+.nowName {
+  margin: 0 0 2px;
   color: var(--ink);
   font-family: var(--fm);
   font-size: var(--t14);
-  white-space: nowrap;
+  font-weight: 600;
 }
 
 .nowBody {
@@ -608,6 +609,11 @@
   display: flex;
   align-items: center;
   gap: var(--s3);
+}
+
+.nowWhoText {
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .nowSwatch {
@@ -654,6 +660,14 @@
 }
 
 @media (max-width: 900px) {
+  .nowProps :global(.prop-list) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* In the narrow column of a wide screen the panel is 320 px across: two columns of a colour
+   field and a slider do not fit there, so the rows are one after another. */
+@media (min-width: 1101px) {
   .nowProps :global(.prop-list) {
     grid-template-columns: minmax(0, 1fr);
   }

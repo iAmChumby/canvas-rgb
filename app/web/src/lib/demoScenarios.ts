@@ -43,6 +43,8 @@ export const DEVICE_EMPTY = "device-empty";
 export const SLOW = "slow";
 export const SLOW_FPS = "slow-fps";
 export const SAVE_ERROR = "save-error";
+export const LINKS_CONNECTING = "links-connecting";
+export const FAN_CONNECTING = "fan-connecting";
 
 /** The scenario tokens in the query string, the same way the demo reads them. */
 function tokens(): string[] {
@@ -94,6 +96,16 @@ export function saveError(): boolean {
   return has(SAVE_ERROR);
 }
 
+/** The links are still coming up: the OpenRGB bridge and the fan service. */
+export function linksConnecting(): boolean {
+  return has(LINKS_CONNECTING);
+}
+
+/** The fan service alone is still coming up. */
+export function fanConnecting(): boolean {
+  return has(FAN_CONNECTING);
+}
+
 /** How long the demo waits before it answers. */
 export function answerDelayMs(): number {
   return slow() ? 700 : 2;
@@ -126,6 +138,8 @@ export function applyStatusScenarios(status: Status): Status {
   let next = status;
   if (openRgbDown()) next = { ...next, openrgb: "down" };
   if (slowFps()) next = { ...next, fps_measured: 12 };
+  if (linksConnecting()) next = { ...next, openrgb: "connecting", service: "connecting" };
+  if (fanConnecting()) next = { ...next, service: "connecting" };
   return next;
 }
 

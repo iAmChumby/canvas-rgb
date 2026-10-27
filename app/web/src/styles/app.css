@@ -405,6 +405,9 @@ html[data-motion="reduced"] *::after {
   box-shadow: 0 6px 18px rgb(0 0 0 / 0.28);
   color: var(--ink);
   animation: canvas-enter var(--dur) var(--ease) both;
+  /* A panel that is taller than the window scrolls: it is never cut off by the edge. */
+  overflow: auto;
+  overscroll-behavior: contain;
 }
 
 .strip-details-head {
@@ -446,6 +449,39 @@ html[data-motion="reduced"] *::after {
 }
 
 .strip-details-problems li[data-tone="work"] {
+  color: var(--work);
+}
+
+/* Each link and what it is doing: the three links the app has, named. */
+.strip-details-links {
+  margin: var(--s2) 0 0;
+  padding: var(--s2) 0 0;
+  border-top: 1px solid var(--line);
+  list-style: none;
+  font-size: var(--t14);
+}
+
+.strip-details-links li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s3);
+  padding: 2px 0;
+}
+
+.strip-details-link-name {
+  color: var(--mute);
+}
+
+.strip-details-links li[data-tone="down"] .fig {
+  color: var(--down);
+}
+
+.strip-details-links li[data-tone="warn"] .fig {
+  color: var(--warn);
+}
+
+.strip-details-links li[data-tone="work"] .fig {
   color: var(--work);
 }
 
@@ -1440,6 +1476,24 @@ button.chip:hover {
   min-width: 0;
 }
 
+/* The canvas and the line under it: the way back to the canvas on a phone. */
+.layout-canvas {
+  min-width: 0;
+}
+
+/* The right column: what is playing, the zones and the way to save. */
+.layout-side {
+  min-width: 0;
+}
+
+.layout-now,
+.layout-render,
+.layout-zones,
+.layout-unplaced,
+.layout-save {
+  min-width: 0;
+}
+
 .stage-meta {
   display: flex;
   flex-wrap: wrap;
@@ -1989,6 +2043,44 @@ button.chip:hover {
 
   .fans-editor-col {
     position: static;
+  }
+}
+
+/*
+ * On one column the layout page is a stack of its parts, and the order is the order a reader
+ * wants them: the desk, what is playing on it, the render settings, the zones and the way to
+ * save. The two columns are dissolved so the parts can be put in that order.
+ */
+@media (max-width: 1100px) {
+  .layout-grid {
+    display: flex;
+    flex-direction: column;
+    gap: var(--s4);
+  }
+
+  .layout-stage-col,
+  .layout-side {
+    display: contents;
+  }
+
+  .layout-now {
+    order: 3;
+  }
+
+  .layout-render {
+    order: 4;
+  }
+
+  .layout-zones {
+    order: 5;
+  }
+
+  .layout-unplaced {
+    order: 6;
+  }
+
+  .layout-save {
+    order: 7;
   }
 }
 

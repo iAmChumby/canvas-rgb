@@ -14,6 +14,7 @@ import { applyMotion, applyTheme, nextTheme, readMotion, readTheme } from "@/she
 import { ToastProvider, ToastHost, useToast } from "@/components/Toast";
 import { CommandPalette, type Command } from "@/components/CommandPalette";
 import { DaemonDown } from "@/components/DaemonDown";
+import { links, playingLine } from "@/lib/status";
 
 const PAGE_PATHS: Record<string, string> = {
   layout: "/",
@@ -44,6 +45,9 @@ function Frame({ children }: { children: ReactNode }) {
   const effects = useSnap((s) => s.effects);
   const toast = useToast();
   const [paletteOpen, setPaletteOpen] = useState(false);
+  /** The status details hang under the strip's mark. The palette can open them too, so the
+   *  state lives here. */
+  const [detailsOpen, setDetailsOpen] = useState(false);
 
   // The daemon is not answering: the editor cannot show any live data.
   const daemonDown = status === null && statusError !== null;
@@ -124,13 +128,43 @@ function Frame({ children }: { children: ReactNode }) {
   );
 
   const commands = useMemo<Command[]>(() => {
-    const list: Command[] = NAV.map((item) => ({
-      id: `page-${item.href}`,
-      group: "Pages",
-      label: `Go to ${item.label}`,
-      hint: item.href,
-      run: () => router.push(item.href),
-    }));
+    const list: Command[] = [];
+    // The status comes first: the palette says what is going on before it offers anything to
+    // do. The lines are read, not run; only the last one is an action.
+    const linkList = links(status, status === null && statusError !== null);
+    list.push({
+      id: "status-now",
+      group: "Status",
+      label: "Now playing",
+      hint: playingLine(status, effects),
+      status: true,
+      run: () => {},
+    });
+    for (const l of linkList) {
+      list.push({
+        id: `status-link-${l.name}`,
+        group: "Status",
+        label: l.name,
+        hint: l.state,
+        status: true,
+        run: () => {},
+      });
+    }
+    list.push({
+      id: "status-details",
+      group: "Status",
+      label: "Open the status details",
+      run: () => setDetailsOpen(true),
+    });
+    for (const item of NAV) {
+      list.push({
+        id: `page-${item.href}`,
+        group: "Pages",
+        label: `Go to ${item.label}`,
+        hint: item.href,
+        run: () => router.push(item.href),
+      });
+    }
     list.push({
       id: "theme",
       group: "Appearance",
@@ -168,10 +202,10 @@ function Frame({ children }: { children: ReactNode }) {
       });
     }
     return list;
-  }, [router, status, effects, togglePower, runEffect, toast]);
+  }, [router, status, statusError, effects, togglePower, runEffect, toast]);
 
-  // A phone opens the palette with the pages, the lights and the effects you would switch to.
-  // Typing still searches the whole list.
+  // A phone opens the palette with what is going on, the pages, the lights and the effects
+  // you would switch to. Typing still searches the whole list.
   const shortCommands = useMemo<Command[]>(() => {
     const list = commands.filter((c) => c.group === "Pages" || c.group === "Lights");
     const running = (effects ?? []).find((e) => e.id === status?.active_effect);
@@ -189,7 +223,9 @@ function Frame({ children }: { children: ReactNode }) {
         run: () => void runEffect(e.id, e.name),
       });
     }
-    return list;
+    // The status comes first: it is what the reader wants to know before they pick anything.
+    const statusRows = commands.filter((c) => c.group === "Status");
+    return [...statusRows, ...list];
   }, [commands, effects, status, runEffect]);
 
   const current = pathname.endsWith("/") || pathname === "" ? pathname : `${pathname}/`;
@@ -205,7 +241,11 @@ function Frame({ children }: { children: ReactNode }) {
         <Rail pathname={current} />
       </div>
       <div className="main">
-        <StatusStrip onOpenPalette={() => setPaletteOpen(true)} />
+        <StatusStrip
+          onOpenPalette={() => setPaletteOpen(true)}
+          detailsOpen={detailsOpen}
+          onDetailsOpen={setDetailsOpen}
+        />
         <GlobalBanners />
         <main className="content">
           {/* The toast floats: it takes no room in the page, so the page's first content does not

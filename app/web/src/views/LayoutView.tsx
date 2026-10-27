@@ -49,8 +49,6 @@ const CANVAS_W = 320;
 const CANVAS_H = 200;
 /** A value of the running effect reaches the daemon this long after the last change (ms). */
 const PROPS_DEBOUNCE_MS = 60;
-/** The room the list of effects needs under the button it hangs from, in css pixels. */
-const PICKER_ROOM = 380;
 
 /**
  * The layout as it is on the page, and the steps that led to it. The past is what undo takes
@@ -145,8 +143,11 @@ function topProperties(schema: PropertySchema): PropertySchema {
 }
 
 /**
- * The running effect, under the canvas: its name, a live picture of it, a quick switch to
+ * The running effect, beside the canvas: its name, a live picture of it, a quick switch to
  * another one, its top properties and the brightness every device shares.
+ *
+ * The picture and the name are always there - the panel says what is playing. The controls
+ * fold away behind the chevron, so the panel takes a corner of the screen and not all of it.
  */
 function NowPlaying({
   runningId,
@@ -156,7 +157,6 @@ function NowPlaying({
   schema,
   effects,
   brightness,
-  phone,
   error,
   onPick,
   onPropChange,
@@ -170,36 +170,27 @@ function NowPlaying({
   schema: PropertySchema | null;
   effects: EffectSummary[] | null;
   brightness: number;
-  phone: boolean;
   error: string | null;
   onPick: (id: string) => void;
   onPropChange: (key: string, value: PropValue) => void;
   onBrightness: (v: number) => void;
   onBrightnessCommit: (v: number) => void;
 }) {
-  // On a phone the canvas is the first thing on the screen, so the effect's controls fold away
-  // and the reader opens them when they want them.
-  const [open, setOpen] = useState(!phone);
+  // The effect's own controls: the colours, the speed and the brightness. They fold away, so
+  // the panel is a corner of the screen and not a wall of it.
+  const [controls, setControls] = useState(false);
   const [picker, setPicker] = useState(false);
   const changeRef = useRef<HTMLSpanElement>(null);
-  const reduced = usePrefersReducedMotion();
   const props = schema ? topProperties(schema) : null;
   // An effect that reads the screen or the audio cannot be drawn by the editor: the picture
   // is the daemon's.
   const needsInput = schema ? schema.needs.screen || schema.needs.audio : false;
 
   /**
-   * The list of effects hangs under the button, and the button can be near the bottom of the
-   * window: the page brings it up so the whole list is there to read.
+   * The list of effects hangs under the button. It opens upwards when there is no room under
+   * it, so the whole list is there to read wherever the panel is.
    */
   const openPicker = () => {
-    const el = changeRef.current;
-    if (el) {
-      const r = el.getBoundingClientRect();
-      if (r.bottom > window.innerHeight - PICKER_ROOM) {
-        el.scrollIntoView({ behavior: reduced ? "auto" : "smooth", block: "center" });
-      }
-    }
     setPicker(true);
   };
 
@@ -208,7 +199,6 @@ function NowPlaying({
       title="Now playing"
       actions={
         <span className="row-wrap" style={{ alignItems: "center", gap: "var(--s2)" }}>
-          <span className={desk.nowEffectName}>{name ?? "No effect"}</span>
           <span ref={changeRef} className={desk.nowChange}>
             <Button
               size="sm"
@@ -221,26 +211,27 @@ function NowPlaying({
             </Button>
           </span>
           <IconButton
-            label={open ? "Hide the effect's controls" : "Show the effect's controls"}
-            icon={open ? <CaretUp size={14} /> : <CaretDown size={14} />}
+            label={controls ? "Hide the effect's controls" : "Show the effect's controls"}
+            icon={controls ? <CaretUp size={14} /> : <CaretDown size={14} />}
             size="sm"
-            onClick={() => setOpen((o) => !o)}
+            onClick={() => setControls((o) => !o)}
           />
         </span>
       }
     >
-      {open && (
-        <div className={desk.nowBody} data-now-playing="true">
-          <div className={desk.nowWho}>
-            <span className={desk.nowSwatch}>
-              {runningId ? (
-                needsInput ? (
-                  <Thumb id={runningId} size="sm" label={name ?? "Effect"} />
-                ) : (
-                  <EffectPreview id={runningId} values={values} />
-                )
-              ) : null}
-            </span>
+      <div className={desk.nowBody} data-now-playing="true">
+        <div className={desk.nowWho}>
+          <span className={desk.nowSwatch}>
+            {runningId ? (
+              needsInput ? (
+                <Thumb id={runningId} size="sm" label={name ?? "Effect"} />
+              ) : (
+                <EffectPreview id={runningId} values={values} />
+              )
+            ) : null}
+          </span>
+          <div className={desk.nowWhoText}>
+            <p className={desk.nowName}>{name ?? "No effect"}</p>
             <p className={desk.nowDesc}>
               {description ?? "The desk has no effect running."}
               {needsInput && (
@@ -251,34 +242,38 @@ function NowPlaying({
               )}
             </p>
           </div>
-          {props && (
-            <div className={desk.nowProps}>
-              <PropertyControls schema={props} values={values} onChange={onPropChange} />
-            </div>
-          )}
-          <Field label="Brightness" hint="Every LED the daemon writes">
-            <span className="row-wrap field-slider">
-              <Slider
-                label="Brightness"
-                min={0}
-                max={100}
-                value={brightness}
-                onChange={onBrightness}
-                onCommit={onBrightnessCommit}
-              />
-              <NumberField
-                label="Brightness value"
-                min={0}
-                max={100}
-                value={brightness}
-                unit="%"
-                onCommit={onBrightnessCommit}
-              />
-            </span>
-          </Field>
-          {error && <p className="error-line">{error}</p>}
         </div>
-      )}
+        {controls && (
+          <>
+            {props && (
+              <div className={desk.nowProps}>
+                <PropertyControls schema={props} values={values} onChange={onPropChange} />
+              </div>
+            )}
+            <Field label="Brightness" hint="Every LED the daemon writes">
+              <span className="row-wrap field-slider">
+                <Slider
+                  label="Brightness"
+                  min={0}
+                  max={100}
+                  value={brightness}
+                  onChange={onBrightness}
+                  onCommit={onBrightnessCommit}
+                />
+                <NumberField
+                  label="Brightness value"
+                  min={0}
+                  max={100}
+                  value={brightness}
+                  unit="%"
+                  onCommit={onBrightnessCommit}
+                />
+              </span>
+            </Field>
+          </>
+        )}
+        {error && <p className="error-line">{error}</p>}
+      </div>
       <Popover
         anchor={changeRef}
         open={picker}
@@ -674,198 +669,211 @@ export function LayoutView() {
       </div>
 
       <div className="layout-grid">
-        <div className="layout-stage-col stack" ref={stageRef}>
-          <PreviewStage
-            zones={zones}
-            devices={devices}
-            selected={selected}
-            onSelect={setSelected}
-            onChange={changeZone}
-            onDrop={onDropUnplaced}
-            onRemoveZone={unplace}
-            onDraggingChange={(d) => {
-              setDragging(d);
-              if (!d) setLiveZone(null);
-            }}
-            onLiveChange={(index, zone) => setLiveZone({ index, zone })}
-            layoutId={draft.id}
-            dropPayloadType={DROP_TYPE}
-            effect={runningEffect ? { id: runningEffect.id, props: liveProps } : null}
-            effectNeedsInput={effectNeedsInput}
-            sampling={draft.sampling}
-          />
-          <div className="stage-meta">
-            <span className="dropzone-hint">
-              {phone
-                ? "Tap a zone to pick it. Drag it to move it, the corner to resize it."
-                : "Drag to move, the corner to resize, the knob to rotate. Arrow keys nudge."}
-            </span>
-            <span className="row-wrap" style={{ alignItems: "center", gap: "var(--s3)" }}>
-              <span className="row-wrap" style={{ alignItems: "center", gap: "var(--s1)" }}>
-                <IconButton
-                  label="Undo the last change"
-                  icon={<ArrowUUpLeft size={15} />}
-                  size="sm"
-                  disabled={past.length === 0}
-                  onClick={undo}
-                />
-                <IconButton
-                  label="Redo the change that was undone"
-                  icon={<ArrowUUpRight size={15} />}
-                  size="sm"
-                  disabled={future.length === 0}
-                  onClick={redo}
-                />
+        <div className="layout-stage-col stack">
+          <div className="layout-canvas" ref={stageRef}>
+            <PreviewStage
+              zones={zones}
+              devices={devices}
+              selected={selected}
+              onSelect={setSelected}
+              onChange={changeZone}
+              onDrop={onDropUnplaced}
+              onRemoveZone={unplace}
+              onDraggingChange={(d) => {
+                setDragging(d);
+                if (!d) setLiveZone(null);
+              }}
+              onLiveChange={(index, zone) => setLiveZone({ index, zone })}
+              layoutId={draft.id}
+              dropPayloadType={DROP_TYPE}
+              effect={runningEffect ? { id: runningEffect.id, props: liveProps } : null}
+              effectNeedsInput={effectNeedsInput}
+              sampling={draft.sampling}
+            />
+            <div className="stage-meta">
+              <span className="dropzone-hint">
+                {phone
+                  ? "Tap a zone to pick it. Drag it to move it, the corner to resize it."
+                  : "Drag to move, the corner to resize, the knob to rotate. Arrow keys nudge."}
               </span>
-              {previewLine && (
-                <span className={previewLine.down ? desk.noteDown : desk.drawn}>{previewLine.text}</span>
-              )}
-              <span className="mute fig">
-                {zones.filter((z) => z.visible).length} of {zones.length} zones showing
+              <span className="row-wrap" style={{ alignItems: "center", gap: "var(--s3)" }}>
+                <span className="row-wrap" style={{ alignItems: "center", gap: "var(--s1)" }}>
+                  <IconButton
+                    label="Undo the last change"
+                    icon={<ArrowUUpLeft size={15} />}
+                    size="sm"
+                    disabled={past.length === 0}
+                    onClick={undo}
+                  />
+                  <IconButton
+                    label="Redo the change that was undone"
+                    icon={<ArrowUUpRight size={15} />}
+                    size="sm"
+                    disabled={future.length === 0}
+                    onClick={redo}
+                  />
+                </span>
+                {previewLine && (
+                  <span className={previewLine.down ? desk.noteDown : desk.drawn}>{previewLine.text}</span>
+                )}
+                <span className="mute fig">
+                  {zones.filter((z) => z.visible).length} of {zones.length} zones showing
+                </span>
               </span>
-            </span>
+            </div>
           </div>
 
-          <NowPlaying
-            runningId={runningId}
-            name={nowDetail?.schema.name ?? effectName}
-            description={nowDetail?.schema.description ?? null}
-            values={liveProps}
-            schema={nowDetail?.schema ?? null}
-            effects={effects}
-            brightness={brightnessDraft ?? settings?.brightness ?? 100}
-            phone={phone}
-            error={nowError}
-            onPick={(id) => void pickEffect(id)}
-            onPropChange={onPropChange}
-            onBrightness={(v) => setBrightnessDraft(v)}
-            onBrightnessCommit={(v) => void commitBrightness(v)}
-          />
-
-          <Panel title="Render">
-            <div className="render-grid">
-              <div className={desk.renderCell}>
-                <Field label="How much of the desk" hint="The desk is 320 × 200 units">
-                  <Segmented<`${RenderScale}`>
-                    label="How much of the desk the effect is drawn at"
-                    value={`${draft.render_scale}` as `${RenderScale}`}
-                    options={[
-                      { value: "25", label: "A quarter" },
-                      { value: "50", label: "Half" },
-                      { value: "100", label: "All of it" },
-                    ]}
-                    onChange={(v) => commit((l) => ({ ...l, render_scale: Number(v) as RenderScale }))}
-                  />
-                </Field>
-                <p className={desk.plainNote}>
-                  {renderNote.text} · <span className="fig">{renderNote.value}</span>
-                </p>
+          <div className="layout-render">
+            <Panel title="Render">
+              <div className="render-grid">
+                <div className={desk.renderCell}>
+                  <Field label="How much of the desk" hint="The desk is 320 × 200 units">
+                    <Segmented<`${RenderScale}`>
+                      label="How much of the desk the effect is drawn at"
+                      value={`${draft.render_scale}` as `${RenderScale}`}
+                      options={[
+                        { value: "25", label: "A quarter" },
+                        { value: "50", label: "Half" },
+                        { value: "100", label: "All of it" },
+                      ]}
+                      onChange={(v) => commit((l) => ({ ...l, render_scale: Number(v) as RenderScale }))}
+                    />
+                  </Field>
+                  <p className={desk.plainNote}>
+                    {renderNote.text} · <span className="fig">{renderNote.value}</span>
+                  </p>
+                </div>
+                <div className={desk.renderCell}>
+                  <Field label="How each LED reads it" hint="What one LED takes from the picture">
+                    <Segmented<SamplingMode>
+                      label="How each LED reads the picture"
+                      value={draft.sampling}
+                      options={[
+                        { value: "nearest", label: "One pixel" },
+                        { value: "bilinear", label: "Four pixels" },
+                        { value: "area_average", label: "Every pixel" },
+                      ]}
+                      onChange={(v) => commit((l) => ({ ...l, sampling: v }))}
+                    />
+                  </Field>
+                  <p className={desk.plainNote}>
+                    {samplingNote.text} · <span className="fig">{samplingNote.value}</span>
+                  </p>
+                </div>
               </div>
-              <div className={desk.renderCell}>
-                <Field label="How each LED reads it" hint="What one LED takes from the picture">
-                  <Segmented<SamplingMode>
-                    label="How each LED reads the picture"
-                    value={draft.sampling}
-                    options={[
-                      { value: "nearest", label: "One pixel" },
-                      { value: "bilinear", label: "Four pixels" },
-                      { value: "area_average", label: "Every pixel" },
-                    ]}
-                    onChange={(v) => commit((l) => ({ ...l, sampling: v }))}
-                  />
-                </Field>
-                <p className={desk.plainNote}>
-                  {samplingNote.text} · <span className="fig">{samplingNote.value}</span>
-                </p>
-              </div>
-            </div>
-          </Panel>
+            </Panel>
+          </div>
         </div>
 
-        <div className="stack">
-          <Panel title={selectedZone ? "Zone" : "Zones"}>
-            {shownZone && selected !== null ? (
-              <div ref={inspectorRef}>
-                <ZoneInspector
-                  key={selected}
-                  zone={shownZone}
-                  name={
-                    selectedInfo?.zone.name ??
-                    staleDeviceName(shownZone.device_id, devices)
-                  }
-                  deviceName={selectedInfo?.device.name ?? shortDeviceId(shownZone.device_id)}
-                  ledCount={selectedInfo?.zone.led_count ?? 0}
-                  missing={!selectedInfo}
-                  onChange={(patch) => changeZone(selected, patch)}
-                  onRemove={() => unplace(selected)}
-                  onBack={phone ? backToCanvas : null}
-                />
-              </div>
-            ) : (
-              <p className="mute">Select a zone on the preview, or in the list below.</p>
-            )}
-            <div className="stack" style={{ gap: 0, marginTop: 12 }}>
-              {zones.map((z, i) => {
-                const info = findZoneInfo(devices, z.device_id, z.zone_index);
-                return (
-                  <RowButton
-                    key={`${z.device_id}#${z.zone_index}`}
-                    current={selected === i}
-                    label={`Select ${info?.zone.name ?? "the zone whose device is gone"}`}
-                    onSelect={() => setSelected(i)}
-                  >
-                    <span className="row-title">
-                      {info?.zone.name ?? "Device not found"}
-                    </span>
-                    <span className="row-sub one-line">{info ? info.device.name : "not connected"}</span>
-                    <span className="fig mute">{info?.zone.led_count ?? "—"}</span>
-                  </RowButton>
-                );
-              })}
-            </div>
-          </Panel>
+        <div className="layout-side stack">
+          {/* What is playing sits beside the canvas, not under it: the panel is the one thing
+              a reader wants to see while they watch the desk. */}
+          <div className="layout-now">
+            <NowPlaying
+              runningId={runningId}
+              name={nowDetail?.schema.name ?? effectName}
+              description={nowDetail?.schema.description ?? null}
+              values={liveProps}
+              schema={nowDetail?.schema ?? null}
+              effects={effects}
+              brightness={brightnessDraft ?? settings?.brightness ?? 100}
+              error={nowError}
+              onPick={(id) => void pickEffect(id)}
+              onPropChange={onPropChange}
+              onBrightness={(v) => setBrightnessDraft(v)}
+              onBrightnessCommit={(v) => void commitBrightness(v)}
+            />
+          </div>
 
-          <Panel title="Unplaced zones" actions={<span className="mute fig">{unplaced.length}</span>}>
-            {unplaced.length === 0 && <p className="mute">Every zone is placed.</p>}
-            <div className="unplaced">
-              {unplaced.map((u) => (
-                <div
-                  key={`${u.deviceId}#${u.zoneIndex}`}
-                  className="unplaced-item"
-                  draggable
-                  onDragStart={(e) => dragStart(u.deviceId, u.zoneIndex, e)}
-                >
-                  <span style={{ minWidth: 0 }}>
-                    <span className="row-title" style={{ display: "block" }}>
-                      {u.zoneName} <span className="fig mute">{u.ledCount}</span>
-                    </span>
-                    <span className="row-sub one-line" style={{ display: "block" }}>
-                      {u.deviceName}
-                      {!u.connected && " · disconnected"}
-                    </span>
-                  </span>
-                  <IconButton
-                    label={`Place ${u.zoneName}`}
-                    icon={<Plus size={16} weight="bold" />}
-                    size="sm"
-                    onClick={() => place(u.deviceId, u.zoneIndex)}
+          <div className="layout-zones">
+            <Panel title={selectedZone ? "Zone" : "Zones"}>
+              {shownZone && selected !== null ? (
+                <div ref={inspectorRef}>
+                  <ZoneInspector
+                    key={selected}
+                    zone={shownZone}
+                    name={
+                      selectedInfo?.zone.name ??
+                      staleDeviceName(shownZone.device_id, devices)
+                    }
+                    deviceName={selectedInfo?.device.name ?? shortDeviceId(shownZone.device_id)}
+                    ledCount={selectedInfo?.zone.led_count ?? 0}
+                    missing={!selectedInfo}
+                    onChange={(patch) => changeZone(selected, patch)}
+                    onRemove={() => unplace(selected)}
+                    onBack={phone ? backToCanvas : null}
                   />
                 </div>
-              ))}
-            </div>
-          </Panel>
+              ) : (
+                <p className="mute">Select a zone on the preview, or in the list below.</p>
+              )}
+              <div className="stack" style={{ gap: 0, marginTop: 12 }}>
+                {zones.map((z, i) => {
+                  const info = findZoneInfo(devices, z.device_id, z.zone_index);
+                  return (
+                    <RowButton
+                      key={`${z.device_id}#${z.zone_index}`}
+                      current={selected === i}
+                      label={`Select ${info?.zone.name ?? "the zone whose device is gone"}`}
+                      onSelect={() => setSelected(i)}
+                    >
+                      <span className="row-title">
+                        {info?.zone.name ?? "Device not found"}
+                      </span>
+                      <span className="row-sub one-line">{info ? info.device.name : "not connected"}</span>
+                      <span className="fig mute">{info?.zone.led_count ?? "—"}</span>
+                    </RowButton>
+                  );
+                })}
+              </div>
+            </Panel>
+          </div>
 
-          <div className="savebar" data-dirty={dirty ? "true" : "false"}>
-            <span className={dirty ? "warn-text fig" : "mute"}>{dirty ? "Unsaved layout changes" : "Saved"}</span>
-            <div className="row-wrap">
-              <Button variant="ghost" icon={<ArrowCounterClockwise size={16} />} disabled={!dirty || saving} onClick={revert}>
-                Revert
-              </Button>
-              <Button variant="primary" icon={<FloppyDisk size={16} weight="bold" />} disabled={!dirty || saving} onClick={save}>
-                {saving ? "Saving" : "Save layout"}
-              </Button>
+          <div className="layout-unplaced">
+            <Panel title="Unplaced zones" actions={<span className="mute fig">{unplaced.length}</span>}>
+              {unplaced.length === 0 && <p className="mute">Every zone is placed.</p>}
+              <div className="unplaced">
+                {unplaced.map((u) => (
+                  <div
+                    key={`${u.deviceId}#${u.zoneIndex}`}
+                    className="unplaced-item"
+                    draggable
+                    onDragStart={(e) => dragStart(u.deviceId, u.zoneIndex, e)}
+                  >
+                    <span style={{ minWidth: 0 }}>
+                      <span className="row-title" style={{ display: "block" }}>
+                        {u.zoneName} <span className="fig mute">{u.ledCount}</span>
+                      </span>
+                      <span className="row-sub one-line" style={{ display: "block" }}>
+                        {u.deviceName}
+                        {!u.connected && " · disconnected"}
+                      </span>
+                    </span>
+                    <IconButton
+                      label={`Place ${u.zoneName}`}
+                      icon={<Plus size={16} weight="bold" />}
+                      size="sm"
+                      onClick={() => place(u.deviceId, u.zoneIndex)}
+                    />
+                  </div>
+                ))}
+              </div>
+            </Panel>
+          </div>
+
+          <div className="layout-save">
+            <div className="savebar" data-dirty={dirty ? "true" : "false"}>
+              <span className={dirty ? "warn-text fig" : "mute"}>{dirty ? "Unsaved layout changes" : "Saved"}</span>
+              <div className="row-wrap">
+                <Button variant="ghost" icon={<ArrowCounterClockwise size={16} />} disabled={!dirty || saving} onClick={revert}>
+                  Revert
+                </Button>
+                <Button variant="primary" icon={<FloppyDisk size={16} weight="bold" />} disabled={!dirty || saving} onClick={save}>
+                  {saving ? "Saving" : "Save layout"}
+                </Button>
+              </div>
+              {saveError && <span className="error-line">{saveError}</span>}
             </div>
-            {saveError && <span className="error-line">{saveError}</span>}
           </div>
         </div>
       </div>

@@ -505,6 +505,31 @@
   padding: var(--s1);
 }
 
+/* A group is named once, above its first row: the pages, the effects, the status. */
+.cmdk-group {
+  padding: var(--s3) var(--s3) var(--s1);
+  color: var(--mute);
+  font-size: var(--t12);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* A status line: it says what is true and it cannot be picked. */
+.cmdk-item[data-status="true"] {
+  color: var(--dim);
+  cursor: default;
+}
+
+.cmdk-item[data-status="true"]:hover {
+  background: transparent;
+  color: var(--dim);
+}
+
+.cmdk-item[data-status="true"] .cmdk-item-hint {
+  color: var(--ink);
+}
+
 .cmdk-item {
   display: flex;
   align-items: center;

@@ -4,51 +4,16 @@ import { useEffect, useRef, useState } from "react";
 import { CheckCircle, CircleDashed, MagnifyingGlass, Pause, Play, Warning, WarningOctagon } from "@phosphor-icons/react";
 import { Button, IconButton } from "@/components/Button";
 import { Crossfade } from "@/components/Crossfade";
+import { useMediaQuery } from "@/components/MediaQuery";
 import { Popover } from "@/components/Popover";
 import { useToast } from "@/components/Toast";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
+import { links, playing, problems, type Tone } from "@/lib/status";
 import { patchSnap, refreshStatus, useSnap } from "@/lib/store";
-import type { Status } from "@/proto/Status";
 
 /** What the strip says when nothing is wrong. */
 const ALL_GOOD = "All connected";
-
-type Tone = "ok" | "warn" | "down" | "work";
-
-interface Problem {
-  tone: Tone;
-  text: string;
-}
-
-/**
- * What is not working, worst first. An empty list means everything is fine.
- *
- * A link that is still connecting is not a fault, but it is not "all connected" either, so it
- * is said in words too - in the link's own colour. The words are short on purpose: the strip
- * has one line, and a phone has one line's worth of room.
- */
-function problems(status: Status | null, offline: boolean): Problem[] {
-  const out: Problem[] = [];
-  if (offline) {
-    out.push({ tone: "down", text: "Daemon offline" });
-    return out;
-  }
-  if (!status) {
-    out.push({ tone: "work", text: "Connecting…" });
-    return out;
-  }
-  if (status.openrgb === "down") out.push({ tone: "down", text: "OpenRGB down" });
-  if (status.service === "down") out.push({ tone: "down", text: "Fan control off" });
-  // The lights are running, but not at the rate they were asked for.
-  if (status.power === "running" && !status.parked && status.fps_measured < status.fps_target - 1) {
-    out.push({ tone: "warn", text: "Running slow" });
-  }
-  if (out.length === 0 && (status.openrgb === "connecting" || status.service === "connecting")) {
-    out.push({ tone: "work", text: "Connecting…" });
-  }
-  return out;
-}
 
 /** The icon of the mark: a tick when all is well, a warning when it is not. */
 function markIcon(tone: Tone) {
@@ -64,7 +29,8 @@ function markIcon(tone: Tone) {
  * One row, in plain words: what is playing (with a chip of the running light's own colour),
  * how it is going, and the control. When everything is well the state collapses into one
  * quiet "all connected" mark; when something is not, the mark says what it is, in the colour
- * of that kind of fault, and it stays there until the fault clears.
+ * of that kind of fault, and it stays there until the fault clears. A link that is still
+ * coming up is named, so the reader knows which one it is.
  *
  * The precise numbers - the measured frame rate, each link's state - are one click away, in
  * the panel that hangs under the mark.
@@ -73,12 +39,21 @@ function markIcon(tone: Tone) {
  * the space beside it and the controls stay where they are, so the page below the strip never
  * moves when the daemon answers or something breaks.
  */
-export function StatusStrip({ onOpenPalette }: { onOpenPalette?: () => void }) {
+export function StatusStrip({
+  onOpenPalette,
+  detailsOpen,
+  onDetailsOpen,
+}: {
+  onOpenPalette?: () => void;
+  /** Whether the details panel is open. The command palette opens it too, so the state lives
+   *  in the shell. */
+  detailsOpen: boolean;
+  onDetailsOpen: (open: boolean) => void;
+}) {
   const status = useSnap((s) => s.status);
   const statusError = useSnap((s) => s.statusError);
   const effects = useSnap((s) => s.effects);
   const [busy, setBusy] = useState(false);
-  const [details, setDetails] = useState(false);
   const toast = useToast();
   const stripRef = useRef<HTMLDivElement>(null);
   const markRef = useRef<HTMLButtonElement>(null);
@@ -102,25 +77,18 @@ export function StatusStrip({ onOpenPalette }: { onOpenPalette?: () => void }) {
   const known = status !== null;
   const offline = known === false && statusError !== null;
   const paused = status ? status.power === "paused" : false;
-  const effectName = status
-    ? (effects?.find((e) => e.id === status.active_effect)?.name ?? status.active_effect ?? "")
-    : "";
 
   // What is playing.
-  const playing = (() => {
-    if (!status) return { name: "—", detail: "", count: false };
-    // Without a layout there is nowhere for the lights to go.
-    if (!status.active_layout) return { name: "No layout yet", detail: "", count: false };
-    if (!status.active_effect || !effectName) return { name: "Nothing is running", detail: "", count: false };
-    if (paused) return { name: effectName, detail: "paused", count: false };
-    if (status.parked) return { name: effectName, detail: "idle", count: false };
-    const n = status.devices_connected;
-    return { name: effectName, detail: `on ${n} ${n === 1 ? "device" : "devices"}`, count: true };
-  })();
-
+  const now = playing(status, effects);
   const list = problems(status, offline);
   const tone: Tone = list[0]?.tone ?? "ok";
-  const markText = list[0]?.text ?? ALL_GOOD;
+  // On a phone the row has room for the link's name, not for the whole sentence. The full
+  // words are the button's own label, so nothing is lost.
+  const phone = useMediaQuery("(max-width: 720px)");
+  const fullText = list[0]?.text ?? ALL_GOOD;
+  const markText = list[0] ? (phone ? (list[0].short ?? list[0].text) : list[0].text) : ALL_GOOD;
+  // Each link and what it is doing: the panel shows them all, one after another.
+  const linkList = links(status, offline);
 
   const togglePower = async () => {
     if (!status) return;
@@ -149,10 +117,10 @@ export function StatusStrip({ onOpenPalette }: { onOpenPalette?: () => void }) {
         <span className="strip-now">
           <span className="strip-swatch" data-paused={paused ? "true" : "false"} aria-hidden="true" />
           <span className="strip-now-text">
-            <span className="strip-effect-name">{playing.name}</span>
-            {playing.detail && (
-              <span className="strip-now-detail" data-count={playing.count ? "true" : "false"}>
-                {playing.detail}
+            <span className="strip-effect-name">{now.name}</span>
+            {now.detail && (
+              <span className="strip-now-detail" data-count={now.count ? "true" : "false"}>
+                {now.detail}
               </span>
             )}
           </span>
@@ -164,11 +132,12 @@ export function StatusStrip({ onOpenPalette }: { onOpenPalette?: () => void }) {
           type="button"
           className="strip-mark"
           data-tone={tone}
-          aria-label={markText}
-          aria-expanded={details}
-          onClick={() => setDetails((v) => !v)}
+          aria-label={fullText}
+          title={fullText}
+          aria-expanded={detailsOpen}
+          onClick={() => onDetailsOpen(!detailsOpen)}
         >
-          <Crossfade swapKey={`${tone}:${markText}`}>
+          <Crossfade swapKey={`${tone}:${fullText}`}>
             <span className="strip-mark-icon" aria-hidden="true">
               {markIcon(tone)}
             </span>
@@ -202,16 +171,29 @@ export function StatusStrip({ onOpenPalette }: { onOpenPalette?: () => void }) {
         </span>
       </div>
 
-      <Popover anchor={markRef} open={details} onClose={() => setDetails(false)} label="Status details" className="strip-details">
+      <Popover
+        anchor={markRef}
+        open={detailsOpen}
+        onClose={() => onDetailsOpen(false)}
+        label="Status details"
+        className="strip-details"
+      >
         <div className="strip-details-head">Details</div>
         <dl className="strip-details-list">
           <Detail label="Frame rate" value={status ? `${status.fps_measured.toFixed(1)} / ${status.fps_target} fps` : "—"} />
           <Detail label="Frame time" value={status ? `${status.frame_time_ms.toFixed(1)} ms` : "—"} />
           <Detail label="Lights" value={status ? (paused ? "paused" : status.parked ? "idle" : "running") : "—"} />
-          <Detail label="OpenRGB" value={status ? status.openrgb : "—"} />
-          <Detail label="Fan service" value={status ? status.service : "—"} />
           <Detail label="Devices" value={status ? `${status.devices_connected} connected` : "—"} />
         </dl>
+        {/* Each link and what it is doing, so "connecting" is never a mystery. */}
+        <ul className="strip-details-links">
+          {linkList.map((l) => (
+            <li key={l.name} data-tone={l.tone}>
+              <span className="strip-details-link-name">{l.name}</span>
+              <span className="fig">{l.state}</span>
+            </li>
+          ))}
+        </ul>
         {list.length > 1 && (
           <ul className="strip-details-problems">
             {list.slice(1).map((p) => (
