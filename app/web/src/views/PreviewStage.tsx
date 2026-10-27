@@ -50,16 +50,43 @@ interface Picture {
   stride: number;
 }
 
-/** One LED's place on the canvas: its centre, and the rectangle it covers. */
+/** One LED's place on the canvas: its centre, the rectangle it covers, and how big it is. */
 interface LedCell {
   /** The centre, in canvas units. */
   cx: number;
   cy: number;
   /** The rectangle the LED covers, in canvas units: x0, y0, x1, y1. */
   bounds: [number, number, number, number];
+  /**
+   * The lamp's half-axes in the zone's own frame, in canvas units, and the zone's turn in
+   * radians. A strip of 120 has a lamp as wide as the pitch and as tall as most of the strip, so
+   * the strip reads as a lit bar; a stick of 8 has round lamps that fill their cell.
+   */
+  rx: number;
+  ry: number;
+  turn: number;
 }
 
 type RGB = [number, number, number];
+
+/** A lamp ready to paint: its place in overlay pixels, its half-axes, its turn and its colour. */
+interface Lamp {
+  x: number;
+  y: number;
+  rx: number;
+  ry: number;
+  turn: number;
+  c: RGB;
+}
+
+/** A colour mixed towards white: the hot core of a lamp. */
+function brighten(c: RGB, k: number): RGB {
+  return [
+    Math.round(c[0] + (255 - c[0]) * k),
+    Math.round(c[1] + (255 - c[1]) * k),
+    Math.round(c[2] + (255 - c[2]) * k),
+  ];
+}
 
 /** The colour of the pixel at (x, y), the pixel nearest the point. */
 function sampleNearest(pic: Picture, x: number, y: number): RGB {
@@ -180,6 +207,33 @@ function ledCells(z: PlacedZone, info: ZoneInfo, offsets: Point[]): LedCell[] {
       ? z.height / 2
       : z.height / (2 * n)
     : z.height / (2 * rows);
+  // The lamp: as wide as the pitch of the strip (so a strip of 120 is a bead line) and as wide as
+  // the zone's cross-section (so a wide LED is a lamp and not a speck).
+  const pitch = linear
+    ? horizontal
+      ? z.width / n
+      : z.height / n
+    : Math.min(z.width / cols, z.height / rows);
+  const cross = linear
+    ? horizontal
+      ? z.height
+      : z.width
+    : Math.max(z.width / cols, z.height / rows);
+  // Round lamps when the pitch is about the strip's width; a bar of beads when the pitch is far
+  // thinner than the strip (a lamp as thin as the pitch would be a hairline).
+  let along = pitch * 1.15;
+  let across = cross * 0.7;
+  if (along >= cross * 0.5) {
+    along = Math.min(along, cross * 0.85);
+    across = along;
+  }
+  // A matrix LED fills its own cell (a keyboard that is one LED is one wide lamp); a strip's
+  // lamps are as worked out above.
+  const lampX = linear ? (horizontal ? along : across) : (z.width / cols) * 0.85;
+  const lampY = linear ? (horizontal ? across : along) : (z.height / rows) * 0.85;
+  const rx = Math.max(0.3, lampX / 2);
+  const ry = Math.max(0.3, lampY / 2);
+  const turn = Math.atan2(t.sin, t.cos);
   return offsets.map((p) => {
     const lx = linear ? (horizontal ? p.x * z.width : 0) : p.x * z.width;
     const ly = linear ? (horizontal ? 0 : p.x * z.height) : p.y * z.height;
@@ -206,6 +260,9 @@ function ledCells(z: PlacedZone, info: ZoneInfo, offsets: Point[]): LedCell[] {
         number,
         number,
       ],
+      rx,
+      ry,
+      turn,
     };
   });
 }
@@ -226,6 +283,11 @@ const WHEEL_MS = 120;
 const NOTCH_DELTA = 40;
 /** The chrome around a chip's text: the padding, the hairline and the accent edge, in css pixels. */
 const CHIP_CHROME = 14;
+/**
+ * The biggest a lamp is drawn, in device pixels, across. At 800 % a DRAM LED is a cell of about
+ * 270 px; past this a lamp is a slab and its glow is a wash over the whole zone.
+ */
+const LED_MAX_PX = 240;
 /**
  * On a phone a chip may take at most this share of the canvas. A chip that fits keeps the LED
  * count ("DRAM 8"), a chip that does not keeps the name alone ("JARGB 1").
@@ -721,6 +783,8 @@ export function PreviewStage({
   const daemonLiveRef = useRef(false);
   const samplingRef = useRef<SamplingMode>("nearest");
   const missingRef = useRef<Set<number>>(new Set());
+  /** The lamps of the zone being painted, reused every frame so a frame allocates no array. */
+  const lampsRef = useRef<Lamp[]>([]);
   const obstaclesRef = useRef<Box[]>([]);
   const paintQueued = useRef(false);
   const liveRaf = useRef<number | null>(null);
@@ -830,7 +894,6 @@ export function PreviewStage({
     const oy = v.panY * k;
     octx.setTransform(1, 0, 0, 1, 0, 0);
     octx.clearRect(0, 0, ov.width, ov.height);
-    const r = clamp(Math.min(3.2, Math.max(2, ov.width / 360)) * v.scale, 1, 7);
     const frame = frameRef.current;
     // The dots take their colour from the daemon's frames when they are coming, and from the
     // editor's own draw otherwise.
@@ -849,17 +912,66 @@ export function PreviewStage({
       const cells = ledCells(z, cache.info, cache.offsets);
       // A zone whose device is not connected has no LEDs lit: its dots stay dark.
       const off = missingRef.current.has(i);
+      // Two passes: every glow first, then every core, so a lamp's glow never washes over its
+      // neighbour's core (a strip of 120 is a row of overlapping lamps).
+      const lamps = lampsRef.current;
+      lamps.length = 0;
       for (const cell of cells) {
+        const x = cell.cx * k + ox;
+        const y = cell.cy * k + oy;
+        const grow = Math.min(1, (LED_MAX_PX / 2) / Math.max(cell.rx * k, cell.ry * k));
+        const rx = cell.rx * k * grow;
+        const ry = cell.ry * k * grow;
+        // A lamp that is off the canvas is not drawn: at a high zoom most of the desk is not on
+        // screen, and a frame that draws 379 lamps nobody can see is a frame wasted.
+        const reach = Math.max(rx, ry) * 2.4;
+        if (x + reach < 0 || y + reach < 0 || x - reach > ov.width || y - reach > ov.height) continue;
         if (pic && !off) {
-          const c = sampleLed(pic, cell, mode);
-          octx.fillStyle = `rgb(${c[0]} ${c[1]} ${c[2]})`;
+          lamps.push({ x, y, rx, ry, turn: cell.turn, c: sampleLed(pic, cell, mode) });
         } else {
           // No picture, or no device: the dots still show where the LEDs sit.
           octx.fillStyle = "rgba(255, 255, 255, 0.18)";
+          octx.beginPath();
+          octx.ellipse(x, y, rx, ry, cell.turn, 0, Math.PI * 2);
+          octx.fill();
         }
+      }
+      // The glow: the lamp's own colour, soft, reaching about a lamp's radius past its edge.
+      for (const l of lamps) {
+        const big = Math.max(l.rx, l.ry);
+        const reach = 2.2;
+        octx.save();
+        octx.translate(l.x, l.y);
+        octx.rotate(l.turn);
+        octx.scale(l.rx / big, l.ry / big);
+        const glow = octx.createRadialGradient(0, 0, 0, 0, 0, big * reach);
+        glow.addColorStop(0, `rgba(${l.c[0]} ${l.c[1]} ${l.c[2]} / 0.75)`);
+        glow.addColorStop(0.45, `rgba(${l.c[0]} ${l.c[1]} ${l.c[2]} / 0.28)`);
+        glow.addColorStop(1, `rgba(${l.c[0]} ${l.c[1]} ${l.c[2]} / 0)`);
+        octx.fillStyle = glow;
         octx.beginPath();
-        octx.arc(cell.cx * k + ox, cell.cy * k + oy, r, 0, Math.PI * 2);
+        octx.arc(0, 0, big * reach, 0, Math.PI * 2);
         octx.fill();
+        octx.restore();
+      }
+      // The core: opaque, hotter in the middle than at the edge, so it reads as a lit lamp.
+      for (const l of lamps) {
+        const big = Math.max(l.rx, l.ry);
+        const hot = brighten(l.c, 0.85);
+        const rim = brighten(l.c, 0.4);
+        octx.save();
+        octx.translate(l.x, l.y);
+        octx.rotate(l.turn);
+        octx.scale(l.rx / big, l.ry / big);
+        const core = octx.createRadialGradient(0, 0, 0, 0, 0, big);
+        core.addColorStop(0, `rgb(${hot[0]} ${hot[1]} ${hot[2]})`);
+        core.addColorStop(0.55, `rgb(${rim[0]} ${rim[1]} ${rim[2]})`);
+        core.addColorStop(1, `rgb(${rim[0]} ${rim[1]} ${rim[2]})`);
+        octx.fillStyle = core;
+        octx.beginPath();
+        octx.arc(0, 0, big, 0, Math.PI * 2);
+        octx.fill();
+        octx.restore();
       }
     }
   }, []);
