@@ -1,21 +1,26 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { CopySimple, FloppyDisk, Plus, Trash, X } from "@phosphor-icons/react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { ArrowClockwise, CopySimple, Fan, FloppyDisk, Plus, Trash, X } from "@phosphor-icons/react";
 import { Button, IconButton } from "@/components/Button";
 import { Chip } from "@/components/Chip";
+import { EmptyState } from "@/components/EmptyState";
 import { NumberField, TextField } from "@/components/NumberField";
-import { Panel, Field, StateDot } from "@/components/Panel";
+import { Panel, Field } from "@/components/Panel";
 import { Segmented } from "@/components/Segmented";
 import { Select } from "@/components/Select";
 import { Slider } from "@/components/Slider";
 import { Sparkline, Figure } from "@/components/Readout";
+import { AnimatedNumber } from "@/components/AnimatedNumber";
+import { useMediaQuery } from "@/components/MediaQuery";
+import { SkeletonLines } from "@/components/Skeleton";
+import { useToast } from "@/components/Toast";
 import { FanCurveEditor } from "@/views/FanCurveEditor";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
 import { refreshFans, useSnap } from "@/lib/store";
 import { baseFloor, hotRuleText } from "@/lib/fan-rules";
-import { clamp, fmtCelsius, fmtInt } from "@/lib/format";
+import { clamp } from "@/lib/format";
 import type { CurvePoint } from "@/proto/CurvePoint";
 import type { FanHeaderStatus } from "@/proto/FanHeaderStatus";
 import type { FanMode } from "@/proto/FanMode";
@@ -49,6 +54,33 @@ function tempFor(mode: FanMode, temps: TempReading[]): number | null {
   return reading?.celsius ?? null;
 }
 
+/** The duty a curve asks for at a temperature: the same evaluation the daemon does. */
+function dutyFor(points: CurvePoint[], temp: number | null): number | null {
+  if (temp === null || points.length === 0) return null;
+  const sorted = [...points].sort((a, b) => a.temp_c - b.temp_c);
+  const first = sorted[0];
+  const last = sorted[sorted.length - 1];
+  if (!first || !last) return null;
+  if (temp <= first.temp_c) return first.percent;
+  if (temp >= last.temp_c) return last.percent;
+  for (let i = 1; i < sorted.length; i++) {
+    const a = sorted[i - 1];
+    const b = sorted[i];
+    if (a && b && temp <= b.temp_c) {
+      const f = b.temp_c === a.temp_c ? 0 : (temp - a.temp_c) / (b.temp_c - a.temp_c);
+      return a.percent + (b.percent - a.percent) * f;
+    }
+  }
+  return last.percent;
+}
+
+/** A temperature bar reads cool, warm or hot, and says so in colour only. */
+function tempTone(c: number): string {
+  if (c < 50) return "var(--a3)";
+  if (c < 72) return "var(--warn)";
+  return "var(--down)";
+}
+
 function defaultCurve(floor: number): CurvePoint[] {
   return [
     { temp_c: 30, percent: Math.max(floor, 30) },
@@ -62,32 +94,57 @@ export function FansView() {
   const fans = useSnap((s) => s.fans);
   const fansError = useSnap((s) => s.fansError);
   const rpm = useSnap((s) => s.rpm);
+  const narrow = useMediaQuery("(max-width: 720px)");
   const [picked, setSelectedId] = useState<string | null>(null);
   // The first header is the default selection until one is clicked.
   const selectedId = picked ?? fans?.headers[0]?.id ?? null;
 
-  if (fansError || !fans) {
+  // The "Try again" on the service-down state.
+  const retryFans = async () => {
+    await refreshFans();
+  };
+
+  if (fansError) {
     return (
       <div className="stack">
         <div className="page-head">
           <h1>Fans</h1>
         </div>
-        <Panel title="The fan service is not answering">
-          <div className="stack" style={{ gap: 10 }}>
-            <StateDot tone="down">Service down</StateDot>
-            <p className="dim" style={{ wordBreak: "break-word" }}>
-              {fansError ?? "Reading the fans."}
-            </p>
-            <p className="mute" style={{ fontSize: 14 }}>
-              Lighting is unaffected. This page fills in when the fan service reconnects.
-            </p>
-          </div>
+        <Panel>
+          <EmptyState
+            icon={<Fan size={24} />}
+            tone="warn"
+            title="The fan service is not answering"
+            action={
+              <Button size="sm" icon={<ArrowClockwise size={16} />} onClick={() => void retryFans()}>
+                Try again
+              </Button>
+            }
+          >
+            Fan control is unavailable until the service is back. The lights are unaffected, and the
+            fans stay under BIOS control in the meantime.
+            <span className="state-detail">{fansError}</span>
+          </EmptyState>
+        </Panel>
+      </div>
+    );
+  }
+
+  if (!fans) {
+    return (
+      <div className="stack">
+        <div className="page-head">
+          <h1>Fans</h1>
+        </div>
+        <Panel title="Reading the fans">
+          <SkeletonLines rows={5} />
         </Panel>
       </div>
     );
   }
 
   const selected = fans.headers.find((h) => h.id === selectedId) ?? fans.headers[0] ?? null;
+  const headers = fans.headers;
 
   return (
     <div className="stack">
@@ -103,20 +160,10 @@ export function FansView() {
 
       <div className="fans-grid">
         <Panel title="Headers">
-          <div className="table-scroll">
-          <table className="fan-table">
-            <thead>
-              <tr>
-                <th scope="col">Header</th>
-                <th scope="col" className="num-col">RPM</th>
-                <th scope="col" className="num-col">Duty</th>
-                <th scope="col">Mode</th>
-                <th scope="col">Last 60 s</th>
-              </tr>
-            </thead>
-            <tbody>
-              {fans.headers.map((h) => (
-                <FanRow
+          {narrow ? (
+            <div className="fan-cards">
+              {headers.map((h) => (
+                <FanCard
                   key={h.id}
                   header={h}
                   selected={selected?.id === h.id}
@@ -124,9 +171,33 @@ export function FansView() {
                   onSelect={() => setSelectedId(h.id)}
                 />
               ))}
-            </tbody>
-          </table>
-          </div>
+            </div>
+          ) : (
+            <div className="table-scroll">
+              <table className="fan-table">
+                <thead>
+                  <tr>
+                    <th scope="col">Header</th>
+                    <th scope="col" className="num-col">RPM</th>
+                    <th scope="col">Duty</th>
+                    <th scope="col">Mode</th>
+                    <th scope="col">Last 60 s</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {headers.map((h) => (
+                    <FanRow
+                      key={h.id}
+                      header={h}
+                      selected={selected?.id === h.id}
+                      history={rpm[h.id] ?? []}
+                      onSelect={() => setSelectedId(h.id)}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </Panel>
 
         <div className="stack">
@@ -139,12 +210,28 @@ export function FansView() {
           )}
           <Panel title="Temperatures">
             {fans.temps.length === 0 && <p className="mute">No temperature sources reported.</p>}
-            {fans.temps.map((t) => (
-              <div className="temp-row" key={sourceKey(t.source)}>
-                <span>{t.label}</span>
-                <span className="fig">{fmtCelsius(t.celsius)}</span>
-              </div>
-            ))}
+            {fans.temps.map((t) => {
+              const c = t.celsius ?? 0;
+              return (
+                <div className="temp-cell" key={sourceKey(t.source)}>
+                  <span className="one-line">{t.label}</span>
+                  <span className="meter" aria-hidden="true">
+                    <span
+                      className="meter-fill"
+                      style={
+                        {
+                          "--p": clamp((c - 20) / 80, 0, 1),
+                          "--tone": tempTone(c),
+                        } as CSSProperties
+                      }
+                    />
+                  </span>
+                  <span className="fig">
+                    <AnimatedNumber value={c} decimals={1} /> °C
+                  </span>
+                </div>
+              );
+            })}
           </Panel>
         </div>
       </div>
@@ -164,6 +251,7 @@ function FanRow({
   onSelect: () => void;
 }) {
   const peak = Math.max(2000, ...history);
+  const duty = header.pwm_percent ?? 0;
   return (
     <tr
       aria-selected={selected}
@@ -178,12 +266,24 @@ function FanRow({
     >
       <td>
         <span className="fig" style={{ fontWeight: 600 }}>{header.label}</span>
-        {header.on_bios && <span className="mute" style={{ display: "block", fontSize: 14 }}>on BIOS</span>}
+        <Handoff header={header} />
       </td>
       <td className="num-col">
-        <span className="rpm-big">{fmtInt(header.rpm)}</span>
+        <span className="rpm-big">
+          <AnimatedNumber value={header.rpm ?? 0} />
+        </span>
       </td>
-      <td className="num-col">{header.pwm_percent === null ? "—" : `${header.pwm_percent}%`}</td>
+      <td>
+        <span className="duty-cell">
+          <span className="meter" aria-hidden="true">
+            <span
+              className="meter-fill"
+              style={{ "--p": clamp(duty / 100, 0, 1), "--tone": "var(--a3)" } as CSSProperties}
+            />
+          </span>
+          <span className="fig">{header.pwm_percent === null ? "—" : `${header.pwm_percent}%`}</span>
+        </span>
+      </td>
       <td>
         <Chip>{modeLabel(header.mode)}</Chip>
       </td>
@@ -196,21 +296,82 @@ function FanRow({
   );
 }
 
+/**
+ * The one place a header's state is said. The mode chip says what was asked for. When the chip
+ * is doing something else, the daemon has handed the header back, and that is said here, with
+ * the reason.
+ */
+function Handoff({ header }: { header: FanHeaderStatus }) {
+  const handedBack = header.on_bios && header.mode.mode !== "bios";
+  if (!handedBack) return null;
+  return (
+    <>
+      <span className="fan-handoff">Handed back to BIOS</span>
+      {header.override_reason && <span className="fan-reason">{header.override_reason}</span>}
+    </>
+  );
+}
+
+/** The same header as a card, for phone width: every column readable, no sideways scroll. */
+function FanCard({
+  header,
+  selected,
+  history,
+  onSelect,
+}: {
+  header: FanHeaderStatus;
+  selected: boolean;
+  history: number[];
+  onSelect: () => void;
+}) {
+  const peak = Math.max(2000, ...history);
+  const duty = header.pwm_percent ?? 0;
+  return (
+    <button type="button" className="fan-card" data-selected={selected ? "true" : "false"} onClick={onSelect}>
+      <span className="fan-card-head">
+        <span className="fig fan-card-name">{header.label}</span>
+        <Chip>{modeLabel(header.mode)}</Chip>
+        {selected && <span className="fan-card-editing">Editing</span>}
+        <Handoff header={header} />
+      </span>
+      <span className="fan-card-readouts">
+        <span className="fan-card-rpm">
+          <AnimatedNumber value={header.rpm ?? 0} />
+          <span className="unit">RPM</span>
+        </span>
+        <span className="meter" aria-hidden="true">
+          <span
+            className="meter-fill"
+            style={{ "--p": clamp(duty / 100, 0, 1), "--tone": "var(--a3)" } as CSSProperties}
+          />
+        </span>
+        <span className="fig">{header.pwm_percent === null ? "—" : `${header.pwm_percent}%`}</span>
+      </span>
+      <span className="fan-card-spark">
+        <Sparkline values={history} max={peak} label={`${header.label} RPM over the last 60 seconds`} />
+      </span>
+    </button>
+  );
+}
+
 function ProfilesPanel({ fans }: { fans: FansStatus }) {
   const [err, setErr] = useState<string | null>(null);
   // The profile whose delete is waiting for an inline confirm.
   const [confirming, setConfirming] = useState<string | null>(null);
+  const toast = useToast();
 
   const current = (): Record<string, FanMode> =>
     Object.fromEntries(fans.headers.map((h) => [h.id, h.mode]));
 
-  const run = async (fn: () => Promise<unknown>) => {
+  const run = async (fn: () => Promise<unknown>, done?: string) => {
     setErr(null);
     try {
       await fn();
       await refreshFans();
+      if (done) toast(done);
     } catch (e) {
       setErr(messageOf(e));
+      toast(messageOf(e), "down");
     }
   };
 
@@ -226,10 +387,10 @@ function ProfilesPanel({ fans }: { fans: FansStatus }) {
       title="Profiles"
       actions={
         <div className="row-wrap">
-          <Button size="sm" icon={<CopySimple size={14} />} onClick={() => void run(() => api.putFanProfile(nextName(fans.active_profile), { name: nextName(fans.active_profile), headers: current() }))}>
+          <Button size="sm" icon={<CopySimple size={14} />} onClick={() => void run(() => api.putFanProfile(nextName(fans.active_profile), { name: nextName(fans.active_profile), headers: current() }), "Profile duplicated")}>
             Duplicate
           </Button>
-          <Button size="sm" icon={<FloppyDisk size={14} />} onClick={() => void run(() => api.putFanProfile(fans.active_profile, { name: fans.active_profile, headers: current() }))}>
+          <Button size="sm" icon={<FloppyDisk size={14} />} onClick={() => void run(() => api.putFanProfile(fans.active_profile, { name: fans.active_profile, headers: current() }), `${fans.active_profile} saved`)}>
             Save {fans.active_profile}
           </Button>
         </div>
@@ -241,7 +402,7 @@ function ProfilesPanel({ fans }: { fans: FansStatus }) {
             <span key={p} className="row-wrap" style={{ gap: 2 }}>
               <Chip
                 pressed={p === fans.active_profile}
-                onClick={() => void run(() => api.switchFanProfile(p))}
+                onClick={() => void run(() => api.switchFanProfile(p), `${p} is the active profile`)}
                 label={`Switch to profile ${p}`}
               >
                 {p}
@@ -256,7 +417,7 @@ function ProfilesPanel({ fans }: { fans: FansStatus }) {
           ))}
         </div>
         {confirming && (
-          <div className="confirm" role="alert">
+          <div className="confirm slide-in" role="alert">
             <span>
               Delete <span className="fig" style={{ color: "var(--ink)" }}>{confirming}</span>? Its saved headers are removed.
             </span>
@@ -268,7 +429,7 @@ function ProfilesPanel({ fans }: { fans: FansStatus }) {
                   void run(async () => {
                     await api.deleteFanProfile(confirming);
                     setConfirming(null);
-                  })
+                  }, `${confirming} deleted`)
                 }
               >
                 Delete
@@ -293,7 +454,7 @@ function ProfilesPanel({ fans }: { fans: FansStatus }) {
                 await api.putFanProfile(name, { name, headers: current() });
                 await api.switchFanProfile(name);
                 if (old !== name) await api.deleteFanProfile(old);
-              })
+              }, `Profile renamed to ${name}`)
             }
           />
         </Field>
@@ -312,6 +473,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
   const [points, setPoints] = useState<CurvePoint[]>(mode.mode === "curve" ? mode.points : defaultCurve(base));
   const [source, setSource] = useState<TempSource>(mode.mode === "curve" ? mode.source : { type: "cpu" });
   const pointsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const toast = useToast();
 
   useEffect(
     () => () => {
@@ -328,6 +490,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
       await refreshFans();
     } catch (e) {
       setErr(messageOf(e));
+      toast(messageOf(e), "down");
     } finally {
       setBusy(false);
     }
@@ -362,14 +525,22 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
 
   const sourceOptions = fans.temps.map((t) => ({ value: sourceKey(t.source), label: t.label }));
   const currentTemp = tempFor({ mode: "curve", source, points }, fans.temps);
+  const currentDuty = dutyFor(points, currentTemp);
 
   const manual = mode.mode !== "bios";
   const current = mode.mode;
+  // The chip is doing something else than what was asked for: the daemon handed it back.
+  const handedBack = header.on_bios && mode.mode !== "bios";
 
   return (
     <Panel
       title={header.label}
-      actions={<span className="mute fig">{fmtInt(header.rpm)} RPM</span>}
+      actions={
+        <span className="rpm-readout">
+          <AnimatedNumber value={header.rpm ?? 0} />
+          <span className="unit">RPM</span>
+        </span>
+      }
     >
       <div className="stack" style={{ gap: 14 }}>
         <Segmented<"bios" | "fixed" | "curve">
@@ -384,7 +555,12 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
         />
 
         {header.override_reason && (
-          <p className="rule">The daemon overrode this: {header.override_reason}</p>
+          <p className={handedBack ? "rule rule-warn" : "rule"}>
+            {handedBack
+              ? "The daemon handed this header back to BIOS"
+              : "The daemon overrode this"}
+            : {header.override_reason}
+          </p>
         )}
 
         {mode.mode === "bios" && (
@@ -441,6 +617,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
               points={points}
               floor={base}
               currentTemp={currentTemp}
+              currentDuty={currentDuty}
               onChange={setPoints}
               onCommit={commitCurve}
             />
@@ -511,4 +688,3 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
     </Panel>
   );
 }
-

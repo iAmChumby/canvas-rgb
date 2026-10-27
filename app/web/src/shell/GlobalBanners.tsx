@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useState } from "react";
-import { Lightning, Warning, WarningOctagon } from "@phosphor-icons/react";
+import { Lightning, SquaresFour, Warning, WarningOctagon } from "@phosphor-icons/react";
 import { Banner } from "@/components/Banner";
 import { Button } from "@/components/Button";
 import { api } from "@/lib/endpoints";
@@ -25,6 +25,8 @@ export function GlobalBanners() {
 
   const conflict = status.conflicts.find((c) => c.kind === "signal_rgb");
   const serviceDown = status.service_down_ms !== null && status.service_down_ms >= SERVICE_BANNER_MS;
+  // Nothing can run until the desk canvas has a zone in it.
+  const noLayout = !status.active_layout;
 
   const firstResizable = devices?.find((d) => d.zones.some((z) => z.resizable));
   const walkHref = firstResizable
@@ -41,7 +43,7 @@ export function GlobalBanners() {
     }
   };
 
-  if (!conflict && !serviceDown && !status.show_zone_panel) return null;
+  if (!conflict && !serviceDown && !status.show_zone_panel && !noLayout) return null;
 
   return (
     <div className="banners">
@@ -62,9 +64,24 @@ export function GlobalBanners() {
         <Banner
           tone="down"
           icon={<WarningOctagon size={20} weight="fill" />}
-          title={`The fan service has been down for ${fmtSeconds(status.service_down_ms ?? 0)}`}
+          title="Fan control is unavailable"
         >
-          Fan control is unavailable until it reconnects. Lighting keeps running.
+          The daemon has not heard from the fan service for {fmtSeconds(status.service_down_ms ?? 0)}. The
+          lights are unaffected.
+        </Banner>
+      )}
+      {noLayout && (
+        <Banner
+          tone="work"
+          icon={<SquaresFour size={20} weight="fill" />}
+          title="There is no layout yet"
+          actions={
+            <Link className="btn btn-primary btn-sm" href="/" prefetch={false}>
+              Open the Layout
+            </Link>
+          }
+        >
+          Nothing can run until the desk canvas has a zone in it.
         </Banner>
       )}
       {status.show_zone_panel && (

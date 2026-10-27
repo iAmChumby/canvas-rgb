@@ -41,7 +41,13 @@ async function send(method: Method, path: string, body?: unknown): Promise<Respo
       cache: "no-store",
     });
   } catch {
-    throw new ApiFailure(0, "unreachable", "The daemon is not answering on 127.0.0.1:9430.");
+    // A cross-origin request that fails like this is either a daemon that is down or a reply the
+    // browser was not allowed to read. Say so, instead of blaming the network.
+    throw new ApiFailure(
+      0,
+      "unreachable",
+      "The daemon did not answer. It may be down, or the browser was not allowed to read its reply.",
+    );
   }
 
   if (!res.ok) {

@@ -3,7 +3,7 @@
 import { useMemo, useState, type DragEvent } from "react";
 import { ArrowCounterClockwise, FloppyDisk, Plus, X } from "@phosphor-icons/react";
 import { Button, IconButton } from "@/components/Button";
-import { Panel, Field } from "@/components/Panel";
+import { Panel, Field, StateDot } from "@/components/Panel";
 import { Segmented } from "@/components/Segmented";
 import { NumberField } from "@/components/NumberField";
 import { Toggle } from "@/components/Toggle";
@@ -11,11 +11,13 @@ import { RowButton } from "@/components/Chip";
 import { PreviewStage } from "@/views/PreviewStage";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
+import { usePreviewStatus } from "@/lib/preview";
 import { refreshLayouts, useSnap } from "@/lib/store";
 import { defaultRect, findZoneInfo } from "@/lib/zones";
 import { clamp } from "@/lib/format";
 import type { Layout } from "@/proto/Layout";
 import type { PlacedZone } from "@/proto/PlacedZone";
+import desk from "./desk.module.css";
 import type { RenderScale } from "@/proto/RenderScale";
 import type { SamplingMode } from "@/proto/SamplingMode";
 
@@ -28,6 +30,18 @@ function withoutEffect(l: Layout): Layout {
   return { ...l, effect: null };
 }
 
+/** A short, readable name for a device the daemon does not list any more. */
+function shortDeviceId(id: string): string {
+  const vid = id.match(/VID_([0-9A-Fa-f]{4})/);
+  const pid = id.match(/PID_([0-9A-Fa-f]{4})/);
+  if (vid && pid) return `VID ${vid[1]} · PID ${pid[1]}`;
+  const hex = id.match(/0x[0-9a-fA-F]+/g)?.pop();
+  if (hex) return hex;
+  const tail = id.split(/[#:]/).filter(Boolean).pop() ?? id;
+  return tail.length > 20 ? `${tail.slice(0, 20)}…` : tail;
+}
+
+
 export function LayoutView() {
   const server = useSnap((s) => s.layouts?.find((l) => l.id === s.activeLayout) ?? null);
   const devices = useSnap((s) => s.devices);
@@ -39,6 +53,13 @@ export function LayoutView() {
   const [selected, setSelected] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  /** True while a zone is being dragged: the server's layout must not replace the draft then. */
+  const [dragging, setDragging] = useState(false);
+  /**
+   * Where the dragged zone is right now. The canvas reports it once per animation frame, so the
+   * inspector follows the pointer without the drag re-rendering the canvas every move.
+   */
+  const [liveZone, setLiveZone] = useState<{ index: number; zone: PlacedZone } | null>(null);
 
   const serverKey = server ? JSON.stringify(server) : "";
   const dirty =
@@ -46,13 +67,12 @@ export function LayoutView() {
 
   // Take the server's layout whenever it changes and there are no unsaved edits. This runs during
   // render (React's pattern for state that follows a prop), so the page never shows a stale frame.
+  // A drag in progress holds it off: the zone would jump back under the pointer.
   const [syncedKey, setSyncedKey] = useState("");
-  if (serverKey !== syncedKey) {
+  if (serverKey !== syncedKey && server && !dirty && !dragging) {
     setSyncedKey(serverKey);
-    if (server && !dirty) {
-      setBase(server);
-      setDraft(server);
-    }
+    setBase(server);
+    setDraft(server);
   }
 
   const effectName = useMemo(() => {
@@ -83,6 +103,9 @@ export function LayoutView() {
   const zones = draft?.zones ?? [];
   const selectedZone = selected !== null ? zones[selected] ?? null : null;
   const selectedInfo = selectedZone ? findZoneInfo(devices, selectedZone.device_id, selectedZone.zone_index) : null;
+  const preview = usePreviewStatus();
+  // While a zone is being dragged the inspector shows where it is, not where it was.
+  const shownZone = liveZone && liveZone.index === selected ? liveZone.zone : selectedZone;
 
   const patchDraft = (fn: (l: Layout) => Layout) => {
     setDraft((prev) => (prev ? fn(prev) : prev));
@@ -172,7 +195,8 @@ export function LayoutView() {
       <div className="page-head">
         <h1>{draft.name}</h1>
         <p>
-          Live preview of <span style={{ color: "var(--ink)" }}>{effectName}</span>, with every placed zone over it.
+          The desk canvas: every placed zone over the live preview of{" "}
+          <span style={{ color: "var(--ink)" }}>{effectName}</span>.
         </p>
       </div>
 
@@ -185,16 +209,32 @@ export function LayoutView() {
             onSelect={setSelected}
             onChange={changeZone}
             onDrop={onDropUnplaced}
+            onDraggingChange={(d) => {
+              setDragging(d);
+              if (!d) setLiveZone(null);
+            }}
+            onLiveChange={(index, zone) => setLiveZone({ index, zone })}
+            layoutId={draft.id}
             dropPayloadType={DROP_TYPE}
           />
           <div className="stage-meta">
             <span className="dropzone-hint">
               Drag a zone to move it, its corner to resize, its top knob to rotate (Shift snaps to 15°). Arrow keys nudge.
             </span>
-            <span className="mute fig">
-              {zones.filter((z) => z.visible).length} of {zones.length} placed zones visible
+            <span className="row-wrap" style={{ alignItems: "center", gap: "var(--s3)" }}>
+              <StateDot tone={preview.state === "live" ? "ok" : preview.state === "refused" ? "down" : "work"}>
+                {preview.state === "live" ? `preview ${preview.fps.toFixed(1)} fps` : `preview ${preview.state}`}
+              </StateDot>
+              <span className="mute fig">
+                {zones.filter((z) => z.visible).length} of {zones.length} placed zones visible
+              </span>
             </span>
           </div>
+          {preview.state === "refused" && preview.error && (
+            <p className="fig" style={{ color: "var(--down)", marginTop: 6 }}>
+              {preview.error}
+            </p>
+          )}
 
           <Panel title="Render">
             <div className="render-grid">
@@ -228,12 +268,13 @@ export function LayoutView() {
 
         <div className="stack">
           <Panel title={selectedZone ? "Zone" : "Zones"}>
-            {selectedZone && selected !== null ? (
+            {shownZone && selected !== null ? (
               <ZoneInspector
-                zone={selectedZone}
-                name={selectedInfo?.zone.name ?? "missing zone"}
-                deviceName={selectedInfo?.device.name ?? selectedZone.device_id}
+                zone={shownZone}
+                name={selectedInfo?.zone.name ?? `Zone ${shownZone.zone_index} · device not found`}
+                deviceName={selectedInfo?.device.name ?? shortDeviceId(shownZone.device_id)}
                 ledCount={selectedInfo?.zone.led_count ?? 0}
+                missing={!selectedInfo}
                 onChange={(patch) => changeZone(selected, patch)}
                 onRemove={() => unplace(selected)}
               />
@@ -247,12 +288,14 @@ export function LayoutView() {
                   <RowButton
                     key={`${z.device_id}#${z.zone_index}`}
                     current={selected === i}
-                    label={`Select ${info?.zone.name ?? "zone"}`}
+                    label={`Select ${info?.zone.name ?? "the zone whose device is gone"}`}
                     onSelect={() => setSelected(i)}
                   >
-                    <span className="row-title">{info?.zone.name ?? "missing zone"}</span>
-                    <span className="row-sub">{info?.device.name ?? z.device_id}</span>
-                    <span className="fig mute">{info?.zone.led_count ?? 0}</span>
+                    <span className="row-title">
+                      {info?.zone.name ?? "Device not found"}
+                    </span>
+                    <span className="row-sub one-line">{info ? info.device.name : "not connected"}</span>
+                    <span className="fig mute">{info?.zone.led_count ?? "—"}</span>
                   </RowButton>
                 );
               })}
@@ -312,6 +355,7 @@ function ZoneInspector({
   name,
   deviceName,
   ledCount,
+  missing,
   onChange,
   onRemove,
 }: {
@@ -319,6 +363,7 @@ function ZoneInspector({
   name: string;
   deviceName: string;
   ledCount: number;
+  missing: boolean;
   onChange: (patch: Partial<PlacedZone>) => void;
   onRemove: () => void;
 }) {
@@ -326,9 +371,17 @@ function ZoneInspector({
     <div className="stack" style={{ gap: 8 }}>
       <div className="row-title" style={{ justifyContent: "space-between" }}>
         <span className="one-line">{name}</span>
-        <span className="fig mute">{ledCount} LEDs</span>
+        <span className="fig mute">{missing ? "—" : `${ledCount} LEDs`}</span>
       </div>
-      <p className="row-sub">{deviceName}</p>
+      <p className="row-sub one-line">{deviceName}</p>
+      {missing && (
+        <div className={desk.stale}>
+          <span className={desk.staleReason}>This device is not connected, so this zone draws nothing.</span>
+          <Button size="sm" variant="ghost" icon={<X size={14} />} onClick={onRemove}>
+            Remove from layout
+          </Button>
+        </div>
+      )}
       <div className="grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
         <Field label="X">
           <NumberField label="X" value={zone.x} min={0} max={CANVAS_W} onCommit={(v) => onChange({ x: v })} />
@@ -360,11 +413,13 @@ function ZoneInspector({
       <Field label="Reversed" hint="Runs the LEDs the other way">
         <Toggle label="Reversed" checked={zone.reversed} onChange={(v) => onChange({ reversed: v })} />
       </Field>
-      <div className="row-wrap" style={{ justifyContent: "flex-end" }}>
-        <Button size="sm" variant="ghost" icon={<X size={14} />} onClick={onRemove}>
-          Remove from layout
-        </Button>
-      </div>
+      {!missing && (
+        <div className="row-wrap" style={{ justifyContent: "flex-end" }}>
+          <Button size="sm" variant="ghost" icon={<X size={14} />} onClick={onRemove}>
+            Remove from layout
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

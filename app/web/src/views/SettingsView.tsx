@@ -16,32 +16,17 @@ import { BLACK_HEX } from "@/lib/color";
 import { openLogsFolder, tauriHost } from "@/lib/host";
 import { patchSnap, refreshAll, refreshRender, refreshSettings, useSnap } from "@/lib/store";
 import { fmt1, fmtInt } from "@/lib/format";
+import { useToast } from "@/components/Toast";
+import { SkeletonLines } from "@/components/Skeleton";
+import {
+  applyMotion,
+  applyTheme,
+  readMotion,
+  readTheme,
+  type MotionPref,
+  type Theme,
+} from "@/shell/prefs";
 import type { Settings } from "@/proto/Settings";
-
-const THEME_KEY = "canvas-rgb.theme";
-type Theme = "dark" | "light" | "system";
-
-function readTheme(): Theme {
-  if (typeof window === "undefined") return "dark";
-  try {
-    const v = window.localStorage.getItem(THEME_KEY);
-    if (v === "light" || v === "system") return v;
-  } catch {
-    // Storage can be blocked; the default is dark.
-  }
-  return "dark";
-}
-
-function applyTheme(t: Theme): void {
-  const root = document.documentElement;
-  if (t === "system") root.removeAttribute("data-theme");
-  else root.setAttribute("data-theme", t);
-  try {
-    window.localStorage.setItem(THEME_KEY, t);
-  } catch {
-    // The choice still applies for this session.
-  }
-}
 
 export function SettingsView() {
   const settings = useSnap((s) => s.settings);
@@ -51,10 +36,13 @@ export function SettingsView() {
   const [fps, setFps] = useState<number | null>(null);
   const [brightness, setBrightness] = useState<number | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [renderErr, setRenderErr] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [theme, setTheme] = useState<Theme>(() => readTheme());
+  const [motion, setMotion] = useState<MotionPref>(() => readMotion());
   const [bootDraft, setBootDraft] = useState<string | null>(null);
   const inTray = tauriHost() !== null;
+  const toast = useToast();
 
   if (!settings) {
     return (
@@ -62,8 +50,12 @@ export function SettingsView() {
         <div className="page-head">
           <h1>Settings</h1>
         </div>
-        <Panel>
-          <p className="mute">{settingsError ? `Settings could not be read: ${settingsError}` : "Reading the settings."}</p>
+        <Panel title={settingsError ? "The settings could not be read" : "Reading the settings"}>
+          {settingsError ? (
+            <p className="error-line">{settingsError}</p>
+          ) : (
+            <SkeletonLines rows={5} />
+          )}
         </Panel>
       </div>
     );
@@ -87,26 +79,29 @@ export function SettingsView() {
   };
 
   const commitFps = async (v: number) => {
-    setErr(null);
+    setRenderErr(null);
     try {
       await api.patchRender({ fps: v, scale: null, sampling: null });
       setFps(null);
       await refreshRender();
     } catch (e) {
-      setErr(messageOf(e));
+      // The control goes back to the value the daemon has: nothing fails silently.
       setFps(null);
+      setRenderErr(messageOf(e));
+      toast(messageOf(e), "down");
     }
   };
 
   const commitBrightness = async (v: number) => {
-    setErr(null);
+    setRenderErr(null);
     try {
       await api.patchOutput({ power: null, brightness: v });
       setBrightness(null);
       await refreshSettings();
     } catch (e) {
-      setErr(messageOf(e));
       setBrightness(null);
+      setRenderErr(messageOf(e));
+      toast(messageOf(e), "down");
     }
   };
 
@@ -116,8 +111,10 @@ export function SettingsView() {
     try {
       const name = await exportConfig();
       setNote(`Downloaded ${name}`);
+      toast(`Downloaded ${name}`);
     } catch (e) {
       setErr(messageOf(e));
+      toast(messageOf(e), "down");
     }
   };
 
@@ -127,9 +124,11 @@ export function SettingsView() {
     try {
       await importConfigFile(file);
       setNote(`Imported ${file.name}`);
+      toast(`Imported ${file.name}`);
       await refreshAll();
     } catch (e) {
       setErr(messageOf(e));
+      toast(messageOf(e), "down");
     }
   };
 
@@ -172,6 +171,7 @@ export function SettingsView() {
                 <NumberField label="Brightness value" min={0} max={100} value={shownBrightness} unit="%" onCommit={commitBrightness} />
               </span>
             </Field>
+            {renderErr && <p className="error-line" style={{ marginTop: 8 }}>{renderErr}</p>}
           </Panel>
 
           <Panel title="Lock and quit">
@@ -241,6 +241,22 @@ export function SettingsView() {
                 onChange={(t) => {
                   setTheme(t);
                   applyTheme(t);
+                  toast(`Theme: ${t}`);
+                }}
+              />
+            </Field>
+            <Field label="Interface motion" hint="Reduced turns the entrance, slide and count animations off">
+              <Segmented<MotionPref>
+                label="Interface motion"
+                value={motion}
+                options={[
+                  { value: "full", label: "Full" },
+                  { value: "reduced", label: "Reduced" },
+                ]}
+                onChange={(m) => {
+                  setMotion(m);
+                  applyMotion(m);
+                  toast(m === "reduced" ? "Motion reduced" : "Motion on");
                 }}
               />
             </Field>

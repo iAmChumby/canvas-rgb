@@ -2,9 +2,22 @@
 // runs outside the Tauri host (a plain browser or the screenshot server). It mirrors the
 // daemon's validation messages (crates/canvas-proto/src/fans.rs) so the inline 422 and 503 paths
 // can be seen. `?state=conflict|service-down|first-run|html` changes what the status reports.
+//
+// The scenarios in `@/lib/demoScenarios` are wired in here too, so the editor's own states can
+// be seen in a plain browser: `?state=daemon-down|openrgb-down|no-layout|device-empty|slow|
+// save-error|handback:<header id>`.
 
 import { ApiFailure } from "@/lib/errors";
 import { thumbnailBytes } from "@/lib/thumb-demo";
+import {
+  answerDelayMs,
+  applyDeviceScenarios,
+  applyFanScenarios,
+  applyLayoutScenarios,
+  applyStatusScenarios,
+  daemonDown,
+  saveError,
+} from "@/lib/demoScenarios";
 import {
   DEVICES,
   EFFECTS,
@@ -66,15 +79,16 @@ function initialState(): DemoState {
   const fanModes: Record<string, FanMode> = {};
   for (const h of FAN_HEADERS) fanModes[h.id] = profile?.headers[h.id] ?? { mode: "bios" };
   const favorites = new Set(EFFECTS.filter((e) => e.summary.favorite).map((e) => e.schema.id));
+  const layouts = applyLayoutScenarios([{ ...LAYOUT_DESK, zones: LAYOUT_DESK.zones.map((z) => ({ ...z })) }], LAYOUT_DESK.id);
   return {
     settings: { ...INITIAL_SETTINGS },
-    devices: DEVICES.map((d) => ({ ...d, zones: d.zones.map((z) => ({ ...z })) })),
+    devices: applyDeviceScenarios(DEVICES.map((d) => ({ ...d, zones: d.zones.map((z) => ({ ...z })) }))),
     effects,
     favorites,
     saved: {},
     activeEffect: "poison",
-    layouts: [{ ...LAYOUT_DESK, zones: LAYOUT_DESK.zones.map((z) => ({ ...z })) }],
-    activeLayout: LAYOUT_DESK.id,
+    layouts: layouts.layouts,
+    activeLayout: layouts.active,
     fanModes,
     fanFloor: 20,
     fanProfiles: FAN_PROFILES.map((p) => ({ ...p, headers: { ...p.headers } })),
@@ -215,8 +229,8 @@ function statusNow(): Status {
   const down = !s.serviceUp;
   const fps = s.settings.fps;
   const jitter = Math.sin(Date.now() / 1700) * 0.12;
-  const elapsed = Date.now() - s.startedAt;
-  return {
+  const elapsed = (Date.now() - s.startedAt) / 1000;
+  return applyStatusScenarios({
     version: APP_VERSION,
     power: s.settings.power,
     brightness: s.settings.brightness,
@@ -234,7 +248,7 @@ function statusNow(): Status {
     service_down_ms: down ? 14000 + elapsed : null,
     conflicts: s.conflicts,
     show_zone_panel: s.zonePanel,
-  };
+  });
 }
 
 // ---- effects ----
@@ -275,8 +289,13 @@ function setActiveProps(over: Props): void {
 // ---- router ----
 
 export async function demoRequest(method: string, path: string, body: unknown): Promise<unknown> {
-  // Yield once, as a network call would, so callers see the same async behaviour.
-  await new Promise((resolve) => setTimeout(resolve, 2));
+  // Yield once, as a network call would, so callers see the same async behaviour. The `slow`
+  // scenario makes every answer take long enough for the editor's skeletons to show.
+  await new Promise((resolve) => setTimeout(resolve, answerDelayMs()));
+  // The daemon does not answer at all.
+  if (daemonDown()) fail(503, "service_unavailable", "the daemon is not answering");
+  // Every write is refused.
+  if (method !== "GET" && saveError()) fail(500, "internal", "the daemon refused the change");
 
   const url = new URL(path, "http://demo.invalid");
   const pathname = decodeURIComponent(url.pathname);
@@ -424,7 +443,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
   if (head === "fans") {
     if (seg.length === 1 && method === "GET") {
       if (!s.serviceUp) fail(503, "service_unavailable", "the fan service is not reachable");
-      return fansStatus();
+      return applyFanScenarios(fansStatus());
     }
     if (seg[1] === "headers" && method === "PATCH") {
       if (!s.serviceUp) fail(503, "service_unavailable", "the fan service is not reachable");

@@ -21,8 +21,14 @@ export function Sparkline({
   const pts = values.map((v, i) => {
     const x = values.length > 1 ? i * step : w;
     const y = h - 3 - (Math.min(v, scaleMax) / scaleMax) * (h - 6);
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
+    return { x: Number(x.toFixed(1)), y: Number(y.toFixed(1)) };
   });
+  const line = pts.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x} ${p.y}`).join(" ");
+  const area = pts.length > 1 ? `${line} L ${w} ${h} L 0 ${h} Z` : "";
+  const head = pts.length > 0 ? pts[pts.length - 1] : undefined;
+  const last = values.length > 0 ? (values[values.length - 1] ?? 0) : 0;
+  const peak = values.length > 0 ? Math.max(...values) : 0;
+
   return (
     <svg
       className="sparkline"
@@ -31,10 +37,13 @@ export function Sparkline({
       aria-label={label}
       style={{ color: `var(--${tone})` } as CSSProperties}
     >
+      <title>{`${label}: ${Math.round(last)} RPM, peak ${Math.round(peak)}`}</title>
       <line x1={0} x2={w} y1={h - 0.5} y2={h - 0.5} stroke="var(--line-2)" strokeWidth={1} />
+      {area && <path className="spark-area" d={area} />}
       {pts.length > 1 && (
-        <polyline points={pts.join(" ")} fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinejoin="round" />
+        <path className="spark-line" d={line} fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinejoin="round" />
       )}
+      {head && <circle className="spark-head" cx={head.x} cy={head.y} r={2.5} />}
     </svg>
   );
 }

@@ -58,6 +58,16 @@ function zoneShape(z: ZoneInfo): string {
 }
 
 /**
+ * The one detail that tells two devices apart when the daemon gives them the same name: the
+ * address in their location. Two ENE DRAM sticks both answer to "ENE DRAM"; their SMBus
+ * addresses do not.
+ */
+function deviceTag(d: DeviceInfo): string | null {
+  const hex = d.location.match(/0x[0-9a-fA-F]+/g)?.pop();
+  return hex ?? null;
+}
+
+/**
  * A zone drawn as its LEDs: one dot per LED on a linear strip, one dot for a single LED, or the
  * matrix grid with filled cells where the map has an LED. Coloured by the device's accent.
  */
@@ -86,7 +96,14 @@ function ZoneStrip({ zone }: { zone: ZoneInfo }) {
       </svg>
     );
   }
-  const n = Math.max(1, Math.min(zone.led_count, 160));
+  const n = Math.max(0, Math.min(zone.led_count, 160));
+  if (n === 0) {
+    return (
+      <svg className="zone-strip-svg" viewBox="0 0 200 22" preserveAspectRatio="xMidYMid meet" role="img" aria-label={`${zone.name}: no LEDs yet`}>
+        <line x1="40" y1="11" x2="160" y2="11" stroke="currentColor" strokeWidth="1.5" strokeDasharray="4 4" opacity="0.45" />
+      </svg>
+    );
+  }
   const step = 200 / n;
   const r = Math.min(3, Math.max(0.9, step * 0.32));
   const dots: ReactElement[] = [];
@@ -118,7 +135,9 @@ export function DevicesView() {
   const fromUrl: WalkTarget | null = (() => {
     if (urlHandled || !urlWalk || !devices) return null;
     const d = devices.find((x) => x.id === urlWalk);
-    const z = d?.zones.find((x) => x.resizable);
+    // The first header that already reports LEDs: a header that reports none is the fixed
+    // part of the board, not an addressable strip.
+    const z = d?.zones.find((x) => x.resizable && x.led_count > 0) ?? d?.zones.find((x) => x.resizable);
     return d && z ? { deviceId: d.id, zoneIndex: z.index } : null;
   })();
   const walk = choice ?? fromUrl;
@@ -145,6 +164,8 @@ export function DevicesView() {
           {(devices ?? []).map((d, di) => {
             const Glyph = KIND_ICON[d.kind];
             const accent = ACCENTS[di % ACCENTS.length];
+            const tag = deviceTag(d);
+            const sameName = (devices ?? []).filter((x) => x.name === d.name).length > 1;
             return (
               <section
                 key={d.id}
@@ -158,9 +179,13 @@ export function DevicesView() {
                       <Glyph size={18} />
                     </span>
                     <span className="stack" style={{ gap: 0, minWidth: 0 }}>
-                      <span className="one-line">{d.name}</span>
+                      <span className="one-line">
+                        {d.name}
+                        {sameName && tag ? ` ${tag}` : ""}
+                      </span>
                       <span className="row-sub fig one-line">
                         {KIND_LABEL[d.kind]} · {d.vendor} · {d.adapter} #{d.adapter_index}
+                        {tag ? ` · ${tag}` : ""}
                       </span>
                     </span>
                   </div>
@@ -311,8 +336,11 @@ function IdentifyWalker({
         </p>
         <div className="walker-led">
           <span className="walker-big">{led + 1}</span>
-          <span className="mute">of {zone.led_count} LEDs now</span>
+          <span className="mute">of {zone.max_leds} LEDs</span>
         </div>
+        <p className="mute" style={{ fontSize: 14, marginTop: -4 }}>
+          LED {led + 1}. The header reads {zone.led_count} LEDs now.
+        </p>
         <div className="walker-keys">
           <IconButton label="Previous LED" icon={<ArrowLeft size={18} />} disabled={led <= 0} onClick={() => setLed((v) => Math.max(0, v - 1))} />
           <IconButton label="Next LED" icon={<ArrowRight size={18} />} disabled={led >= maxIndex} onClick={() => setLed((v) => Math.min(maxIndex, v + 1))} />
@@ -328,7 +356,7 @@ function IdentifyWalker({
           This is the last LED
         </Button>
         <p className="mute" style={{ fontSize: 14 }}>
-          Sets the length to {led + 1}. Allowed range {zone.min_leds} to {zone.max_leds}.
+          Sets the length to {led + 1} LEDs. Allowed range {zone.min_leds} to {zone.max_leds}.
         </p>
         {note && <StateDot tone="ok">{note}</StateDot>}
         {error && <p className="error-line">{error}</p>}

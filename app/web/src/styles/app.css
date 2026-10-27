@@ -103,8 +103,19 @@ h3 {
   *::after {
     transition-duration: 0ms !important;
     animation-duration: 0ms !important;
+    animation-delay: 0ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+/* The editor's own motion switch (Settings > Appearance). Same promise as the OS setting. */
+html[data-motion="reduced"] *,
+html[data-motion="reduced"] *::before,
+html[data-motion="reduced"] *::after {
+  transition-duration: 0ms !important;
+  animation-duration: 0ms !important;
+  animation-delay: 0ms !important;
+  scroll-behavior: auto !important;
 }
 
 /* ---------- shell ---------- */
@@ -150,6 +161,12 @@ h3 {
   transition: background var(--dur-slow) var(--ease);
 }
 
+/* The brand dot follows the daemon, like the dot in the status strip: it is the live hue while
+   the daemon answers and red while it does not. */
+.app[data-live="off"] .rail-brand-dot {
+  background: var(--down);
+}
+
 .rail-link {
   position: relative;
   display: flex;
@@ -176,16 +193,27 @@ h3 {
   color: var(--ink);
 }
 
-.rail-link[aria-current="page"]::before {
-  content: "";
+/* The active-page marker slides between links: one element, moved with transform. */
+.rail-marker {
   position: absolute;
-  left: -13px;
-  top: 8px;
-  bottom: 8px;
+  left: 0;
+  top: 0;
   width: 3px;
+  height: var(--mh, 0px);
   border-radius: 2px;
   background: var(--live);
-  transition: background var(--dur-slow) var(--ease);
+  transform: translate3d(var(--mx, 0px), var(--my, 0px), 0);
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    transform var(--dur-slow) var(--ease),
+    width var(--dur-slow) var(--ease),
+    height var(--dur-slow) var(--ease),
+    opacity var(--dur-fast) var(--ease);
+}
+
+.rail-marker[data-on="true"] {
+  opacity: 1;
 }
 
 .rail-icon {
@@ -210,6 +238,9 @@ h3 {
   border-bottom: 1px solid var(--line);
   background: var(--panel);
   font-size: var(--t14);
+  /* The strip is the same height before and after the daemon answers, so the page under it
+     never jumps down. */
+  min-height: 55px;
 }
 
 .strip-group {
@@ -270,11 +301,26 @@ h3 {
   display: flex;
   align-items: flex-start;
   gap: var(--s3);
-  padding: var(--s3) var(--s4);
+  padding: var(--s2) var(--s4);
   border: 1px solid var(--line-2);
   border-left: 3px solid var(--tone);
   border-radius: var(--r-md);
   background: color-mix(in srgb, var(--tone) 12%, var(--panel));
+  animation: canvas-enter var(--dur) var(--ease) both;
+}
+
+.banner-icon {
+  color: var(--tone);
+  display: inline-flex;
+  padding-top: 2px;
+  flex: none;
+}
+
+.banner-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1) var(--s4);
 }
 
 .banner-body {
@@ -294,8 +340,9 @@ h3 {
 .banner-actions {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: var(--s2);
-  margin-top: var(--s2);
+  margin-left: auto;
 }
 
 .banners {
@@ -476,6 +523,7 @@ h3 {
 }
 
 .seg {
+  position: relative;
   display: inline-flex;
   flex-wrap: wrap;
   gap: 2px;
@@ -485,7 +533,27 @@ h3 {
   background: var(--sunk);
 }
 
+/* The selected segment: one thumb that slides, so the change reads as movement. */
+.seg-thumb {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: var(--tw, 0px);
+  height: var(--th, 0px);
+  border-radius: var(--r-sm);
+  background: var(--raised);
+  box-shadow: inset 0 -2px 0 var(--live);
+  transform: translate3d(var(--tx, 0px), var(--ty, 0px), 0);
+  pointer-events: none;
+  transition:
+    transform var(--dur) var(--ease),
+    width var(--dur) var(--ease),
+    height var(--dur) var(--ease);
+}
+
 .seg-item {
+  position: relative;
+  z-index: 1;
   display: inline-flex;
   align-items: center;
   gap: var(--s1);
@@ -509,9 +577,8 @@ h3 {
 }
 
 .seg-item[aria-checked="true"] {
-  background: var(--raised);
+  background: transparent;
   color: var(--ink);
-  box-shadow: inset 0 -2px 0 var(--live);
 }
 
 .switch {
@@ -555,6 +622,14 @@ h3 {
 .switch[aria-checked="true"]::after {
   transform: translateX(20px);
   background: var(--live);
+}
+
+.switch:active::after {
+  transform: translateX(0) scale(0.86);
+}
+
+.switch[aria-checked="true"]:active::after {
+  transform: translateX(20px) scale(0.86);
 }
 
 .chip {
@@ -808,8 +883,16 @@ button.chip:hover {
 
 .slider-fill {
   left: 0;
-  width: calc(var(--p) * 100%);
+  width: 100%;
   background: var(--live);
+  transform: translateY(-50%) scaleX(var(--p));
+  transform-origin: left center;
+  transition: transform var(--dur) var(--ease);
+}
+
+/* While the pointer is down the fill follows the pointer exactly: no lag. */
+.slider[data-dragging="true"] .slider-fill {
+  transition: none;
 }
 
 .slider-floor {
@@ -955,6 +1038,12 @@ button.chip:hover {
   flex: none;
 }
 
+/* The fan table has less room: the trace is narrower there. */
+.fan-table .sparkline {
+  width: 132px;
+  height: 34px;
+}
+
 /* ---------- live preview stage and zones ---------- */
 
 .stage {
@@ -1014,11 +1103,8 @@ button.chip:hover {
   opacity: 0.55;
 }
 
-.zrect[aria-selected="true"] {
-  outline: 2px solid var(--live);
-  outline-offset: 2px;
-  cursor: move;
-}
+/* The selection is styled by the desk canvas' own module (views/desk.module.css): the stage
+   sets aria-pressed, and a rule here would fight it. */
 
 .zrect:focus-visible {
   outline: 2px solid var(--focus);
@@ -1132,12 +1218,7 @@ button.chip:hover {
 
 /* ---------- effects page ---------- */
 
-.effects-grid {
-  display: grid;
-  grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
-  gap: var(--s4);
-  align-items: start;
-}
+/* ---------- effects page: the grid and its parts live in motion.css ---------- */
 
 .list-panel {
   min-width: 0;
@@ -1396,6 +1477,10 @@ button.chip:hover {
   font-size: var(--t14);
 }
 
+.rule-warn {
+  border-left-color: var(--warn);
+}
+
 .profile-row {
   display: flex;
   flex-wrap: wrap;
@@ -1414,6 +1499,21 @@ button.chip:hover {
 }
 
 .temp-row:last-child {
+  border-bottom: 0;
+}
+
+/* The temperature rows on the fans page: name, bar, exact reading. */
+.temp-cell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 84px auto;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s2) 0;
+  border-bottom: 1px solid var(--line);
+  font-size: var(--t14);
+}
+
+.temp-cell:last-child {
   border-bottom: 0;
 }
 
@@ -1461,6 +1561,19 @@ button.chip:hover {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  /* The palette button sits in the corner of the strip, so it does not add a row. */
+  .strip {
+    position: relative;
+    padding-right: 52px;
+  }
+
+  .strip-search-group {
+    position: absolute;
+    top: var(--s3);
+    right: var(--s3);
+    margin: 0;
+  }
+
   .rail-col {
     display: contents;
   }
@@ -1494,13 +1607,10 @@ button.chip:hover {
     font-size: var(--t14);
   }
 
-  .rail-link[aria-current="page"]::before {
-    left: 16px;
-    right: 16px;
-    top: -5px;
-    bottom: auto;
-    width: auto;
+  .rail-marker {
+    width: var(--mw, 0px);
     height: 3px;
+    transform: translate3d(var(--mxn, 0px), var(--myn, 0px), 0);
   }
 
   .content {
@@ -1509,6 +1619,7 @@ button.chip:hover {
 
   .strip {
     padding: var(--s3) var(--s4);
+    min-height: 140px;
   }
 
   .banners {
@@ -1552,6 +1663,7 @@ button.chip:hover {
 
 .thumb {
   position: relative;
+  display: block;
   flex: none;
   overflow: hidden;
   border: 1px solid var(--line-2);
@@ -1564,6 +1676,15 @@ button.chip:hover {
   width: 100%;
   height: 100%;
   image-rendering: pixelated;
+  opacity: 0;
+  transition:
+    opacity var(--dur-slow) var(--ease),
+    transform var(--dur-slow) var(--ease);
+}
+
+/* A tile that has its frames fades in; it never appears as a black hole. */
+.thumb[data-loaded="true"] canvas {
+  opacity: 1;
 }
 
 .thumb-sm {

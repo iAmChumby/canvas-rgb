@@ -27,13 +27,15 @@ export function Banner({
   const style = { "--tone": `var(--${tone})` } as CSSProperties;
   return (
     <div className="banner" style={style} role={tone === "down" ? "alert" : "status"}>
-      <span aria-hidden="true" style={{ color: "var(--tone)", display: "inline-flex", paddingTop: 2 }}>
+      <span aria-hidden="true" className="banner-icon">
         {icon}
       </span>
       <div className="banner-body">
-        <div className="banner-title">{title}</div>
+        <div className="banner-head">
+          <div className="banner-title">{title}</div>
+          {actions && <div className="banner-actions">{actions}</div>}
+        </div>
         {children && <div className="banner-text">{children}</div>}
-        {actions && <div className="banner-actions">{actions}</div>}
       </div>
       {onDismiss && (
         <IconButton label={dismissLabel ?? "Dismiss"} icon={<X size={16} />} size="sm" onClick={onDismiss} />

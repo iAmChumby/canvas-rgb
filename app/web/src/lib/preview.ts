@@ -2,7 +2,12 @@
 // u16 LE height, then width*height*3 RGB bytes). In a plain browser it is a local demo gradient.
 // The socket is open only while the window is visible. The dominant hue of the frame is written
 // to --live-h at no more than 2 Hz, so the chrome tints with the light.
+//
+// The feed also keeps a status the desk canvas shows: whether the socket is connecting, live or
+// refused, and why. A refused socket is diagnosed against the daemon's own answer, so the canvas
+// can say what is wrong instead of waiting for a frame that never comes.
 
+import { useSyncExternalStore } from "react";
 import { apiConfig } from "@/lib/api";
 import { isDemo } from "@/lib/host";
 import { routes } from "@/proto/routes";
@@ -15,18 +20,47 @@ export interface Frame {
 
 type FrameListener = (frame: Frame) => void;
 
+export const PREVIEW_W = 320;
+export const PREVIEW_H = 200;
+
+export type PreviewState = "idle" | "connecting" | "live" | "refused";
+
+export interface PreviewStatus {
+  /** idle: not started. connecting: the socket is opening. live: frames are arriving. */
+  state: PreviewState;
+  /** Why the socket was refused, in the daemon's own words. Null while it is not refused. */
+  error: string | null;
+  /** Frames received since the page opened. */
+  frames: number;
+  /** Frames per second over the last second. */
+  fps: number;
+}
+
 const listeners = new Set<FrameListener>();
+const statusListeners = new Set<() => void>();
 let active = false;
 let socket: WebSocket | null = null;
 let reconnect: ReturnType<typeof setTimeout> | null = null;
 let demoTimer: ReturnType<typeof setInterval> | null = null;
 let lastFrame: Frame | null = null;
+const frameTimes: number[] = [];
+let status: PreviewStatus = { state: "idle", error: null, frames: 0, fps: 0 };
+/** How many times the socket has been refused; the retry waits grow with it. */
+let refusals = 0;
 
-export const PREVIEW_W = 320;
-export const PREVIEW_H = 200;
+function setStatus(partial: Partial<PreviewStatus>): void {
+  status = { ...status, ...partial };
+  for (const l of statusListeners) l();
+}
 
 function emit(frame: Frame): void {
   lastFrame = frame;
+  const now = performance.now();
+  frameTimes.push(now);
+  while (frameTimes.length > 0 && now - (frameTimes[0] ?? 0) > 2000) frameTimes.shift();
+  const span = frameTimes.length > 1 ? (now - (frameTimes[0] ?? now)) / 1000 : 0;
+  const fps = span > 0 ? Math.round((frameTimes.length / span) * 10) / 10 : 0;
+  setStatus({ state: "live", frames: status.frames + 1, fps });
   for (const l of listeners) l(frame);
 }
 
@@ -42,6 +76,26 @@ export function currentFrame(): Frame | null {
   return lastFrame;
 }
 
+export function getPreviewStatus(): PreviewStatus {
+  return status;
+}
+
+function subscribeStatus(listener: () => void): () => void {
+  statusListeners.add(listener);
+  return () => {
+    statusListeners.delete(listener);
+  };
+}
+
+/** The preview feed's state, for the desk canvas. */
+export function usePreviewStatus(): PreviewStatus {
+  return useSyncExternalStore(
+    subscribeStatus,
+    () => status,
+    () => status,
+  );
+}
+
 function parseFrame(buf: ArrayBuffer): Frame | null {
   if (buf.byteLength < 4) return null;
   const view = new DataView(buf);
@@ -55,14 +109,19 @@ function parseFrame(buf: ArrayBuffer): Frame | null {
 async function connect(): Promise<void> {
   if (!active || socket) return;
   let url: string;
+  let baseUrl: string;
   try {
     const cfg = await apiConfig();
-    const base = cfg.base_url.replace(/^http/, "ws");
-    url = `${base}${routes.preview}?token=${encodeURIComponent(cfg.token)}`;
+    baseUrl = cfg.base_url;
+    const wsBase = baseUrl.replace(/^http/, "ws");
+    url = `${wsBase}${routes.preview}?token=${encodeURIComponent(cfg.token)}`;
   } catch {
     scheduleReconnect();
     return;
   }
+  // Once the socket has been refused the state stays "refused": a retry must not paper over the
+  // reason the canvas is showing.
+  if (refusals === 0) setStatus({ state: "connecting", error: null });
   const ws = new WebSocket(url);
   ws.binaryType = "arraybuffer";
   ws.onmessage = (ev: MessageEvent) => {
@@ -71,6 +130,13 @@ async function connect(): Promise<void> {
       if (frame) emit(frame);
     }
   };
+  ws.onopen = () => {
+    refusals = 0;
+    setStatus({ state: "connecting", error: null });
+  };
+  ws.onerror = () => {
+    void diagnose(baseUrl);
+  };
   ws.onclose = () => {
     socket = null;
     if (active) scheduleReconnect();
@@ -78,12 +144,35 @@ async function connect(): Promise<void> {
   socket = ws;
 }
 
+/**
+ * Works out what to say about a refused preview socket. The status route is open (it needs no
+ * token), so it says whether the daemon is up at all: if it answers, the refusal is about the
+ * socket and nothing else.
+ */
+async function diagnose(baseUrl: string): Promise<void> {
+  let detail: string;
+  try {
+    const res = await fetch(`${baseUrl}${routes.status}`, { cache: "no-store" });
+    if (res.ok) {
+      detail = "The daemon refused the preview socket. Every other call works.";
+    } else {
+      detail = `The daemon answered the status route with HTTP ${res.status}.`;
+    }
+  } catch {
+    detail = "The daemon is not answering on 127.0.0.1:9430.";
+  }
+  refusals += 1;
+  setStatus({ state: "refused", error: detail });
+}
+
 function scheduleReconnect(): void {
   if (reconnect || !active) return;
+  // 1.2 s, then 2.4 s, 4.8 s, up to 15 s: a refused socket must not spin the console.
+  const wait = Math.min(15000, 1200 * Math.pow(2, Math.min(4, refusals)));
   reconnect = setTimeout(() => {
     reconnect = null;
     void connect();
-  }, 1200);
+  }, wait);
 }
 
 /** A cheap moving gradient, 15 frames a second, for demo mode only. */
@@ -128,6 +217,7 @@ export function startPreview(): void {
   if (active) return;
   active = true;
   if (isDemo()) {
+    setStatus({ state: "connecting", error: null });
     const t0 = performance.now();
     demoTimer = setInterval(() => {
       emit(demoFrame((performance.now() - t0) / 1000));
@@ -152,6 +242,7 @@ export function stopPreview(): void {
     socket.close();
     socket = null;
   }
+  setStatus({ state: "idle", fps: 0 });
 }
 
 // ---- dominant hue at <= 2 Hz ----

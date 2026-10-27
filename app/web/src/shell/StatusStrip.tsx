@@ -1,13 +1,14 @@
 "use client";
 
-import { useState } from "react";
-import { Pause, Play } from "@phosphor-icons/react";
-import { Button } from "@/components/Button";
+import { useEffect, useRef, useState } from "react";
+import { MagnifyingGlass, Pause, Play } from "@phosphor-icons/react";
+import { Button, IconButton } from "@/components/Button";
 import { StateDot, type DotTone } from "@/components/Panel";
+import { AnimatedNumber } from "@/components/AnimatedNumber";
+import { useToast } from "@/components/Toast";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
 import { patchSnap, refreshStatus, useSnap } from "@/lib/store";
-import { fmt1 } from "@/lib/format";
 
 function linkTone(state: string): DotTone {
   if (state === "connected") return "ok";
@@ -15,19 +16,41 @@ function linkTone(state: string): DotTone {
   return "down";
 }
 
+/**
+ * The strip's height is published as `--strip-h`, so a view that takes over the screen (the
+ * effect detail pushed over the gallery on a phone) starts exactly below it.
+ */
+function useStripHeight(ref: React.RefObject<HTMLDivElement | null>) {
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const set = () => document.documentElement.style.setProperty("--strip-h", `${el.offsetHeight}px`);
+    set();
+    const ro = new ResizeObserver(set);
+    ro.observe(el);
+    return () => {
+      ro.disconnect();
+      document.documentElement.style.removeProperty("--strip-h");
+    };
+  }, [ref]);
+}
+
 /** Power, active effect, fps measured against target, and the two link states. Always visible. */
-export function StatusStrip() {
+export function StatusStrip({ onOpenPalette }: { onOpenPalette?: () => void }) {
   const status = useSnap((s) => s.status);
   const statusError = useSnap((s) => s.statusError);
   const effects = useSnap((s) => s.effects);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const toast = useToast();
+  const stripRef = useRef<HTMLDivElement>(null);
+  useStripHeight(stripRef);
 
   if (!status) {
+    // The daemon-down page carries the detail; the strip only says that it is offline.
     return (
-      <div className="strip" role="status">
+      <div className="strip" role="status" ref={stripRef}>
         <StateDot tone="down">{statusError ? "Daemon offline" : "Connecting to the daemon"}</StateDot>
-        {statusError && <span className="mute" style={{ wordBreak: "break-word" }}>{statusError}</span>}
       </div>
     );
   }
@@ -43,8 +66,10 @@ export function StatusStrip() {
       await api.patchOutput({ power: paused ? "running" : "paused", brightness: null });
       patchSnap({ status: { ...status, power: paused ? "running" : "paused" } });
       await refreshStatus();
+      toast(paused ? "Lights resumed" : "Lights paused");
     } catch (e) {
       setErr(messageOf(e));
+      toast(messageOf(e), "down");
     } finally {
       setBusy(false);
     }
@@ -53,7 +78,7 @@ export function StatusStrip() {
   const fpsTone: DotTone = status.fps_measured >= status.fps_target - 1 ? "ok" : "warn";
 
   return (
-    <div className="strip" role="status" aria-label="Daemon status">
+    <div className="strip" role="status" aria-label="Daemon status" ref={stripRef}>
       <div className="strip-group">
         <Button
           size="sm"
@@ -75,7 +100,7 @@ export function StatusStrip() {
       <div className="strip-group">
         <span className="mute">Rate</span>
         <span className="fig">
-          {fmt1(status.fps_measured)} / {status.fps_target} fps
+          <AnimatedNumber value={status.fps_measured} decimals={1} /> / {status.fps_target} fps
         </span>
         <StateDot tone={fpsTone}>{paused ? "paused" : status.parked ? "parked" : "running"}</StateDot>
       </div>
@@ -83,8 +108,19 @@ export function StatusStrip() {
       <div className="strip-group">
         <StateDot tone={linkTone(status.openrgb)}>OpenRGB {status.openrgb}</StateDot>
         <StateDot tone={linkTone(status.service)}>Fan service {status.service}</StateDot>
-        <span className="mute fig">{status.devices_connected} devices</span>
+        <span className="mute fig strip-devices">{status.devices_connected} devices</span>
       </div>
+      {onOpenPalette && (
+        <span className="strip-group strip-search-group">
+          <span className="strip-sep" aria-hidden="true" />
+          <IconButton
+            label="Open the command palette"
+            size="sm"
+            icon={<MagnifyingGlass size={16} />}
+            onClick={onOpenPalette}
+          />
+        </span>
+      )}
     </div>
   );
 }

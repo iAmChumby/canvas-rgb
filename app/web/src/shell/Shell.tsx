@@ -1,13 +1,19 @@
 "use client";
 
-import { useEffect, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { startSync, useSnap } from "@/lib/store";
+import { startSync, useSnap, getSnap, patchSnap, refreshAll, refreshStatus, statusRetry } from "@/lib/store";
 import { startHueTint, startPreview, stopPreview } from "@/lib/preview";
 import { onNavigate } from "@/lib/host";
-import { Rail } from "@/shell/Rail";
+import { api } from "@/lib/endpoints";
+import { messageOf } from "@/lib/errors";
+import { Rail, NAV } from "@/shell/Rail";
 import { StatusStrip } from "@/shell/StatusStrip";
 import { GlobalBanners } from "@/shell/GlobalBanners";
+import { applyMotion, applyTheme, nextTheme, readMotion, readTheme } from "@/shell/prefs";
+import { ToastProvider, useToast } from "@/components/Toast";
+import { CommandPalette, type Command } from "@/components/CommandPalette";
+import { DaemonDown } from "@/components/DaemonDown";
 
 const PAGE_PATHS: Record<string, string> = {
   layout: "/",
@@ -23,9 +29,24 @@ const PAGE_PATHS: Record<string, string> = {
  * window is visible), the live-hue tint, and the tray's navigate event.
  */
 export function Shell({ children }: { children: ReactNode }) {
+  return (
+    <ToastProvider>
+      <Frame>{children}</Frame>
+    </ToastProvider>
+  );
+}
+
+function Frame({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const status = useSnap((s) => s.status);
+  const statusError = useSnap((s) => s.statusError);
+  const effects = useSnap((s) => s.effects);
+  const toast = useToast();
+  const [paletteOpen, setPaletteOpen] = useState(false);
+
+  // The daemon is not answering: the editor cannot show any live data.
+  const daemonDown = status === null && statusError !== null;
 
   useEffect(() => startSync(), []);
 
@@ -60,7 +81,120 @@ export function Shell({ children }: { children: ReactNode }) {
     };
   }, [router]);
 
+  // Ctrl+K opens the command palette.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  const togglePower = useCallback(async () => {
+    const snap = getSnap().status;
+    if (!snap) return;
+    const paused = snap.power === "paused";
+    try {
+      await api.patchOutput({ power: paused ? "running" : "paused", brightness: null });
+      patchSnap({ status: { ...snap, power: paused ? "running" : "paused" } });
+      await refreshStatus();
+      toast(paused ? "Lights resumed" : "Lights paused");
+    } catch (e) {
+      toast(messageOf(e), "down");
+    }
+  }, [toast]);
+
+  const runEffect = useCallback(
+    async (id: string, name: string) => {
+      try {
+        await api.activateEffect(id, { props: {}, preset: null });
+        await refreshAll();
+        toast(`${name} is running`);
+      } catch (e) {
+        toast(messageOf(e), "down");
+      }
+    },
+    [toast],
+  );
+
+  const commands = useMemo<Command[]>(() => {
+    const list: Command[] = NAV.map((item) => ({
+      id: `page-${item.href}`,
+      group: "Pages",
+      label: `Go to ${item.label}`,
+      hint: item.href,
+      run: () => router.push(item.href),
+    }));
+    list.push({
+      id: "theme",
+      group: "Appearance",
+      label: "Switch the theme",
+      hint: readTheme(),
+      run: () => {
+        const next = nextTheme(readTheme());
+        applyTheme(next);
+        toast(`Theme: ${next}`);
+      },
+    });
+    list.push({
+      id: "motion",
+      group: "Appearance",
+      label: "Toggle interface motion",
+      hint: readMotion(),
+      run: () => {
+        const next = readMotion() === "reduced" ? "full" : "reduced";
+        applyMotion(next);
+        toast(next === "reduced" ? "Motion reduced" : "Motion on");
+      },
+    });
+    list.push({
+      id: "power",
+      group: "Lights",
+      label: status?.power === "paused" ? "Resume the lights" : "Pause the lights",
+      run: () => void togglePower(),
+    });
+    for (const e of effects ?? []) {
+      list.push({
+        id: `run-${e.id}`,
+        group: "Effects",
+        label: `Run ${e.name}`,
+        run: () => void runEffect(e.id, e.name),
+      });
+    }
+    return list;
+  }, [router, status, effects, togglePower, runEffect, toast]);
+
+  // A phone opens the palette with the pages, the lights and the effects you would switch to.
+  // Typing still searches the whole list.
+  const shortCommands = useMemo<Command[]>(() => {
+    const list = commands.filter((c) => c.group === "Pages" || c.group === "Lights");
+    const running = (effects ?? []).find((e) => e.id === status?.active_effect);
+    const wanted = [running, ...(effects ?? []).filter((e) => e.favorite)].filter(
+      (e): e is NonNullable<typeof e> => e !== undefined,
+    );
+    const seen = new Set<string>();
+    for (const e of wanted) {
+      if (seen.has(e.id)) continue;
+      seen.add(e.id);
+      list.push({
+        id: `run-${e.id}`,
+        group: "Effects",
+        label: `Run ${e.name}`,
+        run: () => void runEffect(e.id, e.name),
+      });
+    }
+    return list;
+  }, [commands, effects, status, runEffect]);
+
   const current = pathname.endsWith("/") || pathname === "" ? pathname : `${pathname}/`;
+
+  // The retry the daemon-down page offers.
+  const retryDaemon = useCallback(async () => {
+    await refreshStatus();
+  }, []);
 
   return (
     <div className="app" data-live={status ? "on" : "off"}>
@@ -68,10 +202,26 @@ export function Shell({ children }: { children: ReactNode }) {
         <Rail pathname={current} />
       </div>
       <div className="main">
-        <StatusStrip />
+        <StatusStrip onOpenPalette={() => setPaletteOpen(true)} />
         <GlobalBanners />
-        <main className="content">{children}</main>
+        <main className="content">
+          {daemonDown ? (
+            <DaemonDown
+              detail={statusError ?? ""}
+              onRetry={retryDaemon}
+              lastTryAt={statusRetry().lastTryAt}
+              nextTryInMs={statusRetry().nextTryInMs}
+            />
+          ) : (
+            <div className="page-enter" key={current}>
+              {children}
+            </div>
+          )}
+        </main>
       </div>
+      {paletteOpen && (
+        <CommandPalette commands={commands} short={shortCommands} onClose={() => setPaletteOpen(false)} />
+      )}
     </div>
   );
 }

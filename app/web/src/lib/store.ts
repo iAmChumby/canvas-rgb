@@ -17,6 +17,27 @@ import type { Settings } from "@/proto/Settings";
 
 export const RPM_HISTORY = 60;
 
+/**
+ * How long the editor waits before it tries the daemon again after the daemon refused it.
+ * A daemon that is down does not need to be asked every second.
+ */
+export const DOWN_RETRY_MS = 5000;
+
+/** When the daemon last refused to answer, 0 when it is answering. */
+let lastStatusFailureAt = 0;
+
+/**
+ * When the daemon was last tried and when the next try is due. The daemon-down page shows it,
+ * so the page can say something new instead of repeating its own heading.
+ */
+export function statusRetry(): { lastTryAt: number; nextTryInMs: number } {
+  if (!lastStatusFailureAt) return { lastTryAt: 0, nextTryInMs: 0 };
+  return {
+    lastTryAt: lastStatusFailureAt,
+    nextTryInMs: Math.max(0, lastStatusFailureAt + DOWN_RETRY_MS - Date.now()),
+  };
+}
+
 export interface Snap {
   status: Status | null;
   statusError: string | null;
@@ -85,8 +106,10 @@ export function useSnap<T>(select: (s: Snap) => T): T {
 export async function refreshStatus(): Promise<void> {
   try {
     patchSnap({ status: await api.status(), statusError: null });
+    lastStatusFailureAt = 0;
   } catch (e) {
     patchSnap({ statusError: messageOf(e) });
+    lastStatusFailureAt = Date.now();
   }
 }
 
@@ -173,14 +196,21 @@ export function startSync(): () => void {
 
   const tickFast = () => {
     if (!visible()) return;
+    // A daemon that just refused is not asked again until its turn comes.
+    if (lastStatusFailureAt && Date.now() < lastStatusFailureAt + DOWN_RETRY_MS) return;
     void refreshStatus();
     void refreshFans();
   };
   const tickSlow = () => {
     if (!visible()) return;
+    if (lastStatusFailureAt && Date.now() < lastStatusFailureAt + DOWN_RETRY_MS) return;
     void refreshDevices();
     void refreshEffects();
     void refreshRender();
+    // The layout can change outside the editor (the CLI, the daemon's own defaults), and a
+    // stale desk canvas is worse than one extra request every four seconds.
+    void refreshLayouts();
+    void refreshSettings();
   };
   const onVisibility = () => {
     if (visible()) void refreshAll();

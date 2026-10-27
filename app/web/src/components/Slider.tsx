@@ -1,6 +1,6 @@
 "use client";
 
-import type { CSSProperties, KeyboardEvent, PointerEvent } from "react";
+import { useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
 
 /**
  * A range control with a live fill. `onChange` runs while dragging; `onCommit` runs on release
@@ -28,6 +28,7 @@ export function Slider({
   onChange: (v: number) => void;
   onCommit?: (v: number) => void;
 }) {
+  const [dragging, setDragging] = useState(false);
   const span = max - min || 1;
   const p = Math.min(1, Math.max(0, (value - min) / span));
   const f = floor === undefined ? 0 : Math.min(1, Math.max(0, (floor - min) / span));
@@ -38,7 +39,7 @@ export function Slider({
   };
 
   return (
-    <div className="slider" style={style}>
+    <div className="slider" style={style} data-dragging={dragging ? "true" : "false"}>
       <div className="slider-track" />
       {floor !== undefined && <div className="slider-floor" />}
       <div className="slider-fill" />
@@ -51,7 +52,12 @@ export function Slider({
         value={value}
         disabled={disabled}
         onChange={(e) => onChange(Number(e.target.value))}
-        onPointerUp={release}
+        onPointerDown={() => setDragging(true)}
+        onPointerUp={(e) => {
+          setDragging(false);
+          release(e);
+        }}
+        onPointerCancel={() => setDragging(false)}
         onKeyUp={(e) => {
           if (e.key.startsWith("Arrow") || e.key === "Home" || e.key === "End") release(e);
         }}

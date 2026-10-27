@@ -260,104 +260,99 @@ const zone = (index: number, name: string, kind: DeviceInfo["zones"][number]["ki
   resizable,
 });
 
-const mapOf = (w: number, hgt: number, count: number): (number | null)[] => {
-  const out: (number | null)[] = [];
-  for (let i = 0; i < w * hgt; i++) out.push(i < count ? i : null);
-  return out;
-};
-
-/** Luke's five devices. */
+/**
+ * The machine as the daemon really sees it: the two ENE DRAM sticks, the HyperX Quadcast S,
+ * the MSI Mystic Light with its four headers and the ROYUAN keyboard on the native adapter.
+ * The ids, names, addresses and LED counts are the ones `GET /api/v1/devices` answers on
+ * this PC, so the demo and the real thing look the same.
+ */
 export const DEVICES: DeviceInfo[] = [
   {
-    id: "openrgb:msi-pro-b850-p-wifi",
-    name: "MSI PRO B850-P WIFI Mystic Light",
-    vendor: "MSI",
-    kind: "motherboard",
+    id: "openrgb:I2C: PawnIO SMBus PIIX4 0, address 0x71",
+    name: "ENE DRAM",
+    vendor: "ENE",
+    kind: "dram",
     adapter: "openrgb",
     adapter_index: 0,
     serial: "",
-    location: "HID: /dev/hidraw-msi-b850",
+    location: "I2C: PawnIO SMBus PIIX4 0, address 0x71",
     connected: true,
-    zones: [
-      zone(0, "JARGB1", { type: "linear" }, 120, 1, 120, true),
-      zone(1, "JARGB2", { type: "linear" }, 120, 1, 120, true),
-      zone(2, "JARGB3", { type: "linear" }, 120, 1, 120, true),
-      zone(3, "JRGB1", { type: "linear" }, 3, 3, 3, false),
-    ],
+    zones: [zone(0, "DRAM", { type: "linear" }, 8, 8, 8, false)],
   },
   {
-    id: "openrgb:ene-dram-0x71",
-    name: "ENE DRAM Stick A",
+    id: "openrgb:I2C: PawnIO SMBus PIIX4 0, address 0x73",
+    name: "ENE DRAM",
     vendor: "ENE",
     kind: "dram",
     adapter: "openrgb",
     adapter_index: 1,
     serial: "",
-    location: "SMBus: /dev/i2c-1 0x71",
+    location: "I2C: PawnIO SMBus PIIX4 0, address 0x73",
     connected: true,
     zones: [zone(0, "DRAM", { type: "linear" }, 8, 8, 8, false)],
   },
   {
-    id: "openrgb:ene-dram-0x73",
-    name: "ENE DRAM Stick B",
-    vendor: "ENE",
-    kind: "dram",
-    adapter: "openrgb",
-    adapter_index: 2,
-    serial: "",
-    location: "SMBus: /dev/i2c-1 0x73",
-    connected: true,
-    zones: [zone(0, "DRAM", { type: "linear" }, 8, 8, 8, false)],
-  },
-  {
-    id: "openrgb:epomaker-royuan",
-    name: "Epomaker ROYUAN Keyboard",
-    vendor: "Epomaker",
-    kind: "keyboard",
-    adapter: "openrgb",
-    adapter_index: 3,
-    serial: "EPM-ROYUAN-01",
-    location: "HID: usb-1-4",
-    connected: true,
-    zones: [
-      {
-        index: 0,
-        name: "Keyboard",
-        kind: { type: "matrix", width: 16, height: 6, map: mapOf(16, 6, 90) },
-        led_count: 90,
-        min_leds: 90,
-        max_leds: 90,
-        resizable: false,
-      },
-    ],
-  },
-  {
-    id: "openrgb:hyperx-quadcast-s",
-    name: "HyperX QuadCast S",
+    id: "openrgb:HID: \\\\?\\HID#VID_03F0&PID_028C&MI_00#a&eb32b1c&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}",
+    name: "HyperX Quadcast S",
     vendor: "HyperX",
     kind: "microphone",
     adapter: "openrgb",
-    adapter_index: 4,
-    serial: "QCS-0042",
-    location: "HID: usb-1-2",
-    connected: false,
-    zones: [zone(0, "Lighting", { type: "single" }, 1, 1, 1, false)],
+    adapter_index: 2,
+    serial: "",
+    location: "HID: \\\\?\\HID#VID_03F0&PID_028C&MI_00#a&eb32b1c&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}",
+    connected: true,
+    zones: [zone(0, "Microphone", { type: "single" }, 2, 2, 2, false)],
+  },
+  {
+    id: "openrgb:SERIAL0000000",
+    name: "MSI MYSTIC LIGHT",
+    vendor: "MSI",
+    kind: "motherboard",
+    adapter: "openrgb",
+    adapter_index: 3,
+    serial: "SERIAL0000000",
+    location: "HID: \\\\?\\HID#VID_0DB0&PID_0076#0&00000000&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}",
+    connected: true,
+    zones: [
+      zone(0, "JAF", { type: "linear" }, 0, 0, 240, true),
+      zone(1, "JARGB 1", { type: "linear" }, 120, 0, 240, true),
+      zone(2, "JARGB 2", { type: "linear" }, 120, 0, 240, true),
+      zone(3, "JARGB 3", { type: "linear" }, 120, 0, 240, true),
+    ],
+  },
+  {
+    id: "royuan:3151:4015",
+    name: "ROYUAN MonsGeek Keyboard",
+    vendor: "ROYUAN",
+    kind: "keyboard",
+    adapter: "royuan",
+    adapter_index: 0,
+    serial: "",
+    location: "hid:3151:4015:if2",
+    connected: true,
+    zones: [zone(0, "Keyboard", { type: "single" }, 1, 1, 1, false)],
   },
 ];
 
-/** The active layout: four zones placed, JRGB1 and DRAM Stick B left unplaced. */
+/** The active layout: the three JARGB headers, the keyboard, the microphone and the two
+ *  DRAM sticks are placed; the MSI's fixed `JAF` header is not. */
 export const LAYOUT_DESK: Layout = {
   id: "desk",
   name: "Desk",
   render_scale: 50,
   sampling: "area_average",
   zones: [
-    { device_id: "openrgb:msi-pro-b850-p-wifi", zone_index: 0, x: 10, y: 168, width: 100, height: 8, rotation_deg: 0, reversed: false, visible: true },
-    { device_id: "openrgb:msi-pro-b850-p-wifi", zone_index: 1, x: 116, y: 168, width: 100, height: 8, rotation_deg: 0, reversed: false, visible: true },
-    { device_id: "openrgb:msi-pro-b850-p-wifi", zone_index: 2, x: 222, y: 168, width: 90, height: 8, rotation_deg: 0, reversed: true, visible: true },
-    { device_id: "openrgb:ene-dram-0x71", zone_index: 0, x: 296, y: 24, width: 8, height: 60, rotation_deg: 0, reversed: false, visible: true },
-    { device_id: "openrgb:epomaker-royuan", zone_index: 0, x: 60, y: 96, width: 200, height: 52, rotation_deg: 0, reversed: false, visible: true },
-    { device_id: "openrgb:hyperx-quadcast-s", zone_index: 0, x: 24, y: 40, width: 14, height: 14, rotation_deg: 0, reversed: false, visible: true },
+    { device_id: "openrgb:SERIAL0000000", zone_index: 1, x: 4, y: 4, width: 120, height: 10, rotation_deg: 0, reversed: false, visible: true },
+    { device_id: "openrgb:SERIAL0000000", zone_index: 2, x: 4, y: 22, width: 120, height: 10, rotation_deg: 0, reversed: false, visible: true },
+    { device_id: "openrgb:SERIAL0000000", zone_index: 3, x: 4, y: 40, width: 120, height: 10, rotation_deg: 0, reversed: false, visible: true },
+    { device_id: "royuan:3151:4015", zone_index: 0, x: 4, y: 58, width: 180, height: 16, rotation_deg: 0, reversed: false, visible: true },
+    // The zone OpenRGB used for the keyboard, before the native adapter took it over. The
+    // daemon does not drive that device any more, so the zone draws nothing: the editor shows
+    // it as stale.
+    { device_id: "openrgb:HID: \\\\?\\HID#VID_3151&PID_4015&MI_02#9&298b2e71&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}", zone_index: 0, x: 4, y: 58, width: 180, height: 16, rotation_deg: 0, reversed: false, visible: true },
+    { device_id: "openrgb:HID: \\\\?\\HID#VID_03F0&PID_028C&MI_00#a&eb32b1c&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}", zone_index: 0, x: 4, y: 82, width: 12, height: 12, rotation_deg: 0, reversed: false, visible: true },
+    { device_id: "openrgb:I2C: PawnIO SMBus PIIX4 0, address 0x71", zone_index: 0, x: 300, y: 40, width: 16, height: 120, rotation_deg: 0, reversed: false, visible: true },
+    { device_id: "openrgb:I2C: PawnIO SMBus PIIX4 0, address 0x73", zone_index: 0, x: 280, y: 40, width: 16, height: 120, rotation_deg: 0, reversed: false, visible: true },
   ],
   effect: { id: "poison", props: EFFECTS[11]!.defaults },
 };
@@ -367,14 +362,19 @@ export interface DemoHeader {
   label: string;
 }
 
+/** The headers the fan service really has on this PC. */
 export const FAN_HEADERS: DemoHeader[] = [
-  { id: "cpu_fan", label: "CPU_FAN" },
-  { id: "pump_fan", label: "PUMP_FAN" },
-  { id: "sys_fan1", label: "SYS_FAN1" },
-  { id: "sys_fan2", label: "SYS_FAN2" },
-  { id: "sys_fan3", label: "SYS_FAN3" },
-  { id: "sys_fan4", label: "SYS_FAN4" },
-  { id: "sys_fan5", label: "SYS_FAN5" },
+  { id: "cpu_fan", label: "CPU fan" },
+  { id: "pump_fan", label: "Pump fan" },
+  { id: "sys_fan1", label: "System fan 1" },
+  { id: "sys_fan2", label: "System fan 2" },
+  { id: "sys_fan3", label: "System fan 3" },
+  { id: "sys_fan4", label: "System fan 4" },
+  { id: "sys_fan5", label: "System fan 5" },
+  { id: "sys_fan6", label: "System fan 6" },
+  { id: "pump_fan2", label: "Pump fan 2 (tach only)" },
+  { id: "gpu_fan1", label: "GPU fan 1" },
+  { id: "gpu_fan2", label: "GPU fan 2" },
 ];
 
 /** Two profiles: Default and Quiet. Headers not listed stay on BIOS. */

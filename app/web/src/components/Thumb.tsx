@@ -12,9 +12,22 @@ const FPS = 12;
  * A looping effect thumbnail, drawn on a small canvas and scaled up with pixelated rendering.
  * It loads when it scrolls into view, animates only while it is in view and the window is
  * visible, and under prefers-reduced-motion it shows frame 0 and stops.
+ *
+ * `prefetch` lists the tiles that come next: they are fetched as soon as this tile is in view,
+ * so scrolling down never finds an empty frame. Whatever still loads late fades in.
  */
-export function Thumb({ id, size = "sm", label }: { id: string; size?: ThumbSize; label: string }) {
-  const wrapRef = useRef<HTMLDivElement>(null);
+export function Thumb({
+  id,
+  size = "sm",
+  label,
+  prefetch,
+}: {
+  id: string;
+  size?: ThumbSize;
+  label: string;
+  prefetch?: string[];
+}) {
+  const wrapRef = useRef<HTMLSpanElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [inView, setInView] = useState(false);
   const [thumb, setThumb] = useState<ThumbData | null>(null);
@@ -47,6 +60,12 @@ export function Thumb({ id, size = "sm", label }: { id: string; size?: ThumbSize
       live = false;
     };
   }, [inView, id, thumb]);
+
+  // The next tiles are fetched with this one, so the scroll never finds a blank frame.
+  useEffect(() => {
+    if (!inView || !prefetch || prefetch.length === 0) return;
+    for (const next of prefetch) void loadThumb(next);
+  }, [inView, prefetch]);
 
   // Paint: frame 0 whenever idle, and the frame sequence while animating.
   useEffect(() => {
@@ -82,8 +101,14 @@ export function Thumb({ id, size = "sm", label }: { id: string; size?: ThumbSize
   }, [thumb, animate]);
 
   return (
-    <div ref={wrapRef} className={`thumb thumb-${size}`} role="img" aria-label={`${label} preview`}>
-      <canvas ref={canvasRef} aria-hidden="true" />
-    </div>
+    <span ref={wrapRef} className={`thumb thumb-${size}`} data-loaded={thumb ? "true" : "false"} role="img" aria-label={`${label} preview`}>
+      {thumb ? (
+        <canvas ref={canvasRef} aria-hidden="true" />
+      ) : (
+        <span className="thumb-pending-label" aria-hidden="true">
+          &middot;&middot;&middot;
+        </span>
+      )}
+    </span>
   );
 }

@@ -38,6 +38,7 @@ export function IconButton({
   pressed,
   size = "md",
   disabled,
+  className,
   onClick,
 }: {
   label: string;
@@ -45,9 +46,10 @@ export function IconButton({
   pressed?: boolean;
   size?: "sm" | "md";
   disabled?: boolean;
+  className?: string;
   onClick: () => void;
 }) {
-  const cls = ["ibtn", size === "sm" && "ibtn-sm"].filter(Boolean).join(" ");
+  const cls = ["ibtn", size === "sm" && "ibtn-sm", className].filter(Boolean).join(" ");
   return (
     <Tooltip label={label}>
       <button

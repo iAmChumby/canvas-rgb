@@ -1,0 +1,1054 @@
+
+/* ==========================================================================
+   Motion layer
+   Every state change in the editor moves: panels rise as they enter, values
+   ease to their new number, thumbs slide. Nothing animates longer than
+   --dur-slow (240 ms), and every animation is transform or opacity only, so
+   the compositor does the work and the layout never thrashes.
+   ========================================================================== */
+
+@keyframes canvas-enter {
+  from {
+    opacity: 0;
+    transform: translate3d(0, var(--rise), 0);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes canvas-pop {
+  0% {
+    transform: scale(0.72);
+  }
+  62% {
+    transform: scale(1.14);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes canvas-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* A pushed view: the old one steps left, the new one comes in from the right. */
+@keyframes push-out-left {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0.28;
+    transform: translate3d(-22px, 0, 0);
+  }
+}
+
+@keyframes push-in-right {
+  from {
+    opacity: 0;
+    transform: translate3d(28px, 0, 0);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes push-out-right {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translate3d(28px, 0, 0);
+  }
+}
+
+@keyframes push-back-right {
+  from {
+    opacity: 0.28;
+    transform: translate3d(-22px, 0, 0);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes sheet-up {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 26px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* An element that rises into place once, then stays.
+   The fill is "backwards", not "both": with "both" the element keeps a transform animation in
+   effect for ever, and an element with a transform in effect is the containing block for its
+   fixed children. That would tie the phone's pushed detail sheet to the page box instead of the
+   viewport, and the gallery would show in the gutter beside it. */
+.enter {
+  animation: canvas-enter var(--dur-enter) var(--ease) backwards;
+  animation-delay: var(--enter-delay, 0ms);
+}
+
+/* The page body: a new route rises in. */
+.page-enter {
+  animation: canvas-enter var(--dur-enter) var(--ease) backwards;
+}
+
+/* A value that changed scale (a favourite star, a badge). */
+.pop {
+  animation: canvas-pop var(--dur) var(--ease) both;
+}
+
+.fade-in {
+  animation: canvas-fade var(--dur) var(--ease) both;
+}
+
+/* A row that just appeared (a banner, a confirm row). */
+.slide-in {
+  animation: canvas-enter var(--dur) var(--ease) both;
+}
+
+/* ==========================================================================
+   The states nobody screenshots
+   ========================================================================== */
+
+/* The whole editor, when the daemon cannot be reached. */
+.state-page {
+  display: grid;
+  place-items: center;
+  min-height: 60vh;
+  padding: var(--s6) var(--s4);
+}
+
+.state-page-inner {
+  width: min(460px, 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s3);
+}
+
+.state-page-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: var(--r-lg);
+  background: var(--raised);
+  color: var(--dim);
+}
+
+.state-page-title {
+  font-size: var(--t20);
+  font-weight: 600;
+}
+
+.state-page-lead {
+  color: var(--dim);
+  font-size: var(--t15);
+}
+
+.state-page-keeps {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--dim);
+  font-size: var(--t14);
+}
+
+.state-page-keeps li {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.state-page-keeps svg {
+  color: var(--ok);
+  flex: none;
+}
+
+.state-page-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+  margin-top: var(--s2);
+}
+
+.state-page-detail,
+.state-detail {
+  color: var(--mute);
+  font-size: var(--t14);
+  word-break: break-word;
+}
+
+.state-detail {
+  display: block;
+  margin-top: var(--s2);
+}
+
+/* The spinner in the daemon-down page's retry button: one turn a second, and it stops with the
+   button. */
+@keyframes canvas-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.spin {
+  animation: canvas-spin 900ms linear infinite;
+}
+
+/* An empty state: what is missing, one line, and the control that fixes it. */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s2);
+  padding: var(--s5) var(--s4);
+  border: 1px dashed var(--line-2);
+  border-radius: var(--r-lg);
+  background: var(--panel);
+}
+
+.empty-state-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--r-lg);
+  background: var(--raised);
+  color: var(--mute);
+}
+
+.empty-state[data-tone="warn"] .empty-state-icon {
+  color: var(--warn);
+}
+
+.empty-state-title {
+  font-size: var(--t16);
+  font-weight: 600;
+}
+
+.empty-state-body {
+  color: var(--dim);
+  font-size: var(--t14);
+  max-width: 52ch;
+}
+
+.empty-state-action {
+  margin-top: var(--s2);
+}
+
+/* A card that is still loading has the shape of the card that will arrive. */
+.effect-card-skeleton {
+  padding: 0;
+}
+
+.effect-card-skeleton .skeleton-preview {
+  aspect-ratio: 16 / 10;
+  border-radius: 0;
+}
+
+.effect-card-skeleton .skeleton-line {
+  margin: 0;
+}
+
+.effect-card-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.effect-card-excerpt {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  color: var(--mute);
+  font-size: var(--t14);
+  overflow-wrap: anywhere;
+}
+
+.effect-card-excerpt mark {
+  border-radius: 3px;
+  padding: 0 1px;
+  background: color-mix(in srgb, var(--live) 14%, transparent);
+  color: var(--dim);
+}
+
+
+.skeleton {
+  border-radius: var(--r-sm);
+  background: var(--raised);
+  animation: canvas-fade var(--dur-slow) var(--ease) both;
+}
+
+.skeleton-line {
+  height: 12px;
+  margin-bottom: var(--s2);
+}
+
+.skeleton-line:last-child {
+  margin-bottom: 0;
+  width: 62%;
+}
+
+/* ==========================================================================
+   Toasts
+   ========================================================================== */
+
+.toast-host {
+  position: fixed;
+  right: var(--s5);
+  bottom: var(--s5);
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--s2);
+  pointer-events: none;
+}
+
+.toast {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  max-width: 380px;
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--line-2);
+  border-left: 3px solid var(--tone);
+  border-radius: var(--r-md);
+  background: var(--panel);
+  color: var(--ink);
+  font-size: var(--t14);
+  box-shadow: 0 6px 18px rgb(0 0 0 / 0.28);
+  pointer-events: auto;
+  animation: canvas-enter var(--dur) var(--ease) both;
+  transition:
+    opacity var(--dur) var(--ease),
+    transform var(--dur) var(--ease);
+}
+
+.toast[data-leaving="true"] {
+  opacity: 0;
+  transform: translateY(4px);
+}
+
+.toast-icon {
+  display: inline-flex;
+  color: var(--tone);
+}
+
+.toast-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .toast-host {
+    right: var(--s3);
+    left: var(--s3);
+    bottom: 76px;
+    align-items: stretch;
+  }
+
+  .toast {
+    max-width: none;
+  }
+}
+
+/* ==========================================================================
+   Command palette
+   ========================================================================== */
+
+.cmdk-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: grid;
+  place-items: start center;
+  padding-top: 12vh;
+  background: var(--scrim);
+  animation: canvas-fade var(--dur-fast) var(--ease) both;
+}
+
+.cmdk {
+  width: min(560px, calc(100vw - 32px));
+  overflow: hidden;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-lg);
+  background: var(--panel);
+  box-shadow: 0 18px 48px rgb(0 0 0 / 0.4);
+  animation: canvas-enter var(--dur) var(--ease) both;
+}
+
+.cmdk-input {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s3);
+  border-bottom: 1px solid var(--line);
+}
+
+.cmdk-input input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--t16);
+}
+
+.cmdk-input input:focus {
+  outline: none;
+}
+
+.cmdk-list {
+  max-height: 46vh;
+  overflow-y: auto;
+  padding: var(--s1);
+}
+
+.cmdk-item {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  width: 100%;
+  padding: var(--s2) var(--s3);
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--dim);
+  font: inherit;
+  font-size: var(--t15);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.cmdk-item:hover,
+.cmdk-item[data-active="true"] {
+  background: var(--hover);
+  color: var(--ink);
+}
+
+.cmdk-item[data-active="true"] {
+  background: var(--live-soft);
+}
+
+.cmdk-item-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cmdk-item-hint {
+  flex: none;
+  color: var(--mute);
+  font-family: var(--fm);
+  font-size: var(--t14);
+}
+
+.cmdk-empty {
+  padding: var(--s4);
+  color: var(--mute);
+  font-size: var(--t14);
+  text-align: center;
+}
+
+/* On a phone the palette is a sheet that comes up from the bottom. */
+@media (max-width: 720px) {
+  .cmdk-backdrop {
+    align-items: end;
+    padding-top: 0;
+  }
+
+  .cmdk {
+    width: 100%;
+    max-height: 86vh;
+    border-radius: var(--r-lg) var(--r-lg) 0 0;
+    animation: sheet-up var(--dur-slow) var(--ease) both;
+  }
+}
+
+/* ==========================================================================
+   Effects gallery
+   ========================================================================== */
+
+.effects-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 380px);
+  gap: var(--s4);
+  align-items: start;
+}
+
+@media (max-width: 1100px) {
+  .effects-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.effect-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+}
+
+.effect-search {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-width: 180px;
+}
+
+.effect-search input {
+  width: 100%;
+  height: 32px;
+  padding: 0 var(--s2) 0 30px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background: var(--sunk);
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--t15);
+  transition: border-color var(--dur-fast) var(--ease);
+}
+
+.effect-search input:hover {
+  border-color: var(--mute);
+}
+
+.effect-search input:focus {
+  outline: 2px solid var(--focus);
+  outline-offset: 3px;
+}
+
+.effect-search-icon {
+  position: absolute;
+  left: var(--s2);
+  display: inline-flex;
+  color: var(--mute);
+  pointer-events: none;
+}
+
+.effect-gallery {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--s3);
+}
+
+@media (max-width: 1100px) {
+  .effect-gallery {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 860px) {
+  .effect-gallery {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 620px) {
+  .effect-gallery {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.effect-card {
+  position: relative;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--panel);
+  overflow: hidden;
+  transition:
+    transform var(--dur) var(--ease),
+    border-color var(--dur) var(--ease),
+    background var(--dur) var(--ease);
+}
+
+.effect-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--line-2);
+}
+
+.effect-card[data-selected="true"] {
+  border-color: var(--live);
+}
+
+.effect-card-open {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease);
+}
+
+.effect-card:hover .effect-card-open {
+  background: var(--hover);
+}
+
+.effect-card-preview {
+  display: block;
+  position: relative;
+  aspect-ratio: 16 / 10;
+  background: var(--sunk);
+  overflow: hidden;
+}
+
+/* The tile fills the preview; it never decides how tall the preview is, so a thumbnail that
+   arrives late cannot move the cards below it. */
+.effect-card-preview .thumb {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+}
+
+.effect-card-preview .preview-canvas {
+  display: block;
+  image-rendering: pixelated;
+}
+
+.effect-card-preview .thumb canvas {
+  width: 100%;
+  height: 100%;
+}
+
+.effect-card:hover .effect-card-preview .thumb canvas,
+.effect-card:hover .effect-card-preview .preview-canvas {
+  transform: scale(1.04);
+}
+
+.effect-card-preview .preview-canvas {
+  transition: transform var(--dur-slow) var(--ease);
+}
+
+.effect-card-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s2) var(--s3);
+  min-width: 0;
+}
+
+.effect-card-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+/* The letters the search matched are marked in the name. */
+.effect-card-name mark {
+  border-radius: 3px;
+  padding: 0 1px;
+  background: color-mix(in srgb, var(--live) 20%, transparent);
+  color: var(--ink);
+}
+
+.effect-card-badge {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--ok);
+  font-size: var(--t14);
+}
+
+.effect-card-badge-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ok);
+}
+
+.effect-card-fav-wrap {
+  position: absolute;
+  top: var(--s2);
+  right: var(--s2);
+  z-index: 2;
+}
+
+.effect-card-fav {
+  background: var(--panel);
+  border-color: var(--line-2);
+}
+
+/* The live preview in the detail pane. */
+.effect-live {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  overflow: hidden;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  background: var(--sunk);
+}
+
+.effect-live canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+}
+
+.effect-live .thumb {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+}
+
+.effect-live-note {
+  margin-top: var(--s2);
+  color: var(--mute);
+  font-size: var(--t14);
+}
+
+/* ==========================================================================
+   The effect detail as its own view on a phone
+   ========================================================================== */
+
+.effects-push {
+  position: relative;
+}
+
+.effect-gallery-wrap {
+  min-width: 0;
+}
+
+@media (max-width: 720px) {
+  .effects-push[data-pushed="true"] .effect-gallery {
+    animation: push-out-left var(--dur-slow) var(--ease) both;
+  }
+
+  /* The back control plays the push in reverse. */
+  .effects-push[data-closing="true"] .effect-gallery {
+    animation: push-back-right var(--dur-slow) var(--ease) both;
+  }
+
+  /* The pushed detail owns everything below the status strip: it is full bleed, so nothing of
+     the gallery can show in the gutter beside it. The top edge is fixed when the sheet opens
+     (--sheet-top), so a strip that changes height does not move the sheet. */
+  .effect-sheet {
+    position: fixed;
+    top: var(--sheet-top, var(--strip-h, 0px));
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 40;
+    overflow-y: auto;
+    padding: var(--s3) var(--s4) 104px;
+    background-color: var(--g1);
+    background-image: radial-gradient(var(--dot) 1px, transparent 1.4px);
+    background-size: 22px 22px;
+    animation: push-in-right var(--dur-slow) var(--ease) both;
+  }
+
+  .effect-sheet[data-closing="true"] {
+    animation: push-out-right var(--dur-slow) var(--ease) both;
+  }
+
+  /* Once the push has settled the gallery is out of the way, and out of the tab order. */
+  .effects-push[data-settled="true"] .effect-gallery-wrap {
+    visibility: hidden;
+  }
+}
+
+.effect-sheet-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s1) 0 var(--s3);
+  background-color: var(--g1);
+}
+
+.effect-sheet-head span {
+  font-weight: 600;
+}
+
+/* ==========================================================================
+   Fans: meters that move
+   ========================================================================== */
+
+.meter {
+  position: relative;
+  width: 100%;
+  min-width: 54px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--raised);
+  overflow: hidden;
+}
+
+.meter-fill {
+  position: absolute;
+  inset: 0;
+  border-radius: 3px;
+  background: var(--tone, var(--a3));
+  transform: scaleX(var(--p, 0));
+  transform-origin: left center;
+  transition: transform var(--dur-slow) var(--ease);
+}
+
+.meter-floor {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: calc(var(--f, 0) * 100%);
+  border-right: 1px solid var(--down);
+  opacity: 0.7;
+}
+
+.rpm-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.rpm-cell .meter {
+  width: 72px;
+}
+
+.temp-cell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 78px auto;
+  align-items: center;
+  gap: var(--s3);
+}
+
+.temp-cell .meter {
+  height: 5px;
+}
+
+.value-tween {
+  font-variant-numeric: tabular-nums;
+}
+
+.duty-cell {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--s2);
+}
+
+.duty-cell .meter {
+  width: 68px;
+  flex: none;
+}
+
+.rpm-readout {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--s1);
+  font-family: var(--fm);
+  font-size: var(--t16);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The device count changes with the hardware: its space is reserved so the strip does not
+   twitch. */
+.strip-devices {
+  display: inline-block;
+  min-width: 9ch;
+  text-align: right;
+}
+
+/* A readout that changes width when the digits change moves the column next to it: the
+   space for the digits is reserved on the cell, not on the number (an inline block would
+   grow the line box and every row with it). */
+.rpm-big {
+  font-family: var(--fm);
+  font-variant-numeric: tabular-nums;
+}
+
+.fan-table td.num-col {
+  min-width: 5ch;
+}
+
+/* ==========================================================================
+   Fans: the headers as cards at phone width
+   ========================================================================== */
+
+.fan-cards {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.fan-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  width: 100%;
+  padding: var(--s3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--panel);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease);
+}
+
+.fan-card[data-selected="true"] {
+  border-color: var(--live);
+  background: var(--live-soft);
+}
+
+.fan-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.fan-card-name {
+  font-weight: 600;
+}
+
+/* The selected card says so in words as well as in colour. */
+.fan-card-editing {
+  color: var(--live);
+  font-size: var(--t14);
+  font-weight: 600;
+}
+
+.fan-card-readouts {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  min-width: 0;
+}
+
+.fan-card-rpm {
+  font-family: var(--fm);
+  font-size: var(--t20);
+  font-variant-numeric: tabular-nums;
+}
+
+.fan-card-spark {
+  min-width: 0;
+}
+
+/* The state of a header, said once: the mode you asked for, and whether the chip
+   is doing it. When they differ, the daemon handed the header back, and it says why. */
+.fan-state {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1) var(--s2);
+}
+
+.fan-handoff {
+  color: var(--warn);
+  font-size: var(--t14);
+  font-weight: 600;
+}
+
+.fan-reason {
+  display: block;
+  width: 100%;
+  color: var(--mute);
+  font-size: var(--t14);
+}
+
+/* ==========================================================================
+   Sparkline: a filled trace with a live head
+   ========================================================================== */
+
+.sparkline {
+  overflow: visible;
+}
+
+.sparkline .spark-area {
+  fill: color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.sparkline .spark-head {
+  fill: currentColor;
+}
+
+/* The trace moves to the new sample instead of snapping: the `d` property is a CSS
+   property in Chromium, so the path tweens between the two shapes. */
+.sparkline .spark-line,
+.sparkline .spark-area {
+  transition: d var(--dur-slow) var(--ease);
+}
+
+.sparkline .spark-head {
+  transition:
+    cx var(--dur-slow) var(--ease),
+    cy var(--dur-slow) var(--ease);
+}
+
+/* ==========================================================================
+   Thumb placeholder: a tile that has not loaded yet
+   ========================================================================== */
+
+.thumb-pending-label {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--mute);
+  font-family: var(--fm);
+  font-size: var(--t14);
+  letter-spacing: 2px;
+}
+
+.effect-empty {
+  grid-column: 1 / -1;
+}

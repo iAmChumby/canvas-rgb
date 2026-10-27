@@ -3,6 +3,7 @@ import "@fontsource-variable/schibsted-grotesk/index.css";
 import "@fontsource-variable/jetbrains-mono/index.css";
 import "@/styles/tokens.css";
 import "@/styles/app.css";
+import "@/styles/motion.css";
 import { Shell } from "@/shell/Shell";
 
 export const metadata: Metadata = {
@@ -12,7 +13,8 @@ export const metadata: Metadata = {
 
 // Runs before first paint. The theme choice is per viewer (localStorage); "system" removes the
 // attribute so the prefers-color-scheme set applies. Anything else keeps the dark default.
-const THEME_SCRIPT = `try{var t=localStorage.getItem("canvas-rgb.theme");if(t==="light"){document.documentElement.setAttribute("data-theme","light")}else if(t==="system"){document.documentElement.removeAttribute("data-theme")}}catch(e){}`;
+// The motion preference works the same way: "reduced" turns the editor's motion off.
+const THEME_SCRIPT = `try{var t=localStorage.getItem("canvas-rgb.theme");if(t==="light"){document.documentElement.setAttribute("data-theme","light")}else if(t==="system"){document.documentElement.removeAttribute("data-theme")}}catch(e){}try{var m=localStorage.getItem("canvas-rgb.motion");if(m==="reduced"){document.documentElement.setAttribute("data-motion","reduced")}}catch(e){}`;
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (

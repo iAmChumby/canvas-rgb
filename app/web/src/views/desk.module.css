@@ -1,0 +1,295 @@
+/* The desk canvas: the surface canvas-rgb users stare at.
+ *
+ * Every rule here is scoped under `.desk` so it beats the global `.stage` / `.zrect` rules in
+ * app.css without changing that file: `.desk .zone` (0,2,0) outranks `.zrect` (0,1,0), and
+ * `.desk.canvas` (0,2,0) outranks `.stage` (0,1,0), whatever order the two sheets end up in.
+ *
+ * Colours are tokens only. The zone colour is `--zc`, set per zone from the device accents.
+ */
+
+.desk.canvas {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 320 / 200;
+  overflow: hidden;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-lg);
+  background:
+    linear-gradient(var(--dot) 1px, transparent 1px) 0 0 / 12.5% 12.5%,
+    linear-gradient(90deg, var(--dot) 1px, transparent 1px) 0 0 / 12.5% 12.5%,
+    var(--sunk);
+  user-select: none;
+  touch-action: none;
+}
+
+/* ---------- zones ---------- */
+
+.desk .zone {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1px solid var(--zc);
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--zc) 10%, transparent);
+  cursor: grab;
+  transform-origin: 50% 50%;
+  transition:
+    background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.desk .zone:hover {
+  background: color-mix(in srgb, var(--zc) 20%, transparent);
+}
+
+.desk .zone[data-dragging="true"] {
+  cursor: grabbing;
+  transition: none;
+}
+
+.desk .zone[data-selected="true"] {
+  border-color: var(--live);
+  background: color-mix(in srgb, var(--zc) 24%, transparent);
+  outline: 2px solid var(--live);
+  outline-offset: 2px;
+  z-index: 4;
+}
+
+.desk .zone[data-hidden="true"] {
+  border-style: dashed;
+  opacity: 0.5;
+}
+
+/* A zone whose device is not connected: dashed, dimmed, and behind the live zones. */
+.desk .zone[data-missing="true"] {
+  border-color: var(--down);
+  border-style: dashed;
+  background: color-mix(in srgb, var(--down) 10%, transparent);
+  opacity: 0.5;
+  z-index: 0;
+}
+
+.desk .zone[data-missing="true"]:hover {
+  background: color-mix(in srgb, var(--down) 20%, transparent);
+  opacity: 0.75;
+}
+
+/* The live zones sit over the stale ones. */
+.desk .zone {
+  z-index: 1;
+}
+
+/* A selected zone is on top of everything, stale or not. */
+.desk .zone[data-selected="true"] {
+  z-index: 4;
+}
+
+.desk .zone:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 3px;
+}
+
+/* ---------- labels ---------- */
+
+.desk .label {
+  position: absolute;
+  z-index: 6;
+  padding: 0 5px;
+  height: 20px;
+  line-height: 18px;
+  border: 1px solid var(--line-2);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--ink);
+  font-family: var(--fm);
+  font-size: var(--t14);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.desk .label[data-selected="true"] {
+  border-color: var(--live);
+}
+
+.desk .label[data-missing="true"] {
+  border-color: var(--down);
+  color: var(--down);
+  opacity: 0.75;
+}
+
+/* The inspector's note about a zone whose device is not connected. */
+.desk .stale {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s2);
+  padding: var(--s3);
+  border: 1px dashed var(--down);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--down) 8%, transparent);
+}
+
+.desk .staleReason {
+  color: var(--down);
+  font-size: var(--t14);
+  line-height: 1.4;
+}
+
+/* ---------- grips ---------- */
+
+.desk .stem {
+  position: absolute;
+  z-index: 7;
+  width: 1px;
+  background: var(--live);
+  transform-origin: 50% 0%;
+  pointer-events: none;
+}
+
+.desk .grip {
+  position: absolute;
+  z-index: 8;
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  border: 2px solid var(--panel);
+  border-radius: 3px;
+  background: var(--ink);
+  cursor: nwse-resize;
+  transform: translate(-50%, -50%);
+}
+
+.desk .grip:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 3px;
+}
+
+.desk .gripRotate {
+  border-radius: 50%;
+  background: var(--live);
+  cursor: grab;
+}
+
+/* ---------- the alignment guides ---------- */
+
+.desk .guideV {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  z-index: 7;
+  background: var(--live);
+  pointer-events: none;
+  display: none;
+}
+
+.desk .guideH {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1px;
+  z-index: 7;
+  background: var(--live);
+  pointer-events: none;
+  display: none;
+}
+
+/* ---------- the drag readout ---------- */
+
+.desk .readout {
+  position: absolute;
+  z-index: 9;
+  padding: 2px 7px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background: var(--panel);
+  color: var(--ink);
+  font-family: var(--fm);
+  font-size: var(--t14);
+  line-height: 1.4;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* ---------- the zoom controls ---------- */
+
+.desk .controls {
+  position: absolute;
+  top: var(--s2);
+  right: var(--s2);
+  z-index: 9;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  background: var(--panel);
+}
+
+.desk .zoomValue {
+  min-width: 40px;
+  padding: 0 2px;
+  color: var(--dim);
+  font-family: var(--fm);
+  font-size: var(--t14);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The zoom controls sit in the canvas's top-right corner. Their tooltips open upwards by
+   default, which put them outside the canvas, where they were cut in half: they open downwards
+   instead, into the canvas. */
+.desk .tip-bubble {
+  bottom: auto;
+  top: calc(100% + 6px);
+}
+
+/* The last control's bubble would hang over the canvas's right edge. */
+.desk .controls .tip:last-child .tip-bubble {
+  left: auto;
+  right: 0;
+  transform: none;
+}
+
+/* ---------- the preview's state ---------- */
+
+/* The preview's state: a bar along the bottom of the canvas, not a sheet over the middle of
+   it. The zones stay visible and draggable while the preview is down. */
+
+.desk .stageEmpty {
+  position: absolute;
+  left: var(--s2);
+  right: var(--s2);
+  bottom: var(--s2);
+  z-index: 9;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.desk .stageEmptyInner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  max-width: 46ch;
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  background: var(--panel);
+  color: var(--dim);
+  font-size: var(--t14);
+  line-height: 1.35;
+  text-align: center;
+}
+
+.desk .stageEmptyTitle {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.desk .stageEmptyError {
+  color: var(--down);
+  font-family: var(--fm);
+  font-size: var(--t14);
+}

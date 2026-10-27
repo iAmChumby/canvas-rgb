@@ -20,6 +20,7 @@ export function FanCurveEditor({
   points,
   floor,
   currentTemp,
+  currentDuty,
   onChange,
   onCommit,
 }: {
@@ -27,6 +28,7 @@ export function FanCurveEditor({
   points: CurvePoint[];
   floor: number;
   currentTemp: number | null;
+  currentDuty: number | null;
   onChange: (points: CurvePoint[]) => void;
   onCommit: (points: CurvePoint[]) => void;
 }) {
@@ -184,6 +186,29 @@ export function FanCurveEditor({
             stroke="var(--ink)"
             strokeDasharray="2 3"
           />
+        )}
+
+        {/* Where the curve sits right now: the temperature on the left, the duty on the curve. */}
+        {currentTemp !== null && currentDuty !== null && (
+          <g className="curve-now">
+            <circle
+              cx={xOf(clamp(currentTemp, TEMP_MIN, TEMP_MAX))}
+              cy={yOf(clamp(currentDuty, 0, 100))}
+              r={6}
+              fill="var(--live)"
+              stroke="var(--panel)"
+              strokeWidth={2}
+            />
+            <circle
+              cx={xOf(clamp(currentTemp, TEMP_MIN, TEMP_MAX))}
+              cy={yOf(clamp(currentDuty, 0, 100))}
+              r={10}
+              fill="none"
+              stroke="var(--live)"
+              strokeWidth={1.5}
+              opacity={0.5}
+            />
+          </g>
         )}
 
         <polyline points={line} fill="none" stroke="var(--a2)" strokeWidth={2.5} strokeLinejoin="round" />
