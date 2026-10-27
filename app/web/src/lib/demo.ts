@@ -26,6 +26,8 @@ import {
   HTML_FIXTURE,
   INITIAL_SETTINGS,
   LAYOUT_DESK,
+  CHIONE_DISPLAY,
+  DISPLAY_DEFAULT,
   type DemoEffect,
   type Props,
 } from "@/lib/fixtures";
@@ -40,6 +42,11 @@ import type { Settings } from "@/proto/Settings";
 import type { ExportBundle } from "@/proto/ExportBundle";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { PropValue } from "@/proto/PropValue";
+import type { DisplayConfig } from "@/proto/DisplayConfig";
+import type { DisplayInfo } from "@/proto/DisplayInfo";
+import type { DisplayStatus } from "@/proto/DisplayStatus";
+import type { DisplayUnit } from "@/proto/DisplayUnit";
+import type { DisplayValue } from "@/proto/DisplayValue";
 
 const BASE = "/api/v1";
 const APP_VERSION = "0.1.0";
@@ -68,6 +75,9 @@ interface DemoState {
   serviceUp: boolean;
   conflicts: Status["conflicts"];
   startedAt: number;
+  /** The numeric display's saved config, and the value last PUT to its value route. */
+  displayConfig: DisplayConfig | null;
+  displayApiValue: number | null;
 }
 
 function initialState(): DemoState {
@@ -97,6 +107,9 @@ function initialState(): DemoState {
     serviceUp: !s.has("service-down"),
     conflicts: s.has("conflict") ? [{ kind: "signal_rgb", process: true, service: false }] : [],
     startedAt: Date.now(),
+    // No display has a saved source yet: the daemon leaves the pump head alone.
+    displayConfig: null,
+    displayApiValue: null,
   };
 }
 
@@ -284,6 +297,86 @@ function setActiveProps(over: Props): void {
   const next = mergeProps(layout.effect?.props ?? currentProps(e), over);
   layout.effect = { id: e.schema.id, props: next };
   s.saved[e.schema.id] = next;
+}
+
+// ---- numeric displays ----
+
+/** The display the CHIONE adapter finds: the pump head, four digits. */
+function displayInfo(): DisplayInfo {
+  return { ...CHIONE_DISPLAY };
+}
+
+/** The value a display's source reads now, in the display's own unit. */
+function displayReads(s: DemoState, config: DisplayConfig): { value: number | null; rpm: boolean } {
+  const source = config.source;
+  if (source.kind === "fixed") return { value: source.value, rpm: false };
+  if (source.kind === "api") return { value: s.displayApiValue, rpm: false };
+  if (source.kind === "cpu_temp") return { value: temps().cpu, rpm: false };
+  if (source.kind === "gpu_temp") return { value: temps().gpu, rpm: false };
+  if (source.kind === "board_temp") {
+    const reading = fansStatus().temps.find(
+      (t) => t.source.type === "board" && t.source.name === source.sensor,
+    );
+    return { value: reading?.celsius ?? null, rpm: false };
+  }
+  const header = fansStatus().headers.find((h) => h.id === source.header);
+  return { value: header?.rpm ?? 0, rpm: true };
+}
+
+/** What the display shows now: the value in its unit, rounded the way the adapter rounds it. */
+function displayShown(s: DemoState, config: DisplayConfig): DisplayValue {
+  const { value, rpm } = displayReads(s, config);
+  const unit: DisplayUnit = config.unit;
+  let out = value;
+  if (out !== null && unit === "fahrenheit") out = out * 9 / 5 + 32;
+  if (out !== null) {
+    const scale = rpm ? 1 : 10 ** config.decimals;
+    out = Math.round(out * scale) / scale;
+  }
+  return {
+    value: out,
+    decimals: rpm ? 0 : config.decimals,
+    unit,
+    mode: rpm ? "fan_rpm" : "temperature",
+    blink: config.blink_above !== null && out !== null && out >= config.blink_above,
+  };
+}
+
+/** The displays the daemon would report. */
+function displayList(): DisplayStatus[] {
+  const s = st();
+  const config = s.displayConfig ?? { ...DISPLAY_DEFAULT };
+  return [
+    {
+      info: displayInfo(),
+      config,
+      // Nothing is written to a display before a source is saved for it.
+      shown: s.displayConfig ? displayShown(s, config) : null,
+    },
+  ];
+}
+
+/** The daemon's own validation (crates/canvas-daemon/src/displays.rs). */
+function validateDisplay(pathId: string, config: DisplayConfig): void {
+  if (config.device !== pathId) {
+    fail(422, "validation", `the device in the body (${config.device}) does not match the path (${pathId})`);
+  }
+  if (config.decimals > 1) {
+    fail(422, "validation", `decimals must be 0 or 1, got ${config.decimals}`);
+  }
+  if (config.source.kind === "fan_rpm") {
+    if (config.decimals !== 0) fail(422, "validation", "a fan RPM is shown with 0 decimals");
+    if (!config.source.header.trim()) fail(422, "validation", "the fan header name is empty");
+  }
+  if (config.source.kind === "board_temp" && !config.source.sensor.trim()) {
+    fail(422, "validation", "the board sensor name is empty");
+  }
+  if (config.source.kind === "fixed" && !Number.isFinite(config.source.value)) {
+    fail(422, "validation", "the fixed value must be a finite number");
+  }
+  if (config.blink_above !== null && !Number.isFinite(config.blink_above)) {
+    fail(422, "validation", "blink_above must be a finite number");
+  }
 }
 
 // ---- router ----
@@ -509,6 +602,36 @@ export async function demoRequest(method: string, path: string, body: unknown): 
     return { ok: true };
   }
 
+  if (head === "displays") {
+    if (seg.length === 1 && method === "GET") return displayList();
+    const id = seg[1] ?? "";
+    if (seg.length === 2 && method === "PUT") {
+      const config = body as DisplayConfig;
+      validateDisplay(id, config);
+      s.displayConfig = { ...config, source: { ...config.source } };
+      return s.displayConfig;
+    }
+    if (seg.length === 2 && method === "DELETE") {
+      // The daemon answers 404 when there is no saved config; the demo lets the editor stop a
+      // display that was never saved, which is the same end state.
+      s.displayConfig = null;
+      s.displayApiValue = null;
+      return { ok: true, device_id: id };
+    }
+    if (seg.length === 3 && seg[2] === "value" && method === "PUT") {
+      const b = body as { value: number | null };
+      if (b.value !== null && !Number.isFinite(b.value)) {
+        fail(422, "validation", "the value must be a finite number");
+      }
+      if (s.displayConfig && s.displayConfig.source.kind !== "api") {
+        fail(422, "validation", `display ${id} is not set to the api source, so a value does not show`);
+      }
+      s.displayApiValue = b.value;
+      return b;
+    }
+    return bad();
+  }
+
   if (head === "config") {
     if (seg[1] === "export" && method === "GET") {
       const bundle: ExportBundle = {
@@ -536,7 +659,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
           profiles: s.fanProfiles,
           boot_color: s.settings.boot_color,
         },
-        displays: [],
+        displays: s.displayConfig ? [{ ...s.displayConfig }] : [],
       };
       return bundle;
     }

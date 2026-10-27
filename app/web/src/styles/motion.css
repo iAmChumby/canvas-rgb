@@ -339,21 +339,23 @@
    Toasts
    ========================================================================== */
 
-/* The toast lane: a band at the top of the page that a toast lives in. The band is always
-   there and is empty when there is no toast, so a toast never covers a control and the page
-   never moves for one. The lane is the page's own space, not a floating layer. */
-.toast-lane {
+/* The toast floats: it takes no room in the page, so the page's first content does not move when
+   one appears. On a wide screen it sits over the page head's subtitle row, top right, and it
+   scrolls away with the page: the only thing it can ever be over is the page's own title row. */
+.toast-host {
+  position: absolute;
+  /* The page head's subtitle row, below whatever notices stand above the page. */
+  top: calc(var(--s6) + var(--standing-h, 0px) + var(--s5));
+  right: var(--s6);
+  z-index: 30;
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  justify-content: flex-end;
   gap: var(--s2);
-  min-height: var(--toast-lane-h);
-  margin-bottom: var(--s2);
   pointer-events: none;
 }
 
-.toast-lane > * {
+.toast-host > * {
   pointer-events: auto;
 }
 
@@ -395,7 +397,15 @@
 }
 
 @media (max-width: 720px) {
-  .toast-lane {
+  /* On a phone the toast floats in the bottom dock's own band, directly above the rail. The rail
+     grows by the toast's height while the toast is up, so the toast is over the app's own chrome
+     and hides no control the reader could have reached. */
+  .toast-host {
+    position: fixed;
+    top: auto;
+    bottom: var(--rail-h, 65px);
+    left: 0;
+    right: 0;
     align-items: stretch;
   }
 

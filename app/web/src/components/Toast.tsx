@@ -79,13 +79,14 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 }
 
 /**
- * The lane the toast lives in. The shell puts it at the top of the page, so a toast is always
- * in the same place and never covers a control.
+ * The host the toast floats in. On a wide screen it hangs over the page head's subtitle row; on
+ * a phone it takes a band of the bottom dock. It takes no room in the page, so the page's first
+ * content does not move when a toast comes or goes.
  */
 export function ToastHost() {
   const { items, remove } = useToasts();
   return (
-    <div className="toast-lane" role="status" aria-live="polite">
+    <div className="toast-host" role="status" aria-live="polite">
       {items.map((t) => (
         <Toast key={t.id} item={t} onDone={() => remove(t.id)} />
       ))}

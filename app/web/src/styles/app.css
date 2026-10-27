@@ -121,9 +121,10 @@ html[data-motion="reduced"] *::after {
 /* ---------- shell ---------- */
 
 :root {
-  /* The toast lane: the space at the top of every page that a toast lives in. It is always
-     there, so a toast never covers a control and the page never moves for one. */
-  --toast-lane-h: 44px;
+  /* The height of the phone's bottom dock, and the band a toast takes in it. The dock grows by
+     the band while a toast is up. */
+  --rail-h: 65px;
+  --toast-band-h: 46px;
 }
 
 .app {
@@ -320,9 +321,10 @@ html[data-motion="reduced"] *::after {
 }
 
 .content {
-  /* The top padding is the toast lane's: the lane is the space under the strip, and it holds a
-     toast when there is one. */
-  padding: 0 var(--s6) var(--s8);
+  /* The toast floats over the page head's subtitle row, so the content is the anchor it hangs
+     from. */
+  position: relative;
+  padding: var(--s6) var(--s6) var(--s8);
   min-width: 0;
 }
 
@@ -410,11 +412,10 @@ html[data-motion="reduced"] *::after {
 }
 
 /* The notices float over the content's own space: a notice that appears does not push the page
-   down. On a wide screen they sit at the top right; on a phone they sit above the bottom rail.
-   They start below the toast lane, so the two never fight for the same corner. */
+   down. On a wide screen they sit at the top right; on a phone they sit above the bottom rail. */
 .banners {
   position: fixed;
-  top: calc(var(--strip-h, 0px) + var(--toast-lane-h, 0px));
+  top: var(--strip-h, 0px);
   right: var(--s6);
   z-index: 35;
   width: min(460px, calc(100vw - var(--s6) * 2));
@@ -1691,6 +1692,82 @@ button.chip:hover {
   border-bottom: 0;
 }
 
+/* ---------- displays: one number on a pump head ---------- */
+
+.display-card {
+  display: grid;
+  grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
+  gap: var(--s5);
+  align-items: start;
+}
+
+.digit-readout {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--s2);
+  min-height: 48px;
+}
+
+.digit {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 48px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background: var(--sunk);
+  color: var(--ink);
+  font-family: var(--fm);
+  font-size: var(--t28);
+  font-variant-numeric: tabular-nums;
+}
+
+/* A blank position is an unlit segment, not a zero. */
+.digit[data-blank="true"] {
+  background: transparent;
+  border-color: var(--line);
+}
+
+.digit-dot {
+  position: absolute;
+  right: 3px;
+  bottom: 5px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--ink);
+}
+
+.digit-unit {
+  padding-bottom: var(--s2);
+  color: var(--mute);
+  font-family: var(--fm);
+  font-size: var(--t16);
+}
+
+.digit-readout-empty {
+  align-self: center;
+  color: var(--mute);
+  font-size: var(--t14);
+}
+
+.display-readout-note {
+  margin-top: var(--s3);
+  font-size: var(--t14);
+}
+
+.display-controls {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.display-actions {
+  margin-top: var(--s2);
+}
+
 /* ---------- settings ---------- */
 
 .settings-grid {
@@ -1875,12 +1952,19 @@ button.chip:hover {
     left: 0;
     right: 0;
     z-index: 20;
-    height: auto;
+    height: var(--rail-h);
     flex-direction: row;
     justify-content: space-around;
     padding: var(--s1) var(--s2);
     border-top: 1px solid var(--line);
     background: var(--panel);
+  }
+
+  /* A toast takes a band of the dock's own surface, so it hides nothing the reader could reach:
+     the dock grows by exactly the toast's height. */
+  .rail[data-toast="on"] {
+    height: calc(var(--rail-h) + var(--toast-band-h));
+    padding-top: var(--toast-band-h);
   }
 
   .rail-brand {
@@ -1904,18 +1988,14 @@ button.chip:hover {
   }
 
   .content {
-    padding: 0 var(--s4) 96px;
-  }
-
-  /* The toast lane is a little taller on a phone: the toast there is the full width. */
-  :root {
-    --toast-lane-h: 48px;
+    /* The bottom dock, plus the band a toast takes in it, so the page's end is clear of both. */
+    padding: var(--s4) var(--s4) 120px;
   }
 
   /* The transient notice floats under the strip on a phone. It is anchored to the top, so when it
      grows it grows downward and the page does not move for it. */
   .banners {
-    top: calc(var(--strip-h, 0px) + var(--toast-lane-h, 0px));
+    top: var(--strip-h, 0px);
     bottom: auto;
     left: var(--s3);
     right: var(--s3);
@@ -1960,6 +2040,12 @@ button.chip:hover {
 
   .prop-item:not([data-kind="number"]) {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* A display's readout and its controls: one above the other. */
+  .display-card {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--s4);
   }
 
   /* A setting's control takes the whole row on a phone: the label is above it. */

@@ -24,6 +24,11 @@ export const routes = {
   fanProfiles: (name: string) => `/api/v1/fans/profiles/${encodeURIComponent(name)}`,
   settings: "/api/v1/settings",
   dismissZonePanel: "/api/v1/first-run/dismiss-zone-panel",
+  // GET every numeric display with its config and the value it shows now; PUT a DisplayConfig
+  // for one display; DELETE removes the config, stops writing and closes the device.
+  displays: "/api/v1/displays",
+  display: (id: string) => `/api/v1/displays/${encodeURIComponent(id)}`,
+  displayValue: (id: string) => `/api/v1/displays/${encodeURIComponent(id)}/value`,
   configExport: "/api/v1/config/export",
   configImport: "/api/v1/config/import",
   quit: "/api/v1/quit",

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Lightning, SquaresFour, Warning, WarningOctagon } from "@phosphor-icons/react";
 import { Banner } from "@/components/Banner";
 import { Button } from "@/components/Button";
@@ -24,6 +24,24 @@ export function StandingNotices() {
   const status = useSnap((s) => s.status);
   const devices = useSnap((s) => s.devices);
   const [err, setErr] = useState<string | null>(null);
+  const flowRef = useRef<HTMLDivElement>(null);
+
+  // The toast hangs over the page head's subtitle row, so it has to know how tall the notices
+  // above the page are.
+  useEffect(() => {
+    const el = flowRef.current;
+    if (!el) return;
+    const measure = () => {
+      document.documentElement.style.setProperty("--standing-h", `${el.offsetHeight}px`);
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => {
+      ro.disconnect();
+      document.documentElement.style.removeProperty("--standing-h");
+    };
+  }, []);
 
   const conflict = status?.conflicts.find((c) => c.kind === "signal_rgb");
   // Nothing can run until the desk canvas has a zone in it.
@@ -47,7 +65,7 @@ export function StandingNotices() {
   if (!conflict && !noLayout && !status?.show_zone_panel) return null;
 
   return (
-    <div className="banners-flow">
+    <div className="banners-flow" ref={flowRef}>
       {conflict && (
         <Banner
           tone="warn"

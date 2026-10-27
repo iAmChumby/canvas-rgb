@@ -208,7 +208,8 @@ function Frame({ children }: { children: ReactNode }) {
         <StatusStrip onOpenPalette={() => setPaletteOpen(true)} />
         <GlobalBanners />
         <main className="content">
-          {/* The toast lane: the page's own space at the top, so a toast never covers a control. */}
+          {/* The toast floats: it takes no room in the page, so the page's first content does not
+              move when one appears. */}
           <ToastHost />
           {daemonDown ? (
             <DaemonDown

@@ -8,6 +8,8 @@ import type { EffectSummary } from "@/proto/EffectSummary";
 import type { Layout } from "@/proto/Layout";
 import type { FanProfile } from "@/proto/FanProfile";
 import type { Settings } from "@/proto/Settings";
+import type { DisplayInfo } from "@/proto/DisplayInfo";
+import type { DisplayConfig } from "@/proto/DisplayConfig";
 import type { PropValue } from "@/proto/PropValue";
 import type { PropKind } from "@/proto/PropKind";
 import type { PropertySchema } from "@/proto/PropertySchema";
@@ -411,4 +413,26 @@ export const INITIAL_SETTINGS: Settings = {
   boot_color: "#6000fc",
   brightness: 100,
   power: "running",
+};
+
+/**
+ * The numeric display the CHIONE adapter finds: the GAMDIAS pump head, four digits and a degree
+ * mark. The id is the adapter's own (`chione:1b80:b53c`).
+ */
+export const CHIONE_DISPLAY: DisplayInfo = {
+  id: "chione:1b80:b53c",
+  name: "CHIONE Digital Display",
+  digits: 4,
+  max_decimals: 1,
+  modes: ["temperature", "fan_rpm"],
+  connected: true,
+};
+
+/** What a display shows before anything has been saved for it: nothing at all. */
+export const DISPLAY_DEFAULT: DisplayConfig = {
+  device: CHIONE_DISPLAY.id,
+  source: { kind: "cpu_temp" },
+  unit: "celsius",
+  decimals: 1,
+  blink_above: null,
 };

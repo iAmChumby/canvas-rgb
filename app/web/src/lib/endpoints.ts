@@ -24,6 +24,9 @@ import type { FanMode } from "@/proto/FanMode";
 import type { FanProfile } from "@/proto/FanProfile";
 import type { FanProfileName } from "@/proto/FanProfileName";
 import type { Settings } from "@/proto/Settings";
+import type { DisplayConfig } from "@/proto/DisplayConfig";
+import type { DisplayStatus } from "@/proto/DisplayStatus";
+import type { SetDisplayValue } from "@/proto/SetDisplayValue";
 import type { ExportBundle } from "@/proto/ExportBundle";
 
 export const api = {
@@ -69,6 +72,15 @@ export const api = {
   settings: () => request<Settings>("GET", routes.settings),
   putSettings: (body: Settings) => request<Settings>("PUT", routes.settings, body),
   dismissZonePanel: () => request<unknown>("POST", routes.dismissZonePanel),
+
+  /** Every numeric display with its config and the value it shows now. */
+  displays: () => request<DisplayStatus[]>("GET", routes.displays),
+  /** Saves a display's config. The daemon starts driving the display from it. */
+  putDisplay: (id: string, body: DisplayConfig) => request<DisplayConfig>("PUT", routes.display(id), body),
+  /** Removes the config: the daemon stops writing and closes the device. */
+  deleteDisplay: (id: string) => request<unknown>("DELETE", routes.display(id)),
+  /** The number a display with the `api` source shows. */
+  putDisplayValue: (id: string, body: SetDisplayValue) => request<SetDisplayValue>("PUT", routes.displayValue(id), body),
 
   configExport: () => request<ExportBundle>("GET", routes.configExport),
   configImport: (bundle: ExportBundle) => request<unknown>("POST", routes.configImport, bundle),

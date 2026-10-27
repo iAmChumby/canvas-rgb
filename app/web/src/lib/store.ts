@@ -5,7 +5,7 @@
 
 import { useSyncExternalStore } from "react";
 import { api } from "@/lib/endpoints";
-import { messageOf } from "@/lib/errors";
+import { ApiFailure, messageOf } from "@/lib/errors";
 import { onStateChanged } from "@/lib/host";
 import type { Status } from "@/proto/Status";
 import type { FansStatus } from "@/proto/FansStatus";
@@ -14,6 +14,7 @@ import type { EffectSummary } from "@/proto/EffectSummary";
 import type { Layout } from "@/proto/Layout";
 import type { RenderState } from "@/proto/RenderState";
 import type { Settings } from "@/proto/Settings";
+import type { DisplayStatus } from "@/proto/DisplayStatus";
 
 export const RPM_HISTORY = 60;
 
@@ -53,6 +54,8 @@ export interface Snap {
   render: RenderState | null;
   settings: Settings | null;
   settingsError: string | null;
+  displays: DisplayStatus[] | null;
+  displaysError: string | null;
   rpm: Record<string, number[]>;
 }
 
@@ -71,6 +74,8 @@ let snap: Snap = {
   render: null,
   settings: null,
   settingsError: null,
+  displays: null,
+  displaysError: null,
   rpm: {},
 };
 
@@ -169,6 +174,19 @@ export async function refreshSettings(): Promise<void> {
   }
 }
 
+export async function refreshDisplays(): Promise<void> {
+  try {
+    patchSnap({ displays: await api.displays(), displaysError: null });
+  } catch (e) {
+    // A daemon that is older than the display routes answers 404. Say that, not "HTTP 404".
+    const message =
+      e instanceof ApiFailure && e.status === 404
+        ? "This daemon has no display routes: it is older than the display support. Update the daemon and the tray app."
+        : messageOf(e);
+    patchSnap({ displaysError: message });
+  }
+}
+
 export async function refreshAll(): Promise<void> {
   await Promise.all([
     refreshStatus(),
@@ -178,6 +196,7 @@ export async function refreshAll(): Promise<void> {
     refreshLayouts(),
     refreshRender(),
     refreshSettings(),
+    refreshDisplays(),
   ]);
 }
 
@@ -211,6 +230,7 @@ export function startSync(): () => void {
     // stale desk canvas is worse than one extra request every four seconds.
     void refreshLayouts();
     void refreshSettings();
+    void refreshDisplays();
   };
   const onVisibility = () => {
     if (visible()) void refreshAll();

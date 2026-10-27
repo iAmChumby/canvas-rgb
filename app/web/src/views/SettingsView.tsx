@@ -220,7 +220,7 @@ export function SettingsView() {
 
         <div className="stack">
           <Panel title="Config">
-            <Field label="Export" hint="Downloads the settings, layouts, zone sizes and effects">
+            <Field label="Export" hint="Settings, layouts, zone sizes, effects, fans and displays">
               <Button icon={<DownloadSimple size={16} />} onClick={() => void doExport()}>
                 Export config
               </Button>
