@@ -1,25 +1,45 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
-import { ArrowCounterClockwise, ArrowUUpLeft, ArrowUUpRight, ArrowUp, FloppyDisk, Plus, X } from "@phosphor-icons/react";
+import {
+  ArrowCounterClockwise,
+  ArrowsClockwise,
+  ArrowUUpLeft,
+  ArrowUUpRight,
+  ArrowUp,
+  CaretDown,
+  CaretUp,
+  FloppyDisk,
+  Plus,
+  X,
+} from "@phosphor-icons/react";
 import { Button, IconButton } from "@/components/Button";
 import { Panel, Field } from "@/components/Panel";
 import { Segmented } from "@/components/Segmented";
 import { NumberField } from "@/components/NumberField";
+import { Slider } from "@/components/Slider";
 import { Toggle } from "@/components/Toggle";
-import { RowButton } from "@/components/Chip";
+import { Chip, RowButton } from "@/components/Chip";
+import { EffectPreview } from "@/components/EffectPreview";
+import { Popover } from "@/components/Popover";
+import { Thumb } from "@/components/Thumb";
 import { useMediaQuery } from "@/components/MediaQuery";
 import { PreviewStage } from "@/views/PreviewStage";
+import { PropertyControls, type Values } from "@/views/PropertyControls";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
 import { usePreviewStatus } from "@/lib/preview";
 import { usePrefersReducedMotion } from "@/lib/motion";
-import { refreshLayouts, useSnap } from "@/lib/store";
+import { refreshAll, refreshLayouts, refreshSettings, useSnap } from "@/lib/store";
 import { defaultRect, findZoneInfo } from "@/lib/zones";
 import { clamp } from "@/lib/format";
 import type { Layout } from "@/proto/Layout";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
+import type { EffectDetail } from "@/proto/EffectDetail";
+import type { EffectSummary } from "@/proto/EffectSummary";
 import type { PlacedZone } from "@/proto/PlacedZone";
+import type { PropValue } from "@/proto/PropValue";
+import type { PropertySchema } from "@/proto/PropertySchema";
 import desk from "./desk.module.css";
 import type { RenderScale } from "@/proto/RenderScale";
 import type { SamplingMode } from "@/proto/SamplingMode";
@@ -27,6 +47,10 @@ import type { SamplingMode } from "@/proto/SamplingMode";
 const DROP_TYPE = "application/x-canvas-zone";
 const CANVAS_W = 320;
 const CANVAS_H = 200;
+/** A value of the running effect reaches the daemon this long after the last change (ms). */
+const PROPS_DEBOUNCE_MS = 60;
+/** The room the list of effects needs under the button it hangs from, in css pixels. */
+const PICKER_ROOM = 380;
 
 /**
  * The layout as it is on the page, and the steps that led to it. The past is what undo takes
@@ -108,10 +132,185 @@ function shortDeviceId(id: string): string {
 }
 
 
+/**
+ * The effect's top properties: the first three of the effect's own, plus its speed if it has
+ * one and it is not among them. An effect's colours and its speed are what a reader changes
+ * while they watch the desk; the rest is for the Effects page.
+ */
+function topProperties(schema: PropertySchema): PropertySchema {
+  const picked = schema.properties.slice(0, 3);
+  const speed = schema.properties.find((p) => p.kind.type === "number" && !picked.includes(p));
+  if (speed) picked.push(speed);
+  return { ...schema, properties: picked };
+}
+
+/**
+ * The running effect, under the canvas: its name, a live picture of it, a quick switch to
+ * another one, its top properties and the brightness every device shares.
+ */
+function NowPlaying({
+  runningId,
+  name,
+  description,
+  values,
+  schema,
+  effects,
+  brightness,
+  phone,
+  error,
+  onPick,
+  onPropChange,
+  onBrightness,
+  onBrightnessCommit,
+}: {
+  runningId: string | null;
+  name: string | null;
+  description: string | null;
+  values: Values;
+  schema: PropertySchema | null;
+  effects: EffectSummary[] | null;
+  brightness: number;
+  phone: boolean;
+  error: string | null;
+  onPick: (id: string) => void;
+  onPropChange: (key: string, value: PropValue) => void;
+  onBrightness: (v: number) => void;
+  onBrightnessCommit: (v: number) => void;
+}) {
+  // On a phone the canvas is the first thing on the screen, so the effect's controls fold away
+  // and the reader opens them when they want them.
+  const [open, setOpen] = useState(!phone);
+  const [picker, setPicker] = useState(false);
+  const changeRef = useRef<HTMLSpanElement>(null);
+  const reduced = usePrefersReducedMotion();
+  const props = schema ? topProperties(schema) : null;
+  // An effect that reads the screen or the audio cannot be drawn by the editor: the picture
+  // is the daemon's.
+  const needsInput = schema ? schema.needs.screen || schema.needs.audio : false;
+
+  /**
+   * The list of effects hangs under the button, and the button can be near the bottom of the
+   * window: the page brings it up so the whole list is there to read.
+   */
+  const openPicker = () => {
+    const el = changeRef.current;
+    if (el) {
+      const r = el.getBoundingClientRect();
+      if (r.bottom > window.innerHeight - PICKER_ROOM) {
+        el.scrollIntoView({ behavior: reduced ? "auto" : "smooth", block: "center" });
+      }
+    }
+    setPicker(true);
+  };
+
+  return (
+    <Panel
+      title="Now playing"
+      actions={
+        <span className="row-wrap" style={{ alignItems: "center", gap: "var(--s2)" }}>
+          <span className={desk.nowEffectName}>{name ?? "No effect"}</span>
+          <span ref={changeRef} className={desk.nowChange}>
+            <Button
+              size="sm"
+              variant="ghost"
+              icon={<ArrowsClockwise size={14} />}
+              disabled={!effects || effects.length === 0}
+              onClick={openPicker}
+            >
+              Change
+            </Button>
+          </span>
+          <IconButton
+            label={open ? "Hide the effect's controls" : "Show the effect's controls"}
+            icon={open ? <CaretUp size={14} /> : <CaretDown size={14} />}
+            size="sm"
+            onClick={() => setOpen((o) => !o)}
+          />
+        </span>
+      }
+    >
+      {open && (
+        <div className={desk.nowBody} data-now-playing="true">
+          <div className={desk.nowWho}>
+            <span className={desk.nowSwatch}>
+              {runningId ? (
+                needsInput ? (
+                  <Thumb id={runningId} size="sm" label={name ?? "Effect"} />
+                ) : (
+                  <EffectPreview id={runningId} values={values} />
+                )
+              ) : null}
+            </span>
+            <p className={desk.nowDesc}>
+              {description ?? "The desk has no effect running."}
+              {needsInput && (
+                <span className={desk.nowNote}>
+                  {" "}
+                  This effect reads the screen or the audio, so the picture is the daemon&apos;s.
+                </span>
+              )}
+            </p>
+          </div>
+          {props && (
+            <div className={desk.nowProps}>
+              <PropertyControls schema={props} values={values} onChange={onPropChange} />
+            </div>
+          )}
+          <Field label="Brightness" hint="Every LED the daemon writes">
+            <span className="row-wrap field-slider">
+              <Slider
+                label="Brightness"
+                min={0}
+                max={100}
+                value={brightness}
+                onChange={onBrightness}
+                onCommit={onBrightnessCommit}
+              />
+              <NumberField
+                label="Brightness value"
+                min={0}
+                max={100}
+                value={brightness}
+                unit="%"
+                onCommit={onBrightnessCommit}
+              />
+            </span>
+          </Field>
+          {error && <p className="error-line">{error}</p>}
+        </div>
+      )}
+      <Popover
+        anchor={changeRef}
+        open={picker}
+        onClose={() => setPicker(false)}
+        label="Choose the effect that runs on this desk"
+      >
+        <div className={desk.nowPicker}>
+          {(effects ?? []).map((e) => (
+            <Chip
+              key={e.id}
+              pressed={e.id === runningId}
+              label={`Run ${e.name} on this desk`}
+              onClick={() => {
+                setPicker(false);
+                onPick(e.id);
+              }}
+            >
+              <Thumb id={e.id} size="sm" label={e.name} live={e.id === runningId} />
+              <span className={desk.nowPickerName}>{e.name}</span>
+            </Chip>
+          ))}
+        </div>
+      </Popover>
+    </Panel>
+  );
+}
+
 export function LayoutView() {
   const server = useSnap((s) => s.layouts?.find((l) => l.id === s.activeLayout) ?? null);
   const devices = useSnap((s) => s.devices);
   const effects = useSnap((s) => s.effects);
+  const settings = useSnap((s) => s.settings);
   const layoutsError = useSnap((s) => s.layoutsError);
 
   const [base, setBase] = useState<Layout | null>(null);
@@ -190,6 +389,87 @@ export function LayoutView() {
   const shownZone = liveZone && liveZone.index === selected ? liveZone.zone : selectedZone;
   // The running effect: the editor draws it itself when the daemon's preview is not connected.
   const runningEffect = server?.effect ?? null;
+  const runningId = runningEffect?.id ?? null;
+  /**
+   * The "Now playing" panel: the running effect's own values, and the values as the reader
+   * changes them. The canvas follows the second ones at once, so a colour moves before the
+   * daemon has answered.
+   */
+  const [nowDetail, setNowDetail] = useState<EffectDetail | null>(null);
+  const [liveProps, setLiveProps] = useState<Values>({});
+  const [nowError, setNowError] = useState<string | null>(null);
+  const [brightnessDraft, setBrightnessDraft] = useState<number | null>(null);
+  /** The values waiting for the daemon: a drag sends one value, not forty. */
+  const pendingProps = useRef<Values>({});
+  const propsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // A different effect running means different values: the old ones go.
+  const [propsFor, setPropsFor] = useState<string | null>(null);
+  if (runningId !== propsFor) {
+    setPropsFor(runningId);
+    setNowDetail(null);
+    setLiveProps(runningEffect?.props ?? {});
+  }
+  useEffect(() => {
+    if (!runningId) return;
+    let stop = false;
+    api
+      .effect(runningId)
+      .then((d) => {
+        if (stop) return;
+        setNowDetail(d);
+        setLiveProps(d.props);
+      })
+      .catch((e: unknown) => {
+        if (!stop) setNowError(messageOf(e));
+      });
+    return () => {
+      stop = true;
+    };
+  }, [runningId]);
+  useEffect(
+    () => () => {
+      if (propsTimer.current) clearTimeout(propsTimer.current);
+    },
+    [],
+  );
+  /** A value of the running effect: the canvas has it at once, the daemon gets it after. */
+  const onPropChange = (key: string, value: PropValue) => {
+    setNowError(null);
+    setLiveProps((prev) => ({ ...prev, [key]: value }));
+    pendingProps.current = { ...pendingProps.current, [key]: value };
+    if (propsTimer.current) clearTimeout(propsTimer.current);
+    const id = runningId;
+    propsTimer.current = setTimeout(() => {
+      propsTimer.current = null;
+      const batch = pendingProps.current;
+      pendingProps.current = {};
+      if (!id || Object.keys(batch).length === 0) return;
+      api.patchActiveProps(batch).catch((e: unknown) => setNowError(messageOf(e)));
+    }, PROPS_DEBOUNCE_MS);
+  };
+  /** Another effect on this desk. */
+  const pickEffect = async (id: string) => {
+    if (id === runningId) return;
+    setNowError(null);
+    try {
+      await api.activateEffect(id, { props: {}, preset: null });
+      await refreshAll();
+    } catch (e) {
+      setNowError(messageOf(e));
+    }
+  };
+  /** The brightness every device shares. */
+  const commitBrightness = async (v: number) => {
+    setNowError(null);
+    try {
+      await api.patchOutput({ power: null, brightness: v });
+      setBrightnessDraft(null);
+      await refreshSettings();
+    } catch (e) {
+      setBrightnessDraft(null);
+      setNowError(messageOf(e));
+    }
+  };
   const effectNeedsInput = useMemo(() => {
     if (!runningEffect) return false;
     const summary = effects?.find((e) => e.id === runningEffect.id);
@@ -410,7 +690,7 @@ export function LayoutView() {
             onLiveChange={(index, zone) => setLiveZone({ index, zone })}
             layoutId={draft.id}
             dropPayloadType={DROP_TYPE}
-            effect={runningEffect}
+            effect={runningEffect ? { id: runningEffect.id, props: liveProps } : null}
             effectNeedsInput={effectNeedsInput}
             sampling={draft.sampling}
           />
@@ -445,6 +725,22 @@ export function LayoutView() {
               </span>
             </span>
           </div>
+
+          <NowPlaying
+            runningId={runningId}
+            name={nowDetail?.schema.name ?? effectName}
+            description={nowDetail?.schema.description ?? null}
+            values={liveProps}
+            schema={nowDetail?.schema ?? null}
+            effects={effects}
+            brightness={brightnessDraft ?? settings?.brightness ?? 100}
+            phone={phone}
+            error={nowError}
+            onPick={(id) => void pickEffect(id)}
+            onPropChange={onPropChange}
+            onBrightness={(v) => setBrightnessDraft(v)}
+            onBrightnessCommit={(v) => void commitBrightness(v)}
+          />
 
           <Panel title="Render">
             <div className="render-grid">

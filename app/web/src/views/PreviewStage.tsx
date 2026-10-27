@@ -949,6 +949,15 @@ export function PreviewStage({
     setFading(drawn);
     setDrawn(effect ? { id: effect.id, props: effect.props } : null);
   }
+  /**
+   * The effect's values can change while it runs - the Layout page's "Now playing" panel edits
+   * them - and the editor's own draw follows them, so the canvas shows the change at once.
+   */
+  const drawnNow = useMemo(() => {
+    if (!drawn) return null;
+    if (effect && effect.id === drawn.id) return { id: drawn.id, props: effect.props };
+    return drawn;
+  }, [drawn, effect]);
   useEffect(() => {
     // The picture that is fading out is taken down once the fade is over.
     if (!fading) return;
@@ -1828,7 +1837,7 @@ export function PreviewStage({
           <EffectPreview id={fading.id} values={fading.props} className={desk.editorCanvas} />
         </div>
       )}
-      {drawn && !editorGone && (
+      {drawnNow && !editorGone && (
         // The editor's own draw of the running effect. It is drawn in the canvas's own
         // 320 x 200 units, so it lines up with the zones, and the daemon's frames fade in over
         // it when they arrive.
@@ -1842,7 +1851,7 @@ export function PreviewStage({
             transform: `translate(${view.panX * base * view.scale}px, ${view.panY * base * view.scale}px) scale(${base * view.scale})`,
           }}
         >
-          <EffectPreview id={drawn.id} values={drawn.props} className={desk.editorCanvas} />
+          <EffectPreview id={drawnNow.id} values={drawnNow.props} className={desk.editorCanvas} />
         </div>
       )}
       <canvas
