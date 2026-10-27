@@ -83,6 +83,8 @@ pub struct App {
     pub pipe: Arc<dyn crate::pipe_client::PipeLink>,
     /// The effect thumbnails rendered so far.
     pub thumbnails: crate::thumbnail::ThumbnailCache,
+    /// The numeric displays: their adapter, what they show, and the task's pacing.
+    pub displays: crate::displays::DisplayHub,
 }
 
 /// The fan config the daemon keeps a copy of.
@@ -92,7 +94,7 @@ pub type FansFile = canvas_proto::config::FansFile;
 pub type ZoneSizes = BTreeMap<String, BTreeMap<u32, u32>>;
 
 impl App {
-    /// Builds an app from the pieces the caller supplies.
+    /// Builds an app from the pieces the caller supplies, with no numeric displays.
     ///
     /// The daemon uses this too, so the tests and the daemon build the same state.
     pub fn new(
@@ -103,7 +105,29 @@ impl App {
         version: String,
         quit_tx: tokio::sync::mpsc::UnboundedSender<()>,
     ) -> Self {
+        Self::with_displays(
+            store,
+            engine,
+            adapter,
+            token,
+            version,
+            quit_tx,
+            Box::new(crate::displays::NoDisplays),
+        )
+    }
+
+    /// Like [`App::new`], with the numeric display adapter the daemon wires in (the CHIONE).
+    pub fn with_displays(
+        store: crate::storage::Store,
+        engine: Arc<dyn Engine>,
+        adapter: Box<dyn DeviceAdapter>,
+        token: String,
+        version: String,
+        quit_tx: tokio::sync::mpsc::UnboundedSender<()>,
+        display_adapter: Box<dyn canvas_proto::traits::NumericDisplayAdapter>,
+    ) -> Self {
         Self {
+            displays: crate::displays::DisplayHub::new(display_adapter),
             store: tokio::sync::RwLock::new(store),
             engine,
             adapter: Arc::new(tokio::sync::Mutex::new(adapter)),

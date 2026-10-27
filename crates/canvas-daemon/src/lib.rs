@@ -7,6 +7,7 @@ pub mod capture;
 pub mod cli;
 pub mod composite;
 pub mod conflict;
+pub mod displays;
 pub mod elevated;
 pub mod first_run;
 pub mod logging;

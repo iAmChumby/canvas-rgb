@@ -90,15 +90,21 @@ async fn daemon_main() -> i32 {
         ),
     );
 
+    // The numeric display (the CHIONE pump head). It only enumerates until a display has a saved
+    // config, so starting it opens nothing on a PC without one.
+    let display_adapter = Box::new(canvas_adapters::chione::ChioneDisplay::new())
+        as Box<dyn canvas_proto::traits::NumericDisplayAdapter>;
+
     let (quit_tx, mut quit_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
 
-    let app = Arc::new(App::new(
+    let app = Arc::new(App::with_displays(
         store,
         engine.clone(),
         Box::new(adapter) as Box<dyn DeviceAdapter>,
         token,
         canvas_daemon::version(),
         quit_tx,
+        display_adapter,
     ));
 
     // The zone sizes from disk.
@@ -127,6 +133,7 @@ async fn daemon_main() -> i32 {
     spawn_openrgb_supervisor(app.clone());
     spawn_pipe_client(app.clone());
     spawn_fan_poller(app.clone());
+    spawn_display_task(app.clone());
     spawn_conflict_check(app.clone());
     spawn_power_watcher(app.clone());
     spawn_first_run(app.clone());
@@ -481,6 +488,23 @@ fn spawn_fan_poller(app: Arc<App>) {
                 }
             }
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    });
+}
+
+/// Drives the numeric displays: writes each configured display's value at its own rate, and
+/// backs off after an adapter error. Idle until a display has a saved config.
+fn spawn_display_task(app: Arc<App>) {
+    tokio::spawn(async move {
+        loop {
+            if app.shutting_down.load(Ordering::SeqCst) != 0 {
+                return;
+            }
+            let wait = canvas_daemon::displays::tick(&app, std::time::Instant::now()).await;
+            tokio::select! {
+                _ = tokio::time::sleep(wait) => {}
+                _ = app.displays.wake.notified() => {}
+            }
         }
     });
 }

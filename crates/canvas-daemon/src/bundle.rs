@@ -11,6 +11,7 @@ const CONFIG_FILES: &[&str] = &[
     "layouts.json",
     "zones.json",
     "effects.json",
+    "displays.json",
     "fans.last.toml",
 ];
 
@@ -86,6 +87,11 @@ pub enum BundleError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_display_configs_are_in_the_diagnostic_bundle() {
+        assert!(CONFIG_FILES.contains(&"displays.json"));
+    }
 
     #[test]
     fn the_bundle_never_carries_the_token() {

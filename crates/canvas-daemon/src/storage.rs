@@ -18,6 +18,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::displays::{DisplaysFile, DISPLAYS_FILE, DISPLAYS_SCHEMA};
 use crate::paths;
 
 /// Writes `bytes` to `path` atomically (temp file in the same dir, then rename).
@@ -121,6 +122,12 @@ macro_rules! impl_schema_version {
 
 impl_schema_version!(ConfigFile, LayoutsFile, ZonesFile, EffectsFile, FansFile);
 
+impl SchemaVersioned for DisplaysFile {
+    fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+}
+
 /// Reads the `schema_version` field of a parsed document, if it has one.
 fn version_of<T: SchemaVersioned>(value: &T) -> u32 {
     value.schema_version()
@@ -164,7 +171,14 @@ pub fn timestamp() -> String {
 pub fn snapshot(home: &Path, label: &str) -> std::io::Result<PathBuf> {
     let dir = paths::backups_dir_in(home).join(format!("{}-{}", timestamp(), label));
     std::fs::create_dir_all(&dir)?;
-    let keep: &[&str] = &["config.toml", "layouts.json", "zones.json", "effects.json", "fans.last.toml"];
+    let keep: &[&str] = &[
+        "config.toml",
+        "layouts.json",
+        "zones.json",
+        "effects.json",
+        DISPLAYS_FILE,
+        "fans.last.toml",
+    ];
     for name in keep {
         let src = home.join(name);
         if src.exists() {
@@ -206,6 +220,8 @@ pub struct Store {
     pub layouts: LayoutsFile,
     pub zones: ZonesFile,
     pub effects: EffectsFile,
+    /// The numeric display configs (`displays.json`). A display is driven only while it has one.
+    pub displays: DisplaysFile,
     /// Where the files live. The daemon uses the user's home; the tests use a temp
     /// directory so they never touch Luke's real config.
     pub home: PathBuf,
@@ -218,6 +234,7 @@ impl Default for Store {
             layouts: default_layouts(),
             zones: ZonesFile { schema_version: ZONES_SCHEMA, sizes: BTreeMap::new() },
             effects: EffectsFile { schema_version: EFFECTS_SCHEMA, ..Default::default() },
+            displays: DisplaysFile::default(),
             home: paths::home(),
         }
     }
@@ -260,6 +277,7 @@ impl Store {
         let layouts = home.join(LAYOUTS_FILE);
         let zones = home.join(ZONES_FILE);
         let effects = home.join(EFFECTS_FILE);
+        let displays = home.join(DISPLAYS_FILE);
         let _ = std::fs::create_dir_all(&home);
 
         let config_value: Option<ConfigFile> =
@@ -282,12 +300,18 @@ impl Store {
                 tracing::error!(error = %e, "effects.json could not be read");
                 None
             });
+        let displays_value: Option<DisplaysFile> =
+            read_parsed(&displays, DISPLAYS_SCHEMA, DISPLAYS_FILE).unwrap_or_else(|e| {
+                tracing::error!(error = %e, "displays.json could not be read");
+                None
+            });
 
         let mut store = Store {
             config: config_value.unwrap_or_default(),
             layouts: layouts_value.unwrap_or_else(default_layouts),
             zones: zones_value.unwrap_or_else(|| Store::default().zones),
             effects: effects_value.unwrap_or_else(|| Store::default().effects),
+            displays: displays_value.unwrap_or_default(),
             home,
         };
         // A config from a newer schema is not silently downgraded.
@@ -331,6 +355,10 @@ impl Store {
         write_json(&self.home.join(ZONES_FILE), &self.zones)
     }
 
+    pub fn save_displays(&self) -> std::io::Result<()> {
+        crate::displays::save(&self.home, &self.displays)
+    }
+
     pub fn save_effects(&self) -> std::io::Result<()> {
         write_json(&self.home.join(EFFECTS_FILE), &self.effects)
     }
@@ -339,7 +367,8 @@ impl Store {
         self.save_config()?;
         self.save_layouts()?;
         self.save_zones()?;
-        self.save_effects()
+        self.save_effects()?;
+        self.save_displays()
     }
 }
 

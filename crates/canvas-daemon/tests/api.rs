@@ -936,3 +936,366 @@ async fn a_refused_request_from_an_unknown_origin_carries_no_cors_headers() {
         "an unknown origin gets no CORS headers"
     );
 }
+
+// ---------------------------------------------------------------- numeric displays
+
+use canvas_daemon::displays;
+use canvas_proto::device::DeviceId;
+use canvas_proto::display::{DisplayConfig, DisplaySource, DisplayUnit};
+use canvas_proto::fans::{FanHeaderStatus, FanMode, FansStatus, TempReading, TempSource};
+use common::{chione_info, DisplayLog, FakeDisplay};
+use std::sync::Mutex as StdMutex;
+use std::time::{Duration, Instant};
+
+/// The CHIONE's id, as the spine names it.
+const ID: &str = "chione:1b80:b53c";
+
+/// The display route for the CHIONE.
+fn display_path() -> String {
+    routes::DISPLAY.replace("{id}", ID)
+}
+
+/// The value route for the CHIONE.
+fn value_path() -> String {
+    routes::DISPLAY_VALUE.replace("{id}", ID)
+}
+
+/// Builds the app with a fake numeric display. The fake's log is returned for the assertions.
+fn build_with_display(found: bool) -> (axum::Router, Arc<App>, TempHome, Arc<StdMutex<DisplayLog>>) {
+    let home = TempHome::new();
+    let store = canvas_daemon::storage::Store::at(&home.path);
+    let engine = Arc::new(FakeEngine::default());
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let log = Arc::new(StdMutex::new(DisplayLog {
+        found: if found { vec![chione_info()] } else { Vec::new() },
+        ..DisplayLog::default()
+    }));
+    let app = Arc::new(App::with_displays(
+        store,
+        engine,
+        Box::new(FakeAdapter::default()),
+        TOKEN.to_string(),
+        "0.1.0-test".to_string(),
+        tx,
+        Box::new(FakeDisplay(log.clone())),
+    ));
+    (api::router(app.clone()), app, home, log)
+}
+
+/// A saved config for the CHIONE.
+fn config(source: DisplaySource, unit: DisplayUnit, decimals: u8, blink_above: Option<f32>) -> DisplayConfig {
+    DisplayConfig { device: DeviceId(ID.into()), source, unit, decimals, blink_above }
+}
+
+/// A `PUT` of a config to the CHIONE's route.
+async fn put_config(router: &axum::Router, body: &DisplayConfig) -> axum::response::Response {
+    let text = serde_json::to_string(body).expect("the config serializes");
+    router
+        .clone()
+        .oneshot(request_with_body("PUT", &display_path(), &text))
+        .await
+        .expect("the router answers")
+}
+
+/// Fan status with temperatures and fan headers.
+fn fans(temps: Vec<(TempSource, f32)>, headers: Vec<(&str, u32)>) -> FansStatus {
+    FansStatus {
+        chip: Some("NCT6687D-R @ 0xA20".into()),
+        hardware_watchdog: None,
+        headers: headers
+            .into_iter()
+            .map(|(id, rpm)| FanHeaderStatus {
+                id: id.to_string(),
+                label: id.to_string(),
+                rpm: Some(rpm),
+                pwm_percent: None,
+                mode: FanMode::Bios,
+                on_bios: true,
+                override_reason: None,
+            })
+            .collect(),
+        temps: temps
+            .into_iter()
+            .map(|(source, c)| TempReading { label: String::new(), source, celsius: Some(c) })
+            .collect(),
+        active_profile: "Default".into(),
+        profiles: vec!["Default".into()],
+        floor_percent: 30,
+    }
+}
+
+/// Runs one pass of the display task at `now`. Returns the wait it asked for.
+async fn pass(app: &App, now: Instant) -> Duration {
+    displays::tick(app, now).await
+}
+
+#[tokio::test]
+async fn an_unconfigured_display_is_never_connected_or_written() {
+    let (_router, app, _home, log) = build_with_display(true);
+    let mut now = Instant::now();
+    for _ in 0..3 {
+        now += pass(&app, now).await;
+    }
+    let log = log.lock().unwrap();
+    assert_eq!(log.connects, 0, "a display with no saved config is never connected");
+    assert!(log.writes.is_empty(), "and never written");
+    assert_eq!(log.discovers, 0, "the task does not even enumerate with nothing saved");
+}
+
+#[tokio::test]
+async fn a_configured_display_that_is_not_plugged_in_is_not_opened() {
+    let (router, app, _home, log) = build_with_display(false);
+    let response = put_config(&router, &config(DisplaySource::Fixed { value: 5.0 }, DisplayUnit::Celsius, 0, None)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let wait = pass(&app, Instant::now()).await;
+    assert_eq!(wait, displays::ABSENT_POLL, "a missing display is looked for again later");
+    let log = log.lock().unwrap();
+    assert_eq!(log.discovers, 1, "it is enumerated");
+    assert_eq!(log.connects, 0, "and not opened");
+    assert!(log.writes.is_empty());
+}
+
+#[tokio::test]
+async fn a_saved_config_is_written_at_the_interval_with_the_value() {
+    let (router, app, _home, log) = build_with_display(true);
+    let response = put_config(&router, &config(DisplaySource::CpuTemp, DisplayUnit::Celsius, 1, None)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    *app.fans.write().await = Some(fans(vec![(TempSource::Cpu, 42.5)], vec![]));
+
+    let now = Instant::now();
+    let wait = pass(&app, now).await;
+    assert_eq!(wait, Duration::from_millis(250));
+    {
+        let log = log.lock().unwrap();
+        assert_eq!(log.connects, 1);
+        assert_eq!(log.writes.len(), 1);
+        let (device, value) = &log.writes[0];
+        assert_eq!(device.0, ID);
+        assert_eq!(value.value, Some(42.5));
+        assert_eq!(value.decimals, 1);
+        assert_eq!(value.unit, DisplayUnit::Celsius);
+        assert!(!value.blink);
+    }
+    pass(&app, now + Duration::from_millis(250)).await;
+    assert_eq!(log.lock().unwrap().writes.len(), 2, "the next write is one interval later");
+}
+
+#[tokio::test]
+async fn fahrenheit_is_rounded_and_blinks_at_blink_above() {
+    let (router, app, _home, log) = build_with_display(true);
+    put_config(&router, &config(DisplaySource::CpuTemp, DisplayUnit::Fahrenheit, 0, Some(100.0))).await;
+    let now = Instant::now();
+    *app.fans.write().await = Some(fans(vec![(TempSource::Cpu, 37.8)], vec![]));
+    pass(&app, now).await;
+    *app.fans.write().await = Some(fans(vec![(TempSource::Cpu, 37.4)], vec![]));
+    pass(&app, now + Duration::from_millis(250)).await;
+
+    let log = log.lock().unwrap();
+    let (_, hot) = &log.writes[0];
+    assert_eq!(hot.value, Some(100.0), "37.8 C is 100.04 F, shown as 100");
+    assert!(hot.blink, "100 is at blink_above 100");
+    assert_eq!(hot.unit, DisplayUnit::Fahrenheit);
+    let (_, cool) = &log.writes[1];
+    assert_eq!(cool.value, Some(99.0), "37.4 C is 99.32 F, shown as 99");
+    assert!(!cool.blink);
+}
+
+#[tokio::test]
+async fn the_api_source_shows_the_put_value_and_blank_until_then() {
+    let (router, app, _home, log) = build_with_display(true);
+    put_config(&router, &config(DisplaySource::Api, DisplayUnit::Celsius, 1, None)).await;
+    let mut now = Instant::now();
+    now += pass(&app, now).await;
+    assert_eq!(log.lock().unwrap().writes.last().unwrap().1.value, None, "blank before any value");
+
+    let set = |v: serde_json::Value| router.clone().oneshot(request_with_body("PUT", &value_path(), &v.to_string()));
+    assert_eq!(set(serde_json::json!({ "value": 12.5 })).await.unwrap().status(), StatusCode::OK);
+    pass(&app, now).await;
+    assert_eq!(log.lock().unwrap().writes.last().unwrap().1.value, Some(12.5));
+
+    let status = json(router.clone().oneshot(request("GET", routes::DISPLAYS)).await.unwrap()).await;
+    assert_eq!(status[0]["shown"]["value"], serde_json::json!(12.5));
+    assert_eq!(status[0]["info"]["connected"], serde_json::json!(true));
+
+    assert_eq!(set(serde_json::json!({ "value": null })).await.unwrap().status(), StatusCode::OK);
+    now += Duration::from_millis(250);
+    pass(&app, now).await;
+    assert_eq!(log.lock().unwrap().writes.last().unwrap().1.value, None, "null blanks it");
+    let status = json(router.clone().oneshot(request("GET", routes::DISPLAYS)).await.unwrap()).await;
+    assert!(status[0]["shown"].is_null(), "a blank reports shown: null");
+}
+
+#[tokio::test]
+async fn a_value_for_an_unknown_display_is_a_404() {
+    let (router, _app, _home, _log) = build_with_display(true);
+    let path = routes::DISPLAY_VALUE.replace("{id}", "chione:0000:0000");
+    let response = router
+        .clone()
+        .oneshot(request_with_body("PUT", &path, r#"{"value": 1.0}"#))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(json(response).await["error"], "not_found");
+}
+
+#[tokio::test]
+async fn a_value_the_display_refuses_shows_blank_and_is_logged_once() {
+    let (router, app, _home, log) = build_with_display(true);
+    log.lock().unwrap().refuse_at = Some(1000.0);
+    put_config(&router, &config(DisplaySource::Fixed { value: 1234.0 }, DisplayUnit::Celsius, 0, None)).await;
+    let mut now = Instant::now();
+    for _ in 0..3 {
+        now += pass(&app, now).await;
+        now += Duration::from_millis(250);
+    }
+    {
+        let log = log.lock().unwrap();
+        assert!(log.writes.iter().all(|(_, v)| v.value.is_none()), "every pass writes blank");
+        assert_eq!(log.writes.len(), 3);
+        assert_eq!(log.connects, 1, "a refusal keeps the connection");
+        assert_eq!(log.disconnects, 0);
+    }
+    assert_eq!(app.displays.runtime.read().await.refusal_warnings, 1, "the refusal is logged once");
+
+    // A value that fits clears the streak, so the next refusal is logged again.
+    put_config(&router, &config(DisplaySource::Fixed { value: 500.0 }, DisplayUnit::Celsius, 0, None)).await;
+    pass(&app, now).await;
+    assert_eq!(log.lock().unwrap().writes.last().unwrap().1.value, Some(500.0));
+    put_config(&router, &config(DisplaySource::Fixed { value: 1234.0 }, DisplayUnit::Celsius, 0, None)).await;
+    pass(&app, now + Duration::from_millis(500)).await;
+    assert_eq!(app.displays.runtime.read().await.refusal_warnings, 2);
+}
+
+#[tokio::test]
+async fn a_missing_sensor_reading_shows_blank() {
+    let (router, app, _home, log) = build_with_display(true);
+    put_config(&router, &config(DisplaySource::CpuTemp, DisplayUnit::Celsius, 1, None)).await;
+    // No fan status yet (the service is down): the CPU reading is missing.
+    pass(&app, Instant::now()).await;
+    assert_eq!(log.lock().unwrap().writes[0].1.value, None);
+}
+
+#[tokio::test]
+async fn a_fan_rpm_display_shows_the_header_speed() {
+    let (router, app, _home, log) = build_with_display(true);
+    put_config(&router, &config(DisplaySource::FanRpm { header: "pump_fan".into() }, DisplayUnit::Celsius, 0, None)).await;
+    *app.fans.write().await = Some(fans(vec![], vec![("pump_fan", 2400)]));
+    pass(&app, Instant::now()).await;
+    let log = log.lock().unwrap();
+    let (_, value) = &log.writes[0];
+    assert_eq!(value.value, Some(2400.0));
+    assert_eq!(value.mode, canvas_proto::display::DisplayMode::FanRpm);
+}
+
+#[tokio::test]
+async fn a_failed_connect_backs_off_and_the_wait_doubles() {
+    let (router, app, _home, log) = build_with_display(true);
+    put_config(&router, &config(DisplaySource::Fixed { value: 5.0 }, DisplayUnit::Celsius, 0, None)).await;
+    log.lock().unwrap().fail_connect = 2;
+    let t0 = Instant::now();
+    assert_eq!(pass(&app, t0).await, Duration::from_secs(1), "first error: wait 1 s");
+    assert_eq!(pass(&app, t0 + Duration::from_millis(500)).await, Duration::from_millis(500), "waits, no call");
+    assert_eq!(log.lock().unwrap().connects, 1, "no connect while backing off");
+    let t1 = t0 + Duration::from_secs(1);
+    assert_eq!(pass(&app, t1).await, Duration::from_secs(2), "second error: wait doubles to 2 s");
+    assert_eq!(log.lock().unwrap().connects, 2);
+    let t2 = t1 + Duration::from_secs(2);
+    assert_eq!(pass(&app, t2).await, Duration::from_millis(250), "connected and writing");
+    let log = log.lock().unwrap();
+    assert_eq!(log.connects, 3);
+    assert_eq!(log.writes.len(), 1);
+    assert_eq!(log.disconnects, 2, "each failure closes the device");
+}
+
+#[tokio::test]
+async fn a_failed_write_drops_the_connection_and_retries_after_backoff() {
+    let (router, app, _home, log) = build_with_display(true);
+    put_config(&router, &config(DisplaySource::Fixed { value: 5.0 }, DisplayUnit::Celsius, 0, None)).await;
+    log.lock().unwrap().fail_write = 1;
+    let t0 = Instant::now();
+    assert_eq!(pass(&app, t0).await, Duration::from_secs(1));
+    {
+        let log = log.lock().unwrap();
+        assert!(!log.connected, "the device is closed after the failed write");
+        assert!(log.writes.is_empty());
+    }
+    assert!(app.displays.runtime.read().await.shown.is_empty(), "nothing is shown while closed");
+    assert_eq!(pass(&app, t0 + Duration::from_secs(1)).await, Duration::from_millis(250));
+    assert_eq!(log.lock().unwrap().writes.len(), 1, "reconnected and written");
+}
+
+#[tokio::test]
+async fn delete_stops_the_writes_and_closes_the_device() {
+    let (router, app, _home, log) = build_with_display(true);
+    put_config(&router, &config(DisplaySource::Fixed { value: 5.0 }, DisplayUnit::Celsius, 0, None)).await;
+    let now = Instant::now();
+    pass(&app, now).await;
+    assert_eq!(log.lock().unwrap().writes.len(), 1);
+
+    let response = router.clone().oneshot(request("DELETE", &display_path())).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    {
+        let log = log.lock().unwrap();
+        assert_eq!(log.disconnects, 1, "the device is closed");
+        assert!(!log.connected);
+    }
+    let status = json(router.clone().oneshot(request("GET", routes::DISPLAYS)).await.unwrap()).await;
+    assert_eq!(status, serde_json::json!([]), "the config is gone");
+
+    let wait = pass(&app, now + Duration::from_millis(250)).await;
+    assert_eq!(wait, displays::IDLE_POLL, "nothing to drive");
+    {
+        let log = log.lock().unwrap();
+        assert_eq!(log.writes.len(), 1, "no write after the delete");
+        assert_eq!(log.connects, 1, "and no reconnect");
+    }
+
+    let again = router.clone().oneshot(request("DELETE", &display_path())).await.unwrap();
+    assert_eq!(again.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_bad_config_is_refused_with_422_and_nothing_is_saved() {
+    let (router, _app, home, _log) = build_with_display(true);
+    let other_device = DisplayConfig {
+        device: DeviceId("chione:0000:0000".into()),
+        ..config(DisplaySource::CpuTemp, DisplayUnit::Celsius, 1, None)
+    };
+    let refused = [
+        other_device,
+        config(DisplaySource::CpuTemp, DisplayUnit::Celsius, 2, None),
+        config(DisplaySource::FanRpm { header: "pump_fan".into() }, DisplayUnit::Celsius, 1, None),
+    ];
+    for body in &refused {
+        let response = put_config(&router, body).await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY, "{body:?}");
+        assert_eq!(json(response).await["error"], "validation");
+    }
+    assert!(!home.path.join("displays.json").exists(), "a refused config writes nothing");
+}
+
+#[tokio::test]
+async fn a_saved_config_is_written_to_displays_json_and_reloaded() {
+    let (router, _app, home, _log) = build_with_display(true);
+    let saved = config(DisplaySource::BoardTemp { sensor: "board_temp0".into() }, DisplayUnit::Fahrenheit, 1, Some(90.0));
+    assert_eq!(put_config(&router, &saved).await.status(), StatusCode::OK);
+    let file = home.path.join("displays.json");
+    assert!(file.exists(), "displays.json is in the user directory");
+    let reloaded = canvas_daemon::storage::Store::load_from(&home.path);
+    assert_eq!(reloaded.displays.displays, vec![saved.clone()]);
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains("\"schema_version\": 1"), "{text}");
+}
+
+#[tokio::test]
+async fn a_value_for_a_display_not_on_the_api_source_is_a_422() {
+    let (router, _app, _home, _log) = build_with_display(true);
+    put_config(&router, &config(DisplaySource::CpuTemp, DisplayUnit::Celsius, 1, None)).await;
+    let response = router
+        .clone()
+        .oneshot(request_with_body("PUT", &value_path(), r#"{"value": 40.0}"#))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(json(response).await["error"], "validation");
+}

@@ -5,6 +5,7 @@
 
 pub mod diag;
 pub mod devices;
+pub mod displays;
 pub mod effects;
 pub mod fans;
 pub mod layouts;
@@ -45,6 +46,12 @@ pub fn router(app: Arc<App>) -> Router {
         .route(routes::LAYOUTS, get(layouts::list_layouts))
         .route(routes::LAYOUT, get(layouts::get_layout).put(layouts::put_layout))
         .route(routes::LAYOUT_ACTIVE, put(layouts::put_active_layout))
+        .route(routes::DISPLAYS, get(displays::list_displays))
+        .route(
+            routes::DISPLAY,
+            put(displays::put_display).delete(displays::delete_display),
+        )
+        .route(routes::DISPLAY_VALUE, put(displays::put_display_value))
         .route(routes::FANS, get(fans::get_fans))
         .route(routes::FAN_HEADER, patch(fans::patch_header))
         .route(routes::FAN_PROFILE, get(fans::get_profile).patch(fans::patch_profile))

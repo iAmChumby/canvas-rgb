@@ -278,3 +278,106 @@ pub fn device(name: &str, kind: canvas_proto::device::DeviceKind, leds: u32) -> 
 pub fn engine_settings() -> EngineSettings {
     EngineSettings { fps: 30, power: canvas_proto::api::Power::Running, brightness: 100 }
 }
+
+/// What a [`FakeDisplay`] was asked to do, and what it did. Tests set the `found`, `fail_*` and
+/// `refuse_at` knobs before the call under test and read the counters after it.
+#[derive(Debug, Default)]
+pub struct DisplayLog {
+    /// The displays the enumeration reports.
+    pub found: Vec<canvas_proto::display::DisplayInfo>,
+    pub connected: bool,
+    pub connects: u32,
+    pub disconnects: u32,
+    pub discovers: u32,
+    /// Accepted writes only, in order.
+    pub writes: Vec<(DeviceId, canvas_proto::display::DisplayValue)>,
+    /// Makes this many connects fail.
+    pub fail_connect: u32,
+    /// Makes this many writes fail. A failed write drops the connection, as the CHIONE does.
+    pub fail_write: u32,
+    /// Refuses a value at or above this. A refusal keeps the connection and writes nothing.
+    pub refuse_at: Option<f32>,
+}
+
+/// A numeric display that records everything. Never opens a device.
+pub struct FakeDisplay(pub std::sync::Arc<Mutex<DisplayLog>>);
+
+/// The CHIONE as the enumeration reports it.
+pub fn chione_info() -> canvas_proto::display::DisplayInfo {
+    canvas_proto::display::DisplayInfo {
+        id: DeviceId("chione:1b80:b53c".into()),
+        name: "GAMDIAS CHIONE Digital Display".into(),
+        digits: 4,
+        max_decimals: 1,
+        modes: vec![
+            canvas_proto::display::DisplayMode::Temperature,
+            canvas_proto::display::DisplayMode::FanRpm,
+        ],
+        connected: false,
+    }
+}
+
+#[async_trait::async_trait]
+impl canvas_proto::traits::NumericDisplayAdapter for FakeDisplay {
+    fn name(&self) -> &'static str {
+        "fake-display"
+    }
+
+    async fn connect(&mut self) -> Result<(), AdapterError> {
+        let mut log = self.0.lock().unwrap();
+        log.connects += 1;
+        if log.fail_connect > 0 {
+            log.fail_connect -= 1;
+            return Err(AdapterError::Io(std::io::Error::new(std::io::ErrorKind::TimedOut, "no reply")));
+        }
+        if log.found.is_empty() {
+            return Err(AdapterError::NotConnected);
+        }
+        log.connected = true;
+        Ok(())
+    }
+
+    async fn disconnect(&mut self) -> Result<(), AdapterError> {
+        let mut log = self.0.lock().unwrap();
+        log.disconnects += 1;
+        log.connected = false;
+        Ok(())
+    }
+
+    fn is_connected(&self) -> bool {
+        self.0.lock().unwrap().connected
+    }
+
+    async fn discover(&mut self) -> Result<Vec<canvas_proto::display::DisplayInfo>, AdapterError> {
+        let mut log = self.0.lock().unwrap();
+        log.discovers += 1;
+        Ok(log.found.clone())
+    }
+
+    async fn write_value(
+        &mut self,
+        device: &DeviceId,
+        value: &canvas_proto::display::DisplayValue,
+    ) -> Result<(), AdapterError> {
+        let mut log = self.0.lock().unwrap();
+        if !log.connected {
+            return Err(AdapterError::NotConnected);
+        }
+        if log.fail_write > 0 {
+            log.fail_write -= 1;
+            log.connected = false;
+            return Err(AdapterError::Io(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "write failed")));
+        }
+        if let (Some(at), Some(v)) = (log.refuse_at, value.value) {
+            if v >= at {
+                return Err(AdapterError::Protocol(format!("{v} does not fit four digits")));
+            }
+        }
+        log.writes.push((device.clone(), *value));
+        Ok(())
+    }
+
+    fn write_interval_ms(&self) -> u32 {
+        250
+    }
+}
