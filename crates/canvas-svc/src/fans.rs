@@ -27,6 +27,10 @@ use std::time::{Duration, Instant};
 
 /// Readback tolerance for a written duty, in percentage points.
 pub const READBACK_TOLERANCE: u8 = 2;
+/// How long a new duty may take to show in the chip's PWM readback before it is a mismatch.
+pub const READBACK_SETTLE: Duration = Duration::from_secs(3);
+/// Readback polls while a duty settles.
+const READBACK_POLL: Duration = Duration::from_millis(100);
 
 /// hardware_watchdog as settled from public sources (see the report): neither the nct6687d
 /// driver nor LibreHardwareMonitor's NCT677X handling reaches a chip watchdog register.
@@ -428,10 +432,26 @@ impl FanController {
     fn write_and_verify(&mut self, ch: usize, percent: u8) -> Result<(), String> {
         let chip = self.chip.as_mut().ok_or("no fan chip")?;
         chip.write_duty_percent(ch, percent).map_err(|e| format!("write {percent}%: {e}"))?;
-        match chip.read_duty_percent(ch).map_err(|e| format!("readback: {e}"))? {
-            Some(read) if read.abs_diff(percent) <= READBACK_TOLERANCE => {}
-            Some(read) => return Err(format!("readback {read}% for {percent}%")),
-            None => return Err("no duty readback".into()),
+        // The EC applies a new duty a moment after it accepts it (nct6687d: writes "don't take
+        // effect immediately" on some MSI boards), so the readback gets READBACK_SETTLE.
+        let started = Instant::now();
+        let mut seen = Vec::new();
+        loop {
+            match chip.read_duty_percent(ch).map_err(|e| format!("readback: {e}"))? {
+                Some(read) if read.abs_diff(percent) <= READBACK_TOLERANCE => {
+                    if !seen.is_empty() {
+                        tracing::info!(channel = ch, percent, settle_ms = started.elapsed().as_millis() as u64, ?seen, "the duty settled");
+                    }
+                    break;
+                }
+                Some(read) => seen.push(read),
+                None => return Err("no duty readback".into()),
+            }
+            if started.elapsed() >= READBACK_SETTLE {
+                let last = seen.last().copied().unwrap_or_default();
+                return Err(format!("readback {last}% for {percent}% after {} ms", READBACK_SETTLE.as_millis()));
+            }
+            std::thread::sleep(READBACK_POLL);
         }
         if !chip.read_manual(ch).map_err(|e| format!("manual readback: {e}"))? {
             return Err("chip reports BIOS control after a manual write".into());
