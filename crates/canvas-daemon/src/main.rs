@@ -351,6 +351,22 @@ fn spawn_openrgb_supervisor(app: Arc<App>) {
                             let mut state = app.openrgb.write().await;
                             *state = LinkState::Connected;
                         }
+                        // After the first run, a zone that appears (a late device, a
+                        // header that got its LEDs) is placed instead of staying black.
+                        {
+                            let mut store = app.store.write().await;
+                            if store.config.first_run_done {
+                                let added = store.active_layout_mut().map_or(0, |layout| {
+                                    canvas_daemon::first_run::place_missing_zones(layout, &devices)
+                                });
+                                if added > 0 {
+                                    tracing::info!(added, "new zones were placed on the canvas");
+                                    if let Err(e) = store.save_layouts() {
+                                        tracing::warn!(error = %e, "could not save the layouts");
+                                    }
+                                }
+                            }
+                        }
                         // The engine needs the new devices and the zone sizes.
                         if let Some(layout) = app.active_layout().await {
                             let device_list = app.devices.read().await.clone();

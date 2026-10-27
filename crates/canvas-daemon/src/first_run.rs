@@ -384,6 +384,66 @@ pub fn build_default_layout(devices: &[DeviceInfo]) -> Layout {
     }
 }
 
+/// Adds every zone with LEDs that the layout does not place yet, where the first run
+/// would have put it. Zones already in the layout are left where they are.
+///
+/// A device detected after the first run (or a header sized later) lands on the canvas,
+/// as SignalRGB does with a new device, instead of staying black. Returns how many zones
+/// were added.
+pub fn place_missing_zones(layout: &mut Layout, devices: &[DeviceInfo]) -> usize {
+    let defaults = build_default_layout(devices);
+    let mut added = 0;
+    for zone in defaults.zones {
+        let present = layout
+            .zones
+            .iter()
+            .any(|p| p.device_id == zone.device_id && p.zone_index == zone.zone_index);
+        if !present {
+            layout.zones.push(zone);
+            added += 1;
+        }
+    }
+    added
+}
+
+/// How long the device list must hold still before the first run trusts it: longer than
+/// one supervisor refresh (5 s), so a device still being detected shows up first.
+const SETTLE: std::time::Duration = std::time::Duration::from_secs(6);
+
+/// The most settle rounds the first run waits through before using the list it has.
+const SETTLE_ROUNDS: u32 = 10;
+
+/// What decides "the device list moved": ids and every zone's LED count.
+fn settle_key(devices: &[DeviceInfo]) -> Vec<(String, Vec<u32>)> {
+    let mut key: Vec<_> = devices
+        .iter()
+        .map(|d| (d.id.0.clone(), d.zones.iter().map(|z| z.led_count).collect()))
+        .collect();
+    key.sort();
+    key
+}
+
+/// The device list once OpenRGB has stopped adding to it.
+///
+/// OpenRGB detects devices one at a time, so the first list can be short: the mic alone,
+/// with the board still coming. `None` when the daemon is quitting.
+async fn settled_devices(app: &std::sync::Arc<crate::state::App>) -> Option<Vec<DeviceInfo>> {
+    let mut devices = app.devices.read().await.clone();
+    for _ in 0..SETTLE_ROUNDS {
+        tokio::time::sleep(SETTLE).await;
+        if app.shutting_down.load(std::sync::atomic::Ordering::SeqCst) != 0 {
+            return None;
+        }
+        let now = app.devices.read().await.clone();
+        if settle_key(&now) == settle_key(&devices) {
+            return Some(now);
+        }
+        tracing::info!(count = now.len(), "the device list is still changing; the first run waits");
+        devices = now;
+    }
+    Some(devices)
+}
+
 /// The order the device kinds are placed in.
 fn kind_rank(kind: DeviceKind) -> u8 {
     match kind {
@@ -463,11 +523,13 @@ async fn run(app: &std::sync::Arc<crate::state::App>) {
     if !should_run(app).await {
         return;
     }
-    let devices = app.devices.read().await.clone();
-    if devices.is_empty() {
+    if app.devices.read().await.is_empty() {
         tracing::info!("the first run waits for the devices");
         return;
     }
+    let Some(devices) = settled_devices(app).await else {
+        return;
+    };
 
     // The JARGB counts come from SignalRGB, read-only.
     let counts = find_signalrgb_jargb_counts();
@@ -531,8 +593,14 @@ async fn run(app: &std::sync::Arc<crate::state::App>) {
         }
     };
 
-    // Place the devices and activate Poison.
-    let layout = build_default_layout(&devices);
+    // Place the devices and activate Poison. The effect is saved on the layout, as the
+    // activate route does, so the status and the next start both see it.
+    let props = canvas_proto::props::Props::new();
+    let mut layout = build_default_layout(&devices);
+    layout.effect = Some(canvas_proto::layout::ActiveEffect {
+        id: FIRST_RUN_EFFECT.to_string(),
+        props: props.clone(),
+    });
     {
         let mut store = app.store.write().await;
         store.layouts.active = layout.id.clone();
@@ -545,7 +613,6 @@ async fn run(app: &std::sync::Arc<crate::state::App>) {
     let device_list = app.devices.read().await.clone();
     app.engine.set_layout(layout.clone(), device_list);
 
-    let props = canvas_proto::props::Props::new();
     if let Err(e) = crate::apply_effect(app, FIRST_RUN_EFFECT, &props).await {
         tracing::error!(error = %e, "the first run could not activate Poison");
     } else {
@@ -626,6 +693,20 @@ mod tests {
         let layout = build_default_layout(&devices);
         let zone = &layout.zones[0];
         assert!(zone.width > zone.height, "a board header is a horizontal strip");
+    }
+
+    #[test]
+    fn a_late_device_is_placed_and_the_placed_ones_stay_put() {
+        let mic = device("HyperX Quadcast S", DeviceKind::Microphone, 2);
+        let board = device("MSI MYSTIC LIGHT", DeviceKind::Motherboard, 120);
+        let mut layout = build_default_layout(std::slice::from_ref(&mic));
+        layout.zones[0].x = 200.0; // Luke moved the mic.
+        let added = place_missing_zones(&mut layout, &[mic.clone(), board.clone()]);
+        assert_eq!(added, board.zones.iter().filter(|z| z.led_count > 0).count());
+        assert!(layout.zones.iter().any(|z| z.device_id == board.id));
+        let mic_zone = layout.zones.iter().find(|z| z.device_id == mic.id).unwrap();
+        assert_eq!(mic_zone.x, 200.0);
+        assert_eq!(place_missing_zones(&mut layout, &[mic, board]), 0);
     }
 
     #[test]

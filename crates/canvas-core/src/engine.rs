@@ -602,7 +602,9 @@ fn render_loop(engine: Arc<CoreEngine>) {
                         &mut buffers.device_colors[i],
                         Vec::with_capacity(sink.led_count as usize),
                     ),
-                    None => Vec::new(),
+                    // A sink can arrive a frame before the plan that knows its device:
+                    // it gets black, at its full length, never an empty frame.
+                    None => vec![Rgb8::BLACK; sink.led_count as usize],
                 };
                 sink.sink.submit(colors);
             }
