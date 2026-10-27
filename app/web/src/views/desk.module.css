@@ -27,7 +27,7 @@
  * not from the palette, and it wants to be a token (see the report).
  */
 .desk {
-  --zone-bed: #07080c;
+  --zone-bed: var(--led-bed);
 }
 
 /* ---------- zones ---------- */

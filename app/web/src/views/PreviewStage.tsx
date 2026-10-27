@@ -512,9 +512,11 @@ function boxDistance(a: Box, b: Box): number {
 /**
  * Places the label chips.
  *
- * A chip must sit against **its own** zone: above it, or inside it when there is no room above.
- * It may never cover another zone, or it reads as that zone's label, and it may never sit under
- * the zoom control or one of its tooltips, or it is a chip nobody can read. The chips are
+ * A chip must sit against **its own** zone, just outside it: above, below or beside it. It goes
+ * inside the zone only when no place outside is free, because a chip inside its zone covers the
+ * zone's lamps (a JARGB strip is a bar of them). It may never cover another zone, or it reads as
+ * that zone's label, and it may never sit under the zoom control or one of its tooltips, or it
+ * is a chip nobody can read. The chips are
  * therefore placed one at a time, each one taking the first place where it is inside the canvas,
  * clear of every other zone and clear of the controls, and the ones that cannot be clear of each
  * other are pushed down.
@@ -597,7 +599,9 @@ function layoutLabels(
     // with the zone's left edge or with its right edge. When the zone is tall and narrow, the
     // chip can also stand beside it.
     const xs = [item.box.x, item.box.x + item.box.w - w];
-    const ys = [item.box.y - m.h - 4, item.box.y + 3, item.box.y + item.box.h + 4];
+    // Inside the zone, the chip is centred on it: a strip a few pixels tall is then covered by a
+    // chip that is clear of its neighbours, where a chip hung from its top would hit them.
+    const ys = [item.box.y - m.h - 4, item.box.y + 3, item.box.y + (item.box.h - m.h) / 2, item.box.y + item.box.h + 4];
     const candidates: Box[] = [];
     for (const y of ys) {
       for (const x of xs) {
@@ -636,19 +640,23 @@ function layoutLabels(
     };
     /**
      * How good a place is. The rules are weighed in the order they matter: a chip that names
-     * its zone beats a chip that does not, a chip that does not cover another zone beats one
-     * that does, and a chip that nobody can see under the control is the worst of all.
+     * its zone beats a chip that does not; a chip that sits just outside its zone beats one that
+     * covers the zone's own lamps, whenever there is room outside (the lamps are the thing the
+     * chip must not hide); a chip that covers another zone, another chip or the zoom control
+     * loses to any chip that does not, and a chip under the control is the worst of all.
      */
     const score = (b: Box): number => {
       if (!inCanvas(b)) return -1000;
       let s = 0;
       s += anchored(b) ? 16 : -8;
-      // A chip that is printed on its zone reads better than one that floats next to it.
-      s += overlaps(b, item.box) ? 2 : 0;
-      s += !zoneClash(b) ? 8 : -4;
-      s += !chipClash(b) ? 4 : -2;
-      s += !controlClash(b) ? 2 : -8;
-      s += nearestIsOwn(b) ? 1 : 0;
+      // A chip inside its own zone covers the zone's lamps: that is the last resort, taken only
+      // when every place outside the zone is taken by another zone, a chip or the control.
+      s += overlaps(b, item.box) ? -20 : 0;
+      s += !zoneClash(b) ? 8 : -30;
+      s += !chipClash(b) ? 4 : -30;
+      s += !controlClash(b) ? 2 : -40;
+      // A chip that sits nearer to another zone names that one: a clear fault, not a tie-break.
+      s += nearestIsOwn(b) ? 1 : -30;
       return s;
     };
     /**
@@ -684,7 +692,12 @@ function layoutLabels(
      */
     const slide = (b: Box): Box => {
       if (!zoneClash(b)) return b;
-      const free = (t: Box) => inCanvas(t) && !zoneClash(t) && !chipClash(t);
+      // A chip that sits outside its zone stays outside it while it slides.
+      const free = (t: Box) =>
+        inCanvas(t) &&
+        !zoneClash(t) &&
+        !chipClash(t) &&
+        !(overlaps(t, item.box) && !overlaps(b, item.box));
       for (let d = 1; d <= 12; d++) {
         for (const y of [b.y - d, b.y + d]) {
           const t = { ...b, y };
