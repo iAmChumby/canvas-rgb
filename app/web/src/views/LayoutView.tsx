@@ -16,6 +16,7 @@ import { refreshLayouts, useSnap } from "@/lib/store";
 import { defaultRect, findZoneInfo } from "@/lib/zones";
 import { clamp } from "@/lib/format";
 import type { Layout } from "@/proto/Layout";
+import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { PlacedZone } from "@/proto/PlacedZone";
 import desk from "./desk.module.css";
 import type { RenderScale } from "@/proto/RenderScale";
@@ -28,6 +29,24 @@ const CANVAS_H = 200;
 /** The layout without its effect: the effect is owned by the Effects page, not by this draft. */
 function withoutEffect(l: Layout): Layout {
   return { ...l, effect: null };
+}
+
+/**
+ * A name for a device the daemon does not list: the same VID/PID as a listed device, if there is
+ * one. The stale zone on this PC is OpenRGB's copy of the keyboard, and the native adapter's id
+ * carries the same numbers, so the editor can say what it is instead of "zone 0".
+ */
+function staleDeviceName(deviceId: string, devices: DeviceInfo[] | null): string {
+  const vid = /VID_([0-9A-Fa-f]{4})/.exec(deviceId)?.[1];
+  const pid = /PID_([0-9A-Fa-f]{4})/.exec(deviceId)?.[1];
+  if (vid && pid) {
+    const key = `${vid.toLowerCase()}:${pid.toLowerCase()}`;
+    const same = devices?.find(
+      (d) => d.id.toLowerCase().includes(key) || d.location.toLowerCase().includes(key),
+    );
+    if (same) return `${same.name} (OpenRGB copy)`;
+  }
+  return "Device not connected";
 }
 
 /** A short, readable name for a device the daemon does not list any more. */
@@ -271,7 +290,10 @@ export function LayoutView() {
             {shownZone && selected !== null ? (
               <ZoneInspector
                 zone={shownZone}
-                name={selectedInfo?.zone.name ?? `Zone ${shownZone.zone_index} · device not found`}
+                name={
+                  selectedInfo?.zone.name ??
+                  staleDeviceName(shownZone.device_id, devices)
+                }
                 deviceName={selectedInfo?.device.name ?? shortDeviceId(shownZone.device_id)}
                 ledCount={selectedInfo?.zone.led_count ?? 0}
                 missing={!selectedInfo}
@@ -370,8 +392,8 @@ function ZoneInspector({
   return (
     <div className="stack" style={{ gap: 8 }}>
       <div className="row-title" style={{ justifyContent: "space-between" }}>
-        <span className="one-line">{name}</span>
-        <span className="fig mute">{missing ? "—" : `${ledCount} LEDs`}</span>
+        <span className={missing ? "" : "one-line"}>{name}</span>
+        <span className="fig mute">{missing ? "not connected" : `${ledCount} LEDs`}</span>
       </div>
       <p className="row-sub one-line">{deviceName}</p>
       {missing && (

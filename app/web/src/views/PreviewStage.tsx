@@ -32,6 +32,8 @@ const SNAP_GRID = 5;
 const SNAP_PIXELS = 8;
 /** How far the rotation grip sits above the zone's top edge, in canvas units. */
 const GRIP_GAP = 7;
+/** How far a chip may sit from its own zone and still count as sitting at it, in css pixels. */
+const CHIP_GAP = 6;
 /** The zoom range. 1 is the whole canvas in the stage. */
 const MIN_SCALE = 0.25;
 const MAX_SCALE = 8;
@@ -187,6 +189,28 @@ function overlaps(a: Box, b: Box): boolean {
   return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
 }
 
+/** How far two boxes are from each other, in css pixels: 0 when they touch or overlap. */
+function boxGap(a: Box, b: Box): number {
+  const gapX = Math.max(0, Math.max(a.x - (b.x + b.w), b.x - (a.x + a.w)));
+  const gapY = Math.max(0, Math.max(a.y - (b.y + b.h), b.y - (a.y + a.h)));
+  return Math.hypot(gapX, gapY);
+}
+
+/** True when two boxes are within `gap` pixels of each other. */
+function near(a: Box, b: Box, gap: number): boolean {
+  return boxGap(a, b) <= gap;
+}
+
+/** True when one box holds the other. */
+function contains(outer: Box, inner: Box): boolean {
+  return (
+    outer.x <= inner.x + 1 &&
+    outer.y <= inner.y + 1 &&
+    outer.x + outer.w >= inner.x + inner.w - 1 &&
+    outer.y + outer.h >= inner.y + inner.h - 1
+  );
+}
+
 /** The distance between two boxes; 0 when they touch or overlap. */
 function boxDistance(a: Box, b: Box): number {
   const dx = Math.max(0, Math.max(a.x - (b.x + b.w), b.x - (a.x + a.w)));
@@ -275,18 +299,48 @@ function layoutLabels(
         candidates.push({ ...base, y: base.y + stack * (m.h + 2) });
       }
     }
-    const inCanvas = (b: Box) => b.y >= 0 && b.y + b.h <= stageH && b.x >= 0 && b.x + b.w <= stageW;
-    // The chip may not cover another zone: it would read as that zone's label.
-    const zoneClash = (b: Box) => items.some((o) => o.index !== item.index && overlaps(b, o.box));
+    const inCanvas = (b: Box) => b.y >= 0 && b.y + m.h <= stageH && b.x >= 0 && b.x + b.w <= stageW;
+    // The chip has to sit at its own zone: it must touch it, cover it, or sit right above it,
+    // or it names nothing.
+    const anchored = (b: Box) => near(b, item.box, CHIP_GAP);
+    // The chip may not cover another zone: it would read as that zone's label. A zone that
+    // holds this zone (or is the same box) is the exception: a chip on a small zone inside a
+    // big one cannot help but be inside the big one too.
+    const zoneClash = (b: Box) =>
+      items.some(
+        (o) => o.index !== item.index && overlaps(b, o.box) && !contains(o.box, item.box),
+      );
     // And it may not cover another chip: that chip's label would be cut in half.
     const chipClash = (b: Box) => placed.some((p) => overlaps(b, { x: p.x, y: p.y, w: p.w, h: m.h }));
+    // And its own zone must be the nearest one: a chip that sits closer to another zone names
+    // that one.
+    const nearestIsOwn = (b: Box) => {
+      const others = items.filter((o) => o.index !== item.index && !contains(o.box, item.box));
+      let best = Infinity;
+      for (const o of others) best = Math.min(best, boxDistance(b, o.box));
+      return boxDistance(b, item.box) <= best + 0.001;
+    };
+    // Chips that share a place are stacked: the chip is pushed down until it is clear.
+    const stacked = (b: Box): Box => {
+      let out = b;
+      for (let i = 0; i < 5; i++) {
+        const hit = placed.find((p) => overlaps(out, { x: p.x, y: p.y, w: p.w, h: m.h }));
+        if (!hit) break;
+        out = { ...out, y: hit.y + m.h + 2 };
+      }
+      return out;
+    };
+    const tries = candidates.map(stacked);
     let chosen =
-      candidates.find((b) => inCanvas(b) && !zoneClash(b) && !chipClash(b)) ??
-      candidates.find((b) => inCanvas(b) && !zoneClash(b)) ??
+      tries.find(
+        (b) => inCanvas(b) && anchored(b) && !zoneClash(b) && !chipClash(b) && nearestIsOwn(b),
+      ) ??
+      tries.find((b) => inCanvas(b) && anchored(b) && !zoneClash(b)) ??
+      tries.find((b) => inCanvas(b) && anchored(b)) ??
       null;
     if (!chosen) {
       // Nothing is clear of the other zones: take the place that is closest to its own zone.
-      const options = candidates.map((b) => ({ b, d: boxDistance(b, item.box) }));
+      const options = tries.map((b) => ({ b, d: boxDistance(b, item.box) }));
       options.sort((a, b) => a.d - b.d);
       chosen = options[0]?.b ?? { x: item.box.x, y: item.box.y, w, h: m.h };
     }

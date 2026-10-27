@@ -59,18 +59,23 @@
   opacity: 0.5;
 }
 
-/* A zone whose device is not connected: dashed, dimmed, and behind the live zones. */
+/* A zone whose device is not connected: dimmed, dashed, and drawn over the live zones so that
+   it can be seen at all. It covers a live zone exactly on this PC, so its own edge is left to
+   the live zone and its dashed marker is drawn a hair inside it. */
 .desk .zone[data-missing="true"] {
-  border-color: var(--down);
+  border-color: transparent;
   border-style: dashed;
-  background: color-mix(in srgb, var(--down) 10%, transparent);
-  opacity: 0.5;
-  z-index: 0;
+  background: transparent;
+  outline: 1px dashed color-mix(in srgb, var(--down) 70%, transparent);
+  outline-offset: -4px;
+  opacity: 0.85;
+  z-index: 2;
+  /* The ghost is a marker: it never takes a click away from the live zone under it. */
+  pointer-events: none;
 }
 
 .desk .zone[data-missing="true"]:hover {
-  background: color-mix(in srgb, var(--down) 20%, transparent);
-  opacity: 0.75;
+  background: transparent;
 }
 
 /* The live zones sit over the stale ones. */
@@ -238,14 +243,15 @@
 
 /* The zoom controls sit in the canvas's top-right corner. Their tooltips open upwards by
    default, which put them outside the canvas, where they were cut in half: they open downwards
-   instead, into the canvas. */
-.desk .tip-bubble {
+   instead, into the canvas. (`.tip` and `.tip-bubble` are the editor's own classes, so they
+   have to be reached through :global in a module.) */
+.desk :global(.tip-bubble) {
   bottom: auto;
   top: calc(100% + 6px);
 }
 
 /* The last control's bubble would hang over the canvas's right edge. */
-.desk .controls .tip:last-child .tip-bubble {
+.desk .controls :global(.tip):last-child :global(.tip-bubble) {
   left: auto;
   right: 0;
   transform: none;
