@@ -4,4 +4,5 @@
 pub mod fake;
 pub mod openrgb;
 mod protocol;
+pub mod royuan;
 pub mod zones;

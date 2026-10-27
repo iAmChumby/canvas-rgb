@@ -82,10 +82,12 @@ async fn daemon_main() -> i32 {
         brightness: settings.brightness,
     });
 
-    // The OpenRGB adapter, on the port the config names.
-    let adapter = canvas_adapters::openrgb::OpenRgbAdapter::new(
-        canvas_proto::consts::OPENRGB_HOST,
-        store.config.openrgb_port,
+    // The OpenRGB adapter, on the port the config names, with the native adapters beside it.
+    let adapter = canvas_daemon::composite::CompositeAdapter::new(
+        canvas_adapters::openrgb::OpenRgbAdapter::new(
+            canvas_proto::consts::OPENRGB_HOST,
+            store.config.openrgb_port,
+        ),
     );
 
     let (quit_tx, mut quit_rx) = tokio::sync::mpsc::unbounded_channel::<()>();

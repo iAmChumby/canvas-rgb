@@ -5,6 +5,7 @@ pub mod auth;
 pub mod bundle;
 pub mod capture;
 pub mod cli;
+pub mod composite;
 pub mod conflict;
 pub mod elevated;
 pub mod first_run;
@@ -60,7 +61,8 @@ pub async fn apply_effect(app: &Arc<App>, id: &str, props: &Props) -> Result<(),
 ///
 /// - `VID_3151&PID_4015`, the ROYUAN MonsGeek keyboard: frames through OpenRGB blank its
 ///   lights and stop it typing (lighting session 2, 2026-10-26). OpenRGB's detector for it
-///   cannot be turned off in its config, so the daemon leaves it alone instead.
+///   cannot be turned off in its config, so the daemon drops OpenRGB's copy and drives the
+///   keyboard through the native `royuan` adapter instead (see `composite`).
 pub const NOT_DRIVEN: &[&str] = &["VID_3151&PID_4015"];
 
 /// True when the daemon may send frames to this device.
