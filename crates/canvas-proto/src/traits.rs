@@ -13,10 +13,13 @@
 //! - `canvas_adapters::fake::FakeOpenRgbServer::start(devices) -> FakeOpenRgbServer`
 //!   (a real TCP server speaking the OpenRGB SDK protocol, for tests)
 //! - `canvas_adapters::zones::ZoneStore` (zones.json load/save/apply)
+//! - `canvas_adapters::chione::ChioneDisplay::new() -> ChioneDisplay` (implements
+//!   [`NumericDisplayAdapter`]; the GAMDIAS CHIONE Digital Display, USB HID 1B80:B53C)
 
 use crate::api::Power;
 use crate::color::Rgb8;
 use crate::device::{AdapterCapabilities, DeviceId, DeviceInfo};
+use crate::display::{DisplayInfo, DisplayValue};
 use crate::layout::{Layout, CANVAS_HEIGHT, CANVAS_WIDTH};
 use crate::props::{Props, PropertySchema};
 use async_trait::async_trait;
@@ -194,4 +197,18 @@ pub trait DeviceAdapter: Send + Sync {
     async fn identify(&mut self, device: &DeviceId, zone: u32, led: u32) -> Result<(), AdapterError>;
     /// Colors as the hardware side reports them (OpenRGB REQUEST_CONTROLLER_DATA).
     async fn read_back(&mut self, device: &DeviceId) -> Result<Vec<Rgb8>, AdapterError>;
+}
+
+/// A display that shows one number (see `display`). The daemon writes the current value at the
+/// device's own rate; the adapter encodes it and refuses what the digits cannot show.
+#[async_trait]
+pub trait NumericDisplayAdapter: Send + Sync {
+    fn name(&self) -> &'static str;
+    async fn connect(&mut self) -> Result<(), AdapterError>;
+    async fn disconnect(&mut self) -> Result<(), AdapterError>;
+    fn is_connected(&self) -> bool;
+    async fn discover(&mut self) -> Result<Vec<DisplayInfo>, AdapterError>;
+    async fn write_value(&mut self, device: &DeviceId, value: &DisplayValue) -> Result<(), AdapterError>;
+    /// How often the device expects a write (the CHIONE: every 250 ms).
+    fn write_interval_ms(&self) -> u32;
 }
