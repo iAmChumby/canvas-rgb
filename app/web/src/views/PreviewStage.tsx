@@ -22,6 +22,8 @@ import { usePrefersReducedMotion } from "@/lib/motion";
 import { FIT_VIEW, forgetView, readView, writeView } from "@/lib/viewPrefs";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { PlacedZone } from "@/proto/PlacedZone";
+import type { SamplingMode } from "@/proto/SamplingMode";
+import type { ZoneInfo } from "@/proto/ZoneInfo";
 import desk from "./desk.module.css";
 
 const CANVAS_W = 320;
@@ -36,6 +38,178 @@ const SNAP_PIXELS = 8;
 const GRIP_GAP = 7;
 /** How far a chip may sit from its own zone and still count as sitting at it, in css pixels. */
 const CHIP_GAP = 10;
+
+/**
+ * A picture the LED dots can be sampled from: the daemon's frames, or the editor's own draw of
+ * the effect. The pixels are `stride` bytes each, row by row.
+ */
+interface Picture {
+  width: number;
+  height: number;
+  data: Uint8Array | Uint8ClampedArray;
+  stride: number;
+}
+
+/** One LED's place on the canvas: its centre, and the rectangle it covers. */
+interface LedCell {
+  /** The centre, in canvas units. */
+  cx: number;
+  cy: number;
+  /** The rectangle the LED covers, in canvas units: x0, y0, x1, y1. */
+  bounds: [number, number, number, number];
+}
+
+type RGB = [number, number, number];
+
+/** The colour of the pixel at (x, y), the pixel nearest the point. */
+function sampleNearest(pic: Picture, x: number, y: number): RGB {
+  const px = clamp(Math.round(x), 0, pic.width - 1);
+  const py = clamp(Math.round(y), 0, pic.height - 1);
+  const o = (py * pic.width + px) * pic.stride;
+  return [pic.data[o] ?? 0, pic.data[o + 1] ?? 0, pic.data[o + 2] ?? 0];
+}
+
+/** The colour at (x, y), interpolated from the four neighbours. */
+function sampleBilinear(pic: Picture, x: number, y: number): RGB {
+  const maxX = pic.width - 1;
+  const maxY = pic.height - 1;
+  const fx = clamp(x, 0, maxX);
+  const fy = clamp(y, 0, maxY);
+  const x0 = Math.floor(fx);
+  const y0 = Math.floor(fy);
+  const x1 = Math.min(x0 + 1, maxX);
+  const y1 = Math.min(y0 + 1, maxY);
+  const tx = fx - x0;
+  const ty = fy - y0;
+  const at = (px: number, py: number): RGB => {
+    const o = (py * pic.width + px) * pic.stride;
+    return [pic.data[o] ?? 0, pic.data[o + 1] ?? 0, pic.data[o + 2] ?? 0];
+  };
+  const p00 = at(x0, y0);
+  const p10 = at(x1, y0);
+  const p01 = at(x0, y1);
+  const p11 = at(x1, y1);
+  const out: RGB = [0, 0, 0];
+  for (let c = 0; c < 3; c++) {
+    const a0 = p00[c] ?? 0;
+    const a1 = p10[c] ?? 0;
+    const b0 = p01[c] ?? 0;
+    const b1 = p11[c] ?? 0;
+    const top = a0 + (a1 - a0) * tx;
+    const bottom = b0 + (b1 - b0) * tx;
+    out[c] = Math.round(top + (bottom - top) * ty);
+  }
+  return out;
+}
+
+/** The mean of the pixels whose centres fall inside the LED's rectangle. */
+function sampleArea(pic: Picture, x: number, y: number, bounds: [number, number, number, number]): RGB {
+  const maxX = pic.width - 1;
+  const maxY = pic.height - 1;
+  // A pixel's centre is at (x + 0.5, y + 0.5).
+  const x0 = clamp(Math.ceil(bounds[0] - 0.5), 0, maxX);
+  const y0 = clamp(Math.ceil(bounds[1] - 0.5), 0, maxY);
+  const x1 = clamp(Math.floor(bounds[2] - 0.5), 0, maxX);
+  const y1 = clamp(Math.floor(bounds[3] - 0.5), 0, maxY);
+  if (x0 > x1 || y0 > y1) return sampleNearest(pic, x, y);
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  let n = 0;
+  for (let py = y0; py <= y1; py++) {
+    for (let px = x0; px <= x1; px++) {
+      const o = (py * pic.width + px) * pic.stride;
+      r += pic.data[o] ?? 0;
+      g += pic.data[o + 1] ?? 0;
+      b += pic.data[o + 2] ?? 0;
+      n++;
+    }
+  }
+  if (n === 0) return sampleNearest(pic, x, y);
+  return [Math.round(r / n), Math.round(g / n), Math.round(b / n)];
+}
+
+/**
+ * The colour of one LED, sampled the way the layout says to: nearest, bilinear, or the mean
+ * over the LED's own rectangle. The daemon samples the same cells
+ * (`crates/canvas-core/src/sampling.rs`), so the dots and the LEDs agree.
+ */
+function sampleLed(
+  pic: Picture,
+  cell: LedCell,
+  mode: SamplingMode,
+): RGB {
+  // The picture may be smaller than the canvas: the editor's own draw is 112 x 70.
+  const sx = pic.width / CANVAS_W;
+  const sy = pic.height / CANVAS_H;
+  const x = cell.cx * sx;
+  const y = cell.cy * sy;
+  if (mode === "bilinear") return sampleBilinear(pic, x, y);
+  if (mode === "area_average") {
+    return sampleArea(pic, x, y, [
+      cell.bounds[0] * sx,
+      cell.bounds[1] * sy,
+      cell.bounds[2] * sx,
+      cell.bounds[3] * sy,
+    ]);
+  }
+  return sampleNearest(pic, x, y);
+}
+
+/**
+ * The LED cells of a zone on the canvas: where each LED sits and how much of the canvas it
+ * covers. The cells are the daemon's (`crates/canvas-core/src/geometry.rs`), so a dot and the
+ * LED it stands for are the same place.
+ */
+function ledCells(z: PlacedZone, info: ZoneInfo, offsets: Point[]): LedCell[] {
+  const t = zoneTransform(z);
+  const kind = info.kind;
+  const horizontal = z.width >= z.height;
+  const linear = kind.type === "linear";
+  const cols = kind.type === "matrix" ? kind.width : 1;
+  const rows = kind.type === "matrix" ? kind.height : 1;
+  const n = Math.max(1, info.led_count);
+  // Half the cell's size along the strip and across it, in the zone's own frame.
+  const hx = linear
+    ? horizontal
+      ? z.width / (2 * n)
+      : z.width / 2
+    : z.width / (2 * cols);
+  const hy = linear
+    ? horizontal
+      ? z.height / 2
+      : z.height / (2 * n)
+    : z.height / (2 * rows);
+  return offsets.map((p) => {
+    const lx = linear ? (horizontal ? p.x * z.width : 0) : p.x * z.width;
+    const ly = linear ? (horizontal ? 0 : p.x * z.height) : p.y * z.height;
+    const cx = t.cx + lx * t.cos - ly * t.sin;
+    const cy = t.cy + lx * t.sin + ly * t.cos;
+    // The cell's corners, turned with the zone: the LED covers their box.
+    const corners: Point[] = [
+      { x: -hx, y: -hy },
+      { x: hx, y: -hy },
+      { x: hx, y: hy },
+      { x: -hx, y: hy },
+    ].map((c) => ({
+      x: t.cx + (lx + c.x) * t.cos - (ly + c.y) * t.sin,
+      y: t.cy + (lx + c.x) * t.sin + (ly + c.y) * t.cos,
+    }));
+    const xs = corners.map((c) => c.x);
+    const ys = corners.map((c) => c.y);
+    return {
+      cx,
+      cy,
+      bounds: [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)] as [
+        number,
+        number,
+        number,
+        number,
+      ],
+    };
+  });
+}
+
 /** The zoom range. 1 is the whole canvas in the stage. */
 const MIN_SCALE = 0.25;
 const MAX_SCALE = 8;
@@ -76,8 +250,10 @@ interface View {
 }
 
 interface LedCache {
+  /** The LED positions in the zone's own frame. */
   offsets: Point[];
-  linear: boolean;
+  /** The zone's own description: its LEDs' cells are cut from it. */
+  info: ZoneInfo;
 }
 
 interface LabelBox {
@@ -166,8 +342,7 @@ function labelMetrics(scale: number): { h: number; font: number; char: number } 
 /**
  * The house easing, cubic-bezier(0.2, 0.8, 0.2, 1), as a function of time. The zoom eases with
  * the same curve as every other move in the editor, so one number describes all of them.
- */
-function houseEase(t: number): number {
+ */function houseEase(t: number): number {
   const cx = 0.2;
   const cy = 0.8;
   const bx = 0.2;
@@ -212,6 +387,8 @@ export interface StageProps {
    * daemon's frames are the only honest picture of them.
    */
   effectNeedsInput?: boolean;
+  /** How each LED reads the picture: nearest, bilinear or the mean over its own rectangle. */
+  sampling?: SamplingMode;
 }
 
 function zoneKey(z: PlacedZone): string {
@@ -519,6 +696,7 @@ export function PreviewStage({
   dropPayloadType,
   effect = null,
   effectNeedsInput = false,
+  sampling = "nearest",
 }: StageProps) {
   const stageRef = useRef<HTMLDivElement>(null);
   const previewRef = useRef<HTMLCanvasElement>(null);
@@ -538,6 +716,11 @@ export function PreviewStage({
   const guideEls = useRef<{ v: HTMLSpanElement | null; h: HTMLSpanElement | null }>({ v: null, h: null });
   const readoutRef = useRef<HTMLDivElement | null>(null);
   const controlsRef = useRef<HTMLDivElement | null>(null);
+  const editorLayerRef = useRef<HTMLDivElement | null>(null);
+  const editorPicRef = useRef<Picture | null>(null);
+  const daemonLiveRef = useRef(false);
+  const samplingRef = useRef<SamplingMode>("nearest");
+  const missingRef = useRef<Set<number>>(new Set());
   const obstaclesRef = useRef<Box[]>([]);
   const paintQueued = useRef(false);
   const liveRaf = useRef<number | null>(null);
@@ -554,7 +737,29 @@ export function PreviewStage({
    * editor draws the running effect itself, behind the zones, and says so.
    */
   const daemonLive = status.state === "live";
+  daemonLiveRef.current = daemonLive;
+  samplingRef.current = sampling;
   const editorDraws = !daemonLive && !!effect && !effectNeedsInput;
+  /**
+   * The picture on the canvas, and the one it is fading out of. When the running effect
+   * changes, the new picture fades in over the old one instead of snapping.
+   */
+  const [drawn, setDrawn] = useState<{ id: string; props: PreviewValues } | null>(null);
+  const [fading, setFading] = useState<{ id: string; props: PreviewValues } | null>(null);
+  const effectId = effect?.id ?? null;
+  const [lastEffectId, setLastEffectId] = useState<string | null>(null);
+  if (effectId !== lastEffectId) {
+    // The running effect changed: the picture that was showing fades out under the new one.
+    setLastEffectId(effectId);
+    setFading(drawn);
+    setDrawn(effect ? { id: effect.id, props: effect.props } : null);
+  }
+  useEffect(() => {
+    // The picture that is fading out is taken down once the fade is over.
+    if (!fading) return;
+    const t = setTimeout(() => setFading(null), 320);
+    return () => clearTimeout(t);
+  }, [fading]);
   /**
    * The editor's draw is taken down once the daemon's frames have taken over: it would
    * otherwise keep repainting a canvas nobody can see.
@@ -587,7 +792,7 @@ export function PreviewStage({
       if (!info) continue;
       map.set(zoneKey(z), {
         offsets: zoneLedOffsets(info.zone, z.reversed),
-        linear: info.zone.kind.type === "linear",
+        info: info.zone,
       });
     }
     return map;
@@ -627,31 +832,33 @@ export function PreviewStage({
     octx.clearRect(0, 0, ov.width, ov.height);
     const r = clamp(Math.min(3.2, Math.max(2, ov.width / 360)) * v.scale, 1, 7);
     const frame = frameRef.current;
-    const src = frame?.rgb;
+    // The dots take their colour from the daemon's frames when they are coming, and from the
+    // editor's own draw otherwise.
+    const pic = daemonLiveRef.current
+      ? frame
+        ? { width: frame.width, height: frame.height, data: frame.rgb, stride: 3 }
+        : null
+      : editorPicRef.current;
+    const mode = samplingRef.current;
     const geom = liveRef.current;
     for (let i = 0; i < geom.length; i++) {
       const z = geom[i];
       if (!z || !z.visible) continue;
       const cache = ledCacheRef.current.get(zoneKey(z));
       if (!cache) continue;
-      const t = zoneTransform(z);
-      const horizontal = z.width >= z.height;
-      for (const p of cache.offsets) {
-        const lx = cache.linear ? (horizontal ? p.x * z.width : 0) : p.x * z.width;
-        const ly = cache.linear ? (horizontal ? 0 : p.x * z.height) : p.y * z.height;
-        const cx = t.cx + lx * t.cos - ly * t.sin;
-        const cy = t.cy + lx * t.sin + ly * t.cos;
-        const ix = clamp(Math.floor(cx), 0, CANVAS_W - 1);
-        const iy = clamp(Math.floor(cy), 0, CANVAS_H - 1);
-        if (src && frame) {
-          const o = (iy * frame.width + ix) * 3;
-          octx.fillStyle = `rgb(${src[o] ?? 0} ${src[o + 1] ?? 0} ${src[o + 2] ?? 0})`;
+      const cells = ledCells(z, cache.info, cache.offsets);
+      // A zone whose device is not connected has no LEDs lit: its dots stay dark.
+      const off = missingRef.current.has(i);
+      for (const cell of cells) {
+        if (pic && !off) {
+          const c = sampleLed(pic, cell, mode);
+          octx.fillStyle = `rgb(${c[0]} ${c[1]} ${c[2]})`;
         } else {
-          // No frame yet: the dots still show where the LEDs sit.
-          octx.fillStyle = "rgba(255, 255, 255, 0.34)";
+          // No picture, or no device: the dots still show where the LEDs sit.
+          octx.fillStyle = "rgba(255, 255, 255, 0.18)";
         }
         octx.beginPath();
-        octx.arc(cx * k + ox, cy * k + oy, r, 0, Math.PI * 2);
+        octx.arc(cell.cx * k + ox, cell.cy * k + oy, r, 0, Math.PI * 2);
         octx.fill();
       }
     }
@@ -665,6 +872,51 @@ export function PreviewStage({
       paintOverlay();
     });
   }, [paintOverlay]);
+
+  /**
+   * Reads the editor's own draw, so the LED dots can be coloured from it: the picture the
+   * reader sees and the dots on it are the same picture.
+   */
+  const readEditorPicture = useCallback(() => {
+    const layer = editorLayerRef.current;
+    const canvas = layer?.querySelector("canvas") as HTMLCanvasElement | null;
+    if (!canvas || !canvas.width || !canvas.height) {
+      editorPicRef.current = null;
+      return;
+    }
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      editorPicRef.current = null;
+      return;
+    }
+    try {
+      const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      editorPicRef.current = {
+        width: canvas.width,
+        height: canvas.height,
+        data: img.data,
+        stride: 4,
+      };
+    } catch {
+      editorPicRef.current = null;
+    }
+  }, []);
+
+  /**
+   * The editor's draw animates on its own clock, so the dots have to follow it: while it is
+   * showing, the canvas is repainted every frame.
+   */
+  useEffect(() => {
+    if (!editorDraws) return;
+    let raf = 0;
+    const step = () => {
+      readEditorPicture();
+      paintOverlay();
+      raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+  }, [editorDraws, paintOverlay, readEditorPicture]);
 
   /**
    * The boxes a chip may not sit in: the zoom control and every tooltip it can open. The
@@ -1245,6 +1497,7 @@ export function PreviewStage({
     });
     return out;
   }, [zones, devices]);
+  missingRef.current = missing;
 
   const selectedZone = selected !== null ? zones[selected] : undefined;
   const grips = selectedZone ? gripGeometry(selectedZone) : null;
@@ -1283,12 +1536,26 @@ export function PreviewStage({
         stageRef.current?.setPointerCapture(e.pointerId);
       }}
     >
-      {effect && !effectNeedsInput && !editorGone && (
+      {fading && !editorGone && (
+        // The picture that is fading out. It sits under the new one, which fades in over it.
+        <div
+          className={desk.editorPreview}
+          data-editor-fading="true"
+          aria-hidden="true"
+          style={{
+            transform: `translate(${view.panX * base * view.scale}px, ${view.panY * base * view.scale}px) scale(${base * view.scale})`,
+          }}
+        >
+          <EffectPreview id={fading.id} values={fading.props} className={desk.editorCanvas} />
+        </div>
+      )}
+      {drawn && !editorGone && (
         // The editor's own draw of the running effect. It is drawn in the canvas's own
         // 320 x 200 units, so it lines up with the zones, and the daemon's frames fade in over
         // it when they arrive.
         <div
-          className={desk.editorPreview}
+          ref={editorLayerRef}
+          className={`${desk.editorPreview} ${fading ? desk.editorFadeIn : ""}`}
           data-editor-preview="true"
           aria-hidden="true"
           style={{
@@ -1296,7 +1563,7 @@ export function PreviewStage({
             transform: `translate(${view.panX * base * view.scale}px, ${view.panY * base * view.scale}px) scale(${base * view.scale})`,
           }}
         >
-          <EffectPreview id={effect.id} values={effect.props} className={desk.editorCanvas} />
+          <EffectPreview id={drawn.id} values={drawn.props} className={desk.editorCanvas} />
         </div>
       )}
       <canvas

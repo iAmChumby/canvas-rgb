@@ -3,7 +3,7 @@
 import { useMemo, useState, type DragEvent } from "react";
 import { ArrowCounterClockwise, FloppyDisk, Plus, X } from "@phosphor-icons/react";
 import { Button, IconButton } from "@/components/Button";
-import { Panel, Field, StateDot } from "@/components/Panel";
+import { Panel, Field } from "@/components/Panel";
 import { Segmented } from "@/components/Segmented";
 import { NumberField } from "@/components/NumberField";
 import { Toggle } from "@/components/Toggle";
@@ -132,16 +132,35 @@ export function LayoutView() {
     const summary = effects?.find((e) => e.id === runningEffect.id);
     return !!(summary?.needs.screen || summary?.needs.audio);
   }, [runningEffect, effects]);
-  // The daemon's frames are the honest picture. Without them the editor draws the effect, and
-  // says so in one quiet line.
+  // The editor draws the effect itself when the daemon's frames are not coming.
   const editorDraws = preview.state !== "live" && !!runningEffect && !effectNeedsInput;
-  // What the preview is doing, said under the canvas rather than over it. A refused preview
-  // says why in the line below, so it does not say it twice.
-  const previewNote = useMemo(() => {
-    if (preview.state === "connecting") return "Connecting to the daemon's preview.";
-    if (preview.state === "idle") return "Waiting for the first frame from the daemon.";
-    return null;
-  }, [preview.state]);
+  // The daemon's frames are the honest picture. Without them the editor draws the effect, and
+  // says so in one quiet line. Red is for when there is no picture at all.
+  const previewLine = useMemo(() => {
+    if (preview.state === "live") return null;
+    if (editorDraws) {
+      return {
+        text: "Preview drawn by the editor · the daemon's live preview is not available yet",
+        down: false,
+      };
+    }
+    if (preview.state === "refused") {
+      return {
+        text: `The live preview is not connected. ${preview.error ?? ""}`.trim(),
+        down: true,
+      };
+    }
+    if (effectNeedsInput) {
+      return {
+        text: "This effect reads the screen or the audio, so the preview is the daemon's frame.",
+        down: true,
+      };
+    }
+    if (!runningEffect) {
+      return { text: "No effect is running on this layout.", down: true };
+    }
+    return { text: "The daemon's live preview is not available yet.", down: false };
+  }, [preview.state, preview.error, editorDraws, effectNeedsInput, runningEffect]);
 
   const patchDraft = (fn: (l: Layout) => Layout) => {
     setDraft((prev) => (prev ? fn(prev) : prev));
@@ -254,28 +273,21 @@ export function LayoutView() {
             dropPayloadType={DROP_TYPE}
             effect={runningEffect}
             effectNeedsInput={effectNeedsInput}
+            sampling={draft.sampling}
           />
           <div className="stage-meta">
-            {previewNote ? (
-              <span className={desk.note}>{previewNote}</span>
-            ) : (
-              <span className="dropzone-hint">
-                Drag to move, the corner to resize, the knob to rotate. Arrow keys nudge.
-              </span>
-            )}
+            <span className="dropzone-hint">
+              Drag to move, the corner to resize, the knob to rotate. Arrow keys nudge.
+            </span>
             <span className="row-wrap" style={{ alignItems: "center", gap: "var(--s3)" }}>
-              {editorDraws && <span className={desk.drawn}>Preview drawn by the editor</span>}
-              <StateDot tone={preview.state === "live" ? "ok" : preview.state === "refused" ? "down" : "work"}>
-                {preview.state === "live" ? `preview ${preview.fps.toFixed(1)} fps` : `preview ${preview.state}`}
-              </StateDot>
+              {previewLine && (
+                <span className={previewLine.down ? desk.noteDown : desk.drawn}>{previewLine.text}</span>
+              )}
               <span className="mute fig">
                 {zones.filter((z) => z.visible).length} of {zones.length} placed zones visible
               </span>
             </span>
           </div>
-          {preview.state === "refused" && preview.error && (
-            <p className={`fig ${desk.noteDown}`}>{preview.error}</p>
-          )}
 
           <Panel title="Render">
             <div className="render-grid">

@@ -28,31 +28,22 @@
   box-sizing: border-box;
   border: 1px solid var(--zc);
   border-radius: 3px;
-  background: color-mix(in srgb, var(--zc) 10%, transparent);
+  /* A zone is a physical strip: the picture under it is dimmed, so the LEDs drawn on it in
+     their own colour read against it. The picture itself is never changed. */
+  background-color: color-mix(in srgb, var(--zc) 10%, transparent);
+  background-image: linear-gradient(
+    color-mix(in srgb, var(--scrim) 62%, transparent),
+    color-mix(in srgb, var(--scrim) 62%, transparent)
+  );
   cursor: grab;
   transform-origin: 50% 50%;
   transition:
-    background var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease),
     border-color var(--dur-fast) var(--ease);
 }
 
 .desk .zone:hover {
-  background: color-mix(in srgb, var(--zc) 20%, transparent);
-}
-
-/* The editor's own draw is an approximation of the effect, and it can be any colour. When it
-   is behind the zones, the zones get a scrim under them so their edges read over it. The
-   daemon's own frames are never dimmed: those are the LED colours. */
-.desk[data-editor-draw="true"] .zone {
-  background:
-    color-mix(in srgb, var(--scrim) 62%, transparent),
-    color-mix(in srgb, var(--zc) 12%, transparent);
-}
-
-.desk[data-editor-draw="true"] .zone:hover {
-  background:
-    color-mix(in srgb, var(--scrim) 62%, transparent),
-    color-mix(in srgb, var(--zc) 24%, transparent);
+  background-color: color-mix(in srgb, var(--zc) 20%, transparent);
 }
 
 .desk .zone[data-dragging="true"] {
@@ -62,7 +53,7 @@
 
 .desk .zone[data-selected="true"] {
   border-color: var(--live);
-  background: color-mix(in srgb, var(--zc) 24%, transparent);
+  background-color: color-mix(in srgb, var(--zc) 24%, transparent);
   z-index: 4;
 }
 
@@ -94,7 +85,8 @@
 .desk .zone[data-missing="true"] {
   border-color: transparent;
   border-style: dashed;
-  background: transparent;
+  background-color: transparent;
+  background-image: none;
   outline: 1px dashed color-mix(in srgb, var(--down) 70%, transparent);
   outline-offset: -4px;
   opacity: 0.85;
@@ -104,7 +96,7 @@
 }
 
 .desk .zone[data-missing="true"]:hover {
-  background: transparent;
+  background-color: transparent;
 }
 
 /* The live zones sit over the stale ones. */
@@ -318,6 +310,12 @@
 
 /* ---------- the editor's own draw of the running effect ---------- */
 
+/* The LED dots sit above the zones: a dot is the LED itself, and it has to be seen against the
+   zone it belongs to, and against the picture under it. The chips stay above the dots. */
+.desk :global(.stage-leds) {
+  z-index: 5;
+}
+
 /* The editor's own draw of the running effect, behind the zones. It is drawn in the canvas's own
    320 x 200 units, so it lines up with the zones, and the daemon's frames fade in over it when
    they arrive. */
@@ -338,8 +336,22 @@
   height: 100%;
 }
 
+/* When the running effect changes, the new picture fades in over the old one. */
+@keyframes editor-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.editorFadeIn {
+  animation: editor-fade-in var(--dur-slow) var(--ease);
+}
+
 /* The daemon's frames take over from the editor's own draw with a crossfade. */
-.desk .stage-canvas {
+.desk :global(.stage-canvas) {
   transition: opacity var(--dur-slow) var(--ease);
 }
 
@@ -406,11 +418,6 @@
 
 /* The preview's state is said under the canvas, not over it: the canvas is the desk, and
    nothing but the desk's own furniture belongs on top of it. */
-.note {
-  color: var(--mute);
-  font-size: var(--t14);
-}
-
 .noteDown {
   margin-top: 6px;
   color: var(--down);
