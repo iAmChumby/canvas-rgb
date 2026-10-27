@@ -265,16 +265,31 @@ fn stripped(reply: &[u8]) -> Option<&[u8]> {
     }
 }
 
-/// Checks the 0xFF reply (recon section 2): `hFW lFW tempFW cpuFW fanFW`, read from the stripped
-/// form. The recon gives three variants: cpuFW=1 with tempFW=1 (Celsius start), cpuFW=1 with
-/// tempFW=0 (Fahrenheit start), fanFW=1 (RPM variant). Anything else is refused as garbled.
+/// The fields of a 0xFF query reply, as the adapter reads them (recon section 2).
 ///
 /// UNKNOWN (recon section 2): the values this unit reports, and whether the real layout matches
-/// recon once the report ID is gone. Conservative choice: the flag bytes must each be 0 or 1, and
-/// exactly one of cpuFW and fanFW must be 1. A unit that reports something else is refused with
-/// the raw bytes in the message and in the log, so the first hardware test can see them. Settler:
-/// the first hardware test, step 1.
-fn check_query_reply(reply: &[u8]) -> Result<(), AdapterError> {
+/// recon once the report ID is gone. The first hardware test settles it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueryReply {
+    /// The firmware version, high byte.
+    pub hfw: u8,
+    /// The firmware version, low byte.
+    pub lfw: u8,
+    /// 1 when the unit starts in Fahrenheit.
+    pub temp_fw: u8,
+    /// 1 when the unit reports the CPU temperature.
+    pub cpu_fw: u8,
+    /// 1 when the unit is the fan-RPM variant.
+    pub fan_fw: u8,
+}
+
+/// Parses the 0xFF reply (recon section 2): `hFW lFW tempFW cpuFW fanFW`, read from the stripped
+/// form.
+///
+/// The recon gives three variants: cpuFW=1 with tempFW=1 (Celsius start), cpuFW=1 with tempFW=0
+/// (Fahrenheit start), fanFW=1 (RPM variant). Anything else is refused as garbled, with the raw
+/// bytes in the message, so the first hardware test can see them.
+pub fn parse_query_reply(reply: &[u8]) -> Result<QueryReply, AdapterError> {
     if reply.is_empty() {
         return Err(refuse("no reply to the CHIONE 0xFF query within 1000 ms"));
     }
@@ -293,20 +308,29 @@ fn check_query_reply(reply: &[u8]) -> Result<(), AdapterError> {
             hex(reply)
         )));
     }
+    Ok(QueryReply { hfw: r[R_HFW], lfw: r[R_LFW], temp_fw, cpu_fw, fan_fw })
+}
+
+/// Checks the 0xFF reply. Same rules as [`parse_query_reply`], and the fields are logged.
+fn check_query_reply(reply: &[u8]) -> Result<(), AdapterError> {
+    let parsed = parse_query_reply(reply)?;
     tracing::info!(
-        hfw = r[R_HFW],
-        lfw = r[R_LFW],
-        temp_fw,
-        cpu_fw,
-        fan_fw,
+        hfw = parsed.hfw,
+        lfw = parsed.lfw,
+        temp_fw = parsed.temp_fw,
+        cpu_fw = parsed.cpu_fw,
+        fan_fw = parsed.fan_fw,
         "CHIONE query reply"
     );
     Ok(())
 }
 
-/// Opens the device and runs the 0xFF handshake. Blocking: call it from `spawn_blocking`.
-/// Any failure is an error and the opened device is dropped.
-fn connect_blocking(opener: &dyn Opener, wait: Duration) -> Result<Box<dyn Transport>, AdapterError> {
+/// Opens the device and runs the 0xFF handshake, without checking the reply. Blocking: call it
+/// from `spawn_blocking`. Returns the open device and the raw reply bytes.
+fn open_and_query(
+    opener: &dyn Opener,
+    wait: Duration,
+) -> Result<(Box<dyn Transport>, Vec<u8>), AdapterError> {
     let mut dev = opener.open().map_err(AdapterError::Protocol)?.ok_or(AdapterError::NotConnected)?;
     let sent = dev
         .write(&query_report())
@@ -320,18 +344,29 @@ fn connect_blocking(opener: &dyn Opener, wait: Duration) -> Result<Box<dyn Trans
         .read(&mut reply, QUERY_REPLY_TIMEOUT_MS)
         .map_err(|e| refuse(format!("CHIONE query read failed: {e}")))?;
     // Every connect logs the raw reply at info, so the first hardware run shows the real layout.
-    // A garbled reply is logged again, with the reason, before the error goes back.
     let raw = hex(&reply[..n]);
     tracing::info!(bytes = n, raw = %raw, "CHIONE raw query reply");
-    if let Err(e) = check_query_reply(&reply[..n]) {
-        tracing::info!(bytes = n, raw = %raw, "CHIONE query reply refused: {e}");
+    Ok((dev, reply[..n].to_vec()))
+}
+
+/// Opens the device and runs the 0xFF handshake. Blocking: call it from `spawn_blocking`.
+/// Any failure is an error and the opened device is dropped.
+fn connect_blocking(opener: &dyn Opener, wait: Duration) -> Result<Box<dyn Transport>, AdapterError> {
+    let (dev, reply) = open_and_query(opener, wait)?;
+    // A garbled reply is logged again, with the reason, before the error goes back.
+    if let Err(e) = check_query_reply(&reply) {
+        tracing::info!(bytes = reply.len(), raw = %hex(&reply), "CHIONE query reply refused: {e}");
         return Err(e);
     }
     Ok(dev)
 }
 
 /// One display write and the ack read. Blocking: call it from `spawn_blocking`.
-fn write_blocking(dev: &mut dyn Transport, report: &[u8; REPORT_LEN]) -> Result<(), AdapterError> {
+/// Returns the ack the device sent back, if any.
+fn write_blocking(
+    dev: &mut dyn Transport,
+    report: &[u8; REPORT_LEN],
+) -> Result<Option<Vec<u8>>, AdapterError> {
     match dev.write(report) {
         Ok(REPORT_LEN) => {}
         Ok(sent) => return Err(refuse(format!("CHIONE display write: short write of {sent} bytes"))),
@@ -341,11 +376,16 @@ fn write_blocking(dev: &mut dyn Transport, report: &[u8; REPORT_LEN]) -> Result<
     // input queue does not fill, and discard it.
     let mut ack = [0u8; REPORT_LEN];
     match dev.read(&mut ack, ACK_TIMEOUT_MS) {
-        Ok(0) => tracing::debug!("CHIONE: no ack within {ACK_TIMEOUT_MS} ms"),
-        Ok(_) => {}
-        Err(e) => return Err(refuse(format!("CHIONE ack read failed: {e}"))),
+        Ok(0) => {
+            tracing::debug!("CHIONE: no ack within {ACK_TIMEOUT_MS} ms");
+            Ok(None)
+        }
+        Ok(n) => {
+            tracing::debug!(bytes = n, ack = %hex(&ack[..n]), "CHIONE ack");
+            Ok(Some(ack[..n].to_vec()))
+        }
+        Err(e) => Err(refuse(format!("CHIONE ack read failed: {e}"))),
     }
-    Ok(())
 }
 
 fn join_error(e: tokio::task::JoinError) -> AdapterError {
@@ -359,6 +399,8 @@ pub struct ChioneDisplay {
     dev: Option<Box<dyn Transport>>,
     /// Wait between the query and its reply read. `QUERY_WAIT` in production; tests use zero.
     query_wait: Duration,
+    /// The ack the device sent back after the last write, if any.
+    last_ack: Option<Vec<u8>>,
 }
 
 impl Default for ChioneDisplay {
@@ -373,7 +415,30 @@ impl ChioneDisplay {
     }
 
     fn with_opener(opener: Arc<dyn Opener>, query_wait: Duration) -> Self {
-        Self { opener, dev: None, query_wait }
+        Self { opener, dev: None, query_wait, last_ack: None }
+    }
+
+    /// Opens the device, sends the 0xFF query and reads the reply, and returns the raw reply
+    /// bytes.
+    ///
+    /// The reply is **not** checked: this is the probe's path, and the reply layout on the real
+    /// unit is still a guess (recon section 2), so the raw bytes are what the first hardware test
+    /// needs. `connect` runs the same handshake and refuses a reply it cannot read.
+    ///
+    /// The device stays open, so the caller can write to it, and must disconnect it.
+    pub async fn query_raw(&mut self) -> Result<Vec<u8>, AdapterError> {
+        let opener = self.opener.clone();
+        let wait = self.query_wait;
+        let (dev, reply) = tokio::task::spawn_blocking(move || open_and_query(opener.as_ref(), wait))
+            .await
+            .map_err(join_error)??;
+        self.dev = Some(dev);
+        Ok(reply)
+    }
+
+    /// The ack the device sent back after the last write, if it sent one.
+    pub fn last_ack(&self) -> Option<&[u8]> {
+        self.last_ack.as_deref()
     }
 
     fn check_id(&self, id: &DeviceId) -> Result<(), AdapterError> {
@@ -456,8 +521,9 @@ impl NumericDisplayAdapter for ChioneDisplay {
         .await
         .map_err(join_error)?;
         // A failed write or ack read drops the device: `self.dev` stays `None`.
-        result?;
+        let ack = result?;
         self.dev = Some(dev);
+        self.last_ack = ack;
         Ok(())
     }
 
@@ -1042,6 +1108,45 @@ mod tests {
         let short = check_query_reply(&[0xDE, 0xAD]).unwrap_err();
         assert!(matches!(&short, AdapterError::Protocol(m) if m.contains("de ad")), "{short:?}");
         assert_eq!(hex(&[0x00, 0x3a, 0xff]), "00 3a ff");
+    }
+
+    // ------------------------------------------------------------ the probe's path
+
+    #[test]
+    fn the_reply_fields_are_read_from_the_stripped_form() {
+        let mut r = vec![0u8; 64];
+        r[3] = 0x01; // hFW
+        r[4] = 0x07; // lFW
+        r[5] = 0; // tempFW: the unit starts in Celsius
+        r[6] = 1; // cpuFW
+        r[7] = 0; // fanFW
+        let parsed = parse_query_reply(&r).unwrap();
+        assert_eq!(parsed, QueryReply { hfw: 1, lfw: 7, temp_fw: 0, cpu_fw: 1, fan_fw: 0 });
+    }
+
+    #[tokio::test]
+    async fn query_raw_gives_the_raw_reply_even_when_the_adapter_would_refuse_it() {
+        // A reply the adapter refuses (two variants at once): the probe still gets the bytes,
+        // because the real layout is still a guess and the first hardware test needs to see it.
+        let mut r = vec![0u8; 64];
+        r[6] = 1;
+        r[7] = 1;
+        let (mut a, s) = rig(true, vec![r]);
+        let reply = a.query_raw().await.unwrap();
+        assert_eq!(reply.len(), 64);
+        assert!(parse_query_reply(&reply).is_err(), "the adapter refuses this reply");
+        assert!(a.is_connected(), "the device stays open, so the probe can write to it");
+        assert_eq!(s.lock().unwrap().opens, 1);
+        let _ = a.disconnect().await;
+    }
+
+    #[tokio::test]
+    async fn the_ack_the_device_sent_is_kept_for_the_probe() {
+        let (mut a, _) = rig(true, vec![reply(0x01, 0x07, 1, 1, 0), vec![0xAB; 8]]);
+        a.connect().await.unwrap();
+        assert!(a.last_ack().is_none(), "no write yet");
+        a.write_value(&id(), &temp_c(42.5)).await.unwrap();
+        assert_eq!(a.last_ack().map(|bytes| bytes.to_vec()), Some(vec![0xAB; 8]));
     }
 
     // ------------------------------------------------------------ F2: no blank packet
