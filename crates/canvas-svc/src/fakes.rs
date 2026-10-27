@@ -5,8 +5,8 @@
 //! the command handshake, and the board temperature registers. The real driver runs over it.
 
 use crate::chip::{
-    Channel, PortIo, RegisterMap, BOARD_SENSORS, CMD_DONE, CMD_REQUEST, COMMAND_REG, ENGINE_STS_REG, MODE_REG,
-    STS_CHECK_DONE, STS_LOCK, STS_PHASE, TEMP_BASE_REG,
+    Channel, PortIo, RegisterMap, BOARD_SENSORS, CMD_DONE, CMD_REQUEST, COMMAND_REG, CURVE_POINTS, CURVE_STRIDE,
+    ENGINE_STS_REG, MODE_REG, STS_CHECK_DONE, STS_LOCK, STS_PHASE, TEMP_BASE_REG,
 };
 use crate::process::{ChildProcess, ProcessSpawner};
 use crate::temps::TempReader;
@@ -27,6 +27,8 @@ const BIOS_RPM: f32 = 900.0;
 /// Time constant of the RPM response, so RPM "follows duty with a lag".
 const RPM_TAU_SECS: f32 = 2.0;
 const CHANNELS: usize = 9;
+/// A sloped BIOS fan curve: no two points equal, so one written point changes nothing.
+pub const BIOS_CURVE: [u8; CURVE_POINTS] = [0x26, 0x40, 0x59, 0x73, 0x8C, 0xB3, 0xFF];
 
 struct Sim {
     map: RegisterMap,
@@ -43,6 +45,8 @@ struct Sim {
     index: u8,
     regs: HashMap<u16, u8>,
     duty_raw: [u8; CHANNELS],
+    /// Each header's fan curve duty points, as the BIOS left them.
+    curve: [[u8; CURVE_POINTS]; CHANNELS],
     rpm: [f32; CHANNELS],
     manual: [bool; CHANNELS],
     drop_duty_writes: bool,
@@ -102,6 +106,7 @@ impl FakeChip {
             index: 0,
             regs: HashMap::new(),
             duty_raw: [BIOS_RAW_DUTY; CHANNELS],
+            curve: [BIOS_CURVE; CHANNELS],
             rpm: [BIOS_RPM; CHANNELS],
             manual: [false; CHANNELS],
             drop_duty_writes: false,
@@ -161,6 +166,18 @@ impl FakeChip {
         lock(&self.sim).duty_raw.get(ch).copied().unwrap_or(0)
     }
 
+    /// Sets the curve-point duties of `ch` as if the BIOS had left them so.
+    pub fn set_curve(&self, ch: usize, points: [u8; CURVE_POINTS]) {
+        if let Some(curve) = lock(&self.sim).curve.get_mut(ch) {
+            *curve = points;
+        }
+    }
+
+    /// The curve-point duties of `ch` (meaningful on msi_alt1 system-fan headers).
+    pub fn curve(&self, ch: usize) -> [u8; CURVE_POINTS] {
+        lock(&self.sim).curve.get(ch).copied().unwrap_or_default()
+    }
+
     /// Number of register writes the chip has accepted through the EC port.
     pub fn writes(&self) -> u32 {
         lock(&self.sim).writes
@@ -217,6 +234,9 @@ impl Sim {
                 STS_LOCK
             };
         }
+        if let Some((ch, point)) = self.curve_point(reg) {
+            return self.curve[ch][point];
+        }
         if let Some(ch) = self.channel_of_pwm_write(reg) {
             return self.duty_raw[ch];
         }
@@ -255,6 +275,17 @@ impl Sim {
             self.regs.insert(reg, value);
             return;
         }
+        // Like Luke's B850: an msi_alt1 system-fan header's output follows its curve, so its
+        // duty changes only once all 7 points hold the same value.
+        if let Some((ch, point)) = self.curve_point(reg) {
+            if self.cfg_open && !self.drop_duty_writes {
+                self.curve[ch][point] = value;
+                if self.curve[ch].iter().all(|&p| p == value) {
+                    self.duty_raw[ch] = value;
+                }
+            }
+            return;
+        }
         if let Some(ch) = self.channel_of_pwm_write(reg) {
             if self.cfg_open && !self.drop_duty_writes {
                 self.duty_raw[ch] = value;
@@ -262,6 +293,19 @@ impl Sim {
             return;
         }
         self.regs.insert(reg, value);
+    }
+
+    /// The (channel, point) of a curve-point duty register on an msi_alt1 system-fan header.
+    fn curve_point(&self, reg: u16) -> Option<(usize, usize)> {
+        if self.map.name != "msi_alt1" {
+            return None;
+        }
+        self.map.channels.iter().enumerate().skip(2).find_map(|(ch, c)| {
+            let first = c.pwm_write_reg?;
+            let offset = reg.checked_sub(first)?;
+            let point = usize::from(offset / CURVE_STRIDE);
+            (offset % CURVE_STRIDE == 0 && point < CURVE_POINTS).then_some((ch, point))
+        })
     }
 }
 

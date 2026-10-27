@@ -81,6 +81,10 @@ pub const STS_CHECK_DONE: u8 = 1 << 5;
 pub const STS_LOCK: u8 = 1 << 6;
 /// Polls of the engine status per wait, 1 ms apart: nct6687d waits up to a second.
 const CFG_POLLS: u32 = 1000;
+/// Points in a header's fan curve (nct6687d `NCT6687_FAN_CURVE_POINTS`).
+pub const CURVE_POINTS: usize = 7;
+/// Bytes between curve points; the duty is the first byte of each (`NCT6687_FAN_CURVE_POINT_SIZE`).
+pub const CURVE_STRIDE: u16 = 2;
 /// Board temperature registers: `0x100 + 2n` (integer), `+1` bit 7 = half degree.
 pub const TEMP_BASE_REG: u16 = 0x100;
 pub const BOARD_SENSORS: [&str; 7] = [
@@ -184,6 +188,11 @@ pub trait FanChip: Send {
     fn set_manual(&mut self, channel: usize, manual: bool) -> io::Result<()>;
     /// Writes a duty and waits for the chip to acknowledge it. Fails for tach-only headers.
     fn write_duty_percent(&mut self, channel: usize, percent: u8) -> io::Result<()>;
+    /// The header's BIOS fan curve (raw duty points) when its duty is driven through that
+    /// curve, so it can be saved before a manual write; `None` for every other header.
+    fn read_curve(&mut self, channel: usize) -> io::Result<Option<Vec<u8>>>;
+    /// Writes a curve read by [`read_curve`](Self::read_curve) back. Used on every handback.
+    fn write_curve(&mut self, channel: usize, points: &[u8]) -> io::Result<()>;
     /// Board sensor in degrees C, `None` for an unknown name.
     fn read_board_temp(&mut self, name: &str) -> io::Result<Option<f32>>;
 }
@@ -289,16 +298,43 @@ impl<P: PortIo> Nct6687<P> {
         Ok(())
     }
 
-    /// Inside the window: the manual bit, then the duty, read back.
-    fn write_inside_cfg(&mut self, reg: u16, bit: u8, raw: u8) -> io::Result<()> {
-        let mode = self.ec_read(MODE_REG)?;
-        self.ec_write(MODE_REG, mode | (1 << bit))?;
-        self.ec_write(reg, raw)?;
-        let read = self.ec_read(reg)?;
-        if read != raw {
-            return Err(io::Error::other(ChipError::Readback { reg, wrote: raw, read }.to_string()));
+    /// Inside the window: the manual bit (when given), then each value to its register, each
+    /// read back.
+    fn write_inside_cfg(&mut self, manual_bit: Option<u8>, regs: &[u16], values: &[u8]) -> io::Result<()> {
+        if let Some(bit) = manual_bit {
+            let mode = self.ec_read(MODE_REG)?;
+            self.ec_write(MODE_REG, mode | (1 << bit))?;
+        }
+        for (&reg, &value) in regs.iter().zip(values) {
+            self.ec_write(reg, value)?;
+            let read = self.ec_read(reg)?;
+            if read != value {
+                return Err(io::Error::other(ChipError::Readback { reg, wrote: value, read }.to_string()));
+            }
         }
         Ok(())
+    }
+
+    /// Opens the window, runs [`write_inside_cfg`](Self::write_inside_cfg), and always closes it.
+    fn write_in_window(&mut self, manual_bit: Option<u8>, regs: &[u16], values: &[u8]) -> io::Result<()> {
+        self.cfg_start()?;
+        let written = self.write_inside_cfg(manual_bit, regs, values);
+        // The window is always closed, even when the write inside it failed.
+        let finished = self.cfg_finish();
+        written?;
+        finished
+    }
+
+    /// The 7 curve-point duty registers of a header whose PWM follows its curve: msi_alt1
+    /// headers from index 2 (nct6687d `nct6687_uses_msi_fan_curve`). On Luke's B850 a single
+    /// write to sys_fan3's PWM register was accepted and read back, but the PWM output stayed
+    /// at the BIOS 70% for 3 s and the fan never changed (lighting session 2).
+    fn curve_regs(&self, channel: usize) -> Option<[u16; CURVE_POINTS]> {
+        if self.map.name != MSI_ALT1_MAP.name || channel < 2 {
+            return None;
+        }
+        let first = self.map.channels.get(channel)?.pwm_write_reg?;
+        Some(std::array::from_fn(|i| first + CURVE_STRIDE * i as u16))
     }
 
     /// nct6687d `finish_fan_cfg_update`.
@@ -391,21 +427,39 @@ impl<P: PortIo> FanChip for Nct6687<P> {
         Ok(())
     }
 
-    /// nct6687d `nct6687_write_pwm` (non brute-force path, its default): open the fan
-    /// configuration window, set the manual bit, write the duty and read it back, close the
-    /// window. The first real write (lighting session 2) wrote the duty before the request
-    /// and waited on 0xA01 for an acknowledgement the EC never gives, so it timed out.
+    /// nct6687d `nct6687_write_pwm`: open the fan configuration window, set the manual bit,
+    /// write the duty and read it back, close the window. A header that follows its curve
+    /// gets the duty on all 7 curve points (nct6687d's MSI brute-force path), which flattens
+    /// the curve; [`read_curve`](FanChip::read_curve) saves it first.
     fn write_duty_percent(&mut self, channel: usize, percent: u8) -> io::Result<()> {
         let c = self.channel(channel)?;
         let reg = c.pwm_write_reg.ok_or_else(|| bad_channel(channel))?;
         let bit = c.mode_bit.ok_or_else(|| bad_channel(channel))?;
         let raw = ((u32::from(percent.min(100)) * 255 + 50) / 100) as u8;
-        self.cfg_start()?;
-        let written = self.write_inside_cfg(reg, bit, raw);
-        // The window is always closed, even when the write inside it failed.
-        let finished = self.cfg_finish();
-        written?;
-        finished
+        match self.curve_regs(channel) {
+            Some(regs) => self.write_in_window(Some(bit), &regs, &[raw; CURVE_POINTS]),
+            None => self.write_in_window(Some(bit), &[reg], &[raw]),
+        }
+    }
+
+    fn read_curve(&mut self, channel: usize) -> io::Result<Option<Vec<u8>>> {
+        let Some(regs) = self.curve_regs(channel) else { return Ok(None) };
+        let mut points = Vec::with_capacity(CURVE_POINTS);
+        for reg in regs {
+            points.push(self.ec_read(reg)?);
+        }
+        Ok(Some(points))
+    }
+
+    fn write_curve(&mut self, channel: usize, points: &[u8]) -> io::Result<()> {
+        let regs = self.curve_regs(channel).ok_or_else(|| bad_channel(channel))?;
+        if points.len() != CURVE_POINTS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("a curve has {CURVE_POINTS} points, not {}", points.len()),
+            ));
+        }
+        self.write_in_window(None, &regs, points)
     }
 
     fn read_board_temp(&mut self, name: &str) -> io::Result<Option<f32>> {
