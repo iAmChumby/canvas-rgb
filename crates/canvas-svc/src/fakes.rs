@@ -8,6 +8,7 @@ use crate::chip::{
     Channel, PortIo, RegisterMap, BOARD_SENSORS, CMD_DONE, CMD_REQUEST, COMMAND_REG, ENGINE_STS_REG,
     STS_CHECK_DONE, STS_LOCK, STS_PHASE, TEMP_BASE_REG,
 };
+use crate::gpu_fans::GpuFanApi;
 use crate::process::{ChildProcess, ProcessSpawner};
 use crate::temps::TempReader;
 use std::collections::HashMap;
@@ -356,6 +357,126 @@ impl TempReader for FakeTemp {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "fake sensor is down"))
+    }
+}
+
+/// What one simulated GPU fan holds.
+struct GpuFan {
+    target: u32,
+    manual: bool,
+}
+
+struct GpuSim {
+    fans: Vec<GpuFan>,
+    fail_set_speed: bool,
+    fail_count: bool,
+    /// Every `set_speed` call as (fan, percent), including failed ones.
+    speed_calls: Vec<(u32, u32)>,
+    /// Every `set_default` call, by fan.
+    default_calls: Vec<u32>,
+}
+
+/// A simulated set of GPU fans behind [`GpuFanApi`]. Like the real card, a speed write makes the
+/// fan manual with the new target at once, and a default call returns it to auto at 30%.
+/// Clones see the same fans.
+#[derive(Clone)]
+pub struct FakeGpuFans {
+    sim: Arc<Mutex<GpuSim>>,
+}
+
+fn gpu_lock(sim: &Mutex<GpuSim>) -> MutexGuard<'_, GpuSim> {
+    sim.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+impl FakeGpuFans {
+    /// `count` fans, all on auto with the 30% idle target.
+    pub fn new(count: usize) -> Self {
+        let fans = (0..count).map(|_| GpuFan { target: 30, manual: false }).collect();
+        let sim = GpuSim { fans, fail_set_speed: false, fail_count: false, speed_calls: Vec::new(), default_calls: Vec::new() };
+        Self { sim: Arc::new(Mutex::new(sim)) }
+    }
+
+    /// Makes every `set_speed` fail, as a driver that rejects the write.
+    pub fn set_fail_set_speed(&self, fail: bool) {
+        gpu_lock(&self.sim).fail_set_speed = fail;
+    }
+
+    /// Makes `count` fail.
+    pub fn set_fail_count(&self, fail: bool) {
+        gpu_lock(&self.sim).fail_count = fail;
+    }
+
+    pub fn speed_calls(&self) -> Vec<(u32, u32)> {
+        gpu_lock(&self.sim).speed_calls.clone()
+    }
+
+    pub fn default_calls(&self) -> Vec<u32> {
+        gpu_lock(&self.sim).default_calls.clone()
+    }
+
+    pub fn clear_calls(&self) {
+        let mut sim = gpu_lock(&self.sim);
+        sim.speed_calls.clear();
+        sim.default_calls.clear();
+    }
+
+    pub fn target_of(&self, fan: u32) -> Option<u32> {
+        gpu_lock(&self.sim).fans.get(fan as usize).map(|f| f.target)
+    }
+
+    pub fn manual_of(&self, fan: u32) -> bool {
+        gpu_lock(&self.sim).fans.get(fan as usize).is_some_and(|f| f.manual)
+    }
+}
+
+fn no_fan(fan: u32) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, format!("no GPU fan {fan}"))
+}
+
+impl GpuFanApi for FakeGpuFans {
+    fn count(&mut self) -> io::Result<u32> {
+        let sim = gpu_lock(&self.sim);
+        if sim.fail_count {
+            return Err(io::Error::other("fake NVML count failure"));
+        }
+        Ok(sim.fans.len() as u32)
+    }
+
+    fn speed(&mut self, fan: u32) -> io::Result<u32> {
+        let sim = gpu_lock(&self.sim);
+        let f = sim.fans.get(fan as usize).ok_or_else(|| no_fan(fan))?;
+        Ok(if f.manual { f.target } else { 0 })
+    }
+
+    fn target(&mut self, fan: u32) -> io::Result<u32> {
+        let sim = gpu_lock(&self.sim);
+        sim.fans.get(fan as usize).map(|f| f.target).ok_or_else(|| no_fan(fan))
+    }
+
+    fn policy_manual(&mut self, fan: u32) -> io::Result<bool> {
+        let sim = gpu_lock(&self.sim);
+        sim.fans.get(fan as usize).map(|f| f.manual).ok_or_else(|| no_fan(fan))
+    }
+
+    fn set_speed(&mut self, fan: u32, percent: u32) -> io::Result<()> {
+        let mut sim = gpu_lock(&self.sim);
+        sim.speed_calls.push((fan, percent));
+        if sim.fail_set_speed {
+            return Err(io::Error::other("fake NVML set_speed failure"));
+        }
+        let f = sim.fans.get_mut(fan as usize).ok_or_else(|| no_fan(fan))?;
+        f.target = percent;
+        f.manual = true;
+        Ok(())
+    }
+
+    fn set_default(&mut self, fan: u32) -> io::Result<()> {
+        let mut sim = gpu_lock(&self.sim);
+        sim.default_calls.push(fan);
+        let f = sim.fans.get_mut(fan as usize).ok_or_else(|| no_fan(fan))?;
+        f.target = 30;
+        f.manual = false;
+        Ok(())
     }
 }
 

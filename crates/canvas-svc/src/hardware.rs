@@ -2,6 +2,7 @@
 //! is logged; the service still runs, with the fan headers absent from status.
 
 use crate::chip::{FanChip, Nct6687, MSI_ALT1_MAP};
+use crate::gpu_fans::{CompositeChip, GpuFanApi, NvmlFans};
 use crate::pawnio::{pawnio_home, PawnIoPortIo, TctlSource};
 use crate::temps::{NvmlSource, TempReader};
 use canvas_proto::fans::TempSource;
@@ -13,8 +14,35 @@ pub struct Hardware {
     pub temps: BTreeMap<TempSource, Box<dyn TempReader>>,
 }
 
-/// Opens the NCT6687D-R through PawnIO's LpcIO module and checks it with the detect path.
+/// Opens the fan headers: the NCT6687D-R's, then the GPU's through NVML, as one chip. Either
+/// half may be missing; both missing is the NCT error. Used by service startup and by
+/// `--restore-bios`, so the GPU handback runs in both.
 pub fn open_chip() -> Result<Box<dyn FanChip>, String> {
+    let nct = open_nct();
+    let gpu: Option<Box<dyn GpuFanApi>> = match NvmlFans::open() {
+        Ok(fans) => Some(Box::new(fans)),
+        Err(e) => {
+            tracing::warn!(error = %e, "GPU fans unavailable; only the motherboard headers will be driven");
+            None
+        }
+    };
+    match (nct, gpu) {
+        (Err(e), None) => Err(e),
+        (nct, gpu) => {
+            let nct = match nct {
+                Ok(chip) => Some(chip),
+                Err(e) => {
+                    tracing::error!(error = %e, "fan chip unavailable; only the GPU fans can be handed back");
+                    None
+                }
+            };
+            Ok(Box::new(CompositeChip::new(nct, gpu)))
+        }
+    }
+}
+
+/// Opens the NCT6687D-R through PawnIO's LpcIO module and checks it with the detect path.
+fn open_nct() -> Result<Box<dyn FanChip>, String> {
     let home = pawnio_home();
     // Both Super I/O ports are tried, 0x2E first; the errors of both are reported.
     let mut errors = Vec::new();

@@ -10,6 +10,7 @@ pub mod chip;
 pub mod daemon;
 pub mod fakes;
 pub mod fans;
+pub mod gpu_fans;
 pub mod hardware;
 pub mod logging;
 pub mod openrgb;
@@ -27,5 +28,7 @@ pub mod winsvc;
 mod app_tests;
 #[cfg(test)]
 mod fans_tests;
+#[cfg(test)]
+mod gpu_fans_tests;
 #[cfg(test)]
 mod openrgb_tests;
