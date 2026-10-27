@@ -117,8 +117,14 @@ pub const MSI_ALT1_MAP: RegisterMap = RegisterMap {
     ],
 };
 
-/// Super I/O config port (slot 0). The driver does not probe 0x4E; see the report.
+/// Super I/O config port, slot 0 of PawnIO's LpcIO module.
 pub const SIO_PORT: u16 = 0x2E;
+/// The second Super I/O config port, LpcIO slot 1. Luke's B850 has nothing at 0x2E (LpcIO's
+/// `find_bars` read chip id 0x00/0xFF there, lighting session 2), so both are probed, in this
+/// order, as LibreHardwareMonitor does.
+pub const SIO_PORT_ALT: u16 = 0x4E;
+/// The Super I/O ports by LpcIO slot index.
+pub const SIO_PORTS: [u16; 2] = [SIO_PORT, SIO_PORT_ALT];
 /// Hardware-monitor base the chip must report for this board.
 pub const EXPECTED_HWM_BASE: u16 = 0xA20;
 const SIO_CHIP_ID_HI: u8 = 0x20;
@@ -171,14 +177,14 @@ fn bad_channel(channel: usize) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, format!("no header index {channel}"))
 }
 
-fn sio_write<P: PortIo>(io: &mut P, reg: u8, value: u8) -> io::Result<()> {
-    io.write_port(SIO_PORT, reg)?;
-    io.write_port(SIO_PORT + 1, value)
+fn sio_write<P: PortIo>(io: &mut P, sio: u16, reg: u8, value: u8) -> io::Result<()> {
+    io.write_port(sio, reg)?;
+    io.write_port(sio + 1, value)
 }
 
-fn sio_read<P: PortIo>(io: &mut P, reg: u8) -> io::Result<u8> {
-    io.write_port(SIO_PORT, reg)?;
-    io.read_port(SIO_PORT + 1)
+fn sio_read<P: PortIo>(io: &mut P, sio: u16, reg: u8) -> io::Result<u8> {
+    io.write_port(sio, reg)?;
+    io.read_port(sio + 1)
 }
 
 /// The NCT6687D-R driver over a [`PortIo`].
@@ -191,13 +197,20 @@ pub struct Nct6687<P: PortIo> {
 impl<P: PortIo> Nct6687<P> {
     /// Identifies the chip through Super I/O, checks its hardware-monitor base is
     /// [`EXPECTED_HWM_BASE`], and leaves the chip in run mode. Never writes a fan register.
-    pub fn detect(mut io: P, map: RegisterMap) -> Result<Self, ChipError> {
-        io.write_port(SIO_PORT, SIO_ENTER_KEY)?;
-        io.write_port(SIO_PORT, SIO_ENTER_KEY)?;
-        io.config_mode_entered()?;
-        let probed = probe(&mut io);
-        // Always leave config mode, even when the probe failed.
-        let exit = io.write_port(SIO_PORT, SIO_EXIT_KEY);
+    pub fn detect(io: P, map: RegisterMap) -> Result<Self, ChipError> {
+        Self::detect_at(io, map, SIO_PORT)
+    }
+
+    /// [`detect`](Self::detect) at the Super I/O config port `sio` (0x2E or 0x4E).
+    pub fn detect_at(mut io: P, map: RegisterMap, sio: u16) -> Result<Self, ChipError> {
+        io.write_port(sio, SIO_ENTER_KEY)?;
+        io.write_port(sio, SIO_ENTER_KEY)?;
+        let probed = io
+            .config_mode_entered()
+            .map_err(ChipError::from)
+            .and_then(|()| probe(&mut io, sio));
+        // Always leave config mode, even when entering it or the probe failed.
+        let exit = io.write_port(sio, SIO_EXIT_KEY);
         let base = probed?;
         exit?;
         Ok(Self { io, base, map })
@@ -225,13 +238,15 @@ impl<P: PortIo> Nct6687<P> {
     }
 }
 
-fn probe<P: PortIo>(io: &mut P) -> Result<u16, ChipError> {
-    let id = (u16::from(sio_read(io, SIO_CHIP_ID_HI)?) << 8) | u16::from(sio_read(io, SIO_CHIP_ID_LO)?);
+fn probe<P: PortIo>(io: &mut P, sio: u16) -> Result<u16, ChipError> {
+    let id = (u16::from(sio_read(io, sio, SIO_CHIP_ID_HI)?) << 8)
+        | u16::from(sio_read(io, sio, SIO_CHIP_ID_LO)?);
     if id & CHIP_ID_MASK != NCT6687_CHIP_ID {
-        return Err(ChipError::NotFound { port: SIO_PORT, id });
+        return Err(ChipError::NotFound { port: sio, id });
     }
-    sio_write(io, SIO_LD_SELECT, SIO_LD_HWM)?;
-    let base = (u16::from(sio_read(io, SIO_ADDR_HI)?) << 8) | u16::from(sio_read(io, SIO_ADDR_LO)?);
+    sio_write(io, sio, SIO_LD_SELECT, SIO_LD_HWM)?;
+    let base = (u16::from(sio_read(io, sio, SIO_ADDR_HI)?) << 8)
+        | u16::from(sio_read(io, sio, SIO_ADDR_LO)?);
     if base != EXPECTED_HWM_BASE {
         return Err(ChipError::WrongBase { found: base, expected: EXPECTED_HWM_BASE });
     }
@@ -321,6 +336,17 @@ mod tests {
     #[test]
     fn detects_the_chip_at_the_expected_base() {
         let chip = Nct6687::detect(FakeChip::new(MSI_ALT1_MAP), MSI_ALT1_MAP).unwrap();
+        assert_eq!(chip.chip_name(), "NCT6687D-R @ 0xA20");
+    }
+
+    #[test]
+    fn a_chip_at_the_second_port_is_found_there_and_not_at_the_first() {
+        let err = Nct6687::detect_at(FakeChip::at_port(MSI_ALT1_MAP, SIO_PORT_ALT), MSI_ALT1_MAP, SIO_PORT)
+            .err()
+            .unwrap();
+        assert!(matches!(err, ChipError::NotFound { port: SIO_PORT, .. }), "{err}");
+        let chip =
+            Nct6687::detect_at(FakeChip::at_port(MSI_ALT1_MAP, SIO_PORT_ALT), MSI_ALT1_MAP, SIO_PORT_ALT).unwrap();
         assert_eq!(chip.chip_name(), "NCT6687D-R @ 0xA20");
     }
 

@@ -79,6 +79,19 @@ impl DaemonSupervisor {
         }
     }
 
+    /// The service is stopping: the daemon it launched ends too and is not restarted.
+    /// Without this a service restart leaves the old daemon holding the API port, so the new
+    /// service's daemon cannot bind and crash-loops (lighting session 2).
+    pub fn stop(&mut self) {
+        self.stopped = true;
+        if let Some(mut child) = self.child.take() {
+            tracing::info!(pid = child.id(), "the service is stopping; ending the daemon it launched");
+            if let Err(e) = child.kill() {
+                tracing::warn!(error = %e, "could not end the daemon");
+            }
+        }
+    }
+
     /// The daemon is quitting on purpose; its exit is not a crash.
     pub fn on_quitting(&mut self) {
         tracing::info!("daemon announced a quit; it will not be restarted");
@@ -293,6 +306,19 @@ mod tests {
             Box::new(FakeLauncher(processes.clone())),
         );
         (sup, processes)
+    }
+
+    #[test]
+    fn stopping_the_service_ends_its_daemon_and_never_restarts_it() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        sup.start(t0);
+        assert!(sup.daemon_pid().is_some());
+        sup.stop();
+        assert_eq!(sup.daemon_pid(), None);
+        assert!(sup.stopped());
+        assert_eq!(sup.tick(t0 + Duration::from_secs(10)), DaemonAction::None);
+        assert_eq!(processes.spawns().len(), 1);
     }
 
     #[test]

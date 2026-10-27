@@ -59,6 +59,7 @@ impl Core {
     /// Writes BIOS on every header and stops the OpenRGB server. Called on stop and shutdown.
     pub fn shutdown(&mut self, reason: &str) {
         self.fans.restore_all(reason);
+        self.daemon.stop();
         self.openrgb.stop();
     }
 

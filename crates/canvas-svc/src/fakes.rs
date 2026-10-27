@@ -29,6 +29,8 @@ struct Sim {
     map: RegisterMap,
     present: bool,
     base: u16,
+    /// The Super I/O config port the chip answers on (0x2E or 0x4E).
+    sio_port: u16,
     sio_config: bool,
     sio_index: u8,
     sio_ld: u8,
@@ -70,11 +72,19 @@ impl FakeChip {
         Self::build(map, true, base)
     }
 
+    /// A present chip that answers on Super I/O port `sio` instead of 0x2E.
+    pub fn at_port(map: RegisterMap, sio: u16) -> Self {
+        let chip = Self::build(map, true, HWM_BASE);
+        lock(&chip.sim).sio_port = sio;
+        chip
+    }
+
     fn build(map: RegisterMap, present: bool, base: u16) -> Self {
         let sim = Sim {
             map,
             present,
             base,
+            sio_port: 0x2E,
             sio_config: false,
             sio_index: 0,
             sio_ld: 0,
@@ -227,7 +237,7 @@ impl Sim {
 impl PortIo for FakeChip {
     fn read_port(&mut self, port: u16) -> io::Result<u8> {
         let sim = lock(&self.sim);
-        if port == 0x2F {
+        if port == sim.sio_port + 1 {
             if !sim.present {
                 return Ok(0xFF);
             }
@@ -258,7 +268,7 @@ impl PortIo for FakeChip {
 
     fn write_port(&mut self, port: u16, value: u8) -> io::Result<()> {
         let mut sim = lock(&self.sim);
-        if port == 0x2E {
+        if port == sim.sio_port {
             match value {
                 0x87 => sim.sio_config = true,
                 0xAA => sim.sio_config = false,
@@ -266,7 +276,7 @@ impl PortIo for FakeChip {
             }
             return Ok(());
         }
-        if port == 0x2F {
+        if port == sim.sio_port + 1 {
             if sim.sio_config && sim.sio_index == 0x07 {
                 sim.sio_ld = value;
             }

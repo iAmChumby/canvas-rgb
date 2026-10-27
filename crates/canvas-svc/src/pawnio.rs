@@ -149,10 +149,10 @@ pub struct PawnIoPortIo {
 }
 
 impl PawnIoPortIo {
-    /// Opens LpcIO and selects Super I/O slot 0 (port 0x2E).
-    pub fn open(home: &Path) -> io::Result<Self> {
+    /// Opens LpcIO and selects a Super I/O slot: 0 is port 0x2E, 1 is port 0x4E.
+    pub fn open(home: &Path, slot: u64) -> io::Result<Self> {
         let mut module = Module::open(home, LPC_MODULE)?;
-        module.call("ioctl_select_slot", &[0], &mut [])?;
+        module.call("ioctl_select_slot", &[slot], &mut [])?;
         Ok(Self { module })
     }
 }

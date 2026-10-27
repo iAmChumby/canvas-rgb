@@ -16,9 +16,22 @@ pub struct Hardware {
 /// Opens the NCT6687D-R through PawnIO's LpcIO module and checks it with the detect path.
 pub fn open_chip() -> Result<Box<dyn FanChip>, String> {
     let home = pawnio_home();
-    let io = PawnIoPortIo::open(&home).map_err(|e| format!("PawnIO LpcIO: {e}"))?;
-    let chip = Nct6687::detect(io, MSI_ALT1_MAP).map_err(|e| e.to_string())?;
-    Ok(Box::new(chip))
+    // Both Super I/O ports are tried, 0x2E first; the errors of both are reported.
+    let mut errors = Vec::new();
+    for (slot, sio) in crate::chip::SIO_PORTS.iter().enumerate() {
+        let io = match PawnIoPortIo::open(&home, slot as u64) {
+            Ok(io) => io,
+            Err(e) => {
+                errors.push(format!("{sio:#x}: PawnIO LpcIO: {e}"));
+                continue;
+            }
+        };
+        match Nct6687::detect_at(io, MSI_ALT1_MAP, *sio) {
+            Ok(chip) => return Ok(Box::new(chip)),
+            Err(e) => errors.push(format!("{sio:#x}: {e}")),
+        }
+    }
+    Err(errors.join("; "))
 }
 
 /// Opens every source the service can read. Nothing here panics on a missing driver.
