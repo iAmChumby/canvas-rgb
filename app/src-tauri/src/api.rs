@@ -9,6 +9,8 @@ use canvas_proto::consts;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
+use crate::peer;
+
 /// Connect and read budget. The daemon is on localhost: anything slower is down.
 const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -18,6 +20,9 @@ pub enum ApiError {
     Token(String),
     /// The connection failed: the daemon is not running.
     Unreachable,
+    /// The process holding the port is not the daemon (or runs as another user), so the
+    /// token is not sent to it.
+    NotTrusted(String),
     /// The daemon answered with an error status, e.g. 503 when the fan service is down.
     Http { status: u16, message: String },
     /// The response did not parse as the expected type.
@@ -29,6 +34,7 @@ impl std::fmt::Display for ApiError {
         match self {
             ApiError::Token(e) => write!(f, "API token unavailable: {e}"),
             ApiError::Unreachable => write!(f, "daemon not reachable"),
+            ApiError::NotTrusted(message) => write!(f, "{message}"),
             ApiError::Http { status, message } => write!(f, "HTTP {status}: {message}"),
             ApiError::Decode(e) => write!(f, "unexpected response: {e}"),
         }
@@ -64,7 +70,11 @@ pub fn client() -> &'static Client {
 }
 
 /// Reads the token file at call time (G9). Never cached: the daemon may rotate it.
+///
+/// The token is only handed out when the daemon really holds the port: it is a bearer
+/// secret and must not reach another process.
 pub fn read_token() -> Result<String, ApiError> {
+    peer::check(consts::API_PORT).map_err(|refusal| ApiError::NotTrusted(refusal.message()))?;
     let path = consts::token_path();
     let text = std::fs::read_to_string(&path)
         .map_err(|e| ApiError::Token(format!("{}: {e}", path.display())))?;

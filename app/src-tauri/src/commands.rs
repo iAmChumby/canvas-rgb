@@ -9,6 +9,9 @@ use crate::api;
 
 /// `get_api_config`: the token is read from the file at call time, so the editor never
 /// bundles it. The token is returned to the WebView only; it is not logged.
+///
+/// The token is only handed out when the daemon really holds 127.0.0.1:9430: it is a
+/// bearer secret, and the editor sends it to whatever answers on that port.
 #[tauri::command]
 pub fn get_api_config() -> Result<ApiConfig, String> {
     let token = api::read_token().map_err(|e| e.to_string())?;

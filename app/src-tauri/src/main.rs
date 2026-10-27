@@ -6,9 +6,12 @@
 
 mod api;
 mod commands;
+#[cfg(test)]
+mod config_tests;
 mod editor;
 mod elevation;
 mod log;
+mod peer;
 mod tray;
 
 use tauri::RunEvent;
