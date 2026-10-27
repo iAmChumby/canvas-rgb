@@ -45,6 +45,9 @@ pub mod routes {
     /// `GET`: every numeric display with its config and the value it shows now ([`super::DisplayStatus`]).
     pub const DISPLAYS: &str = "/api/v1/displays";
     /// `PUT` a [`crate::display::DisplayConfig`] for one display (its `device` must match `{id}`).
+    /// A display is driven only while it has a saved config: the daemon never opens or writes one
+    /// it was not told to (the vendor app may own it). `DELETE` removes the config, stops writing
+    /// and closes the device so the vendor app can take it back.
     pub const DISPLAY: &str = "/api/v1/displays/{id}";
     /// `PUT` with [`super::SetDisplayValue`]: the number a display with `DisplaySource::Api` shows.
     pub const DISPLAY_VALUE: &str = "/api/v1/displays/{id}/value";
