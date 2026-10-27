@@ -441,6 +441,29 @@ impl ChioneDisplay {
         self.last_ack.as_deref()
     }
 
+    /// Writes exactly these 65 bytes and reads the ack, as `write_value` does after it encodes.
+    ///
+    /// This is the probe's path for packets that `encode` would not build (the dot test). The
+    /// daemon never calls it: `write_value` is still the only path it uses, and it encodes first.
+    /// Refuses with `NotConnected` when the device is not open. A failed write drops the device.
+    pub async fn send_report(&mut self, report: &[u8; REPORT_LEN]) -> Result<(), AdapterError> {
+        let Some(mut dev) = self.dev.take() else {
+            return Err(AdapterError::NotConnected);
+        };
+        let report = *report;
+        let (dev, result) = tokio::task::spawn_blocking(move || {
+            let result = write_blocking(dev.as_mut(), &report);
+            (dev, result)
+        })
+        .await
+        .map_err(join_error)?;
+        // A failed write or ack read drops the device: `self.dev` stays `None`.
+        let ack = result?;
+        self.dev = Some(dev);
+        self.last_ack = ack;
+        Ok(())
+    }
+
     fn check_id(&self, id: &DeviceId) -> Result<(), AdapterError> {
         if *id == device_id() {
             Ok(())
@@ -511,20 +534,7 @@ impl NumericDisplayAdapter for ChioneDisplay {
         // Encode first: a value that cannot be shown (or a blank, which is never sent) is refused
         // before anything is written, and the connection stays up.
         let report = encode(value)?;
-        let Some(mut dev) = self.dev.take() else {
-            return Err(AdapterError::NotConnected);
-        };
-        let (dev, result) = tokio::task::spawn_blocking(move || {
-            let result = write_blocking(dev.as_mut(), &report);
-            (dev, result)
-        })
-        .await
-        .map_err(join_error)?;
-        // A failed write or ack read drops the device: `self.dev` stays `None`.
-        let ack = result?;
-        self.dev = Some(dev);
-        self.last_ack = ack;
-        Ok(())
+        self.send_report(&report).await
     }
 
     fn write_interval_ms(&self) -> u32 {

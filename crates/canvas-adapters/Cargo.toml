@@ -13,3 +13,7 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 hidapi = { version = "2.6", default-features = false, features = ["windows-native"] }
+
+[[example]]
+name = "chione_probe"
+test = true

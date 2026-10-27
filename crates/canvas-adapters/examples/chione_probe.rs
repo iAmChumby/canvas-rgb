@@ -12,8 +12,11 @@
 //!   stop sending and close.
 //! - `hold`: like `show`, then stop writing for 30 s and count down, so the display can be seen
 //!   holding, blanking or reverting.
+//! - `dot`: does a decimal-point byte of 0 turn the dot off? Three phases of 8 s, a packet every
+//!   250 ms: (A) "425" in temperature mode with byte 8 = 0, (B) "425" in fan-RPM mode with byte 8
+//!   = 0, (C) the normal 42.5 °C packet. Then 42.5 for 5 s so the display is left on a normal value.
 //!
-//! `query`, `show` and `hold` refuse to run while ZEUS CAST is running: it owns the display, and
+//! `query`, `show`, `hold` and `dot` refuse to run while ZEUS CAST is running: it owns the display, and
 //! both writing at once would confuse it. The tool never starts or stops ZEUS CAST itself; every
 //! step says how to restore it.
 //!
@@ -30,7 +33,7 @@ use canvas_adapters::chione::{
 use canvas_proto::device::DeviceId;
 use canvas_proto::display::{DisplayMode, DisplayUnit, DisplayValue};
 use canvas_proto::traits::NumericDisplayAdapter;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The vendor app that owns the display while it runs.
 const ZEUS_CAST_EXE: &str = "ZEUS CAST.exe";
@@ -48,6 +51,51 @@ const SHOW_VALUE: DisplayValue = DisplayValue {
 const SHOW_SECONDS: u64 = 10;
 /// How long `hold` stops writing.
 const HOLD_SECONDS: u64 = 30;
+/// How long each `dot` phase writes.
+const DOT_PHASE_SECONDS: u64 = 8;
+/// How long `dot` keeps writing 42.5 after phase C.
+const DOT_TAIL_SECONDS: u64 = 5;
+
+/// One phase of the dot test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DotPhase {
+    /// "425" in temperature mode, dot byte 0.
+    A,
+    /// "425" in fan-RPM mode, dot byte 0.
+    B,
+    /// The normal 42.5 °C packet.
+    C,
+}
+
+impl DotPhase {
+    fn name(self) -> &'static str {
+        match self {
+            DotPhase::A => "A: 425, temperature mode, dot off",
+            DotPhase::B => "B: 425, fan-RPM mode, dot off",
+            DotPhase::C => "C: 42.5 C, normal",
+        }
+    }
+}
+
+/// The known-good 42.5 °C packet (recon section 2; the `show` hardware test), checksum included.
+const KNOWN_GOOD_42_5: [u8; 14] = [0x00, 0x3A, 0xB5, 0x01, 0x20, 0x04, 0x02, 0x05, 0x01, 0x01, 0x01, 0x00, 0x00, 0x1E];
+
+/// Byte 8 is the dot, byte 11 the mode (0 temperature, 1 fan RPM). Only those bytes and the
+/// checksum (byte 13, the sum of bytes 0..=12 masked to 0xFF) differ from the known-good packet.
+fn dot_packet(phase: DotPhase) -> [u8; 65] {
+    let mut r = [0u8; 65];
+    r[..14].copy_from_slice(&KNOWN_GOOD_42_5);
+    match phase {
+        DotPhase::A => r[8] = 0,
+        DotPhase::B => {
+            r[8] = 0;
+            r[11] = 1;
+        }
+        DotPhase::C => {}
+    }
+    r[13] = r[..13].iter().fold(0u8, |acc, b| acc.wrapping_add(*b));
+    r
+}
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
@@ -59,9 +107,10 @@ async fn main() -> std::process::ExitCode {
         "query" => query().await,
         "show" => show(force).await,
         "hold" => hold(force).await,
+        "dot" => dot(force).await,
         other => {
             eprintln!("unknown step '{other}'");
-            eprintln!("usage: chione_probe [check|query|show|hold] [--force]");
+            eprintln!("usage: chione_probe [check|query|show|hold|dot] [--force]");
             return std::process::ExitCode::from(2);
         }
     };
@@ -213,6 +262,94 @@ async fn hold(force: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// The dot test: phases A, B and C at 250 ms per packet, then 42.5 for a short tail. Stops at the
+/// first write error, since the device is dropped by then.
+async fn dot(force: bool) -> Result<(), String> {
+    refuse_if_vendor_running()?;
+    println!("== chione_probe dot ==");
+    println!("LOOK AT THE PUMP HEAD NOW");
+    let mut display = ChioneDisplay::new();
+    open(&mut display, force).await?;
+    let interval = Duration::from_millis(u64::from(display.write_interval_ms()));
+    println!("writing every {} ms; {DOT_PHASE_SECONDS} s per phase.", interval.as_millis());
+
+    let mut failure = None;
+    for phase in [DotPhase::A, DotPhase::B, DotPhase::C] {
+        let packet = dot_packet(phase);
+        println!();
+        println!("phase {}", phase.name());
+        println!("  start: {}", clock());
+        println!("  packet: {}", hex(&packet));
+        let tally = run_phase(&mut display, &packet, interval, DOT_PHASE_SECONDS).await;
+        println!("  writes {}, acks {}", tally.writes, tally.acks);
+        if let Some(error) = tally.error {
+            println!("  WRITE ERROR: {error}");
+            failure = Some(format!("phase {} stopped on a write error: {error}", phase.name()));
+            break;
+        }
+    }
+
+    if failure.is_none() {
+        let normal = dot_packet(DotPhase::C);
+        println!();
+        println!("tail: 42.5 C for {DOT_TAIL_SECONDS} s so the display is left on a normal value");
+        println!("  start: {}", clock());
+        let tally = run_phase(&mut display, &normal, interval, DOT_TAIL_SECONDS).await;
+        println!("  writes {}, acks {}", tally.writes, tally.acks);
+        if let Some(error) = tally.error {
+            println!("  WRITE ERROR: {error}");
+            failure = Some(format!("the tail stopped on a write error: {error}"));
+        }
+    }
+
+    let _ = display.disconnect().await;
+    println!();
+    println!("closed the device.");
+    restore();
+    match failure {
+        Some(message) => Err(message),
+        None => Ok(()),
+    }
+}
+
+/// What one phase did: writes sent, acks read back, and the first write error (which ends it).
+struct PhaseTally {
+    writes: u32,
+    acks: u32,
+    error: Option<String>,
+}
+
+/// Writes `packet` every `interval` for `seconds`, counting the acks.
+async fn run_phase(display: &mut ChioneDisplay, packet: &[u8; 65], interval: Duration, seconds: u64) -> PhaseTally {
+    let mut tally = PhaseTally { writes: 0, acks: 0, error: None };
+    let until = Instant::now() + Duration::from_secs(seconds);
+    while Instant::now() < until {
+        if let Err(e) = display.send_report(packet).await {
+            tally.error = Some(e.to_string());
+            break;
+        }
+        tally.writes += 1;
+        if display.last_ack().is_some() {
+            tally.acks += 1;
+        }
+        tokio::time::sleep(interval).await;
+    }
+    tally
+}
+
+/// The current UTC time of day, to the millisecond.
+fn clock() -> String {
+    let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let secs = since.as_secs() % 86_400;
+    format!(
+        "{:02}:{:02}:{:02}.{:03} UTC",
+        secs / 3600,
+        secs % 3600 / 60,
+        secs % 60,
+        since.subsec_millis()
+    )
+}
+
 /// Opens the display for a step that writes to it.
 ///
 /// Without `force` this is the daemon's own path: `connect` runs the 0xFF handshake and refuses a
@@ -271,4 +408,67 @@ fn restore() {
 /// The bytes as hex, spaced, like the adapter's own log.
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The 13 bytes of a report before its checksum, as hex: the test's own expectation.
+    fn head(r: &[u8; 65]) -> String {
+        hex(&r[..14])
+    }
+
+    #[test]
+    fn phase_a_is_425_temperature_with_the_dot_off() {
+        // dot 0, mode 0: sum 285 -> 0x1D
+        let r = dot_packet(DotPhase::A);
+        assert_eq!(head(&r), "00 3a b5 01 20 04 02 05 00 01 01 00 00 1d");
+        assert!(r[14..].iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn phase_b_is_425_fan_rpm_with_the_dot_off() {
+        // dot 0, mode 1, bytes 9 and 10 kept from the known-good packet: sum 286 -> 0x1E
+        let r = dot_packet(DotPhase::B);
+        assert_eq!(head(&r), "00 3a b5 01 20 04 02 05 00 01 01 01 00 1e");
+    }
+
+    #[test]
+    fn phase_c_is_the_known_good_42_5() {
+        // sum 286 -> 0x1E; the same bytes the adapter's encode builds for 42.5 C
+        let r = dot_packet(DotPhase::C);
+        assert_eq!(head(&r), "00 3a b5 01 20 04 02 05 01 01 01 00 00 1e");
+        let encoded = crate::encode(&DisplayValue {
+            value: Some(42.5),
+            decimals: 1,
+            unit: DisplayUnit::Celsius,
+            mode: DisplayMode::Temperature,
+            blink: false,
+        })
+        .unwrap();
+        assert_eq!(r, encoded);
+    }
+
+    #[test]
+    fn every_checksum_is_the_sum_of_bytes_0_to_12() {
+        for phase in [DotPhase::A, DotPhase::B, DotPhase::C] {
+            let r = dot_packet(phase);
+            let sum: u32 = r[..13].iter().map(|b| u32::from(*b)).sum();
+            assert_eq!(u32::from(r[13]), sum % 256, "{phase:?}");
+            assert_eq!(r.len(), 65);
+            assert_eq!(r[0], 0x00, "report ID");
+        }
+    }
+
+    #[test]
+    fn only_the_dot_mode_and_checksum_differ_from_the_known_good_packet() {
+        let good = dot_packet(DotPhase::C);
+        let a = dot_packet(DotPhase::A);
+        let b = dot_packet(DotPhase::B);
+        let differing = |x: &[u8; 65]| (0..14).filter(|i| x[*i] != good[*i]).collect::<Vec<_>>();
+        assert_eq!(differing(&a), vec![8, 13]);
+        // B's sum is 286 like C's, so its checksum byte is the same 0x1E
+        assert_eq!(differing(&b), vec![8, 11]);
+    }
 }
