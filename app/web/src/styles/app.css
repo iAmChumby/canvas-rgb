@@ -34,8 +34,8 @@ p {
 }
 
 h1 {
-  font-size: var(--t28);
-  font-weight: 600;
+  font-size: var(--t22);
+  font-weight: 650;
   letter-spacing: -0.01em;
   line-height: 1.2;
 }
@@ -129,8 +129,24 @@ html[data-motion="reduced"] *::after {
 
 .app {
   display: grid;
-  grid-template-columns: 208px minmax(0, 1fr);
+  grid-template-columns: var(--rail-w) minmax(0, 1fr);
   min-height: 100vh;
+}
+
+/* The signature: a 2 px spectrum line across the top of the window. The only place, with the
+   brand ring, that the full RGB sweep appears. */
+.app::before {
+  content: "";
+  position: fixed;
+  inset: 0 0 auto 0;
+  z-index: 60;
+  height: 2px;
+  background: var(--spectrum);
+  pointer-events: none;
+}
+
+.app[data-live="off"]::before {
+  background: var(--down);
 }
 
 /* The rail column stretches the full height of the shell, so its surface runs to the bottom of
@@ -147,31 +163,81 @@ html[data-motion="reduced"] *::after {
   height: 100vh;
   display: flex;
   flex-direction: column;
-  gap: var(--s1);
-  padding: var(--s4) var(--s3);
+  gap: 2px;
+  padding: var(--s3);
 }
 
 .rail-brand {
   display: flex;
   align-items: center;
-  gap: var(--s2);
-  padding: var(--s2) var(--s2) var(--s4);
-  font-size: var(--t16);
+  gap: 10px;
+  height: 40px;
+  padding: 0 10px;
+  margin-bottom: var(--s2);
+  font-size: var(--t15);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+/* The brand mark: an easel holding a canvas (components/BrandMark.tsx). The canvas is the live hue
+   while the daemon answers and red while it does not; the legs are ink. The same glyph is the
+   first "a" of the wordmark. */
+.brand-mark,
+.wordmark-a {
+  flex: none;
+  overflow: visible;
+}
+
+.easel-legs,
+.easel-back {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.easel-back {
+  opacity: 0.45;
+}
+
+.easel-canvas {
+  fill: var(--live);
+  transition: fill var(--dur-slow) var(--ease);
+}
+
+.app[data-live="off"] .easel-canvas {
+  fill: var(--down);
+}
+
+/* The name: "c", the easel as the "a", "nvas", then "rgb" in the figures face. */
+.wordmark {
+  color: var(--ink);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+.wordmark-a {
+  display: inline-block;
+  width: 0.62em;
+  height: 0.72em;
+  margin: 0 0.03em 0 0.01em;
+  vertical-align: -0.02em;
+}
+
+.wordmark-rgb {
+  margin-left: 1px;
+  color: var(--live);
+  font-family: var(--fm);
   font-weight: 600;
+  letter-spacing: 0;
+  transition: color var(--dur-slow) var(--ease);
 }
 
-.rail-brand-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: var(--live);
-  transition: background var(--dur-slow) var(--ease);
-}
-
-/* The brand dot follows the daemon, like the dot in the status strip: it is the live hue while
-   the daemon answers and red while it does not. */
-.app[data-live="off"] .rail-brand-dot {
-  background: var(--down);
+/* The full rail says the name, whose "a" is the easel; the easel alone is for the icon rail. */
+.rail-brand > .brand-mark {
+  display: none;
 }
 
 .rail-link {
@@ -179,12 +245,13 @@ html[data-motion="reduced"] *::after {
   display: flex;
   align-items: center;
   gap: var(--s3);
-  height: 40px;
-  padding: 0 var(--s3);
+  height: 36px;
+  padding: 0 10px;
   border-radius: var(--r-md);
   color: var(--dim);
   text-decoration: none;
-  font-size: var(--t15);
+  font-size: var(--t14);
+  font-weight: 500;
   transition:
     background var(--dur) var(--ease),
     color var(--dur) var(--ease);
@@ -198,6 +265,10 @@ html[data-motion="reduced"] *::after {
 .rail-link[aria-current="page"] {
   background: var(--live-soft);
   color: var(--ink);
+}
+
+.rail-link[aria-current="page"] .rail-icon {
+  color: var(--live);
 }
 
 /* The active-page marker slides between links: one element, moved with transform. */
@@ -498,10 +569,11 @@ html[data-motion="reduced"] *::after {
    on the left and a sentence marooned at the far right. */
 .page-head {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: var(--s1);
-  margin-bottom: var(--s5);
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s4);
+  min-height: var(--control-h);
+  margin-bottom: var(--s4);
 }
 
 .page-head p {
@@ -537,10 +609,9 @@ html[data-motion="reduced"] *::after {
   align-items: flex-start;
   gap: var(--s3);
   padding: var(--s2) var(--s4);
-  border: 1px solid var(--line-2);
-  border-left: 3px solid var(--tone);
+  border: 1px solid color-mix(in srgb, var(--tone) 40%, transparent);
   border-radius: var(--r-md);
-  background: color-mix(in srgb, var(--tone) 12%, var(--panel));
+  background: color-mix(in srgb, var(--tone) 10%, var(--panel));
   animation: canvas-enter var(--dur) var(--ease) both;
 }
 
@@ -628,7 +699,8 @@ html[data-motion="reduced"] *::after {
 }
 
 .panel-title {
-  font-size: var(--t16);
+  color: var(--dim);
+  font-size: var(--t14);
   font-weight: 600;
 }
 
@@ -638,7 +710,7 @@ html[data-motion="reduced"] *::after {
   align-items: center;
   justify-content: space-between;
   gap: var(--s2) var(--s4);
-  min-height: 44px;
+  min-height: 48px;
   padding: var(--s2) 0;
   border-bottom: 1px solid var(--line);
 }
@@ -651,9 +723,8 @@ html[data-motion="reduced"] *::after {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  /* The label takes the room that is left over. Without this the control beside it wraps to a
-     line of its own when the hint is long, and the panel's controls stop lining up. */
-  flex: 1 1 220px;
+  /* The label takes the room that is left over, so a short control stays on its line. */
+  flex: 1 1 140px;
 }
 
 .field-hint {
@@ -704,8 +775,8 @@ html[data-motion="reduced"] *::after {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: var(--s2);
-  height: 36px;
+  gap: 6px;
+  height: var(--control-h);
   text-decoration: none;
   padding: 0 var(--s3);
   border: 1px solid var(--line-2);
@@ -713,7 +784,8 @@ html[data-motion="reduced"] *::after {
   background: var(--raised);
   color: var(--ink);
   font: inherit;
-  font-size: var(--t15);
+  font-size: var(--t14);
+  font-weight: 500;
   cursor: pointer;
   white-space: nowrap;
   transition:
@@ -723,12 +795,12 @@ html[data-motion="reduced"] *::after {
 }
 
 .btn:hover {
-  background: var(--press);
-  border-color: var(--mute);
+  background-image: linear-gradient(var(--hover), var(--hover));
 }
 
+/* A press is a colour change only: nothing under the pointer moves or changes size. */
 .btn:active {
-  transform: translateY(1px);
+  background-image: linear-gradient(var(--press), var(--press));
 }
 
 /* A disabled button is a plain button that cannot be pressed. It never keeps the accent
@@ -737,20 +809,20 @@ html[data-motion="reduced"] *::after {
 .btn:disabled,
 .btn:disabled:hover {
   background: var(--raised);
+  background-image: none;
   border-color: var(--line);
   color: var(--mute);
   opacity: 1;
   cursor: not-allowed;
-  transform: none;
 }
 
 /* The primary action: the live accent, one accent everywhere. Every save and every apply in
    the app is this button. */
+/* Same weight as every other button: a button that turns primary keeps its width. */
 .btn-primary {
   background: var(--live);
   border-color: transparent;
   color: var(--on-accent);
-  font-weight: 600;
 }
 
 .btn-primary:not(:disabled):hover {
@@ -761,6 +833,11 @@ html[data-motion="reduced"] *::after {
 .btn-ghost {
   background: transparent;
   border-color: transparent;
+  color: var(--dim);
+}
+
+.btn-ghost:hover {
+  color: var(--ink);
 }
 
 .btn-ghost:disabled,
@@ -773,10 +850,24 @@ html[data-motion="reduced"] *::after {
   color: var(--down);
 }
 
+/* A label that swaps (Pause / Resume, Activate / Running) keeps the width of its longest
+   variant, so the button never resizes under the pointer. */
+.swap {
+  display: inline-grid;
+}
+
+.swap > * {
+  grid-area: 1 / 1;
+  text-align: center;
+}
+
+.swap > [data-on="false"] {
+  visibility: hidden;
+}
+
 .btn-sm {
-  height: 30px;
-  padding: 0 var(--s2);
-  font-size: var(--t14);
+  height: 28px;
+  padding: 0 10px;
 }
 
 .btn-live {
@@ -787,8 +878,8 @@ html[data-motion="reduced"] *::after {
 .ibtn {
   display: inline-grid;
   place-items: center;
-  width: 36px;
-  height: 36px;
+  width: var(--control-h);
+  height: var(--control-h);
   flex: none;
   border: 1px solid transparent;
   border-radius: var(--r-md);
@@ -816,8 +907,8 @@ html[data-motion="reduced"] *::after {
 }
 
 .ibtn-sm {
-  width: 30px;
-  height: 30px;
+  width: 28px;
+  height: 28px;
 }
 
 .seg {
@@ -826,7 +917,7 @@ html[data-motion="reduced"] *::after {
   flex-wrap: wrap;
   gap: 2px;
   padding: 2px;
-  border: 1px solid var(--line-2);
+  border: 1px solid var(--line);
   border-radius: var(--r-md);
   background: var(--sunk);
 }
@@ -840,7 +931,9 @@ html[data-motion="reduced"] *::after {
   height: var(--th, 0px);
   border-radius: var(--r-sm);
   background: var(--raised);
-  box-shadow: inset 0 -2px 0 var(--live);
+  box-shadow:
+    inset 0 0 0 1px var(--line-2),
+    inset 0 -2px 0 var(--live);
   transform: translate3d(var(--tx, 0px), var(--ty, 0px), 0);
   pointer-events: none;
   transition:
@@ -855,14 +948,15 @@ html[data-motion="reduced"] *::after {
   display: inline-flex;
   align-items: center;
   gap: var(--s1);
-  height: 30px;
-  padding: 0 var(--s2);
+  height: 26px;
+  padding: 0 10px;
   border: 0;
   border-radius: var(--r-sm);
   background: transparent;
   color: var(--dim);
   font: inherit;
   font-size: var(--t14);
+  font-weight: 500;
   cursor: pointer;
   transition:
     background var(--dur-fast) var(--ease),
@@ -870,7 +964,6 @@ html[data-motion="reduced"] *::after {
 }
 
 .seg-item:hover {
-  background: var(--hover);
   color: var(--ink);
 }
 
@@ -889,12 +982,12 @@ html[data-motion="reduced"] *::after {
 .switch {
   position: relative;
   flex: none;
-  width: 44px;
-  height: 24px;
+  width: 36px;
+  height: 20px;
   padding: 0;
   border: 1px solid var(--line-2);
   border-radius: var(--r-lg);
-  background: var(--raised);
+  background: var(--sunk);
   cursor: pointer;
   transition:
     background var(--dur) var(--ease),
@@ -904,12 +997,12 @@ html[data-motion="reduced"] *::after {
 .switch::after {
   content: "";
   position: absolute;
-  top: 3px;
-  left: 3px;
-  width: 16px;
-  height: 16px;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
   border-radius: 50%;
-  background: var(--mute);
+  background: var(--dim);
   transition:
     transform var(--dur) var(--ease),
     background var(--dur) var(--ease);
@@ -920,35 +1013,30 @@ html[data-motion="reduced"] *::after {
 }
 
 .switch[aria-checked="true"] {
-  border-color: var(--live);
-  background: var(--live-soft);
-}
-
-.switch[aria-checked="true"]::after {
-  transform: translateX(20px);
+  border-color: transparent;
   background: var(--live);
 }
 
-.switch:active::after {
-  transform: translateX(0) scale(0.86);
+.switch[aria-checked="true"]::after {
+  transform: translateX(16px);
+  background: var(--on-accent);
 }
 
-.switch[aria-checked="true"]:active::after {
-  transform: translateX(20px) scale(0.86);
-}
+
 
 .chip {
   display: inline-flex;
   align-items: center;
   gap: var(--s1);
   height: 28px;
-  padding: 0 var(--s2);
-  border: 1px solid var(--line-2);
+  padding: 0 10px;
+  border: 1px solid var(--line);
   border-radius: var(--r-sm);
-  background: var(--sunk);
+  background: transparent;
   color: var(--dim);
   font: inherit;
   font-size: var(--t14);
+  font-weight: 500;
   white-space: nowrap;
   cursor: default;
 }
@@ -963,7 +1051,7 @@ button.chip {
 
 button.chip:hover {
   color: var(--ink);
-  border-color: var(--mute);
+  background: var(--hover);
 }
 
 .chip[aria-pressed="true"],
@@ -1034,10 +1122,10 @@ button.chip:hover {
 
 .num {
   width: 92px;
-  height: 32px;
+  height: var(--control-h);
   padding: 0 var(--s2);
   border: 1px solid var(--line-2);
-  border-radius: var(--r-sm);
+  border-radius: var(--r-md);
   background: var(--sunk);
   color: var(--ink);
   font-family: var(--fm);
@@ -1067,11 +1155,11 @@ button.chip:hover {
 }
 
 .text-in {
-  height: 32px;
+  height: var(--control-h);
   min-width: 0;
-  padding: 0 var(--s2);
+  padding: 0 var(--s3);
   border: 1px solid var(--line-2);
-  border-radius: var(--r-sm);
+  border-radius: var(--r-md);
   background: var(--sunk);
   color: var(--ink);
   font: inherit;
@@ -1083,36 +1171,121 @@ button.chip:hover {
   border-color: var(--mute);
 }
 
-.select {
-  position: relative;
+/* Select: a trigger like a button and a list that drops from it (components/Select.tsx). */
+.select-trigger {
   display: inline-flex;
   align-items: center;
-}
-
-.select select {
-  height: 32px;
-  min-width: 128px;
-  padding: 0 var(--s6) 0 var(--s2);
+  justify-content: space-between;
+  gap: var(--s2);
+  min-width: 160px;
+  max-width: 100%;
+  height: var(--control-h);
+  padding: 0 10px 0 var(--s3);
   border: 1px solid var(--line-2);
-  border-radius: var(--r-sm);
-  background: var(--sunk);
+  border-radius: var(--r-md);
+  background: var(--raised);
   color: var(--ink);
   font: inherit;
-  font-size: var(--t15);
-  appearance: none;
+  font-size: var(--t14);
+  font-weight: 500;
+  text-align: left;
   cursor: pointer;
-  transition: border-color var(--dur-fast) var(--ease);
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease);
 }
 
-.select select:hover {
-  border-color: var(--mute);
+.select-trigger:hover {
+  background-image: linear-gradient(var(--hover), var(--hover));
+}
+
+.select-trigger[aria-expanded="true"] {
+  border-color: var(--live);
+}
+
+/* Every option is laid out in the trigger, only the chosen one visible: the trigger is as wide as
+   its widest option, so picking one never resizes it. */
+.select-value {
+  display: inline-grid;
+  min-width: 0;
+  text-align: left;
+}
+
+.select-value > * {
+  grid-area: 1 / 1;
+}
+
+.select-value > [data-on="false"] {
+  visibility: hidden;
 }
 
 .select-caret {
-  position: absolute;
-  right: var(--s2);
-  pointer-events: none;
+  flex: none;
   color: var(--mute);
+  transition:
+    transform var(--dur) var(--ease),
+    color var(--dur) var(--ease);
+}
+
+.select-trigger[aria-expanded="true"] .select-caret {
+  transform: rotate(180deg);
+  color: var(--live);
+}
+
+.listbox {
+  position: fixed;
+  z-index: 80;
+  max-height: min(320px, calc(100vh - 16px));
+  overflow: auto;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-lg);
+  background: var(--panel);
+  box-shadow: var(--pop);
+  color: var(--ink);
+  font-family: var(--fu);
+  animation: listbox-in var(--dur-fast) var(--ease) both;
+}
+
+@keyframes listbox-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+}
+
+.listbox-opt {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  height: 32px;
+  padding: 0 10px;
+  border-radius: var(--r-sm);
+  color: var(--dim);
+  font-size: var(--t14);
+  cursor: pointer;
+}
+
+.listbox-opt[data-active="true"] {
+  background: var(--press);
+  color: var(--ink);
+}
+
+.listbox-opt[aria-selected="true"] {
+  color: var(--ink);
+}
+
+.listbox-check {
+  flex: none;
+  color: var(--live);
+  visibility: hidden;
+}
+
+.listbox-opt[aria-selected="true"] .listbox-check {
+  visibility: visible;
 }
 
 .color {
@@ -1183,7 +1356,8 @@ button.chip:hover {
 .slider-track {
   left: 0;
   right: 0;
-  background: var(--raised);
+  background: var(--sunk);
+  box-shadow: inset 0 0 0 1px var(--line-2);
 }
 
 .slider-fill {
@@ -1233,25 +1407,31 @@ button.chip:hover {
 
 .slider input::-webkit-slider-thumb {
   -webkit-appearance: none;
-  width: 18px;
-  height: 18px;
-  margin-top: 7px;
-  border: 2px solid var(--panel);
+  width: 14px;
+  height: 14px;
+  margin-top: 9px;
+  border: 0;
   border-radius: 50%;
   background: var(--ink);
-  transition: transform var(--dur-fast) var(--ease);
+  box-shadow: 0 0 0 3px var(--live-soft);
+  transition:
+    transform var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
 }
 
 .slider input::-moz-range-thumb {
-  width: 16px;
-  height: 16px;
-  border: 2px solid var(--panel);
+  width: 14px;
+  height: 14px;
+  border: 0;
   border-radius: 50%;
   background: var(--ink);
+  box-shadow: 0 0 0 3px var(--live-soft);
 }
 
-.slider:hover input::-webkit-slider-thumb {
-  transform: scale(1.12);
+.slider:hover input::-webkit-slider-thumb,
+.slider[data-dragging="true"] input::-webkit-slider-thumb {
+  transform: scale(1.15);
+  box-shadow: 0 0 0 6px var(--live-soft);
 }
 
 .slider input:focus-visible {
@@ -1476,8 +1656,11 @@ button.chip:hover {
   min-width: 0;
 }
 
-/* The canvas and the line under it: the way back to the canvas on a phone. */
+/* The canvas and the line under it: the way back to the canvas on a phone. It fills its column
+   at every width; in the phone stack nothing else would stretch it. */
 .layout-canvas {
+  align-self: stretch;
+  width: 100%;
   min-width: 0;
 }
 
@@ -1846,15 +2029,16 @@ button.chip:hover {
 
 .rule {
   padding: var(--s2) var(--s3);
-  border-left: 3px solid var(--a2);
-  border-radius: var(--r-sm);
-  background: var(--sunk);
+  border: 1px solid color-mix(in srgb, var(--a2) 35%, transparent);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--a2) 8%, var(--sunk));
   color: var(--dim);
   font-size: var(--t14);
 }
 
 .rule-warn {
-  border-left-color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+  background: color-mix(in srgb, var(--warn) 8%, var(--sunk));
 }
 
 .profile-row {
@@ -2030,9 +2214,76 @@ button.chip:hover {
   text-align: right;
 }
 
+/* ---------- the icon rail: 721 px to 1279 px ----------
+   The rail gives up its labels before the page gives up a column. Each label stays in the
+   link for its accessible name and shows as a tooltip on hover and focus. */
+
+@media (min-width: 721px) and (max-width: 1279px) {
+  .app {
+    grid-template-columns: var(--rail-w-icon) minmax(0, 1fr);
+  }
+
+  .rail {
+    align-items: center;
+  }
+
+  .rail-brand {
+    justify-content: center;
+    width: 40px;
+    padding: 0;
+  }
+
+  .rail-brand > .brand-mark {
+    display: block;
+  }
+
+  .rail-link {
+    justify-content: center;
+    width: 40px;
+    padding: 0;
+  }
+
+  .rail-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+
+  .rail-link::after {
+    content: attr(data-label);
+    position: absolute;
+    left: calc(100% + 10px);
+    top: 50%;
+    z-index: 70;
+    padding: 4px 8px;
+    border: 1px solid var(--line-2);
+    border-radius: var(--r-sm);
+    background: var(--panel);
+    box-shadow: var(--pop);
+    color: var(--ink);
+    font-size: var(--t14);
+    white-space: nowrap;
+    opacity: 0;
+    transform: translate(-4px, -50%);
+    pointer-events: none;
+    transition:
+      opacity var(--dur-fast) var(--ease),
+      transform var(--dur-fast) var(--ease);
+  }
+
+  .rail-link:hover::after,
+  .rail-link:focus-visible::after {
+    opacity: 1;
+    transform: translate(0, -50%);
+  }
+}
+
 /* ---------- narrow screens: rail becomes a bottom bar ---------- */
 
-@media (max-width: 1100px) {
+@media (max-width: 960px) {
   .layout-grid,
   .effects-grid,
   .devices-grid,
@@ -2051,7 +2302,7 @@ button.chip:hover {
  * wants them: the desk, what is playing on it, the render settings, the zones and the way to
  * save. The two columns are dissolved so the parts can be put in that order.
  */
-@media (max-width: 1100px) {
+@media (max-width: 960px) {
   .layout-grid {
     display: flex;
     flex-direction: column;
@@ -2109,9 +2360,8 @@ button.chip:hover {
     box-sizing: border-box;
   }
 
-  /* The phone has no room for the brand's dot: the chip of the running light is the colour
-     mark now. */
-  .strip-brand .rail-brand-dot {
+  /* The phone has no room for the word: the mark stands for the name. */
+  .strip-brand .wordmark {
     display: none;
   }
 
@@ -2243,8 +2493,9 @@ button.chip:hover {
     gap: var(--s4);
   }
 
-  /* A setting's control takes the whole row on a phone: the label is above it. */
-  .field-control {
+  /* A slider takes the whole row on a phone, under its label. A toggle or a short choice stays on
+     the label's line. */
+  .field-control:has(> .field-slider) {
     width: 100%;
   }
 
@@ -2335,15 +2586,17 @@ button.chip:hover {
 
 /* ---------- layout: the stage fills the left column; the render settings sit under it ---------- */
 
-@media (min-width: 1101px) {
+@media (min-width: 961px) {
   .layout-grid {
     grid-template-columns: minmax(0, 1fr) 320px;
   }
 }
 
+/* Two cells side by side when each has room for its choice; one above the other otherwise. The
+   cell gives up its column before a segmented control would have to wrap. */
 .render-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
   gap: var(--s4);
 }
 
@@ -2435,10 +2688,9 @@ button.chip:hover {
   align-items: center;
   gap: var(--s2);
   padding: var(--s2) var(--s3);
-  border: 1px solid var(--line-2);
-  border-left: 3px solid var(--down);
+  border: 1px solid color-mix(in srgb, var(--down) 40%, transparent);
   border-radius: var(--r-md);
-  background: var(--sunk);
+  background: color-mix(in srgb, var(--down) 8%, var(--sunk));
   font-size: var(--t14);
 }
 

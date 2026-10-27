@@ -4,6 +4,7 @@ import "@fontsource-variable/jetbrains-mono/index.css";
 import "@/styles/tokens.css";
 import "@/styles/app.css";
 import "@/styles/motion.css";
+import "@/styles/hardware.css";
 import { Shell } from "@/shell/Shell";
 
 export const metadata: Metadata = {

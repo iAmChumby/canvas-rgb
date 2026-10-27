@@ -13,6 +13,8 @@ interface ThumbBox {
   y: number;
   w: number;
   h: number;
+  /** The well's inner width: the thumb is placed by its left and right edges. */
+  ww: number;
 }
 
 /**
@@ -34,11 +36,16 @@ export function Segmented<T extends string>({
   const refs = useRef<(HTMLButtonElement | null)[]>([]);
   const wrapRef = useRef<HTMLDivElement>(null);
   const [thumb, setThumb] = useState<ThumbBox | null>(null);
+  // Which way the thumb last travelled: its leading edge runs ahead, the trailing edge follows.
+  const [dir, setDir] = useState<"left" | "right" | null>(null);
+  const lastAt = useRef<number>(-1);
 
   useLayoutEffect(() => {
     const wrap = wrapRef.current;
     if (!wrap) return;
     const at = options.findIndex((o) => o.value === value);
+    if (lastAt.current >= 0 && at !== lastAt.current) setDir(at > lastAt.current ? "right" : "left");
+    lastAt.current = at;
     const el = at >= 0 ? refs.current[at] : null;
     if (!el) {
       setThumb(null);
@@ -52,9 +59,10 @@ export function Segmented<T extends string>({
         y: r.top - wr.top - wrap.clientTop,
         w: r.width,
         h: r.height,
+        ww: wrap.clientWidth,
       };
       setThumb((prev) =>
-        prev && Math.abs(prev.x - next.x) < 0.5 && Math.abs(prev.y - next.y) < 0.5 && Math.abs(prev.w - next.w) < 0.5 && Math.abs(prev.h - next.h) < 0.5
+        prev && Math.abs(prev.x - next.x) < 0.5 && Math.abs(prev.y - next.y) < 0.5 && Math.abs(prev.w - next.w) < 0.5 && Math.abs(prev.h - next.h) < 0.5 && Math.abs(prev.ww - next.ww) < 0.5
           ? prev
           : next,
       );
@@ -86,11 +94,13 @@ export function Segmented<T extends string>({
         "--ty": `${thumb.y}px`,
         "--tw": `${thumb.w}px`,
         "--th": `${thumb.h}px`,
+        "--tl": `${thumb.x}px`,
+        "--tr": `${thumb.ww - thumb.x - thumb.w}px`,
       } as CSSProperties)
     : undefined;
 
   return (
-    <div role="radiogroup" aria-label={label} className="seg" onKeyDown={onKey} ref={wrapRef}>
+    <div role="radiogroup" aria-label={label} className="seg" data-dir={dir ?? undefined} onKeyDown={onKey} ref={wrapRef}>
       {thumb && <span className="seg-thumb" style={thumbStyle} aria-hidden="true" />}
       {options.map((o, i) => {
         const checked = o.value === value;

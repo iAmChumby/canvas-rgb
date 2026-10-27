@@ -13,7 +13,7 @@ import {
   Plus,
   X,
 } from "@phosphor-icons/react";
-import { Button, IconButton } from "@/components/Button";
+import { Button, IconButton, Swap } from "@/components/Button";
 import { Panel, Field } from "@/components/Panel";
 import { Segmented } from "@/components/Segmented";
 import { NumberField } from "@/components/NumberField";
@@ -43,6 +43,7 @@ import type { PropertySchema } from "@/proto/PropertySchema";
 import desk from "./desk.module.css";
 import type { RenderScale } from "@/proto/RenderScale";
 import type { SamplingMode } from "@/proto/SamplingMode";
+import { AnimatedNumber } from "@/components/AnimatedNumber";
 
 const DROP_TYPE = "application/x-canvas-zone";
 const CANVAS_W = 320;
@@ -233,13 +234,7 @@ function NowPlaying({
           <div className={desk.nowWhoText}>
             <p className={desk.nowName}>{name ?? "No effect"}</p>
             <p className={desk.nowDesc}>
-              {description ?? "The desk has no effect running."}
-              {needsInput && (
-                <span className={desk.nowNote}>
-                  {" "}
-                  This effect reads the screen or the audio, so the picture is the daemon&apos;s.
-                </span>
-              )}
+              {description ?? "Nothing running"}
             </p>
           </div>
         </div>
@@ -250,7 +245,7 @@ function NowPlaying({
                 <PropertyControls schema={props} values={values} onChange={onPropChange} />
               </div>
             )}
-            <Field label="Brightness" hint="Every LED the daemon writes">
+            <Field label="Brightness">
               <span className="row-wrap field-slider">
                 <Slider
                   label="Brightness"
@@ -651,7 +646,7 @@ export function LayoutView() {
         </div>
         <Panel>
           <p className="mute">
-            {layoutsError ? `The layout could not be read: ${layoutsError}` : "Reading the layout from the daemon."}
+            {layoutsError ? `Layout unreadable: ${layoutsError}` : "Loading"}
           </p>
         </Panel>
       </div>
@@ -662,10 +657,6 @@ export function LayoutView() {
     <div className="stack">
       <div className="page-head">
         <h1>{draft.name}</h1>
-        <p className={desk.subtitle}>
-          The desk canvas: every placed zone over the live preview of{" "}
-          <span style={{ color: "var(--ink)" }}>{effectName}</span>.
-        </p>
       </div>
 
       <div className="layout-grid">
@@ -691,11 +682,7 @@ export function LayoutView() {
               sampling={draft.sampling}
             />
             <div className="stage-meta">
-              <span className="dropzone-hint">
-                {phone
-                  ? "Tap a zone to pick it. Drag it to move it, the corner to resize it."
-                  : "Drag to move, the corner to resize, the knob to rotate. Arrow keys nudge."}
-              </span>
+              <span className="dropzone-hint" />
               <span className="row-wrap" style={{ alignItems: "center", gap: "var(--s3)" }}>
                 <span className="row-wrap" style={{ alignItems: "center", gap: "var(--s1)" }}>
                   <IconButton
@@ -717,7 +704,7 @@ export function LayoutView() {
                   <span className={previewLine.down ? desk.noteDown : desk.drawn}>{previewLine.text}</span>
                 )}
                 <span className="mute fig">
-                  {zones.filter((z) => z.visible).length} of {zones.length} zones showing
+                  <AnimatedNumber value={zones.filter((z) => z.visible).length} /> of <AnimatedNumber value={zones.length} /> zones showing
                 </span>
               </span>
             </div>
@@ -727,7 +714,7 @@ export function LayoutView() {
             <Panel title="Render">
               <div className="render-grid">
                 <div className={desk.renderCell}>
-                  <Field label="How much of the desk" hint="The desk is 320 × 200 units">
+                  <Field label="Render area">
                     <Segmented<`${RenderScale}`>
                       label="How much of the desk the effect is drawn at"
                       value={`${draft.render_scale}` as `${RenderScale}`}
@@ -740,11 +727,11 @@ export function LayoutView() {
                     />
                   </Field>
                   <p className={desk.plainNote}>
-                    {renderNote.text} · <span className="fig">{renderNote.value}</span>
+                    <span className="fig">{renderNote.value}</span>
                   </p>
                 </div>
                 <div className={desk.renderCell}>
-                  <Field label="How each LED reads it" hint="What one LED takes from the picture">
+                  <Field label="Sampling">
                     <Segmented<SamplingMode>
                       label="How each LED reads the picture"
                       value={draft.sampling}
@@ -757,7 +744,7 @@ export function LayoutView() {
                     />
                   </Field>
                   <p className={desk.plainNote}>
-                    {samplingNote.text} · <span className="fig">{samplingNote.value}</span>
+                    <span className="fig">{samplingNote.value}</span>
                   </p>
                 </div>
               </div>
@@ -805,7 +792,7 @@ export function LayoutView() {
                   />
                 </div>
               ) : (
-                <p className="mute">Select a zone on the preview, or in the list below.</p>
+                null
               )}
               <div className="stack" style={{ gap: 0, marginTop: 12 }}>
                 {zones.map((z, i) => {
@@ -821,7 +808,7 @@ export function LayoutView() {
                         {info?.zone.name ?? "Device not found"}
                       </span>
                       <span className="row-sub one-line">{info ? info.device.name : "not connected"}</span>
-                      <span className="fig mute">{info?.zone.led_count ?? "—"}</span>
+                      <span className="fig mute">{info ? <AnimatedNumber value={info.zone.led_count} /> : "—"}</span>
                     </RowButton>
                   );
                 })}
@@ -830,7 +817,7 @@ export function LayoutView() {
           </div>
 
           <div className="layout-unplaced">
-            <Panel title="Unplaced zones" actions={<span className="mute fig">{unplaced.length}</span>}>
+            <Panel title="Unplaced zones" actions={<span className="mute fig"><AnimatedNumber value={unplaced.length} /></span>}>
               {unplaced.length === 0 && <p className="mute">Every zone is placed.</p>}
               <div className="unplaced">
                 {unplaced.map((u) => (
@@ -842,7 +829,7 @@ export function LayoutView() {
                   >
                     <span style={{ minWidth: 0 }}>
                       <span className="row-title" style={{ display: "block" }}>
-                        {u.zoneName} <span className="fig mute">{u.ledCount}</span>
+                        {u.zoneName} <span className="fig mute"><AnimatedNumber value={u.ledCount} /></span>
                       </span>
                       <span className="row-sub one-line" style={{ display: "block" }}>
                         {u.deviceName}
@@ -869,7 +856,7 @@ export function LayoutView() {
                   Revert
                 </Button>
                 <Button variant="primary" icon={<FloppyDisk size={16} weight="bold" />} disabled={!dirty || saving} onClick={save}>
-                  {saving ? "Saving" : "Save layout"}
+                  <Swap labels={["Save layout", "Saving"]} at={saving ? 1 : 0} />
                 </Button>
               </div>
               {saveError && <span className="error-line">{saveError}</span>}
@@ -912,7 +899,7 @@ function ZoneInspector({
       )}
       <div className="row-title" style={{ justifyContent: "space-between" }}>
         <span className={missing ? "" : "one-line"}>{name}</span>
-        <span className="fig mute">{missing ? "not connected" : `${ledCount} LEDs`}</span>
+        <span className="fig mute">{missing ? "not connected" : <><AnimatedNumber value={ledCount} /> LEDs</>}</span>
       </div>
       <p className="row-sub one-line">{deviceName}</p>
       {missing && (
@@ -937,7 +924,7 @@ function ZoneInspector({
           <NumberField label="Height" value={zone.height} min={2} max={CANVAS_H} onCommit={(v) => onChange({ height: v })} />
         </Field>
       </div>
-      <Field label="Rotation" hint="Shift while turning snaps to 15°">
+      <Field label="Rotation">
         <NumberField
           label="Rotation"
           value={zone.rotation_deg}
@@ -951,7 +938,7 @@ function ZoneInspector({
       <Field label="Visible">
         <Toggle label="Visible" checked={zone.visible} onChange={(v) => onChange({ visible: v })} />
       </Field>
-      <Field label="Reversed" hint="Runs the LEDs the other way">
+      <Field label="Reversed">
         <Toggle label="Reversed" checked={zone.reversed} onChange={(v) => onChange({ reversed: v })} />
       </Field>
       {!missing && (

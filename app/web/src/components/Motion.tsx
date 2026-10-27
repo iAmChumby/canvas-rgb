@@ -51,32 +51,77 @@ export function Enter({
   );
 }
 
+/** The house easing, cubic-bezier(0.2, 0.8, 0.2, 1), as a function of time. */
+function houseEase(t: number): number {
+  const cx = 0.2;
+  const cy = 0.8;
+  const bx = 0.2;
+  const by = 1;
+  let lo = 0;
+  let hi = 1;
+  let u = t;
+  for (let i = 0; i < 18; i++) {
+    u = (lo + hi) / 2;
+    const x = 3 * (1 - u) * (1 - u) * u * cx + 3 * (1 - u) * u * u * bx + u * u * u;
+    if (x < t) lo = u;
+    else hi = u;
+  }
+  return 3 * (1 - u) * (1 - u) * u * cy + 3 * (1 - u) * u * u * by + u * u * u;
+}
+
+/** A small jump counts in about 180 ms, a jump of a thousand or more in about 450 ms. */
+function countDuration(jump: number): number {
+  return Math.min(450, 180 + 90 * Math.log10(1 + Math.abs(jump)));
+}
+
 /**
- * A value that eases to its new number instead of snapping. Used for the readouts
- * that change while you watch (fan RPM, temperature, frame rate).
+ * A number that counts to its new value instead of snapping: it passes through every step of
+ * `decimals` on the way, eases out on the house curve, and a new target mid-flight starts from
+ * the figure on screen. With motion off the value is shown as it is.
+ *
+ * `chars` is the widest the text has been since the count began, so a caller can hold that
+ * width and nothing beside the number moves while it counts.
  */
-export function useTweenNumber(value: number, duration = 220): number {
-  const reduced = useMotionOff();
-  const [shown, setShown] = useState(value);
+export function useCounter(
+  value: number,
+  decimals = 0,
+  duration?: number,
+): { shown: number; chars: number } {
+  const off = useMotionOff();
+  const len = (n: number) => n.toFixed(decimals).length;
+  const [state, setState] = useState({ shown: value, chars: len(value) });
   const fromRef = useRef(value);
 
   useEffect(() => {
-    // With motion off the value is shown as it is; nothing to tween.
-    if (reduced || duration <= 0) return;
-    let raf = 0;
+    if (off || !Number.isFinite(value)) {
+      fromRef.current = Number.isFinite(value) ? value : 0;
+      return;
+    }
     const from = fromRef.current;
+    const ms = from === value ? 0 : (duration ?? countDuration(value - from));
+    let raf = 0;
     const start = performance.now();
     const step = (now: number) => {
-      const t = Math.min(1, (now - start) / duration);
-      const eased = 1 - Math.pow(1 - t, 3);
-      const next = from + (value - from) * eased;
+      const t = ms <= 0 ? 1 : Math.min(1, (now - start) / ms);
+      const next = t >= 1 ? value : from + (value - from) * houseEase(t);
       fromRef.current = next;
-      setShown(next);
+      const rounded = t >= 1 ? value : Number(next.toFixed(decimals));
+      setState((s) => {
+        if (t < 1 && s.shown === rounded) return s;
+        return { shown: rounded, chars: t >= 1 ? len(value) : Math.max(s.chars, len(rounded), len(value)) };
+      });
       if (t < 1) raf = requestAnimationFrame(step);
     };
     raf = requestAnimationFrame(step);
     return () => cancelAnimationFrame(raf);
-  }, [value, duration, reduced]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value, duration, decimals, off]);
 
-  return reduced ? value : shown;
+  if (off || !Number.isFinite(value)) return { shown: value, chars: Number.isFinite(value) ? len(value) : 1 };
+  return state;
+}
+
+/** The counting value alone, for a caller that formats it itself (the display's digits). */
+export function useTweenNumber(value: number, duration?: number, decimals = 0): number {
+  return useCounter(value, decimals, duration).shown;
 }

@@ -1,0 +1,458 @@
+/*
+ * The hardware layer: the editor's controls as plain physical parts, after small instruments like
+ * the EP-133. Each part is a few lines on paper: a key is a flat face, a 1 px edge and a short
+ * skirt; a well is a recess; a fader is a slot and a cap; an LED is a dot. No sheen, no texture.
+ * Loaded after app.css and motion.css; it re-skins controls without changing a single box.
+ *
+ * Nothing here moves or resizes a control. Transforms only act inside one (a legend in its key,
+ * a knob in its slot), never on the box under the pointer.
+ */
+
+:root {
+  /* a key's skirt: the darker band its face sits on */
+  --skirt: rgba(0, 0, 0, 0.55);
+  --skirt-h: 2px;
+  /* a recess: one dark line along the top edge */
+  --well: inset 0 1px 0 rgba(0, 0, 0, 0.6);
+  /* an unlit LED */
+  --led-off: rgba(255, 255, 255, 0.14);
+  --press-in: 60ms;
+  --release: 240ms;
+}
+
+:root[data-theme="light"] {
+  --skirt: rgba(15, 18, 24, 0.22);
+  --well: inset 0 1px 0 rgba(15, 18, 24, 0.14);
+  --led-off: rgba(15, 18, 24, 0.16);
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --skirt: rgba(15, 18, 24, 0.22);
+    --well: inset 0 1px 0 rgba(15, 18, 24, 0.14);
+    --led-off: rgba(15, 18, 24, 0.16);
+  }
+}
+
+/* ---------- faces ---------- */
+
+.panel {
+  border-radius: var(--r-lg);
+}
+
+/* Titles are printed on the case: mono, small capitals, spaced. */
+.panel-title {
+  color: var(--mute);
+  font-family: var(--fm);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* ---------- keys: a flat face on a short skirt ---------- */
+
+.btn,
+.select-trigger,
+.chip {
+  border: 1px solid var(--line-2);
+  background-color: var(--raised);
+  background-image: none;
+  box-shadow: 0 var(--skirt-h) 0 var(--skirt);
+  transition:
+    background-color var(--release) var(--ease),
+    border-color var(--release) var(--ease),
+    box-shadow var(--release) var(--ease),
+    color var(--release) var(--ease),
+    opacity var(--release) var(--ease);
+}
+
+.btn,
+.select-trigger {
+  border-radius: var(--r-md);
+}
+
+.btn > *,
+.select-trigger > *,
+.chip > * {
+  transition: transform var(--release) var(--ease);
+}
+
+.btn:hover,
+.select-trigger:hover,
+button.chip:hover {
+  background-color: color-mix(in oklab, var(--raised) 90%, var(--ink));
+  background-image: none;
+}
+
+/* Key travel: the skirt folds away and the legend drops 1 px. The key's box stays where it is. */
+.btn:active:not(:disabled),
+.select-trigger:active,
+button.chip:active {
+  background-color: color-mix(in oklab, var(--raised) 94%, black);
+  box-shadow: 0 0 0 var(--skirt);
+  transition-duration: var(--press-in);
+}
+
+.btn:active:not(:disabled) > *,
+.select-trigger:active > *,
+button.chip:active > * {
+  transform: translateY(1px);
+  transition-duration: var(--press-in);
+}
+
+/* The primary key is the live colour, on a skirt of the same colour, darker. */
+.btn-primary {
+  border-color: transparent;
+  background-color: var(--live);
+  box-shadow: 0 var(--skirt-h) 0 color-mix(in oklab, var(--live) 55%, black);
+}
+
+.btn-primary:not(:disabled):hover {
+  background-color: color-mix(in oklab, var(--live) 90%, white);
+}
+
+.btn-primary:active:not(:disabled) {
+  background-color: color-mix(in oklab, var(--live) 88%, black);
+  box-shadow: 0 0 0 color-mix(in oklab, var(--live) 55%, black);
+}
+
+.btn-ghost,
+.btn-ghost:hover {
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.btn-ghost {
+  background-color: transparent;
+}
+
+.btn-ghost:hover {
+  background-color: var(--hover);
+}
+
+.btn-ghost:active:not(:disabled) {
+  background-color: var(--press);
+  box-shadow: none;
+}
+
+.btn:disabled,
+.btn:disabled:hover {
+  box-shadow: none;
+  opacity: 0.5;
+}
+
+.ibtn {
+  border-radius: var(--r-md);
+  transition:
+    background-color var(--release) var(--ease),
+    color var(--release) var(--ease);
+}
+
+.ibtn:active:not(:disabled) {
+  background-color: var(--press);
+  transition-duration: var(--press-in);
+}
+
+/* A label that swaps crossfades through a smear: the old one slides up and blurs out, the new one
+   rises out of a blur. Every variant keeps its cell, so the key never changes width. */
+.swap > * {
+  transition:
+    opacity 200ms var(--ease),
+    transform 260ms var(--ease),
+    filter 200ms var(--ease),
+    visibility 0s linear 0s;
+}
+
+.swap > [data-on="false"] {
+  visibility: hidden;
+  opacity: 0;
+  transform: translateY(-55%);
+  filter: blur(2px);
+  transition:
+    opacity 160ms var(--ease-exit),
+    transform 200ms var(--ease-exit),
+    filter 160ms var(--ease-exit),
+    visibility 0s linear 200ms;
+}
+
+.swap > [data-on="true"] {
+  animation: swap-in 280ms var(--ease) both;
+}
+
+@keyframes swap-in {
+  from {
+    opacity: 0;
+    transform: translateY(55%);
+    filter: blur(2px);
+  }
+}
+
+/* ---------- LEDs: a dot that lights when its key is on ---------- */
+
+button.chip::before,
+.seg-item::before {
+  content: "";
+  flex: none;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--led-off);
+  transition:
+    background-color var(--release) var(--ease),
+    box-shadow var(--release) var(--ease);
+}
+
+.chip[aria-pressed="true"]::before,
+.seg-item[aria-checked="true"]::before {
+  background: var(--live);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--live) 22%, transparent);
+}
+
+/* A latched chip stays down: no skirt, its LED lit. */
+.chip {
+  border-radius: var(--r-sm);
+}
+
+.chip[aria-pressed="true"],
+.chip-on {
+  border-color: var(--line-2);
+  background-color: color-mix(in oklab, var(--raised) 92%, black);
+  box-shadow: 0 0 0 var(--skirt);
+  color: var(--ink);
+}
+
+/* ---------- wells: recesses in the case ---------- */
+
+.seg,
+.num,
+.text-in,
+.effect-search {
+  border-color: var(--line);
+  background: var(--sunk);
+  box-shadow: var(--well);
+}
+
+.seg {
+  border-radius: var(--r-md);
+}
+
+.num,
+.text-in {
+  border-radius: var(--r-md);
+}
+
+.num:focus-visible,
+.text-in:focus-visible {
+  border-color: var(--live);
+  outline: none;
+}
+
+/* The selected segment is a key sitting in the well. It travels with a stretch: the leading edge
+   runs ahead and the trailing edge catches up, so the move has a smear instead of a jump. */
+.seg-thumb {
+  left: var(--tl, 0px);
+  right: var(--tr, 0px);
+  width: auto;
+  border-radius: calc(var(--r-md) - 3px);
+  background: var(--raised);
+  box-shadow:
+    inset 0 0 0 1px var(--line-2),
+    0 var(--skirt-h) 0 var(--skirt);
+  transform: translate3d(0, var(--ty, 0px), 0);
+  transition:
+    left 300ms var(--ease),
+    right 300ms var(--ease),
+    height var(--dur) var(--ease);
+}
+
+.seg[data-dir="right"] .seg-thumb {
+  transition:
+    left 320ms var(--ease) 40ms,
+    right 200ms var(--ease),
+    height var(--dur) var(--ease);
+}
+
+.seg[data-dir="left"] .seg-thumb {
+  transition:
+    left 200ms var(--ease),
+    right 320ms var(--ease) 40ms,
+    height var(--dur) var(--ease);
+}
+
+.seg-item {
+  gap: 6px;
+  transition: color var(--release) var(--ease);
+}
+
+/* ---------- the switch: a slot and a knob ---------- */
+
+.switch {
+  width: 40px;
+  height: 22px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--sunk);
+  box-shadow: var(--well);
+  transition:
+    background-color var(--release) var(--ease),
+    border-color var(--release) var(--ease);
+}
+
+.switch::after {
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 8px;
+  background-color: var(--dim);
+  box-shadow: 0 1px 0 var(--skirt);
+  transition:
+    transform 300ms var(--ease),
+    background-color var(--release) var(--ease);
+}
+
+.switch[aria-checked="true"] {
+  border-color: transparent;
+  background: var(--live);
+}
+
+.switch[aria-checked="true"]::after {
+  transform: translateX(18px);
+  background-color: var(--on-accent);
+}
+
+/* Once touched, the knob smears as it travels: it stretches towards where it is going and gathers
+   back into a circle when it lands. */
+.switch[data-touched="true"][aria-checked="true"]::after {
+  animation: knob-on 300ms var(--ease) both;
+}
+
+.switch[data-touched="true"][aria-checked="false"]::after {
+  animation: knob-off 300ms var(--ease) both;
+}
+
+@keyframes knob-on {
+  0% {
+    transform: translateX(0);
+    width: 16px;
+  }
+  45% {
+    transform: translateX(4px);
+    width: 26px;
+  }
+  100% {
+    transform: translateX(18px);
+    width: 16px;
+  }
+}
+
+@keyframes knob-off {
+  0% {
+    transform: translateX(18px);
+    width: 16px;
+  }
+  45% {
+    transform: translateX(4px);
+    width: 26px;
+  }
+  100% {
+    transform: translateX(0);
+    width: 16px;
+  }
+}
+
+/* ---------- the fader: a slot and a cap ---------- */
+
+.slider {
+  height: 32px;
+}
+
+.slider-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--sunk);
+  box-shadow: var(--well), inset 0 0 0 1px var(--line);
+}
+
+.slider-fill {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--live);
+  transition:
+    transform 260ms var(--ease),
+    background-color var(--release) var(--ease);
+}
+
+/* The cap: a small flat key with one line across it. */
+.slider input::-webkit-slider-thumb {
+  width: 14px;
+  height: 24px;
+  margin-top: 4px;
+  border: 1px solid var(--line-2);
+  border-radius: 4px;
+  background-color: var(--raised);
+  background-image: linear-gradient(var(--live), var(--live));
+  background-size: 8px 2px;
+  background-position: center;
+  background-repeat: no-repeat;
+  box-shadow: 0 var(--skirt-h) 0 var(--skirt);
+  transform: none;
+  transition:
+    box-shadow var(--release) var(--ease),
+    background-color var(--release) var(--ease);
+}
+
+.slider:hover input::-webkit-slider-thumb {
+  transform: none;
+  box-shadow: 0 var(--skirt-h) 0 var(--skirt);
+  background-color: color-mix(in oklab, var(--raised) 90%, var(--ink));
+}
+
+/* Held: the cap is pressed onto the slot. */
+.slider[data-dragging="true"] input::-webkit-slider-thumb {
+  transform: none;
+  box-shadow: 0 0 0 var(--skirt);
+  transition-duration: var(--press-in);
+}
+
+.slider input::-moz-range-thumb {
+  width: 14px;
+  height: 24px;
+  border: 1px solid var(--line-2);
+  border-radius: 4px;
+  background: var(--raised);
+  box-shadow: 0 var(--skirt-h) 0 var(--skirt);
+}
+
+/* ---------- the list that drops from a select ---------- */
+
+.listbox {
+  border-radius: calc(var(--r-lg) - 4px);
+}
+
+.listbox-opt {
+  border-radius: var(--r-sm);
+  transition:
+    background-color 140ms var(--ease),
+    color 140ms var(--ease);
+}
+
+/* The chosen value slides in from below when it changes, like a label behind a window. */
+.select-value > [data-on="true"] {
+  animation: swap-in 240ms var(--ease) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .swap > [data-on="true"],
+  .select-value > [data-on="true"],
+  .switch[data-touched="true"]::after {
+    animation: none !important;
+  }
+}
+
+html[data-motion="reduced"] .swap > [data-on="true"],
+html[data-motion="reduced"] .select-value > [data-on="true"],
+html[data-motion="reduced"] .switch[data-touched="true"]::after {
+  animation: none !important;
+}

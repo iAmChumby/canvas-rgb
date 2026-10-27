@@ -177,8 +177,7 @@ export function FansView() {
           </EmptyState>
         </Panel>
         {known.length > 0 && (
-          <Panel title="Headers, as the editor last read them">
-            <p className="mute known-note">Read only while the fan service is away. Nothing here can be changed.</p>
+          <Panel title="Last reading">
             <ul className="known-headers" aria-label="Fan headers, last read">
               {known.map((h) => (
                 <li key={h.id}>
@@ -214,10 +213,9 @@ export function FansView() {
     <div className="stack">
       <div className="page-head">
         <h1>Fans</h1>
-        <p>
-          {fans.chip ?? "Chip not detected"} · floor {fans.floor_percent}% · profile{" "}
-          <span style={{ color: "var(--ink)" }}>{fans.active_profile}</span>
-        </p>
+        <span className="mute fig">
+          {fans.chip ?? "No chip"} · floor <AnimatedNumber value={fans.floor_percent} />%
+        </span>
       </div>
 
       <ProfilesPanel fans={fans} />
@@ -347,7 +345,7 @@ function FanRow({
               style={{ "--p": clamp(duty / 100, 0, 1), "--tone": "var(--a3)" } as CSSProperties}
             />
           </span>
-          <span className="fig">{header.pwm_percent === null ? "—" : `${header.pwm_percent}%`}</span>
+          <span className="fig">{header.pwm_percent === null ? "—" : <><AnimatedNumber value={header.pwm_percent} />%</>}</span>
         </span>
       </td>
       <td>
@@ -411,7 +409,7 @@ function FanCard({
             style={{ "--p": clamp(duty / 100, 0, 1), "--tone": "var(--a3)" } as CSSProperties}
           />
         </span>
-        <span className="fig">{header.pwm_percent === null ? "—" : `${header.pwm_percent}%`}</span>
+        <span className="fig">{header.pwm_percent === null ? "—" : <><AnimatedNumber value={header.pwm_percent} />%</>}</span>
       </span>
       <span className="fan-card-spark">
         <Sparkline values={history} max={peak} label={`${header.label} RPM over the last 60 seconds`} />
@@ -510,10 +508,7 @@ function ProfilesPanel({ fans }: { fans: FansStatus }) {
             </div>
           </div>
         )}
-        <Field
-          label="Rename the active profile"
-          hint="Type a new name and press Enter. The profile is saved under it and becomes active."
-        >
+        <Field label="Rename">
           <TextField
             label="New profile name"
             placeholder="New name"
@@ -634,12 +629,12 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
         )}
 
         {mode.mode === "bios" && (
-          <p className="dim">The chip&apos;s own automatic control, as the BIOS configured it. Floors do not apply.</p>
+          <p className="mute">Chip auto control. Floors off.</p>
         )}
 
         {manual && (
           <div className="rule">
-            Floor <span className="fig" style={{ color: "var(--ink)" }}>{base}%</span>. {hotRuleText()}.
+            Floor <span className="fig" style={{ color: "var(--ink)" }}><AnimatedNumber value={base} />%</span>. {hotRuleText()}.
           </div>
         )}
 
@@ -740,7 +735,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
                   Add point
                 </Button>
                 <span className="mute fig" style={{ fontSize: 14 }}>
-                  {points.length} of {MAX_POINTS} points
+                  <AnimatedNumber value={points.length} /> of {MAX_POINTS} points
                 </span>
               </div>
             </div>
@@ -749,7 +744,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
 
         {mode.mode === "fixed" && (
           <p className="mute" style={{ fontSize: 14 }}>
-            Current duty: <Figure unit="%">{header.pwm_percent ?? "—"}</Figure>
+            Duty <Figure unit="%">{header.pwm_percent === null ? "—" : <AnimatedNumber value={header.pwm_percent} />}</Figure>
           </p>
         )}
         {err && <p className="error-line">{err}</p>}

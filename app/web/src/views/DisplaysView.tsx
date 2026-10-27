@@ -18,6 +18,8 @@ import type { DisplaySource } from "@/proto/DisplaySource";
 import type { DisplayStatus } from "@/proto/DisplayStatus";
 import type { DisplayUnit } from "@/proto/DisplayUnit";
 import type { FansStatus } from "@/proto/FansStatus";
+import { AnimatedNumber } from "@/components/AnimatedNumber";
+import { useTweenNumber } from "@/components/Motion";
 
 /** The source of a display, as one string: the picker works on keys, not on the spine's shape. */
 function sourceKey(source: DisplaySource): string {
@@ -92,7 +94,12 @@ function DigitReadout({
   temperature: boolean;
   unit: DisplayUnit;
 }) {
-  const shown = displayDigits(value, digits, decimals, temperature);
+  const target = displayDigits(value, digits, decimals, temperature);
+  // The number counts first and is split into digits after, so each digit rolls through its
+  // values. The tenths of a temperature count in tenths.
+  const counted = useTweenNumber(value ?? 0, undefined, temperature && decimals > 0 ? 1 : 0);
+  const live = displayDigits(value === null ? null : counted, digits, decimals, temperature);
+  const shown = live.fits ? live : target;
   const mark = temperature ? (unit === "celsius" ? "°C" : "°F") : "RPM";
   if (value === null) {
     return (
@@ -233,8 +240,7 @@ function DisplayCard({ row, fans }: { row: DisplayStatus; fans: FansStatus | nul
           {/* The big number is what the source would read, not what the display shows: it says so,
               and the line under it says what the display shows now. */}
           <p className="readout-caption">
-            <span className="readout-caption-title">Would show</span>
-            <span className="readout-caption-note">the source set here, once saved</span>
+            <span className="readout-caption-title">Preview</span>
           </p>
           <DigitReadout
             value={preview}
@@ -248,24 +254,23 @@ function DisplayCard({ row, fans }: { row: DisplayStatus; fans: FansStatus | nul
             {shown ? (
               <>
                 {" "}
-                the pump head shows{" "}
                 <span className="fig">
-                  {shown.value} {shown.mode === "temperature" ? (shown.unit === "celsius" ? "°C" : "°F") : "RPM"}
+                  {shown.value === null ? "—" : <AnimatedNumber value={shown.value} decimals={shown.mode === "temperature" ? draft.decimals : 0} />} {shown.mode === "temperature" ? (shown.unit === "celsius" ? "°C" : "°F") : "RPM"}
                 </span>
-                , written {shown.blink ? "with the alarm blink" : "without a blink"}.
+                {shown.blink ? " · blinking" : ""}
               </>
             ) : (
-              <> nothing is written to it. It keeps whatever it showed before.</>
+              <> not driven</>
             )}
           </p>
           <p className="mute display-readout-note fig">
             {row.info.digits} digits · {row.info.max_decimals} decimal
-            {row.info.max_decimals === 1 ? "" : "s"} at most
+            {row.info.max_decimals === 1 ? "" : "s"}
           </p>
         </div>
 
         <div className="display-controls">
-          <Field label="Source" hint="Where the number comes from">
+          <Field label="Source">
             <Select
               label={`${row.info.name} source`}
               value={sourceKey(draft.source)}
@@ -278,7 +283,7 @@ function DisplayCard({ row, fans }: { row: DisplayStatus; fans: FansStatus | nul
           </Field>
 
           {draft.source.kind === "fixed" && (
-            <Field label="The number" hint="The display shows this, whatever the machine does">
+            <Field label="Value">
               <NumberField
                 label="The fixed number"
                 min={0}
@@ -290,7 +295,7 @@ function DisplayCard({ row, fans }: { row: DisplayStatus; fans: FansStatus | nul
             </Field>
           )}
 
-          <Field label="Unit" hint="The unit the number is written in">
+          <Field label="Unit">
             <Segmented<DisplayUnit>
               label={`${row.info.name} unit`}
               value={draft.unit}
@@ -302,7 +307,7 @@ function DisplayCard({ row, fans }: { row: DisplayStatus; fans: FansStatus | nul
             />
           </Field>
 
-          <Field label="Decimals" hint={rpm ? "A fan RPM is a whole number" : "The decimal point before the last digit"}>
+          <Field label="Decimals">
             <Segmented<"0" | "1">
               label={`${row.info.name} decimals`}
               value={String(draft.decimals) as "0" | "1"}
@@ -314,7 +319,7 @@ function DisplayCard({ row, fans }: { row: DisplayStatus; fans: FansStatus | nul
             />
           </Field>
 
-          <Field label="Blink at or above" hint="The display blinks while the number is at or above this">
+          <Field label="Blink at">
             <span className="row-wrap">
               <Toggle
                 label={`${row.info.name} blinks`}
@@ -337,12 +342,12 @@ function DisplayCard({ row, fans }: { row: DisplayStatus; fans: FansStatus | nul
 
           <div className="row-wrap display-actions">
             <Button variant="primary" icon={<FloppyDisk size={16} weight="bold" />} disabled={!dirty || busy} onClick={() => void save()}>
-              Save the source
+              Save
             </Button>
             <Button variant="ghost" disabled={busy} onClick={() => void stop()}>
-              Stop driving it
+              Stop
             </Button>
-            {dirty && <span className="mute">Not saved yet. Nothing is sent until it is.</span>}
+            {dirty && <span className="mute">Unsaved</span>}
           </div>
           {error && <p className="error-line">{error}</p>}
         </div>
@@ -361,13 +366,10 @@ export function DisplaysView() {
     <div className="stack">
       <div className="page-head">
         <h1>Displays</h1>
-        <p>A display takes one number, not colours: a pump head that shows a temperature or a fan speed.</p>
       </div>
 
       <p className="rule rule-warn">
-        <WarningOctagon size={16} weight="fill" aria-hidden="true" /> Close the vendor app (ZEUS CAST)
-        first. canvas-rgb never opens a display while ZEUS CAST is running, because both would write
-        it. Nothing is sent to a display until its source is saved here.
+        <WarningOctagon size={16} weight="fill" aria-hidden="true" /> Close ZEUS CAST first; both would write the display.
       </p>
 
       {displaysUnsupported ? (

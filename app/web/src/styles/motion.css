@@ -403,13 +403,12 @@
   gap: var(--s2);
   max-width: 380px;
   padding: var(--s2) var(--s3);
-  border: 1px solid var(--line-2);
-  border-left: 3px solid var(--tone);
+  border: 1px solid color-mix(in srgb, var(--tone) 45%, var(--line-2));
   border-radius: var(--r-md);
   background: var(--panel);
   color: var(--ink);
   font-size: var(--t14);
-  box-shadow: 0 6px 18px rgb(0 0 0 / 0.28);
+  box-shadow: var(--pop);
   pointer-events: auto;
   animation: canvas-enter var(--dur) var(--ease) both;
   transition:
@@ -607,7 +606,7 @@
   align-items: start;
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 960px) {
   .effects-grid {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -685,7 +684,7 @@
   gap: var(--s3);
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 960px) {
   .effect-gallery {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
@@ -1003,8 +1002,16 @@
   height: 5px;
 }
 
+/* A counter and its unit stay on one line: the reserved width never pushes the unit below. */
+:has(> .value-tween) {
+  white-space: nowrap;
+}
+
 .value-tween {
+  display: inline-block;
+  text-align: right;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .duty-cell {

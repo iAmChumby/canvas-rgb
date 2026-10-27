@@ -5,6 +5,7 @@ import { useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import type { Icon } from "@phosphor-icons/react";
 import { Cpu, Fan, Gear, SquaresFour, Sparkle, ThermometerSimple } from "@phosphor-icons/react";
 import { useToasts } from "@/components/Toast";
+import { BrandMark, Wordmark } from "@/components/BrandMark";
 
 interface NavItem {
   href: string;
@@ -33,7 +34,7 @@ interface MarkerBox {
 }
 
 /**
- * Left rail on wide screens; a bottom bar below 720 px. The active page carries the live
+ * Left rail with labels from 1280 px, icons only from 721 px, a bottom bar at 720 px and below. The active page carries the live
  * hue, and the marker that shows it slides from one link to the next.
  */
 export function Rail({ pathname }: { pathname: string }) {
@@ -99,8 +100,10 @@ export function Rail({ pathname }: { pathname: string }) {
     <nav className="rail" aria-label="Pages" ref={navRef} data-toast={toast.items.length > 0 ? "on" : "off"}>
       <span className="rail-marker" data-on={marker ? "true" : "false"} style={markerStyle} aria-hidden="true" />
       <div className="rail-brand">
-        <span className="rail-brand-dot" aria-hidden="true" />
-        canvas-rgb
+        <BrandMark />
+        <span className="rail-label">
+          <Wordmark />
+        </span>
       </div>
       {NAV.map((item) => {
         const Glyph = item.icon;
@@ -111,12 +114,13 @@ export function Rail({ pathname }: { pathname: string }) {
             href={item.href}
             prefetch={false}
             className="rail-link"
+            data-label={item.label}
             aria-current={current ? "page" : undefined}
           >
             <span className="rail-icon" aria-hidden="true">
-              <Glyph size={20} weight={current ? "fill" : "regular"} />
+              <Glyph size={18} weight={current ? "fill" : "regular"} />
             </span>
-            {item.label}
+            <span className="rail-label">{item.label}</span>
           </Link>
         );
       })}

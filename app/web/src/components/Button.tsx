@@ -40,6 +40,22 @@ export function Button({
 }
 
 /**
+ * A label that changes with state but never changes width: every variant is laid out in one cell
+ * and only the current one shows, so the button keeps the width of its longest label.
+ */
+export function Swap({ labels, at }: { labels: string[]; at: number }) {
+  return (
+    <span className="swap">
+      {labels.map((l, i) => (
+        <span key={l} data-on={i === at ? "true" : "false"} aria-hidden={i === at ? undefined : true}>
+          {l}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+/**
  * A link that looks like a button. The editor's own pages are reached by links in a few
  * places, and a link that is styled by hand is a second button style waiting to drift.
  */

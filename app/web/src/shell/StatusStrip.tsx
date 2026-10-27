@@ -1,16 +1,18 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { CheckCircle, CircleDashed, MagnifyingGlass, Pause, Play, Warning, WarningOctagon } from "@phosphor-icons/react";
-import { Button, IconButton } from "@/components/Button";
+import { Button, IconButton, Swap } from "@/components/Button";
 import { Crossfade } from "@/components/Crossfade";
 import { useMediaQuery } from "@/components/MediaQuery";
+import { BrandMark, Wordmark } from "@/components/BrandMark";
 import { Popover } from "@/components/Popover";
 import { useToast } from "@/components/Toast";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
 import { links, playing, problems, type Tone } from "@/lib/status";
 import { patchSnap, refreshStatus, useSnap } from "@/lib/store";
+import { AnimatedNumber } from "@/components/AnimatedNumber";
 
 /** What the strip says when nothing is wrong. */
 const ALL_GOOD = "All connected";
@@ -109,8 +111,8 @@ export function StatusStrip({
     <div className="strip" role="status" aria-label="Status" ref={stripRef}>
       <div className="strip-inner">
         <span className="strip-brand">
-          <span className="rail-brand-dot" aria-hidden="true" />
-          canvas-rgb
+          <BrandMark size={16} />
+          <Wordmark />
         </span>
 
         {/* What the lights are doing, with a chip of the running light's own colour. */}
@@ -157,7 +159,9 @@ export function StatusStrip({
             >
               {/* On a phone the row has no room for the words: the button's own label says
                   what it does. */}
-              <span className="strip-power-text">{paused ? "Resume lights" : "Pause lights"}</span>
+              <span className="strip-power-text">
+                <Swap labels={["Pause lights", "Resume lights"]} at={paused ? 1 : 0} />
+              </span>
             </Button>
           ) : null}
           {onOpenPalette && (
@@ -180,10 +184,10 @@ export function StatusStrip({
       >
         <div className="strip-details-head">Details</div>
         <dl className="strip-details-list">
-          <Detail label="Frame rate" value={status ? `${status.fps_measured.toFixed(1)} / ${status.fps_target} fps` : "—"} />
-          <Detail label="Frame time" value={status ? `${status.frame_time_ms.toFixed(1)} ms` : "—"} />
+          <Detail label="Frame rate" value={status ? <><AnimatedNumber value={status.fps_measured} decimals={1} /> / <AnimatedNumber value={status.fps_target} /> fps</> : "—"} />
+          <Detail label="Frame time" value={status ? <><AnimatedNumber value={status.frame_time_ms} decimals={1} /> ms</> : "—"} />
           <Detail label="Lights" value={status ? (paused ? "paused" : status.parked ? "idle" : "running") : "—"} />
-          <Detail label="Devices" value={status ? `${status.devices_connected} connected` : "—"} />
+          <Detail label="Devices" value={status ? <><AnimatedNumber value={status.devices_connected} /> connected</> : "—"} />
         </dl>
         {/* Each link and what it is doing, so "connecting" is never a mystery. */}
         <ul className="strip-details-links">
@@ -208,7 +212,7 @@ export function StatusStrip({
   );
 }
 
-function Detail({ label, value }: { label: string; value: string }) {
+function Detail({ label, value }: { label: string; value: ReactNode }) {
   return (
     <>
       <dt>{label}</dt>

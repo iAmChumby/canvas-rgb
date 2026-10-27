@@ -667,7 +667,7 @@
 
 /* In the narrow column of a wide screen the panel is 320 px across: two columns of a colour
    field and a slider do not fit there, so the rows are one after another. */
-@media (min-width: 1101px) {
+@media (min-width: 961px) {
   .nowProps :global(.prop-list) {
     grid-template-columns: minmax(0, 1fr);
   }

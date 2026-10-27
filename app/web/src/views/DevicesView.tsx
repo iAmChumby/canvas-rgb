@@ -28,6 +28,7 @@ import { refreshDevices, useSnap } from "@/lib/store";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { DeviceKind } from "@/proto/DeviceKind";
 import type { ZoneInfo } from "@/proto/ZoneInfo";
+import { AnimatedNumber } from "@/components/AnimatedNumber";
 
 const KIND_ICON: Record<DeviceKind, Icon> = {
   motherboard: Cpu,
@@ -168,13 +169,12 @@ export function DevicesView() {
     <div className="stack">
       <div className="page-head">
         <h1>Devices</h1>
-        <p>Every device the daemon sees over OpenRGB. Resizable ARGB headers can be sized with the identify walker.</p>
       </div>
 
       {devicesError && <Panel><p className="error-line">{devicesError}</p></Panel>}
       {openrgb !== "connected" && (
         <p className="rule rule-warn">
-          OpenRGB is not connected. The daemon is up, but it cannot reach the lights yet.
+          OpenRGB is not connected.
         </p>
       )}
 
@@ -253,7 +253,7 @@ export function DevicesView() {
                     </span>
                     <ZoneStrip zone={z} />
                     <span className="zone-strip-count">
-                      {z.led_count} {z.led_count === 1 ? "LED" : "LEDs"}
+                      <AnimatedNumber value={z.led_count} /> {z.led_count === 1 ? "LED" : "LEDs"}
                       {z.resizable && <span className="mute"> · {z.min_leds}–{z.max_leds}</span>}
                     </span>
                     <span className="zone-strip-size">
@@ -286,8 +286,7 @@ export function DevicesView() {
             />
           ) : (
             <EmptyState icon={<Crosshair size={22} />} title="Identify walker">
-              Pick a resizable zone (an ARGB header) and the walker lights one white LED at a time
-              along it. Stop on the last LED to set the header&apos;s length.
+              Pick a header&apos;s Size to find its last LED.
             </EmptyState>
           )}
         </div>
@@ -389,11 +388,11 @@ function IdentifyWalker({
           {device.name}
         </p>
         <div className="walker-led">
-          <span className="walker-big">{led + 1}</span>
+          <span className="walker-big"><AnimatedNumber value={led + 1} /></span>
           <span className="mute">of {zone.max_leds} LEDs</span>
         </div>
         <p className="mute" style={{ fontSize: 14, marginTop: -4 }}>
-          LED {led + 1}. The header reads {zone.led_count} LEDs now.
+          Set to <span className="fig"><AnimatedNumber value={zone.led_count} /></span>
         </p>
         <div className="walker-keys">
           <IconButton label="Previous LED" icon={<ArrowLeft size={18} />} disabled={led <= 0} onClick={() => setLed((v) => Math.max(0, v - 1))} />
@@ -409,8 +408,8 @@ function IdentifyWalker({
         <Button variant="primary" onClick={() => void setLength()}>
           This is the last LED
         </Button>
-        <p className="mute" style={{ fontSize: 14 }}>
-          Sets the length to {led + 1} LEDs. Allowed range {zone.min_leds} to {zone.max_leds}.
+        <p className="mute fig" style={{ fontSize: 14 }}>
+          {zone.min_leds}–{zone.max_leds}
         </p>
         {note && <StateDot tone="ok">{note}</StateDot>}
         {error && <p className="error-line">{error}</p>}

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { CaretLeft, MagnifyingGlass, MonitorPlay, Play, SquaresFour, Star, Waveform } from "@phosphor-icons/react";
-import { Button, ButtonLink, IconButton } from "@/components/Button";
+import { Button, ButtonLink, IconButton, Swap } from "@/components/Button";
 import { Chip } from "@/components/Chip";
 import { Thumb } from "@/components/Thumb";
 import { Panel } from "@/components/Panel";
@@ -22,6 +22,7 @@ import { EFFECT_CATEGORIES, categoryOf, type EffectCategory } from "@/lib/effect
 import { getSnap, refreshAll, useSnap } from "@/lib/store";
 import type { EffectDetail } from "@/proto/EffectDetail";
 import type { PropValue } from "@/proto/PropValue";
+import { AnimatedNumber } from "@/components/AnimatedNumber";
 
 /** Live edits are sent this long after the last change (ms). */
 const PATCH_DEBOUNCE_MS = 60;
@@ -308,7 +309,7 @@ export function EffectsView() {
                   onClick={() => void activate(null)}
                   icon={<Play size={14} weight="fill" />}
                 >
-                  {running ? "Running" : "Activate"}
+                  <Swap labels={["Activate", "Running"]} at={running ? 1 : 0} />
                 </Button>
               </div>
               <p className="dim">{detail.schema.description}</p>
@@ -316,12 +317,10 @@ export function EffectsView() {
                 {detail.schema.needs.screen && <Chip icon={<MonitorPlay size={14} />}>Screen capture</Chip>}
                 {detail.schema.needs.audio && <Chip icon={<Waveform size={14} />}>Audio input</Chip>}
                 {selectedId?.startsWith("html:") && <Chip html>HTML effect</Chip>}
-                <StateDot tone={running ? "ok" : "mute"}>{running ? "Running on the layout" : "Not running"}</StateDot>
+                <StateDot tone={running ? "ok" : "mute"}>{running ? "Running" : "Idle"}</StateDot>
               </div>
               <p className="effect-live-note">
-                {needsInput
-                  ? "This effect reads the screen or the audio input, so the preview is the daemon's frame."
-                  : "Preview: the editor's own draw of this effect. The daemon owns the LEDs."}
+                {needsInput ? "Live frame" : "Preview"}
               </p>
             </div>
           </Panel>
@@ -355,7 +354,6 @@ export function EffectsView() {
     <div className="stack">
       <div className="page-head">
         <h1>Effects</h1>
-        <p>Every control is live: the preview follows your edits as you make them.</p>
       </div>
 
       <div className="effect-toolbar">
@@ -389,13 +387,8 @@ export function EffectsView() {
             aria-label="Search effects"
           />
         </span>
-        <span className="mute fig">{list.length} effects</span>
+        <span className="mute fig"><AnimatedNumber value={list.length} /> effects</span>
       </div>
-
-      <p className="effect-hint">
-        Add SignalRGB-format <code className="fig">.html</code> effects to{" "}
-        <code className="fig">%APPDATA%\canvas-rgb\effects</code>.
-      </p>
 
       {effectsError && <p className="error-line">{effectsError}</p>}
 

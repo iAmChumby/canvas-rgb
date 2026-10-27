@@ -2,6 +2,7 @@
 
 import { useState, type KeyboardEvent } from "react";
 import { clamp } from "@/lib/format";
+import { useCounter } from "@/components/Motion";
 
 /**
  * A mono number entry. The value is clamped to [min, max] when it is committed (Enter or blur),
@@ -29,7 +30,11 @@ export function NumberField({
   onCommit: (v: number) => void;
 }) {
   const [draft, setDraft] = useState<string | null>(null);
-  const shown = draft ?? value.toFixed(decimals);
+  const [focused, setFocused] = useState(false);
+  // Out of focus the text counts to a new value; in focus it is exactly what the user typed or
+  // the value as it is, never a tween under the cursor.
+  const counted = useCounter(value, decimals).shown;
+  const shown = draft ?? (focused ? value.toFixed(decimals) : counted.toFixed(decimals));
   const parsed = draft === null ? null : Number(draft);
   const invalid = parsed !== null && (Number.isNaN(parsed) || parsed < min || parsed > max);
 
@@ -66,9 +71,15 @@ export function NumberField({
         value={shown}
         disabled={disabled}
         onChange={(e) => setDraft(e.target.value)}
-        onBlur={commit}
+        onBlur={() => {
+          setFocused(false);
+          commit();
+        }}
         onKeyDown={onKey}
-        onFocus={(e) => e.currentTarget.select()}
+        onFocus={(e) => {
+          setFocused(true);
+          e.currentTarget.select();
+        }}
       />
       {unit && <span className="unit">{unit}</span>}
     </span>

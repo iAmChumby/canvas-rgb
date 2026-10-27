@@ -4,6 +4,8 @@
  * (graphite page, five accents, status colours, Schibsted Grotesk + JetBrains Mono, 6-10 px
  * radii, cubic-bezier(0.2,0.8,0.2,1)). The dot texture is portfolio-site's globals.css.
  *
+ * The design system that documents these is the "canvas-rgb" Design System artifact.
+ *
  * Dark is the default. Light applies with data-theme="light", or with the system preference
  * when the page has no data-theme attribute (Settings > Appearance > System).
  */
@@ -12,22 +14,22 @@
   color-scheme: dark;
 
   /* surfaces */
-  --g1: #0e0f11;          /* page */
-  --sunk: #0a0b0d;        /* wells: the preview frame, input tracks */
-  --panel: #15171a;       /* panels */
-  --raised: #1c1f23;      /* controls at rest */
-  --line: rgba(255, 255, 255, 0.08);
-  --line-2: rgba(255, 255, 255, 0.16);
-  --hover: rgba(255, 255, 255, 0.06);
-  --press: rgba(255, 255, 255, 0.11);
-  --dot: rgba(255, 255, 255, 0.055);
-  --scrim: rgba(0, 0, 0, 0.55);
+  --g1: #0b0c0e;          /* page */
+  --sunk: #070809;        /* wells: the preview frame, input tracks */
+  --panel: #121417;       /* panels */
+  --raised: #191c20;      /* controls at rest */
+  --line: rgba(255, 255, 255, 0.07);
+  --line-2: rgba(255, 255, 255, 0.14);
+  --hover: rgba(255, 255, 255, 0.05);
+  --press: rgba(255, 255, 255, 0.1);
+  --dot: rgba(255, 255, 255, 0.05);
+  --scrim: rgba(0, 0, 0, 0.6);
 
   /* ink */
-  --ink: #f2f3f5;
-  --dim: #b9bdc3;
-  --mute: #8a8f98;
-  --on-accent: #0e0f11;
+  --ink: #eef0f3;
+  --dim: #b4b9c1;
+  --mute: #858b95;
+  --on-accent: #0b0c0e;
 
   /* accents: five real hues, one per device family and per control role */
   --a1: #8fb4e8;          /* blue: primary actions, focus */
@@ -42,6 +44,19 @@
   --warn: #e8c02c;
   --down: #e5484d;
 
+  /* spectrum: the RGB signature. Only the 2 px line across the top of the window uses it; never a
+     button, a card or a background. */
+  --rgb-1: #ff3b5c;
+  --rgb-2: #ffb02e;
+  --rgb-3: #3ddc84;
+  --rgb-4: #2ad4ff;
+  --rgb-5: #5b7cff;
+  --rgb-6: #c25bff;
+  --spectrum: linear-gradient(90deg, var(--rgb-1), var(--rgb-2), var(--rgb-3), var(--rgb-4), var(--rgb-5), var(--rgb-6));
+
+  /* floating things only (listbox, popover, tooltip, palette); panels have no shadow */
+  --pop: 0 12px 32px rgba(0, 0, 0, 0.5);
+
   /* live: the hue of the running preview, written by the page at <= 2 Hz */
   --live-h: 215;
   --live: hsl(var(--live-h) 78% 72%);
@@ -54,6 +69,7 @@
   --t15: 15px;
   --t16: 16px;
   --t20: 20px;
+  --t22: 22px;
   --t28: 28px;
   --t40: 40px;
 
@@ -66,10 +82,15 @@
   --s6: 24px;
   --s8: 32px;
 
-  /* radius: 6-10 px on panels and controls; 20 px only for a rare large surface */
-  --r-sm: 6px;
-  --r-md: 8px;
-  --r-lg: 10px;
+  /* shell and control sizes */
+  --rail-w: 200px;
+  --rail-w-icon: 64px;
+  --control-h: 32px;
+
+  /* radius: hardware-soft corners (Luke, 2026-10-27: "rounded corners", a sleek piece of hardware) */
+  --r-sm: 8px;
+  --r-md: 10px;
+  --r-lg: 16px;
   --r-xl: 20px;
 
   /* motion: snappy, 90-240 ms, one curve */
@@ -91,6 +112,7 @@
 
 :root[data-theme="light"] {
   color-scheme: light;
+  --pop: 0 12px 32px rgba(15, 18, 24, 0.16);
   --g1: #f3f4f6;
   --sunk: #e7e9ee;
   --panel: #ffffff;
@@ -121,6 +143,7 @@
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) {
     color-scheme: light;
+    --pop: 0 12px 32px rgba(15, 18, 24, 0.16);
     --g1: #f3f4f6;
     --sunk: #e7e9ee;
     --panel: #ffffff;

@@ -4,11 +4,11 @@ import { useState } from "react";
 import { DownloadSimple, FolderOpen, UploadSimple } from "@phosphor-icons/react";
 import { Button, FileButton } from "@/components/Button";
 import { ColorField } from "@/components/ColorField";
-import { NumberField } from "@/components/NumberField";
 import { Field, Panel, StateDot } from "@/components/Panel";
 import { Segmented } from "@/components/Segmented";
-import { Slider } from "@/components/Slider";
 import { Toggle } from "@/components/Toggle";
+import { NumberField } from "@/components/NumberField";
+import { Slider } from "@/components/Slider";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
 import { exportConfig, importConfigFile } from "@/lib/config-transfer";
@@ -142,7 +142,6 @@ export function SettingsView() {
     <div className="stack">
       <div className="page-head">
         <h1>Settings</h1>
-        <p>Changes apply as you make them.</p>
       </div>
 
       <div className="settings-grid">
@@ -150,7 +149,7 @@ export function SettingsView() {
           <Panel title="Rendering">
             <Field
               label="Frame rate"
-              hint={`Last second: ${status ? fmt1(status.fps_measured) : "—"} fps`}
+              hint={<span className="fig">{status ? fmt1(status.fps_measured) : "—"} fps measured</span>}
             >
               <span className="row-wrap field-slider">
                 <Slider
@@ -164,7 +163,7 @@ export function SettingsView() {
                 <NumberField label="Frame rate value" min={10} max={60} value={shownFps} unit="fps" onCommit={commitFps} />
               </span>
             </Field>
-            <Field label="Brightness" hint="Scales every LED the daemon writes">
+            <Field label="Brightness">
               <span className="row-wrap field-slider">
                 <Slider
                   label="Brightness"
@@ -181,14 +180,14 @@ export function SettingsView() {
           </Panel>
 
           <Panel title="Lock and quit">
-            <Field label="Go black on lock and monitors off" hint="Off by default">
+            <Field label="Black on lock">
               <Toggle
-                label="Go black on lock and monitors off"
+                label="Black on lock and monitors off"
                 checked={settings.black_on_lock}
                 onChange={(v) => void save({ black_on_lock: v })}
               />
             </Field>
-            <Field label="On quit" hint="What the lights do when the tray app exits">
+            <Field label="On quit">
               <Segmented<"black" | "leave_last_frame">
                 label="On quit"
                 value={settings.on_quit}
@@ -199,7 +198,7 @@ export function SettingsView() {
                 onChange={(v) => void save({ on_quit: v })}
               />
             </Field>
-            <Field label="Boot colour" hint="Held by the fan service until the daemon connects. Clear it for black.">
+            <Field label="Boot colour">
               <span className="row-wrap">
                 <ColorField
                   label="Boot colour"
@@ -211,7 +210,7 @@ export function SettingsView() {
                   }}
                 />
                 <Button size="sm" variant="ghost" disabled={settings.boot_color === null} onClick={() => void save({ boot_color: null })}>
-                  Clear (black)
+                  Clear
                 </Button>
               </span>
             </Field>
@@ -220,14 +219,14 @@ export function SettingsView() {
 
         <div className="stack">
           <Panel title="Config">
-            <Field label="Export" hint="Settings, layouts, zone sizes, effects, fans and displays">
+            <Field label="Export">
               <Button icon={<DownloadSimple size={16} />} onClick={() => void doExport()}>
-                Export config
+                Export
               </Button>
             </Field>
-            <Field label="Import" hint="The daemon refuses a file it cannot read, and says why">
+            <Field label="Import">
               <FileButton accept="application/json,.json" icon={<UploadSimple size={16} />} onFile={(f) => void doImport(f)}>
-                Import config
+                Import
               </FileButton>
             </Field>
             {note && <StateDot tone="ok">{note}</StateDot>}
@@ -235,7 +234,7 @@ export function SettingsView() {
           </Panel>
 
           <Panel title="Appearance">
-            <Field label="Theme" hint="Dark is the default">
+            <Field label="Theme">
               <Segmented<Theme>
                 label="Theme"
                 value={theme}
@@ -251,7 +250,7 @@ export function SettingsView() {
                 }}
               />
             </Field>
-            <Field label="Interface motion" hint="Reduced turns the entrance, slide and count animations off">
+            <Field label="Motion">
               <Segmented<MotionPref>
                 label="Interface motion"
                 value={motion}
@@ -288,7 +287,7 @@ export function SettingsView() {
               >
                 Open logs folder
               </Button>
-              {!inTray && <span className="mute" style={{ fontSize: 14 }}>Available in the tray app.</span>}
+              {!inTray && <span className="mute" style={{ fontSize: 14 }}>Tray app only</span>}
             </div>
           </Panel>
         </div>

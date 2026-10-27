@@ -1,15 +1,17 @@
 "use client";
 
-import { useTweenNumber } from "@/components/Motion";
+import type { CSSProperties } from "react";
+import { useCounter } from "@/components/Motion";
 
 /**
- * A number that eases to its new value. Tabular figures, so the digits do not
- * jump sideways while they move.
+ * A number that counts to its new value, through every step of `decimals`. Tabular figures,
+ * and the width is held at the widest the count reaches (right-aligned), so the digits never
+ * move what sits beside them while they run.
  */
 export function AnimatedNumber({
   value,
   decimals = 0,
-  duration = 220,
+  duration,
   className,
 }: {
   value: number;
@@ -17,9 +19,10 @@ export function AnimatedNumber({
   duration?: number;
   className?: string;
 }) {
-  const shown = useTweenNumber(value, duration);
+  const { shown, chars } = useCounter(value, decimals, duration);
+  const style: CSSProperties = { minWidth: `${chars}ch` };
   return (
-    <span className={className ? `value-tween ${className}` : "value-tween"}>
+    <span className={className ? `value-tween ${className}` : "value-tween"} style={style}>
       {shown.toFixed(decimals)}
     </span>
   );
