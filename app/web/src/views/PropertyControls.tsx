@@ -39,7 +39,7 @@ export function PropertyControls({
       {schema.properties.map((def) => {
         const value = values[def.key] ?? defaultFor(def.kind);
         return (
-          <div className="prop-item" key={def.key}>
+          <div className="prop-item" data-kind={def.kind.type} key={def.key}>
             <span className="field-label">
               <span>{def.label}</span>
             </span>

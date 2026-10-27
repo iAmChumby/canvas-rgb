@@ -159,8 +159,10 @@ export function EffectsView() {
     .map((e, i) => ({ effect: e, match: matchEffect(q, e.name, e.description, i) }))
     .filter((row) => row.match !== null && (filter === "all" || row.effect.favorite))
     .sort((a, b) => (b.match?.score ?? 0) - (a.match?.score ?? 0));
-  // The detail belongs to the effect it was fetched for; a stale one is not shown.
-  const detail = loaded && loaded.id === selectedId ? loaded.detail : null;
+  // While the next effect's detail is in flight the previous one stays on screen, so the preview
+  // is never blank; the Activate button waits for the real one.
+  const detail = loaded ? loaded.detail : null;
+  const stale = loaded !== null && loaded.id !== selectedId;
   const running = selectedId !== null && selectedId === activeId;
   const needsInput = detail ? detail.schema.needs.screen || detail.schema.needs.audio : false;
   // Nothing can run until there is a layout.
@@ -283,18 +285,20 @@ export function EffectsView() {
         <>
           <Panel>
             <div className="stack" style={{ gap: 12 }}>
-              <div className="effect-live">
+              <div className="effect-live" data-stale={stale ? "true" : "false"}>
                 {needsInput ? (
                   <Thumb id={detail.schema.id} size="lg" label={detail.schema.name} />
                 ) : (
-                  <EffectPreview id={detail.schema.id} values={values} />
+                  <div className="effect-live-frame" key={detail.schema.id}>
+                    <EffectPreview id={detail.schema.id} values={values} />
+                  </div>
                 )}
               </div>
               <div className="row-wrap" style={{ justifyContent: "space-between" }}>
                 <h2 className="effect-title">{detail.schema.name}</h2>
                 <Button
                   variant={running ? "default" : "primary"}
-                  disabled={running}
+                  disabled={running || stale}
                   onClick={() => void activate(null)}
                   icon={<Play size={14} weight="fill" />}
                 >

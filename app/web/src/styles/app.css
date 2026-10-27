@@ -1347,6 +1347,25 @@ button.chip:hover {
   border-bottom: 0;
 }
 
+.prop-item[data-kind="number"] {
+  /* One row: label, slider, number. The control wrapper steps out of the grid. */
+  grid-template-columns: minmax(64px, 96px) minmax(0, 1fr) 64px;
+  gap: var(--s3);
+}
+
+.prop-item[data-kind="number"] .prop-control {
+  display: contents;
+}
+
+.prop-item[data-kind="number"] .slider {
+  flex: none;
+  min-width: 0;
+}
+
+.prop-item[data-kind="number"] .num {
+  width: 64px;
+}
+
 .prop-control {
   display: flex;
   flex-wrap: wrap;
@@ -1453,6 +1472,40 @@ button.chip:hover {
   grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
   gap: var(--s4);
   align-items: start;
+}
+
+.fans-editor-col {
+  position: sticky;
+  top: var(--s4);
+}
+
+/* The control mode: a state (dot and word), not a button. */
+.mode-state {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  color: var(--dim);
+  font-size: var(--t14);
+  white-space: nowrap;
+}
+
+.mode-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--mute);
+}
+
+.mode-state[data-mode="curve"] {
+  color: var(--ink);
+}
+
+.mode-state[data-mode="curve"] .mode-dot {
+  background: var(--live);
+}
+
+.mode-state[data-mode="fixed"] .mode-dot {
+  background: var(--warn);
 }
 
 .fan-table {
@@ -1632,6 +1685,10 @@ button.chip:hover {
   .fans-grid,
   .settings-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .fans-editor-col {
+    position: static;
   }
 }
 
@@ -1853,7 +1910,7 @@ button.chip:hover {
     width: 100%;
   }
 
-  .prop-item {
+  .prop-item:not([data-kind="number"]) {
     grid-template-columns: minmax(0, 1fr);
   }
 
@@ -1901,8 +1958,8 @@ button.chip:hover {
   image-rendering: pixelated;
   opacity: 0;
   transition:
-    opacity var(--dur-slow) var(--ease),
-    transform var(--dur-slow) var(--ease);
+    opacity var(--dur) var(--ease),
+    transform var(--dur) var(--ease);
 }
 
 /* A tile that has its frames fades in; it never appears as a black hole. */

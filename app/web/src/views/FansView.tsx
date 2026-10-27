@@ -46,6 +46,16 @@ function modeLabel(m: FanMode): string {
   return "Curve";
 }
 
+/** The control mode as a state: a dot and a word, no border, so it never reads as a button. */
+function ModeState({ mode }: { mode: FanMode }) {
+  return (
+    <span className="mode-state" data-mode={mode.mode}>
+      <span className="mode-dot" aria-hidden="true" />
+      {modeLabel(mode)}
+    </span>
+  );
+}
+
 /** The temperature a curve header reads, if its source reports one. */
 function tempFor(mode: FanMode, temps: TempReading[]): number | null {
   if (mode.mode !== "curve") return null;
@@ -213,6 +223,7 @@ export function FansView() {
       <ProfilesPanel fans={fans} />
 
       <div className="fans-grid">
+        <div className="stack">
         <Panel title="Headers">
           {narrow ? (
             <div className="fan-cards">
@@ -253,15 +264,6 @@ export function FansView() {
             </div>
           )}
         </Panel>
-
-        <div className="stack">
-          {selected && (
-            <HeaderEditor
-              key={`${selected.id}|${selected.mode.mode}|${fans.active_profile}`}
-              header={selected}
-              fans={fans}
-            />
-          )}
           <Panel title="Temperatures">
             {fans.temps.length === 0 && <p className="mute">No temperature sources reported.</p>}
             {fans.temps.map((t) => {
@@ -287,6 +289,16 @@ export function FansView() {
               );
             })}
           </Panel>
+        </div>
+
+        <div className="stack fans-editor-col">
+          {selected && (
+            <HeaderEditor
+              key={`${selected.id}|${selected.mode.mode}|${fans.active_profile}`}
+              header={selected}
+              fans={fans}
+            />
+          )}
         </div>
       </div>
     </div>
@@ -339,7 +351,7 @@ function FanRow({
         </span>
       </td>
       <td>
-        <Chip>{modeLabel(header.mode)}</Chip>
+        <ModeState mode={header.mode} />
       </td>
       <td>
         <div className="row-wrap" style={{ flexWrap: "nowrap" }}>
@@ -384,7 +396,7 @@ function FanCard({
     <button type="button" className="fan-card" data-selected={selected ? "true" : "false"} onClick={onSelect}>
       <span className="fan-card-head">
         <span className="fig fan-card-name">{header.label}</span>
-        <Chip>{modeLabel(header.mode)}</Chip>
+        <ModeState mode={header.mode} />
         {selected && <span className="fan-card-editing">Editing</span>}
         <Handoff header={header} />
       </span>

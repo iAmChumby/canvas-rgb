@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import { useDocumentVisible } from "@/lib/motion";
 import { useMotionOff } from "@/components/Motion";
 import type { PropValue } from "@/proto/PropValue";
@@ -38,6 +38,7 @@ function scale(c: RGB, k: number): RGB {
 }
 
 function hsv(h: number, s: number, v: number): RGB {
+  // Returns 0-255 channels, like every other colour in this file.
   const hh = ((h % 1) + 1) % 1;
   const i = Math.floor(hh * 6);
   const f = hh * 6 - i;
@@ -46,17 +47,17 @@ function hsv(h: number, s: number, v: number): RGB {
   const t = v * (1 - s * (1 - f));
   switch (i % 6) {
     case 0:
-      return [v, t, p];
+      return [v * 255, t * 255, p * 255];
     case 1:
-      return [q, v, p];
+      return [q * 255, v * 255, p * 255];
     case 2:
-      return [p, v, t];
+      return [p * 255, v * 255, t * 255];
     case 3:
-      return [p, q, v];
+      return [p * 255, q * 255, v * 255];
     case 4:
-      return [t, p, v];
+      return [t * 255, p * 255, v * 255];
     default:
-      return [v, p, q];
+      return [v * 255, p * 255, q * 255];
   }
 }
 
@@ -250,8 +251,9 @@ export function EffectPreview({
     valuesRef.current = values;
   }, [values]);
 
-  // Repaint on every value change: the feedback is immediate, motion or not.
-  useEffect(() => {
+  // Repaint on every value change: the feedback is immediate, motion or not. A layout effect, so
+  // the first frame is drawn before the browser paints and a new canvas is never blank.
+  useLayoutEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");

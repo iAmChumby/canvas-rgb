@@ -613,9 +613,9 @@
   background: var(--panel);
   overflow: hidden;
   transition:
-    transform var(--dur) var(--ease),
-    border-color var(--dur) var(--ease),
-    background var(--dur) var(--ease);
+    transform var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease);
 }
 
 .effect-card:hover {
@@ -679,7 +679,7 @@
 }
 
 .effect-card-preview .preview-canvas {
-  transition: transform var(--dur-slow) var(--ease);
+  transition: transform var(--dur) var(--ease);
 }
 
 .effect-card-meta {
@@ -744,6 +744,22 @@
   border: 1px solid var(--line-2);
   border-radius: var(--r-md);
   background: var(--sunk);
+}
+
+.effect-live-frame {
+  position: absolute;
+  inset: 0;
+  animation: preview-swap var(--dur-fast) var(--ease) both;
+}
+
+/* A new effect's preview eases in over the sunk well; it never starts from nothing. */
+@keyframes preview-swap {
+  from {
+    opacity: 0.5;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 .effect-live canvas {
