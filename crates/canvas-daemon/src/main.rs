@@ -111,6 +111,16 @@ async fn daemon_main() -> i32 {
     // The user HTML effects are listed before the API answers; the watcher keeps them current.
     app.user_effects.rescan(&canvas_daemon::paths::effects_dir());
 
+    // The effect saved on the active layout runs again, so a restart does not leave the
+    // lights black until something activates an effect.
+    let saved_effect = app.active_layout().await.and_then(|layout| layout.effect);
+    if let Some(effect) = saved_effect {
+        match canvas_daemon::apply_effect(&app, &effect.id, &effect.props).await {
+            Ok(()) => tracing::info!(effect = %effect.id, "the saved effect was restored"),
+            Err(e) => tracing::warn!(effect = %effect.id, error = %e, "the saved effect could not be restored"),
+        }
+    }
+
     // The background tasks.
     spawn_openrgb_supervisor(app.clone());
     spawn_pipe_client(app.clone());
