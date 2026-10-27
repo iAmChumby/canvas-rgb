@@ -266,7 +266,10 @@ fn a_readback_mismatch_hands_the_header_back_and_stays_back() {
     r.fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 50 }, t0).unwrap();
     assert!(!r.chip.manual(SYS_FAN1), "the mismatch hands the header back");
     let status = r.fans.status();
-    assert!(header(&status, "sys_fan1").override_reason.as_deref().unwrap_or_default().starts_with("write failed: readback"));
+    // The chip reads the duty back inside its configuration window, so the mismatch is
+    // reported by the write itself.
+    let reason = header(&status, "sys_fan1").override_reason.clone().unwrap_or_default();
+    assert!(reason.starts_with("write failed:") && reason.contains("read back"), "{reason}");
     // Sticky: later ticks do not drive it again.
     r.chip.set_drop_duty_writes(false);
     r.fans.tick(t0 + Duration::from_secs(1));

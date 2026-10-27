@@ -68,6 +68,19 @@ pub const MODE_REG: u16 = 0xA00;
 pub const COMMAND_REG: u16 = 0xA01;
 pub const CMD_REQUEST: u8 = 0x80;
 pub const CMD_DONE: u8 = 0x40;
+/// Fan engine status (nct6687d `NCT6687_REG_FAN_ENGINE_STS`). The EC acknowledges the
+/// command register here, never in 0xA01 itself.
+pub const ENGINE_STS_REG: u16 = 0xCF8;
+/// nct6687d `NCT6687_FAN_CFG_PHASE`: the EC is in the configuration phase.
+pub const STS_PHASE: u8 = 1 << 3;
+/// nct6687d `NCT6687_FAN_CFG_INVALID`: the EC rejected the new configuration.
+pub const STS_INVALID: u8 = 1 << 4;
+/// nct6687d `NCT6687_FAN_CFG_CHECK_DONE`: the EC checked the new configuration.
+pub const STS_CHECK_DONE: u8 = 1 << 5;
+/// nct6687d `NCT6687_FAN_CFG_LOCK`: the fan register set is locked.
+pub const STS_LOCK: u8 = 1 << 6;
+/// Polls of the engine status per wait, 1 ms apart: nct6687d waits up to a second.
+const CFG_POLLS: u32 = 1000;
 /// Board temperature registers: `0x100 + 2n` (integer), `+1` bit 7 = half degree.
 pub const TEMP_BASE_REG: u16 = 0x100;
 pub const BOARD_SENSORS: [&str; 7] = [
@@ -243,6 +256,70 @@ impl<P: PortIo> Nct6687<P> {
         self.io.write_port(self.base + 6, value)
     }
 
+    /// Polls the engine status until `done` holds, 1 ms apart, at most [`CFG_POLLS`] times.
+    fn wait_sts(&mut self, done: impl Fn(&mut Self, u8) -> io::Result<bool>) -> io::Result<Option<u8>> {
+        for _ in 0..CFG_POLLS {
+            let sts = self.ec_read(ENGINE_STS_REG)?;
+            if done(self, sts)? {
+                return Ok(Some(sts));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        Ok(None)
+    }
+
+    /// nct6687d `start_fan_cfg_update`.
+    fn cfg_start(&mut self) -> io::Result<()> {
+        let sts = self.ec_read(ENGINE_STS_REG)?;
+        if sts & STS_LOCK == 0 && sts & STS_PHASE != 0 {
+            return Ok(()); // already accessible
+        }
+        // Wait for any earlier configuration phase to end and the request bit to clear.
+        let idle = self.wait_sts(|chip, sts| {
+            Ok(sts & STS_PHASE == 0 && chip.ec_read(COMMAND_REG)? & CMD_REQUEST == 0)
+        })?;
+        if idle.is_none() {
+            return Err(io::Error::other("the EC is stuck in its configuration phase"));
+        }
+        self.ec_write(COMMAND_REG, CMD_REQUEST)?;
+        let open = self.wait_sts(|_, sts| Ok(sts & STS_LOCK == 0 && sts & STS_PHASE != 0))?;
+        if open.is_none() {
+            return Err(io::Error::other(ChipError::CommandTimeout(COMMAND_REG).to_string()));
+        }
+        Ok(())
+    }
+
+    /// Inside the window: the manual bit, then the duty, read back.
+    fn write_inside_cfg(&mut self, reg: u16, bit: u8, raw: u8) -> io::Result<()> {
+        let mode = self.ec_read(MODE_REG)?;
+        self.ec_write(MODE_REG, mode | (1 << bit))?;
+        self.ec_write(reg, raw)?;
+        let read = self.ec_read(reg)?;
+        if read != raw {
+            return Err(io::Error::other(ChipError::Readback { reg, wrote: raw, read }.to_string()));
+        }
+        Ok(())
+    }
+
+    /// nct6687d `finish_fan_cfg_update`.
+    fn cfg_finish(&mut self) -> io::Result<()> {
+        let sts = self.ec_read(ENGINE_STS_REG)?;
+        if sts & STS_LOCK != 0 || sts & STS_PHASE == 0 {
+            return Err(io::Error::other("the fan registers were not open when closing them"));
+        }
+        self.ec_write(COMMAND_REG, CMD_DONE)?;
+        let Some(sts) = self.wait_sts(|_, sts| Ok(sts & STS_CHECK_DONE != 0))? else {
+            return Err(io::Error::other("the EC never accepted the new fan configuration"));
+        };
+        if sts & STS_INVALID != 0 {
+            return Err(io::Error::other("the EC rejected the new fan configuration as invalid"));
+        }
+        if sts & STS_LOCK == 0 {
+            return Err(io::Error::other("the fan registers are still open after the update"));
+        }
+        Ok(())
+    }
+
     fn channel(&self, channel: usize) -> io::Result<Channel> {
         self.map.channels.get(channel).copied().ok_or_else(|| bad_channel(channel))
     }
@@ -314,19 +391,21 @@ impl<P: PortIo> FanChip for Nct6687<P> {
         Ok(())
     }
 
+    /// nct6687d `nct6687_write_pwm` (non brute-force path, its default): open the fan
+    /// configuration window, set the manual bit, write the duty and read it back, close the
+    /// window. The first real write (lighting session 2) wrote the duty before the request
+    /// and waited on 0xA01 for an acknowledgement the EC never gives, so it timed out.
     fn write_duty_percent(&mut self, channel: usize, percent: u8) -> io::Result<()> {
         let c = self.channel(channel)?;
         let reg = c.pwm_write_reg.ok_or_else(|| bad_channel(channel))?;
+        let bit = c.mode_bit.ok_or_else(|| bad_channel(channel))?;
         let raw = ((u32::from(percent.min(100)) * 255 + 50) / 100) as u8;
-        self.ec_write(reg, raw)?;
-        // Command handshake from nct6687d: request, then wait for done. UNCONFIRMED ordering on hardware.
-        self.ec_write(COMMAND_REG, CMD_REQUEST)?;
-        for _ in 0..10 {
-            if self.ec_read(COMMAND_REG)? & CMD_DONE != 0 {
-                return Ok(());
-            }
-        }
-        Err(io::Error::other(ChipError::CommandTimeout(COMMAND_REG).to_string()))
+        self.cfg_start()?;
+        let written = self.write_inside_cfg(reg, bit, raw);
+        // The window is always closed, even when the write inside it failed.
+        let finished = self.cfg_finish();
+        written?;
+        finished
     }
 
     fn read_board_temp(&mut self, name: &str) -> io::Result<Option<f32>> {

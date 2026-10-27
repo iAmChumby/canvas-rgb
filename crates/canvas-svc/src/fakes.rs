@@ -4,7 +4,10 @@
 //! registers, the EC page/index/data ports, the fan RPM with a lag, the duty and mode bits,
 //! the command handshake, and the board temperature registers. The real driver runs over it.
 
-use crate::chip::{Channel, PortIo, RegisterMap, BOARD_SENSORS, COMMAND_REG, CMD_DONE, CMD_REQUEST, MODE_REG, TEMP_BASE_REG};
+use crate::chip::{
+    Channel, PortIo, RegisterMap, BOARD_SENSORS, CMD_DONE, CMD_REQUEST, COMMAND_REG, ENGINE_STS_REG, MODE_REG,
+    STS_CHECK_DONE, STS_LOCK, STS_PHASE, TEMP_BASE_REG,
+};
 use crate::process::{ChildProcess, ProcessSpawner};
 use crate::temps::TempReader;
 use std::collections::HashMap;
@@ -44,6 +47,10 @@ struct Sim {
     manual: [bool; CHANNELS],
     drop_duty_writes: bool,
     drop_commands: bool,
+    /// The EC's fan configuration window (engine status PHASE set, LOCK clear).
+    cfg_open: bool,
+    /// The EC checked the last configuration (engine status CHECK_DONE).
+    cfg_checked: bool,
     writes: u32,
     write_log: Vec<(u16, u8)>,
 }
@@ -99,6 +106,8 @@ impl FakeChip {
             manual: [false; CHANNELS],
             drop_duty_writes: false,
             drop_commands: false,
+            cfg_open: false,
+            cfg_checked: false,
             writes: 0,
             write_log: Vec::new(),
         };
@@ -199,6 +208,18 @@ impl Sim {
     }
 
     fn ec_read(&self, reg: u16) -> u8 {
+        if reg == ENGINE_STS_REG {
+            return if self.cfg_open {
+                STS_PHASE
+            } else if self.cfg_checked {
+                STS_LOCK | STS_CHECK_DONE
+            } else {
+                STS_LOCK
+            };
+        }
+        if let Some(ch) = self.channel_of_pwm_write(reg) {
+            return self.duty_raw[ch];
+        }
         if let Some(ch) = self.channel_of_pwm_read(reg) {
             return self.duty_raw[ch];
         }
@@ -212,10 +233,17 @@ impl Sim {
     fn ec_write(&mut self, reg: u16, value: u8) {
         self.writes += 1;
         self.write_log.push((reg, value));
+        // Like the real EC: a request opens the configuration window (seen in 0xCF8, never in
+        // 0xA01), done closes it, and duty writes land only while it is open.
         if reg == COMMAND_REG {
             if value == CMD_REQUEST && !self.drop_commands {
-                self.regs.insert(COMMAND_REG, CMD_DONE);
+                self.cfg_open = true;
+                self.cfg_checked = false;
+            } else if value == CMD_DONE && self.cfg_open {
+                self.cfg_open = false;
+                self.cfg_checked = true;
             }
+            self.regs.insert(COMMAND_REG, value & !CMD_REQUEST);
             return;
         }
         if reg == MODE_REG {
@@ -228,7 +256,7 @@ impl Sim {
             return;
         }
         if let Some(ch) = self.channel_of_pwm_write(reg) {
-            if !self.drop_duty_writes {
+            if self.cfg_open && !self.drop_duty_writes {
                 self.duty_raw[ch] = value;
             }
             return;

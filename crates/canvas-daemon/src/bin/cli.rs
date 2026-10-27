@@ -316,7 +316,17 @@ fn fans_status(cli: &Cli) -> Result<(), CliError> {
                 .and_then(|v| v.as_u64())
                 .map(|v| format!("{v}%"))
                 .unwrap_or_else(|| "-".into());
-            let mode = describe_mode(header.get("mode"));
+            let asked = describe_mode(header.get("mode"));
+            let on_bios = header.get("on_bios").and_then(|v| v.as_bool()).unwrap_or(false);
+            let reason = header.get("override_reason").and_then(|v| v.as_str());
+            // What the chip is doing comes first; what was asked is shown only when it differs.
+            let mode = match (on_bios, asked.as_str(), reason) {
+                (true, "BIOS", _) => "BIOS".to_string(),
+                (true, _, Some(reason)) => format!("BIOS (asked {asked}; {reason})"),
+                (true, _, None) => format!("BIOS (asked {asked})"),
+                (false, _, Some(reason)) => format!("{asked} ({reason})"),
+                (false, _, None) => asked,
+            };
             println!("{:<14} {:<10} {:<8} {}", id, rpm, duty, mode);
         }
     }
