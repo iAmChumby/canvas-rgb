@@ -216,7 +216,9 @@ export function FanCurveEditor({
           const idx = points.indexOf(p);
           return (
             <circle
-              key={`${i}-${p.temp_c}-${p.percent}`}
+              // The key is the point's place in the array, not its numbers: a point that moves must
+              // keep its node, or every step of a drag would destroy and rebuild the circle.
+              key={idx}
               cx={xOf(p.temp_c)}
               cy={yOf(p.percent)}
               r={7}

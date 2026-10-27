@@ -473,12 +473,16 @@ function ProfilesPanel({ fans }: { fans: FansStatus }) {
               >
                 {p}
               </Chip>
-              <IconButton
-                label={`Delete profile ${p}`}
-                size="sm"
-                icon={<Trash size={14} />}
-                onClick={() => setConfirming(p)}
-              />
+              {/* The active profile is not deletable: you switch to another one first. One way to
+                  delete, not two. */}
+              {p !== fans.active_profile && (
+                <IconButton
+                  label={`Delete profile ${p}`}
+                  size="sm"
+                  icon={<Trash size={14} />}
+                  onClick={() => setConfirming(p)}
+                />
+              )}
             </span>
           ))}
         </div>

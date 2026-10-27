@@ -18,13 +18,19 @@ export function Sparkline({
   const h = 44;
   const scaleMax = max > 0 ? max : 1;
   const step = values.length > 1 ? w / (values.length - 1) : w;
-  const pts = values.map((v, i) => {
+  const raw: { x: number; y: number }[] = values.map((v, i) => {
     const x = values.length > 1 ? i * step : w;
     const y = h - 3 - (Math.min(v, scaleMax) / scaleMax) * (h - 6);
     return { x: Number(x.toFixed(1)), y: Number(y.toFixed(1)) };
   });
+  // One reading is a flat line across the window, not a lone dot: the speed has been the same
+  // since the first sample, and a dot reads as a broken chart.
+  const one = raw.length === 1 ? raw[0] : undefined;
+  const pts = one ? [{ x: 0, y: one.y }, one] : raw;
+  // A history that never moved is a rule, not a filled block.
+  const flat = values.length > 0 && values.every((v) => v === values[0]);
   const line = pts.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x} ${p.y}`).join(" ");
-  const area = pts.length > 1 ? `${line} L ${w} ${h} L 0 ${h} Z` : "";
+  const area = pts.length > 1 && !flat ? `${line} L ${w} ${h} L 0 ${h} Z` : "";
   const head = pts.length > 0 ? pts[pts.length - 1] : undefined;
   const last = values.length > 0 ? (values[values.length - 1] ?? 0) : 0;
   const peak = values.length > 0 ? Math.max(...values) : 0;

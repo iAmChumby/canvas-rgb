@@ -56,6 +56,8 @@ export interface Snap {
   settingsError: string | null;
   displays: DisplayStatus[] | null;
   displaysError: string | null;
+  /** The daemon is older than the display routes: it answered 404, so it is not an error. */
+  displaysUnsupported: boolean;
   rpm: Record<string, number[]>;
 }
 
@@ -76,6 +78,7 @@ let snap: Snap = {
   settingsError: null,
   displays: null,
   displaysError: null,
+  displaysUnsupported: false,
   rpm: {},
 };
 
@@ -176,14 +179,15 @@ export async function refreshSettings(): Promise<void> {
 
 export async function refreshDisplays(): Promise<void> {
   try {
-    patchSnap({ displays: await api.displays(), displaysError: null });
+    patchSnap({ displays: await api.displays(), displaysError: null, displaysUnsupported: false });
   } catch (e) {
-    // A daemon that is older than the display routes answers 404. Say that, not "HTTP 404".
-    const message =
-      e instanceof ApiFailure && e.status === 404
-        ? "This daemon has no display routes: it is older than the display support. Update the daemon and the tray app."
-        : messageOf(e);
-    patchSnap({ displaysError: message });
+    // A daemon that is older than the display routes answers 404. That is not a failure to read
+    // the displays: the page says the daemon is old and what to do about it.
+    const unsupported = e instanceof ApiFailure && e.status === 404;
+    const message = unsupported
+      ? "This daemon has no display routes: it is older than the display support. Update the daemon and the tray app."
+      : messageOf(e);
+    patchSnap({ displaysError: message, displaysUnsupported: unsupported });
   }
 }
 

@@ -340,12 +340,12 @@
    ========================================================================== */
 
 /* The toast floats: it takes no room in the page, so the page's first content does not move when
-   one appears. On a wide screen it sits over the page head's subtitle row, top right, and it
-   scrolls away with the page: the only thing it can ever be over is the page's own title row. */
+   one appears. On a wide screen it sits on the page head's title row, top right, and it scrolls
+   away with the page: the only thing it can ever be over is the page's own title row. */
 .toast-host {
   position: absolute;
-  /* The page head's subtitle row, below whatever notices stand above the page. */
-  top: calc(var(--s6) + var(--standing-h, 0px) + var(--s5));
+  /* The page head's title row, below whatever notices stand above the page. */
+  top: calc(var(--s6) + var(--standing-h, 0px));
   right: var(--s6);
   z-index: 30;
   display: flex;

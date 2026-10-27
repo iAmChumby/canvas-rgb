@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { ThermometerSimple, WarningOctagon } from "@phosphor-icons/react";
+import { ArrowClockwise, ThermometerSimple, WarningOctagon } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
 import { EmptyState } from "@/components/EmptyState";
 import { NumberField } from "@/components/NumberField";
@@ -97,7 +97,7 @@ function DigitReadout({
   if (value === null) {
     return (
       <div className="digit-readout" data-blank="true">
-        <span className="digit-readout-empty">Nothing is shown yet</span>
+        <span className="digit-readout-empty">No reading yet</span>
       </div>
     );
   }
@@ -109,7 +109,7 @@ function DigitReadout({
     );
   }
   return (
-    <div className="digit-readout" role="img" aria-label={`The display shows ${value} ${mark}`}>
+    <div className="digit-readout" role="img" aria-label={`Would show ${value} ${mark}`}>
       {shown.cells.map((cell, i) => (
         <span key={i} className="digit" data-blank={cell === null ? "true" : "false"}>
           {cell ?? ""}
@@ -230,6 +230,12 @@ function DisplayCard({ row, fans }: { row: DisplayStatus; fans: FansStatus | nul
     >
       <div className="display-card">
         <div className="display-readout">
+          {/* The big number is what the source would read, not what the display shows: it says so,
+              and the line under it says what the display shows now. */}
+          <p className="readout-caption">
+            <span className="readout-caption-title">Would show</span>
+            <span className="readout-caption-note">the source set here, once saved</span>
+          </p>
           <DigitReadout
             value={preview}
             digits={row.info.digits}
@@ -237,10 +243,20 @@ function DisplayCard({ row, fans }: { row: DisplayStatus; fans: FansStatus | nul
             temperature={temperature}
             unit={draft.unit}
           />
-          <p className="mute display-readout-note">
-            {shown
-              ? `The pump head shows ${shown.value} ${shown.mode === "temperature" ? (shown.unit === "celsius" ? "°C" : "°F") : "RPM"} now. It is written ${shown.blink ? "with the alarm blink" : "without a blink"}.`
-              : "Nothing has been written to the display yet. It keeps whatever it showed before, and nothing is sent until a source is saved."}
+          <p className="readout-now">
+            <span className="readout-now-label">Now</span>
+            {shown ? (
+              <>
+                {" "}
+                the pump head shows{" "}
+                <span className="fig">
+                  {shown.value} {shown.mode === "temperature" ? (shown.unit === "celsius" ? "°C" : "°F") : "RPM"}
+                </span>
+                , written {shown.blink ? "with the alarm blink" : "without a blink"}.
+              </>
+            ) : (
+              <> nothing is written to it. It keeps whatever it showed before.</>
+            )}
           </p>
           <p className="mute display-readout-note fig">
             {row.info.digits} digits · {row.info.max_decimals} decimal
@@ -338,6 +354,7 @@ function DisplayCard({ row, fans }: { row: DisplayStatus; fans: FansStatus | nul
 export function DisplaysView() {
   const displays = useSnap((s) => s.displays);
   const displaysError = useSnap((s) => s.displaysError);
+  const displaysUnsupported = useSnap((s) => s.displaysUnsupported);
   const fans = useSnap((s) => s.fans);
 
   return (
@@ -353,7 +370,25 @@ export function DisplaysView() {
         it. Nothing is sent to a display until its source is saved here.
       </p>
 
-      {displaysError ? (
+      {displaysUnsupported ? (
+        // The daemon answered 404: it is older than the display support. That is a version to fix,
+        // not a failure, so it does not read like one.
+        <Panel>
+          <EmptyState
+            icon={<ArrowClockwise size={22} />}
+            title="This daemon is older than the editor"
+            action={
+              <Button size="sm" onClick={() => void refreshDisplays()}>
+                Check again
+              </Button>
+            }
+          >
+            The daemon does not have the display routes yet: it was built before displays existed.
+            Update the daemon and the tray app to set a display up. Nothing else on this page is
+            affected, and no display is touched until one has a source.
+          </EmptyState>
+        </Panel>
+      ) : displaysError ? (
         <Panel title="The displays could not be read">
           <p className="error-line">{displaysError}</p>
         </Panel>

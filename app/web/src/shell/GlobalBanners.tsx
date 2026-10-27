@@ -5,7 +5,6 @@ import { usePathname } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { Lightning, SquaresFour, Warning, WarningOctagon } from "@phosphor-icons/react";
 import { Banner } from "@/components/Banner";
-import { Button } from "@/components/Button";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
 import { fmtSeconds } from "@/lib/format";
@@ -26,7 +25,7 @@ export function StandingNotices() {
   const [err, setErr] = useState<string | null>(null);
   const flowRef = useRef<HTMLDivElement>(null);
 
-  // The toast hangs over the page head's subtitle row, so it has to know how tall the notices
+  // The toast hangs over the page head's title row, so it has to know how tall the notices
   // above the page are.
   useEffect(() => {
     const el = flowRef.current;
@@ -101,14 +100,9 @@ export function StandingNotices() {
           onDismiss={dismissPanel}
           dismissLabel="Dismiss this panel"
           actions={
-            <>
-              <Link className="btn btn-primary btn-sm" href={walkHref} prefetch={false}>
-                Open the identify walker
-              </Link>
-              <Button size="sm" onClick={dismissPanel}>
-                Dismiss
-              </Button>
-            </>
+            <Link className="btn btn-primary btn-sm" href={walkHref} prefetch={false}>
+              Open the identify walker
+            </Link>
           }
         >
           Walk one lit LED along each addressable header and mark where it ends, so effects fill the strip you

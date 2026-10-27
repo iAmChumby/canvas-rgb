@@ -328,18 +328,22 @@ html[data-motion="reduced"] *::after {
   min-width: 0;
 }
 
+/* The page head: the title, and the line under it that says what the page is for. The subtitle
+   sits under the title and is aligned to it, so the head reads as one block instead of a title
+   on the left and a sentence marooned at the far right. */
 .page-head {
   display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--s2) var(--s4);
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s1);
   margin-bottom: var(--s5);
 }
 
 .page-head p {
   color: var(--mute);
   font-size: var(--t14);
+  max-width: 120ch;
+  text-wrap: pretty;
 }
 
 .stack {
@@ -1755,6 +1759,40 @@ button.chip:hover {
 .display-readout-note {
   margin-top: var(--s3);
   font-size: var(--t14);
+}
+
+/* The readout says twice which is which: the caption names the number above it, the line under it
+   says what the display shows now. Both labels are the same quiet uppercase. */
+.readout-caption {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s1) var(--s2);
+  margin-bottom: var(--s2);
+}
+
+.readout-caption-title,
+.readout-now-label {
+  color: var(--mute);
+  font-size: var(--t14);
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.readout-caption-note {
+  color: var(--mute);
+  font-size: var(--t14);
+}
+
+.readout-now {
+  margin-top: var(--s3);
+  color: var(--dim);
+  font-size: var(--t14);
+}
+
+.readout-now-label {
+  margin-right: var(--s1);
 }
 
 .display-controls {
