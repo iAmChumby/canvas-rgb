@@ -90,6 +90,30 @@ function defaultCurve(floor: number): CurvePoint[] {
   ];
 }
 
+/**
+ * The headers the editor last read, kept for this viewer, so a fan-service outage can still show the
+ * machine. A viewer convenience only: nothing reads it back as state, and nothing writes to a fan from it.
+ */
+const KNOWN_HEADERS_KEY = "canvas-rgb.fan-headers";
+type KnownHeader = { id: string; label: string; rpm: number | null; on_bios: boolean };
+
+function readKnownHeaders(): KnownHeader[] {
+  try {
+    const v: unknown = JSON.parse(window.localStorage.getItem(KNOWN_HEADERS_KEY) ?? "[]");
+    return Array.isArray(v) ? (v as KnownHeader[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeKnownHeaders(list: KnownHeader[]): void {
+  try {
+    window.localStorage.setItem(KNOWN_HEADERS_KEY, JSON.stringify(list));
+  } catch {
+    // Storage can be blocked; the page still works without the memory.
+  }
+}
+
 export function FansView() {
   const fans = useSnap((s) => s.fans);
   const fansError = useSnap((s) => s.fansError);
@@ -99,6 +123,15 @@ export function FansView() {
   const [picked, setSelectedId] = useState<string | null>(null);
   // The first header is the default selection until one is clicked.
   const selectedId = picked ?? fans?.headers[0]?.id ?? null;
+
+  // The headers last read: from this session if there was one, else from the viewer's memory.
+  const [saved] = useState<KnownHeader[]>(() => readKnownHeaders());
+  const known: KnownHeader[] = fans
+    ? fans.headers.map((h) => ({ id: h.id, label: h.label, rpm: h.rpm ?? null, on_bios: h.on_bios }))
+    : saved;
+  useEffect(() => {
+    if (fans) writeKnownHeaders(fans.headers.map((h) => ({ id: h.id, label: h.label, rpm: h.rpm ?? null, on_bios: h.on_bios })));
+  }, [fans]);
 
   // How long the service has been away, in words.
   const downFor = serviceDownMs === null ? "a moment" : fmtSeconds(serviceDownMs);
@@ -133,6 +166,20 @@ export function FansView() {
             <span className="state-detail">the daemon said: {fansError}</span>
           </EmptyState>
         </Panel>
+        {known.length > 0 && (
+          <Panel title="Headers, as the editor last read them">
+            <p className="mute known-note">Read only while the fan service is away. Nothing here can be changed.</p>
+            <ul className="known-headers" aria-label="Fan headers, last read">
+              {known.map((h) => (
+                <li key={h.id}>
+                  <span>{h.label}</span>
+                  <span className="fig">{h.rpm !== null ? `${h.rpm} RPM` : "no reading"}</span>
+                  <span className="mute">{h.on_bios ? "on BIOS" : "not on BIOS"}</span>
+                </li>
+              ))}
+            </ul>
+          </Panel>
+        )}
       </div>
     );
   }

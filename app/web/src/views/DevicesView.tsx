@@ -6,7 +6,6 @@ import {
   ArrowLeft,
   ArrowRight,
   Cpu,
-  Fan,
   GraphicsCard,
   Keyboard,
   Lightbulb,
@@ -93,12 +92,10 @@ function ZoneStrip({ zone }: { zone: ZoneInfo }) {
       </svg>
     );
   }
+  // A single LED has no strip to draw: its one dot would sit alone in the middle of the row and read
+  // as a stray mark. The count beside it says it is one LED.
   if (zone.kind.type === "single") {
-    return (
-      <svg className="zone-strip-svg" viewBox="0 0 200 22" preserveAspectRatio="xMidYMid meet" role="img" aria-label={`${zone.name}: one LED`}>
-        <circle cx={100} cy={11} r={4} fill="currentColor" />
-      </svg>
-    );
+    return <span className="zone-strip-svg" aria-hidden="true" />;
   }
   const n = Math.max(0, Math.min(zone.led_count, 160));
   if (n === 0) {
@@ -222,7 +219,7 @@ export function DevicesView() {
                 {d.zones.length === 0 ? (
                   <div className="zone-empty">
                     <EmptyState
-                      icon={<Fan size={20} />}
+                      icon={<Memory size={20} />}
                       title={`${d.name} reports no zones`}
                       action={
                         <Button size="sm" icon={<ArrowClockwise size={16} />} onClick={() => void refreshDevices()}>
@@ -243,10 +240,10 @@ export function DevicesView() {
                     </span>
                     <ZoneStrip zone={z} />
                     <span className="zone-strip-count">
-                      {z.led_count} LEDs
+                      {z.led_count} {z.led_count === 1 ? "LED" : "LEDs"}
                       {z.resizable && <span className="mute"> · {z.min_leds}–{z.max_leds}</span>}
                     </span>
-                    <span style={{ width: 64, textAlign: "right" }}>
+                    <span className="zone-strip-size">
                       {z.resizable && (
                         <Button
                           size="sm"

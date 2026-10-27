@@ -229,23 +229,30 @@ html[data-motion="reduced"] *::after {
   overflow-x: clip;
 }
 
+/* The strip: what the daemon is doing.
+   Three rows of facts — brand and power, effect and rate, the two link states and the device
+   count. On a wide screen the three rows sit on one line; on a phone they are three lines.
+   The rows are the same in every state: a fact the daemon has not told us yet is a dash, so
+   the strip's height never changes and the page below it never moves. */
 .strip {
   overflow: hidden;
   border-bottom: 1px solid var(--line);
   background: var(--panel);
   font-size: var(--t14);
-  /* The strip grows when it has more to say. The height is set from the measured content, so the
-     growth is animated and the page below moves with it: motion, not a layout shift. */
-  transition: height var(--dur-slow) linear;
-  min-height: 45px;
 }
 
+/* The desktop strip: one row, everything on it. The rows are flattened (display: contents) so
+   the three groups read as one line. */
 .strip-inner {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--s2) var(--s4);
   padding: var(--s3) var(--s6);
+}
+
+.strip-row {
+  display: contents;
 }
 
 /* The mark the phone has instead of the rail's. */
@@ -258,7 +265,7 @@ html[data-motion="reduced"] *::after {
 
 .strip-group {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   gap: var(--s2);
   min-width: 0;
@@ -268,6 +275,32 @@ html[data-motion="reduced"] *::after {
   width: 1px;
   align-self: stretch;
   background: var(--line);
+}
+
+/* The palette button sits at the end of the strip, whatever else is in the row. */
+.strip-search-group {
+  order: 10;
+  margin-left: auto;
+}
+
+/* The device count: a number and the word beside it. */
+.strip-devices {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--s1);
+  white-space: nowrap;
+}
+
+.strip-devices-icon {
+  display: none;
+  color: var(--mute);
+  align-self: center;
+}
+
+/* The link state: the service, then the state it is in. */
+.strip-link-label,
+.strip-link-state {
+  white-space: nowrap;
 }
 
 .content {
@@ -377,6 +410,15 @@ html[data-motion="reduced"] *::after {
 
 .banners-inner > * {
   pointer-events: auto;
+}
+
+/* The standing notices take their own place above the page. They are part of the page's first
+   frame, so they never push it down once it has been painted. */
+.banners-flow {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  margin-bottom: var(--s4);
 }
 
 .panel {
@@ -1588,17 +1630,121 @@ button.chip:hover {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  /* The palette button sits in the corner of the strip, so it does not add a row. */
+  /* The strip publishes its height for the floating notice. Before it does, the phone value is the
+     one it will publish, so the notice is not moved on the first frame. */
+  :root {
+    --strip-h: 116px;
+  }
+
+  /* The phone strip: three fixed rows, the same in every state. Row 1 is the brand, the power
+     control and the palette button; row 2 the effect and the rate; row 3 the two link states and
+     the device count. Every fact has a fixed column, sized for its widest value, so nothing moves
+     when the daemon answers and nothing wraps or runs past the edge. */
   .strip {
-    position: relative;
-    padding-right: 52px;
+    height: 116px;
+  }
+
+  .strip-inner {
+    display: grid;
+    grid-template-rows: 32px 24px 24px;
+    row-gap: var(--s1);
+    align-content: center;
+    height: 100%;
+    padding: 0 var(--s3);
+    box-sizing: border-box;
+  }
+
+  .strip-row {
+    display: flex;
+    align-items: center;
+    gap: var(--s2);
+    min-width: 0;
+    white-space: nowrap;
+  }
+
+  .strip-brand {
+    display: inline-flex;
+    flex: none;
+  }
+
+  /* The power control and the "Connecting" placeholder share one box, so the row does not change size
+     when the daemon answers. */
+  .strip-power {
+    flex: none;
+    display: flex;
+    align-items: center;
+    width: 128px;
+    height: 32px;
   }
 
   .strip-search-group {
-    position: absolute;
-    top: var(--s3);
-    right: var(--s3);
-    margin: 0;
+    flex: none;
+    margin-left: auto;
+  }
+
+  /* Row 2: the effect takes what the rate leaves. */
+  .strip-effect {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .strip-effect-name {
+    flex: 1 1 0;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .strip-rate {
+    flex: none;
+    width: 250px;
+  }
+
+  .strip-rate-value {
+    display: inline-block;
+    flex: none;
+    width: 112px;
+  }
+
+  .strip-state-word {
+    display: inline-block;
+    width: 64px;
+  }
+
+  /* Row 3: the two links, then the device count at the end. */
+  .strip-links {
+    display: flex;
+    flex: 1 1 0;
+    align-items: center;
+    gap: var(--s2);
+    min-width: 0;
+  }
+
+  .strip-link-label {
+    display: inline-block;
+    flex: none;
+  }
+
+  .strip-link-state {
+    display: inline-block;
+    flex: none;
+  }
+
+  .strip-devices {
+    flex: none;
+    justify-content: flex-end;
+  }
+
+  .strip-devices-icon {
+    display: inline-flex;
+  }
+
+  .strip-devices-word {
+    display: none;
+  }
+
+  .strip-sep {
+    display: none;
   }
 
   .rail-col {
@@ -1644,28 +1790,49 @@ button.chip:hover {
     padding: var(--s4) var(--s4) 96px;
   }
 
-  .strip-inner {
-    padding: var(--s3) var(--s4);
-  }
-
+  /* The transient notice floats under the strip on a phone. It is anchored to the top, so when it
+     grows it grows downward and the page does not move for it. */
   .banners {
-    top: auto;
-    bottom: 76px;
+    top: var(--strip-h, 0px);
+    bottom: auto;
     left: var(--s3);
     right: var(--s3);
     width: auto;
-  }
-
-  .strip-brand {
-    display: inline-flex;
-  }
-
-  .banners {
     padding: var(--s3) var(--s4) 0;
   }
 
   .strip-sep {
     display: none;
+  }
+
+  /* A zone on a phone: the name and count on the first line with the Size button, the LED strip below.
+     Nothing is wider than the card. */
+  .zone-strip {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-areas: "name count size" "svg svg svg";
+    align-items: center;
+    gap: var(--s2) var(--s3);
+  }
+
+  .zone-strip .zone-strip-name {
+    grid-area: name;
+    flex: none;
+    min-width: 0;
+  }
+
+  .zone-strip .zone-strip-count {
+    grid-area: count;
+    min-width: 0;
+  }
+
+  .zone-strip .zone-strip-size {
+    grid-area: size;
+  }
+
+  .zone-strip .zone-strip-svg {
+    grid-area: svg;
+    width: 100%;
   }
 
   .prop-item {
@@ -1799,6 +1966,12 @@ button.chip:hover {
   color: var(--tone);
 }
 
+.zone-strip-size {
+  flex: 0 0 auto;
+  min-width: 64px;
+  text-align: right;
+}
+
 .zone-strip-count {
   flex: 0 0 auto;
   min-width: 96px;
@@ -1848,4 +2021,46 @@ button.chip:hover {
   .fans-grid .sparkline {
     width: 96px;
   }
+}
+
+/* The LED zone bed on the desk: it stands for an unlit strip, so it stays near-black in both themes. */
+:root {
+  --led-bed: #07080c;
+}
+
+:root[data-theme="light"] {
+  --led-bed: #07080c;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --led-bed: #07080c;
+  }
+}
+
+:root[data-theme="dark"] {
+  --led-bed: #07080c;
+}
+
+/* The fan headers the editor last read, shown while the fan service is away: dimmed, no controls. */
+.known-headers {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  opacity: 0.6;
+}
+
+.known-headers li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: var(--s3);
+  align-items: center;
+  padding: var(--s2) 0;
+  border-top: 1px solid var(--line);
+  font-size: var(--t14);
+}
+
+.known-note {
+  margin: 0 0 var(--s3);
+  font-size: var(--t14);
 }

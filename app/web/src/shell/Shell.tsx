@@ -9,7 +9,7 @@ import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
 import { Rail, NAV } from "@/shell/Rail";
 import { StatusStrip } from "@/shell/StatusStrip";
-import { GlobalBanners } from "@/shell/GlobalBanners";
+import { GlobalBanners, StandingNotices } from "@/shell/GlobalBanners";
 import { applyMotion, applyTheme, nextTheme, readMotion, readTheme } from "@/shell/prefs";
 import { ToastProvider, useToast } from "@/components/Toast";
 import { CommandPalette, type Command } from "@/components/CommandPalette";
@@ -47,6 +47,9 @@ function Frame({ children }: { children: ReactNode }) {
 
   // The daemon is not answering: the editor cannot show any live data.
   const daemonDown = status === null && statusError !== null;
+  // The page is not drawn until the daemon has answered once. The standing notices depend on that
+  // first answer, so drawing the page first would push it down after it had been painted.
+  const answered = status !== null || statusError !== null;
 
   useEffect(() => startSync(), []);
 
@@ -211,10 +214,13 @@ function Frame({ children }: { children: ReactNode }) {
               lastTryAt={statusRetry().lastTryAt}
               nextTryInMs={statusRetry().nextTryInMs}
             />
-          ) : (
-            <div className="page-enter" key={current}>
-              {children}
-            </div>
+          ) : !answered ? null : (
+            <>
+              <StandingNotices />
+              <div className="page-enter" key={current}>
+                {children}
+              </div>
+            </>
           )}
         </main>
       </div>
