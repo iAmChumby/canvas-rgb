@@ -508,7 +508,7 @@ function ProfilesPanel({ fans }: { fans: FansStatus }) {
         )}
         <Field
           label="Rename the active profile"
-          hint="Type a new name and press Enter. The profile is saved under the new name, which becomes active, and the old name is removed."
+          hint="Type a new name and press Enter. The profile is saved under it and becomes active."
         >
           <TextField
             label="New profile name"
@@ -641,7 +641,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
 
         {mode.mode === "fixed" && (
           <Field label="Duty">
-            <div className="row-wrap" style={{ flex: "1 1 260px", minWidth: 0 }}>
+            <div className="row-wrap field-slider">
               <Slider
                 label={`${header.label} duty`}
                 min={base}

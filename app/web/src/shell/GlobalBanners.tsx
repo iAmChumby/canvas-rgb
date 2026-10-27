@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { Lightning, SquaresFour, Warning, WarningOctagon } from "@phosphor-icons/react";
 import { Banner } from "@/components/Banner";
 import { Button } from "@/components/Button";
@@ -110,26 +110,6 @@ export function StandingNotices() {
 export function GlobalBanners() {
   const pathname = usePathname();
   const status = useSnap((s) => s.status);
-  const innerRef = useRef<HTMLDivElement>(null);
-  const [height, setHeight] = useState(0);
-
-  useEffect(() => {
-    const el = innerRef.current;
-    if (!el) return;
-    const measure = () => {
-      const h = el.offsetHeight;
-      setHeight(h);
-      // The toasts make room for the notices on a phone.
-      document.documentElement.style.setProperty("--notices-h", `${h}px`);
-    };
-    measure();
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    return () => {
-      ro.disconnect();
-      document.documentElement.style.removeProperty("--notices-h");
-    };
-  }, []);
 
   // The Fans page says this in its own card; the banner would say it twice.
   const onFans = pathname.endsWith("/fans/");
@@ -137,8 +117,8 @@ export function GlobalBanners() {
     !onFans && status !== null && status.service_down_ms !== null && status.service_down_ms >= SERVICE_BANNER_MS;
 
   return (
-    <div className="banners" style={height === 0 ? undefined : ({ "--notices-h": `${height}px` } as React.CSSProperties)}>
-      <div className="banners-inner" ref={innerRef}>
+    <div className="banners">
+      <div className="banners-inner">
         {serviceDown && status && (
           <Banner
             tone="down"

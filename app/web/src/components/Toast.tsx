@@ -23,10 +23,25 @@ interface ToastItem {
 
 type Push = (text: string, tone?: ToastTone) => void;
 
-const ToastContext = createContext<Push>(() => {});
+interface ToastState {
+  push: Push;
+  items: ToastItem[];
+  remove: (id: number) => void;
+}
+
+const ToastContext = createContext<ToastState>({
+  push: () => {},
+  items: [],
+  remove: () => {},
+});
 
 /** Shows a short confirmation. Returns nothing; the toast lives on its own. */
 export function useToast(): Push {
+  return useContext(ToastContext).push;
+}
+
+/** The toast list and the way to change it. For the host that draws the lane. */
+export function useToasts(): ToastState {
   return useContext(ToastContext);
 }
 
@@ -40,29 +55,41 @@ const ICONS: Record<ToastTone, ReactNode> = {
 };
 
 /**
- * The toast host. One stack, bottom right on desktop and above the bottom bar on
- * narrow screens. Each toast rises in, holds, and fades out on its own.
+ * The toast host. One toast at a time, in the lane the shell draws at the top of the page.
+ * The lane is the page's own space: a toast never floats over a control.
  */
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<ToastItem[]>([]);
   const nextId = useRef(1);
 
+  // One toast at a time: the newest replaces the one before it. A stack would grow the lane
+  // and push the page down.
   const push = useCallback((text: string, tone: ToastTone = "ok") => {
     const id = nextId.current++;
-    setItems((prev) => [...prev.slice(-2), { id, tone, text }]);
+    setItems([{ id, tone, text }]);
   }, []);
 
-  const value = useMemo(() => push, [push]);
+  const remove = useCallback((id: number) => {
+    setItems((prev) => prev.filter((x) => x.id !== id));
+  }, []);
 
+  const value = useMemo(() => ({ push, items, remove }), [push, items, remove]);
+
+  return <ToastContext.Provider value={value}>{children}</ToastContext.Provider>;
+}
+
+/**
+ * The lane the toast lives in. The shell puts it at the top of the page, so a toast is always
+ * in the same place and never covers a control.
+ */
+export function ToastHost() {
+  const { items, remove } = useToasts();
   return (
-    <ToastContext.Provider value={value}>
-      {children}
-      <div className="toast-host" role="status" aria-live="polite">
-        {items.map((t) => (
-          <Toast key={t.id} item={t} onDone={() => setItems((prev) => prev.filter((x) => x.id !== t.id))} />
-        ))}
-      </div>
-    </ToastContext.Provider>
+    <div className="toast-lane" role="status" aria-live="polite">
+      {items.map((t) => (
+        <Toast key={t.id} item={t} onDone={() => remove(t.id)} />
+      ))}
+    </div>
   );
 }
 

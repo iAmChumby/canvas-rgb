@@ -120,6 +120,12 @@ html[data-motion="reduced"] *::after {
 
 /* ---------- shell ---------- */
 
+:root {
+  /* The toast lane: the space at the top of every page that a toast lives in. It is always
+     there, so a toast never covers a control and the page never moves for one. */
+  --toast-lane-h: 44px;
+}
+
 .app {
   display: grid;
   grid-template-columns: 208px minmax(0, 1fr);
@@ -314,7 +320,9 @@ html[data-motion="reduced"] *::after {
 }
 
 .content {
-  padding: var(--s6) var(--s6) var(--s8);
+  /* The top padding is the toast lane's: the lane is the space under the strip, and it holds a
+     toast when there is one. */
+  padding: 0 var(--s6) var(--s8);
   min-width: 0;
 }
 
@@ -402,10 +410,11 @@ html[data-motion="reduced"] *::after {
 }
 
 /* The notices float over the content's own space: a notice that appears does not push the page
-   down. On a wide screen they sit at the top right; on a phone they sit above the bottom rail. */
+   down. On a wide screen they sit at the top right; on a phone they sit above the bottom rail.
+   They start below the toast lane, so the two never fight for the same corner. */
 .banners {
   position: fixed;
-  top: var(--strip-h, 0px);
+  top: calc(var(--strip-h, 0px) + var(--toast-lane-h, 0px));
   right: var(--s6);
   z-index: 35;
   width: min(460px, calc(100vw - var(--s6) * 2));
@@ -472,6 +481,9 @@ html[data-motion="reduced"] *::after {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  /* The label takes the room that is left over. Without this the control beside it wraps to a
+     line of its own when the hint is long, and the panel's controls stop lining up. */
+  flex: 1 1 220px;
 }
 
 .field-hint {
@@ -486,6 +498,29 @@ html[data-motion="reduced"] *::after {
   min-width: 0;
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+/* A slider and its number on one row, the same shape as an effect's property row: the slider
+   takes the room that is left, the number keeps its width. */
+.field-slider {
+  flex: 1 1 240px;
+  min-width: 280px;
+  flex-wrap: nowrap;
+  gap: var(--s3);
+}
+
+.field-slider .slider {
+  flex: 1 1 120px;
+  min-width: 80px;
+}
+
+.field-slider .row-wrap {
+  flex: none;
+  flex-wrap: nowrap;
+}
+
+.field-slider .num {
+  width: 72px;
 }
 
 .error-line {
@@ -658,6 +693,13 @@ html[data-motion="reduced"] *::after {
 .seg-item[aria-checked="true"] {
   background: transparent;
   color: var(--ink);
+}
+
+/* A segmented control is a group of choices: it takes the width it needs, not the width of the
+   column it sits in. */
+.stack > .seg {
+  align-self: flex-start;
+  max-width: 100%;
 }
 
 .switch {
@@ -1862,13 +1904,18 @@ button.chip:hover {
   }
 
   .content {
-    padding: var(--s4) var(--s4) 96px;
+    padding: 0 var(--s4) 96px;
+  }
+
+  /* The toast lane is a little taller on a phone: the toast there is the full width. */
+  :root {
+    --toast-lane-h: 48px;
   }
 
   /* The transient notice floats under the strip on a phone. It is anchored to the top, so when it
      grows it grows downward and the page does not move for it. */
   .banners {
-    top: var(--strip-h, 0px);
+    top: calc(var(--strip-h, 0px) + var(--toast-lane-h, 0px));
     bottom: auto;
     left: var(--s3);
     right: var(--s3);
@@ -1908,10 +1955,21 @@ button.chip:hover {
   .zone-strip .zone-strip-svg {
     grid-area: svg;
     width: 100%;
+    height: auto;
   }
 
   .prop-item:not([data-kind="number"]) {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* A setting's control takes the whole row on a phone: the label is above it. */
+  .field-control {
+    width: 100%;
+  }
+
+  .field-slider {
+    width: 100%;
+    min-width: 0;
   }
 
   .fans-grid .sparkline {
@@ -2016,45 +2074,54 @@ button.chip:hover {
 
 /* ---------- devices: a strip per zone (LED dots or a matrix grid), with a status dot per device ---------- */
 
-.zone-strip {
-  display: flex;
-  align-items: center;
-  gap: var(--s3);
-  padding: var(--s2) var(--s4);
-  border-top: 1px solid var(--line);
-}
-
-.zone-strip:first-of-type {
-  border-top: 0;
-}
-
-.zone-strip-name {
-  flex: 0 0 132px;
-  min-width: 0;
-  font-size: var(--t14);
-}
-
+/* The strip is drawn in the device's accent, at every width. */
 .zone-strip-svg {
-  flex: 1 1 auto;
-  min-width: 0;
-  height: 22px;
   color: var(--tone);
 }
 
-.zone-strip-size {
-  flex: 0 0 auto;
-  min-width: 64px;
-  text-align: right;
-}
+/* The wide layout: the zone's name, its strip, its count and its button on one line. The phone
+   layout (the zone's strip on a line of its own) is in the phone media query above, and this
+   block comes later in the file, so it is limited to the wide screens. */
+@media (min-width: 721px) {
+  .zone-strip {
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
+    padding: var(--s2) var(--s4);
+    border-top: 1px solid var(--line);
+  }
 
-.zone-strip-count {
-  flex: 0 0 auto;
-  min-width: 96px;
-  text-align: right;
-  font-family: var(--fm);
-  font-size: var(--t14);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
+  .zone-strip:first-of-type {
+    border-top: 0;
+  }
+
+  .zone-strip-name {
+    flex: 0 0 132px;
+    min-width: 0;
+    font-size: var(--t14);
+  }
+
+  .zone-strip-svg {
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 22px;
+  }
+
+  .zone-strip-size {
+    flex: 0 0 auto;
+    min-width: 64px;
+    text-align: right;
+  }
+
+  .zone-strip-count {
+    flex: 0 0 auto;
+    min-width: 96px;
+    text-align: right;
+    font-family: var(--fm);
+    font-size: var(--t14);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
 }
 
 /* ---------- fan profiles: the delete confirm sits inline under the profile list ---------- */

@@ -6,6 +6,7 @@ import {
   ArrowLeft,
   ArrowRight,
   Cpu,
+  Crosshair,
   GraphicsCard,
   Keyboard,
   Lightbulb,
@@ -71,7 +72,7 @@ function deviceTag(d: DeviceInfo): string | null {
 }
 
 /**
- * A zone drawn as its LEDs: one dot per LED on a linear strip, one dot for a single LED, or the
+ * A zone drawn as its LEDs: a row of lamps for a short strip, a lit bar for a long one, and the
  * matrix grid with filled cells where the map has an LED. Coloured by the device's accent.
  */
 function ZoneStrip({ zone }: { zone: ZoneInfo }) {
@@ -97,7 +98,7 @@ function ZoneStrip({ zone }: { zone: ZoneInfo }) {
   if (zone.kind.type === "single") {
     return <span className="zone-strip-svg" aria-hidden="true" />;
   }
-  const n = Math.max(0, Math.min(zone.led_count, 160));
+  const n = Math.max(0, Math.min(zone.led_count, 240));
   if (n === 0) {
     return (
       <svg className="zone-strip-svg" viewBox="0 0 200 22" preserveAspectRatio="xMidYMid meet" role="img" aria-label={`${zone.name}: no LEDs yet`}>
@@ -106,13 +107,25 @@ function ZoneStrip({ zone }: { zone: ZoneInfo }) {
     );
   }
   const step = 200 / n;
-  const r = Math.min(3, Math.max(0.9, step * 0.32));
+  // A short strip: one lamp per LED. A long one: the lamps run into each other, so the strip is
+  // drawn as the lit bar it is, the way it looks on the desk.
+  if (n > 24) {
+    return (
+      <svg className="zone-strip-svg" viewBox="0 0 200 22" preserveAspectRatio="xMidYMid meet" role="img" aria-label={`${zone.name}: ${zone.led_count} LEDs`}>
+        <rect x="0" y="4" width="200" height="14" rx="5" fill="currentColor" opacity="0.16" />
+        <rect x="0" y="6.5" width="200" height="9" rx="4.5" fill="currentColor" opacity="0.5" />
+        <rect x="0" y="9.5" width="200" height="3" rx="1.5" fill="currentColor" />
+      </svg>
+    );
+  }
+  const r = Math.min(4, Math.max(1.8, step * 0.3));
   const dots: ReactElement[] = [];
   for (let i = 0; i < n; i++) {
     dots.push(<circle key={i} cx={(i + 0.5) * step} cy={11} r={r} fill="currentColor" />);
   }
   return (
     <svg className="zone-strip-svg" viewBox="0 0 200 22" preserveAspectRatio="xMidYMid meet" role="img" aria-label={`${zone.name}: ${zone.led_count} LEDs`}>
+      <rect x="0" y="4" width="200" height="14" rx="5" fill="currentColor" opacity="0.16" />
       {dots}
     </svg>
   );
@@ -272,12 +285,10 @@ export function DevicesView() {
               onClose={() => setWalk(null)}
             />
           ) : (
-            <Panel title="Identify walker">
-              <p className="dim">
-                Pick a resizable zone (an ARGB header) and the walker lights one white LED at a time along it. Stop on the
-                last LED to set the header&apos;s length.
-              </p>
-            </Panel>
+            <EmptyState icon={<Crosshair size={22} />} title="Identify walker">
+              Pick a resizable zone (an ARGB header) and the walker lights one white LED at a time
+              along it. Stop on the last LED to set the header&apos;s length.
+            </EmptyState>
           )}
         </div>
       </div>

@@ -11,7 +11,7 @@ import { Rail, NAV } from "@/shell/Rail";
 import { StatusStrip } from "@/shell/StatusStrip";
 import { GlobalBanners, StandingNotices } from "@/shell/GlobalBanners";
 import { applyMotion, applyTheme, nextTheme, readMotion, readTheme } from "@/shell/prefs";
-import { ToastProvider, useToast } from "@/components/Toast";
+import { ToastProvider, ToastHost, useToast } from "@/components/Toast";
 import { CommandPalette, type Command } from "@/components/CommandPalette";
 import { DaemonDown } from "@/components/DaemonDown";
 
@@ -208,6 +208,8 @@ function Frame({ children }: { children: ReactNode }) {
         <StatusStrip onOpenPalette={() => setPaletteOpen(true)} />
         <GlobalBanners />
         <main className="content">
+          {/* The toast lane: the page's own space at the top, so a toast never covers a control. */}
+          <ToastHost />
           {daemonDown ? (
             <DaemonDown
               onRetry={retryDaemon}

@@ -32,6 +32,7 @@ export function SettingsView() {
   const settings = useSnap((s) => s.settings);
   const settingsError = useSnap((s) => s.settingsError);
   const status = useSnap((s) => s.status);
+  const layouts = useSnap((s) => s.layouts);
   const render = useSnap((s) => s.render);
   const [fps, setFps] = useState<number | null>(null);
   const [brightness, setBrightness] = useState<number | null>(null);
@@ -63,6 +64,11 @@ export function SettingsView() {
 
   const shownFps = fps ?? render?.fps ?? settings.fps;
   const shownBrightness = brightness ?? settings.brightness;
+
+  // The layout is named the same everywhere: the Layout page titles the layout by its name, so
+  // this says the name too, not the id the daemon stores it under.
+  const activeLayout = layouts?.find((l) => l.id === status?.active_layout) ?? null;
+  const layoutName = activeLayout?.name ?? status?.active_layout ?? "—";
 
   const save = async (patch: Partial<Settings>) => {
     setErr(null);
@@ -144,9 +150,9 @@ export function SettingsView() {
           <Panel title="Rendering">
             <Field
               label="Frame rate"
-              hint={`Measured ${status ? fmt1(status.fps_measured) : "—"} fps over the last second`}
+              hint={`Last second: ${status ? fmt1(status.fps_measured) : "—"} fps`}
             >
-              <span className="row-wrap" style={{ flex: "1 1 240px", minWidth: 0 }}>
+              <span className="row-wrap field-slider">
                 <Slider
                   label="Frame rate"
                   min={10}
@@ -159,7 +165,7 @@ export function SettingsView() {
               </span>
             </Field>
             <Field label="Brightness" hint="Scales every LED the daemon writes">
-              <span className="row-wrap" style={{ flex: "1 1 240px", minWidth: 0 }}>
+              <span className="row-wrap field-slider">
                 <Slider
                   label="Brightness"
                   min={0}
@@ -214,7 +220,7 @@ export function SettingsView() {
 
         <div className="stack">
           <Panel title="Config">
-            <Field label="Export" hint="Downloads settings, layouts, zone sizes, effects and fan profiles as JSON">
+            <Field label="Export" hint="Downloads the settings, layouts, zone sizes and effects">
               <Button icon={<DownloadSimple size={16} />} onClick={() => void doExport()}>
                 Export config
               </Button>
@@ -267,7 +273,7 @@ export function SettingsView() {
               <dt>Version</dt>
               <dd>{status?.version ?? "—"}</dd>
               <dt>Active layout</dt>
-              <dd>{status?.active_layout ?? "—"}</dd>
+              <dd>{layoutName}</dd>
               <dt>Devices connected</dt>
               <dd>{fmtInt(status?.devices_connected ?? null)}</dd>
             </dl>
