@@ -207,7 +207,6 @@ function Frame({ children }: { children: ReactNode }) {
         <main className="content">
           {daemonDown ? (
             <DaemonDown
-              detail={statusError ?? ""}
               onRetry={retryDaemon}
               lastTryAt={statusRetry().lastTryAt}
               nextTryInMs={statusRetry().nextTryInMs}

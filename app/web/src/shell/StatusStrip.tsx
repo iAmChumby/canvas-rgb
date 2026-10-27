@@ -17,25 +17,11 @@ function linkTone(state: string): DotTone {
 }
 
 /**
- * The strip's height is published as `--strip-h`, so a view that takes over the screen (the
- * effect detail pushed over the gallery on a phone) starts exactly below it.
+ * Power, active effect, fps measured against target, and the two link states. Always visible.
+ *
+ * The strip's height is measured and set, so when it grows (the daemon answers, a notice needs
+ * room) the page below moves with it. That is motion, not a layout shift.
  */
-function useStripHeight(ref: React.RefObject<HTMLDivElement | null>) {
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const set = () => document.documentElement.style.setProperty("--strip-h", `${el.offsetHeight}px`);
-    set();
-    const ro = new ResizeObserver(set);
-    ro.observe(el);
-    return () => {
-      ro.disconnect();
-      document.documentElement.style.removeProperty("--strip-h");
-    };
-  }, [ref]);
-}
-
-/** Power, active effect, fps measured against target, and the two link states. Always visible. */
 export function StatusStrip({ onOpenPalette }: { onOpenPalette?: () => void }) {
   const status = useSnap((s) => s.status);
   const statusError = useSnap((s) => s.statusError);
@@ -43,23 +29,35 @@ export function StatusStrip({ onOpenPalette }: { onOpenPalette?: () => void }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const toast = useToast();
-  const stripRef = useRef<HTMLDivElement>(null);
-  useStripHeight(stripRef);
+  const innerRef = useRef<HTMLDivElement>(null);
+  const [height, setHeight] = useState(45);
 
-  if (!status) {
-    // The daemon-down page carries the detail; the strip only says that it is offline.
-    return (
-      <div className="strip" role="status" ref={stripRef}>
-        <StateDot tone="down">{statusError ? "Daemon offline" : "Connecting to the daemon"}</StateDot>
-      </div>
-    );
-  }
+  useEffect(() => {
+    const el = innerRef.current;
+    if (!el) return;
+    const measure = () => setHeight(el.offsetHeight);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
-  const paused = status.power === "paused";
-  const effectName =
-    effects?.find((e) => e.id === status.active_effect)?.name ?? status.active_effect ?? "no effect";
+  // The height the sheet pushed over the gallery starts below.
+  useEffect(() => {
+    if (height === 45) return;
+    document.documentElement.style.setProperty("--strip-h", `${height}px`);
+    return () => {
+      document.documentElement.style.removeProperty("--strip-h");
+    };
+  }, [height]);
+
+  const paused = status ? status.power === "paused" : false;
+  const effectName = status
+    ? (effects?.find((e) => e.id === status.active_effect)?.name ?? status.active_effect ?? "no effect")
+    : "no effect";
 
   const togglePower = async () => {
+    if (!status) return;
     setBusy(true);
     setErr(null);
     try {
@@ -75,52 +73,76 @@ export function StatusStrip({ onOpenPalette }: { onOpenPalette?: () => void }) {
     }
   };
 
-  const fpsTone: DotTone = status.fps_measured >= status.fps_target - 1 ? "ok" : "warn";
-
   return (
-    <div className="strip" role="status" aria-label="Daemon status" ref={stripRef}>
-      <div className="strip-group">
-        <Button
-          size="sm"
-          variant={paused ? "primary" : "default"}
-          disabled={busy}
-          onClick={togglePower}
-          icon={paused ? <Play size={14} weight="fill" /> : <Pause size={14} weight="fill" />}
-        >
-          {paused ? "Resume lights" : "Pause lights"}
-        </Button>
-        {err && <span className="error-line">{err}</span>}
-      </div>
-      <span className="strip-sep" aria-hidden="true" />
-      <div className="strip-group">
-        <span className="mute">Effect</span>
-        <span>{effectName}</span>
-      </div>
-      <span className="strip-sep" aria-hidden="true" />
-      <div className="strip-group">
-        <span className="mute">Rate</span>
-        <span className="fig">
-          <AnimatedNumber value={status.fps_measured} decimals={1} /> / {status.fps_target} fps
+    <div
+      className="strip"
+      role="status"
+      aria-label="Daemon status"
+      style={{ height: `${height}px` }}
+    >
+      <div className="strip-inner" ref={innerRef}>
+        <span className="strip-brand">
+          <span className="rail-brand-dot" aria-hidden="true" />
+          canvas-rgb
         </span>
-        <StateDot tone={fpsTone}>{paused ? "paused" : status.parked ? "parked" : "running"}</StateDot>
+        {status ? (
+          <>
+            <div className="strip-group">
+              <Button
+                size="sm"
+                variant={paused ? "primary" : "default"}
+                disabled={busy}
+                onClick={togglePower}
+                icon={paused ? <Play size={14} weight="fill" /> : <Pause size={14} weight="fill" />}
+              >
+                {paused ? "Resume lights" : "Pause lights"}
+              </Button>
+              {err && <span className="error-line">{err}</span>}
+            </div>
+            <span className="strip-sep" aria-hidden="true" />
+            <div className="strip-group">
+              <span className="mute">Effect</span>
+              <span>{effectName}</span>
+            </div>
+            <span className="strip-sep" aria-hidden="true" />
+            <div className="strip-group">
+              <span className="mute">Rate</span>
+              <span className="fig">
+                <AnimatedNumber value={status.fps_measured} decimals={1} /> / {status.fps_target} fps
+              </span>
+              <StateDot tone={fpsTone(status)}>
+                {paused ? "paused" : status.parked ? "parked" : "running"}
+              </StateDot>
+            </div>
+            <span className="strip-sep" aria-hidden="true" />
+            <div className="strip-group">
+              <StateDot tone={linkTone(status.openrgb)}>OpenRGB {status.openrgb}</StateDot>
+              <StateDot tone={linkTone(status.service)}>Fan service {status.service}</StateDot>
+              <span className="mute fig strip-devices">{status.devices_connected} devices</span>
+            </div>
+            {onOpenPalette && (
+              <span className="strip-group strip-search-group">
+                <span className="strip-sep" aria-hidden="true" />
+                <IconButton
+                  label="Open the command palette"
+                  size="sm"
+                  icon={<MagnifyingGlass size={16} />}
+                  onClick={onOpenPalette}
+                />
+              </span>
+            )}
+          </>
+        ) : (
+          <div className="strip-group">
+            {/* The daemon-down page carries the detail; the strip only says that it is offline. */}
+            <StateDot tone="down">{statusError ? "Daemon offline" : "Connecting to the daemon"}</StateDot>
+          </div>
+        )}
       </div>
-      <span className="strip-sep" aria-hidden="true" />
-      <div className="strip-group">
-        <StateDot tone={linkTone(status.openrgb)}>OpenRGB {status.openrgb}</StateDot>
-        <StateDot tone={linkTone(status.service)}>Fan service {status.service}</StateDot>
-        <span className="mute fig strip-devices">{status.devices_connected} devices</span>
-      </div>
-      {onOpenPalette && (
-        <span className="strip-group strip-search-group">
-          <span className="strip-sep" aria-hidden="true" />
-          <IconButton
-            label="Open the command palette"
-            size="sm"
-            icon={<MagnifyingGlass size={16} />}
-            onClick={onOpenPalette}
-          />
-        </span>
-      )}
     </div>
   );
+}
+
+function fpsTone(status: { fps_measured: number; fps_target: number }): DotTone {
+  return status.fps_measured >= status.fps_target - 1 ? "ok" : "warn";
 }

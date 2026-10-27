@@ -230,17 +230,30 @@ html[data-motion="reduced"] *::after {
 }
 
 .strip {
+  overflow: hidden;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  font-size: var(--t14);
+  /* The strip grows when it has more to say. The height is set from the measured content, so the
+     growth is animated and the page below moves with it: motion, not a layout shift. */
+  transition: height var(--dur-slow) linear;
+  min-height: 45px;
+}
+
+.strip-inner {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--s2) var(--s4);
   padding: var(--s3) var(--s6);
-  border-bottom: 1px solid var(--line);
-  background: var(--panel);
-  font-size: var(--t14);
-  /* The strip is the same height before and after the daemon answers, so the page under it
-     never jumps down. */
-  min-height: 55px;
+}
+
+/* The mark the phone has instead of the rail's. */
+.strip-brand {
+  display: none;
+  align-items: center;
+  gap: var(--s2);
+  font-weight: 600;
 }
 
 .strip-group {
@@ -345,11 +358,25 @@ html[data-motion="reduced"] *::after {
   margin-left: auto;
 }
 
+/* The notices float over the content's own space: a notice that appears does not push the page
+   down. On a wide screen they sit at the top right; on a phone they sit above the bottom rail. */
 .banners {
+  position: fixed;
+  top: var(--strip-h, 0px);
+  right: var(--s6);
+  z-index: 35;
+  width: min(460px, calc(100vw - var(--s6) * 2));
+  pointer-events: none;
+}
+
+.banners-inner {
   display: flex;
   flex-direction: column;
-  gap: var(--s3);
-  padding: var(--s3) var(--s6) 0;
+  gap: var(--s2);
+}
+
+.banners-inner > * {
+  pointer-events: auto;
 }
 
 .panel {
@@ -1617,9 +1644,20 @@ button.chip:hover {
     padding: var(--s4) var(--s4) 96px;
   }
 
-  .strip {
+  .strip-inner {
     padding: var(--s3) var(--s4);
-    min-height: 140px;
+  }
+
+  .banners {
+    top: auto;
+    bottom: 76px;
+    left: var(--s3);
+    right: var(--s3);
+    width: auto;
+  }
+
+  .strip-brand {
+    display: inline-flex;
   }
 
   .banners {

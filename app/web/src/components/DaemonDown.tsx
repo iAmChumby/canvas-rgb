@@ -12,12 +12,10 @@ import { Button } from "@/components/Button";
  * again, so it never repeats the heading.
  */
 export function DaemonDown({
-  detail,
   onRetry,
   lastTryAt,
   nextTryInMs,
 }: {
-  detail: string;
   onRetry: () => Promise<void>;
   /** When the daemon was last tried, 0 when it has not been tried yet. */
   lastTryAt?: number;
@@ -48,10 +46,6 @@ export function DaemonDown({
 
   const ago = lastTryAt ? Math.max(0, Math.round((now - lastTryAt) / 1000)) : 0;
   const next = lastTryAt && nextTryInMs ? Math.max(0, Math.ceil((lastTryAt + nextTryInMs - now) / 1000)) : 0;
-  // The heading already says the daemon is not answering: the line must not say it again.
-  const says = (text: string) => text.replace(/[.\s]+$/, "").toLowerCase();
-  const extra = detail && says(detail) !== says("The daemon is not answering") ? ` · ${detail}` : "";
-
   return (
     <div className="state-page enter">
       <div className="state-page-inner">
@@ -77,15 +71,10 @@ export function DaemonDown({
           <Button onClick={() => void retry()} disabled={busy} icon={busy ? <SpinnerGap size={16} className="spin" /> : <ArrowClockwise size={16} />}>
             {busy ? "Retrying…" : "Try again"}
           </Button>
+          {/* One line of timing. The heading already says what is wrong, and the daemon's own
+              words are jargon, so neither is repeated here. */}
           <span className="state-page-detail" aria-live="polite">
-            {lastTryAt ? (
-              <>
-                tried {ago} s ago · next in {next} s
-                {extra}
-              </>
-            ) : (
-              detail || "the daemon has not answered yet"
-            )}
+            {lastTryAt ? `tried ${ago} s ago · next in ${next} s` : "not tried yet"}
           </span>
         </div>
       </div>

@@ -2,9 +2,11 @@
 
 import { useEffect, useRef, useState, type CSSProperties, type ReactElement } from "react";
 import {
+  ArrowClockwise,
   ArrowLeft,
   ArrowRight,
   Cpu,
+  Fan,
   GraphicsCard,
   Keyboard,
   Lightbulb,
@@ -16,8 +18,10 @@ import {
 } from "@phosphor-icons/react";
 import type { Icon } from "@phosphor-icons/react";
 import { Button, IconButton } from "@/components/Button";
+import { EmptyState } from "@/components/EmptyState";
 import { NumberField } from "@/components/NumberField";
 import { Panel, StateDot } from "@/components/Panel";
+import { Skeleton } from "@/components/Skeleton";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
 import { refreshDevices, useSnap } from "@/lib/store";
@@ -125,6 +129,7 @@ interface WalkTarget {
 export function DevicesView() {
   const devices = useSnap((s) => s.devices);
   const devicesError = useSnap((s) => s.devicesError);
+  const openrgb = useSnap((s) => s.status?.openrgb ?? "connected");
   // The first-run banner links here with ?walk=<device id>. That device's first resizable zone opens
   // in the walker until the user closes it or picks another zone.
   const [urlWalk] = useState<string | null>(() =>
@@ -157,11 +162,34 @@ export function DevicesView() {
       </div>
 
       {devicesError && <Panel><p className="error-line">{devicesError}</p></Panel>}
-      {devices === null && !devicesError && <Panel><p className="mute">Reading the devices.</p></Panel>}
+      {openrgb !== "connected" && (
+        <p className="rule rule-warn">
+          OpenRGB is not connected. The daemon is up, but it cannot reach the lights yet.
+        </p>
+      )}
 
       <div className="devices-grid">
         <div>
-          {(devices ?? []).map((d, di) => {
+          {devices === null && !devicesError ? (
+            // The shape of the list that is coming, so nothing jumps when it lands.
+            [0, 1, 2].map((i) => (
+              <section className="device device-skeleton" key={`skeleton-${i}`} aria-hidden="true">
+                <div className="device-head">
+                  <Skeleton className="skeleton-icon" />
+                  <span className="stack" style={{ gap: 4, minWidth: 0 }}>
+                    <Skeleton height={16} width="52%" />
+                    <Skeleton height={12} width="34%" />
+                  </span>
+                </div>
+                <div className="zone-strip">
+                  <Skeleton height={14} width="28%" />
+                  <Skeleton height={14} width="42%" />
+                  <Skeleton height={14} width="14%" />
+                </div>
+              </section>
+            ))
+          ) : (
+          (devices ?? []).map((d, di) => {
             const Glyph = KIND_ICON[d.kind];
             const accent = ACCENTS[di % ACCENTS.length];
             const tag = deviceTag(d);
@@ -191,7 +219,23 @@ export function DevicesView() {
                   </div>
                   <StateDot tone={d.connected ? "ok" : "down"}>{d.connected ? "connected" : "disconnected"}</StateDot>
                 </div>
-                {d.zones.map((z) => (
+                {d.zones.length === 0 ? (
+                  <div className="zone-empty">
+                    <EmptyState
+                      icon={<Fan size={20} />}
+                      title={`${d.name} reports no zones`}
+                      action={
+                        <Button size="sm" icon={<ArrowClockwise size={16} />} onClick={() => void refreshDevices()}>
+                          Ask the daemon again
+                        </Button>
+                      }
+                    >
+                      The daemon sees this device, but it has not reported any zones for it yet. Ask
+                      it again once the device is lit and connected over OpenRGB.
+                    </EmptyState>
+                  </div>
+                ) : (
+                d.zones.map((z) => (
                   <div className="zone-strip" key={z.index}>
                     <span className="zone-strip-name">
                       <span className="one-line" style={{ display: "block" }}>{z.name}</span>
@@ -214,10 +258,12 @@ export function DevicesView() {
                       )}
                     </span>
                   </div>
-                ))}
+                ))
+                )}
               </section>
             );
-          })}
+          })
+          )}
         </div>
 
         <div className="stack" style={{ position: "sticky", top: 16 }}>

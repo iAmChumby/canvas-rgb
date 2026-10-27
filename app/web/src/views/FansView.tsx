@@ -20,7 +20,7 @@ import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
 import { refreshFans, useSnap } from "@/lib/store";
 import { baseFloor, hotRuleText } from "@/lib/fan-rules";
-import { clamp } from "@/lib/format";
+import { clamp, fmtSeconds } from "@/lib/format";
 import type { CurvePoint } from "@/proto/CurvePoint";
 import type { FanHeaderStatus } from "@/proto/FanHeaderStatus";
 import type { FanMode } from "@/proto/FanMode";
@@ -93,11 +93,15 @@ function defaultCurve(floor: number): CurvePoint[] {
 export function FansView() {
   const fans = useSnap((s) => s.fans);
   const fansError = useSnap((s) => s.fansError);
+  const serviceDownMs = useSnap((s) => s.status?.service_down_ms ?? null);
   const rpm = useSnap((s) => s.rpm);
   const narrow = useMediaQuery("(max-width: 720px)");
   const [picked, setSelectedId] = useState<string | null>(null);
   // The first header is the default selection until one is clicked.
   const selectedId = picked ?? fans?.headers[0]?.id ?? null;
+
+  // How long the service has been away, in words.
+  const downFor = serviceDownMs === null ? "a moment" : fmtSeconds(serviceDownMs);
 
   // The "Try again" on the service-down state.
   const retryFans = async () => {
@@ -110,6 +114,8 @@ export function FansView() {
         <div className="page-head">
           <h1>Fans</h1>
         </div>
+        {/* One card says it: the title, how long, what keeps working, and the way to try again.
+            The status strip says it in its own words; this page does not repeat the strip. */}
         <Panel>
           <EmptyState
             icon={<Fan size={24} />}
@@ -121,9 +127,10 @@ export function FansView() {
               </Button>
             }
           >
-            Fan control is unavailable until the service is back. The lights are unaffected, and the
-            fans stay under BIOS control in the meantime.
-            <span className="state-detail">{fansError}</span>
+            The daemon has not heard from it for {downFor}. Fan control is unavailable until the
+            service is back. The lights are unaffected, and the fans stay under BIOS control in the
+            meantime.
+            <span className="state-detail">the daemon said: {fansError}</span>
           </EmptyState>
         </Panel>
       </div>
