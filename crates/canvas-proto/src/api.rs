@@ -42,6 +42,12 @@ pub mod routes {
     /// `PUT` a [`crate::fans::FanProfile`] to create or replace it. `DELETE` removes it
     /// (409 `conflict` for the active profile or the last remaining one).
     pub const FAN_PROFILES: &str = "/api/v1/fans/profiles/{name}";
+    /// `GET`: every numeric display with its config and the value it shows now ([`super::DisplayStatus`]).
+    pub const DISPLAYS: &str = "/api/v1/displays";
+    /// `PUT` a [`crate::display::DisplayConfig`] for one display (its `device` must match `{id}`).
+    pub const DISPLAY: &str = "/api/v1/displays/{id}";
+    /// `PUT` with [`super::SetDisplayValue`]: the number a display with `DisplaySource::Api` shows.
+    pub const DISPLAY_VALUE: &str = "/api/v1/displays/{id}/value";
     /// `GET` / `PUT` a [`crate::config::Settings`].
     pub const SETTINGS: &str = "/api/v1/settings";
     /// `POST`, no body: dismisses G7's "size your ARGB headers" panel.
@@ -280,4 +286,21 @@ pub struct ReadbackDevice {
 #[ts(export)]
 pub struct ReadbackResponse {
     pub devices: Vec<ReadbackDevice>,
+}
+
+/// One display as `GET /displays` reports it: what it is, how it is set, and what it shows now
+/// (`shown: None` when it is blank or not written yet).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DisplayStatus {
+    pub info: crate::display::DisplayInfo,
+    pub config: crate::display::DisplayConfig,
+    pub shown: Option<crate::display::DisplayValue>,
+}
+
+/// Body of `PUT /displays/{id}/value`. `value: None` blanks the display.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SetDisplayValue {
+    pub value: Option<f32>,
 }
