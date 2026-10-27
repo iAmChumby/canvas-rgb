@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
-import { ArrowCounterClockwise, ArrowUp, FloppyDisk, Plus, X } from "@phosphor-icons/react";
+import { ArrowCounterClockwise, ArrowUUpLeft, ArrowUUpRight, ArrowUp, FloppyDisk, Plus, X } from "@phosphor-icons/react";
 import { Button, IconButton } from "@/components/Button";
 import { Panel, Field } from "@/components/Panel";
 import { Segmented } from "@/components/Segmented";
@@ -27,6 +27,51 @@ import type { SamplingMode } from "@/proto/SamplingMode";
 const DROP_TYPE = "application/x-canvas-zone";
 const CANVAS_W = 320;
 const CANVAS_H = 200;
+
+/**
+ * The layout as it is on the page, and the steps that led to it. The past is what undo takes
+ * back; the future is what redo takes forward.
+ */
+interface Edit {
+  draft: Layout | null;
+  past: Layout[];
+  future: Layout[];
+}
+
+/**
+ * What the render scale does, in words, and the precise value beside it. The words are what
+ * the reader acts on; the value is there for the reader who wants the number.
+ */
+const RENDER_SCALE_NOTE: Record<string, { text: string; value: string }> = {
+  "25": {
+    text: "A quarter of the desk: the effect is drawn small and then scaled up, so the edges are softer and the work is lighter.",
+    value: "25 %",
+  },
+  "50": {
+    text: "Half of the desk: a balance between the detail of the picture and the work of drawing it.",
+    value: "50 %",
+  },
+  "100": {
+    text: "The whole desk: every LED reads the picture at the desk's own size, which is the sharpest and the most work.",
+    value: "100 %",
+  },
+};
+
+/** What each way of reading the picture does, in words, and its name. */
+const SAMPLING_NOTE: Record<string, { text: string; value: string }> = {
+  nearest: {
+    text: "Each LED takes the colour of the one pixel it sits on: the sharpest, and the lightest.",
+    value: "Nearest",
+  },
+  bilinear: {
+    text: "Each LED blends the four pixels around it, so the edge between them fades.",
+    value: "Bilinear",
+  },
+  area_average: {
+    text: "Each LED takes the average of every pixel it covers, so it is lit evenly.",
+    value: "Area average",
+  },
+};
 
 /** The layout without its effect: the effect is owned by the Effects page, not by this draft. */
 function withoutEffect(l: Layout): Layout {
@@ -69,11 +114,17 @@ export function LayoutView() {
   const effects = useSnap((s) => s.effects);
   const layoutsError = useSnap((s) => s.layoutsError);
 
-  const [draft, setDraft] = useState<Layout | null>(null);
   const [base, setBase] = useState<Layout | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  /**
+   * The layout as it is on the page, and the history of how it got there. Every edit is a step:
+   * the layout as it was goes on the history, and undo takes it back. The two stacks live with
+   * the draft in one piece of state, so an edit and its step can never come apart.
+   */
+  const [edit, setEdit] = useState<Edit>({ draft: null, past: [], future: [] });
+  const { draft, past, future } = edit;
   /** True while a zone is being dragged: the server's layout must not replace the draft then. */
   const [dragging, setDragging] = useState(false);
   /**
@@ -101,7 +152,9 @@ export function LayoutView() {
   if (serverKey !== syncedKey && server && !dirty && !dragging) {
     setSyncedKey(serverKey);
     setBase(server);
-    setDraft(server);
+    // A layout that arrives from the daemon starts a new history: the old steps belong to the
+    // layout they were made on.
+    setEdit({ draft: server, past: [], future: [] });
   }
 
   const effectName = useMemo(() => {
@@ -172,12 +225,62 @@ export function LayoutView() {
     return { text: "The daemon's live preview is not available yet.", down: false };
   }, [preview.state, preview.error, editorDraws, effectNeedsInput, runningEffect]);
 
-  const patchDraft = (fn: (l: Layout) => Layout) => {
-    setDraft((prev) => (prev ? fn(prev) : prev));
-  };
+  // The plain-language note under each setting: what it does in words, and the precise value.
+  const renderNote = RENDER_SCALE_NOTE[`${draft?.render_scale ?? 50}`] ?? RENDER_SCALE_NOTE["50"]!;
+  const samplingNote = SAMPLING_NOTE[draft?.sampling ?? "nearest"] ?? SAMPLING_NOTE.nearest!;
+
+  /**
+   * An edit to the layout: the layout as it was goes on the history, so ctrl+z can take it
+   * back. Every change on this page goes through here - a move, a resize, a turn, a zone
+   * taken off, a zone put on, and the two settings under the canvas.
+   */
+  const commit = useCallback((fn: (l: Layout) => Layout) => {
+    setEdit((e) => {
+      if (!e.draft) return e;
+      return { draft: fn(e.draft), past: [...e.past, e.draft], future: [] };
+    });
+  }, []);
+
+  const undo = useCallback(() => {
+    setEdit((e) => {
+      const prev = e.past[e.past.length - 1];
+      if (!e.draft || !prev) return e;
+      return { draft: prev, past: e.past.slice(0, -1), future: [e.draft, ...e.future] };
+    });
+  }, []);
+
+  const redo = useCallback(() => {
+    setEdit((e) => {
+      const next = e.future[0];
+      if (!e.draft || !next) return e;
+      return { draft: next, past: [...e.past, e.draft], future: e.future.slice(1) };
+    });
+  }, []);
+
+  // Ctrl+Z and ctrl+shift+Z (and ctrl+Y) take a step back and take it again. A text field
+  // keeps its own undo: the reader there is undoing what they typed.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      const key = e.key.toLowerCase();
+      if (key === "z" && !e.shiftKey) {
+        e.preventDefault();
+        undo();
+        return;
+      }
+      if ((key === "z" && e.shiftKey) || key === "y") {
+        e.preventDefault();
+        redo();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [undo, redo]);
 
   const changeZone = (index: number, patch: Partial<PlacedZone>) => {
-    patchDraft((l) => ({
+    commit((l) => ({
       ...l,
       zones: l.zones.map((z, i) => (i === index ? { ...z, ...patch } : z)),
     }));
@@ -200,17 +303,20 @@ export function LayoutView() {
       reversed: false,
       visible: true,
     };
-    patchDraft((l) => ({ ...l, zones: [...l.zones, placedZone] }));
+    commit((l) => ({ ...l, zones: [...l.zones, placedZone] }));
     setSelected(draft.zones.length);
   };
 
-  const unplace = (index: number) => {
-    patchDraft((l) => ({ ...l, zones: l.zones.filter((_, i) => i !== index) }));
-    setSelected(null);
-  };
+  const unplace = useCallback(
+    (index: number) => {
+      commit((l) => ({ ...l, zones: l.zones.filter((_, i) => i !== index) }));
+      setSelected(null);
+    },
+    [commit],
+  );
 
   const revert = () => {
-    if (base) setDraft(base);
+    if (base) commit(() => base);
     setSaveError(null);
   };
 
@@ -222,7 +328,7 @@ export function LayoutView() {
       const body: Layout = { ...draft, effect: server.effect };
       await api.putLayout(draft.id, body);
       setBase(body);
-      setDraft(body);
+      setEdit((e) => ({ ...e, draft: body }));
       await refreshLayouts();
     } catch (e) {
       setSaveError(messageOf(e));
@@ -296,6 +402,7 @@ export function LayoutView() {
             onSelect={setSelected}
             onChange={changeZone}
             onDrop={onDropUnplaced}
+            onRemoveZone={unplace}
             onDraggingChange={(d) => {
               setDragging(d);
               if (!d) setLiveZone(null);
@@ -314,41 +421,67 @@ export function LayoutView() {
                 : "Drag to move, the corner to resize, the knob to rotate. Arrow keys nudge."}
             </span>
             <span className="row-wrap" style={{ alignItems: "center", gap: "var(--s3)" }}>
+              <span className="row-wrap" style={{ alignItems: "center", gap: "var(--s1)" }}>
+                <IconButton
+                  label="Undo the last change"
+                  icon={<ArrowUUpLeft size={15} />}
+                  size="sm"
+                  disabled={past.length === 0}
+                  onClick={undo}
+                />
+                <IconButton
+                  label="Redo the change that was undone"
+                  icon={<ArrowUUpRight size={15} />}
+                  size="sm"
+                  disabled={future.length === 0}
+                  onClick={redo}
+                />
+              </span>
               {previewLine && (
                 <span className={previewLine.down ? desk.noteDown : desk.drawn}>{previewLine.text}</span>
               )}
               <span className="mute fig">
-                {zones.filter((z) => z.visible).length} of {zones.length} placed zones visible
+                {zones.filter((z) => z.visible).length} of {zones.length} zones showing
               </span>
             </span>
           </div>
 
           <Panel title="Render">
             <div className="render-grid">
-              <Field label="Render scale" hint="Share of the 320 × 200 canvas the effect is drawn at">
-                <Segmented<`${RenderScale}`>
-                  label="Render scale"
-                  value={`${draft.render_scale}` as `${RenderScale}`}
-                  options={[
-                    { value: "25", label: "25%" },
-                    { value: "50", label: "50%" },
-                    { value: "100", label: "100%" },
-                  ]}
-                  onChange={(v) => patchDraft((l) => ({ ...l, render_scale: Number(v) as RenderScale }))}
-                />
-              </Field>
-              <Field label="Sampling" hint="How each LED reads the canvas">
-                <Segmented<SamplingMode>
-                  label="Sampling"
-                  value={draft.sampling}
-                  options={[
-                    { value: "nearest", label: "Nearest" },
-                    { value: "bilinear", label: "Bilinear" },
-                    { value: "area_average", label: "Area average" },
-                  ]}
-                  onChange={(v) => patchDraft((l) => ({ ...l, sampling: v }))}
-                />
-              </Field>
+              <div className={desk.renderCell}>
+                <Field label="How much of the desk" hint="The desk is 320 × 200 units">
+                  <Segmented<`${RenderScale}`>
+                    label="How much of the desk the effect is drawn at"
+                    value={`${draft.render_scale}` as `${RenderScale}`}
+                    options={[
+                      { value: "25", label: "A quarter" },
+                      { value: "50", label: "Half" },
+                      { value: "100", label: "All of it" },
+                    ]}
+                    onChange={(v) => commit((l) => ({ ...l, render_scale: Number(v) as RenderScale }))}
+                  />
+                </Field>
+                <p className={desk.plainNote}>
+                  {renderNote.text} · <span className="fig">{renderNote.value}</span>
+                </p>
+              </div>
+              <div className={desk.renderCell}>
+                <Field label="How each LED reads it" hint="What one LED takes from the picture">
+                  <Segmented<SamplingMode>
+                    label="How each LED reads the picture"
+                    value={draft.sampling}
+                    options={[
+                      { value: "nearest", label: "One pixel" },
+                      { value: "bilinear", label: "Four pixels" },
+                      { value: "area_average", label: "Every pixel" },
+                    ]}
+                    onChange={(v) => commit((l) => ({ ...l, sampling: v }))}
+                  />
+                </Field>
+                <p className={desk.plainNote}>
+                  {samplingNote.text} · <span className="fig">{samplingNote.value}</span>
+                </p>
+              </div>
             </div>
           </Panel>
         </div>

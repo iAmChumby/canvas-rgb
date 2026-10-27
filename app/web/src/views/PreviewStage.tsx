@@ -12,8 +12,9 @@ import {
   type KeyboardEvent,
   type PointerEvent,
 } from "react";
-import { ArrowsOut, Minus, Plus } from "@phosphor-icons/react";
+import { ArrowsOut, Minus, Plus, X } from "@phosphor-icons/react";
 import { IconButton } from "@/components/Button";
+import { Chip } from "@/components/Chip";
 import { EffectPreview, type PreviewValues } from "@/components/EffectPreview";
 import { useMediaQuery } from "@/components/MediaQuery";
 import { onFrame, PREVIEW_H, PREVIEW_W, usePreviewStatus, type Frame } from "@/lib/preview";
@@ -243,10 +244,25 @@ function ledCells(z: PlacedZone, info: ZoneInfo, offsets: Point[]): LedCell[] {
     along = Math.min(along, cross * 0.85);
     across = along;
   }
-  // A matrix LED fills its own cell (a keyboard that is one LED is one wide lamp); a strip's
-  // lamps are as worked out above.
-  const lampX = linear ? (horizontal ? along : across) : (z.width / cols) * 0.85;
-  const lampY = linear ? (horizontal ? across : along) : (z.height / rows) * 0.85;
+  // A matrix LED fills its own cell; a strip's lamps are as worked out above. A zone with one
+  // LED in it is a lamp and not a slab: it is a disc in the middle of the zone, so a keyboard
+  // drawn wide shows the one lit LED it has instead of a bar across the whole board.
+  const single = kind.type === "single";
+  const shortSide = Math.min(z.width, z.height);
+  const lampX = single
+    ? shortSide * 0.45
+    : linear
+      ? horizontal
+        ? along
+        : across
+      : (z.width / cols) * 0.85;
+  const lampY = single
+    ? shortSide * 0.45
+    : linear
+      ? horizontal
+        ? across
+        : along
+      : (z.height / rows) * 0.85;
   const rx = Math.max(0.3, lampX / 2);
   const ry = Math.max(0.3, lampY / 2);
   const turn = Math.atan2(t.sin, t.cos);
@@ -299,6 +315,12 @@ const WHEEL_MS = 120;
 const NOTCH_DELTA = 40;
 /** The chrome around a chip's text: the padding, the hairline and the accent edge, in css pixels. */
 const CHIP_CHROME = 14;
+/**
+ * The room a chip's remove button takes, in css pixels: the button itself and the gap to the
+ * text. The chip is placed with this in its width, so the place it takes is the place the chip
+ * really needs.
+ */
+const CHIP_REMOVE_W = 22;
 /**
  * The biggest a lamp is drawn, in device pixels, across. At 800 % a DRAM LED is a cell of about
  * 270 px; past this a lamp is a slab and its glow is a wash over the whole zone.
@@ -445,6 +467,11 @@ export interface StageProps {
   onSelect: (index: number | null) => void;
   onChange: (index: number, patch: Partial<PlacedZone>) => void;
   onDrop: (deviceId: string, zoneIndex: number, x: number, y: number) => void;
+  /**
+   * Takes a zone off the layout. The chip of a stale zone offers this once the zone is picked:
+   * a ghost cannot be clicked on the canvas, so the chip is the way to it.
+   */
+  onRemoveZone?: (index: number) => void;
   /** Told when a drag starts and ends, so the page can hold off replacing the layout. */
   onDraggingChange?: (dragging: boolean) => void;
   /**
@@ -477,6 +504,29 @@ function zoneKey(z: PlacedZone): string {
 function accentOf(devices: DeviceInfo[] | null, deviceId: string): number {
   const i = devices?.findIndex((d) => d.id === deviceId) ?? -1;
   return i < 0 ? -1 : i % ACCENTS.length;
+}
+
+/**
+ * The shape the desk draws for a zone: the device it belongs to, as a thing you can recognise.
+ *
+ * The shape comes from the device's kind and the zone's kind, never from a name: a JARGB header
+ * is a strip because it is a linear zone, a DIMM is a stick because its device is DRAM, and a
+ * keyboard is a board with keys because its device is a keyboard. A zone whose device the daemon
+ * does not list has no shape: it is a ghost, and a ghost draws nothing.
+ */
+type ZoneShape = "none" | "strip" | "dram" | "keyboard" | "microphone" | "grid" | "module";
+
+function zoneShape(found: { device: DeviceInfo; zone: ZoneInfo } | null): ZoneShape {
+  if (!found) return "none";
+  const kind = found.device.kind;
+  if (kind === "dram") return "dram";
+  if (kind === "keyboard") return "keyboard";
+  if (kind === "microphone") return "microphone";
+  if (kind === "led_strip") return "strip";
+  // A linear zone is a strip of LEDs however it is wired; a matrix is a field of them.
+  if (found.zone.kind.type === "linear") return "strip";
+  if (found.zone.kind.type === "matrix") return "grid";
+  return "module";
 }
 
 /**
@@ -539,7 +589,9 @@ function boxDistance(a: Box, b: Box): number {
  *
  * `chipFor` says which zones get a chip at all. On a phone only the picked zone has one (round 2),
  * so the chip is placed as if it were the only chip on the canvas: it can take the free place
- * above its own strip instead of the crowded one beside its neighbours.
+ * above its own strip instead of the crowded one beside its neighbours. `chipExtra` says how much
+ * wider a chip is than its text is: the chip of a stale zone carries a remove button once it is
+ * picked, and the place it takes has to be the place the chip really needs.
  */
 function layoutLabels(
   zones: PlacedZone[],
@@ -549,6 +601,7 @@ function layoutLabels(
   view: View,
   obstacles: Box[],
   chipFor?: (index: number) => boolean,
+  chipExtra?: (index: number) => number,
 ): LabelBox[] {
   // On a phone the chip must not eat the canvas: the name alone, and a short word for a zone
   // whose device is gone. The zone list below spells both out. A chip that still fits in the
@@ -606,7 +659,7 @@ function layoutLabels(
       index,
       key: zoneKey(z),
       text,
-      w: text.length * m.char + CHIP_CHROME,
+      w: text.length * m.char + CHIP_CHROME + (chipExtra?.(index) ?? 0),
       missing: stale,
       accent: accentOf(devices, z.device_id),
       box,
@@ -817,6 +870,7 @@ export function PreviewStage({
   onSelect,
   onChange,
   onDrop,
+  onRemoveZone,
   onDraggingChange,
   onLiveChange,
   layoutId,
@@ -942,6 +996,31 @@ export function PreviewStage({
   const ledCacheRef = useRef(ledCache);
   ledCacheRef.current = ledCache;
 
+  // A zone whose device the daemon does not drive is stale: it is drawn dimmed and dashed, and
+  // the inspector says so.
+  const missing = useMemo(() => {
+    const out = new Set<number>();
+    if (!devices) return out;
+    zones.forEach((z, i) => {
+      const info = findZoneInfo(devices, z.device_id, z.zone_index);
+      if (!info || !info.device.connected) out.add(i);
+    });
+    return out;
+  }, [zones, devices]);
+  missingRef.current = missing;
+
+  /**
+   * A stale zone cannot be picked on the canvas: it is a ghost over another zone and it never
+   * takes a click. Its chip is the way to it, and the chip carries the way to take it off the
+   * layout once the zone is picked.
+   */
+  const removable = useCallback(
+    (index: number) => selected === index && missing.has(index) && !!onRemoveZone,
+    [selected, missing, onRemoveZone],
+  );
+  /** How much wider the chip of a zone is than its text: the remove button's room. */
+  const chipExtra = useCallback((index: number) => (removable(index) ? CHIP_REMOVE_W : 0), [removable]);
+
   /** Writes one zone's geometry onto its element. No React involved. */
   const applyGeom = useCallback(
     (index: number, z: PlacedZone, v: View) => {
@@ -954,6 +1033,9 @@ export function PreviewStage({
       el.style.width = `${z.width * k}px`;
       el.style.height = `${z.height * k}px`;
       el.style.transform = `rotate(${z.rotation_deg}deg)`;
+      // The device is drawn along its long side, so a stick that is turned on the desk is drawn
+      // turned too. A resize can turn a zone round, so this follows the drag.
+      el.dataset.axis = z.width >= z.height ? "h" : "v";
     },
     [],
   );
@@ -1144,6 +1226,7 @@ export function PreviewStage({
         v,
         obstaclesRef.current,
         chipVisible,
+        chipExtra,
       );
       for (const b of boxes) {
         const el = labelEls.current[b.index];
@@ -1152,7 +1235,7 @@ export function PreviewStage({
         el.style.top = `${b.y}px`;
       }
     },
-    [zones, devices, chipVisible],
+    [zones, devices, chipVisible, chipExtra],
   );
 
   /** Draws the whole view: the effect, the zones, the labels and the LEDs. */
@@ -1226,8 +1309,10 @@ export function PreviewStage({
   }, [queuePaint]);
 
   // When the layout changes outside a drag (a nudge, a load, a revert), the live geometry and
-  // the elements follow it.
+  // the elements follow it. A drag owns the geometry while it lasts: the page re-renders on
+  // every frame of it, and the draft it is dragging is still the one it started from.
   useEffect(() => {
+    if (dragRef.current) return;
     liveRef.current = zones.map((z) => ({ ...z }));
     const v = viewRef.current;
     zones.forEach((z, i) => applyGeom(i, z, v));
@@ -1545,9 +1630,18 @@ export function PreviewStage({
     const obstacles = measureObstacles();
     obstaclesRef.current = obstacles;
     setLabelBoxes(
-      layoutLabels(zones, devices, stage.clientWidth, stage.clientHeight, view, obstacles, chipVisible),
+      layoutLabels(
+        zones,
+        devices,
+        stage.clientWidth,
+        stage.clientHeight,
+        view,
+        obstacles,
+        chipVisible,
+        chipExtra,
+      ),
     );
-  }, [zones, devices, stageBox, view, measureObstacles, chipVisible]);
+  }, [zones, devices, stageBox, view, measureObstacles, chipVisible, chipExtra]);
 
   // The view is written back to React when the gesture settles, so the page keeps the zoom.
   const commitView = useCallback(
@@ -1679,19 +1773,6 @@ export function PreviewStage({
     animateTo({ ...FIT_VIEW });
   };
 
-  // A zone whose device the daemon does not drive is stale: it is drawn dimmed and dashed, and
-  // the inspector says so.
-  const missing = useMemo(() => {
-    const out = new Set<number>();
-    if (!devices) return out;
-    zones.forEach((z, i) => {
-      const info = findZoneInfo(devices, z.device_id, z.zone_index);
-      if (!info || !info.device.connected) out.add(i);
-    });
-    return out;
-  }, [zones, devices]);
-  missingRef.current = missing;
-
   const selectedZone = selected !== null ? zones[selected] : undefined;
   const grips = selectedZone ? gripGeometry(selectedZone) : null;
 
@@ -1700,7 +1781,8 @@ export function PreviewStage({
 
   /**
    * The scale bar: a round number of desk units that is about as wide as the bar itself, so
-   * the reader can measure a zone with it.
+   * the reader can measure a zone with it. It says what the bar is in words - a share of the
+   * desk - and keeps the units beside it as the precise value.
    */
   const scaleBar = useMemo(() => {
     if (!stageBox.w) return null;
@@ -1709,7 +1791,11 @@ export function PreviewStage({
     const raw = 120 / pxPerUnit;
     let units = steps[0] as number;
     for (const s of steps) if (s <= raw) units = s;
-    return { units, px: Math.round(units * pxPerUnit) };
+    // The bar's share of the desk's width, when that share is a clean one.
+    const denom = CANVAS_W / units;
+    const share =
+      Number.isInteger(denom) && denom >= 2 && denom <= 16 ? `1/${denom} of the desk` : null;
+    return { units, px: Math.round(units * pxPerUnit), share };
   }, [base, view.scale, stageBox.w]);
 
   return (
@@ -1828,6 +1914,8 @@ export function PreviewStage({
             data-selected={isSel}
             data-missing={isMissing}
             data-hover={hover === i}
+            data-shape={zoneShape(found)}
+            data-axis={z.width >= z.height ? "h" : "v"}
             style={style}
             onPointerDown={(e) => beginDrag("move", i, e)}
             onPointerEnter={() => setHover(i)}
@@ -1841,6 +1929,7 @@ export function PreviewStage({
       {labelBoxes.map((b) => {
         const i = b.index;
         const isSel = selected === i;
+        const canRemove = removable(i);
         return (
           <div
             key={b.key}
@@ -1865,7 +1954,27 @@ export function PreviewStage({
                 : `var(${ACCENTS[b.accent] ?? "--a1"})`,
             } as CSSProperties}
           >
-            {b.text}
+            <span className={desk.labelText}>{b.text}</span>
+            {canRemove && (
+              // A ghost cannot be picked on the canvas, so its chip is the way to it: once the
+              // zone is picked the chip carries the way to take it off the layout. The editor's
+              // own small button is used, not a raw one.
+              <span
+                className={desk.labelRemove}
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                  e.preventDefault();
+                }}
+              >
+                <Chip
+                  icon={<X size={10} weight="bold" />}
+                  label={`Remove ${b.text} from the layout`}
+                  onClick={() => onRemoveZone?.(i)}
+                >
+                  {null}
+                </Chip>
+              </span>
+            )}
           </div>
         );
       })}
@@ -1936,9 +2045,18 @@ export function PreviewStage({
 
       {scaleBar && (
         // The scale: how long a line on the desk is, in the daemon's own units.
-        <div className={desk.scaleBar} aria-hidden="true">
+        <div
+          className={desk.scaleBar}
+          role="img"
+          aria-label={`Scale: ${scaleBar.units} of the desk's ${CANVAS_W} units${
+            scaleBar.share ? `, ${scaleBar.share}` : ""
+          }`}
+        >
           <span className={desk.scaleLine} style={{ width: `${scaleBar.px}px` }} />
-          <span className={desk.scaleLabel}>{scaleBar.units} units</span>
+          <span className={desk.scaleLabel}>
+            {scaleBar.share && <span className={desk.scaleShare}>{scaleBar.share}</span>}
+            <span className="fig">{scaleBar.units} units</span>
+          </span>
         </div>
       )}
     </div>

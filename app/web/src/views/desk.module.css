@@ -28,6 +28,16 @@
  */
 .desk {
   --zone-bed: var(--led-bed);
+  /*
+   * The devices' own surfaces: the plastic of a key, the line of a trace, the metal of a
+   * heatspreader, the gold of a contact. Every one of them is a step off the bed and never a
+   * light: the lit LEDs have to stay the brightest thing on the desk. The contact takes the
+   * zone's own colour, so a stick is drawn in the colour of the device it belongs to.
+   */
+  --dev-face: color-mix(in srgb, var(--mute) 30%, var(--zone-bed));
+  --dev-line: color-mix(in srgb, var(--mute) 50%, var(--zone-bed));
+  --dev-metal: color-mix(in srgb, var(--dim) 28%, var(--zone-bed));
+  --dev-gold: color-mix(in srgb, var(--zc, var(--a1)) 40%, var(--zone-bed));
 }
 
 /* ---------- zones ---------- */
@@ -119,6 +129,130 @@
   outline-offset: 3px;
 }
 
+/* ---------- the device silhouettes ---------- */
+
+/*
+ * Each zone is drawn as the device it is. The shape comes from the device's kind and the
+ * zone's kind, never from its name: a JARGB header is a strip because it is a linear zone, a
+ * DIMM is a stick because its device is DRAM, a keyboard is a board with keys because its
+ * device is a keyboard, and a microphone is a capsule on a stand.
+ *
+ * The shapes are drawn in tokens, in the zone's own box, under the lit LEDs. A zone whose
+ * device the daemon does not list is a ghost and draws nothing.
+ */
+
+/* An ARGB strip: a thin bar with its light channel down the middle and a connector at each
+   end. The beads are the LEDs, and they are drawn over this. */
+.desk .zone[data-shape="strip"][data-axis="h"] {
+  background-image:
+    linear-gradient(
+      to bottom,
+      transparent calc(50% - 1px),
+      var(--dev-line) calc(50% - 1px) calc(50% + 1px),
+      transparent calc(50% + 1px)
+    ),
+    linear-gradient(to right, var(--dev-face) 0 3px, transparent 3px calc(100% - 3px), var(--dev-face) calc(100% - 3px));
+}
+
+.desk .zone[data-shape="strip"][data-axis="v"] {
+  background-image:
+    linear-gradient(
+      to right,
+      transparent calc(50% - 1px),
+      var(--dev-line) calc(50% - 1px) calc(50% + 1px),
+      transparent calc(50% + 1px)
+    ),
+    linear-gradient(to bottom, var(--dev-face) 0 3px, transparent 3px calc(100% - 3px), var(--dev-face) calc(100% - 3px));
+}
+
+/* A DIMM: a board with a heatspreader down one long edge, its contacts along the other, and
+   the notch that every stick has in its contacts. The edges are drawn where the lamps do not
+   reach, so the stick reads as a stick and not as a row of lights. */
+.desk .zone[data-shape="dram"][data-axis="h"] {
+  background-image:
+    linear-gradient(to right, transparent 0 54%, var(--zone-bed) 54% 60%, transparent 60%),
+    repeating-linear-gradient(90deg, var(--dev-gold) 0 2px, transparent 2px 6px),
+    linear-gradient(to bottom, var(--dev-line) 0 1px, var(--dev-metal) 1px 14%, transparent 14%);
+  background-size: 100% 11%, 100% 11%, 100% 100%;
+  background-position: 0 100%, 0 100%, 0 0;
+  background-repeat: no-repeat;
+}
+
+.desk .zone[data-shape="dram"][data-axis="v"] {
+  background-image:
+    linear-gradient(to bottom, transparent 0 54%, var(--zone-bed) 54% 60%, transparent 60%),
+    repeating-linear-gradient(0deg, var(--dev-gold) 0 2px, transparent 2px 6px),
+    linear-gradient(to right, var(--dev-line) 0 1px, var(--dev-metal) 1px 14%, transparent 14%);
+  background-size: 11% 100%, 11% 100%, 100% 100%;
+  background-position: 100% 0, 100% 0, 0 0;
+  background-repeat: no-repeat;
+}
+
+/* A keyboard: a rounded case with a grid of keys in it. The keys are the case's own colour
+   and the gaps between them are the bed, so the board reads as a board and not as a box. The
+   one LED it has is drawn where it is, in the middle. */
+.desk .zone[data-shape="keyboard"] {
+  border-radius: var(--r-sm);
+  background-image:
+    repeating-linear-gradient(90deg, var(--zone-bed) 0 2px, transparent 2px 6.25%),
+    repeating-linear-gradient(0deg, var(--zone-bed) 0 2px, transparent 2px 50%),
+    linear-gradient(var(--dev-face), var(--dev-face));
+  background-size: calc(100% - 10px) calc(100% - 8px);
+  background-position: 5px 4px;
+  background-repeat: no-repeat;
+}
+
+.desk .zone[data-shape="keyboard"]::after {
+  border-radius: calc(var(--r-sm) + 3px);
+}
+
+/* A microphone: a capsule on a stand. */
+.desk .zone[data-shape="microphone"] {
+  background-image:
+    linear-gradient(to right, transparent 0 47%, var(--dev-line) 47% 53%, transparent 53%),
+    linear-gradient(to bottom, transparent 0 86%, var(--dev-line) 86% 91%, transparent 91%);
+  background-size: 100% 16%, 60% 100%;
+  background-position: 0 72%, 20% 0;
+  background-repeat: no-repeat;
+}
+
+.desk .zone[data-shape="microphone"]::before {
+  content: "";
+  position: absolute;
+  left: 10%;
+  right: 10%;
+  top: 0;
+  height: 70%;
+  box-sizing: border-box;
+  border: 1px solid var(--dev-line);
+  border-radius: 50%;
+  background: var(--dev-face);
+}
+
+/* A field of LEDs: a matrix zone is a grid of cells. */
+.desk .zone[data-shape="grid"] {
+  background-image:
+    repeating-linear-gradient(90deg, var(--zone-bed) 0 2px, transparent 2px 12.5%),
+    repeating-linear-gradient(0deg, var(--zone-bed) 0 2px, transparent 2px 12.5%),
+    linear-gradient(var(--dev-face), var(--dev-face));
+  background-size: calc(100% - 8px) calc(100% - 8px);
+  background-position: 4px 4px;
+  background-repeat: no-repeat;
+}
+
+/* Anything else: a small board with two marks on it. */
+.desk .zone[data-shape="module"] {
+  border-radius: var(--r-sm);
+  background-image: linear-gradient(
+    to bottom,
+    transparent 0 24%,
+    var(--dev-line) 24% 26%,
+    transparent 26% 74%,
+    var(--dev-line) 74% 76%,
+    transparent 76%
+  );
+}
+
 /* ---------- labels ---------- */
 
 /* A chip is a small tag with the device's colour on its left edge: the eye can pair it with the
@@ -126,6 +260,9 @@
 .desk .label {
   position: absolute;
   z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   padding: 0 5px;
   height: 20px;
   line-height: 18px;
@@ -141,6 +278,32 @@
   transition:
     border-color var(--dur-fast) var(--ease),
     color var(--dur-fast) var(--ease);
+}
+
+/* The chip of a stale zone carries the way to take the zone off the layout. A ghost cannot
+   be picked on the canvas, so the chip is the only way to it. The editor's own small button is
+   used, sized down to sit inside the chip. */
+.desk .labelRemove {
+  display: inline-flex;
+  align-items: center;
+  pointer-events: auto;
+}
+
+.desk .labelRemove :global(.chip) {
+  height: 14px;
+  padding: 0 2px;
+  border-color: currentColor;
+  background: transparent;
+  color: inherit;
+}
+
+.desk .labelRemove :global(.chip):hover {
+  background: color-mix(in srgb, currentColor 18%, transparent);
+}
+
+.desk .labelRemove :global(.chip):focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
 }
 
 .desk .label[data-selected="true"] {
@@ -396,7 +559,37 @@
 }
 
 .scaleLabel {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
   white-space: nowrap;
+}
+
+/* What the bar is, in words: a share of the desk. The units beside it are the precise value. */
+.scaleShare {
+  color: var(--dim);
+  font-family: var(--fu);
+}
+
+/* ---------- the plain-language notes ---------- */
+
+/* Under a control: what it does in words, and the precise value beside it in mono. */
+.plainNote {
+  margin-top: var(--s2);
+  color: var(--dim);
+  font-size: var(--t14);
+  line-height: 1.45;
+}
+
+.plainNote .fig {
+  color: var(--mute);
+  white-space: nowrap;
+}
+
+/* One cell of the render grid: a control and the note under it. */
+.renderCell {
+  display: flex;
+  flex-direction: column;
 }
 
 /* ---------- the phone ---------- */
