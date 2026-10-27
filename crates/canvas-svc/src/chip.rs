@@ -135,6 +135,8 @@ const SIO_ADDR_HI: u8 = 0x60;
 const SIO_ADDR_LO: u8 = 0x61;
 const SIO_ENTER_KEY: u8 = 0x87;
 const SIO_EXIT_KEY: u8 = 0xAA;
+/// Written to the EC page register before the page itself.
+const EC_PAGE_SELECT: u8 = 0xFF;
 pub const NCT6687_CHIP_ID: u16 = 0xD590;
 pub const CHIP_ID_MASK: u16 = 0xFFF0;
 
@@ -221,15 +223,23 @@ impl<P: PortIo> Nct6687<P> {
         self.base
     }
 
-    fn ec_read(&mut self, reg: u16) -> io::Result<u8> {
+    /// Latches the page and index of `reg` in EC port 1 (base + 4). The page register takes
+    /// `EC_PAGE_SELECT` first, then the page (nct6687d `nct6687_read`/`nct6687_write`, and
+    /// LibreHardwareMonitor). Without the select the chip never latches the page and every
+    /// read returns the same stale byte (lighting session 2: 1028 RPM and 4 C everywhere).
+    fn ec_select(&mut self, reg: u16) -> io::Result<()> {
+        self.io.write_port(self.base + 4, EC_PAGE_SELECT)?;
         self.io.write_port(self.base + 4, (reg >> 8) as u8)?;
-        self.io.write_port(self.base + 5, (reg & 0xFF) as u8)?;
+        self.io.write_port(self.base + 5, (reg & 0xFF) as u8)
+    }
+
+    fn ec_read(&mut self, reg: u16) -> io::Result<u8> {
+        self.ec_select(reg)?;
         self.io.read_port(self.base + 6)
     }
 
     fn ec_write(&mut self, reg: u16, value: u8) -> io::Result<()> {
-        self.io.write_port(self.base + 4, (reg >> 8) as u8)?;
-        self.io.write_port(self.base + 5, (reg & 0xFF) as u8)?;
+        self.ec_select(reg)?;
         self.io.write_port(self.base + 6, value)
     }
 

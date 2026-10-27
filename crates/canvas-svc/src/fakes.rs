@@ -34,6 +34,8 @@ struct Sim {
     sio_config: bool,
     sio_index: u8,
     sio_ld: u8,
+    /// Set by a 0xFF write to the page register; the next write there is the page.
+    page_armed: bool,
     page: u8,
     index: u8,
     regs: HashMap<u16, u8>,
@@ -88,6 +90,7 @@ impl FakeChip {
             sio_config: false,
             sio_index: 0,
             sio_ld: 0,
+            page_armed: false,
             page: 0,
             index: 0,
             regs: HashMap::new(),
@@ -284,7 +287,13 @@ impl PortIo for FakeChip {
         }
         let base = sim.base;
         if port == base + 4 {
-            sim.page = value;
+            // Like the real chip: the page latches only right after the 0xFF page select.
+            if value == 0xFF {
+                sim.page_armed = true;
+            } else if sim.page_armed {
+                sim.page = value;
+                sim.page_armed = false;
+            }
         } else if port == base + 5 {
             sim.index = value;
         } else if port == base + 6 {
