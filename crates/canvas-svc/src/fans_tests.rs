@@ -1,6 +1,6 @@
 //! Controller tests over the register simulation (`FakeChip`) and fake temperatures.
 
-use crate::chip::{FanChip, Nct6687, MODE_REG, MSI_ALT1_MAP};
+use crate::chip::{FanChip, Nct6687, COMMAND_REG, MODE_REG, MSI_ALT1_MAP, SYS_MODE_REG};
 use crate::fakes::{FakeChip, FakeTemp};
 use crate::fans::{curve_percent, FanController, FanError};
 use crate::paths;
@@ -68,9 +68,18 @@ const UNCONFIRMED_TEXT: &str = "channel map msi_alt1 not yet confirmed against L
 fn assert_only_auto_restores(chip: &FakeChip) {
     let log = chip.writes_log();
     let duty_regs: Vec<u16> = MSI_ALT1_MAP.channels.iter().filter_map(|c| c.pwm_write_reg).collect();
-    assert!(log.iter().all(|(reg, _)| *reg == MODE_REG), "only the fan-mode register: {log:?}");
+    assert!(log.iter().all(|(reg, _)| is_restore_reg(*reg)), "only restore registers: {log:?}");
     assert!(log.iter().all(|(reg, _)| !duty_regs.contains(reg)), "no duty register: {log:?}");
-    assert!(log.iter().all(|(_, value)| *value == 0), "every value is the auto value: {log:?}");
+    assert!(
+        log.iter().filter(|(reg, _)| *reg != COMMAND_REG).all(|(_, value)| *value == 0),
+        "every mode value is the auto value: {log:?}"
+    );
+}
+
+/// The registers a restore to auto may write: the two fan-mode registers, and the command
+/// register for the configuration handshake around a mode change.
+fn is_restore_reg(reg: u16) -> bool {
+    reg == MODE_REG || reg == SYS_MODE_REG || reg == COMMAND_REG
 }
 
 #[test]
@@ -89,6 +98,7 @@ fn unconfirmed_writes_only_restores_to_auto_and_every_header_says_why() {
     assert_only_auto_restores(&chip);
     assert!(!chip.manual(SYS_FAN1));
     assert_eq!(chip.register(MODE_REG), 0);
+    assert_eq!(chip.register(SYS_MODE_REG), 0);
 
     let status = fans.status();
     for h in &status.headers {
@@ -131,16 +141,19 @@ fn a_header_left_manual_by_an_earlier_run_is_restored_to_auto_at_startup_while_u
     assert!(!unconfirmed.writes_allowed());
     assert!(!r.chip.manual(SYS_FAN1), "restored to auto at startup");
     assert_eq!(r.chip.register(MODE_REG), 0, "every manual bit cleared");
+    assert_eq!(r.chip.register(SYS_MODE_REG), 0, "every system-fan manual bit cleared");
     // And the profile did not re-engage it.
     unconfirmed.tick(t0 + Duration::from_secs(1));
     assert!(!r.chip.manual(SYS_FAN1));
     let since = r.chip.writes_log()[before..].to_vec();
     assert!(!since.is_empty(), "the restore wrote the mode register");
-    assert!(since.iter().all(|(reg, _)| *reg == MODE_REG), "only the fan-mode register: {since:?}");
-    // Each write clears bits and never sets one, and the register ends at the auto value (0).
-    let values: Vec<u8> = since.iter().map(|(_, v)| *v).collect();
-    assert!(values.windows(2).all(|w| w[1] & !w[0] == 0), "writes only clear manual bits: {values:?}");
-    assert_eq!(values.last().copied(), Some(0), "ends at auto: {values:?}");
+    assert!(since.iter().all(|(reg, _)| is_restore_reg(*reg)), "only restore registers: {since:?}");
+    // In each mode register, every write clears bits and never sets one, and it ends at auto (0).
+    for mode_reg in [MODE_REG, SYS_MODE_REG] {
+        let values: Vec<u8> = since.iter().filter(|(reg, _)| *reg == mode_reg).map(|(_, v)| *v).collect();
+        assert!(values.windows(2).all(|w| w[1] & !w[0] == 0), "{mode_reg:#x} only clears bits: {values:?}");
+        assert!(values.last().is_none_or(|v| *v == 0), "{mode_reg:#x} ends at auto: {values:?}");
+    }
 }
 
 #[test]
@@ -158,7 +171,7 @@ fn restore_bios_writes_only_the_mode_register_while_unconfirmed() {
     FanController::restore_from_file(r.dir.path(), &mut chip).unwrap();
     let after = r.chip.written_regs();
     assert!(after.len() > before, "restore wrote something");
-    assert!(after[before..].iter().all(|reg| *reg == MODE_REG), "only the fan-mode register: {:?}", &after[before..]);
+    assert!(after[before..].iter().all(|reg| is_restore_reg(*reg)), "only restore registers: {:?}", &after[before..]);
     assert!(!r.chip.manual(SYS_FAN1));
 }
 
@@ -492,4 +505,19 @@ fn a_profile_can_be_deleted_but_not_the_active_or_last_one() {
     r.fans.delete_profile("Quiet").unwrap();
     assert_eq!(r.fans.status().profiles, vec!["Default".to_string()]);
     assert!(matches!(r.fans.delete_profile("Default"), Err(FanError::Conflict(_))), "active and last");
+}
+
+#[test]
+fn a_system_fan_is_driven_through_the_msi_am5_registers() {
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    let before = r.chip.writes_log().len();
+    r.fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 50 }, t0).unwrap();
+    let log = r.chip.writes_log()[before..].to_vec();
+    // LibreHardwareMonitor's NCT6687DR mapping: SYSFAN1 duty at 0x265, manual bit 7 of 0x80F.
+    assert!(log.contains(&(0x265, 128)), "duty written to 0x265: {log:?}");
+    assert_eq!(r.chip.register(SYS_MODE_REG) & 0x80, 0x80, "manual bit 7 of 0x80F set");
+    assert_eq!(r.chip.register(MODE_REG), 0, "nothing set in 0xA00: {log:?}");
+    assert!(r.chip.manual(SYS_FAN1));
+    assert_eq!(r.chip.duty_raw(SYS_FAN1), 128);
 }

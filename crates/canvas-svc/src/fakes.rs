@@ -5,7 +5,7 @@
 //! the command handshake, and the board temperature registers. The real driver runs over it.
 
 use crate::chip::{
-    Channel, PortIo, RegisterMap, BOARD_SENSORS, CMD_DONE, CMD_REQUEST, COMMAND_REG, ENGINE_STS_REG, MODE_REG,
+    Channel, PortIo, RegisterMap, BOARD_SENSORS, CMD_DONE, CMD_REQUEST, COMMAND_REG, ENGINE_STS_REG,
     STS_CHECK_DONE, STS_LOCK, STS_PHASE, TEMP_BASE_REG,
 };
 use crate::process::{ChildProcess, ProcessSpawner};
@@ -246,9 +246,11 @@ impl Sim {
             self.regs.insert(COMMAND_REG, value & !CMD_REQUEST);
             return;
         }
-        if reg == MODE_REG {
+        // A fan-mode register (0xA00, or 0x80F for MSI AM5 system fans): each header follows
+        // its own bit in its own register.
+        if self.map.channels.iter().any(|c| c.mode_reg == reg) {
             for (ch, c) in self.map.channels.iter().enumerate() {
-                if let Some(bit) = c.mode_bit {
+                if let (true, Some(bit)) = (c.mode_reg == reg, c.mode_bit) {
                     self.manual[ch] = value & (1 << bit) != 0;
                 }
             }

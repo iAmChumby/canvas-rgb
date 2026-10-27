@@ -42,7 +42,9 @@ pub struct Channel {
     pub rpm_reg: u16,
     pub pwm_read_reg: Option<u16>,
     pub pwm_write_reg: Option<u16>,
-    /// Bit in the fan-mode register (0xA00); set = manual, clear = BIOS/auto.
+    /// The fan-mode register this header's bit lives in: [`MODE_REG`] or [`SYS_MODE_REG`].
+    pub mode_reg: u16,
+    /// Bit in `mode_reg`; set = manual, clear = BIOS/auto.
     pub mode_bit: Option<u8>,
 }
 
@@ -64,6 +66,11 @@ pub struct RegisterMap {
 
 /// Fan-mode register: one bit per fan index, set = manual (nct6687d `NCT6687_REG_FAN_CTRL_MODE`).
 pub const MODE_REG: u16 = 0xA00;
+/// Fan-mode register of the system-fan headers on MSI AM5 boards (LibreHardwareMonitor
+/// `Nct677X` NCT6687DR branch, `FAN_CONTROL_MODE_REG` 0x80F). On Luke's B850, msi_alt1's
+/// write registers (0xC70..0xBF8, bits in 0xA00) were accepted and never moved sys_fan3; the
+/// DR branch drives SYSFAN1..6 at 0x265..0x260 with bits 7..2 of 0x80F (lighting session 2).
+pub const SYS_MODE_REG: u16 = 0x80F;
 /// Fan command register (nct6687d `NCT6687_REG_FAN_PWM_COMMAND`).
 pub const COMMAND_REG: u16 = 0xA01;
 pub const CMD_REQUEST: u8 = 0x80;
@@ -99,14 +106,14 @@ pub const DEFAULT_MAP: RegisterMap = RegisterMap {
     name: "default",
     confirmed: true,
     channels: &[
-        Channel { id: "cpu_fan", label: "CPU fan", rpm_reg: 0x140, pwm_read_reg: Some(0x160), pwm_write_reg: Some(0xA28), mode_bit: Some(0) },
-        Channel { id: "pump_fan", label: "Pump fan", rpm_reg: 0x142, pwm_read_reg: Some(0x161), pwm_write_reg: Some(0xA29), mode_bit: Some(1) },
-        Channel { id: "sys_fan1", label: "System fan 1", rpm_reg: 0x144, pwm_read_reg: Some(0x162), pwm_write_reg: Some(0xA2A), mode_bit: Some(2) },
-        Channel { id: "sys_fan2", label: "System fan 2", rpm_reg: 0x146, pwm_read_reg: Some(0x163), pwm_write_reg: Some(0xA2B), mode_bit: Some(3) },
-        Channel { id: "sys_fan3", label: "System fan 3", rpm_reg: 0x148, pwm_read_reg: Some(0x164), pwm_write_reg: Some(0xA2C), mode_bit: Some(4) },
-        Channel { id: "sys_fan4", label: "System fan 4", rpm_reg: 0x14A, pwm_read_reg: Some(0x165), pwm_write_reg: Some(0xA2D), mode_bit: Some(5) },
-        Channel { id: "sys_fan5", label: "System fan 5", rpm_reg: 0x14C, pwm_read_reg: Some(0x166), pwm_write_reg: Some(0xA2E), mode_bit: Some(6) },
-        Channel { id: "sys_fan6", label: "System fan 6", rpm_reg: 0x14E, pwm_read_reg: Some(0x167), pwm_write_reg: Some(0xA2F), mode_bit: Some(7) },
+        Channel { id: "cpu_fan", label: "CPU fan", rpm_reg: 0x140, pwm_read_reg: Some(0x160), pwm_write_reg: Some(0xA28), mode_reg: MODE_REG, mode_bit: Some(0) },
+        Channel { id: "pump_fan", label: "Pump fan", rpm_reg: 0x142, pwm_read_reg: Some(0x161), pwm_write_reg: Some(0xA29), mode_reg: MODE_REG, mode_bit: Some(1) },
+        Channel { id: "sys_fan1", label: "System fan 1", rpm_reg: 0x144, pwm_read_reg: Some(0x162), pwm_write_reg: Some(0xA2A), mode_reg: MODE_REG, mode_bit: Some(2) },
+        Channel { id: "sys_fan2", label: "System fan 2", rpm_reg: 0x146, pwm_read_reg: Some(0x163), pwm_write_reg: Some(0xA2B), mode_reg: MODE_REG, mode_bit: Some(3) },
+        Channel { id: "sys_fan3", label: "System fan 3", rpm_reg: 0x148, pwm_read_reg: Some(0x164), pwm_write_reg: Some(0xA2C), mode_reg: MODE_REG, mode_bit: Some(4) },
+        Channel { id: "sys_fan4", label: "System fan 4", rpm_reg: 0x14A, pwm_read_reg: Some(0x165), pwm_write_reg: Some(0xA2D), mode_reg: MODE_REG, mode_bit: Some(5) },
+        Channel { id: "sys_fan5", label: "System fan 5", rpm_reg: 0x14C, pwm_read_reg: Some(0x166), pwm_write_reg: Some(0xA2E), mode_reg: MODE_REG, mode_bit: Some(6) },
+        Channel { id: "sys_fan6", label: "System fan 6", rpm_reg: 0x14E, pwm_read_reg: Some(0x167), pwm_write_reg: Some(0xA2F), mode_reg: MODE_REG, mode_bit: Some(7) },
     ],
 };
 
@@ -118,15 +125,15 @@ pub const MSI_ALT1_MAP: RegisterMap = RegisterMap {
     name: "msi_alt1",
     confirmed: false,
     channels: &[
-        Channel { id: "cpu_fan", label: "CPU fan", rpm_reg: 0x140, pwm_read_reg: Some(0x160), pwm_write_reg: Some(0xA28), mode_bit: Some(0) },
-        Channel { id: "pump_fan", label: "Pump fan", rpm_reg: 0x142, pwm_read_reg: Some(0x161), pwm_write_reg: Some(0xA29), mode_bit: Some(1) },
-        Channel { id: "sys_fan1", label: "System fan 1", rpm_reg: 0x15E, pwm_read_reg: Some(0xE05), pwm_write_reg: Some(0xC70), mode_bit: Some(2) },
-        Channel { id: "sys_fan2", label: "System fan 2", rpm_reg: 0x15C, pwm_read_reg: Some(0xE04), pwm_write_reg: Some(0xC58), mode_bit: Some(3) },
-        Channel { id: "sys_fan3", label: "System fan 3", rpm_reg: 0x15A, pwm_read_reg: Some(0xE03), pwm_write_reg: Some(0xC40), mode_bit: Some(4) },
-        Channel { id: "sys_fan4", label: "System fan 4", rpm_reg: 0x158, pwm_read_reg: Some(0xE02), pwm_write_reg: Some(0xC28), mode_bit: Some(5) },
-        Channel { id: "sys_fan5", label: "System fan 5", rpm_reg: 0x156, pwm_read_reg: Some(0xE01), pwm_write_reg: Some(0xC10), mode_bit: Some(6) },
-        Channel { id: "sys_fan6", label: "System fan 6", rpm_reg: 0x154, pwm_read_reg: Some(0xE00), pwm_write_reg: Some(0xBF8), mode_bit: Some(7) },
-        Channel { id: "pump_fan2", label: "Pump fan 2 (tach only)", rpm_reg: 0x144, pwm_read_reg: None, pwm_write_reg: None, mode_bit: None },
+        Channel { id: "cpu_fan", label: "CPU fan", rpm_reg: 0x140, pwm_read_reg: Some(0x160), pwm_write_reg: Some(0xA28), mode_reg: MODE_REG, mode_bit: Some(0) },
+        Channel { id: "pump_fan", label: "Pump fan", rpm_reg: 0x142, pwm_read_reg: Some(0x161), pwm_write_reg: Some(0xA29), mode_reg: MODE_REG, mode_bit: Some(1) },
+        Channel { id: "sys_fan1", label: "System fan 1", rpm_reg: 0x15E, pwm_read_reg: Some(0xE05), pwm_write_reg: Some(0x265), mode_reg: SYS_MODE_REG, mode_bit: Some(7) },
+        Channel { id: "sys_fan2", label: "System fan 2", rpm_reg: 0x15C, pwm_read_reg: Some(0xE04), pwm_write_reg: Some(0x264), mode_reg: SYS_MODE_REG, mode_bit: Some(6) },
+        Channel { id: "sys_fan3", label: "System fan 3", rpm_reg: 0x15A, pwm_read_reg: Some(0xE03), pwm_write_reg: Some(0x263), mode_reg: SYS_MODE_REG, mode_bit: Some(5) },
+        Channel { id: "sys_fan4", label: "System fan 4", rpm_reg: 0x158, pwm_read_reg: Some(0xE02), pwm_write_reg: Some(0x262), mode_reg: SYS_MODE_REG, mode_bit: Some(4) },
+        Channel { id: "sys_fan5", label: "System fan 5", rpm_reg: 0x156, pwm_read_reg: Some(0xE01), pwm_write_reg: Some(0x261), mode_reg: SYS_MODE_REG, mode_bit: Some(3) },
+        Channel { id: "sys_fan6", label: "System fan 6", rpm_reg: 0x154, pwm_read_reg: Some(0xE00), pwm_write_reg: Some(0x260), mode_reg: SYS_MODE_REG, mode_bit: Some(2) },
+        Channel { id: "pump_fan2", label: "Pump fan 2 (tach only)", rpm_reg: 0x144, pwm_read_reg: None, pwm_write_reg: None, mode_reg: MODE_REG, mode_bit: None },
     ],
 };
 
@@ -290,9 +297,9 @@ impl<P: PortIo> Nct6687<P> {
     }
 
     /// Inside the window: the manual bit, then the duty, read back.
-    fn write_inside_cfg(&mut self, reg: u16, bit: u8, raw: u8) -> io::Result<()> {
-        let mode = self.ec_read(MODE_REG)?;
-        self.ec_write(MODE_REG, mode | (1 << bit))?;
+    fn write_inside_cfg(&mut self, mode_reg: u16, reg: u16, bit: u8, raw: u8) -> io::Result<()> {
+        let mode = self.ec_read(mode_reg)?;
+        self.ec_write(mode_reg, mode | (1 << bit))?;
         self.ec_write(reg, raw)?;
         let read = self.ec_read(reg)?;
         if read != raw {
@@ -375,18 +382,28 @@ impl<P: PortIo> FanChip for Nct6687<P> {
     fn read_manual(&mut self, channel: usize) -> io::Result<bool> {
         let c = self.channel(channel)?;
         let Some(bit) = c.mode_bit else { return Ok(false) };
-        Ok(self.ec_read(MODE_REG)? & (1 << bit) != 0)
+        Ok(self.ec_read(c.mode_reg)? & (1 << bit) != 0)
     }
 
+    /// The mode bit changes inside the configuration window, as LibreHardwareMonitor's DR
+    /// path does. A handback must never depend on the handshake, so when the window cannot be
+    /// opened the bit is still written, directly.
     fn set_manual(&mut self, channel: usize, manual: bool) -> io::Result<()> {
         let c = self.channel(channel)?;
         let bit = c.mode_bit.ok_or_else(|| bad_channel(channel))?;
-        let current = self.ec_read(MODE_REG)?;
+        let window = self.cfg_start().is_ok();
+        let current = self.ec_read(c.mode_reg)?;
         let wanted = if manual { current | (1 << bit) } else { current & !(1 << bit) };
-        self.ec_write(MODE_REG, wanted)?;
-        let read = self.ec_read(MODE_REG)?;
+        let written = self.ec_write(c.mode_reg, wanted);
+        if window {
+            if let Err(e) = self.cfg_finish() {
+                tracing::warn!(header = c.id, error = %e, "the fan-mode change did not close its configuration window cleanly");
+            }
+        }
+        written?;
+        let read = self.ec_read(c.mode_reg)?;
         if read != wanted {
-            return Err(io::Error::other(ChipError::Readback { reg: MODE_REG, wrote: wanted, read }.to_string()));
+            return Err(io::Error::other(ChipError::Readback { reg: c.mode_reg, wrote: wanted, read }.to_string()));
         }
         Ok(())
     }
@@ -401,7 +418,7 @@ impl<P: PortIo> FanChip for Nct6687<P> {
         let bit = c.mode_bit.ok_or_else(|| bad_channel(channel))?;
         let raw = ((u32::from(percent.min(100)) * 255 + 50) / 100) as u8;
         self.cfg_start()?;
-        let written = self.write_inside_cfg(reg, bit, raw);
+        let written = self.write_inside_cfg(c.mode_reg, reg, bit, raw);
         // The window is always closed, even when the write inside it failed.
         let finished = self.cfg_finish();
         written?;
