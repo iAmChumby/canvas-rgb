@@ -75,7 +75,7 @@ fn nct_indices_go_to_the_nct_chip_and_gpu_indices_to_the_gpu() {
     assert!(chip.read_duty_percent(11).is_err());
     assert_eq!(chip.map_name(), "msi_alt1");
     assert_eq!(chip.chip_name(), "NCT6687D-R @ 0xA20 + NVML 2 fans");
-    assert_eq!(chip.board_sensor_names().len(), 7);
+    assert_eq!(chip.board_sensor_names().len(), 4);
 }
 
 #[test]

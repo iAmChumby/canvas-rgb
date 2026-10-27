@@ -797,19 +797,142 @@ async fn the_readback_lists_the_devices() {
     assert!(body.get("devices").and_then(|v| v.as_array()).is_some());
 }
 
+/// The headers a browser sends with a WebSocket handshake.
+const UPGRADE_HEADERS: &str = "Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==";
+
+/// Starts the router on a loopback port and returns its address.
+async fn serve(router: axum::Router) -> std::net::SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("the port is free");
+    let addr = listener.local_addr().expect("the address");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    addr
+}
+
+/// Sends a raw HTTP request over a socket and returns the answer's status line.
+///
+/// The request names `127.0.0.1:9430` as its host, because that is the host the daemon's
+/// guard allows, whatever port the test server listens on.
+async fn raw_get(addr: std::net::SocketAddr, target: &str, extra: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(addr).await.expect("the socket opens");
+    let request = format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1:9430\r\n{extra}\r\n\r\n");
+    stream.write_all(request.as_bytes()).await.expect("the request is written");
+    let mut buf = vec![0u8; 512];
+    let n = stream.read(&mut buf).await.expect("the answer is read");
+    String::from_utf8_lossy(&buf[..n]).lines().next().unwrap_or("").to_string()
+}
+
+/// A WebSocket upgrade for the preview route. A browser cannot put a header on the handshake,
+/// so the token rides in the query string.
+fn preview_upgrade(query: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(format!("{}{}", routes::PREVIEW, query))
+        .header("host", "127.0.0.1:9430")
+        .header("connection", "Upgrade")
+        .header("upgrade", "websocket")
+        .header("sec-websocket-version", "13")
+        .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+        .body(Body::empty())
+        .expect("the request builds")
+}
+
 #[tokio::test]
-async fn the_preview_needs_a_token() {
+async fn the_preview_upgrade_with_only_a_query_token_passes_the_guard() {
     let (router, _app, _home) = build();
+    // No Authorization header: the browser cannot send one on a WebSocket handshake. The
+    // guard must let the handshake through, and the route checks the token in the query.
+    let response = router
+        .oneshot(preview_upgrade(&format!("?token={TOKEN}")))
+        .await
+        .expect("the router answers");
+    assert_ne!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "the guard must not refuse the preview handshake"
+    );
+    // The route accepted the token and reached the upgrade itself. A unit test has no
+    // hyper upgrade state, so the upgrade cannot happen here (426), but the answer is the
+    // route's, not the guard's refusal.
+    let body = json(response).await;
+    assert!(
+        body.get("error").is_none(),
+        "the answer is not the guard's refusal: {body}"
+    );
+}
+
+#[tokio::test]
+async fn the_preview_socket_opens_with_only_a_query_token() {
+    let (router, _app, _home) = build();
+    let addr = serve(router).await;
+    // The whole point of F1: a browser sends the token in the query and nothing else, and
+    // the socket opens.
+    let status = raw_get(addr, &format!("{}?token={TOKEN}", routes::PREVIEW), UPGRADE_HEADERS).await;
+    assert!(status.contains("101"), "the socket opened: {status}");
+}
+
+#[tokio::test]
+async fn the_preview_socket_without_a_token_is_refused() {
+    let (router, _app, _home) = build();
+    let addr = serve(router).await;
+    let status = raw_get(addr, routes::PREVIEW, UPGRADE_HEADERS).await;
+    assert!(status.contains("401"), "the handshake was refused: {status}");
+}
+
+#[tokio::test]
+async fn the_preview_socket_with_a_wrong_query_token_is_refused() {
+    let (router, _app, _home) = build();
+    let addr = serve(router).await;
+    let status = raw_get(addr, &format!("{}?token=not-the-token", routes::PREVIEW), UPGRADE_HEADERS).await;
+    assert!(status.contains("401"), "the handshake was refused: {status}");
+}
+
+#[tokio::test]
+async fn a_refused_request_from_the_tauri_origin_carries_the_cors_headers() {
+    let (router, _app, _home) = build();
+    // No token: the guard refuses it. A browser cannot read a 401 that comes back without
+    // the CORS headers, and the editor would say "the daemon did not answer".
     let response = router
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri(routes::PREVIEW)
+                .uri(routes::DEVICES)
                 .header("host", "127.0.0.1:9430")
+                .header("origin", "http://tauri.localhost")
                 .body(Body::empty())
                 .expect("the request builds"),
         )
         .await
         .expect("the router answers");
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        response.headers().get("access-control-allow-origin").map(|v| v.to_str().unwrap()),
+        Some("http://tauri.localhost"),
+        "the browser must be able to read the refusal"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_request_from_an_unknown_origin_carries_no_cors_headers() {
+    let (router, _app, _home) = build();
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(routes::DEVICES)
+                .header("host", "127.0.0.1:9430")
+                .header("origin", "https://evil.example")
+                .header("authorization", format!("Bearer {TOKEN}"))
+                .body(Body::empty())
+                .expect("the request builds"),
+        )
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(
+        !response.headers().contains_key("access-control-allow-origin"),
+        "an unknown origin gets no CORS headers"
+    );
 }

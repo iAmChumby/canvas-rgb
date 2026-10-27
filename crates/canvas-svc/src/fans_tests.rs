@@ -452,7 +452,9 @@ fn board_sensors_read_back_with_the_half_degree_bit() {
     let mut chip = Nct6687::detect(r.chip.clone(), MSI_ALT1_MAP).unwrap();
     assert_eq!(chip.read_board_temp("board_temp0").unwrap(), Some(42.5));
     assert_eq!(chip.read_board_temp("board_temp3").unwrap(), Some(31.0));
-    assert_eq!(chip.read_board_temp("board_temp6").unwrap(), Some(0.0));
+    // Only four board sensors exist on this chip: the ones behind them read 0.0 °C and are
+    // not reported, so the editor does not draw a temperature that is not there.
+    assert_eq!(chip.read_board_temp("board_temp4").unwrap(), None);
     assert_eq!(chip.read_board_temp("no_such_sensor").unwrap(), None);
 }
 

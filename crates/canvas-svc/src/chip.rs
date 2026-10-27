@@ -90,14 +90,17 @@ pub const STS_LOCK: u8 = 1 << 6;
 const CFG_POLLS: u32 = 1000;
 /// Board temperature registers: `0x100 + 2n` (integer), `+1` bit 7 = half degree.
 pub const TEMP_BASE_REG: u16 = 0x100;
-pub const BOARD_SENSORS: [&str; 7] = [
+
+/// LibreHardwareMonitor shows four board temperatures on this chip and they matched the
+/// readings exactly: CPU Core, System, VRM MOS and Chipset are `board_temp0..3`. The
+/// registers behind `board_temp4..6` are on the chip but no sensor is attached to them: they
+/// read 0.0 °C, which the editor would draw as a real temperature. The list stops at
+/// `board_temp3`. The ids `board_temp0..3` are kept as they are: a fan profile may name one.
+pub const BOARD_SENSORS: [&str; 4] = [
     "board_temp0",
     "board_temp1",
     "board_temp2",
     "board_temp3",
-    "board_temp4",
-    "board_temp5",
-    "board_temp6",
 ];
 
 /// Default mapping (nct6687d `reg_rpm`/`reg_pwm`/`reg_pwm_write` defaults). Fan 1 is the CPU
