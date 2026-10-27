@@ -6,7 +6,6 @@
  *
  * Colours are tokens only. The zone colour is `--zc`, set per zone from the device accents.
  */
-
 .desk.canvas {
   position: relative;
   width: 100%;
@@ -49,9 +48,24 @@
 .desk .zone[data-selected="true"] {
   border-color: var(--live);
   background: color-mix(in srgb, var(--zc) 24%, transparent);
-  outline: 2px solid var(--live);
-  outline-offset: 2px;
   z-index: 4;
+}
+
+/* The selection is a ring that fades in around the zone: picking a zone reads as a change, not
+   as a jump. The ring is a pseudo-element, so it never takes a click away from the zone. */
+.desk .zone::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border: 2px solid var(--live);
+  border-radius: 5px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+.desk .zone[data-selected="true"]::after {
+  opacity: 1;
 }
 
 .desk .zone[data-hidden="true"] {
@@ -95,6 +109,8 @@
 
 /* ---------- labels ---------- */
 
+/* A chip is a small tag with the device's colour on its left edge: the eye can pair it with the
+   zone's outline without reading it. */
 .desk .label {
   position: absolute;
   z-index: 6;
@@ -102,6 +118,7 @@
   height: 20px;
   line-height: 18px;
   border: 1px solid var(--line-2);
+  border-left: 3px solid var(--zc, var(--line-2));
   border-radius: 4px;
   background: var(--panel);
   color: var(--ink);
@@ -109,14 +126,19 @@
   font-size: var(--t14);
   white-space: nowrap;
   pointer-events: none;
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
 }
 
 .desk .label[data-selected="true"] {
   border-color: var(--live);
+  border-left-color: var(--zc, var(--live));
 }
 
 .desk .label[data-missing="true"] {
   border-color: var(--down);
+  border-left-color: var(--down);
   color: var(--down);
   opacity: 0.75;
 }
@@ -161,6 +183,19 @@
   background: var(--ink);
   cursor: nwse-resize;
   transform: translate(-50%, -50%);
+  animation: grip-in var(--dur-fast) var(--ease);
+}
+
+/* The handles come in with the selection: they are part of picking a zone, not a decoration. */
+@keyframes grip-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.7);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
 }
 
 .desk .grip:focus-visible {
@@ -176,6 +211,8 @@
 
 /* ---------- the alignment guides ---------- */
 
+/* The guides fade in and out: they are there while a zone is moving and gone the moment it
+   lands, and a line that blinks is worse than a line that eases. */
 .desk .guideV {
   position: absolute;
   top: 0;
@@ -184,7 +221,9 @@
   z-index: 7;
   background: var(--live);
   pointer-events: none;
-  display: none;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity var(--dur-fast) var(--ease);
 }
 
 .desk .guideH {
@@ -195,7 +234,9 @@
   z-index: 7;
   background: var(--live);
   pointer-events: none;
-  display: none;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity var(--dur-fast) var(--ease);
 }
 
 /* ---------- the drag readout ---------- */
@@ -213,13 +254,20 @@
   line-height: 1.4;
   white-space: nowrap;
   pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity var(--dur-fast) var(--ease);
 }
 
 /* ---------- the zoom controls ---------- */
 
+/* The zoom controls sit in the canvas's bottom-right corner, clear of the desk's top edge
+   where the zones usually start. They are the one thing that floats over the artwork, so the
+   chips are never placed under them: the chip placement treats the control and its tooltips as
+   obstacles. */
 .desk .controls {
   position: absolute;
-  top: var(--s2);
+  bottom: var(--s2);
   right: var(--s2);
   z-index: 9;
   display: flex;
@@ -241,61 +289,47 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* The zoom controls sit in the canvas's top-right corner. Their tooltips open upwards by
-   default, which put them outside the canvas, where they were cut in half: they open downwards
-   instead, into the canvas. (`.tip` and `.tip-bubble` are the editor's own classes, so they
-   have to be reached through :global in a module.) */
-.desk :global(.tip-bubble) {
-  bottom: auto;
-  top: calc(100% + 6px);
-}
-
-/* The last control's bubble would hang over the canvas's right edge. */
-.desk .controls :global(.tip):last-child :global(.tip-bubble) {
+/* The control's tooltips open to the left of their button, on the canvas: the canvas clips what
+   is outside it, so a tooltip that opened upwards was cut in half, and one that opened downwards
+   sat on top of the zones. (`.tip` and `.tip-bubble` are the editor's own classes, so they have
+   to be reached through :global in a module.) */
+.desk .controls :global(.tip-bubble) {
   left: auto;
-  right: 0;
-  transform: none;
+  right: calc(100% + 6px);
+  bottom: auto;
+  top: 50%;
+  transform: translateY(-50%);
 }
 
 /* ---------- the preview's state ---------- */
 
-/* The preview's state: a bar along the bottom of the canvas, not a sheet over the middle of
-   it. The zones stay visible and draggable while the preview is down. */
-
-.desk .stageEmpty {
-  position: absolute;
-  left: var(--s2);
-  right: var(--s2);
-  bottom: var(--s2);
-  z-index: 9;
-  display: flex;
-  justify-content: center;
-  pointer-events: none;
-}
-
-.desk .stageEmptyInner {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-  max-width: 46ch;
-  padding: var(--s2) var(--s3);
-  border: 1px solid var(--line-2);
-  border-radius: var(--r-md);
-  background: var(--panel);
-  color: var(--dim);
+/* The preview's state is said under the canvas, not over it: the canvas is the desk, and
+   nothing but the desk's own furniture belongs on top of it. */
+.note {
+  color: var(--mute);
   font-size: var(--t14);
-  line-height: 1.35;
-  text-align: center;
 }
 
-.desk .stageEmptyTitle {
-  color: var(--ink);
-  font-weight: 600;
-}
-
-.desk .stageEmptyError {
+.noteDown {
+  margin-top: 6px;
   color: var(--down);
-  font-family: var(--fm);
-  font-size: var(--t14);
+}
+
+/* ---------- the inspector ---------- */
+
+/* The inspector rises into place when a zone is picked: the panel is the same, the content is
+   new, and the reader should see that something changed. */
+@keyframes inspector-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, var(--rise), 0);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.inspector {
+  animation: inspector-in var(--dur) var(--ease);
 }

@@ -125,6 +125,13 @@ export function LayoutView() {
   const preview = usePreviewStatus();
   // While a zone is being dragged the inspector shows where it is, not where it was.
   const shownZone = liveZone && liveZone.index === selected ? liveZone.zone : selectedZone;
+  // What the preview is doing, said under the canvas rather than over it. A refused preview
+  // says why in the line below, so it does not say it twice.
+  const previewNote = useMemo(() => {
+    if (preview.state === "connecting") return "Connecting to the daemon's preview.";
+    if (preview.state === "idle") return "Waiting for the first frame from the daemon.";
+    return null;
+  }, [preview.state]);
 
   const patchDraft = (fn: (l: Layout) => Layout) => {
     setDraft((prev) => (prev ? fn(prev) : prev));
@@ -237,9 +244,13 @@ export function LayoutView() {
             dropPayloadType={DROP_TYPE}
           />
           <div className="stage-meta">
-            <span className="dropzone-hint">
-              Drag a zone to move it, its corner to resize, its top knob to rotate (Shift snaps to 15°). Arrow keys nudge.
-            </span>
+            {previewNote ? (
+              <span className={desk.note}>{previewNote}</span>
+            ) : (
+              <span className="dropzone-hint">
+                Drag to move, the corner to resize, the knob to rotate. Arrow keys nudge.
+              </span>
+            )}
             <span className="row-wrap" style={{ alignItems: "center", gap: "var(--s3)" }}>
               <StateDot tone={preview.state === "live" ? "ok" : preview.state === "refused" ? "down" : "work"}>
                 {preview.state === "live" ? `preview ${preview.fps.toFixed(1)} fps` : `preview ${preview.state}`}
@@ -250,9 +261,7 @@ export function LayoutView() {
             </span>
           </div>
           {preview.state === "refused" && preview.error && (
-            <p className="fig" style={{ color: "var(--down)", marginTop: 6 }}>
-              {preview.error}
-            </p>
+            <p className={`fig ${desk.noteDown}`}>{preview.error}</p>
           )}
 
           <Panel title="Render">
@@ -289,6 +298,7 @@ export function LayoutView() {
           <Panel title={selectedZone ? "Zone" : "Zones"}>
             {shownZone && selected !== null ? (
               <ZoneInspector
+                key={selected}
                 zone={shownZone}
                 name={
                   selectedInfo?.zone.name ??
@@ -390,7 +400,7 @@ function ZoneInspector({
   onRemove: () => void;
 }) {
   return (
-    <div className="stack" style={{ gap: 8 }}>
+    <div className={`stack ${desk.inspector}`} style={{ gap: 8 }}>
       <div className="row-title" style={{ justifyContent: "space-between" }}>
         <span className={missing ? "" : "one-line"}>{name}</span>
         <span className="fig mute">{missing ? "not connected" : `${ledCount} LEDs`}</span>
@@ -418,7 +428,7 @@ function ZoneInspector({
           <NumberField label="Height" value={zone.height} min={2} max={CANVAS_H} onCommit={(v) => onChange({ height: v })} />
         </Field>
       </div>
-      <Field label="Rotation">
+      <Field label="Rotation" hint="Shift while turning snaps to 15°">
         <NumberField
           label="Rotation"
           value={zone.rotation_deg}

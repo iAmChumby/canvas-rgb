@@ -14,9 +14,10 @@ import {
 } from "react";
 import { ArrowsOut, Minus, Plus } from "@phosphor-icons/react";
 import { IconButton } from "@/components/Button";
-import { onFrame, PREVIEW_H, PREVIEW_W, usePreviewStatus, type Frame } from "@/lib/preview";
+import { onFrame, PREVIEW_H, PREVIEW_W, type Frame } from "@/lib/preview";
 import { findZoneInfo, zoneCorners, zoneGripPoint, zoneLedOffsets, zoneTransform, type Point } from "@/lib/zones";
 import { clamp } from "@/lib/format";
+import { usePrefersReducedMotion } from "@/lib/motion";
 import { FIT_VIEW, forgetView, readView, writeView } from "@/lib/viewPrefs";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { PlacedZone } from "@/proto/PlacedZone";
@@ -33,12 +34,21 @@ const SNAP_PIXELS = 8;
 /** How far the rotation grip sits above the zone's top edge, in canvas units. */
 const GRIP_GAP = 7;
 /** How far a chip may sit from its own zone and still count as sitting at it, in css pixels. */
-const CHIP_GAP = 6;
+const CHIP_GAP = 10;
 /** The zoom range. 1 is the whole canvas in the stage. */
 const MIN_SCALE = 0.25;
 const MAX_SCALE = 8;
 /** How long the view waits before it is written back to React, in ms. */
 const VIEW_COMMIT_MS = 140;
+/** How long the view eases to a new zoom level or back to the fit view, in ms. */
+const ZOOM_MS = 180;
+/** The chrome around a chip's text: the padding, the hairline and the accent edge, in css pixels. */
+const CHIP_CHROME = 14;
+/**
+ * On a phone a chip may take at most this share of the canvas. A chip that fits keeps the LED
+ * count ("DRAM 8"), a chip that does not keeps the name alone ("JARGB 1").
+ */
+const NARROW_BUDGET = 0.25;
 
 type DragKind = "move" | "resize" | "rotate";
 interface Drag {
@@ -46,8 +56,8 @@ interface Drag {
   index: number;
   start: Point;
   orig: PlacedZone;
-  /** Where the zone's label chip was when the drag began. */
-  label: { x: number; y: number } | null;
+  /** Where the zone's label chip was when the drag began, as an offset from the zone's corner. */
+  label: { dx: number; dy: number } | null;
 }
 
 /** The view: how the 320 x 200 canvas is drawn into the stage. It never touches the layout. */
@@ -71,6 +81,8 @@ interface LabelBox {
   y: number;
   w: number;
   missing: boolean;
+  /** The device's accent, so the chip carries the same colour as the zone it names. */
+  accent: number;
 }
 
 /** The lines a zone offers to the guides: its two edges and its middle. */
@@ -141,6 +153,28 @@ function snapMove(
 function labelMetrics(scale: number): { h: number; font: number; char: number } {
   const font = clamp(Math.round(14 * scale), 14, 26);
   return { h: Math.round(font * 1.45), font, char: font * 0.6 };
+}
+
+/**
+ * The house easing, cubic-bezier(0.2, 0.8, 0.2, 1), as a function of time. The zoom eases with
+ * the same curve as every other move in the editor, so one number describes all of them.
+ */
+function houseEase(t: number): number {
+  const cx = 0.2;
+  const cy = 0.8;
+  const bx = 0.2;
+  const by = 1;
+  // The curve's x is monotonic, so a few bisections find the parameter for the wanted time.
+  let lo = 0;
+  let hi = 1;
+  let u = t;
+  for (let i = 0; i < 18; i++) {
+    u = (lo + hi) / 2;
+    const x = 3 * (1 - u) * (1 - u) * u * cx + 3 * (1 - u) * u * u * bx + u * u * u;
+    if (x < t) lo = u;
+    else hi = u;
+  }
+  return 3 * (1 - u) * (1 - u) * u * cy + 3 * (1 - u) * u * u * by + u * u * u;
 }
 
 export interface StageProps {
@@ -222,9 +256,11 @@ function boxDistance(a: Box, b: Box): number {
  * Places the label chips.
  *
  * A chip must sit against **its own** zone: above it, or inside it when there is no room above.
- * It may never cover another zone, or it reads as that zone's label. The chips are therefore
- * placed one at a time, each one taking the first place where it is inside the canvas and clear
- * of every other zone, and the ones that cannot be clear of each other are pushed down.
+ * It may never cover another zone, or it reads as that zone's label, and it may never sit under
+ * the zoom control or one of its tooltips, or it is a chip nobody can read. The chips are
+ * therefore placed one at a time, each one taking the first place where it is inside the canvas,
+ * clear of every other zone and clear of the controls, and the ones that cannot be clear of each
+ * other are pushed down.
  */
 function layoutLabels(
   zones: PlacedZone[],
@@ -232,9 +268,11 @@ function layoutLabels(
   stageW: number,
   stageH: number,
   view: View,
+  obstacles: Box[],
 ): LabelBox[] {
-  // On a phone the chip must not eat the canvas: the name only, and a short word for a zone
-  // whose device is gone. The zone list below spells both out.
+  // On a phone the chip must not eat the canvas: the name alone, and a short word for a zone
+  // whose device is gone. The zone list below spells both out. A chip that still fits in the
+  // phone's budget keeps the LED count as well, so "DRAM 8" stays "DRAM 8".
   const narrow = stageW < 480;
   const base = stageW / CANVAS_W;
   const k = base * view.scale;
@@ -247,20 +285,25 @@ function layoutLabels(
   const visY1 = Math.min(stageH, view.panY + stageH * view.scale);
 
   // The zones that are on screen, with their boxes in css pixels.
-  const items: { index: number; key: string; text: string; w: number; missing: boolean; box: Box }[] = [];
+  const items: {
+    index: number;
+    key: string;
+    text: string;
+    w: number;
+    missing: boolean;
+    accent: number;
+    box: Box;
+  }[] = [];
   zones.forEach((z, index) => {
     if (!z.visible) return;
     const info = findZoneInfo(devices, z.device_id, z.zone_index);
     // A zone is stale when the daemon does not drive its device: the device is not in the list
     // at all, or it is there and not connected.
     const stale = !info || !info.device.connected;
-    const text = info
-      ? narrow
-        ? info.zone.name
-        : `${info.zone.name} ${info.zone.led_count}`
-      : narrow
-        ? "not connected"
-        : "device not found";
+    const named = info ? info.zone.name : narrow ? "not connected" : "device not found";
+    const counted = info ? `${info.zone.name} ${info.zone.led_count}` : named;
+    const text =
+      info && narrow && counted.length * m.char + CHIP_CHROME > stageW * NARROW_BUDGET ? named : counted;
     const corners = zoneCorners(z);
     let minX = Infinity;
     let minY = Infinity;
@@ -279,24 +322,35 @@ function layoutLabels(
       h: (maxY - minY) * k,
     };
     if (box.x + box.w < visX0 || box.x > visX1 || box.y + box.h < visY0 || box.y > visY1) return;
-    items.push({ index, key: zoneKey(z), text, w: text.length * m.char + 12, missing: stale, box });
+    items.push({
+      index,
+      key: zoneKey(z),
+      text,
+      w: text.length * m.char + CHIP_CHROME,
+      missing: stale,
+      accent: accentOf(devices, z.device_id),
+      box,
+    });
   });
 
   const placed: LabelBox[] = [];
   for (const item of items) {
     const w = item.w;
     // The places a chip can go: above the zone, inside it, below it; each one either aligned
-    // with the zone's left edge or with its right edge.
+    // with the zone's left edge or with its right edge. When the zone is tall and narrow, the
+    // chip can also stand beside it.
     const xs = [item.box.x, item.box.x + item.box.w - w];
     const ys = [item.box.y - m.h - 4, item.box.y + 3, item.box.y + item.box.h + 4];
     const candidates: Box[] = [];
     for (const y of ys) {
       for (const x of xs) {
-        const base: Box = { x: clamp(x, 0, Math.max(0, stageW - w)), y, w, h: m.h };
-        // Chips that would sit on this place are stacked under it, so two chips never cover one
-        // another and each of them shows its whole label.
-        const stack = placed.filter((p) => overlaps(base, { x: p.x, y: p.y, w: p.w, h: m.h })).length;
-        candidates.push({ ...base, y: base.y + stack * (m.h + 2) });
+        candidates.push({ x: clamp(x, 0, Math.max(0, stageW - w)), y, w, h: m.h });
+      }
+    }
+    // Beside the zone: to its left or to its right, at the zone's head or at its foot.
+    for (const y of [item.box.y, item.box.y + item.box.h - m.h]) {
+      for (const x of [item.box.x - w - 4, item.box.x + item.box.w + 4]) {
+        candidates.push({ x: clamp(x, 0, Math.max(0, stageW - w)), y, w, h: m.h });
       }
     }
     const inCanvas = (b: Box) => b.y >= 0 && b.y + m.h <= stageH && b.x >= 0 && b.x + b.w <= stageW;
@@ -312,6 +366,9 @@ function layoutLabels(
       );
     // And it may not cover another chip: that chip's label would be cut in half.
     const chipClash = (b: Box) => placed.some((p) => overlaps(b, { x: p.x, y: p.y, w: p.w, h: m.h }));
+    // And it may not sit under the zoom control or one of its tooltips: that is where the
+    // pointer goes, and a chip under it is a chip nobody can read.
+    const controlClash = (b: Box) => obstacles.some((o) => overlaps(b, o));
     // And its own zone must be the nearest one: a chip that sits closer to another zone names
     // that one.
     const nearestIsOwn = (b: Box) => {
@@ -320,30 +377,94 @@ function layoutLabels(
       for (const o of others) best = Math.min(best, boxDistance(b, o.box));
       return boxDistance(b, item.box) <= best + 0.001;
     };
-    // Chips that share a place are stacked: the chip is pushed down until it is clear.
-    const stacked = (b: Box): Box => {
-      let out = b;
-      for (let i = 0; i < 5; i++) {
-        const hit = placed.find((p) => overlaps(out, { x: p.x, y: p.y, w: p.w, h: m.h }));
-        if (!hit) break;
-        out = { ...out, y: hit.y + m.h + 2 };
-      }
-      return out;
+    /**
+     * How good a place is. The rules are weighed in the order they matter: a chip that names
+     * its zone beats a chip that does not, a chip that does not cover another zone beats one
+     * that does, and a chip that nobody can see under the control is the worst of all.
+     */
+    const score = (b: Box): number => {
+      if (!inCanvas(b)) return -1000;
+      let s = 0;
+      s += anchored(b) ? 16 : -8;
+      // A chip that is printed on its zone reads better than one that floats next to it.
+      s += overlaps(b, item.box) ? 2 : 0;
+      s += !zoneClash(b) ? 8 : -4;
+      s += !chipClash(b) ? 4 : -2;
+      s += !controlClash(b) ? 2 : -8;
+      s += nearestIsOwn(b) ? 1 : 0;
+      return s;
     };
-    const tries = candidates.map(stacked);
-    let chosen =
-      tries.find(
-        (b) => inCanvas(b) && anchored(b) && !zoneClash(b) && !chipClash(b) && nearestIsOwn(b),
-      ) ??
-      tries.find((b) => inCanvas(b) && anchored(b) && !zoneClash(b)) ??
-      tries.find((b) => inCanvas(b) && anchored(b)) ??
-      null;
-    if (!chosen) {
-      // Nothing is clear of the other zones: take the place that is closest to its own zone.
-      const options = tries.map((b) => ({ b, d: boxDistance(b, item.box) }));
-      options.sort((a, b) => a.d - b.d);
-      chosen = options[0]?.b ?? { x: item.box.x, y: item.box.y, w, h: m.h };
+    /**
+     * Where a chip can go when another chip is in the way: to its side if there is room, above
+     * it or under it if there is not. Two chips side by side read better than two chips
+     * stacked, and a chip that moves sideways stays at its own zone.
+     */
+    const resolve = (start: Box): Box[] => {
+      const out: Box[] = [];
+      const queue: Box[] = [start];
+      const seen = new Set<string>();
+      while (queue.length > 0 && out.length < 8) {
+        const b = queue.shift() as Box;
+        const key = `${Math.round(b.x)},${Math.round(b.y)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const hit = placed.find((p) => overlaps(b, { x: p.x, y: p.y, w: p.w, h: m.h }));
+        if (!hit) {
+          out.push(b);
+          continue;
+        }
+        queue.push({ ...b, x: clamp(hit.x + hit.w + 2, 0, Math.max(0, stageW - w)) });
+        queue.push({ ...b, x: clamp(hit.x - w - 2, 0, Math.max(0, stageW - w)) });
+        queue.push({ ...b, y: hit.y + m.h + 2 });
+        queue.push({ ...b, y: Math.max(0, hit.y - m.h - 2) });
+      }
+      return out.length > 0 ? out : [start];
+    };
+    /**
+     * A chip that would cover a neighbouring zone slides up or down until it does not. A slide
+     * that keeps the chip at its own zone is the one that is taken: the zones on a desk sit
+     * close together, and a chip that is a few pixels off still names the right one.
+     */
+    const slide = (b: Box): Box => {
+      if (!zoneClash(b)) return b;
+      const free = (t: Box) => inCanvas(t) && !zoneClash(t) && !chipClash(t);
+      for (let d = 1; d <= 12; d++) {
+        for (const y of [b.y - d, b.y + d]) {
+          const t = { ...b, y };
+          if (free(t) && anchored(t)) return t;
+        }
+      }
+      for (let d = 1; d <= 12; d++) {
+        for (const y of [b.y - d, b.y + d]) {
+          const t = { ...b, y };
+          if (free(t)) return t;
+        }
+      }
+      return b;
+    };
+    const tries: Box[] = [];
+    const free: Box[] = [];
+    const moved: Box[] = [];
+    for (const c of candidates) {
+      const alt = resolve(c);
+      // A place that is already free is preferred over a place another chip had to be moved
+      // out of: the chip then sits where the zone says it should.
+      if (alt.length > 0 && alt[0] === c) free.push(c);
+      else moved.push(...alt);
     }
+    tries.push(...free, ...moved);
+    // The best place wins; the order of the candidates breaks a tie.
+    let best: Box | null = null;
+    let bestScore = -Infinity;
+    for (const b of tries) {
+      const pos = slide(b);
+      const s = score(pos);
+      if (s > bestScore) {
+        bestScore = s;
+        best = pos;
+      }
+    }
+    const chosen = best ?? { x: item.box.x, y: item.box.y, w, h: m.h };
     placed.push({
       key: item.key,
       index: item.index,
@@ -352,6 +473,7 @@ function layoutLabels(
       y: clamp(chosen.y, 0, Math.max(0, stageH - m.h)),
       w,
       missing: item.missing,
+      accent: item.accent,
     });
   }
   return placed;
@@ -395,15 +517,17 @@ export function PreviewStage({
   }>({ rotate: null, resize: null, stem: null });
   const guideEls = useRef<{ v: HTMLSpanElement | null; h: HTMLSpanElement | null }>({ v: null, h: null });
   const readoutRef = useRef<HTMLDivElement | null>(null);
+  const controlsRef = useRef<HTMLDivElement | null>(null);
+  const obstaclesRef = useRef<Box[]>([]);
   const paintQueued = useRef(false);
   const liveRaf = useRef<number | null>(null);
+  const zoomRaf = useRef<number | null>(null);
   const viewCommit = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [hasFrame, setHasFrame] = useState(false);
   const [hover, setHover] = useState<number | null>(null);
   const [view, setView] = useState<View>({ scale: 1, panX: 0, panY: 0 });
   const viewRef = useRef<View>(view);
   const [viewFor, setViewFor] = useState<string | null>(null);
-  const status = usePreviewStatus();
+  const reduced = usePrefersReducedMotion();
 
   // The view belongs to the layout: it is restored when the editor comes back to it. This runs
   // during render (React's pattern for state that follows a prop), so the canvas is never shown
@@ -504,12 +628,43 @@ export function PreviewStage({
     });
   }, [paintOverlay]);
 
+  /**
+   * The boxes a chip may not sit in: the zoom control and every tooltip it can open. The
+   * tooltip bubbles are in the DOM even while they are closed, so their boxes can be read
+   * without hovering anything.
+   */
+  const measureObstacles = useCallback((): Box[] => {
+    const stage = stageRef.current;
+    const controls = controlsRef.current;
+    if (!stage || !controls) return [];
+    const stageBox = stage.getBoundingClientRect();
+    const rel = (r: DOMRect): Box => ({
+      x: r.left - stageBox.left,
+      y: r.top - stageBox.top,
+      w: r.width,
+      h: r.height,
+    });
+    const out: Box[] = [rel(controls.getBoundingClientRect())];
+    for (const bubble of Array.from(controls.querySelectorAll(".tip-bubble"))) {
+      const r = bubble.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) out.push(rel(r));
+    }
+    return out;
+  }, []);
+
   /** Writes the label chips where they belong for a view. */
   const writeLabels = useCallback(
     (v: View) => {
       const stage = stageRef.current;
       if (!stage) return;
-      const boxes = layoutLabels(zones, devices, stage.clientWidth, stage.clientHeight, v);
+      const boxes = layoutLabels(
+        zones,
+        devices,
+        stage.clientWidth,
+        stage.clientHeight,
+        v,
+        obstaclesRef.current,
+      );
       for (const b of boxes) {
         const el = labelEls.current[b.index];
         if (!el) continue;
@@ -546,7 +701,6 @@ export function PreviewStage({
   useEffect(() => {
     const off = onFrame((frame) => {
       frameRef.current = frame;
-      setHasFrame(true);
       const pv = previewRef.current;
       const ctx = pv?.getContext("2d");
       if (ctx && frame.width === PREVIEW_W && frame.height === PREVIEW_H) {
@@ -670,7 +824,8 @@ export function PreviewStage({
       const gap = snap.gapX !== null && snap.gapY !== null ? Math.min(snap.gapX, snap.gapY) : (snap.gapX ?? snap.gapY);
       const where = gap === null ? "" : gap < 0.05 ? " · on the guide" : ` · ${gap.toFixed(1)} u to the guide`;
       el.textContent = `x ${x.toFixed(0)} · y ${y.toFixed(0)}${where}`;
-      el.style.display = "block";
+      el.style.opacity = "1";
+      el.style.visibility = "visible";
       el.style.left = `${clamp(e.clientX - box.left + 16, 4, Math.max(4, box.width - 190))}px`;
       el.style.top = `${clamp(e.clientY - box.top + 16, 4, Math.max(4, box.height - 40))}px`;
     },
@@ -684,18 +839,18 @@ export function PreviewStage({
     const base = (stageRef.current?.clientWidth ?? CANVAS_W) / CANVAS_W;
     const k = base * v.scale;
     if (els.v) {
-      if (snap.guideX === null) els.v.style.display = "none";
-      else {
-        els.v.style.display = "block";
-        els.v.style.left = `${(snap.guideX + v.panX) * k}px`;
-      }
+      const gx = snap.guideX;
+      const on = gx !== null;
+      els.v.style.opacity = on ? "1" : "0";
+      els.v.style.visibility = on ? "visible" : "hidden";
+      if (gx !== null) els.v.style.left = `${(gx + v.panX) * k}px`;
     }
     if (els.h) {
-      if (snap.guideY === null) els.h.style.display = "none";
-      else {
-        els.h.style.display = "block";
-        els.h.style.top = `${(snap.guideY + v.panY) * k}px`;
-      }
+      const gy = snap.guideY;
+      const on = gy !== null;
+      els.h.style.opacity = on ? "1" : "0";
+      els.h.style.visibility = on ? "visible" : "hidden";
+      if (gy !== null) els.h.style.top = `${(gy + v.panY) * k}px`;
     }
   }, []);
 
@@ -710,13 +865,26 @@ export function PreviewStage({
     const z = liveRef.current[index];
     if (!z) return;
     onSelect(index);
+    // The chip rides along with the zone it names, so the name never points at the place the
+    // zone used to be.
     const label = labelEls.current[index];
+    let offset: { dx: number; dy: number } | null = null;
+    if (label) {
+      const base = (stageRef.current?.clientWidth ?? CANVAS_W) / CANVAS_W;
+      const k = base * viewRef.current.scale;
+      const zx = (z.x + viewRef.current.panX) * k;
+      const zy = (z.y + viewRef.current.panY) * k;
+      offset = {
+        dx: (parseFloat(label.style.left) || 0) - zx,
+        dy: (parseFloat(label.style.top) || 0) - zy,
+      };
+    }
     dragRef.current = {
       kind,
       index,
       start: toLogical(e),
       orig: { ...z },
-      label: label ? { x: parseFloat(label.style.left) || 0, y: parseFloat(label.style.top) || 0 } : null,
+      label: offset,
     };
     const el = zoneEls.current[index];
     if (el) el.dataset.dragging = "true";
@@ -795,6 +963,16 @@ export function PreviewStage({
     liveRef.current[d.index] = next;
     applyGeom(d.index, next, viewRef.current);
     applyGrips(d.index);
+    // The chip rides along with the zone.
+    if (d.label) {
+      const el = labelEls.current[d.index];
+      if (el) {
+        const base = (stageRef.current?.clientWidth ?? CANVAS_W) / CANVAS_W;
+        const k = base * viewRef.current.scale;
+        el.style.left = `${(next.x + viewRef.current.panX) * k + d.label.dx}px`;
+        el.style.top = `${(next.y + viewRef.current.panY) * k + d.label.dy}px`;
+      }
+    }
     notifyLive(d.index);
     queuePaint();
   };
@@ -817,7 +995,10 @@ export function PreviewStage({
     if (el) delete el.dataset.dragging;
     onDraggingChange?.(false);
     applyGuides({ guideX: null, guideY: null });
-    if (readoutRef.current) readoutRef.current.style.display = "none";
+    if (readoutRef.current) {
+      readoutRef.current.style.opacity = "0";
+      readoutRef.current.style.visibility = "hidden";
+    }
     if (liveRaf.current !== null) {
       cancelAnimationFrame(liveRaf.current);
       liveRaf.current = null;
@@ -878,8 +1059,12 @@ export function PreviewStage({
   useLayoutEffect(() => {
     const stage = stageRef.current;
     if (!stage) return;
-    setLabelBoxes(layoutLabels(zones, devices, stage.clientWidth, stage.clientHeight, view));
-  }, [zones, devices, stageBox, view]);
+    const obstacles = measureObstacles();
+    obstaclesRef.current = obstacles;
+    setLabelBoxes(
+      layoutLabels(zones, devices, stage.clientWidth, stage.clientHeight, view, obstacles),
+    );
+  }, [zones, devices, stageBox, view, measureObstacles]);
 
   // The view is written back to React when the gesture settles, so the page keeps the zoom.
   const commitView = useCallback(
@@ -908,6 +1093,11 @@ export function PreviewStage({
     if (!stage) return;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
+      // A wheel gesture wins over an eased zoom that is still running.
+      if (zoomRaf.current !== null) {
+        cancelAnimationFrame(zoomRaf.current);
+        zoomRaf.current = null;
+      }
       const box = stage.getBoundingClientRect();
       const v = viewRef.current;
       const px = e.clientX - box.left;
@@ -926,6 +1116,61 @@ export function PreviewStage({
     return () => stage.removeEventListener("wheel", onWheel);
   }, [applyView, commitView]);
 
+  /**
+   * Eases the view to a new one, over ZOOM_MS, with the house curve.
+   *
+   * The wheel does not use this: a wheel gesture is direct manipulation, and easing it would
+   * put the canvas behind the pointer. The buttons and the fit control are a single, discrete
+   * action, so they move.
+   */
+  const animateTo = useCallback(
+    (target: View) => {
+      if (zoomRaf.current !== null) {
+        cancelAnimationFrame(zoomRaf.current);
+        zoomRaf.current = null;
+      }
+      const from = { ...viewRef.current };
+      // The reader asked for less motion, in the system or in the editor's own switch: the view
+      // lands at once.
+      const still =
+        reduced ||
+        (typeof document !== "undefined" &&
+          document.documentElement.getAttribute("data-motion") === "reduced");
+      if (still) {
+        applyView(target);
+        setView(target);
+        return;
+      }
+      const t0 = performance.now();
+      const step = () => {
+        const raw = Math.min(1, (performance.now() - t0) / ZOOM_MS);
+        const e = houseEase(raw);
+        const next: View = {
+          scale: from.scale + (target.scale - from.scale) * e,
+          panX: from.panX + (target.panX - from.panX) * e,
+          panY: from.panY + (target.panY - from.panY) * e,
+        };
+        applyView(next);
+        if (raw < 1) {
+          zoomRaf.current = requestAnimationFrame(step);
+        } else {
+          zoomRaf.current = null;
+          setView(target);
+        }
+      };
+      zoomRaf.current = requestAnimationFrame(step);
+    },
+    [applyView, reduced],
+  );
+
+  // An eased zoom that is still running when the canvas goes away must not keep painting.
+  useEffect(
+    () => () => {
+      if (zoomRaf.current !== null) cancelAnimationFrame(zoomRaf.current);
+    },
+    [],
+  );
+
   const zoomBy = (factor: number) => {
     const box = stageRef.current?.getBoundingClientRect();
     if (!box) return;
@@ -937,14 +1182,11 @@ export function PreviewStage({
     const lx = cx / (base * v.scale) - v.panX;
     const ly = cy / (base * v.scale) - v.panY;
     const next = clampView({ scale, panX: cx / (base * scale) - lx, panY: cy / (base * scale) - ly });
-    applyView(next);
-    setView(next);
+    animateTo(next);
   };
 
   const fit = () => {
-    const next: View = { ...FIT_VIEW };
-    applyView(next);
-    setView(next);
+    animateTo({ ...FIT_VIEW });
   };
 
   // A zone whose device the daemon does not drive is stale: it is drawn dimmed and dashed, and
@@ -961,15 +1203,6 @@ export function PreviewStage({
 
   const selectedZone = selected !== null ? zones[selected] : undefined;
   const grips = selectedZone ? gripGeometry(selectedZone) : null;
-
-  const previewMessage = useMemo(() => {
-    if (hasFrame) return null;
-    if (status.state === "refused") {
-      return { title: "The live preview is not connected", detail: status.error ?? null };
-    }
-    if (status.state === "connecting") return { title: "Connecting to the daemon's preview", detail: null };
-    return { title: "Waiting for the first frame from the daemon", detail: null };
-  }, [hasFrame, status.state, status.error]);
 
   const base = (stageBox.w || CANVAS_W) / CANVAS_W;
   const k = base * view.scale;
@@ -1008,7 +1241,7 @@ export function PreviewStage({
         className={desk.readout}
         data-readout="true"
         aria-hidden="true"
-        style={{ display: "none" }}
+        style={{ opacity: 0, visibility: "hidden" }}
       />
 
       <span
@@ -1087,7 +1320,12 @@ export function PreviewStage({
               height: `${metrics.h}px`,
               lineHeight: `${metrics.h - 2}px`,
               fontSize: `${metrics.font}px`,
-            }}
+              // The chip carries the colour of the device it names, so the eye can pair it with
+              // the zone's outline without reading it.
+              "--zc": b.missing
+                ? "var(--down)"
+                : `var(${ACCENTS[b.accent] ?? "--a1"})`,
+            } as CSSProperties}
           >
             {b.text}
           </div>
@@ -1147,6 +1385,7 @@ export function PreviewStage({
       )}
 
       <div
+        ref={controlsRef}
         className={desk.controls}
         onPointerDown={(e) => e.stopPropagation()}
         onWheel={(e) => e.stopPropagation()}
@@ -1156,14 +1395,6 @@ export function PreviewStage({
         <IconButton label="Zoom in" icon={<Plus size={13} />} size="sm" onClick={() => zoomBy(1.3)} />
         <IconButton label="Fit the canvas" icon={<ArrowsOut size={13} />} size="sm" onClick={fit} />
       </div>
-
-      {previewMessage && (
-        <div className={desk.stageEmpty} data-stage-message="true">
-          <div className={desk.stageEmptyInner}>
-            <span className={desk.stageEmptyTitle}>{previewMessage.title}</span>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
