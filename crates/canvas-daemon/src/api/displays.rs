@@ -1,6 +1,10 @@
 //! The numeric display routes. A config is validated FIRST, saved to `displays.json`, and then the
 //! display task starts writing it. A DELETE removes the config, stops the writes and closes the
 //! device. A display with no saved config is never opened (see `crate::displays`).
+//!
+//! `GET /displays` also lists the displays the adapter finds that have no saved config, with a
+//! default config, so the editor can set them up. Listing one is not driving it: it is still
+//! never opened or written.
 
 use axum::extract::{Path, State};
 use axum::Json;
@@ -10,7 +14,7 @@ use canvas_proto::display::{DisplayConfig, DisplayInfo, DisplaySource};
 use std::sync::Arc;
 
 use crate::api::{ApiFailure, ApiResult};
-use crate::displays::{save, validate, DisplaysFile};
+use crate::displays::{default_config, save, validate, DisplaysFile};
 use crate::state::App;
 
 /// What a configured display that the enumeration has not found reports.
@@ -25,22 +29,39 @@ fn not_found_info(config: &DisplayConfig) -> DisplayInfo {
     }
 }
 
-/// `GET /api/v1/displays`. Every saved config, with what the display shows now.
+/// `GET /api/v1/displays`. Every saved config, with what the display shows now, and every display
+/// the adapter finds that has no saved config, with a default config.
+///
+/// The enumeration runs on demand and is cached for a few seconds (`crate::displays`), so a page
+/// that polls does not enumerate on every request. It opens nothing: a display with no saved
+/// config is listed, never driven.
 pub async fn list_displays(State(app): State<Arc<App>>) -> Json<Vec<DisplayStatus>> {
     let configs = app.store.read().await.displays.displays.clone();
+    let found = app.displays.discover().await;
     let runtime = app.displays.runtime.read().await;
-    let list = configs
-        .into_iter()
-        .map(|config| {
-            let info = match runtime.found.iter().find(|f| f.id == config.device) {
-                Some(found) => DisplayInfo { connected: runtime.connected, ..found.clone() },
-                None => not_found_info(&config),
-            };
-            // A blank is reported as `shown: None`, not as a value with no number.
-            let shown = runtime.shown.get(&config.device).filter(|v| v.value.is_some()).copied();
-            DisplayStatus { info, config, shown }
-        })
-        .collect();
+    let mut list: Vec<DisplayStatus> = Vec::with_capacity(configs.len() + found.len());
+    for config in configs.iter() {
+        // The fresh enumeration first, the task's own second: both are the same adapter.
+        let info = found
+            .iter()
+            .chain(runtime.found.iter())
+            .find(|f| f.id == config.device)
+            .map(|f| DisplayInfo { connected: runtime.connected, ..f.clone() })
+            .unwrap_or_else(|| not_found_info(config));
+        // A blank is reported as `shown: None`, not as a value with no number.
+        let shown = runtime.shown.get(&config.device).filter(|v| v.value.is_some()).copied();
+        list.push(DisplayStatus { info, config: config.clone(), shown });
+    }
+    // The displays that are here but have no saved config: listed with a default config, so the
+    // editor can save one. They are never opened or written (the task drives a display only
+    // while it has a saved config).
+    for info in found.iter().filter(|i| !configs.iter().any(|c| c.device == i.id)) {
+        list.push(DisplayStatus {
+            info: DisplayInfo { connected: false, ..info.clone() },
+            config: default_config(info.id.clone()),
+            shown: None,
+        });
+    }
     Json(list)
 }
 

@@ -5,6 +5,10 @@
 //! The adapter enumerates with `discover`, which never opens a device. The task connects to and
 //! writes only a display that has a config, because the vendor app may own the others.
 //!
+//! The routes enumerate too, on demand and cached for a few seconds, so a display that has never
+//! been configured is listed (with a default config) and can be set up from the editor. That
+//! enumeration opens nothing either: a display with no saved config is listed, never driven.
+//!
 //! The task never opens the device while the vendor app (`ZEUS CAST.exe`) is running: both would
 //! write the same display. It checks again on each poll and says why once.
 //!
@@ -44,6 +48,9 @@ pub const IDLE_POLL: Duration = Duration::from_secs(60);
 pub const VENDOR_POLL: Duration = Duration::from_secs(5);
 /// The vendor app's executable, matched without regard to case.
 pub const VENDOR_EXE: &str = "ZEUS CAST.exe";
+/// The enumeration the routes report is cached this long, so a page that polls does not
+/// enumerate on every request.
+pub const DISCOVERY_CACHE: Duration = Duration::from_secs(5);
 /// Used when an adapter reports a zero write interval.
 const FALLBACK_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -71,7 +78,10 @@ pub fn save(home: &Path, file: &DisplaysFile) -> std::io::Result<()> {
 pub struct DisplayHub {
     /// Held for every enumerate, connect, write and disconnect. A DELETE that waits for this
     /// lock cannot race a write: once it holds the lock, no write is in flight.
-    pub adapter: tokio::sync::Mutex<Box<dyn NumericDisplayAdapter>>,
+    ///
+    /// It is an `Arc` so the routes can hand the adapter to the blocking pool for an enumeration
+    /// without giving up the lock the task holds.
+    pub adapter: Arc<tokio::sync::Mutex<Box<dyn NumericDisplayAdapter>>>,
     /// What the task and the routes share.
     pub runtime: tokio::sync::RwLock<Runtime>,
     /// Bumped by every config change. The task drops its retry pacing when this moves.
@@ -80,6 +90,23 @@ pub struct DisplayHub {
     vendor_running: std::sync::Mutex<VendorCheck>,
     /// Wakes the task after a config change.
     pub wake: tokio::sync::Notify,
+    /// The last enumeration the routes asked for, and when it was taken.
+    discovery: tokio::sync::Mutex<Option<Discovery>>,
+}
+
+/// One enumeration and the moment it was taken.
+struct Discovery {
+    at: Instant,
+    found: Vec<DisplayInfo>,
+}
+
+/// Why an enumeration did not give a fresh list.
+enum Enumerate {
+    /// The adapter is held by the task: it is writing. The route does not wait for a write in
+    /// flight, so the last result is reported instead.
+    Busy,
+    /// The adapter could not enumerate.
+    Failed(AdapterError),
 }
 
 /// Answers "is the vendor app running?". It may block (a process snapshot), so the task runs it
@@ -114,11 +141,12 @@ pub struct Runtime {
 impl DisplayHub {
     pub fn new(adapter: Box<dyn NumericDisplayAdapter>) -> Self {
         Self {
-            adapter: tokio::sync::Mutex::new(adapter),
+            adapter: Arc::new(tokio::sync::Mutex::new(adapter)),
             runtime: tokio::sync::RwLock::new(Runtime::default()),
             generation: AtomicU64::new(0),
             vendor_running: std::sync::Mutex::new(Arc::new(vendor_app_running)),
             wake: tokio::sync::Notify::new(),
+            discovery: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -139,6 +167,61 @@ impl DisplayHub {
 
     fn generation(&self) -> u64 {
         self.generation.load(Ordering::SeqCst)
+    }
+
+    /// The displays the adapter finds now, cached for [`DISCOVERY_CACHE`].
+    ///
+    /// This is how a display that has never been configured shows up: the routes list it with a
+    /// default config, so the editor can set it up. The enumeration never opens a device (the
+    /// CHIONE's `discover` reads the HID metadata and does no I/O), so a listed display is not
+    /// driven: only a display with a saved config is opened and written.
+    ///
+    /// The result is cached for a few seconds, so a page that polls does not enumerate on every
+    /// request. While the task holds the adapter (it is writing) the enumeration is skipped and
+    /// the last result is reported: the route does not wait for a write in flight.
+    pub async fn discover(&self) -> Vec<DisplayInfo> {
+        let mut cache = self.discovery.lock().await;
+        if let Some(cached) = cache.as_ref() {
+            if cached.at.elapsed() < DISCOVERY_CACHE {
+                return cached.found.clone();
+            }
+        }
+        match self.enumerate().await {
+            Ok(found) => {
+                *cache = Some(Discovery { at: Instant::now(), found: found.clone() });
+                found
+            }
+            Err(Enumerate::Busy) => {
+                tracing::debug!("the display adapter is busy; the last enumeration is reported");
+                cache.as_ref().map(|c| c.found.clone()).unwrap_or_default()
+            }
+            Err(Enumerate::Failed(error)) => {
+                tracing::warn!(error = %error, "could not enumerate the displays");
+                cache.as_ref().map(|c| c.found.clone()).unwrap_or_default()
+            }
+        }
+    }
+
+    /// Runs the adapter's enumeration on the blocking pool.
+    ///
+    /// The enumeration reads the metadata of every HID device on the machine, so it runs off the
+    /// runtime: the routes keep answering while it does. The adapter is not waited for either:
+    /// while the task is writing it, the enumeration is skipped (see [`Enumerate::Busy`]).
+    async fn enumerate(&self) -> Result<Vec<DisplayInfo>, Enumerate> {
+        let adapter = self.adapter.clone();
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            // No runtime to hand the work to: enumerate here.
+            let mut guard = self.adapter.lock().await;
+            return guard.discover().await.map_err(Enumerate::Failed);
+        };
+        tokio::task::spawn_blocking(move || {
+            let Ok(mut guard) = adapter.try_lock() else {
+                return Err(Enumerate::Busy);
+            };
+            handle.block_on(async { guard.discover().await }).map_err(Enumerate::Failed)
+        })
+        .await
+        .map_err(|error| Enumerate::Failed(AdapterError::Io(std::io::Error::other(error.to_string()))))?
     }
 }
 
@@ -266,6 +349,19 @@ pub fn display_value(config: &DisplayConfig, inputs: &Inputs<'_>) -> DisplayValu
         _ => false,
     };
     DisplayValue { value: shown, decimals: config.decimals, unit: config.unit, mode, blink }
+}
+
+/// The config a display with no saved config is listed with: the CPU temperature in Celsius with
+/// one decimal and no blink. It is not saved: the editor saves it when the user asks for it, and
+/// until then the display is listed but never driven.
+pub fn default_config(device: DeviceId) -> DisplayConfig {
+    DisplayConfig {
+        device,
+        source: DisplaySource::CpuTemp,
+        unit: DisplayUnit::Celsius,
+        decimals: 1,
+        blink_above: None,
+    }
 }
 
 /// Checks a config PUT to `/displays/{path_id}` before it is saved.

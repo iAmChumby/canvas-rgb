@@ -1258,7 +1258,12 @@ async fn delete_stops_the_writes_and_closes_the_device() {
         assert!(!log.connected);
     }
     let status = json(router.clone().oneshot(request("GET", routes::DISPLAYS)).await.unwrap()).await;
-    assert_eq!(status, serde_json::json!([]), "the config is gone");
+    // The config is gone, so the display is listed again with the default config: it is there,
+    // but it is not driven.
+    assert_eq!(status.as_array().map(Vec::len), Some(1), "the display is listed again");
+    assert_eq!(status[0]["config"]["source"]["kind"], serde_json::json!("cpu_temp"));
+    assert_eq!(status[0]["shown"], serde_json::json!(null));
+    assert_eq!(status[0]["info"]["connected"], serde_json::json!(false));
 
     let wait = pass(&app, now + Duration::from_millis(250)).await;
     assert_eq!(wait, displays::IDLE_POLL, "nothing to drive");
@@ -1316,6 +1321,79 @@ async fn a_value_for_a_display_not_on_the_api_source_is_a_422() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(json(response).await["error"], "validation");
+}
+
+// ---------------------------------------------------------------- an unconfigured display is listed
+
+#[tokio::test]
+async fn an_unconfigured_display_is_listed_but_never_opened() {
+    let (router, app, _home, log) = build_with_display(true);
+    let status = json(router.clone().oneshot(request("GET", routes::DISPLAYS)).await.unwrap()).await;
+    assert_eq!(status.as_array().map(Vec::len), Some(1), "the display is listed");
+    assert_eq!(status[0]["info"]["id"], serde_json::json!(ID));
+    assert_eq!(status[0]["info"]["name"], serde_json::json!("GAMDIAS CHIONE Digital Display"));
+    assert_eq!(status[0]["info"]["digits"], serde_json::json!(4));
+    assert_eq!(status[0]["info"]["connected"], serde_json::json!(false), "it is never opened");
+    // The default config: CPU temperature, Celsius, one decimal, no blink.
+    assert_eq!(status[0]["config"]["device"], serde_json::json!(ID));
+    assert_eq!(status[0]["config"]["source"]["kind"], serde_json::json!("cpu_temp"));
+    assert_eq!(status[0]["config"]["unit"], serde_json::json!("celsius"));
+    assert_eq!(status[0]["config"]["decimals"], serde_json::json!(1));
+    assert_eq!(status[0]["config"]["blink_above"], serde_json::json!(null));
+    assert_eq!(status[0]["shown"], serde_json::json!(null), "nothing is shown yet");
+
+    // The task does not drive it: with no saved config nothing is opened or written.
+    let mut now = Instant::now();
+    for _ in 0..3 {
+        now += pass(&app, now).await;
+    }
+    let log = log.lock().unwrap();
+    assert_eq!(log.connects, 0, "a display with no saved config is never connected");
+    assert!(log.writes.is_empty(), "and never written");
+}
+
+#[tokio::test]
+async fn the_enumeration_is_cached_so_a_polling_page_does_not_enumerate_again() {
+    let (router, _app, _home, log) = build_with_display(true);
+    for _ in 0..3 {
+        let status = json(router.clone().oneshot(request("GET", routes::DISPLAYS)).await.unwrap()).await;
+        assert_eq!(status.as_array().map(Vec::len), Some(1), "the display is listed every time");
+    }
+    assert_eq!(log.lock().unwrap().discovers, 1, "the enumeration is cached");
+}
+
+#[tokio::test]
+async fn configuring_a_listed_display_drives_it_and_deleting_it_lists_it_again() {
+    let (router, app, _home, log) = build_with_display(true);
+    let listed = json(router.clone().oneshot(request("GET", routes::DISPLAYS)).await.unwrap()).await;
+    assert_eq!(listed[0]["config"]["source"]["kind"], serde_json::json!("cpu_temp"), "the default config");
+
+    // Saving a config makes the task drive it.
+    let saved = config(DisplaySource::Fixed { value: 5.0 }, DisplayUnit::Celsius, 0, None);
+    assert_eq!(put_config(&router, &saved).await.status(), StatusCode::OK);
+    let now = Instant::now();
+    pass(&app, now).await;
+    {
+        let log = log.lock().unwrap();
+        assert_eq!(log.connects, 1, "the display is opened once it has a config");
+        assert_eq!(log.writes.len(), 1);
+    }
+    let status = json(router.clone().oneshot(request("GET", routes::DISPLAYS)).await.unwrap()).await;
+    assert_eq!(status.as_array().map(Vec::len), Some(1), "listed once, not twice");
+    assert_eq!(status[0]["config"]["source"]["kind"], serde_json::json!("fixed"), "the saved config, not the default");
+    assert_eq!(status[0]["info"]["connected"], serde_json::json!(true));
+
+    // Deleting it: listed again with the default config, and no longer driven.
+    assert_eq!(router.clone().oneshot(request("DELETE", &display_path())).await.unwrap().status(), StatusCode::OK);
+    let status = json(router.clone().oneshot(request("GET", routes::DISPLAYS)).await.unwrap()).await;
+    assert_eq!(status.as_array().map(Vec::len), Some(1), "listed again");
+    assert_eq!(status[0]["config"]["source"]["kind"], serde_json::json!("cpu_temp"), "back to the default config");
+    assert_eq!(status[0]["shown"], serde_json::json!(null));
+    assert_eq!(status[0]["info"]["connected"], serde_json::json!(false), "and not connected");
+    pass(&app, now + Duration::from_millis(250)).await;
+    let log = log.lock().unwrap();
+    assert_eq!(log.writes.len(), 1, "no write after the delete");
+    assert_eq!(log.connects, 1, "and no reconnect");
 }
 
 // ---------------------------------------------------------------- F3, F5, F6
