@@ -979,6 +979,8 @@ fn build_with_display(found: bool) -> (axum::Router, Arc<App>, TempHome, Arc<Std
         tx,
         Box::new(FakeDisplay(log.clone())),
     ));
+    // The tests never look at the real machine: ZEUS CAST really runs on it.
+    app.displays.set_vendor_check(Arc::new(|| false));
     (api::router(app.clone()), app, home, log)
 }
 
@@ -1101,12 +1103,16 @@ async fn fahrenheit_is_rounded_and_blinks_at_blink_above() {
 }
 
 #[tokio::test]
-async fn the_api_source_shows_the_put_value_and_blank_until_then() {
+async fn the_api_source_writes_nothing_until_a_value_arrives_and_holds_it_after_null() {
     let (router, app, _home, log) = build_with_display(true);
     put_config(&router, &config(DisplaySource::Api, DisplayUnit::Celsius, 1, None)).await;
     let mut now = Instant::now();
     now += pass(&app, now).await;
-    assert_eq!(log.lock().unwrap().writes.last().unwrap().1.value, None, "blank before any value");
+    {
+        let log = log.lock().unwrap();
+        assert_eq!(log.connects, 1, "the display is connected");
+        assert!(log.writes.is_empty(), "no value yet, so no packet at all, blank or otherwise");
+    }
 
     let set = |v: serde_json::Value| router.clone().oneshot(request_with_body("PUT", &value_path(), &v.to_string()));
     assert_eq!(set(serde_json::json!({ "value": 12.5 })).await.unwrap().status(), StatusCode::OK);
@@ -1117,12 +1123,14 @@ async fn the_api_source_shows_the_put_value_and_blank_until_then() {
     assert_eq!(status[0]["shown"]["value"], serde_json::json!(12.5));
     assert_eq!(status[0]["info"]["connected"], serde_json::json!(true));
 
+    // null is "no value": nothing is written and the display holds 12.5
     assert_eq!(set(serde_json::json!({ "value": null })).await.unwrap().status(), StatusCode::OK);
     now += Duration::from_millis(250);
     pass(&app, now).await;
-    assert_eq!(log.lock().unwrap().writes.last().unwrap().1.value, None, "null blanks it");
-    let status = json(router.clone().oneshot(request("GET", routes::DISPLAYS)).await.unwrap()).await;
-    assert!(status[0]["shown"].is_null(), "a blank reports shown: null");
+    pass(&app, now + Duration::from_millis(250)).await;
+    let log = log.lock().unwrap();
+    assert_eq!(log.writes.len(), 1, "null writes no blank packet");
+    assert!(log.writes.iter().all(|(_, v)| v.value.is_some()));
 }
 
 #[tokio::test]
@@ -1139,23 +1147,25 @@ async fn a_value_for_an_unknown_display_is_a_404() {
 }
 
 #[tokio::test]
-async fn a_value_the_display_refuses_shows_blank_and_is_logged_once() {
+async fn a_value_the_display_refuses_writes_nothing_and_is_logged_once() {
     let (router, app, _home, log) = build_with_display(true);
     log.lock().unwrap().refuse_at = Some(1000.0);
-    put_config(&router, &config(DisplaySource::Fixed { value: 1234.0 }, DisplayUnit::Celsius, 0, None)).await;
+    put_config(&router, &config(DisplaySource::Fixed { value: 1234.0 }, DisplayUnit::Celsius, 0, Some(10.0))).await;
     let mut now = Instant::now();
     for _ in 0..3 {
         now += pass(&app, now).await;
-        now += Duration::from_millis(250);
     }
     {
         let log = log.lock().unwrap();
-        assert!(log.writes.iter().all(|(_, v)| v.value.is_none()), "every pass writes blank");
-        assert_eq!(log.writes.len(), 3);
+        assert!(log.writes.is_empty(), "a refusal writes nothing, not even a blank");
         assert_eq!(log.connects, 1, "a refusal keeps the connection");
         assert_eq!(log.disconnects, 0);
     }
-    assert_eq!(app.displays.runtime.read().await.refusal_warnings, 1, "the refusal is logged once");
+    {
+        let runtime = app.displays.runtime.read().await;
+        assert_eq!(runtime.refusal_warnings, 1, "the refusal is logged once");
+        assert!(runtime.shown.is_empty(), "the refused value, and its blink flag, are not recorded");
+    }
 
     // A value that fits clears the streak, so the next refusal is logged again.
     put_config(&router, &config(DisplaySource::Fixed { value: 500.0 }, DisplayUnit::Celsius, 0, None)).await;
@@ -1164,15 +1174,23 @@ async fn a_value_the_display_refuses_shows_blank_and_is_logged_once() {
     put_config(&router, &config(DisplaySource::Fixed { value: 1234.0 }, DisplayUnit::Celsius, 0, None)).await;
     pass(&app, now + Duration::from_millis(500)).await;
     assert_eq!(app.displays.runtime.read().await.refusal_warnings, 2);
+    assert_eq!(log.lock().unwrap().writes.len(), 1, "still only the accepted 500");
 }
 
 #[tokio::test]
-async fn a_missing_sensor_reading_shows_blank() {
+async fn a_missing_sensor_reading_writes_nothing() {
     let (router, app, _home, log) = build_with_display(true);
     put_config(&router, &config(DisplaySource::CpuTemp, DisplayUnit::Celsius, 1, None)).await;
     // No fan status yet (the service is down): the CPU reading is missing.
     pass(&app, Instant::now()).await;
-    assert_eq!(log.lock().unwrap().writes[0].1.value, None);
+    assert!(log.lock().unwrap().writes.is_empty(), "no reading, no packet");
+    assert_eq!(log.lock().unwrap().connects, 1);
+    // A reading arrives and is written; it then goes missing again and the display is left alone.
+    *app.fans.write().await = Some(fans(vec![(TempSource::Cpu, 40.0)], vec![]));
+    pass(&app, Instant::now()).await;
+    *app.fans.write().await = Some(fans(vec![], vec![]));
+    pass(&app, Instant::now()).await;
+    assert_eq!(log.lock().unwrap().writes.len(), 1);
 }
 
 #[tokio::test]
@@ -1298,4 +1316,213 @@ async fn a_value_for_a_display_not_on_the_api_source_is_a_422() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(json(response).await["error"], "validation");
+}
+
+// ---------------------------------------------------------------- F3, F5, F6
+
+/// A display whose write waits for the test, to prove the routes answer while the device is busy.
+struct SlowDisplay {
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    connected: bool,
+}
+
+#[async_trait::async_trait]
+impl canvas_proto::traits::NumericDisplayAdapter for SlowDisplay {
+    fn name(&self) -> &'static str {
+        "slow-display"
+    }
+    async fn connect(&mut self) -> Result<(), canvas_proto::traits::AdapterError> {
+        self.connected = true;
+        Ok(())
+    }
+    async fn disconnect(&mut self) -> Result<(), canvas_proto::traits::AdapterError> {
+        self.connected = false;
+        Ok(())
+    }
+    fn is_connected(&self) -> bool {
+        self.connected
+    }
+    async fn discover(&mut self) -> Result<Vec<canvas_proto::display::DisplayInfo>, canvas_proto::traits::AdapterError> {
+        Ok(vec![chione_info()])
+    }
+    async fn write_value(
+        &mut self,
+        _device: &DeviceId,
+        _value: &canvas_proto::display::DisplayValue,
+    ) -> Result<(), canvas_proto::traits::AdapterError> {
+        self.started.notify_one();
+        self.release.notified().await;
+        Ok(())
+    }
+    fn write_interval_ms(&self) -> u32 {
+        250
+    }
+}
+
+#[tokio::test]
+async fn the_routes_answer_while_a_write_is_in_flight() {
+    let home = TempHome::new();
+    let store = canvas_daemon::storage::Store::at(&home.path);
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let app = Arc::new(App::with_displays(
+        store,
+        Arc::new(FakeEngine::default()),
+        Box::new(FakeAdapter::default()),
+        TOKEN.to_string(),
+        "0.1.0-test".to_string(),
+        tx,
+        Box::new(SlowDisplay { started: started.clone(), release: release.clone(), connected: false }),
+    ));
+    app.displays.set_vendor_check(Arc::new(|| false));
+    let router = api::router(app.clone());
+    put_config(&router, &config(DisplaySource::Fixed { value: 5.0 }, DisplayUnit::Celsius, 0, None)).await;
+
+    let task = {
+        let app = app.clone();
+        tokio::spawn(async move { displays::tick(&app, Instant::now()).await })
+    };
+    started.notified().await; // the tick is inside write_value, holding the adapter
+
+    let wait = Duration::from_secs(2);
+    let get = tokio::time::timeout(wait, router.clone().oneshot(request("GET", routes::DISPLAYS)))
+        .await
+        .expect("GET /displays answers while the device is busy")
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    let put = tokio::time::timeout(
+        wait,
+        router.clone().oneshot(request_with_body("PUT", &value_path(), r#"{"value": 1.0}"#)),
+    )
+    .await
+    .expect("PUT /value answers while the device is busy")
+    .unwrap();
+    // 422: the saved source is Fixed, not Api. The point is that the route answered at all.
+    assert_eq!(put.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    release.notify_one();
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn the_display_is_not_opened_while_the_vendor_app_runs() {
+    let (router, app, _home, log) = build_with_display(true);
+    let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let checks = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    {
+        let (running, checks) = (running.clone(), checks.clone());
+        app.displays.set_vendor_check(Arc::new(move || {
+            checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            running.load(std::sync::atomic::Ordering::SeqCst)
+        }));
+    }
+    put_config(&router, &config(DisplaySource::Fixed { value: 5.0 }, DisplayUnit::Celsius, 0, None)).await;
+
+    let t0 = Instant::now();
+    assert_eq!(pass(&app, t0).await, displays::VENDOR_POLL);
+    assert_eq!(log.lock().unwrap().connects, 0, "ZEUS CAST is running: nothing is opened");
+    assert!(log.lock().unwrap().writes.is_empty());
+    let status = json(router.clone().oneshot(request("GET", routes::DISPLAYS)).await.unwrap()).await;
+    assert_eq!(status[0]["info"]["connected"], serde_json::json!(false), "reported as not connected");
+    assert!(app.displays.runtime.read().await.vendor_blocked);
+
+    // Still running at the next poll: still closed, still one check per poll.
+    assert_eq!(pass(&app, t0 + displays::VENDOR_POLL).await, displays::VENDOR_POLL);
+    assert_eq!(log.lock().unwrap().connects, 0);
+    assert_eq!(checks.load(std::sync::atomic::Ordering::SeqCst), 2, "re-checked on each poll");
+
+    // ZEUS CAST exits: the next poll opens the display and writes.
+    running.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(pass(&app, t0 + displays::VENDOR_POLL * 2).await, Duration::from_millis(250));
+    assert_eq!(log.lock().unwrap().connects, 1);
+    assert_eq!(log.lock().unwrap().writes.len(), 1);
+    assert!(!app.displays.runtime.read().await.vendor_blocked);
+}
+
+#[tokio::test]
+async fn the_real_vendor_check_matches_a_process_name_exactly() {
+    // Not the real machine's answer (ZEUS CAST may be running here); only that it runs and returns.
+    let _ = displays::vendor_app_running();
+    assert_eq!(displays::VENDOR_EXE, "ZEUS CAST.exe");
+}
+
+#[tokio::test]
+async fn repeating_an_unchanged_put_does_not_reset_the_backoff() {
+    let (router, app, _home, log) = build_with_display(true);
+    let body = config(DisplaySource::Fixed { value: 5.0 }, DisplayUnit::Celsius, 0, None);
+    put_config(&router, &body).await;
+    log.lock().unwrap().fail_connect = 5;
+    let t0 = Instant::now();
+    assert_eq!(pass(&app, t0).await, Duration::from_secs(1));
+    assert_eq!(pass(&app, t0 + Duration::from_secs(1)).await, Duration::from_secs(2));
+    assert_eq!(log.lock().unwrap().connects, 2);
+
+    // The same config again: the backoff keeps counting (no connect, no reset to 1 s).
+    assert_eq!(put_config(&router, &body).await.status(), StatusCode::OK);
+    assert_eq!(pass(&app, t0 + Duration::from_millis(1500)).await, Duration::from_millis(1500), "still waiting out the 2 s");
+    assert_eq!(log.lock().unwrap().connects, 2, "an unchanged PUT retries nothing");
+    assert_eq!(pass(&app, t0 + Duration::from_secs(3)).await, Duration::from_secs(4), "the wait keeps doubling");
+
+    // A changed config does drop the pacing and retry at once.
+    let changed = config(DisplaySource::Fixed { value: 6.0 }, DisplayUnit::Celsius, 0, None);
+    put_config(&router, &changed).await;
+    assert_eq!(pass(&app, t0 + Duration::from_millis(3100)).await, Duration::from_secs(1));
+    assert_eq!(log.lock().unwrap().connects, 4);
+}
+
+// ---------------------------------------------------------------- export and import of displays
+
+#[tokio::test]
+async fn displays_are_exported_and_a_bundle_without_the_field_still_imports() {
+    let (router, app, home, _log) = build_with_display(true);
+    let saved = config(DisplaySource::BoardTemp { sensor: "board_temp0".into() }, DisplayUnit::Fahrenheit, 1, Some(90.0));
+    put_config(&router, &saved).await;
+
+    let bundle = json(router.clone().oneshot(request("GET", routes::CONFIG_EXPORT)).await.unwrap()).await;
+    assert_eq!(bundle["displays"].as_array().map(Vec::len), Some(1), "the export carries the display configs");
+    assert_eq!(bundle["displays"][0]["device"], serde_json::json!(ID));
+
+    // Delete the display, then import the bundle: displays.json comes back from it.
+    router.clone().oneshot(request("DELETE", &display_path())).await.unwrap();
+    assert!(app.store.read().await.displays.displays.is_empty());
+    let response = router
+        .clone()
+        .oneshot(request_with_body("POST", routes::CONFIG_IMPORT, &bundle.to_string()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(app.store.read().await.displays.displays, vec![saved.clone()]);
+    let reloaded = canvas_daemon::storage::Store::load_from(&home.path);
+    assert_eq!(reloaded.displays.displays, vec![saved]);
+
+    // A bundle from before displays has no `displays` key and still imports. As with the other
+    // files, the import replaces what was saved, so the display configs are now empty.
+    let mut old = bundle.clone();
+    old.as_object_mut().unwrap().remove("displays");
+    assert!(old.get("displays").is_none());
+    let response = router
+        .clone()
+        .oneshot(request_with_body("POST", routes::CONFIG_IMPORT, &old.to_string()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "a bundle without displays imports");
+    assert!(app.store.read().await.displays.displays.is_empty());
+    assert!(canvas_daemon::storage::Store::load_from(&home.path).displays.displays.is_empty());
+}
+
+#[tokio::test]
+async fn an_import_with_a_bad_display_config_is_refused() {
+    let (router, app, _home, _log) = build_with_display(true);
+    let mut bundle = json(router.clone().oneshot(request("GET", routes::CONFIG_EXPORT)).await.unwrap()).await;
+    let bad = config(DisplaySource::CpuTemp, DisplayUnit::Celsius, 2, None);
+    bundle["displays"] = serde_json::json!([bad]);
+    let response = router
+        .clone()
+        .oneshot(request_with_body("POST", routes::CONFIG_IMPORT, &bundle.to_string()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(app.store.read().await.displays.displays.is_empty());
 }

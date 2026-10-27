@@ -4,10 +4,20 @@
 //! A display is driven only while it has a saved config in `displays.json` (spine: `routes::DISPLAY`).
 //! The adapter enumerates with `discover`, which never opens a device. The task connects to and
 //! writes only a display that has a config, because the vendor app may own the others.
+//!
+//! The task never opens the device while the vendor app (`ZEUS CAST.exe`) is running: both would
+//! write the same display. It checks again on each poll and says why once.
+//!
+//! A display with no value to show is not written. The task holds the last value on the glass: no
+//! blank packet is sent (ZEUS CAST never sends one, so blanking is unproven on hardware), and
+//! before the first value nothing is sent at all. Whether the device keeps showing the last
+//! packet when writes stop is UNKNOWN (recon: ZEUS CAST writes at 4 Hz with no keep-alive); the
+//! first hardware test settles it, and until then holding means not writing.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -30,6 +40,10 @@ pub const BACKOFF_MAX: Duration = Duration::from_secs(30);
 pub const ABSENT_POLL: Duration = Duration::from_secs(5);
 /// No display has a saved config: the task sleeps this long, or until a PUT or DELETE wakes it.
 pub const IDLE_POLL: Duration = Duration::from_secs(60);
+/// The vendor app is running: look again after this long. Nothing is opened in the meantime.
+pub const VENDOR_POLL: Duration = Duration::from_secs(5);
+/// The vendor app's executable, matched without regard to case.
+pub const VENDOR_EXE: &str = "ZEUS CAST.exe";
 /// Used when an adapter reports a zero write interval.
 const FALLBACK_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -62,9 +76,15 @@ pub struct DisplayHub {
     pub runtime: tokio::sync::RwLock<Runtime>,
     /// Bumped by every config change. The task drops its retry pacing when this moves.
     generation: AtomicU64,
+    /// Whether the vendor app is running. The real check by default; tests replace it.
+    vendor_running: std::sync::Mutex<VendorCheck>,
     /// Wakes the task after a config change.
     pub wake: tokio::sync::Notify,
 }
+
+/// Answers "is the vendor app running?". It may block (a process snapshot), so the task runs it
+/// on the blocking pool.
+pub type VendorCheck = Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// Runtime state. Nothing here is saved: after a restart, API values are blank until PUT again.
 #[derive(Debug, Default)]
@@ -81,6 +101,8 @@ pub struct Runtime {
     pub refusing: BTreeSet<DeviceId>,
     /// How many refusal warnings have been logged in total. Tests read it to check "logged once".
     pub refusal_warnings: u32,
+    /// The vendor app is running, so the display is held closed. Logged once per run of it.
+    pub vendor_blocked: bool,
     /// Retry pacing: no adapter call before this instant.
     pub retry_at: Option<Instant>,
     /// The last backoff wait after an adapter error.
@@ -95,8 +117,18 @@ impl DisplayHub {
             adapter: tokio::sync::Mutex::new(adapter),
             runtime: tokio::sync::RwLock::new(Runtime::default()),
             generation: AtomicU64::new(0),
+            vendor_running: std::sync::Mutex::new(Arc::new(vendor_app_running)),
             wake: tokio::sync::Notify::new(),
         }
+    }
+
+    /// Replaces the vendor-app check. The tests use it so they never look at the real machine.
+    pub fn set_vendor_check(&self, check: VendorCheck) {
+        *self.vendor_running.lock().unwrap_or_else(|e| e.into_inner()) = check;
+    }
+
+    fn vendor_check(&self) -> VendorCheck {
+        self.vendor_running.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Called after a PUT or DELETE: the task retries now rather than after a backoff.
@@ -108,6 +140,42 @@ impl DisplayHub {
     fn generation(&self) -> u64 {
         self.generation.load(Ordering::SeqCst)
     }
+}
+
+/// Whether `ZEUS CAST.exe` is running, by a toolhelp process snapshot (any user's process).
+#[cfg(windows)]
+pub fn vendor_app_running() -> bool {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+    };
+
+    unsafe {
+        let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
+            return false;
+        };
+        let mut entry = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        let mut found = false;
+        if Process32FirstW(snapshot, &mut entry).is_ok() {
+            loop {
+                let len = entry.szExeFile.iter().position(|c| *c == 0).unwrap_or(entry.szExeFile.len());
+                if String::from_utf16_lossy(&entry.szExeFile[..len]).eq_ignore_ascii_case(VENDOR_EXE) {
+                    found = true;
+                    break;
+                }
+                if Process32NextW(snapshot, &mut entry).is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = CloseHandle(snapshot);
+        found
+    }
+}
+
+#[cfg(not(windows))]
+pub fn vendor_app_running() -> bool {
+    false
 }
 
 /// An adapter that has no displays. The daemon's default until the CHIONE is wired in, and the
@@ -242,37 +310,39 @@ fn write_interval(ms: u32) -> Duration {
     }
 }
 
-/// Writes one display's value.
+/// Writes one display's value. The runtime lock is taken only to record the outcome, never
+/// across the adapter call, so the routes keep answering while the device is busy.
 ///
-/// An adapter that refuses a value keeps its connection, because a refusal writes nothing. For
-/// that case the display shows blank and the refusal is logged once per streak. A failed write
-/// leaves the adapter disconnected; the error goes back to the caller.
+/// A value with nothing to show (`value: None`) is not written: the display holds what it shows
+/// (see the module doc). An adapter that refuses a value keeps its connection, because a refusal
+/// writes nothing. The refusal is logged once per streak, and the refused value is not recorded
+/// as shown, so its blink flag is not either. A failed write leaves the adapter disconnected; the
+/// error goes back to the caller.
 async fn write_one(
     adapter: &mut dyn NumericDisplayAdapter,
-    runtime: &mut Runtime,
+    hub: &DisplayHub,
     device: &DeviceId,
     value: DisplayValue,
 ) -> Result<(), AdapterError> {
+    if value.value.is_none() {
+        return Ok(());
+    }
     match adapter.write_value(device, &value).await {
         Ok(()) => {
-            accepted(runtime, device, value);
+            accepted(&mut *hub.runtime.write().await, device, value);
             Ok(())
         }
         Err(error) if adapter.is_connected() => {
+            let mut runtime = hub.runtime.write().await;
             if runtime.refusing.insert(device.clone()) {
                 runtime.refusal_warnings += 1;
                 tracing::warn!(
                     device = %device,
                     value = ?value.value,
                     error = %error,
-                    "the display refused the value; showing blank"
+                    "the display refused the value; it keeps what it shows and nothing is written"
                 );
             }
-            // The blank write is what the display shows now. It does not end the streak: the
-            // refused value comes back next pass, and that is not a new refusal to log.
-            let blank = DisplayValue { value: None, ..value };
-            adapter.write_value(device, &blank).await?;
-            runtime.shown.insert(device.clone(), blank);
             Ok(())
         }
         Err(error) => Err(error),
@@ -365,6 +435,25 @@ pub async fn tick(app: &App, now: Instant) -> Duration {
             runtime.retry_at = Some(now + ABSENT_POLL);
             return ABSENT_POLL;
         }
+        // The vendor app owns the display while it runs. Look again on the next poll.
+        let check = hub.vendor_check();
+        let vendor = tokio::task::spawn_blocking(move || check()).await.unwrap_or(false);
+        {
+            let mut runtime = hub.runtime.write().await;
+            if vendor {
+                if !runtime.vendor_blocked {
+                    runtime.vendor_blocked = true;
+                    tracing::warn!("{VENDOR_EXE} is running; the display is not opened until it exits");
+                }
+                runtime.connected = false;
+                runtime.retry_at = Some(now + VENDOR_POLL);
+                return VENDOR_POLL;
+            }
+            if runtime.vendor_blocked {
+                runtime.vendor_blocked = false;
+                tracing::info!("{VENDOR_EXE} has exited; the display can be opened");
+            }
+        }
         if let Err(error) = adapter.connect().await {
             return fail(hub, &mut **adapter, now, "could not connect to the display", error).await;
         }
@@ -374,18 +463,19 @@ pub async fn tick(app: &App, now: Instant) -> Duration {
 
     let interval = write_interval(adapter.write_interval_ms());
     let fans = app.fans.read().await.clone();
+    // Read what the pass needs under a short lock; the adapter calls below hold none.
+    let (found, apis) = {
+        let runtime = hub.runtime.read().await;
+        (runtime.found.iter().map(|f| f.id.clone()).collect::<Vec<DeviceId>>(), runtime.api.clone())
+    };
     let mut failure = None;
-    {
-        let mut runtime = hub.runtime.write().await;
-        let found: Vec<DeviceId> = runtime.found.iter().map(|f| f.id.clone()).collect();
-        for config in configs.iter().filter(|c| found.contains(&c.device)) {
-            let api = runtime.api.get(&config.device).copied().flatten();
-            let inputs = Inputs { fans: fans.as_ref(), api };
-            let value = display_value(config, &inputs);
-            if let Err(error) = write_one(&mut **adapter, &mut runtime, &config.device, value).await {
-                failure = Some(error);
-                break;
-            }
+    for config in configs.iter().filter(|c| found.contains(&c.device)) {
+        let api = apis.get(&config.device).copied().flatten();
+        let inputs = Inputs { fans: fans.as_ref(), api };
+        let value = display_value(config, &inputs);
+        if let Err(error) = write_one(&mut **adapter, hub, &config.device, value).await {
+            failure = Some(error);
+            break;
         }
     }
     match failure {

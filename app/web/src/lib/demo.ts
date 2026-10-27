@@ -536,6 +536,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
           profiles: s.fanProfiles,
           boot_color: s.settings.boot_color,
         },
+        displays: [],
       };
       return bundle;
     }

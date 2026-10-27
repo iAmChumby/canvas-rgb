@@ -117,6 +117,7 @@ pub async fn config_export(State(app): State<Arc<App>>) -> ApiResult<Json<Export
         zones: store.zones.clone(),
         effects: store.effects.clone(),
         fans,
+        displays: store.displays.displays.clone(),
     };
     Ok(Json(bundle))
 }
@@ -176,6 +177,8 @@ pub async fn config_import(
             .await;
         *guard = store;
     }
+    // The display task reads the saved configs on its next pass; wake it so it does not wait.
+    app.displays.changed();
     let settings = app.store.read().await.config.settings.clone();
     app.engine.set_fps(settings.fps);
     app.engine.set_brightness(settings.brightness);

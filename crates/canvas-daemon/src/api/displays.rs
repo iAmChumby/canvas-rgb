@@ -54,18 +54,32 @@ pub async fn put_display(
     Json(config): Json<DisplayConfig>,
 ) -> ApiResult<Json<DisplayConfig>> {
     validate(&id, &config).map_err(ApiFailure::validation)?;
-    {
+    let changed = {
         let mut store = app.store.write().await;
         let mut next: DisplaysFile = store.displays.clone();
-        match next.displays.iter_mut().find(|c| c.device == config.device) {
-            Some(existing) => *existing = config.clone(),
-            None => next.displays.push(config.clone()),
+        let changed = match next.displays.iter_mut().find(|c| c.device == config.device) {
+            Some(existing) if *existing == config => false,
+            Some(existing) => {
+                *existing = config.clone();
+                true
+            }
+            None => {
+                next.displays.push(config.clone());
+                true
+            }
+        };
+        if changed {
+            save(&store.home, &next)
+                .map_err(|e| ApiFailure::internal(format!("could not save the display config: {e}")))?;
+            store.displays = next;
         }
-        save(&store.home, &next)
-            .map_err(|e| ApiFailure::internal(format!("could not save the display config: {e}")))?;
-        store.displays = next;
+        changed
+    };
+    // Only a real change wakes the task and drops its retry pacing. A repeated PUT of the same
+    // config (a client that PUTs on a timer) must not reset a backoff in progress.
+    if changed {
+        app.displays.changed();
     }
-    app.displays.changed();
     tracing::info!(device = %id, source = ?config.source, "the display config was saved");
     Ok(Json(config))
 }
@@ -91,24 +105,29 @@ pub async fn delete_display(
             .map_err(|e| ApiFailure::internal(format!("could not save the display config: {e}")))?;
         store.displays = next;
     }
+    app.displays.changed();
+
+    // The task holds the adapter for each enumerate, connect and write. Taking the lock here waits
+    // out any write in flight; the config is already gone, so no later pass writes this display.
+    // The runtime is cleaned up only after that wait, so a write that was in flight cannot put
+    // `shown` back afterwards.
+    let still_saved = app.store.read().await.displays.displays.iter().any(|c| c.device == device);
+    let mut adapter = app.displays.adapter.lock().await;
+    if !still_saved {
+        if let Err(e) = adapter.disconnect().await {
+            tracing::warn!(device = %id, error = %e, "the display did not close cleanly");
+        }
+    }
     {
         let mut runtime = app.displays.runtime.write().await;
         runtime.shown.remove(&device);
         runtime.api.remove(&device);
         runtime.refusing.remove(&device);
-    }
-    app.displays.changed();
-
-    // The task holds the adapter for each enumerate, connect and write. Taking the lock here waits
-    // out any write in flight; the config is already gone, so no later pass writes this display.
-    let still_saved = app.store.read().await.displays.displays.iter().any(|c| c.device == device);
-    if !still_saved {
-        let mut adapter = app.displays.adapter.lock().await;
-        if let Err(e) = adapter.disconnect().await {
-            tracing::warn!(device = %id, error = %e, "the display did not close cleanly");
+        if !still_saved {
+            runtime.connected = false;
         }
-        app.displays.runtime.write().await.connected = false;
     }
+    drop(adapter);
     tracing::info!(device = %id, "the display config was removed");
     Ok(Json(serde_json::json!({ "ok": true, "device_id": id })))
 }
@@ -117,7 +136,8 @@ pub async fn delete_display(
 ///
 /// 404 `not_found` when neither a saved config nor an enumerated display has that id. 422
 /// `validation` when the display's saved source is not `api`, or the value is not a finite number.
-/// `value: null` blanks the display.
+/// `value: null` means "no value": the display keeps what it shows, because no blank packet is
+/// sent until blanking is proven on hardware (see `crate::displays`).
 pub async fn put_display_value(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,

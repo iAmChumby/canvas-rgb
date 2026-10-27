@@ -396,6 +396,7 @@ pub fn export_bundle(home: &Path, fans: FansFile) -> ExportBundle {
         zones: store.zones.clone(),
         effects: store.effects.clone(),
         fans,
+        displays: store.displays.displays.clone(),
     }
 }
 
@@ -408,6 +409,8 @@ pub enum ImportError {
     Schema { found: u32, expected: u32 },
     #[error("fan values are not allowed: {0}")]
     Fans(#[from] FanValidationError),
+    #[error("display config refused: {0}")]
+    Displays(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -419,6 +422,13 @@ pub fn validate_bundle(bundle: &ExportBundle) -> Result<(), ImportError> {
     }
     for profile in &bundle.fans.profiles {
         validate_profile(profile, bundle.fans.floor_percent).map_err(ImportError::Fans)?;
+    }
+    // The same checks as a PUT to the display route, and one config per device.
+    for (i, display) in bundle.displays.iter().enumerate() {
+        crate::displays::validate(&display.device.0, display).map_err(ImportError::Displays)?;
+        if bundle.displays[..i].iter().any(|d| d.device == display.device) {
+            return Err(ImportError::Displays(format!("two configs for {}", display.device.0)));
+        }
     }
     Ok(())
 }
@@ -447,10 +457,15 @@ pub fn import_bundle(home: &Path, bundle: &ExportBundle) -> Result<(), ImportErr
     let mut fans = bundle.fans.clone();
     fans.schema_version = canvas_proto::config::FANS_SCHEMA;
 
+    // Replaces displays.json like the other files. A bundle from before displays has no list and
+    // reads as an empty one, so it clears the saved display configs, as it clears the rest.
+    let displays = DisplaysFile { schema_version: DISPLAYS_SCHEMA, displays: bundle.displays.clone() };
+
     write_toml(&home.join(CONFIG_FILE), &config)?;
     write_json(&home.join(LAYOUTS_FILE), &layouts)?;
     write_json(&home.join(ZONES_FILE), &zones)?;
     write_json(&home.join(EFFECTS_FILE), &effects)?;
+    write_json(&home.join(DISPLAYS_FILE), &displays)?;
     // The daemon keeps its own copy so an export while the service is down still works.
     write_toml(&home.join("fans.last.toml"), &fans)?;
     Ok(())

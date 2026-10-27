@@ -163,4 +163,8 @@ pub struct ExportBundle {
     pub zones: ZonesFile,
     pub effects: EffectsFile,
     pub fans: FansFile,
+    /// The numeric displays' configs (`displays.json`). Absent in bundles from before displays;
+    /// import replaces the saved display configs with these, like the other files.
+    #[serde(default)]
+    pub displays: Vec<crate::display::DisplayConfig>,
 }
