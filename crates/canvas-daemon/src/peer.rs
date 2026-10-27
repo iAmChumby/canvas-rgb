@@ -7,8 +7,11 @@
 //!
 //! Before sending the token, a client checks who holds the port:
 //!
-//! 1. `GetExtendedTcpTable(AF_INET, TCP_TABLE_OWNER_PID_LISTENER)` gives the PID that owns
-//!    the listening socket.
+//! 1. `GetExtendedTcpTable(TCP_TABLE_OWNER_PID_LISTENER)`, for `AF_INET` and `AF_INET6`,
+//!    gives the PID of every socket listening on the port that a loopback client could
+//!    reach. Every one of them must pass: an impostor on `[::1]:9430` beside the real
+//!    daemon on `127.0.0.1:9430` would get the token from a client that resolves
+//!    `localhost` to IPv6 first.
 //! 2. `QueryFullProcessImageNameW` gives the image path; its file name must be
 //!    `canvas-rgbd.exe`.
 //! 3. `OpenProcessToken` + `GetTokenInformation(TokenUser)` give the user SID of that
@@ -22,12 +25,14 @@
 //! path whose file name is `canvas-rgbd.exe` is accepted.
 
 use std::ffi::c_void;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 
 use windows::core::PWSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::NetworkManagement::IpHelper::{
-    GetExtendedTcpTable, MIB_TCPROW_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER,
+    GetExtendedTcpTable, MIB_TCP6ROW_OWNER_PID, MIB_TCPROW_OWNER_PID,
+    TCP_TABLE_OWNER_PID_LISTENER,
 };
 use windows::Win32::Security::{
     EqualSid, GetLengthSid, GetTokenInformation, IsValidSid, TokenUser, PSID, TOKEN_QUERY,
@@ -49,6 +54,9 @@ pub const UNKNOWN_PROCESS: &str = "an unknown process";
 
 /// `AF_INET`: the daemon's API is IPv4 loopback.
 const AF_INET: u32 = 2;
+
+/// `AF_INET6`: checked too, because a client may reach an impostor on `[::1]`.
+const AF_INET6: u32 = 23;
 
 /// `MIB_TCP_STATE_LISTEN`.
 const TCP_STATE_LISTEN: u32 = 2;
@@ -169,6 +177,12 @@ pub enum Refusal {
         /// The port that was checked.
         port: u16,
     },
+    /// The API URL is not plainly `http://<loopback address>:<port>`, so the token is
+    /// never sent to it.
+    NotLoopback {
+        /// The URL that was refused.
+        base: String,
+    },
 }
 
 impl Refusal {
@@ -179,6 +193,11 @@ impl Refusal {
             Refusal::HeldBy { name, port } => {
                 format!("{PRODUCT} daemon not running (port {port} is held by {name})")
             }
+            Refusal::NotLoopback { base } => format!(
+                "{PRODUCT} sends its API token only to a loopback address such as \
+                 http://127.0.0.1:{}, not to {base}",
+                canvas_proto::consts::API_PORT
+            ),
         }
     }
 }
@@ -214,67 +233,112 @@ pub fn trusted(listener: Option<PeerInfo>, me: &Sid) -> Result<(), Refusal> {
     }
 }
 
-/// Checks that the listener on `port` is the daemon, running as this user.
+/// The decision for every listener on the port: each one must be our daemon, running as
+/// this user. One impostor beside the real daemon is enough to refuse, because the client
+/// may reach either of them.
+pub fn all_trusted(listeners: Vec<PeerInfo>, me: &Sid) -> Result<(), Refusal> {
+    if listeners.is_empty() {
+        return Err(Refusal::NothingListening);
+    }
+    listeners
+        .into_iter()
+        .try_for_each(|peer| trusted(Some(peer), me))
+}
+
+/// Checks that every listener a loopback client could reach on `port` is the daemon,
+/// running as this user.
 pub fn check(port: u16) -> Result<(), Refusal> {
-    let Some(pid) = listener_pid(port) else {
+    // A table that cannot be read is refused, never assumed empty.
+    let Some(pids) = listener_pids(port) else {
         return Err(Refusal::NothingListening);
     };
-    let peer = PeerInfo {
-        pid,
-        port,
-        image_name: image_name(pid),
-        sid: process_sid(pid),
-    };
+    let peers: Vec<PeerInfo> = pids
+        .into_iter()
+        .map(|pid| PeerInfo {
+            pid,
+            port,
+            image_name: image_name(pid),
+            sid: process_sid(pid),
+        })
+        .collect();
+    if peers.is_empty() {
+        return Err(Refusal::NothingListening);
+    }
     let Some(me) = caller_sid() else {
         // We cannot say who we are, so we cannot trust the holder either.
         return Err(Refusal::HeldBy {
-            name: peer
+            name: peers[0]
                 .image_name
                 .clone()
                 .unwrap_or_else(|| UNKNOWN_PROCESS.to_string()),
             port,
         });
     };
-    trusted(Some(peer), &me)
+    all_trusted(peers, &me)
 }
 
-/// Checks the listener of an API base URL, e.g. `http://127.0.0.1:9430`.
+/// Checks the listeners of an API base URL, e.g. `http://127.0.0.1:9430`.
 ///
-/// Only a loopback address is checked: the daemon's API is loopback-only, so any other
-/// address is not the daemon and the check does not apply to it.
+/// The daemon's API is loopback-only, so a URL that is not plainly on a loopback address
+/// is refused: the token is never sent anywhere the check cannot cover.
 pub fn check_base(base: &str) -> Result<(), Refusal> {
-    match loopback_port(base) {
-        Some(port) => check(port),
-        None => Ok(()),
-    }
+    let port = loopback_port(base).ok_or_else(|| Refusal::NotLoopback {
+        base: base.to_string(),
+    })?;
+    check(port)
 }
 
-/// The port of a loopback API URL, or `None` when the URL is not on the loopback interface.
+/// The port of a loopback API URL.
+///
+/// `None` when the URL is anything but `http(s)://<host>:<port>` with `localhost` or a
+/// loopback IP literal as the host: user info, another host, or a missing port.
 fn loopback_port(base: &str) -> Option<u16> {
     let rest = base
-        .trim_start_matches("http://")
-        .trim_start_matches("https://");
+        .strip_prefix("http://")
+        .or_else(|| base.strip_prefix("https://"))?;
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    let (host, port) = authority.rsplit_once(':')?;
-    let host = host.trim_start_matches('[').trim_end_matches(']');
-    if !host.eq_ignore_ascii_case("localhost") && host != "127.0.0.1" && host != "::1" {
+    if authority.contains('@') {
         return None;
     }
-    port.parse::<u16>().ok()
+    let (host, port) = authority.rsplit_once(':')?;
+    let loopback = if host.eq_ignore_ascii_case("localhost") {
+        true
+    } else if let Some(v6) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+        v6.parse::<Ipv6Addr>().is_ok_and(|ip| ip.is_loopback())
+    } else {
+        host.parse::<Ipv4Addr>().is_ok_and(|ip| ip.is_loopback())
+    };
+    if !loopback {
+        return None;
+    }
+    port.parse::<u16>().ok().filter(|port| *port != 0)
 }
 
-/// The PID that owns the listening socket on 127.0.0.1:`port`.
+/// The PIDs that own a socket listening on `port` that a loopback client could reach:
+/// IPv4 127.0.0.0/8 or 0.0.0.0, IPv6 `::1` or `::` (and their IPv4-mapped forms).
 ///
-/// `None` when nothing listens there.
-pub fn listener_pid(port: u16) -> Option<u32> {
-    tcp_rows()?.into_iter().find_map(|row| {
-        if row.dwState == TCP_STATE_LISTEN && row_port(row.dwLocalPort) == port && is_local(row.dwLocalAddr)
+/// Empty when nothing listens there; `None` when a table cannot be read.
+pub fn listener_pids(port: u16) -> Option<Vec<u32>> {
+    let mut pids = Vec::new();
+    for row in listening_rows::<MIB_TCPROW_OWNER_PID>(AF_INET)? {
+        if row.dwState == TCP_STATE_LISTEN
+            && row_port(row.dwLocalPort) == port
+            && is_local(row.dwLocalAddr)
         {
-            Some(row.dwOwningPid)
-        } else {
-            None
+            pids.push(row.dwOwningPid);
         }
-    })
+    }
+    for row in listening_rows::<MIB_TCP6ROW_OWNER_PID>(AF_INET6)? {
+        if row.dwState == TCP_STATE_LISTEN
+            && row_port(row.dwLocalPort) == port
+            && is_local6(&row.ucLocalAddr)
+        {
+            pids.push(row.dwOwningPid);
+        }
+    }
+    pids.sort_unstable();
+    pids.dedup();
+    Some(pids)
 }
 
 /// The file name of a process's image, e.g. `canvas-rgbd.exe`.
@@ -353,49 +417,47 @@ unsafe fn sid_bytes(sid: PSID) -> Option<Sid> {
     Some(Sid(bytes))
 }
 
-/// Every listening row of the IPv4 TCP table.
-fn tcp_rows() -> Option<Vec<MIB_TCPROW_OWNER_PID>> {
-    // SAFETY: the table is read into a buffer of the size Windows asks for.
-    unsafe {
-        let mut size: u32 = 0;
-        // The first call asks how big the table is.
-        GetExtendedTcpTable(
-            None,
-            &mut size,
-            false,
-            AF_INET,
-            TCP_TABLE_OWNER_PID_LISTENER,
-            0,
-        );
-        if size == 0 {
-            return None;
+/// Every listening row of one TCP table: `T` is `MIB_TCPROW_OWNER_PID` for `AF_INET` or
+/// `MIB_TCP6ROW_OWNER_PID` for `AF_INET6`.
+///
+/// `None` when the table cannot be read.
+fn listening_rows<T: Copy>(family: u32) -> Option<Vec<T>> {
+    // The table can grow between asking its size and reading it; a few tries cover that.
+    for _ in 0..3 {
+        // SAFETY: the table is read into a buffer of the size Windows asks for, and each
+        // row is copied out with an unaligned read.
+        unsafe {
+            let mut size: u32 = 0;
+            // The first call asks how big the table is.
+            GetExtendedTcpTable(None, &mut size, false, family, TCP_TABLE_OWNER_PID_LISTENER, 0);
+            if size == 0 {
+                return None;
+            }
+            let mut buffer = vec![0u8; size as usize];
+            let code = GetExtendedTcpTable(
+                Some(buffer.as_mut_ptr() as *mut c_void),
+                &mut size,
+                false,
+                family,
+                TCP_TABLE_OWNER_PID_LISTENER,
+                0,
+            );
+            if code != 0 {
+                continue;
+            }
+            let count = u32::from_ne_bytes(buffer.get(0..4)?.try_into().ok()?) as usize;
+            // Only the first `count` rows are real; the buffer may hold spare bytes.
+            let rows = buffer
+                .get(4..)
+                .unwrap_or_default()
+                .chunks_exact(std::mem::size_of::<T>())
+                .take(count)
+                .map(|chunk| std::ptr::read_unaligned(chunk.as_ptr() as *const T))
+                .collect();
+            return Some(rows);
         }
-        let mut buffer = vec![0u8; size as usize];
-        let code = GetExtendedTcpTable(
-            Some(buffer.as_mut_ptr() as *mut c_void),
-            &mut size,
-            false,
-            AF_INET,
-            TCP_TABLE_OWNER_PID_LISTENER,
-            0,
-        );
-        if code != 0 {
-            // The table grew while we were reading it: try again next time.
-            return None;
-        }
-        let count = u32::from_ne_bytes(buffer.get(0..4)?.try_into().ok()?);
-        let row_size = std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
-        // The count comes from the kernel, but a table that changed under us could name
-        // more rows than the buffer holds: the cap keeps the allocation sane.
-        let rows_in_buffer = buffer.len().saturating_sub(4) / row_size;
-        let mut rows = Vec::with_capacity((count as usize).min(rows_in_buffer));
-        for chunk in buffer.get(4..).unwrap_or_default().chunks_exact(row_size) {
-            let row: MIB_TCPROW_OWNER_PID =
-                std::ptr::read_unaligned(chunk.as_ptr() as *const MIB_TCPROW_OWNER_PID);
-            rows.push(row);
-        }
-        Some(rows)
     }
+    None
 }
 
 /// The port of a row: the low 16 bits of `dwLocalPort` are in network byte order.
@@ -403,10 +465,21 @@ fn row_port(dw_local_port: u32) -> u16 {
     ((dw_local_port & 0xFFFF) as u16).swap_bytes()
 }
 
-/// True when the address of a row is 127.0.0.1 or 0.0.0.0 (any address).
+/// True when the address of an IPv4 row is in 127.0.0.0/8 or is 0.0.0.0 (any address).
 fn is_local(dw_local_addr: u32) -> bool {
-    let bytes = dw_local_addr.to_ne_bytes();
-    bytes == [127, 0, 0, 1] || bytes == [0, 0, 0, 0]
+    let ip = Ipv4Addr::from(dw_local_addr.to_ne_bytes());
+    ip.is_loopback() || ip.is_unspecified()
+}
+
+/// True when the address of an IPv6 row is `::1`, `::` (any address), or the IPv4-mapped
+/// form of a local IPv4 address, which a dual-stack socket also answers on.
+fn is_local6(address: &[u8; 16]) -> bool {
+    let ip = Ipv6Addr::from(*address);
+    if ip.is_loopback() || ip.is_unspecified() {
+        return true;
+    }
+    ip.to_ipv4_mapped()
+        .is_some_and(|v4| v4.is_loopback() || v4.is_unspecified())
 }
 
 /// Closes a handle when it goes out of scope.
@@ -519,10 +592,89 @@ mod tests {
     }
 
     #[test]
+    fn an_impostor_beside_our_daemon_is_refused_and_named() {
+        let ours = peer(Some("canvas-rgbd.exe"), Some(fake_sid(1)));
+        let impostor = peer(Some("evil.exe"), Some(fake_sid(1)));
+        let refusal = all_trusted(vec![ours, impostor], &fake_sid(1)).unwrap_err();
+        assert_eq!(
+            refusal.message(),
+            "canvas-rgb daemon not running (port 9430 is held by evil.exe)"
+        );
+    }
+
+    #[test]
+    fn no_listeners_at_all_is_refused() {
+        assert_eq!(
+            all_trusted(Vec::new(), &fake_sid(1)).unwrap_err(),
+            Refusal::NothingListening
+        );
+    }
+
+    #[test]
+    fn only_loopback_urls_with_a_port_are_accepted() {
+        assert_eq!(loopback_port("http://127.0.0.1:9430"), Some(9430));
+        assert_eq!(loopback_port("http://127.0.0.2:9430/api"), Some(9430));
+        assert_eq!(loopback_port("http://localhost:9430"), Some(9430));
+        assert_eq!(loopback_port("http://[::1]:9430"), Some(9430));
+        for refused in [
+            "http://127.0.0.1:9430",
+            "http://evil.example:9430",
+            "http://127.0.0.1.evil.example:9430",
+            "http://user@127.0.0.1:9430",
+            "http://127.0.0.1:9430@evil.example:80",
+            "http://127.0.0.1",
+            "http://127.0.0.1:0",
+            "http://[::]:9430",
+            "http://0.0.0.0:9430",
+            "ftp://127.0.0.1:9430",
+            "127.0.0.1:9430",
+        ] {
+            assert_eq!(loopback_port(refused), None, "{refused}");
+        }
+    }
+
+    #[test]
+    fn a_url_off_loopback_is_refused_before_any_check() {
+        assert_eq!(
+            check_base("http://evil.example:9430").unwrap_err(),
+            Refusal::NotLoopback {
+                base: "http://evil.example:9430".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn local_addresses_in_both_families_are_recognised() {
+        assert!(is_local(u32::from_ne_bytes([127, 0, 0, 1])));
+        assert!(is_local(u32::from_ne_bytes([127, 9, 9, 9])));
+        assert!(is_local(0));
+        assert!(!is_local(u32::from_ne_bytes([192, 168, 1, 5])));
+        assert!(is_local6(&Ipv6Addr::LOCALHOST.octets()));
+        assert!(is_local6(&Ipv6Addr::UNSPECIFIED.octets()));
+        assert!(is_local6(&Ipv4Addr::LOCALHOST.to_ipv6_mapped().octets()));
+        assert!(!is_local6(&"fe80::1".parse::<Ipv6Addr>().unwrap().octets()));
+    }
+
+    #[test]
     fn the_table_names_this_process_as_the_owner_of_a_listener() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
         let port = listener.local_addr().expect("the local address").port();
-        assert_eq!(listener_pid(port), Some(std::process::id()));
+        assert_eq!(listener_pids(port), Some(vec![std::process::id()]));
+    }
+
+    #[test]
+    fn an_ipv6_loopback_listener_is_seen() {
+        let listener = std::net::TcpListener::bind("[::1]:0").expect("bind an IPv6 ephemeral port");
+        let port = listener.local_addr().expect("the local address").port();
+        assert_eq!(listener_pids(port), Some(vec![std::process::id()]));
+    }
+
+    #[test]
+    fn an_ipv6_impostor_on_the_port_is_refused() {
+        let listener = std::net::TcpListener::bind("[::1]:0").expect("bind an IPv6 ephemeral port");
+        let port = listener.local_addr().expect("the local address").port();
+        // The test binary is not canvas-rgbd.exe, so a lone IPv6 listener is an impostor.
+        assert!(matches!(check(port), Err(Refusal::HeldBy { .. })));
     }
 
     #[test]
@@ -530,6 +682,6 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
         let port = listener.local_addr().expect("the local address").port();
         drop(listener);
-        assert_eq!(listener_pid(port), None);
+        assert_eq!(listener_pids(port), Some(Vec::new()));
     }
 }
