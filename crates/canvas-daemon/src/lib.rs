@@ -55,7 +55,38 @@ pub async fn apply_effect(app: &Arc<App>, id: &str, props: &Props) -> Result<(),
     Ok(())
 }
 
+/// Devices the daemon never sends frames to, matched on the HID path inside the device id.
+/// OpenRGB's driver for each of these breaks the device when it is streamed to:
+///
+/// - `VID_3151&PID_4015`, the ROYUAN MonsGeek keyboard: frames through OpenRGB blank its
+///   lights and stop it typing (lighting session 2, 2026-10-26). OpenRGB's detector for it
+///   cannot be turned off in its config, so the daemon leaves it alone instead.
+pub const NOT_DRIVEN: &[&str] = &["VID_3151&PID_4015"];
+
+/// True when the daemon may send frames to this device.
+pub fn is_driven(id: &canvas_proto::DeviceId) -> bool {
+    let id = id.0.to_ascii_uppercase();
+    !NOT_DRIVEN.iter().any(|path| id.contains(path))
+}
+
 /// The daemon's version, as reported by `/status`.
 pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use canvas_proto::DeviceId;
+
+    #[test]
+    fn the_monsgeek_keyboard_is_never_driven_and_the_rest_are() {
+        let keyboard = DeviceId(
+            r"openrgb:HID: \\?\HID#VID_3151&PID_4015&MI_02#9&298b2e71&0&0000#{4d1e55b2}".into(),
+        );
+        let mic = DeviceId(r"openrgb:HID: \\?\HID#VID_03F0&PID_028C&MI_00#a&eb32b1c".into());
+        assert!(!super::is_driven(&keyboard));
+        assert!(!super::is_driven(&DeviceId(keyboard.0.to_lowercase())));
+        assert!(super::is_driven(&mic));
+        assert!(super::is_driven(&DeviceId("openrgb:SERIAL0000000".into())));
+    }
 }

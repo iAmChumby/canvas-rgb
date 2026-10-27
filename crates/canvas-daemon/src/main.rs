@@ -267,8 +267,18 @@ async fn sync_device_sinks(
     sinks: &tokio::sync::Mutex<std::collections::HashMap<canvas_proto::DeviceId, tokio::task::JoinHandle<()>>>,
 ) {
     let mut sinks = sinks.lock().await;
-    let live: std::collections::HashSet<_> =
-        devices.iter().filter(|d| d.connected).map(|d| d.id.clone()).collect();
+    let live: std::collections::HashSet<_> = devices
+        .iter()
+        .filter(|d| d.connected)
+        .filter(|d| {
+            let driven = canvas_daemon::is_driven(&d.id);
+            if !driven && !sinks.contains_key(&d.id) {
+                tracing::info!(device = %d.id, "this device is never driven; it gets no frames");
+            }
+            driven
+        })
+        .map(|d| d.id.clone())
+        .collect();
     sinks.retain(|id, writer| {
         if live.contains(id) {
             return true;
