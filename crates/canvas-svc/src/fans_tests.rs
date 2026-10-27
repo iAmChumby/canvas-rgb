@@ -1,7 +1,7 @@
 //! Controller tests over the register simulation (`FakeChip`) and fake temperatures.
 
-use crate::chip::{FanChip, Nct6687, COMMAND_REG, MODE_REG, MSI_ALT1_MAP};
-use crate::fakes::{FakeChip, FakeTemp, BIOS_CURVE};
+use crate::chip::{FanChip, Nct6687, MODE_REG, MSI_ALT1_MAP};
+use crate::fakes::{FakeChip, FakeTemp};
 use crate::fans::{curve_percent, FanController, FanError};
 use crate::paths;
 use crate::store;
@@ -144,7 +144,7 @@ fn a_header_left_manual_by_an_earlier_run_is_restored_to_auto_at_startup_while_u
 }
 
 #[test]
-fn restore_bios_writes_only_restores_while_unconfirmed() {
+fn restore_bios_writes_only_the_mode_register_while_unconfirmed() {
     let t0 = Instant::now();
     let r = rig(FansFile::default(), t0);
     let mut first = r.fans;
@@ -158,16 +158,8 @@ fn restore_bios_writes_only_restores_while_unconfirmed() {
     FanController::restore_from_file(r.dir.path(), &mut chip).unwrap();
     let after = r.chip.written_regs();
     assert!(after.len() > before, "restore wrote something");
-    // Only restores: the fan-mode register, and the saved BIOS curve of the header that was
-    // flattened (through the command handshake).
-    let curve_regs: Vec<u16> = (0..7).map(|i| 0xC70 + 2 * i).collect();
-    assert!(
-        after[before..].iter().all(|reg| *reg == MODE_REG || *reg == COMMAND_REG || curve_regs.contains(reg)),
-        "only restores: {:?}",
-        &after[before..]
-    );
+    assert!(after[before..].iter().all(|reg| *reg == MODE_REG), "only the fan-mode register: {:?}", &after[before..]);
     assert!(!r.chip.manual(SYS_FAN1));
-    assert_eq!(r.chip.curve(SYS_FAN1), BIOS_CURVE, "the curve is back at the BIOS values");
 }
 
 #[test]
@@ -315,78 +307,6 @@ fn a_killed_service_restores_bios_before_the_profile_applies() {
     let _second = controller(&r.dir, &r.chip, &cpu, store::load_fans(&paths::fans_path(r.dir.path())).unwrap().unwrap(), t0);
     assert!(!r.chip.manual(SYS_FAN1), "startup restored BIOS on the header");
     assert!(!paths::bios_state_path(r.dir.path()).exists(), "the crash record was consumed");
-}
-
-#[test]
-fn a_system_fan_duty_is_written_to_every_curve_point_and_drives_the_fan() {
-    let t0 = Instant::now();
-    let mut r = rig(FansFile::default(), t0);
-    r.fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 50 }, t0).unwrap();
-    assert!(r.chip.manual(SYS_FAN1));
-    assert_eq!(r.chip.curve(SYS_FAN1), [128; 7], "all 7 points hold 50%");
-    assert_eq!(r.chip.duty_raw(SYS_FAN1), 128, "the flat curve drives the output");
-    assert_eq!(r.fans.status().headers.iter().find(|h| h.id == "sys_fan1").and_then(|h| h.override_reason.clone()), None);
-}
-
-#[test]
-fn a_curve_that_is_not_a_duty_curve_is_never_written() {
-    let t0 = Instant::now();
-    let r = rig(FansFile::default(), t0);
-    let mut fans = r.fans;
-    r.chip.set_curve(SYS_FAN1, [0x80, 0x20, 0x90, 0x10, 0xFF, 0x00, 0x40]);
-    let before = r.chip.writes_log().len();
-    let _ = fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 50 }, t0);
-    assert!(!r.chip.manual(SYS_FAN1), "the header stays on BIOS");
-    assert_eq!(r.chip.curve(SYS_FAN1), [0x80, 0x20, 0x90, 0x10, 0xFF, 0x00, 0x40], "nothing was written to the curve");
-    let reason = fans.status().headers.iter().find(|h| h.id == "sys_fan1").and_then(|h| h.override_reason.clone());
-    assert!(reason.unwrap_or_default().contains("not a duty curve"));
-    assert!(r.chip.writes_log()[before..].iter().all(|(reg, _)| *reg == MODE_REG), "only the BIOS handback");
-}
-
-#[test]
-fn handing_a_system_fan_back_restores_its_bios_curve() {
-    let t0 = Instant::now();
-    let mut r = rig(FansFile::default(), t0);
-    r.fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 50 }, t0).unwrap();
-    assert_ne!(r.chip.curve(SYS_FAN1), BIOS_CURVE);
-    r.fans.set_header_mode("sys_fan1", FanMode::Bios, t0).unwrap();
-    assert!(!r.chip.manual(SYS_FAN1));
-    assert_eq!(r.chip.curve(SYS_FAN1), BIOS_CURVE, "the BIOS curve is back");
-}
-
-#[test]
-fn a_restart_after_a_crash_restores_the_bios_curve_from_the_saved_state() {
-    let t0 = Instant::now();
-    let r = rig(FansFile::default(), t0);
-    let mut first = r.fans;
-    first.set_header_mode("sys_fan1", FanMode::Fixed { percent: 50 }, t0).unwrap();
-    // "Process killed": no restore, the curve stays flat and bios-state.json stays behind.
-    drop(first);
-    assert_eq!(r.chip.curve(SYS_FAN1), [128; 7]);
-    // As app.rs does: the state file passed the owner check, then startup.
-    let chip_box: Box<dyn FanChip> = Box::new(Nct6687::detect(r.chip.clone(), MSI_ALT1_MAP).unwrap());
-    let cpu = FakeTemp::new(40.0);
-    let temps: BTreeMap<TempSource, Box<dyn TempReader>> =
-        BTreeMap::from([(TempSource::Cpu, Box::new(cpu) as Box<dyn TempReader>)]);
-    let mut second =
-        FanController::new(r.dir.path().to_path_buf(), Some(chip_box), None, temps, FansFile::default(), confirmed());
-    second.set_state_trusted(true);
-    second.startup(t0);
-    assert!(!r.chip.manual(SYS_FAN1));
-    assert_eq!(r.chip.curve(SYS_FAN1), BIOS_CURVE, "startup wrote the saved BIOS curve back");
-}
-
-#[test]
-fn restore_bios_from_the_file_restores_the_bios_curve() {
-    let t0 = Instant::now();
-    let r = rig(FansFile::default(), t0);
-    let mut first = r.fans;
-    first.set_header_mode("sys_fan1", FanMode::Fixed { percent: 50 }, t0).unwrap();
-    drop(first);
-    let mut chip = Nct6687::detect(r.chip.clone(), MSI_ALT1_MAP).unwrap();
-    FanController::restore_from_file(r.dir.path(), &mut chip).unwrap();
-    assert!(!r.chip.manual(SYS_FAN1));
-    assert_eq!(r.chip.curve(SYS_FAN1), BIOS_CURVE);
 }
 
 #[test]

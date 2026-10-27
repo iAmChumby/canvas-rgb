@@ -116,10 +116,6 @@ pub struct SavedHeader {
     pub manual: bool,
     /// Duty the chip reported then, if it could be read.
     pub duty_percent: Option<u8>,
-    /// The header's BIOS fan curve (raw duty points) before a curve write flattened it, for
-    /// headers whose duty follows their curve. Written back on every handback.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub curve: Option<Vec<u8>>,
 }
 
 /// `bios-state.json`: written before any manual write, so a restarted service knows which

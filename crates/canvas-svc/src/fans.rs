@@ -90,16 +90,6 @@ pub fn curve_percent(points: &[CurvePoint], temp: f32) -> u8 {
 }
 
 /// The reason every header reports while the channel map is unconfirmed.
-/// Writes a header's saved BIOS fan curve back, when one was saved. A failure is logged and
-/// the caller still clears the manual bit: the header goes back to BIOS either way.
-fn restore_saved_curve(chip: &mut dyn FanChip, ch: usize, id: &str, saved: Option<&SavedHeader>) {
-    let Some(points) = saved.and_then(|s| s.curve.as_deref()) else { return };
-    match chip.write_curve(ch, points) {
-        Ok(()) => tracing::info!(header = id, ?points, "BIOS fan curve restored"),
-        Err(e) => tracing::error!(header = id, error = %e, "could not restore the BIOS fan curve"),
-    }
-}
-
 pub fn unconfirmed_reason(map: &str) -> String {
     format!("channel map {map} not yet confirmed against LibreHardwareMonitor; fans stay on BIOS")
 }
@@ -196,8 +186,6 @@ impl FanController {
             Ok(previous) if !previous.headers.is_empty() => {
                 let names: Vec<&String> = previous.headers.keys().collect();
                 tracing::warn!(headers = ?names, "bios-state.json present: an earlier run did not restore BIOS; restoring now");
-                // Its saved curves are what restore_all writes back.
-                self.bios_state = previous;
             }
             Ok(_) => {}
             Err(e) => tracing::warn!(error = %e, "cannot read bios-state.json; restoring every header anyway"),
@@ -221,7 +209,6 @@ impl FanController {
                 if !spec.controllable() {
                     continue;
                 }
-                restore_saved_curve(chip.as_mut(), ch, spec.id, self.bios_state.headers.get(spec.id));
                 match chip.set_manual(ch, false) {
                     Ok(()) => tracing::info!(header = spec.id, reason, "header returned to BIOS control"),
                     Err(e) => tracing::error!(header = spec.id, error = %e, reason, "could not return header to BIOS"),
@@ -240,15 +227,6 @@ impl FanController {
     /// Restores BIOS for the headers the saved state names. Used by `--restore-bios`
     /// and by the panic hook, which run without a controller. Returns how many were restored.
     pub fn restore_from_file(home: &std::path::Path, chip: &mut dyn FanChip) -> io::Result<usize> {
-        // The saved BIOS curves go back first; the mode bits follow.
-        match store::load_bios_state(&paths::bios_state_path(home)) {
-            Ok(state) => {
-                for (ch, spec) in chip.channels().iter().enumerate() {
-                    restore_saved_curve(chip, ch, spec.id, state.headers.get(spec.id));
-                }
-            }
-            Err(e) => tracing::error!(error = %e, "cannot read bios-state.json; BIOS fan curves not restored"),
-        }
         let count = Self::restore_chip_only(chip)?;
         store::remove_bios_state(&paths::bios_state_path(home)).map_err(|e| io::Error::other(e.to_string()))?;
         Ok(count)
@@ -315,19 +293,7 @@ impl FanController {
         let spec = *chip.channels().get(ch).ok_or("no such header")?;
         let manual = chip.read_manual(ch).map_err(|e| format!("read manual bit: {e}"))?;
         let duty = chip.read_duty_percent(ch).ok().flatten();
-        // A curve write flattens the BIOS curve, so it is saved first or not at all.
-        let curve = chip.read_curve(ch).map_err(|e| format!("read BIOS fan curve: {e}"))?;
-        // A BIOS duty curve never falls from one point to the next. Anything else means the
-        // curve registers are not where the map says, so nothing is written there.
-        if let Some(points) = curve.as_deref() {
-            if points.windows(2).any(|w| w[1] < w[0]) {
-                return Err(format!("the BIOS fan curve reads {points:?}, which is not a duty curve; not writing it"));
-            }
-            tracing::info!(header = spec.id, ?points, "BIOS fan curve saved");
-        }
-        self.bios_state
-            .headers
-            .insert(spec.id.to_string(), SavedHeader { manual, duty_percent: duty, curve });
+        self.bios_state.headers.insert(spec.id.to_string(), SavedHeader { manual, duty_percent: duty });
         store::save_bios_state(&paths::bios_state_path(&self.home), &self.bios_state)
             .map_err(|e| format!("cannot save bios-state.json: {e}"))?;
         chip.set_manual(ch, true).map_err(|e| format!("set manual: {e}"))?;
@@ -345,7 +311,6 @@ impl FanController {
         slot.manual_since = None;
         let id = self.chip.as_ref().and_then(|c| c.channels().get(ch)).map_or("", |s| s.id);
         if let Some(chip) = self.chip.as_mut() {
-            restore_saved_curve(chip.as_mut(), ch, id, self.bios_state.headers.get(id));
             if let Err(e) = chip.set_manual(ch, false) {
                 tracing::error!(header = id, error = %e, "could not return header to BIOS");
             }
@@ -362,7 +327,6 @@ impl FanController {
         let Some(chip) = self.chip.as_mut() else { return };
         let Some(id) = chip.channels().get(ch).map(|s| s.id) else { return };
         tracing::warn!(header = id, reason = %reason, "safety handback: header returned to BIOS");
-        restore_saved_curve(chip.as_mut(), ch, id, self.bios_state.headers.get(id));
         if let Err(e) = chip.set_manual(ch, false) {
             tracing::error!(header = id, error = %e, "handback write failed; chip state unknown");
         }
