@@ -13,6 +13,12 @@ pub const CPU_FAN_HEADER: &str = "cpu_fan";
 pub const DEFAULT_FLOOR_PERCENT: u8 = 20;
 /// CPU_FAN never goes below this, whatever the configured floor (spec).
 pub const CPU_FAN_MIN_PERCENT: u8 = 30;
+/// GPU fan headers are `gpu_fan1`, `gpu_fan2`, ... (NVML fan index + 1). Added on Luke's
+/// request (lighting session 2), after an NVML write test on his RTX 5070 Ti.
+pub const GPU_FAN_HEADER_PREFIX: &str = "gpu_fan";
+/// GPU fans never go below this: NVML's own manual minimum on the RTX 5070 Ti
+/// (`nvmlDeviceGetMinMaxFanSpeed` = 30..100).
+pub const GPU_FAN_MIN_PERCENT: u8 = 30;
 /// G4: while a manual header's curve temperature is at or above this, the hot floors apply.
 pub const HOT_TEMP_C: f32 = 50.0;
 /// G4: hot floor for every header in a manual mode.
@@ -125,6 +131,8 @@ pub fn floor_for(header: &str, configured_floor: u8) -> u8 {
     let floor = configured_floor.max(DEFAULT_FLOOR_PERCENT);
     if header == CPU_FAN_HEADER {
         floor.max(CPU_FAN_MIN_PERCENT)
+    } else if header.starts_with(GPU_FAN_HEADER_PREFIX) {
+        floor.max(GPU_FAN_MIN_PERCENT)
     } else {
         floor
     }
@@ -190,6 +198,9 @@ mod tests {
         assert_eq!(floor_for("sys_fan1", 20), 20);
         assert_eq!(floor_for(CPU_FAN_HEADER, 20), 30);
         assert_eq!(floor_for(CPU_FAN_HEADER, 40), 40);
+        assert_eq!(floor_for("gpu_fan1", 20), GPU_FAN_MIN_PERCENT);
+        assert_eq!(floor_for("gpu_fan2", 45), 45);
+        assert!(validate_mode("gpu_fan1", &FanMode::Fixed { percent: 29 }, 20).is_err());
         // A floor below the default (e.g. from an imported file) is ignored.
         assert_eq!(floor_for("sys_fan1", 0), DEFAULT_FLOOR_PERCENT);
         assert!(validate_mode("sys_fan1", &FanMode::Fixed { percent: 5 }, 0).is_err());
