@@ -14,7 +14,8 @@ import {
 } from "react";
 import { ArrowsOut, Minus, Plus } from "@phosphor-icons/react";
 import { IconButton } from "@/components/Button";
-import { onFrame, PREVIEW_H, PREVIEW_W, type Frame } from "@/lib/preview";
+import { EffectPreview, type PreviewValues } from "@/components/EffectPreview";
+import { onFrame, PREVIEW_H, PREVIEW_W, usePreviewStatus, type Frame } from "@/lib/preview";
 import { findZoneInfo, zoneCorners, zoneGripPoint, zoneLedOffsets, zoneTransform, type Point } from "@/lib/zones";
 import { clamp } from "@/lib/format";
 import { usePrefersReducedMotion } from "@/lib/motion";
@@ -42,6 +43,13 @@ const MAX_SCALE = 8;
 const VIEW_COMMIT_MS = 140;
 /** How long the view eases to a new zoom level or back to the fit view, in ms. */
 const ZOOM_MS = 180;
+/** How long the view eases to a new level after a mouse wheel notch, in ms. */
+const WHEEL_MS = 120;
+/**
+ * A wheel delta this big is a mouse notch. A trackpad's deltas are small and continuous, and a
+ * ctrl+wheel is the browser's own gesture: both are applied at once.
+ */
+const NOTCH_DELTA = 40;
 /** The chrome around a chip's text: the padding, the hairline and the accent edge, in css pixels. */
 const CHIP_CHROME = 14;
 /**
@@ -194,6 +202,16 @@ export interface StageProps {
   /** The layout the view belongs to: the zoom and the pan are remembered per layout. */
   layoutId?: string;
   dropPayloadType: string;
+  /**
+   * The running effect. The editor draws it itself when the daemon's preview is not connected,
+   * so the desk is never an empty grid.
+   */
+  effect?: { id: string; props: PreviewValues } | null;
+  /**
+   * True when the effect reads the screen or the audio: the editor cannot draw those, so the
+   * daemon's frames are the only honest picture of them.
+   */
+  effectNeedsInput?: boolean;
 }
 
 function zoneKey(z: PlacedZone): string {
@@ -499,6 +517,8 @@ export function PreviewStage({
   onLiveChange,
   layoutId,
   dropPayloadType,
+  effect = null,
+  effectNeedsInput = false,
 }: StageProps) {
   const stageRef = useRef<HTMLDivElement>(null);
   const previewRef = useRef<HTMLCanvasElement>(null);
@@ -527,7 +547,25 @@ export function PreviewStage({
   const [view, setView] = useState<View>({ scale: 1, panX: 0, panY: 0 });
   const viewRef = useRef<View>(view);
   const [viewFor, setViewFor] = useState<string | null>(null);
+  const status = usePreviewStatus();
   const reduced = usePrefersReducedMotion();
+  /**
+   * The daemon's frames are the honest picture of the effect. When they are not coming, the
+   * editor draws the running effect itself, behind the zones, and says so.
+   */
+  const daemonLive = status.state === "live";
+  const editorDraws = !daemonLive && !!effect && !effectNeedsInput;
+  /**
+   * The editor's draw is taken down once the daemon's frames have taken over: it would
+   * otherwise keep repainting a canvas nobody can see.
+   */
+  const [editorGone, setEditorGone] = useState(false);
+  useEffect(() => {
+    // The editor's draw comes back at once when the daemon's frames stop, and is taken down a
+    // moment after they take over.
+    const t = setTimeout(() => setEditorGone(daemonLive), daemonLive ? 400 : 0);
+    return () => clearTimeout(t);
+  }, [daemonLive]);
 
   // The view belongs to the layout: it is restored when the editor comes back to it. This runs
   // during render (React's pattern for state that follows a prop), so the canvas is never shown
@@ -1086,6 +1124,52 @@ export function PreviewStage({
     else writeView(layoutId, view);
   }, [layoutId, view]);
 
+  /**
+   * Eases the view to a new one, with the house curve.
+   *
+   * The wheel does not always use this: a mouse notch does, a trackpad's continuous deltas do
+   * not. The buttons and the fit control are a single, discrete action, so they move.
+   */
+  const animateTo = useCallback(
+    (target: View, ms: number = ZOOM_MS) => {
+      if (zoomRaf.current !== null) {
+        cancelAnimationFrame(zoomRaf.current);
+        zoomRaf.current = null;
+      }
+      const from = { ...viewRef.current };
+      // The reader asked for less motion, in the system or in the editor's own switch: the view
+      // lands at once.
+      const still =
+        reduced ||
+        (typeof document !== "undefined" &&
+          document.documentElement.getAttribute("data-motion") === "reduced");
+      if (still) {
+        applyView(target);
+        setView(target);
+        return;
+      }
+      const t0 = performance.now();
+      const step = () => {
+        const raw = Math.min(1, (performance.now() - t0) / ms);
+        const e = houseEase(raw);
+        const next: View = {
+          scale: from.scale + (target.scale - from.scale) * e,
+          panX: from.panX + (target.panX - from.panX) * e,
+          panY: from.panY + (target.panY - from.panY) * e,
+        };
+        applyView(next);
+        if (raw < 1) {
+          zoomRaf.current = requestAnimationFrame(step);
+        } else {
+          zoomRaf.current = null;
+          setView(target);
+        }
+      };
+      zoomRaf.current = requestAnimationFrame(step);
+    },
+    [applyView, reduced],
+  );
+
   // The wheel zooms around the pointer. React's own wheel listener is passive, so the page would
   // scroll as well: a native, non-passive listener does the work.
   useEffect(() => {
@@ -1109,59 +1193,20 @@ export function PreviewStage({
       const lx = px / (base * v.scale) - v.panX;
       const ly = py / (base * v.scale) - v.panY;
       const next = clampView({ scale, panX: px / (base * scale) - lx, panY: py / (base * scale) - ly });
-      applyView(next);
-      commitView(next);
+      // A mouse notch is a step the reader can see: the view eases to it over WHEEL_MS, and the
+      // next notch retargets from where the canvas is now, so nothing queues up. A trackpad's
+      // small, continuous deltas and a ctrl+wheel are applied at once.
+      const notch = !e.ctrlKey && (e.deltaMode === 1 || Math.abs(e.deltaY) >= NOTCH_DELTA);
+      if (notch) {
+        animateTo(next, WHEEL_MS);
+      } else {
+        applyView(next);
+        commitView(next);
+      }
     };
     stage.addEventListener("wheel", onWheel, { passive: false });
     return () => stage.removeEventListener("wheel", onWheel);
-  }, [applyView, commitView]);
-
-  /**
-   * Eases the view to a new one, over ZOOM_MS, with the house curve.
-   *
-   * The wheel does not use this: a wheel gesture is direct manipulation, and easing it would
-   * put the canvas behind the pointer. The buttons and the fit control are a single, discrete
-   * action, so they move.
-   */
-  const animateTo = useCallback(
-    (target: View) => {
-      if (zoomRaf.current !== null) {
-        cancelAnimationFrame(zoomRaf.current);
-        zoomRaf.current = null;
-      }
-      const from = { ...viewRef.current };
-      // The reader asked for less motion, in the system or in the editor's own switch: the view
-      // lands at once.
-      const still =
-        reduced ||
-        (typeof document !== "undefined" &&
-          document.documentElement.getAttribute("data-motion") === "reduced");
-      if (still) {
-        applyView(target);
-        setView(target);
-        return;
-      }
-      const t0 = performance.now();
-      const step = () => {
-        const raw = Math.min(1, (performance.now() - t0) / ZOOM_MS);
-        const e = houseEase(raw);
-        const next: View = {
-          scale: from.scale + (target.scale - from.scale) * e,
-          panX: from.panX + (target.panX - from.panX) * e,
-          panY: from.panY + (target.panY - from.panY) * e,
-        };
-        applyView(next);
-        if (raw < 1) {
-          zoomRaf.current = requestAnimationFrame(step);
-        } else {
-          zoomRaf.current = null;
-          setView(target);
-        }
-      };
-      zoomRaf.current = requestAnimationFrame(step);
-    },
-    [applyView, reduced],
-  );
+  }, [applyView, commitView, animateTo]);
 
   // An eased zoom that is still running when the canvas goes away must not keep painting.
   useEffect(
@@ -1207,10 +1252,25 @@ export function PreviewStage({
   const base = (stageBox.w || CANVAS_W) / CANVAS_W;
   const k = base * view.scale;
 
+  /**
+   * The scale bar: a round number of desk units that is about as wide as the bar itself, so
+   * the reader can measure a zone with it.
+   */
+  const scaleBar = useMemo(() => {
+    if (!stageBox.w) return null;
+    const pxPerUnit = base * view.scale;
+    const steps = [1, 2, 5, 10, 20, 40, 80, 160, 320];
+    const raw = 120 / pxPerUnit;
+    let units = steps[0] as number;
+    for (const s of steps) if (s <= raw) units = s;
+    return { units, px: Math.round(units * pxPerUnit) };
+  }, [base, view.scale, stageBox.w]);
+
   return (
     <div
       ref={stageRef}
       className={`stage ${desk.desk} ${desk.canvas}`}
+      data-editor-draw={editorDraws ? "true" : "false"}
       onPointerMove={onStageMove}
       onPointerUp={endDrag}
       onPointerCancel={endDrag}
@@ -1223,6 +1283,22 @@ export function PreviewStage({
         stageRef.current?.setPointerCapture(e.pointerId);
       }}
     >
+      {effect && !effectNeedsInput && !editorGone && (
+        // The editor's own draw of the running effect. It is drawn in the canvas's own
+        // 320 x 200 units, so it lines up with the zones, and the daemon's frames fade in over
+        // it when they arrive.
+        <div
+          className={desk.editorPreview}
+          data-editor-preview="true"
+          aria-hidden="true"
+          style={{
+            opacity: editorDraws ? 1 : 0,
+            transform: `translate(${view.panX * base * view.scale}px, ${view.panY * base * view.scale}px) scale(${base * view.scale})`,
+          }}
+        >
+          <EffectPreview id={effect.id} values={effect.props} className={desk.editorCanvas} />
+        </div>
+      )}
       <canvas
         ref={previewRef}
         className="stage-canvas"
@@ -1232,6 +1308,8 @@ export function PreviewStage({
         style={{
           transformOrigin: "0 0",
           transform: `translate(${view.panX * base * view.scale}px, ${view.panY * base * view.scale}px) scale(${view.scale})`,
+          // The daemon's frames take over from the editor's own draw with a crossfade.
+          opacity: daemonLive ? 1 : 0,
         }}
       />
       <canvas ref={overlayRef} className="stage-leds" aria-hidden="true" />
@@ -1395,10 +1473,17 @@ export function PreviewStage({
         <IconButton label="Zoom in" icon={<Plus size={13} />} size="sm" onClick={() => zoomBy(1.3)} />
         <IconButton label="Fit the canvas" icon={<ArrowsOut size={13} />} size="sm" onClick={fit} />
       </div>
+
+      {scaleBar && (
+        // The scale: how long a line on the desk is, in the daemon's own units.
+        <div className={desk.scaleBar} aria-hidden="true">
+          <span className={desk.scaleLine} style={{ width: `${scaleBar.px}px` }} />
+          <span className={desk.scaleLabel}>{scaleBar.units} units</span>
+        </div>
+      )}
     </div>
   );
 }
-
 /**
  * Keeps the canvas in the stage: at or above 1 the canvas covers the stage, so it can be
  * panned but never dragged away; below 1 it is centred.

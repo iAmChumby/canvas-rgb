@@ -125,6 +125,16 @@ export function LayoutView() {
   const preview = usePreviewStatus();
   // While a zone is being dragged the inspector shows where it is, not where it was.
   const shownZone = liveZone && liveZone.index === selected ? liveZone.zone : selectedZone;
+  // The running effect: the editor draws it itself when the daemon's preview is not connected.
+  const runningEffect = server?.effect ?? null;
+  const effectNeedsInput = useMemo(() => {
+    if (!runningEffect) return false;
+    const summary = effects?.find((e) => e.id === runningEffect.id);
+    return !!(summary?.needs.screen || summary?.needs.audio);
+  }, [runningEffect, effects]);
+  // The daemon's frames are the honest picture. Without them the editor draws the effect, and
+  // says so in one quiet line.
+  const editorDraws = preview.state !== "live" && !!runningEffect && !effectNeedsInput;
   // What the preview is doing, said under the canvas rather than over it. A refused preview
   // says why in the line below, so it does not say it twice.
   const previewNote = useMemo(() => {
@@ -220,7 +230,7 @@ export function LayoutView() {
     <div className="stack">
       <div className="page-head">
         <h1>{draft.name}</h1>
-        <p>
+        <p className={desk.subtitle}>
           The desk canvas: every placed zone over the live preview of{" "}
           <span style={{ color: "var(--ink)" }}>{effectName}</span>.
         </p>
@@ -242,6 +252,8 @@ export function LayoutView() {
             onLiveChange={(index, zone) => setLiveZone({ index, zone })}
             layoutId={draft.id}
             dropPayloadType={DROP_TYPE}
+            effect={runningEffect}
+            effectNeedsInput={effectNeedsInput}
           />
           <div className="stage-meta">
             {previewNote ? (
@@ -252,6 +264,7 @@ export function LayoutView() {
               </span>
             )}
             <span className="row-wrap" style={{ alignItems: "center", gap: "var(--s3)" }}>
+              {editorDraws && <span className={desk.drawn}>Preview drawn by the editor</span>}
               <StateDot tone={preview.state === "live" ? "ok" : preview.state === "refused" ? "down" : "work"}>
                 {preview.state === "live" ? `preview ${preview.fps.toFixed(1)} fps` : `preview ${preview.state}`}
               </StateDot>
