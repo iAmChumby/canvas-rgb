@@ -1,17 +1,19 @@
 "use client";
 
-import { useMemo, useState, type DragEvent } from "react";
-import { ArrowCounterClockwise, FloppyDisk, Plus, X } from "@phosphor-icons/react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import { ArrowCounterClockwise, ArrowUp, FloppyDisk, Plus, X } from "@phosphor-icons/react";
 import { Button, IconButton } from "@/components/Button";
 import { Panel, Field } from "@/components/Panel";
 import { Segmented } from "@/components/Segmented";
 import { NumberField } from "@/components/NumberField";
 import { Toggle } from "@/components/Toggle";
 import { RowButton } from "@/components/Chip";
+import { useMediaQuery } from "@/components/MediaQuery";
 import { PreviewStage } from "@/views/PreviewStage";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
 import { usePreviewStatus } from "@/lib/preview";
+import { usePrefersReducedMotion } from "@/lib/motion";
 import { refreshLayouts, useSnap } from "@/lib/store";
 import { defaultRect, findZoneInfo } from "@/lib/zones";
 import { clamp } from "@/lib/format";
@@ -79,6 +81,14 @@ export function LayoutView() {
    * inspector follows the pointer without the drag re-rendering the canvas every move.
    */
   const [liveZone, setLiveZone] = useState<{ index: number; zone: PlacedZone } | null>(null);
+  /**
+   * On a phone the canvas is at the top of the page and the inspector is under it: picking a
+   * zone has to bring the inspector into view, and the reader needs a way back to the canvas.
+   */
+  const phone = useMediaQuery("(max-width: 720px)");
+  const reduced = usePrefersReducedMotion();
+  const stageRef = useRef<HTMLDivElement>(null);
+  const inspectorRef = useRef<HTMLDivElement>(null);
 
   const serverKey = server ? JSON.stringify(server) : "";
   const dirty =
@@ -225,6 +235,28 @@ export function LayoutView() {
     place(deviceId, zoneIndex, { x, y });
   };
 
+  /** Scrolls a panel into view. */
+  const reveal = useCallback(
+    (el: HTMLElement | null) => {
+      if (!el) return;
+      el.scrollIntoView({ behavior: reduced ? "auto" : "smooth", block: "start" });
+    },
+    [reduced],
+  );
+
+  // Picking a zone reveals its inspector: on a phone the two are a screen apart.
+  useEffect(() => {
+    if (!phone || selected === null) return;
+    reveal(inspectorRef.current);
+  }, [phone, selected, reveal]);
+
+  /** The way back to the canvas. */
+  const backToCanvas = () => {
+    const el = stageRef.current;
+    if (!el) return;
+    el.scrollIntoView({ behavior: reduced ? "auto" : "smooth", block: "start" });
+  };
+
   const dragStart = (deviceId: string, zoneIndex: number, e: DragEvent<HTMLElement>) => {
     e.dataTransfer.setData(DROP_TYPE, JSON.stringify({ deviceId, zoneIndex }));
     e.dataTransfer.effectAllowed = "copy";
@@ -256,7 +288,7 @@ export function LayoutView() {
       </div>
 
       <div className="layout-grid">
-        <div className="layout-stage-col stack">
+        <div className="layout-stage-col stack" ref={stageRef}>
           <PreviewStage
             zones={zones}
             devices={devices}
@@ -277,7 +309,9 @@ export function LayoutView() {
           />
           <div className="stage-meta">
             <span className="dropzone-hint">
-              Drag to move, the corner to resize, the knob to rotate. Arrow keys nudge.
+              {phone
+                ? "Tap a zone to pick it. Drag it to move it, the corner to resize it."
+                : "Drag to move, the corner to resize, the knob to rotate. Arrow keys nudge."}
             </span>
             <span className="row-wrap" style={{ alignItems: "center", gap: "var(--s3)" }}>
               {previewLine && (
@@ -322,19 +356,22 @@ export function LayoutView() {
         <div className="stack">
           <Panel title={selectedZone ? "Zone" : "Zones"}>
             {shownZone && selected !== null ? (
-              <ZoneInspector
-                key={selected}
-                zone={shownZone}
-                name={
-                  selectedInfo?.zone.name ??
-                  staleDeviceName(shownZone.device_id, devices)
-                }
-                deviceName={selectedInfo?.device.name ?? shortDeviceId(shownZone.device_id)}
-                ledCount={selectedInfo?.zone.led_count ?? 0}
-                missing={!selectedInfo}
-                onChange={(patch) => changeZone(selected, patch)}
-                onRemove={() => unplace(selected)}
-              />
+              <div ref={inspectorRef}>
+                <ZoneInspector
+                  key={selected}
+                  zone={shownZone}
+                  name={
+                    selectedInfo?.zone.name ??
+                    staleDeviceName(shownZone.device_id, devices)
+                  }
+                  deviceName={selectedInfo?.device.name ?? shortDeviceId(shownZone.device_id)}
+                  ledCount={selectedInfo?.zone.led_count ?? 0}
+                  missing={!selectedInfo}
+                  onChange={(patch) => changeZone(selected, patch)}
+                  onRemove={() => unplace(selected)}
+                  onBack={phone ? backToCanvas : null}
+                />
+              </div>
             ) : (
               <p className="mute">Select a zone on the preview, or in the list below.</p>
             )}
@@ -389,7 +426,7 @@ export function LayoutView() {
             </div>
           </Panel>
 
-          <div className="savebar">
+          <div className="savebar" data-dirty={dirty ? "true" : "false"}>
             <span className={dirty ? "warn-text fig" : "mute"}>{dirty ? "Unsaved layout changes" : "Saved"}</span>
             <div className="row-wrap">
               <Button variant="ghost" icon={<ArrowCounterClockwise size={16} />} disabled={!dirty || saving} onClick={revert}>
@@ -415,6 +452,7 @@ function ZoneInspector({
   missing,
   onChange,
   onRemove,
+  onBack,
 }: {
   zone: PlacedZone;
   name: string;
@@ -423,9 +461,18 @@ function ZoneInspector({
   missing: boolean;
   onChange: (patch: Partial<PlacedZone>) => void;
   onRemove: () => void;
+  /** On a phone: the way back to the canvas the zone was picked on. */
+  onBack: (() => void) | null;
 }) {
   return (
     <div className={`stack ${desk.inspector}`} style={{ gap: 8 }}>
+      {onBack && (
+        <div>
+          <Button size="sm" variant="ghost" icon={<ArrowUp size={14} />} onClick={onBack}>
+            Back to the canvas
+          </Button>
+        </div>
+      )}
       <div className="row-title" style={{ justifyContent: "space-between" }}>
         <span className={missing ? "" : "one-line"}>{name}</span>
         <span className="fig mute">{missing ? "not connected" : `${ledCount} LEDs`}</span>

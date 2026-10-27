@@ -15,6 +15,7 @@ import {
 import { ArrowsOut, Minus, Plus } from "@phosphor-icons/react";
 import { IconButton } from "@/components/Button";
 import { EffectPreview, type PreviewValues } from "@/components/EffectPreview";
+import { useMediaQuery } from "@/components/MediaQuery";
 import { onFrame, PREVIEW_H, PREVIEW_W, usePreviewStatus, type Frame } from "@/lib/preview";
 import { findZoneInfo, zoneCorners, zoneGripPoint, zoneLedOffsets, zoneTransform, type Point } from "@/lib/zones";
 import { clamp } from "@/lib/format";
@@ -535,6 +536,10 @@ function boxDistance(a: Box, b: Box): number {
  * therefore placed one at a time, each one taking the first place where it is inside the canvas,
  * clear of every other zone and clear of the controls, and the ones that cannot be clear of each
  * other are pushed down.
+ *
+ * `chipFor` says which zones get a chip at all. On a phone only the picked zone has one (round 2),
+ * so the chip is placed as if it were the only chip on the canvas: it can take the free place
+ * above its own strip instead of the crowded one beside its neighbours.
  */
 function layoutLabels(
   zones: PlacedZone[],
@@ -543,6 +548,7 @@ function layoutLabels(
   stageH: number,
   view: View,
   obstacles: Box[],
+  chipFor?: (index: number) => boolean,
 ): LabelBox[] {
   // On a phone the chip must not eat the canvas: the name alone, and a short word for a zone
   // whose device is gone. The zone list below spells both out. A chip that still fits in the
@@ -609,6 +615,9 @@ function layoutLabels(
 
   const placed: LabelBox[] = [];
   for (const item of items) {
+    // On a phone only the picked zone has a chip: the canvas shows the lights, and the chip
+    // names the one zone the reader is on.
+    if (chipFor && !chipFor(item.index)) continue;
     const w = item.w;
     // The places a chip can go: above the zone, inside it, below it; each one either aligned
     // with the zone's left edge or with its right edge. When the zone is tall and narrow, the
@@ -847,11 +856,23 @@ export function PreviewStage({
   const zoomRaf = useRef<number | null>(null);
   const viewCommit = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [hover, setHover] = useState<number | null>(null);
+  /** The zone a finger is on: its chip shows on a phone even before it is picked. */
+  const [pressed, setPressed] = useState<number | null>(null);
   const [view, setView] = useState<View>({ scale: 1, panX: 0, panY: 0 });
   const viewRef = useRef<View>(view);
   const [viewFor, setViewFor] = useState<string | null>(null);
   const status = usePreviewStatus();
   const reduced = usePrefersReducedMotion();
+  /**
+   * A phone's canvas is 358 px wide and carries eight zones: eight chips on it is a wall of
+   * text over the lights. On a phone only the picked zone is named, and the zone under a finger
+   * names itself while it is held.
+   */
+  const phone = useMediaQuery("(max-width: 720px)");
+  const chipVisible = useCallback(
+    (index: number) => !phone || index === selected || index === pressed,
+    [phone, selected, pressed],
+  );
   /**
    * The daemon's frames are the honest picture of the effect. When they are not coming, the
    * editor draws the running effect itself, behind the zones, and says so.
@@ -1122,6 +1143,7 @@ export function PreviewStage({
         stage.clientHeight,
         v,
         obstaclesRef.current,
+        chipVisible,
       );
       for (const b of boxes) {
         const el = labelEls.current[b.index];
@@ -1130,7 +1152,7 @@ export function PreviewStage({
         el.style.top = `${b.y}px`;
       }
     },
-    [zones, devices],
+    [zones, devices, chipVisible],
   );
 
   /** Draws the whole view: the effect, the zones, the labels and the LEDs. */
@@ -1154,7 +1176,6 @@ export function PreviewStage({
     },
     [applyGeom, writeLabels, queuePaint, selected],
   );
-
   // Paint each arriving frame: the preview canvas, then the LED dots over it.
   useEffect(() => {
     const off = onFrame((frame) => {
@@ -1323,6 +1344,8 @@ export function PreviewStage({
     const z = liveRef.current[index];
     if (!z) return;
     onSelect(index);
+    // The zone under the finger names itself on a phone, even before it is picked.
+    setPressed(index);
     // The chip rides along with the zone it names, so the name never points at the place the
     // zone used to be.
     const label = labelEls.current[index];
@@ -1436,6 +1459,8 @@ export function PreviewStage({
   };
 
   const endDrag = (e: PointerEvent<HTMLDivElement>) => {
+    // The finger is off the zone: on a phone its chip goes with it.
+    setPressed(null);
     const pan = panRef.current;
     if (pan) {
       panRef.current = null;
@@ -1520,9 +1545,9 @@ export function PreviewStage({
     const obstacles = measureObstacles();
     obstaclesRef.current = obstacles;
     setLabelBoxes(
-      layoutLabels(zones, devices, stage.clientWidth, stage.clientHeight, view, obstacles),
+      layoutLabels(zones, devices, stage.clientWidth, stage.clientHeight, view, obstacles, chipVisible),
     );
-  }, [zones, devices, stageBox, view, measureObstacles]);
+  }, [zones, devices, stageBox, view, measureObstacles, chipVisible]);
 
   // The view is written back to React when the gesture settles, so the page keeps the zoom.
   const commitView = useCallback(

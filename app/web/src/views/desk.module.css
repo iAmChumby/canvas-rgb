@@ -419,6 +419,24 @@
   }
 }
 
+/* On a phone only the picked zone has a chip (round 2), so the chip is the one thing on the
+   canvas that says which zone is picked: it fades in when it appears. 120 ms, the house's
+   "quick" step. */
+@keyframes chip-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (max-width: 720px) {
+  .desk .label {
+    animation: chip-in var(--dur-fast) var(--ease);
+  }
+}
+
 /* ---------- the preview's state ---------- */
 
 /* The preview's state is said under the canvas, not over it: the canvas is the desk, and
