@@ -277,18 +277,28 @@ html[data-motion="reduced"] *::after {
   background: var(--line);
 }
 
-/* The palette button sits at the end of the strip, whatever else is in the row. */
+/* The palette button sits at the end of the strip, whatever else is in the row. Its tooltip is
+   aligned to the button's right edge: centred on it, the bubble ran past the strip (which is
+   overflow: hidden) and was cut when it opened. */
 .strip-search-group {
   order: 10;
   margin-left: auto;
 }
 
-/* The device count: a number and the word beside it. */
+.strip-search-group .tip-bubble {
+  left: auto;
+  right: 0;
+  transform: none;
+}
+
+/* The device count: a number and the word beside it. It sits in the top row in the markup, and
+   the order puts it after the links and before the palette button, as before. */
 .strip-devices {
   display: inline-flex;
   align-items: baseline;
   gap: var(--s1);
   white-space: nowrap;
+  order: 9;
 }
 
 .strip-devices-icon {
@@ -1650,7 +1660,7 @@ button.chip:hover {
     row-gap: var(--s1);
     align-content: center;
     height: 100%;
-    padding: 0 var(--s3);
+    padding: 0 var(--s2);
     box-sizing: border-box;
   }
 
@@ -1695,9 +1705,11 @@ button.chip:hover {
     text-overflow: ellipsis;
   }
 
+  /* The rate's own parts are fixed widths (the value, the state word), so the column is as wide
+     as they are: a fixed 250 px left the effect's name clipped at 360. */
   .strip-rate {
     flex: none;
-    width: 250px;
+    width: auto;
   }
 
   .strip-rate-value {
@@ -1733,6 +1745,12 @@ button.chip:hover {
   .strip-devices {
     flex: none;
     justify-content: flex-end;
+  }
+
+  .strip .strip-devices {
+    display: inline-flex;
+    min-width: 2ch;
+    order: 11;
   }
 
   .strip-devices-icon {

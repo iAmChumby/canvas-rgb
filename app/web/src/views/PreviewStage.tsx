@@ -38,6 +38,21 @@ const SNAP_PIXELS = 8;
 const GRIP_GAP = 7;
 /** How far a chip may sit from its own zone and still count as sitting at it, in css pixels. */
 const CHIP_GAP = 10;
+/**
+ * A chip sits this many css px off its zone's edge. Close enough to read as that zone's own
+ * label, and it leaves the most room for the clear gap to the next zone (CHIP_CLEAR).
+ */
+const CHIP_TOUCH = 2;
+/**
+ * The clear gap a chip leaves to another zone when it sits in a gap between two zones, in css px.
+ * The desk check (chips-gui3, rule 8) uses the same figure.
+ */
+const CHIP_CLEAR = 4;
+/**
+ * Rounding allowance when two distances are compared: a chip is nearer its own zone only by more
+ * than this. A tie is not nearer (the desk check, rule 7, uses the same figure).
+ */
+const NEARER_EPS = 0.05;
 
 /**
  * A picture the LED dots can be sampled from: the daemon's frames, or the editor's own draw of
@@ -598,21 +613,24 @@ function layoutLabels(
     // The places a chip can go: above the zone, inside it, below it; each one either aligned
     // with the zone's left edge or with its right edge. When the zone is tall and narrow, the
     // chip can also stand beside it.
-    const xs = [item.box.x, item.box.x + item.box.w - w];
+    const candidates: Box[] = [];
+    const at = (x: number, y: number) => ({ x: clamp(x, 0, Math.max(0, stageW - w)), y, w, h: m.h });
+    // Above and below the zone the chip may stand anywhere along the zone's width, every 6 px: when
+    // a neighbour zone sits at the same height, the chip moves off the neighbour's end and stays
+    // nearer its own zone.
+    const along: number[] = [item.box.x, item.box.x + item.box.w - w];
+    for (let x = item.box.x - w + 6; x < item.box.x + item.box.w - 6; x += 6) along.push(x);
+    for (const y of [item.box.y - m.h - CHIP_TOUCH, item.box.y + item.box.h + CHIP_TOUCH]) {
+      for (const x of along) candidates.push(at(x, y));
+    }
     // Inside the zone, the chip is centred on it: a strip a few pixels tall is then covered by a
     // chip that is clear of its neighbours, where a chip hung from its top would hit them.
-    const ys = [item.box.y - m.h - 4, item.box.y + 3, item.box.y + (item.box.h - m.h) / 2, item.box.y + item.box.h + 4];
-    const candidates: Box[] = [];
-    for (const y of ys) {
-      for (const x of xs) {
-        candidates.push({ x: clamp(x, 0, Math.max(0, stageW - w)), y, w, h: m.h });
-      }
+    for (const y of [item.box.y + 3, item.box.y + (item.box.h - m.h) / 2]) {
+      for (const x of [item.box.x, item.box.x + item.box.w - w]) candidates.push(at(x, y));
     }
-    // Beside the zone: to its left or to its right, at the zone's head or at its foot.
-    for (const y of [item.box.y, item.box.y + item.box.h - m.h]) {
-      for (const x of [item.box.x - w - 4, item.box.x + item.box.w + 4]) {
-        candidates.push({ x: clamp(x, 0, Math.max(0, stageW - w)), y, w, h: m.h });
-      }
+    // Beside the zone: to its left or to its right, anywhere along its height, every 4 px.
+    for (const x of [item.box.x - w - CHIP_TOUCH, item.box.x + item.box.w + CHIP_TOUCH]) {
+      for (let y = item.box.y - m.h + 4; y <= item.box.y + item.box.h - 4; y += 4) candidates.push(at(x, y));
     }
     const inCanvas = (b: Box) => b.y >= 0 && b.y + m.h <= stageH && b.x >= 0 && b.x + b.w <= stageW;
     // The chip has to sit at its own zone: it must touch it, cover it, or sit right above it,
@@ -632,11 +650,26 @@ function layoutLabels(
     const controlClash = (b: Box) => obstacles.some((o) => overlaps(b, o));
     // And its own zone must be the nearest one: a chip that sits closer to another zone names
     // that one.
-    const nearestIsOwn = (b: Box) => {
+    const nearestOther = (b: Box) => {
       const others = items.filter((o) => o.index !== item.index && !contains(o.box, item.box));
       let best = Infinity;
       for (const o of others) best = Math.min(best, boxDistance(b, o.box));
-      return boxDistance(b, item.box) <= best + 0.001;
+      return best;
+    };
+    const nearestIsOwn = (b: Box) => boxDistance(b, item.box) < nearestOther(b) - NEARER_EPS;
+    /**
+     * The side a chip prefers: above its zone and left-aligned with the zone's start, then above
+     * and right-aligned, then below on the same two terms, then beside the zone. The bonus is
+     * small against every clash (30 to 40), so a preferred side is taken only when it is clear;
+     * a blocked one falls through to the next side.
+     */
+    const sideBonus = (b: Box): number => {
+      const above = b.y + b.h <= item.box.y + 0.5;
+      const below = b.y >= item.box.y + item.box.h - 0.5;
+      const left = Math.abs(b.x - item.box.x) < 0.5;
+      if (above) return left ? 6 : 4;
+      if (below) return left ? 3 : 2;
+      return 1;
     };
     /**
      * How good a place is. The rules are weighed in the order they matter: a chip that names
@@ -656,7 +689,12 @@ function layoutLabels(
       s += !chipClash(b) ? 4 : -30;
       s += !controlClash(b) ? 2 : -40;
       // A chip that sits nearer to another zone names that one: a clear fault, not a tie-break.
-      s += nearestIsOwn(b) ? 1 : -30;
+      // A tie is a fault, but a smaller one than covering the zone's own lamps (-20 above): a chip
+      // that covers its lamps is the worse of the two.
+      s += nearestIsOwn(b) ? 1 : -15;
+      // In a gap between two zones, the chip leaves a clear gap to the other one.
+      s += nearestOther(b) - boxDistance(b, item.box) >= CHIP_CLEAR ? 6 : 0;
+      s += sideBonus(b);
       return s;
     };
     /**
@@ -723,10 +761,15 @@ function layoutLabels(
       else moved.push(...alt);
     }
     tries.push(...free, ...moved);
-    // The best place wins; the order of the candidates breaks a tie.
+    // The best place wins; the order of the candidates breaks a tie. Only the six best unslid
+    // places are slid: a slide is the costly part, and a place that needs one is rarely the best.
+    const top = tries
+      .map((b) => ({ b, s: score(b) }))
+      .sort((p, q) => q.s - p.s)
+      .slice(0, 6);
     let best: Box | null = null;
     let bestScore = -Infinity;
-    for (const b of tries) {
+    for (const { b } of top) {
       const pos = slide(b);
       const s = score(pos);
       if (s > bestScore) {

@@ -108,6 +108,11 @@ export function StatusStrip({ onOpenPalette }: { onOpenPalette?: () => void }) {
               />
             </span>
           )}
+          <span className="strip-devices">
+            <Cpu size={13} className="strip-devices-icon" aria-hidden="true" />
+            <span className="fig strip-devices-count">{known ? status.devices_connected : "—"}</span>
+            <span className="strip-devices-word"> devices</span>
+          </span>
         </div>
 
         <div className="strip-row strip-row-mid">
@@ -150,11 +155,6 @@ export function StatusStrip({ onOpenPalette }: { onOpenPalette?: () => void }) {
               <span className="strip-link-state">{known ? status.service : "—"}</span>
             </StateDot>
           </div>
-          <span className="strip-devices">
-            <Cpu size={13} className="strip-devices-icon" aria-hidden="true" />
-            <span className="fig strip-devices-count">{known ? status.devices_connected : "—"}</span>
-            <span className="strip-devices-word"> devices</span>
-          </span>
         </div>
       </div>
     </div>
