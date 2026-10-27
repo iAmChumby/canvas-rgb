@@ -59,10 +59,16 @@ pub fn signalrgb_process_running() -> bool {
 /// Whether the `SignalRgb.Service` service exists and is running.
 #[cfg(windows)]
 pub fn signalrgb_service_running() -> bool {
+    service_running(SIGNALRGB_SERVICE)
+}
+
+/// Whether the named Windows service exists and is running.
+#[cfg(windows)]
+pub fn service_running(service_name: &str) -> bool {
     use windows::core::PCWSTR;
     use windows::Win32::System::Services::{
         CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceStatusEx, SC_MANAGER_CONNECT,
-        SERVICE_QUERY_STATUS, SERVICE_RUNNING, SERVICE_STATUS, SC_STATUS_PROCESS_INFO,
+        SERVICE_QUERY_STATUS, SERVICE_RUNNING, SERVICE_STATUS_PROCESS, SC_STATUS_PROCESS_INFO,
     };
 
     unsafe {
@@ -70,7 +76,7 @@ pub fn signalrgb_service_running() -> bool {
             Ok(m) => m,
             Err(_) => return false,
         };
-        let name: Vec<u16> = SIGNALRGB_SERVICE.encode_utf16().chain(std::iter::once(0)).collect();
+        let name: Vec<u16> = service_name.encode_utf16().chain(std::iter::once(0)).collect();
         let service = match OpenServiceW(manager, PCWSTR(name.as_ptr()), SERVICE_QUERY_STATUS) {
             Ok(s) => s,
             Err(_) => {
@@ -78,11 +84,14 @@ pub fn signalrgb_service_running() -> bool {
                 return false;
             }
         };
-        let mut status = SERVICE_STATUS::default();
+        // SC_STATUS_PROCESS_INFO fills a SERVICE_STATUS_PROCESS (36 bytes). A SERVICE_STATUS
+        // (28 bytes) makes the call fail with ERROR_INSUFFICIENT_BUFFER, which read as "not
+        // running" while SignalRgb.Service was running (seen live).
+        let mut status = SERVICE_STATUS_PROCESS::default();
         let mut bytes: u32 = 0;
         let buffer: &mut [u8] = std::slice::from_raw_parts_mut(
             std::ptr::addr_of_mut!(status).cast::<u8>(),
-            std::mem::size_of::<SERVICE_STATUS>(),
+            std::mem::size_of::<SERVICE_STATUS_PROCESS>(),
         );
         let ok = QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO, Some(buffer), &mut bytes);
         let _ = CloseServiceHandle(service);
@@ -159,5 +168,13 @@ mod tests {
         assert_eq!(text.len(), 1);
         assert!(text[0].contains("SignalRgb.exe"));
         assert!(text[0].contains("SignalRgb.Service"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_service_query_reads_a_running_service_and_a_missing_one() {
+        // EventLog always runs on Windows; the buffer-size bug made every service read as stopped.
+        assert!(super::service_running("EventLog"));
+        assert!(!super::service_running("canvas-rgb-no-such-service"));
     }
 }

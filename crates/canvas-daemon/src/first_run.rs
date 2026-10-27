@@ -444,7 +444,22 @@ pub async fn should_run(app: &std::sync::Arc<crate::state::App>) -> bool {
 /// The first run: size the JARGB headers, place the devices, activate Poison.
 ///
 /// It runs only once, when `config.first_run_done` is false and OpenRGB has devices.
+/// Set while a first run is in progress, so two device callbacks can't both run it (the
+/// second would rebuild the layout without the effect the first one activated).
+static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub async fn maybe_run(app: &std::sync::Arc<crate::state::App>) {
+    if !should_run(app).await {
+        return;
+    }
+    if RUNNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    run(app).await;
+    RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+async fn run(app: &std::sync::Arc<crate::state::App>) {
     if !should_run(app).await {
         return;
     }
@@ -497,6 +512,24 @@ pub async fn maybe_run(app: &std::sync::Arc<crate::state::App>) {
             );
         }
     }
+
+    // Re-discover after sizing, so the layout and the engine see the new LED counts (the
+    // list read above still has the headers at 0 LEDs).
+    let devices = if sizes.is_empty() {
+        devices
+    } else {
+        let rediscovered = app.adapter.lock().await.discover().await;
+        match rediscovered {
+            Ok(list) => {
+                *app.devices.write().await = list.clone();
+                list
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "could not re-discover after sizing the headers");
+                devices
+            }
+        }
+    };
 
     // Place the devices and activate Poison.
     let layout = build_default_layout(&devices);

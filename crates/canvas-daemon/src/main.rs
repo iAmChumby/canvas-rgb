@@ -258,12 +258,64 @@ fn load_zone_sizes() -> std::collections::BTreeMap<String, std::collections::BTr
     }
 }
 
+/// Gives every connected device a frame sink in the engine: a bounded(1) channel into a
+/// writer task that sends each frame to the adapter. Devices that went away lose theirs.
+/// Without this the engine has no sinks, stays parked, and nothing reaches the lights.
+async fn sync_device_sinks(
+    app: &Arc<App>,
+    devices: &[canvas_proto::DeviceInfo],
+    sinks: &tokio::sync::Mutex<std::collections::HashMap<canvas_proto::DeviceId, tokio::task::JoinHandle<()>>>,
+) {
+    let mut sinks = sinks.lock().await;
+    let live: std::collections::HashSet<_> =
+        devices.iter().filter(|d| d.connected).map(|d| d.id.clone()).collect();
+    sinks.retain(|id, writer| {
+        if live.contains(id) {
+            return true;
+        }
+        app.engine.remove_sink(id);
+        writer.abort();
+        tracing::info!(device = %id, "device gone; its frame sink is removed");
+        false
+    });
+    for id in live {
+        if sinks.contains_key(&id) {
+            continue;
+        }
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<canvas_proto::Rgb8>>(1);
+        let adapter = app.adapter.clone();
+        let writer_id = id.clone();
+        let writer = tokio::spawn(async move {
+            let mut failures = 0u32;
+            while let Some(frame) = rx.recv().await {
+                let result = adapter.lock().await.write_frame(&writer_id, &frame).await;
+                match result {
+                    Ok(()) => failures = 0,
+                    Err(e) => {
+                        failures += 1;
+                        // Log the first failure and then every 300th, not every frame.
+                        if failures == 1 || failures.is_multiple_of(300) {
+                            tracing::warn!(device = %writer_id, error = %e, failures, "frame write failed");
+                        }
+                    }
+                }
+            }
+        });
+        app.engine.add_sink(id.clone(), Arc::new(canvas_daemon::state::DeviceSink::new(id.clone(), tx)));
+        tracing::info!(device = %id, "device frame sink added");
+        sinks.insert(id, writer);
+    }
+}
+
 /// Keeps the OpenRGB connection alive and re-applies the zone sizes.
 fn spawn_openrgb_supervisor(app: Arc<App>) {
     let adapter = app.adapter.clone();
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let app_for_supervisor = app.clone();
     let zones = app_for_supervisor.zones.clone();
+    // Devices that have a frame sink registered with the engine.
+    let sinks: Arc<tokio::sync::Mutex<std::collections::HashMap<canvas_proto::DeviceId, tokio::task::JoinHandle<()>>>> =
+        Arc::default();
     tokio::spawn(async move {
         // Milestone 1: the daemon starts the OpenRGB server itself when the service does
         // not own it. The app keeps it, and the quit path stops it.
@@ -284,8 +336,10 @@ fn spawn_openrgb_supervisor(app: Arc<App>) {
             zones,
             {
                 let app = app_for_supervisor.clone();
+                let sinks = sinks.clone();
                 move |devices| {
                     let app = app.clone();
+                    let sinks = sinks.clone();
                     // The device list and the layout are updated on the runtime, because
                     // the callback is not async.
                     tokio::spawn(async move {
@@ -302,6 +356,7 @@ fn spawn_openrgb_supervisor(app: Arc<App>) {
                             let device_list = app.devices.read().await.clone();
                             app.engine.set_layout(layout, device_list);
                         }
+                        sync_device_sinks(&app, &devices, &sinks).await;
                         // The first run waits for the devices.
                         canvas_daemon::first_run::maybe_run(&app).await;
                     });

@@ -256,6 +256,48 @@ pub async fn ensure_openrgb_running(port: u16) -> Option<ServerProcess> {
 /// Connects to OpenRGB, re-applies the zone sizes and re-discovers the devices.
 ///
 /// Returns the devices as OpenRGB reports them after the zone sizes were applied.
+/// What decides "the device list changed": ids, connection, and every zone's LED count.
+fn device_key(devices: &[DeviceInfo]) -> Vec<(String, bool, Vec<u32>)> {
+    let mut key: Vec<_> = devices
+        .iter()
+        .map(|d| (d.id.0.clone(), d.connected, d.zones.iter().map(|z| z.led_count).collect()))
+        .collect();
+    key.sort();
+    key
+}
+
+/// Re-reads the device list on a live connection. A saved zone size that the device doesn't
+/// have yet (a device that appeared since connect) is applied, then the list is read again.
+async fn refresh_devices(
+    adapter: &mut dyn DeviceAdapter,
+    zone_sizes: &std::collections::BTreeMap<String, std::collections::BTreeMap<u32, u32>>,
+) -> Result<Vec<DeviceInfo>, String> {
+    let devices = adapter.discover().await.map_err(|e| format!("discovery failed: {e}"))?;
+    let mut resized = false;
+    for device in &devices {
+        let Some(sizes) = zone_sizes.get(&device.id.0) else {
+            continue;
+        };
+        for (zone, leds) in sizes {
+            let current = device.zones.iter().find(|z| z.index == *zone).map(|z| z.led_count);
+            if current.is_some_and(|c| c != *leds) {
+                match adapter.set_zone_size(&device.id, *zone, *leds).await {
+                    Ok(()) => {
+                        resized = true;
+                        tracing::info!(device = %device.id, zone, leds, "applied the saved zone size");
+                    }
+                    Err(e) => tracing::warn!(device = %device.id, zone, leds, error = %e, "could not apply the saved zone size"),
+                }
+            }
+        }
+    }
+    if resized {
+        adapter.discover().await.map_err(|e| format!("discovery failed: {e}"))
+    } else {
+        Ok(devices)
+    }
+}
+
 pub async fn connect_and_prepare(
     adapter: &mut dyn DeviceAdapter,
     zone_sizes: &std::collections::BTreeMap<String, std::collections::BTreeMap<u32, u32>>,
@@ -314,9 +356,13 @@ pub async fn supervise(
         match result {
             Ok(devices) => {
                 tracing::info!(count = devices.len(), "connected to OpenRGB");
+                let mut last = device_key(&devices);
                 on_devices(devices);
                 backoff = backoff.reset();
-                // Wait for the connection to drop before trying again.
+                // Wait for the connection to drop before trying again. Every 5 s, re-read the
+                // device list: OpenRGB may still be detecting when we connect (seen live: 0
+                // devices at connect, never refreshed), and devices can come and go.
+                let mut ticks = 0u32;
                 loop {
                     if *stop.borrow() {
                         return;
@@ -329,6 +375,23 @@ pub async fn supervise(
                     if !connected {
                         tracing::info!("OpenRGB went away; reconnecting");
                         break;
+                    }
+                    ticks += 1;
+                    if !ticks.is_multiple_of(10) {
+                        continue;
+                    }
+                    let refreshed = {
+                        let mut guard = adapter.lock().await;
+                        refresh_devices(guard.as_mut(), &zone_sizes.read().await.clone()).await
+                    };
+                    match refreshed {
+                        Ok(devices) if device_key(&devices) != last => {
+                            tracing::info!(count = devices.len(), "the OpenRGB device list changed");
+                            last = device_key(&devices);
+                            on_devices(devices);
+                        }
+                        Ok(_) => {}
+                        Err(e) => tracing::debug!(error = %e, "could not re-read the OpenRGB devices"),
                     }
                 }
             }

@@ -7,6 +7,8 @@
 use clap::{Args, Parser, Subcommand};
 use std::collections::BTreeMap;
 
+use crate::peer;
+
 /// The CLI's commands.
 #[derive(Debug, Parser)]
 #[command(name = "canvas-rgb", version, about = "canvas-rgb: lighting and fan control")]
@@ -231,6 +233,10 @@ pub fn parse_activate_props(args: &[String]) -> Result<BTreeMap<String, String>,
 pub enum CliError {
     #[error("the daemon is not running (nothing answers on {0})")]
     NotRunning(String),
+    /// The daemon is not running, or the port is held by another program: the API token
+    /// is not sent to it.
+    #[error("{0}")]
+    NotTrusted(String),
     #[error("the API returned {status}: {message}")]
     Api { status: u16, message: String },
     #[error("{0}")]
@@ -253,7 +259,7 @@ impl CliError {
     /// The exit code for this error.
     pub fn exit_code(&self) -> i32 {
         match self {
-            CliError::NotRunning(_) => 2,
+            CliError::NotRunning(_) | CliError::NotTrusted(_) => 2,
             CliError::Api { .. } => 1,
             CliError::Other(_) => 1,
         }
@@ -271,10 +277,15 @@ pub struct Client {
 
 impl Client {
     /// Builds a client from the token file and the base URL.
+    ///
+    /// The API token is a bearer secret, so the client is only built when the process
+    /// holding the port really is the daemon, running as this user. Otherwise the token
+    /// is never sent.
     pub fn new(base: Option<&str>) -> Result<Self, CliError> {
         let base = base
             .map(str::to_string)
             .unwrap_or_else(canvas_proto::consts::api_base_url);
+        peer::check_base(&base).map_err(|refusal| CliError::NotTrusted(refusal.message()))?;
         let token_path = crate::paths::token_file();
         let token = match std::fs::read_to_string(&token_path) {
             Ok(text) => text.trim().to_string(),
@@ -428,5 +439,22 @@ mod tests {
         assert_eq!(key, "color");
         assert_eq!(value, "#ff0000");
         assert!(parse_prop_pair("nope").is_err());
+    }
+
+    #[test]
+    fn no_client_is_built_for_a_port_nobody_listens_on() {
+        // A port that was just freed: nothing listens there, so the token (which is
+        // never read) would go nowhere.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
+        let port = listener.local_addr().expect("the local address").port();
+        drop(listener);
+
+        let error = match Client::new(Some(&format!("http://127.0.0.1:{port}"))) {
+            Ok(_) => panic!("the client must not be built"),
+            Err(e) => e,
+        };
+        assert!(matches!(error, CliError::NotTrusted(_)));
+        assert_eq!(error.to_string(), "canvas-rgb daemon not running");
+        assert_eq!(error.exit_code(), 2);
     }
 }

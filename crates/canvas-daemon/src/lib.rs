@@ -11,6 +11,7 @@ pub mod first_run;
 pub mod logging;
 pub mod openrgb_supervisor;
 pub mod paths;
+pub mod peer;
 pub mod pipe_client;
 pub mod power;
 pub mod state;
