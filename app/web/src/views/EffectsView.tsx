@@ -1,9 +1,8 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { CaretLeft, MagnifyingGlass, MonitorPlay, Play, SquaresFour, Star, Waveform } from "@phosphor-icons/react";
-import { Button, IconButton } from "@/components/Button";
+import { Button, ButtonLink, IconButton } from "@/components/Button";
 import { Chip } from "@/components/Chip";
 import { Thumb } from "@/components/Thumb";
 import { Panel } from "@/components/Panel";
@@ -19,6 +18,7 @@ import { useToast } from "@/components/Toast";
 import { PropertyControls, type Values } from "@/views/PropertyControls";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
+import { EFFECT_CATEGORIES, categoryOf, type EffectCategory } from "@/lib/effectCategories";
 import { getSnap, refreshAll, useSnap } from "@/lib/store";
 import type { EffectDetail } from "@/proto/EffectDetail";
 import type { PropValue } from "@/proto/PropValue";
@@ -39,6 +39,7 @@ export function EffectsView() {
   const status = useSnap((s) => s.status);
   const activeId = useSnap((s) => s.status?.active_effect ?? null);
   const [filter, setFilter] = useState<"all" | "favorites">("all");
+  const [category, setCategory] = useState<EffectCategory | null>(null);
   const [query, setQuery] = useState("");
   const [picked, setPicked] = useState<string | null>(null);
   // The running effect is the default; a click on the list overrides it.
@@ -157,7 +158,12 @@ export function EffectsView() {
   // may match the description. The letters that matched are marked in the name.
   const list = (effects ?? [])
     .map((e, i) => ({ effect: e, match: matchEffect(q, e.name, e.description, i) }))
-    .filter((row) => row.match !== null && (filter === "all" || row.effect.favorite))
+    .filter(
+      (row) =>
+        row.match !== null &&
+        (filter === "all" || row.effect.favorite) &&
+        (category === null || categoryOf(row.effect.id) === category),
+    )
     .sort((a, b) => (b.match?.score ?? 0) - (a.match?.score ?? 0));
   // While the next effect's detail is in flight the previous one stays on screen, so the preview
   // is never blank; the Activate button waits for the real one.
@@ -217,7 +223,7 @@ export function EffectsView() {
                 onClick={() => pick(e.id)}
               >
                 <span className="effect-card-preview">
-                  <Thumb id={e.id} size="md" label={e.name} prefetch={list.slice(i + 1, i + 3).map((n) => n.effect.id)} />
+                  <Thumb id={e.id} size="md" label={e.name} live={selected} />
                 </span>
                 <span className="effect-card-meta">
                   <span className="effect-card-text">
@@ -267,9 +273,9 @@ export function EffectsView() {
           icon={<SquaresFour size={24} />}
           title="There is no layout yet"
           action={
-            <Link className="btn btn-primary btn-sm" href="/" prefetch={false}>
+            <ButtonLink href="/" variant="primary" size="sm">
               Open the Layout
-            </Link>
+            </ButtonLink>
           }
         >
           Nothing can run until the desk canvas has a zone in it. The effects are still here, ready
@@ -287,7 +293,7 @@ export function EffectsView() {
             <div className="stack" style={{ gap: 12 }}>
               <div className="effect-live" data-stale={stale ? "true" : "false"}>
                 {needsInput ? (
-                  <Thumb id={detail.schema.id} size="lg" label={detail.schema.name} />
+                  <Thumb id={detail.schema.id} size="lg" label={detail.schema.name} live />
                 ) : (
                   <div className="effect-live-frame" key={detail.schema.id}>
                     <EffectPreview id={detail.schema.id} values={values} />
@@ -362,6 +368,18 @@ export function EffectsView() {
           ]}
           onChange={setFilter}
         />
+        <span className="effect-categories" role="group" aria-label="Filter by category">
+          {EFFECT_CATEGORIES.map((c) => (
+            <Chip
+              key={c.value}
+              pressed={category === c.value}
+              title={c.hint}
+              onClick={() => setCategory((cur) => (cur === c.value ? null : c.value))}
+            >
+              {c.label}
+            </Chip>
+          ))}
+        </span>
         <span className="effect-search">
           <MagnifyingGlass className="effect-search-icon" size={14} aria-hidden="true" />
           <input
@@ -371,8 +389,13 @@ export function EffectsView() {
             aria-label="Search effects"
           />
         </span>
-        <span className="mute fig">{list.length}</span>
+        <span className="mute fig">{list.length} effects</span>
       </div>
+
+      <p className="effect-hint">
+        Add SignalRGB-format <code className="fig">.html</code> effects to{" "}
+        <code className="fig">%APPDATA%\canvas-rgb\effects</code>.
+      </p>
 
       {effectsError && <p className="error-line">{effectsError}</p>}
 

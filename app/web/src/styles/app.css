@@ -566,13 +566,21 @@ html[data-motion="reduced"] *::after {
   transform: translateY(1px);
 }
 
-.btn:disabled {
-  opacity: 0.45;
+/* A disabled button is a plain button that cannot be pressed. It never keeps the accent
+   colour: a faded accent reads as a button that is still there, and a bright one reads as
+   live. */
+.btn:disabled,
+.btn:disabled:hover {
+  background: var(--raised);
+  border-color: var(--line);
+  color: var(--mute);
+  opacity: 1;
   cursor: not-allowed;
   transform: none;
 }
 
-/* Primary actions use the live accent: the hue of the running preview. One accent, everywhere. */
+/* The primary action: the live accent, one accent everywhere. Every save and every apply in
+   the app is this button. */
 .btn-primary {
   background: var(--live);
   border-color: transparent;
@@ -580,12 +588,18 @@ html[data-motion="reduced"] *::after {
   font-weight: 600;
 }
 
-.btn-primary:hover {
+.btn-primary:not(:disabled):hover {
   background: color-mix(in srgb, var(--live) 86%, var(--ink));
   border-color: transparent;
 }
 
 .btn-ghost {
+  background: transparent;
+  border-color: transparent;
+}
+
+.btn-ghost:disabled,
+.btn-ghost:disabled:hover {
   background: transparent;
   border-color: transparent;
 }
@@ -2193,6 +2207,28 @@ button.chip:hover {
 @media (max-width: 720px) {
   .render-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* On a phone the layout page is a long page: when there is something to save, the bar rides
+   above the dock, so saving a zone is one tap away and not a scroll away. A clean layout has
+   nothing to save, so the bar is not there to cover the page. */
+@media (max-width: 720px) {
+  .savebar {
+    position: fixed;
+    left: var(--s4);
+    right: var(--s4);
+    bottom: calc(var(--rail-h) + var(--s2));
+    z-index: 6;
+    animation: canvas-enter var(--dur) var(--ease) both;
+  }
+
+  .savebar[data-dirty="false"] {
+    display: none;
+  }
+
+  .layout-grid {
+    padding-bottom: 34px;
   }
 }
 

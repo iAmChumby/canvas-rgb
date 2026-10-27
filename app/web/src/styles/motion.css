@@ -557,6 +557,28 @@
   gap: var(--s2) var(--s3);
 }
 
+.effect-categories {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--s1);
+}
+
+/* Where the user's own effects come from. One line, quiet, under the filters. */
+.effect-hint {
+  margin: var(--s2) 0 0;
+  color: var(--mute);
+  font-size: var(--t14);
+}
+
+.effect-hint code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--sunk);
+  color: var(--dim);
+  font-family: var(--fm);
+  font-size: var(--t14);
+}
+
 .effect-search {
   position: relative;
   display: inline-flex;

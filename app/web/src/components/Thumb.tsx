@@ -2,38 +2,50 @@
 
 import { useEffect, useRef, useState } from "react";
 import { loadThumb, type Thumb as ThumbData } from "@/lib/thumbs";
-import { useDocumentVisible, usePrefersReducedMotion } from "@/lib/motion";
+import { useDocumentVisible } from "@/lib/motion";
+import { useMotionOff } from "@/components/Motion";
 
 export type ThumbSize = "sm" | "md" | "lg";
 
+/** The loop the daemon's thumbnails run on. */
 const FPS = 12;
 
 /**
  * A looping effect thumbnail, drawn on a small canvas and scaled up with pixelated rendering.
- * It loads when it scrolls into view, animates only while it is in view and the window is
- * visible, and under prefers-reduced-motion it shows frame 0 and stops.
  *
- * `prefetch` lists the tiles that come next: they are fetched as soon as this tile is in view,
- * so scrolling down never finds an empty frame. Whatever still loads late fades in.
+ * It fetches its picture as soon as it is on the page: the gallery shows its whole library,
+ * and a tile that scrolls into view already has its picture. (It used to wait for the tile to
+ * scroll into view, which left the last row of the grid showing placeholders whenever the
+ * row sat at the bottom edge of the window.)
+ *
+ * It runs the loop only while it is worth running: the pointer is on it, it has the keyboard
+ * focus, or it is the effect that is selected (`live`). A gallery of twelve tiles therefore
+ * runs one loop, not twelve, and the frame rate of the page is the frame rate of the page.
+ *
+ * Under reduced motion - the OS setting or the editor's own switch - it shows the first
+ * frame and stops.
  */
 export function Thumb({
   id,
   size = "sm",
   label,
-  prefetch,
+  live = false,
 }: {
   id: string;
   size?: ThumbSize;
   label: string;
-  prefetch?: string[];
+  /** The tile runs its loop all the time, whether or not the pointer is on it. */
+  live?: boolean;
 }) {
   const wrapRef = useRef<HTMLSpanElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [inView, setInView] = useState(false);
   const [thumb, setThumb] = useState<ThumbData | null>(null);
+  // The pointer is on the tile, or it has the keyboard focus.
+  const [awake, setAwake] = useState(false);
   const docVisible = useDocumentVisible();
-  const reduced = usePrefersReducedMotion();
-  const animate = inView && docVisible && !reduced && thumb !== null;
+  const reduced = useMotionOff();
+  const animate = inView && docVisible && !reduced && thumb !== null && (awake || live);
 
   // In view or not: observed once per tile.
   useEffect(() => {
@@ -49,9 +61,9 @@ export function Thumb({
     return () => io.disconnect();
   }, []);
 
-  // Fetch once the tile is first in view.
+  // Fetch the picture straight away. `loadThumb` keeps one request per effect, so a tile that
+  // mounts again does not ask the daemon for a second render.
   useEffect(() => {
-    if (!inView || thumb) return;
     let live = true;
     void loadThumb(id).then((t) => {
       if (live) setThumb(t);
@@ -59,13 +71,7 @@ export function Thumb({
     return () => {
       live = false;
     };
-  }, [inView, id, thumb]);
-
-  // The next tiles are fetched with this one, so the scroll never finds a blank frame.
-  useEffect(() => {
-    if (!inView || !prefetch || prefetch.length === 0) return;
-    for (const next of prefetch) void loadThumb(next);
-  }, [inView, prefetch]);
+  }, [id]);
 
   // Paint: frame 0 whenever idle, and the frame sequence while animating.
   useEffect(() => {
@@ -101,7 +107,18 @@ export function Thumb({
   }, [thumb, animate]);
 
   return (
-    <span ref={wrapRef} className={`thumb thumb-${size}`} data-loaded={thumb ? "true" : "false"} role="img" aria-label={`${label} preview`}>
+    <span
+      ref={wrapRef}
+      className={`thumb thumb-${size}`}
+      data-loaded={thumb ? "true" : "false"}
+      data-running={animate ? "true" : "false"}
+      role="img"
+      aria-label={`${label} preview`}
+      onPointerEnter={() => setAwake(true)}
+      onPointerLeave={() => setAwake(false)}
+      onFocus={() => setAwake(true)}
+      onBlur={() => setAwake(false)}
+    >
       {thumb ? (
         <canvas ref={canvasRef} aria-hidden="true" />
       ) : (

@@ -114,6 +114,31 @@ function shadeFor(id: string): Shade {
   return SHADES[id] ?? SHADES.solid!;
 }
 
+/** The loop the demo shades run on, in seconds. The same one the thumbnails use. */
+export const DEMO_LOOP_SECONDS = 2;
+
+/**
+ * One frame of an effect's demo look, at the size the preview feed uses.
+ *
+ * The phase runs on the thumbnail's loop, so the preview and the card's thumbnail show the
+ * same effect at the same moment.
+ */
+export function demoFrameFor(id: string, seconds: number, w: number, h: number): Uint8Array {
+  const shade = shadeFor(id);
+  const t = ((seconds / DEMO_LOOP_SECONDS) % 1 + 1) % 1;
+  const rgb = new Uint8Array(w * h * 3);
+  let o = 0;
+  for (let py = 0; py < h; py++) {
+    for (let px = 0; px < w; px++) {
+      const c = shade((px + 0.5) / w, (py + 0.5) / h, t);
+      rgb[o++] = Math.round(clamp01(c[0] / 255) * 255);
+      rgb[o++] = Math.round(clamp01(c[1] / 255) * 255);
+      rgb[o++] = Math.round(clamp01(c[2] / 255) * 255);
+    }
+  }
+  return rgb;
+}
+
 /** The same binary the daemon sends: u16 LE w, u16 LE h, u16 LE frames, then the RGB frames. */
 export function thumbnailBytes(id: string): ArrayBuffer {
   const shade = shadeFor(id);

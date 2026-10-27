@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { ArrowClockwise, ThermometerSimple, WarningOctagon } from "@phosphor-icons/react";
+import { ArrowClockwise, FloppyDisk, ThermometerSimple, WarningOctagon } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
 import { EmptyState } from "@/components/EmptyState";
 import { NumberField } from "@/components/NumberField";
@@ -336,7 +336,7 @@ function DisplayCard({ row, fans }: { row: DisplayStatus; fans: FansStatus | nul
           </Field>
 
           <div className="row-wrap display-actions">
-            <Button variant="primary" disabled={!dirty || busy} onClick={() => void save()}>
+            <Button variant="primary" icon={<FloppyDisk size={16} weight="bold" />} disabled={!dirty || busy} onClick={() => void save()}>
               Save the source
             </Button>
             <Button variant="ghost" disabled={busy} onClick={() => void stop()}>

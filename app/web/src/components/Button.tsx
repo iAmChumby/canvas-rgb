@@ -1,19 +1,17 @@
 "use client";
 
 import { useRef, type ButtonHTMLAttributes, type ChangeEvent, type ReactNode } from "react";
+import Link from "next/link";
 import { Tooltip } from "@/components/Tooltip";
 
 type Variant = "default" | "primary" | "ghost" | "danger";
 
-export function Button({
-  variant = "default",
-  size = "md",
-  icon,
-  children,
-  className,
-  ...rest
-}: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: Variant; size?: "sm" | "md"; icon?: ReactNode }) {
-  const cls = [
+/**
+ * The class names for a button. Every control in the editor gets its look from here, so a
+ * save button on one page is the same button as a save button on the next one.
+ */
+function buttonClass(variant: Variant, size: "sm" | "md", className?: string): string {
+  return [
     "btn",
     variant === "primary" && "btn-primary",
     variant === "ghost" && "btn-ghost",
@@ -23,11 +21,50 @@ export function Button({
   ]
     .filter(Boolean)
     .join(" ");
+}
+
+export function Button({
+  variant = "default",
+  size = "md",
+  icon,
+  children,
+  className,
+  ...rest
+}: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: Variant; size?: "sm" | "md"; icon?: ReactNode }) {
   return (
-    <button type="button" className={cls} {...rest}>
+    <button type="button" className={buttonClass(variant, size, className)} {...rest}>
       {icon}
       {children}
     </button>
+  );
+}
+
+/**
+ * A link that looks like a button. The editor's own pages are reached by links in a few
+ * places, and a link that is styled by hand is a second button style waiting to drift.
+ */
+export function ButtonLink({
+  href,
+  variant = "default",
+  size = "md",
+  icon,
+  children,
+  className,
+  prefetch = false,
+}: {
+  href: string;
+  variant?: Variant;
+  size?: "sm" | "md";
+  icon?: ReactNode;
+  children: ReactNode;
+  className?: string;
+  prefetch?: boolean;
+}) {
+  return (
+    <Link href={href} className={buttonClass(variant, size, className)} prefetch={prefetch}>
+      {icon}
+      {children}
+    </Link>
   );
 }
 

@@ -456,7 +456,7 @@ function ProfilesPanel({ fans }: { fans: FansStatus }) {
           <Button size="sm" icon={<CopySimple size={14} />} onClick={() => void run(() => api.putFanProfile(nextName(fans.active_profile), { name: nextName(fans.active_profile), headers: current() }), "Profile duplicated")}>
             Duplicate
           </Button>
-          <Button size="sm" icon={<FloppyDisk size={14} />} onClick={() => void run(() => api.putFanProfile(fans.active_profile, { name: fans.active_profile, headers: current() }), `${fans.active_profile} saved`)}>
+          <Button variant="primary" size="sm" icon={<FloppyDisk size={14} />} onClick={() => void run(() => api.putFanProfile(fans.active_profile, { name: fans.active_profile, headers: current() }), `${fans.active_profile} saved`)}>
             Save {fans.active_profile}
           </Button>
         </div>

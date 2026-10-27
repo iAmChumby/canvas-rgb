@@ -1,7 +1,8 @@
 // The live preview feed. In the tray it is the daemon's WebSocket (binary frames: u16 LE width,
-// u16 LE height, then width*height*3 RGB bytes). In a plain browser it is a local demo gradient.
-// The socket is open only while the window is visible. The dominant hue of the frame is written
-// to --live-h at no more than 2 Hz, so the chrome tints with the light.
+// u16 LE height, then width*height*3 RGB bytes). In a plain browser it is the running effect's
+// own look, drawn from the demo shades. The socket is open only while the window is visible. The
+// dominant hue of the frame is written to --live-h at no more than 2 Hz, so the chrome tints with
+// the light.
 //
 // The feed also keeps a status the desk canvas shows: whether the socket is connecting, live or
 // refused, and why. A refused socket is diagnosed against the daemon's own answer, so the canvas
@@ -10,6 +11,9 @@
 import { useSyncExternalStore } from "react";
 import { apiConfig } from "@/lib/api";
 import { isDemo } from "@/lib/host";
+import { demoFrameFor } from "@/lib/thumb-demo";
+import { dominantHue, hueDistance } from "@/lib/hue";
+import { getSnap } from "@/lib/store";
 import { routes } from "@/proto/routes";
 
 export interface Frame {
@@ -175,41 +179,17 @@ function scheduleReconnect(): void {
   }, wait);
 }
 
-/** A cheap moving gradient, 15 frames a second, for demo mode only. */
+/**
+ * The demo's own frame: the effect that is running, drawn from the same shades the demo
+ * thumbnails use. It used to be a decorative rainbow, which had nothing to do with the effect
+ * on screen, so the chrome tinted with whatever colour the rainbow happened to average to.
+ */
 function demoFrame(t: number): Frame {
-  const rgb = new Uint8Array(PREVIEW_W * PREVIEW_H * 3);
-  let o = 0;
-  for (let y = 0; y < PREVIEW_H; y++) {
-    for (let x = 0; x < PREVIEW_W; x++) {
-      const u = x / PREVIEW_W;
-      const v = y / PREVIEW_H;
-      const wave = Math.sin(u * 6.2 + t * 0.9) * 0.5 + Math.sin(v * 4.1 - t * 0.7) * 0.5;
-      const hue = (t * 14 + u * 120 + v * 40) % 360;
-      const k = 0.5 + 0.5 * wave;
-      const [r, g, b] = hsvToRgb(hue, 0.85, 0.25 + 0.7 * k * (0.6 + 0.4 * v));
-      rgb[o++] = r;
-      rgb[o++] = g;
-      rgb[o++] = b;
-    }
-  }
+  // The status is null until the demo backend answers its first request; the demo's own
+  // default effect is Poison.
+  const id = getSnap().status?.active_effect ?? "poison";
+  const rgb = demoFrameFor(id, t, PREVIEW_W, PREVIEW_H);
   return { width: PREVIEW_W, height: PREVIEW_H, rgb };
-}
-
-function hsvToRgb(h: number, s: number, v: number): [number, number, number] {
-  const c = v * s;
-  const hp = (h % 360) / 60;
-  const x = c * (1 - Math.abs((hp % 2) - 1));
-  let r = 0;
-  let g = 0;
-  let b = 0;
-  if (hp < 1) [r, g, b] = [c, x, 0];
-  else if (hp < 2) [r, g, b] = [x, c, 0];
-  else if (hp < 3) [r, g, b] = [0, c, x];
-  else if (hp < 4) [r, g, b] = [0, x, c];
-  else if (hp < 5) [r, g, b] = [x, 0, c];
-  else [r, g, b] = [c, 0, x];
-  const m = v - c;
-  return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255)];
 }
 
 /** Opens the preview. Idempotent. Call stopPreview when the window hides. */
@@ -245,53 +225,70 @@ export function stopPreview(): void {
   setStatus({ state: "idle", fps: 0 });
 }
 
-// ---- dominant hue at <= 2 Hz ----
-
-function rgbToHue(r: number, g: number, b: number): { hue: number; sat: number } {
-  const max = Math.max(r, g, b);
-  const min = Math.min(r, g, b);
-  const d = max - min;
-  if (d === 0) return { hue: 0, sat: 0 };
-  let h: number;
-  if (max === r) h = ((g - b) / d) % 6;
-  else if (max === g) h = (b - r) / d + 2;
-  else h = (r - g) / d + 4;
-  h = (h * 60 + 360) % 360;
-  return { hue: h, sat: d / max };
-}
+// ---- the dominant hue of a frame ----
 
 /**
- * Samples the frame's colour-weighted average hue and writes --live-h on the root element.
- * A near-grey frame keeps the previous hue. Returns a stop function.
+ * How close two samples have to be to count as the same colour, and how far the accent has to
+ * move before it does move. Together they keep the chrome calm.
+ */
+const HUE_STEP = 10;
+/** How many samples in a row have to agree before the accent follows them. */
+const HUE_AGREEMENT = 3;
+/** The shortest time between two moves of the accent, in milliseconds. */
+const HUE_COOLDOWN_MS = 2000;
+
+/**
+ * Writes the frame's dominant hue to --live-h on the root element, at no more than 2 Hz.
+ *
+ * The accent follows a light that settles. A frame with no dominant hue (a rainbow) leaves it
+ * alone, and a light that is still moving (a colour cycle) never agrees with itself long
+ * enough to be followed, so the chrome keeps the colour it had instead of chasing the
+ * spectrum. A near-grey frame keeps the previous hue too.
+ *
+ * Returns a stop function.
  */
 export function startHueTint(): () => void {
   let last = 0;
-  let lastHue = 215;
+  let lastMove = 0;
+  let lastHue = readLiveHue();
+  let candidate: number | null = null;
+  let agree = 0;
+  // The first frame of the feed sets the accent at once: the page has only just opened and
+  // there is nothing to be steady about yet.
+  let first = true;
   const off = onFrame((frame) => {
     const now = performance.now();
     if (now - last < 500) return;
     last = now;
-    let sr = 0;
-    let sg = 0;
-    let sb = 0;
-    let weight = 0;
-    const step = 7;
-    for (let i = 0; i + 2 < frame.rgb.length; i += 3 * step) {
-      const r = frame.rgb[i] ?? 0;
-      const g = frame.rgb[i + 1] ?? 0;
-      const b = frame.rgb[i + 2] ?? 0;
-      const max = Math.max(r, g, b);
-      const min = Math.min(r, g, b);
-      const w = (max - min) * max + 1;
-      sr += r * w;
-      sg += g * w;
-      sb += b * w;
-      weight += w;
+    const found = dominantHue(frame.rgb);
+    if (!found) {
+      candidate = null;
+      agree = 0;
+      return;
     }
-    if (weight === 0) return;
-    const { hue, sat } = rgbToHue(sr / weight, sg / weight, sb / weight);
-    if (sat > 0.08) lastHue = Math.round(hue);
-    document.documentElement.style.setProperty("--live-h", String(lastHue));
+    const next = Math.round(found.hue);
+    if (candidate !== null && hueDistance(next, candidate) < HUE_STEP) agree += 1;
+    else {
+      candidate = next;
+      agree = 1;
+    }
+    const settled = first || agree >= HUE_AGREEMENT;
+    first = false;
+    if (!settled) return;
+    if (hueDistance(next, lastHue) < HUE_STEP) return;
+    if (now - lastMove < HUE_COOLDOWN_MS) return;
+    lastMove = now;
+    lastHue = next;
+    document.documentElement.style.setProperty("--live-h", String(next));
   });
   return off;
 }
+
+/** The hue the chrome is on now, from the token the page starts with. */
+function readLiveHue(): number {
+  if (typeof document === "undefined") return 215;
+  const raw = getComputedStyle(document.documentElement).getPropertyValue("--live-h").trim();
+  const value = Number.parseFloat(raw);
+  return Number.isFinite(value) ? value : 215;
+}
+

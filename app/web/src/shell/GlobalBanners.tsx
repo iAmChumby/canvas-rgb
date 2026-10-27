@@ -1,10 +1,10 @@
 "use client";
 
-import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { Lightning, SquaresFour, Warning, WarningOctagon } from "@phosphor-icons/react";
 import { Banner } from "@/components/Banner";
+import { ButtonLink } from "@/components/Button";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
 import { fmtSeconds } from "@/lib/format";
@@ -84,9 +84,9 @@ export function StandingNotices() {
           icon={<SquaresFour size={20} weight="fill" />}
           title="There is no layout yet"
           actions={
-            <Link className="btn btn-primary btn-sm" href="/" prefetch={false}>
+            <ButtonLink href="/" variant="primary" size="sm">
               Open the Layout
-            </Link>
+            </ButtonLink>
           }
         >
           Nothing can run until the desk canvas has a zone in it.
@@ -100,9 +100,9 @@ export function StandingNotices() {
           onDismiss={dismissPanel}
           dismissLabel="Dismiss this panel"
           actions={
-            <Link className="btn btn-primary btn-sm" href={walkHref} prefetch={false}>
+            <ButtonLink href={walkHref} variant="primary" size="sm">
               Open the identify walker
-            </Link>
+            </ButtonLink>
           }
         >
           Walk one lit LED along each addressable header and mark where it ends, so effects fill the strip you

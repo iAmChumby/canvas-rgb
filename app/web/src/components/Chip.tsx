@@ -10,6 +10,7 @@ export function Chip({
   html,
   onClick,
   label,
+  title,
 }: {
   children: ReactNode;
   icon?: ReactNode;
@@ -17,11 +18,13 @@ export function Chip({
   html?: boolean;
   onClick?: () => void;
   label?: string;
+  /** The native tooltip. It explains the chip without changing its name. */
+  title?: string;
 }) {
   const cls = ["chip", html && "chip-html", pressed && "chip-on"].filter(Boolean).join(" ");
   if (onClick) {
     return (
-      <button type="button" className={cls} aria-pressed={pressed ?? false} aria-label={label} onClick={onClick}>
+      <button type="button" className={cls} aria-pressed={pressed ?? false} aria-label={label} title={title} onClick={onClick}>
         {icon}
         {children}
       </button>
