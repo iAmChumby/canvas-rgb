@@ -236,88 +236,217 @@ html[data-motion="reduced"] *::after {
   overflow-x: clip;
 }
 
-/* The strip: what the daemon is doing.
-   Three rows of facts — brand and power, effect and rate, the two link states and the device
-   count. On a wide screen the three rows sit on one line; on a phone they are three lines.
-   The rows are the same in every state: a fact the daemon has not told us yet is a dash, so
-   the strip's height never changes and the page below it never moves. */
+/* The strip: what the lights are doing.
+   One row, in plain words: what is playing (with a chip of the running light's own colour),
+   how it is going, and the control. Everything well is one quiet "all connected" mark; a
+   fault says what it is, in the colour of that kind of fault, and stays until it clears.
+   The row is the same height and the same width in every state: the mark's text grows into
+   the space beside it and the controls stay where they are, so the page below the strip never
+   moves when the daemon answers or something breaks. */
 .strip {
-  overflow: hidden;
+  overflow: visible;
   border-bottom: 1px solid var(--line);
   background: var(--panel);
   font-size: var(--t14);
 }
 
-/* The desktop strip: one row, everything on it. The rows are flattened (display: contents) so
-   the three groups read as one line. */
 .strip-inner {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
   gap: var(--s2) var(--s4);
-  padding: var(--s3) var(--s6);
+  height: 54px;
+  padding: 0 var(--s6);
+  white-space: nowrap;
 }
 
-.strip-row {
-  display: contents;
-}
-
-/* The mark the phone has instead of the rail's. */
+/* The mark the phone has instead of the rail's. It is the app's name, not a status, so it
+   is quiet: the effect's name beside it is the thing worth reading. */
 .strip-brand {
   display: none;
   align-items: center;
   gap: var(--s2);
+  color: var(--mute);
   font-weight: 600;
+  flex: none;
 }
 
-.strip-group {
-  display: flex;
-  flex-wrap: nowrap;
+/* What is playing. */
+.strip-now {
+  display: inline-flex;
   align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+/* A chip of the running light's own colour: the accent is the hue of the frame the daemon is
+   drawing, so this chip is the light itself. */
+.strip-swatch {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border-radius: var(--r-sm);
+  background: var(--live);
+}
+
+.strip-swatch[data-paused="true"] {
+  opacity: 0.4;
+}
+
+.strip-now-text {
+  display: inline-flex;
+  align-items: baseline;
   gap: var(--s2);
   min-width: 0;
 }
 
-.strip-sep {
-  width: 1px;
-  align-self: stretch;
-  background: var(--line);
+.strip-effect-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-/* The palette button sits at the end of the strip, whatever else is in the row. Its tooltip is
-   aligned to the button's right edge: centred on it, the bubble ran past the strip (which is
-   overflow: hidden) and was cut when it opened. */
-.strip-search-group {
-  order: 10;
+.strip-now-detail {
+  color: var(--mute);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* How it is going: the mark is quiet when all is well and says the fault when there is one. */
+.strip-mark {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  flex: 0 1 auto;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--mute);
+  font: inherit;
+  font-size: var(--t14);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease);
+}
+
+.strip-mark:hover {
+  color: var(--ink);
+  background: var(--hover);
+}
+
+.strip-mark:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.strip-mark[data-tone="down"] {
+  color: var(--down);
+}
+
+.strip-mark[data-tone="warn"] {
+  color: var(--warn);
+}
+
+.strip-mark[data-tone="work"] {
+  color: var(--work);
+}
+
+.strip-mark-icon {
+  display: inline-flex;
+  flex: none;
+}
+
+.strip-mark[data-tone="ok"] .strip-mark-icon {
+  color: var(--ok);
+}
+
+.strip-mark-text {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The controls sit at the end of the row. The mark's text grows into the space beside them and
+   they do not move. */
+.strip-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  flex: none;
   margin-left: auto;
 }
 
-.strip-search-group .tip-bubble {
+.strip-offline {
+  color: var(--mute);
+}
+
+/* A control in the strip has no room above it: its label opens downwards, over the page. */
+.strip .tip-bubble {
+  bottom: auto;
+  top: calc(100% + 6px);
   left: auto;
   right: 0;
   transform: none;
 }
 
-/* The device count: a number and the word beside it. It sits in the top row in the markup, and
-   the order puts it after the links and before the palette button, as before. */
-.strip-devices {
-  display: inline-flex;
-  align-items: baseline;
-  gap: var(--s1);
-  white-space: nowrap;
-  order: 9;
+/* The panel that hangs under the mark: the precise numbers, one click away. */
+.popover {
+  position: fixed;
+  z-index: 40;
+  min-width: 236px;
+  max-width: min(320px, calc(100vw - 16px));
+  padding: var(--s3);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  background: var(--panel);
+  box-shadow: 0 6px 18px rgb(0 0 0 / 0.28);
+  color: var(--ink);
+  animation: canvas-enter var(--dur) var(--ease) both;
 }
 
-.strip-devices-icon {
-  display: none;
+.strip-details-head {
+  margin-bottom: var(--s2);
+  font-weight: 600;
+}
+
+.strip-details-list {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: var(--s1) var(--s3);
+  margin: 0;
+  font-size: var(--t14);
+}
+
+.strip-details-list dt {
   color: var(--mute);
-  align-self: center;
 }
 
-/* The link state: the service, then the state it is in. */
-.strip-link-label,
-.strip-link-state {
-  white-space: nowrap;
+.strip-details-list dd {
+  margin: 0;
+  text-align: right;
+}
+
+.strip-details-problems {
+  margin: var(--s2) 0 0;
+  padding: var(--s2) 0 0;
+  border-top: 1px solid var(--line);
+  list-style: none;
+  font-size: var(--t14);
+}
+
+.strip-details-problems li[data-tone="down"] {
+  color: var(--down);
+}
+
+.strip-details-problems li[data-tone="warn"] {
+  color: var(--warn);
+}
+
+.strip-details-problems li[data-tone="work"] {
+  color: var(--work);
 }
 
 .content {
@@ -1871,33 +2000,32 @@ button.chip:hover {
   /* The strip publishes its height for the floating notice. Before it does, the phone value is the
      one it will publish, so the notice is not moved on the first frame. */
   :root {
-    --strip-h: 116px;
+    --strip-h: 48px;
   }
 
-  /* The phone strip: three fixed rows, the same in every state. Row 1 is the brand, the power
-     control and the palette button; row 2 the effect and the rate; row 3 the two link states and
-     the device count. Every fact has a fixed column, sized for its widest value, so nothing moves
-     when the daemon answers and nothing wraps or runs past the edge. */
+  /* The phone strip: one row. The brand, what is playing, how it is going, and the control.
+     The row is the same height in every state, and the mark's text grows into the space beside
+     it, so nothing moves when the daemon answers or something breaks. */
   .strip {
-    height: 116px;
+    height: 48px;
   }
 
   .strip-inner {
-    display: grid;
-    grid-template-rows: 32px 24px 24px;
-    row-gap: var(--s1);
-    align-content: center;
+    gap: var(--s2);
     height: 100%;
     padding: 0 var(--s2);
     box-sizing: border-box;
   }
 
-  .strip-row {
-    display: flex;
-    align-items: center;
-    gap: var(--s2);
-    min-width: 0;
-    white-space: nowrap;
+  /* The phone has no room for the brand's dot: the chip of the running light is the colour
+     mark now. */
+  .strip-brand .rail-brand-dot {
+    display: none;
+  }
+
+  /* All is well is a tick on a phone: the words of a fault still have to fit beside it. */
+  .strip-mark[data-tone="ok"] .strip-mark-text {
+    display: none;
   }
 
   .strip-brand {
@@ -1905,92 +2033,19 @@ button.chip:hover {
     flex: none;
   }
 
-  /* The power control and the "Connecting" placeholder share one box, so the row does not change size
-     when the daemon answers. */
-  .strip-power {
-    flex: none;
-    display: flex;
-    align-items: center;
-    width: 128px;
-    height: 32px;
-  }
-
-  .strip-search-group {
-    flex: none;
-    margin-left: auto;
-  }
-
-  /* Row 2: the effect takes what the rate leaves. */
-  .strip-effect {
-    flex: 1 1 0;
-    min-width: 0;
-  }
-
-  .strip-effect-name {
-    flex: 1 1 0;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  /* The rate's own parts are fixed widths (the value, the state word), so the column is as wide
-     as they are: a fixed 250 px left the effect's name clipped at 360. */
-  .strip-rate {
-    flex: none;
-    width: auto;
-  }
-
-  .strip-rate-value {
-    display: inline-block;
-    flex: none;
-    width: 112px;
-  }
-
-  .strip-state-word {
-    display: inline-block;
-    width: 64px;
-  }
-
-  /* Row 3: the two links, then the device count at the end. */
-  .strip-links {
-    display: flex;
-    flex: 1 1 0;
-    align-items: center;
-    gap: var(--s2);
-    min-width: 0;
-  }
-
-  .strip-link-label {
-    display: inline-block;
-    flex: none;
-  }
-
-  .strip-link-state {
-    display: inline-block;
-    flex: none;
-  }
-
-  .strip-devices {
-    flex: none;
-    justify-content: flex-end;
-  }
-
-  .strip .strip-devices {
-    display: inline-flex;
-    min-width: 2ch;
-    order: 11;
-  }
-
-  .strip-devices-icon {
-    display: inline-flex;
-  }
-
-  .strip-devices-word {
+  /* The phone has room for the effect's name, not for the device count with it. */
+  .strip-now-detail[data-count="true"] {
     display: none;
   }
 
-  .strip-sep {
+  /* The power control is an icon on a phone: the row has no room for the words, and the
+     button's own label says what it does. */
+  .strip-power-text {
     display: none;
+  }
+
+  .strip-mark {
+    flex: 0 1 auto;
   }
 
   .rail-col {
@@ -2053,10 +2108,6 @@ button.chip:hover {
     right: var(--s3);
     width: auto;
     padding: var(--s3) var(--s4) 0;
-  }
-
-  .strip-sep {
-    display: none;
   }
 
   /* A zone on a phone: the name and count on the first line with the Size button, the LED strip below.

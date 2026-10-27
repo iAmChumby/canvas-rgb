@@ -41,6 +41,7 @@ export const OPENRGB_DOWN = "openrgb-down";
 export const NO_LAYOUT = "no-layout";
 export const DEVICE_EMPTY = "device-empty";
 export const SLOW = "slow";
+export const SLOW_FPS = "slow-fps";
 export const SAVE_ERROR = "save-error";
 
 /** The scenario tokens in the query string, the same way the demo reads them. */
@@ -83,6 +84,11 @@ export function slow(): boolean {
   return has(SLOW);
 }
 
+/** The lights are running, but not at the rate they were asked for. */
+export function slowFps(): boolean {
+  return has(SLOW_FPS);
+}
+
 /** Every write is refused. */
 export function saveError(): boolean {
   return has(SAVE_ERROR);
@@ -115,10 +121,12 @@ export function applyFanScenarios(status: FansStatus): FansStatus {
   };
 }
 
-/** Applies the status scenarios: OpenRGB is not connected. */
+/** Applies the status scenarios: OpenRGB is not connected, or the lights run slow. */
 export function applyStatusScenarios(status: Status): Status {
-  if (!openRgbDown()) return status;
-  return { ...status, openrgb: "down" };
+  let next = status;
+  if (openRgbDown()) next = { ...next, openrgb: "down" };
+  if (slowFps()) next = { ...next, fps_measured: 12 };
+  return next;
 }
 
 /** Applies the device scenarios: the first device reports no zones. */

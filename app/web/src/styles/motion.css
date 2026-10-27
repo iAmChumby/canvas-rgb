@@ -39,6 +39,44 @@
   }
 }
 
+/* The other half of a crossfade: the layer that is going. */
+@keyframes canvas-fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+/* A crossfade: the two layers sit in the same cell, so the box is as wide as the widest of
+   them and nothing around it moves. */
+.cross {
+  display: inline-grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  max-width: 100%;
+  align-items: center;
+  overflow: hidden;
+}
+
+.cross-layer {
+  grid-area: 1 / 1;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  min-width: 0;
+  overflow: hidden;
+}
+
+.cross-in {
+  animation: canvas-fade var(--dur) var(--ease) both;
+}
+
+.cross-out {
+  animation: canvas-fade-out var(--dur) var(--ease) both;
+}
+
 /* A pushed view: the old one steps left, the new one comes in from the right. */
 @keyframes push-out-left {
   from {
