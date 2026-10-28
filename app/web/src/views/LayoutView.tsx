@@ -10,6 +10,7 @@ import {
   CaretDown,
   CaretUp,
   CircleDashed,
+  Cube,
   DotOutline,
   DotsThree,
   FloppyDisk,
@@ -31,6 +32,8 @@ import { EffectPreview } from "@/components/EffectPreview";
 import { Popover } from "@/components/Popover";
 import { Thumb } from "@/components/Thumb";
 import { useMediaQuery } from "@/components/MediaQuery";
+import { KindIcon } from "@/components/KindIcon";
+import { autoPlace } from "@/lib/caseForms";
 import { PreviewStage } from "@/views/PreviewStage";
 import { PropertyControls, type Values } from "@/views/PropertyControls";
 import { api } from "@/lib/endpoints";
@@ -38,8 +41,9 @@ import { messageOf } from "@/lib/errors";
 import { usePreviewStatus } from "@/lib/preview";
 import { usePrefersReducedMotion } from "@/lib/motion";
 import { getSnap, patchSnap, refreshAll, refreshLayouts, refreshSettings, useSnap } from "@/lib/store";
-import { defaultRect, defaultShape, findZoneInfo, reshapeBox, resolveShape, SHAPE_LABEL, SHAPE_ORDER } from "@/lib/zones";
+import { defaultRect, defaultShape, findZoneInfo, plainName, reshapeBox, resolveShape, SHAPE_LABEL, SHAPE_ORDER } from "@/lib/zones";
 import { clamp } from "@/lib/format";
+import type { CaseForm } from "@/proto/CaseForm";
 import type { Layout } from "@/proto/Layout";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { EffectDetail } from "@/proto/EffectDetail";
@@ -456,6 +460,7 @@ export function LayoutView() {
   const zones = draft?.zones ?? [];
   const selectedZone = selected !== null ? zones[selected] ?? null : null;
   const selectedInfo = selectedZone ? findZoneInfo(devices, selectedZone.device_id, selectedZone.zone_index) : null;
+  const selectedPlain = plainName(devices, selectedZone?.device_id ?? "", selectedZone?.zone_index ?? 0);
   const preview = usePreviewStatus();
   // While a zone is being dragged the inspector shows where it is, not where it was.
   const shownZone = liveZone && liveZone.index === selected ? liveZone.zone : selectedZone;
@@ -614,6 +619,19 @@ export function LayoutView() {
       return { draft: fn(e.draft), past: [...e.past, e.draft], future: [] };
     });
   }, []);
+
+  /**
+   * Picks the PC form factor drawn behind the zones. Choosing a case puts every device in its
+   * place in it (fans in the fan positions, RAM in the RAM slots, headers along the case edges,
+   * the keyboard and mic on the desk) as one change, so one undo step. "No case" only takes the
+   * drawing away and leaves every zone where it is.
+   */
+  const chooseCase = useCallback(
+    (form: CaseForm) => {
+      commit((l) => ({ ...l, case_form: form, zones: autoPlace(form, devices, l.zones) }));
+    },
+    [commit, devices],
+  );
 
   const undo = useCallback(() => {
     setEdit((e) => {
@@ -788,6 +806,8 @@ export function LayoutView() {
               effectNeedsInput={effectNeedsInput}
               sampling={draft.sampling}
               identifying={identifying}
+              caseForm={draft.case_form}
+              onCaseForm={chooseCase}
             />
             <div className="stage-meta">
               <span className="dropzone-hint" />
@@ -887,11 +907,15 @@ export function LayoutView() {
                   <ZoneInspector
                     key={selected}
                     zone={shownZone}
-                    name={
-                      selectedInfo?.zone.name ??
-                      staleDeviceName(shownZone.device_id, devices)
+                    name={selectedInfo ? selectedPlain.name : staleDeviceName(shownZone.device_id, devices)}
+                    icon={selectedInfo ? <KindIcon kind={selectedPlain.kind} fan={selectedPlain.fan} size={18} /> : null}
+                    deviceName={
+                      selectedInfo
+                        ? selectedPlain.hardware && selectedPlain.hardware !== selectedInfo.device.name
+                          ? `${selectedPlain.hardware} · ${selectedInfo.device.name}`
+                          : selectedInfo.device.name
+                        : shortDeviceId(shownZone.device_id)
                     }
-                    deviceName={selectedInfo?.device.name ?? shortDeviceId(shownZone.device_id)}
                     ledCount={selectedInfo?.zone.led_count ?? 0}
                     info={selectedInfo?.zone ?? null}
                     identifying={identifying === selected}
@@ -904,6 +928,17 @@ export function LayoutView() {
                 </div>
               ) : (
                 null
+              )}
+              {draft.case_form === "none" && (
+                <div className={desk.suggest}>
+                  <p className={desk.plainNote} style={{ marginTop: 0 }}>
+                    Pick your PC&apos;s shape and every device goes where its hardware sits: fans in the fan
+                    positions, RAM in the RAM slots, strips along the case edges, the keyboard on the desk.
+                  </p>
+                  <Button size="sm" variant="ghost" icon={<Cube size={14} />} onClick={() => chooseCase("mid_tower")}>
+                    Put my devices in a case
+                  </Button>
+                </div>
               )}
               {suggested.length > 0 && (
                 <div className={desk.suggest}>
@@ -919,18 +954,26 @@ export function LayoutView() {
               <div className="stack" style={{ gap: 0, marginTop: 12 }}>
                 {zones.map((z, i) => {
                   const info = findZoneInfo(devices, z.device_id, z.zone_index);
+                  const pn = plainName(devices, z.device_id, z.zone_index);
+                  const friendly = z.label?.trim() || null;
                   return (
                     <RowButton
                       key={`${z.device_id}#${z.zone_index}`}
                       current={selected === i}
-                      label={`Select ${info?.zone.name ?? "the zone whose device is gone"}`}
+                      label={`Select ${friendly || pn.name}`}
                       onSelect={() => selectZone(i)}
                     >
                       <span className="row-title">
-                        {z.label?.trim() || info?.zone.name || "Device not found"}
-                        {z.label?.trim() && info && <span className={desk.zoneHw}>{info.zone.name}</span>}
+                        {info && <KindIcon kind={pn.kind} fan={pn.fan} size={15} />}{" "}
+                        {friendly || pn.name}
                       </span>
-                      <span className="row-sub one-line">{info ? info.device.name : "not connected"}</span>
+                      <span className="row-sub one-line">
+                        {info
+                          ? [friendly ? pn.name : pn.hardware, info.device.name]
+                              .filter((t, i, arr) => t && t !== (friendly ? "" : pn.name) && arr.indexOf(t) === i)
+                              .join(" · ")
+                          : "this device is gone"}
+                      </span>
                       <span className="fig mute">{info ? <AnimatedNumber value={info.zone.led_count} /> : "—"}</span>
                     </RowButton>
                   );
@@ -1014,6 +1057,7 @@ const SHAPE_NOTE: Record<ZoneShape["type"], string> = {
 function ZoneInspector({
   zone,
   name,
+  icon,
   deviceName,
   ledCount,
   info,
@@ -1026,6 +1070,7 @@ function ZoneInspector({
 }: {
   zone: PlacedZone;
   name: string;
+  icon: ReactNode;
   deviceName: string;
   ledCount: number;
   info: ZoneInfo | null;
@@ -1058,7 +1103,10 @@ function ZoneInspector({
         </div>
       )}
       <div className="row-title" style={{ justifyContent: "space-between" }}>
-        <span className={missing ? "" : "one-line"}>{name}</span>
+        <span className={missing ? "" : "one-line"} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+          {icon}
+          {name}
+        </span>
         <span className="fig mute">{missing ? "not connected" : <><AnimatedNumber value={ledCount} /> LEDs</>}</span>
       </div>
       <p className="row-sub one-line">{deviceName}</p>

@@ -3,6 +3,7 @@
 // crates/canvas-effects/src/*.rs, the devices from the spec's hardware list, and the fan
 // headers from the spine. The production path never reads this file.
 
+import { autoPlace } from "@/lib/caseForms";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { EffectSummary } from "@/proto/EffectSummary";
 import type { Layout } from "@/proto/Layout";
@@ -335,22 +336,22 @@ export const LAYOUT_DESK: Layout = {
   name: "Desk",
   render_scale: 50,
   sampling: "area_average",
+  case_form: "mid_tower",
+  // The demo PC in a mid tower: fan in a fan position, RAM in the RAM slots, the three ARGB headers
+  // along the case edges, and the keyboard and microphone on the desk shelf (`autoPlace` is the
+  // same placement the daemon's first run makes). Two zones have the owner's own names.
   zones: [
-    // A diagram of the PC: the three ARGB headers as strips down the left, the front fan as a ring,
-    // the RAM as two upright sticks on the right, and the keyboard and the microphone as points
-    // along the bottom.
-    { device_id: "openrgb:A1B2C3D4E5F6", zone_index: 1, x: 10, y: 10, width: 120, height: 10, rotation_deg: 0, reversed: false, visible: true, shape: { type: "strip" }, label: "Top strip" },
-    { device_id: "openrgb:A1B2C3D4E5F6", zone_index: 2, x: 10, y: 30, width: 120, height: 10, rotation_deg: 0, reversed: false, visible: true, shape: { type: "strip" }, label: "Shelf light" },
-    { device_id: "openrgb:A1B2C3D4E5F6", zone_index: 3, x: 10, y: 50, width: 120, height: 10, rotation_deg: 0, reversed: false, visible: true, shape: { type: "strip" } },
-    { device_id: "openrgb:fan-hub-1", zone_index: 0, x: 160, y: 20, width: 56, height: 56, rotation_deg: 0, reversed: false, visible: true, shape: { type: "ring" } },
-    { device_id: "royuan:3151:4015", zone_index: 0, x: 20, y: 140, width: 120, height: 36, rotation_deg: 0, reversed: false, visible: true, shape: { type: "point" } },
+    ...autoPlace("mid_tower", DEVICES, []).map((z) =>
+      z.device_id === "openrgb:A1B2C3D4E5F6" && z.zone_index === 1
+        ? { ...z, label: "Top strip" }
+        : z.device_id === "openrgb:A1B2C3D4E5F6" && z.zone_index === 2
+          ? { ...z, label: "Shelf light" }
+          : z,
+    ),
     // The zone OpenRGB used for the keyboard, before the native adapter took it over. The
     // daemon does not drive that device any more, so the zone draws nothing: the editor shows
     // it as stale.
-    { device_id: "openrgb:HID: \\\\?\\HID#VID_3151&PID_4015&MI_02#9&298b2e71&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}", zone_index: 0, x: 20, y: 140, width: 120, height: 36, rotation_deg: 0, reversed: false, visible: true, shape: { type: "auto" } },
-    { device_id: "openrgb:HID: \\\\?\\HID#VID_03F0&PID_028C&MI_00#a&eb32b1c&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}", zone_index: 0, x: 170, y: 120, width: 20, height: 40, rotation_deg: 0, reversed: false, visible: true, shape: { type: "point" } },
-    { device_id: "openrgb:I2C: PawnIO SMBus PIIX4 0, address 0x71", zone_index: 0, x: 294, y: 36, width: 16, height: 120, rotation_deg: 0, reversed: false, visible: true, shape: { type: "strip" } },
-    { device_id: "openrgb:I2C: PawnIO SMBus PIIX4 0, address 0x73", zone_index: 0, x: 270, y: 36, width: 16, height: 120, rotation_deg: 0, reversed: false, visible: true, shape: { type: "strip" } },
+    { device_id: "openrgb:HID: \\\\?\\HID#VID_3151&PID_4015&MI_02#9&298b2e71&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}", zone_index: 0, x: 14, y: 158, width: 110, height: 30, rotation_deg: 0, reversed: false, visible: true, shape: { type: "auto" } },
   ],
   // Aurora in the editor's own accents (--a1 blue, --a2 violet, --a3 teal): one calm picture
   // flowing across every device. The demo thumbnail is rendered with the same three colours.

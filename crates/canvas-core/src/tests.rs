@@ -297,6 +297,7 @@ fn layout(zones: Vec<PlacedZone>, sampling: SamplingMode, scale: RenderScale) ->
         sampling,
         zones,
         effect: None,
+        case_form: canvas_proto::layout::CaseForm::None,
     }
 }
 

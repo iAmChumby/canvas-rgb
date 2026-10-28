@@ -408,6 +408,7 @@ mod tests {
             sampling: SamplingMode::Nearest,
             zones,
             effect: None,
+            case_form: canvas_proto::layout::CaseForm::None,
         }
     }
 

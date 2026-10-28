@@ -353,3 +353,54 @@ export function reshapeBox(z: PlacedZone, shape: ZoneShape): Partial<PlacedZone>
     y: Math.min(Math.max(0, cy - nh / 2), CANVAS_H - nh),
   };
 }
+
+/** What a zone is called to a person: the plain name and, muted beside it, the hardware's own. */
+export interface PlainName {
+  name: string;
+  hardware: string | null;
+  kind: DeviceKind | null;
+  /** The zone is a fan (a ring of LEDs round a hub). */
+  fan: boolean;
+}
+
+/**
+ * The plain name of a zone, the one a person would use: "RAM 2", "ARGB header 1", "Keyboard",
+ * "Front fan". The hardware's own name ("ENE DRAM", "JARGB 1") goes second and muted. Nothing is
+ * invented: a zone the table does not know keeps its own name.
+ */
+export function plainName(devices: DeviceInfo[] | null, deviceId: string, zoneIndex: number): PlainName {
+  const found = findZoneInfo(devices, deviceId, zoneIndex);
+  if (!found) return { name: "Not connected", hardware: null, kind: null, fan: false };
+  const { device, zone } = found;
+  const zn = zone.name.trim();
+  const fan = zn.toLowerCase().includes("fan") && zone.led_count > 1;
+  const header = /^(JARGB|JRGB|JRAINBOW|JAF|JCORSAIR|JPUMP)\s*(\d*)$/i.exec(zn);
+  const hw = (s: string): string | null => (s && s !== zn ? s : null);
+  switch (device.kind) {
+    case "dram": {
+      const sticks = (devices ?? []).filter((d) => d.kind === "dram");
+      const n = sticks.findIndex((d) => d.id === device.id) + 1;
+      return { name: `RAM ${n}`, hardware: hw(device.name), kind: "dram", fan: false };
+    }
+    case "keyboard":
+      return { name: "Keyboard", hardware: hw(device.name), kind: "keyboard", fan: false };
+    case "mouse":
+      return { name: "Mouse", hardware: hw(device.name), kind: "mouse", fan: false };
+    case "microphone":
+      return { name: "Microphone", hardware: hw(device.name), kind: "microphone", fan: false };
+    case "headset":
+      return { name: "Headset", hardware: hw(device.name), kind: "headset", fan: false };
+    case "gpu":
+      return { name: "Graphics card", hardware: hw(zn || device.name), kind: "gpu", fan: false };
+    default:
+      break;
+  }
+  if (fan) return { name: zn, hardware: hw(device.name), kind: device.kind, fan: true };
+  if (header) {
+    const word = { jargb: "ARGB header", jrgb: "RGB header", jrainbow: "Rainbow header", jaf: "Fan header", jcorsair: "Corsair header", jpump: "Pump header" }[
+      header[1]!.toLowerCase()
+    ] as string;
+    return { name: header[2] ? `${word} ${header[2]}` : word, hardware: zn, kind: device.kind, fan: false };
+  }
+  return { name: zn || device.name, hardware: hw(device.name), kind: device.kind, fan: false };
+}

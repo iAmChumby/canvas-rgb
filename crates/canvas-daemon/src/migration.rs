@@ -109,6 +109,7 @@ mod tests {
                 sampling: Default::default(),
                 zones: Vec::new(),
                 effect: Some(ActiveEffect { id: effect_id.to_string(), props: stored_props() }),
+                case_form: canvas_proto::layout::CaseForm::None,
             }],
         }
     }

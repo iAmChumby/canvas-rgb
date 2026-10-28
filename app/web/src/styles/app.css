@@ -3250,6 +3250,54 @@ button.chip:hover {
   }
 }
 
+/* The case drawing behind the zones: the lines of the PC, the keyline under them, the soft fills
+   of the case, the board and the desk, and the muted slot text. Each has a dark and a light set. */
+:root {
+  --case-line: rgba(255, 255, 255, 0.78);
+  --case-soft: rgba(255, 255, 255, 0.5);
+  --case-halo: rgba(0, 0, 0, 0.42);
+  --case-body: rgba(0, 0, 0, 0.14);
+  --case-board: rgba(0, 0, 0, 0.16);
+  --case-desk: rgba(0, 0, 0, 0.26);
+  --case-text: rgba(255, 255, 255, 0.92);
+  --zone-art: rgba(255, 255, 255, 0.7);
+}
+
+:root[data-theme="dark"] {
+  --case-line: rgba(255, 255, 255, 0.78);
+  --case-soft: rgba(255, 255, 255, 0.5);
+  --case-halo: rgba(0, 0, 0, 0.42);
+  --case-body: rgba(0, 0, 0, 0.14);
+  --case-board: rgba(0, 0, 0, 0.16);
+  --case-desk: rgba(0, 0, 0, 0.26);
+  --case-text: rgba(255, 255, 255, 0.92);
+  --zone-art: rgba(255, 255, 255, 0.7);
+}
+
+:root[data-theme="light"] {
+  --case-line: rgba(255, 255, 255, 0.92);
+  --case-soft: rgba(255, 255, 255, 0.62);
+  --case-halo: rgba(0, 0, 0, 0.5);
+  --case-body: rgba(0, 0, 0, 0.1);
+  --case-board: rgba(0, 0, 0, 0.12);
+  --case-desk: rgba(0, 0, 0, 0.2);
+  --case-text: rgba(255, 255, 255, 0.98);
+  --zone-art: rgba(255, 255, 255, 0.85);
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --case-line: rgba(255, 255, 255, 0.92);
+    --case-soft: rgba(255, 255, 255, 0.62);
+    --case-halo: rgba(0, 0, 0, 0.5);
+    --case-body: rgba(0, 0, 0, 0.1);
+    --case-board: rgba(0, 0, 0, 0.12);
+    --case-desk: rgba(0, 0, 0, 0.2);
+    --case-text: rgba(255, 255, 255, 0.98);
+    --zone-art: rgba(255, 255, 255, 0.85);
+  }
+}
+
 /* The fan headers the editor last read, shown while the fan service is away: dimmed, no controls. */
 .known-headers {
   margin: 0;

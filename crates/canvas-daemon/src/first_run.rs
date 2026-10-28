@@ -280,101 +280,147 @@ pub fn default_shape(kind: DeviceKind, zone: &ZoneInfo) -> ZoneShape {
     }
 }
 
-/// The default rectangle size (width, height) for a shape on a device kind.
-fn default_size(kind: DeviceKind, shape: ZoneShape) -> (f32, f32) {
-    match (kind, shape) {
-        (_, ZoneShape::Ring) => (40.0, 40.0),
-        (DeviceKind::Dram, _) => (16.0, 120.0),
-        (DeviceKind::Keyboard, ZoneShape::Grid { .. }) => (120.0, 38.0),
-        (DeviceKind::Keyboard, _) => (110.0, 30.0),
-        (DeviceKind::Mouse, ZoneShape::Point) => (22.0, 32.0),
-        (DeviceKind::Microphone, ZoneShape::Point) => (16.0, 28.0),
-        (DeviceKind::Headset, ZoneShape::Point) => (30.0, 30.0),
-        (_, ZoneShape::Point) => (20.0, 20.0),
-        _ => (120.0, 10.0),
-    }
+/// What a case slot holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SlotKind {
+    Fan,
+    Ram,
+    Gpu,
+    Edge,
+    Desk,
 }
 
-/// Builds the default layout for the discovered devices.
-///
-/// The placement is deterministic: the devices are sorted by kind and name, then laid
-/// out by role on the 320x200 canvas, like a diagram of the PC: ARGB headers stack on
-/// the left, fan rings sit in a row beneath them, peripherals line up along the bottom
-/// and the RAM sticks stand on the right. Nothing overlaps another zone.
-pub fn build_default_layout(devices: &[DeviceInfo]) -> Layout {
-    const MARGIN: f32 = 4.0;
-    const GAP: f32 = 6.0;
-    const ROW_HEIGHT: f32 = 18.0;
-    const DRAM_Y: f32 = 20.0;
-    const LEFT_LIMIT: f32 = 240.0;
-    const FAN_BAND_Y: f32 = 68.0;
-    const PERIPHERAL_Y: f32 = 150.0;
+/// One standard place in the generic case drawing: a fan position, a RAM slot, the GPU slot, a
+/// case edge where a strip runs, or a place on the desk shelf. The editor draws the same slots
+/// (`app/web/src/lib/caseForms.ts`) and snaps zones to them; keep the two tables the same.
+#[derive(Debug, Clone, Copy)]
+struct Slot {
+    kind: SlotKind,
+    /// Peripheral slots on the desk name the kind they are for.
+    peripheral: Option<DeviceKind>,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+}
 
+/// The mid-tower's slots, in the order zones fill them: front fans, top fans, rear fan, RAM,
+/// GPU, three case edges, the desk's keyboard, mouse, mic and headset places, then three
+/// spare desk places. Arithmetic is the editor's, rounded to whole units.
+fn mid_tower_slots() -> Vec<Slot> {
+    let (cx, cy, cw, ch, s) = (10.0f32, 6.0f32, 250.0f32, 138.0f32, 32.0f32);
+    let (front, top, ram) = (3usize, 2usize, 4usize);
+    let mut slots = Vec::new();
+    let slot = |kind, x: f32, y: f32, w: f32, h: f32| Slot { kind, peripheral: None, x, y, w, h };
+    let fy0 = cy + 10.0;
+    for i in 0..front {
+        slots.push(slot(SlotKind::Fan, cx + 6.0, fy0 + i as f32 * (s + 4.0), s, s));
+    }
+    let top_x0 = cx + 6.0 + s + 10.0;
+    for i in 0..top {
+        slots.push(slot(SlotKind::Fan, top_x0 + i as f32 * (s + 4.0), cy + 10.0, s, s));
+    }
+    slots.push(slot(SlotKind::Fan, cx + cw - 10.0 - s, cy + 10.0, s, s));
+    let bx = cx + 6.0 + s + 10.0;
+    let by = cy + 10.0 + s + 8.0;
+    let bw = cw - (bx - cx) - 10.0;
+    let bh = cy + ch - 16.0 - by;
+    let (rw, rh) = (9.0f32, 48.0f32);
+    let total = ram as f32 * rw + (ram as f32 - 1.0) * 3.0;
+    let start = bx + bw - 8.0 - total;
+    for i in 0..ram {
+        slots.push(slot(SlotKind::Ram, start + i as f32 * (rw + 3.0), by + 6.0, rw, rh));
+    }
+    slots.push(slot(SlotKind::Gpu, bx + 6.0, (by + bh * 0.55).round(), (bw * 0.58).round(), 14.0));
+    slots.push(slot(SlotKind::Edge, cx + 10.0, cy + 3.0, cw - 20.0, 4.0));
+    slots.push(slot(SlotKind::Edge, cx + 10.0, cy + ch - 8.0, cw - 20.0, 4.0));
+    slots.push(slot(SlotKind::Edge, cx + cw - 6.0, cy + 16.0, 4.0, ch - 32.0));
+    let desk = |kind, x, y, w, h| Slot { kind: SlotKind::Desk, peripheral: Some(kind), x, y, w, h };
+    slots.push(desk(DeviceKind::Keyboard, 14.0, 158.0, 110.0, 30.0));
+    slots.push(desk(DeviceKind::Mouse, 132.0, 156.0, 22.0, 32.0));
+    slots.push(desk(DeviceKind::Microphone, 162.0, 158.0, 16.0, 28.0));
+    slots.push(desk(DeviceKind::Headset, 186.0, 157.0, 30.0, 30.0));
+    for i in 0..3 {
+        slots.push(Slot {
+            kind: SlotKind::Desk,
+            peripheral: None,
+            x: 226.0 + 30.0 * i as f32,
+            y: 159.0,
+            w: 26.0,
+            h: 26.0,
+        });
+    }
+    slots
+}
+
+/// The slot a zone belongs in, among `slots` not yet taken (`used`). A fan-like zone takes a fan
+/// position, RAM a RAM slot, a GPU the GPU slot, a keyboard, mouse, mic or headset its own place
+/// on the desk; a header or strip takes a case edge; anything else (and anything whose own slots
+/// are full) takes a spare desk place if it is a desk thing.
+fn pick_slot(kind: DeviceKind, zone: &ZoneInfo, slots: &[Slot], used: &[bool]) -> Option<usize> {
+    let free = |want: &dyn Fn(&Slot) -> bool| (0..slots.len()).find(|&i| !used[i] && want(&slots[i]));
+    let fan_like = zone.name.to_ascii_lowercase().contains("fan") && zone.led_count > 1;
+    let single = matches!(zone.kind, ZoneKind::Single) || zone.led_count == 1;
+    let own = if fan_like {
+        free(&|s| s.kind == SlotKind::Fan)
+    } else {
+        match kind {
+            DeviceKind::Dram => free(&|s| s.kind == SlotKind::Ram),
+            DeviceKind::Gpu if !single => free(&|s| s.kind == SlotKind::Gpu),
+            DeviceKind::Keyboard | DeviceKind::Mouse | DeviceKind::Microphone | DeviceKind::Headset => {
+                free(&|s| s.kind == SlotKind::Desk && s.peripheral == Some(kind))
+            }
+            _ if single => None,
+            _ => free(&|s| s.kind == SlotKind::Edge),
+        }
+    };
+    // A spare desk place is for what lives on a desk: a second keyboard, a single-LED gadget. A fan,
+    // a RAM stick or a strip with no case slot left is staggered in the case by the caller.
+    let desk_thing = matches!(
+        kind,
+        DeviceKind::Keyboard | DeviceKind::Mouse | DeviceKind::Microphone | DeviceKind::Headset
+    ) || (single && !matches!(kind, DeviceKind::Dram | DeviceKind::Gpu) && !fan_like);
+    own.or_else(|| {
+        if desk_thing {
+            free(&|s| s.kind == SlotKind::Desk && s.peripheral.is_none())
+        } else {
+            None
+        }
+    })
+}
+
+/// Places every zone with LEDs of `devices` in the mid-tower's slots, skipping slots already
+/// `used`. Returns the zones in placement order. A zone with no slot left is staggered near the
+/// middle of the desk so it is never off the canvas or on top of a slot.
+fn place_in_mid_tower(devices: &[DeviceInfo], existing: &[PlacedZone], used: &mut Vec<bool>) -> Vec<PlacedZone> {
+    let slots = mid_tower_slots();
+    used.resize(slots.len(), false);
     let mut sorted: Vec<&DeviceInfo> = devices.iter().collect();
     sorted.sort_by(|a, b| {
         kind_rank(a.kind)
             .cmp(&kind_rank(b.kind))
             .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()))
     });
-
     let mut zones = Vec::new();
-    // The RAM sticks go on the right, side by side.
-    let mut dram_column = 0u32;
-    // ARGB headers and other strips stack down the left.
-    let mut row_y = MARGIN;
-    let mut row_x = MARGIN;
-    // Fan rings and small points share a band beneath the headers.
-    let mut band_x = MARGIN;
-    let mut band_y = FAN_BAND_Y;
-    // Peripherals line up along the bottom.
-    let mut peri_x = MARGIN;
-    let mut peri_y = PERIPHERAL_Y;
-    let mut peri_row_height = 0.0f32;
-
+    let mut overflow = 0.0f32;
     for device in sorted {
-        let peripheral = matches!(
-            device.kind,
-            DeviceKind::Keyboard
-                | DeviceKind::Mouse
-                | DeviceKind::Microphone
-                | DeviceKind::Headset
-        );
         for zone in &device.zones {
             if zone.led_count == 0 {
                 continue;
             }
+            if existing.iter().any(|p| p.device_id == device.id && p.zone_index == zone.index) {
+                continue;
+            }
             let shape = default_shape(device.kind, zone);
-            let (width, height) = default_size(device.kind, shape);
-            let (x, y) = if device.kind == DeviceKind::Dram {
-                let x = 320.0 - width - MARGIN - (dram_column as f32) * (width + 4.0);
-                dram_column += 1;
-                (x, DRAM_Y)
-            } else if peripheral {
-                if peri_x + width > LEFT_LIMIT && peri_x > MARGIN {
-                    peri_x = MARGIN;
-                    peri_y += peri_row_height + GAP;
-                    peri_row_height = 0.0;
+            let (x, y, width, height) = match pick_slot(device.kind, zone, &slots, used) {
+                Some(i) => {
+                    used[i] = true;
+                    (slots[i].x, slots[i].y, slots[i].w, slots[i].h)
                 }
-                let at = (peri_x, peri_y);
-                peri_x += width + GAP;
-                peri_row_height = peri_row_height.max(height);
-                at
-            } else if matches!(shape, ZoneShape::Ring | ZoneShape::Point) {
-                if band_x + width > LEFT_LIMIT && band_x > MARGIN {
-                    band_x = MARGIN;
-                    band_y += 44.0;
+                None => {
+                    overflow += 1.0;
+                    (150.0 + 6.0 * overflow, 60.0 + 6.0 * overflow, 24.0, 24.0)
                 }
-                let at = (band_x, band_y);
-                band_x += width + GAP;
-                at
-            } else {
-                let at = (row_x, row_y);
-                row_y += ROW_HEIGHT;
-                if row_y > FAN_BAND_Y - ROW_HEIGHT {
-                    row_y = MARGIN;
-                    row_x += width + GAP;
-                }
-                at
             };
             zones.push(PlacedZone {
                 device_id: device.id.clone(),
@@ -391,7 +437,16 @@ pub fn build_default_layout(devices: &[DeviceInfo]) -> Layout {
             });
         }
     }
+    zones
+}
 
+/// Builds the default layout for the discovered devices: a mid tower, with every device in its
+/// place in the case (fans in the fan positions, RAM in the RAM slots, header strips along the
+/// case edges) and the keyboard, mouse, mic and headset on the desk shelf. The placement is
+/// deterministic and nothing overlaps another zone.
+pub fn build_default_layout(devices: &[DeviceInfo]) -> Layout {
+    let mut used = Vec::new();
+    let zones = place_in_mid_tower(devices, &[], &mut used);
     Layout {
         id: "default".into(),
         name: "Default".into(),
@@ -399,27 +454,33 @@ pub fn build_default_layout(devices: &[DeviceInfo]) -> Layout {
         sampling: SamplingMode::AreaAverage,
         zones,
         effect: None,
+        case_form: canvas_proto::layout::CaseForm::MidTower,
     }
 }
 
-/// Adds every zone with LEDs that the layout does not place yet, where the first run
-/// would have put it. Zones already in the layout are left where they are.
+/// Adds every zone with LEDs that the layout does not place yet, in the mid tower's next free
+/// slot. Zones already in the layout are left where they are, and a slot an existing zone sits
+/// in counts as taken.
 ///
 /// A device detected after the first run (or a header sized later) lands on the canvas,
 /// as SignalRGB does with a new device, instead of staying black. Returns how many zones
 /// were added.
 pub fn place_missing_zones(layout: &mut Layout, devices: &[DeviceInfo]) -> usize {
-    let defaults = build_default_layout(devices);
+    let slots = mid_tower_slots();
+    let mut used: Vec<bool> = slots
+        .iter()
+        .map(|s| {
+            let (cx, cy) = (s.x + s.w / 2.0, s.y + s.h / 2.0);
+            layout
+                .zones
+                .iter()
+                .any(|p| cx >= p.x && cx <= p.x + p.width && cy >= p.y && cy <= p.y + p.height)
+        })
+        .collect();
     let mut added = 0;
-    for zone in defaults.zones {
-        let present = layout
-            .zones
-            .iter()
-            .any(|p| p.device_id == zone.device_id && p.zone_index == zone.zone_index);
-        if !present {
-            layout.zones.push(zone);
-            added += 1;
-        }
+    for zone in place_in_mid_tower(devices, &layout.zones.clone(), &mut used) {
+        layout.zones.push(zone);
+        added += 1;
     }
     added
 }
@@ -818,6 +879,63 @@ mod tests {
         let mic_zone = layout.zones.iter().find(|z| z.device_id == mic.id).unwrap();
         assert_eq!(mic_zone.x, 200.0);
         assert_eq!(place_missing_zones(&mut layout, &[mic, board]), 0);
+    }
+
+    #[test]
+    fn the_default_layout_is_a_mid_tower_with_devices_in_their_slots() {
+        let mut board = device("MSI", DeviceKind::Motherboard, 120);
+        board.zones = vec![
+            ZoneInfo { index: 0, name: "JARGB 1".into(), ..board.zones[0].clone() },
+            ZoneInfo { index: 1, name: "Front Fan".into(), led_count: 16, ..board.zones[0].clone() },
+        ];
+        let mut keyboard = device("Keys", DeviceKind::Keyboard, 1);
+        keyboard.zones[0].kind = ZoneKind::Single;
+        let ram = device("ENE DRAM", DeviceKind::Dram, 8);
+        let gpu = device("RTX", DeviceKind::Gpu, 20);
+        let layout = build_default_layout(&[board.clone(), keyboard.clone(), ram.clone(), gpu.clone()]);
+        assert_eq!(layout.case_form, canvas_proto::layout::CaseForm::MidTower);
+        let at = |id: &DeviceId, zone: u32| {
+            layout.zones.iter().find(|z| &z.device_id == id && z.zone_index == zone).unwrap()
+        };
+        // The numbers are the editor's mid-tower table (caseForms.ts): front fan 1, RAM slot 1,
+        // the GPU slot, the top edge and the desk's keyboard place.
+        let fan = at(&board.id, 1);
+        assert_eq!((fan.x, fan.y, fan.width, fan.height, fan.shape), (16.0, 16.0, 32.0, 32.0, ZoneShape::Ring));
+        let header = at(&board.id, 0);
+        assert_eq!((header.x, header.y, header.width, header.height), (20.0, 9.0, 230.0, 4.0));
+        let stick = at(&ram.id, 0);
+        assert_eq!((stick.x, stick.y, stick.width, stick.height), (197.0, 62.0, 9.0, 48.0));
+        let card = at(&gpu.id, 0);
+        assert_eq!((card.x, card.y, card.width, card.height), (64.0, 96.0, 111.0, 14.0));
+        let keys = at(&keyboard.id, 0);
+        assert_eq!((keys.x, keys.y, keys.width, keys.height, keys.shape), (14.0, 158.0, 110.0, 30.0, ZoneShape::Point));
+    }
+
+    #[test]
+    fn a_late_device_takes_the_next_free_slot_and_not_a_taken_one() {
+        let first = device("ENE A", DeviceKind::Dram, 8);
+        let second = device("ENE B", DeviceKind::Dram, 8);
+        let mut layout = build_default_layout(std::slice::from_ref(&first));
+        let taken = (layout.zones[0].x, layout.zones[0].y);
+        let added = place_missing_zones(&mut layout, &[first, second.clone()]);
+        assert_eq!(added, 1);
+        let late = layout.zones.iter().find(|z| z.device_id == second.id).unwrap();
+        assert_ne!((late.x, late.y), taken, "the second stick has its own slot");
+        assert_eq!(late.shape, ZoneShape::Strip);
+        assert!(late.height > late.width);
+    }
+
+    #[test]
+    fn more_fans_than_fan_slots_do_not_leave_the_canvas_or_stack() {
+        let mut board = device("MSI", DeviceKind::Motherboard, 12);
+        board.zones = (0..9)
+            .map(|i| ZoneInfo { index: i, name: format!("Fan {i}"), ..board.zones[0].clone() })
+            .collect();
+        let layout = build_default_layout(&[board]);
+        assert_eq!(layout.zones.len(), 9);
+        for z in &layout.zones {
+            assert!(z.x >= 0.0 && z.y >= 0.0 && z.x + z.width <= 320.0 && z.y + z.height <= 200.0, "{z:?}");
+        }
     }
 
     #[test]

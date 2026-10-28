@@ -132,6 +132,28 @@ pub struct Layout {
     pub sampling: SamplingMode,
     pub zones: Vec<PlacedZone>,
     pub effect: Option<ActiveEffect>,
+    /// The PC's form factor, drawn behind the zones as a generic case with standard slots
+    /// (fans, RAM, GPU, edges) plus a desk area for peripherals. Layouts saved before this
+    /// existed load as `None`: a free layout with no case drawn, so nothing moves.
+    #[serde(default)]
+    pub case_form: CaseForm,
+}
+
+/// A generic case shape for the desk. It is a drawing and a set of snap slots only: the
+/// effect is still sampled where each zone sits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum CaseForm {
+    /// No case drawn: zones sit freely on the desk.
+    #[default]
+    None,
+    MidTower,
+    FullTower,
+    /// Small form factor (mini-ITX).
+    SmallFormFactor,
+    /// An open-frame bench case.
+    OpenFrame,
 }
 
 #[cfg(test)]

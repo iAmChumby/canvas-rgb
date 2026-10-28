@@ -130,25 +130,29 @@
   position: absolute;
   z-index: 6;
   box-sizing: border-box;
-  height: 22px;
-  padding: 0 6px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 7px;
   border: 1px solid var(--line-2);
   border-left: 3px solid var(--zc, var(--line-2));
   border-radius: 4px;
   background: var(--panel);
   color: var(--ink);
-  font-family: var(--fm);
+  font-family: var(--fu);
   font-size: var(--t14);
-  line-height: 20px;
+  font-weight: 500;
+  line-height: 1;
   white-space: nowrap;
   pointer-events: none;
   transition: opacity var(--dur-fast) var(--ease);
 }
 
 .desk .tagSub {
-  margin-left: 6px;
   color: var(--mute);
-  font-size: 12px;
+  font-size: var(--t14);
+  font-weight: 400;
 }
 
 /* Identify: the zone's outline flashes a few times so the eye finds it. */
@@ -190,15 +194,16 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 0 6px;
-  height: 22px;
-  line-height: 20px;
+  padding: 0 7px;
+  height: 26px;
+  line-height: 1;
   border: 1px solid var(--line-2);
   border-left: 3px solid var(--zc, var(--line-2));
   border-radius: 4px;
   background: var(--panel);
   color: var(--ink);
-  font-family: var(--fm);
+  font-family: var(--fu);
+  font-weight: 500;
   font-size: var(--t14);
   white-space: nowrap;
   pointer-events: none;
@@ -755,8 +760,7 @@
 .zoneHw {
   margin-left: 6px;
   color: var(--mute);
-  font-family: var(--fm);
-  font-size: 12px;
+  font-size: var(--t14);
   font-weight: 400;
 }
 
@@ -785,4 +789,142 @@
   flex: 1 1 auto;
   width: 100%;
   min-width: 0;
+}
+
+/* ---------- the case behind the zones ---------- */
+
+.caseSvg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.caseSvg rect,
+.caseSvg line,
+.caseSvg circle,
+.caseSvg path {
+  fill: none;
+  vector-effect: non-scaling-stroke;
+}
+
+.caseHalo rect,
+.caseHalo line,
+.caseHalo circle,
+.caseHalo path {
+  stroke: var(--case-halo);
+  stroke-width: 3.25px;
+}
+
+.caseLine rect,
+.caseLine line,
+.caseLine circle,
+.caseLine path {
+  stroke: var(--case-line);
+  stroke-width: 1.25px;
+}
+
+.caseSvg .caseSoft {
+  stroke: var(--case-soft);
+}
+
+.caseHalo .caseSoft {
+  stroke: var(--case-halo);
+  stroke-width: 2.5px;
+}
+
+.caseLine .caseSoft {
+  stroke-width: 1px;
+}
+
+.caseSvg .caseDash {
+  stroke-dasharray: 5 4;
+}
+
+.caseSvg .caseBody {
+  fill: var(--case-body);
+  stroke: none;
+}
+
+.caseSvg .caseBoard {
+  fill: var(--case-board);
+  stroke: none;
+}
+
+.caseSvg .caseDesk {
+  fill: var(--case-desk);
+  stroke: none;
+}
+
+.caseSvg .caseText {
+  fill: var(--case-text);
+  font-family: var(--fu);
+  font-size: calc(14px / var(--k, 2));
+  font-weight: 500;
+  stroke: var(--case-halo);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+  paint-order: stroke;
+  vector-effect: non-scaling-stroke;
+}
+
+/* ---------- silhouettes: what a zone is, drawn inside its box ---------- */
+
+.art {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.art * {
+  fill: none;
+  stroke: var(--zone-art);
+  stroke-width: 1px;
+  vector-effect: non-scaling-stroke;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* ---------- leader lines, the legend ---------- */
+
+.leaders {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 5;
+  overflow: visible;
+}
+
+.leaders line {
+  stroke: var(--zone-line);
+  stroke-width: 1px;
+}
+
+.leaders circle {
+  fill: var(--zone-line);
+}
+
+.desk[data-moving="true"] .leaders {
+  opacity: 0;
+}
+
+.legend {
+  margin: var(--s2) 0 0;
+  color: var(--mute);
+  font-size: var(--t14);
+  line-height: 1.4;
+}
+
+.caseSelect {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
 }

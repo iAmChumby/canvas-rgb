@@ -13,14 +13,18 @@ import {
   type PointerEvent,
 } from "react";
 import { ArrowsOut, Minus, Plus, Tag, X } from "@phosphor-icons/react";
+import { KindIcon } from "@/components/KindIcon";
+import { Select } from "@/components/Select";
 import { IconButton } from "@/components/Button";
 import { Chip } from "@/components/Chip";
 import { EffectPreview, type PreviewValues } from "@/components/EffectPreview";
 import { useMediaQuery } from "@/components/MediaQuery";
+import { CASE_OPTIONS, caseSpec, nearestSlot, zoneInSlot, type Slot } from "@/lib/caseForms";
 import { onFrame, PREVIEW_H, PREVIEW_W, usePreviewStatus, type Frame } from "@/lib/preview";
 import {
   canvasCell,
   findZoneInfo,
+  plainName,
   resolveShape,
   zoneCorners,
   zoneLocalLeds,
@@ -32,10 +36,14 @@ import {
 import { clamp } from "@/lib/format";
 import { usePrefersReducedMotion } from "@/lib/motion";
 import { FIT_VIEW, forgetView, readView, writeView } from "@/lib/viewPrefs";
+import type { CaseForm } from "@/proto/CaseForm";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
+import type { DeviceKind } from "@/proto/DeviceKind";
 import type { PlacedZone } from "@/proto/PlacedZone";
 import type { SamplingMode } from "@/proto/SamplingMode";
 import type { ZoneInfo } from "@/proto/ZoneInfo";
+import { CaseBackdrop } from "./CaseBackdrop";
+import { ZoneArt } from "./ZoneArt";
 import desk from "./desk.module.css";
 
 const CANVAS_W = 320;
@@ -44,6 +52,8 @@ const ACCENTS = ["--a1", "--a2", "--a3", "--a4", "--a5"] as const;
 
 /** The grid a zone snaps to, in canvas units. */
 const SNAP_GRID = 5;
+/** How close, in screen pixels, a zone's centre has to be to a case slot's centre to snap to it. */
+const SLOT_REACH_PX = 26;
 /** How close, in screen pixels, a zone has to be to another zone's line to snap to it. */
 const SNAP_PIXELS = 8;
 /** The smallest a zone can be, in canvas units. */
@@ -208,8 +218,8 @@ function handleCursor(h: HandleDef, rotation: number): string {
 }
 
 /** The name tags: their height and the gap they keep to their zone, in css pixels. */
-const TAG_H = 22;
-const TAG_GAP = 5;
+const TAG_H = 26;
+const TAG_GAP = 9;
 /** Where the viewer's choice to show the name tags is remembered. */
 const LABELS_KEY = "canvas-rgb.desk-labels";
 
@@ -240,54 +250,38 @@ function overlaps(a: Box, b: Box, pad = 0): boolean {
   return a.x < b.x + b.w + pad && b.x < a.x + a.w + pad && a.y < b.y + b.h + pad && b.y < a.y + a.h + pad;
 }
 
-/** One name tag, placed. */
+/** One name tag, placed, with the line that ties it to its zone. */
 interface Tag {
   index: number;
   key: string;
-  /** The friendly name (or, with none, the hardware name) and, after it, the hardware name. */
+  /** The name a person would use (or the owner's own) and, after it, the hardware's name. */
   text: string;
   sub: string | null;
+  kind: DeviceKind | null;
+  fan: boolean;
   x: number;
   y: number;
   missing: boolean;
   accent: number;
+  /** The leader: from the tag's edge to the nearest point of the zone's box. */
+  lead: { x1: number; y1: number; x2: number; y2: number } | null;
+}
+
+/** The distance between two boxes: 0 when they touch or overlap. */
+function boxGap(a: Box, b: Box): number {
+  const dx = Math.max(0, a.x - (b.x + b.w), b.x - (a.x + a.w));
+  const dy = Math.max(0, a.y - (b.y + b.h), b.y - (a.y + a.h));
+  return Math.hypot(dx, dy);
 }
 
 /**
- * The short name a zone wears on the desk: what the thing is, as the owner calls it. RAM sticks
- * are numbered by their place in the device list; a board header, a fan or a strip keeps the
- * zone's own name ("JARGB 1", "Front fan"); a peripheral is named by its kind.
- */
-function shortName(devices: DeviceInfo[] | null, z: PlacedZone): string {
-  const found = findZoneInfo(devices, z.device_id, z.zone_index);
-  if (!found) return "not connected";
-  const { device, zone } = found;
-  switch (device.kind) {
-    case "dram": {
-      const sticks = (devices ?? []).filter((d) => d.kind === "dram");
-      return `RAM ${sticks.findIndex((d) => d.id === device.id) + 1}`;
-    }
-    case "keyboard":
-      return "Keyboard";
-    case "mouse":
-      return "Mouse";
-    case "microphone":
-      return "Mic";
-    case "headset":
-      return "Headset";
-    case "gpu":
-      return zone.name.toLowerCase().includes("gpu") ? zone.name : `GPU ${zone.name}`;
-    default:
-      return zone.name || device.name;
-  }
-}
-
-/**
- * Places a name tag beside every zone. A tag sits just outside its zone (above, below or beside
- * it, aligned to the start, the middle or the end) so it never covers the zone's LEDs; it stays
- * inside the desk, so a zone at an edge has its tag on the side that has room; and it never
- * covers another tag. Where every tidy place is taken the tag steps along the zone's side until
- * it finds one, and a tag that finds none is left off rather than drawn over another.
+ * Places a name tag beside every zone and ties it to its zone with a leader line. A tag sits
+ * just outside its zone (above, below or beside it, aligned to the start, the middle or the
+ * end) so it never covers the zone's LEDs; it stays inside the desk; it never covers another
+ * tag; and it prefers a place that is nearer its own zone than any other, so it is never read
+ * as belonging to the zone next to it. Where every tidy place is taken the tag steps along the
+ * zone's side until it finds one, and a tag that finds none is left off rather than drawn over
+ * another.
  */
 function layoutTags(
   zones: PlacedZone[],
@@ -296,31 +290,64 @@ function layoutTags(
   stageH: number,
   view: View,
   skip: number | null,
+  compact: boolean,
+  slots: Slot[],
 ): Tag[] {
   const k = (stageW / CANVAS_W) * view.scale;
-  const items: { index: number; z: PlacedZone; text: string; sub: string | null; w: number; box: Box; missing: boolean }[] = [];
+  const items: {
+    index: number;
+    z: PlacedZone;
+    text: string;
+    sub: string | null;
+    kind: DeviceKind | null;
+    fan: boolean;
+    w: number;
+    box: Box;
+    missing: boolean;
+  }[] = [];
   zones.forEach((z, index) => {
     if (!z.visible) return;
     const found = findZoneInfo(devices, z.device_id, z.zone_index);
     const missing = !found || !found.device.connected;
-    const hardware = shortName(devices, z);
+    // A stale zone lying exactly on a live one is a marker under it: it needs no tag of its own.
+    if (
+      missing &&
+      zones.some(
+        (o, j) =>
+          j !== index &&
+          Math.abs(o.x - z.x) < 0.5 &&
+          Math.abs(o.y - z.y) < 0.5 &&
+          Math.abs(o.width - z.width) < 0.5 &&
+          Math.abs(o.height - z.height) < 0.5,
+      )
+    )
+      return;
+    const pn = plainName(devices, z.device_id, z.zone_index);
     const friendly = z.label?.trim() ? z.label.trim() : null;
-    const text = friendly ?? hardware;
-    const sub = friendly && !missing ? hardware : null;
+    // On a phone the names are short: the canvas is 358 px wide.
+    const text = friendly ?? (compact ? pn.name.replace("ARGB header ", "ARGB ").replace("Microphone", "Mic") : pn.name);
+    // The second name is muted: the plain name when the owner has named the zone, else the hardware's.
+    const sub = compact || missing ? null : friendly ? pn.name : pn.hardware;
     const b = boundsOf(z);
     items.push({
       index,
       z,
       text,
       sub,
-      w: Math.ceil(text.length * 8.7 + (sub ? sub.length * 7.4 + 14 : 0)) + 20,
+      kind: pn.kind,
+      fan: pn.fan,
+      // On a phone a tag is its icon alone: the canvas is 358 px wide and its name shows when the zone is touched.
+      w: compact ? 34 : Math.ceil(24 + text.length * 7.9 + (sub ? 12 + sub.length * 7.4 : 0)) + 14,
       missing,
       box: { x: (b.x + view.panX) * k, y: (b.y + view.panY) * k, w: b.w * k, h: b.h * k },
     });
   });
+  const slotBoxes = slots.map((sl) => ({
+    sl,
+    box: { x: (sl.x + view.panX) * k, y: (sl.y + view.panY) * k, w: sl.w * k, h: sl.h * k },
+  }));
   const taken: Box[] = [];
   const out: Tag[] = [];
-  // The zone under the pointer or picked wears a bigger label of its own: its tag steps aside.
   for (const item of items) {
     const { box, w } = item;
     const cands: Box[] = [];
@@ -342,19 +369,57 @@ function layoutTags(
       for (const x of xs) cands.push({ x, y: box.y - TAG_H - TAG_GAP - dy, w, h: TAG_H });
       for (const x of xs) cands.push({ x, y: box.y + box.h + TAG_GAP + dy, w, h: TAG_H });
     }
+    // Free places over the whole desk, for a tag whose own sides are crowded: the leader line
+    // carries it back to its zone, and the nearer the place the better.
+    const adjacent = cands.length;
+    for (let gy = 4; gy + TAG_H < stageH - 2; gy += 30) {
+      for (let gx = 4; gx + w < stageW - 2; gx += 40) cands.push({ x: gx, y: gy, w, h: TAG_H });
+    }
     let best: Box | null = null;
     let bestScore = -Infinity;
     cands.forEach((c, i) => {
       if (c.x < 2 || c.y < 2 || c.x + c.w > stageW - 2 || c.y + c.h > stageH - 2) return;
       if (taken.some((t) => overlaps(c, t, 2))) return;
       let score = -i * 0.5;
-      // Covering another zone is the worst a tag can do short of covering a tag: it costs the
-      // share of the tag that lies on the zone.
+      if (i >= adjacent) {
+        score = -16 - boxGap(c, box) / 14;
+        // A leader through another zone would tie the tag to the wrong thing: it costs.
+        const x1 = c.x + c.w / 2;
+        const y1 = c.y + c.h / 2;
+        const x2 = clamp(x1, box.x, box.x + box.w);
+        const y2 = clamp(y1, box.y, box.y + box.h);
+        for (const o of items) {
+          if (o.index === item.index) continue;
+          for (let q = 1; q < 8; q++) {
+            const px = x1 + ((x2 - x1) * q) / 8;
+            const py = y1 + ((y2 - y1) * q) / 8;
+            if (px >= o.box.x && px <= o.box.x + o.box.w && py >= o.box.y && py <= o.box.y + o.box.h) {
+              score -= 12;
+              break;
+            }
+          }
+        }
+      }
+      const own = boxGap(c, box);
       for (const o of items) {
-        if (o.index === item.index || !overlaps(c, o.box)) continue;
-        const ox = Math.min(c.x + c.w, o.box.x + o.box.w) - Math.max(c.x, o.box.x);
-        const oy = Math.min(c.y + c.h, o.box.y + o.box.h) - Math.max(c.y, o.box.y);
-        score -= 60 * Math.max(0, (ox * oy) / (c.w * c.h));
+        if (o.index === item.index) continue;
+        // Covering another zone is the worst a tag can do short of covering a tag: it costs the
+        // share of the tag that lies on the zone.
+        if (overlaps(c, o.box)) {
+          const ox = Math.min(c.x + c.w, o.box.x + o.box.w) - Math.max(c.x, o.box.x);
+          const oy = Math.min(c.y + c.h, o.box.y + o.box.h) - Math.max(c.y, o.box.y);
+          score -= 60 * Math.max(0, (ox * oy) / (c.w * c.h));
+        }
+        // Standing nearer another zone than its own reads as that zone's name.
+        if (boxGap(c, o.box) < own - 0.5) score -= 14;
+      }
+      // A tag over a case slot hides its drawing (a fan, a RAM slot): it costs the share of the
+      // tag on the slot, unless the slot is the zone's own.
+      for (const { sl, box: sb } of slotBoxes) {
+        if (!overlaps(c, sb) || zoneInSlot(item.z, sl)) continue;
+        const ox = Math.min(c.x + c.w, sb.x + sb.w) - Math.max(c.x, sb.x);
+        const oy = Math.min(c.y + c.h, sb.y + sb.h) - Math.max(c.y, sb.y);
+        score -= 40 * Math.max(0, (ox * oy) / (c.w * c.h));
       }
       if (score > bestScore) {
         bestScore = score;
@@ -365,15 +430,26 @@ function layoutTags(
     const placed: Box = best;
     taken.push(placed);
     if (item.index === skip) continue;
+    // The leader runs from the zone's nearest point to the tag's nearest point.
+    const tcx = placed.x + placed.w / 2;
+    const tcy = placed.y + placed.h / 2;
+    const zx = clamp(tcx, box.x, box.x + box.w);
+    const zy = clamp(tcy, box.y, box.y + box.h);
+    const tx = clamp(zx, placed.x, placed.x + placed.w);
+    const ty = clamp(zy, placed.y, placed.y + placed.h);
+    const lead = Math.hypot(tx - zx, ty - zy) > 1.5 ? { x1: tx, y1: ty, x2: zx, y2: zy } : null;
     out.push({
       index: item.index,
       key: zoneKey(item.z),
       text: item.text,
       sub: item.sub,
+      kind: item.kind,
+      fan: item.fan,
       x: placed.x,
       y: placed.y,
       missing: item.missing,
       accent: accentOf(devices, item.z.device_id),
+      lead,
     });
   }
   return out;
@@ -584,6 +660,13 @@ export interface StageProps {
   sampling?: SamplingMode;
   /** The zone being identified: its outline flashes so the eye finds it. */
   identifying?: number | null;
+  /** The PC form factor drawn behind the zones, and the way to change it. */
+  caseForm?: CaseForm;
+  onCaseForm?: (f: CaseForm) => void;
+}
+
+function plainOf(devices: DeviceInfo[] | null, z: PlacedZone) {
+  return plainName(devices, z.device_id, z.zone_index);
 }
 
 function zoneKey(z: PlacedZone): string {
@@ -651,6 +734,8 @@ export function PreviewStage({
   effectNeedsInput = false,
   sampling = "nearest",
   identifying = null,
+  caseForm = "none",
+  onCaseForm,
 }: StageProps) {
   const stageRef = useRef<HTMLDivElement>(null);
   const previewRef = useRef<HTMLCanvasElement>(null);
@@ -665,6 +750,10 @@ export function PreviewStage({
   const labelEl = useRef<HTMLDivElement | null>(null);
   const guideEls = useRef<{ v: HTMLSpanElement | null; h: HTMLSpanElement | null }>({ v: null, h: null });
   const readoutRef = useRef<HTMLDivElement | null>(null);
+  const caseSvgRef = useRef<SVGSVGElement | null>(null);
+  const caseGRef = useRef<SVGGElement | null>(null);
+  const caseFormRef = useRef<CaseForm>(caseForm);
+  caseFormRef.current = caseForm;
   const editorLayerRef = useRef<HTMLDivElement | null>(null);
   const editorPicRef = useRef<Picture | null>(null);
   const daemonLiveRef = useRef(false);
@@ -939,9 +1028,9 @@ export function PreviewStage({
       // A point is one soft, larger dot: the zone's one blob of light.
       const minPx = isPoint ? 4 : DOT_MIN_PX;
       const radius = clamp(
-        (isPoint ? local.radius * 1.3 : local.radius) * k,
+        (isPoint ? local.radius * 0.6 : local.radius) * k,
         minPx * dpr,
-        (isPoint ? 15 : DOT_MAX_PX) * dpr * Math.max(1, v.scale * 0.5),
+        (isPoint ? 8 : DOT_MAX_PX) * dpr * Math.max(1, v.scale * 0.5),
       );
       for (let j = 0; j < count; j++) {
         const led = local.leds[j];
@@ -1062,6 +1151,9 @@ export function PreviewStage({
         if (z) applyGeom(i, z, v);
       }
       placeLabel(labelIndexRef.current, v);
+      const kk = ((stageRef.current?.clientWidth ?? CANVAS_W) / CANVAS_W) * v.scale;
+      caseGRef.current?.setAttribute('transform', `scale(${kk}) translate(${v.panX} ${v.panY})`);
+      caseSvgRef.current?.style.setProperty('--k', String(kk));
       // The name tags are placed from the committed view: while the view moves they step aside.
       if (stageRef.current) stageRef.current.dataset.moving = "true";
       queuePaint();
@@ -1256,9 +1348,23 @@ export function PreviewStage({
         x: clamp(snap.x, 0, CANVAS_W - o.width),
         y: clamp(snap.y, 0, CANVAS_H - o.height),
       };
-      applyGuides({ guideX: snap.guideX, guideY: snap.guideY });
+      // A case slot pulls the zone in by its centre; Alt frees it. A slot beats a guide.
+      const sp = specRef.current;
+      const slot = sp && !e.altKey ? nearestSlot(next, sp, SLOT_REACH_PX / (base * viewRef.current.scale)) : null;
+      if (slot) {
+        next = {
+          ...next,
+          x: clamp(slot.x + slot.w / 2 - o.width / 2, 0, CANVAS_W - o.width),
+          y: clamp(slot.y + slot.h / 2 - o.height / 2, 0, CANVAS_H - o.height),
+        };
+        applyGuides({ guideX: null, guideY: null });
+      } else {
+        applyGuides({ guideX: snap.guideX, guideY: snap.guideY });
+      }
       const gap = snap.gapX !== null && snap.gapY !== null ? Math.min(snap.gapX, snap.gapY) : (snap.gapX ?? snap.gapY);
-      const where = gap === null ? "" : gap < 0.05 ? " · on the guide" : ` · ${gap.toFixed(1)} u to the guide`;
+      const where = slot
+        ? ` · snaps to ${slot.label}`
+        : gap === null ? "" : gap < 0.05 ? " · on the guide" : ` · ${gap.toFixed(1)} u to the guide`;
       readout = `x ${next.x.toFixed(0)} · y ${next.y.toFixed(0)}${where}`;
     } else if (d.kind === "resize" && d.handle) {
       // The dragged edge snaps to the grid and to other zones' lines while the zone is square to
@@ -1540,9 +1646,13 @@ export function PreviewStage({
     if (stageRef.current) delete stageRef.current.dataset.moving;
   }, [view]);
 
+  const spec = useMemo(() => caseSpec(caseForm), [caseForm]);
+  const specRef = useRef(spec);
+  specRef.current = spec;
+
   const tags = useMemo(
-    () => (tagsOn && stageBox.w > 0 ? layoutTags(zones, devices, stageBox.w, stageBox.h, view, labelIndex) : []),
-    [tagsOn, zones, devices, stageBox, view, labelIndex],
+    () => (tagsOn && stageBox.w > 0 ? layoutTags(zones, devices, stageBox.w, stageBox.h, view, labelIndex, phone, spec?.slots ?? []) : []),
+    [tagsOn, zones, devices, stageBox, view, labelIndex, phone, spec],
   );
 
   const base = (stageBox.w || CANVAS_W) / CANVAS_W;
@@ -1567,18 +1677,15 @@ export function PreviewStage({
     return { units, px: Math.round(units * pxPerUnit), share };
   }, [base, view.scale, stageBox.w]);
 
-  // The label's text: the zone's name and its LEDs, as the zone list says it.
+  // The label's text: the zone's plain name, the hardware's name muted after it, and its LEDs.
   const labelZone = labelIndex !== null ? zones[labelIndex] : undefined;
   const labelFound = labelZone ? findZoneInfo(devices, labelZone.device_id, labelZone.zone_index) : null;
   const labelMissing = labelIndex !== null && missing.has(labelIndex);
   const labelFriendly = labelZone?.label?.trim() ? labelZone.label.trim() : null;
-  const labelText = labelZone
-    ? labelFound
-      ? `${labelFriendly ? `${labelFriendly} · ${labelFound.zone.name}` : labelFound.zone.name} ${labelFound.zone.led_count}`
-      : phone
-        ? "not connected"
-        : "device not found"
-    : "";
+  const labelPlain = labelZone ? plainName(devices, labelZone.device_id, labelZone.zone_index) : null;
+  const labelText = labelPlain ? (labelFound ? (labelFriendly ?? labelPlain.name) : "Not connected") : "";
+  const labelSub = labelPlain && labelFound ? (labelFriendly ? labelPlain.name : labelPlain.hardware) : null;
+  const labelLeds = labelFound ? `${labelFound.zone.led_count} LEDs` : null;
   const labelAccent = labelZone ? accentOf(devices, labelZone.device_id) : -1;
 
   return (
@@ -1646,6 +1753,17 @@ export function PreviewStage({
       {/* The picture is the backdrop, not the subject: a quiet veil keeps the zones' outlines
           and dots readable over any effect. */}
       <div className={desk.veil} aria-hidden="true" />
+      {spec && (
+        <CaseBackdrop
+          spec={spec}
+          zones={zones}
+          k={k}
+          panX={view.panX}
+          panY={view.panY}
+          svgRef={caseSvgRef}
+          gRef={caseGRef}
+        />
+      )}
       <canvas ref={overlayRef} className="stage-leds" aria-hidden="true" />
 
       <div
@@ -1723,7 +1841,11 @@ export function PreviewStage({
             onPointerEnter={() => setHover(i)}
             onPointerLeave={() => setHover((h) => (h === i ? null : h))}
             onFocus={() => onSelect(i)}
-          />
+          >
+            {found && !isMissing && (
+              <ZoneArt kind={plainOf(devices, z).kind} fan={plainOf(devices, z).fan} />
+            )}
+          </div>
         );
       })}
 
@@ -1772,9 +1894,24 @@ export function PreviewStage({
         </div>
       )}
 
+      {tags.length > 0 && (
+        // The leader lines: each name tag is tied to its zone, so no name sits between two zones
+        // and could belong to either.
+        <svg className={desk.leaders} aria-hidden="true">
+          {tags.map((t) =>
+            t.lead ? (
+              <g key={t.key}>
+                <line x1={t.lead.x1} y1={t.lead.y1} x2={t.lead.x2} y2={t.lead.y2} />
+                <circle cx={t.lead.x2} cy={t.lead.y2} r={2.5} />
+              </g>
+            ) : null,
+          )}
+        </svg>
+      )}
+
       {tags.map((t) => (
-        // A solid chip beside each zone: its name, always on while the tags are on, in a colour
-        // that holds on any picture.
+        // A solid chip beside each zone: its icon, its name and the hardware's name muted, in a
+        // colour that holds on any picture.
         <div
           key={t.key}
           className={desk.tag}
@@ -1789,8 +1926,15 @@ export function PreviewStage({
             } as CSSProperties
           }
         >
-          {t.text}
-          {t.sub && <span className={desk.tagSub}>{t.sub}</span>}
+          <KindIcon kind={t.kind} fan={t.fan} size={15} />
+          {phone ? (
+            <span className="sr-only">{t.text}</span>
+          ) : (
+            <>
+              <span>{t.text}</span>
+              {t.sub && <span className={desk.tagSub}>{t.sub}</span>}
+            </>
+          )}
         </div>
       ))}
 
@@ -1811,7 +1955,10 @@ export function PreviewStage({
             } as CSSProperties
           }
         >
+          {labelPlain && <KindIcon kind={labelPlain.kind} fan={labelPlain.fan} size={15} />}
           <span className={desk.labelText}>{labelText}</span>
+          {labelSub && <span className={desk.tagSub}>{labelSub}</span>}
+          {labelLeds && <span className={desk.tagSub}>{labelLeds}</span>}
           {removable(labelIndex) && (
             // A ghost cannot be picked on the canvas, so its label is the way to it: once the
             // zone is picked the label carries the way to take it off the layout. The editor's
@@ -1856,6 +2003,14 @@ export function PreviewStage({
           <span />
         )}
         <div className={desk.controls}>
+          {onCaseForm && (
+            <Select
+              value={caseForm}
+              label="Case"
+              options={CASE_OPTIONS}
+              onChange={(v) => onCaseForm(v as CaseForm)}
+            />
+          )}
           <IconButton
             label={tagsOn ? "Hide the zone names" : "Show the zone names"}
             icon={<Tag size={13} weight={tagsOn ? "fill" : "regular"} />}
@@ -1869,6 +2024,10 @@ export function PreviewStage({
           <IconButton label="Fit the canvas" icon={<ArrowsOut size={13} />} size="sm" onClick={fit} />
         </div>
       </div>
+      <p className={desk.legend}>
+        Dots are LEDs showing the live colour. The picture behind is the effect.
+        {phone && " Tap anything for its name."}
+      </p>
     </>
   );
 }

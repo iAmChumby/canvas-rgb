@@ -173,6 +173,7 @@ fn a_running_engine_at_thirty_fps_stays_inside_the_budget() {
             })
             .collect(),
         effect: None,
+        case_form: canvas_proto::layout::CaseForm::None,
     };
     engine.set_layout(layout, vec![device]);
     engine.add_sink(DeviceId("cpu".into()), Arc::new(NullSink));

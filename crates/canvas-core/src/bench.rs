@@ -81,6 +81,7 @@ fn bench_layout(device: &DeviceInfo) -> Layout {
         sampling: SamplingMode::AreaAverage,
         zones,
         effect: None,
+        case_form: canvas_proto::layout::CaseForm::None,
     }
 }
 
