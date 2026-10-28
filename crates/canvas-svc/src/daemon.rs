@@ -1,4 +1,4 @@
-//! Daemon supervision (grill G3). The daemon runs in Luke's session, so the service starts it
+//! Daemon supervision (grill G3). The daemon runs in the user's session, so the service starts it
 //! there through [`SessionLauncher`]. A missed heartbeat for 5 s or an exit counts as a crash.
 //! The service restarts a crashed daemon at most `DAEMON_RESTART_LIMIT` times in
 //! `DAEMON_RESTART_WINDOW_S`, then writes black through OpenRGB and stops restarting it.

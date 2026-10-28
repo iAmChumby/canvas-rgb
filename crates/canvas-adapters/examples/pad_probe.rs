@@ -20,7 +20,7 @@
 //!
 //! The profile read sends the vendor's own chunk requests: 36 output reports on the vendor
 //! collection. They ask the pad for what it already holds and change no setting, but they are
-//! still output reports, so this needs Luke's OK. The paddle experiment sends **nothing** at all:
+//! still output reports, so this needs an explicit go-ahead. The paddle experiment sends **nothing** at all:
 //! it only reads.
 //!
 //! Config writes are off by default: the adapter's write path (`writes_enabled`) is false until a

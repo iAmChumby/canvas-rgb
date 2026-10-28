@@ -108,8 +108,8 @@ fn current_user_sid() -> std::io::Result<String> {
 
 /// Restricts the file to the current user only (plus SYSTEM), read and write.
 ///
-/// The daemon runs as Luke, non-elevated. The DACL names the process token's user, so the
-/// file is readable by Luke and by SYSTEM (which the installer uses) and by nobody else.
+/// The daemon runs as the logged-on user, non-elevated. The DACL names the process token's user, so the
+/// file is readable by the daemon's user and by SYSTEM (which the installer uses) and by nobody else.
 #[cfg(windows)]
 pub fn restrict_to_current_user(path: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;

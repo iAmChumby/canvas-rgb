@@ -118,7 +118,7 @@ pub fn write_request(offset: usize, data: &[u8]) -> Result<Vec<u8>, String> {
 /// Ultimate 2 (`SelectPlatform` sets the DLL's current PID to `0x6012`), config traffic is
 /// `81 04 <payload>` with no length byte; the length-byte form `81 11 04 ...` (research 5.3's
 /// "wrapped" commit) is only what the connect-time probes use before that decision. The profile
-/// read already uses `81 04` and is confirmed on Luke's pad, so the commit uses it too.
+/// read already uses `81 04` and is confirmed on the test pad, so the commit uses it too.
 pub fn commit_request() -> Vec<u8> {
     frame(REQ_COMMIT, COMMIT_ARG, 0, 0, 0, 0, &[])
 }
@@ -161,7 +161,7 @@ pub fn report_state_connect_request(state: u16) -> Vec<u8> {
 /// Check the pad's acknowledgement of a write or commit request: the reply must be report `0x02`
 /// with class `04`, carry the `04 00` header copy and answer request word `want` (1 for a write
 /// chunk, 6 for the commit). This is the same header the read reply carries (the read loop's
-/// rule), so it is confirmed for reads on Luke's pad; the pad's write and commit replies have
+/// rule), so it is confirmed for reads on the test pad; the pad's write and commit replies have
 /// never been seen, so no other field is checked.
 pub fn parse_ack_reply(frame: &[u8], want: u16) -> Result<(), String> {
     if frame.len() < 6 {
@@ -1042,7 +1042,7 @@ pub mod evidence {
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ];
-    /// The reply to the profile read's first chunk on Luke's pad, 2026-10-27 (the XInput
+    /// The reply to the profile read's first chunk on the test pad, 2026-10-27 (the XInput
     /// personality, `2DC8:310B`), copied out of the hardware log `.build/s2/hw-pad-read-2.txt`.
     ///
     /// It is 63 bytes: the 18-byte header and the 45 bytes of the image's first chunk. The CRC
@@ -1237,7 +1237,7 @@ mod tests {
 
     #[test]
     fn the_real_chunk_zero_reply_is_accepted_because_it_echoes_our_own_crc() {
-        // Luke's pad in the XInput personality answers the read with the CRC our request
+        // The test pad in the XInput personality answers the read with the CRC our request
         // carried: the CRC of the 45 bytes of 0xCC filler, not a CRC of the reply.
         assert_eq!(crc16(&[READ_FILL; 45]), 0x4f5b, "the CRC the pad echoed");
         let reply = evidence::REPLY_CHUNK_0;
@@ -1503,8 +1503,8 @@ mod tests {
     }
 
     #[test]
-    fn every_code_lukes_real_map_holds_is_a_named_target() {
-        // Luke's profile 1 map, as the hardware read decoded it on 2026-10-27: the identity map
+    fn every_code_of_the_captured_map_is_a_named_target() {
+        // The captured profile 1 map, as the hardware read decoded it on 2026-10-27: the identity map
         // the vendor app writes for the XInput personality, with R2, Menu and Home holding the
         // masks the research's table names.
         let mut image = synthetic_image();
@@ -1541,7 +1541,7 @@ mod tests {
             assert_ne!(
                 button_target(*mask),
                 OTHER_TARGET,
-                "slot {slot} holds {mask:#x}: every code of Luke's map is a named target"
+                "slot {slot} holds {mask:#x}: every code of the captured map is a named target"
             );
         }
         // The four paddles of that profile are unmapped.
@@ -1655,7 +1655,7 @@ mod tests {
 
     #[test]
     fn the_real_image_carries_no_crc_of_its_own() {
-        // Luke's image, chunk 0: the value at offset 0x0C is the erased-flash pattern, the same
+        // The captured image, chunk 0: the value at offset 0x0C is the erased-flash pattern, the same
         // value the two unused profile flags hold. It is not a CRC: the vendor's CRC is a
         // `ushort`, so a stored value with bits above the low half set is something else. The
         // image was never CRC'd by the vendor app, so no range can match it.
@@ -1668,7 +1668,7 @@ mod tests {
 
     // ------------------------------------------------------------------------- the idle cadence
 
-    /// Luke's pad on the desk, 2026-10-27, the first paddle run (`.build/s2/hw-pad-paddles-2.txt`):
+    /// The test pad on the desk, 2026-10-27, the first paddle run (`.build/s2/hw-pad-paddles-2.txt`):
     /// the packet counter, the button mask and the two triggers of every sample the probe
     /// printed. Nothing that mattered was pressed; the log holds 67 "packet moved and nothing
     /// else" lines, which are the pad's own heartbeat.
@@ -1765,7 +1765,7 @@ mod tests {
         (2290, 0x0000, 0, 0),
     ];
 
-    /// The second paddle run of the same day (`.build/s2/hw-pad-paddles-3.txt`): Luke pressed
+    /// The second paddle run of the same day (`.build/s2/hw-pad-paddles-3.txt`): the tester pressed
     /// both back paddles and L4 and R4, and **nothing at all changed anywhere**. The log holds 39
     /// "packet moved and nothing else" lines: the same heartbeat as the first run.
     const RUN_3: [(u32, u16, u8, u8); 41] = [
@@ -1853,7 +1853,7 @@ mod tests {
 
     #[test]
     fn the_second_real_run_yields_no_paddle_candidate_either() {
-        // Luke pressed both back paddles and L4 and R4: the rhythm is the same, so nothing
+        // The tester pressed both back paddles and L4 and R4: the rhythm is the same, so nothing
         // breaks it and there is no candidate.
         let run = analyse_run(&samples_of(&RUN_3));
         assert_eq!(run.packet_only_moves, 39);

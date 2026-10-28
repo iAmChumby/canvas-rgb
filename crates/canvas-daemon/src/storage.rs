@@ -234,7 +234,7 @@ pub struct Store {
     /// touched only while it has an entry here.
     pub peripherals: PeripheralsFile,
     /// Where the files live. The daemon uses the user's home; the tests use a temp
-    /// directory so they never touch Luke's real config.
+    /// directory so they never touch the user's real config.
     pub home: PathBuf,
 }
 

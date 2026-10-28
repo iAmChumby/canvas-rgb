@@ -104,7 +104,7 @@
   /* the fader's cap: it travels in the slot, and the fill ends under it */
   --cap-w: 14px;
 
-  /* radius: hardware-soft corners (Luke, 2026-10-27: "rounded corners", a sleek piece of hardware) */
+  /* radius: hardware-soft corners (design note, 2026-10-27: "rounded corners", a sleek piece of hardware) */
   --r-sm: 8px;
   --r-md: 10px;
   --r-lg: 16px;

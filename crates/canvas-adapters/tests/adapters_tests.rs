@@ -31,8 +31,8 @@ fn jargb(name: &str) -> ZoneInfo {
         min_leds: 0, max_leds: 300, resizable: true }
 }
 
-/// The five devices Luke's PC reports through OpenRGB.
-fn luke_devices() -> Vec<DeviceInfo> {
+/// The five devices a typical test PC reports through OpenRGB.
+fn test_pc_devices() -> Vec<DeviceInfo> {
     vec![
         device("MSI MPG B850 Mystic Light", "mb", DeviceKind::Motherboard, vec![
             jargb("JARGB1"), jargb("JARGB2"), jargb("JARGB3"), linear("JRGB1", 3)]),
@@ -58,7 +58,7 @@ fn temp_zones_path(name: &str) -> std::path::PathBuf {
 
 #[tokio::test]
 async fn discover_reports_all_five_devices_with_zone_detail() {
-    let server = FakeOpenRgbServer::start(luke_devices()).await.expect("fake server");
+    let server = FakeOpenRgbServer::start(test_pc_devices()).await.expect("fake server");
     let mut adapter = connected(&server).await;
     let found = adapter.discover().await.expect("discover");
 
@@ -91,7 +91,7 @@ async fn device_id_falls_back_to_location_without_serial() {
 
 #[tokio::test]
 async fn jargb_sizes_show_after_resize_and_frames_reach_hardware() {
-    let server = FakeOpenRgbServer::start(luke_devices()).await.expect("fake server");
+    let server = FakeOpenRgbServer::start(test_pc_devices()).await.expect("fake server");
     let mut adapter = connected(&server).await;
     let mb = DeviceId("openrgb:mb".into());
     adapter.set_zone_size(&mb, 0, 30).await.expect("JARGB1");
@@ -114,7 +114,7 @@ async fn jargb_sizes_show_after_resize_and_frames_reach_hardware() {
 
 #[tokio::test]
 async fn resize_is_clamped_to_the_zone_range_and_fixed_zones_refuse() {
-    let server = FakeOpenRgbServer::start(luke_devices()).await.expect("fake server");
+    let server = FakeOpenRgbServer::start(test_pc_devices()).await.expect("fake server");
     let mut adapter = connected(&server).await;
     let mb = DeviceId("openrgb:mb".into());
     adapter.set_zone_size(&mb, 0, 9_999).await.expect("clamped to max");
@@ -128,7 +128,7 @@ async fn resize_is_clamped_to_the_zone_range_and_fixed_zones_refuse() {
 
 #[tokio::test]
 async fn saved_zone_sizes_are_reapplied_after_restart() {
-    let server = FakeOpenRgbServer::start(luke_devices()).await.expect("fake server");
+    let server = FakeOpenRgbServer::start(test_pc_devices()).await.expect("fake server");
     let mut adapter = connected(&server).await;
     let path = temp_zones_path("reapply");
     let mut store = ZoneStore::load(&path).expect("load missing file as empty");
@@ -167,7 +167,7 @@ async fn wait_until_dropped(adapter: &OpenRgbAdapter) {
 
 #[tokio::test]
 async fn dropped_socket_flips_is_connected_and_calls_fail_until_reconnect() {
-    let server = FakeOpenRgbServer::start(luke_devices()).await.expect("fake server");
+    let server = FakeOpenRgbServer::start(test_pc_devices()).await.expect("fake server");
     let mut adapter = connected(&server).await;
     assert!(adapter.is_connected());
     server.restart().await;
@@ -185,7 +185,7 @@ async fn dropped_socket_flips_is_connected_and_calls_fail_until_reconnect() {
 
 #[tokio::test]
 async fn discover_before_connect_is_not_connected() {
-    let server = FakeOpenRgbServer::start(luke_devices()).await.expect("fake server");
+    let server = FakeOpenRgbServer::start(test_pc_devices()).await.expect("fake server");
     let mut adapter = OpenRgbAdapter::new("127.0.0.1", server.port());
     assert!(!adapter.is_connected());
     let error = adapter.discover().await.expect_err("not connected");
@@ -223,7 +223,7 @@ async fn identify_offsets_into_the_second_zone() {
 
 #[tokio::test]
 async fn two_devices_written_from_two_tasks_both_land() {
-    let server = FakeOpenRgbServer::start(luke_devices()).await.expect("fake server");
+    let server = FakeOpenRgbServer::start(test_pc_devices()).await.expect("fake server");
     let adapter = connected(&server).await;
     let mut discovered = adapter.clone();
     let devices = discovered.discover().await.expect("discover");
@@ -247,7 +247,7 @@ async fn two_devices_written_from_two_tasks_both_land() {
 
 #[tokio::test]
 async fn frame_length_must_match_the_device() {
-    let server = FakeOpenRgbServer::start(luke_devices()).await.expect("fake server");
+    let server = FakeOpenRgbServer::start(test_pc_devices()).await.expect("fake server");
     let mut adapter = connected(&server).await;
     let devices = adapter.discover().await.expect("discover");
     let error = adapter.write_frame(&devices[3].id, &[RED; 7]).await.expect_err("7 colors for 8 LEDs");

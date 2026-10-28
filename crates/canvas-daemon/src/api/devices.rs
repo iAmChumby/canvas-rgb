@@ -91,7 +91,7 @@ pub async fn patch_zone(
 
 /// `POST /api/v1/devices/{id}/identify`.
 ///
-/// Lights one white LED at a time so Luke can count to the physical end of a header.
+/// Lights one white LED at a time so a person can count to the physical end of a header.
 pub async fn identify(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,

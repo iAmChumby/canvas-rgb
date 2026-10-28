@@ -92,6 +92,6 @@ mod tests {
         assert!(!super::is_driven(&keyboard));
         assert!(!super::is_driven(&DeviceId(keyboard.0.to_lowercase())));
         assert!(super::is_driven(&mic));
-        assert!(super::is_driven(&DeviceId("openrgb:SERIAL0000000".into())));
+        assert!(super::is_driven(&DeviceId("openrgb:A1B2C3D4E5F6".into())));
     }
 }

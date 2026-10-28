@@ -2,7 +2,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\lib.ps1')
 . (Join-Path $PSScriptRoot '_assert.ps1')
 
-$refusal = "OpenRGB hash not recorded yet: run installer/pin-openrgb.ps1 once with Luke's OK"
+$refusal = "OpenRGB hash not recorded yet: run installer/pin-openrgb.ps1 once, then review the hash it records"
 $good = 'a' * 64
 $dir = New-TestDir
 function New-Lock([string]$Name, [string]$Json) {
@@ -12,10 +12,9 @@ function New-Lock([string]$Name, [string]$Json) {
 }
 
 try {
-    Test-Case 'the repo lock file currently refuses, with the exact message' {
+    Test-Case 'the repo lock file is pinned: url and sha256 recorded, accepted' {
         $r = Test-OpenRgbLock -Path (Join-Path $PSScriptRoot '..\openrgb.lock.json')
-        Assert-True (-not $r.Ok)
-        Assert-Equal $r.Message $refusal
+        Assert-True $r.Ok
         Assert-Equal $r.File 'OpenRGB_1.1_Windows_64_8e16de2.zip'
     }
     Test-Case 'sha256 UNSET refuses' {

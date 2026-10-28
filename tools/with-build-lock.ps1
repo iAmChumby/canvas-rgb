@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
   Runs one heavy build command (cargo, npm, tauri) while holding a machine-wide mutex,
-  so only one heavy build runs at a time across every agent (Luke's CLAUDE.md rule).
+  so only one heavy build runs at a time across every agent (the machine-wide build rule).
 
 .EXAMPLE
   powershell -NoProfile -File tools/with-build-lock.ps1 cargo check -p canvas-core
@@ -31,7 +31,7 @@ if ($env:CARGO_BUILD_JOBS) {
     exit 2
 }
 
-# Global\ so agents in different sessions share it. Same name across Luke's projects.
+# Global\ so agents in different sessions share it. Same name across every project on the machine.
 $lockName = 'Global\agent-heavy-build'
 if ($env:BUILD_LOCK_NAME) { $lockName = $env:BUILD_LOCK_NAME }  # tests only
 $mutex = New-Object System.Threading.Mutex($false, $lockName)

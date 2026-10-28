@@ -32,7 +32,7 @@ $script:CanvasConst = @{
     # Verbatim from the brief (security requirement): SYSTEM and Administrators full control,
     # Users read/execute (0x1200a9), inheritance blocked, owner SYSTEM.
     MachineHomeSddl    = 'O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)'
-    LockRefusal        = "OpenRGB hash not recorded yet: run installer/pin-openrgb.ps1 once with Luke's OK"
+    LockRefusal        = "OpenRGB hash not recorded yet: run installer/pin-openrgb.ps1 once, then review the hash it records"
 }
 
 function Get-CanvasConst { return $script:CanvasConst }
@@ -85,12 +85,12 @@ function Assert-MachineHomeSafe {
     $item = Get-Item -LiteralPath $Path -Force
     if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
         throw ("STOP: '$Path' is a junction or symbolic link. " +
-               "The installer never follows, deletes or takes over it. Tell Luke; he decides what to do with it.")
+               "The installer never follows, deletes or takes over it. Check it yourself and remove or fix it before you run setup again.")
     }
     $sid = Get-PathOwnerSid -Path $Path
     if (-not (Test-OwnerSidAllowed -Sid $sid)) {
         throw ("STOP: '$Path' already exists and is owned by $sid, not SYSTEM or Administrators. " +
-               "The installer never deletes or takes over an existing folder. Tell Luke; he decides what to do with it.")
+               "The installer never deletes or takes over an existing folder. Check it yourself and remove or fix it before you run setup again.")
     }
 }
 

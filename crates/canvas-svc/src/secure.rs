@@ -17,7 +17,7 @@
 //! 2. The home's file ID is recorded.
 //! 3. A read-only walk checks every entry under the home. The first junction, symlink, or entry
 //!    whose owner is not SYSTEM or Administrators fails the step. The error is logged at ERROR with
-//!    the offending path, and the message tells Luke to check it and remove it by hand. Nothing is
+//!    the offending path, and the message tells the user to check it and remove it by hand. Nothing is
 //!    changed by this walk.
 //! 4. The protected DACL is applied to the home itself. Children keep their own ACLs, which are
 //!    trusted, so nothing else is changed.

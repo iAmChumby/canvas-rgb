@@ -10,7 +10,7 @@
   Y disables SignalRGB's autostart and its Windows service SignalRgb.Service (previous state is recorded for uninstall).
   N (default) leaves SignalRGB as is. Not given in a real run: the script asks.
 .PARAMETER PawnIoInstaller
-  Path to the official PawnIO installer Luke already downloaded. Nothing is downloaded while elevated.
+  Path to the official PawnIO installer the user already downloaded. Nothing is downloaded while elevated.
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
@@ -61,7 +61,7 @@ if ($dry) {
 function Fail([string]$Message) { Write-Host $Message; exit 1 }
 
 if (Test-IsAdmin) { Fail 'Run setup.ps1 unelevated. It asks for elevation once, itself.' }
-if ($freeGb -lt $c.MinFreeGb) { Fail "Only $freeGb GB free on C:, under $($c.MinFreeGb) GB. Stop. Tell Luke." }
+if ($freeGb -lt $c.MinFreeGb) { Fail "Only $freeGb GB free on C:, under $($c.MinFreeGb) GB. Free some space and run setup again." }
 if (-not $lock.Ok) { Fail $lock.Message }
 try { Assert-MachineHomeSafe -Path $programData } catch { Fail $_.Exception.Message }
 if ($PawnIoInstaller -and -not (Test-Path -LiteralPath $PawnIoInstaller)) { Fail "PawnIO installer not found: $PawnIoInstaller" }

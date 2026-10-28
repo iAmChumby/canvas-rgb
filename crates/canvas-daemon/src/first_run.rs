@@ -11,7 +11,7 @@ use canvas_proto::Rgb8;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-/// The JARGB header count SignalRGB uses on Luke's board (today 120 each).
+/// The JARGB header count SignalRGB uses on the test board (today 120 each).
 pub const SIGNALRGB_JARGB_LED_COUNT: u32 = 120;
 
 /// The effect the first run activates.
@@ -623,7 +623,7 @@ async fn run(app: &std::sync::Arc<crate::state::App>) {
         tracing::info!(effect = FIRST_RUN_EFFECT, "the first run activated the effect");
     }
 
-    // The zone panel stays open until Luke dismisses it.
+    // The zone panel stays open until the user dismisses it.
     {
         let mut store = app
             .store
@@ -704,7 +704,7 @@ mod tests {
         let mic = device("HyperX Quadcast S", DeviceKind::Microphone, 2);
         let board = device("MSI MYSTIC LIGHT", DeviceKind::Motherboard, 120);
         let mut layout = build_default_layout(std::slice::from_ref(&mic));
-        layout.zones[0].x = 200.0; // Luke moved the mic.
+        layout.zones[0].x = 200.0; // The mic was moved.
         let added = place_missing_zones(&mut layout, &[mic.clone(), board.clone()]);
         assert_eq!(added, board.zones.iter().filter(|z| z.led_count > 0).count());
         assert!(layout.zones.iter().any(|z| z.device_id == board.id));

@@ -67,7 +67,7 @@ pub struct RegisterMap {
 /// Fan-mode register: one bit per fan index, set = manual (nct6687d `NCT6687_REG_FAN_CTRL_MODE`).
 pub const MODE_REG: u16 = 0xA00;
 /// Fan-mode register of the system-fan headers on MSI AM5 boards (LibreHardwareMonitor
-/// `Nct677X` NCT6687DR branch, `FAN_CONTROL_MODE_REG` 0x80F). On Luke's B850, msi_alt1's
+/// `Nct677X` NCT6687DR branch, `FAN_CONTROL_MODE_REG` 0x80F). On the test B850, msi_alt1's
 /// write registers (0xC70..0xBF8, bits in 0xA00) were accepted and never moved sys_fan3; the
 /// DR branch drives SYSFAN1..6 at 0x265..0x260 with bits 7..2 of 0x80F (lighting session 2).
 pub const SYS_MODE_REG: u16 = 0x80F;
@@ -142,7 +142,7 @@ pub const MSI_ALT1_MAP: RegisterMap = RegisterMap {
 
 /// Super I/O config port, slot 0 of PawnIO's LpcIO module.
 pub const SIO_PORT: u16 = 0x2E;
-/// The second Super I/O config port, LpcIO slot 1. Luke's B850 has nothing at 0x2E (LpcIO's
+/// The second Super I/O config port, LpcIO slot 1. The test B850 has nothing at 0x2E (LpcIO's
 /// `find_bars` read chip id 0x00/0xFF there, lighting session 2), so both are probed, in this
 /// order, as LibreHardwareMonitor does.
 pub const SIO_PORT_ALT: u16 = 0x4E;

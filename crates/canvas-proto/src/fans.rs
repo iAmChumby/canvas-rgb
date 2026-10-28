@@ -13,8 +13,8 @@ pub const CPU_FAN_HEADER: &str = "cpu_fan";
 pub const DEFAULT_FLOOR_PERCENT: u8 = 20;
 /// CPU_FAN never goes below this, whatever the configured floor (spec).
 pub const CPU_FAN_MIN_PERCENT: u8 = 30;
-/// GPU fan headers are `gpu_fan1`, `gpu_fan2`, ... (NVML fan index + 1). Added on Luke's
-/// request (lighting session 2), after an NVML write test on his RTX 5070 Ti.
+/// GPU fan headers are `gpu_fan1`, `gpu_fan2`, ... (NVML fan index + 1). Added at the user's
+/// request (lighting session 2), after an NVML write test on the test RTX 5070 Ti.
 pub const GPU_FAN_HEADER_PREFIX: &str = "gpu_fan";
 /// GPU fans never go below this: NVML's own manual minimum on the RTX 5070 Ti
 /// (`nvmlDeviceGetMinMaxFanSpeed` = 30..100).

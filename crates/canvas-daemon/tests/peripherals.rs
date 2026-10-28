@@ -49,7 +49,7 @@ impl Drop for TempHome {
 
 /// Builds the router and the state the tests share.
 ///
-/// The state lives in a temporary directory, so the tests never touch Luke's real
+/// The state lives in a temporary directory, so the tests never touch the user's real
 /// configuration.
 fn build(fixture: FakePeripheral) -> (axum::Router, Arc<App>, TempHome) {
     let home = TempHome::new();

@@ -306,14 +306,14 @@ export const DEVICES: DeviceInfo[] = [
     zones: [zone(0, "Microphone", { type: "single" }, 2, 2, 2, false)],
   },
   {
-    id: "openrgb:SERIAL0000000",
+    id: "openrgb:A1B2C3D4E5F6",
     name: "MSI MYSTIC LIGHT",
     vendor: "MSI",
     kind: "motherboard",
     adapter: "openrgb",
     adapter_index: 3,
-    serial: "SERIAL0000000",
-    location: "HID: \\\\?\\HID#VID_0DB0&PID_0076#0&00000000&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}",
+    serial: "A1B2C3D4E5F6",
+    location: "HID: \\\\?\\HID#VID_0000&PID_0000#0&00000000&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}",
     connected: true,
     zones: [
       zone(0, "JAF", { type: "linear" }, 0, 0, 240, true),
@@ -344,9 +344,9 @@ export const LAYOUT_DESK: Layout = {
   render_scale: 50,
   sampling: "area_average",
   zones: [
-    { device_id: "openrgb:SERIAL0000000", zone_index: 1, x: 4, y: 4, width: 120, height: 10, rotation_deg: 0, reversed: false, visible: true },
-    { device_id: "openrgb:SERIAL0000000", zone_index: 2, x: 4, y: 22, width: 120, height: 10, rotation_deg: 0, reversed: false, visible: true },
-    { device_id: "openrgb:SERIAL0000000", zone_index: 3, x: 4, y: 40, width: 120, height: 10, rotation_deg: 0, reversed: false, visible: true },
+    { device_id: "openrgb:A1B2C3D4E5F6", zone_index: 1, x: 4, y: 4, width: 120, height: 10, rotation_deg: 0, reversed: false, visible: true },
+    { device_id: "openrgb:A1B2C3D4E5F6", zone_index: 2, x: 4, y: 22, width: 120, height: 10, rotation_deg: 0, reversed: false, visible: true },
+    { device_id: "openrgb:A1B2C3D4E5F6", zone_index: 3, x: 4, y: 40, width: 120, height: 10, rotation_deg: 0, reversed: false, visible: true },
     { device_id: "royuan:3151:4015", zone_index: 0, x: 4, y: 58, width: 180, height: 16, rotation_deg: 0, reversed: false, visible: true },
     // The zone OpenRGB used for the keyboard, before the native adapter took it over. The
     // daemon does not drive that device any more, so the zone draws nothing: the editor shows

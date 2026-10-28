@@ -2,7 +2,7 @@
 //!
 //! The test runs the real `canvas-rgbd` binary against a temporary home. The API must
 //! use 127.0.0.1:9430 (the Host check allows only that), so the test refuses to run when
-//! something already holds that port: it never talks to Luke's running daemon. The
+//! something already holds that port: it never talks to the user's running daemon. The
 //! OpenRGB port comes from the temporary config, so the test never reaches a real
 //! OpenRGB server.
 

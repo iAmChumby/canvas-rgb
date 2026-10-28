@@ -25,7 +25,7 @@
 //! refuses a reply it cannot read. With `--force` the raw reply is printed and the writing goes
 //! on anyway.
 //!
-//! TOUCHES REAL HARDWARE from `query` on: run those steps only with Luke watching the pump head.
+//! TOUCHES REAL HARDWARE from `query` on: run those steps only with someone watching the pump head.
 
 use canvas_adapters::chione::{
     encode, parse_query_reply, query_report, ChioneDisplay, PRODUCT_ID, VENDOR_ID,

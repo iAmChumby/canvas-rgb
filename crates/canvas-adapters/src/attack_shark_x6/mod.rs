@@ -96,7 +96,7 @@
 //!
 //! # The sleeping mouse
 //!
-//! Luke's mouse sleeps after half a minute (its own setting) and a sleeping mouse cannot be
+//! The test mouse sleeps after half a minute (its own setting) and a sleeping mouse cannot be
 //! reached over the dongle: every read comes back with the grant refused (`0x00`), and the
 //! vendor app shows "Device Sleep!" and retries (research 3.3). That is not a protocol failure,
 //! so it gets its own error: [`ASLEEP`], "the mouse is asleep: move it and try again".
@@ -105,7 +105,7 @@
 //! mouse's own events for up to five seconds (the vendor app's own retry budget per command)
 //! and reads once more as soon as one arrives. While the mouse is awake the battery event comes
 //! about every two seconds (research 3.4), so a mouse that wakes up is heard within a couple of
-//! seconds. A mouse that stays asleep gets the asleep error, and Luke's next move is the one
+//! seconds. A mouse that stays asleep gets the asleep error, and the user's next move is the one
 //! the message names.
 //!
 //! # What the protocol does not carry
@@ -176,7 +176,7 @@ const GRANT_ATTEMPTS: u32 = 2;
 /// A sleeping mouse answers every read with a refused grant (`0x00`): the receiver cannot reach
 /// it over the dongle (research 3.3: "A sleeping mouse cannot receive config over the dongle;
 /// the vendor UI shows `sleep_device_text` ("Device Sleep!") and retries"). The daemon shows a
-/// protocol message as it is, so this reaches Luke word for word.
+/// protocol message as it is, so this reaches the user word for word.
 pub const ASLEEP: &str = "the mouse is asleep: move it and try again";
 
 // ---------------------------------------------------------------------------------- property keys
@@ -1366,7 +1366,7 @@ impl PeripheralAdapter for AttackSharkX6 {
         if pass.reports.is_empty() {
             return Err(match pass.failure {
                 // Every report was refused: the mouse is asleep. That is its own error, not a
-                // protocol failure, and the message is the instruction Luke needs.
+                // protocol failure, and the message is the instruction the user needs.
                 Some(ReadFailure::Refused) => refuse(ASLEEP),
                 Some(ReadFailure::Other(why)) => {
                     refuse(format!("the mouse answered none of the five read requests: {why}"))
@@ -1970,7 +1970,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_mouse_that_wakes_up_is_read_without_being_asked_again() {
-        // The same session, after Luke moved the mouse: the mouse sends a status event, the
+        // The same session, after the mouse was moved: the mouse sends a status event, the
         // adapter sees it and reads once more.
         let (mut a, s) = rig();
         {

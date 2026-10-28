@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
   Downloads the OpenRGB zip named in openrgb.lock.json to a temp folder, prints its SHA-256 and size,
-  and with -Write records them in the lock file. Run only with Luke's OK (it downloads ~21 MB).
+  and with -Write records them in the lock file. Run only with an explicit go-ahead (it downloads ~21 MB).
 .DESCRIPTION
   The URL comes from the lock file; the script refuses while url is UNSET. -Write changes only
   sha256 and size, and only after the download succeeded. Nothing is extracted or run.
@@ -14,7 +14,7 @@ $lockPath = Join-Path $PSScriptRoot 'openrgb.lock.json'
 $lock = ConvertFrom-Json -InputObject ([System.IO.File]::ReadAllText($lockPath))
 
 if ([string]::IsNullOrWhiteSpace($lock.url) -or $lock.url -eq 'UNSET') {
-    Write-Host "openrgb.lock.json url is UNSET. Put the official codeberg URL for $($lock.file) in the lock file first (Luke's call), then rerun."
+    Write-Host "openrgb.lock.json url is UNSET. Put the official codeberg URL for $($lock.file) in the lock file first, then rerun."
     exit 1
 }
 if ($lock.url -notmatch '^https://') { Write-Host 'The lock url must be https.'; exit 1 }

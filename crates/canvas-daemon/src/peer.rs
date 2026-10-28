@@ -617,7 +617,7 @@ mod tests {
         assert_eq!(loopback_port("http://localhost:9430"), Some(9430));
         assert_eq!(loopback_port("http://[::1]:9430"), Some(9430));
         for refused in [
-            "http://127.0.0.1:9430",
+            "http://192.0.2.5:9430",
             "http://evil.example:9430",
             "http://127.0.0.1.evil.example:9430",
             "http://user@127.0.0.1:9430",

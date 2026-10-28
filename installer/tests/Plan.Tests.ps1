@@ -2,7 +2,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\lib.ps1')
 . (Join-Path $PSScriptRoot '_assert.ps1')
 
-$refusal = "OpenRGB hash not recorded yet: run installer/pin-openrgb.ps1 once with Luke's OK"
+$refusal = "OpenRGB hash not recorded yet: run installer/pin-openrgb.ps1 once, then review the hash it records"
 $okLock = @{ Ok = $true; Message = ''; Url = 'https://example.invalid/OpenRGB.zip'; File = 'OpenRGB.zip'; Sha256 = ('b' * 64) }
 $badLock = @{ Ok = $false; Message = $refusal; Url = 'UNSET'; File = 'OpenRGB.zip'; Sha256 = 'UNSET' }
 $found = Find-SignalRgbAutostart -RunValues @{ SignalRgb = '"C:\V\SignalRgbLauncher.exe" --silent' } -StartupFiles @('C:\Fake\Startup\SignalRgb.lnk') -ServiceStartType 'Automatic' -ServiceName 'SignalRgb.Service'
@@ -98,11 +98,10 @@ try {
         return @{ Out = $out; Code = $LASTEXITCODE }
     }
 
-    Test-Case 'setup.ps1 -WhatIf exits 0, prints the refusal line and plan, and writes nothing' {
+    Test-Case 'setup.ps1 -WhatIf exits 0, prints the pinned lock and the plan, and writes nothing' {
         $r = & $runChild (Join-Path $PSScriptRoot '..\setup.ps1')
         Assert-Equal $r.Code 0
-        Assert-True $r.Out.Contains($refusal) 'refusal text missing'
-        Assert-True $r.Out.Contains('would refuse')
+        Assert-True $r.Out.Contains('OpenRGB lock ok') 'pinned-lock line missing'
         Assert-True $r.Out.Contains('WhatIf: nothing was changed')
         Assert-Equal @(Get-ChildItem -LiteralPath $fake -Recurse -Force).Count 2 'only the two empty folders may exist'
     }

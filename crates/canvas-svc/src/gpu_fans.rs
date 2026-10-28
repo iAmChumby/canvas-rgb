@@ -5,7 +5,7 @@
 //! against `fakes::FakeGpuFans`. [`CompositeChip`] is the [`FanChip`] the service drives: it
 //! routes the first headers to the NCT chip (when there is one) and the rest to the GPU.
 //!
-//! Behaviour proven on Luke's RTX 5070 Ti (driver 610.88): `SetFanSpeed_v2` switches the fan to
+//! Behaviour proven on the test RTX 5070 Ti (driver 610.88): `SetFanSpeed_v2` switches the fan to
 //! the manual policy at once and the target at once, while the actual speed takes about 6 s to
 //! arrive; `SetDefaultFanSpeed_v2` returns the fan to the auto policy. NVML's minimum is 30%.
 

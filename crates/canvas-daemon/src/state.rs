@@ -203,7 +203,7 @@ impl App {
         let active_layout = Some(store.layouts.active.clone());
         let active_effect =
             store.active_layout().and_then(|l| l.effect.as_ref().map(|e| e.id.clone()));
-        // G7: the editor shows the dismissible "size your ARGB headers" panel until Luke
+        // G7: the editor shows the dismissible "size your ARGB headers" panel until the user
         // dismisses it.
         let show_zone_panel = !store.config.zone_panel_dismissed;
         let openrgb = *self.openrgb.read().await;

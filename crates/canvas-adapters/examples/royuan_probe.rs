@@ -1,5 +1,5 @@
 //! Hardware probe for the ROYUAN MonsGeek keyboard: direct mode, then red, green, blue
-//! (one second each), then black. TOUCHES REAL HARDWARE: run it only with Luke watching.
+//! (one second each), then black. TOUCHES REAL HARDWARE: run it only with someone watching.
 
 use canvas_adapters::royuan::RoyuanAdapter;
 use canvas_proto::color::Rgb8;

@@ -1,6 +1,6 @@
 //! `canvas-rgbd.exe`: the canvas-rgb daemon.
 //!
-//! It runs as Luke, non-elevated, at logon. It owns the API on 127.0.0.1:9430, the
+//! It runs as the logged-on user, non-elevated, at logon. It owns the API on 127.0.0.1:9430, the
 //! render engine, the OpenRGB client (and in milestone 1 the OpenRGB server itself),
 //! the screen and audio capture, the storage, the logs, the first run, the sleep
 //! handling, the SignalRGB conflict check and the pipe client to the service.

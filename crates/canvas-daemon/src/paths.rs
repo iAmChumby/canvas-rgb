@@ -1,7 +1,7 @@
 //! Every path the daemon reads or writes, in one place.
 //!
 //! `CANVAS_RGB_HOME` overrides the whole user tree (`%APPDATA%\canvas-rgb` by default)
-//! so tests and dev runs never touch Luke's real config. The OpenRGB config dir and the
+//! so tests and dev runs never touch the user's real config. The OpenRGB config dir and the
 //! machine-wide `%ProgramData%\canvas-rgb` follow the same override so a test run stays
 //! self-contained.
 

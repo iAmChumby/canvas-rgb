@@ -9,7 +9,7 @@
 //! `CpuTempReader` and AMD's THM_TCON_CUR_TMP register.
 //!
 //! Nothing here runs in the test suite or on this machine. It compiles, and it is
-//! exercised only by Luke's real-hardware session.
+//! exercised only by a real-hardware session.
 
 use crate::chip::PortIo;
 use crate::temps::TempReader;

@@ -80,7 +80,7 @@
 //! until a caller turns it on, and nothing in this repository turns it on. A *settings read* does
 //! send output reports: the 36 chunk requests of the profile read. They ask the pad for what it
 //! already holds and change no setting, but they are still 36 output reports, so the first
-//! hardware run of this adapter needs Luke's OK.
+//! hardware run of this adapter needs an explicit go-ahead.
 //!
 //! When writes are on they still refuse what the research does not support: the button map of
 //! the face buttons is read-only (the research's own writer covers the range records and the map
@@ -1135,7 +1135,7 @@ impl EightBitDoUltimate2 {
     /// Reads the pad's settings: the whole profile image, 36 chunks.
     ///
     /// The read sends the vendor's chunk requests. They change no setting, but they are 36
-    /// output reports, so the first run of this on hardware needs Luke's OK.
+    /// output reports, so the first run of this on hardware needs an explicit go-ahead.
     pub async fn read_settings(&mut self, device: &DeviceId) -> Result<Props, AdapterError> {
         self.read_props(device).await
     }
