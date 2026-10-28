@@ -17,6 +17,29 @@ Adapted files (layouts and packet encoders rewritten in Rust, not copied line by
 - The DeviceAdapter trait shape (crates/canvas-proto/src/traits.rs) follows Hypercolor's
   DeviceBackend.
 
+Run, not linked or modified:
+
+- OpenRGB (https://codeberg.org/OpenRGB/OpenRGB), GPL-2.0. The installer downloads the official
+  OpenRGB 1.1 Windows release, checks its SHA-256, and the service runs it unmodified as a
+  separate process; canvas-rgb talks to it over OpenRGB's network SDK protocol. OpenRGB drives the
+  motherboard ARGB headers, the RAM and the microphone. Its source is at the link above.
+- PawnIO (https://github.com/namazso/PawnIO), the signed driver the fan service uses to reach the
+  Super I/O chip. Installed separately by the owner; not shipped here.
+
+Protocol knowledge from other people's open work (no code copied; cited in comments):
+
+- Attack Shark X6: ATKsoft (https://github.com/grivia0/ATKsoft, MIT), the X6 read-back handshake,
+  report layouts and checksums. Cross-checked against prodmutant/Attack-Shark-X3
+  (https://github.com/prodmutant/Attack-Shark-X3), AlternativeLua/attack-shark-x3-driver
+  (https://github.com/AlternativeLua/attack-shark-x3-driver), DavBfr/shark-x3
+  (https://github.com/DavBfr/shark-x3) and libratbag (https://github.com/libratbag/libratbag).
+- 8BitDo Ultimate 2: ascendedent/8bitdo-Linux-Software
+  (https://github.com/ascendedent/8bitdo-Linux-Software), the configuration channel, the chunked
+  profile read and the profile image layout. SDL's HIDAPI 8BitDo driver
+  (https://github.com/libsdl-org/SDL, zlib) for the input report layout.
+- The HTML effect format follows SignalRGB's (https://signalrgb.com) so effects written for it run
+  here; no SignalRGB code is included.
+
 Facts only, no code copied (cited in comments): register addresses for the Nuvoton NCT6687D-R
 from the nct6687d Linux driver (GPL) and LibreHardwareMonitor's Nct677X.cs (MPL-2.0); PawnIO
 LpcIO module ioctl names from PawnIO.Modules (GPL-2.0), used through PawnIO's IOCTL interface.
