@@ -25,6 +25,11 @@ pub struct FrameTimer {
     next_tick: u64,
     /// Whether the high-resolution timer is currently held.
     resolution_held: bool,
+    /// The fps the schedule was built for. A change restarts the schedule: the tick
+    /// index counts ticks of the old interval, so keeping it would put the next frame
+    /// `next_tick * (new - old)` into the future (2026-10-27: 60 -> 30 fps froze the
+    /// lights for as long as the daemon had been running).
+    fps: u32,
 }
 
 impl FrameTimer {
@@ -36,6 +41,7 @@ impl FrameTimer {
             // always waits before the first frame.
             next_tick: 1,
             resolution_held: false,
+            fps: 0,
         }
     }
 
@@ -75,6 +81,13 @@ impl FrameTimer {
     /// The first tick is due one interval after the epoch, so the caller always
     /// waits before the first frame.
     pub fn sleep_until_next(&mut self, fps: u32) -> Instant {
+        if fps != self.fps {
+            // The first call (fps 0) and every change: start a fresh schedule from now.
+            if self.fps != 0 {
+                self.reset_schedule(Instant::now());
+            }
+            self.fps = fps;
+        }
         let interval = Self::interval(fps);
         // `Duration` scales by a u32; a tick count that large is decades away, so
         // saturating is safe.
@@ -179,6 +192,20 @@ mod tests {
         let elapsed = start.elapsed();
         assert!(elapsed >= Duration::from_millis(25), "elapsed {elapsed:?}");
         assert!(elapsed < Duration::from_millis(120), "elapsed {elapsed:?}");
+    }
+
+    #[test]
+    fn lowering_the_fps_after_many_frames_does_not_stall() {
+        // The schedule has run for a while at 60 fps: simulate it by putting the epoch
+        // 2 s in the past with the tick index that 2 s of 60 fps frames would reach.
+        let mut timer = FrameTimer::new();
+        timer.sleep_until_next(60);
+        timer.epoch = Instant::now() - Duration::from_secs(2);
+        timer.next_tick = 121;
+        // Dropping to 30 fps must not wait the 2 s the old tick index implies.
+        let start = Instant::now();
+        timer.sleep_until_next(30);
+        assert!(start.elapsed() < Duration::from_millis(100), "stalled {:?}", start.elapsed());
     }
 
     #[test]
