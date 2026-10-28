@@ -864,10 +864,27 @@ function Test-PawnIoInstallerFile {
 # Copies the installer the user picked into a new folder under StagingRoot (inside the protected %ProgramData%\canvas-rgb,
 # which ordinary users cannot write to), reading the source once. Returns the copy's path. The caller verifies and runs
 # THE COPY, so the user cannot swap the file between the check and the run.
+# The source is checked first (no link, pinned signature), so an elevated setup never copies a file the user could
+# not read, such as an admin-only file, into the staging folder. The staging folder is SYSTEM and Administrators only.
+function New-AdminOnlyDirectorySecurity {
+    $sec = New-Object System.Security.AccessControl.DirectorySecurity
+    $sec.SetAccessRuleProtection($true, $false)
+    foreach ($sid in 'S-1-5-18', 'S-1-5-32-544') {
+        $id = New-Object System.Security.Principal.SecurityIdentifier($sid)
+        $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($id, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+    }
+    return $sec
+}
+
 function Copy-PawnIoToStaging {
-    param([string]$Source, [string]$StagingRoot)
+    param([string]$Source, [string]$StagingRoot, [switch]$NoAcl)
+    $item = Get-Item -LiteralPath $Source -Force -ErrorAction Stop
+    if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { throw "the PawnIO installer path is a link: $Source" }
+    $pre = Test-PawnIoInstallerFile -Path $Source
+    if (-not $pre.Ok) { throw "PawnIO installer refused before copying: $($pre.Reason)" }
     $dir = Join-Path $StagingRoot ('pawnio-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    if (-not $NoAcl) { Set-Acl -LiteralPath $dir -AclObject (New-AdminOnlyDirectorySecurity) }
     $dest = Join-Path $dir 'PawnIO_setup.exe'
     $in = [System.IO.File]::Open($Source, 'Open', 'Read', 'Read')
     try {

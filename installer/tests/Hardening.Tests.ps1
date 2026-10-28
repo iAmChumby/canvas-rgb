@@ -154,14 +154,42 @@ try {
         Assert-True $r.Ok $r.Reason
     }
     Test-Case 'pawnio copy: the staged copy is byte-identical, in its own new folder, and independent of the source' {
-        $src = Join-Path $tmp 'PawnIO_setup.exe'; [System.IO.File]::WriteAllText($src, 'original bytes')
-        $root = Join-Path $tmp 'staging'; New-Item -ItemType Directory -Path $root | Out-Null
-        $c1 = Copy-PawnIoToStaging -Source $src -StagingRoot $root
+        $signed = 'C:\Program Files\PawnIO\uninstall.exe'   # signed by the PawnIO publisher
+        if (-not (Test-Path -LiteralPath $signed)) { return }   # PawnIO not installed here
+        $src = Join-Path $tmp 'PawnIO_setup.exe'; Copy-Item -LiteralPath $signed -Destination $src
+        $orig = [System.IO.File]::ReadAllBytes($src)
+        $root = Join-Path $tmp 'staging'; New-Item -ItemType Directory -Path $root -Force | Out-Null
+        $c1 = Copy-PawnIoToStaging -Source $src -StagingRoot $root -NoAcl
         [System.IO.File]::WriteAllText($src, 'swapped after the copy')
-        Assert-Equal ([System.IO.File]::ReadAllText($c1)) 'original bytes'
+        Assert-True ([System.Linq.Enumerable]::SequenceEqual([byte[]][System.IO.File]::ReadAllBytes($c1), [byte[]]$orig)) 'the copy keeps the original bytes'
         Assert-True ($c1.StartsWith($root + '\pawnio-')) 'under the staging root'
-        $c2 = Copy-PawnIoToStaging -Source $src -StagingRoot $root
+        Copy-Item -LiteralPath $signed -Destination $src -Force
+        $c2 = Copy-PawnIoToStaging -Source $src -StagingRoot $root -NoAcl
         Assert-True ($c1 -ne $c2) 'each copy gets a fresh folder'
+    }
+    Test-Case 'pawnio copy: an unsigned or wrongly signed source is refused before anything is copied' {
+        $root = Join-Path $tmp 'staging-refuse'; New-Item -ItemType Directory -Path $root -Force | Out-Null
+        $src = Join-Path $tmp 'not-pawnio.exe'; [System.IO.File]::WriteAllText($src, 'secret admin-only bytes')
+        $threw = $false; try { Copy-PawnIoToStaging -Source $src -StagingRoot $root -NoAcl | Out-Null } catch { $threw = $true }
+        Assert-True $threw 'refused'
+        Assert-Equal @(Get-ChildItem -LiteralPath $root -Force).Count 0
+        $threw = $false; try { Copy-PawnIoToStaging -Source "$env:SystemRoot\System32\notepad.exe" -StagingRoot $root -NoAcl | Out-Null } catch { $threw = $true }
+        Assert-True $threw 'a file signed by someone else is refused'
+        Assert-Equal @(Get-ChildItem -LiteralPath $root -Force).Count 0
+    }
+    Test-Case 'pawnio copy: a source that is a link is refused' {
+        $root = Join-Path $tmp 'staging-link'; New-Item -ItemType Directory -Path $root -Force | Out-Null
+        $target = Join-Path $tmp 'link-target'; New-Item -ItemType Directory -Path $target -Force | Out-Null
+        $link = Join-Path $tmp 'link-src'; cmd /c mklink /J "$link" "$target" | Out-Null
+        $threw = $false; try { Copy-PawnIoToStaging -Source $link -StagingRoot $root -NoAcl | Out-Null } catch { $threw = $true }
+        Assert-True $threw 'refused'
+        Assert-Equal @(Get-ChildItem -LiteralPath $root -Force).Count 0
+    }
+    Test-Case 'pawnio copy: the staging folder ACL is SYSTEM and Administrators only, not inherited' {
+        $sec = New-AdminOnlyDirectorySecurity
+        Assert-True $sec.AreAccessRulesProtected 'inheritance off'
+        $sids = @($sec.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object { $_.IdentityReference.Value } | Sort-Object)
+        Assert-Equal ($sids -join ',') 'S-1-5-18,S-1-5-32-544'
     }
     Test-Case 'setup-elevated.ps1: copies to the protected folder, then checks, then runs the copy (never the original)' {
         $src = Get-Content -LiteralPath (Join-Path $instDir 'setup-elevated.ps1') -Raw
