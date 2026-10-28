@@ -1297,36 +1297,21 @@ button.chip:hover {
 }
 
 .color-swatch {
-  position: relative;
   width: 32px;
   height: 32px;
+  flex: none;
+  padding: 0;
   border: 1px solid var(--line-2);
   border-radius: var(--r-sm);
   background: var(--c);
   cursor: pointer;
-  overflow: hidden;
-  transition: border-color var(--dur-fast) var(--ease);
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease);
 }
 
 .color-swatch:hover {
   border-color: var(--mute);
-}
-
-.color-swatch input {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  opacity: 0;
-  cursor: pointer;
-}
-
-.color:focus-within .color-swatch {
-  outline: 2px solid var(--focus);
-  outline-offset: 3px;
 }
 
 .color-hex {
@@ -1335,109 +1320,137 @@ button.chip:hover {
   font-size: var(--t14);
 }
 
+/* ---------- the colour picker ---------- */
+
+.picker {
+  display: grid;
+  gap: var(--s3);
+  width: 212px;
+}
+
+/* The field: the hue at full strength, washed to white across and to black down. */
+.picker-sv {
+  position: relative;
+  aspect-ratio: 1;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background-color: hsl(var(--h) 100% 50%);
+  background-image:
+    linear-gradient(to top, var(--field-black), transparent),
+    linear-gradient(to right, var(--field-white), transparent);
+  cursor: crosshair;
+  touch-action: none;
+}
+
+/* The handle is a ring, so the colour under it still shows. */
+.picker-sv-handle {
+  position: absolute;
+  top: calc((1 - var(--v)) * 100%);
+  left: calc(var(--s) * 100%);
+  width: 14px;
+  height: 14px;
+  margin: -7px 0 0 -7px;
+  border: 2px solid var(--ink);
+  border-radius: 50%;
+  box-shadow:
+    0 0 0 1px var(--panel),
+    0 1px 3px rgb(0 0 0 / 0.35);
+  pointer-events: none;
+}
+
+/* The hue strip, with a cap that rides in it. */
+.picker-hue {
+  position: relative;
+  height: 14px;
+  border: 1px solid var(--line-2);
+  border-radius: 3px;
+  background: var(--hue-ramp);
+  cursor: ew-resize;
+  touch-action: none;
+}
+
+.picker-hue-handle {
+  position: absolute;
+  top: 50%;
+  left: calc(var(--h) / 360 * 100%);
+  width: 10px;
+  height: 20px;
+  margin: -10px 0 0 -5px;
+  border: 1px solid var(--line-2);
+  border-radius: 3px;
+  background-color: var(--raised);
+  box-shadow: 0 1px 0 var(--skirt);
+  pointer-events: none;
+}
+
+/* The value, in mono, with the colour it names beside it. */
+.picker-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.picker-hex {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--fm);
+  text-align: left;
+}
+
+.picker-preview {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background: var(--c);
+}
+
+/* The other colours of the same effect, one click away. */
+.picker-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.picker-swatch {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background: var(--c);
+  cursor: pointer;
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+.picker-swatch:hover {
+  border-color: var(--mute);
+  transform: translateY(-1px);
+}
+
+.picker-sv:focus-visible,
+.picker-hue:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
 .slider {
   position: relative;
   flex: 1 1 180px;
   min-width: 100px;
   height: 32px;
-}
-
-.slider-track,
-.slider-fill,
-.slider-floor {
-  position: absolute;
-  top: 50%;
-  height: 4px;
-  transform: translateY(-50%);
-  border-radius: 2px;
-  pointer-events: none;
-}
-
-.slider-track {
-  left: 0;
-  right: 0;
-  background: var(--sunk);
-  box-shadow: inset 0 0 0 1px var(--line-2);
-}
-
-.slider-fill {
-  left: 0;
-  width: 100%;
-  background: var(--live);
-  transform: translateY(-50%) scaleX(var(--p));
-  transform-origin: left center;
-  transition: transform var(--dur) var(--ease);
-}
-
-/* While the pointer is down the fill follows the pointer exactly: no lag. */
-.slider[data-dragging="true"] .slider-fill {
-  transition: none;
-}
-
-.slider-floor {
-  left: 0;
-  width: calc(var(--f) * 100%);
-  height: 12px;
-  border-radius: 0;
-  background: color-mix(in srgb, var(--down) 26%, transparent);
-  transform: translateY(-50%);
-}
-
-.slider input {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  margin: 0;
-  background: transparent;
-  appearance: none;
-  -webkit-appearance: none;
   cursor: pointer;
+  touch-action: none;
+  /* the focus ring is drawn on the cap, so the slot itself takes none */
+  outline: none;
 }
 
-.slider input::-webkit-slider-runnable-track {
-  height: 32px;
-  background: transparent;
-}
-
-.slider input::-moz-range-track {
-  height: 32px;
-  background: transparent;
-}
-
-.slider input::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  width: 14px;
-  height: 14px;
-  margin-top: 9px;
-  border: 0;
-  border-radius: 50%;
-  background: var(--ink);
-  box-shadow: 0 0 0 3px var(--live-soft);
-  transition:
-    transform var(--dur-fast) var(--ease),
-    box-shadow var(--dur-fast) var(--ease);
-}
-
-.slider input::-moz-range-thumb {
-  width: 14px;
-  height: 14px;
-  border: 0;
-  border-radius: 50%;
-  background: var(--ink);
-  box-shadow: 0 0 0 3px var(--live-soft);
-}
-
-.slider:hover input::-webkit-slider-thumb,
-.slider[data-dragging="true"] input::-webkit-slider-thumb {
-  transform: scale(1.15);
-  box-shadow: 0 0 0 6px var(--live-soft);
-}
-
-.slider input:focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 3px;
-  border-radius: 4px;
+.slider[data-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 .hue {
@@ -2288,11 +2301,18 @@ button.chip:hover {
   .effects-grid,
   .devices-grid,
   .fans-grid,
-  .settings-grid {
+  .settings-grid,
+  .peripheral-grid,
+  .pad-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 
   .fans-editor-col {
+    position: static;
+  }
+
+  /* The plan of the pad is a picture: it may be as wide as the page, and it does not stick. */
+  .pad-plan-wrap {
     position: static;
   }
 }
@@ -2694,6 +2714,446 @@ button.chip:hover {
   font-size: var(--t14);
 }
 
+/* ---------- peripherals page ---------- */
+
+.peripheral-grid {
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+  gap: var(--s4);
+  align-items: start;
+}
+
+.peripheral-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+/* One device in the list: its kind, its name, and whether it is there. */
+.peripheral-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  width: 100%;
+  padding: var(--s3);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-lg);
+  background: var(--panel);
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color var(--release) var(--ease),
+    background-color var(--release) var(--ease),
+    box-shadow var(--release) var(--ease);
+}
+
+.peripheral-row:hover {
+  border-color: var(--mute);
+}
+
+.peripheral-row[data-on="true"] {
+  border-color: var(--live);
+  box-shadow: inset 3px 0 0 var(--live);
+}
+
+.peripheral-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: var(--r-sm);
+  background: var(--sunk);
+  color: var(--dim);
+}
+
+.peripheral-row[data-on="true"] .peripheral-icon {
+  color: var(--live);
+}
+
+.peripheral-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.peripheral-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.peripheral-sub {
+  color: var(--mute);
+  font-size: var(--t14);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.peripheral-battery {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  color: var(--dim);
+  font-size: var(--t14);
+}
+
+.peripheral-detail {
+  min-width: 0;
+}
+
+.peripheral-back {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-bottom: var(--s3);
+  color: var(--dim);
+}
+
+/* The device's own head: what it is, and where it is plugged in. */
+.peripheral-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+}
+
+.peripheral-head-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 44px;
+  height: 44px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  background: var(--sunk);
+  color: var(--live);
+}
+
+.peripheral-head-text {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.peripheral-head-name {
+  font-size: var(--t20);
+}
+
+.peripheral-head-sub {
+  color: var(--mute);
+  font-size: var(--t14);
+}
+
+/* Access: what the daemon may do with the device, and what each switch does. */
+.access-list {
+  display: grid;
+  gap: var(--s3);
+}
+
+.access-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--s2) var(--s4);
+}
+
+.access-label {
+  font-weight: 600;
+}
+
+.access-note {
+  grid-column: 1 / -1;
+  color: var(--mute);
+  font-size: var(--t14);
+  margin-top: -4px;
+}
+
+/* A setting the adapter cannot write: the value it holds. */
+.read-only {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  color: var(--dim);
+  font-size: var(--t14);
+}
+
+.read-only-dot {
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--line-2);
+  border-radius: 3px;
+  background: var(--c);
+}
+
+/* The mouse's DPI stages: a chip per stage, the active one marked. */
+.dpi-stages {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  margin-top: var(--s3);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--line);
+}
+
+.dpi-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: 0 var(--s3);
+  height: 32px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background: var(--raised);
+  color: var(--ink);
+  cursor: pointer;
+  box-shadow: 0 var(--skirt-h) 0 var(--skirt);
+  transition:
+    border-color var(--release) var(--ease),
+    background-color var(--release) var(--ease),
+    box-shadow var(--release) var(--ease);
+}
+
+.dpi-chip:hover {
+  background-color: color-mix(in oklab, var(--raised) 90%, var(--ink));
+}
+
+.dpi-chip[data-active="true"] {
+  border-color: var(--live);
+}
+
+.dpi-chip[data-on="true"] {
+  box-shadow: 0 0 0 var(--skirt);
+}
+
+.dpi-chip-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--c);
+  box-shadow: 0 0 0 1px var(--line-2);
+}
+
+.dpi-stage-edit {
+  margin-top: var(--s3);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--line);
+}
+
+/* The controller: the plan of the pad, and the mapping of every button. */
+.pad-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 420px) minmax(0, 1fr);
+  gap: var(--s5);
+  align-items: start;
+}
+
+.pad-plan-wrap {
+  position: sticky;
+  top: var(--s4);
+  display: grid;
+  place-items: center;
+  padding: var(--s3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--sunk);
+}
+
+.pad-plan {
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.pad-body {
+  fill: none;
+  stroke: var(--line-2);
+  stroke-width: 2;
+  stroke-linejoin: round;
+}
+
+.pad-btn {
+  fill: var(--panel);
+  stroke: var(--line-2);
+  stroke-width: 1.5;
+  transition:
+    fill var(--release) var(--ease),
+    stroke var(--release) var(--ease);
+}
+
+.pad-target {
+  cursor: pointer;
+  outline: none;
+}
+
+.pad-target:hover .pad-btn {
+  fill: var(--raised);
+  stroke: var(--mute);
+}
+
+.pad-target[data-pressed="true"] .pad-btn,
+.pad-target:focus-visible .pad-btn {
+  fill: var(--live-soft);
+  stroke: var(--live);
+}
+
+.pad-target[data-on="true"] .pad-btn {
+  fill: var(--live-soft);
+  stroke: var(--live);
+  stroke-width: 2;
+}
+
+.pad-print {
+  fill: var(--dim);
+  font-family: var(--fm);
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.pad-caption {
+  color: var(--mute);
+  font-family: var(--fm);
+  font-size: var(--t14);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.pad-map {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: var(--s2) var(--s4);
+}
+
+.pad-map-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  min-width: 0;
+  padding: var(--s1) 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.pad-map-row[data-on="true"] {
+  border-bottom-color: var(--live);
+}
+
+.pad-map-label {
+  color: var(--dim);
+  font-size: var(--t14);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- effect import ---------- */
+
+/* The files that did not parse: one line each, folded away until they are asked for. */
+.failed-strip {
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--warn) 6%, var(--panel));
+  overflow: hidden;
+}
+
+.failed-strip-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  width: 100%;
+  padding: var(--s2) var(--s3);
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font-size: var(--t14);
+  cursor: pointer;
+}
+
+.failed-strip-head:hover {
+  background: var(--hover);
+}
+
+.failed-strip-body {
+  padding: 0 var(--s3) var(--s3);
+}
+
+.failed-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  font-size: var(--t14);
+  color: var(--dim);
+}
+
+.failed-error {
+  color: var(--mute);
+}
+
+/* The import: the question about a file that is already there, or what the parser said. */
+.import-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2) var(--s4);
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  background: var(--panel);
+}
+
+.import-note[data-tone="ask"] {
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+  background: color-mix(in srgb, var(--warn) 6%, var(--panel));
+}
+
+.import-note[data-tone="down"] {
+  border-color: color-mix(in srgb, var(--down) 40%, transparent);
+  background: color-mix(in srgb, var(--down) 6%, var(--panel));
+}
+
+/* The drop overlay: the page says what it will do with the file. */
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: var(--s6);
+  background: color-mix(in srgb, var(--g1) 72%, transparent);
+  animation: canvas-enter var(--dur) var(--ease) both;
+}
+
+.drop-card {
+  display: grid;
+  justify-items: center;
+  gap: var(--s3);
+  padding: var(--s8) var(--s6);
+  border: 2px dashed var(--live);
+  border-radius: var(--r-lg);
+  background: var(--panel);
+  color: var(--ink);
+  font-size: var(--t15);
+}
+
+/* The delete of a user effect, asked inline. */
+.effect-delete {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2) var(--s4);
+  margin-top: var(--s3);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--line);
+  color: var(--dim);
+  font-size: var(--t14);
+}
+
 /* ---------- edge fixes: tooltips that sit at the right edge of a row or banner, labels near the stage edge ---------- */
 
 .banner .tip-bubble,
@@ -2717,6 +3177,15 @@ button.chip:hover {
 @media (max-width: 720px) {
   .fans-grid .sparkline {
     width: 96px;
+  }
+
+  /* On a phone the mapping of the buttons is the control: it goes under the plan. */
+  .pad-map {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .peripheral-head {
+    flex-wrap: wrap;
   }
 }
 
@@ -2760,4 +3229,78 @@ button.chip:hover {
 .known-note {
   margin: 0 0 var(--s3);
   font-size: var(--t14);
+}
+
+/* The two steps on a phone: [hidden] wins over the display the parts set for themselves. */
+.peripheral-list[hidden],
+.peripheral-detail[hidden] {
+  display: none;
+}
+
+.peripheral-detail .prop-item[data-kind="number"] {
+  grid-template-columns: minmax(120px, 190px) minmax(0, 1fr) 64px;
+}
+
+.pad-map-row .select-trigger {
+  flex: none;
+  min-width: 0;
+  width: 128px;
+}
+
+@media (max-width: 720px) {
+  .peripheral-detail .prop-item[data-kind="number"] {
+    grid-template-columns: minmax(0, 1fr) 64px;
+  }
+
+  .peripheral-detail .prop-item[data-kind="number"] .field-label {
+    grid-column: 1 / -1;
+  }
+}
+
+/* These grids are declared after the 960px rule above, so the single column is restated here. */
+@media (max-width: 960px) {
+  .peripheral-grid,
+  .pad-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .pad-map-label {
+    flex: 1;
+    min-width: 0;
+  }
+}
+
+.pad-views {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s3);
+  width: 100%;
+}
+
+.pad-rear {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s1);
+  width: 200px;
+  max-width: 100%;
+}
+
+.pad-hit {
+  fill: transparent;
+  stroke: none;
+}
+
+.pad-glyph {
+  fill: none;
+  stroke: var(--dim);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.pad-print {
+  font-size: 12px;
+  font-weight: 600;
 }

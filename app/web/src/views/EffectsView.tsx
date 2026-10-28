@@ -1,8 +1,19 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { CaretLeft, MagnifyingGlass, MonitorPlay, Play, SquaresFour, Star, Waveform } from "@phosphor-icons/react";
-import { Button, ButtonLink, IconButton, Swap } from "@/components/Button";
+import {
+  CaretLeft,
+  FileHtml,
+  MagnifyingGlass,
+  MonitorPlay,
+  Play,
+  SquaresFour,
+  Star,
+  Trash,
+  UploadSimple,
+  Waveform,
+} from "@phosphor-icons/react";
+import { Button, ButtonLink, FileButton, IconButton, Swap } from "@/components/Button";
 import { Chip } from "@/components/Chip";
 import { Thumb } from "@/components/Thumb";
 import { Panel } from "@/components/Panel";
@@ -17,7 +28,7 @@ import { Skeleton, SkeletonLines } from "@/components/Skeleton";
 import { useToast } from "@/components/Toast";
 import { PropertyControls, type Values } from "@/views/PropertyControls";
 import { api } from "@/lib/endpoints";
-import { messageOf } from "@/lib/errors";
+import { ApiFailure, messageOf } from "@/lib/errors";
 import { EFFECT_CATEGORIES, categoryOf, type EffectCategory } from "@/lib/effectCategories";
 import { getSnap, refreshAll, useSnap } from "@/lib/store";
 import type { EffectDetail } from "@/proto/EffectDetail";
@@ -37,6 +48,7 @@ function currentStripHeight(): string {
 export function EffectsView() {
   const effects = useSnap((s) => s.effects);
   const effectsError = useSnap((s) => s.effectsError);
+  const failed = useSnap((s) => s.effectsFailed);
   const status = useSnap((s) => s.status);
   const activeId = useSnap((s) => s.status?.active_effect ?? null);
   const [filter, setFilter] = useState<"all" | "favorites">("all");
@@ -50,6 +62,17 @@ export function EffectsView() {
   const [values, setValues] = useState<Values>({});
   const [error, setError] = useState<string | null>(null);
   const [favPop, setFavPop] = useState<string | null>(null);
+  // The import: what is being sent, what the daemon said, and the file that is waiting for a
+  // replace.
+  const [importing, setImporting] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [replaceWith, setReplaceWith] = useState<{ fileName: string; html: string } | null>(null);
+  // A file is over the page: the drop overlay shows.
+  const [dragging, setDragging] = useState(false);
+  // The user effect that is about to be deleted.
+  const [deleting, setDeleting] = useState<string | null>(null);
+  // The failed files' list, folded away until it is asked for.
+  const [showFailed, setShowFailed] = useState(false);
   // On a phone the detail is pushed over the gallery.
   const narrow = useMediaQuery("(max-width: 720px)");
   const [pushed, setPushed] = useState(false);
@@ -148,6 +171,43 @@ export function EffectsView() {
       await api.setFavorite(id, { favorite });
       await refreshAll();
       toast(favorite ? `${name} added to favourites` : `${name} removed from favourites`, "info");
+    } catch (e) {
+      setError(messageOf(e));
+      toast(messageOf(e), "down");
+    }
+  };
+
+  /** Sends an HTML effect to the daemon. A clash asks for a replace first. */
+  const sendImport = async (file: File, replace: boolean) => {
+    setImporting(true);
+    try {
+      const html = await file.text();
+      const r = await api.importEffect({ file_name: file.name, html, replace });
+      await refreshAll();
+      setPicked(r.effect.id);
+      setReplaceWith(null);
+      setImportError(null);
+      toast(r.replaced ? `${r.effect.name} is replaced` : `${r.effect.name} is added`);
+    } catch (e) {
+      if (e instanceof ApiFailure && e.status === 409) {
+        setReplaceWith({ fileName: file.name, html: await file.text() });
+        setImportError(null);
+      } else {
+        setReplaceWith(null);
+        setImportError(messageOf(e));
+      }
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  /** Removes a user effect. The one that is playing asks first. */
+  const deleteEffect = async (id: string, name: string) => {
+    setDeleting(null);
+    try {
+      await api.deleteEffect(id);
+      await refreshAll();
+      toast(`${name} is removed`);
     } catch (e) {
       setError(messageOf(e));
       toast(messageOf(e), "down");
@@ -322,6 +382,38 @@ export function EffectsView() {
               <p className="effect-live-note">
                 {needsInput ? "Live frame" : "Preview"}
               </p>
+              {selectedId?.startsWith("html:") && (
+                <div className="effect-delete">
+                  {deleting === selectedId ? (
+                    <>
+                      <span>
+                        {running ? `${detail.schema.name} is playing. ` : ""}Delete it anyway?
+                      </span>
+                      <div className="row-wrap">
+                        <Button
+                          variant="danger"
+                          size="sm"
+                          onClick={() => void deleteEffect(selectedId, detail.schema.name)}
+                        >
+                          Delete
+                        </Button>
+                        <Button variant="ghost" size="sm" onClick={() => setDeleting(null)}>
+                          Cancel
+                        </Button>
+                      </div>
+                    </>
+                  ) : (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      icon={<Trash size={16} />}
+                      onClick={() => setDeleting(selectedId)}
+                    >
+                      Delete effect
+                    </Button>
+                  )}
+                </div>
+              )}
             </div>
           </Panel>
 
@@ -351,10 +443,34 @@ export function EffectsView() {
   );
 
   return (
-    <div className="stack">
+    <div
+      className="stack"
+      onDragOver={(e) => {
+        e.preventDefault();
+        setDragging(true);
+      }}
+      onDragLeave={(e) => {
+        if (e.currentTarget === e.target) setDragging(false);
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        setDragging(false);
+        const file = e.dataTransfer.files?.[0];
+        if (file) void sendImport(file, false);
+      }}
+    >
       <div className="page-head">
         <h1>Effects</h1>
       </div>
+
+      {dragging && (
+        <div className="drop-overlay" aria-hidden="true">
+          <div className="drop-card">
+            <FileHtml size={26} />
+            <span>Drop an .html effect to add it</span>
+          </div>
+        </div>
+      )}
 
       <div className="effect-toolbar">
         <Segmented<"all" | "favorites">
@@ -388,7 +504,66 @@ export function EffectsView() {
           />
         </span>
         <span className="mute fig"><AnimatedNumber value={list.length} /> effects</span>
+        <FileButton
+          accept=".html,text/html"
+          icon={<UploadSimple size={16} />}
+          disabled={importing}
+          onFile={(file) => void sendImport(file, false)}
+        >
+          Import
+        </FileButton>
       </div>
+
+      {failed.length > 0 && (
+        <div className="failed-strip" data-open={showFailed ? "true" : "false"}>
+          <button
+            type="button"
+            className="failed-strip-head"
+            aria-expanded={showFailed}
+            onClick={() => setShowFailed((v) => !v)}
+          >
+            <FileHtml size={14} aria-hidden="true" />
+            <span>
+              {failed.length} file{failed.length === 1 ? "" : "s"} did not parse
+            </span>
+          </button>
+          {showFailed && (
+            <div className="failed-strip-body">
+              {failed.map((f) => (
+                <p key={f.file} className="failed-line">
+                  <span className="fig">{f.file}</span>
+                  <span className="failed-error">{f.error}</span>
+                </p>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {(replaceWith || importError) && (
+        <div className="import-note" data-tone={replaceWith ? "ask" : "down"}>
+          {replaceWith ? (
+            <>
+              <span>Replace {replaceWith.fileName}?</span>
+              <div className="row-wrap">
+                <Button
+                  variant="primary"
+                  size="sm"
+                  disabled={importing}
+                  onClick={() => void sendImport(new File([replaceWith.html], replaceWith.fileName), true)}
+                >
+                  Replace
+                </Button>
+                <Button variant="ghost" size="sm" onClick={() => setReplaceWith(null)}>
+                  Cancel
+                </Button>
+              </div>
+            </>
+          ) : (
+            <span className="error-line">{importError}</span>
+          )}
+        </div>
+      )}
 
       {effectsError && <p className="error-line">{effectsError}</p>}
 

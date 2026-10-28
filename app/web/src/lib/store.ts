@@ -11,6 +11,7 @@ import type { Status } from "@/proto/Status";
 import type { FansStatus } from "@/proto/FansStatus";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { EffectSummary } from "@/proto/EffectSummary";
+import type { FailedEffect } from "@/proto/FailedEffect";
 import type { Layout } from "@/proto/Layout";
 import type { RenderState } from "@/proto/RenderState";
 import type { Settings } from "@/proto/Settings";
@@ -48,6 +49,8 @@ export interface Snap {
   devicesError: string | null;
   effects: EffectSummary[] | null;
   effectsError: string | null;
+  /** The user effect files that did not parse. */
+  effectsFailed: FailedEffect[];
   layouts: Layout[] | null;
   activeLayout: string | null;
   layoutsError: string | null;
@@ -70,6 +73,7 @@ let snap: Snap = {
   devicesError: null,
   effects: null,
   effectsError: null,
+  effectsFailed: [],
   layouts: null,
   activeLayout: null,
   layoutsError: null,
@@ -146,7 +150,7 @@ export async function refreshDevices(): Promise<void> {
 export async function refreshEffects(): Promise<void> {
   try {
     const r = await api.effects();
-    patchSnap({ effects: r.effects, effectsError: null });
+    patchSnap({ effects: r.effects, effectsFailed: r.failed ?? [], effectsError: null });
   } catch (e) {
     patchSnap({ effectsError: messageOf(e) });
   }

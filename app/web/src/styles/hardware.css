@@ -368,27 +368,57 @@ button.chip::before,
   height: 32px;
 }
 
-.slider-track {
+.slider-track,
+.slider-fill,
+.slider-floor {
+  position: absolute;
+  top: 50%;
   height: 4px;
+  transform: translateY(-50%);
   border-radius: 2px;
+  pointer-events: none;
+}
+
+.slider-track {
+  left: 0;
+  right: 0;
   background: var(--sunk);
   box-shadow: var(--well), inset 0 0 0 1px var(--line);
 }
 
+/* The fill runs from the slot's end to the cap, so the two always meet. */
 .slider-fill {
-  height: 4px;
-  border-radius: 2px;
+  left: 0;
+  width: calc(100% - var(--cap-w));
   background: var(--live);
-  transition:
-    transform 260ms var(--ease),
-    background-color var(--release) var(--ease);
+  transform: translateY(-50%) translateX(calc(var(--cap-w) / 2)) scaleX(var(--p));
+  transform-origin: left center;
+  transition: transform 260ms var(--ease);
+}
+
+/* While the pointer is down the fill follows the pointer exactly: no lag. */
+.slider[data-dragging="true"] .slider-fill {
+  transition: none;
+}
+
+/* The floor a fan may not go under: a band under the slot. */
+.slider-floor {
+  left: 0;
+  width: calc(var(--f) * (100% - var(--cap-w)));
+  height: 12px;
+  border-radius: 0;
+  background: color-mix(in srgb, var(--down) 26%, transparent);
+  transform: translateY(-50%) translateX(calc(var(--cap-w) / 2));
 }
 
 /* The cap: a small flat key with one line across it. */
-.slider input::-webkit-slider-thumb {
-  width: 14px;
+.slider-cap {
+  position: absolute;
+  top: 50%;
+  left: calc(var(--p) * (100% - var(--cap-w)) + var(--cap-w) / 2);
+  width: var(--cap-w);
   height: 24px;
-  margin-top: 4px;
+  transform: translate(-50%, -50%);
   border: 1px solid var(--line-2);
   border-radius: 4px;
   background-color: var(--raised);
@@ -397,32 +427,61 @@ button.chip::before,
   background-position: center;
   background-repeat: no-repeat;
   box-shadow: 0 var(--skirt-h) 0 var(--skirt);
-  transform: none;
+  pointer-events: none;
   transition:
+    left 260ms var(--ease),
     box-shadow var(--release) var(--ease),
     background-color var(--release) var(--ease);
 }
 
-.slider:hover input::-webkit-slider-thumb {
-  transform: none;
-  box-shadow: 0 var(--skirt-h) 0 var(--skirt);
+.slider[data-dragging="true"] .slider-cap {
+  transition:
+    left 0ms var(--ease),
+    box-shadow var(--press-in) var(--ease),
+    background-color var(--release) var(--ease);
+}
+
+.slider:hover .slider-cap {
   background-color: color-mix(in oklab, var(--raised) 90%, var(--ink));
 }
 
 /* Held: the cap is pressed onto the slot. */
-.slider[data-dragging="true"] input::-webkit-slider-thumb {
-  transform: none;
+.slider[data-dragging="true"] .slider-cap {
   box-shadow: 0 0 0 var(--skirt);
-  transition-duration: var(--press-in);
 }
 
-.slider input::-moz-range-thumb {
-  width: 14px;
-  height: 24px;
+/* The cap takes the focus ring: it is the part the pointer holds. */
+.slider:focus-visible .slider-cap {
+  box-shadow:
+    0 0 0 2px var(--focus),
+    0 var(--skirt-h) 0 var(--skirt);
+}
+
+.slider[data-disabled="true"] .slider-cap {
+  box-shadow: none;
+}
+
+/* ---------- the swatch: a chip of the colour it names ---------- */
+
+.color-swatch {
   border: 1px solid var(--line-2);
-  border-radius: 4px;
-  background: var(--raised);
+  border-radius: var(--r-sm);
+  background-color: var(--c);
+  background-image: none;
   box-shadow: 0 var(--skirt-h) 0 var(--skirt);
+  transition:
+    border-color var(--release) var(--ease),
+    background-color var(--release) var(--ease),
+    box-shadow var(--release) var(--ease);
+}
+
+.color-swatch:hover {
+  border-color: var(--mute);
+}
+
+.color-swatch:active {
+  box-shadow: 0 0 0 var(--skirt);
+  transition-duration: var(--press-in);
 }
 
 /* ---------- the list that drops from a select ---------- */

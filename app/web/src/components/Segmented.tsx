@@ -26,11 +26,13 @@ export function Segmented<T extends string>({
   options,
   value,
   label,
+  disabled,
   onChange,
 }: {
   options: SegOption<T>[];
   value: T;
   label: string;
+  disabled?: boolean;
   onChange: (v: T) => void;
 }) {
   const refs = useRef<(HTMLButtonElement | null)[]>([]);
@@ -115,6 +117,7 @@ export function Segmented<T extends string>({
             aria-checked={checked}
             tabIndex={checked ? 0 : -1}
             className="seg-item"
+            disabled={disabled}
             onClick={() => onChange(o.value)}
           >
             {o.icon}

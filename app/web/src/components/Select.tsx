@@ -24,11 +24,13 @@ export function Select({
   label,
   options,
   onChange,
+  disabled,
 }: {
   value: string;
   label: string;
   options: SelectOption[];
   onChange: (v: string) => void;
+  disabled?: boolean;
 }) {
   const id = useId();
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -41,6 +43,7 @@ export function Select({
   const chosen = Math.max(0, options.findIndex((o) => o.value === value));
 
   const show = (at = chosen) => {
+    if (disabled) return;
     setActive(at);
     setOpen(true);
   };
@@ -144,6 +147,7 @@ export function Select({
         aria-expanded={open}
         aria-controls={`${id}-list`}
         aria-activedescendant={open ? `${id}-${active}` : undefined}
+        disabled={disabled}
         onClick={() => (open ? setOpen(false) : show())}
         onKeyDown={onKey}
       >

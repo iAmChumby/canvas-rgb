@@ -31,6 +31,7 @@ import {
   type DemoEffect,
   type Props,
 } from "@/lib/fixtures";
+import { PERIPHERALS, type DemoPeripheral } from "@/lib/peripheralFixtures";
 import type { Status } from "@/proto/Status";
 import type { Layout } from "@/proto/Layout";
 import type { FanMode } from "@/proto/FanMode";
@@ -42,11 +43,17 @@ import type { Settings } from "@/proto/Settings";
 import type { ExportBundle } from "@/proto/ExportBundle";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { PropValue } from "@/proto/PropValue";
+import type { PropKind } from "@/proto/PropKind";
 import type { DisplayConfig } from "@/proto/DisplayConfig";
 import type { DisplayInfo } from "@/proto/DisplayInfo";
 import type { DisplayStatus } from "@/proto/DisplayStatus";
 import type { DisplayUnit } from "@/proto/DisplayUnit";
 import type { DisplayValue } from "@/proto/DisplayValue";
+import type { PeripheralAccess } from "@/proto/PeripheralAccess";
+import type { PeripheralDetail } from "@/proto/PeripheralDetail";
+import type { ImportEffect } from "@/proto/ImportEffect";
+import type { ImportEffectResponse } from "@/proto/ImportEffectResponse";
+import type { FailedEffect } from "@/proto/FailedEffect";
 
 const BASE = "/api/v1";
 const APP_VERSION = "0.1.0";
@@ -78,6 +85,12 @@ interface DemoState {
   /** The numeric display's saved config, and the value last PUT to its value route. */
   displayConfig: DisplayConfig | null;
   displayApiValue: number | null;
+  /** The peripherals the adapters see, with what they hold. */
+  peripherals: DemoPeripheral[];
+  /** What the daemon may do with each peripheral. Nothing is on until the owner says so. */
+  peripheralAccess: Record<string, PeripheralAccess>;
+  /** The user effect files that did not parse. */
+  failedEffects: FailedEffect[];
 }
 
 function initialState(): DemoState {
@@ -110,6 +123,16 @@ function initialState(): DemoState {
     // No display has a saved source yet: the daemon leaves the pump head alone.
     displayConfig: null,
     displayApiValue: null,
+    // The daemon never opens a device it was not told to: both start with reads off.
+    peripherals: PERIPHERALS.map((p) => ({ ...p, values: { ...p.values } })),
+    peripheralAccess: {},
+    // A user effect file that did not parse: the author sees why.
+    failedEffects: [
+      {
+        file: "neon-grid.html",
+        error: "the effect does not parse: effect html:neon-grid has no script",
+      },
+    ],
   };
 }
 
@@ -379,6 +402,166 @@ function validateDisplay(pathId: string, config: DisplayConfig): void {
   }
 }
 
+// ---- peripherals ----
+
+/** The daemon's own words when a peripheral's access is asked for. */
+const READS_OFF = "reads are off for this device";
+
+/**
+ * Checks one value against the property's kind, the way the adapter does: the key must be
+ * one the device has, it must be writable, and the value must be inside its range.
+ */
+function checkPeripheralValue(device: DemoPeripheral, key: string, value: PropValue): void {
+  const def = device.schema.sections.flatMap((s) => s.properties).find((p) => p.key === key);
+  if (!def) fail(422, "validation", `the device has no setting called ${key}`);
+  if (device.schema.read_only.includes(key)) {
+    fail(422, "validation", `${key} is read-only: this adapter cannot write it yet`);
+  }
+  const kind = def.kind;
+  if (kind.type === "number" && value.type === "number") {
+    if (value.value < kind.min || value.value > kind.max) {
+      fail(422, "validation", `${key} is ${value.value}; it takes ${kind.min} to ${kind.max}`);
+    }
+    if (kind.step > 0 && ((value.value - kind.min) / kind.step) % 1 !== 0) {
+      fail(422, "validation", `${key} is ${value.value}; it takes steps of ${kind.step}`);
+    }
+    return;
+  }
+  if (kind.type === "choice" && value.type === "choice") {
+    if (!kind.options.includes(value.value)) {
+      fail(422, "validation", `${key} has no option ${value.value}`);
+    }
+    return;
+  }
+  if (kind.type === "color" && value.type === "color") return;
+  if (kind.type === "bool" && value.type === "bool") return;
+  if (kind.type === "hue" && value.type === "hue") return;
+  fail(422, "validation", `${key} does not take that kind of value`);
+}
+
+// ---- effect import ----
+
+/** The daemon's own limit on an imported effect. */
+const IMPORT_MAX_BYTES = 1024 * 1024;
+
+/** The names Windows reserves, as the daemon's file name check lists them. */
+const RESERVED_NAMES = [
+  "con",
+  "prn",
+  "aux",
+  "nul",
+  "com1",
+  "com2",
+  "com3",
+  "com4",
+  "com5",
+  "com6",
+  "com7",
+  "com8",
+  "com9",
+  "lpt1",
+  "lpt2",
+  "lpt3",
+  "lpt4",
+  "lpt5",
+  "lpt6",
+  "lpt7",
+  "lpt8",
+  "lpt9",
+];
+
+/**
+ * The file name check the daemon runs before it writes anything: letters, digits, spaces,
+ * `-`, `_` and `.`, ending in `.html`, and no folder and no reserved name.
+ */
+function checkFileName(fileName: string): string {
+  const trimmed = fileName.trim();
+  if (trimmed.length === 0) fail(422, "validation", "the file name is empty");
+  if (trimmed !== fileName) fail(422, "validation", `"${fileName}" has a space at either end`);
+  for (const ch of trimmed) {
+    const ok = /[a-zA-Z0-9]/.test(ch) || ch === " " || ch === "-" || ch === "_" || ch === ".";
+    if (!ok) {
+      fail(422, "validation", `"${fileName}" may only hold letters, digits, spaces, '-', '_' and '.'`);
+    }
+  }
+  if (trimmed.includes("..")) fail(422, "validation", `"${fileName}" must not hold '..'`);
+  if (!trimmed.toLowerCase().endsWith(".html")) {
+    fail(422, "validation", `"${fileName}" must end in .html`);
+  }
+  const stem = trimmed.slice(0, trimmed.length - ".html".length);
+  if (stem.length === 0) fail(422, "validation", `"${fileName}" needs a name before .html`);
+  if (stem.endsWith(" ") || stem.endsWith(".")) {
+    fail(422, "validation", `"${fileName}" must not end in a space or a dot`);
+  }
+  const base = stem.split(".")[0] ?? stem;
+  if (RESERVED_NAMES.includes(base.toLowerCase())) {
+    fail(422, "validation", `"${fileName}" is a name Windows keeps for itself`);
+  }
+  return trimmed;
+}
+
+/**
+ * The demo's small reader of a SignalRGB-format HTML effect: the title, the property metas
+ * and the script. A file with no script does not parse, exactly as the daemon says.
+ */
+function parseUserEffect(id: string, html: string): DemoEffect {
+  const script = /<script\b[^>]*>[\s\S]*?<\/script>/i.exec(html);
+  if (!script) {
+    fail(422, "validation", `the effect does not parse: effect ${id} has no script`);
+  }
+  const title = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1]?.trim() ?? "";
+  const name = title.length > 0 ? title : id.slice("html:".length);
+  const properties: { key: string; label: string; kind: PropKind }[] = [];
+  for (const match of html.matchAll(/<meta\b([^>]*)>/gi)) {
+    const attrs = match[1] ?? "";
+    const property = /\bproperty\s*=\s*"([^"]*)"/i.exec(attrs)?.[1];
+    if (!property) continue;
+    const label = /\blabel\s*=\s*"([^"]*)"/i.exec(attrs)?.[1] ?? property;
+    const type = /\btype\s*=\s*"([^"]*)"/i.exec(attrs)?.[1] ?? "number";
+    properties.push({ key: property, label, kind: kindFromType(type) });
+  }
+  const defaults: Props = {};
+  for (const p of properties) defaults[p.key] = defaultValueOf(p.kind);
+  const schema = {
+    id,
+    name,
+    description: "A user effect.",
+    needs: { screen: false, audio: false },
+    properties: properties.map((p) => ({ key: p.key, label: p.label, kind: p.kind })),
+    presets: [],
+  };
+  return {
+    schema,
+    defaults,
+    summary: { id, name, description: schema.description, needs: schema.needs, favorite: false },
+  };
+}
+
+/** The kind a property meta names. */
+function kindFromType(type: string): PropKind {
+  if (type === "color") return { type: "color", default: "#6000fc" };
+  if (type === "bool") return { type: "bool", default: false };
+  if (type === "hue") return { type: "hue", default: 0 };
+  if (type === "choice") return { type: "choice", options: ["a", "b"], default: "a" };
+  return { type: "number", min: 0, max: 100, step: 1, default: 0 };
+}
+
+/** The value a kind starts at. */
+function defaultValueOf(kind: PropKind): PropValue {
+  switch (kind.type) {
+    case "color":
+      return { type: "color", value: kind.default };
+    case "number":
+      return { type: "number", value: kind.default };
+    case "bool":
+      return { type: "bool", value: kind.default };
+    case "choice":
+      return { type: "choice", value: kind.default };
+    case "hue":
+      return { type: "hue", value: kind.default };
+  }
+}
+
 // ---- router ----
 
 export async function demoRequest(method: string, path: string, body: unknown): Promise<unknown> {
@@ -461,7 +644,24 @@ export async function demoRequest(method: string, path: string, body: unknown): 
   if (head === "effects") {
     if (seg.length === 1 && method === "GET") {
       const list = Object.values(s.effects).map((e) => ({ ...e.summary, favorite: s.favorites.has(e.schema.id) }));
-      return { effects: list, active: s.activeEffect };
+      return { effects: list, active: s.activeEffect, failed: s.failedEffects };
+    }
+    if (seg[1] === "import" && method === "POST") {
+      const req = body as ImportEffect;
+      const fileName = checkFileName(req.file_name);
+      if (req.html.length > IMPORT_MAX_BYTES) {
+        fail(422, "validation", `the effect is ${req.html.length} bytes; the limit is ${IMPORT_MAX_BYTES}`);
+      }
+      const id = `html:${fileName.slice(0, fileName.length - ".html".length)}`;
+      const existing = s.effects[id];
+      if (existing && !req.replace) {
+        fail(409, "conflict", `${req.file_name} is already installed; ask for a replace to overwrite it`);
+      }
+      const effect = parseUserEffect(id, req.html);
+      s.effects[id] = effect;
+      s.saved[id] = { ...effect.defaults };
+      const answer: ImportEffectResponse = { effect: { ...effect.summary }, replaced: !!existing };
+      return answer;
     }
     if (seg[1] === "active" && seg[2] === "props" && method === "PATCH") {
       setActiveProps(body as Props);
@@ -503,6 +703,70 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       if (fav) s.favorites.add(id);
       else s.favorites.delete(id);
       return { ok: true };
+    }
+    if (seg.length === 2 && method === "DELETE") {
+      if (!id.startsWith("html:")) {
+        fail(422, "validation", `${id} is not a user effect; only html: effects can be deleted`);
+      }
+      const e = s.effects[id];
+      if (!e) fail(404, "not_found", `no user effect with the id ${id}`);
+      delete s.effects[id];
+      delete s.saved[id];
+      s.favorites.delete(id);
+      if (s.activeEffect === id) s.activeEffect = null;
+      return { ok: true };
+    }
+    return bad();
+  }
+
+  if (head === "peripherals") {
+    if (seg.length === 1 && method === "GET") {
+      return { peripherals: s.peripherals.map((p) => ({ ...p.info })) };
+    }
+    const id = seg[1] ?? "";
+    const device = s.peripherals.find((p) => p.info.id === id);
+    if (!device) fail(404, "not_found", `no peripheral with the id ${id}`);
+    const access = s.peripheralAccess[id] ?? { reads: false, writes: false };
+    if (seg.length === 2 && method === "GET") {
+      const detail: PeripheralDetail = {
+        info: { ...device.info },
+        schema: device.schema,
+        values: {},
+        access,
+        problem: READS_OFF,
+      };
+      if (access.reads) {
+        // A mouse that is asleep answers nothing: the adapter says so.
+        if (scenario().has("asleep") && device.info.kind === "mouse") {
+          detail.problem = "the mouse is asleep: move it and try again";
+        } else {
+          detail.values = { ...device.values };
+          detail.problem = null;
+        }
+      }
+      return detail;
+    }
+    if (seg.length === 2 && method === "PATCH") {
+      if (!access.writes) {
+        fail(422, "validation", `config writes are off for ${id}: turn them on before writing`);
+      }
+      if (!access.reads) {
+        fail(422, "validation", `config writes need reads for ${id}: turn reads on before writing`);
+      }
+      const props = body as Props;
+      for (const [key, value] of Object.entries(props)) {
+        checkPeripheralValue(device, key, value);
+      }
+      Object.assign(device.values, props);
+      return props;
+    }
+    if (seg.length === 3 && seg[2] === "access" && method === "PUT") {
+      const next = body as PeripheralAccess;
+      if (next.writes && !next.reads) {
+        fail(422, "validation", "config writes need reads: turn reads on too");
+      }
+      s.peripheralAccess[id] = { reads: !!next.reads, writes: !!next.writes };
+      return s.peripheralAccess[id];
     }
     return bad();
   }

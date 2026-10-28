@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import type { Icon } from "@phosphor-icons/react";
-import { Cpu, Fan, Gear, SquaresFour, Sparkle, ThermometerSimple } from "@phosphor-icons/react";
+import { Cpu, Fan, GameController, Gear, SquaresFour, Sparkle, ThermometerSimple } from "@phosphor-icons/react";
 import { useToasts } from "@/components/Toast";
 import { BrandMark, Wordmark } from "@/components/BrandMark";
 
@@ -18,6 +18,7 @@ export const NAV: NavItem[] = [
   { href: "/effects/", label: "Effects", icon: Sparkle },
   { href: "/devices/", label: "Devices", icon: Cpu },
   { href: "/displays/", label: "Displays", icon: ThermometerSimple },
+  { href: "/peripherals/", label: "Peripherals", icon: GameController },
   { href: "/fans/", label: "Fans", icon: Fan },
   { href: "/settings/", label: "Settings", icon: Gear },
 ];

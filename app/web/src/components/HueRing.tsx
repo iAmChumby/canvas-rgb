@@ -24,11 +24,13 @@ function arcPath(cx: number, cy: number, rOuter: number, rInner: number, a0: num
 export function HueRing({
   value,
   label,
+  disabled,
   onChange,
   onCommit,
 }: {
   value: number;
   label: string;
+  disabled?: boolean;
   onChange: (deg: number) => void;
   onCommit?: (deg: number) => void;
 }) {
@@ -45,19 +47,23 @@ export function HueRing({
   };
 
   const onDown = (e: PointerEvent<HTMLDivElement>) => {
+    if (disabled) return;
     e.currentTarget.setPointerCapture(e.pointerId);
     onChange(angleAt(e));
   };
   const onMove = (e: PointerEvent<HTMLDivElement>) => {
+    if (disabled) return;
     if (e.currentTarget.hasPointerCapture(e.pointerId)) onChange(angleAt(e));
   };
   const onUp = (e: PointerEvent<HTMLDivElement>) => {
+    if (disabled) return;
     if (e.currentTarget.hasPointerCapture(e.pointerId)) {
       e.currentTarget.releasePointerCapture(e.pointerId);
       onCommit?.(angleAt(e));
     }
   };
   const onKey = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (disabled) return;
     const step = e.shiftKey ? 15 : 3;
     let next: number | null = null;
     if (e.key === "ArrowRight" || e.key === "ArrowUp") next = (hue + step) % 360;
@@ -92,6 +98,7 @@ export function HueRing({
       aria-valuemin={0}
       aria-valuemax={360}
       aria-valuenow={Math.round(hue)}
+      aria-disabled={disabled ? true : undefined}
       onPointerDown={onDown}
       onPointerMove={onMove}
       onPointerUp={onUp}

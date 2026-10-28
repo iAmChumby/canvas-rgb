@@ -14,8 +14,13 @@ import type { IdentifyRequest } from "@/proto/IdentifyRequest";
 import type { EffectsResponse } from "@/proto/EffectsResponse";
 import type { EffectDetail } from "@/proto/EffectDetail";
 import type { ActivateEffect } from "@/proto/ActivateEffect";
+import type { ImportEffect } from "@/proto/ImportEffect";
+import type { ImportEffectResponse } from "@/proto/ImportEffectResponse";
 import type { SetFavorite } from "@/proto/SetFavorite";
 import type { Props } from "@/proto/props";
+import type { PeripheralDetail } from "@/proto/PeripheralDetail";
+import type { PeripheralAccess } from "@/proto/PeripheralAccess";
+import type { PeripheralRow } from "@/lib/peripherals";
 import type { LayoutsResponse } from "@/proto/LayoutsResponse";
 import type { Layout } from "@/proto/Layout";
 import type { SetActiveLayout } from "@/proto/SetActiveLayout";
@@ -53,6 +58,20 @@ export const api = {
   patchActiveProps: (props: Props) => request<unknown>("PATCH", routes.effectActiveProps, props),
   setFavorite: (id: string, body: SetFavorite) =>
     request<unknown>("PUT", routes.effectFavorite(id), body),
+  /** Adds a user effect from an HTML file the reader chose. */
+  importEffect: (body: ImportEffect) => request<ImportEffectResponse>("POST", routes.effectsImport, body),
+  /** Removes a user effect. Only the `html:` ids can go. */
+  deleteEffect: (id: string) => request<unknown>("DELETE", routes.effect(id)),
+
+  /** Every peripheral the adapters see. The list opens nothing. */
+  peripherals: () => request<{ peripherals: PeripheralRow[] }>("GET", routes.peripherals),
+  /** What one peripheral is, what it has and what it holds now. */
+  peripheral: (id: string) => request<PeripheralDetail>("GET", routes.peripheral(id)),
+  /** Writes the changed keys to the device. Only while writes are on. */
+  patchPeripheral: (id: string, body: Props) => request<Props>("PATCH", routes.peripheral(id), body),
+  /** What the daemon may do with one peripheral. */
+  putPeripheralAccess: (id: string, body: PeripheralAccess) =>
+    request<PeripheralAccess>("PUT", routes.peripheralAccess(id), body),
 
   layouts: () => request<LayoutsResponse>("GET", routes.layouts),
   putLayout: (id: string, body: Layout) => request<Layout>("PUT", routes.layout(id), body),

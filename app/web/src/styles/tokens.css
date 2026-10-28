@@ -22,7 +22,7 @@
   --line-2: rgba(255, 255, 255, 0.14);
   --hover: rgba(255, 255, 255, 0.05);
   --press: rgba(255, 255, 255, 0.1);
-  --dot: rgba(255, 255, 255, 0.05);
+  --dot: rgba(255, 255, 255, 0.15);
   --scrim: rgba(0, 0, 0, 0.6);
 
   /* ink */
@@ -62,6 +62,21 @@
   --live: hsl(var(--live-h) 78% 72%);
   --live-soft: hsl(var(--live-h) 55% 55% / 0.16);
 
+  /* the colour field: the washes over the hue in the picker, and the hue ramp itself.
+     These are the colour model, not the theme, so they are the same in both. */
+  --field-white: rgb(255 255 255);
+  --field-black: rgb(0 0 0);
+  --hue-ramp: linear-gradient(
+    90deg,
+    hsl(0 100% 50%),
+    hsl(60 100% 50%),
+    hsl(120 100% 50%),
+    hsl(180 100% 50%),
+    hsl(240 100% 50%),
+    hsl(300 100% 50%),
+    hsl(360 100% 50%)
+  );
+
   /* type: Schibsted Grotesk for UI and display, JetBrains Mono for every figure */
   --fu: "Schibsted Grotesk Variable", "Schibsted Grotesk", sans-serif;
   --fm: "JetBrains Mono Variable", "JetBrains Mono", monospace;
@@ -86,6 +101,8 @@
   --rail-w: 200px;
   --rail-w-icon: 64px;
   --control-h: 32px;
+  /* the fader's cap: it travels in the slot, and the fill ends under it */
+  --cap-w: 14px;
 
   /* radius: hardware-soft corners (Luke, 2026-10-27: "rounded corners", a sleek piece of hardware) */
   --r-sm: 8px;
@@ -113,15 +130,15 @@
 :root[data-theme="light"] {
   color-scheme: light;
   --pop: 0 12px 32px rgba(15, 18, 24, 0.16);
-  --g1: #f3f4f6;
-  --sunk: #e7e9ee;
+  --g1: #e8eaef;
+  --sunk: #d9dde4;
   --panel: #ffffff;
-  --raised: #f0f1f4;
-  --line: rgba(15, 18, 24, 0.09);
-  --line-2: rgba(15, 18, 24, 0.2);
-  --hover: rgba(15, 18, 24, 0.05);
-  --press: rgba(15, 18, 24, 0.1);
-  --dot: rgba(15, 18, 24, 0.07);
+  --raised: #f0f2f5;
+  --line: rgba(15, 18, 24, 0.16);
+  --line-2: rgba(15, 18, 24, 0.26);
+  --hover: rgba(15, 18, 24, 0.06);
+  --press: rgba(15, 18, 24, 0.12);
+  --dot: rgba(15, 18, 24, 0.2);
   --scrim: rgba(15, 18, 24, 0.35);
   --ink: #15171a;
   --dim: #3c4149;
@@ -144,15 +161,15 @@
   :root:not([data-theme="dark"]) {
     color-scheme: light;
     --pop: 0 12px 32px rgba(15, 18, 24, 0.16);
-    --g1: #f3f4f6;
-    --sunk: #e7e9ee;
+    --g1: #e8eaef;
+    --sunk: #d9dde4;
     --panel: #ffffff;
-    --raised: #f0f1f4;
-    --line: rgba(15, 18, 24, 0.09);
-    --line-2: rgba(15, 18, 24, 0.2);
-    --hover: rgba(15, 18, 24, 0.05);
-    --press: rgba(15, 18, 24, 0.1);
-    --dot: rgba(15, 18, 24, 0.07);
+    --raised: #f0f2f5;
+    --line: rgba(15, 18, 24, 0.16);
+    --line-2: rgba(15, 18, 24, 0.26);
+    --hover: rgba(15, 18, 24, 0.06);
+    --press: rgba(15, 18, 24, 0.12);
+    --dot: rgba(15, 18, 24, 0.2);
     --scrim: rgba(15, 18, 24, 0.35);
     --ink: #15171a;
     --dim: #3c4149;
