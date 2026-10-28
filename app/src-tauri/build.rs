@@ -15,5 +15,8 @@ fn main() {
         )
         .expect("write the placeholder app/web/out/index.html");
     }
+    // The exe's icon resource (taskbar, Start menu, Installed apps) is embedded here. Without
+    // this, a changed icon file did not re-run the script and the old icon shipped.
+    println!("cargo:rerun-if-changed=icons");
     tauri_build::build();
 }
