@@ -13,6 +13,12 @@ path = "src/lib.rs"
 name = "canvas-rgb-svc"
 path = "src/main.rs"
 
+# Read-only BIOS fan-curve probe (run by hand, elevated, with the service stopped). `test = true`
+# so its decoder tests run with `cargo test -p canvas-svc`.
+[[example]]
+name = "bios_curve_probe"
+test = true
+
 [dependencies]
 canvas-proto.workspace = true
 canvas-adapters.workspace = true

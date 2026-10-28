@@ -261,6 +261,13 @@ impl<P: PortIo> Nct6687<P> {
         self.io.read_port(self.base + 6)
     }
 
+    /// One EC register read: the page and index select, then the data read. The same primitive
+    /// every read in this driver uses, exposed for read-only tools such as the
+    /// `bios_curve_probe` example. It never writes anything but the page and index latch.
+    pub fn read_register(&mut self, reg: u16) -> io::Result<u8> {
+        self.ec_read(reg)
+    }
+
     fn ec_write(&mut self, reg: u16, value: u8) -> io::Result<()> {
         self.ec_select(reg)?;
         self.io.write_port(self.base + 6, value)
@@ -469,6 +476,17 @@ mod tests {
     fn a_wrong_hardware_monitor_base_is_refused() {
         let err = Nct6687::detect(FakeChip::with_base(MSI_ALT1_MAP, 0xA30), MSI_ALT1_MAP).err().unwrap();
         assert!(matches!(err, ChipError::WrongBase { found: 0xA30, .. }), "{err}");
+    }
+
+    #[test]
+    fn read_register_is_the_driver_read_and_writes_no_register() {
+        let fake = FakeChip::new(MSI_ALT1_MAP);
+        let mut chip = Nct6687::detect(fake.clone(), MSI_ALT1_MAP).unwrap();
+        chip.ec_write(0xC40, 0x66).unwrap();
+        let writes_before = fake.writes();
+        assert_eq!(chip.read_register(0xC40).unwrap(), 0x66);
+        assert_eq!(chip.read_register(0xC40).unwrap(), chip.ec_read(0xC40).unwrap());
+        assert_eq!(fake.writes(), writes_before, "a read must not log a register write");
     }
 
     #[test]
