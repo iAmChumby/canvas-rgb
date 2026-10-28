@@ -331,7 +331,13 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         .ok_or_else(|| std::io::Error::other("the path has no folder"))?;
     std::fs::create_dir_all(dir)?;
     let temp = temp_path(path)?;
-    std::fs::write(&temp, bytes)?;
+    {
+        use std::io::Write as _;
+        let mut file = std::fs::File::create(&temp)?;
+        file.write_all(bytes)?;
+        // Data on disk before the rename commits, so a power loss cannot leave an empty target.
+        file.sync_all()?;
+    }
     match std::fs::rename(&temp, path) {
         Ok(()) => Ok(()),
         Err(e) => {

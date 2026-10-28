@@ -30,7 +30,10 @@ impl RainbowWave {
             "A rainbow band that travels across the canvas.",
         )
         .number("speed", "Speed", 0.0, 100.0, 1.0, 30.0)
-        .number("width", "Width", 5.0, 200.0, 1.0, 60.0)
+        // Width is in logical units, as it always was: a saved 60 stays a 60-unit band. The
+        // default (190, about 60 % of the 320-unit canvas) is what keeps a new effect from
+        // being a thin sliver on black.
+        .number("width", "Width", 5.0, 200.0, 1.0, 190.0)
         .number("direction", "Direction", 0.0, 360.0, 1.0, 0.0)
         .number("cycles", "Cycles", 1.0, 8.0, 1.0, 1.0)
         .preset(
@@ -186,5 +189,50 @@ mod tests {
                 assert!((0.0..=1.0).contains(v), "{p:?}");
             }
         }
+    }
+
+    /// At the defaults the band spans most of a canvas width, as the thumbnail shows: black
+    /// pixels are a minority of the frames, not nine in ten.
+    #[test]
+    fn default_band_is_not_a_thin_sliver_on_black() {
+        let mut e = RainbowWave::new();
+        let mut canvas = Canvas::new(320, 200);
+        let (mut black, mut total) = (0usize, 0usize);
+        for _ in 0..48 {
+            e.update(1.0 / 12.0, &mut canvas, &Inputs::default());
+            black += canvas.pixels.iter().filter(|p| p.iter().all(|v| *v < 0.02)).count();
+            total += canvas.pixels.len();
+        }
+        let fraction = black as f32 / total as f32;
+        assert!(fraction < 0.7, "{:.0}% of the pixels are black", fraction * 100.0);
+    }
+
+    fn black_fraction(props: &[(&str, f64)]) -> f32 {
+        let mut e = RainbowWave::new();
+        let mut p = e.schema.defaults();
+        for (k, v) in props {
+            p.insert((*k).into(), canvas_proto::PropValue::Number(*v));
+        }
+        e.init(&p);
+        let mut canvas = Canvas::new(320, 200);
+        let (mut black, mut total) = (0usize, 0usize);
+        for _ in 0..48 {
+            e.update(1.0 / 12.0, &mut canvas, &Inputs::default());
+            black += canvas.pixels.iter().filter(|p| p.iter().all(|v| *v < 0.02)).count();
+            total += canvas.pixels.len();
+        }
+        black as f32 / total as f32
+    }
+
+    /// A saved width keeps its old meaning (logical units): 60 stays the thin band it was,
+    /// and the "Fast sweep" (40) and "Wide arc" (150) presets look as they always did.
+    #[test]
+    fn saved_widths_keep_their_old_meaning() {
+        let thin = black_fraction(&[("width", 60.0)]);
+        assert!(thin > 0.8, "a saved 60 is a 60-unit band, got {:.0}% black", thin * 100.0);
+        let fast = black_fraction(&[("width", 40.0)]);
+        assert!(fast > thin, "a 40-unit band is thinner still");
+        let wide = black_fraction(&[("width", 150.0)]);
+        assert!(wide < 0.8 && wide > black_fraction(&[]), "150 is wider than 60 and narrower than the new default");
     }
 }

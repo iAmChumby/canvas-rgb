@@ -48,8 +48,20 @@ pub fn create_effect(
 ///
 /// Returns an error when the effect id is unknown.
 pub async fn apply_effect(app: &Arc<App>, id: &str, props: &Props) -> Result<(), String> {
-    let mut effect = create_effect(&app.user_effects, id)?;
-    effect.init(props);
+    // Loading an HTML effect runs its scripts (up to 2 s of CPU), so it must not run on an
+    // async worker.
+    let effect = {
+        let app = Arc::clone(app);
+        let id = id.to_string();
+        let props = props.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut effect = create_effect(&app.user_effects, &id)?;
+            effect.init(&props);
+            Ok::<_, String>(effect)
+        })
+        .await
+        .map_err(|e| format!("the effect load task failed: {e}"))??
+    };
 
     // The captures follow the effect's `needs`.
     let needs = effect.schema().needs;

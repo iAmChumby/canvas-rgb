@@ -817,3 +817,92 @@ fn dump_lumen_seed_1000() {
     }
     std::fs::write(&path, bytes).expect("write the dump");
 }
+
+#[test]
+fn set_timeout_honours_its_delay() {
+    // A browser-style loop: step() re-arms itself every 1000 ms. After one second of frames
+    // it has run once or twice, never once per frame. The canvas turns red once it has run
+    // three times.
+    let html = r##"<head><title>T</title></head>
+<body><canvas id="c" width="4" height="4"></canvas></body>
+<script>
+  var ctx = document.getElementById("c").getContext("2d");
+  var n = 0;
+  function step() { n++; setTimeout(step, 1000); }
+  step();
+  function draw() {
+    ctx.fillStyle = n >= 3 ? "#ff0000" : "#00ff00";
+    ctx.fillRect(0, 0, 4, 4);
+    requestAnimationFrame(draw);
+  }
+  requestAnimationFrame(draw);
+</script>"##;
+    let mut effect = HtmlEffect::from_source("t", html, &Props::new()).expect("loads");
+    let canvas = run(&mut effect, 60);
+    assert_eq!(pixels_near(&canvas, [255, 0, 0], 2), 0, "step() ran about once per frame");
+}
+
+#[test]
+fn the_load_budget_covers_all_scripts_together() {
+    // Time how long a counting loop takes here, then give the page four scripts that each
+    // take about 0.9 s: 3.6 s together, over the 2 s load budget.
+    fn page(iterations: u64, scripts: usize) -> String {
+        let one = format!("<script>for (var i = 0; i < {iterations}; i++) {{}}</script>");
+        format!("<head><title>T</title></head><body><canvas id=\"c\" width=\"4\" height=\"4\"></canvas></body>{}", one.repeat(scripts))
+    }
+    let probe = 3_000_000u64;
+    let start = std::time::Instant::now();
+    HtmlEffect::from_source("probe", &page(probe, 1), &Props::new()).expect("probe loads");
+    let per_iter = start.elapsed().as_secs_f64() / probe as f64;
+    let iterations = (0.9 / per_iter) as u64;
+    let result = HtmlEffect::from_source("t", &page(iterations, 4), &Props::new());
+    assert!(
+        matches!(result, Err(canvas_html::HtmlError::Timeout(_))),
+        "four 0.9 s scripts should exceed one shared 2 s budget"
+    );
+}
+
+#[test]
+fn a_script_that_allocates_without_limit_fails_cleanly() {
+    // About 640 MB of arrays: far over the 256 MB heap cap, small enough to run safely if
+    // there is no cap.
+    let html = r##"<head><title>T</title></head>
+<body><canvas id="c" width="4" height="4"></canvas></body>
+<script>
+  var keep = [];
+  for (var i = 0; i < 400; i++) { keep.push(new Array(100000).fill(0)); }
+</script>"##;
+    let result = HtmlEffect::from_source("t", html, &Props::new());
+    assert!(matches!(result, Err(canvas_html::HtmlError::Script(_))), "the heap cap should raise an error");
+}
+
+#[test]
+fn the_largest_allowed_canvas_can_be_read_back() {
+    // 4096 x 4096 is the biggest canvas the loader accepts; its getImageData buffer is 64 MB
+    // and must fit under the JS heap cap with headroom.
+    let html = r##"<head><title>T</title></head>
+<body><canvas id="c" width="4096" height="4096"></canvas></body>
+<script>
+  var ctx = document.getElementById("c").getContext("2d");
+  var img = ctx.getImageData(0, 0, 4096, 4096);
+  if (img.data.length !== 4096 * 4096 * 4) { throw new Error("short read " + img.data.length); }
+</script>"##;
+    let result = HtmlEffect::from_source("t", html, &Props::new());
+    assert!(result.is_ok(), "a max-size getImageData failed: {:?}", result.err());
+}
+
+#[test]
+fn a_throwing_timer_does_not_drop_the_timers_queued_behind_it() {
+    let html = r##"<head><title>T</title></head>
+<body><canvas id="c" width="4" height="4"></canvas></body>
+<script>
+  var ctx = document.getElementById("c").getContext("2d");
+  ctx.fillStyle = "#ff0000";
+  setTimeout(function () { throw new Error("first timer fails"); }, 0);
+  setTimeout(function () { ctx.fillRect(0, 0, 4, 4); }, 0);
+</script>"##;
+    let mut effect = HtmlEffect::from_source("t", html, &Props::new()).expect("loads");
+    let canvas = run(&mut effect, 4);
+    assert_eq!(effect.errors().len(), 1, "{:?}", effect.errors());
+    assert_eq!(pixels_near(&canvas, [255, 0, 0], 2), 320 * 200, "the second timer was dropped");
+}

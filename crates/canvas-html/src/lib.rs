@@ -288,6 +288,8 @@ impl HtmlEffect {
     /// Runs the script bodies in order.
     fn run_scripts(&mut self) -> Result<(), HtmlError> {
         let scripts = self.scripts.clone();
+        // One budget for the whole load, not one per <script>.
+        let load_started = std::time::Instant::now();
         for (i, body) in scripts.into_iter().enumerate() {
             // Browsers run page scripts in sloppy mode unless they say "use strict"; SignalRGB
             // effects rely on that (they assign an undeclared `i` in a `for`). rquickjs
@@ -295,7 +297,13 @@ impl HtmlEffect {
             //
             // The script runs with a deadline, so a runaway one is stopped instead of
             // hanging the thread it runs on.
-            self.runtime.deadline.start(LOAD_BUDGET_MS);
+            let remaining = LOAD_BUDGET_MS.saturating_sub(load_started.elapsed().as_millis() as u64);
+            if remaining == 0 {
+                return Err(HtmlError::Timeout(format!(
+                    "the effect's scripts ran longer than {LOAD_BUDGET_MS} ms together"
+                )));
+            }
+            self.runtime.deadline.start(remaining);
             let result = self.runtime.context.with(|ctx| {
                 let mut options = rquickjs::context::EvalOptions::default();
                 options.strict = false;
@@ -353,11 +361,29 @@ impl HtmlEffect {
             if count == 0 {
                 return Ok(());
             }
-            globals.set(js::TIMEOUT_SLOT, rquickjs::Array::new(ctx.clone()))?;
+            let fresh = rquickjs::Array::new(ctx.clone())?;
+            globals.set(js::TIMEOUT_SLOT, fresh.clone())?;
+            let now_ms = self.time * 1000.0;
             for i in 0..count {
-                let timer = timers.get::<Value<'_>>(i)?;
+                // Each entry is `[due_ms, callback]`. One that is not due yet goes back on the
+                // queue for a later frame.
+                let entry = timers.get::<rquickjs::Array<'_>>(i)?;
+                let due = entry.get::<f64>(0)?;
+                if due > now_ms {
+                    fresh.set(fresh.len(), entry)?;
+                    continue;
+                }
+                let timer = entry.get::<Value<'_>>(1)?;
                 if let Some(func) = timer.as_function() {
-                    func.call::<_, Value<'_>>(())?;
+                    if let Err(e) = func.call::<_, Value<'_>>(()) {
+                        // A throwing callback is reported, but the entries behind it stay
+                        // queued for the next frame instead of being dropped.
+                        for k in i + 1..count {
+                            let rest = timers.get::<rquickjs::Array<'_>>(k)?;
+                            fresh.set(fresh.len(), rest)?;
+                        }
+                        return Err(e);
+                    }
                 }
             }
             Ok(())

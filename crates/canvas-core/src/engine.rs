@@ -323,7 +323,7 @@ impl Engine for CoreEngine {
 
     fn write_solid(&self, color: Rgb8) {
         self.mutate(|state| {
-            for sink in &state.sinks {
+            for sink in state.sinks.iter().filter(|s| s.led_count > 0) {
                 sink.sink.submit(vec![color; sink.led_count as usize]);
             }
         });
@@ -456,6 +456,11 @@ fn render_loop(engine: Arc<CoreEngine>) {
                     info!("paused: the render loop stops after one black frame");
                 } else {
                     info!("resumed: the render loop runs again");
+                    // Leaving a pause never sets `parked`, so flag the re-anchor here:
+                    // the schedule and `dt` restart instead of replaying the pause.
+                    if last_power == Power::Paused {
+                        resumed = true;
+                    }
                 }
                 last_power = state.power;
             }
@@ -617,6 +622,11 @@ fn render_loop(engine: Arc<CoreEngine>) {
                     // it gets black, at its full length, never an empty frame.
                     None => vec![Rgb8::BLACK; sink.led_count as usize],
                 };
+                // A device with no known LEDs (its layout has not arrived) gets nothing: an empty
+                // frame is rejected by every adapter and only fills the log.
+                if colors.is_empty() {
+                    continue;
+                }
                 sink.sink.submit(colors);
             }
         }
@@ -657,7 +667,7 @@ fn render_loop(engine: Arc<CoreEngine>) {
 
 /// Writes one black frame to every sink.
 fn write_black(state: &State) {
-    for sink in &state.sinks {
+    for sink in state.sinks.iter().filter(|s| s.led_count > 0) {
         sink.sink.submit(vec![Rgb8::BLACK; sink.led_count as usize]);
     }
 }

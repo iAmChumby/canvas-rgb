@@ -89,6 +89,14 @@ impl FrameTimer {
             self.fps = fps;
         }
         let interval = Self::interval(fps);
+        // More than one interval behind (a long frame, a stall, a suspend): the missed ticks
+        // are not replayed back to back. Restart the schedule from now.
+        if let Some(due) = self.epoch.checked_add(interval.saturating_mul(u32::try_from(self.next_tick).unwrap_or(u32::MAX))) {
+            let now = Instant::now();
+            if now > due && now - due > interval {
+                self.reset_schedule(now);
+            }
+        }
         // `Duration` scales by a u32; a tick count that large is decades away, so
         // saturating is safe.
         let ticks = u32::try_from(self.next_tick).unwrap_or(u32::MAX);
@@ -217,5 +225,20 @@ mod tests {
         timer.sleep_until_next(60);
         // The next frame is due one 60 fps interval from the reset, not ten frames later.
         assert!(start.elapsed() < Duration::from_millis(60));
+    }
+
+    #[test]
+    fn a_stall_longer_than_an_interval_does_not_cause_a_catch_up_burst() {
+        // A frame stalled for a second at 60 fps: 60 ticks are overdue.
+        let mut timer = FrameTimer::new();
+        timer.sleep_until_next(60);
+        timer.epoch = Instant::now() - Duration::from_secs(1);
+        timer.next_tick = 1;
+        let start = Instant::now();
+        for _ in 0..5 {
+            timer.sleep_until_next(60);
+        }
+        // Re-anchored: five frames take about five intervals (83 ms), not zero.
+        assert!(start.elapsed() >= Duration::from_millis(60), "burst: {:?}", start.elapsed());
     }
 }

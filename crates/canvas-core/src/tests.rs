@@ -318,6 +318,18 @@ fn wait_until(timeout: Duration, check: impl Fn() -> bool) -> bool {
     check()
 }
 
+/// A layout that knows device `d0` (4 LEDs), so a sink on it gets real frames. Frames for a
+/// device the engine has never heard of are skipped, not sent empty.
+fn give_d0_a_layout(engine: &Arc<dyn canvas_proto::traits::Engine>) {
+    let dev = device("d0", vec![zone(0, ZoneKind::Linear, 4)]);
+    let lay = layout(
+        vec![placed("d0", 0, 0.0, 0.0, 320.0, 200.0)],
+        SamplingMode::AreaAverage,
+        RenderScale::P100,
+    );
+    engine.set_layout(lay, vec![dev]);
+}
+
 // ---------------------------------------------------------------------------
 // Frames reach the hardware
 // ---------------------------------------------------------------------------
@@ -495,6 +507,7 @@ fn removing_the_last_sink_parks_the_loop_again() {
 fn pausing_writes_one_black_frame_and_stops_the_loop() {
     let engine = spawn(settings(30));
     let sink = RecordingSink::new();
+    give_d0_a_layout(&engine);
     engine.add_sink(DeviceId("d0".into()), sink.clone());
     engine.set_effect(
         Box::new(SolidEffect::new(
@@ -531,6 +544,7 @@ fn pausing_writes_one_black_frame_and_stops_the_loop() {
 fn running_resumes_the_loop_after_a_pause() {
     let engine = spawn(settings(30));
     let sink = RecordingSink::new();
+    give_d0_a_layout(&engine);
     engine.add_sink(DeviceId("d0".into()), sink.clone());
     engine.set_effect(
         Box::new(SolidEffect::new(
@@ -553,6 +567,60 @@ fn running_resumes_the_loop_after_a_pause() {
         wait_until(Duration::from_secs(3), || sink.frame_count() > frames_at_resume),
         "frames are submitted again after resuming"
     );
+    engine.shutdown();
+}
+
+#[test]
+fn resuming_from_a_pause_does_not_replay_the_missed_ticks() {
+    let engine = spawn(settings(60));
+    let sink = RecordingSink::new();
+    give_d0_a_layout(&engine);
+    engine.add_sink(DeviceId("d0".into()), sink.clone());
+    engine.set_effect(
+        Box::new(SolidEffect::new([1.0, 0.0, 0.0], Arc::new(AtomicBool::new(false)))),
+        &Props::new(),
+    );
+    assert!(wait_until(Duration::from_secs(3), || sink.frame_count() > 0));
+
+    engine.set_power(Power::Paused);
+    assert!(wait_until(Duration::from_secs(2), || sink
+        .last()
+        .map(|f| f.iter().all(|c| *c == Rgb8::BLACK))
+        .unwrap_or(false)));
+    // About 90 ticks of 60 fps pass while paused.
+    std::thread::sleep(Duration::from_millis(1500));
+
+    let before = engine.stats().frames_rendered;
+    engine.set_power(Power::Running);
+    std::thread::sleep(Duration::from_millis(150));
+    let burst = engine.stats().frames_rendered - before;
+    // 150 ms at 60 fps is 9 frames; allow slack for scheduling, far below the ~90 replayed.
+    assert!(burst <= 15, "{burst} frames rendered in 150 ms after the resume");
+    engine.shutdown();
+}
+
+#[test]
+fn a_sink_added_before_its_layout_never_receives_an_empty_frame() {
+    let engine = spawn(settings(60));
+    let sink = RecordingSink::new();
+    // The device is not in any layout yet, so the engine does not know its LED count.
+    engine.add_sink(DeviceId("late".into()), sink.clone());
+    engine.set_effect(
+        Box::new(SolidEffect::new([1.0, 0.0, 0.0], Arc::new(AtomicBool::new(false)))),
+        &Props::new(),
+    );
+    // Let it render a while with the sink unknown to the plan.
+    std::thread::sleep(Duration::from_millis(300));
+    let dev = device("late", vec![zone(0, ZoneKind::Linear, 8)]);
+    let lay = layout(
+        vec![placed("late", 0, 0.0, 0.0, 320.0, 200.0)],
+        SamplingMode::AreaAverage,
+        RenderScale::P100,
+    );
+    engine.set_layout(lay, vec![dev]);
+    assert!(wait_until(Duration::from_secs(3), || sink.last().is_some_and(|f| f.len() == 8)));
+    let empties = sink.frames.lock().unwrap().iter().filter(|f| f.is_empty()).count();
+    assert_eq!(empties, 0, "{empties} zero-length frames were submitted");
     engine.shutdown();
 }
 
@@ -709,6 +777,7 @@ fn write_solid_submits_one_solid_frame_to_every_sink() {
 fn capture_data_is_only_pulled_when_the_effect_needs_it() {
     let engine = spawn(settings(30));
     let sink = RecordingSink::new();
+    give_d0_a_layout(&engine);
     engine.add_sink(DeviceId("d0".into()), sink.clone());
 
     let source = CountingInputSource::new();
@@ -743,6 +812,7 @@ fn capture_data_is_only_pulled_when_the_effect_needs_it() {
 fn set_props_reinitialises_the_active_effect_while_the_loop_runs() {
     let engine = spawn(settings(30));
     let sink = RecordingSink::new();
+    give_d0_a_layout(&engine);
     engine.add_sink(DeviceId("d0".into()), sink.clone());
 
     let inits = Arc::new(AtomicU32::new(0));

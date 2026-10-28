@@ -10,6 +10,11 @@ use crate::props_util as p;
 use crate::schema::SchemaBuilder;
 use canvas_proto::{Canvas, Effect, Inputs, PropertySchema, Props};
 
+/// Logical units per noise unit at Scale 1. Saved `scale` values keep this meaning: 40 here
+/// and a stored 6.0 is the dense look it always was. The broad-band look comes from the new
+/// default (0.75) and the lower range minimum, not from a change of unit.
+const NOISE_UNIT: f32 = 40.0;
+
 /// The Aurora effect.
 pub struct Aurora {
     schema: PropertySchema,
@@ -46,7 +51,7 @@ impl Aurora {
         .color("color2", "Color 2", "#0066ff")
         .color("color3", "Color 3", "#a300ff")
         .number("speed", "Speed", 0.0, 100.0, 1.0, 20.0)
-        .number("scale", "Scale", 1.0, 20.0, 0.5, 6.0)
+        .number("scale", "Scale", 0.25, 20.0, 0.25, 0.75)
         .number("bands", "Bands", 1.0, 6.0, 1.0, 3.0)
         .preset(
             "Northern lights",
@@ -66,7 +71,7 @@ impl Aurora {
         )
         .preset(
             "Slow and wide",
-            vec![("speed", number_kind(6.0)), ("scale", number_kind(3.0))],
+            vec![("speed", number_kind(6.0)), ("scale", number_kind(0.5))],
         )
         .build()
     }
@@ -77,7 +82,7 @@ impl Aurora {
             schema,
             colors: [[0.0; 3]; 3],
             speed: 0.0,
-            scale: 6.0,
+            scale: 0.75,
             bands: 3.0,
             phase: 0.0,
             columns: Vec::new(),
@@ -134,7 +139,7 @@ impl Effect for Aurora {
         self.columns.clear();
         for x in 0..canvas.width {
             let lx = (x as f32 + 0.5) / s;
-            let xn = lx / 40.0 * scale;
+            let xn = lx / NOISE_UNIT * scale;
             let (drift_sin, drift_cos) = (xn * 0.45).sin_cos();
             self.columns.push(Column {
                 wave: (xn * 0.7 + phase).sin() * 0.25 * bands,
@@ -148,7 +153,7 @@ impl Effect for Aurora {
             // The row's shares, once per row. The noise is n = wave/4 + (b/2 + 1/2) + c/10
             // with b = 0.3 sin(row term) and c = sin(drift + row offset); here `base` is
             // the row's part of u = n * bands.
-            let row = ly / 40.0 * scale;
+            let row = ly / NOISE_UNIT * scale;
             let b_term = (row * 1.3 - phase * 0.6).sin() * 0.3;
             let base = (b_term * 0.5 + 0.5) * bands;
             let (row_sin, row_cos) = (row * 0.45 + phase * 1.7).sin_cos();
@@ -194,8 +199,8 @@ mod tests {
     /// The straightforward formula, with a direct `sin` per term, for one pixel. The
     /// optimized update must agree with it.
     fn reference_pixel(colors: [Rgb; 3], bands: f32, scale: f32, phase: f32, lx: f32, ly: f32) -> Rgb {
-        let xn = lx / 40.0 * scale;
-        let row = ly / 40.0 * scale;
+        let xn = lx / NOISE_UNIT * scale;
+        let row = ly / NOISE_UNIT * scale;
         let a = (xn * 0.7 + phase).sin();
         let b = (row * 1.3 - phase * 0.6).sin() * 0.3;
         let c = (xn * 0.45 + row * 0.45 + phase * 1.7).sin();
@@ -264,5 +269,65 @@ mod tests {
             e.update(1.0 / 30.0, &mut canvas, &Inputs::default());
         }
         assert_ne!(before, canvas.pixels);
+    }
+
+    /// Bands are smooth: at the default props on the 320x200 canvas, neighbouring pixels
+    /// differ little on average.
+    #[test]
+    fn default_bands_are_smooth_not_speckled() {
+        let mut e = Aurora::new();
+        let mut canvas = Canvas::new(320, 200);
+        for _ in 0..13 {
+            e.update(1.0 / 12.0, &mut canvas, &Inputs::default());
+        }
+        let w = canvas.width as usize;
+        let mut total = 0.0f32;
+        let mut n = 0usize;
+        for y in 0..canvas.height as usize {
+            for x in 0..w - 1 {
+                let (a, b) = (canvas.pixels[y * w + x], canvas.pixels[y * w + x + 1]);
+                total += (0..3).map(|c| (a[c] - b[c]).abs()).sum::<f32>() / 3.0;
+                n += 1;
+            }
+        }
+        let mean = total / n as f32;
+        assert!(mean < 0.05, "mean neighbour difference {mean}");
+    }
+
+    /// A saved `scale` of 6.0 (Luke's own effects.json) keeps its old meaning: the same noise
+    /// unit as before, so the same dense look, and it stays inside the schema range.
+    #[test]
+    fn a_saved_scale_keeps_its_old_meaning() {
+        assert_eq!(NOISE_UNIT, 40.0, "the unit saved values were made against");
+        let mut e = Aurora::new();
+        let mut props = e.schema.defaults();
+        props.insert("scale".into(), canvas_proto::PropValue::Number(6.0));
+        e.init(&props);
+        assert_eq!(e.scale, 6.0);
+        let mut canvas = Canvas::new(320, 200);
+        for _ in 0..13 {
+            e.update(1.0 / 12.0, &mut canvas, &Inputs::default());
+        }
+        let w = canvas.width as usize;
+        let mut total = 0.0f32;
+        for y in 0..canvas.height as usize {
+            for x in 0..w - 1 {
+                let (a, b) = (canvas.pixels[y * w + x], canvas.pixels[y * w + x + 1]);
+                total += (0..3).map(|c| (a[c] - b[c]).abs()).sum::<f32>() / 3.0;
+            }
+        }
+        let mean = total / (canvas.height as usize * (w - 1)) as f32;
+        assert!(mean > 0.08, "a stored 6.0 must stay the old dense look, got {mean}");
+    }
+
+    /// The new defaults give the smooth look; the presets stay inside the range.
+    #[test]
+    fn the_presets_are_inside_the_scale_range() {
+        let schema = Aurora::schema();
+        for preset in &schema.presets {
+            if let Some(canvas_proto::PropValue::Number(n)) = preset.props.get("scale") {
+                assert!((0.25..=20.0).contains(n), "{n}");
+            }
+        }
     }
 }

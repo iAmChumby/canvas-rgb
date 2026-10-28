@@ -312,10 +312,19 @@ pub fn setup<'js>(
 
     // `setTimeout(fn, 0)` queues the callback in a JavaScript array; the host drains
     // the queue each frame.
-    let set_timeout = Function::new(ctx.clone(), move |this: rquickjs::function::This<Value<'js>>, cb: Function<'js>, _delay: Opt<f64>| -> rquickjs::Result<()> {
-        let globals = this.0.ctx().globals();
+    let timer_host = host.clone();
+    let set_timeout = Function::new(ctx.clone(), move |this: rquickjs::function::This<Value<'js>>, cb: Function<'js>, delay: Opt<f64>| -> rquickjs::Result<()> {
+        let c = this.0.ctx().clone();
+        let globals = c.globals();
         let queue = globals.get::<_, Array<'js>>(TIMEOUT_SLOT)?;
-        queue.set(queue.len(), cb)?;
+        // The entry is `[due_ms, callback]`, due on the effect clock; the host runs it on the
+        // first frame at or after that time. A missing, negative or NaN delay is 0, as in browsers.
+        let delay = delay.0.filter(|d| d.is_finite() && *d > 0.0).unwrap_or(0.0);
+        let now = timer_host.lock().map(|h| h.now_ms).unwrap_or(0.0);
+        let entry = Array::new(c.clone())?;
+        entry.set(0, now + delay)?;
+        entry.set(1, cb)?;
+        queue.set(queue.len(), entry)?;
         Ok(())
     })?;
     globals.set("setTimeout", set_timeout)?;
@@ -808,10 +817,17 @@ pub struct JsRuntime {
     pub deadline: Deadline,
 }
 
+/// The most heap one effect may hold: the largest allowed canvas (4096 x 4096) reads back as a
+/// 64 MB buffer, so the cap leaves room for that plus the script's own data.
+pub const JS_MEMORY_LIMIT: usize = 256 * 1024 * 1024;
+
 impl JsRuntime {
     /// Creates a runtime with a canvas of the given size.
     pub fn new(width: u32, height: u32) -> rquickjs::Result<Self> {
         let runtime = Runtime::new()?;
+        // The per-call deadline bounds CPU time, not heap. Without a cap an effect that keeps
+        // data across frames grows the daemon until the machine is out of memory.
+        runtime.set_memory_limit(JS_MEMORY_LIMIT);
         let context = Context::full(&runtime)?;
         let host = std::sync::Arc::new(std::sync::Mutex::new(Host::new(RasterContext::new(
             width, height,
