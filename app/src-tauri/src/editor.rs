@@ -43,6 +43,19 @@ fn open_on_main<R: Runtime>(app: &AppHandle<R>, page: Option<String>) {
         .min_inner_size(900.0, 600.0)
         .center();
 
+    // The taskbar shows the window's own icon. Without one, Windows falls back to its icon cache
+    // for the exe's path, which kept showing the old mark after the icon changed.
+    match tauri::image::Image::from_bytes(include_bytes!("../icons/128x128@2x.png")) {
+        Ok(icon) => match builder.icon(icon) {
+            Ok(b) => builder = b,
+            Err(e) => {
+                log::append(&format!("could not set the editor window icon: {e}"));
+                return;
+            }
+        },
+        Err(e) => log::append(&format!("could not load the editor window icon: {e}")),
+    }
+
     if let Some(page) = page {
         let handle = app.clone();
         builder = builder.on_page_load(move |_window, payload| {
