@@ -135,6 +135,17 @@ impl State {
     ///
     /// Zero while the loop is parked or paused: no frames are being rendered, so
     /// there is no rate to report.
+    /// Records a rendered frame and drops the ones older than a second, so `measured_fps` is the
+    /// rate of the last second and the window stays small. (It used to compare in the wrong
+    /// order, `recent[0].duration_since(now)`, which is always zero: nothing was ever dropped, the
+    /// window grew by one entry per frame forever and the rate was the average since start.)
+    fn record_frame(&mut self, at: Instant) {
+        self.recent.push_back(at);
+        while self.recent.len() > 2 && at.duration_since(self.recent[0]) > Duration::from_secs(1) {
+            self.recent.pop_front();
+        }
+    }
+
     fn measured_fps(&self) -> f32 {
         if self.parked || self.power == Power::Paused {
             return 0.0;
@@ -634,13 +645,7 @@ fn render_loop(engine: Arc<CoreEngine>) {
             let mut state = engine.state.lock().unwrap_or_else(|e| e.into_inner());
             state.frames_rendered += 1;
             state.frame_time_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
-            state.recent.push_back(frame_start);
-            // Keep only the last second.
-            while state.recent.len() > 2
-                && state.recent[0].duration_since(frame_start) > Duration::from_secs(1)
-            {
-                state.recent.pop_front();
-            }
+            state.record_frame(frame_start);
         }
 
         // ---- sleep to the next tick ------------------------------------------
@@ -696,5 +701,44 @@ mod platform {
         {
             0
         }
+    }
+}
+
+#[cfg(test)]
+mod frame_window_tests {
+    use super::*;
+
+
+    fn state() -> State {
+        State::new(&EngineSettings { fps: 60, power: Power::Running, brightness: 100 })
+    }
+
+    #[test]
+    fn the_window_keeps_only_the_last_second() {
+        let mut s = state();
+        let start = Instant::now();
+        // Ten seconds of frames at 60 fps.
+        for i in 0..600u32 {
+            s.record_frame(start + Duration::from_micros(16_667 * u64::from(i)));
+        }
+        assert!(s.recent.len() <= 62, "window holds {} frames", s.recent.len());
+    }
+
+    #[test]
+    fn the_measured_rate_follows_a_drop_in_fps() {
+        let mut s = state();
+        let start = Instant::now();
+        let mut t = start;
+        for _ in 0..300 {
+            s.record_frame(t);
+            t += Duration::from_micros(16_667);
+        }
+        // Then two seconds at 30 fps.
+        for _ in 0..60 {
+            s.record_frame(t);
+            t += Duration::from_micros(33_333);
+        }
+        let fps = s.measured_fps();
+        assert!((29.0..=31.0).contains(&fps), "measured {fps}");
     }
 }
