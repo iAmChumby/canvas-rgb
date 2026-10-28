@@ -1,6 +1,6 @@
 ﻿<picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-dark.png">
-  <img alt="canvas-rgb: lighting, fans and peripherals for your Windows PC. One small app instead of four." src="docs/assets/banner-light.png">
+  <img alt="canvas-rgb: RGB software shouldn't take a gigabyte of RAM." src="docs/assets/banner-light.png">
 </picture>
 
 [![CI](https://github.com/iAmChumby/canvas-rgb/actions/workflows/ci.yml/badge.svg)](https://github.com/iAmChumby/canvas-rgb/actions/workflows/ci.yml)
@@ -8,17 +8,16 @@
 ![Platform: Windows 11](https://img.shields.io/badge/platform-Windows%2011-0e0f11)
 ![Rust](https://img.shields.io/badge/built%20with-Rust-b45cff?logo=rust)
 ![Tauri 2](https://img.shields.io/badge/Tauri-2-ffb02e?logo=tauri)
-![RAM: 60 MB](https://img.shields.io/badge/RAM-60%20MB-3ddc84)
 
-canvas-rgb paints effects across every LED in your case, runs your fan curves and sets up your mouse and controller. It uses 60 MB of RAM. The apps it replaced used 819 MB. Your SignalRGB effects still work.
+canvas-rgb paints effects across every LED in your case, runs your fan curves and sets up your mouse and controller, in a fraction of the memory the vendor apps use. Your SignalRGB effects still work.
 
-| Measured on one PC, 60 seconds per app | RAM | CPU | Disk |
+| Measured on one PC (Ryzen 7 7800X3D, Windows 11), 60 seconds per app | RAM | CPU | Disk |
 |---|---|---|---|
 | **canvas-rgb**: lights, fans, pump display, mouse, controller | **60 MB** | **0.6%** | **80 MB** |
 | SignalRGB, ZEUS CAST and Attack Shark X6 app | 819 MB | 2.6% | 2.4 GB |
 | SignalRGB alone (its background service was off) | 643 MB | 0.7% | 1.8 GB |
 
-canvas-rgb uses 13.5 times less RAM than the three apps. The 8BitDo software was not measured.
+The 8BitDo software was not measured.
 Opening the editor adds about 360 MB while its window is open. The method and the caveats are in
 [docs/benchmark.md](docs/benchmark.md).
 

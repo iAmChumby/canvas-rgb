@@ -12,7 +12,7 @@ time over the window / (60 s x 16 threads). One app at a time; canvas-rgb paused
 | Attack Shark X6 app | mouse | 1 | 14.6 | 0.00 | 9.4 |
 | **The three vendor apps together** | | 7 | **819.0** | **2.63** | **2356.0** |
 
-canvas-rgb uses **13.5x less RAM**, **4.2x less CPU** and **29x less disk** than the three apps it replaces.
+On this PC, canvas-rgb used **13.5x less RAM**, **4.2x less CPU** and **29x less disk** than the three apps it replaces.
 
 Caveats (each one favours the vendor apps):
 - SignalRGB ran without its background service (disabled since the retirement); normally the service runs too.
