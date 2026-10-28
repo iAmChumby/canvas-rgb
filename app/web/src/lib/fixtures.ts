@@ -223,26 +223,6 @@ export const EFFECTS: DemoEffect[] = [
       { name: "Warm", over: { color_low: c("#ff5e00"), color_high: c("#ffe600") } },
       { name: "Punchy", over: { sensitivity: n(250), decay: n(15) } },
     ], false),
-  build("poison", "Poison", "A test effect.", NO_INPUT,
-    [
-      { key: "bgColor", label: "Background Color", kind: colorKind("#2d0075") },
-      { key: "color1", label: "Color 1", kind: colorKind("#6000fc") },
-      { key: "color2", label: "Color 2", kind: colorKind("#b300ff") },
-      { key: "color3", label: "Color 3", kind: colorKind("#8a42ff") },
-      { key: "speedRaw", label: "Speed", kind: numberKind(0, 100, 1, 35) },
-    ],
-    [
-      {
-        name: "SignalRGB original",
-        over: {
-          bgColor: c("#130032"),
-          color1: c("#6000fc"),
-          color2: c("#b300ff"),
-          color3: c("#8a42ff"),
-          speedRaw: n(10),
-        },
-      },
-    ], true),
 ];
 
 /** A user HTML effect, shown only with ?state=html so the HTML badge can be checked. */
@@ -356,7 +336,7 @@ export const LAYOUT_DESK: Layout = {
     { device_id: "openrgb:I2C: PawnIO SMBus PIIX4 0, address 0x71", zone_index: 0, x: 300, y: 40, width: 16, height: 120, rotation_deg: 0, reversed: false, visible: true },
     { device_id: "openrgb:I2C: PawnIO SMBus PIIX4 0, address 0x73", zone_index: 0, x: 280, y: 40, width: 16, height: 120, rotation_deg: 0, reversed: false, visible: true },
   ],
-  effect: { id: "poison", props: EFFECTS[11]!.defaults },
+  effect: { id: "spiral", props: EFFECTS.find((e) => e.schema.id === "spiral")!.defaults },
 };
 
 export interface DemoHeader {

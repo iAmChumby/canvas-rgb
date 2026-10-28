@@ -13,14 +13,14 @@ export type MotionPref = "full" | "reduced";
 export const MOTION_KEY = "canvas-rgb.motion";
 
 export function readTheme(): Theme {
-  if (typeof window === "undefined") return "dark";
+  if (typeof window === "undefined") return "system";
   try {
     const v = window.localStorage.getItem(THEME_KEY);
-    if (v === "light" || v === "system") return v;
+    if (v === "light" || v === "dark") return v;
   } catch {
-    // Storage can be blocked; the default is dark.
+    // Storage can be blocked; the default is to follow Windows.
   }
-  return "dark";
+  return "system";
 }
 
 export function readMotion(): MotionPref {

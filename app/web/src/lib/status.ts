@@ -119,7 +119,7 @@ export function playing(
   return { name: effectName, detail: `on ${n} ${n === 1 ? "device" : "devices"}`, count: true };
 }
 
-/** The playing line as one sentence: "Poison on 5 devices". */
+/** The playing line as one sentence: "Spiral on 5 devices". */
 export function playingLine(status: Status | null, effects: EffectSummary[] | null): string {
   const p = playing(status, effects);
   return p.detail ? `${p.name} ${p.detail}` : p.name;

@@ -12,14 +12,15 @@ export const metadata: Metadata = {
   description: "Lighting and fan controller: layout, effects, devices, fans and settings.",
 };
 
-// Runs before first paint. The theme choice is per viewer (localStorage); "system" removes the
-// attribute so the prefers-color-scheme set applies. Anything else keeps the dark default.
-// The motion preference works the same way: "reduced" turns the editor's motion off.
-const THEME_SCRIPT = `try{var t=localStorage.getItem("canvas-rgb.theme");if(t==="light"){document.documentElement.setAttribute("data-theme","light")}else if(t==="system"){document.documentElement.removeAttribute("data-theme")}}catch(e){}try{var m=localStorage.getItem("canvas-rgb.motion");if(m==="reduced"){document.documentElement.setAttribute("data-motion","reduced")}}catch(e){}`;
+// Runs before first paint. The theme follows Windows by default: with no data-theme attribute the
+// prefers-color-scheme rules in tokens.css apply, in the stylesheet itself, so the first paint is
+// already right. Only an explicit "light" or "dark" choice (localStorage, per viewer) sets the
+// attribute. The motion preference works the same way: "reduced" turns the editor's motion off.
+const THEME_SCRIPT = `try{var t=localStorage.getItem("canvas-rgb.theme");if(t==="light"||t==="dark"){document.documentElement.setAttribute("data-theme",t)}}catch(e){}try{var m=localStorage.getItem("canvas-rgb.motion");if(m==="reduced"){document.documentElement.setAttribute("data-motion","reduced")}}catch(e){}`;
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" data-theme="dark" suppressHydrationWarning>
+    <html lang="en" suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: THEME_SCRIPT }} />
       </head>

@@ -1834,7 +1834,7 @@ export function PreviewStage({
             transform: `translate(${view.panX * base * view.scale}px, ${view.panY * base * view.scale}px) scale(${base * view.scale})`,
           }}
         >
-          <EffectPreview id={fading.id} values={fading.props} className={desk.editorCanvas} />
+          <EffectPreview id={fading.id} className={desk.editorCanvas} />
         </div>
       )}
       {drawnNow && !editorGone && (
@@ -1851,7 +1851,7 @@ export function PreviewStage({
             transform: `translate(${view.panX * base * view.scale}px, ${view.panY * base * view.scale}px) scale(${base * view.scale})`,
           }}
         >
-          <EffectPreview id={drawnNow.id} values={drawnNow.props} className={desk.editorCanvas} />
+          <EffectPreview id={drawnNow.id} className={desk.editorCanvas} />
         </div>
       )}
       <canvas

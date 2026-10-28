@@ -30,7 +30,7 @@ import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
 import { usePreviewStatus } from "@/lib/preview";
 import { usePrefersReducedMotion } from "@/lib/motion";
-import { refreshAll, refreshLayouts, refreshSettings, useSnap } from "@/lib/store";
+import { getSnap, patchSnap, refreshAll, refreshLayouts, refreshSettings, useSnap } from "@/lib/store";
 import { defaultRect, findZoneInfo } from "@/lib/zones";
 import { clamp } from "@/lib/format";
 import type { Layout } from "@/proto/Layout";
@@ -227,7 +227,7 @@ function NowPlaying({
               needsInput ? (
                 <Thumb id={runningId} size="sm" label={name ?? "Effect"} />
               ) : (
-                <EffectPreview id={runningId} values={values} />
+                <EffectPreview id={runningId} />
               )
             ) : null}
           </span>
@@ -422,6 +422,30 @@ export function LayoutView() {
     },
     [],
   );
+  /** Sends the waiting values to the effect they were edited on, and to no other. */
+  const flushProps = async (id: string | null) => {
+    if (propsTimer.current) clearTimeout(propsTimer.current);
+    propsTimer.current = null;
+    const batch = pendingProps.current;
+    pendingProps.current = {};
+    if (!id || Object.keys(batch).length === 0) return;
+    // The edit belongs to the effect that was running when it was made. If another one runs now
+    // (picked elsewhere, or by the CLI), the values are dropped, not merged into it.
+    if (getSnap().status?.active_effect !== id) return;
+    try {
+      await api.patchActiveProps(batch);
+    } catch (e: unknown) {
+      setNowError(messageOf(e));
+    }
+  };
+  // A different effect running: edits that never left belong to the old one.
+  useEffect(() => {
+    return () => {
+      if (propsTimer.current) clearTimeout(propsTimer.current);
+      propsTimer.current = null;
+      pendingProps.current = {};
+    };
+  }, [runningId]);
   /** A value of the running effect: the canvas has it at once, the daemon gets it after. */
   const onPropChange = (key: string, value: PropValue) => {
     setNowError(null);
@@ -429,19 +453,15 @@ export function LayoutView() {
     pendingProps.current = { ...pendingProps.current, [key]: value };
     if (propsTimer.current) clearTimeout(propsTimer.current);
     const id = runningId;
-    propsTimer.current = setTimeout(() => {
-      propsTimer.current = null;
-      const batch = pendingProps.current;
-      pendingProps.current = {};
-      if (!id || Object.keys(batch).length === 0) return;
-      api.patchActiveProps(batch).catch((e: unknown) => setNowError(messageOf(e)));
-    }, PROPS_DEBOUNCE_MS);
+    propsTimer.current = setTimeout(() => void flushProps(id), PROPS_DEBOUNCE_MS);
   };
   /** Another effect on this desk. */
   const pickEffect = async (id: string) => {
     if (id === runningId) return;
     setNowError(null);
     try {
+      // What was edited on the effect that is leaving goes to it first, then the switch.
+      await flushProps(runningId);
       await api.activateEffect(id, { props: {}, preset: null });
       await refreshAll();
     } catch (e) {
@@ -452,7 +472,9 @@ export function LayoutView() {
   const commitBrightness = async (v: number) => {
     setNowError(null);
     try {
-      await api.patchOutput({ power: null, brightness: v });
+      const out = await api.patchOutput({ power: null, brightness: v });
+      const cur = getSnap().settings;
+      if (cur) patchSnap({ settings: { ...cur, brightness: out.brightness } });
       setBrightnessDraft(null);
       await refreshSettings();
     } catch (e) {

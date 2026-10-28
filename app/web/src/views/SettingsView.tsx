@@ -14,7 +14,7 @@ import { messageOf } from "@/lib/errors";
 import { exportConfig, importConfigFile } from "@/lib/config-transfer";
 import { BLACK_HEX } from "@/lib/color";
 import { openLogsFolder, tauriHost } from "@/lib/host";
-import { patchSnap, refreshAll, refreshRender, refreshSettings, useSnap } from "@/lib/store";
+import { getSnap, patchSnap, refreshAll, refreshRender, refreshSettings, useSnap } from "@/lib/store";
 import { fmt1, fmtInt } from "@/lib/format";
 import { useToast } from "@/components/Toast";
 import { SkeletonLines } from "@/components/Skeleton";
@@ -87,7 +87,9 @@ export function SettingsView() {
   const commitFps = async (v: number) => {
     setRenderErr(null);
     try {
-      await api.patchRender({ fps: v, scale: null, sampling: null });
+      // The daemon's answer goes into the snapshot first: the draft goes away onto the new value,
+      // not onto the old one for as long as the refresh takes.
+      patchSnap({ render: await api.patchRender({ fps: v, scale: null, sampling: null }) });
       setFps(null);
       await refreshRender();
     } catch (e) {
@@ -101,7 +103,9 @@ export function SettingsView() {
   const commitBrightness = async (v: number) => {
     setRenderErr(null);
     try {
-      await api.patchOutput({ power: null, brightness: v });
+      const out = await api.patchOutput({ power: null, brightness: v });
+      const cur = getSnap().settings;
+      if (cur) patchSnap({ settings: { ...cur, brightness: out.brightness } });
       setBrightness(null);
       await refreshSettings();
     } catch (e) {

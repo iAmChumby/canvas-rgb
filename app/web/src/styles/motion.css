@@ -1193,3 +1193,11 @@
 .effect-empty {
   grid-column: 1 / -1;
 }
+
+/* The effect preview canvas takes the size of its box; its pixels come from the daemon (320 x 200
+   live, 64 x 40 thumbnail), so the box, not the bitmap, sets the size. */
+.preview-canvas {
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+}

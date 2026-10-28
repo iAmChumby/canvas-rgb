@@ -12,10 +12,34 @@ import { ApiFailure, messageOf } from "@/lib/errors";
 export { ApiFailure, isUnreachable, messageOf } from "@/lib/errors";
 
 let cachedConfig: ApiConfig | null = null;
+let pendingConfig: Promise<ApiConfig> | null = null;
 
+/**
+ * The address and token the tray hands out. Every fetch re-runs the tray's check that the 9430
+ * listener is canvas-rgbd.exe under this user, so the cache lives only while requests succeed:
+ * `dropApiConfig` clears it on a network failure and on a 401, and the next request asks the
+ * tray again. Requests that start together share one lookup.
+ */
 export async function apiConfig(): Promise<ApiConfig> {
-  if (!cachedConfig) cachedConfig = await fetchApiConfig();
-  return cachedConfig;
+  if (cachedConfig) return cachedConfig;
+  if (!pendingConfig) {
+    const lookup: Promise<ApiConfig> = fetchApiConfig().then((c) => {
+      if (pendingConfig === lookup) cachedConfig = c;
+      return c;
+    });
+    pendingConfig = lookup;
+    const clear = () => {
+      if (pendingConfig === lookup) pendingConfig = null;
+    };
+    lookup.then(clear, clear);
+  }
+  return pendingConfig as Promise<ApiConfig>;
+}
+
+/** Forgets the token. The next request fetches it again, which runs the tray's peer check again. */
+export function dropApiConfig(): void {
+  cachedConfig = null;
+  pendingConfig = null;
 }
 
 export type Method = "GET" | "PUT" | "PATCH" | "POST" | "DELETE";
@@ -41,6 +65,9 @@ async function send(method: Method, path: string, body?: unknown): Promise<Respo
       cache: "no-store",
     });
   } catch {
+    // The listener may be gone, or another process may be about to take its place: the token is
+    // not trusted again until the tray has checked the listener once more.
+    dropApiConfig();
     // A cross-origin request that fails like this is either a daemon that is down or a reply the
     // browser was not allowed to read. Say so, instead of blaming the network.
     throw new ApiFailure(
@@ -49,6 +76,8 @@ async function send(method: Method, path: string, body?: unknown): Promise<Respo
       "The daemon did not answer. It may be down, or the browser was not allowed to read its reply.",
     );
   }
+
+  if (res.status === 401) dropApiConfig(); // the token changed (a purge and reinstall): ask again
 
   if (!res.ok) {
     let parsed: Partial<ApiError> = {};

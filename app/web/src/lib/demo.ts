@@ -8,7 +8,7 @@
 // save-error|handback:<header id>`.
 
 import { ApiFailure } from "@/lib/errors";
-import { thumbnailBytes } from "@/lib/thumb-demo";
+import { demoThumbnail } from "@/lib/thumb-demo";
 import {
   answerDelayMs,
   applyDeviceScenarios,
@@ -109,7 +109,7 @@ function initialState(): DemoState {
     effects,
     favorites,
     saved: {},
-    activeEffect: "poison",
+    activeEffect: "spiral",
     layouts: layouts.layouts,
     activeLayout: layouts.active,
     fanModes,
@@ -679,7 +679,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
     }
     if (seg.length === 3 && seg[2] === "thumbnail" && method === "GET") {
       effectOrNotFound(id);
-      return thumbnailBytes(id);
+      return demoThumbnail(id);
     }
     if (seg.length === 3 && seg[2] === "activate" && method === "POST") {
       const e = effectOrNotFound(id);

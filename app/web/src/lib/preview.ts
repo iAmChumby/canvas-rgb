@@ -9,11 +9,12 @@
 // can say what is wrong instead of waiting for a frame that never comes.
 
 import { useSyncExternalStore } from "react";
-import { apiConfig } from "@/lib/api";
+import { apiConfig, dropApiConfig } from "@/lib/api";
 import { isDemo } from "@/lib/host";
 import { demoFrameFor } from "@/lib/thumb-demo";
 import { dominantHue, hueDistance } from "@/lib/hue";
 import { getSnap } from "@/lib/store";
+import { loadThumb, type Thumb } from "@/lib/thumbs";
 import { routes } from "@/proto/routes";
 
 export interface Frame {
@@ -143,6 +144,8 @@ async function connect(): Promise<void> {
   };
   ws.onclose = () => {
     socket = null;
+    // The listener may have been replaced: the reconnect asks the tray for the token again.
+    dropApiConfig();
     if (active) scheduleReconnect();
   };
   socket = ws;
@@ -179,16 +182,48 @@ function scheduleReconnect(): void {
   }, wait);
 }
 
+/** The demo's thumbnails (the daemon's own renders, see lib/thumb-demo.ts), once they have loaded. */
+const demoThumbs = new Map<string, Thumb>();
+
 /**
- * The demo's own frame: the effect that is running, drawn from the same shades the demo
- * thumbnails use. It used to be a decorative rainbow, which had nothing to do with the effect
- * on screen, so the chrome tinted with whatever colour the rainbow happened to average to.
+ * The demo's own frame: the running effect's real render (its thumbnail loop from the daemon's
+ * renderer), scaled up bilinearly to the feed's size. Until the thumbnail has loaded it is the
+ * generic demo source.
  */
 function demoFrame(t: number): Frame {
-  // The status is null until the demo backend answers its first request; the demo's own
-  // default effect is Poison.
-  const id = getSnap().status?.active_effect ?? "poison";
-  const rgb = demoFrameFor(id, t, PREVIEW_W, PREVIEW_H);
+  // The status is null until the demo backend answers its first request.
+  const id = getSnap().status?.active_effect ?? "";
+  const thumb = demoThumbs.get(id);
+  if (!thumb) {
+    if (id && !demoThumbs.has(id)) {
+      void loadThumb(id).then((loaded) => {
+        if (loaded) demoThumbs.set(id, loaded);
+      });
+    }
+    return { width: PREVIEW_W, height: PREVIEW_H, rgb: demoFrameFor(id, t, PREVIEW_W, PREVIEW_H) };
+  }
+  const index = Math.floor(t * 12) % thumb.frames;
+  const base = index * thumb.w * thumb.h * 3;
+  const rgb = new Uint8Array(PREVIEW_W * PREVIEW_H * 3);
+  let o = 0;
+  for (let y = 0; y < PREVIEW_H; y++) {
+    const fy = Math.min(thumb.h - 1, Math.max(0, ((y + 0.5) / PREVIEW_H) * thumb.h - 0.5));
+    const y0 = Math.floor(fy);
+    const y1 = Math.min(thumb.h - 1, y0 + 1);
+    const wy = fy - y0;
+    for (let x = 0; x < PREVIEW_W; x++) {
+      const fx = Math.min(thumb.w - 1, Math.max(0, ((x + 0.5) / PREVIEW_W) * thumb.w - 0.5));
+      const x0 = Math.floor(fx);
+      const x1 = Math.min(thumb.w - 1, x0 + 1);
+      const wx = fx - x0;
+      for (let c = 0; c < 3; c++) {
+        const at = (px: number, py: number) => thumb.data[base + (py * thumb.w + px) * 3 + c] ?? 0;
+        const top = at(x0, y0) * (1 - wx) + at(x1, y0) * wx;
+        const bottom = at(x0, y1) * (1 - wx) + at(x1, y1) * wx;
+        rgb[o++] = top * (1 - wy) + bottom * wy;
+      }
+    }
+  }
   return { width: PREVIEW_W, height: PREVIEW_H, rgb };
 }
 

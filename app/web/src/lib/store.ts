@@ -28,6 +28,9 @@ export const DOWN_RETRY_MS = 5000;
 /** When the daemon last refused to answer, 0 when it is answering. */
 let lastStatusFailureAt = 0;
 
+/** Failed status reads in a row. One blip keeps the last status on screen; a second one drops it. */
+let statusFailures = 0;
+
 /**
  * When the daemon was last tried and when the next try is due. The daemon-down page shows it,
  * so the page can say something new instead of repeating its own heading.
@@ -119,8 +122,12 @@ export async function refreshStatus(): Promise<void> {
   try {
     patchSnap({ status: await api.status(), statusError: null });
     lastStatusFailureAt = 0;
+    statusFailures = 0;
   } catch (e) {
-    patchSnap({ statusError: messageOf(e) });
+    statusFailures += 1;
+    // The last status is old after the second miss in a row (about DOWN_RETRY_MS later). Clearing it
+    // is what lets the strip and the daemon-down page say the daemon is gone.
+    patchSnap(statusFailures >= 2 ? { status: null, statusError: messageOf(e) } : { statusError: messageOf(e) });
     lastStatusFailureAt = Date.now();
   }
 }

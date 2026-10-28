@@ -529,6 +529,42 @@ function ProfilesPanel({ fans }: { fans: FansStatus }) {
   );
 }
 
+/** The writes to one fan header: one request at a time, and while one is out only the newest waits. */
+const fanWrites = new Map<string, { done: Promise<void> | null; queued: FanMode | null }>();
+
+/**
+ * Sends a mode to a header so the latest choice is the one the chip ends on. Requests that
+ * overlap can land out of order, so a new request waits for the one in flight, and a request
+ * that is still waiting when a newer one arrives is dropped. Resolves when the header has no
+ * writes left.
+ */
+function writeFanMode(header: string, mode: FanMode, onError: (e: unknown) => void): Promise<void> {
+  let slot = fanWrites.get(header);
+  if (!slot) {
+    slot = { done: null, queued: null };
+    fanWrites.set(header, slot);
+  }
+  slot.queued = mode;
+  if (slot.done) return slot.done;
+  const mine = slot;
+  mine.done = (async () => {
+    try {
+      while (mine.queued) {
+        const next = mine.queued;
+        mine.queued = null;
+        try {
+          await api.patchFanHeader(header, next);
+        } catch (e) {
+          onError(e);
+        }
+      }
+    } finally {
+      mine.done = null;
+    }
+  })();
+  return mine.done;
+}
+
 function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansStatus }) {
   const base = baseFloor(header.id, fans.floor_percent);
   const [err, setErr] = useState<string | null>(null);
@@ -547,21 +583,28 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
     [],
   );
 
+  /** A curve edit that has not been sent yet is replaced by whatever the user chooses next. */
+  const cancelCurve = () => {
+    if (pointsTimer.current) clearTimeout(pointsTimer.current);
+    pointsTimer.current = null;
+  };
+
   const apply = async (next: FanMode) => {
     setErr(null);
     setBusy(true);
     try {
-      await api.patchFanHeader(header.id, next);
+      await writeFanMode(header.id, next, (e) => {
+        setErr(messageOf(e));
+        toast(messageOf(e), "down");
+      });
       await refreshFans();
-    } catch (e) {
-      setErr(messageOf(e));
-      toast(messageOf(e), "down");
     } finally {
       setBusy(false);
     }
   };
 
   const setMode = (m: "bios" | "fixed" | "curve") => {
+    cancelCurve();
     if (m === "bios") void apply({ mode: "bios" });
     if (m === "fixed") {
       setPercent(clamp(percent, base, 100));
@@ -575,6 +618,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
   };
 
   const commitPercent = (v: number) => {
+    cancelCurve();
     const p = clamp(Math.round(v), base, 100);
     setPercent(p);
     void apply({ mode: "fixed", percent: p });
@@ -582,8 +626,9 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
 
   const commitCurve = (pts: CurvePoint[]) => {
     setPoints(pts);
-    if (pointsTimer.current) clearTimeout(pointsTimer.current);
+    cancelCurve();
     pointsTimer.current = setTimeout(() => {
+      pointsTimer.current = null;
       void apply({ mode: "curve", source, points: pts });
     }, 250);
   };
@@ -672,6 +717,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
                 options={sourceOptions}
                 onChange={(k) => {
                   const s = sourceFromKey(k);
+                  cancelCurve();
                   setSource(s);
                   void apply({ mode: "curve", source: s, points });
                 }}

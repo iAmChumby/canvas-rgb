@@ -6,8 +6,8 @@
  *
  * The design system that documents these is the "canvas-rgb" Design System artifact.
  *
- * Dark is the default. Light applies with data-theme="light", or with the system preference
- * when the page has no data-theme attribute (Settings > Appearance > System).
+ * The theme follows Windows by default: with no data-theme attribute, dark applies, and light
+ * applies when the system prefers it. data-theme="light" or "dark" (Settings > Appearance) wins.
  */
 
 :root {

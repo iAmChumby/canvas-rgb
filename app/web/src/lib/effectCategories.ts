@@ -28,7 +28,6 @@ const BY_ID: Record<string, EffectCategory> = {
   rainbow_wave: "motion",
   spiral: "motion",
   color_cycle: "motion",
-  poison: "motion",
   screen_ambience: "reactive",
   audio_spectrum: "reactive",
   aurora: "nature",

@@ -84,6 +84,8 @@ export function EffectsView() {
   const toast = useToast();
 
   const pending = useRef<Values>({});
+  /** The effect the waiting values were edited on. */
+  const pendingFor = useRef<string | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const selectedRef = useRef<string | null>(null);
   // The values the daemon has: a failed edit goes back to these.
@@ -91,6 +93,33 @@ export function EffectsView() {
   useEffect(() => {
     selectedRef.current = selectedId;
   }, [selectedId]);
+
+  /** Sends the waiting values to the effect they were edited on, and to no other. */
+  const flush = async () => {
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = null;
+    const id = pendingFor.current;
+    const batch = pending.current;
+    pending.current = {};
+    pendingFor.current = null;
+    if (!id || Object.keys(batch).length === 0) return;
+    try {
+      if (getSnap().status?.active_effect === id) {
+        await api.patchActiveProps(batch);
+      } else {
+        // The first edit to a stopped effect starts it, with the edited values on top.
+        await api.activateEffect(id, { props: batch, preset: null });
+        await refreshAll();
+      }
+      if (selectedRef.current === id) saved.current = { ...saved.current, ...batch };
+      setError(null);
+    } catch (e) {
+      setError(messageOf(e));
+      toast(messageOf(e), "down");
+      // The control goes back to the value the daemon has: nothing fails silently.
+      if (selectedRef.current === id) setValues(saved.current);
+    }
+  };
 
   // Load the detail (schema and current values) for the selected effect.
   useEffect(() => {
@@ -110,7 +139,12 @@ export function EffectsView() {
       });
     return () => {
       stop = true;
+      // A drag that is still waiting belongs to the effect it was made on: it goes there now,
+      // before the next effect's values load.
+      void flush();
     };
+    // flush reads refs and stable setters only
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId, activeId]);
 
   useEffect(
@@ -120,31 +154,11 @@ export function EffectsView() {
     [],
   );
 
-  const flush = async () => {
-    timer.current = null;
-    const id = selectedRef.current;
-    const batch = pending.current;
-    pending.current = {};
-    if (!id || Object.keys(batch).length === 0) return;
-    try {
-      if (getSnap().status?.active_effect === id) {
-        await api.patchActiveProps(batch);
-      } else {
-        // The first edit to a stopped effect starts it, with the edited values on top.
-        await api.activateEffect(id, { props: batch, preset: null });
-        await refreshAll();
-      }
-      saved.current = { ...saved.current, ...batch };
-      setError(null);
-    } catch (e) {
-      setError(messageOf(e));
-      toast(messageOf(e), "down");
-      // The control goes back to the value the daemon has: nothing fails silently.
-      setValues(saved.current);
-    }
-  };
-
   const onChange = (key: string, value: PropValue) => {
+    const id = selectedRef.current;
+    // Values waiting for another effect go to it first; they never mix into this one's batch.
+    if (pendingFor.current && pendingFor.current !== id) void flush();
+    pendingFor.current = id;
     setValues((prev) => ({ ...prev, [key]: value }));
     pending.current = { ...pending.current, [key]: value };
     if (timer.current) clearTimeout(timer.current);
@@ -357,7 +371,7 @@ export function EffectsView() {
                   <Thumb id={detail.schema.id} size="lg" label={detail.schema.name} live />
                 ) : (
                   <div className="effect-live-frame" key={detail.schema.id}>
-                    <EffectPreview id={detail.schema.id} values={values} />
+                    <EffectPreview id={detail.schema.id} />
                   </div>
                 )}
               </div>
