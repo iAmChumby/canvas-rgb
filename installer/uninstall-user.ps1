@@ -15,6 +15,17 @@ $ErrorActionPreference = 'Stop'
 $c = Get-CanvasConst
 $appData = Join-Path $env:APPDATA $c.AppName
 $userRestorePath = Join-Path $appData $c.RestoreFile
+# This may run in the elevated uninstaller (Inno cannot hand work to the original user at uninstall time), and
+# %APPDATA%\canvas-rgb is writable by an ordinary user. So nothing below follows a junction or symbolic link:
+# refuse the whole per-user cleanup when the folder, or any folder above it, is one.
+$bad = Get-ReparseInChain -Path $appData
+if ($bad) {
+    Write-Host "STOP: '$bad' is a junction or symbolic link. The per-user cleanup did not run. Check it yourself and remove or fix it."
+    exit 1
+}
+$failed = $false
+$backupDir = Join-Path $appData 'signalrgb-startup-backup'
+$startupDir = [Environment]::GetFolderPath('Startup')
 $userRestore = $null
 try { $userRestore = Read-RestoreFile -Path $userRestorePath } catch { }
 
@@ -31,22 +42,36 @@ if ($userRestore) {
         Write-Host "HKCU Run: restored $($r.name)"
     }
     foreach ($s in @($userRestore.startupShortcuts)) {
-        if (Test-Path -LiteralPath $s.backupPath) {
-            Move-Item -LiteralPath $s.backupPath -Destination $s.originalPath -Force
-            Write-Host "Startup: restored $($s.originalPath)"
+        # The record is a user-writable file: move only what setup itself could have put there.
+        $v = Test-StartupRestoreEntry -OriginalPath ([string]$s.originalPath) -BackupPath ([string]$s.backupPath) -StartupDir $startupDir -BackupDir $backupDir
+        if (-not $v.Ok) {
+            if ($v.Reason -ne 'the backup file is gone') { $failed = $true }
+            Write-Host "Startup: NOT restored '$($s.originalPath)': $($v.Reason)"
+            continue
         }
+        [System.IO.File]::Move([string]$s.backupPath, [string]$s.originalPath)
+        Write-Host "Startup: restored $($s.originalPath)"
     }
-    Remove-Item -LiteralPath $userRestorePath -Force
-    Remove-Item -LiteralPath (Join-Path $appData 'signalrgb-startup-backup') -Recurse -Force -ErrorAction SilentlyContinue
-    Write-Host 'SignalRGB autostart restored; it starts at next logon.'
+    if (-not $failed) {
+        Remove-Item -LiteralPath $userRestorePath -Force
+        if (Test-Path -LiteralPath $backupDir) { try { Remove-UserTreeNoFollow -Root $backupDir } catch { Write-Host $_.Exception.Message; $failed = $true } }
+        Write-Host 'SignalRGB autostart restored; it starts at next logon.'
+    } else {
+        Write-Host 'The SignalRGB record was kept because an entry was refused.'
+    }
 }
 $bin = Join-Path $InstallDir 'bin'
 if (Set-UserPathEntry -Entry $bin -Remove) { Write-Host "PATH: removed $bin" } else { Write-Host "PATH: $bin was not on the user PATH" }
 if ($PurgeConfig -and (Test-Path -LiteralPath $appData)) {
-    Assert-UserHomeSafe -Path $appData
-    Remove-Item -LiteralPath $appData -Recurse -Force
-    Write-Host "deleted $appData (-PurgeConfig)"
+    try {
+        Remove-UserTreeNoFollow -Root $appData
+        Write-Host "deleted $appData (-PurgeConfig)"
+    } catch {
+        Write-Host $_.Exception.Message
+        Write-Host "kept $appData"
+        $failed = $true
+    }
 } else {
     Write-Host "kept $appData"
 }
-exit 0
+exit $(if ($failed) { 1 } else { 0 })

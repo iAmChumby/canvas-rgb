@@ -76,15 +76,24 @@ try {
 
     # 6. PawnIO from the official installer the user already downloaded.
     if ($PawnIoInstaller) {
-        if (-not (Test-Path -LiteralPath $PawnIoInstaller)) { throw "PawnIO installer not found: $PawnIoInstaller" }
-        $sig = Get-AuthenticodeSignature -LiteralPath $PawnIoInstaller
-        if ($sig.Status -ne 'Valid') { throw "PawnIO installer signature is $($sig.Status), not Valid. Refusing to run it." }
-        Say "  PawnIO installer signed by: $($sig.SignerCertificate.Subject)"
-        $pa = @{ FilePath = $PawnIoInstaller; Wait = $true; PassThru = $true }
-        if ($PawnIoArgs) { $pa.ArgumentList = $PawnIoArgs }
-        $pp = Start-Process @pa
-        Say "  PawnIO installer exit code $($pp.ExitCode)"
-        if ($pp.ExitCode -ne 0) { throw "PawnIO installer failed (exit $($pp.ExitCode))" }
+        if (-not (Test-Path -LiteralPath $PawnIoInstaller -PathType Leaf)) { throw "PawnIO installer not found: $PawnIoInstaller" }
+        # Copy it into the protected ProgramData folder FIRST, then check and run THE COPY: the user-writable
+        # original could be swapped between a check and a run. Only the official publisher's signature passes.
+        $stagingRoot = Join-Path $programData 'staging'
+        New-Item -ItemType Directory -Path $stagingRoot -Force | Out-Null
+        $staged = Copy-PawnIoToStaging -Source $PawnIoInstaller -StagingRoot $stagingRoot
+        try {
+            $v = Test-PawnIoInstallerFile -Path $staged
+            if (-not $v.Ok) { throw "PawnIO installer refused: $($v.Reason). Nothing was run." }
+            Say "  PawnIO installer signature accepted (publisher $((Get-AuthenticodeSignature -LiteralPath $staged).SignerCertificate.Subject)); running the protected copy $staged"
+            $pa = @{ FilePath = $staged; Wait = $true; PassThru = $true }
+            if ($PawnIoArgs) { $pa.ArgumentList = $PawnIoArgs }
+            $pp = Start-Process @pa
+            Say "  PawnIO installer exit code $($pp.ExitCode)"
+            if ($pp.ExitCode -ne 0) { throw "PawnIO installer failed (exit $($pp.ExitCode))" }
+        } finally {
+            Remove-Item -LiteralPath (Split-Path -Parent $staged) -Recurse -Force -ErrorAction SilentlyContinue
+        }
     } else {
         Say '  PawnIO: skipped, no -PawnIoInstaller path was given. Fan control stays unavailable until PawnIO is installed.'
     }

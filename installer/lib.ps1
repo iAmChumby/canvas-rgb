@@ -411,7 +411,7 @@ function Get-SetupPlan {
     $L.Add("  8. $($E.ProgramDataDir): New-Item, then Set-Acl with SDDL $($c.MachineHomeSddl) before anything is written inside")
     $L.Add("     (STOP, never delete or take over, if the folder exists and is not owned by SYSTEM or Administrators)")
     if ($E.PawnIoInstaller) {
-        $L.Add("  9. PawnIO: run the already-downloaded official installer $($E.PawnIoInstaller) (Authenticode signature must be Valid)")
+        $L.Add("  9. PawnIO: run the already-downloaded official installer $($E.PawnIoInstaller) (copied to a protected folder first; must be validly signed by the PawnIO publisher, CN=namazso.eu)")
     } else {
         $L.Add('  9. PawnIO: no -PawnIoInstaller given: skipped with a clear message (fans stay unavailable until PawnIO is installed)')
     }
@@ -736,4 +736,143 @@ function Stop-SignalRgbApp {
         }
     }
     return $out
+}
+
+# ---------------------------------------------------------------- hardening: elevated code that touches user-writable paths
+
+# The first path in the chain (the path itself, then each existing ancestor up to the drive root) that is a
+# junction or symbolic link, or $null when the whole chain is plain folders and files.
+function Get-ReparseInChain {
+    param([string]$Path)
+    $p = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+    while ($p -and $p -notmatch '^[A-Za-z]:$') {
+        if (Test-Path -LiteralPath $p) {
+            $it = Get-Item -LiteralPath $p -Force
+            if ($it.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { return $p }
+        }
+        $parent = [System.IO.Path]::GetDirectoryName($p)
+        if (-not $parent -or $parent -eq $p) { break }
+        $p = $parent
+    }
+    return $null
+}
+
+# Every junction or symbolic link inside Root, found without descending into any of them.
+function Find-ReparseEntries {
+    param([string]$Root)
+    $found = New-Object System.Collections.Generic.List[string]
+    $stack = New-Object System.Collections.Generic.Stack[string]
+    $stack.Push($Root)
+    while ($stack.Count -gt 0) {
+        $dir = $stack.Pop()
+        foreach ($e in [System.IO.Directory]::EnumerateFileSystemEntries($dir)) {
+            $a = [System.IO.File]::GetAttributes($e)
+            if ($a -band [System.IO.FileAttributes]::ReparsePoint) { $found.Add($e); continue }
+            if ($a -band [System.IO.FileAttributes]::Directory) { $stack.Push($e) }
+        }
+    }
+    return $found.ToArray()
+}
+
+# Deletes a folder tree that an unprivileged user could have rigged. Refuses, and deletes NOTHING, when the
+# folder or any parent of it, or anything inside it, is a junction or symbolic link. Each entry is checked again
+# just before it is deleted, and deletion never goes through Remove-Item -Recurse.
+function Remove-UserTreeNoFollow {
+    param([string]$Root)
+    if (-not (Test-Path -LiteralPath $Root)) { return }
+    $bad = Get-ReparseInChain -Path $Root
+    if ($bad) { throw "STOP: '$bad' is a junction or symbolic link, so '$Root' was not deleted. Check it yourself and remove or fix it." }
+    $inside = @(Find-ReparseEntries -Root $Root)
+    if ($inside.Count -gt 0) { throw "STOP: '$($inside[0])' inside '$Root' is a junction or symbolic link, so nothing was deleted. Check it yourself and remove or fix it." }
+    $del = {
+        param($dir, $self)
+        foreach ($e in [System.IO.Directory]::EnumerateFileSystemEntries($dir)) {
+            $a = [System.IO.File]::GetAttributes($e)
+            if ($a -band [System.IO.FileAttributes]::ReparsePoint) { throw "STOP: '$e' became a junction or symbolic link while deleting. Stopped." }
+            if ($a -band [System.IO.FileAttributes]::Directory) {
+                & $self $e $self
+                [System.IO.Directory]::Delete($e, $false)
+            } else {
+                if ($a -band [System.IO.FileAttributes]::ReadOnly) { [System.IO.File]::SetAttributes($e, [System.IO.FileAttributes]::Normal) }
+                [System.IO.File]::Delete($e)
+            }
+        }
+    }
+    & $del $Root $del
+    [System.IO.Directory]::Delete($Root, $false)
+}
+
+# May this recorded Startup shortcut be moved back? Both ends must be exactly where setup put them: the shortcut
+# directly inside the user's Startup folder, its backup directly inside %APPDATA%\canvas-rgb\signalrgb-startup-backup,
+# same file name, .lnk only, and no junction or symbolic link anywhere on either path. Pure apart from reading the disk.
+function Test-StartupRestoreEntry {
+    param([string]$OriginalPath, [string]$BackupPath, [string]$StartupDir, [string]$BackupDir)
+    $no = { param($why) [pscustomobject]@{ Ok = $false; Reason = $why } }
+    foreach ($v in $OriginalPath, $BackupPath, $StartupDir, $BackupDir) {
+        if ([string]::IsNullOrWhiteSpace($v) -or $v -notmatch '^[A-Za-z]:\\') { return (& $no "not an absolute path: '$v'") }
+    }
+    $o = [System.IO.Path]::GetFullPath($OriginalPath); $b = [System.IO.Path]::GetFullPath($BackupPath)
+    $sd = [System.IO.Path]::GetFullPath($StartupDir).TrimEnd('\'); $bd = [System.IO.Path]::GetFullPath($BackupDir).TrimEnd('\')
+    if ([System.IO.Path]::GetExtension($o) -ne '.lnk' -or [System.IO.Path]::GetExtension($b) -ne '.lnk') { return (& $no 'only .lnk shortcuts are restored') }
+    if ([System.IO.Path]::GetDirectoryName($o) -ine $sd) { return (& $no "the shortcut is not directly inside the Startup folder '$sd'") }
+    if ([System.IO.Path]::GetDirectoryName($b) -ine $bd) { return (& $no "the backup is not directly inside '$bd'") }
+    if ([System.IO.Path]::GetFileName($o) -ine [System.IO.Path]::GetFileName($b)) { return (& $no 'the backup and the shortcut have different names') }
+    foreach ($p in $o, $b) {
+        $bad = Get-ReparseInChain -Path $p
+        if ($bad) { return (& $no "'$bad' is a junction or symbolic link") }
+    }
+    if (-not (Test-Path -LiteralPath $b -PathType Leaf)) { return (& $no 'the backup file is gone') }
+    if (Test-Path -LiteralPath $o) { return (& $no 'a file already sits at the shortcut path') }
+    return [pscustomobject]@{ Ok = $true; Reason = '' }
+}
+
+# ---------------------------------------------------------------- PawnIO installer: pinned signer and a protected copy
+
+# The signer of the official PawnIO release. Read from the real PawnIO_setup.exe of release 2.2.0
+# (github.com/namazso/PawnIO.Setup, asset SHA-256 1f519a22e47187f70a1379a48ca604981c4fcf694f4e65b734aaa74a9fba3032,
+# matching GitHub's digest): subject E=admin@namazso.eu, CN=namazso.eu, O=namazso, L=Debrecen, C=HU; certificate
+# thumbprint F380DCC9F706E2756A5047B832FFE719E1BC35F5, issued by GLOBALTRUST 2015 CODESIGNING 1, valid until 2027-08-05.
+# The same certificate signs the already-installed PawnIO uninstall.exe, PawnIOUtil.exe and PawnIOLib.dll.
+# The pin is the subject (CN, O, C), not the thumbprint, so a renewed certificate of the same publisher still passes.
+$script:PawnIoSigner = @{ Cn = 'namazso.eu'; O = 'namazso'; C = 'HU'; Thumbprint = 'F380DCC9F706E2756A5047B832FFE719E1BC35F5' }
+
+function Get-SubjectField {
+    param([string]$Subject, [string]$Field)
+    $m = [regex]::Match($Subject, "(?:^|,\s*)$Field=(?:""([^""]*)""|([^,]*))")
+    if (-not $m.Success) { return '' }
+    return $(if ($m.Groups[1].Success) { $m.Groups[1].Value } else { $m.Groups[2].Value }).Trim()
+}
+
+# Pure: Authenticode status text + certificate subject in, verdict out.
+function Test-PawnIoSignature {
+    param([string]$Status, [string]$Subject)
+    $p = $script:PawnIoSigner
+    if ($Status -ne 'Valid') { return [pscustomobject]@{ Ok = $false; Reason = "the signature is $Status, not Valid" } }
+    $cn = Get-SubjectField $Subject 'CN'; $o = Get-SubjectField $Subject 'O'; $c = Get-SubjectField $Subject 'C'
+    if ($cn -ceq $p.Cn -and $o -ceq $p.O -and $c -ceq $p.C) { return [pscustomobject]@{ Ok = $true; Reason = '' } }
+    return [pscustomobject]@{ Ok = $false; Reason = "it is signed by '$Subject', not by the PawnIO publisher (CN=$($p.Cn), O=$($p.O), C=$($p.C))" }
+}
+
+function Test-PawnIoInstallerFile {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return [pscustomobject]@{ Ok = $false; Reason = "not found: $Path" } }
+    $sig = Get-AuthenticodeSignature -LiteralPath $Path
+    $subj = $(if ($sig.SignerCertificate) { $sig.SignerCertificate.Subject } else { '' })
+    return (Test-PawnIoSignature -Status ([string]$sig.Status) -Subject $subj)
+}
+
+# Copies the installer the user picked into a new folder under StagingRoot (inside the protected %ProgramData%\canvas-rgb,
+# which ordinary users cannot write to), reading the source once. Returns the copy's path. The caller verifies and runs
+# THE COPY, so the user cannot swap the file between the check and the run.
+function Copy-PawnIoToStaging {
+    param([string]$Source, [string]$StagingRoot)
+    $dir = Join-Path $StagingRoot ('pawnio-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    $dest = Join-Path $dir 'PawnIO_setup.exe'
+    $in = [System.IO.File]::Open($Source, 'Open', 'Read', 'Read')
+    try {
+        $out = [System.IO.File]::Open($dest, 'CreateNew', 'Write', 'None')
+        try { $in.CopyTo($out) } finally { $out.Dispose() }
+    } finally { $in.Dispose() }
+    return $dest
 }
