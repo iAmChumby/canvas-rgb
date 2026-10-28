@@ -3,6 +3,7 @@
   <img alt="canvas-rgb: lighting, fans and peripherals for your Windows PC. One small app instead of four." src="docs/assets/banner-light.png">
 </picture>
 
+[![CI](https://github.com/iAmChumby/canvas-rgb/actions/workflows/ci.yml/badge.svg)](https://github.com/iAmChumby/canvas-rgb/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-3b9bff)](LICENSE)
 ![Platform: Windows 11](https://img.shields.io/badge/platform-Windows%2011-0e0f11)
 ![Rust](https://img.shields.io/badge/built%20with-Rust-b45cff?logo=rust)
