@@ -850,10 +850,18 @@ fn the_load_budget_covers_all_scripts_together() {
         let one = format!("<script>for (var i = 0; i < {iterations}; i++) {{}}</script>");
         format!("<head><title>T</title></head><body><canvas id=\"c\" width=\"4\" height=\"4\"></canvas></body>{}", one.repeat(scripts))
     }
-    let probe = 3_000_000u64;
-    let start = std::time::Instant::now();
-    HtmlEffect::from_source("probe", &page(probe, 1), &Props::new()).expect("probe loads");
-    let per_iter = start.elapsed().as_secs_f64() / probe as f64;
+    // Calibrate with a loop that grows until it takes about 50 ms, so a slow machine (a debug
+    // build on a CI runner) never spends the 2 s budget on the calibration itself.
+    let mut probe = 10_000u64;
+    let per_iter = loop {
+        let start = std::time::Instant::now();
+        HtmlEffect::from_source("probe", &page(probe, 1), &Props::new()).expect("probe loads");
+        let took = start.elapsed().as_secs_f64();
+        if took >= 0.05 {
+            break took / probe as f64;
+        }
+        probe *= 2;
+    };
     let iterations = (0.9 / per_iter) as u64;
     let result = HtmlEffect::from_source("t", &page(iterations, 4), &Props::new());
     assert!(
