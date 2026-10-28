@@ -40,6 +40,26 @@ fn free_port() -> u16 {
     listener.local_addr().expect("the listener has an address").port()
 }
 
+/// Every log file under the temporary home, for a failure message.
+fn daemon_logs(home: &std::path::Path) -> String {
+    let mut out = String::new();
+    let mut dirs = vec![home.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.extension().is_some_and(|e| e == "log") {
+                out.push_str(&format!("{}:
+{}
+", path.display(), std::fs::read_to_string(&path).unwrap_or_default()));
+            }
+        }
+    }
+    out
+}
+
 fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(2)))
@@ -75,7 +95,8 @@ fn quit_makes_the_daemon_exit_with_code_zero_within_three_seconds() {
         .env("CANVAS_RGB_OPENRGB", home.0.join("no-such-OpenRGB.exe"))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        // stderr goes to a file in the temporary home, so a failed start says why.
+        .stderr(std::fs::File::create(home.0.join("stderr.log")).expect("the stderr file is created"))
         .spawn()
         .expect("the daemon starts");
     let mut daemon = KillOnDrop(child);
@@ -88,7 +109,13 @@ fn quit_makes_the_daemon_exit_with_code_zero_within_three_seconds() {
             break;
         }
         if let Some(status) = daemon.0.try_wait().expect("the child can be polled") {
-            panic!("the daemon exited before the API answered: {status}");
+            let stderr = std::fs::read_to_string(home.0.join("stderr.log")).unwrap_or_default();
+            let logs = daemon_logs(&home.0) + &daemon_logs(&canvas_proto::consts::user_log_dir());
+            panic!("the daemon exited before the API answered: {status}
+--- stderr ---
+{stderr}
+--- logs ---
+{logs}");
         }
         assert!(started.elapsed() < Duration::from_secs(15), "the API did not start in 15 s");
         std::thread::sleep(Duration::from_millis(100));
