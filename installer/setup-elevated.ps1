@@ -113,7 +113,7 @@ try {
     $tray = Join-Path $InstallDir $c.TrayExe
     $version = (Get-Item -LiteralPath $tray).VersionInfo.ProductVersion
     $sizeKb = [int]((Get-ChildItem -LiteralPath $InstallDir -Recurse -File | Measure-Object Length -Sum).Sum / 1KB)
-    $uninstall = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $unDir 'uninstall.ps1') + '"'
+    $uninstall = Get-UninstallCommand -InstallDir $InstallDir -UninstallerDir $unDir
     New-Item -Path $c.UninstallKey -Force | Out-Null
     $props = [ordered]@{
         DisplayName = $c.DisplayName; DisplayVersion = $version; Publisher = $c.Publisher

@@ -58,14 +58,14 @@ Test-Case 'setup plan flags low disk space' {
     Assert-True ((Get-SetupPlan -E (New-Env @{ FreeGb = 30 })) -join "`n").Contains('would stop')
 }
 
-Test-Case 'uninstall plan runs --restore-bios first, before stopping the service' {
+Test-Case 'uninstall plan hands the fans back to BIOS (stop service, then --restore-bios) before it deletes anything' {
     $lines = Get-UninstallPlan -E @{
         InstallDir = 'C:\Fake\PF\canvas-rgb'; ProgramDataDir = 'C:\Fake\PD\canvas-rgb'; AppDataDir = 'C:\Fake\AD\canvas-rgb'
         PurgeConfig = $false; ServiceExists = $true; MachineRestore = $null; UserRestore = $null
     }
     $t = $lines -join "`n"
-    $iBios = $t.IndexOf('--restore-bios'); $iStop = $t.IndexOf('stop and delete service')
-    Assert-True ($iBios -ge 0 -and $iStop -gt $iBios) 'restore-bios must come before the service stop'
+    $iStop = $t.IndexOf('stop service'); $iBios = $t.IndexOf('--restore-bios'); $iDel = $t.IndexOf('delete service')
+    Assert-True ($iStop -ge 0 -and $iBios -gt $iStop -and $iDel -gt $iBios) 'service stop, then restore-bios, then service delete'
     Assert-True $t.Contains('report its exit code')
     Assert-True $t.Contains('keep C:\Fake\AD\canvas-rgb')
 }

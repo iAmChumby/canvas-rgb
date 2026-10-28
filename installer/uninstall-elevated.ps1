@@ -18,26 +18,55 @@ try {
     $programData = Join-Path $env:ProgramData $c.AppName
     Say '[elevated] start'
 
-    # 1. G4: hand every fan header back to BIOS BEFORE stopping or removing anything.
+    # 0. Check before anything changes: the folders this script is about to delete are the ones
+    #    canvas-rgb owns. The machine home is also where bios-state.json is read from below.
+    Assert-InstallDirSafe -Path $InstallDir
+    Assert-MachineHomeSafe -Path $programData
+
+    # 1. Stop the service FIRST. Its 1 Hz tick re-drives every manual header (each duty write sets the
+    #    manual bit again), so a --restore-bios run beside a live service is undone within a second.
+    #    Its shutdown hands every header back to BIOS. A service that will not stop is a hard stop:
+    #    nothing is deleted while it may still own a header.
     $svcExe = Join-Path $InstallDir $c.ServiceExe
     $svc = Get-Service -Name $c.ServiceName -ErrorAction SilentlyContinue
+    if ($svc) {
+        if ($svc.Status -ne 'Stopped') {
+            try {
+                Stop-Service -Name $c.ServiceName -Force
+                $svc.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
+            } catch {
+                throw "the service $($c.ServiceName) did not stop ($($_.Exception.Message)). Nothing was removed. It may still own fan headers: stop it from services.msc and run the uninstall again."
+            }
+        }
+        $svc.Refresh()
+        if ($svc.Status -ne 'Stopped') { throw "the service $($c.ServiceName) is $($svc.Status), not Stopped. Nothing was removed." }
+        Say "  service $($c.ServiceName) stopped (its shutdown hands the fan headers back to BIOS)"
+    }
+
+    # 2. G4: hand every fan header back to BIOS BEFORE anything is deleted. With the service stopped
+    #    this is the check that nothing is left manual. It exits non-zero on a PC where it cannot open
+    #    any fan chip (no PawnIO driver, no NVIDIA GPU); then nothing could be under canvas-rgb
+    #    control, which bios-state.json settles: it is written before any header is taken over.
     if (Test-Path -LiteralPath $svcExe) {
         & $svcExe --restore-bios
         $code = $LASTEXITCODE
         Say "  $($c.ServiceExe) --restore-bios exit code: $code"
-        if ($code -ne 0) { throw "--restore-bios failed (exit $code). Nothing was stopped or removed. Fans may still be under canvas-rgb control." }
+        $state = Get-BiosStateVerdict -MachineHome $programData
+        switch (Get-RestoreBiosDecision -ExitCode $code -ManualState $state.State) {
+            'refuse' {
+                $why = if ($state.State -eq 'Manual') { "bios-state.json records $(@($state.Headers) -join ', ') as taken over" } else { 'bios-state.json could not be read' }
+                throw "--restore-bios failed (exit $code) and $why. Nothing was removed (the service is stopped). Fans may still be under canvas-rgb control: restart the PC, or fix the fan driver and run the uninstall again."
+            }
+            'skip' { Say '  --restore-bios could not open a fan chip, and bios-state.json lists no header: no fan was ever under canvas-rgb control. Carrying on.' }
+        }
     } elseif ($svc) {
         throw "$svcExe is missing but the service exists: cannot hand fans back to BIOS. Nothing was removed."
     } else {
         Say "  $svcExe not found and no service: nothing installed, --restore-bios skipped"
     }
 
-    # 2. Stop and delete the service.
+    # 2b. Delete the service (already stopped).
     if ($svc) {
-        if ($svc.Status -ne 'Stopped') {
-            Stop-Service -Name $c.ServiceName -Force
-            $svc.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
-        }
         & sc.exe delete $c.ServiceName | ForEach-Object { Say "  sc delete: $_" }
         if ($LASTEXITCODE -ne 0) { throw "sc.exe delete failed (exit $LASTEXITCODE)" }
         Say "  service $($c.ServiceName) deleted"

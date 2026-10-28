@@ -2,9 +2,11 @@
 .SYNOPSIS
   Removes canvas-rgb with ONE UAC prompt. Run it unelevated.
 .DESCRIPTION
-  The elevated child (uninstall-elevated.ps1) first runs canvas-rgb-svc.exe --restore-bios (every fan
-  header goes back to BIOS), then stops and deletes the service, removes the install dir and restores
-  SignalRgbService from its record. Back unelevated: removes the Run entries and the PATH entry,
+  The elevated child (uninstall-elevated.ps1) first stops the service (its shutdown hands the fans
+  back to BIOS), then runs canvas-rgb-svc.exe --restore-bios as the check (every fan header on BIOS;
+  a PC with no fan driver carries on when bios-state.json lists no header), then deletes the service,
+  removes the install dir and restores SignalRgbService from its record. It refuses an -InstallDir
+  that is not a canvas-rgb install. Back unelevated: removes the Run entries and the PATH entry,
   restores SignalRGB's autostart from its record. %APPDATA%\canvas-rgb is kept unless -PurgeConfig.
   -WhatIf prints the plan and changes nothing: no prompt, no elevation.
 #>
@@ -20,6 +22,14 @@ $dry = [bool]$WhatIfPreference
 $c = Get-CanvasConst
 $programData = Join-Path $env:ProgramData $c.AppName
 $appData = Join-Path $env:APPDATA $c.AppName
+# Refuse a folder that is not a canvas-rgb install before the plan prints and before any prompt.
+try {
+    Assert-InstallDirSafe -Path $InstallDir
+    if ($PurgeConfig) { Assert-UserHomeSafe -Path $appData }
+} catch {
+    Write-Host $_.Exception.Message
+    exit 1
+}
 $machineRestorePath = Join-Path $programData $c.RestoreFile
 $userRestorePath = Join-Path $appData $c.RestoreFile
 

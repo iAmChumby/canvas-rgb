@@ -429,6 +429,88 @@ function Get-SetupPlan {
     return $L.ToArray()
 }
 
+# ---------------------------------------------------------------- uninstall safety
+
+# Uninstall deletes with -Recurse -Force, elevated, on a path the caller can choose. Like
+# Assert-MachineHomeSafe on the setup side, this stops with a message and deletes nothing.
+# A folder that exists must be an absolute, non-root, non-junction folder that holds a canvas-rgb
+# program (so uninstall.ps1 -InstallDir C:\Users\me\Documents is refused). A missing folder passes:
+# there is nothing to delete.
+function Assert-InstallDirSafe {
+    param([string]$Path)
+    if ($Path -notmatch '^[A-Za-z]:\\') {
+        throw "STOP: -InstallDir '$Path' is not an absolute drive path. Uninstall never guesses which folder to delete."
+    }
+    $full = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+    if ($full -match '^[A-Za-z]:$') {
+        throw "STOP: -InstallDir '$Path' is a drive root. Uninstall never deletes a whole drive."
+    }
+    if (-not (Test-Path -LiteralPath $full)) { return }
+    $item = Get-Item -LiteralPath $full -Force
+    if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+        throw ("STOP: '$full' is a junction or symbolic link. " +
+               "Uninstall never follows or deletes it. Check it yourself and remove or fix it, then run uninstall again.")
+    }
+    $c = $script:CanvasConst
+    $markers = @($c.DaemonExe, $c.ServiceExe, $c.TrayExe)
+    $found = $markers | Where-Object { Test-Path -LiteralPath (Join-Path $full $_) -PathType Leaf }
+    if (-not $found) {
+        throw ("STOP: '$full' exists but holds none of $($markers -join ', '), so it is not a canvas-rgb install. " +
+               "Nothing was changed. Pass the folder canvas-rgb was installed to.")
+    }
+}
+
+# The per-user config folder (%APPDATA%\canvas-rgb) is deleted by -PurgeConfig. A junction or
+# symbolic link in its place is refused, never followed.
+function Assert-UserHomeSafe {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $item = Get-Item -LiteralPath $Path -Force
+    if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+        throw ("STOP: '$Path' is a junction or symbolic link. " +
+               "Uninstall never follows or deletes it. Check it yourself and remove or fix it, then run uninstall again.")
+    }
+}
+
+# What the service's crash-restore record says. canvas-rgb-svc writes bios-state.json BEFORE it takes
+# a header off BIOS control and removes it once every header is back, so:
+#   None    no file, or a file that lists no header: nothing can be under canvas-rgb control
+#   Manual  at least one header is recorded as taken over (Headers names them)
+#   Unknown the file exists and cannot be read as {"headers":{...}}: not proof of anything
+function Get-BiosStateVerdict {
+    param([string]$MachineHome)
+    $path = Join-Path $MachineHome 'bios-state.json'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return [pscustomobject]@{ State = 'None'; Headers = @() } }
+    try {
+        $j = [System.IO.File]::ReadAllText($path) | ConvertFrom-Json
+        if ($null -eq $j -or $null -eq $j.PSObject.Properties['headers']) { throw 'no headers property' }
+        $names = @()
+        if ($null -ne $j.headers) { $names = @($j.headers.PSObject.Properties | ForEach-Object { $_.Name }) }
+        if ($names.Count -eq 0) { return [pscustomobject]@{ State = 'None'; Headers = @() } }
+        return [pscustomobject]@{ State = 'Manual'; Headers = $names }
+    } catch {
+        return [pscustomobject]@{ State = 'Unknown'; Headers = @() }
+    }
+}
+
+# canvas-rgb-svc --restore-bios exits non-zero when it cannot open any fan chip (no PawnIO driver and
+# no NVIDIA GPU) or cannot write a header. Uninstall may go on only when nothing could be under
+# canvas-rgb control. ok: it worked. skip: it failed but no header is recorded as manual.
+# refuse: it failed and a header is (or may be) manual.
+function Get-RestoreBiosDecision {
+    param([int]$ExitCode, [string]$ManualState)
+    if ($ExitCode -eq 0) { return 'ok' }
+    if ($ManualState -eq 'None') { return 'skip' }
+    return 'refuse'
+}
+
+# The command Settings > Installed apps runs. It names the folder canvas-rgb was installed to, so a
+# custom -InstallDir uninstalls the right one.
+function Get-UninstallCommand {
+    param([string]$InstallDir, [string]$UninstallerDir)
+    return 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $UninstallerDir 'uninstall.ps1') + '" -InstallDir "' + $InstallDir + '"'
+}
+
 # $E keys: InstallDir, ProgramDataDir, AppDataDir, PurgeConfig ([bool]),
 #   ServiceExists ([bool]), MachineRestore, UserRestore (Read-RestoreFile results or $null)
 function Get-UninstallPlan {
@@ -441,25 +523,27 @@ function Get-UninstallPlan {
     $L.Add("  user config : $($E.AppDataDir)  ($(if ($E.PurgeConfig) { 'deleted: -PurgeConfig' } else { 'kept' }))")
     $L.Add('')
     $L.Add('ONE UAC prompt: installer/uninstall-elevated.ps1 (Start-Process -Verb RunAs -Wait):')
-    $L.Add("  1. FIRST: $($E.InstallDir)\$($c.ServiceExe) --restore-bios (hands every fan header back to BIOS); report its exit code; stop if it fails")
-    $L.Add("  2. stop and delete service $($c.ServiceName)$(if ($E.ServiceExists) { '' } else { ' (not installed: skipped)' })")
-    $L.Add("  3. remove the Installed apps entry and the Start menu shortcut, then $($E.InstallDir)")
+    $L.Add("  0. check first, change nothing: $($E.InstallDir) is a canvas-rgb install (not a drive root, junction or other folder); $($E.ProgramDataDir) is not a junction and is owned by SYSTEM or Administrators")
+    $L.Add("  1. stop service $($c.ServiceName)$(if ($E.ServiceExists) { '' } else { ' (not installed: skipped)' }): its shutdown hands every fan header back to BIOS, and a running service would take a header back to manual within a second; stop here if it will not stop")
+    $L.Add("  2. THEN: $($E.InstallDir)\$($c.ServiceExe) --restore-bios (every fan header to BIOS, before anything is deleted); report its exit code; stop if it fails while $($E.ProgramDataDir)\bios-state.json records a manual header (a PC with no fan driver has none: carry on)")
+    $L.Add("  3. delete service $($c.ServiceName)")
+    $L.Add("  4. remove the Installed apps entry and the Start menu shortcut, then $($E.InstallDir)")
     if ($E.MachineRestore -and $E.MachineRestore.service) {
-        $L.Add("  4. restore $($E.MachineRestore.service.name) StartType to $($E.MachineRestore.service.startType) (from $($E.ProgramDataDir)\$($c.RestoreFile))")
+        $L.Add("  5. restore $($E.MachineRestore.service.name) StartType to $($E.MachineRestore.service.startType) (from $($E.ProgramDataDir)\$($c.RestoreFile))")
     } else {
-        $L.Add("  4. no machine SignalRGB restore record: the SignalRGB service is left as is")
+        $L.Add("  5. no machine SignalRGB restore record: the SignalRGB service is left as is")
     }
-    $L.Add($(if ($E.PurgeConfig) { "  5. delete $($E.ProgramDataDir) (-PurgeConfig)" } else { "  5. keep $($E.ProgramDataDir) (fans.toml and logs); only $($c.RestoreFile) is deleted after use" }))
+    $L.Add($(if ($E.PurgeConfig) { "  6. delete $($E.ProgramDataDir) (-PurgeConfig)" } else { "  6. keep $($E.ProgramDataDir) (fans.toml and logs); only $($c.RestoreFile) is deleted after use" }))
     $L.Add('')
     $L.Add('Unelevated, after the UAC child returns:')
-    $L.Add("  6. remove HKCU Run values $($c.RunKeyDaemon) and $($c.RunKeyTray)")
+    $L.Add("  7. remove HKCU Run values $($c.RunKeyDaemon) and $($c.RunKeyTray)")
     if ($E.UserRestore) {
-        foreach ($r in @($E.UserRestore.runValues)) { $L.Add("  7. restore HKCU Run value $($r.name) = $($r.data)") }
-        foreach ($s in @($E.UserRestore.startupShortcuts)) { $L.Add("  7. restore Startup shortcut $($s.originalPath)") }
+        foreach ($r in @($E.UserRestore.runValues)) { $L.Add("  8. restore HKCU Run value $($r.name) = $($r.data)") }
+        foreach ($s in @($E.UserRestore.startupShortcuts)) { $L.Add("  8. restore Startup shortcut $($s.originalPath)") }
     } else {
-        $L.Add('  7. no user SignalRGB restore record: SignalRGB autostart left as is')
+        $L.Add('  8. no user SignalRGB restore record: SignalRGB autostart left as is')
     }
-    $L.Add("  8. remove $($E.InstallDir)\bin from the user PATH")
-    $L.Add($(if ($E.PurgeConfig) { "  9. delete $($E.AppDataDir) (-PurgeConfig)" } else { "  9. keep $($E.AppDataDir)" }))
+    $L.Add("  9. remove $($E.InstallDir)\bin from the user PATH")
+    $L.Add($(if ($E.PurgeConfig) { "  10. delete $($E.AppDataDir) (-PurgeConfig)" } else { "  10. keep $($E.AppDataDir)" }))
     return $L.ToArray()
 }
