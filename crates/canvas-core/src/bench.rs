@@ -14,7 +14,7 @@
 use std::time::Instant;
 
 use canvas_proto::device::{DeviceId, DeviceInfo, DeviceKind, ZoneInfo, ZoneKind};
-use canvas_proto::layout::{Layout, PlacedZone, RenderScale, SamplingMode};
+use canvas_proto::layout::{Layout, PlacedZone, RenderScale, SamplingMode, ZoneShape};
 use canvas_proto::color::Rgb8;
 
 use crate::geometry;
@@ -70,6 +70,7 @@ fn bench_layout(device: &DeviceInfo) -> Layout {
             rotation_deg: 0.0,
             reversed: false,
             visible: true,
+            shape: ZoneShape::Auto,
         })
         .collect();
     Layout {

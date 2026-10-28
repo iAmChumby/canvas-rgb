@@ -5,6 +5,10 @@
  * `.desk.canvas` (0,2,0) outranks `.stage` (0,1,0), whatever order the two sheets end up in.
  *
  * Colours are tokens only. The zone colour is `--zc`, set per zone from the device accents.
+ *
+ * One visual language: each zone is a thin outline of its shape (a rectangle, an ellipse for a
+ * ring) and its LEDs are small crisp dots at the places the daemon samples. The dots are drawn
+ * on the overlay canvas; everything else is here.
  */
 .desk.canvas {
   position: relative;
@@ -19,25 +23,16 @@
     var(--sunk);
   user-select: none;
   touch-action: none;
+  outline: none;
 }
 
-/*
- * The bed of a zone: a physical LED strip is dark whatever the effect is doing, and the LEDs
- * drawn on it have to be the brightest thing in it. This is the one colour on the desk that is
- * not from the palette, and it wants to be a token (see the report).
- */
-.desk {
-  --zone-bed: var(--led-bed);
-  /*
-   * The devices' own surfaces: the plastic of a key, the line of a trace, the metal of a
-   * heatspreader, the gold of a contact. Every one of them is a step off the bed and never a
-   * light: the lit LEDs have to stay the brightest thing on the desk. The contact takes the
-   * zone's own colour, so a stick is drawn in the colour of the device it belongs to.
-   */
-  --dev-face: color-mix(in srgb, var(--mute) 30%, var(--zone-bed));
-  --dev-line: color-mix(in srgb, var(--mute) 50%, var(--zone-bed));
-  --dev-metal: color-mix(in srgb, var(--dim) 28%, var(--zone-bed));
-  --dev-gold: color-mix(in srgb, var(--zc, var(--a1)) 40%, var(--zone-bed));
+/* The picture is the backdrop, not the subject: a quiet veil over it keeps the outlines and the
+   dots readable over any effect. It never takes a click. */
+.desk .veil {
+  position: absolute;
+  inset: 0;
+  background: var(--veil);
+  pointer-events: none;
 }
 
 /* ---------- zones ---------- */
@@ -45,21 +40,40 @@
 .desk .zone {
   position: absolute;
   box-sizing: border-box;
-  border: 1px solid var(--zc);
+  border: 1.5px solid color-mix(in srgb, var(--zc) 85%, transparent);
   border-radius: 3px;
-  /* A zone is a physical strip: its bed is near-black in both themes, so the LEDs drawn on it
-     are the brightest thing in it. (The palette has no near-black that survives the light
-     theme; this wants to be a token - see the report.) */
-  background-color: var(--zone-bed);
+  background-color: var(--zone-plate);
+  /* A one pixel keyline outside the outline, so it holds on any picture. It is hard-edged: a
+     line, not a glow. */
+  box-shadow: 0 0 0 1px var(--zone-halo);
   cursor: grab;
   transform-origin: 50% 50%;
+  z-index: 1;
   transition:
     background-color var(--dur-fast) var(--ease),
     border-color var(--dur-fast) var(--ease);
 }
 
+/* The shape is the outline: a ring is an ellipse, a point is a soft box, the rest are rectangles.
+   An outline is only its edge, because its LEDs ride the edge. */
+.desk .zone[data-shape="ring"] {
+  border-radius: 50%;
+}
+
+.desk .zone[data-shape="point"] {
+  border-radius: 6px;
+}
+
+.desk .zone[data-shape="outline"] {
+  background-color: transparent;
+}
+
 .desk .zone:hover {
-  background-color: color-mix(in srgb, var(--zc) 22%, var(--zone-bed));
+  background-color: color-mix(in srgb, var(--zc) 18%, var(--zone-plate));
+}
+
+.desk .zone[data-shape="outline"]:hover {
+  background-color: color-mix(in srgb, var(--zc) 10%, transparent);
 }
 
 .desk .zone[data-dragging="true"] {
@@ -68,31 +82,14 @@
 }
 
 .desk .zone[data-selected="true"] {
-  border-color: var(--live);
-  background-color: color-mix(in srgb, var(--zc) 26%, var(--zone-bed));
+  border-color: var(--zc);
+  background-color: color-mix(in srgb, var(--zc) 14%, var(--zone-plate));
   z-index: 4;
-}
-
-/* The selection is a ring that fades in around the zone: picking a zone reads as a change, not
-   as a jump. The ring is a pseudo-element, so it never takes a click away from the zone. */
-.desk .zone::after {
-  content: "";
-  position: absolute;
-  inset: -3px;
-  border: 2px solid var(--live);
-  border-radius: 5px;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity var(--dur-fast) var(--ease);
-}
-
-.desk .zone[data-selected="true"]::after {
-  opacity: 1;
 }
 
 .desk .zone[data-hidden="true"] {
   border-style: dashed;
-  opacity: 0.5;
+  opacity: 0.45;
 }
 
 /* A zone whose device is not connected: dimmed, dashed, and drawn over the live zones so that
@@ -102,6 +99,7 @@
   border-color: transparent;
   border-style: dashed;
   background-color: transparent;
+  box-shadow: none;
   outline: 1px dashed color-mix(in srgb, var(--down) 70%, transparent);
   outline-offset: -4px;
   opacity: 0.85;
@@ -114,174 +112,24 @@
   background-color: transparent;
 }
 
-/* The live zones sit over the stale ones. */
-.desk .zone {
-  z-index: 1;
-}
-
-/* A selected zone is on top of everything, stale or not. */
-.desk .zone[data-selected="true"] {
-  z-index: 4;
-}
-
 .desk .zone:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 3px;
 }
 
-/* ---------- the device silhouettes ---------- */
-
-/*
- * Each zone is drawn as the device it is. The shape comes from the device's kind and the
- * zone's kind, never from its name: a JARGB header is a strip because it is a linear zone, a
- * DIMM is a stick because its device is DRAM, a keyboard is a board with keys because its
- * device is a keyboard, and a microphone is a capsule on a stand.
- *
- * The shapes are drawn in tokens, in the zone's own box, under the lit LEDs. A zone whose
- * device the daemon does not list is a ghost and draws nothing.
- */
-
-/* An ARGB strip: a thin bar with its light channel down the middle and a connector at each
-   end. The beads are the LEDs, and they are drawn over this. */
-.desk .zone[data-shape="strip"][data-axis="h"] {
-  background-image:
-    linear-gradient(
-      to bottom,
-      transparent calc(50% - 1px),
-      var(--dev-line) calc(50% - 1px) calc(50% + 1px),
-      transparent calc(50% + 1px)
-    ),
-    linear-gradient(to right, var(--dev-face) 0 3px, transparent 3px calc(100% - 3px), var(--dev-face) calc(100% - 3px));
-}
-
-.desk .zone[data-shape="strip"][data-axis="v"] {
-  background-image:
-    linear-gradient(
-      to right,
-      transparent calc(50% - 1px),
-      var(--dev-line) calc(50% - 1px) calc(50% + 1px),
-      transparent calc(50% + 1px)
-    ),
-    linear-gradient(to bottom, var(--dev-face) 0 3px, transparent 3px calc(100% - 3px), var(--dev-face) calc(100% - 3px));
-}
-
-/* A DIMM: a board with a heatspreader down one long edge, its contacts along the other, and
-   the notch that every stick has in its contacts. The edges are drawn where the lamps do not
-   reach, so the stick reads as a stick and not as a row of lights. */
-.desk .zone[data-shape="dram"][data-axis="h"] {
-  background-image:
-    linear-gradient(to right, transparent 0 54%, var(--zone-bed) 54% 60%, transparent 60%),
-    repeating-linear-gradient(90deg, var(--dev-gold) 0 2px, transparent 2px 6px),
-    linear-gradient(to bottom, var(--dev-line) 0 1px, var(--dev-metal) 1px 14%, transparent 14%);
-  background-size: 100% 11%, 100% 11%, 100% 100%;
-  background-position: 0 100%, 0 100%, 0 0;
-  background-repeat: no-repeat;
-}
-
-.desk .zone[data-shape="dram"][data-axis="v"] {
-  background-image:
-    linear-gradient(to bottom, transparent 0 54%, var(--zone-bed) 54% 60%, transparent 60%),
-    repeating-linear-gradient(0deg, var(--dev-gold) 0 2px, transparent 2px 6px),
-    linear-gradient(to right, var(--dev-line) 0 1px, var(--dev-metal) 1px 14%, transparent 14%);
-  background-size: 11% 100%, 11% 100%, 100% 100%;
-  background-position: 100% 0, 100% 0, 0 0;
-  background-repeat: no-repeat;
-}
-
-/* A keyboard: a rounded case with a grid of keys in it. The keys are the case's own colour
-   and the gaps between them are the bed, so the board reads as a board and not as a box. The
-   one LED it has is drawn where it is, in the middle. */
-.desk .zone[data-shape="keyboard"] {
-  border-radius: var(--r-sm);
-  background-image:
-    repeating-linear-gradient(90deg, var(--zone-bed) 0 2px, transparent 2px 6.25%),
-    repeating-linear-gradient(0deg, var(--zone-bed) 0 2px, transparent 2px 50%),
-    linear-gradient(var(--dev-face), var(--dev-face));
-  background-size: calc(100% - 10px) calc(100% - 8px);
-  background-position: 5px 4px;
-  background-repeat: no-repeat;
-}
-
-.desk .zone[data-shape="keyboard"]::after {
-  border-radius: calc(var(--r-sm) + 3px);
-}
-
-/*
- * A microphone: the capsule, which is the zone itself, with its stand inside it. A zone is
- * only a few units across, so the capsule is the whole box and the stand is the only thing
- * that says "microphone" - it is drawn inside the box, under the lamp, so a silhouette never
- * reaches out of the zone it belongs to.
- */
-.desk .zone[data-shape="microphone"] {
-  border-radius: 50%;
-}
-
-.desk .zone[data-shape="microphone"]::after {
-  border-radius: 50%;
-}
-
-.desk .zone[data-shape="microphone"]::before {
-  content: "";
-  position: absolute;
-  left: 50%;
-  top: 58%;
-  width: 44%;
-  height: 30%;
-  transform: translateX(-50%);
-  background:
-    /* the base of the stand */
-    linear-gradient(
-      to bottom,
-      transparent 0 calc(100% - 1px),
-      var(--dev-line) calc(100% - 1px) 100%,
-      transparent 100%
-    ),
-    /* the stem of the stand */
-    linear-gradient(
-      to right,
-      transparent 0 calc(50% - 1px),
-      var(--dev-line) calc(50% - 1px) calc(50% + 1px),
-      transparent calc(50% + 1px)
-    );
-}
-
-/* A field of LEDs: a matrix zone is a grid of cells. */
-.desk .zone[data-shape="grid"] {
-  background-image:
-    repeating-linear-gradient(90deg, var(--zone-bed) 0 2px, transparent 2px 12.5%),
-    repeating-linear-gradient(0deg, var(--zone-bed) 0 2px, transparent 2px 12.5%),
-    linear-gradient(var(--dev-face), var(--dev-face));
-  background-size: calc(100% - 8px) calc(100% - 8px);
-  background-position: 4px 4px;
-  background-repeat: no-repeat;
-}
-
-/* Anything else: a small board with two marks on it. */
-.desk .zone[data-shape="module"] {
-  border-radius: var(--r-sm);
-  background-image: linear-gradient(
-    to bottom,
-    transparent 0 24%,
-    var(--dev-line) 24% 26%,
-    transparent 26% 74%,
-    var(--dev-line) 74% 76%,
-    transparent 76%
-  );
-}
-
 /* ---------- labels ---------- */
 
-/* A chip is a small tag with the device's colour on its left edge: the eye can pair it with the
-   zone's outline without reading it. */
+/* The one label: the name of the zone that is hovered, held or picked, with the device's colour
+   on its left edge so the eye can pair it with the zone's outline. */
 .desk .label {
   position: absolute;
-  z-index: 6;
+  z-index: 9;
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 0 5px;
-  height: 20px;
-  line-height: 18px;
+  padding: 0 6px;
+  height: 22px;
+  line-height: 20px;
   border: 1px solid var(--line-2);
   border-left: 3px solid var(--zc, var(--line-2));
   border-radius: 4px;
@@ -291,14 +139,21 @@
   font-size: var(--t14);
   white-space: nowrap;
   pointer-events: none;
-  transition:
-    border-color var(--dur-fast) var(--ease),
-    color var(--dur-fast) var(--ease);
+  animation: label-in var(--dur-fast) var(--ease);
 }
 
-/* The chip of a stale zone carries the way to take the zone off the layout. A ghost cannot
-   be picked on the canvas, so the chip is the only way to it. The editor's own small button is
-   used, sized down to sit inside the chip. */
+@keyframes label-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* The label of a stale zone carries the way to take the zone off the layout. A ghost cannot
+   be picked on the canvas, so the label is the only way to it. The editor's own small button is
+   used, sized down to sit inside the label. */
 .desk .labelRemove {
   display: inline-flex;
   align-items: center;
@@ -331,7 +186,6 @@
   border-color: var(--down);
   border-left-color: var(--down);
   color: var(--down);
-  opacity: 0.75;
 }
 
 /* The inspector's note about a zone whose device is not connected. */
@@ -352,65 +206,130 @@
   line-height: 1.4;
 }
 
-/* ---------- grips ---------- */
+/* ---------- the selection frame ---------- */
 
-.desk .stem {
-  position: absolute;
-  z-index: 7;
-  width: 1px;
-  background: var(--live);
-  transform-origin: 50% 0%;
-  pointer-events: none;
-}
-
-.desk .grip {
+/*
+ * Figma's selection: the zone's own box in the live colour with a handle on every corner and
+ * every edge, and a rotation handle on a stem. The frame never takes a click; its handles do.
+ * It is turned with the zone, so the handles turn too.
+ */
+.desk .frame {
   position: absolute;
   z-index: 8;
-  display: grid;
-  place-items: center;
   box-sizing: border-box;
-  border: 2px solid var(--panel);
+  border: 1.5px solid var(--live);
   border-radius: 3px;
-  background: var(--ink);
-  cursor: nwse-resize;
-  transform: translate(-50%, -50%);
-  animation: grip-in var(--dur-fast) var(--ease);
+  transform-origin: 50% 50%;
+  pointer-events: none;
+  animation: frame-in var(--dur-fast) var(--ease);
 }
 
-/* The handles come in with the selection: they are part of picking a zone, not a decoration. */
-@keyframes grip-in {
+@keyframes frame-in {
   from {
     opacity: 0;
-    transform: translate(-50%, -50%) scale(0.7);
   }
   to {
     opacity: 1;
-    transform: translate(-50%, -50%) scale(1);
   }
 }
 
-.desk .grip:focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 3px;
+.desk .handle,
+.desk .rotateHandle {
+  position: absolute;
+  box-sizing: border-box;
+  background: var(--panel);
+  border: 1.5px solid var(--live);
+  pointer-events: auto;
+  touch-action: none;
 }
 
-.desk .gripRotate {
-  border-radius: 50%;
+.desk .handle {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  transform: translate(-50%, -50%);
+}
+
+/* A handle is a nine pixel mark with a generous target: the hit area reaches past the mark. */
+.desk .handle::before,
+.desk .rotateHandle::before {
+  content: "";
+  position: absolute;
+  inset: -7px;
+}
+
+.desk .handle:hover,
+.desk .rotateHandle:hover {
   background: var(--live);
+}
+
+/* On a tiny zone the edge handles would sit on the corner ones: only the corners stay. */
+.desk .frame[data-narrow-x="true"] .handle[data-handle="n"],
+.desk .frame[data-narrow-x="true"] .handle[data-handle="s"],
+.desk .frame[data-narrow-y="true"] .handle[data-handle="e"],
+.desk .frame[data-narrow-y="true"] .handle[data-handle="w"] {
+  display: none;
+}
+
+.desk .rotateHandle {
+  left: 50%;
+  top: -24px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
   cursor: grab;
+}
+
+.desk .stem {
+  position: absolute;
+  left: 50%;
+  top: -24px;
+  width: 1.5px;
+  height: 24px;
+  background: var(--live);
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+/* A zone at the top of the desk has its rotation handle below it, where there is room. */
+.desk .frame[data-flip="true"] .rotateHandle {
+  top: calc(100% + 24px);
+}
+
+.desk .frame[data-flip="true"] .stem {
+  top: 100%;
+}
+
+@media (pointer: coarse) {
+  .desk .handle {
+    width: 13px;
+    height: 13px;
+  }
+
+  .desk .rotateHandle {
+    width: 15px;
+    height: 15px;
+  }
+
+  .desk .handle::before,
+  .desk .rotateHandle::before {
+    inset: -10px;
+  }
 }
 
 /* ---------- the alignment guides ---------- */
 
-/* The guides fade in and out: they are there while a zone is moving and gone the moment it
-   lands, and a line that blinks is worse than a line that eases. */
+/* The guides are rose, as Figma's are: a colour the selection and the zones do not use. They
+   fade in and out: they are there while a zone is moving and gone the moment it lands, and a
+   line that blinks is worse than a line that eases. */
 .desk .guideV {
   position: absolute;
   top: 0;
   bottom: 0;
   width: 1px;
   z-index: 7;
-  background: var(--live);
+  background: var(--a4);
   pointer-events: none;
   opacity: 0;
   visibility: hidden;
@@ -423,7 +342,7 @@
   right: 0;
   height: 1px;
   z-index: 7;
-  background: var(--live);
+  background: var(--a4);
   pointer-events: none;
   opacity: 0;
   visibility: hidden;
@@ -752,23 +671,6 @@
   }
 }
 
-/* On a phone only the picked zone has a chip (round 2), so the chip is the one thing on the
-   canvas that says which zone is picked: it fades in when it appears. 120 ms, the house's
-   "quick" step. */
-@keyframes chip-in {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
-
-@media (max-width: 720px) {
-  .desk .label {
-    animation: chip-in var(--dur-fast) var(--ease);
-  }
-}
 
 /* ---------- the preview's state ---------- */
 

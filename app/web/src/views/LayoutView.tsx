@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
 import {
   ArrowCounterClockwise,
   ArrowsClockwise,
@@ -9,8 +9,14 @@ import {
   ArrowUp,
   CaretDown,
   CaretUp,
+  CircleDashed,
+  DotOutline,
+  DotsThree,
   FloppyDisk,
+  GridFour,
+  MagicWand,
   Plus,
+  Rectangle,
   X,
 } from "@phosphor-icons/react";
 import { Button, IconButton, Swap } from "@/components/Button";
@@ -31,7 +37,7 @@ import { messageOf } from "@/lib/errors";
 import { usePreviewStatus } from "@/lib/preview";
 import { usePrefersReducedMotion } from "@/lib/motion";
 import { getSnap, patchSnap, refreshAll, refreshLayouts, refreshSettings, useSnap } from "@/lib/store";
-import { defaultRect, findZoneInfo } from "@/lib/zones";
+import { defaultRect, defaultShape, findZoneInfo, reshapeBox, resolveShape, SHAPE_LABEL, SHAPE_ORDER } from "@/lib/zones";
 import { clamp } from "@/lib/format";
 import type { Layout } from "@/proto/Layout";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
@@ -40,6 +46,8 @@ import type { EffectSummary } from "@/proto/EffectSummary";
 import type { PlacedZone } from "@/proto/PlacedZone";
 import type { PropValue } from "@/proto/PropValue";
 import type { PropertySchema } from "@/proto/PropertySchema";
+import type { ZoneInfo } from "@/proto/ZoneInfo";
+import type { ZoneShape } from "@/proto/ZoneShape";
 import desk from "./desk.module.css";
 import type { RenderScale } from "@/proto/RenderScale";
 import type { SamplingMode } from "@/proto/SamplingMode";
@@ -581,7 +589,8 @@ export function LayoutView() {
   const place = (deviceId: string, zoneIndex: number, at?: { x: number; y: number }) => {
     const info = findZoneInfo(devices, deviceId, zoneIndex);
     if (!info || !draft) return;
-    const r = defaultRect(info.zone);
+    const shape = defaultShape(info.device.kind, info.zone);
+    const r = defaultRect(info.zone, info.device.kind, shape);
     const x = clamp((at?.x ?? CANVAS_W / 2) - r.width / 2, 0, CANVAS_W - r.width);
     const y = clamp((at?.y ?? CANVAS_H / 2) - r.height / 2, 0, CANVAS_H - r.height);
     const placedZone: PlacedZone = {
@@ -594,6 +603,7 @@ export function LayoutView() {
       rotation_deg: 0,
       reversed: false,
       visible: true,
+      shape,
     };
     commit((l) => ({ ...l, zones: [...l.zones, placedZone] }));
     setSelected(draft.zones.length);
@@ -807,6 +817,7 @@ export function LayoutView() {
                     }
                     deviceName={selectedInfo?.device.name ?? shortDeviceId(shownZone.device_id)}
                     ledCount={selectedInfo?.zone.led_count ?? 0}
+                    info={selectedInfo?.zone ?? null}
                     missing={!selectedInfo}
                     onChange={(patch) => changeZone(selected, patch)}
                     onRemove={() => unplace(selected)}
@@ -890,11 +901,32 @@ export function LayoutView() {
   );
 }
 
+/** The shape picker's icons: a tiny drawing of each shape, from Phosphor. */
+const SHAPE_ICON: Record<ZoneShape["type"], ReactNode> = {
+  auto: <MagicWand size={15} />,
+  strip: <DotsThree size={15} weight="bold" />,
+  ring: <CircleDashed size={15} />,
+  outline: <Rectangle size={15} />,
+  point: <DotOutline size={15} weight="fill" />,
+  grid: <GridFour size={15} />,
+};
+
+/** What each shape does, in one line. */
+const SHAPE_NOTE: Record<ZoneShape["type"], string> = {
+  auto: "Follows the device: a strip for a line of LEDs, a point for one, its own grid for a matrix.",
+  strip: "LEDs in a line along the long side.",
+  ring: "LEDs around an ellipse, clockwise from the top, like a fan.",
+  outline: "LEDs around the box's edge, clockwise from the top-left.",
+  point: "Every LED reads the whole box, as one blob of light.",
+  grid: "LEDs in rows, left to right, top to bottom.",
+};
+
 function ZoneInspector({
   zone,
   name,
   deviceName,
   ledCount,
+  info,
   missing,
   onChange,
   onRemove,
@@ -904,12 +936,24 @@ function ZoneInspector({
   name: string;
   deviceName: string;
   ledCount: number;
+  info: ZoneInfo | null;
   missing: boolean;
   onChange: (patch: Partial<PlacedZone>) => void;
   onRemove: () => void;
   /** On a phone: the way back to the canvas the zone was picked on. */
   onBack: (() => void) | null;
 }) {
+  const shapeType = zone.shape.type;
+  const resolved = info ? resolveShape(zone.shape, info.kind) : null;
+  const pickShape = (type: ZoneShape["type"]) => {
+    if (type === shapeType) return;
+    const next: ZoneShape =
+      type === "grid"
+        ? { type: "grid", columns: Math.max(1, Math.min(ledCount || 1, Math.ceil((ledCount || 1) / 6))) }
+        : ({ type } as ZoneShape);
+    // One change, so one undo step: the shape and the box that suits it.
+    onChange(reshapeBox(zone, next));
+  };
   return (
     <div className={`stack ${desk.inspector}`} style={{ gap: 8 }}>
       {onBack && (
@@ -932,18 +976,41 @@ function ZoneInspector({
           </Button>
         </div>
       )}
+      <Field label="Shape" hint={<span className="fig">{SHAPE_LABEL[shapeType]}{shapeType === "auto" && resolved ? ` · ${SHAPE_LABEL[resolved === "matrix" ? "grid" : resolved]}` : ""}</span>}>
+        <Segmented<ZoneShape["type"]>
+          label="How the LEDs sit in the box"
+          value={shapeType}
+          iconOnly
+          options={SHAPE_ORDER.map((type) => ({ value: type, label: SHAPE_LABEL[type], icon: SHAPE_ICON[type] }))}
+          onChange={pickShape}
+        />
+      </Field>
+      <p className={desk.plainNote} style={{ marginTop: 0 }}>
+        {SHAPE_NOTE[shapeType]} A bigger shape covers more of the effect.
+      </p>
+      {zone.shape.type === "grid" && (
+        <Field label="Columns">
+          <NumberField
+            label="Columns"
+            value={zone.shape.columns}
+            min={1}
+            max={Math.max(1, ledCount)}
+            onCommit={(v) => onChange({ shape: { type: "grid", columns: Math.round(v) } })}
+          />
+        </Field>
+      )}
       <div className="grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
         <Field label="X">
-          <NumberField label="X" value={zone.x} min={0} max={CANVAS_W} onCommit={(v) => onChange({ x: v })} />
+          <NumberField label="X" value={zone.x} min={0} max={CANVAS_W} decimals={1} onCommit={(v) => onChange({ x: v })} />
         </Field>
         <Field label="Y">
-          <NumberField label="Y" value={zone.y} min={0} max={CANVAS_H} onCommit={(v) => onChange({ y: v })} />
+          <NumberField label="Y" value={zone.y} min={0} max={CANVAS_H} decimals={1} onCommit={(v) => onChange({ y: v })} />
         </Field>
         <Field label="Width">
-          <NumberField label="Width" value={zone.width} min={2} max={CANVAS_W} onCommit={(v) => onChange({ width: v })} />
+          <NumberField label="Width" value={zone.width} min={2} max={CANVAS_W} decimals={1} onCommit={(v) => onChange({ width: v })} />
         </Field>
         <Field label="Height">
-          <NumberField label="Height" value={zone.height} min={2} max={CANVAS_H} onCommit={(v) => onChange({ height: v })} />
+          <NumberField label="Height" value={zone.height} min={2} max={CANVAS_H} decimals={1} onCommit={(v) => onChange({ height: v })} />
         </Field>
       </div>
       <Field label="Rotation">
@@ -957,11 +1024,16 @@ function ZoneInspector({
           onCommit={(v) => onChange({ rotation_deg: v })}
         />
       </Field>
+      <Field label="LEDs" hint="set on the Devices page">
+        <span className="fig" aria-label={`${ledCount} LEDs`}>
+          {missing ? "—" : ledCount}
+        </span>
+      </Field>
+      <Field label="Reverse direction">
+        <Toggle label="Reverse direction" checked={zone.reversed} onChange={(v) => onChange({ reversed: v })} />
+      </Field>
       <Field label="Visible">
         <Toggle label="Visible" checked={zone.visible} onChange={(v) => onChange({ visible: v })} />
-      </Field>
-      <Field label="Reversed">
-        <Toggle label="Reversed" checked={zone.reversed} onChange={(v) => onChange({ reversed: v })} />
       </Field>
       {!missing && (
         <div className="row-wrap" style={{ justifyContent: "flex-end" }}>

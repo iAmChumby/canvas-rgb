@@ -5,8 +5,8 @@
 //! 320x200 canvas, activates Aurora and opens the editor's dismissible "size your ARGB
 //! headers" panel.
 
-use canvas_proto::device::{DeviceInfo, DeviceKind};
-use canvas_proto::layout::{Layout, PlacedZone, RenderScale, SamplingMode};
+use canvas_proto::device::{DeviceInfo, DeviceKind, ZoneInfo, ZoneKind};
+use canvas_proto::layout::{Layout, PlacedZone, RenderScale, SamplingMode, ZoneShape};
 use canvas_proto::Rgb8;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -258,41 +258,58 @@ fn counts_in_text(text: &str) -> Option<Vec<u32>> {
     }
 }
 
-/// Where a device goes on the 320x200 canvas.
+/// The shape a zone gets by default, from the device kind and the zone.
 ///
-/// G7: the RAM sticks stand vertical and side by side, the board headers are horizontal
-/// strips, the keyboard is a wide strip and the microphone is a dot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Placement {
-    /// Vertical, side by side.
-    Vertical,
-    /// A horizontal strip.
-    Horizontal,
-    /// A wide strip.
-    Wide,
-    /// A dot.
-    Dot,
+/// Fans are rings, RAM and ARGB headers are strips, a single-LED peripheral is a point
+/// (one blob of light) and a matrix keeps its own map. A multi-LED keyboard that reports
+/// one long line is laid out as a grid, which reads as a keyboard.
+pub fn default_shape(kind: DeviceKind, zone: &ZoneInfo) -> ZoneShape {
+    let name = zone.name.to_ascii_lowercase();
+    if matches!(zone.kind, ZoneKind::Matrix { .. }) {
+        return ZoneShape::Auto;
+    }
+    if name.contains("fan") && zone.led_count > 1 {
+        return ZoneShape::Ring;
+    }
+    if matches!(zone.kind, ZoneKind::Single) || zone.led_count == 1 {
+        return ZoneShape::Point;
+    }
+    match kind {
+        DeviceKind::Keyboard => ZoneShape::Grid { columns: zone.led_count.div_ceil(6).max(1) },
+        _ => ZoneShape::Strip,
+    }
 }
 
-/// The placement a device kind gets.
-pub fn placement_for(kind: DeviceKind) -> Placement {
-    match kind {
-        DeviceKind::Dram => Placement::Vertical,
-        DeviceKind::Motherboard => Placement::Horizontal,
-        DeviceKind::Keyboard => Placement::Wide,
-        DeviceKind::Mouse => Placement::Dot,
-        DeviceKind::Microphone => Placement::Dot,
-        DeviceKind::Headset => Placement::Dot,
-        DeviceKind::LedStrip => Placement::Horizontal,
-        _ => Placement::Horizontal,
+/// The default rectangle size (width, height) for a shape on a device kind.
+fn default_size(kind: DeviceKind, shape: ZoneShape) -> (f32, f32) {
+    match (kind, shape) {
+        (_, ZoneShape::Ring) => (40.0, 40.0),
+        (DeviceKind::Dram, _) => (16.0, 120.0),
+        (DeviceKind::Keyboard, ZoneShape::Grid { .. }) => (120.0, 38.0),
+        (DeviceKind::Keyboard, _) => (110.0, 30.0),
+        (DeviceKind::Mouse, ZoneShape::Point) => (22.0, 32.0),
+        (DeviceKind::Microphone, ZoneShape::Point) => (16.0, 28.0),
+        (DeviceKind::Headset, ZoneShape::Point) => (30.0, 30.0),
+        (_, ZoneShape::Point) => (20.0, 20.0),
+        _ => (120.0, 10.0),
     }
 }
 
 /// Builds the default layout for the discovered devices.
 ///
 /// The placement is deterministic: the devices are sorted by kind and name, then laid
-/// out in rows that fill the 320x200 canvas.
+/// out by role on the 320x200 canvas, like a diagram of the PC: ARGB headers stack on
+/// the left, fan rings sit in a row beneath them, peripherals line up along the bottom
+/// and the RAM sticks stand on the right. Nothing overlaps another zone.
 pub fn build_default_layout(devices: &[DeviceInfo]) -> Layout {
+    const MARGIN: f32 = 4.0;
+    const GAP: f32 = 6.0;
+    const ROW_HEIGHT: f32 = 18.0;
+    const DRAM_Y: f32 = 20.0;
+    const LEFT_LIMIT: f32 = 240.0;
+    const FAN_BAND_Y: f32 = 68.0;
+    const PERIPHERAL_Y: f32 = 150.0;
+
     let mut sorted: Vec<&DeviceInfo> = devices.iter().collect();
     sorted.sort_by(|a, b| {
         kind_rank(a.kind)
@@ -303,78 +320,74 @@ pub fn build_default_layout(devices: &[DeviceInfo]) -> Layout {
     let mut zones = Vec::new();
     // The RAM sticks go on the right, side by side.
     let mut dram_column = 0u32;
-    // The rest is laid out in rows on the left.
-    let mut row_y = 4.0f32;
-    let mut row_x = 4.0f32;
-    const ROW_HEIGHT: f32 = 18.0;
-    const DRAM_WIDTH: f32 = 16.0;
-    const DRAM_HEIGHT: f32 = 120.0;
+    // ARGB headers and other strips stack down the left.
+    let mut row_y = MARGIN;
+    let mut row_x = MARGIN;
+    // Fan rings and small points share a band beneath the headers.
+    let mut band_x = MARGIN;
+    let mut band_y = FAN_BAND_Y;
+    // Peripherals line up along the bottom.
+    let mut peri_x = MARGIN;
+    let mut peri_y = PERIPHERAL_Y;
+    let mut peri_row_height = 0.0f32;
 
     for device in sorted {
-        let placement = placement_for(device.kind);
+        let peripheral = matches!(
+            device.kind,
+            DeviceKind::Keyboard
+                | DeviceKind::Mouse
+                | DeviceKind::Microphone
+                | DeviceKind::Headset
+        );
         for zone in &device.zones {
             if zone.led_count == 0 {
                 continue;
             }
-            let placed = match placement {
-                Placement::Vertical => {
-                    let x = 320.0 - DRAM_WIDTH - 4.0 - (dram_column as f32) * (DRAM_WIDTH + 4.0);
-                    dram_column += 1;
-                    PlacedZone {
-                        device_id: device.id.clone(),
-                        zone_index: zone.index,
-                        x,
-                        y: 40.0,
-                        width: DRAM_WIDTH,
-                        height: DRAM_HEIGHT,
-                        rotation_deg: 0.0,
-                        reversed: false,
-                        visible: true,
-                    }
+            let shape = default_shape(device.kind, zone);
+            let (width, height) = default_size(device.kind, shape);
+            let (x, y) = if device.kind == DeviceKind::Dram {
+                let x = 320.0 - width - MARGIN - (dram_column as f32) * (width + 4.0);
+                dram_column += 1;
+                (x, DRAM_Y)
+            } else if peripheral {
+                if peri_x + width > LEFT_LIMIT && peri_x > MARGIN {
+                    peri_x = MARGIN;
+                    peri_y += peri_row_height + GAP;
+                    peri_row_height = 0.0;
                 }
-                Placement::Dot => PlacedZone {
-                    device_id: device.id.clone(),
-                    zone_index: zone.index,
-                    x: 4.0,
-                    y: 4.0 + row_y,
-                    width: 12.0,
-                    height: 12.0,
-                    rotation_deg: 0.0,
-                    reversed: false,
-                    visible: true,
-                },
-                Placement::Wide => PlacedZone {
-                    device_id: device.id.clone(),
-                    zone_index: zone.index,
-                    x: row_x,
-                    y: row_y,
-                    width: 180.0,
-                    height: 16.0,
-                    rotation_deg: 0.0,
-                    reversed: false,
-                    visible: true,
-                },
-                Placement::Horizontal => {
-                    let placed = PlacedZone {
-                        device_id: device.id.clone(),
-                        zone_index: zone.index,
-                        x: row_x,
-                        y: row_y,
-                        width: 120.0,
-                        height: 10.0,
-                        rotation_deg: 0.0,
-                        reversed: false,
-                        visible: true,
-                    };
-                    row_y += ROW_HEIGHT;
-                    if row_y > 180.0 {
-                        row_y = 4.0;
-                        row_x += 130.0;
-                    }
-                    placed
+                let at = (peri_x, peri_y);
+                peri_x += width + GAP;
+                peri_row_height = peri_row_height.max(height);
+                at
+            } else if matches!(shape, ZoneShape::Ring | ZoneShape::Point) {
+                if band_x + width > LEFT_LIMIT && band_x > MARGIN {
+                    band_x = MARGIN;
+                    band_y += 44.0;
                 }
+                let at = (band_x, band_y);
+                band_x += width + GAP;
+                at
+            } else {
+                let at = (row_x, row_y);
+                row_y += ROW_HEIGHT;
+                if row_y > FAN_BAND_Y - ROW_HEIGHT {
+                    row_y = MARGIN;
+                    row_x += width + GAP;
+                }
+                at
             };
-            zones.push(placed);
+            zones.push(PlacedZone {
+                device_id: device.id.clone(),
+                zone_index: zone.index,
+                x,
+                y,
+                width,
+                height,
+                rotation_deg: 0.0,
+                reversed: false,
+                visible: true,
+                shape,
+            });
         }
     }
 
@@ -638,7 +651,7 @@ async fn run(app: &std::sync::Arc<crate::state::App>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use canvas_proto::device::{DeviceId, ZoneInfo, ZoneKind};
+    use canvas_proto::device::DeviceId;
 
     fn device(name: &str, kind: DeviceKind, leds: u32) -> DeviceInfo {
         DeviceInfo {
@@ -676,19 +689,112 @@ mod tests {
         assert!(a.height > a.width, "a RAM zone is vertical");
         assert!(b.height > b.width, "a RAM zone is vertical");
         assert_ne!(a.x, b.x, "the RAM sticks are side by side");
+        assert_eq!(a.shape, ZoneShape::Strip);
     }
 
     #[test]
-    fn the_keyboard_is_a_wide_strip_and_the_mic_a_dot() {
-        let devices = vec![
-            device("ROYUAN", DeviceKind::Keyboard, 100),
-            device("Quadcast S", DeviceKind::Microphone, 1),
-        ];
-        let layout = build_default_layout(&devices);
+    fn the_keyboard_is_a_point_the_size_of_a_keyboard_and_the_mic_a_small_point() {
+        let mut keyboard = device("ROYUAN", DeviceKind::Keyboard, 1);
+        keyboard.zones[0].kind = ZoneKind::Single;
+        let mut mic = device("Quadcast S", DeviceKind::Microphone, 2);
+        mic.zones[0].kind = ZoneKind::Single;
+        let layout = build_default_layout(&[keyboard, mic]);
         let keyboard = layout.zones.iter().find(|z| z.device_id.0.contains("ROYUAN")).unwrap();
         let mic = layout.zones.iter().find(|z| z.device_id.0.contains("Quadcast")).unwrap();
-        assert!(keyboard.width > keyboard.height * 5.0, "the keyboard is a wide strip");
-        assert!(mic.width <= 16.0 && mic.height <= 16.0, "the microphone is a dot");
+        assert_eq!(keyboard.shape, ZoneShape::Point);
+        assert_eq!(mic.shape, ZoneShape::Point);
+        assert!(keyboard.width > keyboard.height * 2.0 && keyboard.width < keyboard.height * 5.0);
+        assert!(mic.height > mic.width, "a microphone stands upright");
+        assert!(mic.width <= 20.0 && mic.height <= 32.0);
+    }
+
+    #[test]
+    fn peripherals_do_not_stack_on_one_spot() {
+        let mut mouse = device("Mouse", DeviceKind::Mouse, 1);
+        mouse.zones[0].kind = ZoneKind::Single;
+        let mut mic = device("Mic", DeviceKind::Microphone, 2);
+        mic.zones[0].kind = ZoneKind::Single;
+        let mut headset = device("Headset", DeviceKind::Headset, 2);
+        headset.zones[0].kind = ZoneKind::Single;
+        let mut keyboard = device("Keys", DeviceKind::Keyboard, 1);
+        keyboard.zones[0].kind = ZoneKind::Single;
+        let layout = build_default_layout(&[mouse, mic, headset, keyboard]);
+        assert_eq!(layout.zones.len(), 4);
+        for (i, a) in layout.zones.iter().enumerate() {
+            for b in layout.zones.iter().skip(i + 1) {
+                let overlap = a.x < b.x + b.width
+                    && b.x < a.x + a.width
+                    && a.y < b.y + b.height
+                    && b.y < a.y + a.height;
+                assert!(!overlap, "{a:?} overlaps {b:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn no_default_zone_overlaps_another_on_a_full_desk() {
+        let mut devices = vec![
+            device("MSI", DeviceKind::Motherboard, 120),
+            device("ENE A", DeviceKind::Dram, 8),
+            device("ENE B", DeviceKind::Dram, 8),
+        ];
+        devices[0].zones = (0..3)
+            .map(|i| ZoneInfo { index: i, name: format!("JARGB{}", i + 1), ..devices[0].zones[0].clone() })
+            .chain((3..6).map(|i| ZoneInfo { index: i, name: format!("CPU Fan {i}"), led_count: 12, ..devices[0].zones[0].clone() }))
+            .collect();
+        let mut mouse = device("Mouse", DeviceKind::Mouse, 1);
+        mouse.zones[0].kind = ZoneKind::Single;
+        let mut mic = device("Mic", DeviceKind::Microphone, 2);
+        mic.zones[0].kind = ZoneKind::Single;
+        let mut keyboard = device("Keys", DeviceKind::Keyboard, 1);
+        keyboard.zones[0].kind = ZoneKind::Single;
+        devices.extend([mouse, mic, keyboard]);
+        let layout = build_default_layout(&devices);
+        assert_eq!(layout.zones.len(), 3 + 3 + 2 + 3);
+        for (i, a) in layout.zones.iter().enumerate() {
+            assert!(a.x >= 0.0 && a.y >= 0.0 && a.x + a.width <= 320.0 && a.y + a.height <= 200.0, "{a:?} off canvas");
+            for b in layout.zones.iter().skip(i + 1) {
+                let overlap = a.x < b.x + b.width
+                    && b.x < a.x + a.width
+                    && a.y < b.y + b.height
+                    && b.y < a.y + a.height;
+                assert!(!overlap, "{a:?} overlaps {b:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn default_shapes_follow_the_device_and_zone() {
+        let zone = |name: &str, kind: ZoneKind, n: u32| ZoneInfo {
+            index: 0,
+            name: name.into(),
+            kind,
+            led_count: n,
+            min_leds: 1,
+            max_leds: 512,
+            resizable: true,
+        };
+        assert_eq!(default_shape(DeviceKind::Dram, &zone("DRAM", ZoneKind::Linear, 8)), ZoneShape::Strip);
+        assert_eq!(default_shape(DeviceKind::Motherboard, &zone("CPU Fan", ZoneKind::Linear, 12)), ZoneShape::Ring);
+        assert_eq!(default_shape(DeviceKind::Motherboard, &zone("JARGB1", ZoneKind::Linear, 120)), ZoneShape::Strip);
+        assert_eq!(default_shape(DeviceKind::Mouse, &zone("Logo", ZoneKind::Single, 1)), ZoneShape::Point);
+        assert_eq!(default_shape(DeviceKind::Microphone, &zone("Mic", ZoneKind::Single, 2)), ZoneShape::Point);
+        let matrix = ZoneKind::Matrix { width: 2, height: 2, map: vec![Some(0), Some(1), Some(2), Some(3)] };
+        assert_eq!(default_shape(DeviceKind::Keyboard, &zone("Keys", matrix, 4)), ZoneShape::Auto);
+        assert_eq!(
+            default_shape(DeviceKind::Keyboard, &zone("Keys", ZoneKind::Linear, 100)),
+            ZoneShape::Grid { columns: 17 }
+        );
+    }
+
+    #[test]
+    fn a_fan_zone_becomes_a_square_ring() {
+        let mut board = device("MSI", DeviceKind::Motherboard, 12);
+        board.zones[0].name = "System Fan".into();
+        let layout = build_default_layout(&[board]);
+        let fan = &layout.zones[0];
+        assert_eq!(fan.shape, ZoneShape::Ring);
+        assert_eq!(fan.width, fan.height);
     }
 
     #[test]

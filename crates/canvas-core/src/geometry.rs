@@ -7,16 +7,20 @@
 //! its device's frame buffer.
 //!
 //! The rules (decided by the spine):
-//! - `Linear` / `Single` with n LEDs: LED i sits at the center of cell i when the rect
-//!   is split into n equal cells along its longer axis. `reversed` flips the order.
-//! - `Matrix { width, height, map }`: the rect is a w×h grid; LED `map[r*w+c]` sits in
-//!   cell (c, r). `None` entries are gaps.
+//! - The placed zone's `shape` decides where the LEDs sit; `Auto` follows the device's zone
+//!   kind: `Linear` = `Strip`, `Single` = `Point` (every LED samples the whole rect), `Matrix` =
+//!   its own map. `Strip`, `Ring`, `Outline`, `Point` and `Grid` override any kind and place
+//!   the LEDs in zone order. `reversed` flips the order.
+//! - `Strip` with n LEDs: LED i sits at the center of cell i when the rect is split into n
+//!   equal cells along its longer axis.
+//! - `Matrix { width, height, map }` with `Auto`: the rect is a w×h grid; LED `map[r*w+c]`
+//!   sits in cell (c, r). `None` entries are gaps.
 //! - Rotation is clockwise around the rect center.
 //! - Rotated cells: the sample region for area average is the axis-aligned bounding
 //!   box of the rotated cell; nearest and bilinear use the rotated center.
 
 use canvas_proto::device::{DeviceId, DeviceInfo, ZoneInfo, ZoneKind};
-use canvas_proto::layout::{Layout, PlacedZone, SamplingMode};
+use canvas_proto::layout::{Layout, PlacedZone, SamplingMode, ZoneShape};
 
 /// One LED's sample region, in render pixels.
 ///
@@ -176,8 +180,8 @@ impl CellCorners {
 
 /// Rotates `p` clockwise around `center` by `deg` degrees.
 ///
-/// Screen coordinates grow downward, so a clockwise rotation on screen is a
-/// counter-clockwise rotation in the standard math orientation.
+/// Screen coordinates grow downward, so with the usual rotation matrix a positive angle
+/// turns clockwise on screen.
 fn rotate_point(p: (f32, f32), center: (f32, f32), deg: f32) -> (f32, f32) {
     if deg == 0.0 {
         return p;
@@ -186,76 +190,126 @@ fn rotate_point(p: (f32, f32), center: (f32, f32), deg: f32) -> (f32, f32) {
     let (sin, cos) = rad.sin_cos();
     let dx = p.0 - center.0;
     let dy = p.1 - center.1;
-    // Clockwise on screen (y down): x' = x*cos + y*sin, y' = -x*sin + y*cos.
-    (center.0 + dx * cos + dy * sin, center.1 - dx * sin + dy * cos)
-}
-
-/// Builds the cell corners of the rect `placed`, rotated around its center.
-fn rect_corners(placed: &PlacedZone) -> CellCorners {
-    let center = (placed.x + placed.width / 2.0, placed.y + placed.height / 2.0);
-    let x0 = placed.x;
-    let y0 = placed.y;
-    let x1 = placed.x + placed.width;
-    let y1 = placed.y + placed.height;
-    let raw = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)];
-    let corners = raw.map(|p| rotate_point(p, center, placed.rotation_deg));
-    CellCorners { corners }
+    // Clockwise on screen (y down), as CSS rotate() draws it and as the editor mirrors it:
+    // x' = x*cos - y*sin, y' = x*sin + y*cos. (The inverse turned the sampled LEDs the
+    // opposite way from the zone the editor draws.)
+    (center.0 + dx * cos - dy * sin, center.1 + dx * sin + dy * cos)
 }
 
 /// Computes the sample region of every LED of `zone` when placed at `placed`.
 ///
 /// `scale` converts logical canvas units to render pixels.
+///
+/// The placed zone's `shape` decides where the LEDs sit. `Auto` follows the device's zone
+/// kind (single = one point, linear = a strip, matrix = its grid map); every other shape
+/// overrides it and places the LEDs in zone order, honouring `reversed`.
 fn build_zone_leds(placed: &PlacedZone, zone: &ZoneInfo, scale: f32) -> Vec<LedSample> {
     let led_count = zone.led_count as usize;
     let mut leds = vec![LedSample::default(); led_count];
-
-    match &zone.kind {
-        ZoneKind::Single => {
-            if led_count == 0 {
-                return leds;
-            }
-            // A single LED takes the whole rect.
-            let cell = rect_corners(placed);
-            leds[0] = sample_from_corners(&cell, scale);
-        }
-        ZoneKind::Linear => {
-            if led_count == 0 {
-                return leds;
-            }
-            let horizontal = placed.width >= placed.height;
-            let n = led_count as f32;
-            for (i, led) in leds.iter_mut().enumerate() {
-                let cell_index = if placed.reversed { led_count - 1 - i } else { i };
-                let cell = linear_cell(placed, cell_index as f32, n, horizontal);
-                *led = sample_from_corners(&cell, scale);
-            }
-        }
-        ZoneKind::Matrix { width, height, map } => {
-            let w = *width as usize;
-            let h = *height as usize;
-            if w == 0 || h == 0 {
-                return leds;
-            }
-            for row in 0..h {
-                for col in 0..w {
-                    let slot = row * w + col;
-                    let Some(Some(led)) = map.get(slot).copied() else {
-                        continue;
-                    };
-                    let Some(led) = usize::try_from(led).ok() else {
-                        continue;
-                    };
-                    if led >= led_count {
-                        continue;
-                    }
-                    let cell = matrix_cell(placed, col, row, w, h);
-                    leds[led] = sample_from_corners(&cell, scale);
-                }
-            }
-        }
+    if led_count == 0 {
+        return leds;
     }
 
+    let shape = match (placed.shape, &zone.kind) {
+        (ZoneShape::Auto, ZoneKind::Single) => ZoneShape::Point,
+        (ZoneShape::Auto, ZoneKind::Linear) => ZoneShape::Strip,
+        (ZoneShape::Auto, ZoneKind::Matrix { width, height, map }) => {
+            fill_matrix(&mut leds, placed, *width as usize, *height as usize, map, scale);
+            return leds;
+        }
+        (other, _) => other,
+    };
+
+    for (i, led) in leds.iter_mut().enumerate() {
+        // `reversed` flips which end of the shape LED 0 sits at.
+        let slot = if placed.reversed { led_count - 1 - i } else { i };
+        let cell = shape_cell(placed, shape, slot, led_count);
+        *led = sample_from_corners(&cell, scale);
+    }
     leds
+}
+
+/// Fills `leds` from a matrix zone's own map (the `Auto` shape of a matrix zone).
+fn fill_matrix(
+    leds: &mut [LedSample],
+    placed: &PlacedZone,
+    w: usize,
+    h: usize,
+    map: &[Option<u32>],
+    scale: f32,
+) {
+    if w == 0 || h == 0 {
+        return;
+    }
+    for row in 0..h {
+        for col in 0..w {
+            let slot = row * w + col;
+            let Some(Some(led)) = map.get(slot).copied() else {
+                continue;
+            };
+            let Some(led) = usize::try_from(led).ok() else {
+                continue;
+            };
+            if led >= leds.len() {
+                continue;
+            }
+            let cell = matrix_cell(placed, col, row, w, h);
+            leds[led] = sample_from_corners(&cell, scale);
+        }
+    }
+}
+
+/// An axis-aligned cell centred on `(cx, cy)`, rotated with the zone.
+fn centred_cell(placed: &PlacedZone, cx: f32, cy: f32, cw: f32, ch: f32) -> CellCorners {
+    let center = (placed.x + placed.width / 2.0, placed.y + placed.height / 2.0);
+    let (x0, y0, x1, y1) = (cx - cw / 2.0, cy - ch / 2.0, cx + cw / 2.0, cy + ch / 2.0);
+    let raw = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)];
+    CellCorners { corners: raw.map(|p| rotate_point(p, center, placed.rotation_deg)) }
+}
+
+/// The sample cell of the LED at `slot` (0-based position along the shape) of `n` LEDs.
+fn shape_cell(placed: &PlacedZone, shape: ZoneShape, slot: usize, n: usize) -> CellCorners {
+    let (x, y, w, h) = (placed.x, placed.y, placed.width, placed.height);
+    let (mx, my) = (x + w / 2.0, y + h / 2.0);
+    let nf = n as f32;
+    let i = slot as f32;
+    match shape {
+        // `Auto` is resolved by the caller; treat a stray one as a strip.
+        ZoneShape::Auto | ZoneShape::Strip => linear_cell(placed, i, nf, w >= h),
+        ZoneShape::Point => centred_cell(placed, mx, my, w, h),
+        ZoneShape::Ring => {
+            let (a, b) = (w / 2.0, h / 2.0);
+            // Ramanujan's approximation of the ellipse perimeter.
+            let perimeter = std::f32::consts::PI
+                * (3.0 * (a + b) - ((3.0 * a + b) * (a + 3.0 * b)).sqrt());
+            let size = (perimeter / nf).min(w.min(h));
+            let theta = std::f32::consts::TAU * i / nf;
+            // Clockwise from the top, y down.
+            centred_cell(placed, mx + a * theta.sin(), my - b * theta.cos(), size, size)
+        }
+        ZoneShape::Outline => {
+            let perimeter = 2.0 * (w + h);
+            let size = (perimeter / nf).min(w.min(h));
+            let d = perimeter * i / nf;
+            let (px, py) = if d < w {
+                (x + d, y)
+            } else if d < w + h {
+                (x + w, y + (d - w))
+            } else if d < 2.0 * w + h {
+                (x + w - (d - w - h), y + h)
+            } else {
+                (x, y + h - (d - 2.0 * w - h))
+            };
+            centred_cell(placed, px, py, size, size)
+        }
+        ZoneShape::Grid { columns } => {
+            let cols = (columns.max(1) as usize).min(n);
+            let rows = n.div_ceil(cols);
+            let (cw, ch) = (w / cols as f32, h / rows as f32);
+            let (col, row) = ((slot % cols) as f32, (slot / cols) as f32);
+            centred_cell(placed, x + (col + 0.5) * cw, y + (row + 0.5) * ch, cw, ch)
+        }
+    }
 }
 
 /// The `index`-th cell of a linear zone, split along `horizontal`.
@@ -341,6 +395,7 @@ mod tests {
             rotation_deg: 0.0,
             reversed: false,
             visible: true,
+            shape: ZoneShape::Auto,
         }
     }
 
@@ -530,5 +585,204 @@ mod tests {
         let lay = layout(vec![]);
         let plan = build_plan(&lay, std::slice::from_ref(&dev));
         assert_eq!(plan.devices[0].led_count, 5);
+    }
+
+    fn shaped(
+        shape: ZoneShape,
+        kind: ZoneKind,
+        n: u32,
+        rect: (f32, f32, f32, f32),
+    ) -> Vec<LedSample> {
+        let dev = device("d0", vec![zone(0, kind, n)]);
+        let mut p = placed("d0", 0, rect.0, rect.1, rect.2, rect.3);
+        p.shape = shape;
+        let plan = build_plan(&layout(vec![p]), std::slice::from_ref(&dev));
+        plan.devices[0].zones[0].leds.clone()
+    }
+
+    fn near(a: f32, b: f32) -> bool {
+        (a - b).abs() < 0.01
+    }
+
+    #[test]
+    fn single_zone_with_many_leds_samples_the_whole_rect_not_pixel_zero() {
+        let leds = shaped(ZoneShape::Auto, ZoneKind::Single, 3, (100.0, 50.0, 20.0, 10.0));
+        assert_eq!(leds.len(), 3);
+        for led in &leds {
+            assert!(near(led.center_x, 110.0) && near(led.center_y, 55.0));
+            assert_eq!(led.bounds, [100.0, 50.0, 120.0, 60.0]);
+        }
+    }
+
+    #[test]
+    fn point_shape_makes_every_led_sample_the_whole_rect() {
+        let leds = shaped(ZoneShape::Point, ZoneKind::Linear, 5, (10.0, 20.0, 40.0, 30.0));
+        for led in &leds {
+            assert!(near(led.center_x, 30.0) && near(led.center_y, 35.0));
+            assert_eq!(led.bounds, [10.0, 20.0, 50.0, 50.0]);
+        }
+    }
+
+    #[test]
+    fn strip_shape_forces_a_strip_on_a_single_zone() {
+        let leds = shaped(ZoneShape::Strip, ZoneKind::Single, 4, (0.0, 0.0, 100.0, 20.0));
+        assert!(near(leds[0].center_x, 12.5) && near(leds[3].center_x, 87.5));
+        assert!(near(leds[0].center_y, 10.0));
+    }
+
+    #[test]
+    fn auto_linear_equals_strip() {
+        let a = shaped(ZoneShape::Auto, ZoneKind::Linear, 6, (5.0, 5.0, 16.0, 120.0));
+        let b = shaped(ZoneShape::Strip, ZoneKind::Linear, 6, (5.0, 5.0, 16.0, 120.0));
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(&b) {
+            assert_eq!(x, y);
+        }
+        // A tall stick splits along y.
+        assert!(near(a[0].center_y, 15.0) && near(a[5].center_y, 115.0));
+    }
+
+    #[test]
+    fn ring_places_leds_clockwise_from_the_top() {
+        // Square 100x100 at the origin, 4 LEDs: top, right, bottom, left.
+        let leds = shaped(ZoneShape::Ring, ZoneKind::Linear, 4, (0.0, 0.0, 100.0, 100.0));
+        assert!(near(leds[0].center_x, 50.0) && near(leds[0].center_y, 0.0));
+        assert!(near(leds[1].center_x, 100.0) && near(leds[1].center_y, 50.0));
+        assert!(near(leds[2].center_x, 50.0) && near(leds[2].center_y, 100.0));
+        assert!(near(leds[3].center_x, 0.0) && near(leds[3].center_y, 50.0));
+    }
+
+    #[test]
+    fn ring_follows_an_ellipse_when_the_rect_is_not_square() {
+        let leds = shaped(ZoneShape::Ring, ZoneKind::Linear, 4, (0.0, 0.0, 200.0, 100.0));
+        assert!(near(leds[1].center_x, 200.0) && near(leds[1].center_y, 50.0));
+        assert!(near(leds[0].center_x, 100.0) && near(leds[0].center_y, 0.0));
+    }
+
+    #[test]
+    fn ring_reversed_runs_counter_clockwise() {
+        let dev = device("d0", vec![zone(0, ZoneKind::Linear, 4)]);
+        let mut p = placed("d0", 0, 0.0, 0.0, 100.0, 100.0);
+        p.shape = ZoneShape::Ring;
+        p.reversed = true;
+        let plan = build_plan(&layout(vec![p]), std::slice::from_ref(&dev));
+        let leds = &plan.devices[0].zones[0].leds;
+        // LED 0 now sits where the last slot (left) is, LED 1 at the bottom.
+        assert!(near(leds[0].center_x, 0.0) && near(leds[0].center_y, 50.0));
+        assert!(near(leds[1].center_x, 50.0) && near(leds[1].center_y, 100.0));
+    }
+
+    #[test]
+    fn ring_rotation_moves_leds_around_the_centre() {
+        let dev = device("d0", vec![zone(0, ZoneKind::Linear, 4)]);
+        let mut p = placed("d0", 0, 0.0, 0.0, 100.0, 100.0);
+        p.shape = ZoneShape::Ring;
+        p.rotation_deg = 90.0;
+        let plan = build_plan(&layout(vec![p]), std::slice::from_ref(&dev));
+        let leds = &plan.devices[0].zones[0].leds;
+        // The top LED turns clockwise a quarter: it ends up on the right.
+        assert!(near(leds[0].center_x, 100.0) && near(leds[0].center_y, 50.0));
+    }
+
+    #[test]
+    fn outline_walks_the_rect_edge_clockwise_from_top_left() {
+        // 100 x 50 rect, 6 LEDs: perimeter 300, spacing 50.
+        let leds = shaped(ZoneShape::Outline, ZoneKind::Linear, 6, (0.0, 0.0, 100.0, 50.0));
+        let want = [
+            (0.0, 0.0),
+            (50.0, 0.0),
+            (100.0, 0.0),
+            (100.0, 50.0),
+            (50.0, 50.0),
+            (0.0, 50.0),
+        ];
+        for (led, (x, y)) in leds.iter().zip(want) {
+            assert!(near(led.center_x, x) && near(led.center_y, y), "{led:?} vs {x},{y}");
+        }
+    }
+
+    #[test]
+    fn outline_reversed_starts_at_the_other_end() {
+        let dev = device("d0", vec![zone(0, ZoneKind::Linear, 4)]);
+        let mut p = placed("d0", 0, 0.0, 0.0, 100.0, 100.0);
+        p.shape = ZoneShape::Outline;
+        p.reversed = true;
+        let plan = build_plan(&layout(vec![p]), std::slice::from_ref(&dev));
+        let leds = &plan.devices[0].zones[0].leds;
+        // Slots: (0,0) (100,0) (100,100) (0,100); reversed LED 0 takes the last.
+        assert!(near(leds[0].center_x, 0.0) && near(leds[0].center_y, 100.0));
+        assert!(near(leds[3].center_x, 0.0) && near(leds[3].center_y, 0.0));
+    }
+
+    #[test]
+    fn grid_fills_row_by_row_top_left_first() {
+        // 6 LEDs, 3 columns: 2 rows in a 90 x 60 rect.
+        let leds = shaped(
+            ZoneShape::Grid { columns: 3 },
+            ZoneKind::Linear,
+            6,
+            (0.0, 0.0, 90.0, 60.0),
+        );
+        let want = [
+            (15.0, 15.0),
+            (45.0, 15.0),
+            (75.0, 15.0),
+            (15.0, 45.0),
+            (45.0, 45.0),
+            (75.0, 45.0),
+        ];
+        for (led, (x, y)) in leds.iter().zip(want) {
+            assert!(near(led.center_x, x) && near(led.center_y, y));
+        }
+        assert_eq!(leds[0].bounds, [0.0, 0.0, 30.0, 30.0]);
+    }
+
+    #[test]
+    fn grid_with_a_ragged_last_row_and_zero_columns_stays_in_bounds() {
+        let leds =
+            shaped(ZoneShape::Grid { columns: 4 }, ZoneKind::Linear, 5, (0.0, 0.0, 80.0, 40.0));
+        assert_eq!(leds.len(), 5);
+        assert!(near(leds[4].center_x, 10.0) && near(leds[4].center_y, 30.0));
+        let one =
+            shaped(ZoneShape::Grid { columns: 0 }, ZoneKind::Linear, 3, (0.0, 0.0, 10.0, 30.0));
+        assert!(near(one[2].center_y, 25.0) && near(one[2].center_x, 5.0));
+    }
+
+    #[test]
+    fn matrix_zone_with_a_shape_overrides_its_map() {
+        let map = vec![Some(0), None, None, Some(1)];
+        let kind = ZoneKind::Matrix { width: 2, height: 2, map };
+        let auto = shaped(ZoneShape::Auto, kind.clone(), 2, (0.0, 0.0, 100.0, 100.0));
+        assert!(near(auto[1].center_x, 75.0) && near(auto[1].center_y, 75.0));
+        let strip = shaped(ZoneShape::Strip, kind, 2, (0.0, 0.0, 100.0, 100.0));
+        // Width >= height, so the strip runs along x: LED 1 is the right half.
+        assert!(near(strip[1].center_x, 75.0) && near(strip[1].center_y, 50.0));
+    }
+
+    #[test]
+    fn rotated_strip_keeps_rotation() {
+        let dev = device("d0", vec![zone(0, ZoneKind::Linear, 2)]);
+        let mut p = placed("d0", 0, 0.0, 0.0, 100.0, 20.0);
+        p.rotation_deg = 90.0;
+        let plan = build_plan(&layout(vec![p]), std::slice::from_ref(&dev));
+        let leds = &plan.devices[0].zones[0].leds;
+        // Centre (50,10); LED 0 at (25,10) rotates clockwise a quarter to (50,-15).
+        assert!(near(leds[0].center_x, 50.0) && near(leds[0].center_y, -15.0));
+    }
+
+    #[test]
+    fn shapes_give_one_sample_per_led_even_for_one_led() {
+        for shape in [
+            ZoneShape::Auto,
+            ZoneShape::Strip,
+            ZoneShape::Ring,
+            ZoneShape::Outline,
+            ZoneShape::Point,
+            ZoneShape::Grid { columns: 2 },
+        ] {
+            let leds = shaped(shape, ZoneKind::Linear, 1, (0.0, 0.0, 50.0, 50.0));
+            assert_eq!(leds.len(), 1, "{shape:?}");
+            assert!(leds[0].bounds[2] > leds[0].bounds[0], "{shape:?}");
+        }
     }
 }

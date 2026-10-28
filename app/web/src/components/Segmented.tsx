@@ -27,12 +27,15 @@ export function Segmented<T extends string>({
   value,
   label,
   disabled,
+  iconOnly,
   onChange,
 }: {
   options: SegOption<T>[];
   value: T;
   label: string;
   disabled?: boolean;
+  /** Show only each option's icon; the label stays as its accessible name and its tooltip. */
+  iconOnly?: boolean;
   onChange: (v: T) => void;
 }) {
   const refs = useRef<(HTMLButtonElement | null)[]>([]);
@@ -102,7 +105,7 @@ export function Segmented<T extends string>({
     : undefined;
 
   return (
-    <div role="radiogroup" aria-label={label} className="seg" data-dir={dir ?? undefined} onKeyDown={onKey} ref={wrapRef}>
+    <div role="radiogroup" aria-label={label} className="seg" data-icons={iconOnly ? "true" : undefined} data-dir={dir ?? undefined} onKeyDown={onKey} ref={wrapRef}>
       {thumb && <span className="seg-thumb" style={thumbStyle} aria-hidden="true" />}
       {options.map((o, i) => {
         const checked = o.value === value;
@@ -118,10 +121,12 @@ export function Segmented<T extends string>({
             tabIndex={checked ? 0 : -1}
             className="seg-item"
             disabled={disabled}
+            aria-label={iconOnly ? o.label : undefined}
+            title={iconOnly ? o.label : undefined}
             onClick={() => onChange(o.value)}
           >
             {o.icon}
-            {/\d/.test(o.label) ? <span className="fig">{o.label}</span> : o.label}
+            {iconOnly ? null : /\d/.test(o.label) ? <span className="fig">{o.label}</span> : o.label}
           </button>
         );
       })}

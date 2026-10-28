@@ -314,6 +314,18 @@ export const DEVICES: DeviceInfo[] = [
     connected: true,
     zones: [zone(0, "Keyboard", { type: "single" }, 1, 1, 1, false)],
   },
+  {
+    id: "openrgb:fan-hub-1",
+    name: "Lian Li UNI FAN",
+    vendor: "Lian Li",
+    kind: "other",
+    adapter: "openrgb",
+    adapter_index: 4,
+    serial: "fan-hub-1",
+    location: "HID: \\\\?\\HID#VID_0CF2&PID_A100#fan-hub-1",
+    connected: true,
+    zones: [zone(0, "Front fan", { type: "linear" }, 16, 16, 16, false)],
+  },
 ];
 
 /** The active layout: the three JARGB headers, the keyboard, the microphone and the two
@@ -324,17 +336,21 @@ export const LAYOUT_DESK: Layout = {
   render_scale: 50,
   sampling: "area_average",
   zones: [
-    { device_id: "openrgb:A1B2C3D4E5F6", zone_index: 1, x: 4, y: 4, width: 120, height: 10, rotation_deg: 0, reversed: false, visible: true },
-    { device_id: "openrgb:A1B2C3D4E5F6", zone_index: 2, x: 4, y: 22, width: 120, height: 10, rotation_deg: 0, reversed: false, visible: true },
-    { device_id: "openrgb:A1B2C3D4E5F6", zone_index: 3, x: 4, y: 40, width: 120, height: 10, rotation_deg: 0, reversed: false, visible: true },
-    { device_id: "royuan:3151:4015", zone_index: 0, x: 4, y: 58, width: 180, height: 16, rotation_deg: 0, reversed: false, visible: true },
+    // A diagram of the PC: the three ARGB headers as strips down the left, the front fan as a ring,
+    // the RAM as two upright sticks on the right, and the keyboard and the microphone as points
+    // along the bottom.
+    { device_id: "openrgb:A1B2C3D4E5F6", zone_index: 1, x: 10, y: 10, width: 120, height: 10, rotation_deg: 0, reversed: false, visible: true, shape: { type: "strip" } },
+    { device_id: "openrgb:A1B2C3D4E5F6", zone_index: 2, x: 10, y: 30, width: 120, height: 10, rotation_deg: 0, reversed: false, visible: true, shape: { type: "strip" } },
+    { device_id: "openrgb:A1B2C3D4E5F6", zone_index: 3, x: 10, y: 50, width: 120, height: 10, rotation_deg: 0, reversed: false, visible: true, shape: { type: "strip" } },
+    { device_id: "openrgb:fan-hub-1", zone_index: 0, x: 160, y: 20, width: 56, height: 56, rotation_deg: 0, reversed: false, visible: true, shape: { type: "ring" } },
+    { device_id: "royuan:3151:4015", zone_index: 0, x: 20, y: 140, width: 120, height: 36, rotation_deg: 0, reversed: false, visible: true, shape: { type: "point" } },
     // The zone OpenRGB used for the keyboard, before the native adapter took it over. The
     // daemon does not drive that device any more, so the zone draws nothing: the editor shows
     // it as stale.
-    { device_id: "openrgb:HID: \\\\?\\HID#VID_3151&PID_4015&MI_02#9&298b2e71&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}", zone_index: 0, x: 4, y: 58, width: 180, height: 16, rotation_deg: 0, reversed: false, visible: true },
-    { device_id: "openrgb:HID: \\\\?\\HID#VID_03F0&PID_028C&MI_00#a&eb32b1c&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}", zone_index: 0, x: 4, y: 82, width: 12, height: 12, rotation_deg: 0, reversed: false, visible: true },
-    { device_id: "openrgb:I2C: PawnIO SMBus PIIX4 0, address 0x71", zone_index: 0, x: 300, y: 40, width: 16, height: 120, rotation_deg: 0, reversed: false, visible: true },
-    { device_id: "openrgb:I2C: PawnIO SMBus PIIX4 0, address 0x73", zone_index: 0, x: 280, y: 40, width: 16, height: 120, rotation_deg: 0, reversed: false, visible: true },
+    { device_id: "openrgb:HID: \\\\?\\HID#VID_3151&PID_4015&MI_02#9&298b2e71&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}", zone_index: 0, x: 20, y: 140, width: 120, height: 36, rotation_deg: 0, reversed: false, visible: true, shape: { type: "auto" } },
+    { device_id: "openrgb:HID: \\\\?\\HID#VID_03F0&PID_028C&MI_00#a&eb32b1c&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}", zone_index: 0, x: 170, y: 120, width: 20, height: 40, rotation_deg: 0, reversed: false, visible: true, shape: { type: "point" } },
+    { device_id: "openrgb:I2C: PawnIO SMBus PIIX4 0, address 0x71", zone_index: 0, x: 294, y: 36, width: 16, height: 120, rotation_deg: 0, reversed: false, visible: true, shape: { type: "strip" } },
+    { device_id: "openrgb:I2C: PawnIO SMBus PIIX4 0, address 0x73", zone_index: 0, x: 270, y: 36, width: 16, height: 120, rotation_deg: 0, reversed: false, visible: true, shape: { type: "strip" } },
   ],
   effect: { id: "spiral", props: EFFECTS.find((e) => e.schema.id === "spiral")!.defaults },
 };

@@ -9,7 +9,6 @@ import {
   useState,
   type CSSProperties,
   type DragEvent,
-  type KeyboardEvent,
   type PointerEvent,
 } from "react";
 import { ArrowsOut, Minus, Plus, X } from "@phosphor-icons/react";
@@ -18,7 +17,17 @@ import { Chip } from "@/components/Chip";
 import { EffectPreview, type PreviewValues } from "@/components/EffectPreview";
 import { useMediaQuery } from "@/components/MediaQuery";
 import { onFrame, PREVIEW_H, PREVIEW_W, usePreviewStatus, type Frame } from "@/lib/preview";
-import { findZoneInfo, zoneCorners, zoneGripPoint, zoneLedOffsets, zoneTransform, type Point } from "@/lib/zones";
+import {
+  canvasCell,
+  findZoneInfo,
+  resolveShape,
+  zoneCorners,
+  zoneLocalLeds,
+  zoneTransform,
+  type CanvasCell,
+  type LocalLeds,
+  type Point,
+} from "@/lib/zones";
 import { clamp } from "@/lib/format";
 import { usePrefersReducedMotion } from "@/lib/motion";
 import { FIT_VIEW, forgetView, readView, writeView } from "@/lib/viewPrefs";
@@ -36,25 +45,15 @@ const ACCENTS = ["--a1", "--a2", "--a3", "--a4", "--a5"] as const;
 const SNAP_GRID = 5;
 /** How close, in screen pixels, a zone has to be to another zone's line to snap to it. */
 const SNAP_PIXELS = 8;
-/** How far the rotation grip sits above the zone's top edge, in canvas units. */
-const GRIP_GAP = 7;
-/** How far a chip may sit from its own zone and still count as sitting at it, in css pixels. */
-const CHIP_GAP = 10;
+/** The smallest a zone can be, in canvas units. */
+const MIN_SIZE = 2;
 /**
- * A chip sits this many css px off its zone's edge. Close enough to read as that zone's own
- * label, and it leaves the most room for the clear gap to the next zone (CHIP_CLEAR).
+ * A zone's edge handle is hidden when the edge is shorter than this, in css pixels: on a tiny
+ * zone the eight handles would sit on top of each other, so only the corners stay.
  */
-const CHIP_TOUCH = 2;
-/**
- * The clear gap a chip leaves to another zone when it sits in a gap between two zones, in css px.
- * The desk check (chips-gui3, rule 8) uses the same figure.
- */
-const CHIP_CLEAR = 4;
-/**
- * Rounding allowance when two distances are compared: a chip is nearer its own zone only by more
- * than this. A tie is not nearer (the desk check, rule 7, uses the same figure).
- */
-const NEARER_EPS = 0.05;
+const EDGE_HANDLE_MIN_PX = 44;
+/** How far the rotation handle stands off the zone, in css pixels. */
+const ROTATE_STANDOFF = 24;
 
 /**
  * A picture the LED dots can be sampled from: the daemon's frames, or the editor's own draw of
@@ -67,43 +66,7 @@ interface Picture {
   stride: number;
 }
 
-/** One LED's place on the canvas: its centre, the rectangle it covers, and how big it is. */
-interface LedCell {
-  /** The centre, in canvas units. */
-  cx: number;
-  cy: number;
-  /** The rectangle the LED covers, in canvas units: x0, y0, x1, y1. */
-  bounds: [number, number, number, number];
-  /**
-   * The lamp's half-axes in the zone's own frame, in canvas units, and the zone's turn in
-   * radians. A strip of 120 has a lamp as wide as the pitch and as tall as most of the strip, so
-   * the strip reads as a lit bar; a stick of 8 has round lamps that fill their cell.
-   */
-  rx: number;
-  ry: number;
-  turn: number;
-}
-
 type RGB = [number, number, number];
-
-/** A lamp ready to paint: its place in overlay pixels, its half-axes, its turn and its colour. */
-interface Lamp {
-  x: number;
-  y: number;
-  rx: number;
-  ry: number;
-  turn: number;
-  c: RGB;
-}
-
-/** A colour mixed towards white: the hot core of a lamp. */
-function brighten(c: RGB, k: number): RGB {
-  return [
-    Math.round(c[0] + (255 - c[0]) * k),
-    Math.round(c[1] + (255 - c[1]) * k),
-    Math.round(c[2] + (255 - c[2]) * k),
-  ];
-}
 
 /** The colour of the pixel at (x, y), the pixel nearest the point. */
 function sampleNearest(pic: Picture, x: number, y: number): RGB {
@@ -178,11 +141,7 @@ function sampleArea(pic: Picture, x: number, y: number, bounds: [number, number,
  * over the LED's own rectangle. The daemon samples the same cells
  * (`crates/canvas-core/src/sampling.rs`), so the dots and the LEDs agree.
  */
-function sampleLed(
-  pic: Picture,
-  cell: LedCell,
-  mode: SamplingMode,
-): RGB {
+function sampleLed(pic: Picture, cell: CanvasCell, mode: SamplingMode): RGB {
   // The picture may be smaller than the canvas: the editor's own draw is 112 x 70.
   const sx = pic.width / CANVAS_W;
   const sy = pic.height / CANVAS_H;
@@ -200,105 +159,6 @@ function sampleLed(
   return sampleNearest(pic, x, y);
 }
 
-/**
- * The LED cells of a zone on the canvas: where each LED sits and how much of the canvas it
- * covers. The cells are the daemon's (`crates/canvas-core/src/geometry.rs`), so a dot and the
- * LED it stands for are the same place.
- */
-function ledCells(z: PlacedZone, info: ZoneInfo, offsets: Point[]): LedCell[] {
-  const t = zoneTransform(z);
-  const kind = info.kind;
-  const horizontal = z.width >= z.height;
-  const linear = kind.type === "linear";
-  const cols = kind.type === "matrix" ? kind.width : 1;
-  const rows = kind.type === "matrix" ? kind.height : 1;
-  const n = Math.max(1, info.led_count);
-  // Half the cell's size along the strip and across it, in the zone's own frame.
-  const hx = linear
-    ? horizontal
-      ? z.width / (2 * n)
-      : z.width / 2
-    : z.width / (2 * cols);
-  const hy = linear
-    ? horizontal
-      ? z.height / 2
-      : z.height / (2 * n)
-    : z.height / (2 * rows);
-  // The lamp: as wide as the pitch of the strip (so a strip of 120 is a bead line) and as wide as
-  // the zone's cross-section (so a wide LED is a lamp and not a speck).
-  const pitch = linear
-    ? horizontal
-      ? z.width / n
-      : z.height / n
-    : Math.min(z.width / cols, z.height / rows);
-  const cross = linear
-    ? horizontal
-      ? z.height
-      : z.width
-    : Math.max(z.width / cols, z.height / rows);
-  // Round lamps when the pitch is about the strip's width; a bar of beads when the pitch is far
-  // thinner than the strip (a lamp as thin as the pitch would be a hairline).
-  let along = pitch * 1.15;
-  let across = cross * 0.7;
-  if (along >= cross * 0.5) {
-    along = Math.min(along, cross * 0.85);
-    across = along;
-  }
-  // A matrix LED fills its own cell; a strip's lamps are as worked out above. A zone with one
-  // LED in it is a lamp and not a slab: it is a disc in the middle of the zone, so a keyboard
-  // drawn wide shows the one lit LED it has instead of a bar across the whole board.
-  const single = kind.type === "single";
-  const shortSide = Math.min(z.width, z.height);
-  const lampX = single
-    ? shortSide * 0.45
-    : linear
-      ? horizontal
-        ? along
-        : across
-      : (z.width / cols) * 0.85;
-  const lampY = single
-    ? shortSide * 0.45
-    : linear
-      ? horizontal
-        ? across
-        : along
-      : (z.height / rows) * 0.85;
-  const rx = Math.max(0.3, lampX / 2);
-  const ry = Math.max(0.3, lampY / 2);
-  const turn = Math.atan2(t.sin, t.cos);
-  return offsets.map((p) => {
-    const lx = linear ? (horizontal ? p.x * z.width : 0) : p.x * z.width;
-    const ly = linear ? (horizontal ? 0 : p.x * z.height) : p.y * z.height;
-    const cx = t.cx + lx * t.cos - ly * t.sin;
-    const cy = t.cy + lx * t.sin + ly * t.cos;
-    // The cell's corners, turned with the zone: the LED covers their box.
-    const corners: Point[] = [
-      { x: -hx, y: -hy },
-      { x: hx, y: -hy },
-      { x: hx, y: hy },
-      { x: -hx, y: hy },
-    ].map((c) => ({
-      x: t.cx + (lx + c.x) * t.cos - (ly + c.y) * t.sin,
-      y: t.cy + (lx + c.x) * t.sin + (ly + c.y) * t.cos,
-    }));
-    const xs = corners.map((c) => c.x);
-    const ys = corners.map((c) => c.y);
-    return {
-      cx,
-      cy,
-      bounds: [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)] as [
-        number,
-        number,
-        number,
-        number,
-      ],
-      rx,
-      ry,
-      turn,
-    };
-  });
-}
-
 /** The zoom range. 1 is the whole canvas in the stage. */
 const MIN_SCALE = 0.25;
 const MAX_SCALE = 8;
@@ -313,24 +173,38 @@ const WHEEL_MS = 120;
  * ctrl+wheel is the browser's own gesture: both are applied at once.
  */
 const NOTCH_DELTA = 40;
-/** The chrome around a chip's text: the padding, the hairline and the accent edge, in css pixels. */
-const CHIP_CHROME = 14;
+/** The smallest and the biggest a dot is drawn, in css pixels across the radius. */
+const DOT_MIN_PX = 1.2;
+const DOT_MAX_PX = 9;
+
 /**
- * The room a chip's remove button takes, in css pixels: the button itself and the gap to the
- * text. The chip is placed with this in its width, so the place it takes is the place the chip
- * really needs.
+ * The eight resize handles, as Figma lays them out: four corners and four edges. `sx` and `sy`
+ * say which way the handle pulls the box (-1 the left or top edge, 1 the right or bottom edge, 0
+ * the axis it leaves alone).
  */
-const CHIP_REMOVE_W = 22;
-/**
- * The biggest a lamp is drawn, in device pixels, across. At 800 % a DRAM LED is a cell of about
- * 270 px; past this a lamp is a slab and its glow is a wash over the whole zone.
- */
-const LED_MAX_PX = 240;
-/**
- * On a phone a chip may take at most this share of the canvas. A chip that fits keeps the LED
- * count ("DRAM 8"), a chip that does not keeps the name alone ("JARGB 1").
- */
-const NARROW_BUDGET = 0.25;
+type HandleId = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w";
+interface HandleDef {
+  id: HandleId;
+  sx: -1 | 0 | 1;
+  sy: -1 | 0 | 1;
+}
+const HANDLES: HandleDef[] = [
+  { id: "nw", sx: -1, sy: -1 },
+  { id: "n", sx: 0, sy: -1 },
+  { id: "ne", sx: 1, sy: -1 },
+  { id: "e", sx: 1, sy: 0 },
+  { id: "se", sx: 1, sy: 1 },
+  { id: "s", sx: 0, sy: 1 },
+  { id: "sw", sx: -1, sy: 1 },
+  { id: "w", sx: -1, sy: 0 },
+];
+
+/** The resize cursor for a handle on a zone turned by `rotation` degrees. */
+function handleCursor(h: HandleDef, rotation: number): string {
+  const angle = (Math.atan2(h.sy, h.sx) * 180) / Math.PI + rotation;
+  const slot = ((Math.round(angle / 45) % 4) + 4) % 4;
+  return ["ew-resize", "nwse-resize", "ns-resize", "nesw-resize"][slot] ?? "nwse-resize";
+}
 
 type DragKind = "move" | "resize" | "rotate";
 interface Drag {
@@ -338,8 +212,7 @@ interface Drag {
   index: number;
   start: Point;
   orig: PlacedZone;
-  /** Where the zone's label chip was when the drag began, as an offset from the zone's corner. */
-  label: { dx: number; dy: number } | null;
+  handle: HandleDef | null;
 }
 
 /** The view: how the 320 x 200 canvas is drawn into the stage. It never touches the layout. */
@@ -349,32 +222,17 @@ interface View {
   panY: number;
 }
 
-interface LedCache {
-  /** The LED positions in the zone's own frame. */
-  offsets: Point[];
-  /** The zone's own description: its LEDs' cells are cut from it. */
-  info: ZoneInfo;
-}
-
-interface LabelBox {
-  key: string;
-  /** The zone the chip belongs to. */
-  index: number;
-  text: string;
-  x: number;
-  y: number;
-  w: number;
-  missing: boolean;
-  /** The device's accent, so the chip carries the same colour as the zone it names. */
-  accent: number;
-}
-
 /** The lines a zone offers to the guides: its two edges and its middle. */
 function zoneLines(z: { x: number; y: number; width: number; height: number }, axis: "x" | "y"): number[] {
   const a = axis === "x" ? z.x : z.y;
   const b = axis === "x" ? z.width : z.height;
   return [a, a + b / 2, a + b];
 }
+
+/** The desk's own edges and middle: a zone lines up with them as it does with another zone. */
+const CANVAS_BOX = { x: 0, y: 0, width: CANVAS_W, height: CANVAS_H };
+
+const gridOf = (v: number) => Math.round(v / SNAP_GRID) * SNAP_GRID;
 
 interface Snap {
   x: number;
@@ -387,13 +245,26 @@ interface Snap {
   gapY: number | null;
 }
 
+/** The nearest of `lines` to `value` within `threshold`, or null. */
+function nearestLine(value: number, lines: number[], threshold: number): number | null {
+  let best: number | null = null;
+  for (const line of lines) {
+    if (Math.abs(line - value) <= threshold && (best === null || Math.abs(line - value) < Math.abs(best - value))) {
+      best = line;
+    }
+  }
+  return best;
+}
+
 /**
  * Where a moving zone lands: on the grid, or on another zone's edge or middle when it is close
- * enough. The alignment wins over the grid, and the lines it snapped to are the guides.
+ * enough. The alignment wins over the grid, and the lines it snapped to are the guides. Figma
+ * snaps the same way: to the pixel grid and to the edges and centres of nearby layers
+ * (https://help.figma.com/hc/en-us/articles/360041064174-Snap-to-objects-and-guides).
  */
 function snapMove(
   moving: { x: number; y: number; width: number; height: number },
-  others: PlacedZone[],
+  others: { x: number; y: number; width: number; height: number }[],
   threshold: number,
   free: boolean,
 ): Snap {
@@ -418,10 +289,9 @@ function snapMove(
       }
     }
   }
-  const grid = (v: number) => Math.round(v / SNAP_GRID) * SNAP_GRID;
   return {
-    x: bestX ? moving.x + bestX.delta : grid(moving.x),
-    y: bestY ? moving.y + bestY.delta : grid(moving.y),
+    x: bestX ? moving.x + bestX.delta : gridOf(moving.x),
+    y: bestY ? moving.y + bestY.delta : gridOf(moving.y),
     guideX: bestX?.line ?? null,
     guideY: bestY?.line ?? null,
     gapX: bestX ? Math.abs(bestX.delta) : null,
@@ -430,19 +300,64 @@ function snapMove(
 }
 
 /**
- * The label chip's size at a zoom: the text grows with the canvas, between a floor (the 14 px
- * the taste brief sets as the smallest readable text) and a ceiling (a chip that would cover the
- * zone it names).
+ * Resizes a zone by one of its eight handles, in the zone's own turned frame, as Figma does:
+ *
+ *   - the handle opposite the one dragged stays where it is;
+ *   - Shift keeps the box's proportions (corners scale both sides, an edge scales the other side
+ *     about the box's middle line);
+ *   - Alt resizes from the centre.
+ *
+ * `p` is the pointer on the canvas, already snapped by the caller.
  */
-function labelMetrics(scale: number): { h: number; font: number; char: number } {
-  const font = clamp(Math.round(14 * scale), 14, 26);
-  return { h: Math.round(font * 1.45), font, char: font * 0.6 };
+function resizeBy(o: PlacedZone, handle: HandleDef, p: Point, shift: boolean, alt: boolean): PlacedZone {
+  const rad = (o.rotation_deg * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  const cx0 = o.x + o.width / 2;
+  const cy0 = o.y + o.height / 2;
+  // The pointer in the zone's own frame: origin at its centre, axes along its sides.
+  const dx = p.x - cx0;
+  const dy = p.y - cy0;
+  const qx = dx * cos + dy * sin;
+  const qy = -dx * sin + dy * cos;
+  let w = o.width;
+  let h = o.height;
+  if (handle.sx !== 0) w = alt ? 2 * handle.sx * qx : handle.sx * qx + o.width / 2;
+  if (handle.sy !== 0) h = alt ? 2 * handle.sy * qy : handle.sy * qy + o.height / 2;
+  w = clamp(w, MIN_SIZE, CANVAS_W);
+  h = clamp(h, MIN_SIZE, CANVAS_H);
+  if (shift) {
+    const ratio = o.width / o.height;
+    if (handle.sx !== 0 && handle.sy !== 0) {
+      const s = Math.max(w / o.width, h / o.height);
+      w = clamp(o.width * s, MIN_SIZE, CANVAS_W);
+      h = clamp(w / ratio, MIN_SIZE, CANVAS_H);
+      w = h * ratio;
+    } else if (handle.sx !== 0) {
+      h = clamp(w / ratio, MIN_SIZE, CANVAS_H);
+      w = h * ratio;
+    } else {
+      w = clamp(h * ratio, MIN_SIZE, CANVAS_W);
+      h = w / ratio;
+    }
+  }
+  // The centre moves by half the growth on each axis the handle pulls, so the far side stays put.
+  let lx = 0;
+  let ly = 0;
+  if (!alt) {
+    if (handle.sx !== 0) lx = (handle.sx * (w - o.width)) / 2;
+    if (handle.sy !== 0) ly = (handle.sy * (h - o.height)) / 2;
+  }
+  const cx = cx0 + lx * cos - ly * sin;
+  const cy = cy0 + lx * sin + ly * cos;
+  return { ...o, x: cx - w / 2, y: cy - h / 2, width: w, height: h };
 }
 
 /**
  * The house easing, cubic-bezier(0.2, 0.8, 0.2, 1), as a function of time. The zoom eases with
  * the same curve as every other move in the editor, so one number describes all of them.
- */function houseEase(t: number): number {
+ */
+function houseEase(t: number): number {
   const cx = 0.2;
   const cy = 0.8;
   const bx = 0.2;
@@ -468,8 +383,8 @@ export interface StageProps {
   onChange: (index: number, patch: Partial<PlacedZone>) => void;
   onDrop: (deviceId: string, zoneIndex: number, x: number, y: number) => void;
   /**
-   * Takes a zone off the layout. The chip of a stale zone offers this once the zone is picked:
-   * a ghost cannot be clicked on the canvas, so the chip is the way to it.
+   * Takes a zone off the layout. The label of a stale zone offers this once the zone is picked:
+   * a ghost cannot be clicked on the canvas, so the label is the way to it.
    */
   onRemoveZone?: (index: number) => void;
   /** Told when a drag starts and ends, so the page can hold off replacing the layout. */
@@ -506,352 +421,30 @@ function accentOf(devices: DeviceInfo[] | null, deviceId: string): number {
   return i < 0 ? -1 : i % ACCENTS.length;
 }
 
-/**
- * The shape the desk draws for a zone: the device it belongs to, as a thing you can recognise.
- *
- * The shape comes from the device's kind and the zone's kind, never from a name: a JARGB header
- * is a strip because it is a linear zone, a DIMM is a stick because its device is DRAM, and a
- * keyboard is a board with keys because its device is a keyboard. A zone whose device the daemon
- * does not list has no shape: it is a ghost, and a ghost draws nothing.
- */
-type ZoneShape = "none" | "strip" | "dram" | "keyboard" | "microphone" | "grid" | "module";
-
-function zoneShape(found: { device: DeviceInfo; zone: ZoneInfo } | null): ZoneShape {
-  if (!found) return "none";
-  const kind = found.device.kind;
-  if (kind === "dram") return "dram";
-  if (kind === "keyboard") return "keyboard";
-  if (kind === "microphone") return "microphone";
-  if (kind === "led_strip") return "strip";
-  // A linear zone is a strip of LEDs however it is wired; a matrix is a field of them.
-  if (found.zone.kind.type === "linear") return "strip";
-  if (found.zone.kind.type === "matrix") return "grid";
-  return "module";
-}
-
-/**
- * Places a label above every zone's top-left corner, in css pixels, and pushes labels apart when
- * two of them would land on the same line. The result never leaves the canvas.
- */
-/** A rectangle on the canvas, in css pixels. */
-interface Box {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
-
-/** True when two boxes overlap. */
-function overlaps(a: Box, b: Box): boolean {
-  return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
-}
-
-/** How far two boxes are from each other, in css pixels: 0 when they touch or overlap. */
-function boxGap(a: Box, b: Box): number {
-  const gapX = Math.max(0, Math.max(a.x - (b.x + b.w), b.x - (a.x + a.w)));
-  const gapY = Math.max(0, Math.max(a.y - (b.y + b.h), b.y - (a.y + a.h)));
-  return Math.hypot(gapX, gapY);
-}
-
-/** True when two boxes are within `gap` pixels of each other. */
-function near(a: Box, b: Box, gap: number): boolean {
-  return boxGap(a, b) <= gap;
-}
-
-/** True when one box holds the other. */
-function contains(outer: Box, inner: Box): boolean {
-  return (
-    outer.x <= inner.x + 1 &&
-    outer.y <= inner.y + 1 &&
-    outer.x + outer.w >= inner.x + inner.w - 1 &&
-    outer.y + outer.h >= inner.y + inner.h - 1
-  );
-}
-
-/** The distance between two boxes; 0 when they touch or overlap. */
-function boxDistance(a: Box, b: Box): number {
-  const dx = Math.max(0, Math.max(a.x - (b.x + b.w), b.x - (a.x + a.w)));
-  const dy = Math.max(0, Math.max(a.y - (b.y + b.h), b.y - (a.y + a.h)));
-  return Math.hypot(dx, dy);
-}
-
-/**
- * Places the label chips.
- *
- * A chip must sit against **its own** zone, just outside it: above, below or beside it. It goes
- * inside the zone only when no place outside is free, because a chip inside its zone covers the
- * zone's lamps (a JARGB strip is a bar of them). It may never cover another zone, or it reads as
- * that zone's label, and it may never sit under the zoom control or one of its tooltips, or it
- * is a chip nobody can read. The chips are
- * therefore placed one at a time, each one taking the first place where it is inside the canvas,
- * clear of every other zone and clear of the controls, and the ones that cannot be clear of each
- * other are pushed down.
- *
- * `chipFor` says which zones get a chip at all. On a phone only the picked zone has one (round 2),
- * so the chip is placed as if it were the only chip on the canvas: it can take the free place
- * above its own strip instead of the crowded one beside its neighbours. `chipExtra` says how much
- * wider a chip is than its text is: the chip of a stale zone carries a remove button once it is
- * picked, and the place it takes has to be the place the chip really needs.
- */
-function layoutLabels(
-  zones: PlacedZone[],
-  devices: DeviceInfo[] | null,
-  stageW: number,
-  stageH: number,
-  view: View,
-  obstacles: Box[],
-  chipFor?: (index: number) => boolean,
-  chipExtra?: (index: number) => number,
-): LabelBox[] {
-  // On a phone the chip must not eat the canvas: the name alone, and a short word for a zone
-  // whose device is gone. The zone list below spells both out. A chip that still fits in the
-  // phone's budget keeps the LED count as well, so "DRAM 8" stays "DRAM 8".
-  const narrow = stageW < 480;
-  const base = stageW / CANVAS_W;
-  const k = base * view.scale;
-  const m = labelMetrics(view.scale);
-  // The part of the canvas that is on screen: a chip for a zone that is off the canvas is
-  // left out, or every chip would pile up on the edge when the canvas is zoomed in.
-  const visX0 = Math.max(0, view.panX);
-  const visX1 = Math.min(stageW, view.panX + stageW * view.scale);
-  const visY0 = Math.max(0, view.panY);
-  const visY1 = Math.min(stageH, view.panY + stageH * view.scale);
-
-  // The zones that are on screen, with their boxes in css pixels.
-  const items: {
-    index: number;
-    key: string;
-    text: string;
-    w: number;
-    missing: boolean;
-    accent: number;
-    box: Box;
-  }[] = [];
-  zones.forEach((z, index) => {
-    if (!z.visible) return;
-    const info = findZoneInfo(devices, z.device_id, z.zone_index);
-    // A zone is stale when the daemon does not drive its device: the device is not in the list
-    // at all, or it is there and not connected.
-    const stale = !info || !info.device.connected;
-    const named = info ? info.zone.name : narrow ? "not connected" : "device not found";
-    const counted = info ? `${info.zone.name} ${info.zone.led_count}` : named;
-    const text =
-      info && narrow && counted.length * m.char + CHIP_CHROME > stageW * NARROW_BUDGET ? named : counted;
-    const corners = zoneCorners(z);
-    let minX = Infinity;
-    let minY = Infinity;
-    let maxX = -Infinity;
-    let maxY = -Infinity;
-    for (const c of corners) {
-      if (c.x < minX) minX = c.x;
-      if (c.x > maxX) maxX = c.x;
-      if (c.y < minY) minY = c.y;
-      if (c.y > maxY) maxY = c.y;
-    }
-    const box: Box = {
-      x: (minX + view.panX) * k,
-      y: (minY + view.panY) * k,
-      w: (maxX - minX) * k,
-      h: (maxY - minY) * k,
-    };
-    if (box.x + box.w < visX0 || box.x > visX1 || box.y + box.h < visY0 || box.y > visY1) return;
-    items.push({
-      index,
-      key: zoneKey(z),
-      text,
-      w: text.length * m.char + CHIP_CHROME + (chipExtra?.(index) ?? 0),
-      missing: stale,
-      accent: accentOf(devices, z.device_id),
-      box,
-    });
-  });
-
-  const placed: LabelBox[] = [];
-  for (const item of items) {
-    // On a phone only the picked zone has a chip: the canvas shows the lights, and the chip
-    // names the one zone the reader is on.
-    if (chipFor && !chipFor(item.index)) continue;
-    const w = item.w;
-    // The places a chip can go: above the zone, inside it, below it; each one either aligned
-    // with the zone's left edge or with its right edge. When the zone is tall and narrow, the
-    // chip can also stand beside it.
-    const candidates: Box[] = [];
-    const at = (x: number, y: number) => ({ x: clamp(x, 0, Math.max(0, stageW - w)), y, w, h: m.h });
-    // Above and below the zone the chip may stand anywhere along the zone's width, every 6 px: when
-    // a neighbour zone sits at the same height, the chip moves off the neighbour's end and stays
-    // nearer its own zone.
-    const along: number[] = [item.box.x, item.box.x + item.box.w - w];
-    for (let x = item.box.x - w + 6; x < item.box.x + item.box.w - 6; x += 6) along.push(x);
-    for (const y of [item.box.y - m.h - CHIP_TOUCH, item.box.y + item.box.h + CHIP_TOUCH]) {
-      for (const x of along) candidates.push(at(x, y));
-    }
-    // Inside the zone, the chip is centred on it: a strip a few pixels tall is then covered by a
-    // chip that is clear of its neighbours, where a chip hung from its top would hit them.
-    for (const y of [item.box.y + 3, item.box.y + (item.box.h - m.h) / 2]) {
-      for (const x of [item.box.x, item.box.x + item.box.w - w]) candidates.push(at(x, y));
-    }
-    // Beside the zone: to its left or to its right, anywhere along its height, every 4 px.
-    for (const x of [item.box.x - w - CHIP_TOUCH, item.box.x + item.box.w + CHIP_TOUCH]) {
-      for (let y = item.box.y - m.h + 4; y <= item.box.y + item.box.h - 4; y += 4) candidates.push(at(x, y));
-    }
-    const inCanvas = (b: Box) => b.y >= 0 && b.y + m.h <= stageH && b.x >= 0 && b.x + b.w <= stageW;
-    // The chip has to sit at its own zone: it must touch it, cover it, or sit right above it,
-    // or it names nothing.
-    const anchored = (b: Box) => near(b, item.box, CHIP_GAP);
-    // The chip may not cover another zone: it would read as that zone's label. A zone that
-    // holds this zone (or is the same box) is the exception: a chip on a small zone inside a
-    // big one cannot help but be inside the big one too.
-    const zoneClash = (b: Box) =>
-      items.some(
-        (o) => o.index !== item.index && overlaps(b, o.box) && !contains(o.box, item.box),
-      );
-    // And it may not cover another chip: that chip's label would be cut in half.
-    const chipClash = (b: Box) => placed.some((p) => overlaps(b, { x: p.x, y: p.y, w: p.w, h: m.h }));
-    // And it may not sit under the zoom control or one of its tooltips: that is where the
-    // pointer goes, and a chip under it is a chip nobody can read.
-    const controlClash = (b: Box) => obstacles.some((o) => overlaps(b, o));
-    // And its own zone must be the nearest one: a chip that sits closer to another zone names
-    // that one.
-    const nearestOther = (b: Box) => {
-      const others = items.filter((o) => o.index !== item.index && !contains(o.box, item.box));
-      let best = Infinity;
-      for (const o of others) best = Math.min(best, boxDistance(b, o.box));
-      return best;
-    };
-    const nearestIsOwn = (b: Box) => boxDistance(b, item.box) < nearestOther(b) - NEARER_EPS;
-    /**
-     * The side a chip prefers: above its zone and left-aligned with the zone's start, then above
-     * and right-aligned, then below on the same two terms, then beside the zone. The bonus is
-     * small against every clash (30 to 40), so a preferred side is taken only when it is clear;
-     * a blocked one falls through to the next side.
-     */
-    const sideBonus = (b: Box): number => {
-      const above = b.y + b.h <= item.box.y + 0.5;
-      const below = b.y >= item.box.y + item.box.h - 0.5;
-      const left = Math.abs(b.x - item.box.x) < 0.5;
-      if (above) return left ? 6 : 4;
-      if (below) return left ? 3 : 2;
-      return 1;
-    };
-    /**
-     * How good a place is. The rules are weighed in the order they matter: a chip that names
-     * its zone beats a chip that does not; a chip that sits just outside its zone beats one that
-     * covers the zone's own lamps, whenever there is room outside (the lamps are the thing the
-     * chip must not hide); a chip that covers another zone, another chip or the zoom control
-     * loses to any chip that does not, and a chip under the control is the worst of all.
-     */
-    const score = (b: Box): number => {
-      if (!inCanvas(b)) return -1000;
-      let s = 0;
-      s += anchored(b) ? 16 : -8;
-      // A chip inside its own zone covers the zone's lamps: that is the last resort, taken only
-      // when every place outside the zone is taken by another zone, a chip or the control.
-      s += overlaps(b, item.box) ? -20 : 0;
-      s += !zoneClash(b) ? 8 : -30;
-      s += !chipClash(b) ? 4 : -30;
-      s += !controlClash(b) ? 2 : -40;
-      // A chip that sits nearer to another zone names that one: a clear fault, not a tie-break.
-      // A tie is a fault, but a smaller one than covering the zone's own lamps (-20 above): a chip
-      // that covers its lamps is the worse of the two.
-      s += nearestIsOwn(b) ? 1 : -15;
-      // In a gap between two zones, the chip leaves a clear gap to the other one.
-      s += nearestOther(b) - boxDistance(b, item.box) >= CHIP_CLEAR ? 6 : 0;
-      s += sideBonus(b);
-      return s;
-    };
-    /**
-     * Where a chip can go when another chip is in the way: to its side if there is room, above
-     * it or under it if there is not. Two chips side by side read better than two chips
-     * stacked, and a chip that moves sideways stays at its own zone.
-     */
-    const resolve = (start: Box): Box[] => {
-      const out: Box[] = [];
-      const queue: Box[] = [start];
-      const seen = new Set<string>();
-      while (queue.length > 0 && out.length < 8) {
-        const b = queue.shift() as Box;
-        const key = `${Math.round(b.x)},${Math.round(b.y)}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        const hit = placed.find((p) => overlaps(b, { x: p.x, y: p.y, w: p.w, h: m.h }));
-        if (!hit) {
-          out.push(b);
-          continue;
-        }
-        queue.push({ ...b, x: clamp(hit.x + hit.w + 2, 0, Math.max(0, stageW - w)) });
-        queue.push({ ...b, x: clamp(hit.x - w - 2, 0, Math.max(0, stageW - w)) });
-        queue.push({ ...b, y: hit.y + m.h + 2 });
-        queue.push({ ...b, y: Math.max(0, hit.y - m.h - 2) });
-      }
-      return out.length > 0 ? out : [start];
-    };
-    /**
-     * A chip that would cover a neighbouring zone slides up or down until it does not. A slide
-     * that keeps the chip at its own zone is the one that is taken: the zones on a desk sit
-     * close together, and a chip that is a few pixels off still names the right one.
-     */
-    const slide = (b: Box): Box => {
-      if (!zoneClash(b)) return b;
-      // A chip that sits outside its zone stays outside it while it slides.
-      const free = (t: Box) =>
-        inCanvas(t) &&
-        !zoneClash(t) &&
-        !chipClash(t) &&
-        !(overlaps(t, item.box) && !overlaps(b, item.box));
-      for (let d = 1; d <= 12; d++) {
-        for (const y of [b.y - d, b.y + d]) {
-          const t = { ...b, y };
-          if (free(t) && anchored(t)) return t;
-        }
-      }
-      for (let d = 1; d <= 12; d++) {
-        for (const y of [b.y - d, b.y + d]) {
-          const t = { ...b, y };
-          if (free(t)) return t;
-        }
-      }
-      return b;
-    };
-    const tries: Box[] = [];
-    const free: Box[] = [];
-    const moved: Box[] = [];
-    for (const c of candidates) {
-      const alt = resolve(c);
-      // A place that is already free is preferred over a place another chip had to be moved
-      // out of: the chip then sits where the zone says it should.
-      if (alt.length > 0 && alt[0] === c) free.push(c);
-      else moved.push(...alt);
-    }
-    tries.push(...free, ...moved);
-    // The best place wins; the order of the candidates breaks a tie. Only the six best unslid
-    // places are slid: a slide is the costly part, and a place that needs one is rarely the best.
-    const top = tries
-      .map((b) => ({ b, s: score(b) }))
-      .sort((p, q) => q.s - p.s)
-      .slice(0, 6);
-    let best: Box | null = null;
-    let bestScore = -Infinity;
-    for (const { b } of top) {
-      const pos = slide(b);
-      const s = score(pos);
-      if (s > bestScore) {
-        bestScore = s;
-        best = pos;
-      }
-    }
-    const chosen = best ?? { x: item.box.x, y: item.box.y, w, h: m.h };
-    placed.push({
-      key: item.key,
-      index: item.index,
-      text: item.text,
-      x: chosen.x,
-      y: clamp(chosen.y, 0, Math.max(0, stageH - m.h)),
-      w,
-      missing: item.missing,
-      accent: item.accent,
-    });
+/** The axis-aligned box of a zone's corners, in canvas units. */
+function boundsOf(z: PlacedZone): { x: number; y: number; w: number; h: number } {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const c of zoneCorners(z)) {
+    if (c.x < minX) minX = c.x;
+    if (c.x > maxX) maxX = c.x;
+    if (c.y < minY) minY = c.y;
+    if (c.y > maxY) maxY = c.y;
   }
-  return placed;
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
+
+/** The luminance of a colour, 0 to 255: whether a dot is bright or dark against its ring. */
+function luminance(c: RGB): number {
+  return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+}
+
+/** A zone's LED layout, kept until the zone's own shape changes. */
+interface LedLayout {
+  sig: string;
+  local: LocalLeds;
 }
 
 /**
@@ -862,6 +455,10 @@ function layoutLabels(
  * element and repaints the LED overlay, and the geometry is committed to the layout once, when
  * the pointer goes up. The canvas can be zoomed and panned; that is a view transform only and
  * never reaches the saved layout.
+ *
+ * Each zone is drawn as a thin outline of its shape with its LEDs as small dots at the places
+ * the daemon samples. A selected zone gets Figma's frame: eight resize handles and a rotation
+ * handle (https://help.figma.com/hc/en-us/articles/360039956914).
  */
 export function PreviewStage({
   zones,
@@ -888,29 +485,27 @@ export function PreviewStage({
   const panRef = useRef<{ start: Point; orig: View } | null>(null);
   const liveRef = useRef<PlacedZone[]>(zones.map((z) => ({ ...z })));
   const zoneEls = useRef<(HTMLDivElement | null)[]>([]);
-  const labelEls = useRef<(HTMLDivElement | null)[]>([]);
-  const gripEls = useRef<{
-    rotate: HTMLSpanElement | null;
-    resize: HTMLSpanElement | null;
-    stem: HTMLSpanElement | null;
-  }>({ rotate: null, resize: null, stem: null });
+  const frameEl = useRef<HTMLDivElement | null>(null);
+  const labelEl = useRef<HTMLDivElement | null>(null);
   const guideEls = useRef<{ v: HTMLSpanElement | null; h: HTMLSpanElement | null }>({ v: null, h: null });
   const readoutRef = useRef<HTMLDivElement | null>(null);
-  const controlsRef = useRef<HTMLDivElement | null>(null);
   const editorLayerRef = useRef<HTMLDivElement | null>(null);
   const editorPicRef = useRef<Picture | null>(null);
   const daemonLiveRef = useRef(false);
   const samplingRef = useRef<SamplingMode>("nearest");
   const missingRef = useRef<Set<number>>(new Set());
-  /** The lamps of the zone being painted, reused every frame so a frame allocates no array. */
-  const lampsRef = useRef<Lamp[]>([]);
-  const obstaclesRef = useRef<Box[]>([]);
+  const selectedRef = useRef<number | null>(selected);
+  selectedRef.current = selected;
+  const zonesRef = useRef(zones);
+  zonesRef.current = zones;
   const paintQueued = useRef(false);
   const liveRaf = useRef<number | null>(null);
   const zoomRaf = useRef<number | null>(null);
   const viewCommit = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const layoutCache = useRef<Map<string, LedLayout>>(new Map());
+  const ledOff = useRef<{ key: string; color: string }>({ key: "", color: "rgba(255,255,255,0.3)" });
   const [hover, setHover] = useState<number | null>(null);
-  /** The zone a finger is on: its chip shows on a phone even before it is picked. */
+  /** The zone a finger or a pointer is on: its label shows while it is held. */
   const [pressed, setPressed] = useState<number | null>(null);
   const [view, setView] = useState<View>({ scale: 1, panX: 0, panY: 0 });
   const viewRef = useRef<View>(view);
@@ -918,15 +513,15 @@ export function PreviewStage({
   const status = usePreviewStatus();
   const reduced = usePrefersReducedMotion();
   /**
-   * A phone's canvas is 358 px wide and carries eight zones: eight chips on it is a wall of
-   * text over the lights. On a phone only the picked zone is named, and the zone under a finger
+   * A phone's canvas is 358 px wide and carries a dozen zones: a label on each is a wall of text
+   * over the lights. On a phone only the picked zone is named, and the zone under a finger
    * names itself while it is held.
    */
   const phone = useMediaQuery("(max-width: 720px)");
-  const chipVisible = useCallback(
-    (index: number) => !phone || index === selected || index === pressed,
-    [phone, selected, pressed],
-  );
+  /** The zone whose name shows: the one being dragged, then the one under the pointer, then the picked one. */
+  const labelIndex = phone ? (pressed ?? selected) : (pressed ?? hover ?? selected);
+  const labelIndexRef = useRef<number | null>(labelIndex);
+  labelIndexRef.current = labelIndex;
   /**
    * The daemon's frames are the honest picture of the effect. When they are not coming, the
    * editor draws the running effect itself, behind the zones, and says so.
@@ -987,23 +582,17 @@ export function PreviewStage({
     setView(next);
   }
 
-  // The LED offsets of every zone, in the zone's own frame. They only change when the zone is
-  // resized or reversed, so they are cached instead of rebuilt on every pointer move.
-  const ledCache = useMemo(() => {
-    const map = new Map<string, LedCache>();
+  // The device's description of every zone, found once per layout change.
+  const infos = useMemo(() => {
+    const map = new Map<string, ZoneInfo>();
     for (const z of zones) {
-      const info = findZoneInfo(devices, z.device_id, z.zone_index);
-      if (!info) continue;
-      map.set(zoneKey(z), {
-        offsets: zoneLedOffsets(info.zone, z.reversed),
-        info: info.zone,
-      });
+      const found = findZoneInfo(devices, z.device_id, z.zone_index);
+      if (found) map.set(zoneKey(z), found.zone);
     }
     return map;
   }, [zones, devices]);
-
-  const ledCacheRef = useRef(ledCache);
-  ledCacheRef.current = ledCache;
+  const infosRef = useRef(infos);
+  infosRef.current = infos;
 
   // A zone whose device the daemon does not drive is stale: it is drawn dimmed and dashed, and
   // the inspector says so.
@@ -1020,34 +609,105 @@ export function PreviewStage({
 
   /**
    * A stale zone cannot be picked on the canvas: it is a ghost over another zone and it never
-   * takes a click. Its chip is the way to it, and the chip carries the way to take it off the
+   * takes a click. Its label is the way to it, and the label carries the way to take it off the
    * layout once the zone is picked.
    */
   const removable = useCallback(
     (index: number) => selected === index && missing.has(index) && !!onRemoveZone,
     [selected, missing, onRemoveZone],
   );
-  /** How much wider the chip of a zone is than its text: the remove button's room. */
-  const chipExtra = useCallback((index: number) => (removable(index) ? CHIP_REMOVE_W : 0), [removable]);
+
+  /** Where a zone's LEDs sit, rebuilt only when its size, shape or order changes. */
+  const layoutOf = useCallback((z: PlacedZone, info: ZoneInfo): LocalLeds => {
+    const sig = `${z.width.toFixed(3)}|${z.height.toFixed(3)}|${JSON.stringify(z.shape)}|${z.reversed}|${info.led_count}|${info.kind.type}`;
+    const key = zoneKey(z);
+    const hit = layoutCache.current.get(key);
+    if (hit && hit.sig === sig) return hit.local;
+    const local = zoneLocalLeds(z, info);
+    layoutCache.current.set(key, { sig, local });
+    return local;
+  }, []);
+
+  /** Places the zone's name beside it: below a picked zone (the rotation handle is above), above a hovered one. */
+  const placeLabel = useCallback((index: number | null, v: View) => {
+    const el = labelEl.current;
+    const stage = stageRef.current;
+    if (!el || !stage || index === null) return;
+    const z = liveRef.current[index];
+    if (!z) return;
+    const k = (stage.clientWidth / CANVAS_W) * v.scale;
+    const b = boundsOf(z);
+    const box = { x: (b.x + v.panX) * k, y: (b.y + v.panY) * k, w: b.w * k, h: b.h * k };
+    const w = el.offsetWidth;
+    const h = el.offsetHeight;
+    const above = box.y - h - 6;
+    const below = box.y + box.h + 8;
+    const picked = selectedRef.current === index;
+    let y = picked ? below : above;
+    if (picked && below + h > stage.clientHeight - 2) y = above;
+    else if (!picked && above < 2) y = below;
+    el.style.left = `${clamp(box.x, 2, Math.max(2, stage.clientWidth - w - 2))}px`;
+    el.style.top = `${clamp(y, 2, Math.max(2, stage.clientHeight - h - 2))}px`;
+  }, []);
+
+  /** Writes the selection frame onto its element: the zone's box, its handles' cursors, which handles fit. */
+  const applyFrame = useCallback((z: PlacedZone, v: View) => {
+    const el = frameEl.current;
+    const stage = stageRef.current;
+    if (!el || !stage) return;
+    const base = stage.clientWidth / CANVAS_W;
+    const k = base * v.scale;
+    el.style.left = `${(z.x + v.panX) * k}px`;
+    el.style.top = `${(z.y + v.panY) * k}px`;
+    el.style.width = `${z.width * k}px`;
+    el.style.height = `${z.height * k}px`;
+    el.style.transform = `rotate(${z.rotation_deg}deg)`;
+    el.dataset.narrowX = z.width * k < EDGE_HANDLE_MIN_PX ? "true" : "false";
+    el.dataset.narrowY = z.height * k < EDGE_HANDLE_MIN_PX ? "true" : "false";
+    // The rotation handle stands above the zone; when that is off the canvas it stands below.
+    const t = zoneTransform(z);
+    const px = ROTATE_STANDOFF / k;
+    const topOut = {
+      x: t.cx + 0 * t.cos - (-z.height / 2 - px) * t.sin,
+      y: t.cy + 0 * t.sin + (-z.height / 2 - px) * t.cos,
+    };
+    const fits = topOut.x > 2 && topOut.x < CANVAS_W - 2 && topOut.y > 2 && topOut.y < CANVAS_H - 2;
+    el.dataset.flip = fits ? "false" : "true";
+    for (const handle of HANDLES) {
+      const h = el.querySelector<HTMLElement>(`[data-handle="${handle.id}"]`);
+      if (h) h.style.cursor = handleCursor(handle, z.rotation_deg);
+    }
+  }, []);
 
   /** Writes one zone's geometry onto its element. No React involved. */
   const applyGeom = useCallback(
     (index: number, z: PlacedZone, v: View) => {
       const el = zoneEls.current[index];
-      if (!el) return;
-      const base = (stageRef.current?.clientWidth ?? CANVAS_W) / CANVAS_W;
-      const k = base * v.scale;
-      el.style.left = `${(z.x + v.panX) * k}px`;
-      el.style.top = `${(z.y + v.panY) * k}px`;
-      el.style.width = `${z.width * k}px`;
-      el.style.height = `${z.height * k}px`;
-      el.style.transform = `rotate(${z.rotation_deg}deg)`;
-      // The device is drawn along its long side, so a stick that is turned on the desk is drawn
-      // turned too. A resize can turn a zone round, so this follows the drag.
-      el.dataset.axis = z.width >= z.height ? "h" : "v";
+      if (el) {
+        const base = (stageRef.current?.clientWidth ?? CANVAS_W) / CANVAS_W;
+        const k = base * v.scale;
+        el.style.left = `${(z.x + v.panX) * k}px`;
+        el.style.top = `${(z.y + v.panY) * k}px`;
+        el.style.width = `${z.width * k}px`;
+        el.style.height = `${z.height * k}px`;
+        el.style.transform = `rotate(${z.rotation_deg}deg)`;
+      }
+      if (selectedRef.current === index) applyFrame(z, v);
     },
-    [],
+    [applyFrame],
   );
+
+  /** The colour of an unlit dot, read from the token so it follows the theme. */
+  const unlitColor = useCallback((): string => {
+    const stage = stageRef.current;
+    if (!stage) return ledOff.current.color;
+    const key = `${document.documentElement.getAttribute("data-theme") ?? ""}|${window.matchMedia("(prefers-color-scheme: light)").matches}`;
+    if (ledOff.current.key !== key) {
+      const v = getComputedStyle(stage).getPropertyValue("--dot-unlit").trim();
+      ledOff.current = { key, color: v || "rgba(255,255,255,0.3)" };
+    }
+    return ledOff.current.color;
+  }, []);
 
   /** Repaints the LED dots from the last frame, at the zones' live geometry and view. */
   const paintOverlay = useCallback(() => {
@@ -1057,6 +717,7 @@ export function PreviewStage({
     const octx = ov.getContext("2d");
     if (!octx) return;
     const v = viewRef.current;
+    const dpr = ov.width / Math.max(1, stage.clientWidth);
     const k = (ov.width / CANVAS_W) * v.scale;
     const ox = v.panX * k;
     const oy = v.panY * k;
@@ -1072,77 +733,53 @@ export function PreviewStage({
       : editorPicRef.current;
     const mode = samplingRef.current;
     const geom = liveRef.current;
+    const unlit = unlitColor();
+    const ringDark = "rgba(0, 0, 0, 0.62)";
+    const ringLight = "rgba(255, 255, 255, 0.5)";
     for (let i = 0; i < geom.length; i++) {
       const z = geom[i];
       if (!z || !z.visible) continue;
-      const cache = ledCacheRef.current.get(zoneKey(z));
-      if (!cache) continue;
-      const cells = ledCells(z, cache.info, cache.offsets);
+      const info = infosRef.current.get(zoneKey(z));
+      if (!info) continue;
+      const local = layoutOf(z, info);
+      const t = zoneTransform(z);
       // A zone whose device is not connected has no LEDs lit: its dots stay dark.
       const off = missingRef.current.has(i);
-      // Two passes: every glow first, then every core, so a lamp's glow never washes over its
-      // neighbour's core (a strip of 120 is a row of overlapping lamps).
-      const lamps = lampsRef.current;
-      lamps.length = 0;
-      for (const cell of cells) {
+      // A point is one blob of light: its LEDs all sample the same rect, so one dot stands for them.
+      const count = local.shape === "point" ? Math.min(1, local.leds.length) : local.leds.length;
+      const minPx = local.shape === "point" ? 3 : DOT_MIN_PX;
+      const radius = clamp(local.radius * k, minPx * dpr, DOT_MAX_PX * dpr * Math.max(1, v.scale * 0.5));
+      for (let j = 0; j < count; j++) {
+        const led = local.leds[j];
+        if (!led) continue;
+        const cell = canvasCell(t, led);
         const x = cell.cx * k + ox;
         const y = cell.cy * k + oy;
-        const grow = Math.min(1, (LED_MAX_PX / 2) / Math.max(cell.rx * k, cell.ry * k));
-        const rx = cell.rx * k * grow;
-        const ry = cell.ry * k * grow;
-        // A lamp that is off the canvas is not drawn: at a high zoom most of the desk is not on
-        // screen, and a frame that draws 379 lamps nobody can see is a frame wasted.
-        const reach = Math.max(rx, ry) * 2.4;
-        if (x + reach < 0 || y + reach < 0 || x - reach > ov.width || y - reach > ov.height) continue;
+        // A dot that is off the canvas is not drawn: at a high zoom most of the desk is not on
+        // screen, and a frame that draws dots nobody can see is a frame wasted.
+        if (x + radius < 0 || y + radius < 0 || x - radius > ov.width || y - radius > ov.height) continue;
+        let fill: string;
+        let ring = ringDark;
         if (pic && !off) {
-          lamps.push({ x, y, rx, ry, turn: cell.turn, c: sampleLed(pic, cell, mode) });
+          const c = sampleLed(pic, cell, mode);
+          fill = `rgb(${c[0]} ${c[1]} ${c[2]})`;
+          if (luminance(c) < 70) ring = ringLight;
         } else {
           // No picture, or no device: the dots still show where the LEDs sit.
-          octx.fillStyle = "rgba(255, 255, 255, 0.18)";
-          octx.beginPath();
-          octx.ellipse(x, y, rx, ry, cell.turn, 0, Math.PI * 2);
-          octx.fill();
+          fill = unlit;
+          ring = ringDark;
         }
-      }
-      // The glow: the lamp's own colour, soft, reaching about a lamp's radius past its edge.
-      for (const l of lamps) {
-        const big = Math.max(l.rx, l.ry);
-        const reach = 2.2;
-        octx.save();
-        octx.translate(l.x, l.y);
-        octx.rotate(l.turn);
-        octx.scale(l.rx / big, l.ry / big);
-        const glow = octx.createRadialGradient(0, 0, 0, 0, 0, big * reach);
-        glow.addColorStop(0, `rgba(${l.c[0]} ${l.c[1]} ${l.c[2]} / 0.75)`);
-        glow.addColorStop(0.45, `rgba(${l.c[0]} ${l.c[1]} ${l.c[2]} / 0.28)`);
-        glow.addColorStop(1, `rgba(${l.c[0]} ${l.c[1]} ${l.c[2]} / 0)`);
-        octx.fillStyle = glow;
         octx.beginPath();
-        octx.arc(0, 0, big * reach, 0, Math.PI * 2);
+        octx.arc(x, y, radius + dpr, 0, Math.PI * 2);
+        octx.fillStyle = ring;
         octx.fill();
-        octx.restore();
-      }
-      // The core: opaque, hotter in the middle than at the edge, so it reads as a lit lamp.
-      for (const l of lamps) {
-        const big = Math.max(l.rx, l.ry);
-        const hot = brighten(l.c, 0.85);
-        const rim = brighten(l.c, 0.4);
-        octx.save();
-        octx.translate(l.x, l.y);
-        octx.rotate(l.turn);
-        octx.scale(l.rx / big, l.ry / big);
-        const core = octx.createRadialGradient(0, 0, 0, 0, 0, big);
-        core.addColorStop(0, `rgb(${hot[0]} ${hot[1]} ${hot[2]})`);
-        core.addColorStop(0.55, `rgb(${rim[0]} ${rim[1]} ${rim[2]})`);
-        core.addColorStop(1, `rgb(${rim[0]} ${rim[1]} ${rim[2]})`);
-        octx.fillStyle = core;
         octx.beginPath();
-        octx.arc(0, 0, big, 0, Math.PI * 2);
+        octx.arc(x, y, radius, 0, Math.PI * 2);
+        octx.fillStyle = fill;
         octx.fill();
-        octx.restore();
       }
     }
-  }, []);
+  }, [layoutOf, unlitColor]);
 
   const queuePaint = useCallback(() => {
     if (paintQueued.current) return;
@@ -1198,56 +835,7 @@ export function PreviewStage({
     return () => cancelAnimationFrame(raf);
   }, [editorDraws, paintOverlay, readEditorPicture]);
 
-  /**
-   * The boxes a chip may not sit in: the zoom control and every tooltip it can open. The
-   * tooltip bubbles are in the DOM even while they are closed, so their boxes can be read
-   * without hovering anything.
-   */
-  const measureObstacles = useCallback((): Box[] => {
-    const stage = stageRef.current;
-    const controls = controlsRef.current;
-    if (!stage || !controls) return [];
-    const stageBox = stage.getBoundingClientRect();
-    const rel = (r: DOMRect): Box => ({
-      x: r.left - stageBox.left,
-      y: r.top - stageBox.top,
-      w: r.width,
-      h: r.height,
-    });
-    const out: Box[] = [rel(controls.getBoundingClientRect())];
-    for (const bubble of Array.from(controls.querySelectorAll(".tip-bubble"))) {
-      const r = bubble.getBoundingClientRect();
-      if (r.width > 0 && r.height > 0) out.push(rel(r));
-    }
-    return out;
-  }, []);
-
-  /** Writes the label chips where they belong for a view. */
-  const writeLabels = useCallback(
-    (v: View) => {
-      const stage = stageRef.current;
-      if (!stage) return;
-      const boxes = layoutLabels(
-        zones,
-        devices,
-        stage.clientWidth,
-        stage.clientHeight,
-        v,
-        obstaclesRef.current,
-        chipVisible,
-        chipExtra,
-      );
-      for (const b of boxes) {
-        const el = labelEls.current[b.index];
-        if (!el) continue;
-        el.style.left = `${b.x}px`;
-        el.style.top = `${b.y}px`;
-      }
-    },
-    [zones, devices, chipVisible, chipExtra],
-  );
-
-  /** Draws the whole view: the effect, the zones, the labels and the LEDs. */
+  /** Draws the whole view: the effect, the zones, the label and the LEDs. */
   const applyView = useCallback(
     (v: View) => {
       viewRef.current = v;
@@ -1262,11 +850,10 @@ export function PreviewStage({
         const z = geom[i];
         if (z) applyGeom(i, z, v);
       }
-      writeLabels(v);
-      applyGripsRef.current(selected);
+      placeLabel(labelIndexRef.current, v);
       queuePaint();
     },
-    [applyGeom, writeLabels, queuePaint, selected],
+    [applyGeom, placeLabel, queuePaint],
   );
   // Paint each arriving frame: the preview canvas, then the LED dots over it.
   useEffect(() => {
@@ -1320,14 +907,16 @@ export function PreviewStage({
   // When the layout changes outside a drag (a nudge, a load, a revert), the live geometry and
   // the elements follow it. A drag owns the geometry while it lasts: the page re-renders on
   // every frame of it, and the draft it is dragging is still the one it started from.
-  useEffect(() => {
-    if (dragRef.current) return;
-    liveRef.current = zones.map((z) => ({ ...z }));
+  useLayoutEffect(() => {
     const v = viewRef.current;
-    zones.forEach((z, i) => applyGeom(i, z, v));
-    writeLabels(v);
+    if (!dragRef.current) {
+      liveRef.current = zones.map((z) => ({ ...z }));
+      zones.forEach((z, i) => applyGeom(i, z, v));
+    }
+    // The label comes and goes with the pointer, so it is placed whenever it changes, drag or not.
+    placeLabel(labelIndexRef.current, v);
     queuePaint();
-  }, [zones, applyGeom, writeLabels, queuePaint]);
+  }, [zones, applyGeom, placeLabel, queuePaint, selected, labelIndex, stageBox]);
 
   const toLogical = (e: { clientX: number; clientY: number }): Point => {
     const box = stageRef.current?.getBoundingClientRect();
@@ -1340,70 +929,18 @@ export function PreviewStage({
     };
   };
 
-  /** Where the grips of a zone sit, in canvas units. */
-  const gripGeometry = useCallback((z: PlacedZone) => {
-    const corners = zoneCorners(z);
-    const se = corners[2] ?? { x: z.x + z.width, y: z.y + z.height };
-    const outside = zoneGripPoint(z, GRIP_GAP);
-    const inside = zoneGripPoint(z, -GRIP_GAP);
-    const fits = outside.x > 4 && outside.x < CANVAS_W - 4 && outside.y > 4 && outside.y < CANVAS_H - 4;
-    return {
-      rotate: fits ? outside : inside,
-      resize: { x: clamp(se.x, 2, CANVAS_W - 2), y: clamp(se.y, 2, CANVAS_H - 2) },
-      stem: zoneGripPoint(z, 0),
-      deg: z.rotation_deg,
-    };
+  /** What a drag says in words beside the pointer: where the zone is, how big, how far it is turned. */
+  const showReadout = useCallback((e: PointerEvent<HTMLDivElement>, text: string) => {
+    const el = readoutRef.current;
+    const stage = stageRef.current;
+    if (!el || !stage) return;
+    const box = stage.getBoundingClientRect();
+    el.textContent = text;
+    el.style.opacity = "1";
+    el.style.visibility = "visible";
+    el.style.left = `${clamp(e.clientX - box.left + 16, 4, Math.max(4, box.width - 190))}px`;
+    el.style.top = `${clamp(e.clientY - box.top + 16, 4, Math.max(4, box.height - 40))}px`;
   }, []);
-
-  /** Writes the grips straight onto the elements, so they follow a drag and a zoom. */
-  const applyGrips = useCallback(
-    (index: number | null) => {
-      const els = gripEls.current;
-      if (!els.rotate || !els.resize || !els.stem) return;
-      if (index === null) return;
-      const z = liveRef.current[index];
-      if (!z) return;
-      const g = gripGeometry(z);
-      const stage = stageRef.current;
-      const v = viewRef.current;
-      const base = (stage?.clientWidth ?? CANVAS_W) / CANVAS_W;
-      const k = base * v.scale;
-      els.rotate.style.left = `${(g.rotate.x + v.panX) * k}px`;
-      els.rotate.style.top = `${(g.rotate.y + v.panY) * k}px`;
-      els.resize.style.left = `${(g.resize.x + v.panX) * k}px`;
-      els.resize.style.top = `${(g.resize.y + v.panY) * k}px`;
-      els.stem.style.left = `${(g.stem.x + v.panX) * k}px`;
-      els.stem.style.top = `${(g.stem.y + v.panY) * k}px`;
-      els.stem.style.height = `${Math.max(2, GRIP_GAP * k)}px`;
-      els.stem.style.transform = `rotate(${g.deg}deg)`;
-    },
-    [gripGeometry],
-  );
-
-  // applyView needs applyGrips, and applyGrips needs nothing from it: a ref keeps the order.
-  const applyGripsRef = useRef(applyGrips);
-  applyGripsRef.current = applyGrips;
-
-  /**
-   * The readout by the pointer: where the zone is, in the canvas's own units, and how far it is
-   * from the line it lines up with.
-   */
-  const showReadout = useCallback(
-    (e: PointerEvent<HTMLDivElement>, x: number, y: number, snap: Snap) => {
-      const el = readoutRef.current;
-      const stage = stageRef.current;
-      if (!el || !stage) return;
-      const box = stage.getBoundingClientRect();
-      const gap = snap.gapX !== null && snap.gapY !== null ? Math.min(snap.gapX, snap.gapY) : (snap.gapX ?? snap.gapY);
-      const where = gap === null ? "" : gap < 0.05 ? " · on the guide" : ` · ${gap.toFixed(1)} u to the guide`;
-      el.textContent = `x ${x.toFixed(0)} · y ${y.toFixed(0)}${where}`;
-      el.style.opacity = "1";
-      el.style.visibility = "visible";
-      el.style.left = `${clamp(e.clientX - box.left + 16, 4, Math.max(4, box.width - 190))}px`;
-      el.style.top = `${clamp(e.clientY - box.top + 16, 4, Math.max(4, box.height - 40))}px`;
-    },
-    [],
-  );
 
   /** Shows or hides the alignment guides. */
   const applyGuides = useCallback((snap: { guideX: number | null; guideY: number | null }) => {
@@ -1427,43 +964,26 @@ export function PreviewStage({
     }
   }, []);
 
-  // The grips follow the selected zone whenever it moves.
-  useEffect(() => {
-    applyGrips(selected);
-  }, [selected, zones, view, applyGrips]);
-
-  const beginDrag = (kind: DragKind, index: number, e: PointerEvent<HTMLElement>) => {
+  const beginDrag = (kind: DragKind, index: number, e: PointerEvent<HTMLElement>, handle: HandleDef | null = null) => {
     e.stopPropagation();
     e.preventDefault();
     const z = liveRef.current[index];
     if (!z) return;
     onSelect(index);
-    // The zone under the finger names itself on a phone, even before it is picked.
+    // The zone under the finger names itself, even before it is picked.
     setPressed(index);
-    // The chip rides along with the zone it names, so the name never points at the place the
-    // zone used to be.
-    const label = labelEls.current[index];
-    let offset: { dx: number; dy: number } | null = null;
-    if (label) {
-      const base = (stageRef.current?.clientWidth ?? CANVAS_W) / CANVAS_W;
-      const k = base * viewRef.current.scale;
-      const zx = (z.x + viewRef.current.panX) * k;
-      const zy = (z.y + viewRef.current.panY) * k;
-      offset = {
-        dx: (parseFloat(label.style.left) || 0) - zx,
-        dy: (parseFloat(label.style.top) || 0) - zy,
-      };
-    }
     dragRef.current = {
       kind,
       index,
       start: toLogical(e),
       orig: { ...z },
-      label: offset,
+      handle,
     };
     const el = zoneEls.current[index];
     if (el) el.dataset.dragging = "true";
     onDraggingChange?.(true);
+    // The arrow keys work on the picked zone once the stage has the focus.
+    stageRef.current?.focus({ preventScroll: true });
     stageRef.current?.setPointerCapture(e.pointerId);
   };
 
@@ -1504,13 +1024,19 @@ export function PreviewStage({
     const dy = p.y - d.start.y;
     const cur = liveRef.current[d.index];
     if (!cur) return;
+    const base = (stageRef.current?.clientWidth ?? CANVAS_W) / CANVAS_W;
+    const threshold = SNAP_PIXELS / (base * viewRef.current.scale);
+    const others = [CANVAS_BOX, ...liveRef.current.filter((_, i) => i !== d.index)];
     let next: PlacedZone;
+    let readout: string;
     if (d.kind === "move") {
       // The zone snaps to the grid, or to another zone's line; Alt frees it.
-      const others = liveRef.current.filter((_, i) => i !== d.index);
-      const base = (stageRef.current?.clientWidth ?? CANVAS_W) / CANVAS_W;
-      const threshold = SNAP_PIXELS / (base * viewRef.current.scale);
-      const want = { x: clamp(o.x + dx, 0, CANVAS_W - o.width), y: clamp(o.y + dy, 0, CANVAS_H - o.height), width: o.width, height: o.height };
+      const want = {
+        x: clamp(o.x + dx, 0, CANVAS_W - o.width),
+        y: clamp(o.y + dy, 0, CANVAS_H - o.height),
+        width: o.width,
+        height: o.height,
+      };
       const snap = snapMove(want, others, threshold, e.altKey);
       next = {
         ...cur,
@@ -1518,42 +1044,56 @@ export function PreviewStage({
         y: clamp(snap.y, 0, CANVAS_H - o.height),
       };
       applyGuides({ guideX: snap.guideX, guideY: snap.guideY });
-      showReadout(e, next.x, next.y, snap);
-    } else if (d.kind === "resize") {
-      next = {
-        ...cur,
-        width: clamp(o.width + dx, 2, CANVAS_W - o.x),
-        height: clamp(o.height + dy, 2, CANVAS_H - o.y),
-      };
-      applyGuides({ guideX: null, guideY: null });
+      const gap = snap.gapX !== null && snap.gapY !== null ? Math.min(snap.gapX, snap.gapY) : (snap.gapX ?? snap.gapY);
+      const where = gap === null ? "" : gap < 0.05 ? " · on the guide" : ` · ${gap.toFixed(1)} u to the guide`;
+      readout = `x ${next.x.toFixed(0)} · y ${next.y.toFixed(0)}${where}`;
+    } else if (d.kind === "resize" && d.handle) {
+      // The dragged edge snaps to the grid and to other zones' lines while the zone is square to
+      // the canvas; a turned zone follows the pointer freely. Alt frees it, as it does for a move.
+      let q = { x: clamp(p.x, 0, CANVAS_W), y: clamp(p.y, 0, CANVAS_H) };
+      let guideX: number | null = null;
+      let guideY: number | null = null;
+      const square = Math.abs(Math.sin((o.rotation_deg * Math.PI) / 180)) < 1e-6 && Math.cos((o.rotation_deg * Math.PI) / 180) > 0;
+      if (square && !e.altKey) {
+        if (d.handle.sx !== 0) {
+          const line = nearestLine(q.x, others.flatMap((z) => zoneLines(z, "x")), threshold);
+          guideX = line;
+          q = { ...q, x: line ?? gridOf(q.x) };
+        }
+        if (d.handle.sy !== 0) {
+          const line = nearestLine(q.y, others.flatMap((z) => zoneLines(z, "y")), threshold);
+          guideY = line;
+          q = { ...q, y: line ?? gridOf(q.y) };
+        }
+      }
+      next = resizeBy(o, d.handle, q, e.shiftKey, e.altKey);
+      // Shift rescales the box after the snap, so the guide would no longer be where the edge is.
+      if (e.shiftKey) {
+        guideX = null;
+        guideY = null;
+      }
+      applyGuides({ guideX, guideY });
+      readout = `w ${next.width.toFixed(0)} · h ${next.height.toFixed(0)}${e.shiftKey ? " · locked" : ""}`;
     } else {
       const cx = o.x + o.width / 2;
       const cy = o.y + o.height / 2;
       let deg = (Math.atan2(p.y - cy, p.x - cx) * 180) / Math.PI + 90;
       deg = ((deg % 360) + 360) % 360;
       if (e.shiftKey) deg = Math.round(deg / 15) * 15;
-      next = { ...cur, rotation_deg: Math.round(deg * 10) / 10 };
+      next = { ...cur, rotation_deg: Math.round((deg % 360) * 10) / 10 };
       applyGuides({ guideX: null, guideY: null });
+      readout = `${next.rotation_deg.toFixed(1)}°${e.shiftKey ? " · 15° steps" : ""}`;
     }
+    showReadout(e, readout);
     liveRef.current[d.index] = next;
     applyGeom(d.index, next, viewRef.current);
-    applyGrips(d.index);
-    // The chip rides along with the zone.
-    if (d.label) {
-      const el = labelEls.current[d.index];
-      if (el) {
-        const base = (stageRef.current?.clientWidth ?? CANVAS_W) / CANVAS_W;
-        const k = base * viewRef.current.scale;
-        el.style.left = `${(next.x + viewRef.current.panX) * k + d.label.dx}px`;
-        el.style.top = `${(next.y + viewRef.current.panY) * k + d.label.dy}px`;
-      }
-    }
+    placeLabel(labelIndexRef.current, viewRef.current);
     notifyLive(d.index);
     queuePaint();
   };
 
   const endDrag = (e: PointerEvent<HTMLDivElement>) => {
-    // The finger is off the zone: on a phone its chip goes with it.
+    // The finger is off the zone: its label goes with it.
     setPressed(null);
     const pan = panRef.current;
     if (pan) {
@@ -1595,20 +1135,43 @@ export function PreviewStage({
     if (Object.keys(patch).length > 0) onChange(d.index, patch);
   };
 
-  const onRectKey = (index: number, e: KeyboardEvent<HTMLDivElement>) => {
-    const z = zones[index];
-    if (!z) return;
-    const step = e.shiftKey ? 10 : 1;
-    let patch: Partial<PlacedZone> | null = null;
-    if (e.key === "ArrowLeft") patch = { x: clamp(z.x - step, 0, CANVAS_W - z.width) };
-    if (e.key === "ArrowRight") patch = { x: clamp(z.x + step, 0, CANVAS_W - z.width) };
-    if (e.key === "ArrowUp") patch = { y: clamp(z.y - step, 0, CANVAS_H - z.height) };
-    if (e.key === "ArrowDown") patch = { y: clamp(z.y + step, 0, CANVAS_H - z.height) };
-    if (patch) {
+  // The keys work on the picked zone, as in Figma: the arrows nudge it by 1 (Shift: 10) and
+  // Delete or Backspace takes it off the desk (it hides; the zone list brings it back), and Escape
+  // lets go of it. They answer only while the focus is on the canvas or on nothing, so the arrow
+  // keys still move a slider or a segment in the panel beside it.
+  useEffect(() => {
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      const index = selectedRef.current;
+      if (index === null) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const target = e.target as HTMLElement | null;
+      const stage = stageRef.current;
+      const onCanvas = !!target && !!stage && stage.contains(target);
+      const onNothing = !target || target === document.body;
+      if (!onCanvas && !onNothing) return;
+      // The zone's own buttons (the label's remove button, a handle) keep their own keys.
+      if (target && target.closest("button, input, select, textarea")) return;
+      const z = zonesRef.current[index];
+      if (!z) return;
+      const step = e.shiftKey ? 10 : 1;
+      let patch: Partial<PlacedZone> | null = null;
+      if (e.key === "ArrowLeft") patch = { x: clamp(z.x - step, 0, CANVAS_W - z.width) };
+      else if (e.key === "ArrowRight") patch = { x: clamp(z.x + step, 0, CANVAS_W - z.width) };
+      else if (e.key === "ArrowUp") patch = { y: clamp(z.y - step, 0, CANVAS_H - z.height) };
+      else if (e.key === "ArrowDown") patch = { y: clamp(z.y + step, 0, CANVAS_H - z.height) };
+      else if ((e.key === "Delete" || e.key === "Backspace") && z.visible) patch = { visible: false };
+      else if (e.key === "Escape") {
+        e.preventDefault();
+        onSelect(null);
+        return;
+      }
+      if (!patch) return;
       e.preventDefault();
       onChange(index, patch);
-    }
-  };
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onChange, onSelect]);
 
   const onDragOver = (e: DragEvent<HTMLDivElement>) => {
     if (Array.from(e.dataTransfer.types).includes(dropPayloadType)) {
@@ -1630,39 +1193,14 @@ export function PreviewStage({
     }
   };
 
-  // The label chips: laid out once per layout change, then moved by hand during a drag.
-  const [labelBoxes, setLabelBoxes] = useState<LabelBox[]>([]);
-  const metrics = labelMetrics(view.scale);
-  useLayoutEffect(() => {
-    const stage = stageRef.current;
-    if (!stage) return;
-    const obstacles = measureObstacles();
-    obstaclesRef.current = obstacles;
-    setLabelBoxes(
-      layoutLabels(
-        zones,
-        devices,
-        stage.clientWidth,
-        stage.clientHeight,
-        view,
-        obstacles,
-        chipVisible,
-        chipExtra,
-      ),
-    );
-  }, [zones, devices, stageBox, view, measureObstacles, chipVisible, chipExtra]);
-
   // The view is written back to React when the gesture settles, so the page keeps the zoom.
-  const commitView = useCallback(
-    (v: View) => {
-      if (viewCommit.current) clearTimeout(viewCommit.current);
-      viewCommit.current = setTimeout(() => {
-        viewCommit.current = null;
-        setView(v);
-      }, VIEW_COMMIT_MS);
-    },
-    [],
-  );
+  const commitView = useCallback((v: View) => {
+    if (viewCommit.current) clearTimeout(viewCommit.current);
+    viewCommit.current = setTimeout(() => {
+      viewCommit.current = null;
+      setView(v);
+    }, VIEW_COMMIT_MS);
+  }, []);
 
   // The view belongs to the layout: it is remembered per layout, and restored when the editor
   // comes back to it. A layout that was never zoomed has no entry at all.
@@ -1783,7 +1321,6 @@ export function PreviewStage({
   };
 
   const selectedZone = selected !== null ? zones[selected] : undefined;
-  const grips = selectedZone ? gripGeometry(selectedZone) : null;
 
   const base = (stageBox.w || CANVAS_W) / CANVAS_W;
   const k = base * view.scale;
@@ -1807,11 +1344,25 @@ export function PreviewStage({
     return { units, px: Math.round(units * pxPerUnit), share };
   }, [base, view.scale, stageBox.w]);
 
+  // The label's text: the zone's name and its LEDs, as the zone list says it.
+  const labelZone = labelIndex !== null ? zones[labelIndex] : undefined;
+  const labelFound = labelZone ? findZoneInfo(devices, labelZone.device_id, labelZone.zone_index) : null;
+  const labelMissing = labelIndex !== null && missing.has(labelIndex);
+  const labelText = labelZone
+    ? labelFound
+      ? `${labelFound.zone.name} ${labelFound.zone.led_count}`
+      : phone
+        ? "not connected"
+        : "device not found"
+    : "";
+  const labelAccent = labelZone ? accentOf(devices, labelZone.device_id) : -1;
+
   return (
     <div
       ref={stageRef}
       className={`stage ${desk.desk} ${desk.canvas}`}
       data-editor-draw={editorDraws ? "true" : "false"}
+      tabIndex={-1}
       onPointerMove={onStageMove}
       onPointerUp={endDrag}
       onPointerCancel={endDrag}
@@ -1867,6 +1418,9 @@ export function PreviewStage({
           opacity: daemonLive ? 1 : 0,
         }}
       />
+      {/* The picture is the backdrop, not the subject: a quiet veil keeps the zones' outlines
+          and dots readable over any effect. */}
+      <div className={desk.veil} aria-hidden="true" />
       <canvas ref={overlayRef} className="stage-leds" aria-hidden="true" />
 
       <div
@@ -1882,6 +1436,7 @@ export function PreviewStage({
           guideEls.current.v = el;
         }}
         className={desk.guideV}
+        data-guide="v"
         aria-hidden="true"
       />
       <span
@@ -1889,6 +1444,7 @@ export function PreviewStage({
           guideEls.current.h = el;
         }}
         className={desk.guideH}
+        data-guide="h"
         aria-hidden="true"
       />
 
@@ -1923,125 +1479,103 @@ export function PreviewStage({
             data-selected={isSel}
             data-missing={isMissing}
             data-hover={hover === i}
-            data-shape={zoneShape(found)}
-            data-axis={z.width >= z.height ? "h" : "v"}
+            data-shape={found ? resolveShape(z.shape, found.zone.kind) : "none"}
             style={style}
             onPointerDown={(e) => beginDrag("move", i, e)}
             onPointerEnter={() => setHover(i)}
             onPointerLeave={() => setHover((h) => (h === i ? null : h))}
-            onKeyDown={(e) => onRectKey(i, e)}
             onFocus={() => onSelect(i)}
           />
         );
       })}
 
-      {labelBoxes.map((b) => {
-        const i = b.index;
-        const isSel = selected === i;
-        const canRemove = removable(i);
-        return (
-          <div
-            key={b.key}
-            ref={(el) => {
-              labelEls.current[i] = el;
-            }}
-            className={desk.label}
-            data-zone-label="true"
-            data-zone-index={i}
-            data-selected={isSel}
-            data-missing={b.missing}
-            style={{
-              left: `${b.x}px`,
-              top: `${b.y}px`,
-              height: `${metrics.h}px`,
-              lineHeight: `${metrics.h - 2}px`,
-              fontSize: `${metrics.font}px`,
-              // The chip carries the colour of the device it names, so the eye can pair it with
-              // the zone's outline without reading it.
-              "--zc": b.missing
-                ? "var(--down)"
-                : `var(${ACCENTS[b.accent] ?? "--a1"})`,
-            } as CSSProperties}
-          >
-            <span className={desk.labelText}>{b.text}</span>
-            {canRemove && (
-              // A ghost cannot be picked on the canvas, so its chip is the way to it: once the
-              // zone is picked the chip carries the way to take it off the layout. The editor's
-              // own small button is used, not a raw one.
-              <span
-                className={desk.labelRemove}
-                onPointerDown={(e) => {
-                  e.stopPropagation();
-                  e.preventDefault();
-                }}
-              >
-                <Chip
-                  icon={<X size={10} weight="bold" />}
-                  label={`Remove ${b.text} from the layout`}
-                  onClick={() => onRemoveZone?.(i)}
-                >
-                  {null}
-                </Chip>
-              </span>
-            )}
-          </div>
-        );
-      })}
-
-      {grips && selected !== null && (
-        <>
+      {selectedZone && selected !== null && !missing.has(selected) && (
+        // Figma's selection frame: eight resize handles and a rotation handle, drawn in the
+        // zone's own turned box. The frame never takes a click itself; its handles do.
+        <div
+          ref={frameEl}
+          className={desk.frame}
+          data-frame="true"
+          data-narrow-x={selectedZone.width * k < EDGE_HANDLE_MIN_PX}
+          data-narrow-y={selectedZone.height * k < EDGE_HANDLE_MIN_PX}
+          style={{
+            left: `${(selectedZone.x + view.panX) * k}px`,
+            top: `${(selectedZone.y + view.panY) * k}px`,
+            width: `${selectedZone.width * k}px`,
+            height: `${selectedZone.height * k}px`,
+            transform: `rotate(${selectedZone.rotation_deg}deg)`,
+          }}
+        >
+          <span className={desk.stem} aria-hidden="true" />
           <span
-            ref={(el) => {
-              gripEls.current.stem = el;
-            }}
-            className={desk.stem}
-            aria-hidden="true"
-            style={{
-              left: `${(grips.stem.x + view.panX) * k}px`,
-              top: `${(grips.stem.y + view.panY) * k}px`,
-              height: `${Math.max(2, GRIP_GAP * k)}px`,
-              transform: `rotate(${grips.deg}deg)`,
-            }}
-          />
-          <span
-            ref={(el) => {
-              gripEls.current.rotate = el;
-            }}
-            className={`${desk.grip} ${desk.gripRotate}`}
-            data-grip="rotate"
-            style={{
-              width: 13,
-              height: 13,
-              left: `${(grips.rotate.x + view.panX) * k}px`,
-              top: `${(grips.rotate.y + view.panY) * k}px`,
-            }}
+            className={desk.rotateHandle}
+            data-handle="rotate"
             role="button"
-            tabIndex={0}
+            tabIndex={-1}
             aria-label="Rotate this zone"
             onPointerDown={(e) => beginDrag("rotate", selected, e)}
           />
-          <span
-            ref={(el) => {
-              gripEls.current.resize = el;
-            }}
-            className={desk.grip}
-            data-grip="resize"
-            style={{
-              width: 13,
-              height: 13,
-              left: `${(grips.resize.x + view.panX) * k}px`,
-              top: `${(grips.resize.y + view.panY) * k}px`,
-            }}
-            role="button"
-            tabIndex={0}
-            aria-label="Resize this zone"
-            onPointerDown={(e) => beginDrag("resize", selected, e)}
-          />
-        </>
+          {HANDLES.map((h) => (
+            <span
+              key={h.id}
+              className={desk.handle}
+              data-handle={h.id}
+              role="button"
+              tabIndex={-1}
+              aria-label={`Resize this zone from the ${h.id} handle`}
+              style={{
+                left: `${(h.sx + 1) * 50}%`,
+                top: `${(h.sy + 1) * 50}%`,
+                cursor: handleCursor(h, selectedZone.rotation_deg),
+              }}
+              onPointerDown={(e) => beginDrag("resize", selected, e, h)}
+            />
+          ))}
+        </div>
+      )}
+
+      {labelIndex !== null && labelZone && (
+        // The zone's name, beside it while it is hovered, held or picked. Nothing else on the
+        // canvas is text.
+        <div
+          key={labelIndex}
+          ref={labelEl}
+          className={desk.label}
+          data-zone-label="true"
+          data-zone-index={labelIndex}
+          data-selected={selected === labelIndex}
+          data-missing={labelMissing}
+          style={
+            {
+              "--zc": labelMissing ? "var(--down)" : `var(${ACCENTS[labelAccent] ?? "--a1"})`,
+            } as CSSProperties
+          }
+        >
+          <span className={desk.labelText}>{labelText}</span>
+          {removable(labelIndex) && (
+            // A ghost cannot be picked on the canvas, so its label is the way to it: once the
+            // zone is picked the label carries the way to take it off the layout. The editor's
+            // own small button is used, not a raw one.
+            <span
+              className={desk.labelRemove}
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                e.preventDefault();
+              }}
+            >
+              <Chip
+                icon={<X size={10} weight="bold" />}
+                label={`Remove ${labelText} from the layout`}
+                onClick={() => onRemoveZone?.(labelIndex)}
+              >
+                {null}
+              </Chip>
+            </span>
+          )}
+        </div>
       )}
 
       <div
-        ref={controlsRef}
         className={desk.controls}
         onPointerDown={(e) => e.stopPropagation()}
         onWheel={(e) => e.stopPropagation()}
@@ -2071,6 +1605,7 @@ export function PreviewStage({
     </div>
   );
 }
+
 /**
  * Keeps the canvas in the stage: at or above 1 the canvas covers the stage, so it can be
  * panned but never dragged away; below 1 it is centred.

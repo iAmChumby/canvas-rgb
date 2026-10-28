@@ -967,6 +967,12 @@ html[data-motion="reduced"] *::after {
   color: var(--ink);
 }
 
+/* An icon-only group: the icon is the label, so the segments are tighter. */
+.seg[data-icons="true"] .seg-item {
+  padding: 0 8px;
+  gap: 5px;
+}
+
 .seg-item[aria-checked="true"] {
   background: transparent;
   color: var(--ink);
@@ -3206,6 +3212,38 @@ button.chip:hover {
 
 :root[data-theme="dark"] {
   --led-bed: #07080c;
+}
+
+/* The desk's zone drawing: the plate a zone's outline sits on, the keyline round it, the veil over
+   the effect's picture and an unlit LED. Each has a dark and a light set. */
+:root {
+  --zone-plate: rgba(7, 8, 12, 0.5);
+  --zone-halo: rgba(0, 0, 0, 0.55);
+  --veil: rgba(4, 6, 10, 0.5);
+  --dot-unlit: rgba(255, 255, 255, 0.34);
+}
+
+:root[data-theme="dark"] {
+  --zone-plate: rgba(7, 8, 12, 0.5);
+  --zone-halo: rgba(0, 0, 0, 0.55);
+  --veil: rgba(4, 6, 10, 0.5);
+  --dot-unlit: rgba(255, 255, 255, 0.34);
+}
+
+:root[data-theme="light"] {
+  --zone-plate: rgba(255, 255, 255, 0.46);
+  --zone-halo: rgba(255, 255, 255, 0.7);
+  --veil: rgba(255, 255, 255, 0.4);
+  --dot-unlit: rgba(15, 18, 24, 0.42);
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --zone-plate: rgba(255, 255, 255, 0.46);
+    --zone-halo: rgba(255, 255, 255, 0.7);
+    --veil: rgba(255, 255, 255, 0.4);
+    --dot-unlit: rgba(15, 18, 24, 0.42);
+  }
 }
 
 /* The fan headers the editor last read, shown while the fan service is away: dimmed, no controls. */

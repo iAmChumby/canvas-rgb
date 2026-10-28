@@ -80,6 +80,34 @@ pub struct PlacedZone {
     pub rotation_deg: f32,
     pub reversed: bool,
     pub visible: bool,
+    /// How the zone's LEDs sit inside the rect. Layouts saved before shapes existed load as
+    /// `Auto`, which keeps their old placement.
+    #[serde(default)]
+    pub shape: ZoneShape,
+}
+
+/// Where a zone's LEDs sit inside its placed rect (before rotation). The rect is the shape's
+/// bounding box, so resizing a zone resizes its shape, and each LED samples the effect where it sits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum ZoneShape {
+    /// Follows the device's zone kind: single = one point, linear = a strip along the long
+    /// axis, matrix = its grid map.
+    #[default]
+    Auto,
+    /// LEDs evenly spaced along the rect's long axis.
+    Strip,
+    /// LEDs evenly spaced around the ellipse inscribed in the rect, clockwise from the top
+    /// (a fan ring).
+    Ring,
+    /// LEDs evenly spaced around the rect's edge, clockwise from the top-left corner (a case
+    /// or desk outline).
+    Outline,
+    /// Every LED samples the whole rect (one blob of light, e.g. a mouse logo or a mic).
+    Point,
+    /// LEDs fill a grid of `columns` row by row, top-left first.
+    Grid { columns: u32 },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

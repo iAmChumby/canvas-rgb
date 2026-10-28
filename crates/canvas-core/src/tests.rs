@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use canvas_proto::api::Power;
 use canvas_proto::color::Rgb8;
 use canvas_proto::device::{DeviceId, DeviceInfo, DeviceKind, ZoneInfo, ZoneKind};
-use canvas_proto::layout::{Layout, PlacedZone, RenderScale, SamplingMode};
+use canvas_proto::layout::{Layout, PlacedZone, RenderScale, SamplingMode, ZoneShape};
 use canvas_proto::props::{InputNeeds, PropKind, PropertyDef, PropertySchema, Props};
 use canvas_proto::traits::{Canvas, Effect, EngineSettings, FrameSink, PreviewSink};
 use canvas_proto::CANVAS_HEIGHT;
@@ -284,6 +284,7 @@ fn placed(device_id: &str, zone_index: u32, x: f32, y: f32, w: f32, h: f32) -> P
         rotation_deg: 0.0,
         reversed: false,
         visible: true,
+        shape: ZoneShape::Auto,
     }
 }
 

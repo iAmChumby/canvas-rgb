@@ -118,7 +118,7 @@ impl canvas_proto::traits::FrameSink for NullSink {
 #[test]
 fn a_running_engine_at_thirty_fps_stays_inside_the_budget() {
     use canvas_proto::device::{DeviceId, DeviceInfo, DeviceKind, ZoneInfo, ZoneKind};
-    use canvas_proto::layout::{Layout, PlacedZone, RenderScale, SamplingMode};
+    use canvas_proto::layout::{Layout, PlacedZone, RenderScale, SamplingMode, ZoneShape};
     use canvas_proto::traits::Engine;
 
     let engine = spawn_core(EngineSettings {
@@ -168,6 +168,7 @@ fn a_running_engine_at_thirty_fps_stays_inside_the_budget() {
                 rotation_deg: 0.0,
                 reversed: false,
                 visible: true,
+                shape: ZoneShape::Auto,
             })
             .collect(),
         effect: None,
