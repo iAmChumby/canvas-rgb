@@ -7,9 +7,9 @@
 //! ```
 //!
 //! It times 1000 frames of sampling ~600 LEDs from a 320x200 canvas and prints the
-//! nanoseconds per frame. The budget from the spec is "the whole stack renders Poison
-//! at 30 fps under 0.5% CPU of a 16-thread machine", so the sampling path has a very
-//! small per-frame allowance.
+//! nanoseconds per frame. The budget from the spec is "the whole stack renders the
+//! first-run effect at 30 fps under 0.5% CPU of a 16-thread machine", so the sampling
+//! path has a very small per-frame allowance.
 
 use std::time::Instant;
 

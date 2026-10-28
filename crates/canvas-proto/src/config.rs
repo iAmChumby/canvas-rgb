@@ -75,7 +75,7 @@ pub struct ConfigFile {
     pub schema_version: u32,
     pub api_port: u16,
     pub openrgb_port: u16,
-    /// G7: false until first run has auto-placed devices and activated Poison.
+    /// G7: false until first run has auto-placed devices and activated the first-run effect.
     pub first_run_done: bool,
     /// G7: the "size your ARGB headers" panel was dismissed.
     pub zone_panel_dismissed: bool,

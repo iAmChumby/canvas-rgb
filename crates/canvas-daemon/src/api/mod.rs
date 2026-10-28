@@ -10,6 +10,7 @@ pub mod effects;
 pub mod fans;
 pub mod layouts;
 pub mod output;
+pub mod peripherals;
 pub mod preview;
 pub mod render;
 pub mod settings;
@@ -37,7 +38,14 @@ pub fn router(app: Arc<App>) -> Router {
         .route(routes::EFFECTS, get(effects::list_effects))
         .route(
             routes::EFFECT,
-            get(effects::get_effect).put(effects::put_effect),
+            get(effects::get_effect)
+                .put(effects::put_effect)
+                .delete(effects::delete_effect),
+        )
+        .route(
+            routes::EFFECTS_IMPORT,
+            post(effects::import_effect)
+                .layer(axum::extract::DefaultBodyLimit::max(effects::IMPORT_BODY_LIMIT)),
         )
         .route(routes::EFFECT_ACTIVATE, post(effects::activate))
         .route(routes::EFFECT_THUMBNAIL, get(effects::thumbnail))
@@ -52,6 +60,12 @@ pub fn router(app: Arc<App>) -> Router {
             put(displays::put_display).delete(displays::delete_display),
         )
         .route(routes::DISPLAY_VALUE, put(displays::put_display_value))
+        .route(routes::PERIPHERALS, get(peripherals::list_peripherals))
+        .route(
+            routes::PERIPHERAL,
+            get(peripherals::get_peripheral).patch(peripherals::patch_peripheral),
+        )
+        .route(routes::PERIPHERAL_ACCESS, put(peripherals::put_peripheral_access))
         .route(routes::FANS, get(fans::get_fans))
         .route(routes::FAN_HEADER, patch(fans::patch_header))
         .route(routes::FAN_PROFILE, get(fans::get_profile).patch(fans::patch_profile))
@@ -97,6 +111,14 @@ impl ApiFailure {
         Self::new(
             axum::http::StatusCode::UNPROCESSABLE_ENTITY,
             canvas_proto::api::error_codes::VALIDATION,
+            message,
+        )
+    }
+
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self::new(
+            axum::http::StatusCode::CONFLICT,
+            canvas_proto::api::error_codes::CONFLICT,
             message,
         )
     }

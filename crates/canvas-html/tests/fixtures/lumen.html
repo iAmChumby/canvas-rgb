@@ -1,0 +1,133 @@
+<head>
+  <title>Lumen</title>
+  <meta description="Slow rings of light drifting across a dark canvas." />
+  <meta publisher="canvas-rgb" />
+  <meta
+    property="background"
+    label="Background"
+    type="color"
+    min="0"
+    max="360"
+    default="#0b1b3a"
+  />
+  <meta
+    property="tint1"
+    label="Tint 1"
+    type="color"
+    min="0"
+    max="360"
+    default="#19e6ff"
+  />
+  <meta
+    property="tint2"
+    label="Tint 2"
+    type="color"
+    min="0"
+    max="360"
+    default="#7a5cff"
+  />
+  <meta
+    property="tint3"
+    label="Tint 3"
+    type="color"
+    min="0"
+    max="360"
+    default="#ff5cc8"
+  />
+  <meta
+    property="speed"
+    label="Speed"
+    type="number"
+    min="0"
+    max="100"
+    default="12"
+  />
+</head>
+
+<body style="margin: 0; padding: 0">
+  <canvas id="stage" width="320" height="200"></canvas>
+</body>
+
+<script>
+  // The host installs the property values as globals before this script runs and again
+  // after it, so the values declared here are only the file's own defaults: the draw
+  // loop below reads the globals every frame, which is what makes a property change
+  // show up on a running effect.
+  var background = "#0b1b3a";
+  var tint1 = "#19e6ff";
+  var tint2 = "#7a5cff";
+  var tint3 = "#ff5cc8";
+  var speed = 0;
+
+  var stage = document.getElementById("stage");
+  var ctx = stage.getContext("2d");
+  var width = 320;
+  var height = 200;
+
+  // How many rings drift at once.
+  var RINGS = 26;
+  // The biggest radius a ring grows to.
+  var LIMIT = 26;
+
+  var rings = [];
+  for (var n = 0; n < RINGS; n++) {
+    rings.push(newRing());
+  }
+
+  // A ring: a place, a drift, a width and a colour out of the palette.
+  function newRing() {
+    return {
+      x: Math.random() * width,
+      y: Math.random() * height,
+      dx: (Math.random() - 0.5) * 1.4,
+      dy: 0.4 + Math.random() * 1.2,
+      radius: 1,
+      width: 1 + Math.floor(Math.random() * 6),
+      tint: Math.floor(Math.random() * 3),
+      done: false
+    };
+  }
+
+  function draw() {
+    // The palette is read every frame, so a changed property takes effect at once.
+    var palette = [tint1, tint2, tint3];
+
+    // A translucent wash over the whole canvas. The rings leave a trail behind them.
+    ctx.fillStyle = background + "14";
+    ctx.fillRect(0, 0, width, height);
+
+    // The loop counter is not declared: the file runs in sloppy mode, like the
+    // SignalRGB effects the runtime was written for.
+    for (i = 0; i < rings.length; i++) {
+      var ring = rings[i];
+      ctx.strokeStyle = palette[ring.tint] + "cc";
+      ctx.lineWidth = ring.width;
+      ctx.beginPath();
+      ctx.arc(ring.x, ring.y, ring.radius, 0, Math.PI * 2);
+      ctx.stroke();
+
+      if (speed > 0) {
+        ring.x += ring.dx * (speed / 50);
+        ring.y += ring.dy * (speed / 50);
+        if (ring.radius < LIMIT) {
+          ring.radius += Math.random() * 0.4 * (speed / 50);
+        }
+      }
+      if (ring.y > height + 40 || ring.x < -60 || ring.x > width + 60) {
+        ring.done = true;
+      }
+    }
+
+    // A ring that has left the canvas is replaced by a new one above it.
+    for (i = 0; i < rings.length; i++) {
+      if (rings[i].done) {
+        rings[i] = newRing();
+        rings[i].y = -20 - Math.random() * 60;
+      }
+    }
+
+    window.requestAnimationFrame(draw);
+  }
+
+  window.requestAnimationFrame(draw);
+</script>

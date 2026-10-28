@@ -4,11 +4,13 @@
 //! by default and JSON with `--json`, and exits non-zero with the API's error message
 //! when something fails. A refused connection prints "daemon not running".
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::collections::BTreeMap;
 
-use crate::peer;
+use canvas_proto::peripheral::PeripheralAccess;
+use canvas_proto::traits::Effect;
 
+use crate::peer;
 /// The CLI's commands.
 #[derive(Debug, Parser)]
 #[command(name = "canvas-rgb", version, about = "canvas-rgb: lighting and fan control")]
@@ -41,6 +43,9 @@ pub enum Command {
     /// The fans.
     #[command(subcommand)]
     Fans(FansCommand),
+    /// The peripherals: the mouse and the controller.
+    #[command(subcommand)]
+    Peripherals(PeripheralsCommand),
     /// Diagnostics.
     #[command(subcommand)]
     Diag(DiagCommand),
@@ -59,10 +64,14 @@ pub enum DevicesCommand {
 /// `canvas-rgb effects ...`
 #[derive(Debug, Subcommand)]
 pub enum EffectsCommand {
-    /// List the 12 effects.
+    /// List the effects: the built-ins and the user HTML effects.
     List,
     /// Activate an effect.
     Activate(ActivateArgs),
+    /// Import a SignalRGB-format HTML effect into the effects folder.
+    Import(ImportArgs),
+    /// Check a SignalRGB-format HTML effect. No daemon needed.
+    Check(CheckArgs),
 }
 
 /// `canvas-rgb effects activate <Name|id> [--<prop> <value>]...`
@@ -73,6 +82,26 @@ pub struct ActivateArgs {
     /// The properties, as `--<prop> <value>` pairs, e.g. `--color #ff0000`.
     #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
     pub props: Vec<String>,
+}
+
+/// `canvas-rgb effects import <file> [--replace]`
+#[derive(Debug, Args)]
+pub struct ImportArgs {
+    /// The HTML file to import.
+    pub file: String,
+    /// Overwrite an effect of the same name.
+    #[arg(long)]
+    pub replace: bool,
+}
+
+/// `canvas-rgb effects check <file> [--png <path>]`
+#[derive(Debug, Args)]
+pub struct CheckArgs {
+    /// The HTML file to check.
+    pub file: String,
+    /// Write frame 60 as a PNG.
+    #[arg(long)]
+    pub png: Option<String>,
 }
 
 /// `canvas-rgb output ...`
@@ -94,6 +123,45 @@ pub enum FansCommand {
         /// The profile's name.
         name: String,
     },
+}
+
+/// `canvas-rgb peripherals ...`
+#[derive(Debug, Subcommand)]
+pub enum PeripheralsCommand {
+    /// List the peripherals the adapters see.
+    List,
+    /// Show one peripheral: what it has, what it holds and what the daemon may do with it.
+    Show {
+        /// The peripheral's id.
+        id: String,
+    },
+    /// Turn reads and config writes on or off for one device.
+    Access {
+        /// The peripheral's id.
+        id: String,
+        /// Read the device's settings. Off means the daemon never opens it.
+        #[arg(long, value_enum)]
+        reads: Option<Switch>,
+        /// Write config changes to the device. Needs reads.
+        #[arg(long, value_enum)]
+        writes: Option<Switch>,
+    },
+}
+
+/// `on` or `off`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Switch {
+    /// On.
+    On,
+    /// Off.
+    Off,
+}
+
+impl Switch {
+    /// True for `on`.
+    pub fn is_on(self) -> bool {
+        matches!(self, Switch::On)
+    }
 }
 
 /// `canvas-rgb diag ...`
@@ -226,6 +294,201 @@ pub fn parse_activate_props(args: &[String]) -> Result<BTreeMap<String, String>,
         index += 2;
     }
     Ok(map)
+}
+
+/// The canvas the check renders on: the same size the daemon uses.
+pub const CHECK_WIDTH: u32 = 320;
+pub const CHECK_HEIGHT: u32 = 200;
+/// The frames the check renders.
+pub const CHECK_FRAMES: u32 = 120;
+/// The frame the PNG is taken from.
+pub const CHECK_PNG_FRAME: u32 = 60;
+
+/// One property of the checked effect.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CheckedProperty {
+    /// The property's key, which is also the global the script reads.
+    pub key: String,
+    /// The type: color, number, boolean, choice or hue.
+    pub kind: String,
+    /// The default value, as the file declares it.
+    pub default: String,
+}
+
+/// What `effects check` found in a file.
+#[derive(Debug, Clone)]
+pub struct CheckReport {
+    pub name: String,
+    pub description: String,
+    pub properties: Vec<CheckedProperty>,
+    pub frames: u32,
+    /// The mean time one frame took, in milliseconds.
+    pub mean_frame_ms: f64,
+    /// The slowest frame, in milliseconds.
+    pub max_frame_ms: f64,
+    /// The picture is not the same in every frame.
+    pub moves: bool,
+    /// The picture is one flat colour.
+    pub flat: bool,
+    /// Where the PNG was written, when one was asked for.
+    pub png: Option<String>,
+    /// The script errors the runtime reported while the frames were rendered.
+    pub errors: Vec<String>,
+}
+
+/// Checks a SignalRGB-format HTML effect file, with no daemon involved.
+///
+/// The file is parsed with the same runtime the daemon uses, then 120 frames are
+/// rendered on the 320x200 canvas. The error is the parser's own message.
+pub fn check_effect(path: &str, png: Option<&str>) -> Result<CheckReport, String> {
+    let source = std::fs::read_to_string(path).map_err(|e| format!("could not read {path}: {e}"))?;
+    let mut effect = canvas_html::HtmlEffect::from_source("check", &source, &canvas_proto::props::Props::new())
+        .map_err(|e| e.to_string())?;
+    let schema = effect.schema();
+    effect.init(&schema.defaults());
+
+    let mut canvas = canvas_proto::Canvas::new(CHECK_WIDTH, CHECK_HEIGHT);
+    let inputs = canvas_proto::Inputs::default();
+    let step = 1.0 / 60.0;
+
+    let mut times: Vec<f64> = Vec::with_capacity(CHECK_FRAMES as usize);
+    let mut hashes: Vec<u64> = Vec::with_capacity(CHECK_FRAMES as usize);
+    let mut shot: Option<Vec<u8>> = None;
+
+    for frame in 0..CHECK_FRAMES {
+        let started = std::time::Instant::now();
+        effect.update(step, &mut canvas, &inputs);
+        times.push(started.elapsed().as_secs_f64() * 1000.0);
+        hashes.push(frame_hash(&canvas));
+        if frame == CHECK_PNG_FRAME {
+            shot = Some(rgb_bytes(&canvas));
+        }
+        // A script that failed is reported once and more frames tell us nothing. A
+        // script that hangs would cost the whole frame budget on every frame, so the
+        // check stops there too.
+        if !effect.errors().is_empty() {
+            break;
+        }
+    }
+
+    // The picture moves when two frames differ.
+    let moves = hashes.iter().any(|h| *h != hashes[0]);
+    // A flat picture is one colour across the whole canvas.
+    let flat = distinct_colours(&canvas) <= 1;
+
+    let mean_frame_ms = if times.is_empty() {
+        0.0
+    } else {
+        times.iter().sum::<f64>() / times.len() as f64
+    };
+    let max_frame_ms = times.iter().copied().fold(0.0_f64, f64::max);
+
+    let png_path = match (png, shot) {
+        (Some(out), Some(bytes)) => {
+            write_png(out, CHECK_WIDTH, CHECK_HEIGHT, &bytes)?;
+            Some(out.to_string())
+        }
+        (Some(out), None) => {
+            return Err(format!("the file has no frame {CHECK_PNG_FRAME} to write to {out}"))
+        }
+        (None, _) => None,
+    };
+
+    Ok(CheckReport {
+        name: schema.name,
+        description: schema.description,
+        properties: schema
+            .properties
+            .iter()
+            .map(|p| CheckedProperty {
+                key: p.key.clone(),
+                kind: prop_kind_name(&p.kind).to_string(),
+                default: prop_default(&p.kind),
+            })
+            .collect(),
+        frames: times.len() as u32,
+        mean_frame_ms,
+        max_frame_ms,
+        moves,
+        flat,
+        png: png_path,
+        errors: effect.errors().to_vec(),
+    })
+}
+
+/// The name of a property type, as the report shows it.
+fn prop_kind_name(kind: &canvas_proto::props::PropKind) -> &'static str {
+    use canvas_proto::props::PropKind;
+    match kind {
+        PropKind::Color { .. } => "color",
+        PropKind::Number { .. } => "number",
+        PropKind::Bool { .. } => "boolean",
+        PropKind::Choice { .. } => "choice",
+        PropKind::Hue { .. } => "hue",
+    }
+}
+
+/// The default value of a property, as text.
+fn prop_default(kind: &canvas_proto::props::PropKind) -> String {
+    use canvas_proto::props::PropKind;
+    match kind {
+        PropKind::Color { default } => default.to_hex(),
+        PropKind::Number { default, .. } => format!("{default}"),
+        PropKind::Bool { default } => format!("{default}"),
+        PropKind::Choice { default, .. } => default.clone(),
+        PropKind::Hue { default } => format!("{default}"),
+    }
+}
+
+/// A hash of the canvas' pixels, so two frames can be compared.
+fn frame_hash(canvas: &canvas_proto::Canvas) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for pixel in &canvas.pixels {
+        for value in pixel {
+            let byte = (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    hash
+}
+
+/// How many different colours the canvas holds.
+fn distinct_colours(canvas: &canvas_proto::Canvas) -> usize {
+    let mut seen = std::collections::HashSet::new();
+    for pixel in &canvas.pixels {
+        let rgb = pixel.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
+        seen.insert(rgb);
+        if seen.len() > 1 {
+            return seen.len();
+        }
+    }
+    seen.len()
+}
+
+/// The canvas' pixels as RGB bytes.
+fn rgb_bytes(canvas: &canvas_proto::Canvas) -> Vec<u8> {
+    let mut out = Vec::with_capacity(canvas.pixels.len() * 3);
+    for pixel in &canvas.pixels {
+        for value in pixel {
+            out.push((value.clamp(0.0, 1.0) * 255.0).round() as u8);
+        }
+    }
+    out
+}
+
+/// Writes the RGB bytes as a PNG.
+fn write_png(path: &str, width: u32, height: u32, rgb: &[u8]) -> Result<(), String> {
+    let file = std::fs::File::create(path).map_err(|e| format!("could not create {path}: {e}"))?;
+    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width, height);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder
+        .write_header()
+        .map_err(|e| format!("could not write the PNG header of {path}: {e}"))?;
+    writer
+        .write_image_data(rgb)
+        .map_err(|e| format!("could not write the PNG {path}: {e}"))
 }
 
 /// A CLI error.
@@ -376,10 +639,251 @@ impl Client {
     }
 }
 
+/// The API the commands talk to.
+///
+/// [`Client`] is the real one. The trait exists so the commands can be tested without a
+/// daemon: the tests answer with a fake and check what was asked for.
+pub trait Api {
+    /// Sends a request and returns the body.
+    fn call(&self, method: &str, path: &str, body: Option<&str>) -> Result<serde_json::Value, CliError>;
+}
+
+impl Api for Client {
+    fn call(&self, method: &str, path: &str, body: Option<&str>) -> Result<serde_json::Value, CliError> {
+        self.request(method, path, body)
+    }
+}
+
+/// What a command prints.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Output {
+    /// The JSON answer, printed with `--json`.
+    Json(serde_json::Value),
+    /// The text the command prints.
+    Text(String),
+}
+
+/// `canvas-rgb peripherals list`: the peripherals the adapters see.
+///
+/// The enumeration opens nothing: a listed peripheral is not one the daemon may touch.
+pub fn peripherals_list(api: &dyn Api, json: bool) -> Result<Output, CliError> {
+    let answer = api.call("GET", canvas_proto::api::routes::PERIPHERALS, None)?;
+    Ok(if json {
+        Output::Json(answer.clone())
+    } else {
+        Output::Text(peripherals_list_text(&answer))
+    })
+}
+
+/// `canvas-rgb peripherals show <id>`: what the device is, what it has and what it holds now.
+pub fn peripherals_show(api: &dyn Api, id: &str, json: bool) -> Result<Output, CliError> {
+    let answer = api.call("GET", &peripheral_path(id), None)?;
+    Ok(if json {
+        Output::Json(answer.clone())
+    } else {
+        Output::Text(peripherals_show_text(&answer))
+    })
+}
+
+/// `canvas-rgb peripherals access <id> --reads on|off --writes on|off`.
+///
+/// A flag that is not given keeps what it is now, so the daemon is asked for the current
+/// access first.
+pub fn peripherals_access(
+    api: &dyn Api,
+    id: &str,
+    reads: Option<bool>,
+    writes: Option<bool>,
+    json: bool,
+) -> Result<Output, CliError> {
+    if reads.is_none() && writes.is_none() {
+        return Err(CliError::Other(
+            "give --reads and/or --writes".to_string(),
+        ));
+    }
+    let mut access = PeripheralAccess::default();
+    if reads.is_none() || writes.is_none() {
+        // One flag only: the other keeps the value it has now.
+        let detail = api.call("GET", &peripheral_path(id), None)?;
+        let current = detail
+            .get("access")
+            .cloned()
+            .ok_or_else(|| CliError::Other(format!("the daemon did not report the access of {id}")))?;
+        access = serde_json::from_value(current)
+            .map_err(|e| CliError::Other(format!("could not read the access of {id}: {e}")))?;
+    }
+    if let Some(reads) = reads {
+        access.reads = reads;
+    }
+    if let Some(writes) = writes {
+        access.writes = writes;
+    }
+    if access.writes && !access.reads {
+        return Err(CliError::Other(
+            "config writes need reads: turn reads on too".to_string(),
+        ));
+    }
+    let body = serde_json::to_string(&access).map_err(|e| CliError::Other(e.to_string()))?;
+    let answer = api.call("PUT", &access_path(id), Some(&body))?;
+    Ok(if json {
+        Output::Json(answer.clone())
+    } else {
+        Output::Text(peripherals_access_text(id, &answer))
+    })
+}
+
+/// The path of one peripheral.
+fn peripheral_path(id: &str) -> String {
+    format!("{}/{}", canvas_proto::api::routes::PERIPHERALS, id)
+}
+
+/// The path of one peripheral's access.
+fn access_path(id: &str) -> String {
+    format!("{}/access", peripheral_path(id))
+}
+
+/// The text `peripherals list` prints.
+pub fn peripherals_list_text(answer: &serde_json::Value) -> String {
+    let peripherals = answer
+        .get("peripherals")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if peripherals.is_empty() {
+        return "no peripherals\n".to_string();
+    }
+    let mut text = String::new();
+    text.push_str(&format!("{:<26} {:<15} {:<20} {:<10} ID\n", "NAME", "KIND", "ADAPTER", "OPEN"));
+    for peripheral in &peripherals {
+        let name = peripheral.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+        let kind = peripheral.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
+        let adapter = peripheral.get("adapter").and_then(|v| v.as_str()).unwrap_or("?");
+        let id = peripheral.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+        let open = if peripheral.get("connected").and_then(|v| v.as_bool()).unwrap_or(false) {
+            "open"
+        } else {
+            "closed"
+        };
+        text.push_str(&format!("{name:<26} {kind:<15} {adapter:<20} {open:<10} {id}\n"));
+    }
+    text
+}
+
+/// The text `peripherals show <id>` prints.
+pub fn peripherals_show_text(answer: &serde_json::Value) -> String {
+    let mut text = String::new();
+    let info = answer.get("info").cloned().unwrap_or(serde_json::Value::Null);
+    let mut row = |key: &str, label: &str| {
+        let value = info.get(key).and_then(|v| v.as_str()).unwrap_or("");
+        let value = if value.is_empty() { "-" } else { value };
+        text.push_str(&format!("{label:<12} {value}\n"));
+    };
+    row("id", "id");
+    row("name", "name");
+    row("vendor", "vendor");
+    row("kind", "kind");
+    row("adapter", "adapter");
+    row("serial", "serial");
+    row("location", "location");
+    let connected = info.get("connected").and_then(|v| v.as_bool()).unwrap_or(false);
+    text.push_str(&format!("{:<12} {}\n", "open", if connected { "yes" } else { "no" }));
+    let access = answer.get("access").cloned().unwrap_or(serde_json::Value::Null);
+    let reads = access.get("reads").and_then(|v| v.as_bool()).unwrap_or(false);
+    let writes = access.get("writes").and_then(|v| v.as_bool()).unwrap_or(false);
+    text.push_str(&format!(
+        "{:<12} reads {}, writes {}\n",
+        "access",
+        if reads { "on" } else { "off" },
+        if writes { "on" } else { "off" }
+    ));
+    match answer.get("problem").and_then(|v| v.as_str()) {
+        Some(problem) => text.push_str(&format!("{:<12} {problem}\n", "problem")),
+        None => text.push_str(&format!("{:<12} none\n", "problem")),
+    }
+    let values = answer.get("values").cloned().unwrap_or(serde_json::Value::Null);
+    let sections = answer
+        .get("schema")
+        .and_then(|s| s.get("sections"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    for section in &sections {
+        let title = section.get("title").and_then(|v| v.as_str()).unwrap_or("");
+        text.push_str(&format!("\n{title}\n"));
+        for property in section
+            .get("properties")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+        {
+            let key = property.get("key").and_then(|v| v.as_str()).unwrap_or("?");
+            let kind = property.get("kind").cloned().unwrap_or(serde_json::Value::Null);
+            let value = values
+                .get(key)
+                .map(prop_value_text)
+                .unwrap_or_else(|| "-".to_string());
+            text.push_str(&format!(
+                "  {key:<24} {:<22} {value}\n",
+                prop_kind_summary(&kind)
+            ));
+        }
+    }
+    text
+}
+
+/// The text `peripherals access <id>` prints.
+pub fn peripherals_access_text(id: &str, answer: &serde_json::Value) -> String {
+    let reads = answer.get("reads").and_then(|v| v.as_bool()).unwrap_or(false);
+    let writes = answer.get("writes").and_then(|v| v.as_bool()).unwrap_or(false);
+    format!(
+        "{id}: reads {}, writes {}\n",
+        if reads { "on" } else { "off" },
+        if writes { "on" } else { "off" }
+    )
+}
+
+/// A property value, as the CLI shows it.
+fn prop_value_text(value: &serde_json::Value) -> String {
+    match serde_json::from_value::<canvas_proto::props::PropValue>(value.clone()) {
+        Ok(canvas_proto::props::PropValue::Color(color)) => color.to_hex(),
+        Ok(canvas_proto::props::PropValue::Number(number)) => format!("{number}"),
+        Ok(canvas_proto::props::PropValue::Bool(on)) => {
+            if on { "on" } else { "off" }.to_string()
+        }
+        Ok(canvas_proto::props::PropValue::Choice(choice)) => choice,
+        Ok(canvas_proto::props::PropValue::Hue(hue)) => format!("{hue}"),
+        Err(_) => value.to_string(),
+    }
+}
+
+/// A property's kind, as one line: its type and what it takes.
+fn prop_kind_summary(kind: &serde_json::Value) -> String {
+    match kind.get("type").and_then(|v| v.as_str()) {
+        Some("number") => {
+            let min = kind.get("min").and_then(|v| v.as_f64()).unwrap_or_default();
+            let max = kind.get("max").and_then(|v| v.as_f64()).unwrap_or_default();
+            format!("number {min}..{max}")
+        }
+        Some("choice") => {
+            let options: Vec<&str> = kind
+                .get("options")
+                .and_then(|v| v.as_array())
+                .map(|list| list.iter().filter_map(|o| o.as_str()).collect())
+                .unwrap_or_default();
+            format!("choice {}", options.join("|"))
+        }
+        Some("bool") => "bool".to_string(),
+        Some("color") => "color".to_string(),
+        Some("hue") => "hue".to_string(),
+        _ => "?".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use canvas_proto::props::PropKind;
+    use std::path::PathBuf;
 
     #[test]
     fn colors_are_parsed() {
@@ -456,5 +960,133 @@ mod tests {
         assert!(matches!(error, CliError::NotTrusted(_)));
         assert_eq!(error.to_string(), "canvas-rgb daemon not running");
         assert_eq!(error.exit_code(), 2);
+    }
+
+    /// A temporary folder for one test, removed when the test ends.
+    struct TempFile(PathBuf);
+
+    impl TempFile {
+        fn new(name: &str, contents: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "canvas-rgb-check-{}-{name}",
+                std::process::id()
+            ));
+            std::fs::write(&path, contents).expect("the file is written");
+            Self(path)
+        }
+
+        fn path(&self) -> String {
+            self.0.to_string_lossy().into_owned()
+        }
+    }
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    /// An effect that draws a moving block.
+    const MOVING: &str = r##"<head><title>Moving</title>
+<meta property="speed" label="Speed" type="number" min="0" max="100" default="10" />
+<meta property="tint" label="Tint" type="color" default="#ffcc00" />
+</head><body><canvas id="c" width="320" height="200"></canvas></body>
+<script>
+  var c = document.getElementById("c");
+  var ctx = c.getContext("2d");
+  var x = 0;
+  function draw() {
+    ctx.fillStyle = "#101020";
+    ctx.fillRect(0, 0, 320, 200);
+    ctx.fillStyle = tint;
+    ctx.fillRect(x, 40, 30, 30);
+    x = (x + 3) % 300;
+    window.requestAnimationFrame(draw);
+  }
+  window.requestAnimationFrame(draw);
+</script>"##;
+
+    #[test]
+    fn a_moving_effect_passes_the_check() {
+        let file = TempFile::new("moving", MOVING);
+        let report = check_effect(&file.path(), None).expect("the effect loads");
+        assert_eq!(report.name, "Moving");
+        assert_eq!(report.frames, 120);
+        assert!(report.moves, "the picture moves");
+        assert!(!report.flat, "the picture is not one flat colour");
+        assert!(report.mean_frame_ms >= 0.0);
+        assert!(report.max_frame_ms >= report.mean_frame_ms);
+        // The properties are listed with their types and defaults.
+        assert_eq!(report.properties.len(), 2);
+        assert_eq!(report.properties[0].key, "speed");
+        assert_eq!(report.properties[0].kind, "number");
+        assert_eq!(report.properties[0].default, "10");
+        assert_eq!(report.properties[1].key, "tint");
+        assert_eq!(report.properties[1].kind, "color");
+        assert_eq!(report.properties[1].default, "#ffcc00");
+    }
+
+    #[test]
+    fn a_file_that_does_not_parse_gives_the_parser_s_message() {
+        let file = TempFile::new("broken", "<head><title>No script</title></head>");
+        let error = check_effect(&file.path(), None).expect_err("the file must not load");
+        assert!(error.contains("parse:"), "the parser's message is kept: {error}");
+    }
+
+    #[test]
+    fn an_effect_that_draws_nothing_is_flat() {
+        let file = TempFile::new(
+            "flat",
+            "<head><title>Flat</title></head><body><canvas id=\"c\"></canvas></body><script>\
+             var c = document.getElementById('c'); var ctx = c.getContext('2d'); \
+             function draw() { window.requestAnimationFrame(draw); } \
+             window.requestAnimationFrame(draw);</script>",
+        );
+        let report = check_effect(&file.path(), None).expect("the effect loads");
+        assert!(report.flat, "the picture is one flat colour");
+        assert!(!report.moves, "the picture never changes");
+    }
+
+    #[test]
+    fn a_hanging_effect_is_reported_and_the_check_stops_there() {
+        // The frame callback never ends. The runtime stops it at its budget, the error
+        // is reported and the check stops instead of paying the budget on every frame.
+        let file = TempFile::new(
+            "hanging",
+            "<head><title>Hanging</title></head><body><canvas id=\"c\"></canvas></body><script>\
+             var c = document.getElementById('c'); var ctx = c.getContext('2d'); \
+             function draw() { while (true) {} } \
+             window.requestAnimationFrame(draw);</script>",
+        );
+        let started = std::time::Instant::now();
+        let report = check_effect(&file.path(), None).expect("the effect loads");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed.as_millis() < 5_000,
+            "the check took {elapsed:?}, it must stop at the first failure"
+        );
+        assert_eq!(report.frames, 1, "the check stopped after the first frame");
+        assert!(!report.errors.is_empty(), "the error is reported");
+        assert!(
+            report.errors[0].contains("ran longer than"),
+            "the message names the budget: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn a_png_can_be_written() {
+        let file = TempFile::new("png", MOVING);
+        let out = std::env::temp_dir().join(format!(
+            "canvas-rgb-check-{}-frame.png",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&out);
+        let report = check_effect(&file.path(), Some(&out.to_string_lossy())).expect("the effect loads");
+        assert_eq!(report.png.as_deref(), Some(out.to_string_lossy().as_ref()));
+        let bytes = std::fs::read(&out).expect("the PNG is there");
+        // A PNG starts with the eight-byte signature.
+        assert_eq!(&bytes[..8], &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]);
+        let _ = std::fs::remove_file(&out);
     }
 }

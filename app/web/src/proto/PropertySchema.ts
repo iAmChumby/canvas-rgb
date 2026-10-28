@@ -5,6 +5,6 @@ import type { PropertyDef } from "./PropertyDef";
 
 export type PropertySchema = { 
 /**
- * Stable id, one of [`crate::EFFECT_IDS`].
+ * Stable id: one of [`crate::EFFECT_IDS`], or `html:` + the file stem for a user effect.
  */
 id: string, name: string, description: string, needs: InputNeeds, properties: Array<PropertyDef>, presets: Array<Preset>, };

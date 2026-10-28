@@ -1,7 +1,11 @@
-// Renders SignalRGB's original Poison effect.html headless, N runs with different seeds,
-// and writes the raw RGB pixels of the frame after the last step to one binary file.
+// Renders the Poison effect file headless, N runs with different seeds, and writes the
+// raw RGB pixels of the frame after the last step to one binary file.
 // The Rust side (tools/poison-compare/src) computes every statistic for both sides, so both
 // sides go through the same code.
+//
+// The effect file is not in this repository: it is the owner's own copy, installed as a
+// user HTML effect in %APPDATA%\canvas-rgb\effects\poison.html. Pass its path with
+// --effect, or let the default point at the installed file.
 //
 // Usage:
 //   node render.mjs --out <file.rgb> [--runs 20] [--frames 600] [--effect <effect.html>]
@@ -33,8 +37,7 @@ function parseArgs(argv) {
 
 const args = parseArgs(process.argv.slice(2));
 const defaultEffect = path.join(
-  process.env.LOCALAPPDATA ?? '',
-  'WhirlwindFX', 'SignalRgb', 'cache', 'effects', '-Mir7bKkFQmd2LF_9Leg', 'effect.html',
+  process.env.APPDATA ?? '', 'canvas-rgb', 'effects', 'poison.html',
 );
 
 const runs = Number(args.runs ?? 20);
@@ -87,7 +90,8 @@ function stepAndRead({ frames, props }) {
     cb(i * (1000 / 60));
   }
 
-  const canvas = document.getElementById('exCanvas');
+  const canvas = document.getElementById('exCanvas') ?? document.querySelector('canvas');
+  if (!canvas) throw new Error('the effect file has no canvas');
   const data = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
   const rgb = new Uint8Array((data.length / 4) * 3);
   let minAlpha = 255;

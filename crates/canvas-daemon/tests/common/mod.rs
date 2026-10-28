@@ -8,7 +8,10 @@
 #![allow(dead_code)]
 
 use canvas_proto::device::{AdapterCapabilities, DeviceId, DeviceInfo, ZoneInfo, ZoneKind};
-use canvas_proto::props::{Props, PropertySchema};
+use canvas_proto::peripheral::{
+    PeripheralInfo, PeripheralKind, PeripheralSchema, PeripheralSection,
+};
+use canvas_proto::props::{PropKind, PropValue, Props, PropertyDef, PropertySchema};
 use canvas_proto::traits::{
     AdapterError, AudioSpectrum, Canvas, DeviceAdapter, Effect, Engine, EngineSettings, FrameSink,
     InputSource, PreviewSink, RenderStats, ScreenFrame,
@@ -379,5 +382,252 @@ impl canvas_proto::traits::NumericDisplayAdapter for FakeDisplay {
 
     fn write_interval_ms(&self) -> u32 {
         250
+    }
+}
+
+/// What a [`FakePeripheral`] was asked to do, and what it did. The tests read the counters to
+/// check that the daemon opened nothing it was not told to.
+#[derive(Debug, Clone)]
+pub struct PeripheralLog {
+    /// The peripherals the enumeration reports. Empty means the device is not plugged in.
+    pub found: Vec<PeripheralInfo>,
+    pub connected: bool,
+    pub connects: u32,
+    pub disconnects: u32,
+    pub discovers: u32,
+    pub describes: u32,
+    /// The reads that were answered.
+    pub reads: u32,
+    /// The writes that were accepted, in order.
+    pub writes: Vec<Props>,
+    /// Whether the adapter may write. The daemon turns it with the saved access.
+    pub writes_enabled: bool,
+    /// The values a read returns.
+    pub values: Props,
+    /// The schema the fake describes.
+    pub schema: PeripheralSchema,
+}
+
+/// The id of the fake peripheral.
+pub fn fake_peripheral_id() -> DeviceId {
+    DeviceId("fake-peripheral:0001:0001".into())
+}
+
+/// The schema of the fake peripheral: two DPI stages, a colour and a read-only profile.
+pub fn fake_peripheral_schema(device: &DeviceId) -> PeripheralSchema {
+    PeripheralSchema {
+        device: device.clone(),
+        kind: PeripheralKind::Mouse,
+        sections: vec![PeripheralSection {
+            id: "dpi".into(),
+            title: "DPI".into(),
+            properties: vec![
+                PropertyDef {
+                    key: "dpi-stage-1".into(),
+                    label: "DPI stage 1".into(),
+                    kind: PropKind::Number { min: 100.0, max: 20000.0, step: 50.0, default: 800.0 },
+                },
+                PropertyDef {
+                    key: "dpi-stage-2".into(),
+                    label: "DPI stage 2".into(),
+                    kind: PropKind::Number { min: 100.0, max: 20000.0, step: 50.0, default: 1600.0 },
+                },
+                PropertyDef {
+                    key: "led-colour".into(),
+                    label: "LED colour".into(),
+                    kind: PropKind::Color { default: canvas_proto::Rgb8::new(0xEF, 0x3F, 0xFF) },
+                },
+                PropertyDef {
+                    key: "profile".into(),
+                    label: "Profile".into(),
+                    kind: PropKind::Choice { options: vec!["1".into(), "2".into()], default: "1".into() },
+                },
+            ],
+        }],
+        read_only: vec!["profile".into()],
+        unreported: vec!["lift-off".into()],
+    }
+}
+
+/// A peripheral that records everything. It never opens a device.
+#[derive(Clone)]
+pub struct FakePeripheral(pub Arc<Mutex<PeripheralLog>>);
+
+impl Default for FakePeripheral {
+    fn default() -> Self {
+        let device = fake_peripheral_id();
+        let schema = fake_peripheral_schema(&device);
+        let found = vec![PeripheralInfo {
+            id: device.clone(),
+            name: "Fake Mouse".into(),
+            vendor: "Fake".into(),
+            kind: PeripheralKind::Mouse,
+            adapter: "fake-peripheral".into(),
+            serial: String::new(),
+            location: "hid:0001:0001:usage0b".into(),
+            connected: false,
+        }];
+        let mut values = Props::new();
+        values.insert("dpi-stage-1".into(), PropValue::Number(800.0));
+        values.insert("dpi-stage-2".into(), PropValue::Number(1600.0));
+        values.insert("led-colour".into(), PropValue::Color(canvas_proto::Rgb8::new(0xEF, 0x3F, 0xFF)));
+        Self(Arc::new(Mutex::new(PeripheralLog {
+            found,
+            connected: false,
+            connects: 0,
+            disconnects: 0,
+            discovers: 0,
+            describes: 0,
+            reads: 0,
+            writes: Vec::new(),
+            writes_enabled: false,
+            values,
+            schema,
+        })))
+    }
+}
+
+impl FakePeripheral {
+    /// The id of the fake device.
+    pub fn id(&self) -> DeviceId {
+        self.0.lock().unwrap().schema.device.clone()
+    }
+
+    /// What the fake was asked to do.
+    pub fn log(&self) -> PeripheralLog {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+/// Checks a value against its kind, the way the real adapters do.
+fn check_prop_value(def: &PropertyDef, value: &PropValue) -> Result<(), AdapterError> {
+    let wrong = |value: &PropValue| {
+        AdapterError::Protocol(format!(
+            "the setting {} does not take that kind of value: {value:?}",
+            def.key
+        ))
+    };
+    match (&def.kind, value) {
+        (PropKind::Number { min, max, .. }, PropValue::Number(number)) => {
+            if number < min || number > max {
+                return Err(AdapterError::Protocol(format!(
+                    "{number} is outside {min}..={max}"
+                )));
+            }
+            Ok(())
+        }
+        (PropKind::Number { .. }, other) => Err(wrong(other)),
+        (PropKind::Bool { .. }, PropValue::Bool(_)) => Ok(()),
+        (PropKind::Bool { .. }, other) => Err(wrong(other)),
+        (PropKind::Choice { options, .. }, PropValue::Choice(choice)) => {
+            if !options.contains(choice) {
+                return Err(AdapterError::Protocol(format!(
+                    "{choice} is not one of {options:?}"
+                )));
+            }
+            Ok(())
+        }
+        (PropKind::Choice { .. }, other) => Err(wrong(other)),
+        (PropKind::Color { .. }, PropValue::Color(_)) => Ok(()),
+        (PropKind::Color { .. }, other) => Err(wrong(other)),
+        (PropKind::Hue { .. }, PropValue::Hue(hue)) => {
+            if !(0.0..=360.0).contains(hue) {
+                return Err(AdapterError::Protocol(format!("a hue must be 0..=360, got {hue}")));
+            }
+            Ok(())
+        }
+        (PropKind::Hue { .. }, other) => Err(wrong(other)),
+    }
+}
+
+#[async_trait::async_trait]
+impl canvas_proto::traits::PeripheralAdapter for FakePeripheral {
+    fn name(&self) -> &'static str {
+        "fake-peripheral"
+    }
+
+    async fn connect(&mut self) -> Result<(), AdapterError> {
+        let mut log = self.0.lock().unwrap();
+        log.connects += 1;
+        log.connected = true;
+        Ok(())
+    }
+
+    async fn disconnect(&mut self) -> Result<(), AdapterError> {
+        let mut log = self.0.lock().unwrap();
+        log.disconnects += 1;
+        log.connected = false;
+        Ok(())
+    }
+
+    fn is_connected(&self) -> bool {
+        self.0.lock().unwrap().connected
+    }
+
+    async fn discover(&mut self) -> Result<Vec<PeripheralInfo>, AdapterError> {
+        let mut log = self.0.lock().unwrap();
+        log.discovers += 1;
+        Ok(log.found.clone())
+    }
+
+    async fn describe(&mut self, device: &DeviceId) -> Result<PeripheralSchema, AdapterError> {
+        let mut log = self.0.lock().unwrap();
+        log.describes += 1;
+        if &log.schema.device != device {
+            return Err(AdapterError::UnknownDevice(device.clone()));
+        }
+        Ok(log.schema.clone())
+    }
+
+    async fn read_settings(&mut self, device: &DeviceId) -> Result<Props, AdapterError> {
+        let mut log = self.0.lock().unwrap();
+        if &log.schema.device != device {
+            return Err(AdapterError::UnknownDevice(device.clone()));
+        }
+        if !log.connected {
+            return Err(AdapterError::NotConnected);
+        }
+        log.reads += 1;
+        Ok(log.values.clone())
+    }
+
+    async fn write_settings(&mut self, device: &DeviceId, props: &Props) -> Result<(), AdapterError> {
+        let mut log = self.0.lock().unwrap();
+        if &log.schema.device != device {
+            return Err(AdapterError::UnknownDevice(device.clone()));
+        }
+        if !log.writes_enabled {
+            return Err(AdapterError::Unsupported(
+                "config writes are off: turn them on with set_writes_enabled(true) first",
+            ));
+        }
+        if props.is_empty() {
+            return Ok(());
+        }
+        // The adapters' own validation: an unknown key, a read-only key or a value out of
+        // range is refused, and nothing is sent.
+        for (key, value) in props {
+            let Some(def) = log.schema.property(key) else {
+                return Err(AdapterError::Protocol(format!(
+                    "the device has no setting called {key}"
+                )));
+            };
+            if !log.schema.is_writable(key) {
+                return Err(AdapterError::Protocol(format!("{key} is read-only")));
+            }
+            check_prop_value(def, value)?;
+        }
+        log.writes.push(props.clone());
+        Ok(())
+    }
+
+    fn writes_enabled(&self) -> bool {
+        self.0.lock().unwrap().writes_enabled
+    }
+}
+
+impl canvas_daemon::peripherals::Peripheral for FakePeripheral {
+    fn set_config_writes(&mut self, on: bool) {
+        self.0.lock().unwrap().writes_enabled = on;
     }
 }

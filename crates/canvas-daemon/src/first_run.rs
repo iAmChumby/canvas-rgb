@@ -2,7 +2,7 @@
 //!
 //! On a clean profile the daemon lights everything up with no clicks: it sizes the JARGB
 //! headers from SignalRGB's own configuration (read-only), places every device on the
-//! 320x200 canvas, activates Poison and opens the editor's dismissible "size your ARGB
+//! 320x200 canvas, activates Aurora and opens the editor's dismissible "size your ARGB
 //! headers" panel.
 
 use canvas_proto::device::{DeviceInfo, DeviceKind};
@@ -15,7 +15,11 @@ use std::path::PathBuf;
 pub const SIGNALRGB_JARGB_LED_COUNT: u32 = 120;
 
 /// The effect the first run activates.
-pub const FIRST_RUN_EFFECT: &str = "poison";
+///
+/// Aurora: the built-in that looks most like the effect this project started from
+/// (moving colour over a dark canvas, in a three-colour palette), and one of ours, so
+/// the first run works on a clean profile with nothing installed.
+pub const FIRST_RUN_EFFECT: &str = "aurora";
 
 /// Where SignalRGB's device configuration lives.
 pub fn signalrgb_devices_key() -> String {
@@ -501,7 +505,7 @@ pub async fn should_run(app: &std::sync::Arc<crate::state::App>) -> bool {
     !app.store.read().await.config.first_run_done
 }
 
-/// The first run: size the JARGB headers, place the devices, activate Poison.
+/// The first run: size the JARGB headers, place the devices, activate the first effect.
 ///
 /// It runs only once, when `config.first_run_done` is false and OpenRGB has devices.
 /// Set while a first run is in progress, so two device callbacks can't both run it (the
@@ -593,8 +597,8 @@ async fn run(app: &std::sync::Arc<crate::state::App>) {
         }
     };
 
-    // Place the devices and activate Poison. The effect is saved on the layout, as the
-    // activate route does, so the status and the next start both see it.
+    // Place the devices and activate the first effect. The effect is saved on the layout,
+    // as the activate route does, so the status and the next start both see it.
     let props = canvas_proto::props::Props::new();
     let mut layout = build_default_layout(&devices);
     layout.effect = Some(canvas_proto::layout::ActiveEffect {
@@ -614,9 +618,9 @@ async fn run(app: &std::sync::Arc<crate::state::App>) {
     app.engine.set_layout(layout.clone(), device_list);
 
     if let Err(e) = crate::apply_effect(app, FIRST_RUN_EFFECT, &props).await {
-        tracing::error!(error = %e, "the first run could not activate Poison");
+        tracing::error!(error = %e, effect = FIRST_RUN_EFFECT, "the first run could not activate the effect");
     } else {
-        tracing::info!("the first run activated Poison");
+        tracing::info!(effect = FIRST_RUN_EFFECT, "the first run activated the effect");
     }
 
     // The zone panel stays open until Luke dismisses it.

@@ -37,6 +37,7 @@ bytes = "1"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 zip = { version = "9", default-features = false, features = ["deflate", "time"] }
 rustfft = "6"
+png = "0.18"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_NetworkManagement_IpHelper",

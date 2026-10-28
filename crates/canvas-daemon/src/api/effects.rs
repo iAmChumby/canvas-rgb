@@ -4,7 +4,8 @@ use axum::extract::{Path, State};
 use axum::response::IntoResponse;
 use axum::Json;
 use canvas_proto::api::{
-    ActivateEffect, EffectDetail, EffectSummary, EffectsResponse, SetFavorite,
+    ActivateEffect, EffectDetail, EffectSummary, EffectsResponse, FailedEffect, ImportEffect,
+    ImportEffectResponse, SetFavorite,
 };
 use canvas_proto::props::{Props, PropertySchema};
 use std::collections::BTreeMap;
@@ -14,8 +15,8 @@ use crate::api::{ApiFailure, ApiResult};
 use crate::state::App;
 use crate::user_effects::UserEffects;
 
-/// Every effect's schema: the twelve built-ins first, then the user HTML effects sorted by
-/// name. The registry is read once per call: it is cheap (twelve effects) and always
+/// Every effect's schema: the eleven built-ins first, then the user HTML effects sorted by
+/// name. The registry is read once per call: it is cheap (eleven effects) and always
 /// reflects the current build.
 pub fn schemas(user: &UserEffects) -> Vec<PropertySchema> {
     let mut all: Vec<PropertySchema> =
@@ -37,6 +38,20 @@ pub fn find_schema(user: &UserEffects, id: &str) -> Option<PropertySchema> {
         .cloned()
 }
 
+/// The user effect files that did not parse, with the parser's message.
+fn failed_effects(user: &UserEffects) -> Vec<FailedEffect> {
+    user.failures()
+        .into_iter()
+        .map(|(path, error)| FailedEffect {
+            file: path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.to_string_lossy().into_owned()),
+            error,
+        })
+        .collect()
+}
+
 /// `GET /api/v1/effects`.
 pub async fn list_effects(State(app): State<Arc<App>>) -> Json<EffectsResponse> {
     let store = app.store.read().await;
@@ -52,7 +67,8 @@ pub async fn list_effects(State(app): State<Arc<App>>) -> Json<EffectsResponse> 
         })
         .collect();
     let active = store.active_layout().and_then(|l| l.effect.as_ref().map(|e| e.id.clone()));
-    Json(EffectsResponse { effects, active })
+    let failed = failed_effects(&app.user_effects);
+    Json(EffectsResponse { effects, active, failed })
 }
 
 /// `GET /api/v1/effects/{id}`.
@@ -303,3 +319,198 @@ fn binary_response(bytes: &[u8]) -> axum::response::Response {
 pub fn saved_presets(store: &crate::storage::Store) -> BTreeMap<String, Vec<canvas_proto::props::Preset>> {
     store.effects.presets.clone()
 }
+
+/// `POST /api/v1/effects/import`.
+///
+/// Adds a SignalRGB-format HTML effect to the effects folder.
+///
+/// The file name is checked first, then the file is parsed with the builder the loader
+/// uses: a file that does not parse is a validation error and nothing is written. The
+/// file lands in the folder atomically (a temp file in the same folder, then a rename),
+/// the folder is rescanned and the effect's summary comes back.
+pub async fn import_effect(
+    State(app): State<Arc<App>>,
+    body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
+) -> ApiResult<Json<ImportEffectResponse>> {
+    // The body is read as bytes, so an oversized body is answered with the API's own
+    // error shape and not with axum's plain text.
+    let bytes = body.map_err(|rejection| match rejection {
+        axum::extract::rejection::BytesRejection::FailedToBufferBody(
+            axum::extract::rejection::FailedToBufferBody::LengthLimitError(_),
+        ) => ApiFailure::new(
+            axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+            canvas_proto::api::error_codes::VALIDATION,
+            format!("the request body is over the limit of {IMPORT_BODY_LIMIT} bytes"),
+        ),
+        other => ApiFailure::validation(format!("the request body could not be read: {other}")),
+    })?;
+    let request: ImportEffect = serde_json::from_slice(&bytes)
+        .map_err(|e| ApiFailure::validation(format!("the body is not an import request: {e}")))?;
+
+    // The file name is checked before anything else.
+    crate::user_effects::check_file_name(&request.file_name).map_err(ApiFailure::validation)?;
+
+    if request.html.len() > canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES {
+        return Err(ApiFailure::validation(format!(
+            "the effect is {} bytes; the limit is {}",
+            request.html.len(),
+            canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES
+        )));
+    }
+
+    // One import or one delete at a time, so the two never race each other over the
+    // same file.
+    let _guard = app.effect_writes.lock().await;
+
+    // The file that is already there, if any. The names are compared without regard to
+    // case: on NTFS two names that differ only in case are the same file, and the
+    // clash must be found the same way on every file system.
+    let existing = crate::user_effects::existing_file(&app.effects_dir, &request.file_name);
+    if existing.is_some() && !request.replace {
+        return Err(ApiFailure::conflict(format!(
+            "{} is already installed; ask for a replace to overwrite it",
+            request.file_name
+        )));
+    }
+    // The file that is really written: the one that is there, or the one that is asked
+    // for.
+    let path = existing
+        .clone()
+        .unwrap_or_else(|| app.effects_dir.join(&request.file_name));
+    // The id comes from the file's name, so it is the id the loader gives it.
+    let id = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .map(|stem| format!("{}{stem}", crate::user_effects::USER_EFFECT_PREFIX))
+        .ok_or_else(|| ApiFailure::validation("the file has no name"))?;
+
+    // The file is parsed before anything is written: a broken file is refused and the
+    // effects folder stays as it was. The parse runs the effect's script, so it goes
+    // on a blocking thread and not on a tokio worker.
+    let parse_id = id.clone();
+    let parse_html = request.html.clone();
+    let effect = tokio::task::spawn_blocking(move || {
+        (crate::user_effects::html_builder())(&parse_id, &parse_html)
+    })
+    .await
+    .map_err(|e| ApiFailure::internal(format!("the parse task stopped: {e}")))?
+    .map_err(|e| ApiFailure::validation(format!("the effect does not parse: {e}")))?;
+    let schema = effect.schema();
+
+    // The write. A new file is created with a link, so a file that appears between the
+    // check and the write is never overwritten.
+    if request.replace {
+        crate::user_effects::write_atomic(&path, request.html.as_bytes())
+            .map_err(|e| ApiFailure::internal(format!("could not write the effect file: {e}")))?;
+    } else {
+        crate::user_effects::write_atomic_new(&path, request.html.as_bytes()).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                ApiFailure::conflict(format!(
+                    "{} appeared while the effect was being imported; ask for a replace to overwrite it",
+                    request.file_name
+                ))
+            } else {
+                ApiFailure::internal(format!("could not write the effect file: {e}"))
+            }
+        })?;
+    }
+
+    // The folder is rescanned, so the effect is in the library at once. The rescan
+    // parses the file, so it goes on a blocking thread too.
+    {
+        let user = app.user_effects.clone();
+        let dir = app.effects_dir.clone();
+        tokio::task::spawn_blocking(move || user.rescan(&dir))
+            .await
+            .map_err(|e| ApiFailure::internal(format!("the rescan task stopped: {e}")))?;
+    }
+
+    let favorite = {
+        let store = app.store.read().await;
+        store.effects.favorites.iter().any(|f| f == &id)
+    };
+    tracing::info!(effect = %id, replaced = existing.is_some(), "a user effect was imported");
+
+    Ok(Json(ImportEffectResponse {
+        effect: EffectSummary {
+            id,
+            name: schema.name,
+            description: schema.description,
+            needs: schema.needs,
+            favorite,
+        },
+        replaced: existing.is_some(),
+    }))
+}
+
+/// `DELETE /api/v1/effects/{id}`.
+///
+/// Removes a user HTML effect. Only an `html:` id can be deleted: the built-in effects
+/// are part of the app.
+///
+/// The file goes from the effects folder and the folder is rescanned, so the effect
+/// leaves the library at once.
+pub async fn delete_effect(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let stem = id
+        .strip_prefix(crate::user_effects::USER_EFFECT_PREFIX)
+        .ok_or_else(|| {
+            ApiFailure::validation(format!(
+                "{id} is not a user effect; only html: effects can be deleted"
+            ))
+        })?;
+    // The stem comes out of the URL, so it is checked like any other file name: no
+    // folder, no `..`, no reserved Windows name.
+    let file_name = format!("{stem}.html");
+    crate::user_effects::check_file_name(&file_name).map_err(ApiFailure::validation)?;
+
+    // One import or one delete at a time.
+    let _guard = app.effect_writes.lock().await;
+
+    // The file is looked up without regard to case, the same way the import looks for
+    // a clash.
+    let path = crate::user_effects::existing_file(&app.effects_dir, &file_name)
+        .ok_or_else(|| ApiFailure::not_found(format!("no user effect with the id {id}")))?;
+    std::fs::remove_file(&path)
+        .map_err(|e| ApiFailure::internal(format!("could not remove the effect file: {e}")))?;
+
+    // The folder is rescanned, so the effect leaves the library at once.
+    {
+        let user = app.user_effects.clone();
+        let dir = app.effects_dir.clone();
+        tokio::task::spawn_blocking(move || user.rescan(&dir))
+            .await
+            .map_err(|e| ApiFailure::internal(format!("the rescan task stopped: {e}")))?;
+    }
+    tracing::info!(effect = %id, "a user effect was deleted");
+
+    // The effect was the active one: the daemon falls back the same way it does when
+    // the file is missing. The active layout still names it, so the restore path
+    // cannot build it any more and says so, exactly as it does at start.
+    let active = app.active_layout().await.and_then(|l| l.effect);
+    if let Some(active) = active {
+        if active.id == id {
+            tracing::warn!(effect = %id, "the active user effect was deleted");
+            if let Err(e) = crate::apply_effect(&app, &active.id, &active.props).await {
+                tracing::warn!(
+                    effect = %active.id,
+                    error = %e,
+                    "the deleted effect could not be restored"
+                );
+            }
+        }
+    }
+
+    Ok(Json(serde_json::json!({ "ok": true, "id": id })))
+}
+
+/// The largest request body the import route accepts, in bytes.
+///
+/// The body is JSON, and a file byte can take up to six bytes in it: a byte that has
+/// to be escaped becomes `\u00XX`. A file of [`EFFECT_IMPORT_MAX_BYTES`] bytes is
+/// therefore at most six times that in the body, plus a little for the keys and the
+/// file name. The limit is that, with 4 KiB of room.
+pub const IMPORT_BODY_LIMIT: usize =
+    6 * canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES + 4096;

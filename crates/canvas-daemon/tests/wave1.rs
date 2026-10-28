@@ -99,9 +99,9 @@ async fn the_engine_parks_with_no_devices_and_no_preview() {
 
 #[tokio::test]
 #[ignore = "needs wave-1 crates"]
-async fn the_effects_registry_has_the_twelve_effects() {
+async fn the_effects_registry_has_the_eleven_native_effects() {
     let effects = canvas_effects::registry();
-    assert_eq!(effects.len(), 12);
+    assert_eq!(effects.len(), 11);
     let ids: Vec<String> = effects.iter().map(|f| f().schema().id).collect();
     for id in canvas_proto::EFFECT_IDS {
         assert!(ids.iter().any(|i| i == id), "{id} is in the registry");
@@ -110,11 +110,11 @@ async fn the_effects_registry_has_the_twelve_effects() {
 
 #[tokio::test]
 #[ignore = "needs wave-1 crates"]
-async fn poison_declares_its_default_properties() {
-    let effect = canvas_effects::create("poison").expect("poison exists");
+async fn a_native_effect_declares_its_default_properties() {
+    let effect = canvas_effects::create("aurora").expect("aurora exists");
     let schema = effect.schema();
-    assert_eq!(schema.id, "poison");
+    assert_eq!(schema.id, "aurora");
     // The defaults come from the schema.
     let defaults = schema.defaults();
-    assert!(!defaults.is_empty(), "poison declares properties");
+    assert!(!defaults.is_empty(), "aurora declares properties");
 }

@@ -5,6 +5,10 @@
 //! builds a fresh instance from it. The folder is rescanned on a fixed interval; only
 //! files whose size or modified time changed are parsed again. A file that fails to
 //! parse is logged with its error and left out of the list until it changes.
+//!
+//! This module also holds the rules an imported file name must follow
+//! ([`check_file_name`]) and the atomic write that puts a file in the folder
+//! ([`write_atomic`]).
 
 use canvas_proto::props::{Props, PropertySchema};
 use canvas_proto::traits::Effect;
@@ -224,6 +228,144 @@ fn listing(dir: &Path) -> Result<BTreeMap<PathBuf, Stamp>, String> {
     Ok(out)
 }
 
+/// The file names Windows reserves. A file with one of these names cannot be created,
+/// so the import refuses it instead of failing at the write.
+///
+/// Windows reserves the name with any extension, and the part before the first dot is
+/// what counts: `con.html`, `con.x.html` and `con.x.y.html` are all the name `con`.
+const RESERVED_NAMES: &[&str] = &[
+    "con", "prn", "aux", "nul", "com0", "com1", "com2", "com3", "com4", "com5", "com6",
+    "com7", "com8", "com9", "lpt0", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7",
+    "lpt8", "lpt9",
+];
+
+/// Checks a file name for an effect and returns the id the file will carry.
+///
+/// The name may hold letters, digits, spaces, `-`, `_` and `.`, and it must end in
+/// `.html`. A folder, a `..`, a reserved Windows name and a name that would carry a
+/// built-in effect's id are all refused. The error message says why.
+pub fn check_file_name(file_name: &str) -> Result<String, String> {
+    let trimmed = file_name.trim();
+    if trimmed.is_empty() {
+        return Err("the file name is empty".to_string());
+    }
+    if trimmed != file_name {
+        return Err(format!("{file_name:?} has a space at either end"));
+    }
+    for c in trimmed.chars() {
+        if !(c.is_ascii_alphanumeric() || c == ' ' || c == '-' || c == '_' || c == '.') {
+            return Err(format!(
+                "{file_name:?} may only hold letters, digits, spaces, '-', '_' and '.'"
+            ));
+        }
+    }
+    if trimmed.contains("..") {
+        return Err(format!("{file_name:?} must not hold '..'"));
+    }
+    if !trimmed.to_ascii_lowercase().ends_with(".html") {
+        return Err(format!("{file_name:?} must end in .html"));
+    }
+    let stem = &trimmed[..trimmed.len() - ".html".len()];
+    if stem.is_empty() {
+        return Err(format!("{file_name:?} needs a name before .html"));
+    }
+    if stem.ends_with(' ') || stem.ends_with('.') {
+        return Err(format!("{file_name:?} must not end in a space or a dot"));
+    }
+    // The part of the stem before the first dot is the name Windows reserves.
+    let base = stem.split('.').next().unwrap_or(stem);
+    if RESERVED_NAMES.contains(&base.to_ascii_lowercase().as_str()) {
+        return Err(format!("{base:?} is a name Windows reserves"));
+    }
+    if canvas_proto::EFFECT_IDS.iter().any(|id| id.eq_ignore_ascii_case(stem)) {
+        return Err(format!(
+            "{stem:?} is a built-in effect; give the file another name"
+        ));
+    }
+    Ok(format!("{USER_EFFECT_PREFIX}{stem}"))
+}
+
+/// The file in `dir` whose name is `file_name`, compared without regard to case.
+///
+/// Two names that differ only in case are the same file on NTFS, so the clash check
+/// must not rely on that accident: the folder is listed and the names are compared
+/// case-insensitively, the same way on every file system.
+pub fn existing_file(dir: &Path, file_name: &str) -> Option<PathBuf> {
+    let wanted = file_name.to_ascii_lowercase();
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.to_ascii_lowercase() == wanted {
+            return Some(entry.path());
+        }
+    }
+    None
+}
+
+/// Counts the temp files, so two writes in the same process never share a name.
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// The temp file a write goes through: in the same folder as the target, so the
+/// rename that follows is on the same volume.
+fn temp_path(path: &Path) -> std::io::Result<PathBuf> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("the path has no folder"))?;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "effect.html".to_string());
+    Ok(dir.join(format!(
+        ".{name}.tmp{}-{}",
+        std::process::id(),
+        TEMP_COUNTER.fetch_add(1, Ordering::SeqCst)
+    )))
+}
+
+/// Writes `bytes` to `path` atomically: a temp file in the same folder first, then a
+/// rename over the target. A reader never sees a half-written file, and a failed write
+/// leaves the old file alone.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("the path has no folder"))?;
+    std::fs::create_dir_all(dir)?;
+    let temp = temp_path(path)?;
+    std::fs::write(&temp, bytes)?;
+    match std::fs::rename(&temp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&temp);
+            Err(e)
+        }
+    }
+}
+
+/// Writes `bytes` to `path`, but only when nothing is there.
+///
+/// The file is written to a temp file and then hard-linked to its final name: a link
+/// fails when the name is taken, so a file that appears between the check and the
+/// write is never overwritten.
+pub fn write_atomic_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("the path has no folder"))?;
+    std::fs::create_dir_all(dir)?;
+    let temp = temp_path(path)?;
+    std::fs::write(&temp, bytes)?;
+    match std::fs::hard_link(&temp, path) {
+        Ok(()) => {
+            // The temp file is only a means to an atomic create; it goes now.
+            let _ = std::fs::remove_file(&temp);
+            Ok(())
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&temp);
+            Err(e)
+        }
+    }
+}
+
 fn read_lock(lock: &RwLock<State>) -> RwLockReadGuard<'_, State> {
     lock.read().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -402,6 +544,122 @@ mod tests {
         // One parse for the scan, one for the build.
         assert_eq!(parses.load(Ordering::SeqCst), 2);
 
-        assert!(effects.create("poison").is_none());
+        assert!(effects.create("solid").is_none());
+    }
+
+    #[test]
+    fn a_good_file_name_carries_the_html_prefix() {
+        assert_eq!(check_file_name("my-effect.html").unwrap(), "html:my-effect");
+        assert_eq!(check_file_name("My Effect 2.html").unwrap(), "html:My Effect 2");
+        assert_eq!(check_file_name("a.b.html").unwrap(), "html:a.b");
+    }
+
+    #[test]
+    fn the_bad_file_names_are_refused() {
+        for name in [
+            "",
+            "   ",
+            "my effect.html ",
+            "sub/my-effect.html",
+            "sub\\my-effect.html",
+            "my-effect.txt",
+            "my-effect",
+            ".html",
+            "..html",
+            "..my-effect.html",
+            "my..effect.html",
+            "con.html",
+            "NUL.html",
+            "com1.html",
+            "solid.html",
+            "aurora.html",
+            "my-effect.html.txt",
+            "my:effect.html",
+        ] {
+            assert!(
+                check_file_name(name).is_err(),
+                "{name:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reserved_name_is_refused_whatever_comes_after_the_first_dot() {
+        // Windows reserves the name with any extension: the part before the first dot
+        // is the name.
+        for name in [
+            "con.html",
+            "con.x.html",
+            "nul.a.html",
+            "COM1.foo.html",
+            "com0.html",
+            "LPT9.html",
+            "prn.anything.html",
+            "aux.x.y.html",
+        ] {
+            assert!(check_file_name(name).is_err(), "{name:?} must be refused");
+        }
+        // A name that only holds a reserved word further along is fine.
+        assert!(check_file_name("console.html").is_ok());
+        assert!(check_file_name("com10.html").is_ok());
+        assert!(check_file_name("nul.a.html.txt").is_err(), "it does not end in .html");
+    }
+
+    #[test]
+    fn a_new_file_is_never_written_over_an_existing_one() {
+        let dir = TempDir::new("create-new");
+        let path = dir.0.join("effect.html");
+        write_atomic(&path, b"first").expect("the file is written");
+
+        // The second write must fail: the name is taken.
+        let error = write_atomic_new(&path, b"second").expect_err("the write must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        // The file that was there is untouched.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
+
+        // A name that is free is written.
+        let fresh = dir.0.join("other.html");
+        write_atomic_new(&fresh, b"new").expect("the file is written");
+        assert_eq!(std::fs::read_to_string(&fresh).unwrap(), "new");
+
+        // No temp file is left behind.
+        let leftovers: Vec<String> = std::fs::read_dir(&dir.0)
+            .expect("the folder")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| !name.ends_with(".html"))
+            .collect();
+        assert!(leftovers.is_empty(), "the temp files are gone: {leftovers:?}");
+    }
+
+    #[test]
+    fn a_file_is_found_without_regard_to_case() {
+        let dir = TempDir::new("case");
+        dir.write("Foo.html", "F");
+        assert!(existing_file(&dir.0, "foo.html").is_some());
+        assert!(existing_file(&dir.0, "FOO.HTML").is_some());
+        assert!(existing_file(&dir.0, "Foo.html").is_some());
+        assert!(existing_file(&dir.0, "bar.html").is_none());
+    }
+
+    #[test]
+    fn the_file_is_written_atomically_and_the_old_one_survives_a_failure() {
+        let dir = TempDir::new("atomic");
+        let path = dir.0.join("effect.html");
+        write_atomic(&path, b"first").expect("the file is written");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
+
+        // A second write replaces it.
+        write_atomic(&path, b"second").expect("the file is written");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+
+        // No temp file is left behind.
+        let leftovers: Vec<String> = std::fs::read_dir(&dir.0)
+            .expect("the folder")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "effect.html")
+            .collect();
+        assert!(leftovers.is_empty(), "the temp files are gone: {leftovers:?}");
     }
 }

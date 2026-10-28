@@ -1,13 +1,12 @@
 [package]
 name = "canvas-effects"
-description = "canvas-rgb's 12 native effects."
+description = "canvas-rgb's 11 native effects."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 canvas-proto.workspace = true
-canvas-html.workspace = true
 rand.workspace = true
 tracing.workspace = true
 

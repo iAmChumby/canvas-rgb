@@ -2,12 +2,12 @@
 //!
 //! Exported entry points each area crate provides (signatures are fixed by the spine):
 //! - `canvas_core::spawn(settings: EngineSettings) -> std::sync::Arc<dyn Engine>`
-//! - `canvas_effects::registry() -> Vec<EffectFactory>` (exactly the 12 in `EFFECT_IDS`)
+//! - `canvas_effects::registry() -> Vec<EffectFactory>` (exactly the 11 in `EFFECT_IDS`)
 //! - `canvas_effects::create(id: &str) -> Option<Box<dyn Effect>>`
 //! - `canvas_html::HtmlEffect::from_source(id, html, default_overrides) -> Result<HtmlEffect, HtmlError>`
 //!   (implements [`Effect`]; runs SignalRGB-format `effect.html` with an embedded JS engine and
-//!   a Rust Canvas 2D. No browser engine.) Poison ships as SignalRGB's original file through it.
-//!   User HTML effects load from `%APPDATA%\canvas-rgb\effects\*.html` (id = file stem).
+//!   a Rust Canvas 2D. No browser engine.)
+//!   User HTML effects load from `%APPDATA%\canvas-rgb\effects\*.html` (id = `html:` + file stem).
 //! - `canvas_adapters::openrgb::OpenRgbAdapter::new(host: &str, port: u16) -> OpenRgbAdapter`
 //!   (implements [`DeviceAdapter`])
 //! - `canvas_adapters::fake::FakeOpenRgbServer::start(devices) -> FakeOpenRgbServer`
@@ -211,4 +211,39 @@ pub trait NumericDisplayAdapter: Send + Sync {
     async fn write_value(&mut self, device: &DeviceId, value: &DisplayValue) -> Result<(), AdapterError>;
     /// How often the device expects a write (the CHIONE: every 250 ms).
     fn write_interval_ms(&self) -> u32;
+}
+
+/// A peripheral canvas-rgb can drive: a mouse, a game controller, a keyboard.
+///
+/// The sibling of `DeviceAdapter` (devices with LEDs) and `NumericDisplayAdapter` (devices with
+/// a number on them): this one reads and writes the *settings* of a device that has no LEDs of
+/// its own. The settings are the spine's own properties, so the editor needs no new code to
+/// render them.
+#[async_trait]
+pub trait PeripheralAdapter: Send + Sync {
+    /// Adapter name, e.g. `"attack-shark-x6"`.
+    fn name(&self) -> &'static str;
+    /// Opens the device.
+    async fn connect(&mut self) -> Result<(), AdapterError>;
+    /// Closes it.
+    async fn disconnect(&mut self) -> Result<(), AdapterError>;
+    /// True when the device is open.
+    fn is_connected(&self) -> bool;
+    /// Every peripheral this adapter sees.
+    async fn discover(&mut self) -> Result<Vec<crate::peripheral::PeripheralInfo>, AdapterError>;
+    /// What the device has: its sections, its properties, and for every property its range, its
+    /// step or its list of options.
+    async fn describe(&mut self, device: &crate::device::DeviceId) -> Result<crate::peripheral::PeripheralSchema, AdapterError>;
+    /// The device's current values, keyed by [`crate::props::PropertyDef::key`]. A property the device could
+    /// not report this time is simply absent.
+    ///
+    /// A read may send the device a request (a feature report that asks for what it holds); it
+    /// never changes a setting.
+    async fn read_settings(&mut self, device: &crate::device::DeviceId) -> Result<crate::props::Props, AdapterError>;
+    /// Writes the given properties back to the device. Only the keys present are written; an
+    /// unknown key, a read-only key or a value outside its kind is refused and nothing is sent.
+    async fn write_settings(&mut self, device: &crate::device::DeviceId, props: &crate::props::Props) -> Result<(), AdapterError>;
+    /// True when this adapter may send config writes to the hardware. False until a caller turns
+    /// config writes on.
+    fn writes_enabled(&self) -> bool;
 }

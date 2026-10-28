@@ -272,12 +272,13 @@ mod tests {
     }
 
     #[test]
-    fn poison_style_hex_concat_parses() {
-        // Poison writes ctx.fillStyle = bgColor + "22" -> #rrggbbaa.
-        let c = parse("#13003222").unwrap();
-        assert!(close(c.r, 0x13 as f32 / 255.0));
-        assert!(close(c.g, 0.0));
-        assert!(close(c.b, 0x32 as f32 / 255.0));
-        assert!(close(c.a, 0x22 as f32 / 255.0));
+    fn an_eight_digit_hex_carries_its_alpha() {
+        // The SignalRGB format writes a colour plus its alpha as one hex string:
+        // ctx.fillStyle = background + "22" -> #rrggbbaa.
+        let c = parse("#0b1b3a14").unwrap();
+        assert!(close(c.r, 0x0b as f32 / 255.0));
+        assert!(close(c.g, 0x1b as f32 / 255.0));
+        assert!(close(c.b, 0x3a as f32 / 255.0));
+        assert!(close(c.a, 0x14 as f32 / 255.0));
     }
 }

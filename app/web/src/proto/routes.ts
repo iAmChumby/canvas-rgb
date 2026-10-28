@@ -11,6 +11,15 @@ export const routes = {
   effect: (id: string) => `/api/v1/effects/${id}`,
   effectActivate: (id: string) => `/api/v1/effects/${id}/activate`,
   effectActiveProps: "/api/v1/effects/active/props",
+  // POST an ImportEffect: a SignalRGB-format HTML effect to add to the effects folder.
+  // 409 when the name is taken and no replace is asked for; 422 when the file does not parse.
+  effectsImport: "/api/v1/effects/import",
+  // DELETE removes a user effect (an `html:` id).
+  // GET every peripheral the adapters see; GET one peripheral's detail; PATCH writes the
+  // changed keys to the device; PUT the access says what the daemon may do with it.
+  peripherals: "/api/v1/peripherals",
+  peripheral: (id: string) => `/api/v1/peripherals/${encodeURIComponent(id)}`,
+  peripheralAccess: (id: string) => `/api/v1/peripherals/${encodeURIComponent(id)}/access`,
   // GET binary: u16 LE w, u16 LE h, u16 LE frames, then frames*w*h*3 RGB (64x40, 24 frames, 12 fps).
   effectThumbnail: (id: string) => `/api/v1/effects/${encodeURIComponent(id)}/thumbnail`,
   effectFavorite: (id: string) => `/api/v1/effects/${id}/favorite`,

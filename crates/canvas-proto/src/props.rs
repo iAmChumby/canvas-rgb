@@ -71,7 +71,7 @@ pub struct Preset {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct PropertySchema {
-    /// Stable id, one of [`crate::EFFECT_IDS`].
+    /// Stable id: one of [`crate::EFFECT_IDS`], or `html:` + the file stem for a user effect.
     pub id: String,
     pub name: String,
     pub description: String,

@@ -21,6 +21,8 @@ pub const FPS_MIN: u32 = 10;
 pub const FPS_MAX: u32 = 60;
 pub const FPS_DEFAULT: u32 = 30;
 pub const PREVIEW_MAX_FPS: u32 = 15;
+/// The largest user HTML effect `POST /effects/import` accepts, in bytes.
+pub const EFFECT_IMPORT_MAX_BYTES: usize = 1024 * 1024;
 /// Screen Ambience capture rate cap.
 pub const SCREEN_CAPTURE_MAX_FPS: u32 = 30;
 
@@ -95,8 +97,8 @@ pub fn api_base_url() -> String {
     format!("http://{API_HOST}:{API_PORT}")
 }
 
-/// The 12 native effects, by stable id (spec, effects line 1).
-pub const EFFECT_IDS: [&str; 12] = [
+/// The 11 native effects, by stable id (spec, effects line 1).
+pub const EFFECT_IDS: [&str; 11] = [
     "solid",
     "gradient",
     "rainbow_wave",
@@ -108,5 +110,4 @@ pub const EFFECT_IDS: [&str; 12] = [
     "fire",
     "screen_ambience",
     "audio_spectrum",
-    "poison",
 ];

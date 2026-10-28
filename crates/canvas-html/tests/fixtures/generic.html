@@ -2,7 +2,7 @@
   <title>Generic Test Effect</title>
   <meta description="A gradient, a rectangle and an arc, for the canvas-html tests." />
   <meta
-    property="speedRaw"
+    property="speed"
     label="Speed"
     type="number"
     min="0"
@@ -49,7 +49,7 @@
     ctx.fillRect(0, 0, width, height);
 
     // A translucent rectangle that moves with the frame.
-    var offset = (frame * speedRaw) % width;
+    var offset = (frame * speed) % width;
     ctx.fillStyle = "#ffffff22";
     ctx.fillRect(offset, 40, 60, height - 80);
 

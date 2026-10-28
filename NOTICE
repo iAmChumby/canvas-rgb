@@ -23,7 +23,7 @@ LpcIO module ioctl names from PawnIO.Modules (GPL-2.0), used through PawnIO's IO
 
 Third-party content not covered by this repository's license:
 
-- crates/canvas-effects/assets/poison/effect.html and
-  crates/canvas-html/tests/fixtures/poison.html: SignalRGB's "Poison" effect (publisher
-  SignalRGB, catalog id -Mir7bKkFQmd2LF_9Leg), copied unmodified at the owner's request for
-  personal use. All rights remain with its authors.
+- None is shipped here. SignalRGB's "Poison" effect (publisher SignalRGB, catalog id
+  -Mir7bKkFQmd2LF_9Leg) is not part of this repository: the owner installs it as a user
+  HTML effect in %APPDATA%\canvas-rgb\effects\poison.html, from SignalRGB's own copy.
+  It is not covered by this repository's license and all rights remain with its authors.

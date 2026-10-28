@@ -804,6 +804,8 @@ pub struct JsRuntime {
     pub host: Shared<Host>,
     /// The host's JavaScript-side bookkeeping.
     pub handles: SharedHandles,
+    /// The deadline of the script call in progress.
+    pub deadline: Deadline,
 }
 
 impl JsRuntime {
@@ -815,7 +817,81 @@ impl JsRuntime {
             width, height,
         ))));
         let handles = std::sync::Arc::new(std::sync::Mutex::new(JsHandles::default()));
-        Ok(Self { context, runtime, host, handles })
+        // The script runs with a deadline: a runaway script is stopped instead of
+        // hanging the thread it runs on.
+        let deadline = Deadline::new();
+        runtime.set_interrupt_handler(Some(deadline.handler()));
+        Ok(Self { context, runtime, host, handles, deadline })
+    }
+}
+
+/// The deadline of the script call in progress.
+///
+/// QuickJS calls the interrupt handler while the script runs. When the handler says
+/// yes, the engine raises an exception that the script cannot catch, and the call
+/// returns to Rust. That is what stops a runaway script.
+///
+/// The deadline is counted from the instant the runtime was made, so the handler only
+/// has to read a clock and compare two numbers: no lock, nothing that can block the
+/// engine.
+#[derive(Debug, Clone)]
+pub struct Deadline {
+    /// The instant the runtime was made. The deadlines are counted from here.
+    base: std::time::Instant,
+    /// The deadline of the call in progress, in milliseconds since `base`.
+    /// `u64::MAX` means "no limit".
+    at_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Set when the last call ran out of time.
+    timed_out: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Deadline {
+    /// A deadline with no call in progress.
+    fn new() -> Self {
+        Self {
+            base: std::time::Instant::now(),
+            at_ms: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
+            timed_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    /// Starts a call with this budget, in milliseconds.
+    pub fn start(&self, budget_ms: u64) {
+        use std::sync::atomic::Ordering;
+        self.timed_out.store(false, Ordering::Relaxed);
+        let at = self.base.elapsed().as_millis() as u64 + budget_ms;
+        self.at_ms.store(at, Ordering::Relaxed);
+    }
+
+    /// Ends the call: there is no limit again.
+    pub fn clear(&self) {
+        use std::sync::atomic::Ordering;
+        self.at_ms.store(u64::MAX, Ordering::Relaxed);
+    }
+
+    /// True when the call that is over ran out of time.
+    pub fn timed_out(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        self.timed_out.load(Ordering::Relaxed)
+    }
+
+    /// The handler the runtime calls while the script runs.
+    fn handler(&self) -> rquickjs::runtime::InterruptHandler {
+        use std::sync::atomic::Ordering;
+        let at_ms = self.at_ms.clone();
+        let timed_out = self.timed_out.clone();
+        let base = self.base;
+        Box::new(move || {
+            let at = at_ms.load(Ordering::Relaxed);
+            if at == u64::MAX {
+                return false;
+            }
+            if base.elapsed().as_millis() as u64 >= at {
+                timed_out.store(true, Ordering::Relaxed);
+                return true;
+            }
+            false
+        })
     }
 }
 

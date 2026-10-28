@@ -6,12 +6,11 @@
 //! QuickJS engine (no browser engine anywhere in the render path) and rasterizes the
 //! 2D context in Rust with `tiny-skia`.
 //!
-//! The property convention is SignalRGB's: a property named `speedRaw` is a global
-//! named `speedRaw`, a color is a `"#rrggbb"` string, a number is a number and a boolean
+//! The property convention is SignalRGB's: a property named `speed` is a global
+//! named `speed`, a color is a `"#rrggbb"` string, a number is a number and a boolean
 //! is a boolean. The values are installed as globals before the script runs and again
 //! after its top-level code has run, because SignalRGB effects re-declare them with
-//! `var` (`var speedRaw = 0;` in Poison) and SignalRGB applies the user's values after
-//! loading.
+//! `var` (`var speed = 0;`) and SignalRGB applies the user's values after loading.
 
 mod color;
 mod js;
@@ -31,6 +30,9 @@ pub enum HtmlError {
     Parse(String),
     #[error("script: {0}")]
     Script(String),
+    /// The script ran longer than its budget and was stopped.
+    #[error("timeout: {0}")]
+    Timeout(String),
 }
 
 /// The frame rate the effect's animation is defined at. SignalRGB effects are written
@@ -43,6 +45,29 @@ const MAX_REPORTED: usize = 32;
 /// The largest canvas edge an effect file may declare. A bigger canvas is a parse error,
 /// so a bad file cannot ask for a multi-gigabyte pixel buffer.
 const MAX_CANVAS_EDGE: u32 = 4096;
+
+/// The time the top-level script of an effect may take, in milliseconds.
+///
+/// The script runs once, when the effect is built. It sets the effect up: a few lines
+/// of state, a canvas, a requestAnimationFrame. Two seconds is a thousand times that,
+/// so no real effect is cut off, and a runaway script (`while (true) {}`) cannot hold
+/// the daemon's import, its rescan or its render thread for ever.
+pub const LOAD_BUDGET_MS: u64 = 2_000;
+
+/// The time one frame's script may take, in milliseconds.
+///
+/// The engine renders at 10 to 60 frames a second, so a frame lasts 16.7 ms at the
+/// fastest rate and 100 ms at the slowest. The budget is one whole frame at the
+/// slowest rate: the effect gets the whole slot before it is cut off. The frame is
+/// dropped and the last good one stays on the lights, so the render loop keeps
+/// running.
+///
+/// The built-in HTML effects are the slowest things the runtime has to carry: Lumen
+/// draws 26 stroked rings over 320x200 and generic.html fills the canvas with a
+/// gradient. In a debug build they cost 9 ms and 17 ms a frame on average, and 18 ms
+/// and 22 ms at the worst, so the budget is more than four times the worst of them.
+/// A release build is several times faster still.
+pub const FRAME_BUDGET_MS: u64 = 100;
 
 /// One HTML effect instance: its own JS context and 2D canvas.
 pub struct HtmlEffect {
@@ -78,7 +103,7 @@ pub struct HtmlEffect {
 impl HtmlEffect {
     /// `id` becomes `schema.id`; name/description/properties come from the file's
     /// `<title>` and `<meta>` tags. `default_overrides` replace the file's declared
-    /// defaults for the keys given (keys are the file's `property` names, e.g. `speedRaw`).
+    /// defaults for the keys given (keys are the file's `property` names, e.g. `speed`).
     pub fn from_source(id: &str, html: &str, default_overrides: &Props) -> Result<Self, HtmlError> {
         Self::from_source_seeded(id, html, default_overrides, entropy_seed())
     }
@@ -265,14 +290,26 @@ impl HtmlEffect {
         let scripts = self.scripts.clone();
         for (i, body) in scripts.into_iter().enumerate() {
             // Browsers run page scripts in sloppy mode unless they say "use strict"; SignalRGB
-            // effects rely on that (Poison assigns an undeclared `i` in a `for`). rquickjs
+            // effects rely on that (they assign an undeclared `i` in a `for`). rquickjs
             // defaults to strict, so the option is turned off here.
+            //
+            // The script runs with a deadline, so a runaway one is stopped instead of
+            // hanging the thread it runs on.
+            self.runtime.deadline.start(LOAD_BUDGET_MS);
             let result = self.runtime.context.with(|ctx| {
                 let mut options = rquickjs::context::EvalOptions::default();
                 options.strict = false;
                 ctx.eval_with_options::<(), _>(body.as_bytes(), options)
             });
+            let timed_out = self.runtime.deadline.timed_out();
+            self.runtime.deadline.clear();
+
             if let Err(e) = result {
+                if timed_out {
+                    return Err(HtmlError::Timeout(format!(
+                        "the effect's script ran longer than {LOAD_BUDGET_MS} ms"
+                    )));
+                }
                 // The exception message is on the context; turn it into a message.
                 let message = self
                     .runtime
@@ -293,6 +330,9 @@ impl HtmlEffect {
         // The callback and the queued timers live in JavaScript globals, so QuickJS
         // owns them and their lifetime matches the runtime's.
         let timestamp = self.time * 1000.0;
+        // The frame's script runs with a deadline, so a runaway callback is stopped
+        // instead of freezing the render loop.
+        self.runtime.deadline.start(FRAME_BUDGET_MS);
         let result = self.runtime.context.with(|ctx| -> rquickjs::Result<()> {
             let globals = ctx.globals();
 
@@ -322,7 +362,15 @@ impl HtmlEffect {
             }
             Ok(())
         });
+        let timed_out = self.runtime.deadline.timed_out();
+        self.runtime.deadline.clear();
+
         if let Err(e) = result {
+            if timed_out {
+                return Err(HtmlError::Timeout(format!(
+                    "the effect's script ran longer than {FRAME_BUDGET_MS} ms"
+                )));
+            }
             // The exception is already on the context; turn it into a message.
             let message = self
                 .runtime

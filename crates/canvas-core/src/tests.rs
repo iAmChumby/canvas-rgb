@@ -961,7 +961,8 @@ fn the_render_scale_changes_the_sampled_colors() {
 
 #[test]
 fn the_canvas_is_the_logical_size_at_full_scale() {
-    // The logical canvas is SignalRGB's, so the Poison port shares its coordinates.
+    // The logical canvas is SignalRGB's, so an effect ported from it shares its
+    // coordinates.
     assert_eq!(CANVAS_WIDTH, 320);
     assert_eq!(CANVAS_HEIGHT, 200);
     let canvas = Canvas::with_scale(1.0);

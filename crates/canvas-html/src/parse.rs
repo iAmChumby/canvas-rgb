@@ -278,43 +278,46 @@ fn find_sub(bytes: &[u8], needle: &[u8], from: usize) -> Option<usize> {
 mod tests {
     use super::*;
 
-    const POISON_HEAD: &str = r##"
+    const EFFECT_HEAD: &str = r##"
 <head>
-  <title>Poison</title>
-  <meta description="A test effect." />
-  <meta publisher="SignalRGB" />
+  <title>Lumen</title>
+  <meta description="Slow rings of light drifting across a dark canvas." />
+  <meta publisher="canvas-rgb" />
   <meta
-    property="bgColor"
-    label="Background Color"
+    property="background"
+    label="Background"
     type="color"
     min="0"
     max="360"
-    default="#130032"
+    default="#0b1b3a"
   />
-  <meta property="speedRaw" label="Speed" type="number" min="0" max="100" default="10" />
+  <meta property="speed" label="Speed" type="number" min="0" max="100" default="12" />
 </head>
 <body style="margin: 0; padding: 0">
-  <canvas id="exCanvas" width="320" height="200"></canvas>
+  <canvas id="stage" width="320" height="200"></canvas>
 </body>
 <script>
-  var c = document.getElementById("exCanvas");
+  var c = document.getElementById("stage");
   ctx.fillRect(0, 0, width, height);
 </script>
 "##;
 
     #[test]
-    fn parses_poison_shape() {
-        let p = parse(POISON_HEAD);
-        assert_eq!(p.title.as_deref(), Some("Poison"));
-        assert_eq!(p.description.as_deref(), Some("A test effect."));
+    fn parses_an_effect_head() {
+        let p = parse(EFFECT_HEAD);
+        assert_eq!(p.title.as_deref(), Some("Lumen"));
+        assert_eq!(
+            p.description.as_deref(),
+            Some("Slow rings of light drifting across a dark canvas.")
+        );
         assert_eq!(p.metas.len(), 2);
-        assert_eq!(p.metas[0].attr("property"), Some("bgColor"));
+        assert_eq!(p.metas[0].attr("property"), Some("background"));
         assert_eq!(p.metas[0].attr("type"), Some("color"));
-        assert_eq!(p.metas[0].attr("default"), Some("#130032"));
-        assert_eq!(p.metas[1].attr("property"), Some("speedRaw"));
-        assert_eq!(p.metas[1].attr("default"), Some("10"));
+        assert_eq!(p.metas[0].attr("default"), Some("#0b1b3a"));
+        assert_eq!(p.metas[1].attr("property"), Some("speed"));
+        assert_eq!(p.metas[1].attr("default"), Some("12"));
         let canvas = p.canvas.expect("canvas element");
-        assert_eq!(canvas.attr("id"), Some("exCanvas"));
+        assert_eq!(canvas.attr("id"), Some("stage"));
         assert_eq!(canvas.attr("width"), Some("320"));
         assert_eq!(canvas.attr("height"), Some("200"));
         assert_eq!(p.scripts.len(), 1);

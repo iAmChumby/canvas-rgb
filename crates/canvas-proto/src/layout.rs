@@ -5,7 +5,7 @@ use crate::props::Props;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-/// Logical canvas size (SignalRGB's), so the Poison port shares its coordinates.
+/// Logical canvas size (SignalRGB's), so an effect ported from it shares its coordinates.
 pub const CANVAS_WIDTH: u32 = 320;
 pub const CANVAS_HEIGHT: u32 = 200;
 

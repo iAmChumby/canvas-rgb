@@ -72,7 +72,24 @@ async fn daemon_main() -> i32 {
         }
     };
 
-    let store = canvas_daemon::storage::Store::load();
+    let mut store = canvas_daemon::storage::Store::load();
+
+    // Poison is not a built-in any more: it is a user HTML effect in
+    // `%APPDATA%\canvas-rgb\effects\`. The saved ids move to it, once, so the saved
+    // setup comes back exactly as it was.
+    if canvas_daemon::migration::migrate_store(&mut store) {
+        tracing::info!(
+            effect = canvas_daemon::migration::USER_POISON_ID,
+            "the saved Poison effect moved to the user effect"
+        );
+        if let Err(e) = store.save_layouts() {
+            tracing::warn!(error = %e, "could not save the migrated layouts");
+        }
+        if let Err(e) = store.save_effects() {
+            tracing::warn!(error = %e, "could not save the migrated effects");
+        }
+    }
+
     let settings = store.config.settings.clone();
 
     // The engine.
@@ -95,17 +112,30 @@ async fn daemon_main() -> i32 {
     let display_adapter = Box::new(canvas_adapters::chione::ChioneDisplay::new())
         as Box<dyn canvas_proto::traits::NumericDisplayAdapter>;
 
+    // The peripherals: the mouse and the controller. They are enumerated, never opened, until
+    // the owner says so in `peripherals.json` (see `canvas_daemon::peripherals`).
+    let peripherals: Vec<Box<dyn canvas_daemon::peripherals::Peripheral>> = vec![
+        Box::new(canvas_adapters::attack_shark_x6::AttackSharkX6::new()),
+        Box::new(canvas_adapters::eightbitdo_ultimate2::EightBitDoUltimate2::new()),
+    ];
+
     let (quit_tx, mut quit_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
 
-    let app = Arc::new(App::with_displays(
-        store,
-        engine.clone(),
-        Box::new(adapter) as Box<dyn DeviceAdapter>,
-        token,
-        canvas_daemon::version(),
-        quit_tx,
-        display_adapter,
-    ));
+    let app = Arc::new(
+        App::with_displays(
+            store,
+            engine.clone(),
+            Box::new(adapter) as Box<dyn DeviceAdapter>,
+            token,
+            canvas_daemon::version(),
+            quit_tx,
+            display_adapter,
+        )
+        .with_peripherals(peripherals),
+    );
+
+    // The peripherals the owner allowed are opened; the others stay closed.
+    canvas_daemon::peripherals::apply_saved(&app).await;
 
     // The zone sizes from disk.
     {
@@ -117,7 +147,7 @@ async fn daemon_main() -> i32 {
     tracing::info!(version = %canvas_daemon::version(), "canvas-rgbd is starting");
 
     // The user HTML effects are listed before the API answers; the watcher keeps them current.
-    app.user_effects.rescan(&canvas_daemon::paths::effects_dir());
+    app.user_effects.rescan(&app.effects_dir);
 
     // The effect saved on the active layout runs again, so a restart does not leave the
     // lights black until something activates an effect.
@@ -125,7 +155,15 @@ async fn daemon_main() -> i32 {
     if let Some(effect) = saved_effect {
         match canvas_daemon::apply_effect(&app, &effect.id, &effect.props).await {
             Ok(()) => tracing::info!(effect = %effect.id, "the saved effect was restored"),
-            Err(e) => tracing::warn!(effect = %effect.id, error = %e, "the saved effect could not be restored"),
+            Err(e) => {
+                tracing::warn!(effect = %effect.id, error = %e, "the saved effect could not be restored");
+                if effect.id == canvas_daemon::migration::USER_POISON_ID {
+                    tracing::warn!(
+                        path = %canvas_daemon::paths::effects_dir().join(canvas_daemon::migration::USER_POISON_FILE).display(),
+                        "the user effect file is missing; install it to run this effect"
+                    );
+                }
+            }
         }
     }
 
@@ -513,7 +551,7 @@ fn spawn_display_task(app: Arc<App>) {
 /// shows up without a restart.
 fn spawn_user_effects_watch(app: Arc<App>) {
     tokio::spawn(async move {
-        let dir = canvas_daemon::paths::effects_dir();
+        let dir = app.effects_dir.clone();
         loop {
             tokio::time::sleep(canvas_daemon::user_effects::RESCAN_INTERVAL).await;
             let user = app.user_effects.clone();

@@ -20,6 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::displays::{DisplaysFile, DISPLAYS_FILE, DISPLAYS_SCHEMA};
 use crate::paths;
+use crate::peripherals::{PeripheralsFile, PERIPHERALS_FILE, PERIPHERALS_SCHEMA};
 
 /// Writes `bytes` to `path` atomically (temp file in the same dir, then rename).
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -128,6 +129,12 @@ impl SchemaVersioned for DisplaysFile {
     }
 }
 
+impl SchemaVersioned for PeripheralsFile {
+    fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+}
+
 /// Reads the `schema_version` field of a parsed document, if it has one.
 fn version_of<T: SchemaVersioned>(value: &T) -> u32 {
     value.schema_version()
@@ -177,6 +184,7 @@ pub fn snapshot(home: &Path, label: &str) -> std::io::Result<PathBuf> {
         "zones.json",
         "effects.json",
         DISPLAYS_FILE,
+        PERIPHERALS_FILE,
         "fans.last.toml",
     ];
     for name in keep {
@@ -222,6 +230,9 @@ pub struct Store {
     pub effects: EffectsFile,
     /// The numeric display configs (`displays.json`). A display is driven only while it has one.
     pub displays: DisplaysFile,
+    /// What the daemon may do with each peripheral (`peripherals.json`). A peripheral is
+    /// touched only while it has an entry here.
+    pub peripherals: PeripheralsFile,
     /// Where the files live. The daemon uses the user's home; the tests use a temp
     /// directory so they never touch Luke's real config.
     pub home: PathBuf,
@@ -235,6 +246,7 @@ impl Default for Store {
             zones: ZonesFile { schema_version: ZONES_SCHEMA, sizes: BTreeMap::new() },
             effects: EffectsFile { schema_version: EFFECTS_SCHEMA, ..Default::default() },
             displays: DisplaysFile::default(),
+            peripherals: PeripheralsFile::default(),
             home: paths::home(),
         }
     }
@@ -278,6 +290,7 @@ impl Store {
         let zones = home.join(ZONES_FILE);
         let effects = home.join(EFFECTS_FILE);
         let displays = home.join(DISPLAYS_FILE);
+        let peripherals = home.join(PERIPHERALS_FILE);
         let _ = std::fs::create_dir_all(&home);
 
         let config_value: Option<ConfigFile> =
@@ -305,6 +318,11 @@ impl Store {
                 tracing::error!(error = %e, "displays.json could not be read");
                 None
             });
+        let peripherals_value: Option<PeripheralsFile> =
+            read_parsed(&peripherals, PERIPHERALS_SCHEMA, PERIPHERALS_FILE).unwrap_or_else(|e| {
+                tracing::error!(error = %e, "peripherals.json could not be read");
+                None
+            });
 
         let mut store = Store {
             config: config_value.unwrap_or_default(),
@@ -312,6 +330,7 @@ impl Store {
             zones: zones_value.unwrap_or_else(|| Store::default().zones),
             effects: effects_value.unwrap_or_else(|| Store::default().effects),
             displays: displays_value.unwrap_or_default(),
+            peripherals: peripherals_value.unwrap_or_default(),
             home,
         };
         // A config from a newer schema is not silently downgraded.
@@ -359,6 +378,10 @@ impl Store {
         crate::displays::save(&self.home, &self.displays)
     }
 
+    pub fn save_peripherals(&self) -> std::io::Result<()> {
+        crate::peripherals::save(&self.home, &self.peripherals)
+    }
+
     pub fn save_effects(&self) -> std::io::Result<()> {
         write_json(&self.home.join(EFFECTS_FILE), &self.effects)
     }
@@ -368,7 +391,8 @@ impl Store {
         self.save_layouts()?;
         self.save_zones()?;
         self.save_effects()?;
-        self.save_displays()
+        self.save_displays()?;
+        self.save_peripherals()
     }
 }
 
@@ -453,6 +477,10 @@ pub fn import_bundle(home: &Path, bundle: &ExportBundle) -> Result<(), ImportErr
 
     let mut effects = bundle.effects.clone();
     effects.schema_version = EFFECTS_SCHEMA;
+
+    // A bundle from before Poison became a user effect names it `poison`; the ids move
+    // to the user effect, as they do on a normal start.
+    crate::migration::migrate_poison(&mut layouts, &mut effects);
 
     let mut fans = bundle.fans.clone();
     fans.schema_version = canvas_proto::config::FANS_SCHEMA;

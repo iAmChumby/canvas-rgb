@@ -1,11 +1,14 @@
-//! canvas-rgb's effect library: 11 native effects drawn straight onto the canvas, and
-//! Poison, which runs SignalRGB's original `effect.html` through `canvas-html`.
+//! canvas-rgb's effect library: 11 native effects drawn straight onto the canvas.
 //!
 //! Every effect declares its properties once in a [`PropertySchema`]; the editor
 //! renders its controls from that declaration, so there is no per-effect UI code
 //! anywhere in the app.
 //!
-//! The two entry points the spine fixes are [`registry`] (exactly the 12 effects, in the
+//! HTML effects are not in this crate. They are user files in
+//! `%APPDATA%\canvas-rgb\effects\*.html`, run by `canvas-html` and listed by the daemon
+//! after the built-ins (see `canvas-daemon`'s `user_effects`).
+//!
+//! The two entry points the spine fixes are [`registry`] (the built-in effects, in the
 //! order of [`canvas_proto::EFFECT_IDS`]) and [`create`].
 
 pub mod audio_spectrum;
@@ -15,7 +18,6 @@ pub mod color;
 pub mod color_cycle;
 pub mod fire;
 pub mod gradient;
-pub mod poison;
 pub mod props_util;
 pub mod rain;
 pub mod rainbow_wave;
@@ -28,7 +30,11 @@ pub mod spiral;
 
 use canvas_proto::{Effect, EffectFactory};
 
-/// Exactly the 12 effects in `canvas_proto::EFFECT_IDS`, in that order.
+/// The built-in effects, in `canvas_proto::EFFECT_IDS` order.
+///
+/// These are the 11 effects that are ours. A user HTML effect is not one of them: it
+/// lives on the owner's machine as a file in `%APPDATA%\canvas-rgb\effects\`, with the
+/// id `html:` plus the file's stem.
 pub fn registry() -> Vec<EffectFactory> {
     vec![
         solid::create as EffectFactory,
@@ -42,14 +48,22 @@ pub fn registry() -> Vec<EffectFactory> {
         fire::create as EffectFactory,
         screen_ambience::create as EffectFactory,
         audio_spectrum::create as EffectFactory,
-        poison::create as EffectFactory,
     ]
 }
 
 /// Creates the effect with this id, or `None`. Only the requested effect is built.
+///
+/// The spine's id list holds the 11 effects that are ours, so every id in it builds.
+/// An id that is not in the list is not a built-in: `create("html:poison")` is `None`,
+/// because Poison is a user HTML effect now.
 pub fn create(id: &str) -> Option<Box<dyn Effect>> {
     let index = canvas_proto::EFFECT_IDS.iter().position(|known| *known == id)?;
-    registry().get(index).map(|make| make())
+    let registry = registry();
+    let factory = registry.get(index)?;
+    let effect = factory();
+    // The registry and the spine must agree on the order. If they ever do not, the id
+    // check stops one effect from being built under another id.
+    (effect.schema().id == id).then_some(effect)
 }
 
 #[cfg(test)]
@@ -57,8 +71,8 @@ mod tests {
     use super::*;
     use canvas_proto::{Canvas, EFFECT_IDS, Inputs, Props};
 
-    /// The 12 display names, in `EFFECT_IDS` order.
-    const NAMES: [&str; 12] = [
+    /// The display names, in registry order.
+    const NAMES: [&str; 11] = [
         "Solid",
         "Gradient",
         "Rainbow Wave",
@@ -70,34 +84,40 @@ mod tests {
         "Fire",
         "Screen Ambience",
         "Audio Spectrum",
-        "Poison",
     ];
 
-    /// The 11 native effects: the ones whose tests do not touch `canvas-html`.
+    /// The ids of the built-in effects, in registry order: the spine's ids.
     fn native_ids() -> Vec<&'static str> {
-        EFFECT_IDS.iter().copied().filter(|id| *id != "poison").collect()
+        EFFECT_IDS.to_vec()
     }
 
-    /// The registry lists exactly the 12 ids in order. This builds only the 11 native
-    /// effects; the all-twelve build needs `canvas-html` and is ignored below.
+    /// The registry lists the built-in effects, in order.
     #[test]
-    fn the_registry_holds_exactly_the_twelve_effects_in_order() {
+    fn the_registry_holds_the_eleven_native_effects_in_order() {
         let reg = registry();
-        assert_eq!(reg.len(), 12);
-        assert_eq!(EFFECT_IDS[11], "poison");
-        let ids: Vec<String> = reg.iter().take(11).map(|f| f().schema().id).collect();
+        assert_eq!(reg.len(), 11);
+        let ids: Vec<String> = reg.iter().map(|f| f().schema().id).collect();
         assert_eq!(ids, native_ids());
     }
 
     #[test]
-    #[ignore = "needs canvas-html"]
     fn every_registry_entry_builds_with_its_id_and_name() {
         let reg = registry();
+        let ids = native_ids();
         for (i, make) in reg.iter().enumerate() {
             let s = make().schema();
-            assert_eq!(s.id, EFFECT_IDS[i]);
+            assert_eq!(s.id, ids[i]);
             assert_eq!(s.name, NAMES[i]);
         }
+    }
+
+    /// Poison is SignalRGB's effect, so it is not one of ours: it is a user HTML effect
+    /// in `%APPDATA%\canvas-rgb\effects\`, with the id `html:poison`.
+    #[test]
+    fn poison_is_not_a_built_in() {
+        assert!(create("poison").is_none());
+        assert!(create("html:poison").is_none());
+        assert!(registry().iter().all(|f| f().schema().id != "poison"));
     }
 
     #[test]
@@ -146,14 +166,8 @@ mod tests {
     }
 
     #[test]
-    fn native_effects_declare_their_properties_once_and_have_presets() {
-        check_declares(&native_ids());
-    }
-
-    #[test]
-    #[ignore = "needs canvas-html"]
     fn every_effect_declares_its_properties_once_and_has_presets() {
-        check_declares(&EFFECT_IDS);
+        check_declares(&native_ids());
     }
 
     /// Only Screen Ambience needs the screen and only Audio Spectrum needs the audio.
@@ -168,12 +182,6 @@ mod tests {
     #[test]
     fn only_the_capture_effects_need_inputs() {
         check_needs(&native_ids());
-    }
-
-    #[test]
-    #[ignore = "needs canvas-html"]
-    fn only_the_capture_effects_need_inputs_all_twelve() {
-        check_needs(&EFFECT_IDS);
     }
 
     /// The contract every effect must meet: `init` with the schema defaults, then 120
@@ -202,14 +210,8 @@ mod tests {
     }
 
     #[test]
-    fn native_effects_render_finite_values_in_range_at_every_scale() {
-        check_renders_at_every_scale(&native_ids());
-    }
-
-    #[test]
-    #[ignore = "needs canvas-html"]
     fn every_effect_renders_finite_values_in_range_at_every_scale() {
-        check_renders_at_every_scale(&EFFECT_IDS);
+        check_renders_at_every_scale(&native_ids());
     }
 
     /// The same contract, with the inputs the capture effects ask for.
@@ -250,14 +252,8 @@ mod tests {
     }
 
     #[test]
-    fn native_effects_render_finite_values_with_their_inputs() {
-        check_renders_with_inputs(&native_ids());
-    }
-
-    #[test]
-    #[ignore = "needs canvas-html"]
     fn every_effect_renders_finite_values_with_its_inputs() {
-        check_renders_with_inputs(&EFFECT_IDS);
+        check_renders_with_inputs(&native_ids());
     }
 
     /// `init` must only read the properties the effect declares: a props map with
@@ -285,14 +281,8 @@ mod tests {
     }
 
     #[test]
-    fn native_effects_tolerate_missing_and_mistyped_properties() {
-        check_tolerates_junk(&native_ids());
-    }
-
-    #[test]
-    #[ignore = "needs canvas-html"]
     fn every_effect_tolerates_missing_and_mistyped_properties() {
-        check_tolerates_junk(&EFFECT_IDS);
+        check_tolerates_junk(&native_ids());
     }
 
     /// A zero, negative or non-finite `dt` must not panic or produce garbage.
@@ -314,13 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn native_effects_ignore_a_bad_dt() {
-        check_bad_dt(&native_ids());
-    }
-
-    #[test]
-    #[ignore = "needs canvas-html"]
     fn every_effect_ignores_a_bad_dt() {
-        check_bad_dt(&EFFECT_IDS);
+        check_bad_dt(&native_ids());
     }
 }

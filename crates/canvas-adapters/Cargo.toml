@@ -14,6 +14,28 @@ serde_json.workspace = true
 tracing.workspace = true
 hidapi = { version = "2.6", default-features = false, features = ["windows-native"] }
 
+# The X6's feature reports have to go out with their exact length, and hidapi pads every report
+# to the collection's FeatureReportByteLength. windows-sys is already in the lock file through
+# hidapi, and these are the same features hidapi already turns on, so nothing new is compiled.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Devices_HumanInterfaceDevice",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    # The 8BitDo pad's XInput API is loaded at run time (xinput1_4.dll and its friends), so the
+    # crate needs the loader and no import library for it.
+    "Win32_System_LibraryLoader",
+] }
+
 [[example]]
 name = "chione_probe"
+test = true
+
+[[example]]
+name = "x6_probe"
+test = true
+
+[[example]]
+name = "pad_probe"
 test = true

@@ -1,5 +1,6 @@
-//! Statistics for the Poison comparison. Both the original render and the Rust port go
-//! through these same functions, so any difference in the numbers comes from the pixels.
+//! Statistics for the Poison comparison. Both sides (Chromium's render and the Rust
+//! runtime's render) go through these same functions, so any difference in the numbers
+//! comes from the pixels.
 //!
 //! Color distance is CIE76 ΔE (Euclidean distance in CIELAB, D65 white). CIE76 is the
 //! metric the brief allows; CIEDE2000 would track perception more closely but is not needed

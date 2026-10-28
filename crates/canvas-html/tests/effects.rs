@@ -1,56 +1,63 @@
 //! Integration tests for the HTML effect runtime.
 //!
-//! The fixtures are SignalRGB's own Poison effect (copied byte for byte at Luke's
-//! request; see `fixtures/README.md`) and a small effect written for this repo.
+//! The fixtures are written for this repo: `lumen.html` is an effect in the SignalRGB
+//! file format that exercises every engine feature the format needs (see
+//! `fixtures/README.md` for the list), and `generic.html` is a small effect with a
+//! gradient, a rectangle and an arc.
 
 use canvas_html::HtmlEffect;
 use canvas_proto::{Canvas, Effect, Inputs, PropKind, PropValue, Props};
 
-const POISON: &str = include_str!("fixtures/poison.html");
+const LUMEN: &str = include_str!("fixtures/lumen.html");
 const GENERIC: &str = include_str!("fixtures/generic.html");
 
 /// One frame at 60 fps.
 const DT: f32 = 1.0 / 60.0;
 
-/// Poison's declared defaults, as its file states them.
-const POISON_BG: &str = "#130032";
-const POISON_COLORS: [&str; 3] = ["#6000fc", "#b300ff", "#8a42ff"];
-const POISON_SPEED: f64 = 10.0;
+/// Lumen's declared defaults, as its file states them.
+const LUMEN_BG: &str = "#0b1b3a";
+const LUMEN_TINTS: [&str; 3] = ["#19e6ff", "#7a5cff", "#ff5cc8"];
+const LUMEN_SPEED: f64 = 12.0;
 
-/// The properties `tools/poison-compare` compares with.
+/// The background the fixture is compared with: the file's own default is overridden,
+/// the tints are not.
+const COMPARE_BG: &str = "#141a3d";
+/// The speed the fixture is compared with.
+const COMPARE_SPEED: f64 = 35.0;
+
+/// The property values the comparison runs with.
 fn compare_props() -> Props {
     let mut props = Props::new();
     props.insert(
-        "bgColor".to_string(),
-        PropValue::Color("#2d0075".parse().expect("a hex color")),
+        "background".to_string(),
+        PropValue::Color(COMPARE_BG.parse().expect("a hex color")),
     );
     for (key, hex) in [
-        ("color1", POISON_COLORS[0]),
-        ("color2", POISON_COLORS[1]),
-        ("color3", POISON_COLORS[2]),
+        ("tint1", LUMEN_TINTS[0]),
+        ("tint2", LUMEN_TINTS[1]),
+        ("tint3", LUMEN_TINTS[2]),
     ] {
         props.insert(
             key.to_string(),
             PropValue::Color(hex.parse().expect("a hex color")),
         );
     }
-    props.insert("speedRaw".to_string(), PropValue::Number(35.0));
+    props.insert("speed".to_string(), PropValue::Number(COMPARE_SPEED));
     props
 }
 
-/// The seed the thresholded Poison tests run with, so their numbers reproduce.
-const POISON_SEED: u32 = 0x9e37_79b9;
+/// The seed the thresholded tests run with, so their numbers reproduce.
+const LUMEN_SEED: u32 = 0x9e37_79b9;
 
-fn poison() -> HtmlEffect {
-    HtmlEffect::from_source_seeded("poison", POISON, &Props::new(), POISON_SEED)
-        .expect("poison loads")
+fn lumen() -> HtmlEffect {
+    HtmlEffect::from_source_seeded("lumen", LUMEN, &Props::new(), LUMEN_SEED).expect("lumen loads")
 }
 
 #[test]
-fn two_production_instances_of_poison_draw_different_pictures() {
+fn two_production_instances_of_lumen_draw_different_pictures() {
     // `from_source` seeds from entropy, so each activation gets its own sequence.
-    let mut first = HtmlEffect::from_source("poison", POISON, &Props::new()).expect("loads");
-    let mut second = HtmlEffect::from_source("poison", POISON, &Props::new()).expect("loads");
+    let mut first = HtmlEffect::from_source("lumen", LUMEN, &Props::new()).expect("loads");
+    let mut second = HtmlEffect::from_source("lumen", LUMEN, &Props::new()).expect("loads");
     let a = run(&mut first, 120);
     let b = run(&mut second, 120);
     assert!(a.pixels != b.pixels, "two instances drew the same random sequence");
@@ -58,8 +65,8 @@ fn two_production_instances_of_poison_draw_different_pictures() {
 
 #[test]
 fn two_instances_with_the_same_seed_draw_identical_pictures() {
-    let mut first = HtmlEffect::from_source_seeded("poison", POISON, &Props::new(), 7).expect("loads");
-    let mut second = HtmlEffect::from_source_seeded("poison", POISON, &Props::new(), 7).expect("loads");
+    let mut first = HtmlEffect::from_source_seeded("lumen", LUMEN, &Props::new(), 7).expect("loads");
+    let mut second = HtmlEffect::from_source_seeded("lumen", LUMEN, &Props::new(), 7).expect("loads");
     let a = run(&mut first, 120);
     let b = run(&mut second, 120);
     assert!(a.pixels == b.pixels, "the same seed must reproduce the picture");
@@ -107,32 +114,32 @@ fn pixels_near(canvas: &Canvas, target: [u8; 3], tolerance: i32) -> usize {
 // ---------------------------------------------------------------- schema
 
 #[test]
-fn poison_schema_has_five_properties_with_the_declared_defaults() {
-    let effect = poison();
+fn lumen_schema_has_five_properties_with_the_declared_defaults() {
+    let effect = lumen();
     let schema = effect.schema();
 
-    assert_eq!(schema.id, "poison");
-    assert_eq!(schema.name, "Poison");
-    assert_eq!(schema.description, "A test effect.");
-    assert_eq!(schema.properties.len(), 5, "poison declares five properties");
+    assert_eq!(schema.id, "lumen");
+    assert_eq!(schema.name, "Lumen");
+    assert_eq!(schema.description, "Slow rings of light drifting across a dark canvas.");
+    assert_eq!(schema.properties.len(), 5, "lumen declares five properties");
 
     let keys: Vec<&str> = schema.properties.iter().map(|p| p.key.as_str()).collect();
-    assert_eq!(keys, vec!["bgColor", "color1", "color2", "color3", "speedRaw"]);
+    assert_eq!(keys, vec!["background", "tint1", "tint2", "tint3", "speed"]);
 
     // The labels come from the file.
-    assert_eq!(schema.properties[0].label, "Background Color");
+    assert_eq!(schema.properties[0].label, "Background");
     assert_eq!(schema.properties[4].label, "Speed");
 
     // The defaults come from the file too.
     let defaults = schema.defaults();
     assert_eq!(
-        defaults.get("bgColor"),
-        Some(&PropValue::Color(POISON_BG.parse().expect("a hex color")))
+        defaults.get("background"),
+        Some(&PropValue::Color(LUMEN_BG.parse().expect("a hex color")))
     );
     for (key, hex) in [
-        ("color1", POISON_COLORS[0]),
-        ("color2", POISON_COLORS[1]),
-        ("color3", POISON_COLORS[2]),
+        ("tint1", LUMEN_TINTS[0]),
+        ("tint2", LUMEN_TINTS[1]),
+        ("tint3", LUMEN_TINTS[2]),
     ] {
         assert_eq!(
             defaults.get(key),
@@ -140,7 +147,7 @@ fn poison_schema_has_five_properties_with_the_declared_defaults() {
             "{key} default"
         );
     }
-    assert_eq!(defaults.get("speedRaw"), Some(&PropValue::Number(POISON_SPEED)));
+    assert_eq!(defaults.get("speed"), Some(&PropValue::Number(LUMEN_SPEED)));
 
     // Every color property is a color; the speed is a number.
     assert!(matches!(
@@ -159,17 +166,17 @@ fn poison_schema_has_five_properties_with_the_declared_defaults() {
 
 #[test]
 fn default_overrides_replace_the_declared_defaults() {
-    let effect = HtmlEffect::from_source("poison", POISON, &compare_props()).expect("poison loads");
+    let effect = HtmlEffect::from_source("lumen", LUMEN, &compare_props()).expect("lumen loads");
     let defaults = effect.schema().defaults();
     assert_eq!(
-        defaults.get("bgColor"),
-        Some(&PropValue::Color("#2d0075".parse().expect("a hex color")))
+        defaults.get("background"),
+        Some(&PropValue::Color(COMPARE_BG.parse().expect("a hex color")))
     );
-    assert_eq!(defaults.get("speedRaw"), Some(&PropValue::Number(35.0)));
+    assert_eq!(defaults.get("speed"), Some(&PropValue::Number(COMPARE_SPEED)));
     // The colors that were not overridden keep the file's defaults.
     assert_eq!(
-        defaults.get("color1"),
-        Some(&PropValue::Color(POISON_COLORS[0].parse().expect("a hex color")))
+        defaults.get("tint1"),
+        Some(&PropValue::Color(LUMEN_TINTS[0].parse().expect("a hex color")))
     );
 }
 
@@ -193,23 +200,144 @@ fn a_script_that_throws_is_a_script_error() {
     }
 }
 
+// ---------------------------------------------------------------- the deadline
+
+/// An effect whose top-level script never ends.
+const RUNAWAY_LOAD: &str = r##"<head><title>Loop</title></head>
+<body><canvas id="c" width="16" height="16"></canvas></body>
+<script>
+  while (true) {}
+</script>"##;
+
+/// An effect that draws one good frame and then loops for ever.
+const RUNAWAY_FRAME: &str = r##"<head><title>Loop</title></head>
+<body><canvas id="c" width="16" height="16"></canvas></body>
+<script>
+  var ctx = document.getElementById("c").getContext("2d");
+  ctx.fillStyle = "#00ff00";
+  var frame = 0;
+  function draw() {
+    frame++;
+    if (frame === 1) { ctx.fillRect(0, 0, 16, 16); }
+    while (true) {}
+  }
+  window.requestAnimationFrame(draw);
+</script>"##;
+
+#[test]
+fn a_runaway_script_at_the_top_level_is_stopped_at_the_budget() {
+    let started = std::time::Instant::now();
+    let result = HtmlEffect::from_source("loop", RUNAWAY_LOAD, &Props::new());
+    let elapsed = started.elapsed();
+
+    match result {
+        Err(canvas_html::HtmlError::Timeout(message)) => {
+            assert!(
+                message.contains("ran longer than"),
+                "the message names the budget: {message}"
+            );
+            assert!(
+                message.contains(&canvas_html::FRAME_BUDGET_MS.to_string())
+                    || message.contains(&canvas_html::LOAD_BUDGET_MS.to_string()),
+                "the message names the budget that was hit: {message}"
+            );
+        }
+        Err(other) => panic!("expected a timeout, got {other}"),
+        Ok(_) => panic!("a runaway script must not load"),
+    }
+
+    // It was stopped at the budget: not before it, and not long after it.
+    let millis = elapsed.as_millis() as u64;
+    assert!(
+        millis >= canvas_html::LOAD_BUDGET_MS - 200,
+        "it ran for {elapsed:?}, the budget is {} ms",
+        canvas_html::LOAD_BUDGET_MS
+    );
+    assert!(
+        millis <= canvas_html::LOAD_BUDGET_MS + 3_000,
+        "it ran for {elapsed:?}, the budget is {} ms",
+        canvas_html::LOAD_BUDGET_MS
+    );
+}
+
+#[test]
+fn a_runaway_frame_callback_is_stopped_and_the_effect_keeps_running() {
+    let mut effect = HtmlEffect::from_source("loop", RUNAWAY_FRAME, &Props::new()).expect("loads");
+    let mut canvas = Canvas::new(320, 200);
+
+    let started = std::time::Instant::now();
+    effect.update(DT, &mut canvas, &Inputs::default());
+    let elapsed = started.elapsed();
+
+    // The frame was cut off at the budget, not later.
+    let millis = elapsed.as_millis() as u64;
+    assert!(
+        millis >= canvas_html::FRAME_BUDGET_MS - 20,
+        "the frame ran for {elapsed:?}, the budget is {} ms",
+        canvas_html::FRAME_BUDGET_MS
+    );
+    assert!(
+        millis <= canvas_html::FRAME_BUDGET_MS + 2_000,
+        "the frame ran for {elapsed:?}, the budget is {} ms",
+        canvas_html::FRAME_BUDGET_MS
+    );
+
+    // The error is reported once, and it says what happened.
+    assert_eq!(effect.errors().len(), 1, "one distinct error: {:?}", effect.errors());
+    assert!(
+        effect.errors()[0].contains("ran longer than"),
+        "the message names the budget: {:?}",
+        effect.errors()
+    );
+
+    // The update returned, so the engine's loop is not stuck: the next frame runs too.
+    let started = std::time::Instant::now();
+    effect.update(DT, &mut canvas, &Inputs::default());
+    assert!(
+        started.elapsed().as_millis() <= 2_000,
+        "the next frame was stuck too"
+    );
+    // The good frame from before the loop is still on the canvas.
+    assert_eq!(pixels_near(&canvas, [0, 255, 0], 2), 320 * 200, "the good frame was lost");
+}
+
+#[test]
+fn the_fixtures_still_run_inside_the_budget() {
+    // Lumen draws 26 stroked rings over 320x200; generic.html fills the canvas with a
+    // gradient. Neither may come near the frame budget.
+    for (name, html) in [("lumen", LUMEN), ("generic", GENERIC)] {
+        let mut effect = HtmlEffect::from_source(name, html, &Props::new()).expect("loads");
+        let mut canvas = Canvas::new(320, 200);
+        let started = std::time::Instant::now();
+        for _ in 0..30 {
+            effect.update(DT, &mut canvas, &Inputs::default());
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed.as_millis() < 30 * canvas_html::FRAME_BUDGET_MS as u128,
+            "{name} took {elapsed:?} for 30 frames"
+        );
+        assert!(effect.errors().is_empty(), "{name} reported: {:?}", effect.errors());
+    }
+}
+
 // ---------------------------------------------------------------- running
 
 #[test]
-fn poison_runs_600_frames_without_a_js_error() {
-    let mut effect = poison();
+fn lumen_runs_600_frames_without_a_js_error() {
+    let mut effect = lumen();
     let canvas = run(&mut effect, 600);
 
     // No script error was reported in 600 frames.
     assert!(
         effect.errors().is_empty(),
-        "poison reported errors: {:?}",
+        "lumen reported errors: {:?}",
         effect.errors()
     );
     // The canvas is not empty: the effect drew something.
     assert!(
         canvas.pixels.iter().any(|px| px.iter().any(|c| *c > 0.0)),
-        "poison drew nothing"
+        "lumen drew nothing"
     );
 }
 
@@ -271,18 +399,18 @@ fn a_bad_canvas_size_is_a_parse_error() {
 }
 
 #[test]
-fn poison_canvas_is_not_uniform_and_holds_the_palette_colors() {
-    let mut effect = poison();
+fn lumen_canvas_is_not_uniform_and_holds_the_palette_colors() {
+    let mut effect = lumen();
     let canvas = run(&mut effect, 600);
 
     // Not uniform: many different colors on the canvas.
     let distinct = distinct_pixel_count(&canvas);
     assert!(distinct > 10, "the canvas has only {distinct} distinct colors");
 
-    // The palette colors show up. Poison strokes with the colors at 53% alpha over a
+    // The palette colors show up. Lumen strokes with the tints at 80% alpha over a
     // translucent background, so the exact colors are blended; a tolerance of 40 per
     // channel covers the blend.
-    for hex in POISON_COLORS {
+    for hex in LUMEN_TINTS {
         let target: [u8; 3] = {
             let c: canvas_proto::Rgb8 = hex.parse().expect("a hex color");
             [c.r, c.g, c.b]
@@ -293,18 +421,17 @@ fn poison_canvas_is_not_uniform_and_holds_the_palette_colors() {
 }
 
 #[test]
-fn poison_with_speed_zero_draws_the_same_frame_every_time() {
-    let mut effect = poison();
-    // Speed 0 freezes the animation: the squares stop moving.
+fn lumen_with_speed_zero_draws_the_same_frame_every_time() {
+    let mut effect = lumen();
+    // Speed 0 freezes the animation: the rings stop moving and stop growing.
     let mut props = effect.schema().defaults();
-    props.insert("speedRaw".to_string(), PropValue::Number(0.0));
+    props.insert("speed".to_string(), PropValue::Number(0.0));
     effect.init(&props);
 
-    // Poison never moves at speed 0, but each frame strokes the same arcs again, and the
-    // anti-aliased edge pixels take a few hundred frames to saturate (measured: frames 200
-    // to 300 differ by 0 pixels; frames 62 to 100 still differ by up to 38 levels). This is
-    // the original effect's compositing, so the test waits for the picture to settle.
-    let mut canvas = run(&mut effect, 400);
+    // Lumen never moves at speed 0, but each frame strokes the same rings again, and the
+    // anti-aliased edge pixels take a few hundred frames to saturate (the rings are
+    // re-stroked, so the picture settles). The test waits for the picture to settle.
+    let mut canvas = run(&mut effect, 500);
     let first = canvas.pixels.clone();
 
     // The next 60 frames must not change the picture.
@@ -325,12 +452,12 @@ fn poison_with_speed_zero_draws_the_same_frame_every_time() {
 
 #[test]
 fn a_props_change_on_a_live_instance_updates_the_globals() {
-    let mut effect = poison();
-    // Poison paints its background every frame while speed is above 0, so a new background
-    // color shows up in the picture once the frames have replaced the old one.
+    let mut effect = lumen();
+    // Lumen paints its background every frame, so a new background color shows up in
+    // the picture once the frames have replaced the old one.
     let mut props = effect.schema().defaults();
     props.insert(
-        "bgColor".to_string(),
+        "background".to_string(),
         PropValue::Color("#00ff00".parse().expect("a hex color")),
     );
     effect.init(&props);
@@ -350,7 +477,7 @@ fn a_generic_html_effect_works() {
     assert_eq!(schema.name, "Generic Test Effect");
     assert_eq!(schema.properties.len(), 4);
     assert_eq!(
-        schema.defaults().get("speedRaw"),
+        schema.defaults().get("speed"),
         Some(&PropValue::Number(20.0))
     );
     assert_eq!(
@@ -511,10 +638,10 @@ fn every_canvas_method_the_brief_lists_runs_without_error() {
 
 // ---------------------------------------------------------------- compute
 
-/// Times Poison at a canvas of `width` x `height` (the script still sees 320x200; the
+/// Times Lumen at a canvas of `width` x `height` (the script still sees 320x200; the
 /// canvas size is the render scale), and returns the mean microseconds per 60 Hz frame.
-fn poison_us_per_frame(width: u32, height: u32) -> f64 {
-    let mut effect = poison();
+fn lumen_us_per_frame(width: u32, height: u32) -> f64 {
+    let mut effect = lumen();
     let mut canvas = Canvas::new(width, height);
     let inputs = Inputs::default();
 
@@ -530,31 +657,31 @@ fn poison_us_per_frame(width: u32, height: u32) -> f64 {
     }
     let elapsed = start.elapsed();
     let per_frame = elapsed.as_secs_f64() * 1e6 / frames as f64;
-    println!("poison at {width}x{height}: {frames} frames in {elapsed:?}");
-    println!("poison at {width}x{height}: mean {per_frame:.1} us/frame");
-    assert!(effect.errors().is_empty(), "poison reported errors: {:?}", effect.errors());
+    println!("lumen at {width}x{height}: {frames} frames in {elapsed:?}");
+    println!("lumen at {width}x{height}: mean {per_frame:.1} us/frame");
+    assert!(effect.errors().is_empty(), "lumen reported errors: {:?}", effect.errors());
     per_frame
 }
 
-/// The compute budget: Poison at 50% render scale (160x100) must cost at most 1 ms per
+/// The compute budget: Lumen at 50% render scale (160x100) must cost at most 1 ms per
 /// 60 Hz frame in release. Run with
 /// `cargo test -p canvas-html --release --test effects -- --ignored --nocapture`.
 #[test]
 #[ignore = "a release-mode benchmark; run it explicitly"]
-fn poison_frame_cost_at_50_percent() {
-    let per_frame = poison_us_per_frame(160, 100);
+fn lumen_frame_cost_at_50_percent() {
+    let per_frame = lumen_us_per_frame(160, 100);
     assert!(
         per_frame <= 1000.0,
-        "poison costs {per_frame:.1} us/frame at 50%, the budget is 1000 us/frame"
+        "lumen costs {per_frame:.1} us/frame at 50%, the budget is 1000 us/frame"
     );
 }
 
-/// Reference timings: Poison at 100% (320x200) and 25% (80x50). Printed, not asserted.
+/// Reference timings: Lumen at 100% (320x200) and 25% (80x50). Printed, not asserted.
 #[test]
 #[ignore = "a release-mode benchmark; run it explicitly"]
-fn poison_frame_cost_reference_scales() {
-    poison_us_per_frame(320, 200);
-    poison_us_per_frame(80, 50);
+fn lumen_frame_cost_reference_scales() {
+    lumen_us_per_frame(320, 200);
+    lumen_us_per_frame(80, 50);
 }
 
 /// The CIE L*a*b* colour of an sRGB pixel, for ΔE comparisons.
@@ -595,14 +722,14 @@ fn palette_shares(pixels: &[[f32; 3]], palette: &[[f32; 3]]) -> Vec<f32> {
         .collect()
 }
 
-/// Poison at 100% (320x200) against Poison at 50% (160x100), both seeded the same and run
+/// Lumen at 100% (320x200) against Lumen at 50% (160x100), both seeded the same and run
 /// for 600 frames. The 100% picture is box-downsampled to 160x100. Mean RGB per channel
 /// must agree within 3 levels, and the palette shares within 3 percentage points.
 #[test]
-fn poison_at_half_scale_matches_full_scale_statistically() {
+fn lumen_at_half_scale_matches_full_scale_statistically() {
     let props = compare_props();
-    let mut full = HtmlEffect::from_source_seeded("poison", POISON, &props, POISON_SEED).expect("loads");
-    let mut half = HtmlEffect::from_source_seeded("poison", POISON, &props, POISON_SEED).expect("loads");
+    let mut full = HtmlEffect::from_source_seeded("lumen", LUMEN, &props, LUMEN_SEED).expect("loads");
+    let mut half = HtmlEffect::from_source_seeded("lumen", LUMEN, &props, LUMEN_SEED).expect("loads");
 
     let mut full_canvas = Canvas::new(320, 200);
     let mut half_canvas = Canvas::new(160, 100);
@@ -645,10 +772,10 @@ fn poison_at_half_scale_matches_full_scale_statistically() {
     }
 
     let palette: Vec<[f32; 3]> = [
-        props.get("bgColor"),
-        props.get("color1"),
-        props.get("color2"),
-        props.get("color3"),
+        props.get("background"),
+        props.get("tint1"),
+        props.get("tint2"),
+        props.get("tint3"),
     ]
     .iter()
     .map(|v| match v {
@@ -669,19 +796,19 @@ fn poison_at_half_scale_matches_full_scale_statistically() {
     }
 }
 
-/// Writes Poison's picture after `POISON_DUMP_FRAMES` frames (default 600), seed 1000 (the
+/// Writes Lumen's picture after `LUMEN_DUMP_FRAMES` frames (default 600), seed 1000 (the
 /// seed `tools/poison-compare/js/render.mjs` gives its first run), as raw RGB bytes to the
-/// path in `POISON_DUMP`. The Chromium-comparison dump; ignored by default.
+/// path in `LUMEN_DUMP`. The Chromium-comparison dump; ignored by default.
 #[test]
-#[ignore = "writes a comparison dump; set POISON_DUMP"]
-fn dump_poison_seed_1000() {
-    let path = std::env::var("POISON_DUMP").expect("set POISON_DUMP");
-    let frames: usize = std::env::var("POISON_DUMP_FRAMES")
+#[ignore = "writes a comparison dump; set LUMEN_DUMP"]
+fn dump_lumen_seed_1000() {
+    let path = std::env::var("LUMEN_DUMP").expect("set LUMEN_DUMP");
+    let frames: usize = std::env::var("LUMEN_DUMP_FRAMES")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(600);
     let mut effect =
-        HtmlEffect::from_source_seeded("poison", POISON, &compare_props(), 1000).expect("loads");
+        HtmlEffect::from_source_seeded("lumen", LUMEN, &compare_props(), 1000).expect("loads");
     let canvas = run(&mut effect, frames);
     let mut bytes = Vec::with_capacity(canvas.pixels.len() * 3);
     for px in &canvas.pixels {

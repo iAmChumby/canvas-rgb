@@ -32,6 +32,11 @@ pub mod routes {
     pub const EFFECT_THUMBNAIL: &str = "/api/v1/effects/{id}/thumbnail";
     /// `PUT` with `{ "favorite": bool }`.
     pub const EFFECT_FAVORITE: &str = "/api/v1/effects/{id}/favorite";
+    /// `POST` with [`super::ImportEffect`], answers [`super::ImportEffectResponse`]. The daemon
+    /// parses the file before it writes it; a file that does not parse is refused with the
+    /// parser's message and nothing is written. `DELETE` on [`EFFECT`] removes a user effect's
+    /// file (built-ins refuse).
+    pub const EFFECTS_IMPORT: &str = "/api/v1/effects/import";
     pub const LAYOUTS: &str = "/api/v1/layouts";
     pub const LAYOUT: &str = "/api/v1/layouts/{id}";
     /// `PUT` with [`super::SetActiveLayout`].
@@ -51,6 +56,15 @@ pub mod routes {
     pub const DISPLAY: &str = "/api/v1/displays/{id}";
     /// `PUT` with [`super::SetDisplayValue`]: the number a display with `DisplaySource::Api` shows.
     pub const DISPLAY_VALUE: &str = "/api/v1/displays/{id}/value";
+    /// `GET`: every peripheral the adapters see ([`crate::peripheral::PeripheralsResponse`]).
+    pub const PERIPHERALS: &str = "/api/v1/peripherals";
+    /// `GET`: one peripheral's [`crate::peripheral::PeripheralDetail`] (a fresh read from the
+    /// device). `PATCH` with [`crate::props::Props`]: write those keys; refused while config writes
+    /// are off (see [`PERIPHERAL_ACCESS`]), and for unknown or read-only keys, with nothing sent.
+    pub const PERIPHERAL: &str = "/api/v1/peripherals/{id}";
+    /// `PUT` with [`crate::peripheral::PeripheralAccess`]: turn reads and config writes on or off
+    /// for one device, saved. `writes: true` with `reads: false` is a validation error.
+    pub const PERIPHERAL_ACCESS: &str = "/api/v1/peripherals/{id}/access";
     /// `GET` / `PUT` a [`crate::config::Settings`].
     pub const SETTINGS: &str = "/api/v1/settings";
     /// `POST`, no body: dismisses G7's "size your ARGB headers" panel.
@@ -222,6 +236,39 @@ pub struct EffectSummary {
 pub struct EffectsResponse {
     pub effects: Vec<EffectSummary>,
     pub active: Option<String>,
+    /// User effect files in the effects folder that did not parse, so an author sees why.
+    pub failed: Vec<FailedEffect>,
+}
+
+/// A user effect file that did not parse.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct FailedEffect {
+    /// The file name inside the effects folder, e.g. `"my-effect.html"`.
+    pub file: String,
+    /// The parser's message.
+    pub error: String,
+}
+
+/// `POST /effects/import`: a SignalRGB-format HTML effect to add to the effects folder.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ImportEffect {
+    /// The file name to save it as: letters, digits, space, `-`, `_` and `.`, ending in
+    /// `.html`. No folders. The effect's id becomes `html:` + the stem.
+    pub file_name: String,
+    /// The file's contents, at most [`crate::consts::EFFECT_IMPORT_MAX_BYTES`].
+    pub html: String,
+    /// Overwrite a user effect of the same name. Without it, a clash is a conflict.
+    pub replace: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ImportEffectResponse {
+    pub effect: EffectSummary,
+    /// True when an existing file was overwritten.
+    pub replaced: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

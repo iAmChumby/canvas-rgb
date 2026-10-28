@@ -535,6 +535,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -561,6 +562,7 @@ dependencies = [
  "canvas-proto",
  "clap",
  "futures-util",
+ "png",
  "rand 0.8.8",
  "rustfft",
  "serde",
@@ -582,7 +584,6 @@ dependencies = [
 name = "canvas-effects"
 version = "0.1.0"
 dependencies = [
- "canvas-html",
  "canvas-proto",
  "rand 0.8.8",
  "serde",
@@ -2997,7 +2998,7 @@ dependencies = [
 name = "poison-compare"
 version = "0.1.0"
 dependencies = [
- "canvas-effects",
+ "canvas-html",
  "canvas-proto",
 ]
 

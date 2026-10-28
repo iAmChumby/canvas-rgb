@@ -1,7 +1,8 @@
 //! A scratch timing harness for the effects. Not part of the crate's public API.
 //!
-//! Times `update` at 320x200 for every effect in `EFFECT_IDS` order, after a warm-up,
-//! over a fixed frame count, and prints microseconds per update. Run in release only:
+//! Times `update` at 320x200 for every built-in effect, in registry order, after a
+//! warm-up, over a fixed frame count, and prints microseconds per update. Run in release
+//! only:
 //!
 //! `powershell -NoProfile -File tools/with-build-lock.ps1 cargo run --release -p canvas-effects --example timing`
 
@@ -12,8 +13,9 @@ const FRAMES: u32 = 600;
 
 fn main() {
     println!("{:>16} {:>12}", "effect", "us/update");
-    for id in canvas_proto::EFFECT_IDS {
-        let mut e = canvas_effects::create(id).expect(id);
+    for make in canvas_effects::registry() {
+        let mut e = make();
+        let id = e.schema().id;
         let s = e.schema();
         e.init(&s.defaults());
         let mut canvas = Canvas::new(320, 200);

@@ -10,6 +10,7 @@ use canvas_proto::fans::FansStatus;
 use canvas_proto::layout::Layout;
 use canvas_proto::traits::{DeviceAdapter, Engine, FrameSink, PreviewSink};
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -77,6 +78,12 @@ pub struct App {
     pub quit_tx: tokio::sync::mpsc::UnboundedSender<()>,
     /// The user HTML effects found in `%APPDATA%\canvas-rgb\effects\`.
     pub user_effects: Arc<crate::user_effects::UserEffects>,
+    /// The folder the user HTML effects live in. The import writes here and the
+    /// delete removes from here, so both work on the folder the daemon watches.
+    pub effects_dir: PathBuf,
+    /// Held while an effect is imported or deleted, so the two never race each other
+    /// over the same file.
+    pub effect_writes: tokio::sync::Mutex<()>,
     /// The OpenRGB server the daemon started (milestone 1). The quit path stops it.
     pub openrgb_child: Mutex<Option<crate::openrgb_supervisor::ServerProcess>>,
     /// The link to the service. Every fan request goes through it.
@@ -85,6 +92,8 @@ pub struct App {
     pub thumbnails: crate::thumbnail::ThumbnailCache,
     /// The numeric displays: their adapter, what they show, and the task's pacing.
     pub displays: crate::displays::DisplayHub,
+    /// The peripherals: the mouse and the controller, and what the daemon may do with them.
+    pub peripherals: crate::peripherals::PeripheralHub,
 }
 
 /// The fan config the daemon keeps a copy of.
@@ -128,6 +137,7 @@ impl App {
     ) -> Self {
         Self {
             displays: crate::displays::DisplayHub::new(display_adapter),
+            peripherals: crate::peripherals::PeripheralHub::new(Vec::new()),
             store: tokio::sync::RwLock::new(store),
             engine,
             adapter: Arc::new(tokio::sync::Mutex::new(adapter)),
@@ -147,10 +157,25 @@ impl App {
             user_effects: Arc::new(crate::user_effects::UserEffects::new(
                 crate::user_effects::html_builder(),
             )),
+            effects_dir: crate::paths::effects_dir(),
+            effect_writes: tokio::sync::Mutex::new(()),
             openrgb_child: Mutex::new(None),
             pipe: Arc::new(crate::pipe_client::ServicePipe),
             thumbnails: crate::thumbnail::ThumbnailCache::default(),
         }
+    }
+
+    /// Adds the peripheral adapters: the mouse and the controller.
+    ///
+    /// The peripherals are only opened when the owner says so (see [`crate::peripherals`]), so
+    /// building the app opens nothing. The daemon wires in the real adapters; the tests wire
+    /// in fakes.
+    pub fn with_peripherals(
+        mut self,
+        peripherals: Vec<Box<dyn crate::peripherals::Peripheral>>,
+    ) -> Self {
+        self.peripherals = crate::peripherals::PeripheralHub::new(peripherals);
+        self
     }
 
     /// The active layout, if any.

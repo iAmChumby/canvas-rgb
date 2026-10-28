@@ -389,11 +389,12 @@ async fn the_effects_are_listed() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = json(response).await;
     let effects = body.get("effects").and_then(|v| v.as_array()).expect("the effects list");
-    assert_eq!(effects.len(), 12, "there are exactly 12 effects");
+    assert_eq!(effects.len(), 11, "there are exactly 11 built-in effects");
     let ids: Vec<&str> =
         effects.iter().filter_map(|e| e.get("id").and_then(|v| v.as_str())).collect();
-    for id in canvas_proto::EFFECT_IDS {
-        assert!(ids.contains(&id), "{id} is in the list");
+    for make in canvas_effects::registry() {
+        let id = make().schema().id;
+        assert!(ids.contains(&id.as_str()), "{id} is in the list");
     }
 }
 
@@ -429,7 +430,7 @@ fn build_with_user_effect() -> (axum::Router, Arc<App>, TempHome, std::path::Pat
 }
 
 #[tokio::test]
-async fn user_html_effects_are_listed_after_the_twelve_built_ins() {
+async fn user_html_effects_are_listed_after_the_built_ins() {
     let (router, _app, _home, _folder) = build_with_user_effect();
     let response = router
         .oneshot(request("GET", routes::EFFECTS))
@@ -444,11 +445,13 @@ async fn user_html_effects_are_listed_after_the_twelve_built_ins() {
         .iter()
         .filter_map(|e| e.get("id").and_then(|v| v.as_str()).map(str::to_string))
         .collect();
-    assert_eq!(ids.len(), 13);
-    for (i, id) in canvas_proto::EFFECT_IDS.iter().enumerate() {
-        assert_eq!(ids[i], *id, "built-in {i} comes first");
+    let built_ins: Vec<String> =
+        canvas_effects::registry().iter().map(|f| f().schema().id).collect();
+    assert_eq!(ids.len(), built_ins.len() + 1);
+    for (i, id) in built_ins.iter().enumerate() {
+        assert_eq!(&ids[i], id, "built-in {i} comes first");
     }
-    assert_eq!(ids[12], "html:fancy");
+    assert_eq!(ids[built_ins.len()], "html:fancy");
 }
 
 #[tokio::test]
@@ -505,16 +508,16 @@ async fn the_thumbnail_of_solid_has_the_binary_format() {
 }
 
 #[tokio::test]
-async fn the_thumbnail_of_poison_has_the_binary_format() {
+async fn the_thumbnail_of_aurora_has_the_binary_format() {
     let (router, _app, _home) = build();
     let response = router
-        .oneshot(request("GET", "/api/v1/effects/poison/thumbnail"))
+        .oneshot(request("GET", "/api/v1/effects/aurora/thumbnail"))
         .await
         .expect("the router answers");
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = body_bytes(response).await;
     assert_thumbnail_format(&bytes);
-    // Poison is not a flat colour after a second of warm-up.
+    // Aurora is not a flat colour after a second of warm-up.
     let first = &bytes[6..6 + 3];
     assert!(bytes[6..].chunks(3).any(|px| px != first), "the frames are not all one colour");
 }
