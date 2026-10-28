@@ -2,9 +2,14 @@
 .SYNOPSIS
   The elevated half of setup.ps1. Launched once by setup.ps1 (the one UAC prompt). Do not run by hand.
   Downloads nothing: the OpenRGB zip and the PawnIO installer arrive as local files.
+  Binaries come from -PayloadDir (a prebuilt folder with the four exes) or, for a source install,
+  from -RepoRoot (target release folder). -InnoMode is the Inno Setup installer: it has already copied the
+  files into InstallDir and owns the Installed apps entry and the Start menu shortcut.
 #>
 param(
-    [Parameter(Mandatory)][string]$RepoRoot,
+    [string]$RepoRoot = '',
+    [string]$PayloadDir = '',
+    [switch]$InnoMode,
     [Parameter(Mandatory)][string]$InstallDir,
     [Parameter(Mandatory)][string]$OpenRgbZip,
     [ValidateSet('Y', 'N')][string]$DisableSignalRgb = 'N',
@@ -34,21 +39,19 @@ try {
     Say "  OpenRGB zip hash verified: $actual"
 
     # 3. Stop what holds the binaries (upgrade case).
-    $svc = Get-Service -Name $c.ServiceName -ErrorAction SilentlyContinue
-    if ($svc -and $svc.Status -ne 'Stopped') {
-        Stop-Service -Name $c.ServiceName -Force
-        $svc.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
-        Say "  stopped existing service $($c.ServiceName)"
-    }
-    foreach ($n in 'canvas-rgbd', 'canvas-rgb', 'canvas-rgb-cli') {
-        Get-Process -Name $n -ErrorAction SilentlyContinue | ForEach-Object { $_ | Stop-Process -Force; Say "  stopped running $n" }
-    }
+    Stop-CanvasRgbRunning | ForEach-Object { Say $_ }
 
     # 4. Install dir: binaries, shim, OpenRGB.
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-    foreach ($exe in $c.DaemonExe, $c.TrayExe, $c.ServiceExe, $c.CliExe) {
-        Copy-Item -LiteralPath (Join-Path $RepoRoot "target\release\$exe") -Destination (Join-Path $InstallDir $exe) -Force
-        Say "  copied $exe"
+    $source = Resolve-PayloadSource -PayloadDir $PayloadDir -RepoRoot $RepoRoot
+    foreach ($row in (Get-PayloadCopyPlan -SourceDir $source -InstallDir $InstallDir)) {
+        if (-not (Test-Path -LiteralPath $row.From -PathType Leaf)) { throw "missing in the payload: $($row.From)" }
+        if ($row.Copy) {
+            Copy-Item -LiteralPath $row.From -Destination $row.To -Force
+            Say "  copied $($row.Exe)"
+        } else {
+            Say "  $($row.Exe) already in place"
+        }
     }
     $binDir = Join-Path $InstallDir 'bin'
     New-Item -ItemType Directory -Path $binDir -Force | Out-Null
@@ -104,39 +107,51 @@ try {
     Say "  service $($c.ServiceName) is Running"
 
     # 7b. Installed apps entry and Start menu shortcut, so canvas-rgb shows up like any installed app.
-    #     The uninstaller is copied into the install dir so the Uninstall button works without the repo.
-    $unDir = Join-Path $InstallDir $c.UninstallerDir
-    New-Item -ItemType Directory -Path $unDir -Force | Out-Null
-    foreach ($f in 'uninstall.ps1', 'uninstall-elevated.ps1', 'lib.ps1') {
-        Copy-Item -LiteralPath (Join-Path $PSScriptRoot $f) -Destination (Join-Path $unDir $f) -Force
+    #     Script installs write them here. The Inno installer owns both, and the script-made key is removed
+    #     so Settings shows ONE entry (the Inno one is canvas-rgb_is1).
+    $dec = Get-InstallEntryDecision -InnoMode ([bool]$InnoMode)
+    if ($dec.RemoveLegacyEntry) {
+        if (Test-Path -LiteralPath $c.UninstallKey) { Remove-Item -LiteralPath $c.UninstallKey -Recurse -Force; Say '  removed the older script-made Installed apps entry' }
+        $oldUn = Join-Path $InstallDir $c.UninstallerDir
+        if (Test-Path -LiteralPath $oldUn) { Remove-Item -LiteralPath $oldUn -Recurse -Force; Say '  removed the older script uninstaller copy' }
     }
-    $tray = Join-Path $InstallDir $c.TrayExe
-    $version = (Get-Item -LiteralPath $tray).VersionInfo.ProductVersion
-    $sizeKb = [int]((Get-ChildItem -LiteralPath $InstallDir -Recurse -File | Measure-Object Length -Sum).Sum / 1KB)
-    $uninstall = Get-UninstallCommand -InstallDir $InstallDir -UninstallerDir $unDir
-    New-Item -Path $c.UninstallKey -Force | Out-Null
-    $props = [ordered]@{
-        DisplayName = $c.DisplayName; DisplayVersion = $version; Publisher = $c.Publisher
-        DisplayIcon = "$tray,0"; InstallLocation = $InstallDir; UninstallString = $uninstall
-        URLInfoAbout = $c.ProjectUrl; HelpLink = $c.ProjectUrl
-        InstallDate = (Get-Date -Format 'yyyyMMdd')
+    if ($dec.WriteUninstallEntry) {
+        # The uninstaller is copied into the install dir so the Uninstall button works without the repo.
+        $unDir = Join-Path $InstallDir $c.UninstallerDir
+        New-Item -ItemType Directory -Path $unDir -Force | Out-Null
+        foreach ($f in 'uninstall.ps1', 'uninstall-elevated.ps1', 'uninstall-user.ps1', 'lib.ps1') {
+            Copy-Item -LiteralPath (Join-Path $PSScriptRoot $f) -Destination (Join-Path $unDir $f) -Force
+        }
+        $tray = Join-Path $InstallDir $c.TrayExe
+        $version = (Get-Item -LiteralPath $tray).VersionInfo.ProductVersion
+        $sizeKb = [int]((Get-ChildItem -LiteralPath $InstallDir -Recurse -File | Measure-Object Length -Sum).Sum / 1KB)
+        $uninstall = Get-UninstallCommand -InstallDir $InstallDir -UninstallerDir $unDir
+        New-Item -Path $c.UninstallKey -Force | Out-Null
+        $props = [ordered]@{
+            DisplayName = $c.DisplayName; DisplayVersion = $version; Publisher = $c.Publisher
+            DisplayIcon = "$tray,0"; InstallLocation = $InstallDir; UninstallString = $uninstall
+            URLInfoAbout = $c.ProjectUrl; HelpLink = $c.ProjectUrl
+            InstallDate = (Get-Date -Format 'yyyyMMdd')
+        }
+        foreach ($k in $props.Keys) { New-ItemProperty -Path $c.UninstallKey -Name $k -Value $props[$k] -PropertyType String -Force | Out-Null }
+        foreach ($k in 'EstimatedSize', 'NoModify', 'NoRepair') {
+            $v = if ($k -eq 'EstimatedSize') { $sizeKb } else { 1 }
+            New-ItemProperty -Path $c.UninstallKey -Name $k -Value $v -PropertyType DWord -Force | Out-Null
+        }
+        Say "  Installed apps entry: $($c.DisplayName) $version ($sizeKb KB)"
+        $lnk = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) $c.StartMenuShortcut
+        $ws = New-Object -ComObject WScript.Shell
+        $sc = $ws.CreateShortcut($lnk)
+        $sc.TargetPath = $tray; $sc.WorkingDirectory = $InstallDir; $sc.IconLocation = "$tray,0"
+        $sc.Description = 'Lighting, fans and peripherals'
+        $sc.Save()
+        Say "  Start menu shortcut: $lnk"
     }
-    foreach ($k in $props.Keys) { New-ItemProperty -Path $c.UninstallKey -Name $k -Value $props[$k] -PropertyType String -Force | Out-Null }
-    foreach ($k in 'EstimatedSize', 'NoModify', 'NoRepair') {
-        $v = if ($k -eq 'EstimatedSize') { $sizeKb } else { 1 }
-        New-ItemProperty -Path $c.UninstallKey -Name $k -Value $v -PropertyType DWord -Force | Out-Null
-    }
-    Say "  Installed apps entry: $($c.DisplayName) $version ($sizeKb KB)"
-    $lnk = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) $c.StartMenuShortcut
-    $ws = New-Object -ComObject WScript.Shell
-    $sc = $ws.CreateShortcut($lnk)
-    $sc.TargetPath = $tray; $sc.WorkingDirectory = $InstallDir; $sc.IconLocation = "$tray,0"
-    $sc.Description = 'Lighting, fans and peripherals'
-    $sc.Save()
-    Say "  Start menu shortcut: $lnk"
 
     # 8. SignalRGB service (only when the user said Y).
     if ($DisableSignalRgb -eq 'Y') {
+        # The user ticked the box: close SignalRGB itself too, so it lets go of the lights now.
+        Stop-SignalRgbApp | ForEach-Object { Say $_ }
         $info = Get-SignalRgbServiceInfo
         if ($info) {
             $sn = $info.Name

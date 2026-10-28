@@ -23,9 +23,15 @@ $script:CanvasConst = @{
     RestoreFile        = 'signalrgb-restore.json'
     # Installed apps (Settings > Apps) and the Start menu, the Windows convention for an installed app.
     UninstallKey       = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\canvas-rgb'
+    # The key the Inno Setup installer owns (AppId canvas-rgb; Inno always adds the _is1 suffix).
+    InnoUninstallKey   = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\canvas-rgb_is1'
     DisplayName        = 'canvas-rgb'
     Publisher          = 'Luke Edwards'
     ProjectUrl         = 'https://github.com/iAmChumby/canvas-rgb'
+    PawnIoLib          = 'PawnIOLib.dll'
+    PawnIoModules      = @('LpcIO.bin', 'AMDFamily17.bin')
+    PawnIoDriverKey    = 'HKLM:\SYSTEM\CurrentControlSet\Services\PawnIO'
+    PawnIoUrl          = 'https://github.com/namazso/PawnIO'
     StartMenuShortcut  = 'canvas-rgb.lnk'
     UninstallerDir     = 'uninstall'
     MinFreeGb          = 50
@@ -546,4 +552,188 @@ function Get-UninstallPlan {
     $L.Add("  9. remove $($E.InstallDir)\bin from the user PATH")
     $L.Add($(if ($E.PurgeConfig) { "  10. delete $($E.AppDataDir) (-PurgeConfig)" } else { "  10. keep $($E.AppDataDir)" }))
     return $L.ToArray()
+}
+
+# ---------------------------------------------------------------- payload and Inno mode
+
+# Where the four binaries come from. A prebuilt payload directory (the Inno installer) wins; otherwise the
+# repo build output. Pure: no disk access.
+function Resolve-PayloadSource {
+    param([string]$PayloadDir = '', [string]$RepoRoot = '')
+    if ($PayloadDir) { return $PayloadDir }
+    if ($RepoRoot) { return (Join-Path $RepoRoot 'target\release') }
+    throw 'Give -PayloadDir (a prebuilt payload) or -RepoRoot (a source checkout).'
+}
+
+# One row per binary: From, To, Copy. Copy is $false when the source already is the destination (the Inno
+# installer put the files in the install dir itself). Pure: no disk access.
+function Get-PayloadCopyPlan {
+    param([string]$SourceDir, [string]$InstallDir)
+    $c = $script:CanvasConst
+    $same = ([System.IO.Path]::GetFullPath($SourceDir).TrimEnd('\') -ieq [System.IO.Path]::GetFullPath($InstallDir).TrimEnd('\'))
+    foreach ($exe in $c.DaemonExe, $c.TrayExe, $c.ServiceExe, $c.CliExe) {
+        [pscustomobject]@{ Exe = $exe; From = (Join-Path $SourceDir $exe); To = (Join-Path $InstallDir $exe); Copy = (-not $same) }
+    }
+}
+
+# Which machine-wide extras the elevated install writes. The script install owns the Installed apps entry and
+# the Start menu shortcut; the Inno installer owns both (its own uninstall key and [Icons]), and the script
+# removes the older script-made key so Settings shows ONE entry.
+function Get-InstallEntryDecision {
+    param([bool]$InnoMode)
+    [pscustomobject]@{
+        WriteUninstallEntry = -not $InnoMode
+        CopyUninstaller     = -not $InnoMode
+        WriteStartMenu      = -not $InnoMode
+        RemoveLegacyEntry   = $InnoMode
+    }
+}
+
+# What uninstall-elevated removes itself. In Inno mode the Inno uninstaller is the running exe inside the
+# install dir and removes the files, its own key and the shortcut afterwards; the script then only stops
+# and deregisters what Inno knows nothing about. The Inno key is removed in script mode too, so a script
+# uninstall of an Inno-made install leaves no stale entry.
+function Get-UninstallRemovalDecision {
+    param([bool]$InnoMode)
+    [pscustomobject]@{
+        RemoveInstallDir  = -not $InnoMode
+        RemoveScriptEntry = -not $InnoMode
+        RemoveInnoEntry   = -not $InnoMode
+        RemoveShortcut    = -not $InnoMode
+    }
+}
+
+# Stops the service (its shutdown hands the fans to BIOS) and the user processes that hold the binaries.
+# Returns the log lines. A service that will not stop throws: nothing may be replaced under a live service.
+function Stop-CanvasRgbRunning {
+    $c = $script:CanvasConst
+    $out = @()
+    $svc = Get-Service -Name $c.ServiceName -ErrorAction SilentlyContinue
+    if ($svc -and $svc.Status -ne 'Stopped') {
+        Stop-Service -Name $c.ServiceName -Force
+        $svc.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
+        $out += "  stopped existing service $($c.ServiceName)"
+    }
+    foreach ($n in 'canvas-rgbd', 'canvas-rgb', 'canvas-rgb-cli') {
+        Get-Process -Name $n -ErrorAction SilentlyContinue | ForEach-Object { $_ | Stop-Process -Force; $out += "  stopped running $n" }
+    }
+    return $out
+}
+
+# Downloads the locked OpenRGB zip into OutDir and verifies its SHA-256. On a mismatch the file is deleted
+# and this throws; nothing is extracted or run. Returns the zip path.
+function Get-VerifiedOpenRgbZip {
+    param($Lock, [string]$OutDir)
+    New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
+    $zip = Join-Path $OutDir $Lock.File
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    Invoke-WebRequest -Uri $Lock.Url -OutFile $zip -UseBasicParsing
+    $actual = Get-FileSha256Hex -Path $zip
+    if ($actual -ne $Lock.Sha256.ToLowerInvariant()) {
+        Remove-Item -LiteralPath $zip -Force
+        throw "OpenRGB SHA-256 mismatch. expected $($Lock.Sha256) got $actual. Aborted; the download was deleted."
+    }
+    return $zip
+}
+
+# ---------------------------------------------------------------- detection (read-only, used by the Inno wizard)
+
+# Uninstall-key entries whose DisplayName matches -NameLike. Roots are registry paths (tests pass HKCU temp keys).
+function Get-UninstallEntries {
+    param([string[]]$Roots, [string]$NameLike)
+    foreach ($root in $Roots) {
+        if (-not (Test-Path -LiteralPath $root)) { continue }
+        foreach ($k in Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue) {
+            $p = Get-ItemProperty -LiteralPath $k.PSPath -ErrorAction SilentlyContinue
+            if ($p -and $p.PSObject.Properties['DisplayName'] -and ([string]$p.DisplayName) -like $NameLike) {
+                [pscustomobject]@{
+                    DisplayName     = [string]$p.DisplayName
+                    InstallLocation = $(if ($p.PSObject.Properties['InstallLocation']) { [string]$p.InstallLocation } else { '' })
+                }
+            }
+        }
+    }
+}
+
+function Get-DefaultUninstallRoots {
+    return @('HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall',
+             'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall',
+             'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall')
+}
+
+# PawnIO, judged the way canvas-svc itself finds it (crates/canvas-svc/src/pawnio.rs): PawnIOLib.dll in the PawnIO
+# folder (CANVAS_RGB_PAWNIO_HOME, else C:\Program Files\PawnIO) and the two module files in its modules\ folder.
+# The Windows driver registration and the Uninstall entry are the extra signals. Pure given its inputs.
+#   State: Ready        driver registered, PawnIOLib.dll found, both modules present
+#          NeedsModules driver registered, PawnIOLib.dll found, a module file is missing (Missing names them)
+#          NotFound     anything else (including a half-removed install)
+function Get-PawnIoStatus {
+    param([string[]]$HomeCandidates = @(), [bool]$DriverRegistered)
+    $c = $script:CanvasConst
+    $home_ = $null
+    foreach ($h in $HomeCandidates) {
+        if ($h -and (Test-Path -LiteralPath (Join-Path $h $c.PawnIoLib) -PathType Leaf)) { $home_ = $h; break }
+    }
+    $missing = @()
+    if ($home_) {
+        foreach ($m in $c.PawnIoModules) {
+            if (-not (Test-Path -LiteralPath (Join-Path (Join-Path $home_ 'modules') $m) -PathType Leaf)) { $missing += $m }
+        }
+    }
+    $state = 'NotFound'
+    if ($DriverRegistered -and $home_) { $state = $(if ($missing.Count -eq 0) { 'Ready' } else { 'NeedsModules' }) }
+    [pscustomobject]@{ State = $state; Home = $home_; Missing = @($missing); DriverRegistered = $DriverRegistered }
+}
+
+# The real inputs for Get-PawnIoStatus, in the same order the app tries them.
+function Get-PawnIoStatusNow {
+    param([string[]]$UninstallRoots = (Get-DefaultUninstallRoots))
+    $c = $script:CanvasConst
+    $cands = @()
+    if ($env:CANVAS_RGB_PAWNIO_HOME) { $cands += $env:CANVAS_RGB_PAWNIO_HOME }
+    foreach ($e in @(Get-UninstallEntries -Roots $UninstallRoots -NameLike 'PawnIO')) { if ($e.InstallLocation) { $cands += $e.InstallLocation } }
+    $cands += (Join-Path $env:ProgramFiles 'PawnIO')
+    $drv = Test-Path -LiteralPath $c.PawnIoDriverKey
+    return (Get-PawnIoStatus -HomeCandidates $cands -DriverRegistered $drv)
+}
+
+function Test-SignalRgbProcessName {
+    param([string]$Name)
+    return ($Name -match '^(?i)SignalRgb')
+}
+
+# SignalRGB facts. Pure given its inputs.
+#   Installed   its Windows service exists, or an Uninstall entry named SignalRgb, or %LOCALAPPDATA%\VortxEngine exists
+#   AutoStarts  the service is set to Automatic, or a Run value / Startup shortcut of it exists (Find-SignalRgbAutostart)
+#   Running     a process named SignalRgb* is running
+function Get-SignalRgbStatus {
+    param($ServiceInfo, [object[]]$UninstallEntries = @(), [string]$LocalAppData = '',
+          [hashtable]$RunValues = @{}, [string[]]$StartupFiles = @(), [string[]]$ProcessNames = @())
+    $st = if ($ServiceInfo) { [string]$ServiceInfo.StartType } else { '' }
+    $found = Find-SignalRgbAutostart -RunValues $RunValues -StartupFiles $StartupFiles -ServiceStartType $st -ServiceName $(if ($ServiceInfo) { [string]$ServiceInfo.Name } else { '' })
+    $vortx = ($LocalAppData -ne '') -and (Test-Path -LiteralPath (Join-Path $LocalAppData 'VortxEngine'))
+    $installed = [bool]$ServiceInfo -or (@($UninstallEntries).Count -gt 0) -or $vortx
+    $auto = ($st -eq 'Automatic') -or (@($found.RunValues).Count -gt 0) -or (@($found.StartupFiles).Count -gt 0)
+    $running = @($ProcessNames | Where-Object { Test-SignalRgbProcessName -Name $_ }).Count -gt 0
+    [pscustomobject]@{ Installed = $installed; AutoStarts = ($installed -and $auto); Running = $running }
+}
+
+function Get-SignalRgbStatusNow {
+    $sg = Get-SignalRgbServiceInfo
+    return (Get-SignalRgbStatus -ServiceInfo $sg `
+        -UninstallEntries @(Get-UninstallEntries -Roots (Get-DefaultUninstallRoots) -NameLike '*SignalRgb*') `
+        -LocalAppData $env:LOCALAPPDATA -RunValues (Get-RunValueTable) -StartupFiles (Get-UserStartupFiles) `
+        -ProcessNames @(Get-Process -ErrorAction SilentlyContinue | ForEach-Object { $_.ProcessName }))
+}
+
+# Closes the SignalRGB program (tray app, launcher) so it lets go of the lights. Only called when the user ticked the box.
+function Stop-SignalRgbApp {
+    $out = @()
+    foreach ($p in Get-Process -ErrorAction SilentlyContinue) {
+        if (Test-SignalRgbProcessName -Name $p.ProcessName) {
+            $p | Stop-Process -Force -ErrorAction SilentlyContinue
+            $out += "  closed running $($p.ProcessName)"
+        }
+    }
+    return $out
 }

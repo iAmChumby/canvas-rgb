@@ -87,6 +87,12 @@ OpenRGB's SHA-256 before it runs anything.
 Fan control needs the [PawnIO](https://github.com/namazso/PawnIO) driver, which the installer does
 not ship. Pass the PawnIO installer you downloaded with `-PawnIoInstaller`.
 
+A release also ships `canvas-rgb-setup-<version>.exe`, a normal Windows setup wizard (build it with
+`tools\build-installer.ps1`; it needs Inno Setup 6). It is not code-signed, so SmartScreen warns on first
+run. It runs the same installer scripts, looks for SignalRGB and PawnIO first and only asks about what it finds (or misses), and its
+uninstaller hands the fans back to BIOS before it removes any file. Silent switches:
+`/SILENT /SIGNALRGB=Y /PAWNIO="C:\path\PawnIO_setup.exe"`.
+
 `installer\uninstall.ps1` hands every fan back to BIOS, then removes the service, the install
 folder and the startup entries.
 

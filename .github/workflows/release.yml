@@ -1,0 +1,97 @@
+name: Release
+
+# Push a tag like v0.1.0: this builds canvas-rgb-setup-0.1.0.exe and attaches it to the GitHub release.
+# The installer is NOT code-signed, so Windows SmartScreen warns on first run ("Windows protected your PC":
+# More info, then Run anyway). Compare the SHA-256 below with the one in the job log before running it.
+# Every third-party action is pinned to a full commit SHA (tag in the comment). The build job is read-only;
+# only the small upload job holds contents: write.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Tag matches the workspace version
+        shell: pwsh
+        run: |
+          $cargo = Get-Content Cargo.toml -Raw
+          if ($cargo -notmatch '(?ms)\[workspace\.package\].*?^\s*version\s*=\s*"([^"]+)"') { throw 'no workspace version' }
+          $want = "v$($Matches[1])"
+          if ($env:GITHUB_REF_NAME -ne $want) { throw "tag $env:GITHUB_REF_NAME does not match Cargo.toml version $want" }
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/web/package-lock.json
+
+      - run: npm ci
+        working-directory: app/web
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+
+      - name: Installer tests
+        shell: pwsh
+        run: pwsh -NoProfile -File installer/tests/run-all.ps1
+
+      # No Inno Setup action is used: the Chocolatey package is installed directly (see the report: not hash-pinned).
+      - name: Install Inno Setup 6
+        shell: pwsh
+        run: choco install innosetup --version 6.7.1 --no-progress -y # the version the installer was built and tested with locally
+
+      # Web build, cargo release build, payload staging and ISCC, in one script.
+      - name: Build the installer
+        shell: pwsh
+        run: powershell -NoProfile -File tools/build-installer.ps1
+
+      - name: SHA-256
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem dist -Filter 'canvas-rgb-setup-*.exe' | Select-Object -First 1
+          $h = (Get-FileHash -Algorithm SHA256 $exe.FullName).Hash.ToLowerInvariant()
+          Write-Host "$h  $($exe.Name)"
+          "### SHA-256`n`n``$h  $($exe.Name)``" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          Set-Content -Path "dist/$($exe.Name).sha256" -Value "$h  $($exe.Name)" -Encoding ascii
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: installer
+          path: |
+            dist/canvas-rgb-setup-*.exe
+            dist/canvas-rgb-setup-*.exe.sha256
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # the only job that can write to the release
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: installer
+          path: dist
+
+      - name: Checksum still matches
+        run: cd dist && sha256sum -c *.sha256
+
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: |
+            dist/canvas-rgb-setup-*.exe
+            dist/canvas-rgb-setup-*.exe.sha256
+          generate_release_notes: true

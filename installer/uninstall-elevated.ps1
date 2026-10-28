@@ -1,10 +1,13 @@
 <#
 .SYNOPSIS
   The elevated half of uninstall.ps1. Launched once by uninstall.ps1 (the one UAC prompt). Do not run by hand.
+  -InnoMode: the Inno Setup uninstaller runs this first (fans to BIOS before any file goes). It leaves the
+  install dir, the Installed apps entry and the Start menu shortcut to Inno, which removes them next.
 #>
 param(
     [Parameter(Mandatory)][string]$InstallDir,
     [switch]$PurgeConfig,
+    [switch]$InnoMode,
     [Parameter(Mandatory)][string]$LogFile
 )
 
@@ -75,9 +78,11 @@ try {
     # 3. Remove the Installed apps entry, the Start menu shortcut, then the install dir. Leave the
     #    install dir first: the Uninstall button runs this from a copy inside it.
     Set-Location -LiteralPath $env:SystemRoot
-    if (Test-Path -LiteralPath $c.UninstallKey) { Remove-Item -LiteralPath $c.UninstallKey -Recurse -Force; Say '  removed the Installed apps entry' }
+    $rm = Get-UninstallRemovalDecision -InnoMode ([bool]$InnoMode)
+    if ($rm.RemoveScriptEntry -and (Test-Path -LiteralPath $c.UninstallKey)) { Remove-Item -LiteralPath $c.UninstallKey -Recurse -Force; Say '  removed the Installed apps entry' }
+    if ($rm.RemoveInnoEntry -and (Test-Path -LiteralPath $c.InnoUninstallKey)) { Remove-Item -LiteralPath $c.InnoUninstallKey -Recurse -Force; Say '  removed the Inno Installed apps entry' }
     $lnk = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) $c.StartMenuShortcut
-    if (Test-Path -LiteralPath $lnk) { Remove-Item -LiteralPath $lnk -Force; Say '  removed the Start menu shortcut' }
+    if ($rm.RemoveShortcut -and (Test-Path -LiteralPath $lnk)) { Remove-Item -LiteralPath $lnk -Force; Say '  removed the Start menu shortcut' }
     foreach ($n in 'canvas-rgbd', 'canvas-rgb', 'canvas-rgb-cli') {
         Get-Process -Name $n -ErrorAction SilentlyContinue | ForEach-Object { $_ | Stop-Process -Force; Say "  stopped running $n" }
     }
@@ -89,9 +94,16 @@ try {
         $_.ExecutablePath -and $_.ExecutablePath.StartsWith($bundled, [StringComparison]::OrdinalIgnoreCase)
     } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force; Say "  stopped the bundled OpenRGB (pid $($_.ProcessId))" }
     Start-Sleep -Milliseconds 500
-    if (Test-Path -LiteralPath $InstallDir) {
-        Remove-Item -LiteralPath $InstallDir -Recurse -Force
-        Say "  removed $InstallDir"
+    if ($rm.RemoveInstallDir) {
+        if (Test-Path -LiteralPath $InstallDir) {
+            Remove-Item -LiteralPath $InstallDir -Recurse -Force
+            Say "  removed $InstallDir"
+        }
+    } else {
+        # Inno removes the files it installed; the folders this script made (openrgb, bin, uninstall) are
+        # listed in [UninstallDelete]. Clear the bundled OpenRGB here: it is the biggest tree and Inno does not know it.
+        if (Test-Path -LiteralPath $bundled) { Remove-Item -LiteralPath $bundled -Recurse -Force; Say "  removed $bundled" }
+        Say '  install dir, Installed apps entry and Start menu shortcut are left to the Inno uninstaller'
     }
 
     # 4. Restore the SignalRGB service from its record.

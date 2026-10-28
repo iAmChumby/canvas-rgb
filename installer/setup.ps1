@@ -87,16 +87,9 @@ foreach ($exe in $c.DaemonExe, $c.TrayExe, $c.ServiceExe, $c.CliExe) {
 # Download and verify OpenRGB. Nothing is extracted or run before the hash matches.
 $stage = Join-Path $env:TEMP 'canvas-rgb-install'
 New-Item -ItemType Directory -Path $stage -Force | Out-Null
-$zip = Join-Path $stage $lock.File
 Write-Host "download: $($lock.Url)"
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-Invoke-WebRequest -Uri $lock.Url -OutFile $zip -UseBasicParsing
-$actual = Get-FileSha256Hex -Path $zip
-if ($actual -ne $lock.Sha256.ToLowerInvariant()) {
-    Remove-Item -LiteralPath $zip -Force
-    Fail "OpenRGB SHA-256 mismatch. expected $($lock.Sha256) got $actual. Aborted; the download was deleted."
-}
-Write-Host "OpenRGB SHA-256 verified: $actual"
+try { $zip = Get-VerifiedOpenRgbZip -Lock $lock -OutDir $stage } catch { Fail $_.Exception.Message }
+Write-Host "OpenRGB SHA-256 verified: $(Get-FileSha256Hex -Path $zip)"
 
 # ONE elevated child.
 $log = Join-Path $stage 'setup-elevated.log'
@@ -110,42 +103,9 @@ if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log | ForEach-Objec
 if ($p.ExitCode -ne 0) { Fail "Elevated step failed (exit $($p.ExitCode)). Per-user steps were not run." }
 Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
 
-# Per-user steps, unelevated.
-$token = Join-Path $appData $c.TokenFile
-if (Initialize-ApiToken -Path $token) { Write-Host "token: created $token" } else { Write-Host "token: $token exists, left as is" }
-
-$runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-Set-ItemProperty -LiteralPath $runKey -Name $c.RunKeyDaemon -Value ('"{0}"' -f (Join-Path $InstallDir $c.DaemonExe))
-Set-ItemProperty -LiteralPath $runKey -Name $c.RunKeyTray -Value ('"{0}"' -f (Join-Path $InstallDir $c.TrayExe))
-Write-Host "HKCU Run: set $($c.RunKeyDaemon) and $($c.RunKeyTray)"
-
-if ($SignalRgb -eq 'Y') {
-    $restore = Join-Path $appData $c.RestoreFile
-    $backupDir = Join-Path $appData 'signalrgb-startup-backup'
-    $moved = @()
-    foreach ($f in $found.StartupFiles) {
-        New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
-        $dest = Join-Path $backupDir (Split-Path -Leaf $f)
-        $moved += [pscustomobject]@{ name = (Split-Path -Leaf $f); originalPath = $f; backupPath = $dest }
-    }
-    $data = [ordered]@{
-        version = 1; recordedAt = (Get-Date).ToString('o')
-        runValues = @($found.RunValues); startupShortcuts = @($moved)
-    }
-    if (Write-RestoreFile -Path $restore -Data $data -KeepExisting) { Write-Host "recorded SignalRGB autostart in $restore" }
-    else { Write-Host "kept the earlier SignalRGB record in $restore" }
-    foreach ($r in $found.RunValues) {
-        Remove-ItemProperty -LiteralPath $runKey -Name $r.name
-        Write-Host "HKCU Run: removed SignalRGB value $($r.name)"
-    }
-    foreach ($m in $moved) {
-        Move-Item -LiteralPath $m.originalPath -Destination $m.backupPath -Force
-        Write-Host "Startup: moved $($m.originalPath) aside to $($m.backupPath)"
-    }
-}
-
-$bin = Join-Path $InstallDir 'bin'
-if (Set-UserPathEntry -Entry $bin) { Write-Host "PATH: added $bin to the user PATH (open a new terminal)" } else { Write-Host "PATH: $bin already on the user PATH" }
+# Per-user steps, unelevated (setup-user.ps1 is shared with the Inno installer).
+& (Join-Path $PSScriptRoot 'setup-user.ps1') -InstallDir $InstallDir -SignalRgb $SignalRgb
+if (-not $?) { Fail 'The per-user step failed.' }
 
 Write-Host ''
 Write-Host 'setup finished. Check:'

@@ -1,0 +1,499 @@
+; canvas-rgb Windows installer (Inno Setup 6). Built by tools/build-installer.ps1:
+;   ISCC.exe /DAppVersion=0.1.0 /DPayloadDir=<dist\payload> /DOutDir=<dist> canvas-rgb.iss
+;
+; The machine-wide work is NOT done by [Files]/[Registry] here. It is the existing, tested PowerShell
+; (installer\setup-elevated.ps1 -InnoMode, uninstall-elevated.ps1 -InnoMode); this file collects the
+; choices, runs the scripts in a fixed order, and lets Inno own the files, the Start menu shortcut and the
+; one Installed apps entry (canvas-rgb_is1).
+
+#ifndef AppVersion
+  #define AppVersion "0.1.0"
+#endif
+#ifndef PayloadDir
+  #define PayloadDir "..\..\dist\payload"
+#endif
+#define PawnIoUrl "https://github.com/namazso/PawnIO"
+
+#ifndef OutDir
+  #define OutDir "..\..\dist"
+#endif
+
+[Setup]
+; Same AppId as the script install's registry key name. Inno always appends _is1 to the key, so the script
+; install's key (...\Uninstall\canvas-rgb) cannot be adopted; setup-elevated.ps1 -InnoMode removes it.
+AppId=canvas-rgb
+AppName=canvas-rgb
+AppVersion={#AppVersion}
+AppVerName=canvas-rgb {#AppVersion}
+AppPublisher=Luke Edwards
+AppPublisherURL=https://github.com/iAmChumby/canvas-rgb
+AppSupportURL=https://github.com/iAmChumby/canvas-rgb/issues
+AppUpdatesURL=https://github.com/iAmChumby/canvas-rgb/releases
+AppCopyright=Copyright 2026 Luke Edwards
+VersionInfoVersion={#AppVersion}
+DefaultDirName={code:GetDefaultDir}
+UsePreviousAppDir=yes
+DisableProgramGroupPage=yes
+PrivilegesRequired=admin
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
+MinVersion=10.0
+LicenseFile=..\..\LICENSE
+SetupIconFile=..\..\app\src-tauri\icons\icon.ico
+UninstallDisplayIcon={app}\canvas-rgb.exe
+OutputDir={#OutDir}
+OutputBaseFilename=canvas-rgb-setup-{#AppVersion}
+Compression=lzma2/max
+SolidCompression=yes
+WizardStyle=modern
+; setup-elevated.ps1 stops the service, daemon and tray itself; Restart Manager must not touch them.
+CloseApplications=no
+RestartApplications=no
+
+[Languages]
+Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[Files]
+; Prebuilt binaries (target\release, staged by build-installer.ps1) and the installer scripts.
+Source: "{#PayloadDir}\canvas-rgbd.exe";    DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PayloadDir}\canvas-rgb.exe";     DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PayloadDir}\canvas-rgb-svc.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PayloadDir}\canvas-rgb-cli.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PayloadDir}\LICENSE";            DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PayloadDir}\NOTICE";             DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PayloadDir}\installer\*";        DestDir: "{app}\installer"; Flags: ignoreversion
+; Extracted to {tmp} before anything is copied: the pre-install checks (preflight, fetch OpenRGB, stop a running install).
+Source: "{#PayloadDir}\installer\lib.ps1";            DestDir: "{tmp}"; Flags: dontcopy
+Source: "{#PayloadDir}\installer\preflight.ps1";      DestDir: "{tmp}"; Flags: dontcopy
+Source: "{#PayloadDir}\installer\detect.ps1";         DestDir: "{tmp}"; Flags: dontcopy
+Source: "{#PayloadDir}\installer\stop-canvas.ps1";    DestDir: "{tmp}"; Flags: dontcopy
+Source: "{#PayloadDir}\installer\fetch-openrgb.ps1";  DestDir: "{tmp}"; Flags: dontcopy
+Source: "{#PayloadDir}\installer\openrgb.lock.json";  DestDir: "{tmp}"; Flags: dontcopy
+
+[Icons]
+; Same path the script install used (CommonPrograms\canvas-rgb.lnk), so an upgrade replaces it.
+Name: "{autoprograms}\canvas-rgb"; Filename: "{app}\canvas-rgb.exe"; Comment: "Lighting, fans and peripherals"
+
+[UninstallDelete]
+; Made by setup-elevated.ps1 (not by [Files]), so Inno does not know them.
+Type: filesandordirs; Name: "{app}\openrgb"
+Type: filesandordirs; Name: "{app}\bin"
+Type: filesandordirs; Name: "{app}\uninstall"
+
+[Messages]
+; Shown by Inno AFTER InitializeUninstall has already stopped canvas-rgb and handed the fans back.
+ConfirmUninstall=canvas-rgb has stopped running and every fan is back on your motherboard's own settings.%n%nRemove %1 and all of its files?
+
+[Run]
+; Everything else runs from [Code] in a fixed order. This is the only [Run] entry.
+Filename: "{app}\canvas-rgb.exe"; Description: "Launch canvas-rgb"; Flags: nowait postinstall skipifsilent runasoriginaluser; Check: ScriptsOk
+
+[Code]
+const
+  UninstallSubkey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\canvas-rgb';
+
+var
+  SignalRgbPage: TInputOptionWizardPage;
+  PawnChoicePage: TInputOptionWizardPage;
+  PawnFilePage: TInputFileWizardPage;
+  DetPawnIo, DetPawnMissing, DetSgInstalled, DetSgAuto, DetSgRunning: String;
+  FScriptsOk: Boolean;
+  FOpenRgbZip: AnsiString;
+  FFailCode: Integer;       // 0 = ok; else the exit code Setup returns (GetCustomSetupExitCode)
+  FFailText: String;
+  FPurge: String;           // ' -PurgeConfig' or empty
+
+function ScriptsOk: Boolean;
+begin
+  Result := FScriptsOk;
+end;
+
+function GetParam(const Name, Default: String): String;
+var
+  I: Integer;
+  S, Prefix: String;
+begin
+  Result := Default;
+  Prefix := '/' + Uppercase(Name) + '=';
+  for I := 1 to ParamCount do
+  begin
+    S := ParamStr(I);
+    if Pos(Prefix, Uppercase(S)) = 1 then
+    begin
+      Result := Copy(S, Length(Prefix) + 1, MaxInt);
+      Exit;
+    end;
+  end;
+end;
+
+function PsExe: String;
+begin
+  Result := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
+end;
+
+function RunPs(const ScriptPath, Args: String; AsOriginalUser: Boolean; var Code: Integer): Boolean;
+var
+  Params: String;
+begin
+  Params := '-NoProfile -ExecutionPolicy Bypass -File "' + ScriptPath + '" ' + Args;
+  if AsOriginalUser then
+    Result := ExecAsOriginalUser(PsExe, Params, ExpandConstant('{sys}'), SW_HIDE, ewWaitUntilTerminated, Code)
+  else
+    Result := Exec(PsExe, Params, ExpandConstant('{sys}'), SW_HIDE, ewWaitUntilTerminated, Code);
+end;
+
+function LogTail(const LogPath: String): String;
+var
+  Text: AnsiString;
+begin
+  Result := '';
+  if LoadStringFromFile(LogPath, Text) then
+  begin
+    Result := String(Text);
+    if Length(Result) > 1200 then Result := '...' + Copy(Result, Length(Result) - 1199, 1200);
+  end;
+end;
+
+// An existing script install lives where its InstallLocation says. Inno installs are found by UsePreviousAppDir.
+function GetDefaultDir(Param: String): String;
+var
+  Loc: String;
+begin
+  Result := ExpandConstant('{autopf}\canvas-rgb');
+  if RegQueryStringValue(HKLM64, UninstallSubkey, 'InstallLocation', Loc) and (Loc <> '') then
+    Result := Loc;
+end;
+
+// ---- what is already on this PC (detect.ps1, read-only) ----
+
+procedure ReadDetection;
+var
+  Lines: TArrayOfString;
+  I, P, Code: Integer;
+  OutPath, Line: String;
+  Ran: Boolean;
+begin
+  DetPawnIo := 'Unknown';
+  DetPawnMissing := '';
+  DetSgInstalled := 'Unknown';
+  DetSgAuto := '0';
+  DetSgRunning := '0';
+  ExtractTemporaryFile('lib.ps1');
+  ExtractTemporaryFile('detect.ps1');
+  OutPath := ExpandConstant('{tmp}\detect.txt');
+  Ran := False;
+  try
+    // As the logged-in user first: SignalRGB's start-up entries belong to that account.
+    Ran := RunPs(ExpandConstant('{tmp}\detect.ps1'), '-OutFile "' + OutPath + '"', True, Code) and FileExists(OutPath);
+  except
+    Ran := False;
+  end;
+  if not Ran then Ran := RunPs(ExpandConstant('{tmp}\detect.ps1'), '-OutFile "' + OutPath + '"', False, Code) and FileExists(OutPath);
+  if (not Ran) or (not LoadStringsFromFile(OutPath, Lines)) then Exit;
+  for I := 0 to GetArrayLength(Lines) - 1 do
+  begin
+    Line := Lines[I];
+    P := Pos('=', Line);
+    if P = 0 then Continue;
+    if Copy(Line, 1, P - 1) = 'pawnio' then DetPawnIo := Copy(Line, P + 1, MaxInt);
+    if Copy(Line, 1, P - 1) = 'pawnio_missing' then DetPawnMissing := Copy(Line, P + 1, MaxInt);
+    if Copy(Line, 1, P - 1) = 'signalrgb_installed' then
+    begin
+      DetSgInstalled := Copy(Line, P + 1, MaxInt);
+      if DetSgInstalled = '1' then DetSgInstalled := 'Yes'
+      else if DetSgInstalled = '0' then DetSgInstalled := 'No';
+    end;
+    if Copy(Line, 1, P - 1) = 'signalrgb_autostarts' then DetSgAuto := Copy(Line, P + 1, MaxInt);
+    if Copy(Line, 1, P - 1) = 'signalrgb_running' then DetSgRunning := Copy(Line, P + 1, MaxInt);
+  end;
+end;
+
+function PawnIoIsReady: Boolean;
+begin
+  Result := (DetPawnIo = 'Ready') or (DetPawnIo = 'NeedsModules');
+end;
+
+// The silent switches win; in a silent run nothing is taken from the pages (they never showed) and
+// nothing about SignalRGB changes unless /SIGNALRGB=Y is given.
+function GetSignalRgb: String;
+begin
+  Result := 'N';
+  if Uppercase(GetParam('SIGNALRGB', 'N')) = 'Y' then Result := 'Y'
+  else if (not WizardSilent) and (SignalRgbPage <> nil) and (DetSgInstalled <> 'No') and SignalRgbPage.Values[0] then Result := 'Y';
+end;
+
+function GetPawnIoPath: String;
+begin
+  Result := GetParam('PAWNIO', '');
+  if (Result = '') and (not WizardSilent) and (not PawnIoIsReady) and (PawnChoicePage <> nil) and (PawnFilePage <> nil) then
+    if PawnChoicePage.Values[1] then Result := Trim(PawnFilePage.Values[0]);
+end;
+
+procedure OpenPawnIoPageClick(Sender: TObject);
+var
+  Code: Integer;
+begin
+  // Opened as the logged-in user (not with Setup's administrator rights).
+  ExecAsOriginalUser(ExpandConstant('{win}\explorer.exe'), '{#PawnIoUrl}', '', SW_SHOWNORMAL, ewNoWait, Code);
+end;
+
+procedure InitializeWizard;
+var
+  Intro, SgLabel: String;
+  Btn: TNewButton;
+begin
+  ReadDetection;
+
+  // SignalRGB: skipped when it is not installed.
+  Intro := 'Both programs control the same lights, so if both run at once they fight over the colours. ' +
+    'canvas-rgb can stop SignalRGB from starting with Windows. Nothing is uninstalled, and uninstalling canvas-rgb ' +
+    'puts SignalRGB''s start-up setting back the way it was.';
+  if DetSgInstalled = 'Unknown' then
+    Intro := 'We could not check whether SignalRGB is installed on this PC. ' + Intro
+  else if DetSgAuto = '1' then
+    Intro := Intro + #13#10 + #13#10 + 'SignalRGB is set to start with Windows right now.'
+  else
+    Intro := Intro + #13#10 + #13#10 + 'SignalRGB is already set not to start with Windows, so there is nothing to switch off.';
+  SgLabel := 'Stop SignalRGB from starting with Windows';
+  if DetSgRunning = '1' then
+  begin
+    Intro := Intro + #13#10 + #13#10 + 'SignalRGB is running right now. If you tick the box, setup closes it. If you leave it unticked, it keeps running.';
+    SgLabel := SgLabel + ' and close it now';
+  end;
+  SignalRgbPage := CreateInputOptionPage(wpSelectDir, 'SignalRGB is installed on this PC',
+    'Choose what happens to SignalRGB', Intro, False, False);
+  SignalRgbPage.Add(SgLabel);
+  SignalRgbPage.Values[0] := (DetSgAuto = '1') and (DetSgInstalled = 'Yes');
+
+  // Fan control: no question when PawnIO is already there.
+  Intro := 'canvas-rgb can control the fans in your case. To do that it needs a small free driver called PawnIO';
+  if DetPawnIo = 'Unknown' then
+    Intro := Intro + '. We could not check whether it is installed on this PC.'
+  else
+    Intro := Intro + ', which is not installed on this PC yet.';
+  Intro := Intro + ' Without it, lighting and everything else still work, and your fan speeds stay on your motherboard''s ' +
+    'own settings. You can add PawnIO later by running this setup again.';
+  PawnChoicePage := CreateInputOptionPage(SignalRgbPage.ID, 'Fan control', 'Do you want canvas-rgb to control your fans?',
+    Intro, True, False);
+  PawnChoicePage.Add('Skip fan control for now');
+  PawnChoicePage.Add('Set up fan control now, using the PawnIO installer I have downloaded');
+  PawnChoicePage.Values[0] := True;
+  PawnChoicePage.CheckListBox.Height := ScaleY(60);
+  Btn := TNewButton.Create(PawnChoicePage);
+  Btn.Parent := PawnChoicePage.Surface;
+  Btn.Caption := 'Open the PawnIO download page';
+  Btn.Left := 0;
+  Btn.Top := PawnChoicePage.CheckListBox.Top + PawnChoicePage.CheckListBox.Height + ScaleY(12);
+  Btn.Width := ScaleX(200);
+  Btn.Height := ScaleY(26);
+  Btn.OnClick := @OpenPawnIoPageClick;
+
+  PawnFilePage := CreateInputFilePage(PawnChoicePage.ID, 'Choose the PawnIO installer',
+    'Pick the file you downloaded',
+    'Choose the PawnIO installer you downloaded (the file ends in .exe). Setup checks that it is genuinely signed ' +
+    'before it runs it, and refuses it if it is not.');
+  PawnFilePage.Add('PawnIO installer:', 'Programs (*.exe)|*.exe|All files (*.*)|*.*', '.exe');
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := False;
+  if (SignalRgbPage <> nil) and (PageID = SignalRgbPage.ID) then Result := (DetSgInstalled = 'No');
+  if (PawnChoicePage <> nil) and (PageID = PawnChoicePage.ID) then Result := PawnIoIsReady;
+  if (PawnFilePage <> nil) and (PageID = PawnFilePage.ID) then Result := PawnIoIsReady or (not PawnChoicePage.Values[1]);
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+  if (PawnFilePage <> nil) and (CurPageID = PawnFilePage.ID) then
+  begin
+    if Trim(PawnFilePage.Values[0]) = '' then
+    begin
+      MsgBox('Pick the PawnIO installer you downloaded, or go Back and choose to skip fan control for now.', mbError, MB_OK);
+      Result := False;
+    end
+    else if not FileExists(Trim(PawnFilePage.Values[0])) then
+    begin
+      MsgBox('That file does not exist. Pick the PawnIO installer you downloaded, or go Back and choose to skip fan control for now.', mbError, MB_OK);
+      Result := False;
+    end;
+  end;
+end;
+
+function UpdateReadyMemo(Space, NewLine, MemoUserInfoInfo, MemoDirInfo, MemoTypeInfo, MemoComponentsInfo, MemoGroupInfo, MemoTasksInfo: String): String;
+begin
+  Result := MemoDirInfo + NewLine + NewLine + 'Fan control:' + NewLine;
+  if DetPawnIo = 'Ready' then
+    Result := Result + Space + 'Ready. PawnIO is already installed.' + NewLine
+  else if DetPawnIo = 'NeedsModules' then
+    Result := Result + Space + 'PawnIO is installed, but these files canvas-rgb needs for fans are missing: ' + DetPawnMissing +
+      '. Until they are added, fan speeds stay on your motherboard''s own settings.' + NewLine
+  else if GetPawnIoPath <> '' then
+    Result := Result + Space + 'Set up now, using ' + GetPawnIoPath + NewLine
+  else
+    Result := Result + Space + 'Skipped for now. Fan speeds stay on your motherboard''s own settings.' + NewLine;
+
+  Result := Result + NewLine + 'SignalRGB:' + NewLine;
+  if DetSgInstalled = 'No' then
+    Result := Result + Space + 'Not installed on this PC. Nothing to do.' + NewLine
+  else if GetSignalRgb = 'Y' then
+  begin
+    Result := Result + Space + 'Stop it from starting with Windows';
+    if DetSgRunning = '1' then Result := Result + ' and close it now';
+    Result := Result + NewLine;
+  end
+  else
+    Result := Result + Space + 'Leave it as it is.' + NewLine;
+end;
+
+// Before any file is copied: fetch and verify OpenRGB (nothing is changed if this fails), then stop a running install.
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  Code: Integer;
+  Dl, Log, Args: String;
+begin
+  Result := '';
+  Log := ExpandConstant('{tmp}\canvas-rgb-prepare.log');
+  ExtractTemporaryFile('lib.ps1');
+  ExtractTemporaryFile('preflight.ps1');
+  ExtractTemporaryFile('stop-canvas.ps1');
+  ExtractTemporaryFile('fetch-openrgb.ps1');
+  ExtractTemporaryFile('openrgb.lock.json');
+
+  // Every check that can fail early runs here, before any file is copied. A non-empty result stops
+  // Setup on the Preparing to Install page with exit code 7 ("cannot proceed with installation").
+  WizardForm.PreparingLabel.Caption := 'Checking this PC...';
+  Args := '-LogFile "' + Log + '"';
+  if GetPawnIoPath <> '' then Args := Args + ' -PawnIoInstaller "' + GetPawnIoPath + '"';
+  if not RunPs(ExpandConstant('{tmp}\preflight.ps1'), Args, False, Code) or (Code <> 0) then
+  begin
+    Result := 'Setup found a problem before copying anything. Nothing was changed.' + #13#10 + #13#10 + LogTail(Log);
+    Exit;
+  end;
+
+  WizardForm.PreparingLabel.Caption := 'Downloading the lighting component (OpenRGB) and checking it is genuine...';
+  Dl := ExpandConstant('{tmp}\openrgb-dl');
+  if not RunPs(ExpandConstant('{tmp}\fetch-openrgb.ps1'), '-OutDir "' + Dl + '"', False, Code) or (Code <> 0) then
+  begin
+    Result := 'Setup could not download the lighting component (OpenRGB), or it did not pass its safety check (code ' + IntToStr(Code) + '). Nothing was changed. Check your internet connection and run setup again.';
+    Exit;
+  end;
+  if not LoadStringFromFile(Dl + '\zip-path.txt', FOpenRgbZip) then
+  begin
+    Result := 'The lighting component (OpenRGB) download left no file behind. Nothing was changed.';
+    Exit;
+  end;
+
+  WizardForm.PreparingLabel.Caption := 'Closing canvas-rgb if it is running...';
+  if not RunPs(ExpandConstant('{tmp}\stop-canvas.ps1'), '-LogFile "' + Log + '"', False, Code) or (Code <> 0) then
+    Result := 'canvas-rgb is still running in the background and would not stop (code ' + IntToStr(Code) + '). Nothing was changed. ' + LogTail(Log);
+end;
+
+// After the files are in {app}: the elevated machine-wide script, then the per-user script as the logged-in
+// user (ExecAsOriginalUser: HKCU and %APPDATA% belong to the person who started setup), then the daemon.
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  Code: Integer;
+  Log, Args, Pawn: String;
+begin
+  if CurStep <> ssPostInstall then Exit;
+  Log := ExpandConstant('{tmp}\canvas-rgb-setup-elevated.log');
+  Args := '-PayloadDir "' + ExpandConstant('{app}') + '" -InstallDir "' + ExpandConstant('{app}') + '" -InnoMode' +
+          ' -OpenRgbZip "' + Trim(String(FOpenRgbZip)) + '" -DisableSignalRgb ' + GetSignalRgb + ' -LogFile "' + Log + '"';
+  Pawn := GetPawnIoPath;
+  if Pawn <> '' then Args := Args + ' -PawnIoInstaller "' + Pawn + '"';
+
+  WizardForm.StatusLabel.Caption := 'Setting up canvas-rgb to run in the background...';
+  if not RunPs(ExpandConstant('{app}\installer\setup-elevated.ps1'), Args, False, Code) or (Code <> 0) then
+  begin
+    FFailCode := 10;
+    FFailText := 'Setup could not finish installing the background part of canvas-rgb (code ' + IntToStr(Code) + '). It may not be running, and your account settings were not set up. Run this setup again.' + #13#10 + #13#10 + LogTail(Log);
+    SuppressibleMsgBox(FFailText, mbError, MB_OK, IDOK);
+    Exit;
+  end;
+
+  WizardForm.StatusLabel.Caption := 'Setting up canvas-rgb for your account...';
+  Args := '-InstallDir "' + ExpandConstant('{app}') + '" -SignalRgb ' + GetSignalRgb;
+  if not RunPs(ExpandConstant('{app}\installer\setup-user.ps1'), Args, True, Code) or (Code <> 0) then
+  begin
+    FFailCode := 11;
+    FFailText := 'Setup could not set up canvas-rgb for your account (code ' + IntToStr(Code) + '). The background part is installed. Run this setup again to finish.';
+    SuppressibleMsgBox(FFailText, mbError, MB_OK, IDOK);
+    Exit;
+  end;
+  FScriptsOk := True;
+  { The daemon otherwise starts at the next logon (HKCU Run). Start it now, as the user. }
+  ExecAsOriginalUser(ExpandConstant('{app}\canvas-rgbd.exe'), '', ExpandConstant('{app}'), SW_HIDE, ewNoWait, Code);
+end;
+
+// A post-copy failure cannot undo the copied files (Abort there is not documented to exit Setup, and a
+// rollback would delete the exes the service points at). Setup instead ends on a failure page with a
+// non-zero exit code: GetCustomSetupExitCode is called when Setup ran to completion and would return 0.
+function GetCustomSetupExitCode: Integer;
+begin
+  Result := FFailCode;
+end;
+
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if (CurPageID = wpFinished) and (FFailCode <> 0) then
+  begin
+    WizardForm.FinishedHeadingLabel.Caption := 'canvas-rgb setup did not finish';
+    WizardForm.FinishedLabel.Caption := FFailText;
+  end;
+end;
+
+// ---- uninstall: hand the fans to BIOS first, then Inno removes the files ----
+// InitializeUninstall is the documented abort point ("Return False to abort Uninstall, True otherwise").
+// In Inno's source it runs in the elevated second phase (the uninstaller respawns itself elevated, and a
+// non-admin second phase aborts), before any file removal. It runs before Inno's own confirmation, so it
+// asks first, and Inno's confirmation text (see [Messages]) says what has already happened.
+function InitializeUninstall: Boolean;
+var
+  Code: Integer;
+  Log, Args: String;
+begin
+  Result := True;
+  FPurge := '';
+  if UninstallSilent then
+  begin
+    if Uppercase(GetParam('PURGE', 'N')) = 'Y' then FPurge := ' -PurgeConfig';
+  end
+  else
+  begin
+    if MsgBox('Remove canvas-rgb now?' + #13#10 + #13#10 +
+        'First it stops running and gives every fan back to your motherboard''s own settings. If that fails, nothing is deleted.',
+        mbConfirmation, MB_YESNO or MB_DEFBUTTON2) <> IDYES then
+    begin
+      Result := False;
+      Exit;
+    end;
+    if MsgBox('Also delete your canvas-rgb settings and saved fan settings?' + #13#10 +
+        'Choose No to keep them for a later reinstall.', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
+      FPurge := ' -PurgeConfig';
+  end;
+
+  Log := ExpandConstant('{tmp}\canvas-rgb-uninstall-elevated.log');
+  Args := '-InstallDir "' + ExpandConstant('{app}') + '" -InnoMode -LogFile "' + Log + '"' + FPurge;
+  if not RunPs(ExpandConstant('{app}\installer\uninstall-elevated.ps1'), Args, False, Code) or (Code <> 0) then
+  begin
+    if not UninstallSilent then
+      MsgBox('canvas-rgb could not stop running or give the fans back to your motherboard (code ' + IntToStr(Code) + '). Nothing was removed.' + #13#10 + #13#10 +
+        LogTail(Log), mbError, MB_OK);
+    Result := False;
+  end;
+end;
+
+// After Inno's confirmation, before it removes files: the per-user cleanup. ExecAsOriginalUser is not
+// supported at uninstall time, so this runs in the elevated uninstaller (right when the user elevated their own account).
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  Code: Integer;
+begin
+  if CurUninstallStep <> usUninstall then Exit;
+  if not RunPs(ExpandConstant('{app}\installer\uninstall-user.ps1'),
+      '-InstallDir "' + ExpandConstant('{app}') + '"' + FPurge, False, Code) or (Code <> 0) then
+    SuppressibleMsgBox('Cleaning up your account settings did not finish (code ' + IntToStr(Code) + '). The program files are still removed.',
+      mbError, MB_OK, IDOK);
+end;

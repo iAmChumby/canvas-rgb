@@ -69,37 +69,11 @@ if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log | ForEach-Objec
 if ($p.ExitCode -ne 0) { Fail "Elevated step failed (exit $($p.ExitCode)). Per-user steps were not run." }
 Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
 
-# Per-user steps, unelevated.
-$runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-foreach ($n in $c.RunKeyDaemon, $c.RunKeyTray) {
-    if (Get-ItemProperty -LiteralPath $runKey -Name $n -ErrorAction SilentlyContinue) {
-        Remove-ItemProperty -LiteralPath $runKey -Name $n
-        Write-Host "HKCU Run: removed $n"
-    }
-}
-if ($userRestore) {
-    foreach ($r in @($userRestore.runValues)) {
-        Set-ItemProperty -LiteralPath $runKey -Name $r.name -Value $r.data
-        Write-Host "HKCU Run: restored $($r.name)"
-    }
-    foreach ($s in @($userRestore.startupShortcuts)) {
-        if (Test-Path -LiteralPath $s.backupPath) {
-            Move-Item -LiteralPath $s.backupPath -Destination $s.originalPath -Force
-            Write-Host "Startup: restored $($s.originalPath)"
-        }
-    }
-    Remove-Item -LiteralPath $userRestorePath -Force
-    Remove-Item -LiteralPath (Join-Path $appData 'signalrgb-startup-backup') -Recurse -Force -ErrorAction SilentlyContinue
-    Write-Host 'SignalRGB autostart restored; it starts at next logon.'
-}
-$bin = Join-Path $InstallDir 'bin'
-if (Set-UserPathEntry -Entry $bin -Remove) { Write-Host "PATH: removed $bin" } else { Write-Host "PATH: $bin was not on the user PATH" }
-if ($PurgeConfig -and (Test-Path -LiteralPath $appData)) {
-    Remove-Item -LiteralPath $appData -Recurse -Force
-    Write-Host "deleted $appData (-PurgeConfig)"
-} else {
-    Write-Host "kept $appData"
-}
+# Per-user steps, unelevated (uninstall-user.ps1 is shared with the Inno uninstaller).
+$userArgs = @{ InstallDir = $InstallDir }
+if ($PurgeConfig) { $userArgs.PurgeConfig = $true }
+& (Join-Path $PSScriptRoot 'uninstall-user.ps1') @userArgs
+if (-not $?) { Fail 'The per-user step failed.' }
 Write-Host ''
 Write-Host 'uninstall finished.'
 exit 0
