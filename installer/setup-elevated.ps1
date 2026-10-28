@@ -71,7 +71,7 @@ try {
     Initialize-MachineHome -Path $programData -LogFile $LogFile
     Say "  $programData ready"
 
-    # 6. PawnIO from the official installer Luke already downloaded.
+    # 6. PawnIO from the official installer the user already downloaded.
     if ($PawnIoInstaller) {
         if (-not (Test-Path -LiteralPath $PawnIoInstaller)) { throw "PawnIO installer not found: $PawnIoInstaller" }
         $sig = Get-AuthenticodeSignature -LiteralPath $PawnIoInstaller
@@ -103,7 +103,39 @@ try {
     (Get-Service -Name $c.ServiceName).WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
     Say "  service $($c.ServiceName) is Running"
 
-    # 8. SignalRGB service (only when Luke said Y).
+    # 7b. Installed apps entry and Start menu shortcut, so canvas-rgb shows up like any installed app.
+    #     The uninstaller is copied into the install dir so the Uninstall button works without the repo.
+    $unDir = Join-Path $InstallDir $c.UninstallerDir
+    New-Item -ItemType Directory -Path $unDir -Force | Out-Null
+    foreach ($f in 'uninstall.ps1', 'uninstall-elevated.ps1', 'lib.ps1') {
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot $f) -Destination (Join-Path $unDir $f) -Force
+    }
+    $tray = Join-Path $InstallDir $c.TrayExe
+    $version = (Get-Item -LiteralPath $tray).VersionInfo.ProductVersion
+    $sizeKb = [int]((Get-ChildItem -LiteralPath $InstallDir -Recurse -File | Measure-Object Length -Sum).Sum / 1KB)
+    $uninstall = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $unDir 'uninstall.ps1') + '"'
+    New-Item -Path $c.UninstallKey -Force | Out-Null
+    $props = [ordered]@{
+        DisplayName = $c.DisplayName; DisplayVersion = $version; Publisher = $c.Publisher
+        DisplayIcon = "$tray,0"; InstallLocation = $InstallDir; UninstallString = $uninstall
+        URLInfoAbout = $c.ProjectUrl; HelpLink = $c.ProjectUrl
+        InstallDate = (Get-Date -Format 'yyyyMMdd')
+    }
+    foreach ($k in $props.Keys) { New-ItemProperty -Path $c.UninstallKey -Name $k -Value $props[$k] -PropertyType String -Force | Out-Null }
+    foreach ($k in 'EstimatedSize', 'NoModify', 'NoRepair') {
+        $v = if ($k -eq 'EstimatedSize') { $sizeKb } else { 1 }
+        New-ItemProperty -Path $c.UninstallKey -Name $k -Value $v -PropertyType DWord -Force | Out-Null
+    }
+    Say "  Installed apps entry: $($c.DisplayName) $version ($sizeKb KB)"
+    $lnk = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) $c.StartMenuShortcut
+    $ws = New-Object -ComObject WScript.Shell
+    $sc = $ws.CreateShortcut($lnk)
+    $sc.TargetPath = $tray; $sc.WorkingDirectory = $InstallDir; $sc.IconLocation = "$tray,0"
+    $sc.Description = 'Lighting, fans and peripherals'
+    $sc.Save()
+    Say "  Start menu shortcut: $lnk"
+
+    # 8. SignalRGB service (only when the user said Y).
     if ($DisableSignalRgb -eq 'Y') {
         $info = Get-SignalRgbServiceInfo
         if ($info) {

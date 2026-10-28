@@ -43,7 +43,12 @@ try {
         Say "  service $($c.ServiceName) deleted"
     }
 
-    # 3. Remove the install dir.
+    # 3. Remove the Installed apps entry, the Start menu shortcut, then the install dir. Leave the
+    #    install dir first: the Uninstall button runs this from a copy inside it.
+    Set-Location -LiteralPath $env:SystemRoot
+    if (Test-Path -LiteralPath $c.UninstallKey) { Remove-Item -LiteralPath $c.UninstallKey -Recurse -Force; Say '  removed the Installed apps entry' }
+    $lnk = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) $c.StartMenuShortcut
+    if (Test-Path -LiteralPath $lnk) { Remove-Item -LiteralPath $lnk -Force; Say '  removed the Start menu shortcut' }
     foreach ($n in 'canvas-rgbd', 'canvas-rgb', 'canvas-rgb-cli') {
         Get-Process -Name $n -ErrorAction SilentlyContinue | ForEach-Object { $_ | Stop-Process -Force; Say "  stopped running $n" }
     }

@@ -21,6 +21,13 @@ $script:CanvasConst = @{
     RunKeyDaemon       = 'canvas-rgbd'
     RunKeyTray         = 'canvas-rgb'
     RestoreFile        = 'signalrgb-restore.json'
+    # Installed apps (Settings > Apps) and the Start menu, the Windows convention for an installed app.
+    UninstallKey       = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\canvas-rgb'
+    DisplayName        = 'canvas-rgb'
+    Publisher          = 'Luke Edwards'
+    ProjectUrl         = 'https://github.com/iAmChumby/canvas-rgb'
+    StartMenuShortcut  = 'canvas-rgb.lnk'
+    UninstallerDir     = 'uninstall'
     MinFreeGb          = 50
     # Verbatim from the brief (security requirement): SYSTEM and Administrators full control,
     # Users read/execute (0x1200a9), inheritance blocked, owner SYSTEM.
@@ -408,6 +415,7 @@ function Get-SetupPlan {
     } else {
         $L.Add("  11. SignalRGB service left as is")
     }
+    $L.Add("  11b. Installed apps entry $($c.UninstallKey) (name, version, publisher, icon, size; Uninstall runs $($E.InstallDir)\$($c.UninstallerDir)\uninstall.ps1); Start menu shortcut $($c.StartMenuShortcut)")
     $L.Add('')
     $L.Add('Unelevated, after the UAC child returns:')
     $L.Add("  12. create $($E.AppDataDir)\$($c.TokenFile) only if missing (64 lowercase hex from 32 random bytes, current user only)")
@@ -435,7 +443,7 @@ function Get-UninstallPlan {
     $L.Add('ONE UAC prompt: installer/uninstall-elevated.ps1 (Start-Process -Verb RunAs -Wait):')
     $L.Add("  1. FIRST: $($E.InstallDir)\$($c.ServiceExe) --restore-bios (hands every fan header back to BIOS); report its exit code; stop if it fails")
     $L.Add("  2. stop and delete service $($c.ServiceName)$(if ($E.ServiceExists) { '' } else { ' (not installed: skipped)' })")
-    $L.Add("  3. remove $($E.InstallDir)")
+    $L.Add("  3. remove the Installed apps entry and the Start menu shortcut, then $($E.InstallDir)")
     if ($E.MachineRestore -and $E.MachineRestore.service) {
         $L.Add("  4. restore $($E.MachineRestore.service.name) StartType to $($E.MachineRestore.service.startType) (from $($E.ProgramDataDir)\$($c.RestoreFile))")
     } else {
