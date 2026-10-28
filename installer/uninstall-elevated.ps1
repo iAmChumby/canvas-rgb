@@ -47,6 +47,14 @@ try {
     foreach ($n in 'canvas-rgbd', 'canvas-rgb', 'canvas-rgb-cli') {
         Get-Process -Name $n -ErrorAction SilentlyContinue | ForEach-Object { $_ | Stop-Process -Force; Say "  stopped running $n" }
     }
+    # The bundled OpenRGB server, which the service launched as SYSTEM, outlives the service and
+    # holds its DLLs open. Stop only the copy that runs from the install dir: an OpenRGB the owner
+    # runs from anywhere else is left alone.
+    $bundled = Join-Path $InstallDir 'openrgb'
+    Get-CimInstance Win32_Process -Filter "Name='OpenRGB.exe'" | Where-Object {
+        $_.ExecutablePath -and $_.ExecutablePath.StartsWith($bundled, [StringComparison]::OrdinalIgnoreCase)
+    } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force; Say "  stopped the bundled OpenRGB (pid $($_.ProcessId))" }
+    Start-Sleep -Milliseconds 500
     if (Test-Path -LiteralPath $InstallDir) {
         Remove-Item -LiteralPath $InstallDir -Recurse -Force
         Say "  removed $InstallDir"
