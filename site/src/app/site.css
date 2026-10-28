@@ -1,0 +1,646 @@
+/*
+ * The site's own layer. Everything else on this page comes from the editor: its tokens, its
+ * component layer and its hardware skin. This file only lays the editor's parts out on a
+ * page, and it adds no colour of its own: every value here is a token.
+ */
+
+:root {
+  /* The height of the header. The hero fills what is left of the window. */
+  --header-h: 59px;
+}
+
+/* ---------- the page frame ---------- */
+
+.site-main {
+  display: flex;
+  flex-direction: column;
+}
+
+.site-section {
+  width: 100%;
+  max-width: 1160px;
+  margin: 0 auto;
+  padding: var(--s8) var(--s6);
+}
+
+.site-section + .site-section {
+  border-top: 1px solid var(--line);
+}
+
+.site-section-head {
+  max-width: 70ch;
+  margin-bottom: var(--s6);
+}
+
+.site-h2 {
+  font-size: var(--t28);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  line-height: 1.15;
+}
+
+.site-sub {
+  margin-top: var(--s2);
+  color: var(--dim);
+  font-size: var(--t16);
+  text-wrap: pretty;
+}
+
+.site-note {
+  color: var(--mute);
+  font-size: var(--t14);
+  text-wrap: pretty;
+}
+
+/* ---------- the header ---------- */
+
+.site-header {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+/* The signature: a 2 px spectrum line across the top of the window, the same one the editor
+   draws over its own window. It is the only place the full RGB sweep appears. */
+.site-header::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 2px;
+  background: var(--spectrum);
+}
+
+.site-header-inner {
+  display: flex;
+  align-items: center;
+  gap: var(--s4);
+  width: 100%;
+  max-width: 1160px;
+  height: 58px;
+  margin: 0 auto;
+  padding: 0 var(--s6);
+}
+
+.site-brand {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+  color: var(--ink);
+  font-size: var(--t16);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  flex: none;
+}
+
+.site-nav {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.site-nav-link {
+  display: inline-flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: var(--r-md);
+  color: var(--dim);
+  text-decoration: none;
+  font-size: var(--t14);
+  font-weight: 500;
+  transition:
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.site-nav-link:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+
+.site-header-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  margin-left: auto;
+  flex: none;
+}
+
+.site-github {
+  text-decoration: none;
+}
+
+/* The header sits at the top of the window, so its labels open downwards, over the page.
+   The editor's own strip does the same: a label above the control would clip over the top
+   edge of the window. */
+.site-header .tip-bubble {
+  bottom: auto;
+  top: calc(100% + 6px);
+  left: auto;
+  right: 0;
+  transform: none;
+}
+
+/* On a phone the header is two rows, so the label would land on the nav links. It opens
+   under the whole header instead: the header becomes the box the label is placed in. */
+@media (max-width: 720px) {
+  .site-header .tip {
+    position: static;
+  }
+
+  .site-header .tip-bubble {
+    top: calc(100% + 6px);
+    right: var(--s4);
+  }
+}
+
+/* The theme button shows the theme it switches to: a sun in the dark, a moon in the light. */
+.site-theme-sun {
+  display: inline-flex;
+}
+
+.site-theme-moon {
+  display: none;
+}
+
+:root[data-theme="light"] .site-theme-sun {
+  display: none;
+}
+
+:root[data-theme="light"] .site-theme-moon {
+  display: inline-flex;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) .site-theme-sun {
+    display: none;
+  }
+
+  :root:not([data-theme="dark"]) .site-theme-moon {
+    display: inline-flex;
+  }
+}
+
+/* ---------- the hero ---------- */
+
+.site-hero {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-height: calc(100vh - var(--header-h));
+  min-height: calc(100svh - var(--header-h));
+  border-bottom: 1px solid var(--line);
+}
+
+/* The field of light behind the mark. The light is drawn well inside the frame and fades to
+   nothing before it reaches an edge, so there is no box to see. It sits under the words and
+   over the page's own background pattern. */
+.site-hero-field {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.site-hero-inner {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  max-width: 1160px;
+  margin: 0 auto;
+  /* A generous left margin: the hero is a page of its own. */
+  padding: var(--s8) 72px;
+}
+
+/* The mark: the canvas-rgb wordmark, the editor's own, at the size of a headline. The size is
+   capped so the word never runs past the column. */
+.site-hero-wordmark {
+  position: relative;
+  display: block;
+  margin-bottom: var(--s6);
+  font-size: clamp(42px, 12vw, 150px);
+  line-height: 1.05;
+}
+
+/* The easel in the wordmark is drawn for a 16 px rail. At this size its 2 unit strokes would
+   fill the shape in, so they are thinned. */
+.site-hero-wordmark .easel-legs,
+.site-hero-wordmark .easel-back {
+  stroke-width: 0.85;
+}
+
+/* The canvas inside the easel: the spectrum, small and crisp. */
+.site-hero-pane {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+}
+
+.site-h1 {
+  max-width: 16em;
+  font-size: clamp(28px, 3.6vw, 44px);
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  text-wrap: balance;
+}
+
+.site-lead {
+  max-width: 46ch;
+  margin-top: var(--s4);
+  color: var(--dim);
+  font-size: var(--t16);
+  text-wrap: pretty;
+}
+
+.site-hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s3);
+  margin-top: var(--s6);
+}
+
+.site-hero-note {
+  margin-top: var(--s3);
+  color: var(--mute);
+  font-size: var(--t14);
+}
+
+/* ---------- the proof: one row of readouts ---------- */
+
+.site-proof-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s2) var(--s4);
+  margin-bottom: var(--s4);
+}
+
+.site-readout {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--panel);
+}
+
+.site-readout-cell {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  min-width: 0;
+  padding: var(--s4);
+  border-left: 1px solid var(--line);
+}
+
+.site-readout-cell:first-child {
+  border-left: 0;
+}
+
+.site-readout-label {
+  color: var(--mute);
+  font-family: var(--fm);
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.site-readout-values {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  flex-wrap: wrap;
+}
+
+.site-readout-mine {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--s2);
+  color: var(--ink);
+}
+
+.site-readout-led {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--tone);
+}
+
+.site-readout-led[data-tone="mine"] {
+  --tone: var(--ok);
+}
+
+.site-readout-vs {
+  color: var(--mute);
+  font-size: var(--t14);
+}
+
+.site-readout-theirs {
+  color: var(--mute);
+}
+
+.site-proof > .site-note {
+  margin-top: var(--s3);
+}
+
+.site-readout-link {
+  color: var(--dim);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-color: var(--line-2);
+}
+
+.site-readout-link:hover {
+  color: var(--ink);
+}
+
+/* ---------- what it does ---------- */
+
+.site-features {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s6) var(--s8);
+}
+
+.site-feature {
+  min-width: 0;
+  padding-top: var(--s3);
+  border-top: 1px solid var(--line);
+}
+
+.site-feature-title {
+  font-size: var(--t16);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.site-feature-text {
+  margin-top: var(--s2);
+  max-width: 52ch;
+  color: var(--dim);
+  font-size: var(--t15);
+  text-wrap: pretty;
+}
+
+/* ---------- the editor shot ---------- */
+
+.site-shot {
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-lg);
+  background: var(--sunk);
+}
+
+.site-shot img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+/* The pair of screenshots: the one that matches the theme shows, the other one does not.
+   The selector has to be tighter than the one above, or the picture below wins. */
+.site-shot img.site-shot-light {
+  display: none;
+}
+
+:root[data-theme="light"] .site-shot img.site-shot-dark {
+  display: none;
+}
+
+:root[data-theme="light"] .site-shot img.site-shot-light {
+  display: block;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) .site-shot img.site-shot-dark {
+    display: none;
+  }
+
+  :root:not([data-theme="dark"]) .site-shot img.site-shot-light {
+    display: block;
+  }
+}
+
+/* ---------- install ---------- */
+
+.site-install-download {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s3);
+}
+
+.site-install-file {
+  color: var(--mute);
+  font-size: var(--t14);
+}
+
+.site-install-warning {
+  max-width: 62ch;
+  margin-top: var(--s3);
+  color: var(--dim);
+  font-size: var(--t14);
+  text-wrap: pretty;
+}
+
+.site-install-sub {
+  margin: var(--s6) 0 var(--s3);
+  font-size: var(--t16);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.site-install {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  gap: var(--s4);
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .site-install {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.site-code {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  padding: var(--s4);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-lg);
+  background: var(--sunk);
+}
+
+.site-code pre {
+  margin: 0;
+  color: var(--ink);
+  font-family: var(--fm);
+  font-size: var(--t14);
+  line-height: 1.7;
+  /* A phone is narrower than the command, so the line wraps instead of running off. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.site-code-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.site-install-notes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  min-width: 0;
+}
+
+/* ---------- thanks ---------- */
+
+.site-thanks {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+@media (max-width: 760px) {
+  .site-thanks {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.site-thanks-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.site-thanks-name {
+  font-weight: 600;
+}
+
+.site-thanks-name a {
+  color: var(--ink);
+  text-decoration: none;
+  border-bottom: 1px solid var(--line-2);
+}
+
+.site-thanks-name a:hover {
+  border-bottom-color: var(--live);
+}
+
+.site-thanks-note {
+  color: var(--mute);
+  font-size: var(--t14);
+  text-wrap: pretty;
+}
+
+.site-thanks-more {
+  color: var(--mute);
+  font-size: var(--t14);
+}
+
+.site-thanks-more a {
+  color: var(--dim);
+}
+
+/* ---------- the footer ---------- */
+
+.site-footer {
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.site-footer-inner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2) var(--s4);
+  width: 100%;
+  max-width: 1160px;
+  margin: 0 auto;
+  padding: var(--s5) var(--s6);
+  color: var(--mute);
+  font-size: var(--t14);
+}
+
+.site-footer a {
+  color: var(--dim);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-color: var(--line-2);
+}
+
+.site-footer a:hover {
+  color: var(--ink);
+}
+
+/* ---------- phone ---------- */
+
+@media (max-width: 720px) {
+  :root {
+    --header-h: 92px;
+  }
+
+  .site-section {
+    padding: var(--s6) var(--s4);
+  }
+
+  .site-header-inner {
+    flex-wrap: wrap;
+    height: auto;
+    padding-top: var(--s2);
+    padding-bottom: 0;
+    row-gap: 0;
+  }
+
+  .site-nav {
+    order: 3;
+    width: 100%;
+    margin-top: var(--s1);
+    padding-bottom: var(--s1);
+    overflow-x: auto;
+  }
+
+  .site-hero-inner {
+    padding: var(--s6) var(--s4);
+  }
+
+  .site-hero-wordmark {
+    margin-bottom: var(--s5);
+  }
+
+  .site-readout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .site-readout-cell + .site-readout-cell {
+    border-left: 0;
+    border-top: 1px solid var(--line);
+  }
+
+  .site-features {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--s5);
+  }
+
+  .site-footer-inner {
+    padding: var(--s4);
+  }
+}

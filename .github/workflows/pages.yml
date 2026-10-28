@@ -1,0 +1,62 @@
+name: Pages
+
+# The site is a static export of site/, built from the editor's own components. It goes live
+# when the site's files or the editor's source change.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "site/**"
+      - "app/web/src/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            app/web/package-lock.json
+            site/package-lock.json
+
+      # The site imports the editor's components from app/web/src, so the editor's packages
+      # are installed too: the TypeScript in the editor's files resolves React from there.
+      - name: Install the editor's packages
+        run: npm ci
+        working-directory: app/web
+
+      - name: Install the site's packages
+        run: npm ci
+        working-directory: site
+
+      - name: Build the site
+        run: npm --prefix site run build
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/out
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
