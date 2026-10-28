@@ -1,4 +1,5 @@
-//! `POST /api/v1/quit` makes the built daemon exit promptly with code 0 (G3).
+//! `POST /api/v1/quit` makes the built daemon exit promptly with code 0 (G3). Run elevated, the
+//! test instead checks that the daemon refuses to start.
 //!
 //! The test runs the real `canvas-rgbd` binary against a temporary home. The API must
 //! use 127.0.0.1:9430 (the Host check allows only that), so the test refuses to run when
@@ -110,6 +111,14 @@ fn quit_makes_the_daemon_exit_with_code_zero_within_three_seconds() {
         }
         if let Some(status) = daemon.0.try_wait().expect("the child can be polled") {
             let stderr = std::fs::read_to_string(home.0.join("stderr.log")).unwrap_or_default();
+            // An elevated test run (a CI runner is an elevated admin) cannot start the daemon: it
+            // refuses an elevated token by design. Then the refusal itself is what is checked.
+            if canvas_daemon::elevated::is_elevated() {
+                assert!(!status.success(), "an elevated daemon must exit with an error");
+                let expected = canvas_daemon::elevated::ElevatedError.to_string();
+                assert!(stderr.contains(&expected), "expected the elevation refusal, got: {stderr}");
+                return;
+            }
             let logs = daemon_logs(&home.0) + &daemon_logs(&canvas_proto::consts::user_log_dir());
             panic!("the daemon exited before the API answered: {status}
 --- stderr ---
