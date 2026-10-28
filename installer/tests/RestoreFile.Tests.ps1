@@ -63,6 +63,14 @@ try {
         Assert-Equal $f.ServiceStartType 'Automatic'
     }
 
+    Test-Case 'Find-SignalRgbAutostart and Get-SignalRgbStatus survive an empty Startup folder (no files reaches them as $null)' {
+        function Get-NoFiles { return @() }   # what Get-UserStartupFiles returns for an empty folder
+        $f = Find-SignalRgbAutostart -RunValues @{} -StartupFiles (Get-NoFiles) -ServiceStartType ''
+        Assert-Equal @($f.StartupFiles).Count 0
+        $s = Get-SignalRgbStatus -ServiceInfo $null -StartupFiles (Get-NoFiles)
+        Assert-True (-not $s.Installed) 'nothing found'
+    }
+
     Test-Case 'Find-SignalRgbAutostart finds nothing in an unrelated environment' {
         $f = Find-SignalRgbAutostart -RunValues @{ 'Steam' = 'steam.exe' } -StartupFiles @('a.lnk')
         Assert-Equal @($f.RunValues).Count 0

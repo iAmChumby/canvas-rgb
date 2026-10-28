@@ -303,7 +303,8 @@ function Find-SignalRgbAutostart {
             $runHits += [pscustomobject]@{ name = $name; data = $data }
         }
     }
-    $startupHits = @($StartupFiles | Where-Object { (Split-Path -Leaf $_) -match '(?i)SignalRgb' })
+    # An empty Startup folder reaches here as $null, which still runs the filter once: skip empty entries.
+    $startupHits = @($StartupFiles | Where-Object { $_ -and ((Split-Path -Leaf $_) -match '(?i)SignalRgb') })
     return [pscustomobject]@{
         RunValues        = @($runHits)
         StartupFiles     = $startupHits
