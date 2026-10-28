@@ -523,3 +523,114 @@ fn a_system_fan_is_driven_through_the_msi_am5_registers() {
     assert!(r.chip.manual(SYS_FAN1));
     assert_eq!(r.chip.duty_raw(SYS_FAN1), 128);
 }
+
+/// Delegates to a real driver but can be told to fail every `set_manual(.., false)`.
+struct FlakyHandback {
+    inner: Nct6687<FakeChip>,
+    fail: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl FanChip for FlakyHandback {
+    fn chip_name(&self) -> String {
+        self.inner.chip_name()
+    }
+    fn map_name(&self) -> &'static str {
+        self.inner.map_name()
+    }
+    fn channels(&self) -> &'static [crate::chip::Channel] {
+        self.inner.channels()
+    }
+    fn board_sensor_names(&self) -> &'static [&'static str] {
+        self.inner.board_sensor_names()
+    }
+    fn read_rpm(&mut self, channel: usize) -> std::io::Result<Option<u32>> {
+        self.inner.read_rpm(channel)
+    }
+    fn read_duty_percent(&mut self, channel: usize) -> std::io::Result<Option<u8>> {
+        self.inner.read_duty_percent(channel)
+    }
+    fn read_manual(&mut self, channel: usize) -> std::io::Result<bool> {
+        self.inner.read_manual(channel)
+    }
+    fn set_manual(&mut self, channel: usize, manual: bool) -> std::io::Result<()> {
+        if !manual && self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(std::io::Error::other("injected hand-back failure"));
+        }
+        self.inner.set_manual(channel, manual)
+    }
+    fn write_duty_percent(&mut self, channel: usize, percent: u8) -> std::io::Result<()> {
+        self.inner.write_duty_percent(channel, percent)
+    }
+    fn read_board_temp(&mut self, name: &str) -> std::io::Result<Option<f32>> {
+        self.inner.read_board_temp(name)
+    }
+}
+
+#[test]
+fn a_failed_handback_keeps_bios_state_json_for_the_next_start() {
+    let t0 = Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let chip = FakeChip::new(MSI_ALT1_MAP);
+    let fail = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let boxed: Box<dyn FanChip> =
+        Box::new(FlakyHandback { inner: Nct6687::detect(chip.clone(), MSI_ALT1_MAP).unwrap(), fail: fail.clone() });
+    let temps: BTreeMap<TempSource, Box<dyn TempReader>> =
+        BTreeMap::from([(TempSource::Cpu, Box::new(FakeTemp::new(40.0)) as Box<dyn TempReader>)]);
+    let mut fans = FanController::new(dir.path().to_path_buf(), Some(boxed), None, temps, FansFile::default(), confirmed());
+    fans.startup(t0);
+    fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 50 }, t0).unwrap();
+    let path = paths::bios_state_path(dir.path());
+    assert!(path.exists(), "the record exists while sys_fan1 is manual");
+
+    fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    fans.restore_all("test stop");
+    assert!(chip.manual(SYS_FAN1), "the injected failure left sys_fan1 manual");
+    assert!(path.exists(), "bios-state.json must survive a failed hand-back");
+
+    // A later restore that succeeds clears it.
+    fail.store(false, std::sync::atomic::Ordering::SeqCst);
+    fans.restore_all("test retry");
+    assert!(!chip.manual(SYS_FAN1));
+    assert!(!path.exists(), "a fully successful restore removes the record");
+}
+
+fn recorded_state_file(dir: &TempDir) -> std::path::PathBuf {
+    let path = paths::bios_state_path(dir.path());
+    let mut state = store::BiosState::default();
+    state
+        .headers
+        .insert("sys_fan1".into(), store::SavedHeader { manual: false, duty_percent: Some(40) });
+    store::save_bios_state(&path, &state).unwrap();
+    path
+}
+
+#[test]
+fn with_no_chip_the_recorded_bios_state_is_kept() {
+    let t0 = Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let path = recorded_state_file(&dir);
+    let temps: BTreeMap<TempSource, Box<dyn TempReader>> = BTreeMap::new();
+    let mut fans = FanController::new(dir.path().to_path_buf(), None, None, temps, FansFile::default(), confirmed());
+    fans.startup(t0);
+    fans.restore_all("test stop");
+    assert!(path.exists(), "nothing was handed back, so the record must stay");
+}
+
+#[test]
+fn a_failed_startup_restore_does_not_apply_the_profile() {
+    let t0 = Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let path = recorded_state_file(&dir);
+    let chip = FakeChip::new(MSI_ALT1_MAP);
+    let fail = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let boxed: Box<dyn FanChip> =
+        Box::new(FlakyHandback { inner: Nct6687::detect(chip.clone(), MSI_ALT1_MAP).unwrap(), fail });
+    let mut config = FansFile::default();
+    config.profiles[0].headers.insert("sys_fan1".into(), FanMode::Fixed { percent: 60 });
+    let temps: BTreeMap<TempSource, Box<dyn TempReader>> =
+        BTreeMap::from([(TempSource::Cpu, Box::new(FakeTemp::new(40.0)) as Box<dyn TempReader>)]);
+    let mut fans = FanController::new(dir.path().to_path_buf(), Some(boxed), None, temps, config, confirmed());
+    fans.startup(t0);
+    assert!(path.exists(), "record kept");
+    assert!(!chip.manual(SYS_FAN1), "no profile may take a header while the hand-back is failing");
+}

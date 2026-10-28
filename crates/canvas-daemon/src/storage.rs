@@ -38,6 +38,9 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(bytes)?;
         f.flush()?;
+        // flush is not fsync: without sync_all a power loss after the rename can leave the
+        // target empty. The service's store.rs does the same.
+        f.sync_all()?;
     }
     match std::fs::rename(&tmp, path) {
         Ok(()) => Ok(()),

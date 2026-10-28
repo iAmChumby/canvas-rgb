@@ -692,6 +692,11 @@ fn refuse(message: impl Into<String>) -> AdapterError {
     AdapterError::Protocol(message.into())
 }
 
+/// A HID I/O failure (an unplugged pad), as opposed to a pad that is merely silent.
+fn io_failure(message: impl Into<String>) -> AdapterError {
+    AdapterError::Io(std::io::Error::other(message.into()))
+}
+
 fn join_error(e: tokio::task::JoinError) -> AdapterError {
     refuse(format!("the pad blocking task failed: {e}"))
 }
@@ -752,12 +757,12 @@ fn read_image(vendor: &mut dyn VendorTransport, pace: Pace) -> Result<Vec<u8>, A
         for attempt in 1..=ATTEMPTS {
             vendor
                 .send_report(&request)
-                .map_err(|e| refuse(format!("the read request for chunk {offset:#x} failed: {e}")))?;
+                .map_err(|e| io_failure(format!("the read request for chunk {offset:#x} failed: {e}")))?;
             for _ in 0..POLLS {
                 let mut buf = [0u8; codec::REPORT_LEN];
                 let n = vendor
                     .read_input(&mut buf, pace.poll_ms)
-                    .map_err(|e| refuse(format!("the reply to chunk {offset:#x} failed: {e}")))?;
+                    .map_err(|e| io_failure(format!("the reply to chunk {offset:#x} failed: {e}")))?;
                 if n == 0 {
                     continue;
                 }
@@ -955,6 +960,8 @@ pub struct EightBitDoUltimate2 {
     opener: Arc<dyn Opener>,
     xinput: Arc<dyn XInputSource>,
     personality: Option<Personality>,
+    /// The personality the open handles were opened for.
+    bound: Option<Personality>,
     vendor: Option<Box<dyn VendorTransport>>,
     gamepad: Option<Box<dyn InputTransport>>,
     /// False until a caller turns config writes on. Nothing is written to the hardware while it
@@ -980,6 +987,7 @@ impl EightBitDoUltimate2 {
             opener: Arc::new(HidOpener),
             xinput: Arc::new(SystemXInput),
             personality: None,
+            bound: None,
             vendor: None,
             gamepad: None,
             writes_enabled: false,
@@ -1143,6 +1151,7 @@ impl EightBitDoUltimate2 {
     /// The read itself: the whole profile image, 36 chunks.
     async fn read_props(&mut self, device: &DeviceId) -> Result<Props, AdapterError> {
         self.check_id(device)?;
+        self.rebind_if_personality_changed().await?;
         let Some(mut vendor) = self.vendor.take() else {
             return Err(self.not_connected());
         };
@@ -1154,10 +1163,44 @@ impl EightBitDoUltimate2 {
         .await
         .map_err(join_error)?;
         self.vendor = Some(vendor);
-        let image = result?;
+        let image = match result {
+            Ok(image) => image,
+            Err(e) => {
+                // An I/O failure means the handle is dead (unplugged pad): close it, so the next
+                // read opens a fresh one. Silence from an asleep pad keeps the handle.
+                if matches!(e, AdapterError::Io(_)) {
+                    self.vendor = None;
+                    self.gamepad = None;
+                    self.image = None;
+                    self.bound = None;
+                }
+                return Err(e);
+            }
+        };
         let props = props_from_image(&image).map_err(refuse)?;
         self.image = Some(image);
         Ok(props)
+    }
+
+    /// The handle is bound to the personality present when it was opened. When the pad has
+    /// since changed personality (the receiver was idle at boot and the pad linked later),
+    /// that handle hears nothing: close it and open the current one.
+    async fn rebind_if_personality_changed(&mut self) -> Result<(), AdapterError> {
+        if self.vendor.is_none() && self.gamepad.is_none() {
+            return Ok(());
+        }
+        let opener = self.opener.clone();
+        let present = tokio::task::spawn_blocking(move || opener.personalities().first().copied())
+            .await
+            .map_err(join_error)?;
+        if present.is_some() && present != self.bound {
+            self.vendor = None;
+            self.gamepad = None;
+            self.image = None;
+            self.bound = None;
+            self.connect().await?;
+        }
+        Ok(())
     }
 
     /// Why the adapter cannot talk to the pad.
@@ -1448,6 +1491,7 @@ impl PeripheralAdapter for EightBitDoUltimate2 {
         .map_err(join_error)??;
         self.vendor = vendor;
         self.gamepad = gamepad;
+        self.bound = Some(personality);
         if self.vendor.is_none() && self.gamepad.is_none() {
             return Err(self.not_connected());
         }
@@ -1457,6 +1501,7 @@ impl PeripheralAdapter for EightBitDoUltimate2 {
     async fn disconnect(&mut self) -> Result<(), AdapterError> {
         self.vendor = None;
         self.gamepad = None;
+        self.bound = None;
         self.image = None;
         self.last_xinput = None;
         Ok(())
@@ -1518,6 +1563,8 @@ mod tests {
         /// The collections the fake can open.
         collections: Vec<String>,
         opens: u32,
+        /// Makes every vendor read fail with an I/O error, as an unplugged pad does.
+        fail_io: bool,
         /// How the fake answers a write chunk (request word 1).
         write_ack: Ack,
         /// How the fake answers the commit (request word 6).
@@ -1537,7 +1584,9 @@ mod tests {
     }
 
     struct FakeOpener(Arc<Mutex<Shared>>);
-    struct FakeVendor(Arc<Mutex<Shared>>);
+    /// A vendor handle bound to the collection of one personality; it only hears the pad while
+    /// that personality is the one present.
+    struct FakeVendor(Arc<Mutex<Shared>>, Personality);
     struct FakeGamepad(Arc<Mutex<Shared>>);
 
     /// An XInput API that has nothing in it, so a test never depends on what is plugged in.
@@ -1556,6 +1605,12 @@ mod tests {
     impl InputTransport for FakeVendor {
         fn read_input(&mut self, buf: &mut [u8], _timeout_ms: i32) -> Result<usize, String> {
             let mut s = self.0.lock().unwrap();
+            if s.fail_io {
+                return Err("the device is gone".into());
+            }
+            if s.personalities.first() != Some(&self.1) {
+                return Ok(0);
+            }
             let queued = s.queued.pop_front();
             match queued {
                 Some(Some(bytes)) => {
@@ -1649,14 +1704,14 @@ mod tests {
 
         fn open_vendor(
             &self,
-            _personality: Personality,
+            personality: Personality,
         ) -> Result<Option<Box<dyn VendorTransport>>, String> {
             let mut s = self.0.lock().unwrap();
             if s.personalities.is_empty() {
                 return Ok(None);
             }
             s.opens += 1;
-            Ok(Some(Box::new(FakeVendor(self.0.clone()))))
+            Ok(Some(Box::new(FakeVendor(self.0.clone(), personality))))
         }
 
         fn open_gamepad(
@@ -1750,6 +1805,44 @@ mod tests {
         assert_eq!(s.lock().unwrap().opens, 1, "a second connect is a no-op");
         a.disconnect().await.unwrap();
         assert!(!a.is_connected());
+    }
+
+    #[tokio::test]
+    async fn a_handle_opened_in_the_idle_personality_is_replaced_when_the_pad_wakes() {
+        let (mut a, s) = rig();
+        s.lock().unwrap().personalities = vec![Personality::Idle];
+        a.connect().await.unwrap();
+        // The pad links up: the receiver now shows the XInput personality.
+        s.lock().unwrap().personalities = vec![Personality::XInput];
+        let id = a.device_id();
+        let props = a.read_settings(&id).await;
+        assert!(props.is_ok(), "the read must reopen on the new personality: {props:?}");
+        assert_eq!(s.lock().unwrap().opens, 2, "one open per personality");
+    }
+
+    #[tokio::test]
+    async fn a_silent_pad_keeps_its_handle() {
+        let (mut a, s) = rig();
+        a.connect().await.unwrap();
+        s.lock().unwrap().image.clear(); // the fake stops answering: every poll returns 0 bytes
+        let id = a.device_id();
+        assert!(a.read_settings(&id).await.is_err());
+        assert!(a.is_connected(), "an asleep pad is silence, not a dead handle");
+        assert_eq!(s.lock().unwrap().opens, 1, "no reopen churn");
+    }
+
+    #[tokio::test]
+    async fn a_hid_failure_closes_the_handle_so_the_next_read_reopens() {
+        let (mut a, s) = rig();
+        a.connect().await.unwrap();
+        s.lock().unwrap().fail_io = true;
+        let id = a.device_id();
+        assert!(a.read_settings(&id).await.is_err());
+        assert!(!a.is_connected(), "a dead handle must not stay open");
+        s.lock().unwrap().fail_io = false;
+        a.connect().await.unwrap();
+        assert!(a.read_settings(&id).await.is_ok());
+        assert_eq!(s.lock().unwrap().opens, 2);
     }
 
     // -------------------------------------------------------------------------------- describe

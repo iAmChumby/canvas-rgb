@@ -21,6 +21,13 @@ use tokio::task::JoinHandle;
 
 use crate::protocol::*;
 
+/// Most controllers one OpenRGB server may report. The count comes off the wire, so it is
+/// capped before it sizes an allocation or a request loop.
+const MAX_CONTROLLERS: u32 = 1024;
+/// Most LEDs one controller may report. UPDATE_LEDS carries a u16 count, so a larger device
+/// could not be written anyway.
+const MAX_LEDS_PER_CONTROLLER: u64 = u16::MAX as u64;
+
 /// How long a request waits for its reply before the call fails.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 const ZONE_TYPE_SINGLE: i32 = 0;
@@ -211,10 +218,21 @@ impl OpenRgbAdapter {
         let version = self.protocol_version();
         let count_reply = self.request(0, REQUEST_CONTROLLER_COUNT, &[]).await?;
         let count = read_u32(&count_reply, "controller count")?;
+        if count > MAX_CONTROLLERS {
+            return Err(AdapterError::Protocol(format!(
+                "OpenRGB reports {count} controllers; the limit is {MAX_CONTROLLERS}")));
+        }
         let mut controllers = Vec::with_capacity(count as usize);
         for index in 0..count {
             let payload = self.request(index, REQUEST_CONTROLLER_DATA, &version.to_le_bytes()).await?;
-            controllers.push(Controller { index, wire: WireController::decode(&payload, version)? });
+            let wire = WireController::decode(&payload, version)?;
+            let leds: u64 = wire.zones.iter().map(|zone| u64::from(zone.leds_count)).sum();
+            if leds > MAX_LEDS_PER_CONTROLLER {
+                // One absurd controller must not hide the others: skip it.
+                tracing::warn!(index, leds, "skipping an OpenRGB controller over the LED limit of {MAX_LEDS_PER_CONTROLLER}");
+                continue;
+            }
+            controllers.push(Controller { index, wire });
         }
         let mut session = guard(&self.link.session);
         if session.connected {
@@ -461,5 +479,79 @@ fn device_kind(value: i32) -> DeviceKind {
         8 => DeviceKind::Headset,
         16 => DeviceKind::Microphone,
         _ => DeviceKind::Other,
+    }
+}
+
+// ---- hostile OpenRGB listener: wire sizes must not drive allocation or arithmetic
+
+#[cfg(test)]
+mod hostile_tests {
+    use crate::openrgb::OpenRgbAdapter;
+    use crate::protocol::*;
+    use canvas_proto::DeviceAdapter;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Answers the handshake, then `controller_count` and `controller_data` as given.
+    async fn serve(count: u32, data: Vec<Vec<u8>>) -> u16 {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            loop {
+                let mut header = [0u8; HEADER_LEN];
+                if stream.read_exact(&mut header).await.is_err() {
+                    return;
+                }
+                let (device, id, size) = decode_header(&header).unwrap();
+                let mut payload = vec![0u8; size];
+                if stream.read_exact(&mut payload).await.is_err() {
+                    return;
+                }
+                let reply = match id {
+                    REQUEST_PROTOCOL_VERSION => 5u32.to_le_bytes().to_vec(),
+                    REQUEST_CONTROLLER_COUNT => count.to_le_bytes().to_vec(),
+                    REQUEST_CONTROLLER_DATA => data[(device as usize).min(data.len() - 1)].clone(),
+                    _ => continue,
+                };
+                if stream.write_all(&encode_packet(device, id, &reply).unwrap()).await.is_err() {
+                    return;
+                }
+            }
+        });
+        port
+    }
+
+    fn controller(zone_leds: &[u32]) -> Vec<u8> {
+        let wire = WireController {
+            name: "Evil".into(),
+            serial: "x".into(),
+            modes: vec![WireMode { name: "Direct".into(), value: 0, color_mode: 1, ..Default::default() }],
+            zones: zone_leds
+                .iter()
+                .map(|&n| WireZone { name: "Z".into(), zone_type: 1, leds_count: n, ..Default::default() })
+                .collect(),
+            ..Default::default()
+        };
+        wire.encode().unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_huge_controller_count_is_refused_not_allocated() {
+        let port = serve(u32::MAX, vec![controller(&[3])]).await;
+        let mut adapter = OpenRgbAdapter::new("127.0.0.1", port);
+        adapter.connect().await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(3), adapter.discover()).await;
+        assert!(matches!(result, Ok(Err(_))), "expected an error, got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn a_controller_over_the_led_cap_is_skipped_not_fatal() {
+        let port = serve(2, vec![controller(&[u32::MAX, u32::MAX]), controller(&[3])]).await;
+        let mut adapter = OpenRgbAdapter::new("127.0.0.1", port);
+        adapter.connect().await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(3), adapter.discover()).await;
+        assert!(matches!(&result, Ok(Ok(devices)) if devices.len() == 1), "expected the one good controller, got {result:?}");
     }
 }

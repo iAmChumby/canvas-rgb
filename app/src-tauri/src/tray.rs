@@ -18,6 +18,8 @@ use canvas_proto::api::{
 };
 use canvas_proto::fans::{FansStatus, PIPE_LOST_WARN_MS};
 
+use canvas_proto::consts;
+
 use crate::{api, commands, editor, log};
 
 pub const TRAY_ID: &str = "main";
@@ -134,6 +136,11 @@ pub fn refresh<R: Runtime>(app: &AppHandle<R>) {
 }
 
 fn poll() -> Snapshot {
+    // The status route needs no token, but its answer drives the menu and tooltip: only a
+    // listener that passes the peer check (canvas-rgbd.exe, same user) may supply it.
+    if crate::peer::check(consts::API_PORT).is_err() {
+        return Snapshot::offline();
+    }
     let client = api::client();
     let status: Status = match client.status() {
         Ok(status) => status,

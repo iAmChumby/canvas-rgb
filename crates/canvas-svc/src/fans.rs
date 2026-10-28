@@ -192,7 +192,10 @@ impl FanController {
         }
         // Restore-to-auto is allowed even while unconfirmed: a header must never stay manual
         // because the map is unconfirmed. Applying the profile is not.
-        self.restore_all("startup: BIOS before any profile");
+        if !self.restore_all("startup: BIOS before any profile") {
+            tracing::error!("BIOS restore incomplete: the profile is not applied");
+            return;
+        }
         if !self.writes_allowed {
             tracing::warn!("channel map unconfirmed: BIOS restored, profile not applied");
             return;
@@ -203,7 +206,10 @@ impl FanController {
     /// Returns every controllable header to BIOS control, then clears the saved state.
     /// Failures are logged per header; the rest still get restored. Writes only the fan-mode
     /// register, and only to clear a header's manual bit (auto), so it runs while unconfirmed.
-    pub fn restore_all(&mut self, reason: &str) {
+    /// Returns true only when every header was handed back. With no chip, or after any failure,
+    /// `bios-state.json` stays on disk and the result is false.
+    pub fn restore_all(&mut self, reason: &str) -> bool {
+        let mut any_failed = self.chip.is_none();
         if let Some(chip) = self.chip.as_mut() {
             for (ch, spec) in chip.channels().iter().enumerate() {
                 if !spec.controllable() {
@@ -211,17 +217,26 @@ impl FanController {
                 }
                 match chip.set_manual(ch, false) {
                     Ok(()) => tracing::info!(header = spec.id, reason, "header returned to BIOS control"),
-                    Err(e) => tracing::error!(header = spec.id, error = %e, reason, "could not return header to BIOS"),
+                    Err(e) => {
+                        any_failed = true;
+                        tracing::error!(header = spec.id, error = %e, reason, "could not return header to BIOS");
+                    }
                 }
             }
         }
         for slot in &mut self.slots {
             slot.manual_since = None;
         }
+        if any_failed {
+            // A header may still be manual: keep bios-state.json so the next start restores it.
+            tracing::error!(reason, "keeping bios-state.json: nothing or not every header was handed back");
+            return false;
+        }
         self.bios_state = BiosState::default();
         if let Err(e) = store::remove_bios_state(&paths::bios_state_path(&self.home)) {
             tracing::error!(error = %e, "could not remove bios-state.json");
         }
+        true
     }
 
     /// Restores BIOS for the headers the saved state names. Used by `--restore-bios`
