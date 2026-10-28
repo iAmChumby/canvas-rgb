@@ -30,28 +30,79 @@ export interface Slot {
   h: number;
 }
 
-/** The measurements one case is drawn from. */
+/** The measurements one case is drawn from, all in canvas units (the canvas is 320 x 200). */
 export interface CaseDims {
   x: number;
   y: number;
+  /** Depth, front to back. */
   w: number;
+  /** Height, floor to roof. */
   h: number;
-  /** The fan size. */
+  /** The fan size: 120 mm, the same in every case. */
   fan: number;
   front: number;
   top: number;
   rear: number;
   ram: number;
   edges: number;
+  /** The motherboard's size in the side view. */
+  boardW: number;
+  boardH: number;
   /** Closed panels with a glass side; an open frame has rails instead. */
   panels: boolean;
 }
 
+/**
+ * One scale for every case: 4 mm per canvas unit, so a 120 mm fan is 30 units in every case and
+ * a bigger case is visibly bigger. The full tower (584 mm) fills the height above the desk line
+ * (DESK_Y 152). Every case stands on the desk line and sits in the middle of the canvas.
+ *
+ * Real sizes (side view, height x depth, from the makers' spec sheets as recalled, rounded; not
+ * re-checked online): full tower ~ Fractal Define 7 XL / Corsair 7000D class, 550-600 x 550-600
+ * mm; mid tower ~ Lian Li O11 Dynamic EVO / Fractal Meshify 2, 465-500 x 450-490 mm; mini-ITX ~
+ * Cooler Master NR200 / Fractal Terra class, 330-380 x 300-370 mm; open frame ~ a mid tower's size.
+ * Boards: ATX 305 x 244 mm, E-ATX 305 x 330 mm, mini-ITX 170 x 170 mm.
+ */
+export const MM_PER_UNIT = 4;
+
+const FAN = 30; // 120 mm
+const MARGIN = 7; // from the case edge to the first fan
+const mm = (v: number) => Math.round(v / MM_PER_UNIT);
+
+function dims(
+  hMm: number,
+  dMm: number,
+  board: [number, number],
+  n: { front: number; top: number; ram: number; edges: number },
+  panels = true,
+): CaseDims {
+  const w = mm(dMm);
+  const h = mm(hMm);
+  return {
+    x: Math.round(160 - w / 2),
+    y: DESK_Y - 3 - h,
+    w,
+    h,
+    fan: FAN,
+    front: n.front,
+    top: n.top,
+    rear: 1,
+    ram: n.ram,
+    edges: n.edges,
+    boardW: mm(board[0]),
+    boardH: mm(board[1]),
+    panels,
+  };
+}
+
+/** The y where the desk shelf starts. */
+export const DESK_Y = 152;
+
 const DIMS: Record<Exclude<CaseForm, "none">, CaseDims> = {
-  mid_tower: { x: 10, y: 6, w: 250, h: 138, fan: 32, front: 3, top: 2, rear: 1, ram: 4, edges: 3, panels: true },
-  full_tower: { x: 6, y: 4, w: 292, h: 144, fan: 34, front: 3, top: 3, rear: 1, ram: 4, edges: 3, panels: true },
-  small_form_factor: { x: 60, y: 14, w: 170, h: 124, fan: 28, front: 2, top: 1, rear: 1, ram: 2, edges: 3, panels: true },
-  open_frame: { x: 10, y: 8, w: 250, h: 134, fan: 32, front: 3, top: 2, rear: 1, ram: 4, edges: 3, panels: false },
+  full_tower: dims(584, 576, [305, 330], { front: 4, top: 3, ram: 4, edges: 3 }),
+  mid_tower: dims(480, 488, [305, 244], { front: 3, top: 2, ram: 4, edges: 3 }),
+  small_form_factor: dims(368, 336, [170, 170], { front: 2, top: 0, ram: 2, edges: 3 }),
+  open_frame: dims(472, 480, [305, 244], { front: 3, top: 2, ram: 4, edges: 3 }, false),
 };
 
 /** The plain words of the form-factor picker. */
@@ -68,44 +119,56 @@ export interface CaseSpec {
   dims: CaseDims;
   /** The motherboard: where it sits inside the case. */
   board: { x: number; y: number; w: number; h: number };
+  /** The CPU socket, drawn on the board. */
+  cpu: { x: number; y: number; w: number; h: number };
   slots: Slot[];
 }
-
-/** The y where the desk shelf starts. */
-export const DESK_Y = 152;
 
 export function caseSpec(form: CaseForm): CaseSpec | null {
   if (form === "none") return null;
   const d = DIMS[form];
   const s = d.fan;
   const slots: Slot[] = [];
-  const fy0 = d.y + 10;
+  const fy0 = d.y + MARGIN;
   for (let i = 0; i < d.front; i++) {
-    slots.push({ id: `front-fan-${i + 1}`, kind: "fan", label: `Front fan ${i + 1}`, x: d.x + 6, y: fy0 + i * (s + 4), w: s, h: s });
+    slots.push({ id: `front-fan-${i + 1}`, kind: "fan", label: `Front fan ${i + 1}`, x: d.x + 3, y: fy0 + i * (s + 2), w: s, h: s });
   }
-  const topX0 = d.x + 6 + s + 10;
+  const bx = d.x + 3 + s + 1;
+  const by = d.y + MARGIN + s + 4;
   for (let i = 0; i < d.top; i++) {
-    slots.push({ id: `top-fan-${i + 1}`, kind: "fan", label: `Top fan ${i + 1}`, x: topX0 + i * (s + 4), y: d.y + 10, w: s, h: s });
+    slots.push({ id: `top-fan-${i + 1}`, kind: "fan", label: `Top fan ${i + 1}`, x: bx + i * (s + 1), y: d.y + MARGIN, w: s, h: s });
   }
+  // The rear fan sits behind the board's top; with no top fans it takes the roof corner.
   for (let i = 0; i < d.rear; i++) {
-    slots.push({ id: "rear-fan", kind: "fan", label: "Rear fan", x: d.x + d.w - 10 - s, y: d.y + 10, w: s, h: s });
+    slots.push({ id: "rear-fan", kind: "fan", label: "Rear fan", x: d.x + d.w - 5 - s, y: d.top > 0 ? by : d.y + MARGIN, w: s, h: s });
   }
-  const bx = d.x + 6 + s + 10;
-  const by = d.y + 10 + s + 8;
-  const bw = d.w - (bx - d.x) - 10;
-  const bh = d.y + d.h - 16 - by;
-  const rw = 9;
-  const rh = 48;
-  const total = d.ram * rw + (d.ram - 1) * 3;
-  const start = bx + bw - 8 - total;
+  const bw = d.boardW;
+  const bh = d.boardH;
+  const rw = 6;
+  const rh = 34; // a 136 mm DIMM
+  const total = d.ram * rw + (d.ram - 1) * 2;
   for (let i = 0; i < d.ram; i++) {
-    slots.push({ id: `ram-${i + 1}`, kind: "ram", label: `RAM slot ${i + 1}`, x: start + i * (rw + 3), y: by + 6, w: rw, h: rh });
+    slots.push({ id: `ram-${i + 1}`, kind: "ram", label: `RAM slot ${i + 1}`, x: bx + 3 + i * (rw + 2), y: by + 4, w: rw, h: rh });
   }
-  slots.push({ id: "gpu", kind: "gpu", label: "Graphics card", x: bx + 6, y: Math.round(by + bh * 0.55), w: Math.round(bw * 0.58), h: 14 });
+  const cpu = { x: bx + 3 + total + 3, y: by + 4, w: 16, h: 16 };
+  // The graphics card: under the RAM, or (a small board) under the CPU.
+  if (bh < 56) {
+    slots.push({ id: "gpu", kind: "gpu", label: "Graphics card", x: cpu.x, y: cpu.y + cpu.h + 3, w: bx + bw - 3 - cpu.x, h: 14 });
+  } else {
+    slots.push({
+      id: "gpu",
+      kind: "gpu",
+      label: "Graphics card",
+      x: bx + 3,
+      y: Math.max(by + 4 + rh + 3, Math.round(by + bh * 0.55)),
+      w: Math.round(bw * 0.6),
+      h: 14,
+    });
+  }
   const edges: Slot[] = [
-    { id: "top-edge", kind: "edge", label: "Top edge", x: d.x + 10, y: d.y + 3, w: d.w - 20, h: 4 },
+    { id: "top-edge", kind: "edge", label: "Top edge", x: d.x + 10, y: d.y + 2, w: d.w - 20, h: 4 },
     { id: "bottom-edge", kind: "edge", label: "Bottom edge", x: d.x + 10, y: d.y + d.h - 8, w: d.w - 20, h: 4 },
-    { id: "rear-edge", kind: "edge", label: "Rear edge", x: d.x + d.w - 6, y: d.y + 16, w: 4, h: d.h - 32 },
+    { id: "rear-edge", kind: "edge", label: "Rear edge", x: d.x + d.w - 4, y: d.y + 8, w: 3, h: d.h - 24 },
   ];
   slots.push(...edges.slice(0, d.edges));
   slots.push({ id: "desk-keyboard", kind: "desk", label: "Keyboard", peripheral: "keyboard", x: 14, y: 158, w: 110, h: 30 });
@@ -115,7 +178,7 @@ export function caseSpec(form: CaseForm): CaseSpec | null {
   for (let i = 0; i < 3; i++) {
     slots.push({ id: `desk-${i + 1}`, kind: "desk", label: `Desk ${i + 1}`, x: 226 + 30 * i, y: 159, w: 26, h: 26 });
   }
-  return { form, dims: d, board: { x: bx, y: by, w: bw, h: bh }, slots };
+  return { form, dims: d, board: { x: bx, y: by, w: bw, h: bh }, cpu, slots };
 }
 
 /** True when the centre of the zone's box lies in the slot. */

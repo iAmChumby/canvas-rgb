@@ -36,7 +36,7 @@ export function CaseBackdrop({
   svgRef: RefObject<SVGSVGElement | null>;
   gRef: RefObject<SVGGElement | null>;
 }) {
-  const { dims: d, board, slots } = spec;
+  const { dims: d, board, cpu, slots } = spec;
   const visible = zones.filter((z) => z.visible);
   const taken = (s: Slot) => visible.some((z) => zoneInSlot(z, s));
   const unit = 14 / k; // 14 css pixels, in canvas units.
@@ -51,7 +51,6 @@ export function CaseBackdrop({
     [...slots.filter((s) => s.kind !== "edge"), ...extra].some(
       (s) => b.x < s.x + s.w + 1 && s.x < b.x + b.w + 1 && b.y < s.y + s.h + 1 && s.y < b.y + b.h + 1,
     );
-  const cpu = { x: board.x + 12, y: board.y + 9, w: 26, h: 26 };
   const cpuSlot: Slot = { id: "cpu", kind: "gpu", label: "CPU", ...cpu };
 
   const fans = slots.filter((s) => s.kind === "fan");
@@ -68,7 +67,11 @@ export function CaseBackdrop({
       { x: board.x + 6, y: board.y + board.h - 4, a: "start" },
       { x: board.x + board.w - 6, y: board.y + board.h - 4, a: "end" },
     ] as const
-  ).find((c) => !clash(textBox(c.x, c.y, boardText, c.a), [cpuSlot]));
+  ).find((c) => {
+    const b = textBox(c.x, c.y, boardText, c.a);
+    const inside = b.x >= board.x && b.x + b.w <= board.x + board.w && b.y >= board.y && b.y + b.h <= board.y + board.h + 2;
+    return inside && !clash(b, [cpuSlot]);
+  });
   const deskText = "Desk";
   const deskAt = (
     [
@@ -105,11 +108,11 @@ export function CaseBackdrop({
                 <rect x={d.x} y={d.y} width={d.w} height={d.h} rx={7} />
                 {/* The glass side panel. */}
                 <rect x={d.x + 3} y={d.y + 3} width={d.w - 6} height={d.h - 6} rx={5} className={desk.caseSoft} />
-                <line className={desk.caseSoft} x1={d.x + d.w - 52} y1={d.y + d.h - 3} x2={d.x + d.w - 20} y2={d.y + d.h - 39} />
-                <line className={desk.caseSoft} x1={d.x + d.w - 40} y1={d.y + d.h - 3} x2={d.x + d.w - 8} y2={d.y + d.h - 39} />
-                {/* Feet. */}
-                <rect x={d.x + 14} y={d.y + d.h} width={18} height={4} rx={1.5} />
-                <rect x={d.x + d.w - 32} y={d.y + d.h} width={18} height={4} rx={1.5} />
+                <line className={desk.caseSoft} x1={d.x + d.w - 26} y1={d.y + d.h - 3} x2={d.x + d.w - 8} y2={d.y + d.h - 23} />
+                <line className={desk.caseSoft} x1={d.x + d.w - 18} y1={d.y + d.h - 3} x2={d.x + d.w - 5} y2={d.y + d.h - 17} />
+                {/* Feet: the case stands on the desk line. */}
+                <rect x={d.x + 8} y={d.y + d.h} width={14} height={DESK_Y - (d.y + d.h)} rx={1} />
+                <rect x={d.x + d.w - 22} y={d.y + d.h} width={14} height={DESK_Y - (d.y + d.h)} rx={1} />
               </>,
             )}
           </>
@@ -117,9 +120,9 @@ export function CaseBackdrop({
           twice(
             <>
               {/* An open frame: a base plate and two posts, nothing closed. */}
-              <rect x={d.x} y={d.y + d.h - 2} width={d.w} height={5} rx={2} />
-              <rect x={d.x + 3} y={d.y} width={4} height={d.h - 2} rx={1.5} />
-              <rect x={d.x + d.w - 7} y={d.y} width={4} height={d.h - 2} rx={1.5} />
+              <rect x={d.x} y={DESK_Y - 5} width={d.w} height={5} rx={2} />
+              <rect x={d.x + 3} y={d.y} width={4} height={DESK_Y - 5 - d.y} rx={1.5} />
+              <rect x={d.x + d.w - 7} y={d.y} width={4} height={DESK_Y - 5 - d.y} rx={1.5} />
             </>,
           )
         )}

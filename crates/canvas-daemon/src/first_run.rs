@@ -308,33 +308,31 @@ struct Slot {
 /// GPU, three case edges, the desk's keyboard, mouse, mic and headset places, then three
 /// spare desk places. Arithmetic is the editor's, rounded to whole units.
 fn mid_tower_slots() -> Vec<Slot> {
-    let (cx, cy, cw, ch, s) = (10.0f32, 6.0f32, 250.0f32, 138.0f32, 32.0f32);
+    // 4 mm per canvas unit: a 480 x 488 mm mid tower is 120 x 122 units, centred, standing on the
+    // desk line (y 152). The fan is 120 mm = 30 units. ATX board 76 x 61 units.
+    let (cx, cy, cw, ch, s) = (99.0f32, 29.0f32, 122.0f32, 120.0f32, 30.0f32);
     let (front, top, ram) = (3usize, 2usize, 4usize);
     let mut slots = Vec::new();
     let slot = |kind, x: f32, y: f32, w: f32, h: f32| Slot { kind, peripheral: None, x, y, w, h };
-    let fy0 = cy + 10.0;
+    let fy0 = cy + 7.0;
     for i in 0..front {
-        slots.push(slot(SlotKind::Fan, cx + 6.0, fy0 + i as f32 * (s + 4.0), s, s));
+        slots.push(slot(SlotKind::Fan, cx + 3.0, fy0 + i as f32 * (s + 2.0), s, s));
     }
-    let top_x0 = cx + 6.0 + s + 10.0;
+    let bx = cx + 3.0 + s + 1.0;
+    let by = cy + 7.0 + s + 4.0;
     for i in 0..top {
-        slots.push(slot(SlotKind::Fan, top_x0 + i as f32 * (s + 4.0), cy + 10.0, s, s));
+        slots.push(slot(SlotKind::Fan, bx + i as f32 * (s + 1.0), cy + 7.0, s, s));
     }
-    slots.push(slot(SlotKind::Fan, cx + cw - 10.0 - s, cy + 10.0, s, s));
-    let bx = cx + 6.0 + s + 10.0;
-    let by = cy + 10.0 + s + 8.0;
-    let bw = cw - (bx - cx) - 10.0;
-    let bh = cy + ch - 16.0 - by;
-    let (rw, rh) = (9.0f32, 48.0f32);
-    let total = ram as f32 * rw + (ram as f32 - 1.0) * 3.0;
-    let start = bx + bw - 8.0 - total;
+    slots.push(slot(SlotKind::Fan, cx + cw - 5.0 - s, by, s, s));
+    let (bw, bh) = (76.0f32, 61.0f32);
+    let (rw, rh) = (6.0f32, 34.0f32);
     for i in 0..ram {
-        slots.push(slot(SlotKind::Ram, start + i as f32 * (rw + 3.0), by + 6.0, rw, rh));
+        slots.push(slot(SlotKind::Ram, bx + 3.0 + i as f32 * (rw + 2.0), by + 4.0, rw, rh));
     }
-    slots.push(slot(SlotKind::Gpu, bx + 6.0, (by + bh * 0.55).round(), (bw * 0.58).round(), 14.0));
-    slots.push(slot(SlotKind::Edge, cx + 10.0, cy + 3.0, cw - 20.0, 4.0));
+    slots.push(slot(SlotKind::Gpu, bx + 3.0, (by + 4.0 + rh + 3.0).max((by + bh * 0.55).round()), (bw * 0.6).round(), 14.0));
+    slots.push(slot(SlotKind::Edge, cx + 10.0, cy + 2.0, cw - 20.0, 4.0));
     slots.push(slot(SlotKind::Edge, cx + 10.0, cy + ch - 8.0, cw - 20.0, 4.0));
-    slots.push(slot(SlotKind::Edge, cx + cw - 6.0, cy + 16.0, 4.0, ch - 32.0));
+    slots.push(slot(SlotKind::Edge, cx + cw - 4.0, cy + 8.0, 3.0, ch - 24.0));
     let desk = |kind, x, y, w, h| Slot { kind: SlotKind::Desk, peripheral: Some(kind), x, y, w, h };
     slots.push(desk(DeviceKind::Keyboard, 14.0, 158.0, 110.0, 30.0));
     slots.push(desk(DeviceKind::Mouse, 132.0, 156.0, 22.0, 32.0));
@@ -900,13 +898,13 @@ mod tests {
         // The numbers are the editor's mid-tower table (caseForms.ts): front fan 1, RAM slot 1,
         // the GPU slot, the top edge and the desk's keyboard place.
         let fan = at(&board.id, 1);
-        assert_eq!((fan.x, fan.y, fan.width, fan.height, fan.shape), (16.0, 16.0, 32.0, 32.0, ZoneShape::Ring));
+        assert_eq!((fan.x, fan.y, fan.width, fan.height, fan.shape), (102.0, 36.0, 30.0, 30.0, ZoneShape::Ring));
         let header = at(&board.id, 0);
-        assert_eq!((header.x, header.y, header.width, header.height), (20.0, 9.0, 230.0, 4.0));
+        assert_eq!((header.x, header.y, header.width, header.height), (109.0, 31.0, 102.0, 4.0));
         let stick = at(&ram.id, 0);
-        assert_eq!((stick.x, stick.y, stick.width, stick.height), (197.0, 62.0, 9.0, 48.0));
+        assert_eq!((stick.x, stick.y, stick.width, stick.height), (136.0, 74.0, 6.0, 34.0));
         let card = at(&gpu.id, 0);
-        assert_eq!((card.x, card.y, card.width, card.height), (64.0, 96.0, 111.0, 14.0));
+        assert_eq!((card.x, card.y, card.width, card.height), (136.0, 111.0, 46.0, 14.0));
         let keys = at(&keyboard.id, 0);
         assert_eq!((keys.x, keys.y, keys.width, keys.height, keys.shape), (14.0, 158.0, 110.0, 30.0, ZoneShape::Point));
     }
