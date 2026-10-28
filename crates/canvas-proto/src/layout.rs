@@ -84,6 +84,11 @@ pub struct PlacedZone {
     /// `Auto`, which keeps their old placement.
     #[serde(default)]
     pub shape: ZoneShape,
+    /// The owner's own name for this zone ("Front fans"), shown before the hardware's name
+    /// ("JARGB 1"). `None` shows the hardware name alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub label: Option<String>,
 }
 
 /// Where a zone's LEDs sit inside its placed rect (before rotation). The rect is the shape's
@@ -127,4 +132,34 @@ pub struct Layout {
     pub sampling: SamplingMode,
     pub zones: Vec<PlacedZone>,
     pub effect: Option<ActiveEffect>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const OLD_ZONE: &str = r#"{"device_id":"openrgb:board","zone_index":1,"x":4.0,"y":4.0,"width":120.0,
+        "height":10.0,"rotation_deg":0.0,"reversed":false,"visible":true}"#;
+
+    #[test]
+    fn a_zone_saved_before_shapes_and_labels_loads_with_auto_and_no_label() {
+        let zone: PlacedZone = serde_json::from_str(OLD_ZONE).expect("an old zone loads");
+        assert_eq!(zone.shape, ZoneShape::Auto);
+        assert_eq!(zone.label, None);
+    }
+
+    #[test]
+    fn a_label_round_trips_and_a_missing_one_is_not_written() {
+        let mut zone: PlacedZone = serde_json::from_str(OLD_ZONE).unwrap();
+        let bare = serde_json::to_string(&zone).unwrap();
+        assert!(!bare.contains("label"), "no label, nothing written: {bare}");
+
+        zone.label = Some("Front fans".to_string());
+        zone.shape = ZoneShape::Ring;
+        let json = serde_json::to_string(&zone).unwrap();
+        assert!(json.contains(r#""label":"Front fans""#));
+        let back: PlacedZone = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.label.as_deref(), Some("Front fans"));
+        assert_eq!(back.shape, ZoneShape::Ring);
+    }
 }

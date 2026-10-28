@@ -3217,32 +3217,36 @@ button.chip:hover {
 /* The desk's zone drawing: the plate a zone's outline sits on, the keyline round it, the veil over
    the effect's picture and an unlit LED. Each has a dark and a light set. */
 :root {
-  --zone-plate: rgba(7, 8, 12, 0.5);
-  --zone-halo: rgba(0, 0, 0, 0.55);
-  --veil: rgba(4, 6, 10, 0.5);
+  --zone-plate: rgba(0, 0, 0, 0.26);
+  --zone-halo: rgba(0, 0, 0, 0.5);
+  --zone-line: rgba(255, 255, 255, 0.92);
+  --veil: transparent;
   --dot-unlit: rgba(255, 255, 255, 0.34);
 }
 
 :root[data-theme="dark"] {
-  --zone-plate: rgba(7, 8, 12, 0.5);
-  --zone-halo: rgba(0, 0, 0, 0.55);
-  --veil: rgba(4, 6, 10, 0.5);
+  --zone-plate: rgba(0, 0, 0, 0.26);
+  --zone-halo: rgba(0, 0, 0, 0.5);
+  --zone-line: rgba(255, 255, 255, 0.92);
+  --veil: transparent;
   --dot-unlit: rgba(255, 255, 255, 0.34);
 }
 
 :root[data-theme="light"] {
-  --zone-plate: rgba(255, 255, 255, 0.46);
-  --zone-halo: rgba(255, 255, 255, 0.7);
-  --veil: rgba(255, 255, 255, 0.4);
-  --dot-unlit: rgba(15, 18, 24, 0.42);
+  --zone-plate: rgba(0, 0, 0, 0.2);
+  --zone-halo: rgba(0, 0, 0, 0.45);
+  --zone-line: rgba(255, 255, 255, 0.95);
+  --veil: transparent;
+  --dot-unlit: rgba(255, 255, 255, 0.5);
 }
 
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) {
-    --zone-plate: rgba(255, 255, 255, 0.46);
-    --zone-halo: rgba(255, 255, 255, 0.7);
-    --veil: rgba(255, 255, 255, 0.4);
-    --dot-unlit: rgba(15, 18, 24, 0.42);
+    --zone-plate: rgba(0, 0, 0, 0.2);
+    --zone-halo: rgba(0, 0, 0, 0.45);
+  --zone-line: rgba(255, 255, 255, 0.95);
+    --veil: transparent;
+    --dot-unlit: rgba(255, 255, 255, 0.5);
   }
 }
 

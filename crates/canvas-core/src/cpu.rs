@@ -169,6 +169,7 @@ fn a_running_engine_at_thirty_fps_stays_inside_the_budget() {
                 reversed: false,
                 visible: true,
                 shape: ZoneShape::Auto,
+                label: None,
             })
             .collect(),
         effect: None,

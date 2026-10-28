@@ -14,6 +14,7 @@ import {
   DotsThree,
   FloppyDisk,
   GridFour,
+  Lightbulb,
   MagicWand,
   Plus,
   Rectangle,
@@ -22,7 +23,7 @@ import {
 import { Button, IconButton, Swap } from "@/components/Button";
 import { Panel, Field } from "@/components/Panel";
 import { Segmented } from "@/components/Segmented";
-import { NumberField } from "@/components/NumberField";
+import { NumberField, TextField } from "@/components/NumberField";
 import { Slider } from "@/components/Slider";
 import { Toggle } from "@/components/Toggle";
 import { Chip, RowButton } from "@/components/Chip";
@@ -360,6 +361,79 @@ export function LayoutView() {
     return effects?.find((e) => e.id === id)?.name ?? id;
   }, [server, effects]);
 
+  /**
+   * Zones that still have the shape of a layout saved before shapes existed (auto) where the
+   * first run would pick another: a fan that is still a line, a keyboard that is still a strip.
+   * One click applies the same per-device defaults as the first run (`default_shape`).
+   */
+  const suggested = useMemo(() => {
+    const out: { index: number; shape: ZoneShape }[] = [];
+    (draft?.zones ?? []).forEach((z, index) => {
+      if (z.shape.type !== "auto") return;
+      const info = findZoneInfo(devices, z.device_id, z.zone_index);
+      if (!info || !info.device.connected) return;
+      const shape = defaultShape(info.device.kind, info.zone);
+      if (shape.type !== "auto") out.push({ index, shape });
+    });
+    return out;
+  }, [draft, devices]);
+
+  const useSuggestedShapes = () => {
+    // One change, so one undo step: every shape and the box that suits it.
+    commit((l) => ({
+      ...l,
+      zones: l.zones.map((z, i) => {
+        const hit = suggested.find((s) => s.index === i);
+        return hit ? { ...z, ...reshapeBox(z, hit.shape) } : z;
+      }),
+    }));
+  };
+
+  /**
+   * Identify: the daemon lights one white LED at a time (POST identify walks a single LED of one
+   * zone, everything else on that device black), so the owner can see which physical header or
+   * strip the zone is. The walk runs for about five seconds, or until it is pressed again, and
+   * the zone flashes on the desk meanwhile.
+   */
+  const [identifying, setIdentifying] = useState<number | null>(null);
+  const identifyRef = useRef<{ timer: ReturnType<typeof setInterval>; deviceId: string; zone: number } | null>(null);
+  const stopIdentify = useCallback(() => {
+    const run = identifyRef.current;
+    identifyRef.current = null;
+    setIdentifying(null);
+    if (!run) return;
+    clearInterval(run.timer);
+    void api.identify(run.deviceId, { zone: run.zone, led: 0, stop: true }).catch(() => undefined);
+  }, []);
+  const startIdentify = (index: number) => {
+    stopIdentify();
+    const z = draft?.zones[index];
+    const info = z ? findZoneInfo(devices, z.device_id, z.zone_index) : null;
+    if (!z || !info) return;
+    const count = Math.max(1, info.zone.led_count);
+    let tick = 0;
+    const step = () => {
+      if (tick >= 40) {
+        stopIdentify();
+        return;
+      }
+      void api
+        .identify(z.device_id, { zone: z.zone_index, led: tick % count, stop: false })
+        .catch(() => undefined);
+      tick += 1;
+    };
+    step();
+    identifyRef.current = { timer: setInterval(step, 125), deviceId: z.device_id, zone: z.zone_index };
+    setIdentifying(index);
+  };
+  // Leaving the page ends the walk: no LED stays lit.
+  useEffect(() => stopIdentify, [stopIdentify]);
+  // Picking another zone ends it too.
+  const selectZone = (index: number | null) => {
+    if (identifying !== null && identifying !== index) stopIdentify();
+    setSelected(index);
+  };
+
   const unplaced = useMemo(() => {
     const placed = new Set((draft?.zones ?? []).map((z) => `${z.device_id}#${z.zone_index}`));
     const out: { deviceId: string; deviceName: string; zoneIndex: number; zoneName: string; ledCount: number; connected: boolean }[] = [];
@@ -611,10 +685,11 @@ export function LayoutView() {
 
   const unplace = useCallback(
     (index: number) => {
+      stopIdentify();
       commit((l) => ({ ...l, zones: l.zones.filter((_, i) => i !== index) }));
       setSelected(null);
     },
-    [commit],
+    [commit, stopIdentify],
   );
 
   const revert = () => {
@@ -698,7 +773,7 @@ export function LayoutView() {
               zones={zones}
               devices={devices}
               selected={selected}
-              onSelect={setSelected}
+              onSelect={selectZone}
               onChange={changeZone}
               onDrop={onDropUnplaced}
               onRemoveZone={unplace}
@@ -712,6 +787,7 @@ export function LayoutView() {
               effect={runningEffect ? { id: runningEffect.id, props: liveProps } : null}
               effectNeedsInput={effectNeedsInput}
               sampling={draft.sampling}
+              identifying={identifying}
             />
             <div className="stage-meta">
               <span className="dropzone-hint" />
@@ -818,6 +894,8 @@ export function LayoutView() {
                     deviceName={selectedInfo?.device.name ?? shortDeviceId(shownZone.device_id)}
                     ledCount={selectedInfo?.zone.led_count ?? 0}
                     info={selectedInfo?.zone ?? null}
+                    identifying={identifying === selected}
+                    onIdentify={() => (identifying === selected ? stopIdentify() : startIdentify(selected))}
                     missing={!selectedInfo}
                     onChange={(patch) => changeZone(selected, patch)}
                     onRemove={() => unplace(selected)}
@@ -827,6 +905,17 @@ export function LayoutView() {
               ) : (
                 null
               )}
+              {suggested.length > 0 && (
+                <div className={desk.suggest}>
+                  <p className={desk.plainNote} style={{ marginTop: 0 }}>
+                    {suggested.length === 1 ? "One zone has" : `${suggested.length} zones have`} no shape yet. Fans become rings, RAM
+                    and headers strips, a single-LED device a point.
+                  </p>
+                  <Button size="sm" variant="ghost" icon={<MagicWand size={14} />} onClick={useSuggestedShapes}>
+                    Use suggested shapes
+                  </Button>
+                </div>
+              )}
               <div className="stack" style={{ gap: 0, marginTop: 12 }}>
                 {zones.map((z, i) => {
                   const info = findZoneInfo(devices, z.device_id, z.zone_index);
@@ -835,10 +924,11 @@ export function LayoutView() {
                       key={`${z.device_id}#${z.zone_index}`}
                       current={selected === i}
                       label={`Select ${info?.zone.name ?? "the zone whose device is gone"}`}
-                      onSelect={() => setSelected(i)}
+                      onSelect={() => selectZone(i)}
                     >
                       <span className="row-title">
-                        {info?.zone.name ?? "Device not found"}
+                        {z.label?.trim() || info?.zone.name || "Device not found"}
+                        {z.label?.trim() && info && <span className={desk.zoneHw}>{info.zone.name}</span>}
                       </span>
                       <span className="row-sub one-line">{info ? info.device.name : "not connected"}</span>
                       <span className="fig mute">{info ? <AnimatedNumber value={info.zone.led_count} /> : "—"}</span>
@@ -927,6 +1017,8 @@ function ZoneInspector({
   deviceName,
   ledCount,
   info,
+  identifying,
+  onIdentify,
   missing,
   onChange,
   onRemove,
@@ -937,6 +1029,8 @@ function ZoneInspector({
   deviceName: string;
   ledCount: number;
   info: ZoneInfo | null;
+  identifying: boolean;
+  onIdentify: () => void;
   missing: boolean;
   onChange: (patch: Partial<PlacedZone>) => void;
   onRemove: () => void;
@@ -976,6 +1070,31 @@ function ZoneInspector({
           </Button>
         </div>
       )}
+      <Field label="Name" hint={<span className="fig">{zone.label?.trim() ? `${(zone.label ?? "").trim().length} / 32` : "hardware name"}</span>}>
+        <div className={desk.nameRow}>
+          <TextField
+            label="Name"
+            value={zone.label ?? ""}
+            placeholder={name}
+            allowEmpty
+            maxLength={32}
+            onCommit={(v) => onChange({ label: v.trim() === "" ? undefined : v.trim().slice(0, 32) })}
+          />
+          <Button
+            size="sm"
+            variant="ghost"
+            icon={<Lightbulb size={14} weight={identifying ? "fill" : "regular"} />}
+            disabled={missing}
+            onClick={onIdentify}
+          >
+            {identifying ? "Stop" : "Identify"}
+          </Button>
+        </div>
+      </Field>
+      <p className={desk.plainNote} style={{ marginTop: 0 }}>
+        Identify walks one white LED along this zone ({name}) for about five seconds, so you can see which header it
+        is. It lights one LED of the zone at a time, not the whole device.
+      </p>
       <Field label="Shape" hint={<span className="fig">{SHAPE_LABEL[shapeType]}{shapeType === "auto" && resolved ? ` · ${SHAPE_LABEL[resolved === "matrix" ? "grid" : resolved]}` : ""}</span>}>
         <Segmented<ZoneShape["type"]>
           label="How the LEDs sit in the box"

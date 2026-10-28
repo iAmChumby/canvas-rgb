@@ -396,6 +396,7 @@ mod tests {
             reversed: false,
             visible: true,
             shape: ZoneShape::Auto,
+            label: None,
         }
     }
 

@@ -339,8 +339,8 @@ export const LAYOUT_DESK: Layout = {
     // A diagram of the PC: the three ARGB headers as strips down the left, the front fan as a ring,
     // the RAM as two upright sticks on the right, and the keyboard and the microphone as points
     // along the bottom.
-    { device_id: "openrgb:A1B2C3D4E5F6", zone_index: 1, x: 10, y: 10, width: 120, height: 10, rotation_deg: 0, reversed: false, visible: true, shape: { type: "strip" } },
-    { device_id: "openrgb:A1B2C3D4E5F6", zone_index: 2, x: 10, y: 30, width: 120, height: 10, rotation_deg: 0, reversed: false, visible: true, shape: { type: "strip" } },
+    { device_id: "openrgb:A1B2C3D4E5F6", zone_index: 1, x: 10, y: 10, width: 120, height: 10, rotation_deg: 0, reversed: false, visible: true, shape: { type: "strip" }, label: "Top strip" },
+    { device_id: "openrgb:A1B2C3D4E5F6", zone_index: 2, x: 10, y: 30, width: 120, height: 10, rotation_deg: 0, reversed: false, visible: true, shape: { type: "strip" }, label: "Shelf light" },
     { device_id: "openrgb:A1B2C3D4E5F6", zone_index: 3, x: 10, y: 50, width: 120, height: 10, rotation_deg: 0, reversed: false, visible: true, shape: { type: "strip" } },
     { device_id: "openrgb:fan-hub-1", zone_index: 0, x: 160, y: 20, width: 56, height: 56, rotation_deg: 0, reversed: false, visible: true, shape: { type: "ring" } },
     { device_id: "royuan:3151:4015", zone_index: 0, x: 20, y: 140, width: 120, height: 36, rotation_deg: 0, reversed: false, visible: true, shape: { type: "point" } },
@@ -352,7 +352,12 @@ export const LAYOUT_DESK: Layout = {
     { device_id: "openrgb:I2C: PawnIO SMBus PIIX4 0, address 0x71", zone_index: 0, x: 294, y: 36, width: 16, height: 120, rotation_deg: 0, reversed: false, visible: true, shape: { type: "strip" } },
     { device_id: "openrgb:I2C: PawnIO SMBus PIIX4 0, address 0x73", zone_index: 0, x: 270, y: 36, width: 16, height: 120, rotation_deg: 0, reversed: false, visible: true, shape: { type: "strip" } },
   ],
-  effect: { id: "spiral", props: EFFECTS.find((e) => e.schema.id === "spiral")!.defaults },
+  // Aurora in the editor's own accents (--a1 blue, --a2 violet, --a3 teal): one calm picture
+  // flowing across every device. The demo thumbnail is rendered with the same three colours.
+  effect: {
+    id: "aurora",
+    props: { ...EFFECTS.find((e) => e.schema.id === "aurora")!.defaults, color1: c("#8fb4e8"), color2: c("#b49cf0"), color3: c("#5fd0c0") },
+  },
 };
 
 export interface DemoHeader {

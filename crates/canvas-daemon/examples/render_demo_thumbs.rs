@@ -6,7 +6,7 @@
 //! Usage: cargo run -p canvas-daemon --example render_demo_thumbs [out_dir]
 //! Default out_dir: app/web/public/demo-thumbs
 
-use canvas_proto::EFFECT_IDS;
+use canvas_proto::{PropValue, Props, Rgb8, EFFECT_IDS};
 use std::path::PathBuf;
 
 /// The most one effect's strip may take.
@@ -20,7 +20,8 @@ fn main() {
     let mut total = 0usize;
     for id in EFFECT_IDS {
         let mut effect = canvas_effects::create(id).expect("a built-in effect builds");
-        let props = effect.schema().defaults();
+        let mut props = effect.schema().defaults();
+        demo_palette(id, &mut props);
         let body = canvas_daemon::thumbnail::render(effect.as_mut(), &props);
         let w = u16::from_le_bytes([body[0], body[1]]) as u32;
         let h = u16::from_le_bytes([body[2], body[3]]) as u32;
@@ -51,4 +52,16 @@ fn main() {
         println!("{id:<16} {w}x{h} x {frames} frames  {size:>7} bytes  {} levels  {}", 256u32 >> dropped, path.display());
     }
     println!("total {total} bytes for {} effects", EFFECT_IDS.len());
+}
+
+/// The demo runs Aurora on the editor's own accents (blue, violet, teal: `--a1`, `--a2`, `--a3`
+/// in the dark set), so the desk's picture is one calm flow in the editor's palette. Every other
+/// effect keeps its schema defaults.
+fn demo_palette(id: &str, props: &mut Props) {
+    if id != "aurora" {
+        return;
+    }
+    for (key, (r, g, b)) in [("color1", (0x8f, 0xb4, 0xe8)), ("color2", (0xb4, 0x9c, 0xf0)), ("color3", (0x5f, 0xd0, 0xc0))] {
+        props.insert(key.to_string(), PropValue::Color(Rgb8 { r, g, b }));
+    }
 }

@@ -40,7 +40,7 @@
 .desk .zone {
   position: absolute;
   box-sizing: border-box;
-  border: 1.5px solid color-mix(in srgb, var(--zc) 85%, transparent);
+  border: 1.5px solid var(--zone-line);
   border-radius: 3px;
   background-color: var(--zone-plate);
   /* A one pixel keyline outside the outline, so it holds on any picture. It is hard-edged: a
@@ -69,11 +69,12 @@
 }
 
 .desk .zone:hover {
-  background-color: color-mix(in srgb, var(--zc) 18%, var(--zone-plate));
+  border-color: var(--live);
+  background-color: color-mix(in srgb, var(--live) 14%, var(--zone-plate));
 }
 
 .desk .zone[data-shape="outline"]:hover {
-  background-color: color-mix(in srgb, var(--zc) 10%, transparent);
+  background-color: color-mix(in srgb, var(--live) 8%, transparent);
 }
 
 .desk .zone[data-dragging="true"] {
@@ -82,8 +83,8 @@
 }
 
 .desk .zone[data-selected="true"] {
-  border-color: var(--zc);
-  background-color: color-mix(in srgb, var(--zc) 14%, var(--zone-plate));
+  border-color: var(--zone-line);
+  background-color: color-mix(in srgb, var(--live) 16%, var(--zone-plate));
   z-index: 4;
 }
 
@@ -108,6 +109,10 @@
   pointer-events: none;
 }
 
+.desk .zone[data-missing="true"][data-twin="true"] {
+  outline: none;
+}
+
 .desk .zone[data-missing="true"]:hover {
   background-color: transparent;
 }
@@ -115,6 +120,64 @@
 .desk .zone:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 3px;
+}
+
+/* ---------- name tags ---------- */
+
+/* A solid chip beside each zone, like the editor's own chips: the panel colour with the ink on
+   it, so it reads on any picture in light and dark, with the device's colour on its left edge. */
+.desk .tag {
+  position: absolute;
+  z-index: 6;
+  box-sizing: border-box;
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid var(--line-2);
+  border-left: 3px solid var(--zc, var(--line-2));
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--ink);
+  font-family: var(--fm);
+  font-size: var(--t14);
+  line-height: 20px;
+  white-space: nowrap;
+  pointer-events: none;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+.desk .tagSub {
+  margin-left: 6px;
+  color: var(--mute);
+  font-size: 12px;
+}
+
+/* Identify: the zone's outline flashes a few times so the eye finds it. */
+.desk .zone[data-identify="true"] {
+  animation: identify-flash 600ms var(--ease) 8;
+  z-index: 5;
+}
+
+@keyframes identify-flash {
+  0%,
+  100% {
+    border-color: var(--zone-line);
+    box-shadow: 0 0 0 1px var(--zone-halo);
+  }
+  50% {
+    border-color: var(--live);
+    box-shadow: 0 0 0 3px var(--live);
+  }
+}
+
+.desk .tag[data-missing="true"] {
+  border-color: var(--down);
+  border-left-color: var(--down);
+  color: var(--down);
+}
+
+/* While the view zooms or pans the tags step aside: they come back placed for the new view. */
+.desk[data-moving="true"] .tag {
+  opacity: 0;
 }
 
 /* ---------- labels ---------- */
@@ -369,27 +432,31 @@
   transition: opacity var(--dur-fast) var(--ease);
 }
 
-/* ---------- the zoom controls ---------- */
+/* ---------- the toolbar under the canvas ---------- */
 
-/* The zoom controls sit in the canvas's bottom-right corner, clear of the desk's top edge
-   where the zones usually start. They are the one thing that floats over the artwork, so the
-   chips are never placed under them: the chip placement treats the control and its tooltips as
-   obstacles. */
-.desk .controls {
-  position: absolute;
-  bottom: var(--s2);
-  right: var(--s2);
-  z-index: 9;
+/* The scale and the controls sit under the canvas, not on it: nothing but the zones, their dots
+   and their names belongs on the artwork, and a control over the canvas hides whatever zone is
+   under it (at 390 it covered the RAM sticks). */
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  margin-top: var(--s2);
+}
+
+.controls {
   display: flex;
   align-items: center;
   gap: 2px;
+  margin-left: auto;
   padding: 2px;
   border: 1px solid var(--line-2);
   border-radius: var(--r-md);
   background: var(--panel);
 }
 
-.desk .zoomValue {
+.zoomValue {
   min-width: 40px;
   padding: 0 2px;
   color: var(--dim);
@@ -397,18 +464,6 @@
   font-size: var(--t14);
   text-align: center;
   font-variant-numeric: tabular-nums;
-}
-
-/* The control's tooltips open to the left of their button, on the canvas: the canvas clips what
-   is outside it, so a tooltip that opened upwards was cut in half, and one that opened downwards
-   sat on top of the zones. (`.tip` and `.tip-bubble` are the editor's own classes, so they have
-   to be reached through :global in a module.) */
-.desk .controls :global(.tip-bubble) {
-  left: auto;
-  right: calc(100% + 6px);
-  bottom: auto;
-  top: 50%;
-  transform: translateY(-50%);
 }
 
 /* ---------- the editor's own draw of the running effect ---------- */
@@ -468,10 +523,6 @@
 
 /* The scale: how long a line on the desk is, in the daemon's own units. */
 .scaleBar {
-  position: absolute;
-  left: var(--s3);
-  bottom: var(--s3);
-  z-index: 8;
   display: flex;
   align-items: center;
   gap: var(--s2);
@@ -698,4 +749,40 @@
 
 .inspector {
   animation: inspector-in var(--dur) var(--ease);
+}
+
+/* In the zones list the owner's name comes first and the hardware's name follows, smaller and muted. */
+.zoneHw {
+  margin-left: 6px;
+  color: var(--mute);
+  font-family: var(--fm);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+/* The one-click offer to give an old layout its shapes. */
+.suggest {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s2);
+  margin-top: var(--s3);
+  padding: var(--s3);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--live) 7%, transparent);
+}
+
+/* The name field takes the room the Identify button leaves. */
+.nameRow {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.nameRow :global(.text-in) {
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
 }

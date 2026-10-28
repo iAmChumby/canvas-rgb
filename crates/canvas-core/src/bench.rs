@@ -71,6 +71,7 @@ fn bench_layout(device: &DeviceInfo) -> Layout {
             reversed: false,
             visible: true,
             shape: ZoneShape::Auto,
+            label: None,
         })
         .collect();
     Layout {

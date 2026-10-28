@@ -91,11 +91,16 @@ export function TextField({
   value,
   label,
   placeholder,
+  allowEmpty,
+  maxLength,
   onCommit,
 }: {
   value: string;
   label: string;
   placeholder?: string;
+  /** Committing an empty entry is a change (it clears the value) instead of being ignored. */
+  allowEmpty?: boolean;
+  maxLength?: number;
   onCommit: (v: string) => void;
 }) {
   const [draft, setDraft] = useState<string | null>(null);
@@ -103,13 +108,14 @@ export function TextField({
     if (draft === null) return;
     const v = draft.trim();
     setDraft(null);
-    if (v.length > 0 && v !== value) onCommit(v);
+    if ((allowEmpty || v.length > 0) && v !== value) onCommit(v);
   };
   return (
     <input
       type="text"
       aria-label={label}
       placeholder={placeholder}
+      maxLength={maxLength}
       className="text-in"
       value={draft ?? value}
       onChange={(e) => setDraft(e.target.value)}

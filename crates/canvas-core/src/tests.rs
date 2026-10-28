@@ -285,6 +285,7 @@ fn placed(device_id: &str, zone_index: u32, x: f32, y: f32, w: f32, h: f32) -> P
         reversed: false,
         visible: true,
         shape: ZoneShape::Auto,
+        label: None,
     }
 }
 

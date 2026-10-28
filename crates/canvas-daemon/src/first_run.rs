@@ -387,6 +387,7 @@ pub fn build_default_layout(devices: &[DeviceInfo]) -> Layout {
                 reversed: false,
                 visible: true,
                 shape,
+                label: None,
             });
         }
     }

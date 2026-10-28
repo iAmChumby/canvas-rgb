@@ -16,4 +16,9 @@ rotation_deg: number, reversed: boolean, visible: boolean,
  * How the zone's LEDs sit inside the rect. Layouts saved before shapes existed load as
  * `Auto`, which keeps their old placement.
  */
-shape: ZoneShape, };
+shape: ZoneShape, 
+/**
+ * The owner's own name for this zone ("Front fans"), shown before the hardware's name
+ * ("JARGB 1"). `None` shows the hardware name alone.
+ */
+label?: string, };

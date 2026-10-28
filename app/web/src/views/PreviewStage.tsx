@@ -7,11 +7,12 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type CSSProperties,
   type DragEvent,
   type PointerEvent,
 } from "react";
-import { ArrowsOut, Minus, Plus, X } from "@phosphor-icons/react";
+import { ArrowsOut, Minus, Plus, Tag, X } from "@phosphor-icons/react";
 import { IconButton } from "@/components/Button";
 import { Chip } from "@/components/Chip";
 import { EffectPreview, type PreviewValues } from "@/components/EffectPreview";
@@ -174,7 +175,7 @@ const WHEEL_MS = 120;
  */
 const NOTCH_DELTA = 40;
 /** The smallest and the biggest a dot is drawn, in css pixels across the radius. */
-const DOT_MIN_PX = 1.2;
+const DOT_MIN_PX = 1.4;
 const DOT_MAX_PX = 9;
 
 /**
@@ -204,6 +205,178 @@ function handleCursor(h: HandleDef, rotation: number): string {
   const angle = (Math.atan2(h.sy, h.sx) * 180) / Math.PI + rotation;
   const slot = ((Math.round(angle / 45) % 4) + 4) % 4;
   return ["ew-resize", "nwse-resize", "ns-resize", "nesw-resize"][slot] ?? "nwse-resize";
+}
+
+/** The name tags: their height and the gap they keep to their zone, in css pixels. */
+const TAG_H = 22;
+const TAG_GAP = 5;
+/** Where the viewer's choice to show the name tags is remembered. */
+const LABELS_KEY = "canvas-rgb.desk-labels";
+
+/** A rectangle on the stage, in css pixels. */
+interface Box {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+const tagListeners = new Set<() => void>();
+let tagsSession: boolean | null = null;
+function subscribeTags(l: () => void): () => void {
+  tagListeners.add(l);
+  return () => tagListeners.delete(l);
+}
+function readTags(): boolean {
+  if (tagsSession !== null) return tagsSession;
+  try {
+    return window.localStorage.getItem(LABELS_KEY) !== "off";
+  } catch {
+    return true;
+  }
+}
+
+function overlaps(a: Box, b: Box, pad = 0): boolean {
+  return a.x < b.x + b.w + pad && b.x < a.x + a.w + pad && a.y < b.y + b.h + pad && b.y < a.y + a.h + pad;
+}
+
+/** One name tag, placed. */
+interface Tag {
+  index: number;
+  key: string;
+  /** The friendly name (or, with none, the hardware name) and, after it, the hardware name. */
+  text: string;
+  sub: string | null;
+  x: number;
+  y: number;
+  missing: boolean;
+  accent: number;
+}
+
+/**
+ * The short name a zone wears on the desk: what the thing is, as the owner calls it. RAM sticks
+ * are numbered by their place in the device list; a board header, a fan or a strip keeps the
+ * zone's own name ("JARGB 1", "Front fan"); a peripheral is named by its kind.
+ */
+function shortName(devices: DeviceInfo[] | null, z: PlacedZone): string {
+  const found = findZoneInfo(devices, z.device_id, z.zone_index);
+  if (!found) return "not connected";
+  const { device, zone } = found;
+  switch (device.kind) {
+    case "dram": {
+      const sticks = (devices ?? []).filter((d) => d.kind === "dram");
+      return `RAM ${sticks.findIndex((d) => d.id === device.id) + 1}`;
+    }
+    case "keyboard":
+      return "Keyboard";
+    case "mouse":
+      return "Mouse";
+    case "microphone":
+      return "Mic";
+    case "headset":
+      return "Headset";
+    case "gpu":
+      return zone.name.toLowerCase().includes("gpu") ? zone.name : `GPU ${zone.name}`;
+    default:
+      return zone.name || device.name;
+  }
+}
+
+/**
+ * Places a name tag beside every zone. A tag sits just outside its zone (above, below or beside
+ * it, aligned to the start, the middle or the end) so it never covers the zone's LEDs; it stays
+ * inside the desk, so a zone at an edge has its tag on the side that has room; and it never
+ * covers another tag. Where every tidy place is taken the tag steps along the zone's side until
+ * it finds one, and a tag that finds none is left off rather than drawn over another.
+ */
+function layoutTags(
+  zones: PlacedZone[],
+  devices: DeviceInfo[] | null,
+  stageW: number,
+  stageH: number,
+  view: View,
+  skip: number | null,
+): Tag[] {
+  const k = (stageW / CANVAS_W) * view.scale;
+  const items: { index: number; z: PlacedZone; text: string; sub: string | null; w: number; box: Box; missing: boolean }[] = [];
+  zones.forEach((z, index) => {
+    if (!z.visible) return;
+    const found = findZoneInfo(devices, z.device_id, z.zone_index);
+    const missing = !found || !found.device.connected;
+    const hardware = shortName(devices, z);
+    const friendly = z.label?.trim() ? z.label.trim() : null;
+    const text = friendly ?? hardware;
+    const sub = friendly && !missing ? hardware : null;
+    const b = boundsOf(z);
+    items.push({
+      index,
+      z,
+      text,
+      sub,
+      w: Math.ceil(text.length * 8.7 + (sub ? sub.length * 7.4 + 14 : 0)) + 20,
+      missing,
+      box: { x: (b.x + view.panX) * k, y: (b.y + view.panY) * k, w: b.w * k, h: b.h * k },
+    });
+  });
+  const taken: Box[] = [];
+  const out: Tag[] = [];
+  // The zone under the pointer or picked wears a bigger label of its own: its tag steps aside.
+  for (const item of items) {
+    const { box, w } = item;
+    const cands: Box[] = [];
+    const xs = [box.x, box.x + (box.w - w) / 2, box.x + box.w - w];
+    for (const x of xs) cands.push({ x, y: box.y - TAG_H - TAG_GAP, w, h: TAG_H });
+    for (const x of xs) cands.push({ x, y: box.y + box.h + TAG_GAP, w, h: TAG_H });
+    const ys = [box.y, box.y + (box.h - TAG_H) / 2, box.y + box.h - TAG_H];
+    for (const y of ys) cands.push({ x: box.x + box.w + TAG_GAP, y, w, h: TAG_H });
+    for (const y of ys) cands.push({ x: box.x - w - TAG_GAP, y, w, h: TAG_H });
+    // Further out to the sides, for a crowded desk.
+    for (let step = 1; step <= 3; step++) {
+      const dx = step * 12;
+      for (const y of ys) cands.push({ x: box.x + box.w + TAG_GAP + dx, y, w, h: TAG_H });
+      for (const y of ys) cands.push({ x: box.x - w - TAG_GAP - dx, y, w, h: TAG_H });
+    }
+    // Further along the zone's sides, for a crowded desk.
+    for (let step = 1; step <= 4; step++) {
+      const dy = step * (TAG_H + 3);
+      for (const x of xs) cands.push({ x, y: box.y - TAG_H - TAG_GAP - dy, w, h: TAG_H });
+      for (const x of xs) cands.push({ x, y: box.y + box.h + TAG_GAP + dy, w, h: TAG_H });
+    }
+    let best: Box | null = null;
+    let bestScore = -Infinity;
+    cands.forEach((c, i) => {
+      if (c.x < 2 || c.y < 2 || c.x + c.w > stageW - 2 || c.y + c.h > stageH - 2) return;
+      if (taken.some((t) => overlaps(c, t, 2))) return;
+      let score = -i * 0.5;
+      // Covering another zone is the worst a tag can do short of covering a tag: it costs the
+      // share of the tag that lies on the zone.
+      for (const o of items) {
+        if (o.index === item.index || !overlaps(c, o.box)) continue;
+        const ox = Math.min(c.x + c.w, o.box.x + o.box.w) - Math.max(c.x, o.box.x);
+        const oy = Math.min(c.y + c.h, o.box.y + o.box.h) - Math.max(c.y, o.box.y);
+        score -= 60 * Math.max(0, (ox * oy) / (c.w * c.h));
+      }
+      if (score > bestScore) {
+        bestScore = score;
+        best = c;
+      }
+    });
+    if (!best) continue;
+    const placed: Box = best;
+    taken.push(placed);
+    if (item.index === skip) continue;
+    out.push({
+      index: item.index,
+      key: zoneKey(item.z),
+      text: item.text,
+      sub: item.sub,
+      x: placed.x,
+      y: placed.y,
+      missing: item.missing,
+      accent: accentOf(devices, item.z.device_id),
+    });
+  }
+  return out;
 }
 
 type DragKind = "move" | "resize" | "rotate";
@@ -409,6 +582,8 @@ export interface StageProps {
   effectNeedsInput?: boolean;
   /** How each LED reads the picture: nearest, bilinear or the mean over its own rectangle. */
   sampling?: SamplingMode;
+  /** The zone being identified: its outline flashes so the eye finds it. */
+  identifying?: number | null;
 }
 
 function zoneKey(z: PlacedZone): string {
@@ -475,6 +650,7 @@ export function PreviewStage({
   effect = null,
   effectNeedsInput = false,
   sampling = "nearest",
+  identifying = null,
 }: StageProps) {
   const stageRef = useRef<HTMLDivElement>(null);
   const previewRef = useRef<HTMLCanvasElement>(null);
@@ -505,6 +681,17 @@ export function PreviewStage({
   const layoutCache = useRef<Map<string, LedLayout>>(new Map());
   const ledOff = useRef<{ key: string; color: string }>({ key: "", color: "rgba(255,255,255,0.3)" });
   const [hover, setHover] = useState<number | null>(null);
+  /** The name tags beside every zone, on or off: remembered for this viewer. */
+  const tagsOn = useSyncExternalStore(subscribeTags, readTags, () => true);
+  const toggleTags = () => {
+    try {
+      window.localStorage.setItem(LABELS_KEY, tagsOn ? "off" : "on");
+    } catch {
+      // Not remembered, still toggled for this session.
+      tagsSession = !tagsOn;
+    }
+    for (const l of tagListeners) l();
+  };
   /** The zone a finger or a pointer is on: its label shows while it is held. */
   const [pressed, setPressed] = useState<number | null>(null);
   const [view, setView] = useState<View>({ scale: 1, panX: 0, panY: 0 });
@@ -734,8 +921,9 @@ export function PreviewStage({
     const mode = samplingRef.current;
     const geom = liveRef.current;
     const unlit = unlitColor();
-    const ringDark = "rgba(0, 0, 0, 0.62)";
-    const ringLight = "rgba(255, 255, 255, 0.5)";
+    // A thin ring keeps a dot readable on any picture: dark round a bright dot, white round a dark one.
+    const ringDark = "rgba(0, 0, 0, 0.7)";
+    const ringLight = "rgba(255, 255, 255, 0.92)";
     for (let i = 0; i < geom.length; i++) {
       const z = geom[i];
       if (!z || !z.visible) continue;
@@ -747,8 +935,14 @@ export function PreviewStage({
       const off = missingRef.current.has(i);
       // A point is one blob of light: its LEDs all sample the same rect, so one dot stands for them.
       const count = local.shape === "point" ? Math.min(1, local.leds.length) : local.leds.length;
-      const minPx = local.shape === "point" ? 3 : DOT_MIN_PX;
-      const radius = clamp(local.radius * k, minPx * dpr, DOT_MAX_PX * dpr * Math.max(1, v.scale * 0.5));
+      const isPoint = local.shape === "point";
+      // A point is one soft, larger dot: the zone's one blob of light.
+      const minPx = isPoint ? 4 : DOT_MIN_PX;
+      const radius = clamp(
+        (isPoint ? local.radius * 1.3 : local.radius) * k,
+        minPx * dpr,
+        (isPoint ? 15 : DOT_MAX_PX) * dpr * Math.max(1, v.scale * 0.5),
+      );
       for (let j = 0; j < count; j++) {
         const led = local.leds[j];
         if (!led) continue;
@@ -762,15 +956,32 @@ export function PreviewStage({
         let ring = ringDark;
         if (pic && !off) {
           const c = sampleLed(pic, cell, mode);
-          fill = `rgb(${c[0]} ${c[1]} ${c[2]})`;
-          if (luminance(c) < 70) ring = ringLight;
+          // A lit LED reads brighter than the picture it sits on: the dot is lifted a little, so
+          // it stands out as a light and not as a hole in the effect.
+          const lit: RGB = [
+            Math.round(c[0] + (255 - c[0]) * 0.28),
+            Math.round(c[1] + (255 - c[1]) * 0.28),
+            Math.round(c[2] + (255 - c[2]) * 0.28),
+          ];
+          fill = `rgb(${lit[0]} ${lit[1]} ${lit[2]})`;
+          if (luminance(lit) < 120) ring = ringLight;
         } else {
           // No picture, or no device: the dots still show where the LEDs sit.
           fill = unlit;
           ring = ringDark;
         }
+        if (isPoint) {
+          // The soft edge: the dot's own colour, fading out past the ring.
+          const halo = octx.createRadialGradient(x, y, radius * 0.6, x, y, radius * 1.9);
+          halo.addColorStop(0, fill.replace("rgb(", "rgba(").replace(")", " / 0.55)"));
+          halo.addColorStop(1, fill.replace("rgb(", "rgba(").replace(")", " / 0)"));
+          octx.beginPath();
+          octx.arc(x, y, radius * 1.9, 0, Math.PI * 2);
+          octx.fillStyle = halo;
+          octx.fill();
+        }
         octx.beginPath();
-        octx.arc(x, y, radius + dpr, 0, Math.PI * 2);
+        octx.arc(x, y, radius + dpr * 1.25, 0, Math.PI * 2);
         octx.fillStyle = ring;
         octx.fill();
         octx.beginPath();
@@ -851,6 +1062,8 @@ export function PreviewStage({
         if (z) applyGeom(i, z, v);
       }
       placeLabel(labelIndexRef.current, v);
+      // The name tags are placed from the committed view: while the view moves they step aside.
+      if (stageRef.current) stageRef.current.dataset.moving = "true";
       queuePaint();
     },
     [applyGeom, placeLabel, queuePaint],
@@ -1322,6 +1535,16 @@ export function PreviewStage({
 
   const selectedZone = selected !== null ? zones[selected] : undefined;
 
+  // The view is committed: the name tags can be placed again.
+  useEffect(() => {
+    if (stageRef.current) delete stageRef.current.dataset.moving;
+  }, [view]);
+
+  const tags = useMemo(
+    () => (tagsOn && stageBox.w > 0 ? layoutTags(zones, devices, stageBox.w, stageBox.h, view, labelIndex) : []),
+    [tagsOn, zones, devices, stageBox, view, labelIndex],
+  );
+
   const base = (stageBox.w || CANVAS_W) / CANVAS_W;
   const k = base * view.scale;
 
@@ -1348,9 +1571,10 @@ export function PreviewStage({
   const labelZone = labelIndex !== null ? zones[labelIndex] : undefined;
   const labelFound = labelZone ? findZoneInfo(devices, labelZone.device_id, labelZone.zone_index) : null;
   const labelMissing = labelIndex !== null && missing.has(labelIndex);
+  const labelFriendly = labelZone?.label?.trim() ? labelZone.label.trim() : null;
   const labelText = labelZone
     ? labelFound
-      ? `${labelFound.zone.name} ${labelFound.zone.led_count}`
+      ? `${labelFriendly ? `${labelFriendly} · ${labelFound.zone.name}` : labelFound.zone.name} ${labelFound.zone.led_count}`
       : phone
         ? "not connected"
         : "device not found"
@@ -1358,6 +1582,7 @@ export function PreviewStage({
   const labelAccent = labelZone ? accentOf(devices, labelZone.device_id) : -1;
 
   return (
+    <>
     <div
       ref={stageRef}
       className={`stage ${desk.desk} ${desk.canvas}`}
@@ -1478,7 +1703,20 @@ export function PreviewStage({
             data-hidden={!z.visible}
             data-selected={isSel}
             data-missing={isMissing}
+            data-twin={
+              isMissing &&
+              zones.some(
+                (o, j) =>
+                  j !== i &&
+                  !missing.has(j) &&
+                  Math.abs(o.x - z.x) < 0.5 &&
+                  Math.abs(o.y - z.y) < 0.5 &&
+                  Math.abs(o.width - z.width) < 0.5 &&
+                  Math.abs(o.height - z.height) < 0.5,
+              )
+            }
             data-hover={hover === i}
+            data-identify={identifying === i}
             data-shape={found ? resolveShape(z.shape, found.zone.kind) : "none"}
             style={style}
             onPointerDown={(e) => beginDrag("move", i, e)}
@@ -1534,6 +1772,28 @@ export function PreviewStage({
         </div>
       )}
 
+      {tags.map((t) => (
+        // A solid chip beside each zone: its name, always on while the tags are on, in a colour
+        // that holds on any picture.
+        <div
+          key={t.key}
+          className={desk.tag}
+          data-tag="true"
+          data-zone-index={t.index}
+          data-missing={t.missing}
+          style={
+            {
+              left: `${t.x}px`,
+              top: `${t.y}px`,
+              "--zc": t.missing ? "var(--down)" : `var(${ACCENTS[t.accent] ?? "--a1"})`,
+            } as CSSProperties
+          }
+        >
+          {t.text}
+          {t.sub && <span className={desk.tagSub}>{t.sub}</span>}
+        </div>
+      ))}
+
       {labelIndex !== null && labelZone && (
         // The zone's name, beside it while it is hovered, held or picked. Nothing else on the
         // canvas is text.
@@ -1575,34 +1835,41 @@ export function PreviewStage({
         </div>
       )}
 
-      <div
-        className={desk.controls}
-        onPointerDown={(e) => e.stopPropagation()}
-        onWheel={(e) => e.stopPropagation()}
-      >
-        <IconButton label="Zoom out" icon={<Minus size={13} />} size="sm" onClick={() => zoomBy(1 / 1.3)} />
-        <span className={desk.zoomValue}>{Math.round(view.scale * 100)}%</span>
-        <IconButton label="Zoom in" icon={<Plus size={13} />} size="sm" onClick={() => zoomBy(1.3)} />
-        <IconButton label="Fit the canvas" icon={<ArrowsOut size={13} />} size="sm" onClick={fit} />
-      </div>
-
-      {scaleBar && (
-        // The scale: how long a line on the desk is, in the daemon's own units.
-        <div
-          className={desk.scaleBar}
-          role="img"
-          aria-label={`Scale: ${scaleBar.units} of the desk's ${CANVAS_W} units${
-            scaleBar.share ? `, ${scaleBar.share}` : ""
-          }`}
-        >
-          <span className={desk.scaleLine} style={{ width: `${scaleBar.px}px` }} />
-          <span className={desk.scaleLabel}>
-            {scaleBar.share && <span className={desk.scaleShare}>{scaleBar.share}</span>}
-            <span className="fig">{scaleBar.units} units</span>
-          </span>
-        </div>
-      )}
     </div>
+      <div className={desk.toolbar}>
+        {scaleBar ? (
+          // The scale: how long a line on the desk is, in the daemon's own units.
+          <div
+            className={desk.scaleBar}
+            role="img"
+            aria-label={`Scale: ${scaleBar.units} of the desk's ${CANVAS_W} units${
+              scaleBar.share ? `, ${scaleBar.share}` : ""
+            }`}
+          >
+            <span className={desk.scaleLine} style={{ width: `${scaleBar.px}px` }} />
+            <span className={desk.scaleLabel}>
+              {scaleBar.share && <span className={desk.scaleShare}>{scaleBar.share}</span>}
+              <span className="fig">{scaleBar.units} units</span>
+            </span>
+          </div>
+        ) : (
+          <span />
+        )}
+        <div className={desk.controls}>
+          <IconButton
+            label={tagsOn ? "Hide the zone names" : "Show the zone names"}
+            icon={<Tag size={13} weight={tagsOn ? "fill" : "regular"} />}
+            size="sm"
+            pressed={tagsOn}
+            onClick={toggleTags}
+          />
+          <IconButton label="Zoom out" icon={<Minus size={13} />} size="sm" onClick={() => zoomBy(1 / 1.3)} />
+          <span className={desk.zoomValue}>{Math.round(view.scale * 100)}%</span>
+          <IconButton label="Zoom in" icon={<Plus size={13} />} size="sm" onClick={() => zoomBy(1.3)} />
+          <IconButton label="Fit the canvas" icon={<ArrowsOut size={13} />} size="sm" onClick={fit} />
+        </div>
+      </div>
+    </>
   );
 }
 

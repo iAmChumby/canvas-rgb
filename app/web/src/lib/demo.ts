@@ -109,7 +109,7 @@ function initialState(): DemoState {
     effects,
     favorites,
     saved: {},
-    activeEffect: "spiral",
+    activeEffect: "aurora",
     layouts: layouts.layouts,
     activeLayout: layouts.active,
     fanModes,
