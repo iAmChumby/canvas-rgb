@@ -952,6 +952,7 @@ fn mean_abs_diff(a: &[u8], b: &[u8]) -> f64 {
 }
 
 #[test]
+#[cfg_attr(debug_assertions, ignore = "the paint effects fit the 100 ms frame budget in release; CI runs these with --release")]
 fn the_stock_effects_load_move_and_report_no_errors() {
     for (id, source, _) in STOCK {
         let mut effect = stock(id, source);
@@ -1008,16 +1009,19 @@ fn assert_loop_closes(id: &str, source: &str, period: usize) {
 }
 
 #[test]
+#[cfg_attr(debug_assertions, ignore = "the paint effects fit the 100 ms frame budget in release; CI runs these with --release")]
 fn ink_drop_loops_every_12_seconds() {
     assert_loop_closes("ink-drop", INK_DROP, 12);
 }
 
 #[test]
+#[cfg_attr(debug_assertions, ignore = "the paint effects fit the 100 ms frame budget in release; CI runs these with --release")]
 fn wet_smear_loops_every_16_seconds() {
     assert_loop_closes("wet-smear", WET_SMEAR, 16);
 }
 
 #[test]
+#[cfg_attr(debug_assertions, ignore = "the paint effects fit the 100 ms frame budget in release; CI runs these with --release")]
 fn palette_knife_loops_every_24_seconds() {
     assert_loop_closes("palette-knife", PALETTE_KNIFE, 24);
 }

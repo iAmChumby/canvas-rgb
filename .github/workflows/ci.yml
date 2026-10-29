@@ -49,6 +49,11 @@ jobs:
       - name: Tests
         run: cargo test --workspace
 
+      # The paint effects fit their 100 ms frame budget in release (5-10 ms); a debug build on a
+      # shared runner is too slow, so their tests run here in release.
+      - name: Paint effect tests (release)
+        run: cargo test --release -p canvas-html --test effects
+
       # Plain PowerShell scripts with their own asserts, not Pester (see installer/tests/_assert.ps1).
       - name: Installer tests
         shell: pwsh
