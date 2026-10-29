@@ -41,6 +41,27 @@ APIs, so the tests pass.
   `WAVEFORMATEXTENSIBLE` extension (`crates/canvas-daemon/src/capture/audio.rs`). `D3D11CreateDevice`
   used the wrong driver type with an adapter (`crates/canvas-daemon/src/capture/screen.rs`). Both are
   fixed in 0.1.0; the issue stays open until they are confirmed on real lights.
-- **Class fix:** none yet. Each capture path logs a WARN when it fails to start
+- [#5](https://github.com/iAmChumby/canvas-rgb/issues/5): after a wake, the RAM shows its own rainbow.
+  The daemon's message window never receives `WM_POWERBROADCAST` (no suspend or resume in the log
+  across two sleeps), and the registration results are discarded (`let _ =` in
+  `crates/canvas-daemon/src/power.rs`).
+- **Class fix:** due (second bug). Each capture path logs a WARN when it fails to start
   (`crates/canvas-daemon/src/capture/mod.rs`), but a capture that starts and then gets no data stays
-  silent.
+  silent, and a failed power registration leaves no trace. Candidate: no Windows API result is
+  discarded with `let _ =`; every one is logged, and every subscription logs its first event.
+
+### `cause:process-launch`: a process started outside the service's launch rules
+
+The service owns starting the daemon in the user's session, with no window. Any other path that
+starts `canvas-rgbd.exe` skips those rules.
+
+- 46c30c1: the service launched the daemon without `CREATE_NO_WINDOW`, so a console window showed;
+  the installer also started the daemon itself and raced the service for the API port
+  (`installer/inno/canvas-rgb.iss`, the comment above the tray launch).
+- [#6](https://github.com/iAmChumby/canvas-rgb/issues/6): the daemon runs in a visible console
+  after logon. `installer/setup-user.ps1` still writes an HKCU Run key that starts the daemon from
+  Explorer, and the service counts "no user logged on yet" as a crash and stops retrying before
+  logon.
+- **Class fix:** due (second bug). One launcher (the service), a daemon that cannot show a console
+  whoever starts it, and a check that fails when anything outside `canvas-svc` starts
+  `canvas-rgbd.exe`.
