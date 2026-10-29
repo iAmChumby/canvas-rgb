@@ -9,112 +9,123 @@
 ![Rust](https://img.shields.io/badge/built%20with-Rust-b45cff?logo=rust)
 ![Tauri 2](https://img.shields.io/badge/Tauri-2-ffb02e?logo=tauri)
 
-canvas-rgb paints effects across every LED in your case, runs your fan curves and sets up your mouse and controller, in a fraction of the memory the vendor apps use. Your SignalRGB effects still work.
+**RGB software shouldn't take a gigabyte of RAM.** That changes now. canvas-rgb runs your lights,
+fans, mouse and controller in a fraction of the memory.
 
-| Measured on one PC (Ryzen 7 7800X3D, Windows 11), 60 seconds per app | RAM | CPU | Disk |
+[Download v0.1.0](https://github.com/iAmChumby/canvas-rgb/releases/latest) ·
+[Site](https://iamchumby.github.io/canvas-rgb/)
+
+## 819 MB before. 55 MB now.
+
+| Same PC (Ryzen 7 7800X3D, Windows 11), one app at a time, 60 s each | RAM | CPU | Disk |
 |---|---|---|---|
 | **canvas-rgb**: lights, fans, pump display, mouse, controller | **55 MB** | **0.5%** | **117 MB** |
-| SignalRGB, ZEUS CAST and Attack Shark X6 app | 819 MB | 2.6% | 2.4 GB |
-| SignalRGB alone (its background service was off) | 643 MB | 0.7% | 1.8 GB |
+| SignalRGB, ZEUS CAST and the Attack Shark X6 app | 819 MB | 2.6% | 2.4 GB |
+| Signal alone, with its background service switched off | 643 MB | 0.7% | 1.8 GB |
 
-The 8BitDo software was not measured.
-Opening the editor adds about 360 MB while its window is open. The method and the caveats are in
-[docs/benchmark.md](docs/benchmark.md).
+Canvas was driving the fan curves the whole time it was measured. The 8BitDo app never made the
+table, so the real gap is wider. The editor adds about 360 MB while its window is open and gives
+it back when you close it. Method and caveats live in [docs/benchmark.md](docs/benchmark.md).
 
-## Status
+## Your Signal effects run here
 
-canvas-rgb 0.1.0 is the first public release, and it is early: a work in progress that will grow and change. It runs on my PC and the hardware listed below, and that is the only hardware I have tested. Anything else may break or look wrong. If it does, open an issue at https://github.com/iAmChumby/canvas-rgb/issues/new/choose and tell me what happened: the steps, what you expected, and what you saw. A good report is how it gets fixed.
-
-## Your SignalRGB effects still work
-
-canvas-rgb reads SignalRGB's HTML effect format. An effect that uses the supported calls runs
-unchanged.
-
-Copy the effect file into `%APPDATA%\canvas-rgb\effects\`, and the daemon picks it up within five
-seconds. Or let canvas-rgb check and copy it with `canvas-rgb effects import my-effect.html`.
-[docs/effects.md](docs/effects.md) lists the calls that are supported and the few that are not.
+Same HTML files, drawn in Rust by an embedded script engine with no browser underneath. Drop one
+into `%APPDATA%\canvas-rgb\effects\` and the daemon loads it within five seconds. Or run
+`canvas-rgb effects import my-effect.html`, which checks the file before it copies it in.
+[docs/effects.md](docs/effects.md) lists exactly which calls work.
 
 ## Lighting
 
-- One layout for every device. Place your devices on it and an effect flows across them as one
-  picture.
-- 14 built-in effects: 11 classics, from solid colour to screen ambience and audio spectrum, plus three paint effects (Ink Drop, Wet Smear and Palette Knife).
-- Runs SignalRGB-format HTML effects.
-- Write your own: an effect is one HTML file. `canvas-rgb effects check my-effect.html` reports
-  whether it parses, moves and shows more than one colour, before you install it.
+Every device sits on one layout, so an effect paints across the whole case as a single picture.
+Fourteen effects ship built in. Eleven are the classics, from solid colour to screen ambience and
+audio spectrum. The other three paint the case: Ink Drop unfurls ink through still water, Wet
+Smear drags thick pigment into streaks, and Palette Knife lays colour on in slabs.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="site/public/shots/layout-dark.webp">
+  <img alt="The canvas-rgb editor: a desk layout with the devices placed on it and an effect running across them." src="site/public/shots/layout-light.webp">
+</picture>
 
 ## Fans
 
-- Curves, fixed speeds or BIOS control, per header, with named profiles.
-- Every fan goes back to BIOS control when the service shuts down, panics, or loses a temperature
-  sensor for too long. No fan is driven below its floor.
+Curves, fixed speeds or BIOS control on each header, saved as named profiles. If the service shuts
+down, panics or loses a temperature sensor for too long, BIOS gets every fan back. No fan is ever
+driven below its floor. Fan control runs on the NCT6687D chip through the
+[PawnIO](https://github.com/namazso/PawnIO) driver.
 
 ## Mouse and controller
 
-- **Attack Shark X6**: DPI, polling rate, lighting and power settings.
-- **8BitDo Ultimate 2**: paddle and button mapping, with the stick and trigger ranges.
-- Both work without their vendor apps.
+The Attack Shark X6 and 8BitDo Ultimate 2 apps can stay closed for good. Canvas sets the X6's DPI,
+polling rate, lighting and power options, and maps the Ultimate 2's paddles and buttons along with
+its stick and trigger ranges.
 
-## For tinkerers
+## For developers
 
-- A local API on `127.0.0.1:9430`. Every route except the status and the live preview needs the
-  API token. The CLI talks to the same API.
-- A command line, `canvas-rgb`, with `status`, `devices`, `effects`, `output`, `fans`,
-  `peripherals`, `diag` and `config`. Add `--json` for output a script can read.
-- New devices are adapters: a Rust module behind the `DeviceAdapter` trait in
-  `crates/canvas-proto/src/traits.rs`. How to add one: [docs/adapters.md](docs/adapters.md).
-- Effects are one HTML file each. The guide is [docs/effects.md](docs/effects.md). The repository
-  includes a Claude Code skill for writing and fixing them, in `.claude/skills/canvas-rgb-effect`.
-
-## Hardware it is tested on
-
-Tested on one PC: an MSI B850 board with Mystic Light ARGB and an NCT6687D fan chip, ENE RAM, a
-MonsGeek keyboard, a HyperX QuadCast S, a GAMDIAS CHIONE pump display, an Attack Shark X6 and an
-8BitDo Ultimate 2.
-
-Lighting goes through [OpenRGB](https://codeberg.org/OpenRGB/OpenRGB), so OpenRGB-supported devices
-should light up. Fan control works on the NCT6687D only.
+- A local API on `127.0.0.1:9430`. Every route except status and the live preview needs the API
+  token.
+- The `canvas-rgb` CLI talks to that same API: `status`, `devices`, `effects`, `output`, `fans`,
+  `peripherals`, `diag` and `config`. Add `--json` and a script can read any of it.
+- New devices are adapters, a Rust module behind the `DeviceAdapter` trait in
+  `crates/canvas-proto/src/traits.rs`. [docs/adapters.md](docs/adapters.md) walks through one.
+- An effect is one HTML file. `canvas-rgb effects check my-effect.html` tells you whether it parses,
+  moves and shows more than one colour before you install it. The repo ships a Claude Code skill
+  for writing them in `.claude/skills/canvas-rgb-effect`.
 
 ## Install
 
-Windows 11. Run the plan first. It changes nothing.
+Grab `canvas-rgb-setup-0.1.0.exe` from the
+[latest release](https://github.com/iAmChumby/canvas-rgb/releases/latest) and run it. Windows flags
+an unknown publisher the first time, because the installer isn't signed yet.
+
+Setup looks for Signal and PawnIO first and only asks about what it finds or misses. Its
+uninstaller hands the fans back to BIOS before it removes a single file. For a silent install:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File installer\setup.ps1 -WhatIf   # prints the plan, changes nothing
+canvas-rgb-setup-0.1.0.exe /SILENT /SIGNALRGB=Y /PAWNIO="C:\path\PawnIO_setup.exe"
+```
+
+### Developer build
+
+Run the plan first. It prints every step and changes nothing.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File installer\setup.ps1 -WhatIf
 powershell -ExecutionPolicy Bypass -File installer\setup.ps1
 ```
 
-The installer asks for one admin prompt. It builds canvas-rgb and downloads OpenRGB, and it checks
-OpenRGB's SHA-256 before it runs anything.
+One admin prompt. The script builds canvas-rgb, downloads OpenRGB and checks its SHA-256 before
+anything runs. Fan control needs PawnIO, which isn't bundled: pass the installer you downloaded
+with `-PawnIoInstaller`. `installer\uninstall.ps1` hands every fan back to BIOS, then removes the
+service, the install folder and the startup entries.
 
-Fan control needs the [PawnIO](https://github.com/namazso/PawnIO) driver, which the installer does
-not ship. Pass the PawnIO installer you downloaded with `-PawnIoInstaller`.
+To build the setup wizard yourself, run `tools\build-installer.ps1` with Inno Setup 6 installed.
 
-A release also ships `canvas-rgb-setup-<version>.exe`, a normal Windows setup wizard (build it with
-`tools\build-installer.ps1`; it needs Inno Setup 6). It is not code-signed, so SmartScreen warns on first
-run. It runs the same installer scripts, looks for SignalRGB and PawnIO first and only asks about what it finds (or misses), and its
-uninstaller hands the fans back to BIOS before it removes any file. Silent switches:
-`/SILENT /SIGNALRGB=Y /PAWNIO="C:\path\PawnIO_setup.exe"`.
+## Hardware
 
-`installer\uninstall.ps1` hands every fan back to BIOS, then removes the service, the install
-folder and the startup entries.
+Canvas is built and tested on an MSI B850 board with Mystic Light ARGB and an NCT6687D fan chip,
+ENE RAM, a MonsGeek keyboard, a HyperX QuadCast S, a GAMDIAS CHIONE pump display, an Attack Shark
+X6 and an 8BitDo Ultimate 2. Lighting goes through [OpenRGB](https://codeberg.org/OpenRGB/OpenRGB),
+so what OpenRGB supports should light up here too.
 
-## Why I built this
+Something wrong on your rig?
+[Open an issue](https://github.com/iAmChumby/canvas-rgb/issues/new/choose) with the steps, what you
+expected and what you saw.
 
-SignalRGB and ZEUS CAST ran every day, for my lights and my pump display. The 8BitDo and Attack
-Shark apps I never really ran, because they suck so much, so the paddles and mouse settings were
-out of reach.
+## Why Canvas exists
 
-My RGB software shouldn't take a gigabyte of RAM on the machine meant to put its resources into
-games. So I built one app that does all of it and stays out of the way.
+Signal and ZEUS CAST ran every day on the PC this was built for, one for the lights and one for the
+pump display, and between them they held most of a gigabyte. The 8BitDo and Attack Shark apps were
+bad enough that they never got opened, so the paddles and the mouse settings sat out of reach.
 
-Luke
+A gaming PC should spend its memory on games. Canvas took over every one of those jobs and runs
+them in 55 MB.
 
 ## Thanks
 
-canvas-rgb stands on other people's work: OpenRGB, Hypercolor, PawnIO, ATKsoft, the 8BitDo Linux
-project, SDL and more. [docs/thanks.md](docs/thanks.md) says what each one made possible.
+Most of this hardware never shipped with docs. OpenRGB, Hypercolor, PawnIO, ATKsoft, the 8BitDo
+Linux project, SDL and others cracked it first, and Canvas builds on what they found.
+[docs/thanks.md](docs/thanks.md) credits each one.
 
 ## License
 
-Apache-2.0. [NOTICE](NOTICE) lists the code and research this builds on.
+Apache-2.0. [NOTICE](NOTICE) lists the code and research Canvas builds on.
