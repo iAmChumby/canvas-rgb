@@ -41,14 +41,17 @@ export function Button({
 
 /**
  * A label that changes with state but never changes width: every variant is laid out in one cell
- * and only the current one shows, so the button keeps the width of its longest label.
+ * and only the current one shows, so the button keeps the width of its longest label. `shown`
+ * replaces the text of the current label while the wider placeholder still reserves the width
+ * (a label that carries a live figure, "Downloading 42%"); the cells are keyed by position, so a
+ * figure that ticks does not replay the swap.
  */
-export function Swap({ labels, at }: { labels: string[]; at: number }) {
+export function Swap({ labels, at, shown }: { labels: string[]; at: number; shown?: string }) {
   return (
     <span className="swap">
       {labels.map((l, i) => (
-        <span key={l} data-on={i === at ? "true" : "false"} aria-hidden={i === at ? undefined : true}>
-          {l}
+        <span key={i} data-on={i === at ? "true" : "false"} aria-hidden={i === at ? undefined : true}>
+          {i === at && shown !== undefined ? shown : l}
         </span>
       ))}
     </span>

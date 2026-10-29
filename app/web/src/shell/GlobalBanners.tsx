@@ -1,11 +1,14 @@
 "use client";
 
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { Lightning, SquaresFour, Warning, WarningOctagon } from "@phosphor-icons/react";
+import { ArrowCircleUp, CheckCircle, Lightning, SquaresFour, Warning, WarningOctagon } from "@phosphor-icons/react";
 import { Banner } from "@/components/Banner";
-import { ButtonLink } from "@/components/Button";
+import { Button, ButtonLink } from "@/components/Button";
 import { api } from "@/lib/endpoints";
+import { canUpdate, updateDismissUpdated, updateInstall, updateLater, updateSkip } from "@/lib/host";
+import { sendUpdate } from "@/lib/updateActions";
+import { isInstalling, isSkipped } from "@/lib/updateWords";
 import { messageOf } from "@/lib/errors";
 import { fmtSeconds } from "@/lib/format";
 import { patchSnap, useSnap } from "@/lib/store";
@@ -121,16 +124,79 @@ export function StandingNotices() {
  */
 export function GlobalBanners() {
   const pathname = usePathname();
+  const router = useRouter();
   const status = useSnap((s) => s.status);
+  const update = useSnap((s) => s.update);
 
   // The Fans page says this in its own card; the banner would say it twice.
   const onFans = pathname.endsWith("/fans/");
   const serviceDown =
     !onFans && status !== null && status.service_down_ms !== null && status.service_down_ms >= SERVICE_BANNER_MS;
 
+  // A release is waiting: the banner offers it until the person says Later (hidden until the next
+  // automatic check) or Skip this version. The Updates page has the key itself, so it says it once.
+  const onUpdates = pathname.endsWith("/updates/");
+  const offered =
+    update !== null &&
+    update.available !== null &&
+    !update.snoozed &&
+    !isSkipped(update) &&
+    !isInstalling(update) &&
+    !onUpdates &&
+    canUpdate();
+  const later = () => void sendUpdate(updateLater);
+
   return (
     <div className="banners">
       <div className="banners-inner">
+        {update && update.updated_to && (
+          <Banner
+            tone="ok"
+            icon={<CheckCircle size={20} weight="fill" />}
+            title={`Updated to ${update.updated_to.version}`}
+            onDismiss={() => void sendUpdate(updateDismissUpdated)}
+            dismissLabel="Dismiss"
+            actions={
+              <ButtonLink href="/updates/" variant="ghost" size="sm">
+                What&rsquo;s new
+              </ButtonLink>
+            }
+          >
+            You have {update.current_version}.
+          </Banner>
+        )}
+        {offered && update && update.available && (
+          <Banner
+            tone="work"
+            icon={<ArrowCircleUp size={20} weight="fill" />}
+            title={`canvas-rgb ${update.available.version} is out`}
+            onDismiss={later}
+            dismissLabel="Later"
+          >
+            You have {update.current_version}.
+            <div className="upd-banner-acts">
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => {
+                  void sendUpdate(updateInstall);
+                  router.push("/updates/");
+                }}
+              >
+                Update now
+              </Button>
+              <Button size="sm" onClick={later}>
+                Later
+              </Button>
+              <Button size="sm" onClick={() => void sendUpdate(updateSkip)}>
+                Skip this version
+              </Button>
+              <ButtonLink href="/updates/" variant="ghost" size="sm">
+                What&rsquo;s new
+              </ButtonLink>
+            </div>
+          </Banner>
+        )}
         {serviceDown && status && (
           <Banner
             tone="down"

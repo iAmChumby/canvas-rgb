@@ -28,6 +28,7 @@ import {
   type Theme,
 } from "@/shell/prefs";
 import type { Settings } from "@/proto/Settings";
+import { UpdatesPanel } from "./UpdatesPanel";
 
 export function SettingsView() {
   const settings = useSnap((s) => s.settings);
@@ -314,6 +315,8 @@ export function SettingsView() {
               {!inTray && <span className="mute" style={{ fontSize: 14 }}>Tray app only</span>}
             </div>
           </Panel>
+
+          <UpdatesPanel />
         </div>
       </div>
     </div>

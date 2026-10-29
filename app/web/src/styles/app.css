@@ -658,7 +658,7 @@ html[data-motion="reduced"] *::after {
   top: var(--strip-h, 0px);
   right: var(--s6);
   z-index: 35;
-  width: min(460px, calc(100vw - var(--s6) * 2));
+  width: min(540px, calc(100vw - var(--s6) * 2));
   pointer-events: none;
 }
 

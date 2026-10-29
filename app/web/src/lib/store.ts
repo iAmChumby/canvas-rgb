@@ -6,7 +6,8 @@
 import { useSyncExternalStore } from "react";
 import { api } from "@/lib/endpoints";
 import { ApiFailure, messageOf } from "@/lib/errors";
-import { onStateChanged } from "@/lib/host";
+import { canUpdate, getUpdateState, onStateChanged, onUpdateState } from "@/lib/host";
+import { setDemoUpdateListener } from "@/lib/demoUpdate";
 import type { Status } from "@/proto/Status";
 import type { FansStatus } from "@/proto/FansStatus";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
@@ -16,6 +17,7 @@ import type { Layout } from "@/proto/Layout";
 import type { RenderState } from "@/proto/RenderState";
 import type { Settings } from "@/proto/Settings";
 import type { DisplayStatus } from "@/proto/DisplayStatus";
+import type { UpdateState } from "@/proto/UpdateState";
 
 export const RPM_HISTORY = 60;
 
@@ -65,6 +67,8 @@ export interface Snap {
   /** The daemon is older than the display routes: it answered 404, so it is not an error. */
   displaysUnsupported: boolean;
   rpm: Record<string, number[]>;
+  /** The tray's update state. Null until the tray has answered, and in a browser with no fixture. */
+  update: UpdateState | null;
 }
 
 let snap: Snap = {
@@ -87,6 +91,7 @@ let snap: Snap = {
   displaysError: null,
   displaysUnsupported: false,
   rpm: {},
+  update: null,
 };
 
 const listeners = new Set<() => void>();
@@ -202,6 +207,20 @@ export async function refreshDisplays(): Promise<void> {
   }
 }
 
+/**
+ * Reads the update state from the tray. A plain browser has no tray: with no `?update=` fixture
+ * the snapshot stays null, and the controls say "Tray app only".
+ */
+export async function refreshUpdate(): Promise<void> {
+  if (!canUpdate()) return;
+  try {
+    const state = await getUpdateState();
+    if (state) patchSnap({ update: state });
+  } catch {
+    // A tray without the update commands: the editor shows nothing about updates.
+  }
+}
+
 export async function refreshAll(): Promise<void> {
   await Promise.all([
     refreshStatus(),
@@ -226,6 +245,7 @@ export function startSync(): () => void {
   let fast: ReturnType<typeof setInterval> | null = null;
   let slow: ReturnType<typeof setInterval> | null = null;
   let unlisten: (() => void) | null = null;
+  let updateUnlisten: (() => void) | null = null;
   let stopped = false;
 
   const tickFast = () => {
@@ -252,6 +272,13 @@ export function startSync(): () => void {
   };
 
   void refreshAll();
+  void refreshUpdate();
+  // The tray pushes every change of the update state, so nothing polls it. The fixture pushes its own.
+  setDemoUpdateListener((state) => patchSnap({ update: state }));
+  void onUpdateState((state) => patchSnap({ update: state })).then((u) => {
+    if (stopped) u();
+    else updateUnlisten = u;
+  });
   fast = setInterval(tickFast, 1000);
   slow = setInterval(tickSlow, 4000);
   document.addEventListener("visibilitychange", onVisibility);
@@ -268,5 +295,7 @@ export function startSync(): () => void {
     if (slow) clearInterval(slow);
     document.removeEventListener("visibilitychange", onVisibility);
     if (unlisten) unlisten();
+    if (updateUnlisten) updateUnlisten();
+    setDemoUpdateListener(null);
   };
 }
