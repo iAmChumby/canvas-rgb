@@ -32,6 +32,7 @@ skipped_version: string | null,
  */
 snoozed: boolean, 
 /**
- * Set after an update until the person dismisses "Updated to X.Y.Z".
+ * Set after an update until the person dismisses "Updated to X.Y.Z". Carries the installed
+ * release's notes so What's new has something to show once `available` is gone.
  */
-updated_to: string | null, };
+updated_to: UpdateInfo | null, };

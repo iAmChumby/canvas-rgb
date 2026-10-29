@@ -139,6 +139,7 @@ pub struct UpdateState {
     pub skipped_version: Option<String>,
     /// True after Later, until the next automatic check: the editor banner stays hidden.
     pub snoozed: bool,
-    /// Set after an update until the person dismisses "Updated to X.Y.Z".
-    pub updated_to: Option<String>,
+    /// Set after an update until the person dismisses "Updated to X.Y.Z". Carries the installed
+    /// release's notes so What's new has something to show once `available` is gone.
+    pub updated_to: Option<UpdateInfo>,
 }
