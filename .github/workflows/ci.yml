@@ -21,6 +21,11 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
+      # Every copy of the version matches Cargo.toml (docs/releasing.md).
+      - name: Versions agree
+        shell: pwsh
+        run: pwsh -NoProfile -File tools/set-version.ps1 -Check
+
       # The editor goes first: tauri-build needs app/web/out (frontendDist) to exist before the
       # Rust crates compile. next.config.ts sets output: "export", so `next build` writes it.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4

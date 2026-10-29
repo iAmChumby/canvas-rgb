@@ -43,6 +43,13 @@ you close the issue, look for the same mistake elsewhere. Label each issue with 
 labels (where it showed up) and a `cause:` label (why). The second bug of one cause means the class
 gets a structural fix. [docs/bug-classes.md](docs/bug-classes.md) has the steps and the classes so far.
 
+## Changelog and versions
+
+A change people using canvas-rgb can notice adds a line to `CHANGELOG.md` under `## [Unreleased]`,
+in the same commit. Versions belong to releases, not to fixes: fixes ship as the next patch
+(`0.1.1`), features as the next minor (`0.2.0`). Never edit a version by hand; run
+`tools/set-version.ps1`. The rules and the release steps are in [docs/releasing.md](docs/releasing.md).
+
 ## UI changes
 
 A UI change needs screenshots of the editor at 1440 px and 390 px wide. Put them in the pull request.
