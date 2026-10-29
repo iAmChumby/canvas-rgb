@@ -13,7 +13,7 @@ canvas-rgb paints effects across every LED in your case, runs your fan curves an
 
 | Measured on one PC (Ryzen 7 7800X3D, Windows 11), 60 seconds per app | RAM | CPU | Disk |
 |---|---|---|---|
-| **canvas-rgb**: lights, fans, pump display, mouse, controller | **60 MB** | **0.6%** | **80 MB** |
+| **canvas-rgb**: lights, fans, pump display, mouse, controller | **55 MB** | **0.5%** | **117 MB** |
 | SignalRGB, ZEUS CAST and Attack Shark X6 app | 819 MB | 2.6% | 2.4 GB |
 | SignalRGB alone (its background service was off) | 643 MB | 0.7% | 1.8 GB |
 
@@ -28,7 +28,7 @@ canvas-rgb 0.1.0 is the first public release, and it is early: a work in progres
 ## Your SignalRGB effects still work
 
 canvas-rgb reads SignalRGB's HTML effect format. An effect that uses the supported calls runs
-unchanged. The benchmark ran Poison, a SignalRGB effect, at 60 frames a second.
+unchanged.
 
 Copy the effect file into `%APPDATA%\canvas-rgb\effects\`, and the daemon picks it up within five
 seconds. Or let canvas-rgb check and copy it with `canvas-rgb effects import my-effect.html`.
@@ -38,7 +38,7 @@ seconds. Or let canvas-rgb check and copy it with `canvas-rgb effects import my-
 
 - One layout for every device. Place your devices on it and an effect flows across them as one
   picture.
-- 11 built-in effects, from solid colour to screen ambience and audio spectrum.
+- 14 built-in effects: 11 classics, from solid colour to screen ambience and audio spectrum, plus three paint effects (Ink Drop, Wet Smear and Palette Knife).
 - Runs SignalRGB-format HTML effects.
 - Write your own: an effect is one HTML file. `canvas-rgb effects check my-effect.html` reports
   whether it parses, moves and shows more than one colour, before you install it.
