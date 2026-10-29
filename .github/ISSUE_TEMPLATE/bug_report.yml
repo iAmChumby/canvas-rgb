@@ -1,0 +1,103 @@
+name: Bug report
+description: Something in canvas-rgb does not work as it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security problems do not go here. See SECURITY.md.
+        The output and the log files can hold your machine's names and paths. Read them before you paste.
+
+  - type: input
+    id: version
+    attributes:
+      label: canvas-rgb version
+      description: The version in the installer name or in `canvas-rgb status` (the `canvas-rgb` line).
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      description: The Windows edition and build, for example from the winver dialog (run winver).
+      placeholder: "Windows 11 Home 10.0.26200"
+    validations:
+      required: true
+
+  - type: textarea
+    id: hardware
+    attributes:
+      label: Hardware
+      description: Motherboard, RGB devices (keyboard, mouse, controller, RAM, fans, pump display) and GPU.
+      placeholder: |
+        Motherboard:
+        RGB devices:
+        GPU:
+    validations:
+      required: true
+
+  - type: textarea
+    id: other-rgb-apps
+    attributes:
+      label: Other RGB software
+      description: Which of these are installed, and which are running right now? Name any others.
+      placeholder: |
+        SignalRGB: installed / running / not present
+        iCUE: installed / running / not present
+        OpenRGB: installed / running / not present
+        Other:
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The steps, in order. Include the effect name or the command you ran.
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: textarea
+    id: status
+    attributes:
+      label: Output of `canvas-rgb status`
+      description: |
+        Run `canvas-rgb status` in PowerShell. The command is the `canvas-rgb.cmd` shim in the install
+        folder's `bin` folder, which runs `canvas-rgb-cli.exe`. Add `--json` for JSON output.
+        Paste the output here. Check it for paths and names you do not want public.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        The daemon and tray logs are in `%LOCALAPPDATA%\canvas-rgb\logs` (files named `canvas-rgbd.<date>.log`
+        and `tray.log`). The Windows service writes its logs to `%ProgramData%\canvas-rgb\logs`.
+        Attach the relevant lines, or drag the files into this box.
+        Alternative: `canvas-rgb diag bundle --out <folder>` writes a zip of the logs and config files.
+        The API token is never in the bundle. Read the zip before you attach it.
+      render: text

@@ -1,0 +1,70 @@
+name: Device support request
+description: Ask for a device to be supported, or report what you know about one.
+labels: ["device-support"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Lighting goes through OpenRGB, so check whether OpenRGB already lists the device before you file.
+        Devices that need a native adapter are written as Rust modules. See docs/adapters.md.
+
+  - type: input
+    id: device
+    attributes:
+      label: Device name
+      description: The product name, as printed on the box or shown in Windows.
+      placeholder: "Example Keyboard Pro"
+    validations:
+      required: true
+
+  - type: input
+    id: vendor
+    attributes:
+      label: Vendor
+      placeholder: "Example Corp"
+    validations:
+      required: true
+
+  - type: input
+    id: vid-pid
+    attributes:
+      label: USB VID:PID
+      description: |
+        If you know it, in the form `VID_xxxx&PID_xxxx`. Windows Device Manager shows it under the device's
+        Details tab, property Hardware Ids. Leave it blank if you do not know it.
+      placeholder: "VID_3151&PID_4015"
+
+  - type: dropdown
+    id: openrgb
+    attributes:
+      label: Does OpenRGB support it?
+      description: Check the device list at https://codeberg.org/OpenRGB/OpenRGB or the OpenRGB app.
+      options:
+        - "Yes, it lights up in OpenRGB"
+        - "Yes, but it is listed as partial or not working in OpenRGB"
+        - "No, OpenRGB does not list it"
+        - "I have not checked"
+    validations:
+      required: true
+
+  - type: input
+    id: leds-zones
+    attributes:
+      label: LED count and zones
+      description: How many LEDs, and how they are split into zones or segments. Say "unknown" if you do not know.
+      placeholder: "Example: 2 zones, 16 LEDs each"
+    validations:
+      required: true
+
+  - type: input
+    id: link
+    attributes:
+      label: SignalRGB plugin or protocol documentation
+      description: A link to a SignalRGB plugin, a protocol document or a reverse-engineering write-up, if one exists.
+      placeholder: "https://"
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: Connection type (USB, wireless, Bluetooth), firmware version, and any vendor app you used.

@@ -1,0 +1,31 @@
+name: Feature request
+description: Suggest a change or a new capability.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you cannot do today, or what gets in the way. Describe the problem before the fix.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: The proposed behaviour
+      description: What canvas-rgb would do, from your point of view.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: Other ways to solve it, including workarounds you use now.
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: Hardware, effects or other software this touches.
