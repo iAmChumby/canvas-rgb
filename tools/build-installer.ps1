@@ -33,7 +33,8 @@ if (-not $IsccPath) {
 if (-not $IsccPath -or -not (Test-Path -LiteralPath $IsccPath)) { throw 'ISCC.exe not found. Install Inno Setup 6 (choco install innosetup) or pass -IsccPath.' }
 
 $freeGb = [math]::Round(([System.IO.DriveInfo]'C').AvailableFreeSpace / 1GB, 1)
-if (-not $SkipBuild -and $freeGb -lt $c.MinFreeGb) { throw "Only $freeGb GB free on C:, under $($c.MinFreeGb) GB." }
+# The free-space floor protects the dev PC; a GitHub runner has about 30 GB and is thrown away after.
+if (-not $SkipBuild -and -not $env:GITHUB_ACTIONS -and $freeGb -lt $c.MinFreeGb) { throw "Only $freeGb GB free on C:, under $($c.MinFreeGb) GB." }
 
 $lockTool = Join-Path $repo 'tools\with-build-lock.ps1'
 function Invoke-Locked([string[]]$Command) {
