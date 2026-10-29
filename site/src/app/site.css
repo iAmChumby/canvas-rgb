@@ -52,6 +52,68 @@
   text-wrap: pretty;
 }
 
+/* ---------- the hero's entrance ---------- */
+
+/* One movement, used for every part of the hero: a short rise and a fade. It is a
+   transform and an opacity, so nothing moves in the layout and nothing reflows. */
+@keyframes site-rise {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 10px, 0);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes site-fade {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+/* The order: the mark, then the light, then the words, then the buttons. The whole
+   entrance is done in about 700 ms and then the page is still. Under reduced motion every
+   duration and delay is set to zero by the editor's own rule, so all of it shows at once. */
+.site-hero-wordmark,
+.site-h1,
+.site-lead,
+.site-hero-actions,
+.site-hero-note {
+  animation: site-rise var(--dur-slow) var(--ease) both;
+}
+
+.site-hero-wordmark {
+  animation-delay: 0ms;
+}
+
+.site-hero-field {
+  animation: site-fade var(--dur-slow) var(--ease) both;
+  animation-delay: 80ms;
+}
+
+.site-h1 {
+  animation-delay: 190ms;
+}
+
+.site-lead {
+  animation-delay: 270ms;
+}
+
+.site-hero-actions {
+  animation-delay: 350ms;
+}
+
+.site-hero-note {
+  animation-delay: 430ms;
+}
+
 /* ---------- the header ---------- */
 
 .site-header {

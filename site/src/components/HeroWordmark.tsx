@@ -40,6 +40,8 @@ export function HeroWordmark() {
     // before it reaches an edge, so no edge of the canvas can ever show. One scale for both
     // axes, so the light stays round.
     const SCALE = 0.45;
+    // How long the spectrum in the easel's canvas takes to sweep across, once, on load.
+    const SWEEP = 0.62;
     const reduced = window.matchMedia("(prefers-reduced-motion: reduce)");
     const root = getComputedStyle(document.documentElement);
     const colours = SPECTRUM.map((n) => root.getPropertyValue(n).trim() || "#ff3b5c");
@@ -161,18 +163,30 @@ export function HeroWordmark() {
     };
 
     /** The spectrum inside the easel's canvas: a small crisp band under the pointer. */
-    const drawPane = (t: number) => {
+    const drawPane = (t: number, sweepOn: boolean) => {
       const w = pane.width;
       const h = pane.height;
       if (w < 2 || h < 2) return;
       paneCtx.clearRect(0, 0, w, h);
       const host = wrap.getBoundingClientRect();
-      const nx = seen
-        ? (target.x + hero.getBoundingClientRect().left - host.left) / Math.max(1, host.width)
+      const heroBox = hero.getBoundingClientRect();
+      let nx = seen
+        ? (target.x + heroBox.left - host.left) / Math.max(1, host.width)
         : 0.5 + Math.sin(t * 0.28) * 0.1;
       const ny = seen
-        ? (target.y + hero.getBoundingClientRect().top - host.top) / Math.max(1, host.height)
+        ? (target.y + heroBox.top - host.top) / Math.max(1, host.height)
         : 0.5;
+      let hueShift = (nx - 0.5) * 24;
+      if (sweepOn) {
+        // On load the spectrum sweeps once across the canvas, and then hands over to the
+        // pointer. It is the same band, only moved.
+        const s = Math.min(1, t / SWEEP);
+        const ease = s * s * (3 - 2 * s);
+        const sweepX = -0.7 + 1.4 * s;
+        const sweepHue = -26 + 52 * s;
+        nx = sweepX + (nx - sweepX) * ease;
+        hueShift = sweepHue + (hueShift - sweepHue) * ease;
+      }
       // The band tilts with the pointer and slides under it.
       const ang = (ny - 0.5) * 0.3;
       const cx = w / 2 + (nx - 0.5) * w * 0.5;
@@ -187,16 +201,23 @@ export function HeroWordmark() {
         g.addColorStop(i / (colours.length - 1), colours[i] ?? "#ff3b5c");
       }
       // A little hue from the pointer, and no more.
-      paneCtx.filter = `hue-rotate(${((nx - 0.5) * 24).toFixed(1)}deg)`;
+      paneCtx.filter = `hue-rotate(${hueShift.toFixed(1)}deg)`;
       paneCtx.fillStyle = g;
       paneCtx.fillRect(0, 0, w, h);
       paneCtx.filter = "none";
     };
 
     let raf = 0;
+    // The entrance is timed from the first paint, so the sweep in the easel's canvas starts
+    // with the words settling in and not when the script happens to run.
+    const paint = performance
+      .getEntriesByType("paint")
+      .find((e) => e.name === "first-contentful-paint");
+    const t0 = paint ? paint.startTime : 0;
     const frame = (now: number) => {
-      drawField(now / 1000);
-      drawPane(now / 1000);
+      const t = (now - t0) / 1000;
+      drawField(t);
+      drawPane(t, true);
       raf = requestAnimationFrame(frame);
     };
     const still = () => {
@@ -204,7 +225,8 @@ export function HeroWordmark() {
       pos.x = markX;
       pos.y = markY;
       drawField(0);
-      drawPane(0);
+      // No sweep when the motion is off: the canvas is there, and it does not move.
+      drawPane(0, false);
     };
     const start = () => {
       if (raf) return;
