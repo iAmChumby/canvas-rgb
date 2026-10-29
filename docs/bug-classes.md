@@ -65,3 +65,18 @@ starts `canvas-rgbd.exe` skips those rules.
 - **Class fix:** due (second bug). One launcher (the service), a daemon that cannot show a console
   whoever starts it, and a check that fails when anything outside `canvas-svc` starts
   `canvas-rgbd.exe`.
+
+### `cause:unchecked-state`: the system states something it never checked
+
+A message, banner or log line says something about the PC or a device that no code ever checked,
+or acts as if a step worked without checking that it did.
+
+- [#14](https://github.com/iAmChumby/canvas-rgb/issues/14): Displays always says to close ZEUS
+  CAST. The warning is hard-coded; the daemon knows whether ZEUS CAST runs but never sends it.
+- [#18](https://github.com/iAmChumby/canvas-rgb/issues/18): the boot colour is written before
+  OpenRGB has found any device (`devices=0`), and the service moves on as if it had worked.
+- [#19](https://github.com/iAmChumby/canvas-rgb/issues/19): the daemon's exits leave no line, so
+  the service's "crashed" is the only account and it is a guess.
+- **Class fix:** due. Every user-facing claim about system state comes from a field the daemon or
+  service measured, never from a constant; every step that can do nothing (zero devices, a skipped
+  write) logs that it did nothing.
