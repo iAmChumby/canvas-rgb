@@ -102,6 +102,12 @@ fn spawn_timer(app: Arc<App>, generation: u64, base: Duration) {
             if inner.generation != generation || !inner.pending {
                 return;
             }
+            if app.identify.session_active() {
+                // An onboarding session holds the lights; check again after another grace.
+                drop(inner);
+                spawn_timer(app.clone(), generation, GRACE);
+                return;
+            }
             inner.pending = false;
         }
         restore(&app).await;

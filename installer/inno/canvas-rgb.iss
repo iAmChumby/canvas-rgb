@@ -436,8 +436,8 @@ begin
     Exit;
   end;
   FScriptsOk := True;
-  { The daemon otherwise starts at the next logon (HKCU Run). Start it now, as the user. }
-  ExecAsOriginalUser(ExpandConstant('{app}\canvas-rgbd.exe'), '', ExpandConstant('{app}'), SW_HIDE, ewNoWait, Code);
+  { The service owns launching the daemon (in the user's session). Starting canvas-rgbd.exe here raced it:
+    the service's daemon then failed to bind the API (os error 10048) and was refused as not the launched one. }
   { The tray, in the user's session, on the onboarding. Every mode except /VERYSILENT starts it once:
     the wizard does it through the ticked "Launch canvas-rgb" ([Run], --onboard), /SILENT does it here
     ([Run] has skipifsilent). The tray is also single-instance, so a stray second launch only focuses it. }

@@ -26,6 +26,8 @@ pub const WATCHDOG: Duration = Duration::from_secs(4);
 pub const TICK: Duration = Duration::from_millis(100);
 /// The colour of the target run.
 pub const TARGET: Rgb8 = Rgb8::WHITE;
+/// How long after the last `active: true` an onboarding session ends by itself.
+pub const SESSION_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The id prefix of devices whose adapter lights the whole device (the ROYUAN keyboard).
 const WHOLE_DEVICE_PREFIX: &str = "royuan:";
@@ -42,6 +44,8 @@ struct Target {
 #[derive(Default)]
 struct Inner {
     target: Option<Target>,
+    /// The last `active: true` of an onboarding session; `Some` while it holds the lights.
+    session_last: Option<Instant>,
     /// The writer channel of every device the daemon drives.
     sinks: HashMap<DeviceId, tokio::sync::mpsc::Sender<Vec<Rgb8>>>,
     ticker_running: bool,
@@ -71,7 +75,28 @@ impl IdentifyGate {
 
     /// True while the engine's frames must not reach the devices.
     pub fn is_active(&self) -> bool {
-        self.lock().target.is_some()
+        let inner = self.lock();
+        inner.target.is_some() || inner.session_last.is_some()
+    }
+
+    /// True while an onboarding session holds the lights.
+    pub fn session_active(&self) -> bool {
+        self.lock().session_last.is_some()
+    }
+
+    /// Starts or renews the onboarding session. Returns `(was_new, start_ticker)`.
+    pub fn start_session(&self, now: Instant) -> (bool, bool) {
+        let mut inner = self.lock();
+        let was_new = inner.session_last.is_none();
+        inner.session_last = Some(now);
+        let start = !inner.ticker_running;
+        inner.ticker_running = true;
+        (was_new, start)
+    }
+
+    /// Ends the onboarding session. Returns true when one was active.
+    pub fn end_session(&self) -> bool {
+        self.lock().session_last.take().is_some()
     }
 
     /// Registers a device's writer channel so the ticker can reach it.
@@ -96,16 +121,21 @@ impl IdentifyGate {
     /// One ticker step at `now`: the frames to send, or the end of the override.
     pub fn tick(&self, now: Instant, devices: &[DeviceInfo]) -> Tick {
         let mut inner = self.lock();
-        let Some(target) = inner.target.clone() else {
+        if inner.target.is_none() && inner.session_last.is_none() {
             inner.ticker_running = false;
             return Tick::Idle;
-        };
-        if now.saturating_duration_since(target.last_request) >= WATCHDOG {
+        }
+        if inner.target.as_ref().is_some_and(|t| now.saturating_duration_since(t.last_request) >= WATCHDOG) {
             inner.target = None;
+        }
+        if inner.session_last.is_some_and(|l| now.saturating_duration_since(l) >= SESSION_TIMEOUT) {
+            inner.session_last = None;
+        }
+        if inner.target.is_none() && inner.session_last.is_none() {
             inner.ticker_running = false;
             return Tick::Expired;
         }
-        Tick::Frames(frames(&target, devices))
+        Tick::Frames(frames(inner.target.as_ref(), devices))
     }
 
     /// Sends frames to the registered writers. A full channel drops the frame; the next
@@ -128,13 +158,13 @@ impl IdentifyGate {
 }
 
 /// Every device's frame under this target: black everywhere but the target run.
-fn frames(target: &Target, devices: &[DeviceInfo]) -> Vec<(DeviceId, Vec<Rgb8>)> {
+fn frames(target: Option<&Target>, devices: &[DeviceInfo]) -> Vec<(DeviceId, Vec<Rgb8>)> {
     devices
         .iter()
         .filter(|d| d.connected)
         .map(|d| {
             let mut colors = vec![Rgb8::BLACK; d.led_count() as usize];
-            if d.id == target.device {
+            if let Some(target) = target.filter(|t| d.id == t.device) {
                 if d.id.0.starts_with(WHOLE_DEVICE_PREFIX) {
                     colors.fill(TARGET);
                 } else if let Some(run) = run_of(d, target) {
@@ -170,7 +200,7 @@ pub fn spawn_ticker(app: Arc<App>) {
                 Tick::Idle => return,
                 Tick::Frames(frames) => app.identify.push(frames),
                 Tick::Expired => {
-                    tracing::info!("identify ended: no request for {WATCHDOG:?}");
+                    tracing::info!("identify or onboarding session ended by timeout (identify {WATCHDOG:?}, session {SESSION_TIMEOUT:?})");
                     restore(&app).await;
                     return;
                 }
@@ -303,6 +333,47 @@ mod tests {
         gate.start(id, 0, 0, 1, t0 + Duration::from_secs(3));
         assert!(matches!(gate.tick(t0 + Duration::from_secs(6), &devices), Tick::Frames(_)));
         assert_eq!(gate.tick(t0 + Duration::from_secs(7), &devices), Tick::Expired);
+    }
+
+    #[test]
+    fn a_session_makes_every_device_black() {
+        let (gate, devices, t0) = setup();
+        assert_eq!(gate.start_session(t0), (true, true));
+        assert!(gate.is_active());
+        let frames = frames_of(gate.tick(t0, &devices));
+        assert_eq!(frames.len(), 2);
+        assert!(frames.iter().all(|(_, f)| f.iter().all(|c| *c == Rgb8::BLACK)));
+    }
+
+    #[test]
+    fn an_identify_during_a_session_lights_only_its_target() {
+        let (gate, devices, t0) = setup();
+        gate.start_session(t0);
+        gate.start(DeviceId("openrgb:board".into()), 1, 3, 4, t0);
+        let frames = frames_of(gate.tick(t0, &devices));
+        let board = &frames.iter().find(|(id, _)| id.0 == "openrgb:board").unwrap().1;
+        let ram = &frames.iter().find(|(id, _)| id.0 == "openrgb:ram").unwrap().1;
+        assert_eq!(lit(board), vec![13, 14, 15, 16]);
+        assert!(ram.iter().all(|c| *c == Rgb8::BLACK));
+        // The identify ends by its watchdog; the renewed session still holds the lights black.
+        let later = t0 + Duration::from_secs(4);
+        gate.start_session(later);
+        let frames = frames_of(gate.tick(later, &devices));
+        assert!(frames.iter().all(|(_, f)| lit(f).is_empty()));
+        assert!(gate.session_active());
+    }
+
+    #[test]
+    fn the_session_times_out_and_can_be_ended() {
+        let (gate, devices, t0) = setup();
+        gate.start_session(t0);
+        assert!(matches!(gate.tick(t0 + Duration::from_millis(4900), &devices), Tick::Frames(_)));
+        assert_eq!(gate.tick(t0 + SESSION_TIMEOUT, &devices), Tick::Expired);
+        assert!(!gate.is_active());
+        gate.start_session(t0);
+        assert!(gate.end_session());
+        assert!(!gate.end_session());
+        assert_eq!(gate.tick(t0, &devices), Tick::Idle);
     }
 
     #[test]

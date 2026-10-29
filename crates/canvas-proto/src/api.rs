@@ -72,6 +72,10 @@ pub mod routes {
     /// `POST`, no body: the owner reached the end of the onboarding. Sets
     /// `Status.onboarding_complete`, which stays true.
     pub const ONBOARDING_COMPLETE: &str = "/api/v1/onboarding/complete";
+    /// `POST` with [`super::OnboardingSession`]: the onboarding holds the lights. While a session
+    /// is active every LED is black except what identify lights. The page resends `active: true`
+    /// every ~2 s; the daemon ends the session after 5 s without one, or on `active: false`.
+    pub const ONBOARDING_SESSION: &str = "/api/v1/onboarding/session";
     pub const CONFIG_EXPORT: &str = "/api/v1/config/export";
     pub const CONFIG_IMPORT: &str = "/api/v1/config/import";
     /// `POST`, no body: the daemon applies `on_quit` (G3: black by default), tells the
@@ -209,6 +213,12 @@ pub struct PatchRender {
 #[ts(export)]
 pub struct DevicesResponse {
     pub devices: Vec<DeviceInfo>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct OnboardingSession {
+    pub active: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

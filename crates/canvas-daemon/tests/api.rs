@@ -877,6 +877,36 @@ async fn an_onboarding_effect_restores_the_previous_effect_and_is_never_saved() 
 }
 
 #[tokio::test]
+async fn the_onboarding_restore_waits_while_a_session_is_active() {
+    let (router, app, engine, _home) = build_with_engine();
+    app.transient.set_time_scale(0.01);
+    let path = routes::EFFECT_ACTIVATE.replace("{id}", "rainbow_wave");
+    router.clone().oneshot(request_with_body("POST", &path, "{}")).await.unwrap();
+    let r = router
+        .clone()
+        .oneshot(request_with_body("POST", routes::ONBOARDING_SESSION, r#"{"active":true}"#))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert!(app.identify.session_active());
+    let path = routes::EFFECT_ACTIVATE.replace("{id}", "onboard-hello");
+    router.clone().oneshot(request_with_body("POST", &path, "{}")).await.unwrap();
+    // The timer (100 ms) fires and finds the session: no restore.
+    tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+    assert_eq!(engine_effect(&engine).await.as_deref(), Some("onboard-hello"));
+    // The session ends: the next check restores the saved effect.
+    let r = router
+        .clone()
+        .oneshot(request_with_body("POST", routes::ONBOARDING_SESSION, r#"{"active":false}"#))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert!(!app.identify.session_active());
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    assert_eq!(engine_effect(&engine).await.as_deref(), Some("rainbow_wave"));
+}
+
+#[tokio::test]
 async fn activating_a_normal_effect_cancels_the_onboarding_restore() {
     let (router, app, engine, _home) = build_with_engine();
     app.transient.set_time_scale(0.01);

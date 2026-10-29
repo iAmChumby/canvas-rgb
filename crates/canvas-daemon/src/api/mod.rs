@@ -73,6 +73,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route(routes::SETTINGS, get(settings::get_settings).put(settings::put_settings))
         .route(routes::DISMISS_ZONE_PANEL, post(settings::dismiss_zone_panel))
         .route(routes::ONBOARDING_COMPLETE, post(settings::complete_onboarding))
+        .route(routes::ONBOARDING_SESSION, post(devices::onboarding_session))
         .route(routes::CONFIG_EXPORT, get(settings::config_export))
         .route(routes::CONFIG_IMPORT, post(settings::config_import))
         .route(routes::QUIT, post(status::quit))
