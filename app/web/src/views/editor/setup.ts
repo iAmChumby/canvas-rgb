@@ -226,3 +226,119 @@ export function placeForPart(
     height,
   };
 }
+
+// ---- parts first: the runs the owner matches ----
+
+/** Default LEDs in one fan-sized run of a long or resizable zone. */
+export const RUN_LEDS = 12;
+
+/** One run of LEDs to light: a fan-sized chunk of a zone, or a whole fixed device. */
+export interface Run {
+  zone: SetupZone;
+  /** Index into the list of zones being walked. */
+  zi: number;
+  start: number;
+  count: number;
+  /** The run is the whole zone. */
+  whole: boolean;
+}
+
+/** The length of the run that starts at `off`: 12, and a tiny tail joins the run before it. */
+export function runLen(zone: SetupZone, off: number): number {
+  const left = zone.ledCount - off;
+  if (!zone.doubtful || isFixedKind(zone.kind)) return left;
+  // Twelve lights a fan, unless the drawing holds fewer parts than that would make.
+  const size = Math.max(RUN_LEDS, Math.ceil(zone.ledCount / Math.max(1, zone.placements.length)));
+  return left - size < 4 ? left : size;
+}
+
+/** Every default run of the zones, for counting. */
+export function allRuns(zones: SetupZone[]): Run[] {
+  const out: Run[] = [];
+  zones.forEach((zone, zi) => {
+    for (let off = 0; off < zone.ledCount; ) {
+      const count = runLen(zone, off);
+      out.push({ zone, zi, start: off, count, whole: off === 0 && count === zone.ledCount });
+      off += count;
+    }
+  });
+  return out;
+}
+
+/** True when a placement owns some of the run's LEDs. */
+function owns(p: PlacedZone, start: number, count: number): boolean {
+  return !p.leds || (p.leds.start < start + count && start < p.leds.start + p.leds.count);
+}
+
+/** The placements (layout indices) of a zone that own some of the run. */
+export function placementsOfRun(layout: Layout, zone: SetupZone, start: number, count: number): number[] {
+  return layout.zones
+    .map((p, i) => ({ p, i }))
+    .filter(({ p }) => p.device_id === zone.deviceId && p.zone_index === zone.zoneIndex && owns(p, start, count))
+    .map(({ i }) => i);
+}
+
+export const runKey = (zone: SetupZone, start: number) => `${zone.deviceId}#${zone.zoneIndex}@${start}`;
+
+/** The next run at or after (zi, off) that is neither matched nor skipped. */
+export function locateRun(
+  layout: Layout,
+  zones: SetupZone[],
+  skipped: ReadonlySet<string>,
+  zi: number,
+  off: number,
+): Run | null {
+  for (let i = zi; i < zones.length; i++) {
+    const zone = zones[i]!;
+    for (let o = i === zi ? off : 0; o < zone.ledCount; ) {
+      const count = runLen(zone, o);
+      const done =
+        skipped.has(runKey(zone, o)) ||
+        placementsOfRun(layout, zone, o, count).some((p) => layout.zones[p]?.part?.mapped === true);
+      if (!done) return { zone, zi: i, start: o, count, whole: o === 0 && count === zone.ledCount };
+      o += count;
+    }
+  }
+  return null;
+}
+
+/**
+ * The guess the owner starts from: a long or resizable zone placed as one part becomes fan-sized
+ * parts, one per run. The owner then adds, removes and drags rather than building from nothing.
+ */
+export function expandGuess(layout: Layout, devices: DeviceInfo[] | null): Layout {
+  let cur = layout;
+  for (const zone of setupZones(layout, devices)) {
+    if (!zone.doubtful || isFixedKind(zone.kind) || zone.ledCount <= 0) continue;
+    const whole = zone.placements.filter((i) => !cur.zones[i]?.leds && cur.zones[i]?.part?.mapped !== true);
+    // Placement indices shift as zones change, so find the whole one again each time.
+    const idx = cur.zones.findIndex(
+      (p) => p.device_id === zone.deviceId && p.zone_index === zone.zoneIndex && !p.leds && p.part?.mapped !== true,
+    );
+    if (whole.length === 0 || idx < 0) continue;
+    const template = cur.zones[idx]!;
+    const runs = allRuns([zone]);
+    if (runs.length < 2) continue;
+    let next: Layout = { ...cur, zones: cur.zones.filter((_, i) => i !== idx) };
+    for (const r of runs) {
+      const box = placeForPart(next, "fan", template);
+      next = {
+        ...next,
+        zones: [
+          ...next.zones,
+          {
+            ...template,
+            ...box,
+            rotation_deg: 0,
+            reversed: false,
+            shape: shapeForKind("fan"),
+            leds: { start: r.start, count: r.count },
+            part: { kind: "fan", facing: "viewer", mapped: false },
+          },
+        ],
+      };
+    }
+    cur = next;
+  }
+  return cur;
+}

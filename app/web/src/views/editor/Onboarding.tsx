@@ -5,29 +5,27 @@ import { ArrowCounterClockwise, ArrowRight, X } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
 import { BrandMark, Wordmark } from "@/components/BrandMark";
 import { Segmented } from "@/components/Segmented";
-import { FansStep } from "@/views/editor/FansStep";
 import { FinishStep } from "@/views/editor/FinishStep";
-import { FixedStep } from "@/views/editor/FixedStep";
+import { MatchStep } from "@/views/editor/MatchStep";
 import { HardwareLine } from "@/views/editor/HardwareLine";
 import { HelloStep } from "@/views/editor/HelloStep";
 import { StepFrame } from "@/views/editor/OnboardStep";
-import { PlaceStep } from "@/views/editor/PlaceStep";
+import { PartsStep } from "@/views/editor/PartsStep";
 import { ProgressDots } from "@/views/editor/ProgressDots";
 import { buildSteps, type Scope, type Step } from "@/views/editor/flow";
 import { SWEEP_EFFECT, useOnboardEffects } from "@/views/editor/onboardEffects";
-import { CASE_ANCHOR, CASE_GUIDES, PART_LABEL, PART_SIZE, type Sel } from "@/views/editor/parts";
-import { setupZones } from "@/views/editor/setup";
+import { CASE_ANCHOR, CASE_GUIDES, PART_SIZE, type Sel } from "@/views/editor/parts";
+import { expandGuess, setupZones } from "@/views/editor/setup";
 import { rememberLights } from "@/views/editor/newLights";
 import { setTakeover } from "@/views/editor/takeover";
 import { api } from "@/lib/endpoints";
 import { refreshLayouts, refreshStatus, useSnap } from "@/lib/store";
-import { formatLength, placementName, zoneKey, type LengthUnit } from "@/lib/zones";
+import { formatLength, type LengthUnit } from "@/lib/zones";
 import s from "@/views/editor/onboarding.module.css";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { CaseGuide } from "@/views/PreviewStage";
 import type { Layout } from "@/proto/Layout";
 import type { PartKind } from "@/proto/PartKind";
-import type { PlacedZone } from "@/proto/PlacedZone";
 
 type Pick = (sel: Sel[]) => void;
 
@@ -39,8 +37,8 @@ const caseText = (units: number, unit: LengthUnit) =>
   unit === "in" ? `${(units / 6.35).toFixed(1)} in` : `${Math.round(units / 2.5)} cm`;
 
 /**
- * The onboarding: mapping the PC as six screens (Hello, Case, Fans, Fixed devices, Place,
- * Finish) that come to the owner. It takes over the window: the rail, the strip and the banners
+ * The onboarding: mapping the PC as five screens, parts first (Hello, Case, Your parts, Match the
+ * lights, Finish) that come to the owner. It takes over the window: the rail, the strip and the banners
  * are hidden (see `takeover.ts`). The drawing of the PC stays on screen at every step, because the
  * owner matches the real lights to it, and one panel beside it (a bottom sheet on a phone) says
  * what to do next.
@@ -58,9 +56,6 @@ export function Onboarding({
   onSelect,
   onEnsureCase,
   onAddPart,
-  onChase,
-  onFlash,
-  onLit,
   onLater,
   onFinished,
   saveError,
@@ -124,30 +119,25 @@ export function Onboarding({
     return () => setTakeover(false);
   }, []);
 
-  /** The parts the owner could not see: their dots are hollow. */
-  const [skipped, setSkipped] = useState<ReadonlySet<string>>(() => new Set());
-  const onSkip = useCallback(
-    (z: PlacedZone) => {
-      setSkipped((cur) => new Set(cur).add(zoneKey(z)));
-      onChange((l) => ({
-        ...l,
-        zones: l.zones.map((p) =>
-          p.device_id === z.device_id && p.zone_index === z.zone_index && p.leds?.start === z.leds?.start
-            ? { ...p, part: { ...(p.part ?? { kind: "generic", facing: "viewer" }), mapped: true } }
-            : p,
-        ),
-      }));
-    },
-    [onChange],
-  );
+  /** No part is hollow any more: a run the owner skipped simply stays unmapped. */
+  const skipped = useMemo<ReadonlySet<string>>(() => new Set(), []);
+
+  // The onboarding session: every light is black from the screen after the hello until the
+  // finish, except what identify lights. The daemon ends it 5 s after the last heartbeat.
+  const sessionOn = step.kind !== "hello" && step.kind !== "finish";
+  useEffect(() => {
+    if (!sessionOn) return;
+    const beat = () => void api.onboardingSession({ active: true }).catch(() => undefined);
+    beat();
+    const t = setInterval(beat, 2000);
+    return () => {
+      clearInterval(t);
+      void api.onboardingSession({ active: false }).catch(() => undefined);
+    };
+  }, [sessionOn]);
 
   // The case is picked while it is sized; nothing is picked on the other screens.
-  const stepKey =
-    step.kind === "fans"
-      ? `fans:${step.deviceId}#${step.zoneIndex}`
-      : step.kind === "fixed"
-        ? `fixed:${step.zones[0]?.deviceId ?? ""}`
-        : step.kind;
+  const stepKey: string = step.kind;
   const ensureRef = useRef(onEnsureCase);
   const selectRef = useRef(onSelect);
   const unlockRef = useRef<() => void>(() => undefined);
@@ -184,51 +174,27 @@ export function Onboarding({
   // case while it is sized, and, while the owner places, the part under the pointer or picked.
   const [focus, setFocus] = useState<number | null>(null);
   const [hovered, setHovered] = useState<Sel | null>(null);
-  const placing = step.kind === "place";
-
-  const fixedParts = useMemo<Sel[]>(() => {
-    if (step.kind !== "fixed") return [];
-    const out: Sel[] = [];
-    layout.zones.forEach((z, index) => {
-      if (step.zones.some((k) => k.deviceId === z.device_id && k.zoneIndex === z.zone_index)) out.push({ kind: "zone", index });
-    });
-    return out;
-  }, [step, layout.zones]);
+  const placing = step.kind === "parts";
 
   const pulse: Sel[] = useMemo(() => {
-    if (step.kind === "fans") return focus !== null ? [{ kind: "zone", index: focus }] : [];
-    if (step.kind === "fixed") return fixedParts;
+    if (step.kind === "match") return focus !== null ? [{ kind: "zone", index: focus }] : [];
     if (step.kind === "case") {
       const i = (layout.landmarks ?? []).findIndex((l) => l.kind === "case");
       return i >= 0 ? [{ kind: "landmark", index: i }] : [];
     }
     return [];
-  }, [step, focus, fixedParts, layout.landmarks]);
+  }, [step, focus, layout.landmarks]);
 
-  // The spotlight: the one part being asked about, every other part a quiet outline. The Place
-  // screen spotlights the part under the pointer or picked, and nothing while there is none.
+  // The spotlight: while the owner matches, the part just tapped; while placing, the part under
+  // the pointer or picked, and nothing while there is none.
   const spotlight: Sel[] | null = useMemo(() => {
-    if (step.kind === "fans") return pulse;
-    if (step.kind === "fixed") return fixedParts;
+    if (step.kind === "match") return pulse.length > 0 ? pulse : null;
     if (placing) {
       const on = [...(hovered ? [hovered] : []), ...selection];
       return on.length > 0 ? on : null;
     }
     return null;
-  }, [step.kind, pulse, fixedParts, placing, hovered, selection]);
-
-  /** The name of the part the Place screen is pointing at. */
-  const showing = (() => {
-    if (!placing) return null;
-    const p = hovered ?? (selection.length === 1 ? selection[0] : null);
-    if (!p) return null;
-    if (p.kind === "landmark") {
-      const l = layout.landmarks?.[p.index];
-      return l ? l.label?.trim() || PART_LABEL[l.kind] : null;
-    }
-    const z = layout.zones[p.index];
-    return z ? placementName(devices, z, layout.zones) : null;
-  })();
+  }, [step.kind, pulse, placing, hovered, selection]);
 
   // ---- the case ----
   const caseBox = (layout.landmarks ?? []).find((l) => l.kind === "case");
@@ -322,6 +288,27 @@ export function Onboarding({
     setAt(1);
   };
 
+  // The lights the Match screen walks: every light, or the one device that is redone.
+  const matchZones = useMemo(
+    () =>
+      zones.filter(
+        (z) => z.ledCount > 0 && (scope === null || (z.deviceId === scope.deviceId && z.zoneIndex === scope.zoneIndex)),
+      ),
+    [zones, scope],
+  );
+
+  // Entering Your parts fills the drawing with a guess from the detected lights, once.
+  const guessed = useRef(false);
+  const devicesRef = useRef(devices);
+  useEffect(() => {
+    devicesRef.current = devices;
+  });
+  useEffect(() => {
+    if (step.kind !== "parts" || guessed.current) return;
+    guessed.current = true;
+    onChange((l) => expandGuess(l, devicesRef.current));
+  }, [step.kind, onChange]);
+
   const gated = step.kind === "hello" && (status?.conflicts.some((c) => c.kind === "signal_rgb") ?? false);
 
   const body = ((): ReactNode => {
@@ -370,49 +357,29 @@ export function Onboarding({
             </div>
           </StepFrame>
         );
-      case "fans": {
-        const zone = zones.find((x) => x.deviceId === step.deviceId && x.zoneIndex === step.zoneIndex);
-        if (!zone) return null;
+      case "parts":
         return (
-          <FansStep
-            key={stepKey}
-            layout={layout}
-            devices={devices}
-            zone={zone}
-            onChange={onChange}
-            onBack={back}
-            onNext={next}
-            setPick={setPick}
-            onFocusPart={setFocus}
-            onLit={onLit}
-            onChase={(i) => {
-              if (i >= 0) onChase(i);
-            }}
-            onSkip={onSkip}
-            skipped={skipped}
-          />
-        );
-      }
-      case "fixed":
-        return (
-          <FixedStep
-            layout={layout}
-            devices={devices}
-            zones={step.zones}
-            onChange={onChange}
-            onBack={back}
-            onNext={next}
-            onFlash={onFlash}
-          />
-        );
-      case "place":
-        return (
-          <PlaceStep
+          <PartsStep
             layout={layout}
             devices={devices}
             unit={unit}
-            showing={showing}
+            selection={selection}
+            onChange={onChange}
+            onSelect={onSelect}
             onAddPart={onAddPart}
+            onBack={back}
+            onNext={next}
+          />
+        );
+      case "match":
+        return (
+          <MatchStep
+            layout={layout}
+            devices={devices}
+            zones={matchZones}
+            onChange={onChange}
+            setPick={setPick}
+            onFocusPart={setFocus}
             onBack={back}
             onNext={next}
           />

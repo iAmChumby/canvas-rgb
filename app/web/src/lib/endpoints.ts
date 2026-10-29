@@ -11,6 +11,7 @@ import type { PatchOutput } from "@/proto/PatchOutput";
 import type { DevicesResponse } from "@/proto/DevicesResponse";
 import type { PatchZone } from "@/proto/PatchZone";
 import type { IdentifyRequest } from "@/proto/IdentifyRequest";
+import type { OnboardingSession } from "@/proto/OnboardingSession";
 import type { EffectsResponse } from "@/proto/EffectsResponse";
 import type { EffectDetail } from "@/proto/EffectDetail";
 import type { ActivateEffect } from "@/proto/ActivateEffect";
@@ -33,6 +34,9 @@ import type { DisplayConfig } from "@/proto/DisplayConfig";
 import type { DisplayStatus } from "@/proto/DisplayStatus";
 import type { SetDisplayValue } from "@/proto/SetDisplayValue";
 import type { ExportBundle } from "@/proto/ExportBundle";
+
+/** POST /api/v1/onboarding/session (canvas-proto `ONBOARDING_SESSION`). */
+const ONBOARDING_SESSION = "/api/v1/onboarding/session";
 
 export const api = {
   status: () => request<Status>("GET", routes.status),
@@ -95,6 +99,9 @@ export const api = {
   dismissZonePanel: () => request<unknown>("POST", routes.dismissZonePanel),
   /** The owner reached the end of the onboarding: the window stops opening by itself. */
   completeOnboarding: () => request<unknown>("POST", routes.onboardingComplete),
+  /** While active, every light is black except what identify lights; resend every 2 s (the daemon ends it after 5 s). */
+  onboardingSession: (body: OnboardingSession) =>
+    request<unknown>("POST", ONBOARDING_SESSION, body),
 
   /** Every numeric display with its config and the value it shows now. */
   displays: () => request<DisplayStatus[]>("GET", routes.displays),

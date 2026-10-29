@@ -918,6 +918,12 @@ export async function demoRequest(method: string, path: string, body: unknown): 
     return bad();
   }
 
+  if (head === "onboarding" && seg[1] === "session" && method === "POST") {
+    // A test page can collect the heartbeats: `window.__session = []` before the walk.
+    (globalThis as { __session?: unknown[] }).__session?.push({ at: Date.now(), ...(body as object) });
+    return { ok: true };
+  }
+
   if (head === "onboarding" && seg[1] === "complete" && method === "POST") {
     s.onboardingComplete = true;
     try {

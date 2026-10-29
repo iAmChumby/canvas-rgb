@@ -13,14 +13,12 @@
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { Layout } from "@/proto/Layout";
 import type { Status } from "@/proto/Status";
-import { setupZones } from "@/views/editor/setup";
 
 export type Step =
   | { kind: "hello" }
   | { kind: "case" }
-  | { kind: "fans"; deviceId: string; zoneIndex: number }
-  | { kind: "fixed"; zones: { deviceId: string; zoneIndex: number }[] }
-  | { kind: "place" }
+  | { kind: "parts" }
+  | { kind: "match" }
   | { kind: "finish" };
 
 /** The part the flow is limited to, when one device is redone from its row. */
@@ -30,41 +28,12 @@ export interface Scope {
 }
 
 /**
- * The six screens of one run, worked out when the flow opens (and again when the owner leaves
- * the hello, because a rescan may have found lights). Hello, Case, one Fans screen per header
- * with several LEDs, one Fixed screen per fixed device, Place, Finish. A zone that is already mapped has no screen
- * of its own: the flow after "Set up later" picks up where it stopped.
- *
- * Place is the place for what is missing, too: it is a row there, not a screen.
+ * The five screens of one run, parts first: Hello, Case, Your parts (put in what is in the PC),
+ * Match the lights (which part is lit), Finish. A redo of one device is Match and Finish.
  */
-export function buildSteps(layout: Layout, devices: DeviceInfo[] | null, scope: Scope | null): Step[] {
-  const zones = setupZones(layout, devices).filter((z) => z.placements.length > 0);
-  if (scope) {
-    const z = zones.find((x) => x.deviceId === scope.deviceId && x.zoneIndex === scope.zoneIndex);
-    if (!z) return [{ kind: "finish" }];
-    return [
-      z.doubtful
-        ? { kind: "fans", deviceId: z.deviceId, zoneIndex: z.zoneIndex }
-        : { kind: "fixed", zones: [{ deviceId: z.deviceId, zoneIndex: z.zoneIndex }] },
-      { kind: "finish" },
-    ];
-  }
-  const steps: Step[] = [{ kind: "hello" }, { kind: "case" }];
-  for (const z of zones.filter((x) => x.doubtful && !x.mapped)) {
-    steps.push({ kind: "fans", deviceId: z.deviceId, zoneIndex: z.zoneIndex });
-  }
-  // One screen per fixed device: more devices means more screens, never more on one screen.
-  const fixed = zones.filter((x) => !x.doubtful && !x.mapped);
-  const seen: string[] = [];
-  for (const z of fixed) if (!seen.includes(z.deviceId)) seen.push(z.deviceId);
-  for (const deviceId of seen) {
-    steps.push({
-      kind: "fixed",
-      zones: fixed.filter((z) => z.deviceId === deviceId).map((z) => ({ deviceId: z.deviceId, zoneIndex: z.zoneIndex })),
-    });
-  }
-  steps.push({ kind: "place" }, { kind: "finish" });
-  return steps;
+export function buildSteps(_layout: Layout, _devices: DeviceInfo[] | null, scope: Scope | null): Step[] {
+  if (scope) return [{ kind: "match" }, { kind: "finish" }];
+  return [{ kind: "hello" }, { kind: "case" }, { kind: "parts" }, { kind: "match" }, { kind: "finish" }];
 }
 
 /** The window opens by itself while the owner has not finished the onboarding. */
