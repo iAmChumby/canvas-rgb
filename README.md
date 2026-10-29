@@ -21,6 +21,10 @@ The 8BitDo software was not measured.
 Opening the editor adds about 360 MB while its window is open. The method and the caveats are in
 [docs/benchmark.md](docs/benchmark.md).
 
+## Status
+
+canvas-rgb 0.1.0 is the first public release, and it is early: a work in progress that will grow and change. It runs on my PC and the hardware listed below, and that is the only hardware I have tested. Anything else may break or look wrong. If it does, open an issue at https://github.com/iAmChumby/canvas-rgb/issues/new/choose and tell me what happened: the steps, what you expected, and what you saw. A good report is how it gets fixed.
+
 ## Your SignalRGB effects still work
 
 canvas-rgb reads SignalRGB's HTML effect format. An effect that uses the supported calls runs
