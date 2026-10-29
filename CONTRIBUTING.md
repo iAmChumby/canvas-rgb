@@ -36,6 +36,13 @@ hardware. They are for a person at the machine, not for a test run. See
 Match the code around your change: its naming, its error handling and its comments. There is no
 separate style guide. Clippy runs with warnings as errors, so fix its warnings.
 
+## Fixing a bug
+
+A fix commit names its issue (`Fixes #N`) and adds a regression test that runs on the fakes. Before
+you close the issue, look for the same mistake elsewhere. Label each issue with one or more `area:`
+labels (where it showed up) and a `cause:` label (why). The second bug of one cause means the class
+gets a structural fix. [docs/bug-classes.md](docs/bug-classes.md) has the steps and the classes so far.
+
 ## UI changes
 
 A UI change needs screenshots of the editor at 1440 px and 390 px wide. Put them in the pull request.
