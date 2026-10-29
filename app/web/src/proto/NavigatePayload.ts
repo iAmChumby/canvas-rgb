@@ -2,6 +2,6 @@
 
 export type NavigatePayload = { 
 /**
- * `"layout" | "effects" | "devices" | "fans" | "settings"`
+ * `"layout" | "effects" | "devices" | "fans" | "settings" | "updates"`
  */
 page: string, };
