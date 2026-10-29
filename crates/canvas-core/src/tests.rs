@@ -1246,7 +1246,8 @@ fn golden_dump() -> String {
 /// same frame, as it did before the slice work.
 #[test]
 fn a_legacy_layout_builds_the_plan_it_built_before_parts_existed() {
-    let expected = include_str!("fixtures/legacy_plan.txt");
+    // A Windows checkout may turn the fixture's line endings into CRLF.
+    let expected = include_str!("fixtures/legacy_plan.txt").replace("\r\n", "\n");
     assert_eq!(golden_dump(), expected, "the golden plan changed");
 }
 
