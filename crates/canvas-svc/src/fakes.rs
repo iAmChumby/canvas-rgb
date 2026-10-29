@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::time::Duration;
 
 const CHIP_ID_HI: u8 = 0xD5;
@@ -488,7 +488,13 @@ type SpawnRecord = (PathBuf, Vec<String>, Arc<AtomicBool>);
 pub struct FakeProcesses {
     spawns: Arc<Mutex<Vec<SpawnRecord>>>,
     fail_spawns: Arc<AtomicUsize>,
+    /// Daemons "already running" before the service starts: (pid, image, session, exited flag).
+    running: Arc<Mutex<Vec<RunningRecord>>>,
+    /// The console session; `u32::MAX` means none.
+    console: Arc<AtomicU32>,
 }
+
+type RunningRecord = (u32, PathBuf, u32, Arc<AtomicBool>);
 
 impl FakeProcesses {
     pub fn new() -> Self {
@@ -510,6 +516,31 @@ impl FakeProcesses {
         if let Some((_, _, flag)) = self.spawns.lock().unwrap_or_else(|p| p.into_inner()).last() {
             flag.store(true, Ordering::SeqCst);
         }
+    }
+
+    /// Adds a `canvas-rgbd` that was already running, with its image path and session.
+    pub fn add_running(&self, pid: u32, image: &str, session: u32) {
+        self.running
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push((pid, PathBuf::from(image), session, Arc::new(AtomicBool::new(false))));
+    }
+
+    /// Whether the service ended the pre-existing daemon `pid`.
+    pub fn running_ended(&self, pid: u32) -> bool {
+        self.running
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .any(|(p, _, _, flag)| *p == pid && flag.load(Ordering::SeqCst))
+    }
+
+    pub fn set_console(&self, session: u32) {
+        self.console.store(session, Ordering::SeqCst);
+    }
+
+    pub fn clear_console(&self) {
+        self.console.store(u32::MAX, Ordering::SeqCst);
     }
 
     /// Makes the next `n` spawns fail with an error.
@@ -569,6 +600,27 @@ pub struct FakeLauncher(pub FakeProcesses);
 impl crate::daemon::SessionLauncher for FakeLauncher {
     fn launch(&mut self, exe: &Path) -> io::Result<Box<dyn ChildProcess>> {
         self.0.start(exe, &[])
+    }
+
+    fn running_daemons(&mut self) -> Vec<crate::daemon::RunningDaemon> {
+        self.0
+            .running
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .map(|(pid, image, session, flag)| crate::daemon::RunningDaemon {
+                image: image.clone(),
+                session: *session,
+                process: Box::new(FakeChild { exited: Arc::clone(flag), pid: *pid }),
+            })
+            .collect()
+    }
+
+    fn console_session(&mut self) -> Option<u32> {
+        match self.0.console.load(Ordering::SeqCst) {
+            u32::MAX => None,
+            session => Some(session),
+        }
     }
 }
 

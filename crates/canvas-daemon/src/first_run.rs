@@ -6,7 +6,10 @@
 //! headers" panel.
 
 use canvas_proto::device::{DeviceInfo, DeviceKind, ZoneInfo, ZoneKind};
-use canvas_proto::layout::{Layout, PlacedZone, RenderScale, SamplingMode, ZoneShape};
+use canvas_proto::layout::{
+    CaseForm, Facing, Landmark, Layout, Part, PartKind, PlacedZone, RenderScale, SamplingMode,
+    ZoneShape,
+};
 use canvas_proto::Rgb8;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -290,6 +293,89 @@ enum SlotKind {
     Desk,
 }
 
+/// The case box: where the case sits on the canvas and how big it is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CaseBox {
+    pub x: f32,
+    pub y: f32,
+    /// The depth, front to back.
+    pub width: f32,
+    /// The height, floor to roof.
+    pub height: f32,
+}
+
+/// The case forms the editor used to offer, as boxes.
+///
+/// One scale for every case: 4 mm per canvas unit, so a 120 mm fan is 30 units in
+/// every case. The width is the depth (front to back), the height is the height
+/// (floor to roof), and every case stands on the desk line (y 152) in the middle of
+/// the canvas (x 160).
+///
+/// The editor's own table is `app/web/src/lib/caseForms.ts`; the two must agree.
+pub fn case_form_box(form: CaseForm) -> Option<CaseBox> {
+    let (depth_mm, height_mm) = match form {
+        CaseForm::FullTower => (576, 584),
+        CaseForm::MidTower => (488, 480),
+        CaseForm::SmallFormFactor => (336, 368),
+        CaseForm::OpenFrame => (480, 472),
+        CaseForm::None => return None,
+    };
+    let width = (depth_mm as f32 / 4.0).round();
+    let height = (height_mm as f32 / 4.0).round();
+    Some(CaseBox {
+        x: (160.0 - width / 2.0).round(),
+        y: 152.0 - 3.0 - height,
+        width,
+        height,
+    })
+}
+
+/// The case of the first run: today's mid tower.
+fn mid_tower_case() -> CaseBox {
+    case_form_box(CaseForm::MidTower).expect("the mid tower has a size")
+}
+
+/// The case as a landmark: the box the owner sizes, at today's mid-tower size.
+///
+/// The case is not a form factor any more: there is one box, and the owner drags its
+/// sides. A layout saved with a form becomes a landmark of that form's size (see
+/// [`crate::migration::migrate_case_form`]).
+pub fn case_landmark() -> Landmark {
+    case_landmark_of(CaseForm::MidTower).expect("the mid tower has a size")
+}
+
+/// The case landmark of a form, for a layout that was saved with one.
+pub fn case_landmark_of(form: CaseForm) -> Option<Landmark> {
+    let case = case_form_box(form)?;
+    Some(Landmark {
+        kind: PartKind::Case,
+        x: case.x,
+        y: case.y,
+        width: case.width,
+        height: case.height,
+        rotation_deg: 0.0,
+        facing: Facing::Viewer,
+        label: None,
+        visible: true,
+        locked: false,
+    })
+}
+
+/// The part a device kind is.
+fn part_of(kind: DeviceKind) -> PartKind {
+    match kind {
+        DeviceKind::Dram => PartKind::Ram,
+        DeviceKind::Gpu => PartKind::Gpu,
+        DeviceKind::Keyboard => PartKind::Keyboard,
+        DeviceKind::Mouse => PartKind::Mouse,
+        DeviceKind::Microphone => PartKind::Microphone,
+        DeviceKind::Headset => PartKind::Headset,
+        DeviceKind::LedStrip => PartKind::Strip,
+        DeviceKind::Motherboard => PartKind::Strip,
+        DeviceKind::Other => PartKind::Generic,
+    }
+}
+
 /// One standard place in the generic case drawing: a fan position, a RAM slot, the GPU slot, a
 /// case edge where a strip runs, or a place on the desk shelf. The editor draws the same slots
 /// (`app/web/src/lib/caseForms.ts`) and snaps zones to them; keep the two tables the same.
@@ -298,6 +384,9 @@ struct Slot {
     kind: SlotKind,
     /// Peripheral slots on the desk name the kind they are for.
     peripheral: Option<DeviceKind>,
+    /// The part the slot holds, and the way it faces: what the editor draws.
+    part: PartKind,
+    facing: Facing,
     x: f32,
     y: f32,
     w: f32,
@@ -310,30 +399,95 @@ struct Slot {
 fn mid_tower_slots() -> Vec<Slot> {
     // 4 mm per canvas unit: a 480 x 488 mm mid tower is 120 x 122 units, centred, standing on the
     // desk line (y 152). The fan is 120 mm = 30 units. ATX board 76 x 61 units.
-    let (cx, cy, cw, ch, s) = (99.0f32, 29.0f32, 122.0f32, 120.0f32, 30.0f32);
+    let case = mid_tower_case();
+    let (cx, cy, cw, ch) = (case.x, case.y, case.width, case.height);
+    let s = 30.0f32;
     let (front, top, ram) = (3usize, 2usize, 4usize);
     let mut slots = Vec::new();
-    let slot = |kind, x: f32, y: f32, w: f32, h: f32| Slot { kind, peripheral: None, x, y, w, h };
+    let slot = |kind, part, facing, x: f32, y: f32, w: f32, h: f32| Slot {
+        kind,
+        peripheral: None,
+        part,
+        facing,
+        x,
+        y,
+        w,
+        h,
+    };
     let fy0 = cy + 7.0;
     for i in 0..front {
-        slots.push(slot(SlotKind::Fan, cx + 3.0, fy0 + i as f32 * (s + 2.0), s, s));
+        // The fans on the front panel face the viewer.
+        slots.push(slot(
+            SlotKind::Fan,
+            PartKind::Fan,
+            Facing::Viewer,
+            cx + 3.0,
+            fy0 + i as f32 * (s + 2.0),
+            s,
+            s,
+        ));
     }
     let bx = cx + 3.0 + s + 1.0;
     let by = cy + 7.0 + s + 4.0;
     for i in 0..top {
-        slots.push(slot(SlotKind::Fan, bx + i as f32 * (s + 1.0), cy + 7.0, s, s));
+        // The fans on the top panel face up.
+        slots.push(slot(
+            SlotKind::Fan,
+            PartKind::Fan,
+            Facing::Up,
+            bx + i as f32 * (s + 1.0),
+            cy + 7.0,
+            s,
+            s,
+        ));
     }
-    slots.push(slot(SlotKind::Fan, cx + cw - 5.0 - s, by, s, s));
+    // The rear fan sits on the back panel, so it faces away from the viewer.
+    slots.push(slot(
+        SlotKind::Fan,
+        PartKind::Fan,
+        Facing::Away,
+        cx + cw - 5.0 - s,
+        by,
+        s,
+        s,
+    ));
     let (bw, bh) = (76.0f32, 61.0f32);
     let (rw, rh) = (6.0f32, 34.0f32);
     for i in 0..ram {
-        slots.push(slot(SlotKind::Ram, bx + 3.0 + i as f32 * (rw + 2.0), by + 4.0, rw, rh));
+        slots.push(slot(
+            SlotKind::Ram,
+            PartKind::Ram,
+            Facing::Viewer,
+            bx + 3.0 + i as f32 * (rw + 2.0),
+            by + 4.0,
+            rw,
+            rh,
+        ));
     }
-    slots.push(slot(SlotKind::Gpu, bx + 3.0, (by + 4.0 + rh + 3.0).max((by + bh * 0.55).round()), (bw * 0.6).round(), 14.0));
-    slots.push(slot(SlotKind::Edge, cx + 10.0, cy + 2.0, cw - 20.0, 4.0));
-    slots.push(slot(SlotKind::Edge, cx + 10.0, cy + ch - 8.0, cw - 20.0, 4.0));
-    slots.push(slot(SlotKind::Edge, cx + cw - 4.0, cy + 8.0, 3.0, ch - 24.0));
-    let desk = |kind, x, y, w, h| Slot { kind: SlotKind::Desk, peripheral: Some(kind), x, y, w, h };
+    slots.push(slot(
+        SlotKind::Gpu,
+        PartKind::Gpu,
+        Facing::Viewer,
+        bx + 3.0,
+        (by + 4.0 + rh + 3.0).max((by + bh * 0.55).round()),
+        (bw * 0.6).round(),
+        14.0,
+    ));
+    // The case edges, where an ARGB strip runs: the top edge faces up, the bottom edge
+    // down, the rear edge away.
+    slots.push(slot(SlotKind::Edge, PartKind::Strip, Facing::Up, cx + 10.0, cy + 2.0, cw - 20.0, 4.0));
+    slots.push(slot(SlotKind::Edge, PartKind::Strip, Facing::Down, cx + 10.0, cy + ch - 8.0, cw - 20.0, 4.0));
+    slots.push(slot(SlotKind::Edge, PartKind::Strip, Facing::Away, cx + cw - 4.0, cy + 8.0, 3.0, ch - 24.0));
+    let desk = |kind, x, y, w, h| Slot {
+        kind: SlotKind::Desk,
+        peripheral: Some(kind),
+        part: part_of(kind),
+        facing: Facing::Viewer,
+        x,
+        y,
+        w,
+        h,
+    };
     slots.push(desk(DeviceKind::Keyboard, 14.0, 158.0, 110.0, 30.0));
     slots.push(desk(DeviceKind::Mouse, 132.0, 156.0, 22.0, 32.0));
     slots.push(desk(DeviceKind::Microphone, 162.0, 158.0, 16.0, 28.0));
@@ -342,6 +496,8 @@ fn mid_tower_slots() -> Vec<Slot> {
         slots.push(Slot {
             kind: SlotKind::Desk,
             peripheral: None,
+            part: PartKind::Generic,
+            facing: Facing::Viewer,
             x: 226.0 + 30.0 * i as f32,
             y: 159.0,
             w: 26.0,
@@ -387,9 +543,20 @@ fn pick_slot(kind: DeviceKind, zone: &ZoneInfo, slots: &[Slot], used: &[bool]) -
     })
 }
 
+/// The part a zone is when it has no slot of its own: the device says what it is.
+fn fallback_part(kind: DeviceKind, zone: &ZoneInfo) -> (PartKind, Facing) {
+    if zone.name.to_ascii_lowercase().contains("fan") && zone.led_count > 1 {
+        return (PartKind::Fan, Facing::Viewer);
+    }
+    (part_of(kind), Facing::Viewer)
+}
+
 /// Places every zone with LEDs of `devices` in the mid-tower's slots, skipping slots already
 /// `used`. Returns the zones in placement order. A zone with no slot left is staggered near the
 /// middle of the desk so it is never off the canvas or on top of a slot.
+///
+/// Every placed zone gets a part: what it is, and which way it faces. The owner confirms the
+/// mapping later, so `mapped` starts false.
 fn place_in_mid_tower(devices: &[DeviceInfo], existing: &[PlacedZone], used: &mut Vec<bool>) -> Vec<PlacedZone> {
     let slots = mid_tower_slots();
     used.resize(slots.len(), false);
@@ -410,14 +577,27 @@ fn place_in_mid_tower(devices: &[DeviceInfo], existing: &[PlacedZone], used: &mu
                 continue;
             }
             let shape = default_shape(device.kind, zone);
-            let (x, y, width, height) = match pick_slot(device.kind, zone, &slots, used) {
+            let (x, y, width, height, part) = match pick_slot(device.kind, zone, &slots, used) {
                 Some(i) => {
                     used[i] = true;
-                    (slots[i].x, slots[i].y, slots[i].w, slots[i].h)
+                    (
+                        slots[i].x,
+                        slots[i].y,
+                        slots[i].w,
+                        slots[i].h,
+                        Part { kind: slots[i].part, facing: slots[i].facing, mapped: false },
+                    )
                 }
                 None => {
                     overflow += 1.0;
-                    (150.0 + 6.0 * overflow, 60.0 + 6.0 * overflow, 24.0, 24.0)
+                    let (kind, facing) = fallback_part(device.kind, zone);
+                    (
+                        150.0 + 6.0 * overflow,
+                        60.0 + 6.0 * overflow,
+                        24.0,
+                        24.0,
+                        Part { kind, facing, mapped: false },
+                    )
                 }
             };
             zones.push(PlacedZone {
@@ -432,16 +612,22 @@ fn place_in_mid_tower(devices: &[DeviceInfo], existing: &[PlacedZone], used: &mu
                 visible: true,
                 shape,
                 label: None,
+                leds: None,
+                part: Some(part),
+                locked: false,
             });
         }
     }
     zones
 }
 
-/// Builds the default layout for the discovered devices: a mid tower, with every device in its
+/// Builds the default layout for the discovered devices: a case box, with every device in its
 /// place in the case (fans in the fan positions, RAM in the RAM slots, header strips along the
 /// case edges) and the keyboard, mouse, mic and headset on the desk shelf. The placement is
 /// deterministic and nothing overlaps another zone.
+///
+/// The case is a landmark, not a form factor: there is one box, at today's mid-tower size, and
+/// the owner drags its sides.
 pub fn build_default_layout(devices: &[DeviceInfo]) -> Layout {
     let mut used = Vec::new();
     let zones = place_in_mid_tower(devices, &[], &mut used);
@@ -452,7 +638,8 @@ pub fn build_default_layout(devices: &[DeviceInfo]) -> Layout {
         sampling: SamplingMode::AreaAverage,
         zones,
         effect: None,
-        case_form: canvas_proto::layout::CaseForm::MidTower,
+        case_form: CaseForm::None,
+        landmarks: vec![case_landmark()],
     }
 }
 
@@ -880,7 +1067,7 @@ mod tests {
     }
 
     #[test]
-    fn the_default_layout_is_a_mid_tower_with_devices_in_their_slots() {
+    fn the_default_layout_is_a_case_box_with_devices_in_their_slots() {
         let mut board = device("MSI", DeviceKind::Motherboard, 120);
         board.zones = vec![
             ZoneInfo { index: 0, name: "JARGB 1".into(), ..board.zones[0].clone() },
@@ -891,7 +1078,10 @@ mod tests {
         let ram = device("ENE DRAM", DeviceKind::Dram, 8);
         let gpu = device("RTX", DeviceKind::Gpu, 20);
         let layout = build_default_layout(&[board.clone(), keyboard.clone(), ram.clone(), gpu.clone()]);
-        assert_eq!(layout.case_form, canvas_proto::layout::CaseForm::MidTower);
+        // The picker is gone: the case is a box, at today's mid-tower size.
+        assert_eq!(layout.case_form, CaseForm::None);
+        let case = layout.landmarks.iter().find(|l| l.kind == PartKind::Case).expect("a case box");
+        assert_eq!((case.x, case.y, case.width, case.height), (99.0, 29.0, 122.0, 120.0));
         let at = |id: &DeviceId, zone: u32| {
             layout.zones.iter().find(|z| &z.device_id == id && z.zone_index == zone).unwrap()
         };
@@ -907,6 +1097,78 @@ mod tests {
         assert_eq!((card.x, card.y, card.width, card.height), (136.0, 111.0, 46.0, 14.0));
         let keys = at(&keyboard.id, 0);
         assert_eq!((keys.x, keys.y, keys.width, keys.height, keys.shape), (14.0, 158.0, 110.0, 30.0, ZoneShape::Point));
+    }
+
+    #[test]
+    fn every_placed_zone_gets_a_part_and_its_facing() {
+        let mut board = device("MSI", DeviceKind::Motherboard, 120);
+        board.zones = vec![
+            ZoneInfo { index: 0, name: "JARGB 1".into(), ..board.zones[0].clone() },
+            ZoneInfo { index: 1, name: "Front Fan".into(), led_count: 16, ..board.zones[0].clone() },
+            ZoneInfo { index: 2, name: "Front Fan 2".into(), led_count: 16, ..board.zones[0].clone() },
+            ZoneInfo { index: 3, name: "Front Fan 3".into(), led_count: 16, ..board.zones[0].clone() },
+        ];
+        let mut top = device("Top", DeviceKind::Motherboard, 12);
+        top.zones[0].name = "Top Fan".into();
+        let ram = device("ENE DRAM", DeviceKind::Dram, 8);
+        let gpu = device("RTX", DeviceKind::Gpu, 20);
+        let mut keyboard = device("Keys", DeviceKind::Keyboard, 1);
+        keyboard.zones[0].kind = ZoneKind::Single;
+        let layout = build_default_layout(&[board.clone(), top.clone(), ram.clone(), gpu.clone(), keyboard.clone()]);
+        let part = |id: &DeviceId, zone: u32| {
+            layout
+                .zones
+                .iter()
+                .find(|z| &z.device_id == id && z.zone_index == zone)
+                .and_then(|z| z.part)
+                .expect("the zone has a part")
+        };
+        // The fans: the three on the front panel face the viewer, the one on the top
+        // panel (the fourth fan slot) faces up.
+        assert_eq!(part(&board.id, 1), Part { kind: PartKind::Fan, facing: Facing::Viewer, mapped: false });
+        assert_eq!(part(&board.id, 3), Part { kind: PartKind::Fan, facing: Facing::Viewer, mapped: false });
+        assert_eq!(part(&top.id, 0), Part { kind: PartKind::Fan, facing: Facing::Up, mapped: false });
+        // The RAM, the card and the keyboard.
+        assert_eq!(part(&ram.id, 0), Part { kind: PartKind::Ram, facing: Facing::Viewer, mapped: false });
+        assert_eq!(part(&gpu.id, 0), Part { kind: PartKind::Gpu, facing: Facing::Viewer, mapped: false });
+        assert_eq!(
+            part(&keyboard.id, 0),
+            Part { kind: PartKind::Keyboard, facing: Facing::Viewer, mapped: false }
+        );
+        // The header strip runs along the top edge of the case, so it faces up.
+        assert_eq!(
+            part(&board.id, 0),
+            Part { kind: PartKind::Strip, facing: Facing::Up, mapped: false }
+        );
+        // Every part starts unmapped: the owner confirms them in setup.
+        assert!(layout.zones.iter().all(|z| z.part.is_some_and(|p| !p.mapped)));
+    }
+
+    #[test]
+    fn a_zone_with_no_slot_of_its_own_still_gets_a_part() {
+        // More fans than fan slots: the extra ones are staggered on the desk.
+        let mut board = device("MSI", DeviceKind::Motherboard, 12);
+        board.zones = (0..9)
+            .map(|i| ZoneInfo { index: i, name: format!("Fan {i}"), ..board.zones[0].clone() })
+            .collect();
+        let layout = build_default_layout(&[board]);
+        assert_eq!(layout.zones.len(), 9);
+        for z in &layout.zones {
+            let part = z.part.expect("the zone has a part");
+            assert_eq!(part.kind, PartKind::Fan, "{z:?}");
+            assert!(!part.mapped);
+        }
+    }
+
+    #[test]
+    fn a_late_device_gets_a_part_too() {
+        let mic = device("HyperX Quadcast S", DeviceKind::Microphone, 2);
+        let mut layout = build_default_layout(std::slice::from_ref(&mic));
+        assert!(layout.zones[0].part.is_some());
+        let board = device("MSI MYSTIC LIGHT", DeviceKind::Motherboard, 120);
+        place_missing_zones(&mut layout, &[mic, board.clone()]);
+        let late = layout.zones.iter().find(|z| z.device_id == board.id).expect("the board");
+        assert!(late.part.is_some(), "a late device gets a part too");
     }
 
     #[test]

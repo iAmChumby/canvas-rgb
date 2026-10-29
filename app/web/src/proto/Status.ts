@@ -23,4 +23,9 @@ service_down_ms: number | null, conflicts: Array<Conflict>,
 /**
  * G7: the editor shows the dismissible "size your ARGB headers" panel.
  */
-show_zone_panel: boolean, };
+show_zone_panel: boolean, 
+/**
+ * False until the owner finishes the first-run onboarding (maps their PC). While false,
+ * the tray opens the window by itself (a few times) onto the onboarding.
+ */
+onboarding_complete: boolean, };

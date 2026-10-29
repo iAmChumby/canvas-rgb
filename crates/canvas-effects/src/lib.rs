@@ -18,6 +18,7 @@ pub mod color;
 pub mod color_cycle;
 pub mod fire;
 pub mod gradient;
+pub mod onboard;
 pub mod props_util;
 pub mod rain;
 pub mod rainbow_wave;
@@ -57,6 +58,10 @@ pub fn registry() -> Vec<EffectFactory> {
 /// An id that is not in the list is not a built-in: `create("html:poison")` is `None`,
 /// because Poison is a user HTML effect now.
 pub fn create(id: &str) -> Option<Box<dyn Effect>> {
+    // The hidden onboarding effects build by id but are not in the registry.
+    if let Some(effect) = onboard::create_hidden(id) {
+        return Some(effect);
+    }
     let index = canvas_proto::EFFECT_IDS.iter().position(|known| *known == id)?;
     let registry = registry();
     let factory = registry.get(index)?;

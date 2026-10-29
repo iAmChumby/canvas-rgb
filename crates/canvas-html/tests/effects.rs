@@ -914,3 +914,110 @@ fn a_throwing_timer_does_not_drop_the_timers_queued_behind_it() {
     assert_eq!(effect.errors().len(), 1, "{:?}", effect.errors());
     assert_eq!(pixels_near(&canvas, [255, 0, 0], 2), 320 * 200, "the second timer was dropped");
 }
+
+// ---------------------------------------------------------------- stock effects
+//
+// The effects that ship inside the daemon (`crates/canvas-daemon/stock-effects/`). Each one
+// is a seamless loop: the picture a full period later is the same picture.
+
+const INK_DROP: &str = include_str!("../../canvas-daemon/stock-effects/ink-drop.html");
+const WET_SMEAR: &str = include_str!("../../canvas-daemon/stock-effects/wet-smear.html");
+const PALETTE_KNIFE: &str = include_str!("../../canvas-daemon/stock-effects/palette-knife.html");
+
+/// (id, source, period in seconds at the default Speed).
+const STOCK: [(&str, &str, usize); 3] = [
+    ("ink-drop", INK_DROP, 12),
+    ("wet-smear", WET_SMEAR, 16),
+    ("palette-knife", PALETTE_KNIFE, 24),
+];
+
+fn stock(id: &str, source: &str) -> HtmlEffect {
+    let mut effect =
+        HtmlEffect::from_source_seeded(id, source, &Props::new(), LUMEN_SEED).expect("loads");
+    let defaults = effect.schema().defaults();
+    effect.init(&defaults);
+    effect
+}
+
+fn rgb8(canvas: &Canvas) -> Vec<u8> {
+    canvas
+        .pixels
+        .iter()
+        .flat_map(|p| p.iter().map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8))
+        .collect()
+}
+
+fn mean_abs_diff(a: &[u8], b: &[u8]) -> f64 {
+    a.iter().zip(b).map(|(x, y)| (*x as i32 - *y as i32).abs() as f64).sum::<f64>() / a.len() as f64
+}
+
+#[test]
+fn the_stock_effects_load_move_and_report_no_errors() {
+    for (id, source, _) in STOCK {
+        let mut effect = stock(id, source);
+        let schema = effect.schema();
+        assert!(!schema.name.is_empty(), "{id} has a name");
+        assert!(!schema.description.is_empty(), "{id} has a description");
+        assert!(schema.properties.iter().any(|p| p.key == "speed"), "{id} has a speed property");
+        let mut canvas = Canvas::new(320, 200);
+        let inputs = Inputs::default();
+        let mut first = None;
+        let mut moved = false;
+        for frame in 0..120 {
+            effect.update(DT, &mut canvas, &inputs);
+            let now = rgb8(&canvas);
+            if frame == 0 {
+                first = Some(now);
+            } else if first.as_ref() != Some(&now) {
+                moved = true;
+            }
+        }
+        assert!(effect.errors().is_empty(), "{id} reported errors: {:?}", effect.errors());
+        assert!(moved, "{id} does not move");
+        assert!(distinct_pixel_count(&canvas) > 16, "{id} is nearly flat");
+    }
+}
+
+/// Runs `period` seconds of 60 Hz frames twice and compares the picture at the end of the
+/// first period with the end of the second, and one mid-period pair.
+fn assert_loop_closes(id: &str, source: &str, period: usize) {
+    let n = period * 60;
+    let mut effect = stock(id, source);
+    let mut canvas = Canvas::new(320, 200);
+    let inputs = Inputs::default();
+    let (mut at_half, mut at_t, mut at_t_half, mut at_2t) = (vec![], vec![], vec![], vec![]);
+    for k in 1..=2 * n {
+        effect.update(DT, &mut canvas, &inputs);
+        if k == n / 2 {
+            at_half = rgb8(&canvas);
+        } else if k == n {
+            at_t = rgb8(&canvas);
+        } else if k == n + n / 2 {
+            at_t_half = rgb8(&canvas);
+        } else if k == 2 * n {
+            at_2t = rgb8(&canvas);
+        }
+    }
+    assert!(effect.errors().is_empty(), "{id} reported errors: {:?}", effect.errors());
+    let closed = mean_abs_diff(&at_t, &at_2t);
+    let closed_half = mean_abs_diff(&at_half, &at_t_half);
+    let control = mean_abs_diff(&at_t, &at_t_half);
+    assert!(closed < 0.05, "{id}: t=T and t=2T differ by {closed:.4} levels");
+    assert!(closed_half < 0.05, "{id}: T/2 and 3T/2 differ by {closed_half:.4} levels");
+    assert!(control > 5.0, "{id}: the control pair differs by only {control:.4} levels");
+}
+
+#[test]
+fn ink_drop_loops_every_12_seconds() {
+    assert_loop_closes("ink-drop", INK_DROP, 12);
+}
+
+#[test]
+fn wet_smear_loops_every_16_seconds() {
+    assert_loop_closes("wet-smear", WET_SMEAR, 16);
+}
+
+#[test]
+fn palette_knife_loops_every_24_seconds() {
+    assert_loop_closes("palette-knife", PALETTE_KNIFE, 24);
+}

@@ -20,7 +20,7 @@ use canvas_proto::fans::{FansStatus, PIPE_LOST_WARN_MS};
 
 use canvas_proto::consts;
 
-use crate::{api, commands, editor, log};
+use crate::{api, commands, editor, log, onboard};
 
 pub const TRAY_ID: &str = "main";
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -46,6 +46,8 @@ pub struct Snapshot {
     pub signalrgb: bool,
     /// G7: the editor should open once for the "size your ARGB headers" panel.
     pub show_zone_panel: bool,
+    /// The user reached Done in the onboarding. Offline snapshots say `true`: no answer, no open.
+    pub onboarding_complete: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +67,7 @@ impl Snapshot {
             fan_service_down: false,
             signalrgb: false,
             show_zone_panel: false,
+            onboarding_complete: true,
         }
     }
 }
@@ -74,6 +77,8 @@ impl Snapshot {
 pub struct TrayState {
     last: Mutex<Option<Snapshot>>,
     zone_panel_opened: AtomicBool,
+    /// The window was opened for the onboarding in this tray run (by `--onboard` or a poll).
+    onboarding_opened: AtomicBool,
 }
 
 /// Creates the tray icon. The daemon need not be running: the tray starts offline and
@@ -130,9 +135,46 @@ pub fn refresh<R: Runtime>(app: &AppHandle<R>) {
             log::append(&format!("could not update the tray: {e}"));
         }
     }
-    if snap.show_zone_panel && !state.zone_panel_opened.swap(true, Ordering::SeqCst) {
+    // The old "size your ARGB headers" panel stays off until the onboarding is done, so the
+    // two never open the window twice.
+    if snap.show_zone_panel
+        && snap.onboarding_complete
+        && !state.zone_panel_opened.swap(true, Ordering::SeqCst)
+    {
         editor::open(app, None);
     }
+    auto_open_for_onboarding(app, &snap);
+}
+
+/// Opens the editor on Layout for the onboarding, now. Used for `--onboard`, which does not
+/// count toward the auto-open limit. It marks this run as opened, so the poll does not open
+/// the window a second time.
+pub fn open_onboarding<R: Runtime>(app: &AppHandle<R>) {
+    app.state::<TrayState>().onboarding_opened.store(true, Ordering::SeqCst);
+    editor::open(app, Some("layout"));
+}
+
+/// The poll path: the first successful poll that reports `onboarding_complete == false` opens
+/// the window once per tray run, while the tray's counter is below the limit.
+fn auto_open_for_onboarding<R: Runtime>(app: &AppHandle<R>, snap: &Snapshot) {
+    let state = app.state::<TrayState>();
+    let dir = onboard::tray_data_dir();
+    let opened = state.onboarding_opened.load(Ordering::SeqCst);
+    let count = onboard::auto_open_count(&dir);
+    if !onboard::should_auto_open(snap.daemon, snap.onboarding_complete, opened, count) {
+        return;
+    }
+    if state.onboarding_opened.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    match onboard::bump_auto_open_count(&dir) {
+        Ok(n) => log::append(&format!(
+            "onboarding: the poll opened the window ({n} of {})",
+            onboard::AUTO_OPEN_LIMIT
+        )),
+        Err(e) => log::append(&format!("onboarding: could not save the open counter: {e}")),
+    }
+    editor::open(app, Some("layout"));
 }
 
 fn poll() -> Snapshot {
@@ -181,6 +223,7 @@ fn poll() -> Snapshot {
             .iter()
             .any(|c| matches!(c, Conflict::SignalRgb { process, service } if *process || *service)),
         show_zone_panel: status.show_zone_panel,
+        onboarding_complete: status.onboarding_complete,
     }
 }
 

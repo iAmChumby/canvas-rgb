@@ -235,7 +235,10 @@ pub mod wasapi {
                     AUDCLNT_STREAMFLAGS_LOOPBACK,
                     0,
                     0,
-                    &mix_format,
+                    // The pointer GetMixFormat returned, not the copy: the endpoint's format is usually
+                    // WAVEFORMATEXTENSIBLE, and the 18-byte copy drops its extension, so Initialize
+                    // refuses it (E_INVALIDARG).
+                    mix_format_ptr,
                     None,
                 )
                 .map_err(|e| format!("could not initialize the audio client: {e}"))?;

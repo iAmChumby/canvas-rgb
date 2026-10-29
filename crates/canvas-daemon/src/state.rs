@@ -94,6 +94,10 @@ pub struct App {
     pub displays: crate::displays::DisplayHub,
     /// The peripherals: the mouse and the controller, and what the daemon may do with them.
     pub peripherals: crate::peripherals::PeripheralHub,
+    /// The identify override: while it is active the engine's frames reach no device.
+    pub identify: Arc<crate::identify::IdentifyGate>,
+    /// The onboarding effects are transient: the timer that restores the saved effect.
+    pub transient: crate::transient::Transient,
 }
 
 /// The fan config the daemon keeps a copy of.
@@ -138,6 +142,8 @@ impl App {
         Self {
             displays: crate::displays::DisplayHub::new(display_adapter),
             peripherals: crate::peripherals::PeripheralHub::new(Vec::new()),
+            identify: Arc::default(),
+            transient: Default::default(),
             store: tokio::sync::RwLock::new(store),
             engine,
             adapter: Arc::new(tokio::sync::Mutex::new(adapter)),
@@ -154,8 +160,9 @@ impl App {
             openrgb: tokio::sync::RwLock::new(LinkState::Down),
             shutting_down: AtomicU32::new(0),
             quit_tx,
-            user_effects: Arc::new(crate::user_effects::UserEffects::new(
+            user_effects: Arc::new(crate::user_effects::UserEffects::with_stock(
                 crate::user_effects::html_builder(),
+                crate::user_effects::STOCK_EFFECTS,
             )),
             effects_dir: crate::paths::effects_dir(),
             effect_writes: tokio::sync::Mutex::new(()),
@@ -206,6 +213,7 @@ impl App {
         // G7: the editor shows the dismissible "size your ARGB headers" panel until the user
         // dismisses it.
         let show_zone_panel = !store.config.zone_panel_dismissed;
+        let onboarding_complete = store.config.onboarding_complete;
         let openrgb = *self.openrgb.read().await;
         let conflicts = self.conflicts.read().await.clone();
         drop(store);
@@ -228,6 +236,7 @@ impl App {
             service_down_ms: if down == 0 { None } else { Some(down) },
             conflicts,
             show_zone_panel,
+            onboarding_complete,
         }
     }
 
@@ -244,16 +253,31 @@ impl App {
 pub struct DeviceSink {
     id: DeviceId,
     tx: tokio::sync::mpsc::Sender<Vec<canvas_proto::Rgb8>>,
+    /// While this is active the engine's frames are dropped (the identify override).
+    gate: Option<Arc<crate::identify::IdentifyGate>>,
 }
 
 impl DeviceSink {
     pub fn new(id: DeviceId, tx: tokio::sync::mpsc::Sender<Vec<canvas_proto::Rgb8>>) -> Self {
-        Self { id, tx }
+        Self { id, tx, gate: None }
+    }
+
+    /// A sink that obeys the identify override and lets its ticker reach the same writer.
+    pub fn with_gate(
+        id: DeviceId,
+        tx: tokio::sync::mpsc::Sender<Vec<canvas_proto::Rgb8>>,
+        gate: Arc<crate::identify::IdentifyGate>,
+    ) -> Self {
+        gate.register(id.clone(), tx.clone());
+        Self { id, tx, gate: Some(gate) }
     }
 }
 
 impl FrameSink for DeviceSink {
     fn submit(&self, colors: Vec<canvas_proto::Rgb8>) {
+        if self.gate.as_ref().is_some_and(|g| g.is_active()) {
+            return;
+        }
         // `try_send` never blocks; a full channel means the device is behind and the old
         // frame is dropped.
         match self.tx.try_send(colors) {

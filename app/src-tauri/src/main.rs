@@ -11,6 +11,7 @@ mod config_tests;
 mod editor;
 mod elevation;
 mod log;
+mod onboard;
 mod peer;
 mod tray;
 
@@ -26,8 +27,12 @@ fn main() {
     let app = tauri::Builder::default()
         // Registered first, as the plugin's docs require: a second launch opens the editor
         // in the running tray instead of starting another tray icon.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            editor::open(app, None);
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if onboard::has_onboard_arg(&args) {
+                tray::open_onboarding(app);
+            } else {
+                editor::open(app, None);
+            }
         }))
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
@@ -37,6 +42,11 @@ fn main() {
         .setup(|app| {
             let handle = app.handle().clone();
             tray::build(&handle)?;
+            // `--onboard` (the installer launch) opens the window now, not on a poll.
+            let args: Vec<String> = std::env::args().collect();
+            if onboard::has_onboard_arg(&args) {
+                tray::open_onboarding(&handle);
+            }
             tray::start(handle);
             Ok(())
         })

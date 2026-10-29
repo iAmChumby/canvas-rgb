@@ -113,3 +113,111 @@ async fn the_readback_reports_the_colours_the_adapter_gives() {
     assert_eq!(devices.len(), 1);
     assert_eq!(devices[0].device_id, "fake:MSI B850 Mystic Light");
 }
+
+/// A fake adapter whose first `failures` connects fail.
+struct FlakyAdapter {
+    inner: FakeAdapter,
+    failures: u32,
+}
+
+#[async_trait::async_trait]
+impl canvas_proto::traits::DeviceAdapter for FlakyAdapter {
+    fn name(&self) -> &'static str {
+        "flaky"
+    }
+    fn capabilities(&self) -> canvas_proto::device::AdapterCapabilities {
+        self.inner.capabilities()
+    }
+    async fn connect(&mut self) -> Result<(), canvas_proto::traits::AdapterError> {
+        if self.failures > 0 {
+            self.failures -= 1;
+            return Err(canvas_proto::traits::AdapterError::NotConnected);
+        }
+        self.inner.connect().await
+    }
+    async fn disconnect(&mut self) -> Result<(), canvas_proto::traits::AdapterError> {
+        self.inner.disconnect().await
+    }
+    fn is_connected(&self) -> bool {
+        self.inner.is_connected()
+    }
+    async fn discover(
+        &mut self,
+    ) -> Result<Vec<canvas_proto::device::DeviceInfo>, canvas_proto::traits::AdapterError> {
+        self.inner.discover().await
+    }
+    async fn write_frame(
+        &mut self,
+        device: &DeviceId,
+        colors: &[canvas_proto::Rgb8],
+    ) -> Result<(), canvas_proto::traits::AdapterError> {
+        self.inner.write_frame(device, colors).await
+    }
+    async fn set_zone_size(
+        &mut self,
+        device: &DeviceId,
+        zone: u32,
+        leds: u32,
+    ) -> Result<(), canvas_proto::traits::AdapterError> {
+        self.inner.set_zone_size(device, zone, leds).await
+    }
+    async fn identify(
+        &mut self,
+        device: &DeviceId,
+        zone: u32,
+        led: u32,
+    ) -> Result<(), canvas_proto::traits::AdapterError> {
+        self.inner.identify(device, zone, led).await
+    }
+    async fn read_back(
+        &mut self,
+        device: &DeviceId,
+    ) -> Result<Vec<canvas_proto::Rgb8>, canvas_proto::traits::AdapterError> {
+        self.inner.read_back(device).await
+    }
+}
+
+#[tokio::test]
+async fn the_supervisor_reports_connecting_on_every_attempt_and_down_only_after_a_failure() {
+    use canvas_proto::api::LinkState;
+    let adapter: Arc<tokio::sync::Mutex<Box<dyn canvas_proto::traits::DeviceAdapter>>> =
+        Arc::new(tokio::sync::Mutex::new(Box::new(FlakyAdapter {
+            inner: FakeAdapter::default(),
+            failures: 2,
+        })));
+    let zones = Arc::new(tokio::sync::RwLock::new(std::collections::BTreeMap::new()));
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let events: Arc<std::sync::Mutex<Vec<&'static str>>> = Arc::default();
+
+    let on_devices = {
+        let events = events.clone();
+        let stop_tx = stop_tx.clone();
+        move |_devices| {
+            events.lock().unwrap().push("devices");
+            let _ = stop_tx.send(true);
+        }
+    };
+    let on_link = {
+        let events = events.clone();
+        move |link| {
+            events.lock().unwrap().push(match link {
+                LinkState::Connecting => "connecting",
+                LinkState::Down => "down",
+                LinkState::Connected => "connected",
+            });
+        }
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        canvas_daemon::openrgb_supervisor::supervise(adapter, zones, on_devices, on_link, stop_rx),
+    )
+    .await
+    .expect("the supervisor stops once connected");
+
+    let seen = events.lock().unwrap().clone();
+    assert_eq!(
+        seen,
+        vec!["connecting", "down", "connecting", "down", "connecting", "devices"],
+        "Connecting before each attempt, Down only after a failure"
+    );
+}

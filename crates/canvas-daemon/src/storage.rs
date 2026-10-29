@@ -276,6 +276,7 @@ pub fn default_layouts() -> LayoutsFile {
             zones: Vec::new(),
             effect: None,
             case_form: canvas_proto::layout::CaseForm::None,
+            landmarks: Vec::new(),
         }],
     }
 }

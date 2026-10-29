@@ -72,6 +72,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route(routes::FAN_PROFILES, put(fans::put_profile).delete(fans::delete_profile))
         .route(routes::SETTINGS, get(settings::get_settings).put(settings::put_settings))
         .route(routes::DISMISS_ZONE_PANEL, post(settings::dismiss_zone_panel))
+        .route(routes::ONBOARDING_COMPLETE, post(settings::complete_onboarding))
         .route(routes::CONFIG_EXPORT, get(settings::config_export))
         .route(routes::CONFIG_IMPORT, post(settings::config_import))
         .route(routes::QUIT, post(status::quit))

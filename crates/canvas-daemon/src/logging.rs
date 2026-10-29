@@ -38,7 +38,9 @@ pub fn init(name: &str) -> std::io::Result<LogGuard> {
         .rotation(Rotation::DAILY)
         .filename_prefix(name)
         .filename_suffix("log")
-        .max_log_files(1)
+        // Two, not one: at build time the appender prunes down to max - 1 files, so with 1 it
+        // deleted the day's own log on every daemon start.
+        .max_log_files(2)
         .build(&dir)
         .map_err(|e| std::io::Error::other(e.to_string()))?;
     let (writer, guard) = tracing_appender::non_blocking(appender);

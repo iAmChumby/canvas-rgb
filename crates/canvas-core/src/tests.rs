@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use canvas_proto::api::Power;
 use canvas_proto::color::Rgb8;
 use canvas_proto::device::{DeviceId, DeviceInfo, DeviceKind, ZoneInfo, ZoneKind};
-use canvas_proto::layout::{Layout, PlacedZone, RenderScale, SamplingMode, ZoneShape};
+use canvas_proto::layout::{Layout, LedSlice, PlacedZone, RenderScale, SamplingMode, ZoneShape};
 use canvas_proto::props::{InputNeeds, PropKind, PropertyDef, PropertySchema, Props};
 use canvas_proto::traits::{Canvas, Effect, EngineSettings, FrameSink, PreviewSink};
 use canvas_proto::CANVAS_HEIGHT;
@@ -286,6 +286,9 @@ fn placed(device_id: &str, zone_index: u32, x: f32, y: f32, w: f32, h: f32) -> P
         visible: true,
         shape: ZoneShape::Auto,
         label: None,
+        leds: None,
+        part: None,
+        locked: false,
     }
 }
 
@@ -298,6 +301,7 @@ fn layout(zones: Vec<PlacedZone>, sampling: SamplingMode, scale: RenderScale) ->
         zones,
         effect: None,
         case_form: canvas_proto::layout::CaseForm::None,
+        landmarks: Vec::new(),
     }
 }
 
@@ -1029,6 +1033,89 @@ fn the_render_scale_changes_the_sampled_colors() {
 }
 
 // ---------------------------------------------------------------------------
+// A zone split into parts
+// ---------------------------------------------------------------------------
+
+/// A placement that owns a run of its zone's LEDs.
+fn run(mut p: PlacedZone, start: u32, count: u32) -> PlacedZone {
+    p.leds = Some(LedSlice { start, count });
+    p
+}
+
+#[test]
+fn the_leds_of_a_split_zone_that_nobody_owns_are_black() {
+    let engine = spawn(settings(30));
+    // One 40-LED header split into three runs of 12, so the last 4 LEDs belong to
+    // nobody. They must be black, not the effect's top-left pixel.
+    let dev = device("d0", vec![zone(0, ZoneKind::Linear, 40)]);
+    let lay = layout(
+        vec![
+            run(placed("d0", 0, 0.0, 0.0, 120.0, 20.0), 0, 12),
+            run(placed("d0", 0, 0.0, 30.0, 120.0, 20.0), 12, 12),
+            run(placed("d0", 0, 0.0, 60.0, 120.0, 20.0), 24, 12),
+        ],
+        SamplingMode::Nearest,
+        RenderScale::P100,
+    );
+    engine.set_layout(lay, vec![dev]);
+
+    let sink = RecordingSink::new();
+    engine.add_sink(DeviceId("d0".into()), sink.clone());
+
+    let initialized = Arc::new(AtomicBool::new(false));
+    engine.set_effect(
+        Box::new(SolidEffect::new([1.0, 0.0, 0.0], initialized)),
+        &Props::new(),
+    );
+
+    assert!(wait_until(Duration::from_secs(3), || sink.frame_count() > 0));
+    let frame = sink.last().expect("a frame was submitted");
+    assert_eq!(frame.len(), 40, "a frame has one color per LED");
+    for (i, c) in frame.iter().enumerate() {
+        if i < 36 {
+            assert_eq!(*c, Rgb8::new(255, 0, 0), "LED {i} belongs to a part");
+        } else {
+            assert_eq!(*c, Rgb8::BLACK, "LED {i} belongs to nobody: it is black");
+        }
+    }
+    engine.shutdown();
+}
+
+#[test]
+fn a_zone_that_is_split_still_gets_one_color_per_led() {
+    let engine = spawn(settings(30));
+    let dev = device("d0", vec![zone(0, ZoneKind::Linear, 40)]);
+    let lay = layout(
+        vec![
+            run(placed("d0", 0, 0.0, 0.0, 120.0, 20.0), 0, 12),
+            run(placed("d0", 0, 0.0, 30.0, 120.0, 20.0), 12, 12),
+        ],
+        SamplingMode::AreaAverage,
+        RenderScale::P50,
+    );
+    engine.set_layout(lay, vec![dev]);
+    let sink = RecordingSink::new();
+    engine.add_sink(DeviceId("d0".into()), sink.clone());
+    let initialized = Arc::new(AtomicBool::new(false));
+    engine.set_effect(
+        Box::new(SolidEffect::new([0.0, 1.0, 0.0], initialized)),
+        &Props::new(),
+    );
+    assert!(wait_until(Duration::from_secs(3), || sink.frame_count() > 0));
+    let frame = sink.last().expect("a frame was submitted");
+    assert_eq!(frame.len(), 40, "the frame still covers every LED of the zone");
+    // The two runs cover LEDs 0..24; the other 16 belong to nobody.
+    for (i, c) in frame.iter().enumerate() {
+        if i < 24 {
+            assert_eq!(*c, Rgb8::new(0, 255, 0), "LED {i} belongs to a part");
+        } else {
+            assert_eq!(*c, Rgb8::BLACK, "LED {i} belongs to nobody: it is black");
+        }
+    }
+    engine.shutdown();
+}
+
+// ---------------------------------------------------------------------------
 // Canvas size
 // ---------------------------------------------------------------------------
 
@@ -1042,4 +1129,133 @@ fn the_canvas_is_the_logical_size_at_full_scale() {
     assert_eq!(canvas.width, 320);
     assert_eq!(canvas.height, 200);
     assert_eq!(canvas.pixels.len(), 320 * 200);
+}
+
+// ---------------------------------------------------------------------------
+// The golden plan
+// ---------------------------------------------------------------------------
+
+/// The devices of the golden layout: a wide linear zone, a tall linear zone, a
+/// matrix zone with a gap in its map, and a zone nobody placed.
+fn golden_devices() -> Vec<DeviceInfo> {
+    let map = vec![Some(0), Some(1), None, Some(3)];
+    vec![device(
+        "d0",
+        vec![
+            zone(0, ZoneKind::Linear, 4),
+            zone(1, ZoneKind::Linear, 3),
+            zone(2, ZoneKind::Matrix { width: 2, height: 2, map }, 4),
+            zone(3, ZoneKind::Linear, 5),
+        ],
+    )]
+}
+
+/// The golden layout: a layout saved before parts and slices existed, so no
+/// placement carries a `leds` run or a `part`.
+fn golden_layout() -> Layout {
+    layout(
+        vec![
+            placed("d0", 0, 0.0, 0.0, 100.0, 20.0),
+            placed("d0", 1, 10.0, 30.0, 60.0, 90.0),
+            placed("d0", 2, 150.0, 0.0, 100.0, 100.0),
+        ],
+        SamplingMode::AreaAverage,
+        RenderScale::P100,
+    )
+}
+
+/// The plan the golden layout builds, and the frame that plan produces on a fixed
+/// canvas, as text.
+///
+/// The text is the golden fixture: it was captured before the slice work, so a
+/// layout saved before parts existed has to build the same plan, byte for byte.
+fn golden_dump() -> String {
+    let devices = golden_devices();
+    let lay = golden_layout();
+    let plan = crate::geometry::build_plan(&lay, &devices);
+    let mut out = String::new();
+    out.push_str(&format!("scale {:?} sampling {:?}\n", plan.scale, plan.sampling));
+    for device in &plan.devices {
+        out.push_str(&format!("device {} leds {}\n", device.device_id.0, device.led_count));
+        for zone in &device.zones {
+            out.push_str(&format!(
+                "zone {} placed {} leds {}\n",
+                zone.zone_index,
+                zone.placed,
+                zone.leds.len()
+            ));
+            // An unplaced zone is black: it has no region to print.
+            if !zone.placed {
+                continue;
+            }
+            for led in &zone.leds {
+                match led.region() {
+                    Some((cx, cy, bounds)) => {
+                        out.push_str(&format!("  {cx:?} {cy:?} {bounds:?}\n"))
+                    }
+                    None => out.push_str("  black\n"),
+                }
+            }
+        }
+    }
+
+    // The frame the plan produces on a fixed canvas: the unplaced zone is black
+    // and the placed zones carry the canvas's colours. This is the engine's own
+    // rule, so the frame is what the hardware would see.
+    let mut canvas = Canvas::with_scale(plan.scale);
+    for y in 0..canvas.height {
+        for x in 0..canvas.width {
+            canvas.set(
+                x,
+                y,
+                [
+                    x as f32 / 255.0,
+                    y as f32 / 255.0,
+                    ((x + y) % 256) as f32 / 255.0,
+                ],
+            );
+        }
+    }
+    let mut frame: Vec<Rgb8> = Vec::new();
+    for device in &plan.devices {
+        for zone in &device.zones {
+            if !zone.placed {
+                frame.extend(std::iter::repeat_n(Rgb8::BLACK, zone.leds.len()));
+                continue;
+            }
+            let mut colors = Vec::new();
+            crate::sampling::sample_leds(
+                &canvas.pixels,
+                canvas.width,
+                canvas.height,
+                &zone.leds,
+                plan.sampling,
+                &mut colors,
+            );
+            frame.extend(colors);
+        }
+    }
+    for c in &frame {
+        out.push_str(&format!("{:02x}{:02x}{:02x} ", c.r, c.g, c.b));
+    }
+    out.push('\n');
+    out
+}
+
+/// A layout saved before parts and slices existed builds the same plan, and the
+/// same frame, as it did before the slice work.
+#[test]
+fn a_legacy_layout_builds_the_plan_it_built_before_parts_existed() {
+    let expected = include_str!("fixtures/legacy_plan.txt");
+    assert_eq!(golden_dump(), expected, "the golden plan changed");
+}
+
+/// Writes the golden plan to stdout between two markers, so it can be captured
+/// into the fixture file. Ignored: it is a capture, not a correctness test.
+#[test]
+#[ignore = "captures the golden fixture"]
+fn capture_the_golden_plan() {
+    println!("<<<GOLDEN>>>");
+    print!("{}", golden_dump());
+    println!("<<<END>>>");
 }

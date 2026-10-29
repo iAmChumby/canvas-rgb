@@ -22,6 +22,7 @@ pub async fn quit(State(app): State<Arc<App>>) -> Response {
 
     match on_quit {
         OnQuit::Black => {
+            app.identify.stop();
             app.engine.write_solid(canvas_proto::Rgb8::BLACK);
             tracing::info!("quit: wrote black to every device");
         }

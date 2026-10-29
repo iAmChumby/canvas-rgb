@@ -6,6 +6,9 @@
 //! - **Area average**: the unweighted mean of the render pixels whose centers fall in
 //!   the LED's region (at least the nearest pixel).
 //!
+//! A LED with no owner (the LEDs of a split zone that no placement claims) is black:
+//! it carries no region and is never sampled.
+//!
 //! The hot path allocates nothing: it writes into a caller-owned `Vec<Rgb8>`.
 
 use canvas_proto::color::Rgb8;
@@ -28,31 +31,59 @@ pub fn sample_leds(
     out.clear();
     out.reserve(leds.len());
     for led in leds {
-        let color = match mode {
-            SamplingMode::Nearest => sample_nearest(canvas, width, height, led),
-            SamplingMode::Bilinear => sample_bilinear(canvas, width, height, led),
-            SamplingMode::AreaAverage => sample_area(canvas, width, height, led),
+        let color = if !led.sampled {
+            // A LED with no owner is black: it is never sampled.
+            Rgb8::BLACK
+        } else {
+            match mode {
+                SamplingMode::Nearest => {
+                    sample_nearest(canvas, width, height, led.center_x, led.center_y)
+                }
+                SamplingMode::Bilinear => {
+                    sample_bilinear(canvas, width, height, led.center_x, led.center_y)
+                }
+                SamplingMode::AreaAverage => sample_area(
+                    canvas,
+                    width,
+                    height,
+                    led.center_x,
+                    led.center_y,
+                    led.bounds,
+                ),
+            }
         };
         out.push(color);
     }
 }
 
-/// The pixel at `led.center`, rounded to the nearest pixel center.
-fn sample_nearest(canvas: &[[f32; 3]], width: u32, height: u32, led: &LedSample) -> Rgb8 {
-    let (x, y) = nearest_pixel(led.center_x, led.center_y, width, height);
+/// The pixel at the LED's center, rounded to the nearest pixel center.
+fn sample_nearest(
+    canvas: &[[f32; 3]],
+    width: u32,
+    height: u32,
+    center_x: f32,
+    center_y: f32,
+) -> Rgb8 {
+    let (x, y) = nearest_pixel(center_x, center_y, width, height);
     Rgb8::from_f32(canvas[(y * width + x) as usize])
 }
 
-/// The pixel at `led.center`, interpolated from the four neighbours.
-fn sample_bilinear(canvas: &[[f32; 3]], width: u32, height: u32, led: &LedSample) -> Rgb8 {
+/// The pixel at the LED's center, interpolated from the four neighbours.
+fn sample_bilinear(
+    canvas: &[[f32; 3]],
+    width: u32,
+    height: u32,
+    center_x: f32,
+    center_y: f32,
+) -> Rgb8 {
     if width == 0 || height == 0 {
         return Rgb8::BLACK;
     }
     let max_x = width - 1;
     let max_y = height - 1;
     // The fractional position inside the pixel grid.
-    let fx = led.center_x.clamp(0.0, max_x as f32);
-    let fy = led.center_y.clamp(0.0, max_y as f32);
+    let fx = center_x.clamp(0.0, max_x as f32);
+    let fy = center_y.clamp(0.0, max_y as f32);
     let x0 = fx.floor() as u32;
     let y0 = fy.floor() as u32;
     let x1 = (x0 + 1).min(max_x);
@@ -74,15 +105,22 @@ fn sample_bilinear(canvas: &[[f32; 3]], width: u32, height: u32, led: &LedSample
     Rgb8::from_f32(c)
 }
 
-/// The mean of the render pixels whose centers fall inside `led.bounds`.
+/// The mean of the render pixels whose centers fall inside the LED's region.
 ///
 /// At least the nearest pixel is always included, so a region smaller than one pixel
 /// still yields that pixel rather than nothing.
-fn sample_area(canvas: &[[f32; 3]], width: u32, height: u32, led: &LedSample) -> Rgb8 {
+fn sample_area(
+    canvas: &[[f32; 3]],
+    width: u32,
+    height: u32,
+    center_x: f32,
+    center_y: f32,
+    bounds: [f32; 4],
+) -> Rgb8 {
     if width == 0 || height == 0 {
         return Rgb8::BLACK;
     }
-    let [bx0, by0, bx1, by1] = led.bounds;
+    let [bx0, by0, bx1, by1] = bounds;
     let max_x = width - 1;
     let max_y = height - 1;
 
@@ -99,7 +137,7 @@ fn sample_area(canvas: &[[f32; 3]], width: u32, height: u32, led: &LedSample) ->
     }
     // An empty region still samples the nearest pixel.
     if x0 > x1 || y0 > y1 {
-        let (x, y) = nearest_pixel(led.center_x, led.center_y, width, height);
+        let (x, y) = nearest_pixel(center_x, center_y, width, height);
         return Rgb8::from_f32(canvas[(y * width + x) as usize]);
     }
 
@@ -116,7 +154,7 @@ fn sample_area(canvas: &[[f32; 3]], width: u32, height: u32, led: &LedSample) ->
         }
     }
     if count == 0 {
-        let (x, y) = nearest_pixel(led.center_x, led.center_y, width, height);
+        let (x, y) = nearest_pixel(center_x, center_y, width, height);
         return Rgb8::from_f32(canvas[(y * width + x) as usize]);
     }
     let n = count as f64;
@@ -147,10 +185,15 @@ mod tests {
         (vec![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 1.0, 1.0]], 2, 2)
     }
 
+    /// A LED that samples the given region.
+    fn region(center_x: f32, center_y: f32, bounds: [f32; 4]) -> LedSample {
+        LedSample { center_x, center_y, bounds, sampled: true }
+    }
+
     #[test]
     fn nearest_takes_the_pixel_at_the_center() {
         let (c, w, h) = canvas_2x2();
-        let led = LedSample { center_x: 0.0, center_y: 0.0, bounds: [0.0, 0.0, 1.0, 1.0] };
+        let led = region(0.0, 0.0, [0.0, 0.0, 1.0, 1.0]);
         let mut out = Vec::new();
         sample_leds(&c, w, h, std::slice::from_ref(&led), SamplingMode::Nearest, &mut out);
         assert_eq!(out, vec![Rgb8::new(255, 0, 0)]);
@@ -160,7 +203,7 @@ mod tests {
     fn nearest_clamps_out_of_range_centers() {
         let (c, w, h) = canvas_2x2();
         // Clamped to the right edge (x = 1) and the top edge (y = 0): green.
-        let led = LedSample { center_x: 99.0, center_y: -5.0, bounds: [0.0, 0.0, 0.0, 0.0] };
+        let led = region(99.0, -5.0, [0.0, 0.0, 0.0, 0.0]);
         let mut out = Vec::new();
         sample_leds(&c, w, h, std::slice::from_ref(&led), SamplingMode::Nearest, &mut out);
         assert_eq!(out, vec![Rgb8::new(0, 255, 0)]);
@@ -170,7 +213,7 @@ mod tests {
     fn nearest_clamps_below_the_origin() {
         let (c, w, h) = canvas_2x2();
         // Clamped to (0, 0): red.
-        let led = LedSample { center_x: -5.0, center_y: -5.0, bounds: [0.0, 0.0, 0.0, 0.0] };
+        let led = region(-5.0, -5.0, [0.0, 0.0, 0.0, 0.0]);
         let mut out = Vec::new();
         sample_leds(&c, w, h, std::slice::from_ref(&led), SamplingMode::Nearest, &mut out);
         assert_eq!(out, vec![Rgb8::new(255, 0, 0)]);
@@ -180,7 +223,7 @@ mod tests {
     fn bilinear_interpolates_between_pixels() {
         let (c, w, h) = canvas_2x2();
         // Halfway between pixel (0,0) red and pixel (1,0) green.
-        let led = LedSample { center_x: 0.5, center_y: 0.0, bounds: [0.0, 0.0, 1.0, 1.0] };
+        let led = region(0.5, 0.0, [0.0, 0.0, 1.0, 1.0]);
         let mut out = Vec::new();
         sample_leds(&c, w, h, std::slice::from_ref(&led), SamplingMode::Bilinear, &mut out);
         assert_eq!(out, vec![Rgb8::new(128, 128, 0)]);
@@ -189,7 +232,7 @@ mod tests {
     #[test]
     fn bilinear_at_a_pixel_center_is_that_pixel() {
         let (c, w, h) = canvas_2x2();
-        let led = LedSample { center_x: 1.0, center_y: 1.0, bounds: [0.0, 0.0, 1.0, 1.0] };
+        let led = region(1.0, 1.0, [0.0, 0.0, 1.0, 1.0]);
         let mut out = Vec::new();
         sample_leds(&c, w, h, std::slice::from_ref(&led), SamplingMode::Bilinear, &mut out);
         assert_eq!(out, vec![Rgb8::new(255, 255, 255)]);
@@ -199,7 +242,7 @@ mod tests {
     fn area_average_means_the_pixels_whose_centers_fall_in_the_region() {
         let (c, w, h) = canvas_2x2();
         // The whole 2x2 canvas.
-        let led = LedSample { center_x: 1.0, center_y: 1.0, bounds: [0.0, 0.0, 2.0, 2.0] };
+        let led = region(1.0, 1.0, [0.0, 0.0, 2.0, 2.0]);
         let mut out = Vec::new();
         sample_leds(&c, w, h, std::slice::from_ref(&led), SamplingMode::AreaAverage, &mut out);
         // Red + green + blue + white, averaged.
@@ -209,7 +252,7 @@ mod tests {
     #[test]
     fn area_average_of_one_pixel_is_that_pixel() {
         let (c, w, h) = canvas_2x2();
-        let led = LedSample { center_x: 0.0, center_y: 0.0, bounds: [0.0, 0.0, 1.0, 1.0] };
+        let led = region(0.0, 0.0, [0.0, 0.0, 1.0, 1.0]);
         let mut out = Vec::new();
         sample_leds(&c, w, h, std::slice::from_ref(&led), SamplingMode::AreaAverage, &mut out);
         assert_eq!(out, vec![Rgb8::new(255, 0, 0)]);
@@ -219,7 +262,7 @@ mod tests {
     fn area_average_of_an_empty_region_falls_back_to_the_nearest_pixel() {
         let (c, w, h) = canvas_2x2();
         // A degenerate region far from any pixel center.
-        let led = LedSample { center_x: 0.4, center_y: 0.4, bounds: [0.2, 0.2, 0.2, 0.2] };
+        let led = region(0.4, 0.4, [0.2, 0.2, 0.2, 0.2]);
         let mut out = Vec::new();
         sample_leds(&c, w, h, std::slice::from_ref(&led), SamplingMode::AreaAverage, &mut out);
         assert_eq!(out, vec![Rgb8::new(255, 0, 0)]);
@@ -229,9 +272,30 @@ mod tests {
     fn area_average_of_a_two_pixel_region_averages_those_two() {
         let (c, w, h) = canvas_2x2();
         // Covers the centers of pixel (0,0) and (1,0): red and green.
-        let led = LedSample { center_x: 0.5, center_y: 0.0, bounds: [0.0, 0.0, 1.5, 1.0] };
+        let led = region(0.5, 0.0, [0.0, 0.0, 1.5, 1.0]);
         let mut out = Vec::new();
         sample_leds(&c, w, h, std::slice::from_ref(&led), SamplingMode::AreaAverage, &mut out);
         assert_eq!(out, vec![Rgb8::new(128, 128, 0)]);
+    }
+
+    #[test]
+    fn a_led_with_no_owner_is_black_in_every_mode() {
+        let (c, w, h) = canvas_2x2();
+        for mode in [SamplingMode::Nearest, SamplingMode::Bilinear, SamplingMode::AreaAverage] {
+            let mut out = Vec::new();
+            sample_leds(&c, w, h, &[LedSample::default()], mode, &mut out);
+            assert_eq!(out, vec![Rgb8::BLACK], "{mode:?} sampled a LED with no owner");
+        }
+    }
+
+    #[test]
+    fn a_led_with_no_owner_is_black_even_next_to_a_lit_one() {
+        let (c, w, h) = canvas_2x2();
+        let leds = [LedSample::default(), region(0.0, 0.0, [0.0, 0.0, 1.0, 1.0])];
+        for mode in [SamplingMode::Nearest, SamplingMode::Bilinear, SamplingMode::AreaAverage] {
+            let mut out = Vec::new();
+            sample_leds(&c, w, h, &leds, mode, &mut out);
+            assert_eq!(out, vec![Rgb8::BLACK, Rgb8::new(255, 0, 0)], "{mode:?}");
+        }
     }
 }

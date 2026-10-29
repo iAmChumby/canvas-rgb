@@ -797,22 +797,32 @@ impl Context {
     }
 
     /// `putImageData(data, x, y)` in the script's (logical) pixels: replaces the pixels
-    /// outright (no blending). Each image pixel writes the device pixel under its logical
-    /// centre. The image's own width is needed to know the stride, so the caller supplies it.
+    /// outright (no blending). Each image pixel fills every device pixel its logical pixel
+    /// covers, so a canvas rendered at 2x or 4x is filled whole, not dotted. The image's own
+    /// width is needed to know the stride, so the caller supplies it.
     pub fn put_image_data_with_width(&mut self, data: &[u8], x: i32, y: i32, img_width: u32) {
         let img_width = img_width.max(1);
         let img_height = (data.len() / 4) as u32 / img_width;
         let (sx, sy) = (self.scale_x(), self.scale_y());
         let (dev_w, dev_h) = (self.width as i32, self.height as i32);
+        let width = self.width;
         let pixels = self.pixmap.pixels_mut();
+        // The device span of logical pixel `i` is [floor(i * s), floor((i + 1) * s)), at least one.
+        let span = |i: i32, s: f32| -> (i32, i32) {
+            let lo = (i as f32 * s).floor() as i32;
+            let hi = (((i + 1) as f32 * s).floor() as i32).max(lo + 1);
+            (lo, hi)
+        };
         for row in 0..img_height {
-            let dy = ((y as f32 + row as f32 + 0.5) * sy).floor() as i32;
-            if dy < 0 || dy >= dev_h {
+            let (y0, y1) = span(y + row as i32, sy);
+            let (y0, y1) = (y0.max(0), y1.min(dev_h));
+            if y0 >= y1 {
                 continue;
             }
             for col in 0..img_width {
-                let dx = ((x as f32 + col as f32 + 0.5) * sx).floor() as i32;
-                if dx < 0 || dx >= dev_w {
+                let (x0, x1) = span(x + col as i32, sx);
+                let (x0, x1) = (x0.max(0), x1.min(dev_w));
+                if x0 >= x1 {
                     continue;
                 }
                 let si = ((row * img_width + col) as usize) * 4;
@@ -821,14 +831,20 @@ impl Context {
                 }
                 // The image is straight alpha; the pixmap stores premultiplied values.
                 let a = data[si + 3];
-                let dst = &mut pixels[(dy as u32 * self.width + dx as u32) as usize];
-                *dst = tiny_skia::PremultipliedColorU8::from_rgba(
+                let Some(value) = tiny_skia::PremultipliedColorU8::from_rgba(
                     premultiply(data[si], a),
                     premultiply(data[si + 1], a),
                     premultiply(data[si + 2], a),
                     a,
-                )
-                .unwrap_or(*dst);
+                ) else {
+                    continue;
+                };
+                for dy in y0..y1 {
+                    let base = (dy as u32 * width) as usize;
+                    for dx in x0..x1 {
+                        pixels[base + dx as usize] = value;
+                    }
+                }
             }
         }
     }
@@ -1122,6 +1138,22 @@ mod tests {
         // The rectangle is painted.
         let inside_rect = (10usize * 16 + 10) * 4;
         assert_eq!(ctx.pixels()[inside_rect + 3], 255);
+    }
+
+    #[test]
+    fn put_image_data_fills_the_whole_device_block_at_a_larger_render_scale() {
+        // A 2x2 logical canvas at 8x8 device pixels: each image pixel covers a 4x4 block.
+        let mut ctx = Context::new(2, 2);
+        ctx.set_device_size(8, 8);
+        ctx.put_image_data_with_width(&[255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255], 0, 0, 2);
+        let px = ctx.pixels();
+        // The byte of channel `c` at device pixel (x, y).
+        let at = |x: usize, y: usize, c: usize| px[(y * 8 + x) * 4 + c];
+        assert_eq!((at(0, 0, 0), at(3, 3, 0)), (255, 255), "the red block is whole");
+        assert_eq!((at(4, 0, 1), at(7, 3, 1)), (255, 255), "the green block is whole");
+        assert_eq!((at(0, 4, 2), at(3, 7, 2)), (255, 255), "the blue block is whole");
+        assert_eq!(at(5, 5, 0), 255, "the white block is whole");
+        assert_eq!(at(4, 0, 0), 0, "the green block holds no red");
     }
 
     #[test]

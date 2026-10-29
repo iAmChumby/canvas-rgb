@@ -17,6 +17,38 @@ pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Starts the daemon in the active user session.
 pub trait SessionLauncher: Send {
     fn launch(&mut self, exe: &Path) -> io::Result<Box<dyn ChildProcess>>;
+
+    /// Every `canvas-rgbd.exe` process running right now, with its image path and session.
+    /// The default finds none (the fakes override it).
+    fn running_daemons(&mut self) -> Vec<RunningDaemon> {
+        Vec::new()
+    }
+
+    /// The active console session, or `None` when there is none.
+    fn console_session(&mut self) -> Option<u32> {
+        None
+    }
+}
+
+/// A `canvas-rgbd.exe` process that is already running, found before the service launches its own.
+pub struct RunningDaemon {
+    /// The full path of the process's image.
+    pub image: PathBuf,
+    /// The session the process runs in.
+    pub session: u32,
+    pub process: Box<dyn ChildProcess>,
+}
+
+/// How long the service waits for a stale daemon to exit after ending it.
+const STALE_EXIT_WAIT: Duration = Duration::from_secs(5);
+
+/// Compares two Windows paths without regard to case or a verbatim (`\\?\`) prefix.
+fn same_image(a: &Path, b: &Path) -> bool {
+    fn norm(p: &Path) -> String {
+        let s = p.to_string_lossy().replace('/', "\\").to_lowercase();
+        s.strip_prefix("\\\\?\\").map(str::to_owned).unwrap_or(s)
+    }
+    norm(a) == norm(b)
 }
 
 /// What the caller must do after a supervision pass.
@@ -55,7 +87,53 @@ impl DaemonSupervisor {
     /// Starts the daemon for the first time (service start).
     pub fn start(&mut self, now: Instant) {
         self.started = true;
+        self.end_stale_daemons();
         self.launch(now);
+    }
+
+    /// Ends a `canvas-rgbd` left over from a previous service instance. It holds the API port, so
+    /// every daemon launched beside it would exit with code 1 and the restart limit would write
+    /// black. Only a daemon whose image is this service's own `exe` and that runs in the active
+    /// console session is ended; a `canvas-rgbd` from any other path is never touched.
+    fn end_stale_daemons(&mut self) {
+        let Some(console) = self.launcher.console_session() else {
+            return;
+        };
+        for mut stale in self.launcher.running_daemons() {
+            let pid = stale.process.id();
+            if !same_image(&stale.image, &self.exe) || stale.session != console {
+                tracing::info!(
+                    pid,
+                    image = %stale.image.display(),
+                    session = stale.session,
+                    "left a canvas-rgbd alone: not this install's daemon in the console session"
+                );
+                continue;
+            }
+            tracing::warn!(pid, image = %stale.image.display(), "ending a stale daemon from a previous service instance");
+            if let Err(e) = stale.process.kill() {
+                tracing::warn!(pid, error = %e, "could not end the stale daemon");
+                continue;
+            }
+            let deadline = Instant::now() + STALE_EXIT_WAIT;
+            loop {
+                match stale.process.try_wait() {
+                    Ok(Some(_)) => {
+                        tracing::info!(pid, "the stale daemon has exited");
+                        break;
+                    }
+                    Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+                    Ok(None) => {
+                        tracing::warn!(pid, "the stale daemon did not exit within 5 s");
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!(pid, error = %e, "could not wait for the stale daemon");
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     fn launch(&mut self, now: Instant) {
@@ -177,18 +255,24 @@ pub use windows_launcher::WtsLauncher;
 
 #[cfg(windows)]
 mod windows_launcher {
-    use super::SessionLauncher;
+    use super::{RunningDaemon, SessionLauncher};
     use crate::process::ChildProcess;
     use std::ffi::c_void;
     use std::io;
     use std::os::windows::ffi::OsStrExt;
-    use std::path::Path;
-    use windows_sys::Win32::Foundation::{CloseHandle, FALSE, HANDLE, WAIT_OBJECT_0};
+    use std::path::{Path, PathBuf};
+    use windows_sys::Win32::Foundation::{CloseHandle, FALSE, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+    };
+    use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+    const SYNCHRONIZE: u32 = 0x0010_0000;
     use windows_sys::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
     use windows_sys::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
     use windows_sys::Win32::System::Threading::{
-        CreateProcessAsUserW, GetExitCodeProcess, TerminateProcess, WaitForSingleObject, CREATE_UNICODE_ENVIRONMENT,
-        PROCESS_INFORMATION, STARTUPINFOW,
+        CreateProcessAsUserW, GetExitCodeProcess, OpenProcess, QueryFullProcessImageNameW, TerminateProcess,
+        WaitForSingleObject, CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION,
+        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, STARTUPINFOW,
     };
 
     /// Starts the daemon in the active console session with the user's token
@@ -196,6 +280,58 @@ mod windows_launcher {
     pub struct WtsLauncher;
 
     impl SessionLauncher for WtsLauncher {
+        fn console_session(&mut self) -> Option<u32> {
+            // SAFETY: a plain query with no arguments.
+            let session = unsafe { WTSGetActiveConsoleSessionId() };
+            (session != u32::MAX).then_some(session)
+        }
+
+        fn running_daemons(&mut self) -> Vec<RunningDaemon> {
+            let mut found = Vec::new();
+            // SAFETY: the snapshot handle is closed on every path; each process handle is either
+            // handed to a `WinChild` (which closes it) or closed here.
+            unsafe {
+                let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+                if snapshot == INVALID_HANDLE_VALUE {
+                    return found;
+                }
+                let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+                entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+                let mut more = Process32FirstW(snapshot, &mut entry) != 0;
+                while more {
+                    let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
+                    let name = String::from_utf16_lossy(&entry.szExeFile[..len]);
+                    if name.eq_ignore_ascii_case("canvas-rgbd.exe") {
+                        let pid = entry.th32ProcessID;
+                        let process = OpenProcess(
+                            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE,
+                            FALSE,
+                            pid,
+                        );
+                        if !process.is_null() {
+                            let mut buf = [0u16; 1024];
+                            let mut size = buf.len() as u32;
+                            let mut session = 0u32;
+                            if QueryFullProcessImageNameW(process, 0, buf.as_mut_ptr(), &mut size) != 0
+                                && ProcessIdToSessionId(pid, &mut session) != 0
+                            {
+                                found.push(RunningDaemon {
+                                    image: PathBuf::from(String::from_utf16_lossy(&buf[..size as usize])),
+                                    session,
+                                    process: Box::new(WinChild { process, pid }),
+                                });
+                            } else {
+                                CloseHandle(process);
+                            }
+                        }
+                    }
+                    more = Process32NextW(snapshot, &mut entry) != 0;
+                }
+                CloseHandle(snapshot);
+            }
+            found
+        }
+
         fn launch(&mut self, exe: &Path) -> io::Result<Box<dyn ChildProcess>> {
             // SAFETY: each Win32 call gets pointers into buffers that live until the call returns,
             // and every handle is closed on every path.
@@ -227,7 +363,9 @@ mod windows_launcher {
                     std::ptr::null(),
                     std::ptr::null(),
                     FALSE,
-                    CREATE_UNICODE_ENVIRONMENT,
+                    // The daemon is a console program: without CREATE_NO_WINDOW the owner's desktop
+                    // gets a terminal window for it, and closing that window ends the daemon.
+                    CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
                     if have_env { env } else { std::ptr::null() },
                     dir.as_ptr(),
                     &startup,
@@ -409,5 +547,32 @@ mod tests {
         sup.start(t0);
         assert!(sup.is_connected(t0 + Duration::from_secs(2)));
         assert!(!sup.is_connected(t0 + Duration::from_secs(6)));
+    }
+
+    #[test]
+    fn the_service_ends_a_stale_daemon_of_its_own_install_before_launching() {
+        let (mut sup, processes) = supervisor();
+        processes.set_console(1);
+        // Same install (different case), console session: ended. Another path: left alone.
+        // Same path in another session: left alone.
+        processes.add_running(9001, r"c:\SVC\canvas-rgbd.exe", 1);
+        processes.add_running(9002, r"C:\other\canvas-rgbd.exe", 1);
+        processes.add_running(9003, r"C:\svc\canvas-rgbd.exe", 2);
+        sup.start(Instant::now());
+        assert!(processes.running_ended(9001));
+        assert!(!processes.running_ended(9002));
+        assert!(!processes.running_ended(9003));
+        // The service's own daemon still launched.
+        assert_eq!(processes.spawns().len(), 1);
+        assert!(sup.daemon_pid().is_some());
+    }
+
+    #[test]
+    fn with_no_console_session_no_stale_daemon_is_touched() {
+        let (mut sup, processes) = supervisor();
+        processes.clear_console();
+        processes.add_running(9001, r"C:\svc\canvas-rgbd.exe", 1);
+        sup.start(Instant::now());
+        assert!(!processes.running_ended(9001));
     }
 }

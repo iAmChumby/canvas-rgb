@@ -89,6 +89,109 @@ pub struct PlacedZone {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub label: Option<String>,
+    /// The run of the zone's LEDs this placement owns, when one zone drives several parts (three
+    /// daisy-chained fans on one ARGB header are three placements of the same zone). `None` owns
+    /// the whole zone. LEDs of a split zone that no placement owns are black.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub leds: Option<LedSlice>,
+    /// What physical thing this placement is, as the owner mapped it. `None` on layouts saved
+    /// before parts existed: drawn from the device kind, as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub part: Option<Part>,
+    /// Locked placements can't be dragged or resized in the editor (a finished PC can't be
+    /// nudged by accident while the desk is placed).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[ts(optional, as = "Option<bool>")]
+    pub locked: bool,
+}
+
+/// A contiguous run of one zone's LEDs: `count` LEDs from index `start`, in zone order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LedSlice {
+    pub start: u32,
+    pub count: u32,
+}
+
+/// The physical part a placement or landmark stands for. It decides the drawing only; the
+/// effect is sampled where the placement sits, by its `shape`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Part {
+    pub kind: PartKind,
+    #[serde(default)]
+    pub facing: Facing,
+    /// True once the owner confirmed this part in setup (which part lit, its count and its
+    /// direction). Setup's "N of N mapped" counts these.
+    #[serde(default)]
+    pub mapped: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum PartKind {
+    Fan,
+    /// An AIO radiator; its fans are their own parts on top of it.
+    Radiator,
+    /// An AIO pump cap.
+    Pump,
+    Ram,
+    Gpu,
+    Cpu,
+    Strip,
+    Keyboard,
+    Mouse,
+    Microphone,
+    Headset,
+    /// The case itself: a box the owner sizes. A landmark, never lit.
+    Case,
+    /// Anything else: a plain box with a name.
+    Generic,
+}
+
+/// Which way a part faces, as seen through the case's side glass. A fan facing `Viewer` shows
+/// its ring; one facing `Up` or `Down` is seen edge-on, as a bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum Facing {
+    #[default]
+    Viewer,
+    Away,
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+/// A drawn part with no lights (the case, a CPU, a GPU without RGB): something to place lit
+/// parts against. Never sampled. Same canvas units as a [`PlacedZone`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Landmark {
+    pub kind: PartKind,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub rotation_deg: f32,
+    #[serde(default)]
+    pub facing: Facing,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub label: Option<String>,
+    #[serde(default = "default_true")]
+    pub visible: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[ts(optional, as = "Option<bool>")]
+    pub locked: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Where a zone's LEDs sit inside its placed rect (before rotation). The rect is the shape's
@@ -137,6 +240,11 @@ pub struct Layout {
     /// existed load as `None`: a free layout with no case drawn, so nothing moves.
     #[serde(default)]
     pub case_form: CaseForm,
+    /// Unlit parts the owner drew (the case box, a CPU, a dark GPU). Layouts saved before
+    /// landmarks existed load with none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<Vec<Landmark>>", optional)]
+    pub landmarks: Vec<Landmark>,
 }
 
 /// A generic case shape for the desk. It is a drawing and a set of snap slots only: the
@@ -183,5 +291,23 @@ mod tests {
         let back: PlacedZone = serde_json::from_str(&json).unwrap();
         assert_eq!(back.label.as_deref(), Some("Front fans"));
         assert_eq!(back.shape, ZoneShape::Ring);
+    }
+
+    #[test]
+    fn a_zone_saved_before_parts_loads_whole_and_unmapped_and_writes_nothing_new() {
+        let zone: PlacedZone = serde_json::from_str(OLD_ZONE).unwrap();
+        assert_eq!(zone.leds, None);
+        assert_eq!(zone.part, None);
+        let json = serde_json::to_string(&zone).unwrap();
+        assert!(!json.contains("leds") && !json.contains("part"), "{json}");
+    }
+
+    #[test]
+    fn a_slice_and_part_round_trip() {
+        let mut zone: PlacedZone = serde_json::from_str(OLD_ZONE).unwrap();
+        zone.leds = Some(LedSlice { start: 12, count: 12 });
+        zone.part = Some(Part { kind: PartKind::Fan, facing: Facing::Up, mapped: true });
+        let back: PlacedZone = serde_json::from_str(&serde_json::to_string(&zone).unwrap()).unwrap();
+        assert_eq!(back, zone);
     }
 }

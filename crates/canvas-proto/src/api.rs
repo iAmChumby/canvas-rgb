@@ -69,6 +69,9 @@ pub mod routes {
     pub const SETTINGS: &str = "/api/v1/settings";
     /// `POST`, no body: dismisses G7's "size your ARGB headers" panel.
     pub const DISMISS_ZONE_PANEL: &str = "/api/v1/first-run/dismiss-zone-panel";
+    /// `POST`, no body: the owner reached the end of the onboarding. Sets
+    /// `Status.onboarding_complete`, which stays true.
+    pub const ONBOARDING_COMPLETE: &str = "/api/v1/onboarding/complete";
     pub const CONFIG_EXPORT: &str = "/api/v1/config/export";
     pub const CONFIG_IMPORT: &str = "/api/v1/config/import";
     /// `POST`, no body: the daemon applies `on_quit` (G3: black by default), tells the
@@ -162,6 +165,10 @@ pub struct Status {
     pub conflicts: Vec<Conflict>,
     /// G7: the editor shows the dismissible "size your ARGB headers" panel.
     pub show_zone_panel: bool,
+    /// False until the owner finishes the first-run onboarding (maps their PC). While false,
+    /// the tray opens the window by itself (a few times) onto the onboarding.
+    #[serde(default)]
+    pub onboarding_complete: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -210,13 +217,20 @@ pub struct PatchZone {
     pub led_count: u32,
 }
 
-/// Lights one white LED (everything else on the device black) until another identify or
-/// `stop: true`. The editor walks `led` along the zone.
+/// Shows the owner where a light is. While an identify is active the engine renders nothing
+/// else: every LED on every device is black except the target, so the target is the only
+/// light in the room. The target is `count` LEDs from `led` (default 1) in a bright colour.
+/// It lasts until another identify, `stop: true`, or a few seconds with no request, so a
+/// closed window can never leave the PC dark.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct IdentifyRequest {
     pub zone: u32,
     pub led: u32,
+    /// How many LEDs from `led` to light (a whole fan). `None` is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub count: Option<u32>,
     #[serde(default)]
     pub stop: bool,
 }

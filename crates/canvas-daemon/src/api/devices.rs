@@ -91,22 +91,48 @@ pub async fn patch_zone(
 
 /// `POST /api/v1/devices/{id}/identify`.
 ///
-/// Lights one white LED at a time so a person can count to the physical end of a header.
+/// An engine override (see [`crate::identify`]): while it is active every device is black
+/// except `count` LEDs from `led` in `zone` of this device, at full brightness, even with
+/// output paused. `stop: true` ends it; so does silence for [`crate::identify::WATCHDOG`].
 pub async fn identify(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
     Json(request): Json<IdentifyRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    crate::transient::touch(&app);
     let device_id = DeviceId(id.clone());
-    if app.device(&device_id).await.is_none() {
+    let Some(device) = app.device(&device_id).await else {
         return Err(ApiFailure::not_found(format!("no device with the id {id}")));
+    };
+    if request.stop {
+        if app.identify.stop() {
+            crate::identify::restore(&app).await;
+        }
+        return Ok(Json(serde_json::json!({ "ok": true })));
     }
-    {
-        let mut adapter = app.adapter.lock().await;
-        adapter
-            .identify(&device_id, request.zone, request.led)
-            .await
-            .map_err(|e| ApiFailure::internal(format!("identify failed: {e}")))?;
+    let Some(zone) = device.zones.iter().find(|z| z.index == request.zone) else {
+        return Err(ApiFailure::validation(format!("{id} has no zone {}", request.zone)));
+    };
+    if request.led >= zone.led_count {
+        return Err(ApiFailure::validation(format!(
+            "LED {} is past the end of zone {} ({} LEDs)",
+            request.led, request.zone, zone.led_count
+        )));
+    }
+    let start = app.identify.start(
+        device_id,
+        request.zone,
+        request.led,
+        request.count.unwrap_or(1),
+        std::time::Instant::now(),
+    );
+    // Send the first frames now; the ticker repeats them and runs the watchdog.
+    let devices = app.devices.read().await.clone();
+    if let crate::identify::Tick::Frames(frames) = app.identify.tick(std::time::Instant::now(), &devices) {
+        app.identify.push(frames);
+    }
+    if start {
+        crate::identify::spawn_ticker(app.clone());
     }
     Ok(Json(serde_json::json!({ "ok": true })))
 }

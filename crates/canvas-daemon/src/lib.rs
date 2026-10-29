@@ -10,6 +10,7 @@ pub mod conflict;
 pub mod displays;
 pub mod elevated;
 pub mod first_run;
+pub mod identify;
 pub mod logging;
 pub mod migration;
 pub mod openrgb_supervisor;
@@ -21,6 +22,7 @@ pub mod power;
 pub mod state;
 pub mod storage;
 pub mod thumbnail;
+pub mod transient;
 pub mod token;
 pub mod user_effects;
 

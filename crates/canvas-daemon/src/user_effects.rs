@@ -38,12 +38,28 @@ pub fn html_builder() -> Builder {
     })
 }
 
+/// The HTML effects that ship inside the daemon, as (file stem, source). Each one has the id
+/// `html:<stem>`, exactly as if its file sat in the effects folder, but it needs no file: it
+/// is in the library on a fresh install and survives the folder being emptied. A file in the
+/// effects folder with the same id replaces the shipped one until it is deleted.
+pub const STOCK_EFFECTS: &[(&str, &str)] = &[
+    ("ink-drop", include_str!("../stock-effects/ink-drop.html")),
+    ("wet-smear", include_str!("../stock-effects/wet-smear.html")),
+    ("palette-knife", include_str!("../stock-effects/palette-knife.html")),
+];
+
 /// A file's identity for change detection: modified time and size.
 type Stamp = (Option<SystemTime>, u64);
 
 #[derive(Clone)]
 struct LoadedEffect {
     stamp: Stamp,
+    schema: PropertySchema,
+    source: Arc<str>,
+}
+
+#[derive(Clone)]
+struct StockEffect {
     schema: PropertySchema,
     source: Arc<str>,
 }
@@ -60,6 +76,8 @@ struct State {
 pub struct UserEffects {
     builder: Builder,
     state: RwLock<State>,
+    /// The effects shipped inside the daemon; see [`STOCK_EFFECTS`].
+    stock: Vec<StockEffect>,
     /// Bumped whenever a rescan changes the set of user effects, so caches keyed on it
     /// (the thumbnails) know to drop their entries.
     generation: AtomicU64,
@@ -67,7 +85,35 @@ pub struct UserEffects {
 
 impl UserEffects {
     pub fn new(builder: Builder) -> Self {
-        Self { builder, state: RwLock::new(State::default()), generation: AtomicU64::new(0) }
+        Self::with_stock(builder, &[])
+    }
+
+    /// Like [`UserEffects::new`], with effects that ship inside the daemon. A stock effect
+    /// that does not build is logged and left out.
+    pub fn with_stock(builder: Builder, stock: &[(&str, &str)]) -> Self {
+        let stock = stock
+            .iter()
+            .filter_map(|(stem, source)| {
+                let id = format!("{USER_EFFECT_PREFIX}{stem}");
+                match builder(&id, source) {
+                    Ok(effect) => {
+                        let mut schema = effect.schema();
+                        schema.id = id;
+                        Some(StockEffect { schema, source: Arc::from(*source) })
+                    }
+                    Err(error) => {
+                        tracing::error!(%id, %error, "a stock effect failed to build and was left out");
+                        None
+                    }
+                }
+            })
+            .collect();
+        Self {
+            builder,
+            state: RwLock::new(State::default()),
+            stock,
+            generation: AtomicU64::new(0),
+        }
     }
 
     /// The current generation. It changes exactly when a rescan changes the set.
@@ -80,6 +126,12 @@ impl UserEffects {
         let state = read_lock(&self.state);
         let mut out: Vec<PropertySchema> =
             state.loaded.values().map(|e| e.schema.clone()).collect();
+        // A file with a stock effect's id replaces the stock one.
+        for stock in &self.stock {
+            if !out.iter().any(|s| s.id == stock.schema.id) {
+                out.push(stock.schema.clone());
+            }
+        }
         out.sort_by(|a, b| {
             a.name
                 .to_lowercase()
@@ -99,7 +151,8 @@ impl UserEffects {
                 .values()
                 .find(|e| e.schema.id == id)
                 .map(|e| e.source.clone())
-        }?;
+        }
+        .or_else(|| self.stock.iter().find(|e| e.schema.id == id).map(|e| e.source.clone()))?;
         Some((self.builder)(id, &source))
     }
 
@@ -668,4 +721,39 @@ mod tests {
             .collect();
         assert!(leftovers.is_empty(), "the temp files are gone: {leftovers:?}");
     }
+    #[test]
+    fn the_stock_effects_are_listed_and_build_with_the_real_engine() {
+        let effects = UserEffects::with_stock(html_builder(), STOCK_EFFECTS);
+        let ids: Vec<String> = effects.schemas().into_iter().map(|s| s.id).collect();
+        for stem in ["ink-drop", "wet-smear", "palette-knife"] {
+            let id = format!("html:{stem}");
+            assert!(ids.contains(&id), "{id} is missing from {ids:?}");
+            let built = effects.create(&id).expect("a stock id is known").expect("it builds");
+            assert!(!built.schema().name.is_empty());
+        }
+        assert_eq!(ids.len(), STOCK_EFFECTS.len());
+    }
+
+    #[test]
+    fn a_file_with_a_stock_id_replaces_it_until_the_file_is_deleted() {
+        let dir = TempDir::new("stock-override");
+        let parses = Arc::new(AtomicUsize::new(0));
+        let effects = UserEffects::with_stock(
+            fake_builder(parses),
+            &[("ink-drop", "Stock Ink
+<canvas></canvas>")],
+        );
+        assert_eq!(names(&effects), vec![("html:ink-drop".to_string(), "Stock Ink".to_string())]);
+
+        dir.write("ink-drop.html", "My Ink
+<canvas></canvas>");
+        effects.rescan(&dir.0);
+        assert_eq!(names(&effects), vec![("html:ink-drop".to_string(), "My Ink".to_string())]);
+
+        dir.remove("ink-drop.html");
+        effects.rescan(&dir.0);
+        assert_eq!(names(&effects), vec![("html:ink-drop".to_string(), "Stock Ink".to_string())]);
+        assert!(effects.create("html:ink-drop").is_some());
+    }
+
 }

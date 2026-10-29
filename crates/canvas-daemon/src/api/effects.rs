@@ -26,9 +26,13 @@ pub fn schemas(user: &UserEffects) -> Vec<PropertySchema> {
 }
 
 /// Finds a schema by id, case-insensitively (the CLI matches names case-insensitively).
+///
+/// The hidden onboarding effects are found here (so the activate route runs them) but are
+/// not in [`schemas`], so they never reach `GET /effects`.
 pub fn find_schema(user: &UserEffects, id: &str) -> Option<PropertySchema> {
     let id = id.trim();
-    let all = schemas(user);
+    let mut all = schemas(user);
+    all.extend(canvas_effects::onboard::hidden_schemas());
     all.iter()
         .find(|s| s.id.eq_ignore_ascii_case(id))
         .or_else(|| {
@@ -140,8 +144,12 @@ pub async fn activate(
         props.insert(k, v);
     }
 
+    // The onboarding effects are transient: nothing about them is saved, the layout keeps its
+    // own effect, and a timer puts that effect back (see `crate::transient`).
+    let transient = canvas_effects::onboard::is_onboard_id(&schema.id);
+
     // Save the props for next time, then apply the effect.
-    {
+    if !transient {
         let mut store = app
             .store
             .write()
@@ -162,9 +170,14 @@ pub async fn activate(
             .map_err(|e| ApiFailure::internal(format!("could not save the layouts: {e}")))?;
     }
 
+    // Any activation ends an earlier timer; an onboarding effect arms a new one below.
+    app.transient.cancel();
     crate::apply_effect(&app, &schema.id, &props)
         .await
         .map_err(|e| ApiFailure::internal(format!("could not activate the effect: {e}")))?;
+    if transient {
+        crate::transient::arm(&app, &schema.id);
+    }
 
     tracing::info!(effect = %schema.id, "the effect was activated");
     Ok(Json(serde_json::json!({ "ok": true, "id": schema.id, "props": props })))

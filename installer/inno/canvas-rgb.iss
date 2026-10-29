@@ -86,7 +86,10 @@ ConfirmUninstall=canvas-rgb has stopped running and every fan is back on your mo
 
 [Run]
 ; Everything else runs from [Code] in a fixed order. This is the only [Run] entry.
-Filename: "{app}\canvas-rgb.exe"; Description: "Launch canvas-rgb"; Flags: nowait postinstall skipifsilent runasoriginaluser; Check: ScriptsOk
+; The wizard's ticked "Launch canvas-rgb" starts the tray with --onboard, so the window opens on the
+; onboarding. skipifsilent: a /SILENT run starts the tray from [Code] instead (CurStepChanged), so the
+; two paths never start it twice. A /VERYSILENT run starts nothing.
+Filename: "{app}\canvas-rgb.exe"; Parameters: "--onboard"; Description: "Launch canvas-rgb"; Flags: nowait postinstall skipifsilent runasoriginaluser; Check: ScriptsOk
 
 [Code]
 const
@@ -124,6 +127,16 @@ begin
       Exit;
     end;
   end;
+end;
+
+// True for /VERYSILENT. Inno has WizardSilent for both /SILENT and /VERYSILENT, and no separate test.
+function IsVerySilent: Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  for I := 1 to ParamCount do
+    if Uppercase(ParamStr(I)) = '/VERYSILENT' then Result := True;
 end;
 
 function PsExe: String;
@@ -425,6 +438,11 @@ begin
   FScriptsOk := True;
   { The daemon otherwise starts at the next logon (HKCU Run). Start it now, as the user. }
   ExecAsOriginalUser(ExpandConstant('{app}\canvas-rgbd.exe'), '', ExpandConstant('{app}'), SW_HIDE, ewNoWait, Code);
+  { The tray, in the user's session, on the onboarding. Every mode except /VERYSILENT starts it once:
+    the wizard does it through the ticked "Launch canvas-rgb" ([Run], --onboard), /SILENT does it here
+    ([Run] has skipifsilent). The tray is also single-instance, so a stray second launch only focuses it. }
+  if WizardSilent and (not IsVerySilent) then
+    ExecAsOriginalUser(ExpandConstant('{app}\canvas-rgb.exe'), '--onboard', ExpandConstant('{app}'), SW_SHOWNORMAL, ewNoWait, Code);
 end;
 
 // A post-copy failure cannot undo the copied files (Abort there is not documented to exit Setup, and a

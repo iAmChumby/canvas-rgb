@@ -170,10 +170,14 @@ fn a_running_engine_at_thirty_fps_stays_inside_the_budget() {
                 visible: true,
                 shape: ZoneShape::Auto,
                 label: None,
+                leds: None,
+                part: None,
+                locked: false,
             })
             .collect(),
         effect: None,
         case_form: canvas_proto::layout::CaseForm::None,
+        landmarks: Vec::new(),
     };
     engine.set_layout(layout, vec![device]);
     engine.add_sink(DeviceId("cpu".into()), Arc::new(NullSink));

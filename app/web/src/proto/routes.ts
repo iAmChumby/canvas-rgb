@@ -33,6 +33,8 @@ export const routes = {
   fanProfiles: (name: string) => `/api/v1/fans/profiles/${encodeURIComponent(name)}`,
   settings: "/api/v1/settings",
   dismissZonePanel: "/api/v1/first-run/dismiss-zone-panel",
+  // POST, no body: the owner reached the end of the onboarding (Status.onboarding_complete).
+  onboardingComplete: "/api/v1/onboarding/complete",
   // GET every numeric display with its config and the value it shows now; PUT a DisplayConfig
   // for one display; DELETE removes the config, stops writing and closes the device.
   displays: "/api/v1/displays",

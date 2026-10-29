@@ -10,6 +10,7 @@
 //!
 //! It never launches a real OpenRGB in the tests: the tests use the fake server.
 
+use canvas_proto::api::LinkState;
 use canvas_proto::device::DeviceInfo;
 use canvas_proto::pipe::{OpenRgbServerState, PipeRequest, PipeResponse};
 use canvas_proto::traits::DeviceAdapter;
@@ -342,12 +343,16 @@ pub async fn supervise(
     adapter: Arc<tokio::sync::Mutex<Box<dyn DeviceAdapter>>>,
     zone_sizes: Arc<tokio::sync::RwLock<std::collections::BTreeMap<String, std::collections::BTreeMap<u32, u32>>>>,
     mut on_devices: impl FnMut(Vec<DeviceInfo>),
+    mut on_link: impl FnMut(LinkState),
     mut stop: tokio::sync::watch::Receiver<bool>,
-) {    let mut backoff = Backoff::new();
+) {
+    let mut backoff = Backoff::new();
     loop {
         if *stop.borrow() {
             return;
         }
+        // Every attempt is "connecting"; `Down` only follows a failure.
+        on_link(LinkState::Connecting);
         let sizes = zone_sizes.read().await.clone();
         let result = {
             let mut guard = adapter.lock().await;
@@ -374,6 +379,7 @@ pub async fn supervise(
                     };
                     if !connected {
                         tracing::info!("OpenRGB went away; reconnecting");
+                        on_link(LinkState::Connecting);
                         break;
                     }
                     ticks += 1;
@@ -397,6 +403,7 @@ pub async fn supervise(
             }
             Err(e) => {
                 tracing::debug!(error = %e, "OpenRGB is not reachable yet");
+                on_link(LinkState::Down);
                 let (delay, next_backoff) = backoff.advanced();
                 backoff = next_backoff;
                 tokio::select! {

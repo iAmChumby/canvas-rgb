@@ -26,6 +26,9 @@ const FRAMES: usize = 1000;
 /// The number of LEDs the benchmark samples per frame.
 const LED_COUNT: u32 = 600;
 
+/// The number of plans the plan benchmark builds.
+const PLANS: usize = 1000;
+
 /// Builds a device with `LED_COUNT` LEDs spread over a few linear zones.
 fn bench_device(zone_count: u32, leds_per_zone: u32) -> DeviceInfo {
     let zones: Vec<ZoneInfo> = (0..zone_count)
@@ -72,6 +75,9 @@ fn bench_layout(device: &DeviceInfo) -> Layout {
             visible: true,
             shape: ZoneShape::Auto,
             label: None,
+            leds: None,
+            part: None,
+            locked: false,
         })
         .collect();
     Layout {
@@ -82,6 +88,7 @@ fn bench_layout(device: &DeviceInfo) -> Layout {
         zones,
         effect: None,
         case_form: canvas_proto::layout::CaseForm::None,
+        landmarks: Vec::new(),
     }
 }
 
@@ -141,5 +148,40 @@ fn bench_sampling() {
     bench_mode(SamplingMode::Nearest);
     bench_mode(SamplingMode::Bilinear);
     bench_mode(SamplingMode::AreaAverage);
+    println!();
+}
+
+/// Times the plan build itself: the layout goes in, the sample regions come out.
+///
+/// The plan is built at layout time, never per frame, so this is a budget check:
+/// the slice work must not make the plan slower to build.
+fn bench_plan() {
+    let zone_count = 6;
+    let leds_per_zone = LED_COUNT / zone_count;
+    let device = bench_device(zone_count, leds_per_zone);
+    let layout = bench_layout(&device);
+
+    // Warm up, so the first timed plan is not the one that faults the pages in.
+    for _ in 0..10 {
+        let _ = geometry::build_plan(&layout, std::slice::from_ref(&device));
+    }
+
+    let start = Instant::now();
+    for _ in 0..PLANS {
+        let _ = geometry::build_plan(&layout, std::slice::from_ref(&device));
+    }
+    let elapsed = start.elapsed();
+    let per_plan = elapsed.as_nanos() as f64 / PLANS as f64;
+    println!(
+        "build_plan: {PLANS} plans of {LED_COUNT} LEDs in {:.3} ms -> {per_plan:.0} ns/plan",
+        elapsed.as_secs_f64() * 1000.0
+    );
+}
+
+#[test]
+#[ignore = "a micro-benchmark, not a correctness test"]
+fn bench_the_plan_build() {
+    println!();
+    bench_plan();
     println!();
 }

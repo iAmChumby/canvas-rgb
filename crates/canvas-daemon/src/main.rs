@@ -76,11 +76,11 @@ async fn daemon_main() -> i32 {
 
     // Poison is not a built-in any more: it is a user HTML effect in
     // `%APPDATA%\canvas-rgb\effects\`. The saved ids move to it, once, so the saved
-    // setup comes back exactly as it was.
+    // setup comes back exactly as it was. The old case forms move to a case
+    // landmark in the same pass.
     if canvas_daemon::migration::migrate_store(&mut store) {
         tracing::info!(
-            effect = canvas_daemon::migration::USER_POISON_ID,
-            "the saved Poison effect moved to the user effect"
+            "the saved setup was migrated: the old effect ids and the old case forms moved to the new ones"
         );
         if let Err(e) = store.save_layouts() {
             tracing::warn!(error = %e, "could not save the migrated layouts");
@@ -257,6 +257,7 @@ async fn write_on_quit(app: &Arc<App>) {
     let on_quit = app.store.read().await.config.settings.on_quit;
     match on_quit {
         canvas_proto::config::OnQuit::Black => {
+            app.identify.stop();
             app.engine.write_solid(canvas_proto::Rgb8::BLACK);
             tracing::info!(reason = "quit", "wrote black to every device");
             tokio::time::sleep(BLACK_GRACE).await;
@@ -368,7 +369,7 @@ async fn sync_device_sinks(
                 }
             }
         });
-        app.engine.add_sink(id.clone(), Arc::new(canvas_daemon::state::DeviceSink::new(id.clone(), tx)));
+        app.engine.add_sink(id.clone(), Arc::new(canvas_daemon::state::DeviceSink::with_gate(id.clone(), tx, app.identify.clone())));
         tracing::info!(device = %id, "device frame sink added");
         sinks.insert(id, writer);
     }
@@ -384,6 +385,8 @@ fn spawn_openrgb_supervisor(app: Arc<App>) {
     let sinks: Arc<tokio::sync::Mutex<std::collections::HashMap<canvas_proto::DeviceId, tokio::task::JoinHandle<()>>>> =
         Arc::default();
     tokio::spawn(async move {
+        // OpenRGB is starting: the UI shows "waking up", not "broken".
+        *app_for_supervisor.openrgb.write().await = LinkState::Connecting;
         // Milestone 1: the daemon starts the OpenRGB server itself when the service does
         // not own it. The app keeps it, and the quit path stops it.
         let port = app_for_supervisor.store.read().await.config.openrgb_port;
@@ -442,6 +445,19 @@ fn spawn_openrgb_supervisor(app: Arc<App>) {
                         sync_device_sinks(&app, &devices, &sinks).await;
                         // The first run waits for the devices.
                         canvas_daemon::first_run::maybe_run(&app).await;
+                    });
+                }
+            },
+            {
+                let app = app_for_supervisor.clone();
+                // The link state follows every attempt. `Connected` is set with the devices.
+                move |link| {
+                    if link == LinkState::Connected {
+                        return;
+                    }
+                    let app = app.clone();
+                    tokio::spawn(async move {
+                        *app.openrgb.write().await = link;
                     });
                 }
             },

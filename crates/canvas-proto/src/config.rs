@@ -79,6 +79,10 @@ pub struct ConfigFile {
     pub first_run_done: bool,
     /// G7: the "size your ARGB headers" panel was dismissed.
     pub zone_panel_dismissed: bool,
+    /// The owner finished the first-run onboarding. Configs saved before it existed load as
+    /// false, so an existing install is walked through it once.
+    #[serde(default)]
+    pub onboarding_complete: bool,
     pub settings: Settings,
 }
 
@@ -90,6 +94,7 @@ impl Default for ConfigFile {
             openrgb_port: crate::consts::OPENRGB_PORT,
             first_run_done: false,
             zone_panel_dismissed: false,
+            onboarding_complete: false,
             settings: Settings::default(),
         }
     }

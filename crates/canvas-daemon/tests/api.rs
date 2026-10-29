@@ -389,13 +389,17 @@ async fn the_effects_are_listed() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = json(response).await;
     let effects = body.get("effects").and_then(|v| v.as_array()).expect("the effects list");
-    assert_eq!(effects.len(), 11, "there are exactly 11 built-in effects");
     let ids: Vec<&str> =
         effects.iter().filter_map(|e| e.get("id").and_then(|v| v.as_str())).collect();
-    for make in canvas_effects::registry() {
-        let id = make().schema().id;
-        assert!(ids.contains(&id.as_str()), "{id} is in the list");
-    }
+    // Exactly these: the 11 built-ins, then the 3 stock paint effects that ship in the daemon.
+    let built_ins: Vec<String> = canvas_effects::registry().into_iter().map(|make| make().schema().id).collect();
+    assert_eq!(built_ins.len(), 11, "there are 11 built-in effects");
+    let stock = ["html:ink-drop", "html:palette-knife", "html:wet-smear"];
+    let mut expected: Vec<&str> = built_ins.iter().map(|s| s.as_str()).chain(stock).collect();
+    let mut got = ids.clone();
+    expected.sort_unstable();
+    got.sort_unstable();
+    assert_eq!(got, expected, "the list is the built-ins plus the stock effects, nothing else");
 }
 
 /// The app with a user-effects folder holding one HTML effect. The builder is a fake, so
@@ -726,6 +730,163 @@ async fn the_zone_panel_is_dismissed() {
         .await
         .expect("the router answers");
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn onboarding_complete_is_saved_and_reported_in_status() {
+    let (router, app, _home) = build();
+    // A fresh install is not complete.
+    let status = json(
+        router.clone().oneshot(request("GET", routes::STATUS)).await.expect("the router answers"),
+    )
+    .await;
+    assert_eq!(status.get("onboarding_complete").and_then(|v| v.as_bool()), Some(false));
+    assert!(!app.store.read().await.config.onboarding_complete);
+
+    // The route needs the token.
+    let refused = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(routes::ONBOARDING_COMPLETE)
+                .header("host", "127.0.0.1:9430")
+                .body(Body::empty())
+                .expect("the request builds"),
+        )
+        .await
+        .expect("the router answers");
+    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+    assert!(!app.store.read().await.config.onboarding_complete);
+
+    let response = router
+        .clone()
+        .oneshot(request("POST", routes::ONBOARDING_COMPLETE))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(app.store.read().await.config.onboarding_complete);
+
+    let status = json(
+        router.oneshot(request("GET", routes::STATUS)).await.expect("the router answers"),
+    )
+    .await;
+    assert_eq!(status.get("onboarding_complete").and_then(|v| v.as_bool()), Some(true));
+
+    // It was written to disk, not only held in memory.
+    let reloaded = canvas_daemon::storage::Store::load_from(&_home.path);
+    assert!(reloaded.config.onboarding_complete, "the flag survives a reload");
+}
+
+#[tokio::test]
+async fn the_onboarding_effects_are_hidden_from_the_list_but_activate() {
+    let (router, app, _home) = build();
+    let list = json(
+        router.clone().oneshot(request("GET", routes::EFFECTS)).await.expect("the router answers"),
+    )
+    .await;
+    let ids: Vec<&str> = list
+        .get("effects")
+        .and_then(|v| v.as_array())
+        .expect("the effects list")
+        .iter()
+        .filter_map(|e| e.get("id").and_then(|v| v.as_str()))
+        .collect();
+    assert!(!ids.contains(&"onboard-hello") && !ids.contains(&"onboard-sweep"));
+
+    for id in ["onboard-hello", "onboard-sweep"] {
+        let path = routes::EFFECT_ACTIVATE.replace("{id}", id);
+        let response = router
+            .clone()
+            .oneshot(request_with_body("POST", &path, "{}"))
+            .await
+            .expect("the router answers");
+        assert_eq!(response.status(), StatusCode::OK, "{id} activates");
+        // The onboarding effects are transient: the layout keeps its own effect.
+        let store = app.store.read().await;
+        let active = store.active_layout().and_then(|l| l.effect.as_ref().map(|e| e.id.clone()));
+        assert_eq!(active, None, "{id} is never saved as the layout's effect");
+    }
+}
+
+/// An app whose fake engine the test can read back.
+fn build_with_engine() -> (axum::Router, Arc<App>, Arc<FakeEngine>, TempHome) {
+    let home = TempHome::new();
+    let store = canvas_daemon::storage::Store::at(&home.path);
+    let engine = Arc::new(FakeEngine::default());
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let app = Arc::new(App::new(
+        store,
+        engine.clone(),
+        Box::new(FakeAdapter::default()),
+        TOKEN.to_string(),
+        "0.1.0-test".to_string(),
+        tx,
+    ));
+    (api::router(app.clone()), app, engine, home)
+}
+
+async fn engine_effect(engine: &FakeEngine) -> Option<String> {
+    engine.effect_id.lock().unwrap().clone()
+}
+
+#[tokio::test]
+async fn an_onboarding_effect_restores_the_previous_effect_and_is_never_saved() {
+    let (router, app, engine, home) = build_with_engine();
+    // Waits run 100 times faster: hello's 2 s + 8 s grace is 100 ms.
+    app.transient.set_time_scale(0.01);
+
+    // The owner's effect.
+    let path = routes::EFFECT_ACTIVATE.replace("{id}", "rainbow_wave");
+    let r = router.clone().oneshot(request_with_body("POST", &path, "{}")).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(engine_effect(&engine).await.as_deref(), Some("rainbow_wave"));
+
+    // Hello plays: it runs on the engine, but the layout and the files keep rainbow-wave.
+    let path = routes::EFFECT_ACTIVATE.replace("{id}", "onboard-hello");
+    let r = router.clone().oneshot(request_with_body("POST", &path, "{}")).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(engine_effect(&engine).await.as_deref(), Some("onboard-hello"));
+    assert!(app.transient.is_pending());
+    {
+        let store = app.store.read().await;
+        let saved = store.active_layout().and_then(|l| l.effect.as_ref().map(|e| e.id.clone()));
+        assert_eq!(saved.as_deref(), Some("rainbow_wave"));
+        assert!(!store.effects.saved.contains_key("onboard-hello"));
+    }
+    let on_disk = std::fs::read_to_string(home.path.join("layouts.json")).unwrap_or_default()
+        + &std::fs::read_to_string(home.path.join("effects.json")).unwrap_or_default();
+    assert!(!on_disk.contains("onboard-"), "no onboard-* id reaches the files");
+
+    // A second activation (the sweep) restarts the wait: hello's timer is outdated.
+    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+    let path = routes::EFFECT_ACTIVATE.replace("{id}", "onboard-sweep");
+    let r = router.clone().oneshot(request_with_body("POST", &path, "{}")).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    tokio::time::sleep(std::time::Duration::from_millis(70)).await;
+    assert_eq!(
+        engine_effect(&engine).await.as_deref(),
+        Some("onboard-sweep"),
+        "hello's old timer (100 ms) must not fire at 130 ms: the sweep re-armed it to 105 ms from 60 ms"
+    );
+
+    // Silence: the sweep (25 ms) + 80 ms grace after its start, the previous effect returns.
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    assert_eq!(engine_effect(&engine).await.as_deref(), Some("rainbow_wave"));
+    assert!(!app.transient.is_pending());
+}
+
+#[tokio::test]
+async fn activating_a_normal_effect_cancels_the_onboarding_restore() {
+    let (router, app, engine, _home) = build_with_engine();
+    app.transient.set_time_scale(0.01);
+    for id in ["onboard-hello", "solid"] {
+        let path = routes::EFFECT_ACTIVATE.replace("{id}", id);
+        let r = router.clone().oneshot(request_with_body("POST", &path, "{}")).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(engine_effect(&engine).await.as_deref(), Some("solid"), "the owner's choice stays");
 }
 
 #[tokio::test]
@@ -1606,4 +1767,70 @@ async fn an_import_with_a_bad_display_config_is_refused() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     assert!(app.store.read().await.displays.displays.is_empty());
+}
+
+#[tokio::test]
+async fn identify_is_an_override_that_stop_ends_even_with_output_paused() {
+    use canvas_proto::device::DeviceKind;
+    use canvas_proto::traits::FrameSink;
+    let (router, app, _home) = build();
+    *app.devices.write().await = vec![
+        common::device("Board", DeviceKind::Motherboard, 12),
+        common::device("Ram", DeviceKind::Motherboard, 8),
+    ];
+    // Paused output: the engine renders nothing, and identify must still show.
+    let response = router
+        .clone()
+        .oneshot(request_with_body("PATCH", routes::OUTPUT, r#"{"power":"paused"}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let sink = canvas_daemon::state::DeviceSink::with_gate(
+        canvas_proto::DeviceId("fake:Board".into()),
+        tx,
+        app.identify.clone(),
+    );
+
+    let path = routes::DEVICE_IDENTIFY.replace("{id}", "fake:Board");
+    let response = router
+        .clone()
+        .oneshot(request_with_body("POST", &path, r#"{"zone":0,"led":4,"count":3}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(app.identify.is_active());
+    let frame = rx.try_recv().expect("the first override frame is sent at once");
+    let lit: Vec<usize> =
+        frame.iter().enumerate().filter(|(_, c)| **c != canvas_proto::Rgb8::BLACK).map(|(i, _)| i).collect();
+    assert_eq!(lit, vec![4, 5, 6]);
+
+    // The engine's own frames are silent during the override.
+    sink.submit(vec![canvas_proto::Rgb8::WHITE; 12]);
+    assert!(rx.try_recv().is_err());
+
+    // A zone or LED that does not exist is a validation error.
+    let response = router
+        .clone()
+        .oneshot(request_with_body("POST", &path, r#"{"zone":3,"led":0}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let response = router
+        .clone()
+        .oneshot(request_with_body("POST", &path, r#"{"zone":0,"led":12}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // `stop` ends it.
+    let response = router
+        .oneshot(request_with_body("POST", &path, r#"{"zone":0,"led":0,"stop":true}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!app.identify.is_active());
+    sink.submit(vec![canvas_proto::Rgb8::WHITE; 12]);
+    assert!(rx.try_recv().is_ok(), "engine frames flow again");
 }

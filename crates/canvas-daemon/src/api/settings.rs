@@ -77,6 +77,20 @@ pub async fn dismiss_zone_panel(State(app): State<Arc<App>>) -> ApiResult<Json<s
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+/// `POST /api/v1/onboarding/complete`.
+///
+/// The user reached Done in the onboarding. The window stops opening by itself.
+pub async fn complete_onboarding(State(app): State<Arc<App>>) -> ApiResult<Json<serde_json::Value>> {
+    {
+        let mut store = app.store.write().await;
+        store.config.onboarding_complete = true;
+        store
+            .save_config()
+            .map_err(|e| ApiFailure::internal(format!("could not save the config: {e}")))?;
+    }
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 /// `GET /api/v1/config/export`.
 ///
 /// The fans come from the service when it is up, and from the last config the daemon

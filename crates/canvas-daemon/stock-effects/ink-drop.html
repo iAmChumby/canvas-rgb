@@ -1,0 +1,196 @@
+<head>
+  <title>Ink Drop</title>
+  <meta description="Drops of ink fall into still water and unfurl into curling, marbled tendrils that thin out and drift away. Luminous ink in dark water by default; set a pale Water and dark inks for the classic look." />
+  <meta property="water" label="Water" type="color" default="#060a14" />
+  <meta property="ink1" label="Ink 1" type="color" default="#38d0e6" />
+  <meta property="ink2" label="Ink 2" type="color" default="#9b6bff" />
+  <meta property="ink3" label="Ink 3" type="color" default="#ff8f70" />
+  <meta property="speed" label="Speed" type="number" min="0" max="100" default="30" />
+  <meta property="curl" label="Curl" type="number" min="0" max="100" default="55" />
+  <meta property="seed" label="Seed" type="number" min="0" max="999" default="5" />
+</head>
+<body style="margin: 0; padding: 0">
+  <canvas id="stage" width="80" height="50"></canvas>
+</body>
+<script>
+// ---- shared helpers (inlined into every effect in this set) ----
+function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+function lerp(a, b, t) { return a + (b - a) * t; }
+function smooth(a, b, x) {
+  var t = (x - a) / (b - a);
+  t = t < 0 ? 0 : (t > 1 ? 1 : t);
+  return t * t * (3 - 2 * t);
+}
+var _hexCache = {};
+function rgbOf(h) {
+  var c = _hexCache[h];
+  if (c) return c;
+  var s = String(h).replace("#", "");
+  if (s.length === 3) s = s[0] + s[0] + s[1] + s[1] + s[2] + s[2];
+  var n = parseInt(s, 16);
+  if (isNaN(n)) n = 0;
+  c = [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  _hexCache[h] = c;
+  return c;
+}
+function mulberry32(a) {
+  return function () {
+    a = (a + 0x6D2B79F5) | 0;
+    var t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+// Seeded value noise. 64x64 tiling lattice for 2D, 256 entries for 1D.
+var NT = new Float32Array(4096), N1 = new Float32Array(256);
+function seedNoise(seed) {
+  var r = mulberry32((seed * 7919 + 13) | 0), i;
+  for (i = 0; i < 4096; i++) NT[i] = r();
+  for (i = 0; i < 256; i++) N1[i] = r();
+}
+function noise2(x, y) {
+  x += 4096; y += 4096;
+  var xi = x | 0, yi = y | 0, xf = x - xi, yf = y - yi;
+  var u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  var i0 = (xi & 63) + ((yi & 63) << 6), i1 = ((xi + 1) & 63) + ((yi & 63) << 6);
+  var j0 = (xi & 63) + (((yi + 1) & 63) << 6), j1 = ((xi + 1) & 63) + (((yi + 1) & 63) << 6);
+  var a = NT[i0], b = NT[i1], c = NT[j0], d = NT[j1];
+  return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+}
+function noise1(x) {
+  x += 4096;
+  var xi = x | 0, xf = x - xi, u = xf * xf * (3 - 2 * xf);
+  var a = N1[xi & 255], b = N1[(xi + 1) & 255];
+  return a + (b - a) * u;
+}
+// The picture is drawn straight into an 80x50 ImageData (one cell is one pixel; the engine scales the
+// 80x50 canvas up to the lights' canvas) and put on the canvas in one call. Drawing a whole picture in
+// one frame cost 20-40 ms, so the rows are split over SLICES frames: frame s works out the rows with
+// gy % SLICES === s, and the last slice puts the picture on the canvas. A frame therefore costs about
+// 1/SLICES of a picture; every row is refreshed once per SLICES frames (7.5 Hz at 60 fps).
+var SLICES = 8;
+function makeImage(ctx, w, h) {
+  var img = ctx.createImageData(w, h), d = img.data, i;
+  for (i = 3; i < d.length; i += 4) d[i] = 255;
+  return img;
+}
+
+// Ink Drop for canvas-rgb. Original effect, ships with the app.
+var water = "#060a14", ink1 = "#38d0e6", ink2 = "#9b6bff", ink3 = "#ff8f70";
+var speed = 30, curl = 55, seed = 5;
+
+var ctx = document.getElementById("stage").getContext("2d");
+var GW = 80, GH = 50, CS = 4;
+var IMG = makeImage(ctx, GW, GH), PD = IMG.data;
+var F = 0, T = 0, lastSeed = -1, cache = {};
+// LOOP: the picture is a periodic function of T. One cycle is C = 12 s at the default speed (T runs at
+// sp units per second, sp = 1.05 at Speed 30). N drops fall at fixed slots in the cycle and each one
+// lives for nearly all of it; drop n's age is (T - n*GAP) mod C, so the drop that dies is replaced by
+// its own slot's next drop with no jump. The water's motion samples noise on a circle that closes at C.
+var SPD = 1.05, N = 6, C = 12 * SPD, GAP = C / N, LIFE = C - 0.4;
+function spOf(s) { return s <= 0 ? 0 : 0.3 + s / 40; }
+
+function dropInfo(n) {
+  var d = cache[n];
+  if (d) return d;
+  var r = mulberry32(seed * 613 + n * 101 + 3);
+  // spread the drops with a golden-ratio walk so two never land on the same spot
+  var gx = ((n * 0.6180339 + r() * 0.15 + seed * 0.37) % 1), gy = ((n * 0.3819660 + r() * 0.15 + seed * 0.21) % 1);
+  d = { x: 20 + gx * 280, y: 15 + gy * 170, R: 95 + r() * 50, col: n % 3, born: n * GAP, ox: r() * 80, oy: r() * 80 };
+  cache[n] = d;
+  return d;
+}
+
+function draw() {
+  if (seed !== lastSeed) { seedNoise(seed); cache = {}; lastSeed = seed; }
+  var sp = spOf(speed);
+  T += sp / 60;
+  T -= C * Math.floor(T / C);
+  // The clock above runs every frame; the picture is worked out a slice of rows at a time (see SLICES).
+  var slice = F++ % SLICES;
+  var cw = curl / 100;
+  var inks = [rgbOf(ink1), rgbOf(ink2), rgbOf(ink3)], W = rgbOf(water);
+  var act = [], n, d;
+  for (n = 0; n < N; n++) {
+    d = dropInfo(n);
+    var a = T - d.born;
+    if (a < 0) a += C;
+    if (a > LIFE) continue;
+    var S = smooth(0, 0.6, a) * (1 - smooth(LIFE - 5, LIFE, a));
+    act.push({ x: d.x, y: d.y, R: d.R * (1 - Math.exp(-a / 3.0)) + 6, S: S, c: inks[d.col], ox: d.ox, oy: d.oy });
+  }
+  var th = 6.283185307179586 * T / C;
+  var c0 = Math.cos(th) * 0.45, s0 = Math.sin(th) * 0.45;
+  var c1 = Math.cos(th + 2.1) * 0.45, s1 = Math.sin(th + 2.1) * 0.45;
+  var c2 = Math.cos(th + 4.0) * 0.35, s2 = Math.sin(th + 4.0) * 0.35;
+  var c3 = Math.cos(th + 1.0) * 0.35, s3 = Math.sin(th + 1.0) * 0.35;
+  var c4 = Math.cos(th + 3.0) * 0.25, s4 = Math.sin(th + 3.0) * 0.25;
+  var amp = 25 + cw * 80, K = act.length, o, gx, gy, k;
+  // per-drop constants for the cell loop (R squared lets a cell outside a drop skip the square root)
+  for (k = 0; k < K; k++) { d = act[k]; d.R2 = d.R * d.R; d.den = d.R * 0.15 - d.R; }
+  var nx, ny, xi, yi, xf, yf, nu, nv, x0, x1, y0, y1, na, nb, nc, nd;
+  var A2 = amp * 2, A14 = amp * 1.4;
+  for (gy = slice; gy < GH; gy += SLICES) {
+    var y = (gy + 0.5) * CS;
+    o = gy * GW * 4;
+    for (gx = 0; gx < GW; gx++) {
+      var x = (gx + 0.5) * CS;
+      // the water moves: a slow, large warp bends space, and a finer one curls the edges
+      var wx, wy, vx, vy, f;
+      nx = (x * 0.018 + c0) + 4096; ny = (y * 0.018 + 3.1 + s0) + 4096;
+      xi = nx | 0; yi = ny | 0; xf = nx - xi; yf = ny - yi;
+      nu = xf * xf * (3 - 2 * xf); nv = yf * yf * (3 - 2 * yf);
+      x0 = xi & 63; x1 = (xi + 1) & 63; y0 = (yi & 63) << 6; y1 = ((yi + 1) & 63) << 6;
+      na = NT[x0 + y0]; nb = NT[x1 + y0]; nc = NT[x0 + y1]; nd = NT[x1 + y1];
+      wx = na + (nb - na) * nu + (nc - na) * nv + (na - nb - nc + nd) * nu * nv;
+      nx = (x * 0.018 + 7.7 + c1) + 4096; ny = (y * 0.018 + s1) + 4096;
+      xi = nx | 0; yi = ny | 0; xf = nx - xi; yf = ny - yi;
+      nu = xf * xf * (3 - 2 * xf); nv = yf * yf * (3 - 2 * yf);
+      x0 = xi & 63; x1 = (xi + 1) & 63; y0 = (yi & 63) << 6; y1 = ((yi + 1) & 63) << 6;
+      na = NT[x0 + y0]; nb = NT[x1 + y0]; nc = NT[x0 + y1]; nd = NT[x1 + y1];
+      wy = na + (nb - na) * nu + (nc - na) * nv + (na - nb - nc + nd) * nu * nv;
+      wx -= 0.5; wy -= 0.5;
+      var qx = x + wx * A2, qy = y + wy * A2;
+      nx = (qx * 0.03 + c2) + 4096; ny = (qy * 0.03 + s2) + 4096;
+      xi = nx | 0; yi = ny | 0; xf = nx - xi; yf = ny - yi;
+      nu = xf * xf * (3 - 2 * xf); nv = yf * yf * (3 - 2 * yf);
+      x0 = xi & 63; x1 = (xi + 1) & 63; y0 = (yi & 63) << 6; y1 = ((yi + 1) & 63) << 6;
+      na = NT[x0 + y0]; nb = NT[x1 + y0]; nc = NT[x0 + y1]; nd = NT[x1 + y1];
+      vx = na + (nb - na) * nu + (nc - na) * nv + (na - nb - nc + nd) * nu * nv;
+      nx = (qx * 0.03 + 11 + c3) + 4096; ny = (qy * 0.03 + s3) + 4096;
+      xi = nx | 0; yi = ny | 0; xf = nx - xi; yf = ny - yi;
+      nu = xf * xf * (3 - 2 * xf); nv = yf * yf * (3 - 2 * yf);
+      x0 = xi & 63; x1 = (xi + 1) & 63; y0 = (yi & 63) << 6; y1 = ((yi + 1) & 63) << 6;
+      na = NT[x0 + y0]; nb = NT[x1 + y0]; nc = NT[x0 + y1]; nd = NT[x1 + y1];
+      vy = na + (nb - na) * nu + (nc - na) * nv + (na - nb - nc + nd) * nu * nv;
+      vx -= 0.5; vy -= 0.5;
+      qx += vx * A14; qy += vy * A14;
+      // filaments: thin ridges where a noise field crosses its middle
+      nx = (qx * 0.045 + c4) + 4096; ny = (qy * 0.045 + s4) + 4096;
+      xi = nx | 0; yi = ny | 0; xf = nx - xi; yf = ny - yi;
+      nu = xf * xf * (3 - 2 * xf); nv = yf * yf * (3 - 2 * yf);
+      x0 = xi & 63; x1 = (xi + 1) & 63; y0 = (yi & 63) << 6; y1 = ((yi + 1) & 63) << 6;
+      na = NT[x0 + y0]; nb = NT[x1 + y0]; nc = NT[x0 + y1]; nd = NT[x1 + y1];
+      f = na + (nb - na) * nu + (nc - na) * nv + (na - nb - nc + nd) * nu * nv;
+      var fil = 1 - Math.abs(f * 2 - 1);
+      fil = fil * fil * fil;
+      var r = W[0], g = W[1], b = W[2];
+      for (k = 0; k < K; k++) {
+        var dd = act[k], dx = qx - dd.x, dy = qy - dd.y, d2 = dx * dx + dy * dy;
+        if (d2 >= dd.R2) continue;
+        var t = (Math.sqrt(d2) - dd.R) / dd.den;
+        t = t < 0 ? 0 : (t > 1 ? 1 : t);
+        var env = t * t * (3 - 2 * t);
+        if (env <= 0) continue;
+        var dens = env * dd.S * (0.22 + 0.95 * fil + 0.4 * env);
+        dens = dens < 0 ? 0 : (dens > 0.97 ? 0.97 : dens);
+        r += (dd.c[0] - r) * dens; g += (dd.c[1] - g) * dens; b += (dd.c[2] - b) * dens;
+      }
+      PD[o] = r; PD[o + 1] = g; PD[o + 2] = b; o += 4;
+    }
+  }
+  if (slice === SLICES - 1) ctx.putImageData(IMG, 0, 0);
+  window.requestAnimationFrame(draw);
+}
+window.requestAnimationFrame(draw);
+</script>

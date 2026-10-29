@@ -18,22 +18,53 @@
 //! - Rotation is clockwise around the rect center.
 //! - Rotated cells: the sample region for area average is the axis-aligned bounding
 //!   box of the rotated cell; nearest and bilinear use the rotated center.
+//! - A zone can have several placements. A placement with no `leds` slice owns the whole
+//!   zone, as it always did. A placement with a `leds` slice owns only that slice: it lays its
+//!   own LEDs along its own shape, and the cells are sized by the slice, not by the zone.
+//!   The LEDs of a split zone that no placement owns are black.
+//! - A matrix zone is never split: its map owns every LED.
 
 use canvas_proto::device::{DeviceId, DeviceInfo, ZoneInfo, ZoneKind};
 use canvas_proto::layout::{Layout, PlacedZone, SamplingMode, ZoneShape};
+use tracing::warn;
 
 /// One LED's sample region, in render pixels.
 ///
 /// `center` is where nearest/bilinear sample. `bounds` is the axis-aligned region
 /// area-average averages over (already the rotated cell's bounding box when the zone
 /// is rotated).
+///
+/// A LED with no owner is black: `sampled` is false, and it is never sampled. Before
+/// parts existed an unclaimed LED still read the canvas's top-left pixel, which is
+/// what the adversarial review called out; this flag is what stops it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LedSample {
     /// Sample point in render pixels (float, may be fractional for bilinear).
     pub center_x: f32,
+    /// Sample point in render pixels (float, may be fractional for bilinear).
     pub center_y: f32,
     /// Area-average region, in render pixels, as `[x0, y0, x1, y1]`.
     pub bounds: [f32; 4],
+    /// False when the LED has no owner: it is black and is never sampled.
+    pub sampled: bool,
+}
+
+impl LedSample {
+    /// The LED's sample region, or `None` when it has no owner and is black.
+    pub fn region(&self) -> Option<(f32, f32, [f32; 4])> {
+        if self.sampled {
+            Some((self.center_x, self.center_y, self.bounds))
+        } else {
+            None
+        }
+    }
+}
+
+impl Default for LedSample {
+    /// A LED with no owner: black, and never sampled.
+    fn default() -> Self {
+        LedSample { center_x: 0.0, center_y: 0.0, bounds: [0.0; 4], sampled: false }
+    }
 }
 
 /// One zone's LEDs, in zone order.
@@ -41,11 +72,33 @@ pub struct LedSample {
 pub struct ZoneSamples {
     /// The zone's index inside its device.
     pub zone_index: u32,
-    /// True when the layout places this zone visibly. An unplaced or invisible zone
-    /// is never sampled: its LEDs are black.
+    /// True when the layout places this zone visibly: at least one of its placements
+    /// is visible. An unplaced or invisible zone is never sampled: its LEDs are black.
     pub placed: bool,
-    /// One entry per LED of the zone, in zone order.
+    /// One entry per LED of the zone, in zone order. A LED no placement owns is black:
+    /// its sample is not sampled.
     pub leds: Vec<LedSample>,
+    /// The slices of LEDs the zone's placements own, one per split placement. A zone
+    /// that is not split has none.
+    pub slices: Vec<SliceSamples>,
+}
+
+/// One placement's slice of a zone's LEDs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SliceSamples {
+    /// The first LED of the zone the slice starts at.
+    pub start: u32,
+    /// The number of LEDs the slice claims.
+    pub count: u32,
+    /// The number of those LEDs the zone still has. Less than `count` means the zone
+    /// shrank under the slice.
+    pub available: u32,
+    /// True when the slice is honoured: its placement is visible and nothing else claims
+    /// its LEDs.
+    pub placed: bool,
+    /// True when the zone has fewer LEDs than the slice claims: the slice has to be mapped
+    /// again. The slice is never clipped silently.
+    pub needs_mapping: bool,
 }
 
 /// A device's zones, in device order, with the LED count of each.
@@ -86,7 +139,12 @@ impl LayoutPlan {
                 .iter()
                 .map(|z| {
                     let state = if z.placed { "" } else { " (unplaced)" };
-                    format!("z{}:{}{}", z.zone_index, z.leds.len(), state)
+                    let slices = if z.slices.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({} slices)", z.slices.len())
+                    };
+                    format!("z{}:{}{}{}", z.zone_index, z.leds.len(), state, slices)
                 })
                 .collect();
             out.push_str(&format!("{} [{}]", device.device_id, zones.join(" ")));
@@ -107,19 +165,14 @@ pub fn build_plan(layout: &Layout, devices: &[DeviceInfo]) -> LayoutPlan {
     for device in devices {
         let mut zone_samples = Vec::with_capacity(device.zones.len());
         for zone in &device.zones {
-            let placed = layout.zones.iter().find(|p| {
-                p.device_id == device.id && p.zone_index == zone.index
-            });
-            let visible = placed.is_some_and(|p| p.visible);
-            let leds = match placed {
-                Some(p) if p.visible => build_zone_leds(p, zone, scale),
-                _ => vec![LedSample::default(); zone.led_count as usize],
-            };
-            zone_samples.push(ZoneSamples {
-                zone_index: zone.index,
-                placed: visible,
-                leds,
-            });
+            // Every placement of the zone, not just the first: one zone can drive
+            // several parts (three daisy-chained fans on one ARGB header).
+            let placements: Vec<&PlacedZone> = layout
+                .zones
+                .iter()
+                .filter(|p| p.device_id == device.id && p.zone_index == zone.index)
+                .collect();
+            zone_samples.push(build_zone_samples(&device.id, &placements, zone, scale));
         }
         let led_count = device.led_count();
         out.push(DeviceSamples {
@@ -132,13 +185,191 @@ pub fn build_plan(layout: &Layout, devices: &[DeviceInfo]) -> LayoutPlan {
     LayoutPlan { devices: out, scale, sampling: layout.sampling }
 }
 
-impl Default for LedSample {
-    fn default() -> Self {
-        LedSample {
-            center_x: 0.0,
-            center_y: 0.0,
-            bounds: [0.0, 0.0, 0.0, 0.0],
+/// Builds the samples of one zone from every placement of it.
+///
+/// A placement with no `leds` slice owns the whole zone, as it always did, and the
+/// first such placement wins. A zone whose placements all carry a slice is split: every
+/// placement owns its own slice, lays it out along its own shape (the cells are sized
+/// by the slice, not by the zone), and the LEDs no placement owns are black.
+fn build_zone_samples(
+    device_id: &DeviceId,
+    placements: &[&PlacedZone],
+    zone: &ZoneInfo,
+    scale: f32,
+) -> ZoneSamples {
+    let led_count = zone.led_count as usize;
+    let is_matrix = matches!(zone.kind, ZoneKind::Matrix { .. });
+
+    // A matrix zone is never split: its map owns every LED. A slice on one is ignored.
+    for p in placements {
+        if p.leds.is_some() && is_matrix {
+            warn!(
+                device = %device_id,
+                zone = zone.index,
+                "a matrix zone is never split; the slice of LEDs on it is ignored"
+            );
         }
+    }
+
+    // The placement that owns the whole zone, if there is one.
+    let whole = placements.iter().copied().find(|p| p.leds.is_none() || is_matrix);
+    // The placements that own a slice of the zone's LEDs.
+    let split: Vec<&PlacedZone> = placements
+        .iter()
+        .copied()
+        .filter(|p| p.leds.is_some() && !is_matrix)
+        .collect();
+
+    let mut slices = Vec::new();
+    let mut placed = false;
+
+    if let Some(p) = whole {
+        // The zone is not split: the placement owns every LED.
+        let leds = if p.visible {
+            placed = true;
+            build_zone_leds(p, zone, scale)
+        } else {
+            // An invisible placement: the zone is black.
+            vec![LedSample::default(); led_count]
+        };
+        // A slice beside a whole-zone placement claims LEDs that are already taken.
+        for r in &split {
+            let s = r.leds.expect("a slice");
+            warn!(
+                device = %device_id,
+                zone = zone.index,
+                start = s.start,
+                count = s.count,
+                "one placement owns the whole zone and another owns a slice of it; the slice is ignored"
+            );
+            slices.push(SliceSamples {
+                start: s.start,
+                count: s.count,
+                available: 0,
+                placed: false,
+                needs_mapping: false,
+            });
+        }
+        return ZoneSamples { zone_index: zone.index, placed, leds, slices };
+    }
+
+    // The zone is split: every placement owns a slice of its LEDs. The LEDs no
+    // placement owns are black.
+    let mut leds = vec![LedSample::default(); led_count];
+    for p in split {
+        let s = p.leds.expect("a slice");
+        let start = s.start as usize;
+        let count = s.count as usize;
+        // The LEDs the zone still has: the zone may have shrunk under the slice.
+        let available = count.min(led_count.saturating_sub(start));
+        if p.visible && available < count {
+            warn!(
+                device = %device_id,
+                zone = zone.index,
+                start = s.start,
+                count = s.count,
+                available,
+                "the zone has fewer LEDs than this slice needs; the slice needs mapping again"
+            );
+        }
+        let honoured = p.visible && available > 0;
+        if honoured {
+            placed = true;
+            // The slice lays its own LEDs along its own shape: the cells are sized by
+            // the slice, not by the zone. The shape's slot `j` is the zone's LED
+            // `start + j`, and `reversed` flips the slice inside its own shape.
+            let shape = resolve_shape(p.shape, &zone.kind);
+            let run = build_run_leds(p, shape, count, available, scale);
+            for (j, sample) in run.iter().enumerate() {
+                let led = start + j;
+                if leds[led].region().is_some() {
+                    warn!(
+                        device = %device_id,
+                        zone = zone.index,
+                        led,
+                        "two placements claim the same LED; the first one wins"
+                    );
+                    continue;
+                }
+                leds[led] = *sample;
+            }
+        }
+        slices.push(SliceSamples {
+            start: s.start,
+            count: s.count,
+            available: available as u32,
+            placed: honoured,
+            needs_mapping: available < count,
+        });
+    }
+
+    ZoneSamples { zone_index: zone.index, placed, leds, slices }
+}
+
+/// The sample of a run of LEDs along its shape.
+///
+/// The run has `count` LEDs and the shape is sized by that count: a run of 12 on a
+/// fan gets a ring of 12, not a ring of the whole zone. Only the first `take` of
+/// them are laid out, which is what a zone that shrank under the run leaves.
+///
+/// The shape is decided once, here, and not once per LED: each arm below knows the
+/// shape it draws, so the loop inside it is straight-line code.
+fn build_run_leds(
+    placed: &PlacedZone,
+    shape: ZoneShape,
+    count: usize,
+    take: usize,
+    scale: f32,
+) -> Vec<LedSample> {
+    let mut leds = Vec::with_capacity(take);
+    match shape {
+        ZoneShape::Auto | ZoneShape::Strip => {
+            for j in 0..take {
+                let cell = shape_cell(placed, ZoneShape::Strip, slot_of(placed, count, j), count);
+                leds.push(sample_from_corners(&cell, scale));
+            }
+        }
+        ZoneShape::Point => {
+            for j in 0..take {
+                let cell = shape_cell(placed, ZoneShape::Point, slot_of(placed, count, j), count);
+                leds.push(sample_from_corners(&cell, scale));
+            }
+        }
+        ZoneShape::Ring => {
+            for j in 0..take {
+                let cell = shape_cell(placed, ZoneShape::Ring, slot_of(placed, count, j), count);
+                leds.push(sample_from_corners(&cell, scale));
+            }
+        }
+        ZoneShape::Outline => {
+            for j in 0..take {
+                let cell = shape_cell(placed, ZoneShape::Outline, slot_of(placed, count, j), count);
+                leds.push(sample_from_corners(&cell, scale));
+            }
+        }
+        ZoneShape::Grid { columns } => {
+            for j in 0..take {
+                let cell =
+                    shape_cell(placed, ZoneShape::Grid { columns }, slot_of(placed, count, j), count);
+                leds.push(sample_from_corners(&cell, scale));
+            }
+        }
+    }
+    leds
+}
+
+/// The slot of the shape the run's LED `j` sits at. `reversed` flips which end of
+/// the shape the run's first LED sits at.
+fn slot_of(placed: &PlacedZone, count: usize, j: usize) -> usize {
+    if placed.reversed { count - 1 - j } else { j }
+}
+
+/// The shape a placement's LEDs sit in. `Auto` follows the device's zone kind.
+fn resolve_shape(shape: ZoneShape, kind: &ZoneKind) -> ZoneShape {
+    match (shape, kind) {
+        (ZoneShape::Auto, ZoneKind::Single) => ZoneShape::Point,
+        (ZoneShape::Auto, ZoneKind::Linear) => ZoneShape::Strip,
+        (other, _) => other,
     }
 }
 
@@ -205,28 +436,23 @@ fn rotate_point(p: (f32, f32), center: (f32, f32), deg: f32) -> (f32, f32) {
 /// overrides it and places the LEDs in zone order, honouring `reversed`.
 fn build_zone_leds(placed: &PlacedZone, zone: &ZoneInfo, scale: f32) -> Vec<LedSample> {
     let led_count = zone.led_count as usize;
-    let mut leds = vec![LedSample::default(); led_count];
     if led_count == 0 {
-        return leds;
+        return Vec::new();
     }
 
-    let shape = match (placed.shape, &zone.kind) {
-        (ZoneShape::Auto, ZoneKind::Single) => ZoneShape::Point,
-        (ZoneShape::Auto, ZoneKind::Linear) => ZoneShape::Strip,
-        (ZoneShape::Auto, ZoneKind::Matrix { width, height, map }) => {
+    if let ZoneShape::Auto = placed.shape {
+        if let ZoneKind::Matrix { width, height, map } = &zone.kind {
+            // A matrix zone's map leaves the LEDs it does not place without a cell:
+            // they belong to nobody, so they are black and never sampled. (They used
+            // to read the canvas's top-left pixel, which showed the effect's corner on
+            // a key the map does not have.)
+            let mut leds = vec![LedSample::default(); led_count];
             fill_matrix(&mut leds, placed, *width as usize, *height as usize, map, scale);
             return leds;
         }
-        (other, _) => other,
-    };
-
-    for (i, led) in leds.iter_mut().enumerate() {
-        // `reversed` flips which end of the shape LED 0 sits at.
-        let slot = if placed.reversed { led_count - 1 - i } else { i };
-        let cell = shape_cell(placed, shape, slot, led_count);
-        *led = sample_from_corners(&cell, scale);
     }
-    leds
+    let shape = resolve_shape(placed.shape, &zone.kind);
+    build_run_leds(placed, shape, led_count, led_count, scale)
 }
 
 /// Fills `leds` from a matrix zone's own map (the `Auto` shape of a matrix zone).
@@ -349,6 +575,7 @@ fn sample_from_corners(cell: &CellCorners, scale: f32) -> LedSample {
         center_x: cx * scale,
         center_y: cy * scale,
         bounds: [b[0] * scale, b[1] * scale, b[2] * scale, b[3] * scale],
+        sampled: true,
     }
 }
 
@@ -356,6 +583,22 @@ fn sample_from_corners(cell: &CellCorners, scale: f32) -> LedSample {
 mod tests {
     use super::*;
     use canvas_proto::device::DeviceKind;
+    use canvas_proto::layout::LedSlice;
+
+    /// The sample point of a LED, for the tests. A LED with no owner reads (0, 0).
+    fn cx(led: &LedSample) -> f32 {
+        led.center_x
+    }
+
+    /// The sample point of a LED, for the tests. A LED with no owner reads (0, 0).
+    fn cy(led: &LedSample) -> f32 {
+        led.center_y
+    }
+
+    /// The area-average region of a LED, for the tests. A LED with no owner has none.
+    fn bounds(led: &LedSample) -> [f32; 4] {
+        led.bounds
+    }
 
     fn zone(index: u32, kind: ZoneKind, led_count: u32) -> ZoneInfo {
         ZoneInfo {
@@ -397,6 +640,9 @@ mod tests {
             visible: true,
             shape: ZoneShape::Auto,
             label: None,
+            leds: None,
+            part: None,
+            locked: false,
         }
     }
 
@@ -409,6 +655,7 @@ mod tests {
             zones,
             effect: None,
             case_form: canvas_proto::layout::CaseForm::None,
+            landmarks: Vec::new(),
         }
     }
 
@@ -420,11 +667,11 @@ mod tests {
         let leds = &plan.devices[0].zones[0].leds;
         assert_eq!(leds.len(), 4);
         // Four cells of 25 units each across the 100-unit-wide rect.
-        assert!((leds[0].center_x - 12.5).abs() < 0.01);
-        assert!((leds[1].center_x - 37.5).abs() < 0.01);
-        assert!((leds[2].center_x - 62.5).abs() < 0.01);
-        assert!((leds[3].center_x - 87.5).abs() < 0.01);
-        assert!((leds[0].center_y - 10.0).abs() < 0.01);
+        assert!((cx(&leds[0]) - 12.5).abs() < 0.01);
+        assert!((cx(&leds[1]) - 37.5).abs() < 0.01);
+        assert!((cx(&leds[2]) - 62.5).abs() < 0.01);
+        assert!((cx(&leds[3]) - 87.5).abs() < 0.01);
+        assert!((cy(&leds[0]) - 10.0).abs() < 0.01);
     }
 
     #[test]
@@ -433,9 +680,9 @@ mod tests {
         let lay = layout(vec![placed("d0", 0, 10.0, 0.0, 20.0, 90.0)]);
         let plan = build_plan(&lay, std::slice::from_ref(&dev));
         let leds = &plan.devices[0].zones[0].leds;
-        assert!((leds[0].center_y - 15.0).abs() < 0.01);
-        assert!((leds[1].center_y - 45.0).abs() < 0.01);
-        assert!((leds[2].center_y - 75.0).abs() < 0.01);
+        assert!((cy(&leds[0]) - 15.0).abs() < 0.01);
+        assert!((cy(&leds[1]) - 45.0).abs() < 0.01);
+        assert!((cy(&leds[2]) - 75.0).abs() < 0.01);
     }
 
     #[test]
@@ -446,8 +693,8 @@ mod tests {
         let lay = layout(vec![p]);
         let plan = build_plan(&lay, std::slice::from_ref(&dev));
         let leds = &plan.devices[0].zones[0].leds;
-        assert!((leds[0].center_x - 75.0).abs() < 0.01);
-        assert!((leds[2].center_x - 15.0).abs() < 0.01);
+        assert!((cx(&leds[0]) - 75.0).abs() < 0.01);
+        assert!((cx(&leds[2]) - 15.0).abs() < 0.01);
     }
 
     #[test]
@@ -458,17 +705,17 @@ mod tests {
         let plan = build_plan(&lay, std::slice::from_ref(&dev));
         let leds = &plan.devices[0].zones[0].leds;
         // LED 0 is cell (0,0): top-left.
-        assert!((leds[0].center_x - 25.0).abs() < 0.01);
-        assert!((leds[0].center_y - 25.0).abs() < 0.01);
+        assert!((cx(&leds[0]) - 25.0).abs() < 0.01);
+        assert!((cy(&leds[0]) - 25.0).abs() < 0.01);
         // LED 1 is cell (1,0): top-right.
-        assert!((leds[1].center_x - 75.0).abs() < 0.01);
-        assert!((leds[1].center_y - 25.0).abs() < 0.01);
+        assert!((cx(&leds[1]) - 75.0).abs() < 0.01);
+        assert!((cy(&leds[1]) - 25.0).abs() < 0.01);
         // LED 2 is cell (0,1): bottom-left.
-        assert!((leds[2].center_x - 25.0).abs() < 0.01);
-        assert!((leds[2].center_y - 75.0).abs() < 0.01);
+        assert!((cx(&leds[2]) - 25.0).abs() < 0.01);
+        assert!((cy(&leds[2]) - 75.0).abs() < 0.01);
         // LED 3 is cell (1,1): bottom-right.
-        assert!((leds[3].center_x - 75.0).abs() < 0.01);
-        assert!((leds[3].center_y - 75.0).abs() < 0.01);
+        assert!((cx(&leds[3]) - 75.0).abs() < 0.01);
+        assert!((cy(&leds[3]) - 75.0).abs() < 0.01);
     }
 
     #[test]
@@ -479,10 +726,20 @@ mod tests {
         let lay = layout(vec![placed("d0", 0, 0.0, 0.0, 100.0, 100.0)]);
         let plan = build_plan(&lay, std::slice::from_ref(&dev));
         let leds = &plan.devices[0].zones[0].leds;
-        assert_eq!(leds[2].center_x, 0.0);
-        assert_eq!(leds[2].center_y, 0.0);
+        // The LED the map does not place has no sample at all.
+        assert_eq!(leds[2].region(), None, "the gap LED has no owner");
         // LED 3 still lands in cell (1,1).
-        assert!((leds[3].center_x - 75.0).abs() < 0.01);
+        assert!((cx(&leds[3]) - 75.0).abs() < 0.01);
+
+        // And the colour it gets is black, not the effect's top-left pixel: the
+        // canvas here is red everywhere, so a LED that read a pixel would be red.
+        let canvas = vec![[1.0f32, 0.0, 0.0]; 16];
+        let mut colors = Vec::new();
+        crate::sampling::sample_leds(&canvas, 4, 4, leds, SamplingMode::Nearest, &mut colors);
+        assert_eq!(colors.len(), 4);
+        assert_eq!(colors[2], canvas_proto::color::Rgb8::BLACK, "the gap LED is black");
+        assert_eq!(colors[0], canvas_proto::color::Rgb8::new(255, 0, 0), "LED 0 is red");
+        assert_eq!(colors[3], canvas_proto::color::Rgb8::new(255, 0, 0), "LED 3 is red");
     }
 
     #[test]
@@ -494,11 +751,11 @@ mod tests {
         let plan = build_plan(&lay, std::slice::from_ref(&dev));
         let led = plan.devices[0].zones[0].leds[0];
         // The center of a rect rotated around its own center does not move.
-        assert!((led.center_x - 120.0).abs() < 0.01);
-        assert!((led.center_y - 110.0).abs() < 0.01);
+        assert!((cx(&led) - 120.0).abs() < 0.01);
+        assert!((cy(&led) - 110.0).abs() < 0.01);
         // But the axis-aligned bounding box swaps width and height.
-        assert!((led.bounds[2] - led.bounds[0] - 20.0).abs() < 0.01);
-        assert!((led.bounds[3] - led.bounds[1] - 40.0).abs() < 0.01);
+        assert!((bounds(&led)[2] - bounds(&led)[0] - 20.0).abs() < 0.01);
+        assert!((bounds(&led)[3] - bounds(&led)[1] - 40.0).abs() < 0.01);
     }
 
     #[test]
@@ -509,8 +766,8 @@ mod tests {
         let plan = build_plan(&lay, std::slice::from_ref(&dev));
         let leds = &plan.devices[0].zones[0].leds;
         // Logical 80 -> render 40 at 50%.
-        assert!((leds[0].center_x - 40.0).abs() < 0.01);
-        assert!((leds[0].center_y - 50.0).abs() < 0.01);
+        assert!((cx(&leds[0]) - 40.0).abs() < 0.01);
+        assert!((cy(&leds[0]) - 50.0).abs() < 0.01);
         assert_eq!(plan.scale, 0.5);
     }
 
@@ -527,9 +784,9 @@ mod tests {
         let plan = build_plan(&lay, std::slice::from_ref(&dev));
         assert_eq!(plan.scale, 1.0);
         let leds = &plan.devices[0].zones[0].leds;
-        assert!((leds[0].center_x - 40.0).abs() < 0.01);
-        assert!((leds[0].bounds[0] - 0.0).abs() < 0.01);
-        assert!((leds[0].bounds[2] - 80.0).abs() < 0.01);
+        assert!((cx(&leds[0]) - 40.0).abs() < 0.01);
+        assert!((bounds(&leds[0])[0] - 0.0).abs() < 0.01);
+        assert!((bounds(&leds[0])[2] - 80.0).abs() < 0.01);
 
         // 50%: the same zone covers render pixels 0..40.
         let mut lay = layout(vec![base.clone()]);
@@ -537,9 +794,9 @@ mod tests {
         let plan = build_plan(&lay, std::slice::from_ref(&dev));
         assert_eq!(plan.scale, 0.5);
         let leds = &plan.devices[0].zones[0].leds;
-        assert!((leds[0].center_x - 20.0).abs() < 0.01);
-        assert!((leds[0].bounds[0] - 0.0).abs() < 0.01);
-        assert!((leds[0].bounds[2] - 40.0).abs() < 0.01);
+        assert!((cx(&leds[0]) - 20.0).abs() < 0.01);
+        assert!((bounds(&leds[0])[0] - 0.0).abs() < 0.01);
+        assert!((bounds(&leds[0])[2] - 40.0).abs() < 0.01);
 
         // 25%: the same zone covers render pixels 0..20.
         let mut lay = layout(vec![base]);
@@ -547,9 +804,9 @@ mod tests {
         let plan = build_plan(&lay, std::slice::from_ref(&dev));
         assert_eq!(plan.scale, 0.25);
         let leds = &plan.devices[0].zones[0].leds;
-        assert!((leds[0].center_x - 10.0).abs() < 0.01);
-        assert!((leds[0].bounds[0] - 0.0).abs() < 0.01);
-        assert!((leds[0].bounds[2] - 20.0).abs() < 0.01);
+        assert!((cx(&leds[0]) - 10.0).abs() < 0.01);
+        assert!((bounds(&leds[0])[0] - 0.0).abs() < 0.01);
+        assert!((bounds(&leds[0])[2] - 20.0).abs() < 0.01);
     }
 
     #[test]
@@ -573,8 +830,8 @@ mod tests {
         let plan = build_plan(&lay, std::slice::from_ref(&dev));
         let z0 = &plan.devices[0].zones[0].leds;
         let z1 = &plan.devices[0].zones[1].leds;
-        assert!(z0.iter().all(|l| l.center_x == 0.0 && l.center_y == 0.0));
-        assert!(z1.iter().all(|l| l.center_x == 0.0 && l.center_y == 0.0));
+        assert!(z0.iter().all(|l| cx(l) == 0.0 && cy(l) == 0.0));
+        assert!(z1.iter().all(|l| cx(l) == 0.0 && cy(l) == 0.0));
         assert_eq!(plan.devices[0].led_count, 5);
     }
 
@@ -611,8 +868,8 @@ mod tests {
         let leds = shaped(ZoneShape::Auto, ZoneKind::Single, 3, (100.0, 50.0, 20.0, 10.0));
         assert_eq!(leds.len(), 3);
         for led in &leds {
-            assert!(near(led.center_x, 110.0) && near(led.center_y, 55.0));
-            assert_eq!(led.bounds, [100.0, 50.0, 120.0, 60.0]);
+            assert!(near(cx(led), 110.0) && near(cy(led), 55.0));
+            assert_eq!(bounds(led), [100.0, 50.0, 120.0, 60.0]);
         }
     }
 
@@ -620,16 +877,16 @@ mod tests {
     fn point_shape_makes_every_led_sample_the_whole_rect() {
         let leds = shaped(ZoneShape::Point, ZoneKind::Linear, 5, (10.0, 20.0, 40.0, 30.0));
         for led in &leds {
-            assert!(near(led.center_x, 30.0) && near(led.center_y, 35.0));
-            assert_eq!(led.bounds, [10.0, 20.0, 50.0, 50.0]);
+            assert!(near(cx(led), 30.0) && near(cy(led), 35.0));
+            assert_eq!(bounds(led), [10.0, 20.0, 50.0, 50.0]);
         }
     }
 
     #[test]
     fn strip_shape_forces_a_strip_on_a_single_zone() {
         let leds = shaped(ZoneShape::Strip, ZoneKind::Single, 4, (0.0, 0.0, 100.0, 20.0));
-        assert!(near(leds[0].center_x, 12.5) && near(leds[3].center_x, 87.5));
-        assert!(near(leds[0].center_y, 10.0));
+        assert!(near(cx(&leds[0]), 12.5) && near(cx(&leds[3]), 87.5));
+        assert!(near(cy(&leds[0]), 10.0));
     }
 
     #[test]
@@ -641,24 +898,24 @@ mod tests {
             assert_eq!(x, y);
         }
         // A tall stick splits along y.
-        assert!(near(a[0].center_y, 15.0) && near(a[5].center_y, 115.0));
+        assert!(near(cy(&a[0]), 15.0) && near(cy(&a[5]), 115.0));
     }
 
     #[test]
     fn ring_places_leds_clockwise_from_the_top() {
         // Square 100x100 at the origin, 4 LEDs: top, right, bottom, left.
         let leds = shaped(ZoneShape::Ring, ZoneKind::Linear, 4, (0.0, 0.0, 100.0, 100.0));
-        assert!(near(leds[0].center_x, 50.0) && near(leds[0].center_y, 0.0));
-        assert!(near(leds[1].center_x, 100.0) && near(leds[1].center_y, 50.0));
-        assert!(near(leds[2].center_x, 50.0) && near(leds[2].center_y, 100.0));
-        assert!(near(leds[3].center_x, 0.0) && near(leds[3].center_y, 50.0));
+        assert!(near(cx(&leds[0]), 50.0) && near(cy(&leds[0]), 0.0));
+        assert!(near(cx(&leds[1]), 100.0) && near(cy(&leds[1]), 50.0));
+        assert!(near(cx(&leds[2]), 50.0) && near(cy(&leds[2]), 100.0));
+        assert!(near(cx(&leds[3]), 0.0) && near(cy(&leds[3]), 50.0));
     }
 
     #[test]
     fn ring_follows_an_ellipse_when_the_rect_is_not_square() {
         let leds = shaped(ZoneShape::Ring, ZoneKind::Linear, 4, (0.0, 0.0, 200.0, 100.0));
-        assert!(near(leds[1].center_x, 200.0) && near(leds[1].center_y, 50.0));
-        assert!(near(leds[0].center_x, 100.0) && near(leds[0].center_y, 0.0));
+        assert!(near(cx(&leds[1]), 200.0) && near(cy(&leds[1]), 50.0));
+        assert!(near(cx(&leds[0]), 100.0) && near(cy(&leds[0]), 0.0));
     }
 
     #[test]
@@ -670,8 +927,8 @@ mod tests {
         let plan = build_plan(&layout(vec![p]), std::slice::from_ref(&dev));
         let leds = &plan.devices[0].zones[0].leds;
         // LED 0 now sits where the last slot (left) is, LED 1 at the bottom.
-        assert!(near(leds[0].center_x, 0.0) && near(leds[0].center_y, 50.0));
-        assert!(near(leds[1].center_x, 50.0) && near(leds[1].center_y, 100.0));
+        assert!(near(cx(&leds[0]), 0.0) && near(cy(&leds[0]), 50.0));
+        assert!(near(cx(&leds[1]), 50.0) && near(cy(&leds[1]), 100.0));
     }
 
     #[test]
@@ -683,7 +940,7 @@ mod tests {
         let plan = build_plan(&layout(vec![p]), std::slice::from_ref(&dev));
         let leds = &plan.devices[0].zones[0].leds;
         // The top LED turns clockwise a quarter: it ends up on the right.
-        assert!(near(leds[0].center_x, 100.0) && near(leds[0].center_y, 50.0));
+        assert!(near(cx(&leds[0]), 100.0) && near(cy(&leds[0]), 50.0));
     }
 
     #[test]
@@ -699,7 +956,7 @@ mod tests {
             (0.0, 50.0),
         ];
         for (led, (x, y)) in leds.iter().zip(want) {
-            assert!(near(led.center_x, x) && near(led.center_y, y), "{led:?} vs {x},{y}");
+            assert!(near(cx(led), x) && near(cy(led), y), "{led:?} vs {x},{y}");
         }
     }
 
@@ -712,8 +969,8 @@ mod tests {
         let plan = build_plan(&layout(vec![p]), std::slice::from_ref(&dev));
         let leds = &plan.devices[0].zones[0].leds;
         // Slots: (0,0) (100,0) (100,100) (0,100); reversed LED 0 takes the last.
-        assert!(near(leds[0].center_x, 0.0) && near(leds[0].center_y, 100.0));
-        assert!(near(leds[3].center_x, 0.0) && near(leds[3].center_y, 0.0));
+        assert!(near(cx(&leds[0]), 0.0) && near(cy(&leds[0]), 100.0));
+        assert!(near(cx(&leds[3]), 0.0) && near(cy(&leds[3]), 0.0));
     }
 
     #[test]
@@ -734,9 +991,9 @@ mod tests {
             (75.0, 45.0),
         ];
         for (led, (x, y)) in leds.iter().zip(want) {
-            assert!(near(led.center_x, x) && near(led.center_y, y));
+            assert!(near(cx(led), x) && near(cy(led), y));
         }
-        assert_eq!(leds[0].bounds, [0.0, 0.0, 30.0, 30.0]);
+        assert_eq!(bounds(&leds[0]), [0.0, 0.0, 30.0, 30.0]);
     }
 
     #[test]
@@ -744,10 +1001,10 @@ mod tests {
         let leds =
             shaped(ZoneShape::Grid { columns: 4 }, ZoneKind::Linear, 5, (0.0, 0.0, 80.0, 40.0));
         assert_eq!(leds.len(), 5);
-        assert!(near(leds[4].center_x, 10.0) && near(leds[4].center_y, 30.0));
+        assert!(near(cx(&leds[4]), 10.0) && near(cy(&leds[4]), 30.0));
         let one =
             shaped(ZoneShape::Grid { columns: 0 }, ZoneKind::Linear, 3, (0.0, 0.0, 10.0, 30.0));
-        assert!(near(one[2].center_y, 25.0) && near(one[2].center_x, 5.0));
+        assert!(near(cy(&one[2]), 25.0) && near(cx(&one[2]), 5.0));
     }
 
     #[test]
@@ -755,10 +1012,10 @@ mod tests {
         let map = vec![Some(0), None, None, Some(1)];
         let kind = ZoneKind::Matrix { width: 2, height: 2, map };
         let auto = shaped(ZoneShape::Auto, kind.clone(), 2, (0.0, 0.0, 100.0, 100.0));
-        assert!(near(auto[1].center_x, 75.0) && near(auto[1].center_y, 75.0));
+        assert!(near(cx(&auto[1]), 75.0) && near(cy(&auto[1]), 75.0));
         let strip = shaped(ZoneShape::Strip, kind, 2, (0.0, 0.0, 100.0, 100.0));
         // Width >= height, so the strip runs along x: LED 1 is the right half.
-        assert!(near(strip[1].center_x, 75.0) && near(strip[1].center_y, 50.0));
+        assert!(near(cx(&strip[1]), 75.0) && near(cy(&strip[1]), 50.0));
     }
 
     #[test]
@@ -769,7 +1026,7 @@ mod tests {
         let plan = build_plan(&layout(vec![p]), std::slice::from_ref(&dev));
         let leds = &plan.devices[0].zones[0].leds;
         // Centre (50,10); LED 0 at (25,10) rotates clockwise a quarter to (50,-15).
-        assert!(near(leds[0].center_x, 50.0) && near(leds[0].center_y, -15.0));
+        assert!(near(cx(&leds[0]), 50.0) && near(cy(&leds[0]), -15.0));
     }
 
     #[test]
@@ -784,7 +1041,162 @@ mod tests {
         ] {
             let leds = shaped(shape, ZoneKind::Linear, 1, (0.0, 0.0, 50.0, 50.0));
             assert_eq!(leds.len(), 1, "{shape:?}");
-            assert!(leds[0].bounds[2] > leds[0].bounds[0], "{shape:?}");
+            assert!(bounds(&leds[0])[2] > bounds(&leds[0])[0], "{shape:?}");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // A zone split into several parts
+    // -----------------------------------------------------------------------
+
+    /// A placement that owns a slice of the zone's LEDs.
+    fn slice(mut p: PlacedZone, start: u32, count: u32) -> PlacedZone {
+        p.leds = Some(LedSlice { start, count });
+        p
+    }
+
+    /// The 3-slice fixture: one 40-LED header split into three slices of 12, so the
+    /// last 4 LEDs belong to nobody.
+    fn split_zone() -> (Vec<PlacedZone>, Vec<LedSample>, Vec<SliceSamples>) {
+        let dev = device("d0", vec![zone(0, ZoneKind::Linear, 40)]);
+        let lay = layout(vec![
+            slice(placed("d0", 0, 0.0, 0.0, 120.0, 20.0), 0, 12),
+            slice(placed("d0", 0, 0.0, 30.0, 120.0, 20.0), 12, 12),
+            slice(placed("d0", 0, 0.0, 60.0, 120.0, 20.0), 24, 12),
+        ]);
+        let plan = build_plan(&lay, std::slice::from_ref(&dev));
+        let zone = &plan.devices[0].zones[0];
+        (lay.zones, zone.leds.clone(), zone.slices.clone())
+    }
+
+    #[test]
+    fn a_split_zone_lays_each_run_out_along_its_own_shape() {
+        let (_, leds, slices) = split_zone();
+        assert_eq!(leds.len(), 40);
+        assert_eq!(slices.len(), 3);
+        // The cells are sized by the slice (12), not by the zone (40): a slice of 12 in
+        // a 120-unit rect has cells of 10 units, so the centres are 5, 15, ... 115.
+        for slice_index in 0..3 {
+            let first = slice_index * 12;
+            for j in 0..12 {
+                let led = &leds[first + j];
+                assert!(
+                    near(cx(led), 5.0 + 10.0 * j as f32),
+                    "slice {slice_index} LED {j} sits at {}",
+                    cx(led)
+                );
+                assert!(
+                    near(cy(led), 10.0 + 30.0 * slice_index as f32),
+                    "slice {slice_index} LED {j} sits at {}",
+                    cy(led)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_leds_of_a_split_zone_that_nobody_owns_have_no_sample() {
+        let (_, leds, _) = split_zone();
+        // The 36 LEDs the three slices own are sampled.
+        for led in leds.iter().take(36) {
+            assert!(led.region().is_some(), "a claimed LED has a sample");
+        }
+        // The last 4 belong to nobody: they carry the black marker, so they are
+        // never sampled and never read the effect's top-left pixel.
+        for led in leds.iter().skip(36) {
+            assert_eq!(led.region(), None, "an unclaimed LED has no sample");
+            assert!(!led.sampled, "an unclaimed LED is never sampled");
+        }
+    }
+
+    #[test]
+    fn a_split_zone_reports_each_run_and_whether_it_is_placed() {
+        let (_, _, slices) = split_zone();
+        for (i, slice) in slices.iter().enumerate() {
+            assert_eq!(slice.start, i as u32 * 12);
+            assert_eq!(slice.count, 12);
+            assert_eq!(slice.available, 12);
+            assert!(slice.placed, "slice {i} is placed");
+            assert!(!slice.needs_mapping, "slice {i} fits");
+        }
+    }
+
+    #[test]
+    fn a_run_that_is_reversed_flips_inside_its_own_run() {
+        let dev = device("d0", vec![zone(0, ZoneKind::Linear, 24)]);
+        let mut second = slice(placed("d0", 0, 0.0, 30.0, 120.0, 20.0), 12, 12);
+        second.reversed = true;
+        let lay = layout(vec![slice(placed("d0", 0, 0.0, 0.0, 120.0, 20.0), 0, 12), second]);
+        let plan = build_plan(&lay, std::slice::from_ref(&dev));
+        let leds = &plan.devices[0].zones[0].leds;
+        // The first slice is not reversed: LED 0 is at the start of its own shape.
+        assert!(near(cx(&leds[0]), 5.0));
+        // The second slice is: LED 12 sits at the end of its own 12-LED shape, and
+        // LED 23 at its start. The slice is flipped inside itself, not the zone.
+        assert!(near(cx(&leds[12]), 115.0));
+        assert!(near(cx(&leds[23]), 5.0));
+    }
+
+    #[test]
+    fn a_run_sizes_its_ring_from_the_run_and_not_from_the_zone() {
+        let dev = device("d0", vec![zone(0, ZoneKind::Linear, 40)]);
+        let mut p = slice(placed("d0", 0, 0.0, 0.0, 40.0, 40.0), 0, 12);
+        p.shape = ZoneShape::Ring;
+        let lay = layout(vec![p]);
+        let plan = build_plan(&lay, std::slice::from_ref(&dev));
+        let leds = &plan.devices[0].zones[0].leds;
+        // A ring of 12 in a 40-unit square: the first LED is at the top, the
+        // second a twelfth of a turn further round.
+        assert!(near(cx(&leds[0]), 20.0) && near(cy(&leds[0]), 0.0));
+        let theta = std::f32::consts::TAU / 12.0;
+        assert!(near(cx(&leds[1]), 20.0 + 20.0 * theta.sin()));
+        assert!(near(cy(&leds[1]), 20.0 - 20.0 * theta.cos()));
+    }
+
+    #[test]
+    fn a_run_past_the_end_of_the_zone_is_not_clipped_but_flagged() {
+        // The zone has 20 LEDs; the slice claims 12 of them starting at 16.
+        let dev = device("d0", vec![zone(0, ZoneKind::Linear, 20)]);
+        let lay = layout(vec![slice(placed("d0", 0, 0.0, 0.0, 120.0, 20.0), 16, 12)]);
+        let plan = build_plan(&lay, std::slice::from_ref(&dev));
+        let zone = &plan.devices[0].zones[0];
+        assert_eq!(zone.slices.len(), 1);
+        assert_eq!(zone.slices[0].count, 12, "the slice still claims 12 LEDs");
+        assert_eq!(zone.slices[0].available, 4, "the zone only has 4 of them left");
+        assert!(zone.slices[0].needs_mapping, "the slice has to be mapped again");
+        // The four LEDs the zone still has are laid out; the eight that are gone
+        // are not silently taken off the slice.
+        assert!(zone.leds[16].region().is_some());
+        assert!(zone.leds[19].region().is_some());
+        assert_eq!(zone.leds.len(), 20);
+    }
+
+    #[test]
+    fn a_matrix_zone_with_a_run_still_uses_its_map() {
+        let map = vec![Some(0), Some(1), Some(2), Some(3)];
+        let dev = device("d0", vec![zone(0, ZoneKind::Matrix { width: 2, height: 2, map }, 4)]);
+        // A matrix zone is never split: the slice is ignored and the map owns the LEDs.
+        let lay = layout(vec![slice(placed("d0", 0, 0.0, 0.0, 100.0, 100.0), 0, 2)]);
+        let plan = build_plan(&lay, std::slice::from_ref(&dev));
+        let zone = &plan.devices[0].zones[0];
+        assert!(zone.placed);
+        assert!(near(cx(&zone.leds[0]), 25.0) && near(cy(&zone.leds[0]), 25.0));
+        assert!(near(cx(&zone.leds[3]), 75.0) && near(cy(&zone.leds[3]), 75.0));
+        assert_eq!(zone.slices.len(), 0, "the slice is ignored, so there is no slice");
+    }
+
+    #[test]
+    fn a_zone_with_a_run_and_a_whole_zone_placement_keeps_the_whole_zone() {
+        let dev = device("d0", vec![zone(0, ZoneKind::Linear, 40)]);
+        let lay = layout(vec![
+            placed("d0", 0, 0.0, 0.0, 120.0, 20.0),
+            slice(placed("d0", 0, 0.0, 30.0, 120.0, 20.0), 12, 12),
+        ]);
+        let plan = build_plan(&lay, std::slice::from_ref(&dev));
+        let zone = &plan.devices[0].zones[0];
+        // The whole zone wins, as it did before slices existed.
+        assert!(near(cx(&zone.leds[0]), 1.5), "the whole zone's own cells");
+        assert_eq!(zone.slices.len(), 1);
+        assert!(!zone.slices[0].placed, "the slice is ignored");
     }
 }
