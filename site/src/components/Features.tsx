@@ -2,19 +2,19 @@
 const FEATURES = [
   {
     title: "Lighting",
-    text: "Every device sits on one layout, and your SignalRGB effects run on it unchanged.",
+    text: "Your Signal effects run here untouched. Same HTML files, drawn in Rust with no browser underneath. Put every device on one layout and an effect runs across the lot.",
   },
   {
     title: "Fans",
-    text: "Fan curves per header, and every fan goes back to BIOS when the service stops.",
+    text: "Curves per header, with BIOS taking the fans back the moment the service dies or a sensor goes quiet.",
   },
   {
     title: "Mouse and controller",
-    text: "The Attack Shark X6 and the 8BitDo Ultimate 2 are set up from inside canvas-rgb, so their vendor apps can stay closed.",
+    text: "The Attack Shark X6 and 8BitDo Ultimate 2 apps can stay closed for good. Their settings live in Canvas now.",
   },
   {
-    title: "For tinkerers",
-    text: "A local API, a command line, and new effects are one HTML file each.",
+    title: "For developers",
+    text: "There's a local API on port 9430. The CLI talks to it too, and --json makes any of it scriptable. New effects are one HTML file.",
   },
 ];
 
@@ -22,7 +22,7 @@ export function Features() {
   return (
     <section className="site-section" id="features">
       <div className="site-section-head">
-        <h2 className="site-h2">What it does</h2>
+        <h2 className="site-h2">Same job. Then some.</h2>
       </div>
       <div className="site-features">
         {FEATURES.map((f) => (
