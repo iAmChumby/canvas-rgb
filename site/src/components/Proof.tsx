@@ -4,17 +4,20 @@ const BENCHMARK = "https://github.com/iAmChumby/canvas-rgb/blob/main/docs/benchm
 
 /** The three numbers, from docs/benchmark.md. Nothing else is measured. */
 const READOUTS = [
-  { label: "RAM", mine: "60", mineUnit: "MB", theirs: "819", theirsUnit: "MB" },
-  { label: "CPU", mine: "0.6", mineUnit: "%", theirs: "2.6", theirsUnit: "%" },
-  { label: "Disk", mine: "80", mineUnit: "MB", theirs: "2.4", theirsUnit: "GB" },
+  { label: "RAM", mine: "55", mineUnit: "MB", theirs: "819", theirsUnit: "MB" },
+  { label: "CPU", mine: "0.5", mineUnit: "%", theirs: "2.6", theirsUnit: "%" },
+  { label: "Disk", mine: "117", mineUnit: "MB", theirs: "2.4", theirsUnit: "GB" },
 ];
 
 export function Proof() {
   return (
     <section className="site-section site-proof" id="proof">
       <div className="site-proof-head">
-        <h2 className="site-h2">Measured</h2>
-        <p className="site-note">One PC, 60 seconds per app.</p>
+        <h2 className="site-h2">819 MB before. 55 MB now.</h2>
+        <p className="site-note">
+          SignalRGB and the two vendor apps it ran beside, against Canvas doing every one of
+          their jobs. Same PC, one app at a time, a minute each.
+        </p>
       </div>
       <div className="site-readout">
         {READOUTS.map((r) => (
@@ -34,10 +37,12 @@ export function Proof() {
         ))}
       </div>
       <p className="site-note">
-        SignalRGB 2.5.80, ZEUS CAST 2.4.2.2 and the Attack Shark X6 app, one at a time.{" "}
+        Fifteen times less RAM. Signal alone took 643 MB, with its background service switched
+        off. Canvas was driving the fan curves the whole time. Full method in{" "}
         <a className="site-readout-link" href={BENCHMARK}>
           docs/benchmark.md
         </a>
+        .
       </p>
     </section>
   );

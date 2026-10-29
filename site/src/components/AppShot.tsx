@@ -6,8 +6,8 @@ export function AppShot() {
       <div className="site-section-head">
         <h2 className="site-h2">The editor</h2>
         <p className="site-sub">
-          One layout for the devices in your case, the effect running across them, and the
-          settings for everything else.
+          Build your case on screen, then light it. The editor only costs memory while it&apos;s
+          open. Close it and its 360 MB goes with it.
         </p>
       </div>
       <Shot

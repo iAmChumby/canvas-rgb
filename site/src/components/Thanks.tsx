@@ -63,7 +63,8 @@ export function Thanks() {
       <div className="site-section-head">
         <h2 className="site-h2">Thanks</h2>
         <p className="site-sub">
-          canvas-rgb stands on other people&apos;s work. What each one made possible is in{" "}
+          Most of this hardware never shipped with docs. These projects cracked it first.
+          Canvas builds on what they found, with the details in{" "}
           <a
             className="site-readout-link"
             href="https://github.com/iAmChumby/canvas-rgb/blob/main/docs/thanks.md"

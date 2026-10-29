@@ -21,10 +21,9 @@ export function Install() {
         <span className="site-install-file fig">{SETUP}</span>
       </div>
       <p className="site-install-warning">
-        Windows will warn about an unknown publisher on first run; the installer is not
-        code-signed yet.
+        Windows flags an unknown publisher the first time. The installer isn&apos;t signed yet.
       </p>
-      <h3 className="site-install-sub">Build from source</h3>
+      <h3 className="site-install-sub">Developer build</h3>
       <div className="site-install">
         <div className="site-code">
           <pre>
@@ -36,14 +35,15 @@ export function Install() {
         </div>
         <div className="site-install-notes">
           <p className="site-note">
-            One admin prompt. It checks OpenRGB&apos;s SHA-256 before it runs anything.
+            One admin prompt. OpenRGB gets downloaded and its SHA-256 checked before anything
+            runs.
           </p>
           <p className="site-note">
             Fan control needs the{" "}
             <a className="site-readout-link" href={PAWNIO}>
               PawnIO
             </a>{" "}
-            driver, which the installer does not ship.
+            driver. Grab it separately.
           </p>
         </div>
       </div>

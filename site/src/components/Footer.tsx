@@ -5,9 +5,9 @@ export function Footer() {
     <footer className="site-footer">
       <div className="site-footer-inner">
         <p>
-          canvas-rgb is Apache-2.0.{" "}
-          <a href={`${REPO}/blob/main/NOTICE`}>NOTICE</a> lists the code and research this
-          builds on.
+          Canvas RGB is Apache-2.0.{" "}
+          <a href={`${REPO}/blob/main/NOTICE`}>NOTICE</a> lists the code and research it builds
+          on.
         </p>
         <p>Built by Luke.</p>
       </div>
