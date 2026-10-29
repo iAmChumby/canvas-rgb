@@ -45,6 +45,13 @@ export const SLOW_FPS = "slow-fps";
 export const SAVE_ERROR = "save-error";
 export const LINKS_CONNECTING = "links-connecting";
 export const FAN_CONNECTING = "fan-connecting";
+/** The onboarding's own states, for the screenshots and the walk. */
+export const OB_CONNECTING = "connecting"; // OpenRGB never finishes starting
+export const OB_WAKING = "waking"; // OpenRGB is starting for the first 4 s
+export const OB_NO_DEVICES = "no-devices"; // OpenRGB is up and sees nothing
+export const OB_FOUND_ON_RESCAN = "found-on-rescan"; // ...until the owner asks again
+export const OB_CONFLICT_CLEARS = "conflict-clears"; // SignalRGB quits 6 s after the page opens
+export const OB_COMPLETE = "complete"; // the onboarding was finished already
 
 /** The scenario tokens in the query string, the same way the demo reads them. */
 function tokens(): string[] {
@@ -106,6 +113,36 @@ export function fanConnecting(): boolean {
   return has(FAN_CONNECTING);
 }
 
+/** OpenRGB stays "connecting" for good. */
+export function openRgbConnecting(): boolean {
+  return has(OB_CONNECTING);
+}
+
+/** OpenRGB is "connecting" for this many ms after the page opened, then connected. 0 when off. */
+export function wakingMs(): number {
+  return has(OB_WAKING) ? 4000 : 0;
+}
+
+/** OpenRGB is up and no device is found. */
+export function noDevices(): boolean {
+  return has(OB_NO_DEVICES) || has(OB_FOUND_ON_RESCAN);
+}
+
+/** The devices appear once the owner has asked for a rescan. */
+export function foundOnRescan(): boolean {
+  return has(OB_FOUND_ON_RESCAN);
+}
+
+/** SignalRGB quits this many ms after the page opened. 0 when it stays. */
+export function conflictClearsMs(): number {
+  return has(OB_CONFLICT_CLEARS) ? 6000 : 0;
+}
+
+/** The onboarding was finished already. */
+export function onboardingDone(): boolean {
+  return has(OB_COMPLETE);
+}
+
 /** How long the demo waits before it answers. */
 export function answerDelayMs(): number {
   return slow() ? 700 : 2;
@@ -139,12 +176,14 @@ export function applyStatusScenarios(status: Status): Status {
   if (openRgbDown()) next = { ...next, openrgb: "down" };
   if (slowFps()) next = { ...next, fps_measured: 12 };
   if (linksConnecting()) next = { ...next, openrgb: "connecting", service: "connecting" };
+  if (openRgbConnecting()) next = { ...next, openrgb: "connecting" };
   if (fanConnecting()) next = { ...next, service: "connecting" };
   return next;
 }
 
 /** Applies the device scenarios: the first device reports no zones. */
 export function applyDeviceScenarios(devices: DeviceInfo[]): DeviceInfo[] {
+  if (noDevices()) return [];
   if (!deviceEmpty()) return devices;
   return devices.map((d, i) => (i === 0 ? { ...d, zones: [] } : d));
 }

@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { DownloadSimple, FolderOpen, UploadSimple } from "@phosphor-icons/react";
+import { useRouter } from "next/navigation";
+import { CompassTool, DownloadSimple, FolderOpen, UploadSimple } from "@phosphor-icons/react";
 import { Button, FileButton } from "@/components/Button";
 import { ColorField } from "@/components/ColorField";
 import { Field, Panel, StateDot } from "@/components/Panel";
@@ -44,6 +45,7 @@ export function SettingsView() {
   const [bootDraft, setBootDraft] = useState<string | null>(null);
   const inTray = tauriHost() !== null;
   const toast = useToast();
+  const router = useRouter();
 
   if (!settings) {
     return (
@@ -222,6 +224,24 @@ export function SettingsView() {
         </div>
 
         <div className="stack">
+          <Panel title="Lights">
+            <Field label="Map my PC" hint="Walk through every light again">
+              <Button
+                icon={<CompassTool size={16} />}
+                onClick={() => {
+                  try {
+                    window.sessionStorage.setItem("canvas-rgb.onboarding-remap", "1");
+                  } catch {
+                    // The address carries it instead.
+                  }
+                  router.push("/?map=1");
+                }}
+              >
+                Map my PC again
+              </Button>
+            </Field>
+          </Panel>
+
           <Panel title="Config">
             <Field label="Export">
               <Button icon={<DownloadSimple size={16} />} onClick={() => void doExport()}>

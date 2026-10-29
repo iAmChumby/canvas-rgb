@@ -3,7 +3,6 @@
 // crates/canvas-effects/src/*.rs, the devices from the spec's hardware list, and the fan
 // headers from the spine. The production path never reads this file.
 
-import { autoPlace } from "@/lib/caseForms";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { EffectSummary } from "@/proto/EffectSummary";
 import type { Layout } from "@/proto/Layout";
@@ -226,6 +225,20 @@ export const EFFECTS: DemoEffect[] = [
     ], false),
 ];
 
+/**
+ * The onboarding's two built-in effects. The daemon hides them from the effect list and still
+ * activates them by id; the demo does the same (see `isHiddenEffect`).
+ */
+export const ONBOARD_EFFECTS: DemoEffect[] = [
+  build("onboard-hello", "Hello", "One slow, soft wave of colour, then a calm glow.", NO_INPUT, [], [], false),
+  build("onboard-sweep", "Sweep", "A bright band crosses the canvas once.", NO_INPUT, [], [], false),
+];
+
+/** An effect the effect list never shows: the onboarding's own. */
+export function isHiddenEffect(id: string): boolean {
+  return id.startsWith("onboard-");
+}
+
 /** A user HTML effect, shown only with ?state=html so the HTML badge can be checked. */
 export const HTML_FIXTURE: DemoEffect = build(
   "html:fixture-sample", "Sample HTML", "Demo fixture: a user HTML effect.", NO_INPUT,
@@ -245,9 +258,13 @@ const zone = (index: number, name: string, kind: DeviceInfo["zones"][number]["ki
 
 /**
  * The machine as the daemon really sees it: the two ENE DRAM sticks, the HyperX Quadcast S,
- * the MSI Mystic Light with its four headers and the ROYUAN keyboard on the native adapter.
- * The ids, names, addresses and LED counts are the ones `GET /api/v1/devices` answers on
- * this PC, so the demo and the real thing look the same.
+ * the MSI Mystic Light with its four headers, the ROYUAN keyboard on the native adapter and the
+ * fan hubs that carry the case's seven fans.
+ *
+ * The fan hubs are the ones a header with several fans behind it looks like: one zone with
+ * forty LEDs, of which the first three fans take twelve each and the last four are unclaimed.
+ * The ids, names, addresses and LED counts of the real devices are the ones
+ * `GET /api/v1/devices` answers on this PC, so the demo and the real thing look the same.
  */
 export const DEVICES: DeviceInfo[] = [
   {
@@ -316,6 +333,19 @@ export const DEVICES: DeviceInfo[] = [
     zones: [zone(0, "Keyboard", { type: "single" }, 1, 1, 1, false)],
   },
   {
+    id: "openrgb:I2C: PawnIO SMBus PIIX4 0, address 0x75",
+    name: "ENE DRAM",
+    vendor: "ENE",
+    kind: "dram",
+    adapter: "openrgb",
+    adapter_index: 9,
+    serial: "",
+    location: "I2C: PawnIO SMBus PIIX4 0, address 0x75",
+    // A stick that was taken out of the machine: its part stays on the desk, dimmed.
+    connected: false,
+    zones: [zone(0, "DRAM", { type: "linear" }, 8, 8, 8, false)],
+  },
+  {
     id: "openrgb:fan-hub-1",
     name: "Lian Li UNI FAN",
     vendor: "Lian Li",
@@ -325,33 +355,253 @@ export const DEVICES: DeviceInfo[] = [
     serial: "fan-hub-1",
     location: "HID: \\\\?\\HID#VID_0CF2&PID_A100#fan-hub-1",
     connected: true,
-    zones: [zone(0, "Front fan", { type: "linear" }, 16, 16, 16, false)],
+    zones: [zone(0, "Front fan", { type: "linear" }, 40, 40, 40, false)],
+  },
+  {
+    id: "openrgb:fan-hub-2",
+    name: "Lian Li UNI FAN",
+    vendor: "Lian Li",
+    kind: "other",
+    adapter: "openrgb",
+    adapter_index: 5,
+    serial: "fan-hub-2",
+    location: "HID: \\\\?\\HID#VID_0CF2&PID_A100#fan-hub-2",
+    connected: true,
+    zones: [zone(0, "Floor fan", { type: "linear" }, 40, 40, 40, false)],
+  },
+  {
+    id: "openrgb:fan-hub-3",
+    name: "Lian Li UNI FAN",
+    vendor: "Lian Li",
+    kind: "other",
+    adapter: "openrgb",
+    adapter_index: 6,
+    serial: "fan-hub-3",
+    location: "HID: \\\\?\\HID#VID_0CF2&PID_A100#fan-hub-3",
+    connected: true,
+    zones: [zone(0, "Rear fan", { type: "linear" }, 16, 16, 16, false)],
+  },
+  {
+    id: "openrgb:gpu-1",
+    name: "ASUS TUF Gaming",
+    vendor: "ASUS",
+    kind: "gpu",
+    adapter: "openrgb",
+    adapter_index: 7,
+    serial: "gpu-1",
+    location: "HID: \\\\?\\HID#VID_1B4C&PID_1133#gpu-1",
+    connected: true,
+    zones: [zone(0, "Graphics card", { type: "linear" }, 16, 16, 16, false)],
+  },
+  {
+    id: "openrgb:mouse-1",
+    name: "Logitech G Pro X Superlight",
+    vendor: "Logitech",
+    kind: "mouse",
+    adapter: "openrgb",
+    adapter_index: 8,
+    serial: "mouse-1",
+    location: "HID: \\\\?\\HID#VID_046D&PID_C08B#mouse-1",
+    connected: true,
+    zones: [zone(0, "Mouse", { type: "single" }, 1, 1, 1, false)],
+  },
+  {
+    id: "openrgb:strip-1",
+    name: "Arctic Liquid Freezer III",
+    vendor: "Arctic",
+    kind: "led_strip",
+    adapter: "openrgb",
+    adapter_index: 9,
+    serial: "strip-1",
+    location: "HID: \\\\?\\HID#VID_0CF2&PID_A101#strip-1",
+    connected: true,
+    zones: [zone(0, "Strip", { type: "linear" }, 60, 60, 60, false)],
   },
 ];
 
-/** The active layout: the three JARGB headers, the keyboard, the microphone and the two
- *  DRAM sticks are placed; the MSI's fixed `JAF` header is not. */
+/**
+ * The demo desk: Luke's own PC, drawn the way the new editor draws it.
+ *
+ * The case is a box with a handle on every side (a landmark, not a form-factor picker). Inside
+ * it: three fans at the front pointing at the reader, three fans on the floor pointing up, a
+ * fan at the back, two sticks of RAM, a graphics card and a strip along the roof. On the desk:
+ * the keyboard, the mouse and the microphone.
+ *
+ * The three front fans share one header: the zone has forty LEDs, the fans take twelve each,
+ * and the last four belong to nobody and stay black. The scale is 4 mm to the canvas unit, so
+ * a 120 mm fan is thirty units and the case is 48 x 49 cm.
+ */
 export const LAYOUT_DESK: Layout = {
   id: "desk",
   name: "Desk",
   render_scale: 50,
   sampling: "area_average",
-  case_form: "mid_tower",
-  // The demo PC in a mid tower: fan in a fan position, RAM in the RAM slots, the three ARGB headers
-  // along the case edges, and the keyboard and microphone on the desk shelf (`autoPlace` is the
-  // same placement the daemon's first run makes). Two zones have the owner's own names.
+  case_form: "none",
+  landmarks: [
+    // The case: 120 x 122 units, 48 x 49 cm, standing on the desk line.
+    { kind: "case", x: 100, y: 27, width: 120, height: 122, rotation_deg: 0, facing: "viewer", visible: true },
+  ],
   zones: [
-    ...autoPlace("mid_tower", DEVICES, []).map((z) =>
-      z.device_id === "openrgb:A1B2C3D4E5F6" && z.zone_index === 1
-        ? { ...z, label: "Top strip" }
-        : z.device_id === "openrgb:A1B2C3D4E5F6" && z.zone_index === 2
-          ? { ...z, label: "Shelf light" }
-          : z,
-    ),
-    // The zone OpenRGB used for the keyboard, before the native adapter took it over. The
-    // daemon does not drive that device any more, so the zone draws nothing: the editor shows
-    // it as stale.
-    { device_id: "openrgb:HID: \\\\?\\HID#VID_3151&PID_4015&MI_02#9&298b2e71&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}", zone_index: 0, x: 14, y: 158, width: 110, height: 30, rotation_deg: 0, reversed: false, visible: true, shape: { type: "auto" } },
+    // The strip along the roof of the case.
+    {
+      device_id: "openrgb:strip-1",
+      zone_index: 0,
+      x: 106,
+      y: 30,
+      width: 100,
+      height: 5,
+      rotation_deg: 0,
+      reversed: false,
+      visible: true,
+      shape: { type: "strip" },
+      part: { kind: "strip", facing: "viewer", mapped: false },
+      label: "Roof strip",
+    },
+    // The three fans at the front, pointing at the reader: one header, three runs of LEDs.
+    ...([0, 1, 2] as const).map((i) => ({
+      device_id: "openrgb:fan-hub-1",
+      zone_index: 0,
+      x: 103,
+      y: 38 + i * 32,
+      width: 30,
+      height: 30,
+      rotation_deg: 0,
+      reversed: false,
+      visible: true,
+      shape: { type: "ring" } as const,
+      leds: { start: i * 12, count: 12 },
+      part: { kind: "fan" as const, facing: "viewer" as const, mapped: false },
+      label: `Front fan ${i + 1}`,
+    })),
+    // The three fans on the floor, pointing up: seen from the side, so they are bars.
+    ...([0, 1, 2] as const).map((i) => ({
+      device_id: "openrgb:fan-hub-2",
+      zone_index: 0,
+      x: 104 + i * 32,
+      y: 136,
+      width: 30,
+      height: 7,
+      rotation_deg: 0,
+      reversed: false,
+      visible: true,
+      shape: { type: "strip" } as const,
+      leds: { start: i * 12, count: 12 },
+      part: { kind: "fan" as const, facing: "up" as const, mapped: false },
+      label: `Floor fan ${i + 1}`,
+    })),
+    // The fan at the back of the case.
+    {
+      device_id: "openrgb:fan-hub-3",
+      zone_index: 0,
+      x: 186,
+      y: 38,
+      width: 30,
+      height: 30,
+      rotation_deg: 0,
+      reversed: false,
+      visible: true,
+      shape: { type: "ring" },
+      part: { kind: "fan", facing: "viewer", mapped: false },
+      label: "Rear fan",
+    },
+    // The two sticks of RAM, standing on the board.
+    {
+      device_id: "openrgb:I2C: PawnIO SMBus PIIX4 0, address 0x71",
+      zone_index: 0,
+      x: 140,
+      y: 42,
+      width: 6,
+      height: 34,
+      rotation_deg: 0,
+      reversed: false,
+      visible: true,
+      shape: { type: "strip" },
+      part: { kind: "ram", facing: "viewer", mapped: false },
+      label: "RAM 1",
+    },
+    {
+      device_id: "openrgb:I2C: PawnIO SMBus PIIX4 0, address 0x73",
+      zone_index: 0,
+      x: 148,
+      y: 42,
+      width: 6,
+      height: 34,
+      rotation_deg: 0,
+      reversed: false,
+      visible: true,
+      shape: { type: "strip" },
+      part: { kind: "ram", facing: "viewer", mapped: false },
+      label: "RAM 2",
+    },
+    // The stick of RAM that was taken out: its part stays where it was.
+    {
+      device_id: "openrgb:I2C: PawnIO SMBus PIIX4 0, address 0x75",
+      zone_index: 0,
+      x: 156,
+      y: 42,
+      width: 6,
+      height: 34,
+      rotation_deg: 0,
+      reversed: false,
+      visible: true,
+      shape: { type: "strip" },
+      part: { kind: "ram", facing: "viewer", mapped: false },
+      label: "RAM 3",
+    },
+    // The graphics card, under the board.
+    {
+      device_id: "openrgb:gpu-1",
+      zone_index: 0,
+      x: 140,
+      y: 120,
+      width: 70,
+      height: 14,
+      rotation_deg: 0,
+      reversed: false,
+      visible: true,
+      shape: { type: "strip" },
+      part: { kind: "gpu", facing: "viewer", mapped: false },
+    },
+    // The keyboard, the mouse and the microphone, on the desk.
+    {
+      device_id: "royuan:3151:4015",
+      zone_index: 0,
+      x: 16,
+      y: 158,
+      width: 110,
+      height: 30,
+      rotation_deg: 0,
+      reversed: false,
+      visible: true,
+      shape: { type: "grid", columns: 6 },
+      part: { kind: "keyboard", facing: "viewer", mapped: false },
+    },
+    {
+      device_id: "openrgb:mouse-1",
+      zone_index: 0,
+      x: 136,
+      y: 158,
+      width: 20,
+      height: 30,
+      rotation_deg: 0,
+      reversed: false,
+      visible: true,
+      shape: { type: "point" },
+      part: { kind: "mouse", facing: "viewer", mapped: false },
+    },
+    {
+      device_id: "openrgb:HID: \\\\?\\HID#VID_03F0&PID_028C&MI_00#a&eb32b1c&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}",
+      zone_index: 0,
+      x: 166,
+      y: 160,
+      width: 16,
+      height: 28,
+      rotation_deg: 0,
+      reversed: false,
+      visible: true,
+      shape: { type: "point" },
+      part: { kind: "microphone", facing: "viewer", mapped: false },
+    },
   ],
   // Aurora in the editor's own accents (--a1 blue, --a2 violet, --a3 teal): one calm picture
   // flowing across every device. The demo thumbnail is rendered with the same three colours.

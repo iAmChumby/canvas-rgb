@@ -44,6 +44,8 @@ export const api = {
   patchRender: (body: PatchRender) => request<RenderState>("PATCH", routes.render, body),
 
   devices: () => request<DevicesResponse>("GET", routes.devices),
+  /** The same list, asked for again on purpose (the onboarding's "Rescan"). */
+  rescanDevices: () => request<DevicesResponse>("GET", `${routes.devices}?rescan=1`),
   patchZone: (id: string, zone: number, body: PatchZone) =>
     request<unknown>("PATCH", routes.deviceZone(id, zone), body),
   identify: (id: string, body: IdentifyRequest) =>
@@ -91,6 +93,8 @@ export const api = {
   settings: () => request<Settings>("GET", routes.settings),
   putSettings: (body: Settings) => request<Settings>("PUT", routes.settings, body),
   dismissZonePanel: () => request<unknown>("POST", routes.dismissZonePanel),
+  /** The owner reached the end of the onboarding: the window stops opening by itself. */
+  completeOnboarding: () => request<unknown>("POST", routes.onboardingComplete),
 
   /** Every numeric display with its config and the value it shows now. */
   displays: () => request<DisplayStatus[]>("GET", routes.displays),

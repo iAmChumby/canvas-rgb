@@ -1,32 +1,58 @@
 import type { ReactNode } from "react";
-import type { DeviceKind } from "@/proto/DeviceKind";
+import type { Facing } from "@/proto/Facing";
+import type { PartKind } from "@/proto/PartKind";
+import { isFlat } from "@/views/editor/parts";
 import desk from "./desk.module.css";
 
 /**
- * What a zone is, drawn inside its box in thin lines: a fan is a hub with blades, a RAM stick
- * has a heat spreader and its gold contacts, a keyboard has rows of keys, a mouse has its
- * buttons and wheel, a microphone is a capsule on a stand, a headset is a band with two cups.
- * A strip is already a thin bar and needs none. The LEDs stay the dots on the overlay canvas, at
- * the places the daemon samples; this is only the picture around them.
+ * What a part looks like, drawn inside its own box in thin lines.
  *
- * The drawing is in a 100 x 100 box stretched to the zone (`preserveAspectRatio="none"`) with
- * lines that keep their pixel width.
+ * One glyph per kind of part, and the `facing` says which way it points, which is what decides
+ * the drawing: a fan that points at you shows its ring of blades, one that points up or down is
+ * seen from the side and is a thin bar with its LEDs along it. The picture matches what the
+ * engine samples, so the reader can trust it.
+ *
+ * The drawing is crude on purpose and it is the same everywhere: one stroke weight, two fills,
+ * no gradients, no shadows. The LEDs are the dots on the overlay canvas, at the places the
+ * daemon samples; this is only the picture around them.
+ *
+ * The drawing is in a 100 x 100 box stretched to the part's own box (`preserveAspectRatio="none"`)
+ * with lines that keep their pixel width.
  */
-export function ZoneArt({ kind, fan }: { kind: DeviceKind | null; fan: boolean }) {
-  const art = pick(kind, fan);
+export function PartArt({
+  kind,
+  facing = "viewer",
+  className,
+}: {
+  kind: PartKind;
+  facing?: Facing;
+  className?: string;
+}) {
+  const art = pick(kind, facing);
   if (!art) return null;
   return (
-    <svg className={desk.art} viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+    <svg className={`${desk.art} ${className ?? ""}`} viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
       {art}
     </svg>
   );
 }
 
-function pick(kind: DeviceKind | null, fan: boolean): ReactNode {
-  if (fan) return FAN;
+function pick(kind: PartKind, facing: Facing): ReactNode {
   switch (kind) {
-    case "dram":
+    case "fan":
+      return isFlat(facing) ? FAN_FLAT : facing === "left" || facing === "right" ? FAN_STANDING : FAN;
+    case "ram":
       return RAM;
+    case "gpu":
+      return GPU;
+    case "cpu":
+      return CPU;
+    case "pump":
+      return PUMP;
+    case "radiator":
+      return RADIATOR;
+    case "strip":
+      return STRIP;
     case "keyboard":
       return KEYBOARD;
     case "mouse":
@@ -35,74 +61,149 @@ function pick(kind: DeviceKind | null, fan: boolean): ReactNode {
       return MIC;
     case "headset":
       return HEADSET;
-    case "gpu":
-      return GPU;
+    case "case":
+      return CASE;
     default:
-      return null;
+      return GENERIC;
   }
 }
 
+/** A fan pointing at the reader: the bracket, its four holes, the blades and the hub notch. */
 const FAN = (
   <>
-    <circle cx={50} cy={50} r={11} />
-    {[0, 1, 2, 3, 4, 5, 6].map((i) => {
-      const a = (i / 7) * Math.PI * 2;
-      const p = (r: number, da: number) => `${50 + Math.cos(a + da) * r} ${50 + Math.sin(a + da) * r}`;
-      return <path key={i} d={`M${p(11, 0)} Q${p(26, 0.25)} ${p(33, 1.0)}`} />;
-    })}
+    <rect x={4} y={4} width={92} height={92} rx={6} />
+    {([
+      [13, 13],
+      [87, 13],
+      [13, 87],
+      [87, 87],
+    ] as const).map(([cx, cy]) => (
+      <circle key={`${cx}-${cy}`} cx={cx} cy={cy} r={2.6} />
+    ))}
+    <circle cx={50} cy={50} r={44} />
+    <circle cx={50} cy={50} r={9} className={desk.artFill} />
+    {/* The hub notch: the little tab at the top of the hub. */}
+    <path d="M46 6 H54 V14 H46 Z" className={desk.artFill} />
   </>
 );
 
-const RAM = (
+/** A fan seen from the side, lying flat: a bar with its LEDs along it. */
+const FAN_FLAT = (
   <>
-    {/* The heat spreader, with its notch at the top. */}
-    <path d="M14 3 H86 V84 H14 Z" />
-    <line x1={14} y1={14} x2={86} y2={14} />
-    <line x1={50} y1={20} x2={50} y2={76} />
-    {/* The contacts along the foot. */}
-    {[22, 34, 46, 58, 70, 80].map((x) => (
-      <line key={x} x1={x} y1={90} x2={x} y2={98} />
+    <rect x={2} y={28} width={96} height={44} rx={5} />
+    <line x1={2} y1={50} x2={98} y2={50} />
+    {[10, 22, 34, 46, 58, 70, 82, 92].map((x) => (
+      <line key={x} x1={x} y1={34} x2={x} y2={46} />
     ))}
   </>
 );
 
+/** A fan seen from the side, standing up. */
+const FAN_STANDING = (
+  <>
+    <rect x={28} y={2} width={44} height={96} rx={5} />
+    <line x1={50} y1={2} x2={50} y2={98} />
+    {[10, 22, 34, 46, 58, 70, 82, 92].map((y) => (
+      <line key={y} x1={34} y1={y} x2={46} y2={y} />
+    ))}
+  </>
+);
+
+/** A stick of RAM: the slot it sits in, the notch in its foot and its LEDs along the side. */
+const RAM = (
+  <>
+    <path d="M26 2 H74 V88 H58 V96 H42 V88 H26 Z" />
+    {[18, 30, 42, 54, 66, 78].map((y) => (
+      <line key={y} x1={74} y1={y} x2={88} y2={y} />
+    ))}
+  </>
+);
+
+/** A graphics card: a long box with the fans it carries, faint. */
+const GPU = (
+  <>
+    <rect x={2} y={6} width={96} height={86} rx={4} />
+    {/* The card's fans are panels, not lit details: the light of a card is in its LED row. */}
+    <circle cx={28} cy={49} r={19} className={desk.artPanel} />
+    <circle cx={64} cy={49} r={19} className={desk.artPanel} />
+    {/* The bracket at the back of the card. */}
+    <rect x={2} y={20} width={7} height={58} className={desk.artFill} />
+  </>
+);
+
+/** A CPU: a square with a notch in one corner. */
+const CPU = (
+  <>
+    <path d="M24 4 H96 V96 H4 V24 Z" />
+    {/* The chip's face is a panel: it is not lit by the part's own LEDs. */}
+    <rect x={26} y={26} width={48} height={48} rx={2} className={desk.artPanel} />
+  </>
+);
+
+/** A pump head: the cap, the motor and its mount. */
+const PUMP = (
+  <>
+    <circle cx={50} cy={42} r={32} />
+    <circle cx={50} cy={42} r={16} className={desk.artFill} />
+    <path d="M44 74 H56 V90 H44 Z" />
+    <line x1={26} y1={90} x2={74} y2={90} />
+  </>
+);
+
+/** A radiator: a wide box with its fins. */
+const RADIATOR = (
+  <>
+    <rect x={2} y={14} width={96} height={72} rx={3} />
+    {[12, 22, 32, 42, 52, 62, 72, 82, 92].map((x) => (
+      <line key={x} x1={x} y1={20} x2={x} y2={80} />
+    ))}
+  </>
+);
+
+/** A strip: a bar with its LEDs along it. */
+const STRIP = (
+  <>
+    <rect x={1} y={36} width={98} height={28} rx={3} />
+    {[8, 20, 32, 44, 56, 68, 80, 92].map((x) => (
+      <circle key={x} cx={x} cy={50} r={4} className={desk.artFill} />
+    ))}
+  </>
+);
+
+/** A keyboard: a slab and the rows of keys. */
 const KEYBOARD = (
   <>
-    <rect x={1} y={4} width={98} height={92} rx={6} />
-    {[12, 31, 50].map((y, r) =>
-      Array.from({ length: r === 1 ? 12 : 13 }, (_, i) => {
-        const w = (94 - (r === 1 ? 11 : 12) * 1.6) / (r === 1 ? 12 : 13);
-        return <rect key={`${y}-${i}`} x={3 + i * (w + 1.6) + (r === 1 ? 3 : 0)} y={y} width={w} height={14} rx={1.5} />;
-      }),
-    )}
-    <rect x={3} y={72} width={14} height={14} rx={1.5} />
-    <rect x={20} y={72} width={56} height={14} rx={1.5} />
-    <rect x={79} y={72} width={18} height={14} rx={1.5} />
+    <rect x={1} y={8} width={98} height={84} rx={5} />
+    <line x1={8} y1={30} x2={92} y2={30} />
+    <line x1={8} y1={50} x2={92} y2={50} />
+    <line x1={8} y1={70} x2={92} y2={70} />
+    <line x1={8} y1={86} x2={92} y2={86} />
   </>
 );
 
+/** A mouse: its shell, the split and the wheel. */
 const MOUSE = (
   <>
-    <rect x={8} y={2} width={84} height={96} rx={40} />
-    <line x1={8} y1={40} x2={92} y2={40} />
-    <line x1={50} y1={2} x2={50} y2={40} />
-    <rect x={44} y={14} width={12} height={18} rx={5} />
+    <rect x={10} y={2} width={80} height={96} rx={38} />
+    <line x1={10} y1={42} x2={90} y2={42} />
+    <line x1={50} y1={4} x2={50} y2={42} />
+    <rect x={44} y={14} width={12} height={18} rx={5} className={desk.artFill} />
   </>
 );
 
+/** A microphone: the capsule, its grille and the stand. */
 const MIC = (
   <>
-    {/* The capsule and its grille. */}
     <rect x={26} y={2} width={48} height={48} rx={24} />
     <line x1={26} y1={18} x2={74} y2={18} />
-    <line x1={26} y1={30} x2={74} y2={30} />
-    {/* The shock mount, the stem and the foot. */}
+    <line x1={26} y1={32} x2={74} y2={32} />
     <path d="M14 30 V42 Q14 66 50 66 Q86 66 86 42 V30" />
     <line x1={50} y1={66} x2={50} y2={90} />
-    <line x1={26} y1={96} x2={74} y2={96} />
+    <line x1={26} y1={94} x2={74} y2={94} />
   </>
 );
 
+/** A headset: the band and its two cups. */
 const HEADSET = (
   <>
     <path d="M10 56 C10 -6 90 -6 90 56" />
@@ -111,11 +212,18 @@ const HEADSET = (
   </>
 );
 
-const GPU = (
+/** The case: the box, and the panel we look through. */
+const CASE = (
   <>
-    <rect x={0.5} y={3} width={99} height={88} rx={6} />
-    <line x1={33.5} y1={3} x2={33.5} y2={91} />
-    <line x1={66.5} y1={3} x2={66.5} y2={91} />
-    <line x1={8} y1={97} x2={92} y2={97} />
+    <rect x={3} y={3} width={94} height={94} rx={6} />
+    <rect x={11} y={11} width={78} height={78} rx={4} className={desk.artFill} />
+  </>
+);
+
+/** A box: a plain rectangle with a corner mark, so it reads as "something else". */
+const GENERIC = (
+  <>
+    <rect x={6} y={6} width={88} height={88} rx={4} />
+    <rect x={6} y={6} width={22} height={10} className={desk.artFill} />
   </>
 );

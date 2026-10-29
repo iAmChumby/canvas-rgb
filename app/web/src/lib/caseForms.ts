@@ -11,6 +11,7 @@
 import type { CaseForm } from "@/proto/CaseForm";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { DeviceKind } from "@/proto/DeviceKind";
+import type { Landmark } from "@/proto/Landmark";
 import type { PlacedZone } from "@/proto/PlacedZone";
 import type { ZoneInfo } from "@/proto/ZoneInfo";
 import type { ZoneShape } from "@/proto/ZoneShape";
@@ -64,7 +65,6 @@ export interface CaseDims {
  * Boards: ATX 305 x 244 mm, E-ATX 305 x 330 mm, mini-ITX 170 x 170 mm.
  */
 export const MM_PER_UNIT = 4;
-
 const FAN = 30; // 120 mm
 const MARGIN = 7; // from the case edge to the first fan
 const mm = (v: number) => Math.round(v / MM_PER_UNIT);
@@ -113,6 +113,72 @@ export const CASE_OPTIONS: { value: CaseForm; label: string }[] = [
   { value: "small_form_factor", label: "Small (ITX)" },
   { value: "open_frame", label: "Open frame" },
 ];
+
+/**
+ * The case a new desk starts with: a mid tower, 48 x 49 cm. The case is one box with eight
+ * handles from here on, so this is the only starting size there is.
+ */
+export const CASE_START_FORM: Exclude<CaseForm, "none"> = "mid_tower";
+
+/** The measurements of one case form, or null when the form is "no case". */
+export function caseDimsFor(form: CaseForm): CaseDims | null {
+  if (form === "none") return null;
+  return DIMS[form];
+}
+
+/**
+ * The case box a saved form draws as: the same measurements, as a landmark the owner can drag
+ * and resize. A layout saved before landmarks existed has a form and no box: the editor draws
+ * this one until the daemon migrates it.
+ */
+export function caseLandmarkFor(form: CaseForm): Landmark | null {
+  const d = caseDimsFor(form);
+  if (!d) return null;
+  return {
+    kind: "case",
+    x: d.x,
+    y: d.y,
+    width: d.w,
+    height: d.h,
+    rotation_deg: 0,
+    facing: "viewer",
+    visible: true,
+  };
+}
+
+/**
+ * The lines a part can sit against inside a case: the box's edges, its middle and its panels.
+ * The side we look at is the glass; the front and the back are the two ends of the box.
+ */
+export function caseSnapLines(d: CaseDims): { x: number[]; y: number[] } {
+  return {
+    x: [d.x, d.x + d.w / 2, d.x + d.w],
+    y: [d.y, d.y + d.h / 2, d.y + d.h],
+  };
+}
+
+/**
+ * The slots of a case of any size: the reference case's slots, moved and scaled to where this
+ * case actually is. A case the owner has dragged and resized still has a fan place and a RAM
+ * slot, and they are in the right places for it.
+ */
+export function slotsForBox(
+  box: { x: number; y: number; width: number; height: number },
+  form: Exclude<CaseForm, "none"> = CASE_START_FORM,
+): Slot[] {
+  const spec = caseSpec(form);
+  if (!spec) return [];
+  const d = spec.dims;
+  const sx = d.w > 0 ? box.width / d.w : 1;
+  const sy = d.h > 0 ? box.height / d.h : 1;
+  return spec.slots.map((s) => ({
+    ...s,
+    x: box.x + (s.x - d.x) * sx,
+    y: box.y + (s.y - d.y) * sy,
+    w: s.w * sx,
+    h: s.h * sy,
+  }));
+}
 
 export interface CaseSpec {
   form: Exclude<CaseForm, "none">;

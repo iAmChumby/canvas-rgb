@@ -9,8 +9,8 @@ import {
   ArrowUp,
   CaretDown,
   CaretUp,
+  CompassTool,
   CircleDashed,
-  Cube,
   DotOutline,
   DotsThree,
   FloppyDisk,
@@ -25,6 +25,7 @@ import { Button, IconButton, Swap } from "@/components/Button";
 import { Panel, Field } from "@/components/Panel";
 import { Segmented } from "@/components/Segmented";
 import { NumberField, TextField } from "@/components/NumberField";
+import { Select } from "@/components/Select";
 import { Slider } from "@/components/Slider";
 import { Toggle } from "@/components/Toggle";
 import { Chip, RowButton } from "@/components/Chip";
@@ -33,21 +34,51 @@ import { Popover } from "@/components/Popover";
 import { Thumb } from "@/components/Thumb";
 import { useMediaQuery } from "@/components/MediaQuery";
 import { KindIcon } from "@/components/KindIcon";
-import { autoPlace } from "@/lib/caseForms";
-import { PreviewStage } from "@/views/PreviewStage";
+import { PreviewStage, type CaseGuide, type StageMode } from "@/views/PreviewStage";
+import { Onboarding } from "@/views/editor/Onboarding";
+import { putOffUntilNextLaunch, shouldOpen, type Scope } from "@/views/editor/flow";
+import { useNewLights } from "@/views/editor/newLights";
 import { PropertyControls, type Values } from "@/views/PropertyControls";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
 import { usePreviewStatus } from "@/lib/preview";
 import { usePrefersReducedMotion } from "@/lib/motion";
 import { getSnap, patchSnap, refreshAll, refreshLayouts, refreshSettings, useSnap } from "@/lib/store";
-import { defaultRect, defaultShape, findZoneInfo, plainName, reshapeBox, resolveShape, SHAPE_LABEL, SHAPE_ORDER } from "@/lib/zones";
+import {
+  defaultRect,
+  defaultShape,
+  findZoneInfo,
+  formatUnits,
+  initialUnit,
+  rememberUnit,
+  lengthNumber,
+  mmFromLength,
+  placementName,
+  plainName,
+  reshapeBox,
+  resolveShape,
+  SHAPE_LABEL,
+  SHAPE_ORDER,
+  unitWord,
+  zoneKey,
+  type LengthUnit,
+} from "@/lib/zones";
 import { clamp } from "@/lib/format";
-import type { CaseForm } from "@/proto/CaseForm";
+import {
+  FACINGS,
+  FACING_LABEL,
+  LANDMARK_KINDS,
+  PART_LABEL,
+  PART_SIZE,
+  type Sel,
+} from "@/views/editor/parts";
+import type { Facing } from "@/proto/Facing";
+import type { Landmark } from "@/proto/Landmark";
 import type { Layout } from "@/proto/Layout";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { EffectDetail } from "@/proto/EffectDetail";
 import type { EffectSummary } from "@/proto/EffectSummary";
+import type { PartKind } from "@/proto/PartKind";
 import type { PlacedZone } from "@/proto/PlacedZone";
 import type { PropValue } from "@/proto/PropValue";
 import type { PropertySchema } from "@/proto/PropertySchema";
@@ -63,6 +94,8 @@ const CANVAS_W = 320;
 const CANVAS_H = 200;
 /** A value of the running effect reaches the daemon this long after the last change (ms). */
 const PROPS_DEBOUNCE_MS = 60;
+/** Where the unit and the mode are remembered. */
+const MODE_KEY = "canvas-rgb.mode";
 
 /**
  * The layout as it is on the page, and the steps that led to it. The past is what undo takes
@@ -317,7 +350,7 @@ export function LayoutView() {
   const layoutsError = useSnap((s) => s.layoutsError);
 
   const [base, setBase] = useState<Layout | null>(null);
-  const [selected, setSelected] = useState<number | null>(null);
+  const [selection, setSelection] = useState<Sel[]>([]);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   /**
@@ -334,6 +367,27 @@ export function LayoutView() {
    * inspector follows the pointer without the drag re-rendering the canvas every move.
    */
   const [liveZone, setLiveZone] = useState<{ index: number; zone: PlacedZone } | null>(null);
+  /** The unit every size is read in: centimetres or inches. */
+  const [unit, setUnitState] = useState<LengthUnit>(initialUnit);
+  /** The owner picked a unit: it is used now and remembered. */
+  const setUnit = (u: LengthUnit) => {
+    setUnitState(u);
+    rememberUnit(u);
+  };
+  /** What the canvas shows: the effect under the parts, or the lights themselves. */
+  const [mode, setMode] = useState<StageMode>(() => {
+    try {
+      const m = window.localStorage.getItem(MODE_KEY);
+      if (m === "effect" || m === "lights") return m;
+    } catch {
+      // Not remembered, still used for this session.
+    }
+    return "effect";
+  });
+  /** The onboarding that maps the owner's PC: open, and the part it is limited to (if any). */
+  const [onboarding, setOnboarding] = useState<{ scope: Scope | null; again: boolean } | null>(null);
+  /** The LED the setup's walker has lit: the desk marks it. */
+  const [litLed, setLitLed] = useState<{ deviceId: string; zoneIndex: number; led: number; count?: number } | null>(null);
   /**
    * On a phone the canvas is at the top of the page and the inspector is under it: picking a
    * zone has to bring the inspector into view, and the reader needs a way back to the canvas.
@@ -342,10 +396,23 @@ export function LayoutView() {
   const reduced = usePrefersReducedMotion();
   const stageRef = useRef<HTMLDivElement>(null);
   const inspectorRef = useRef<HTMLDivElement>(null);
+  /** The "add a part" menu hangs under its button. */
+  const addRef = useRef<HTMLSpanElement>(null);
+  const [adding, setAdding] = useState(false);
 
   const serverKey = server ? JSON.stringify(server) : "";
   const dirty =
     draft !== null && base !== null && JSON.stringify(withoutEffect(draft)) !== JSON.stringify(withoutEffect(base));
+
+  // The unit, the mode and the locked parts are the reader's own choices: they are remembered
+  // on this machine, not in the layout.
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(MODE_KEY, mode);
+    } catch {
+      // Not remembered, still used for this session.
+    }
+  }, [mode]);
 
   // Take the server's layout whenever it changes and there are no unsaved edits. This runs during
   // render (React's pattern for state that follows a prop), so the page never shows a stale frame.
@@ -409,33 +476,45 @@ export function LayoutView() {
     clearInterval(run.timer);
     void api.identify(run.deviceId, { zone: run.zone, led: 0, stop: true }).catch(() => undefined);
   }, []);
-  const startIdentify = (index: number) => {
+  /**
+   * Shows where a part is. The engine shows nothing else while it runs, so a chase (one LED
+   * running along the part, to read its direction) or the whole part lit is easy to find. The
+   * engine ends it a few seconds after the last request, so the whole-part light asks again.
+   */
+  const startIdentify = (index: number, how: "chase" | "whole" = "chase") => {
     stopIdentify();
     const z = draft?.zones[index];
     const info = z ? findZoneInfo(devices, z.device_id, z.zone_index) : null;
     if (!z || !info) return;
     const count = Math.max(1, info.zone.led_count);
+    const whole = how === "whole";
     let tick = 0;
     const step = () => {
-      if (tick >= 40) {
+      if (tick >= (whole ? 30 : 40)) {
         stopIdentify();
         return;
       }
       void api
-        .identify(z.device_id, { zone: z.zone_index, led: tick % count, stop: false })
+        .identify(
+          z.device_id,
+          whole
+            ? { zone: z.zone_index, led: 0, ...(count > 1 ? { count } : {}), stop: false }
+            : { zone: z.zone_index, led: tick % count, stop: false },
+        )
         .catch(() => undefined);
       tick += 1;
     };
     step();
-    identifyRef.current = { timer: setInterval(step, 125), deviceId: z.device_id, zone: z.zone_index };
+    identifyRef.current = { timer: setInterval(step, whole ? 2000 : 125), deviceId: z.device_id, zone: z.zone_index };
     setIdentifying(index);
   };
   // Leaving the page ends the walk: no LED stays lit.
   useEffect(() => stopIdentify, [stopIdentify]);
-  // Picking another zone ends it too.
-  const selectZone = (index: number | null) => {
-    if (identifying !== null && identifying !== index) stopIdentify();
-    setSelected(index);
+  // Picking another part ends it too.
+  const select = (sel: Sel[]) => {
+    const first = sel[0];
+    if (identifying !== null && (!first || first.kind !== "zone" || first.index !== identifying)) stopIdentify();
+    setSelection(sel);
   };
 
   const unplaced = useMemo(() => {
@@ -458,12 +537,16 @@ export function LayoutView() {
   }, [draft, devices]);
 
   const zones = draft?.zones ?? [];
-  const selectedZone = selected !== null ? zones[selected] ?? null : null;
+  const landmarks = draft?.landmarks ?? [];
+  /** The part that is picked: the first of the selection. */
+  const primary = selection[0] ?? null;
+  const selectedZone = primary?.kind === "zone" ? zones[primary.index] ?? null : null;
+  const selectedLandmark = primary?.kind === "landmark" ? landmarks[primary.index] ?? null : null;
   const selectedInfo = selectedZone ? findZoneInfo(devices, selectedZone.device_id, selectedZone.zone_index) : null;
   const selectedPlain = plainName(devices, selectedZone?.device_id ?? "", selectedZone?.zone_index ?? 0);
   const preview = usePreviewStatus();
   // While a zone is being dragged the inspector shows where it is, not where it was.
-  const shownZone = liveZone && liveZone.index === selected ? liveZone.zone : selectedZone;
+  const shownZone = liveZone && primary?.kind === "zone" && liveZone.index === primary.index ? liveZone.zone : selectedZone;
   // The running effect: the editor draws it itself when the daemon's preview is not connected.
   const runningEffect = server?.effect ?? null;
   const runningId = runningEffect?.id ?? null;
@@ -620,19 +703,6 @@ export function LayoutView() {
     });
   }, []);
 
-  /**
-   * Picks the PC form factor drawn behind the zones. Choosing a case puts every device in its
-   * place in it (fans in the fan positions, RAM in the RAM slots, headers along the case edges,
-   * the keyboard and mic on the desk) as one change, so one undo step. "No case" only takes the
-   * drawing away and leaves every zone where it is.
-   */
-  const chooseCase = useCallback(
-    (form: CaseForm) => {
-      commit((l) => ({ ...l, case_form: form, zones: autoPlace(form, devices, l.zones) }));
-    },
-    [commit, devices],
-  );
-
   const undo = useCallback(() => {
     setEdit((e) => {
       const prev = e.past[e.past.length - 1];
@@ -671,12 +741,64 @@ export function LayoutView() {
     return () => window.removeEventListener("keydown", onKey);
   }, [undo, redo]);
 
-  const changeZone = (index: number, patch: Partial<PlacedZone>) => {
-    commit((l) => ({
-      ...l,
-      zones: l.zones.map((z, i) => (i === index ? { ...z, ...patch } : z)),
-    }));
-  };
+  /**
+   * A change to one or more zones, as one undo step: a drag that moved three parts is one step,
+   * not three.
+   */
+  const changeZones = useCallback(
+    (patches: { index: number; patch: Partial<PlacedZone> }[]) => {
+      if (patches.length === 0) return;
+      commit((l) => ({
+        ...l,
+        zones: l.zones.map((z, i) => {
+          const hit = patches.find((p) => p.index === i);
+          return hit ? { ...z, ...hit.patch } : z;
+        }),
+      }));
+    },
+    [commit],
+  );
+
+  /** A change to a landmark: the case, a CPU, a box. */
+  const changeLandmark = useCallback(
+    (index: number, patch: Partial<Landmark>) => {
+      commit((l) => ({
+        ...l,
+        landmarks: (l.landmarks ?? []).map((m, i) => (i === index ? { ...m, ...patch } : m)),
+      }));
+    },
+    [commit],
+  );
+
+  /** Puts a part on the desk that has no lights of its own: a CPU, a dark GPU, a box, a case. */
+  const addLandmark = useCallback(
+    (kind: PartKind) => {
+      const size = PART_SIZE[kind];
+      const at = { x: CANVAS_W / 2 - size.width / 2, y: CANVAS_H / 2 - size.height / 2 };
+      const landmark: Landmark = {
+        kind,
+        x: at.x,
+        y: at.y,
+        width: size.width,
+        height: size.height,
+        rotation_deg: 0,
+        facing: "viewer",
+        visible: true,
+      };
+      commit((l) => ({ ...l, landmarks: [...(l.landmarks ?? []), landmark] }));
+      setSelection([{ kind: "landmark", index: (draft?.landmarks ?? []).length }]);
+    },
+    [commit, draft],
+  );
+
+  /** Takes a landmark off the desk. */
+  const removeLandmark = useCallback(
+    (index: number) => {
+      commit((l) => ({ ...l, landmarks: (l.landmarks ?? []).filter((_, i) => i !== index) }));
+      setSelection([]);
+    },
+    [commit],
+  );
 
   const place = (deviceId: string, zoneIndex: number, at?: { x: number; y: number }) => {
     const info = findZoneInfo(devices, deviceId, zoneIndex);
@@ -698,14 +820,14 @@ export function LayoutView() {
       shape,
     };
     commit((l) => ({ ...l, zones: [...l.zones, placedZone] }));
-    setSelected(draft.zones.length);
+    setSelection([{ kind: "zone", index: draft.zones.length }]);
   };
 
   const unplace = useCallback(
     (index: number) => {
       stopIdentify();
       commit((l) => ({ ...l, zones: l.zones.filter((_, i) => i !== index) }));
-      setSelected(null);
+      setSelection([]);
     },
     [commit, stopIdentify],
   );
@@ -732,6 +854,106 @@ export function LayoutView() {
     }
   };
 
+  // While the onboarding is open every change is saved a moment after it is made, so what the
+  // owner has mapped survives a closed window. A failed save is not retried in a loop.
+  const saveRef = useRef(save);
+  useEffect(() => {
+    saveRef.current = save;
+  });
+  useEffect(() => {
+    if (!onboarding || !dirty || saving || dragging || saveError) return;
+    const t = setTimeout(() => void saveRef.current(), 600);
+    return () => clearTimeout(t);
+  }, [onboarding, dirty, saving, dragging, saveError, draft]);
+
+  /** Every part with lights is unconfirmed again, so the flow walks all of them. */
+  const remapAll = useCallback(() => {
+    commit((l) => ({
+      ...l,
+      zones: l.zones.map((z) => (z.part ? { ...z, part: { ...z.part, mapped: false } } : z)),
+    }));
+    setSelection([]);
+    setOnboarding({ scope: null, again: true });
+  }, [commit]);
+
+  /** One device again, from its row. */
+  const remapOne = useCallback(
+    (index: number) => {
+      const z = draft?.zones[index];
+      if (!z) return;
+      const scope: Scope = { deviceId: z.device_id, zoneIndex: z.zone_index };
+      commit((l) => ({
+        ...l,
+        zones: l.zones.map((p) =>
+          p.device_id === scope.deviceId && p.zone_index === scope.zoneIndex && p.part
+            ? { ...p, part: { ...p.part, mapped: false } }
+            : p,
+        ),
+      }));
+      setSelection([]);
+      setOnboarding({ scope, again: true });
+    },
+    [commit, draft],
+  );
+
+  // The onboarding opens by itself, once per page load: while the daemon says it is not finished
+  // (and the owner has not said "Set up later" in this launch), or when the owner came here to
+  // map the PC again (from Settings).
+  const status = useSnap((st) => st.status);
+  const newLights = useNewLights(devices, status?.onboarding_complete === true);
+  const decided = useRef(false);
+  useEffect(() => {
+    if (decided.current || !draft || !devices || !status) return;
+    decided.current = true;
+    let again = false;
+    try {
+      const q = new URLSearchParams(window.location.search).get("map") === "1";
+      const kept = window.sessionStorage.getItem("canvas-rgb.onboarding-remap") === "1";
+      window.sessionStorage.removeItem("canvas-rgb.onboarding-remap");
+      again = q || kept;
+      if (q) window.history.replaceState(null, "", window.location.pathname);
+    } catch {
+      // Not asked for; the automatic rule decides.
+    }
+    if (again) remapAll();
+    // A one-time decision when the layout first arrives, so it is made in this effect.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    else if (shouldOpen(status)) setOnboarding({ scope: null, again: false });
+  }, [draft, devices, status, remapAll]);
+
+  /** Closes the flow, and saves what is unsaved. */
+  const closeOnboarding = () => {
+    stopIdentify();
+    setLitLed(null);
+    setSelection([]);
+    setOnboarding(null);
+    if (dirty && !saving) void save();
+  };
+
+  /** "Set up later": the window stays shut until the next app start. */
+  const laterOnboarding = () => {
+    putOffUntilNextLaunch();
+    closeOnboarding();
+  };
+
+  /** The case box the flow sizes: made at a typical mid-size tower when the layout has none. */
+  const ensureCase = () => {
+    const lms = draft?.landmarks ?? [];
+    let i = lms.findIndex((l) => l.kind === "case");
+    if (i < 0) {
+      const size = PART_SIZE.case;
+      commit((l) => ({
+        ...l,
+        landmarks: [
+          ...(l.landmarks ?? []),
+          { kind: "case", x: 100, y: 27, width: size.width, height: size.height, rotation_deg: 0, facing: "viewer", visible: true },
+        ],
+      }));
+      i = lms.length;
+    }
+    setSelection([{ kind: "landmark", index: i }]);
+  };
+
   const onDropUnplaced = (deviceId: string, zoneIndex: number, x: number, y: number) => {
     place(deviceId, zoneIndex, { x, y });
   };
@@ -745,11 +967,11 @@ export function LayoutView() {
     [reduced],
   );
 
-  // Picking a zone reveals its inspector: on a phone the two are a screen apart.
+  // Picking a part reveals its inspector: on a phone the two are a screen apart.
   useEffect(() => {
-    if (!phone || selected === null) return;
+    if (!phone || selection.length === 0) return;
     reveal(inspectorRef.current);
-  }, [phone, selected, reveal]);
+  }, [phone, selection, reveal]);
 
   /** The way back to the canvas. */
   const backToCanvas = () => {
@@ -778,37 +1000,125 @@ export function LayoutView() {
     );
   }
 
+  const renderStage = (
+    pulse: Sel[] = [],
+    onSelectStage: (sel: Sel[]) => void = select,
+    extra: {
+      spotlight?: Sel[] | null;
+      onHoverPart?: (sel: Sel | null) => void;
+      guides?: CaseGuide[];
+      unlockBadge?: boolean;
+    } = {},
+  ) => (
+    <PreviewStage
+      zones={zones}
+      landmarks={landmarks}
+      devices={devices}
+      selection={selection}
+      onSelect={onSelectStage}
+      onChangeZones={changeZones}
+      onChangeLandmark={changeLandmark}
+      onDrop={onDropUnplaced}
+      onDraggingChange={(d) => {
+        setDragging(d);
+        if (!d) setLiveZone(null);
+      }}
+      onLiveChange={(index, zone) => setLiveZone({ index, zone })}
+      layoutId={draft.id}
+      dropPayloadType={DROP_TYPE}
+      effect={runningEffect ? { id: runningEffect.id, props: liveProps } : null}
+      effectNeedsInput={effectNeedsInput}
+      sampling={draft.sampling}
+      identifying={identifying}
+      mode={mode}
+      onMode={setMode}
+      unit={unit}
+      caseForm={draft.case_form}
+      pulse={pulse}
+      litLed={litLed}
+      spotlight={extra.spotlight ?? null}
+      onHoverPart={extra.onHoverPart}
+      guides={extra.guides}
+      unlockBadge={extra.unlockBadge}
+    />
+  );
+
+  if (onboarding) {
+    return (
+      <div className="onboarding-page">
+        <Onboarding
+          layout={draft}
+          devices={devices}
+          scope={onboarding.scope}
+          again={onboarding.again}
+          unit={unit}
+          onUnit={setUnit}
+          selection={selection}
+          canvas={({ pulse, onSelect, ...extra }) => renderStage(pulse, onSelect, extra)}
+          onChange={(fn) => commit(fn)}
+          onSelect={select}
+          onEnsureCase={ensureCase}
+          onAddPart={addLandmark}
+          onChase={(index) => startIdentify(index)}
+          onFlash={(index) => startIdentify(index, "whole")}
+          onLit={setLitLed}
+          onLater={laterOnboarding}
+          onFinished={closeOnboarding}
+          saveError={saveError}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="stack">
       <div className="page-head">
         <h1>{draft.name}</h1>
+        <Button
+          variant="default"
+          icon={<CompassTool size={16} />}
+          onClick={remapAll}
+          style={{ marginLeft: "auto" }}
+        >
+          Map my PC again
+        </Button>
       </div>
+
+      {newLights.fresh.length > 0 && (
+        <div className="new-light" role="status">
+          <span className="new-light-dot" aria-hidden="true" />
+          <span className="new-light-text">
+            <strong>
+              {newLights.fresh.length} new {newLights.fresh.length === 1 ? "light" : "lights"}
+            </strong>
+            <span className="mute one-line">{newLights.fresh.map((d) => d.name).join(", ")}</span>
+          </span>
+          <Button
+            size="sm"
+            onClick={() => {
+              const d = newLights.fresh[0];
+              const z = d?.zones.find((x) => x.led_count > 0);
+              if (d && z) {
+                place(d.id, z.index);
+                newLights.dismiss(d.id);
+              }
+            }}
+          >
+            Place it
+          </Button>
+          <IconButton
+            label="Dismiss"
+            size="sm"
+            icon={<X size={14} />}
+            onClick={() => newLights.fresh.forEach((d) => newLights.dismiss(d.id))}
+          />
+        </div>
+      )}
 
       <div className="layout-grid">
         <div className="layout-stage-col stack">
           <div className="layout-canvas" ref={stageRef}>
-            <PreviewStage
-              zones={zones}
-              devices={devices}
-              selected={selected}
-              onSelect={selectZone}
-              onChange={changeZone}
-              onDrop={onDropUnplaced}
-              onRemoveZone={unplace}
-              onDraggingChange={(d) => {
-                setDragging(d);
-                if (!d) setLiveZone(null);
-              }}
-              onLiveChange={(index, zone) => setLiveZone({ index, zone })}
-              layoutId={draft.id}
-              dropPayloadType={DROP_TYPE}
-              effect={runningEffect ? { id: runningEffect.id, props: liveProps } : null}
-              effectNeedsInput={effectNeedsInput}
-              sampling={draft.sampling}
-              identifying={identifying}
-              caseForm={draft.case_form}
-              onCaseForm={chooseCase}
-            />
+            {renderStage()}
             <div className="stage-meta">
               <span className="dropzone-hint" />
               <span className="row-wrap" style={{ alignItems: "center", gap: "var(--s3)" }}>
@@ -901,12 +1211,59 @@ export function LayoutView() {
           </div>
 
           <div className="layout-zones">
-            <Panel title={selectedZone ? "Zone" : "Zones"}>
-              {shownZone && selected !== null ? (
+            <Panel
+              title={selectedZone ? "Zone" : selectedLandmark ? "Part" : "Parts"}
+              actions={
+                <span className="row-wrap" style={{ alignItems: "center", gap: "var(--s2)" }}>
+                  <Segmented<LengthUnit>
+                    label="The unit every size is read in"
+                    value={unit}
+                    options={[
+                      { value: "cm", label: "cm" },
+                      { value: "in", label: "in" },
+                    ]}
+                    onChange={setUnit}
+                  />
+                  <span ref={addRef} className="row-wrap" style={{ alignItems: "center" }}>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      icon={<Plus size={14} />}
+                      onClick={() => setAdding(true)}
+                    >
+                      Add part
+                    </Button>
+                  </span>
+                  <Popover
+                    anchor={addRef}
+                    open={adding}
+                    onClose={() => setAdding(false)}
+                    label="Add a part to the desk"
+                  >
+                    <div className={desk.nowPicker}>
+                      {LANDMARK_KINDS.map((kind) => (
+                        <Chip
+                          key={kind}
+                          label={`Add a ${PART_LABEL[kind]}`}
+                          onClick={() => {
+                            setAdding(false);
+                            addLandmark(kind);
+                          }}
+                        >
+                          <span className={desk.nowPickerName}>{PART_LABEL[kind]}</span>
+                        </Chip>
+                      ))}
+                    </div>
+                  </Popover>
+                </span>
+              }
+            >
+              {shownZone && primary?.kind === "zone" ? (
                 <div ref={inspectorRef}>
                   <ZoneInspector
-                    key={selected}
+                    key={`zone-${primary.index}`}
                     zone={shownZone}
+                    unit={unit}
                     name={selectedInfo ? selectedPlain.name : staleDeviceName(shownZone.device_id, devices)}
                     icon={selectedInfo ? <KindIcon kind={selectedPlain.kind} fan={selectedPlain.fan} size={18} /> : null}
                     deviceName={
@@ -916,30 +1273,36 @@ export function LayoutView() {
                           : selectedInfo.device.name
                         : shortDeviceId(shownZone.device_id)
                     }
-                    ledCount={selectedInfo?.zone.led_count ?? 0}
+                    ledCount={
+                      shownZone.leds ? shownZone.leds.count : (selectedInfo?.zone.led_count ?? 0)
+                    }
+                    zoneCount={selectedInfo?.zone.led_count ?? 0}
                     info={selectedInfo?.zone ?? null}
-                    identifying={identifying === selected}
-                    onIdentify={() => (identifying === selected ? stopIdentify() : startIdentify(selected))}
+                    identifying={identifying === primary.index}
+                    onIdentify={() => (identifying === primary.index ? stopIdentify() : startIdentify(primary.index))}
                     missing={!selectedInfo}
-                    onChange={(patch) => changeZone(selected, patch)}
-                    onRemove={() => unplace(selected)}
+                    onChange={(patch) => changeZones([{ index: primary.index, patch }])}
+                    onRemove={() => unplace(primary.index)}
+                    locked={shownZone.locked === true}
+                    onToggleLock={() => changeZones([{ index: primary.index, patch: { locked: !shownZone.locked } }])}
+                    onRemap={() => remapOne(primary.index)}
                     onBack={phone ? backToCanvas : null}
                   />
                 </div>
-              ) : (
-                null
-              )}
-              {draft.case_form === "none" && (
-                <div className={desk.suggest}>
-                  <p className={desk.plainNote} style={{ marginTop: 0 }}>
-                    Pick your PC&apos;s shape and every device goes where its hardware sits: fans in the fan
-                    positions, RAM in the RAM slots, strips along the case edges, the keyboard on the desk.
-                  </p>
-                  <Button size="sm" variant="ghost" icon={<Cube size={14} />} onClick={() => chooseCase("mid_tower")}>
-                    Put my devices in a case
-                  </Button>
+              ) : selectedLandmark && primary?.kind === "landmark" ? (
+                <div ref={inspectorRef}>
+                  <LandmarkInspector
+                    key={`lm-${primary.index}`}
+                    landmark={selectedLandmark}
+                    unit={unit}
+                    locked={selectedLandmark.locked === true}
+                    onToggleLock={() => changeLandmark(primary.index, { locked: !selectedLandmark.locked })}
+                    onChange={(patch) => changeLandmark(primary.index, patch)}
+                    onRemove={() => removeLandmark(primary.index)}
+                    onBack={phone ? backToCanvas : null}
+                  />
                 </div>
-              )}
+              ) : null}
               {suggested.length > 0 && (
                 <div className={desk.suggest}>
                   <p className={desk.plainNote} style={{ marginTop: 0 }}>
@@ -955,13 +1318,16 @@ export function LayoutView() {
                 {zones.map((z, i) => {
                   const info = findZoneInfo(devices, z.device_id, z.zone_index);
                   const pn = plainName(devices, z.device_id, z.zone_index);
-                  const friendly = z.label?.trim() || null;
+                  // A split zone: the part owns a run of the zone's LEDs, and the run is what
+                  // it has. The parts of one zone are numbered, so they can be told apart.
+                  const friendly = placementName(devices, z, zones);
+                  const leds = z.leds ? z.leds.count : (info?.zone.led_count ?? 0);
                   return (
                     <RowButton
-                      key={`${z.device_id}#${z.zone_index}`}
-                      current={selected === i}
+                      key={zoneKey(z)}
+                      current={primary?.kind === "zone" && primary.index === i}
                       label={`Select ${friendly || pn.name}`}
-                      onSelect={() => selectZone(i)}
+                      onSelect={() => select([{ kind: "zone", index: i }])}
                     >
                       <span className="row-title">
                         {info && <KindIcon kind={pn.kind} fan={pn.fan} size={15} />}{" "}
@@ -974,10 +1340,22 @@ export function LayoutView() {
                               .join(" · ")
                           : "this device is gone"}
                       </span>
-                      <span className="fig mute">{info ? <AnimatedNumber value={info.zone.led_count} /> : "—"}</span>
+                      <span className="fig mute">{info ? <AnimatedNumber value={leds} /> : "—"}</span>
                     </RowButton>
                   );
                 })}
+                {landmarks.map((l, i) => (
+                  <RowButton
+                    key={`lm-${i}`}
+                    current={primary?.kind === "landmark" && primary.index === i}
+                    label={`Select ${l.label?.trim() || PART_LABEL[l.kind]}`}
+                    onSelect={() => select([{ kind: "landmark", index: i }])}
+                  >
+                    <span className="row-title">{l.label?.trim() || PART_LABEL[l.kind]}</span>
+                    <span className="row-sub one-line">no lights of its own</span>
+                    <span className="fig mute">{formatUnits(l.width, unit)}</span>
+                  </RowButton>
+                ))}
               </div>
             </Panel>
           </div>
@@ -1056,34 +1434,48 @@ const SHAPE_NOTE: Record<ZoneShape["type"], string> = {
 
 function ZoneInspector({
   zone,
+  unit,
   name,
   icon,
   deviceName,
   ledCount,
+  zoneCount,
   info,
   identifying,
   onIdentify,
   missing,
   onChange,
   onRemove,
+  locked,
+  onToggleLock,
+  onRemap,
   onBack,
 }: {
   zone: PlacedZone;
+  unit: LengthUnit;
   name: string;
   icon: ReactNode;
   deviceName: string;
   ledCount: number;
+  /** The whole zone's count, when this part owns only a run of it. */
+  zoneCount: number;
   info: ZoneInfo | null;
   identifying: boolean;
   onIdentify: () => void;
   missing: boolean;
   onChange: (patch: Partial<PlacedZone>) => void;
   onRemove: () => void;
+  locked: boolean;
+  onToggleLock: () => void;
+  /** Maps this one device again, with the onboarding limited to it. */
+  onRemap: () => void;
   /** On a phone: the way back to the canvas the zone was picked on. */
   onBack: (() => void) | null;
 }) {
   const shapeType = zone.shape.type;
   const resolved = info ? resolveShape(zone.shape, info.kind) : null;
+  const kind = zone.part?.kind ?? "generic";
+  const facing = zone.part?.facing ?? "viewer";
   const pickShape = (type: ZoneShape["type"]) => {
     if (type === shapeType) return;
     const next: ZoneShape =
@@ -1093,6 +1485,8 @@ function ZoneInspector({
     // One change, so one undo step: the shape and the box that suits it.
     onChange(reshapeBox(zone, next));
   };
+  const decimals = unit === "in" ? 2 : 1;
+  const toMm = (v: number) => v * 4;
   return (
     <div className={`stack ${desk.inspector}`} style={{ gap: 8 }}>
       {onBack && (
@@ -1107,7 +1501,16 @@ function ZoneInspector({
           {icon}
           {name}
         </span>
-        <span className="fig mute">{missing ? "not connected" : <><AnimatedNumber value={ledCount} /> LEDs</>}</span>
+        <span className="fig mute">
+          {missing ? (
+            "not connected"
+          ) : (
+            <>
+              <AnimatedNumber value={ledCount} /> LEDs
+              {zoneCount > ledCount ? ` of ${zoneCount}` : ""}
+            </>
+          )}
+        </span>
       </div>
       <p className="row-sub one-line">{deviceName}</p>
       {missing && (
@@ -1143,6 +1546,31 @@ function ZoneInspector({
         Identify walks one white LED along this zone ({name}) for about five seconds, so you can see which header it
         is. It lights one LED of the zone at a time, not the whole device.
       </p>
+      <Button
+        size="sm"
+        variant="ghost"
+        icon={<CompassTool size={14} />}
+        disabled={missing}
+        onClick={onRemap}
+      >
+        Map this one again
+      </Button>
+      <Field label="Part" hint={<span className="fig">{PART_LABEL[kind]}</span>}>
+        <Select
+          label="What this part is"
+          value={kind}
+          options={(Object.keys(PART_LABEL) as PartKind[]).map((k) => ({ value: k, label: PART_LABEL[k] }))}
+          onChange={(v) => onChange({ part: { kind: v as PartKind, facing, mapped: zone.part?.mapped ?? false } })}
+        />
+      </Field>
+      <Field label="Facing" hint={<span className="fig">{FACING_LABEL[facing]}</span>}>
+        <Select
+          label="Which way this part points"
+          value={facing}
+          options={FACINGS.map((f) => ({ value: f, label: FACING_LABEL[f] }))}
+          onChange={(v) => onChange({ part: { kind, facing: v as Facing, mapped: zone.part?.mapped ?? false } })}
+        />
+      </Field>
       <Field label="Shape" hint={<span className="fig">{SHAPE_LABEL[shapeType]}{shapeType === "auto" && resolved ? ` · ${SHAPE_LABEL[resolved === "matrix" ? "grid" : resolved]}` : ""}</span>}>
         <Segmented<ZoneShape["type"]>
           label="How the LEDs sit in the box"
@@ -1167,19 +1595,54 @@ function ZoneInspector({
         </Field>
       )}
       <div className="grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-        <Field label="X">
-          <NumberField label="X" value={zone.x} min={0} max={CANVAS_W} decimals={1} onCommit={(v) => onChange({ x: v })} />
+        <Field label="From the left">
+          <NumberField
+            label="From the left"
+            value={lengthNumber(toMm(zone.x), unit)}
+            min={lengthNumber(-CANVAS_W * 4, unit)}
+            max={lengthNumber(CANVAS_W * 4, unit)}
+            decimals={decimals}
+            unit={unitWord(unit)}
+            onCommit={(v) => onChange({ x: mmFromLength(v, unit) / 4 })}
+          />
         </Field>
-        <Field label="Y">
-          <NumberField label="Y" value={zone.y} min={0} max={CANVAS_H} decimals={1} onCommit={(v) => onChange({ y: v })} />
+        <Field label="From the top">
+          <NumberField
+            label="From the top"
+            value={lengthNumber(toMm(zone.y), unit)}
+            min={lengthNumber(-CANVAS_H * 4, unit)}
+            max={lengthNumber(CANVAS_H * 4, unit)}
+            decimals={decimals}
+            unit={unitWord(unit)}
+            onCommit={(v) => onChange({ y: mmFromLength(v, unit) / 4 })}
+          />
         </Field>
         <Field label="Width">
-          <NumberField label="Width" value={zone.width} min={2} max={CANVAS_W} decimals={1} onCommit={(v) => onChange({ width: v })} />
+          <NumberField
+            label="Width"
+            value={lengthNumber(toMm(zone.width), unit)}
+            min={lengthNumber(8, unit)}
+            max={lengthNumber(CANVAS_W * 4, unit)}
+            decimals={decimals}
+            unit={unitWord(unit)}
+            onCommit={(v) => onChange({ width: mmFromLength(v, unit) / 4 })}
+          />
         </Field>
         <Field label="Height">
-          <NumberField label="Height" value={zone.height} min={2} max={CANVAS_H} decimals={1} onCommit={(v) => onChange({ height: v })} />
+          <NumberField
+            label="Height"
+            value={lengthNumber(toMm(zone.height), unit)}
+            min={lengthNumber(8, unit)}
+            max={lengthNumber(CANVAS_H * 4, unit)}
+            decimals={decimals}
+            unit={unitWord(unit)}
+            onCommit={(v) => onChange({ height: mmFromLength(v, unit) / 4 })}
+          />
         </Field>
       </div>
+      <p className={desk.plainNote} style={{ marginTop: 0 }}>
+        The frame is {formatUnits(320, unit)} by {formatUnits(200, unit)}. A 120 mm fan is {formatUnits(30, unit)}.
+      </p>
       <Field label="Rotation">
         <NumberField
           label="Rotation"
@@ -1194,10 +1657,14 @@ function ZoneInspector({
       <Field label="LEDs" hint="set on the Devices page">
         <span className="fig" aria-label={`${ledCount} LEDs`}>
           {missing ? "—" : ledCount}
+          {!missing && zoneCount > ledCount ? ` of ${zoneCount}` : ""}
         </span>
       </Field>
       <Field label="Reverse direction">
         <Toggle label="Reverse direction" checked={zone.reversed} onChange={(v) => onChange({ reversed: v })} />
+      </Field>
+      <Field label="Lock in place">
+        <Toggle label="Lock in place" checked={locked} onChange={onToggleLock} />
       </Field>
       <Field label="Visible">
         <Toggle label="Visible" checked={zone.visible} onChange={(v) => onChange({ visible: v })} />
@@ -1209,6 +1676,131 @@ function ZoneInspector({
           </Button>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * The inspector of a landmark: a part with no lights of its own. The case box, a CPU, a
+ * graphics card without RGB, a plain box. Its size is in the reader's unit, like everything
+ * else.
+ */
+function LandmarkInspector({
+  landmark,
+  unit,
+  locked,
+  onToggleLock,
+  onChange,
+  onRemove,
+  onBack,
+}: {
+  landmark: Landmark;
+  unit: LengthUnit;
+  locked: boolean;
+  onToggleLock: () => void;
+  onChange: (patch: Partial<Landmark>) => void;
+  onRemove: () => void;
+  onBack: (() => void) | null;
+}) {
+  const decimals = unit === "in" ? 2 : 1;
+  const toMm = (v: number) => v * 4;
+  return (
+    <div className={`stack ${desk.inspector}`} style={{ gap: 8 }}>
+      {onBack && (
+        <div>
+          <Button size="sm" variant="ghost" icon={<ArrowUp size={14} />} onClick={onBack}>
+            Back to the canvas
+          </Button>
+        </div>
+      )}
+      <div className="row-title" style={{ justifyContent: "space-between" }}>
+        <span className="one-line">{landmark.label?.trim() || PART_LABEL[landmark.kind]}</span>
+        <span className="fig mute">no lights</span>
+      </div>
+      <p className="row-sub one-line">A landmark is drawn, never sampled and never lit.</p>
+      <Field label="Name">
+        <TextField
+          label="Name"
+          value={landmark.label ?? ""}
+          placeholder={PART_LABEL[landmark.kind]}
+          allowEmpty
+          maxLength={32}
+          onCommit={(v) => onChange({ label: v.trim() === "" ? undefined : v.trim().slice(0, 32) })}
+        />
+      </Field>
+      <Field label="Kind" hint={<span className="fig">{PART_LABEL[landmark.kind]}</span>}>
+        <Select
+          label="What this part is"
+          value={landmark.kind}
+          options={LANDMARK_KINDS.map((k) => ({ value: k, label: PART_LABEL[k] }))}
+          onChange={(v) => onChange({ kind: v as PartKind })}
+        />
+      </Field>
+      <Field label="Facing" hint={<span className="fig">{FACING_LABEL[landmark.facing]}</span>}>
+        <Select
+          label="Which way this part points"
+          value={landmark.facing}
+          options={FACINGS.map((f) => ({ value: f, label: FACING_LABEL[f] }))}
+          onChange={(v) => onChange({ facing: v as Facing })}
+        />
+      </Field>
+      <div className="grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        <Field label="From the left">
+          <NumberField
+            label="From the left"
+            value={lengthNumber(toMm(landmark.x), unit)}
+            min={lengthNumber(-CANVAS_W * 4, unit)}
+            max={lengthNumber(CANVAS_W * 4, unit)}
+            decimals={decimals}
+            unit={unitWord(unit)}
+            onCommit={(v) => onChange({ x: mmFromLength(v, unit) / 4 })}
+          />
+        </Field>
+        <Field label="From the top">
+          <NumberField
+            label="From the top"
+            value={lengthNumber(toMm(landmark.y), unit)}
+            min={lengthNumber(-CANVAS_H * 4, unit)}
+            max={lengthNumber(CANVAS_H * 4, unit)}
+            decimals={decimals}
+            unit={unitWord(unit)}
+            onCommit={(v) => onChange({ y: mmFromLength(v, unit) / 4 })}
+          />
+        </Field>
+        <Field label="Width">
+          <NumberField
+            label="Width"
+            value={lengthNumber(toMm(landmark.width), unit)}
+            min={lengthNumber(8, unit)}
+            max={lengthNumber(CANVAS_W * 4, unit)}
+            decimals={decimals}
+            unit={unitWord(unit)}
+            onCommit={(v) => onChange({ width: mmFromLength(v, unit) / 4 })}
+          />
+        </Field>
+        <Field label="Height">
+          <NumberField
+            label="Height"
+            value={lengthNumber(toMm(landmark.height), unit)}
+            min={lengthNumber(8, unit)}
+            max={lengthNumber(CANVAS_H * 4, unit)}
+            decimals={decimals}
+            unit={unitWord(unit)}
+            onCommit={(v) => onChange({ height: mmFromLength(v, unit) / 4 })}
+          />
+        </Field>
+      </div>
+      <Field label="Lock in place">
+        <Toggle label="Lock in place" checked={locked} onChange={onToggleLock} />
+      </Field>
+      <Field label="Visible">
+        <Toggle label="Visible" checked={landmark.visible !== false} onChange={(v) => onChange({ visible: v })} />
+      </Field>
+      <div className="row-wrap" style={{ justifyContent: "flex-end" }}>
+        <Button size="sm" variant="ghost" icon={<X size={14} />} onClick={onRemove}>
+          Remove from layout
+        </Button>
+      </div>
     </div>
   );
 }

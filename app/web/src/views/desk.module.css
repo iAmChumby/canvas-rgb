@@ -6,13 +6,20 @@
  *
  * Colours are tokens only. The zone colour is `--zc`, set per zone from the device accents.
  *
- * One visual language: each zone is a thin outline of its shape (a rectangle, an ellipse for a
- * ring) and its LEDs are small crisp dots at the places the daemon samples. The dots are drawn
- * on the overlay canvas; everything else is here.
+ * One visual language: each part is a thin outline with its own crude drawing inside it, and
+ * its LEDs are on the overlay canvas, at the places the daemon samples. There is no text on the
+ * canvas by default: one name tag on hover, and a size readout on the picked part.
  */
 .desk.canvas {
   position: relative;
   width: 100%;
+  /* A part's own light, written onto the part by the stage. A part with no light of its own
+     (the case, a box) is not lit at all, so its fill is nothing. */
+  --lit: transparent;
+  /* The stage is as tall as the page allows; the desk fills it (see the hero view in
+     PreviewStage), and on a phone the frame's own proportions hold. */
+  flex: 1 1 auto;
+  height: 100%;
   aspect-ratio: 320 / 200;
   overflow: hidden;
   border: 1px solid var(--line-2);
@@ -24,6 +31,16 @@
   user-select: none;
   touch-action: none;
   outline: none;
+  transition: background-color 120ms var(--ease);
+}
+
+/* The lights mode stands on a dark stage, in the light theme too: a light on a light stage is a
+   light nobody can see. The change is a cross-fade, not a jump. */
+.desk.canvas[data-mode="lights"] {
+  background:
+    linear-gradient(var(--stage-lights-grid) 1px, transparent 1px) 0 0 / 12.5% 12.5%,
+    linear-gradient(90deg, var(--stage-lights-grid) 1px, transparent 1px) 0 0 / 12.5% 12.5%,
+    var(--stage-lights);
 }
 
 /* The picture is the backdrop, not the subject: a quiet veil over it keeps the outlines and the
@@ -35,46 +52,41 @@
   pointer-events: none;
 }
 
-/* ---------- zones ---------- */
+/* ---------- parts ---------- */
 
 .desk .zone {
   position: absolute;
   box-sizing: border-box;
-  border: 1.5px solid var(--zone-line);
-  border-radius: 3px;
-  background-color: var(--zone-plate);
+  border: 1.25px solid var(--zone-line);
+  border-radius: 4px;
+  background: transparent;
   /* A one pixel keyline outside the outline, so it holds on any picture. It is hard-edged: a
      line, not a glow. */
   box-shadow: 0 0 0 1px var(--zone-halo);
   cursor: grab;
   transform-origin: 50% 50%;
-  z-index: 1;
+  z-index: 2;
   transition:
-    background-color var(--dur-fast) var(--ease),
-    border-color var(--dur-fast) var(--ease);
+    border-color var(--dur-fast) var(--ease),
+    opacity var(--dur-fast) var(--ease);
 }
 
-/* The shape is the outline: a ring is an ellipse, a point is a soft box, the rest are rectangles.
-   An outline is only its edge, because its LEDs ride the edge. */
-.desk .zone[data-shape="ring"] {
-  border-radius: 50%;
+/* A landmark is a drawing, not a light: it is quieter, and it is never sampled. */
+.desk .landmark {
+  border-color: var(--landmark-line);
+  cursor: grab;
+  z-index: 1;
 }
 
-.desk .zone[data-shape="point"] {
-  border-radius: 6px;
+/* The case of an old layout, drawn from its form until the daemon migrates it: a picture, not
+   a part. It cannot be picked. */
+.desk .derived {
+  border-style: dashed;
+  pointer-events: none;
 }
 
-.desk .zone[data-shape="outline"] {
-  background-color: transparent;
-}
-
-.desk .zone:hover {
+.desk .zone[data-hover="true"] {
   border-color: var(--live);
-  background-color: color-mix(in srgb, var(--live) 14%, var(--zone-plate));
-}
-
-.desk .zone[data-shape="outline"]:hover {
-  background-color: color-mix(in srgb, var(--live) 8%, transparent);
 }
 
 .desk .zone[data-dragging="true"] {
@@ -83,9 +95,29 @@
 }
 
 .desk .zone[data-selected="true"] {
-  border-color: var(--zone-line);
-  background-color: color-mix(in srgb, var(--live) 16%, var(--zone-plate));
+  border-color: var(--live);
   z-index: 4;
+}
+
+/* The case never sits on top of the parts in it, selected or not: the parts win the pointer. */
+.desk .zone.landmark[data-kind="case"][data-selected="true"] {
+  z-index: 1;
+}
+
+/* The onboarding's spotlight: every part but the one being asked about is a quiet outline. No
+   light, no halo, no glow, no label. */
+.desk .zone[data-dim="true"] {
+  border-color: color-mix(in srgb, var(--zone-line) 28%, transparent);
+  box-shadow: none;
+  animation: none;
+}
+
+.desk .zone[data-dim="true"] .art {
+  opacity: 0.28;
+}
+
+.desk .zone[data-dim="true"]:hover {
+  border-color: color-mix(in srgb, var(--zone-line) 45%, transparent);
 }
 
 .desk .zone[data-hidden="true"] {
@@ -93,24 +125,46 @@
   opacity: 0.45;
 }
 
-/* A zone whose device is not connected: dimmed, dashed, and drawn over the live zones so that
-   it can be seen at all. It covers a live zone exactly on this PC, so its own edge is left to
-   the live zone and its dashed marker is drawn a hair inside it. */
-.desk .zone[data-missing="true"] {
-  border-color: transparent;
-  border-style: dashed;
-  background-color: transparent;
-  box-shadow: none;
-  outline: 1px dashed color-mix(in srgb, var(--down) 70%, transparent);
-  outline-offset: -4px;
-  opacity: 0.85;
-  z-index: 2;
-  /* The ghost is a marker: it never takes a click away from the live zone under it. */
-  pointer-events: none;
+/* A part that cannot be moved says so, quietly. */
+.desk .zone[data-locked="true"] {
+  cursor: not-allowed;
 }
 
-.desk .zone[data-missing="true"][data-twin="true"] {
-  outline: none;
+.desk .zone[data-locked="true"]::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--outside-ink);
+}
+
+/* A part outside the frame of the effect area gets a small badge: it only gets the edge
+   colour, and it says nothing else. */
+.desk .zone[data-outside="true"] {
+  border-color: var(--outside-ink);
+}
+
+.desk .zone[data-outside="true"]::before {
+  content: "";
+  position: absolute;
+  top: -3px;
+  left: -3px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--outside-ink);
+}
+
+/* A zone whose device is not connected: dimmed and dashed. */
+.desk .zone[data-missing="true"] {
+  border-style: dashed;
+  border-color: var(--down);
+  opacity: 0.85;
+  z-index: 2;
+  pointer-events: none;
 }
 
 .desk .zone[data-missing="true"]:hover {
@@ -124,17 +178,17 @@
 
 /* ---------- name tags ---------- */
 
-/* A solid chip beside each zone, like the editor's own chips: the panel colour with the ink on
-   it, so it reads on any picture in light and dark, with the device's colour on its left edge. */
+/* The one tag: the name of the part under the pointer, or the size of the part that is picked.
+   It is a chip with the panel colour on it, so it reads on any picture in light and dark. */
 .desk .tag {
   position: absolute;
-  z-index: 6;
+  z-index: 9;
   box-sizing: border-box;
-  height: 26px;
+  height: 22px;
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 0 7px;
+  padding: 0 6px;
   border: 1px solid var(--line-2);
   border-left: 3px solid var(--zc, var(--line-2));
   border-radius: 4px;
@@ -146,7 +200,13 @@
   line-height: 1;
   white-space: nowrap;
   pointer-events: none;
-  transition: opacity var(--dur-fast) var(--ease);
+}
+
+/* The size of a picked part is a number: it is read in mono. */
+.desk .tagFig,
+.desk .tag[data-selected="true"] span {
+  font-family: var(--fm);
+  font-variant-numeric: tabular-nums;
 }
 
 .desk .tagSub {
@@ -165,18 +225,40 @@
   0%,
   100% {
     border-color: var(--zone-line);
-    box-shadow: 0 0 0 1px var(--zone-halo);
   }
   50% {
     border-color: var(--live);
-    box-shadow: 0 0 0 3px var(--live);
   }
 }
 
-.desk .tag[data-missing="true"] {
-  border-color: var(--down);
-  border-left-color: var(--down);
-  color: var(--down);
+/* The onboarding points at a part: its outline lifts to the live colour and breathes once a
+   beat. With reduced motion it simply stays lit. */
+.desk .zone[data-pulse="true"] {
+  z-index: 5;
+  border-color: var(--live);
+  animation: pulse-part 1.2s var(--ease) infinite;
+}
+
+@keyframes pulse-part {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--live) 0%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--live) 45%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .desk .zone[data-pulse="true"] {
+    animation: none;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--live) 45%, transparent);
+  }
+}
+
+:global(html[data-motion="reduced"]) .desk .zone[data-pulse="true"] {
+  animation: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--live) 45%, transparent);
 }
 
 /* While the view zooms or pans the tags step aside: they come back placed for the new view. */
@@ -185,76 +267,6 @@
 }
 
 /* ---------- labels ---------- */
-
-/* The one label: the name of the zone that is hovered, held or picked, with the device's colour
-   on its left edge so the eye can pair it with the zone's outline. */
-.desk .label {
-  position: absolute;
-  z-index: 9;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 7px;
-  height: 26px;
-  line-height: 1;
-  border: 1px solid var(--line-2);
-  border-left: 3px solid var(--zc, var(--line-2));
-  border-radius: 4px;
-  background: var(--panel);
-  color: var(--ink);
-  font-family: var(--fu);
-  font-weight: 500;
-  font-size: var(--t14);
-  white-space: nowrap;
-  pointer-events: none;
-  animation: label-in var(--dur-fast) var(--ease);
-}
-
-@keyframes label-in {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
-
-/* The label of a stale zone carries the way to take the zone off the layout. A ghost cannot
-   be picked on the canvas, so the label is the only way to it. The editor's own small button is
-   used, sized down to sit inside the label. */
-.desk .labelRemove {
-  display: inline-flex;
-  align-items: center;
-  pointer-events: auto;
-}
-
-.desk .labelRemove :global(.chip) {
-  height: 14px;
-  padding: 0 2px;
-  border-color: currentColor;
-  background: transparent;
-  color: inherit;
-}
-
-.desk .labelRemove :global(.chip):hover {
-  background: color-mix(in srgb, currentColor 18%, transparent);
-}
-
-.desk .labelRemove :global(.chip):focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 2px;
-}
-
-.desk .label[data-selected="true"] {
-  border-color: var(--live);
-  border-left-color: var(--zc, var(--live));
-}
-
-.desk .label[data-missing="true"] {
-  border-color: var(--down);
-  border-left-color: var(--down);
-  color: var(--down);
-}
 
 /* The inspector's note about a zone whose device is not connected. */
 .desk .stale {
@@ -404,6 +416,20 @@
   transition: opacity var(--dur-fast) var(--ease);
 }
 
+/* The second vertical line: the other side of an even spacing. */
+.desk .guideV2 {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  z-index: 7;
+  background: var(--a4);
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
 .desk .guideH {
   position: absolute;
   left: 0;
@@ -435,6 +461,140 @@
   opacity: 0;
   visibility: hidden;
   transition: opacity var(--dur-fast) var(--ease);
+}
+
+/* ---------- the one-time hint ---------- */
+
+/* The hint that says which key shows what. It is shown once and then it is gone. */
+.hint {
+  position: absolute;
+  z-index: 11;
+  left: 50%;
+  top: 10px;
+  transform: translateX(-50%);
+  padding: 3px 8px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background: var(--panel);
+  color: var(--dim);
+  font-family: var(--fu);
+  font-size: var(--t14);
+  white-space: nowrap;
+  pointer-events: none;
+  animation: hint-in var(--dur) var(--ease);
+}
+
+.hint b {
+  color: var(--ink);
+  font-family: var(--fm);
+  font-weight: 600;
+}
+
+@keyframes hint-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -4px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+/* ---------- the guided setup ---------- */
+
+/* The progress: how much of the desk is mapped. One quiet bar. */
+.progress {
+  position: relative;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--line);
+}
+
+.progressFill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--live);
+  transition: width var(--dur) var(--ease);
+}
+
+/* The walker's row: the LED number, then the two buttons. The buttons' tooltips go beside
+   them, so nothing ever covers the number above. */
+.setupWalk {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-top: var(--s2);
+}
+
+.setupWalk :global(.tip-bubble) {
+  bottom: auto;
+  top: 50%;
+  left: calc(100% + 8px);
+  transform: translateY(-50%);
+}
+
+/* One part of a zone: its run of LEDs and what it is. */
+.setupPart {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: 2px 4px;
+  border-radius: var(--r-sm);
+}
+
+.setupPart[data-under="true"] {
+  background: color-mix(in srgb, var(--live) 10%, transparent);
+}
+
+/* The run of LEDs: a number, in mono, that jumps to that run when it is pressed. */
+.setupPartRange {
+  flex: none;
+  padding: 2px 6px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--dim);
+  font-family: var(--fm);
+  font-size: var(--t14);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.setupPartRange:hover {
+  border-color: var(--live);
+  color: var(--ink);
+}
+
+/* A fixed part: one click and it is done. */
+.setupFixed {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  padding: 2px 0;
+  font-size: var(--t14);
+}
+
+/* ---------- the offline badge ---------- */
+
+/* A part whose device is gone stays where it is, dimmed, and says so. */
+.desk .offline {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 2px);
+  padding: 1px 5px;
+  border: 1px solid var(--down);
+  border-radius: var(--r-sm);
+  background: var(--panel);
+  color: var(--down);
+  font-family: var(--fu);
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: nowrap;
+  pointer-events: none;
 }
 
 /* ---------- the toolbar under the canvas ---------- */
@@ -471,17 +631,69 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* The row of arrange buttons, under the canvas, when more than one part is picked. */
+.toolbarRow {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: var(--s2);
+  padding: 2px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  background: var(--panel);
+  width: fit-content;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.toolbarLabel {
+  padding: 0 var(--s2);
+  color: var(--mute);
+  font-size: var(--t14);
+  white-space: nowrap;
+}
+
 /* ---------- the editor's own draw of the running effect ---------- */
 
-/* The LED dots sit above the zones: a dot is the LED itself, and it has to be seen against the
-   zone it belongs to, and against the picture under it. The chips stay above the dots. */
+/* The mark on the LED the setup's walker has lit: a bright ring in the accent colour, with a
+   slow pulse, so the reader can match the light in the room with the cell on the drawing. */
+.litMarker {
+  position: absolute;
+  z-index: 6;
+  border: 2.5px solid var(--live);
+  border-radius: 50%;
+  box-shadow:
+    0 0 0 1.5px rgba(0, 0, 0, 0.75),
+    0 0 14px 3px color-mix(in srgb, var(--live) 65%, transparent);
+  pointer-events: none;
+  animation: litPulse 1.5s var(--ease) infinite;
+}
+
+@keyframes litPulse {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow:
+      0 0 0 1.5px rgba(0, 0, 0, 0.75),
+      0 0 10px 1px color-mix(in srgb, var(--live) 50%, transparent);
+  }
+  50% {
+    opacity: 0.82;
+    box-shadow:
+      0 0 0 1.5px rgba(0, 0, 0, 0.75),
+      0 0 26px 7px color-mix(in srgb, var(--live) 90%, transparent);
+  }
+}
+
+/* The LED cells and the light dots sit above the effect but below the parts: the parts are
+   thin outlines, and they have to read on top of their own lights. */
 .desk :global(.stage-leds) {
-  z-index: 5;
+  z-index: 1;
 }
 
 /* The editor's own draw of the running effect, behind the zones. It is drawn in the canvas's own
    320 x 200 units, so it lines up with the zones, and the daemon's frames fade in over it when
-   they arrive. */
+   they arrive. The change between the two modes is a 120 ms cross-fade. */
 .editorPreview {
   position: absolute;
   top: 0;
@@ -490,7 +702,7 @@
   height: 200px;
   transform-origin: 0 0;
   pointer-events: none;
-  transition: opacity var(--dur-slow) var(--ease);
+  transition: opacity 120ms var(--ease);
 }
 
 .editorCanvas {
@@ -515,7 +727,7 @@
 
 /* The daemon's frames take over from the editor's own draw with a crossfade. */
 .desk :global(.stage-canvas) {
-  transition: opacity var(--dur-slow) var(--ease);
+  transition: opacity 120ms var(--ease);
 }
 
 /* The line that says the picture behind the zones is the editor's own draw. */
@@ -791,8 +1003,10 @@
   min-width: 0;
 }
 
-/* ---------- the case behind the zones ---------- */
+/* ---------- the furniture of the canvas ---------- */
 
+/* The desk rule, the frame of the effect area and the rulers, in one svg that pans and zooms
+   with the desk. */
 .caseSvg {
   position: absolute;
   inset: 0;
@@ -811,67 +1025,93 @@
   vector-effect: non-scaling-stroke;
 }
 
-.caseHalo rect,
-.caseHalo line,
-.caseHalo circle,
-.caseHalo path {
-  stroke: var(--case-halo);
-  stroke-width: 3.25px;
-}
-
-.caseLine rect,
-.caseLine line,
-.caseLine circle,
-.caseLine path {
-  stroke: var(--case-line);
-  stroke-width: 1.25px;
-}
-
-.caseSvg .caseSoft {
-  stroke: var(--case-soft);
-}
-
-.caseHalo .caseSoft {
-  stroke: var(--case-halo);
-  stroke-width: 2.5px;
-}
-
-.caseLine .caseSoft {
+/* The desk: the surface the case stands on. One quiet rule. */
+.caseSvg .deskRule {
+  stroke: var(--ruler-ink);
   stroke-width: 1px;
 }
 
-.caseSvg .caseDash {
-  stroke-dasharray: 5 4;
+/* The frame of the effect area: where the picture ends. */
+.caseSvg .effectFrame {
+  stroke: var(--ruler-ink);
+  stroke-width: 1px;
 }
 
-.caseSvg .caseBody {
-  fill: var(--case-body);
-  stroke: none;
-}
-
-.caseSvg .caseBoard {
-  fill: var(--case-board);
-  stroke: none;
-}
-
-.caseSvg .caseDesk {
-  fill: var(--case-desk);
-  stroke: none;
-}
-
-.caseSvg .caseText {
-  fill: var(--case-text);
-  font-family: var(--fu);
-  font-size: calc(14px / var(--k, 2));
-  font-weight: 500;
-  stroke: var(--case-halo);
-  stroke-width: 3px;
-  stroke-linejoin: round;
-  paint-order: stroke;
+/* The rulers: the ticks and the numbers, quiet, but readable on any picture. Each tick is drawn
+   twice: a dark keyline under a light one. */
+.caseSvg .ruler line {
   vector-effect: non-scaling-stroke;
 }
 
-/* ---------- silhouettes: what a zone is, drawn inside its box ---------- */
+.caseSvg .ruler .rulerKey {
+  stroke: var(--ruler-key);
+}
+
+.caseSvg .ruler .rulerLine {
+  stroke: var(--ruler-ink);
+  stroke-width: 1px;
+}
+
+.caseSvg .ruler text {
+  fill: var(--ruler-num);
+  font-family: var(--fm);
+  font-size: calc(11px / var(--k, 2));
+  font-weight: 500;
+  stroke: var(--ruler-key);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+  paint-order: stroke;
+}
+
+.caseSvg .ruler .rulerLeft {
+  text-anchor: end;
+}
+
+/* The panels inside the case box: the glass we look through and the four panels a part can sit
+   against. */
+.casePanels {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.casePanels rect,
+.casePanels path {
+  fill: none;
+  stroke: var(--landmark-line);
+  stroke-width: 1px;
+  vector-effect: non-scaling-stroke;
+}
+
+.casePanels .casePanel {
+  stroke-dasharray: 4 4;
+  opacity: 0.7;
+}
+
+/* The parts' two fills. In the effect mode they are transparent: the picture is the subject and
+   a grey plate over it hides it. In the lights mode they are very faint, so the light on the
+   part's own body is what the reader sees. */
+.desk.canvas[data-mode="effect"] {
+  --part-fill: transparent;
+  --part-fill-2: transparent;
+}
+
+.desk.canvas[data-mode="lights"] {
+  /* The part's drawing is lit by the part's own light (`--lit`, set on the part). */
+  --part-fill: color-mix(in srgb, var(--lit) 30%, transparent);
+  --part-fill-2: color-mix(in srgb, var(--lit) 16%, transparent);
+}
+
+/* The big panels of a part (a card's fans, a chip's face) are not where its light is: they are
+   never lit, in either mode. */
+.desk.canvas[data-mode="lights"] .artPanel {
+  fill: transparent;
+}
+
+/* ---------- silhouettes: what a part is, drawn inside its box ---------- */
 
 .art {
   position: absolute;
@@ -882,39 +1122,85 @@
   pointer-events: none;
 }
 
-.art * {
+/* One stroke weight, everywhere. */
+.desk .art * {
   fill: none;
-  stroke: var(--zone-art);
+  stroke: var(--part-line);
   stroke-width: 1px;
   vector-effect: non-scaling-stroke;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
 
-/* ---------- leader lines, the legend ---------- */
+/* The second fill: the parts that are filled rather than drawn. */
+.desk .art .artFill {
+  fill: var(--part-fill);
+  stroke: none;
+}
 
-.leaders {
+.desk .landmark .art * {
+  stroke: var(--landmark-line);
+}
+
+.desk .landmark .art .artFill {
+  fill: var(--part-fill-2);
+}
+
+/* ---------- the marquee, the multi-selection ---------- */
+
+/* The rubber band: a thin accent rectangle, the way every editor draws it. */
+.marquee {
+  position: absolute;
+  z-index: 7;
+  box-sizing: border-box;
+  border: 1px solid var(--a4);
+  background: color-mix(in srgb, var(--a4) 12%, transparent);
+  pointer-events: none;
+}
+
+/* More than one part is picked: each gets a quiet outline, no handles. */
+.multi {
   position: absolute;
   inset: 0;
-  width: 100%;
-  height: 100%;
+  z-index: 4;
   pointer-events: none;
-  z-index: 5;
-  overflow: visible;
 }
 
-.leaders line {
-  stroke: var(--zone-line);
-  stroke-width: 1px;
+.multiBox {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1px solid var(--live);
+  border-radius: 4px;
 }
 
-.leaders circle {
-  fill: var(--zone-line);
+/* ---------- the typed size ---------- */
+
+/* The size of a picked part, typed in: two fields, in the reader's unit. */
+.sizeEditor {
+  position: absolute;
+  z-index: 10;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  background: var(--panel);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
 }
 
-.desk[data-moving="true"] .leaders {
-  opacity: 0;
+.sizeField {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  color: var(--dim);
+  font-size: var(--t14);
 }
+
+/* ---------- leader lines, the legend ---------- */
 
 .legend {
   margin: var(--s2) 0 0;
@@ -923,8 +1209,104 @@
   line-height: 1.4;
 }
 
-.caseSelect {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--s2);
+
+/* ---------- the case guides (the onboarding's Case step) ---------- */
+
+/* Faint outlines of a small, a mid and a full tower, behind the case. They are guides to hold
+   the case against, not a picker. */
+.guides {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.guide {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1px dashed color-mix(in srgb, var(--mute) 55%, transparent);
+  border-radius: 6px;
+  pointer-events: none;
+}
+
+/* The names stand in one column left of the widest outline, each level with its outline's top
+   and joined to it by a thin dashed lead: three outlines, three names that never meet. */
+.guideTag {
+  position: absolute;
+  top: -2px;
+  right: calc(100% + var(--lead, 6px));
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--mute);
+  font-family: var(--fu);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.15;
+  white-space: nowrap;
+  text-align: right;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.guideTag::after {
+  content: "";
+  position: absolute;
+  top: 7px;
+  left: calc(100% + 2px);
+  width: calc(var(--lead, 6px) - 4px);
+  border-top: 1px dashed color-mix(in srgb, var(--mute) 55%, transparent);
+  pointer-events: none;
+}
+
+@media (max-width: 720px) {
+  .guideTag {
+    font-size: 10px;
+  }
+}
+
+.guideTag:hover,
+.guideTag:focus-visible {
+  color: var(--ink);
+}
+
+.guideSize {
+  font-family: var(--fm);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+}
+
+/* A run of LEDs is lit (a whole fan): the ring is a rounded box round all of it. */
+.litMarker[data-run="true"] {
+  border-radius: 14px;
+}
+
+/* The lock on a locked case: small, in its top corner, one click to unlock. */
+.lockBadge {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--line-2);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--mute);
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.lockBadge:hover,
+.lockBadge:focus-visible {
+  color: var(--ink);
+  border-color: var(--live);
 }

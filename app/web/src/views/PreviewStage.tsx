@@ -7,64 +7,98 @@ import {
   useMemo,
   useRef,
   useState,
-  useSyncExternalStore,
   type CSSProperties,
   type DragEvent,
   type PointerEvent,
 } from "react";
-import { ArrowsOut, Minus, Plus, Tag, X } from "@phosphor-icons/react";
-import { KindIcon } from "@/components/KindIcon";
-import { Select } from "@/components/Select";
+import {
+  AlignBottom,
+  AlignCenterHorizontal,
+  AlignCenterVertical,
+  AlignLeft,
+  AlignRight,
+  AlignTop,
+  ArrowsOut,
+  LockSimple,
+  Minus,
+  Plus,
+} from "@phosphor-icons/react";
+import { NumberField } from "@/components/NumberField";
+import { Segmented } from "@/components/Segmented";
 import { IconButton } from "@/components/Button";
-import { Chip } from "@/components/Chip";
 import { EffectPreview, type PreviewValues } from "@/components/EffectPreview";
 import { useMediaQuery } from "@/components/MediaQuery";
-import { CASE_OPTIONS, caseSpec, nearestSlot, zoneInSlot, type Slot } from "@/lib/caseForms";
+import { MM_PER_UNIT, caseLandmarkFor } from "@/lib/caseForms";
 import { onFrame, PREVIEW_H, PREVIEW_W, usePreviewStatus, type Frame } from "@/lib/preview";
 import {
   canvasCell,
   findZoneInfo,
-  plainName,
+  formatUnits,
+  lengthNumber,
+  mmFromLength,
+  placementName,
   resolveShape,
+  unitWord,
+  unitsToMm,
   zoneCorners,
+  zoneKey,
   zoneLocalLeds,
   zoneTransform,
   type CanvasCell,
+  type LengthUnit,
   type LocalLeds,
   type Point,
 } from "@/lib/zones";
 import { clamp } from "@/lib/format";
 import { usePrefersReducedMotion } from "@/lib/motion";
 import { FIT_VIEW, forgetView, readView, writeView } from "@/lib/viewPrefs";
-import type { CaseForm } from "@/proto/CaseForm";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
-import type { DeviceKind } from "@/proto/DeviceKind";
+import type { CaseForm } from "@/proto/CaseForm";
+import type { Landmark } from "@/proto/Landmark";
+import type { PartKind } from "@/proto/PartKind";
 import type { PlacedZone } from "@/proto/PlacedZone";
 import type { SamplingMode } from "@/proto/SamplingMode";
 import type { ZoneInfo } from "@/proto/ZoneInfo";
-import { CaseBackdrop } from "./CaseBackdrop";
-import { ZoneArt } from "./ZoneArt";
+import { CanvasFurniture } from "@/views/editor/Rulers";
+import { PART_LABEL, partForDevice, type Sel } from "@/views/editor/parts";
+import { PartArt } from "./ZoneArt";
 import desk from "./desk.module.css";
 
 const CANVAS_W = 320;
 const CANVAS_H = 200;
 const ACCENTS = ["--a1", "--a2", "--a3", "--a4", "--a5"] as const;
 
-/** The grid a zone snaps to, in canvas units. */
-const SNAP_GRID = 5;
-/** How close, in screen pixels, a zone's centre has to be to a case slot's centre to snap to it. */
-const SLOT_REACH_PX = 26;
-/** How close, in screen pixels, a zone has to be to another zone's line to snap to it. */
+/**
+ * The parts whose own body can carry the light of their LEDs: the compact ones, which are a
+ * solid thing with a light in it. A strip, an edge or a box is only its LEDs and their halos:
+ * its body is not lit, because the light in it is a line, not a lamp.
+ */
+const COMPACT_KINDS: ReadonlySet<PartKind> = new Set<PartKind>([
+  "fan",
+  "pump",
+  "ram",
+  "gpu",
+  "keyboard",
+  "mouse",
+  "microphone",
+]);
+
+/** How close, in screen pixels, a part has to be to a line to snap to it. */
 const SNAP_PIXELS = 8;
-/** The smallest a zone can be, in canvas units. */
+/** The smallest a part can be, in canvas units. */
 const MIN_SIZE = 2;
 /**
- * A zone's edge handle is hidden when the edge is shorter than this, in css pixels: on a tiny
- * zone the eight handles would sit on top of each other, so only the corners stay.
+ * A part's edge handle is hidden when the edge is shorter than this, in css pixels: on a tiny
+ * part the eight handles would sit on top of each other, so only the corners stay.
  */
 const EDGE_HANDLE_MIN_PX = 44;
-/** How far the rotation handle stands off the zone, in css pixels. */
-const ROTATE_STANDOFF = 24;
+/** How much the pointer may move, in mm, before the drag is a drag and not a click. */
+const NUDGE_MM = 1;
+const NUDGE_MM_BIG = 10;
+/** The halo's margin past the part's own outline, in css pixels. */
+const HALO_MARGIN_PX = 7;
+/** The dot at the heart of a halo, in css pixels. */
+const CORE_PX = 1.9;
 
 /**
  * A picture the LED dots can be sampled from: the daemon's frames, or the editor's own draw of
@@ -184,9 +218,8 @@ const WHEEL_MS = 120;
  * ctrl+wheel is the browser's own gesture: both are applied at once.
  */
 const NOTCH_DELTA = 40;
-/** The smallest and the biggest a dot is drawn, in css pixels across the radius. */
-const DOT_MIN_PX = 1.4;
-const DOT_MAX_PX = 9;
+/** Where the one-time hint about the two modes is remembered. */
+const HINT_KEY = "canvas-rgb.mode-hint";
 
 /**
  * The eight resize handles, as Figma lays them out: four corners and four edges. `sx` and `sy`
@@ -210,18 +243,12 @@ const HANDLES: HandleDef[] = [
   { id: "w", sx: -1, sy: 0 },
 ];
 
-/** The resize cursor for a handle on a zone turned by `rotation` degrees. */
+/** The resize cursor for a handle on a part turned by `rotation` degrees. */
 function handleCursor(h: HandleDef, rotation: number): string {
   const angle = (Math.atan2(h.sy, h.sx) * 180) / Math.PI + rotation;
   const slot = ((Math.round(angle / 45) % 4) + 4) % 4;
   return ["ew-resize", "nwse-resize", "ns-resize", "nesw-resize"][slot] ?? "nwse-resize";
 }
-
-/** The name tags: their height and the gap they keep to their zone, in css pixels. */
-const TAG_H = 26;
-const TAG_GAP = 9;
-/** Where the viewer's choice to show the name tags is remembered. */
-const LABELS_KEY = "canvas-rgb.desk-labels";
 
 /** A rectangle on the stage, in css pixels. */
 interface Box {
@@ -231,237 +258,23 @@ interface Box {
   h: number;
 }
 
-const tagListeners = new Set<() => void>();
-let tagsSession: boolean | null = null;
-function subscribeTags(l: () => void): () => void {
-  tagListeners.add(l);
-  return () => tagListeners.delete(l);
-}
-function readTags(): boolean {
-  if (tagsSession !== null) return tagsSession;
-  try {
-    return window.localStorage.getItem(LABELS_KEY) !== "off";
-  } catch {
-    return true;
-  }
-}
-
 function overlaps(a: Box, b: Box, pad = 0): boolean {
   return a.x < b.x + b.w + pad && b.x < a.x + a.w + pad && a.y < b.y + b.h + pad && b.y < a.y + a.h + pad;
 }
 
-/** One name tag, placed, with the line that ties it to its zone. */
-interface Tag {
-  index: number;
-  key: string;
-  /** The name a person would use (or the owner's own) and, after it, the hardware's name. */
-  text: string;
-  sub: string | null;
-  kind: DeviceKind | null;
-  fan: boolean;
-  x: number;
-  y: number;
-  missing: boolean;
-  accent: number;
-  /** The leader: from the tag's edge to the nearest point of the zone's box. */
-  lead: { x1: number; y1: number; x2: number; y2: number } | null;
-}
+type DragKind = "move" | "resize" | "rotate" | "marquee";
 
-/** The distance between two boxes: 0 when they touch or overlap. */
-function boxGap(a: Box, b: Box): number {
-  const dx = Math.max(0, a.x - (b.x + b.w), b.x - (a.x + a.w));
-  const dy = Math.max(0, a.y - (b.y + b.h), b.y - (a.y + a.h));
-  return Math.hypot(dx, dy);
-}
-
-/**
- * Places a name tag beside every zone and ties it to its zone with a leader line. A tag sits
- * just outside its zone (above, below or beside it, aligned to the start, the middle or the
- * end) so it never covers the zone's LEDs; it stays inside the desk; it never covers another
- * tag; and it prefers a place that is nearer its own zone than any other, so it is never read
- * as belonging to the zone next to it. Where every tidy place is taken the tag steps along the
- * zone's side until it finds one, and a tag that finds none is left off rather than drawn over
- * another.
- */
-function layoutTags(
-  zones: PlacedZone[],
-  devices: DeviceInfo[] | null,
-  stageW: number,
-  stageH: number,
-  view: View,
-  skip: number | null,
-  compact: boolean,
-  slots: Slot[],
-): Tag[] {
-  const k = (stageW / CANVAS_W) * view.scale;
-  const items: {
-    index: number;
-    z: PlacedZone;
-    text: string;
-    sub: string | null;
-    kind: DeviceKind | null;
-    fan: boolean;
-    w: number;
-    box: Box;
-    missing: boolean;
-  }[] = [];
-  zones.forEach((z, index) => {
-    if (!z.visible) return;
-    const found = findZoneInfo(devices, z.device_id, z.zone_index);
-    const missing = !found || !found.device.connected;
-    // A stale zone lying exactly on a live one is a marker under it: it needs no tag of its own.
-    if (
-      missing &&
-      zones.some(
-        (o, j) =>
-          j !== index &&
-          Math.abs(o.x - z.x) < 0.5 &&
-          Math.abs(o.y - z.y) < 0.5 &&
-          Math.abs(o.width - z.width) < 0.5 &&
-          Math.abs(o.height - z.height) < 0.5,
-      )
-    )
-      return;
-    const pn = plainName(devices, z.device_id, z.zone_index);
-    const friendly = z.label?.trim() ? z.label.trim() : null;
-    // On a phone the names are short: the canvas is 358 px wide.
-    const text = friendly ?? (compact ? pn.name.replace("ARGB header ", "ARGB ").replace("Microphone", "Mic") : pn.name);
-    // The second name is muted: the plain name when the owner has named the zone, else the hardware's.
-    const sub = compact || missing ? null : friendly ? pn.name : pn.hardware;
-    const b = boundsOf(z);
-    items.push({
-      index,
-      z,
-      text,
-      sub,
-      kind: pn.kind,
-      fan: pn.fan,
-      // On a phone a tag is its icon alone: the canvas is 358 px wide and its name shows when the zone is touched.
-      w: compact ? 34 : Math.ceil(24 + text.length * 7.9 + (sub ? 12 + sub.length * 7.4 : 0)) + 14,
-      missing,
-      box: { x: (b.x + view.panX) * k, y: (b.y + view.panY) * k, w: b.w * k, h: b.h * k },
-    });
-  });
-  const slotBoxes = slots.map((sl) => ({
-    sl,
-    box: { x: (sl.x + view.panX) * k, y: (sl.y + view.panY) * k, w: sl.w * k, h: sl.h * k },
-  }));
-  const taken: Box[] = [];
-  const out: Tag[] = [];
-  for (const item of items) {
-    const { box, w } = item;
-    const cands: Box[] = [];
-    const xs = [box.x, box.x + (box.w - w) / 2, box.x + box.w - w];
-    for (const x of xs) cands.push({ x, y: box.y - TAG_H - TAG_GAP, w, h: TAG_H });
-    for (const x of xs) cands.push({ x, y: box.y + box.h + TAG_GAP, w, h: TAG_H });
-    const ys = [box.y, box.y + (box.h - TAG_H) / 2, box.y + box.h - TAG_H];
-    for (const y of ys) cands.push({ x: box.x + box.w + TAG_GAP, y, w, h: TAG_H });
-    for (const y of ys) cands.push({ x: box.x - w - TAG_GAP, y, w, h: TAG_H });
-    // Further out to the sides, for a crowded desk.
-    for (let step = 1; step <= 3; step++) {
-      const dx = step * 12;
-      for (const y of ys) cands.push({ x: box.x + box.w + TAG_GAP + dx, y, w, h: TAG_H });
-      for (const y of ys) cands.push({ x: box.x - w - TAG_GAP - dx, y, w, h: TAG_H });
-    }
-    // Further along the zone's sides, for a crowded desk.
-    for (let step = 1; step <= 4; step++) {
-      const dy = step * (TAG_H + 3);
-      for (const x of xs) cands.push({ x, y: box.y - TAG_H - TAG_GAP - dy, w, h: TAG_H });
-      for (const x of xs) cands.push({ x, y: box.y + box.h + TAG_GAP + dy, w, h: TAG_H });
-    }
-    // Free places over the whole desk, for a tag whose own sides are crowded: the leader line
-    // carries it back to its zone, and the nearer the place the better.
-    const adjacent = cands.length;
-    for (let gy = 4; gy + TAG_H < stageH - 2; gy += 30) {
-      for (let gx = 4; gx + w < stageW - 2; gx += 40) cands.push({ x: gx, y: gy, w, h: TAG_H });
-    }
-    let best: Box | null = null;
-    let bestScore = -Infinity;
-    cands.forEach((c, i) => {
-      if (c.x < 2 || c.y < 2 || c.x + c.w > stageW - 2 || c.y + c.h > stageH - 2) return;
-      if (taken.some((t) => overlaps(c, t, 2))) return;
-      let score = -i * 0.5;
-      if (i >= adjacent) {
-        score = -16 - boxGap(c, box) / 14;
-        // A leader through another zone would tie the tag to the wrong thing: it costs.
-        const x1 = c.x + c.w / 2;
-        const y1 = c.y + c.h / 2;
-        const x2 = clamp(x1, box.x, box.x + box.w);
-        const y2 = clamp(y1, box.y, box.y + box.h);
-        for (const o of items) {
-          if (o.index === item.index) continue;
-          for (let q = 1; q < 8; q++) {
-            const px = x1 + ((x2 - x1) * q) / 8;
-            const py = y1 + ((y2 - y1) * q) / 8;
-            if (px >= o.box.x && px <= o.box.x + o.box.w && py >= o.box.y && py <= o.box.y + o.box.h) {
-              score -= 12;
-              break;
-            }
-          }
-        }
-      }
-      const own = boxGap(c, box);
-      for (const o of items) {
-        if (o.index === item.index) continue;
-        // Covering another zone is the worst a tag can do short of covering a tag: it costs the
-        // share of the tag that lies on the zone.
-        if (overlaps(c, o.box)) {
-          const ox = Math.min(c.x + c.w, o.box.x + o.box.w) - Math.max(c.x, o.box.x);
-          const oy = Math.min(c.y + c.h, o.box.y + o.box.h) - Math.max(c.y, o.box.y);
-          score -= 60 * Math.max(0, (ox * oy) / (c.w * c.h));
-        }
-        // Standing nearer another zone than its own reads as that zone's name.
-        if (boxGap(c, o.box) < own - 0.5) score -= 14;
-      }
-      // A tag over a case slot hides its drawing (a fan, a RAM slot): it costs the share of the
-      // tag on the slot, unless the slot is the zone's own.
-      for (const { sl, box: sb } of slotBoxes) {
-        if (!overlaps(c, sb) || zoneInSlot(item.z, sl)) continue;
-        const ox = Math.min(c.x + c.w, sb.x + sb.w) - Math.max(c.x, sb.x);
-        const oy = Math.min(c.y + c.h, sb.y + sb.h) - Math.max(c.y, sb.y);
-        score -= 40 * Math.max(0, (ox * oy) / (c.w * c.h));
-      }
-      if (score > bestScore) {
-        bestScore = score;
-        best = c;
-      }
-    });
-    if (!best) continue;
-    const placed: Box = best;
-    taken.push(placed);
-    if (item.index === skip) continue;
-    // The leader runs from the zone's nearest point to the tag's nearest point.
-    const tcx = placed.x + placed.w / 2;
-    const tcy = placed.y + placed.h / 2;
-    const zx = clamp(tcx, box.x, box.x + box.w);
-    const zy = clamp(tcy, box.y, box.y + box.h);
-    const tx = clamp(zx, placed.x, placed.x + placed.w);
-    const ty = clamp(zy, placed.y, placed.y + placed.h);
-    const lead = Math.hypot(tx - zx, ty - zy) > 1.5 ? { x1: tx, y1: ty, x2: zx, y2: zy } : null;
-    out.push({
-      index: item.index,
-      key: zoneKey(item.z),
-      text: item.text,
-      sub: item.sub,
-      kind: item.kind,
-      fan: item.fan,
-      x: placed.x,
-      y: placed.y,
-      missing: item.missing,
-      accent: accentOf(devices, item.z.device_id),
-      lead,
-    });
-  }
-  return out;
-}
-
-type DragKind = "move" | "resize" | "rotate";
+/** A part being dragged: what it was, where the pointer was, and what it is now. */
 interface Drag {
   kind: DragKind;
-  index: number;
+  /** The part the pointer is on. */
+  sel: Sel;
+  /** Every part the drag moves, with where it started. */
+  origs: { sel: Sel; zone?: PlacedZone; landmark?: Landmark }[];
   start: Point;
-  orig: PlacedZone;
   handle: HandleDef | null;
+  /** The parts the drag carries with it: the case and everything inside it. */
+  riders: { index: number; zone: PlacedZone }[];
 }
 
 /** The view: how the 320 x 200 canvas is drawn into the stage. It never touches the layout. */
@@ -471,25 +284,33 @@ interface View {
   panY: number;
 }
 
-/** The lines a zone offers to the guides: its two edges and its middle. */
-function zoneLines(z: { x: number; y: number; width: number; height: number }, axis: "x" | "y"): number[] {
+/** A rectangle on the canvas, in canvas units. */
+interface Rect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** The lines a part offers to the guides: its two edges and its middle. */
+function zoneLines(z: Rect, axis: "x" | "y"): number[] {
   const a = axis === "x" ? z.x : z.y;
   const b = axis === "x" ? z.width : z.height;
   return [a, a + b / 2, a + b];
 }
 
-/** The desk's own edges and middle: a zone lines up with them as it does with another zone. */
-const CANVAS_BOX = { x: 0, y: 0, width: CANVAS_W, height: CANVAS_H };
-
-const gridOf = (v: number) => Math.round(v / SNAP_GRID) * SNAP_GRID;
+/** The desk's own edges and middle: a part lines up with them as it does with another part. */
+const CANVAS_BOX: Rect = { x: 0, y: 0, width: CANVAS_W, height: CANVAS_H };
 
 interface Snap {
   x: number;
   y: number;
-  /** The line the zone snapped to, in canvas units. */
+  /** The lines the part snapped to, in canvas units. */
   guideX: number | null;
   guideY: number | null;
-  /** How far the zone is from the line it snapped to, in canvas units. */
+  /** A second vertical line, for the equal-spacing snap. */
+  guideX2: number | null;
+  /** How far the part is from the line it snapped to, in canvas units. */
   gapX: number | null;
   gapY: number | null;
 }
@@ -506,50 +327,101 @@ function nearestLine(value: number, lines: number[], threshold: number): number 
 }
 
 /**
- * Where a moving zone lands: on the grid, or on another zone's edge or middle when it is close
- * enough. The alignment wins over the grid, and the lines it snapped to are the guides. Figma
- * snaps the same way: to the pixel grid and to the edges and centres of nearby layers
- * (https://help.figma.com/hc/en-us/articles/360041064174-Snap-to-objects-and-guides).
+ * Where a moving part lands. It follows the pointer exactly - no grid, no easing - unless it
+ * comes near a line it can sit against: another part's edge or middle, the case's panels, or
+ * the desk's own edges. The alignment wins, and the line it snapped to is the guide.
  */
 function snapMove(
-  moving: { x: number; y: number; width: number; height: number },
-  others: { x: number; y: number; width: number; height: number }[],
+  moving: Rect,
+  others: Rect[],
+  panels: { x: number[]; y: number[] },
   threshold: number,
   free: boolean,
 ): Snap {
-  if (free) return { x: moving.x, y: moving.y, guideX: null, guideY: null, gapX: null, gapY: null };
+  const none: Snap = { x: moving.x, y: moving.y, guideX: null, guideY: null, guideX2: null, gapX: null, gapY: null };
+  if (free) return none;
+  const allX = [...others.flatMap((o) => zoneLines(o, "x")), ...panels.x];
+  const allY = [...others.flatMap((o) => zoneLines(o, "y")), ...panels.y];
   let bestX: { delta: number; line: number } | null = null;
   let bestY: { delta: number; line: number } | null = null;
-  for (const o of others) {
-    for (const line of zoneLines(o, "x")) {
-      for (const mine of zoneLines(moving, "x")) {
-        const delta = line - mine;
-        if (Math.abs(delta) <= threshold && (!bestX || Math.abs(delta) < Math.abs(bestX.delta))) {
-          bestX = { delta, line };
-        }
+  for (const line of allX) {
+    for (const mine of zoneLines(moving, "x")) {
+      const delta = line - mine;
+      if (Math.abs(delta) <= threshold && (!bestX || Math.abs(delta) < Math.abs(bestX.delta))) {
+        bestX = { delta, line };
       }
     }
-    for (const line of zoneLines(o, "y")) {
-      for (const mine of zoneLines(moving, "y")) {
-        const delta = line - mine;
-        if (Math.abs(delta) <= threshold && (!bestY || Math.abs(delta) < Math.abs(bestY.delta))) {
-          bestY = { delta, line };
-        }
+  }
+  for (const line of allY) {
+    for (const mine of zoneLines(moving, "y")) {
+      const delta = line - mine;
+      if (Math.abs(delta) <= threshold && (!bestY || Math.abs(delta) < Math.abs(bestY.delta))) {
+        bestY = { delta, line };
       }
     }
   }
   return {
-    x: bestX ? moving.x + bestX.delta : gridOf(moving.x),
-    y: bestY ? moving.y + bestY.delta : gridOf(moving.y),
+    x: bestX ? moving.x + bestX.delta : moving.x,
+    y: bestY ? moving.y + bestY.delta : moving.y,
     guideX: bestX?.line ?? null,
     guideY: bestY?.line ?? null,
+    guideX2: null,
     gapX: bestX ? Math.abs(bestX.delta) : null,
     gapY: bestY ? Math.abs(bestY.delta) : null,
   };
 }
 
 /**
- * Resizes a zone by one of its eight handles, in the zone's own turned frame, as Figma does:
+ * The equal-spacing snap: when a part sits between two others and the gaps on either side are
+ * the same, it stays there. It is the snap a person expects without thinking about it.
+ */
+function equalSpacing(
+  moving: Rect,
+  others: Rect[],
+  threshold: number,
+): { x: number | null; y: number | null; lineA: number | null; lineB: number | null } {
+  let best: { x: number | null; y: number | null; lineA: number | null; lineB: number | null } = {
+    x: null,
+    y: null,
+    lineA: null,
+    lineB: null,
+  };
+  const overlapsY = (a: Rect, b: Rect) => a.y < b.y + b.height && b.y < a.y + a.height;
+  const overlapsX = (a: Rect, b: Rect) => a.x < b.x + b.width && b.x < a.x + a.width;
+  for (const a of others) {
+    for (const b of others) {
+      if (a === b) continue;
+      // The pair on the left and right of the moving part.
+      if (a.x + a.width <= moving.x + 0.001 && b.x >= moving.x + moving.width - 0.001) {
+        if (!overlapsY(a, moving) || !overlapsY(b, moving)) continue;
+        const gapL = moving.x - (a.x + a.width);
+        const gapR = b.x - (moving.x + moving.width);
+        if (Math.abs(gapL - gapR) <= threshold) {
+          const x = (a.x + a.width + b.x - moving.width) / 2;
+          if (best.x === null || Math.abs(x - moving.x) < Math.abs(best.x - moving.x)) {
+            best = { ...best, x, lineA: a.x + a.width, lineB: b.x };
+          }
+        }
+      }
+      // The pair above and below it.
+      if (a.y + a.height <= moving.y + 0.001 && b.y >= moving.y + moving.height - 0.001) {
+        if (!overlapsX(a, moving) || !overlapsX(b, moving)) continue;
+        const gapT = moving.y - (a.y + a.height);
+        const gapB = b.y - (moving.y + moving.height);
+        if (Math.abs(gapT - gapB) <= threshold) {
+          const y = (a.y + a.height + b.y - moving.height) / 2;
+          if (best.y === null || Math.abs(y - moving.y) < Math.abs(best.y - moving.y)) {
+            best = { ...best, y, lineA: a.y + a.height, lineB: b.y };
+          }
+        }
+      }
+    }
+  }
+  return best;
+}
+
+/**
+ * Resizes a part by one of its eight handles, in the part's own turned frame, as Figma does:
  *
  *   - the handle opposite the one dragged stays where it is;
  *   - Shift keeps the box's proportions (corners scale both sides, an edge scales the other side
@@ -558,13 +430,13 @@ function snapMove(
  *
  * `p` is the pointer on the canvas, already snapped by the caller.
  */
-function resizeBy(o: PlacedZone, handle: HandleDef, p: Point, shift: boolean, alt: boolean): PlacedZone {
+function resizeBy(o: Rect & { rotation_deg: number }, handle: HandleDef, p: Point, shift: boolean, alt: boolean): Rect {
   const rad = (o.rotation_deg * Math.PI) / 180;
   const cos = Math.cos(rad);
   const sin = Math.sin(rad);
   const cx0 = o.x + o.width / 2;
   const cy0 = o.y + o.height / 2;
-  // The pointer in the zone's own frame: origin at its centre, axes along its sides.
+  // The pointer in the part's own frame: origin at its centre, axes along its sides.
   const dx = p.x - cx0;
   const dy = p.y - cy0;
   const qx = dx * cos + dy * sin;
@@ -599,7 +471,32 @@ function resizeBy(o: PlacedZone, handle: HandleDef, p: Point, shift: boolean, al
   }
   const cx = cx0 + lx * cos - ly * sin;
   const cy = cy0 + lx * sin + ly * cos;
-  return { ...o, x: cx - w / 2, y: cy - h / 2, width: w, height: h };
+  return { x: cx - w / 2, y: cy - h / 2, width: w, height: h };
+}
+
+/**
+ * The view the desk opens in: the desk fills the stage's height, so the PC is as big as the
+ * page allows. The crop is capped, so the desk's own edges never disappear off the screen, and
+ * the fit control shows the whole of it.
+ */
+function heroView(w: number, h: number, centre: number): View {
+  if (w <= 0 || h <= 0) return { scale: 1, panX: 0, panY: 0 };
+  const base = w / CANVAS_W;
+  const heightFit = h / CANVAS_H / base;
+  const scale = Math.max(1, Math.min(heightFit, 1.35));
+  // The view looks at the parts, not at the empty desk around them - but the desk's own edges
+  // never come into view, so the picture behind the parts is always the whole desk.
+  const span = CANVAS_W * (1 / scale - 1);
+  const panX = clamp(CANVAS_W / (2 * scale) - centre, span, 0);
+  return { scale, panX, panY: 0 };
+}
+
+/** The view that shows the whole desk. */
+function wholeView(w: number, h: number): View {
+  if (w <= 0 || h <= 0) return { scale: 1, panX: 0, panY: 0 };
+  const base = w / CANVAS_W;
+  const heightFit = h / CANVAS_H / base;
+  return { scale: Math.min(1, heightFit), panX: 0, panY: 0 };
 }
 
 /**
@@ -624,18 +521,71 @@ function houseEase(t: number): number {
   return 3 * (1 - u) * (1 - u) * u * cy + 3 * (1 - u) * u * u * by + u * u * u;
 }
 
+/**
+ * The blue-ish noise that keeps a halo from banding: a high-pass of white noise, so the steps
+ * in the gradient are broken into noise instead of showing as rings. One LSB of it is added to
+ * every pixel of a halo, which is enough and is not seen.
+ */
+let noiseTile: HTMLCanvasElement | null = null;
+function noisePattern(ctx: CanvasRenderingContext2D): CanvasPattern | null {
+  if (!noiseTile) {
+    const size = 64;
+    const c = document.createElement("canvas");
+    c.width = size;
+    c.height = size;
+    const g = c.getContext("2d");
+    if (!g) return null;
+    const img = g.createImageData(size, size);
+    const raw = new Float32Array(size * size);
+    for (let i = 0; i < raw.length; i++) raw[i] = Math.random();
+    // The high pass: a pixel minus the mean of its neighbours.
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        let sum = 0;
+        let n = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            if (dx === 0 && dy === 0) continue;
+            sum += raw[((y + dy + size) % size) * size + ((x + dx + size) % size)] ?? 0;
+            n++;
+          }
+        }
+        const hp = (raw[y * size + x] ?? 0) - sum / n;
+        const v = hp > 0 ? 255 : 0;
+        const o = (y * size + x) * 4;
+        img.data[o] = v;
+        img.data[o + 1] = v;
+        img.data[o + 2] = v;
+        img.data[o + 3] = 255;
+      }
+    }
+    g.putImageData(img, 0, 0);
+    noiseTile = c;
+  }
+  return ctx.createPattern(noiseTile, "repeat");
+}
+
+/**
+ * The tone map: 1 - e^(-x). Two halos that meet never reach white, they reach the colour two
+ * lights make together, which is what the eye expects and what the hardware does.
+ */
+function toneMap(value: number): number {
+  return 1 - Math.exp(-value);
+}
+
+export type StageMode = "effect" | "lights";
+
 export interface StageProps {
   zones: PlacedZone[];
+  landmarks: Landmark[];
   devices: DeviceInfo[] | null;
-  selected: number | null;
-  onSelect: (index: number | null) => void;
-  onChange: (index: number, patch: Partial<PlacedZone>) => void;
+  /** What is picked. One part is the one with the handles; more are outlined. */
+  selection: Sel[];
+  onSelect: (sel: Sel[]) => void;
+  /** A change to one or more zones, as one undo step. */
+  onChangeZones: (patches: { index: number; patch: Partial<PlacedZone> }[]) => void;
+  onChangeLandmark: (index: number, patch: Partial<Landmark>) => void;
   onDrop: (deviceId: string, zoneIndex: number, x: number, y: number) => void;
-  /**
-   * Takes a zone off the layout. The label of a stale zone offers this once the zone is picked:
-   * a ghost cannot be clicked on the canvas, so the label is the way to it.
-   */
-  onRemoveZone?: (index: number) => void;
   /** Told when a drag starts and ends, so the page can hold off replacing the layout. */
   onDraggingChange?: (dragging: boolean) => void;
   /**
@@ -660,17 +610,71 @@ export interface StageProps {
   sampling?: SamplingMode;
   /** The zone being identified: its outline flashes so the eye finds it. */
   identifying?: number | null;
-  /** The PC form factor drawn behind the zones, and the way to change it. */
+  /** Effect (the picture under the parts) or lights (the parts as they shine). */
+  mode: StageMode;
+  onMode: (mode: StageMode) => void;
+  /** The unit every size is read in. */
+  unit: LengthUnit;
+  /** Parts the onboarding points at: they glow, so the eye finds them. */
+  pulse?: Sel[];
+  /**
+   * The LED the setup's walker has lit, so the desk can show where it is: the reader matches the
+   * light in the room with the cell on the drawing.
+   */
+  litLed?: { deviceId: string; zoneIndex: number; led: number; count?: number } | null;
+  /**
+   * The onboarding's spotlight: the parts being asked about. Every other part is dimmed to a quiet
+   * outline (no light, no halo, no label). `null` leaves every part as it is.
+   */
+  spotlight?: Sel[] | null;
+  /** Told which part the pointer is over, so the panel can name it. */
+  onHoverPart?: (sel: Sel | null) => void;
+  /** Reference outlines behind the case (a small, a mid and a full tower), as guides, not a picker. */
+  guides?: CaseGuide[];
+  /** The locked case shows a small lock that unlocks it (the onboarding). */
+  unlockBadge?: boolean;
+  /**
+   * The case form of an old layout, with no case box of its own yet. The box is drawn from it
+   * so the reader still sees their case; the daemon migrates it.
+   */
   caseForm?: CaseForm;
-  onCaseForm?: (f: CaseForm) => void;
 }
 
-function plainOf(devices: DeviceInfo[] | null, z: PlacedZone) {
-  return plainName(devices, z.device_id, z.zone_index);
+/** The width of the case's edge band, in pixels. */
+const EDGE_BAND_PX = 8;
+
+/** True when the pointer is within the edge band of the element's box. */
+function onEdgeBand(e: { clientX: number; clientY: number }, el: HTMLElement): boolean {
+  const r = el.getBoundingClientRect();
+  return (
+    e.clientX - r.left < EDGE_BAND_PX ||
+    r.right - e.clientX < EDGE_BAND_PX ||
+    e.clientY - r.top < EDGE_BAND_PX ||
+    r.bottom - e.clientY < EDGE_BAND_PX
+  );
 }
 
-function zoneKey(z: PlacedZone): string {
-  return `${z.device_id}#${z.zone_index}`;
+/** True when another part (not the case) is under the pointer. */
+function partUnder(e: { clientX: number; clientY: number }): boolean {
+  return document
+    .elementsFromPoint(e.clientX, e.clientY)
+    .some((el) => el instanceof HTMLElement && (el.dataset.zoneIndex !== undefined || (el.dataset.landmark === "true" && el.dataset.kind !== "case")));
+}
+
+/** A reference outline behind the case, in canvas units. */
+export interface CaseGuide {
+  id: string;
+  /** Two quiet lines of text: the name and the size. */
+  name: string;
+  size: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** The canvas x the names line up to, left of every outline: three names, one column. */
+  labelX: number;
+  /** Snaps the case to this outline. */
+  onPick: () => void;
 }
 
 /** The device accent of a zone, or -1 when the device is not in the list any more. */
@@ -680,7 +684,7 @@ function accentOf(devices: DeviceInfo[] | null, deviceId: string): number {
 }
 
 /** The axis-aligned box of a zone's corners, in canvas units. */
-function boundsOf(z: PlacedZone): { x: number; y: number; w: number; h: number } {
+function boundsOf(z: PlacedZone): Rect {
   let minX = Infinity;
   let minY = Infinity;
   let maxX = -Infinity;
@@ -691,41 +695,67 @@ function boundsOf(z: PlacedZone): { x: number; y: number; w: number; h: number }
     if (c.y < minY) minY = c.y;
     if (c.y > maxY) maxY = c.y;
   }
-  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
 }
 
-/** The luminance of a colour, 0 to 255: whether a dot is bright or dark against its ring. */
-function luminance(c: RGB): number {
-  return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+/** The same for a landmark. */
+function landmarkBounds(l: Landmark): Rect {
+  const rad = (l.rotation_deg * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  const cx = l.x + l.width / 2;
+  const cy = l.y + l.height / 2;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const [dx, dy] of (
+    [
+      [-l.width / 2, -l.height / 2],
+      [l.width / 2, -l.height / 2],
+      [l.width / 2, l.height / 2],
+      [-l.width / 2, l.height / 2],
+    ] as const
+  )) {
+    const x = cx + dx * cos - dy * sin;
+    const y = cy + dx * sin + dy * cos;
+    minX = Math.min(minX, x);
+    maxX = Math.max(maxX, x);
+    minY = Math.min(minY, y);
+    maxY = Math.max(maxY, y);
+  }
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
 }
 
-/** A zone's LED layout, kept until the zone's own shape changes. */
-interface LedLayout {
-  sig: string;
-  local: LocalLeds;
+/** The part a zone is, and which way it points. */
+function partOf(z: PlacedZone, devices: DeviceInfo[] | null, info: ZoneInfo | null): PartKind {
+  if (z.part) return z.part.kind;
+  if (!info) return "generic";
+  return partForDevice(devices?.find((d) => d.id === z.device_id)?.kind ?? "other", info);
 }
 
 /**
- * The live preview with every placed zone drawn over it. Zones move, resize and rotate by
- * pointer (or by arrow keys, with Shift for ten units).
+ * The live preview with every placed part drawn over it. Parts move, resize and rotate by
+ * pointer (or by arrow keys, with Shift for ten millimetres).
  *
- * A drag never re-renders React: the pointer move writes the zone's geometry straight onto the
+ * A drag never re-renders React: the pointer move writes the part's geometry straight onto the
  * element and repaints the LED overlay, and the geometry is committed to the layout once, when
  * the pointer goes up. The canvas can be zoomed and panned; that is a view transform only and
  * never reaches the saved layout.
  *
- * Each zone is drawn as a thin outline of its shape with its LEDs as small dots at the places
- * the daemon samples. A selected zone gets Figma's frame: eight resize handles and a rotation
- * handle (https://help.figma.com/hc/en-us/articles/360039956914).
+ * Two ways of seeing the desk: the effect under the parts (the cells the engine samples, in
+ * their own colours) and the lights themselves (each LED a dot with a halo that stays inside
+ * its own part). The second is labelled approximate, because it is.
  */
 export function PreviewStage({
   zones,
+  landmarks,
   devices,
-  selected,
+  selection,
   onSelect,
-  onChange,
+  onChangeZones,
+  onChangeLandmark,
   onDrop,
-  onRemoveZone,
   onDraggingChange,
   onLiveChange,
   layoutId,
@@ -734,122 +764,136 @@ export function PreviewStage({
   effectNeedsInput = false,
   sampling = "nearest",
   identifying = null,
+  mode,
+  onMode,
+  unit,
   caseForm = "none",
-  onCaseForm,
+  pulse = [],
+  litLed = null,
+  spotlight = null,
+  onHoverPart,
+  guides = [],
+  unlockBadge = false,
 }: StageProps) {
   const stageRef = useRef<HTMLDivElement>(null);
   const previewRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
-  const frameRef = useRef<Frame | null>(null);
-  const imageRef = useRef<ImageData | null>(null);
-  const dragRef = useRef<Drag | null>(null);
-  const panRef = useRef<{ start: Point; orig: View } | null>(null);
-  const liveRef = useRef<PlacedZone[]>(zones.map((z) => ({ ...z })));
-  const zoneEls = useRef<(HTMLDivElement | null)[]>([]);
+  /** The mark on the LED the walker has lit. */
+  const litMarkerRef = useRef<HTMLSpanElement>(null);
   const frameEl = useRef<HTMLDivElement | null>(null);
-  const labelEl = useRef<HTMLDivElement | null>(null);
-  const guideEls = useRef<{ v: HTMLSpanElement | null; h: HTMLSpanElement | null }>({ v: null, h: null });
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const gRef = useRef<SVGGElement | null>(null);
+  const guideEls = useRef<{ v: HTMLSpanElement | null; h: HTMLSpanElement | null; v2: HTMLSpanElement | null }>({
+    v: null,
+    h: null,
+    v2: null,
+  });
   const readoutRef = useRef<HTMLDivElement | null>(null);
-  const caseSvgRef = useRef<SVGSVGElement | null>(null);
-  const caseGRef = useRef<SVGGElement | null>(null);
-  const caseFormRef = useRef<CaseForm>(caseForm);
-  caseFormRef.current = caseForm;
   const editorLayerRef = useRef<HTMLDivElement | null>(null);
   const editorPicRef = useRef<Picture | null>(null);
-  const daemonLiveRef = useRef(false);
-  const samplingRef = useRef<SamplingMode>("nearest");
-  const missingRef = useRef<Set<number>>(new Set());
-  const selectedRef = useRef<number | null>(selected);
-  selectedRef.current = selected;
-  const zonesRef = useRef(zones);
-  zonesRef.current = zones;
+  const frameDataRef = useRef<Frame | null>(null);
+  const dragRef = useRef<Drag | null>(null);
+  const marqueeRef = useRef<Box | null>(null);
+  const panRef = useRef<{ start: Point; orig: View } | null>(null);
+  const liveRef = useRef<PlacedZone[]>(zones.map((z) => ({ ...z })));
+  const liveLmRef = useRef<Landmark[]>(landmarks.map((l) => ({ ...l })));
+  const zoneEls = useRef<(HTMLDivElement | null)[]>([]);
+  const lmEls = useRef<(HTMLDivElement | null)[]>([]);
   const paintQueued = useRef(false);
   const liveRaf = useRef<number | null>(null);
   const zoomRaf = useRef<number | null>(null);
   const viewCommit = useRef<ReturnType<typeof setTimeout> | null>(null);
   const layoutCache = useRef<Map<string, LedLayout>>(new Map());
   const ledOff = useRef<{ key: string; color: string }>({ key: "", color: "rgba(255,255,255,0.3)" });
-  const [hover, setHover] = useState<number | null>(null);
-  /** The name tags beside every zone, on or off: remembered for this viewer. */
-  const tagsOn = useSyncExternalStore(subscribeTags, readTags, () => true);
-  const toggleTags = () => {
+  const [hover, setHover] = useState<Sel | null>(null);
+  /** The part a finger or a pointer is on: it names itself while it is held. */
+  const [pressed, setPressed] = useState<Sel | null>(null);
+  /** The one-time hint that says which key shows what. */
+  const [hint, setHint] = useState(() => {
     try {
-      window.localStorage.setItem(LABELS_KEY, tagsOn ? "off" : "on");
+      return window.localStorage.getItem(HINT_KEY) !== "1";
     } catch {
-      // Not remembered, still toggled for this session.
-      tagsSession = !tagsOn;
+      return true;
     }
-    for (const l of tagListeners) l();
-  };
-  /** The zone a finger or a pointer is on: its label shows while it is held. */
-  const [pressed, setPressed] = useState<number | null>(null);
+  });
+  useEffect(() => {
+    if (!hint) return;
+    const t = setTimeout(() => {
+      setHint(false);
+      try {
+        window.localStorage.setItem(HINT_KEY, "1");
+      } catch {
+        // Not remembered, still shown this once.
+      }
+    }, 8000);
+    return () => clearTimeout(t);
+  }, [hint]);
+  /** The part whose size is being typed in. */
+  const [sizing, setSizing] = useState<Sel | null>(null);
+  const [marquee, setMarquee] = useState<Box | null>(null);
   const [view, setView] = useState<View>({ scale: 1, panX: 0, panY: 0 });
   const viewRef = useRef<View>(view);
+  /** True once the reader has zoomed or panned: the view is then theirs, not the desk's. */
+  const userView = useRef(false);
   const [viewFor, setViewFor] = useState<string | null>(null);
   const status = usePreviewStatus();
   const reduced = usePrefersReducedMotion();
-  /**
-   * A phone's canvas is 358 px wide and carries a dozen zones: a label on each is a wall of text
-   * over the lights. On a phone only the picked zone is named, and the zone under a finger
-   * names itself while it is held.
-   */
   const phone = useMediaQuery("(max-width: 720px)");
-  /** The zone whose name shows: the one being dragged, then the one under the pointer, then the picked one. */
-  const labelIndex = phone ? (pressed ?? selected) : (pressed ?? hover ?? selected);
-  const labelIndexRef = useRef<number | null>(labelIndex);
-  labelIndexRef.current = labelIndex;
-  /**
-   * The daemon's frames are the honest picture of the effect. When they are not coming, the
-   * editor draws the running effect itself, behind the zones, and says so.
-   */
+
+  /** The daemon's frames are the honest picture of the effect. */
   const daemonLive = status.state === "live";
+  const daemonLiveRef = useRef(daemonLive);
   daemonLiveRef.current = daemonLive;
+  const samplingRef = useRef<SamplingMode>(sampling);
   samplingRef.current = sampling;
-  const editorDraws = !daemonLive && !!effect && !effectNeedsInput;
-  /**
-   * The picture on the canvas, and the one it is fading out of. When the running effect
-   * changes, the new picture fades in over the old one instead of snapping.
-   */
+  const modeRef = useRef<StageMode>(mode);
+  modeRef.current = mode;
+  const selectionRef = useRef<Sel[]>(selection);
+  selectionRef.current = selection;
+  const zonesRef = useRef(zones);
+  zonesRef.current = zones;
+  const unitRef = useRef(unit);
+  unitRef.current = unit;
+  const litRef = useRef(litLed);
+  litRef.current = litLed;
+  /** Whether a part is dimmed: the spotlight is on and the part is not in it. */
+  const spotRef = useRef(spotlight);
+  spotRef.current = spotlight;
+  const isDim = (sel: Sel): boolean =>
+    spotlight !== null && !spotlight.some((s) => s.kind === sel.kind && s.index === sel.index);
+  const onHoverPartRef = useRef(onHoverPart);
+  onHoverPartRef.current = onHoverPart;
+  useEffect(() => {
+    onHoverPartRef.current?.(hover);
+  }, [hover]);
+
+  /** The picture on the canvas, and the one it is fading out of. */
   const [drawn, setDrawn] = useState<{ id: string; props: PreviewValues } | null>(null);
   const [fading, setFading] = useState<{ id: string; props: PreviewValues } | null>(null);
   const effectId = effect?.id ?? null;
   const [lastEffectId, setLastEffectId] = useState<string | null>(null);
   if (effectId !== lastEffectId) {
-    // The running effect changed: the picture that was showing fades out under the new one.
     setLastEffectId(effectId);
     setFading(drawn);
     setDrawn(effect ? { id: effect.id, props: effect.props } : null);
   }
-  /**
-   * The effect's values can change while it runs - the Layout page's "Now playing" panel edits
-   * them - and the editor's own draw follows them, so the canvas shows the change at once.
-   */
   const drawnNow = useMemo(() => {
     if (!drawn) return null;
     if (effect && effect.id === drawn.id) return { id: drawn.id, props: effect.props };
     return drawn;
   }, [drawn, effect]);
   useEffect(() => {
-    // The picture that is fading out is taken down once the fade is over.
     if (!fading) return;
     const t = setTimeout(() => setFading(null), 320);
     return () => clearTimeout(t);
   }, [fading]);
-  /**
-   * The editor's draw is taken down once the daemon's frames have taken over: it would
-   * otherwise keep repainting a canvas nobody can see.
-   */
   const [editorGone, setEditorGone] = useState(false);
   useEffect(() => {
-    // The editor's draw comes back at once when the daemon's frames stop, and is taken down a
-    // moment after they take over.
     const t = setTimeout(() => setEditorGone(daemonLive), daemonLive ? 400 : 0);
     return () => clearTimeout(t);
   }, [daemonLive]);
 
-  // The view belongs to the layout: it is restored when the editor comes back to it. This runs
-  // during render (React's pattern for state that follows a prop), so the canvas is never shown
-  // with another layout's zoom.
+  // The view belongs to the layout: it is restored when the editor comes back to it.
   if (layoutId !== viewFor) {
     const remembered = readView(layoutId ?? "");
     const next = remembered ?? FIT_VIEW;
@@ -858,7 +902,7 @@ export function PreviewStage({
     setView(next);
   }
 
-  // The device's description of every zone, found once per layout change.
+  /** The device's description of every zone, found once per layout change. */
   const infos = useMemo(() => {
     const map = new Map<string, ZoneInfo>();
     for (const z of zones) {
@@ -870,8 +914,16 @@ export function PreviewStage({
   const infosRef = useRef(infos);
   infosRef.current = infos;
 
-  // A zone whose device the daemon does not drive is stale: it is drawn dimmed and dashed, and
-  // the inspector says so.
+  /**
+   * The case box of a layout that has a form but no box of its own: it is drawn from the
+   * form's measurements, so the reader still sees their case. The daemon migrates it.
+   */
+  const derivedCase = useMemo(() => {
+    if (landmarks.some((l) => l.kind === "case")) return null;
+    return caseLandmarkFor(caseForm);
+  }, [landmarks, caseForm]);
+
+  /** A zone whose device the daemon does not drive is stale. */
   const missing = useMemo(() => {
     const out = new Set<number>();
     if (!devices) return out;
@@ -881,21 +933,12 @@ export function PreviewStage({
     });
     return out;
   }, [zones, devices]);
+  const missingRef = useRef(missing);
   missingRef.current = missing;
-
-  /**
-   * A stale zone cannot be picked on the canvas: it is a ghost over another zone and it never
-   * takes a click. Its label is the way to it, and the label carries the way to take it off the
-   * layout once the zone is picked.
-   */
-  const removable = useCallback(
-    (index: number) => selected === index && missing.has(index) && !!onRemoveZone,
-    [selected, missing, onRemoveZone],
-  );
 
   /** Where a zone's LEDs sit, rebuilt only when its size, shape or order changes. */
   const layoutOf = useCallback((z: PlacedZone, info: ZoneInfo): LocalLeds => {
-    const sig = `${z.width.toFixed(3)}|${z.height.toFixed(3)}|${JSON.stringify(z.shape)}|${z.reversed}|${info.led_count}|${info.kind.type}`;
+    const sig = `${z.width.toFixed(3)}|${z.height.toFixed(3)}|${JSON.stringify(z.shape)}|${z.reversed}|${info.led_count}|${info.kind.type}|${z.leds?.start ?? -1}|${z.leds?.count ?? 0}`;
     const key = zoneKey(z);
     const hit = layoutCache.current.get(key);
     if (hit && hit.sig === sig) return hit.local;
@@ -904,30 +947,8 @@ export function PreviewStage({
     return local;
   }, []);
 
-  /** Places the zone's name beside it: below a picked zone (the rotation handle is above), above a hovered one. */
-  const placeLabel = useCallback((index: number | null, v: View) => {
-    const el = labelEl.current;
-    const stage = stageRef.current;
-    if (!el || !stage || index === null) return;
-    const z = liveRef.current[index];
-    if (!z) return;
-    const k = (stage.clientWidth / CANVAS_W) * v.scale;
-    const b = boundsOf(z);
-    const box = { x: (b.x + v.panX) * k, y: (b.y + v.panY) * k, w: b.w * k, h: b.h * k };
-    const w = el.offsetWidth;
-    const h = el.offsetHeight;
-    const above = box.y - h - 6;
-    const below = box.y + box.h + 8;
-    const picked = selectedRef.current === index;
-    let y = picked ? below : above;
-    if (picked && below + h > stage.clientHeight - 2) y = above;
-    else if (!picked && above < 2) y = below;
-    el.style.left = `${clamp(box.x, 2, Math.max(2, stage.clientWidth - w - 2))}px`;
-    el.style.top = `${clamp(y, 2, Math.max(2, stage.clientHeight - h - 2))}px`;
-  }, []);
-
-  /** Writes the selection frame onto its element: the zone's box, its handles' cursors, which handles fit. */
-  const applyFrame = useCallback((z: PlacedZone, v: View) => {
+  /** Writes the selection frame onto its element: the part's box, its handles' cursors. */
+  const applyFrame = useCallback((z: PlacedZone | Landmark, v: View) => {
     const el = frameEl.current;
     const stage = stageRef.current;
     if (!el || !stage) return;
@@ -940,35 +961,31 @@ export function PreviewStage({
     el.style.transform = `rotate(${z.rotation_deg}deg)`;
     el.dataset.narrowX = z.width * k < EDGE_HANDLE_MIN_PX ? "true" : "false";
     el.dataset.narrowY = z.height * k < EDGE_HANDLE_MIN_PX ? "true" : "false";
-    // The rotation handle stands above the zone; when that is off the canvas it stands below.
-    const t = zoneTransform(z);
-    const px = ROTATE_STANDOFF / k;
-    const topOut = {
-      x: t.cx + 0 * t.cos - (-z.height / 2 - px) * t.sin,
-      y: t.cy + 0 * t.sin + (-z.height / 2 - px) * t.cos,
-    };
-    const fits = topOut.x > 2 && topOut.x < CANVAS_W - 2 && topOut.y > 2 && topOut.y < CANVAS_H - 2;
-    el.dataset.flip = fits ? "false" : "true";
     for (const handle of HANDLES) {
       const h = el.querySelector<HTMLElement>(`[data-handle="${handle.id}"]`);
       if (h) h.style.cursor = handleCursor(handle, z.rotation_deg);
     }
   }, []);
 
-  /** Writes one zone's geometry onto its element. No React involved. */
+  /** Writes one part's geometry onto its element. No React involved. */
   const applyGeom = useCallback(
-    (index: number, z: PlacedZone, v: View) => {
-      const el = zoneEls.current[index];
+    (sel: Sel, v: View) => {
+      const stage = stageRef.current;
+      const base = (stage?.clientWidth ?? CANVAS_W) / CANVAS_W;
+      const k = base * v.scale;
+      const el = sel.kind === "zone" ? zoneEls.current[sel.index] : lmEls.current[sel.index];
+      const obj = sel.kind === "zone" ? liveRef.current[sel.index] : liveLmRef.current[sel.index];
+      if (!obj) return;
       if (el) {
-        const base = (stageRef.current?.clientWidth ?? CANVAS_W) / CANVAS_W;
-        const k = base * v.scale;
-        el.style.left = `${(z.x + v.panX) * k}px`;
-        el.style.top = `${(z.y + v.panY) * k}px`;
-        el.style.width = `${z.width * k}px`;
-        el.style.height = `${z.height * k}px`;
-        el.style.transform = `rotate(${z.rotation_deg}deg)`;
+        el.style.left = `${(obj.x + v.panX) * k}px`;
+        el.style.top = `${(obj.y + v.panY) * k}px`;
+        el.style.width = `${obj.width * k}px`;
+        el.style.height = `${obj.height * k}px`;
+        el.style.transform = `rotate(${obj.rotation_deg}deg)`;
       }
-      if (selectedRef.current === index) applyFrame(z, v);
+      if (sel.kind === "zone" && selectionRef.current.some((s) => s.kind === "zone" && s.index === sel.index)) {
+        applyFrame(obj, v);
+      }
     },
     [applyFrame],
   );
@@ -985,7 +1002,15 @@ export function PreviewStage({
     return ledOff.current.color;
   }, []);
 
-  /** Repaints the LED dots from the last frame, at the zones' live geometry and view. */
+  /**
+   * Repaints the LED overlay. Two ways of showing the same lights:
+   *
+   *   effect  every LED's own cell is filled with the colour it reads from the picture. No
+   *           glow: this is the engine's geometry, drawn as it is.
+   *   lights  every LED is a dot in its colour with a halo that stays inside its own part. The
+   *           overlaps are tone-mapped and dithered, so nothing clips to white and nothing
+   *           bands.
+   */
   const paintOverlay = useCallback(() => {
     const ov = overlayRef.current;
     const stage = stageRef.current;
@@ -999,87 +1024,212 @@ export function PreviewStage({
     const oy = v.panY * k;
     octx.setTransform(1, 0, 0, 1, 0, 0);
     octx.clearRect(0, 0, ov.width, ov.height);
-    const frame = frameRef.current;
-    // The dots take their colour from the daemon's frames when they are coming, and from the
-    // editor's own draw otherwise.
+    const frame = frameDataRef.current;
     const pic = daemonLiveRef.current
       ? frame
         ? { width: frame.width, height: frame.height, data: frame.rgb, stride: 3 }
         : null
       : editorPicRef.current;
-    const mode = samplingRef.current;
+    const modeNow = modeRef.current;
     const geom = liveRef.current;
     const unlit = unlitColor();
-    // A thin ring keeps a dot readable on any picture: dark round a bright dot, white round a dark one.
     const ringDark = "rgba(0, 0, 0, 0.7)";
-    const ringLight = "rgba(255, 255, 255, 0.92)";
+    const pattern = modeNow === "lights" ? noisePattern(octx) : null;
+    const lit = litRef.current;
+    const marker = litMarkerRef.current;
+    if (marker) {
+      marker.hidden = true;
+      delete marker.dataset.run;
+    }
+    const kCss = k / dpr;
     for (let i = 0; i < geom.length; i++) {
       const z = geom[i];
       if (!z || !z.visible) continue;
       const info = infosRef.current.get(zoneKey(z));
       if (!info) continue;
+      // The spotlight is on and this part is not in it: a quiet outline, no light drawn.
+      const spot = spotRef.current;
+      if (spot && !spot.some((x) => x.kind === "zone" && x.index === i)) continue;
+      // Which of this placement's LEDs is the one the walker has lit.
+      const litAt =
+        lit && lit.deviceId === z.device_id && lit.zoneIndex === z.zone_index
+          ? z.leds
+            ? lit.led - z.leds.start
+            : lit.led
+          : -1;
+      // How many LEDs from there are lit (a whole fan, when the identify asks for it).
+      const litTo = litAt >= 0 ? litAt + Math.max(1, lit?.count ?? 1) : -1;
       const local = layoutOf(z, info);
       const t = zoneTransform(z);
+      // Whether this part's own body can carry the light of its LEDs. Only the compact parts
+      // (a fan, a stick, a card, a keyboard) are lit from within; a strip, an edge or a box is
+      // only its LEDs and their halos along the line.
+      const bodyLight = COMPACT_KINDS.has(partOf(z, devices, info));
       // A zone whose device is not connected has no LEDs lit: its dots stay dark.
       const off = missingRef.current.has(i);
-      // A point is one blob of light: its LEDs all sample the same rect, so one dot stands for them.
       const count = local.shape === "point" ? Math.min(1, local.leds.length) : local.leds.length;
       const isPoint = local.shape === "point";
-      // A point is one soft, larger dot: the zone's one blob of light.
-      const minPx = isPoint ? 4 : DOT_MIN_PX;
+      const minPx = isPoint ? 4 : 1.4;
       const radius = clamp(
         (isPoint ? local.radius * 0.6 : local.radius) * k,
         minPx * dpr,
-        (isPoint ? 8 : DOT_MAX_PX) * dpr * Math.max(1, v.scale * 0.5),
+        (isPoint ? 8 : 9) * dpr * Math.max(1, v.scale * 0.5),
       );
+      /** The box round the lit run, when the identify lights more than one LED. */
+      let run: [number, number, number, number] | null = null;
+      if (modeNow === "effect") {
+        // The cells the engine samples, in the colours they read. Each cell is drawn as a
+        // crisp outline filled with its colour, so the picture shows through and the engine's
+        // own geometry is visible. No glow.
+        for (let j = 0; j < count; j++) {
+          const led = local.leds[j];
+          if (!led) continue;
+          const cell = canvasCell(t, led);
+          const x = cell.cx * k + ox;
+          const y = cell.cy * k + oy;
+          if (x + cell.bounds[2] * k < 0 || y + cell.bounds[3] * k < 0 || x > ov.width || y > ov.height) continue;
+          const c = pic && !off ? sampleLed(pic, cell, samplingRef.current) : null;
+          octx.save();
+          octx.translate(x, y);
+          octx.rotate((z.rotation_deg * Math.PI) / 180);
+          const w = Math.max(1, led.w * k);
+          const h = Math.max(1, led.h * k);
+          // The cell is the LED's own ground: its colour, solid, with a dark line round it so
+          // two cells that touch read as two tiles and not as one soft patch. The cells are
+          // drawn in the order of the LEDs, so where they overlap the later one simply covers
+          // the earlier one: nothing is blended and nothing goes see-through.
+          octx.fillStyle = c ? `rgb(${c[0]} ${c[1]} ${c[2]})` : unlit;
+          octx.fillRect(-w / 2, -h / 2, w, h);
+          octx.lineWidth = Math.max(1, dpr);
+          octx.strokeStyle = "rgba(0, 0, 0, 0.55)";
+          octx.strokeRect(-w / 2, -h / 2, w, h);
+          if (litAt >= 0 && j >= litAt && j < litTo) {
+            // The LED the walker has lit: the mark on the desk, so the reader can match it with
+            // the light in the room.
+            if (litTo - litAt === 1) markLit(marker, cell, led, v, kCss);
+            else run = growRun(run, cell);
+          }
+          octx.restore();
+        }
+        if (run) markRun(marker, run, v, kCss);
+        continue;
+      }
+      // Lights mode: the part is lit from within. The light falls on the part's own body, the
+      // halo around each LED is a little over one LED's pitch, and the LED itself is its own
+      // colour with a hot centre. All of it is clipped to the part plus a small margin, so no
+      // light ever leaves the part it belongs to.
+      const horizontal = z.width >= z.height;
+      const pitch = firstPitch(local, horizontal);
+      const haloR = clamp(pitch * k * 1.25, 3 * dpr, 70 * dpr);
+      octx.save();
+      // The halo is clipped to the part's own outline plus a margin: no light ever leaves the
+      // part it belongs to. The margin is at least the halo's own reach, so the glow fades out
+      // before the clip and no hard edge is left behind.
+      partPath(octx, z, k, ox, oy, Math.max(HALO_MARGIN_PX * dpr, haloR + dpr));
+      octx.clip();
+      // The colours of this part's LEDs, and their average: the body of the part is tinted with
+      // it, so a fan or a stick looks lit from within.
+      const colours: RGB[] = [];
       for (let j = 0; j < count; j++) {
         const led = local.leds[j];
         if (!led) continue;
         const cell = canvasCell(t, led);
+        if (pic && !off) colours.push(sampleLed(pic, cell, samplingRef.current));
+      }
+      const avg: RGB = colours.length
+        ? [
+            Math.round(colours.reduce((a, c) => a + c[0], 0) / colours.length),
+            Math.round(colours.reduce((a, c) => a + c[1], 0) / colours.length),
+            Math.round(colours.reduce((a, c) => a + c[2], 0) / colours.length),
+          ]
+        : [0, 0, 0];
+      // The part's own drawing takes the colour of its light, so the glyph is lit too.
+      if (avg[0] + avg[1] + avg[2] > 0) {
+        const el = zoneEls.current[i];
+        const lit = `rgb(${avg[0]} ${avg[1]} ${avg[2]})`;
+        if (el && el.dataset.lit !== lit) {
+          el.dataset.lit = lit;
+          el.style.setProperty("--lit", lit);
+        }
+      }
+      for (let j = 0; j < count; j++) {
+        const led = local.leds[j];
+        if (!led) continue;
+        const cell = canvasCell(t, led);
+        if (litAt >= 0 && j >= litAt && j < litTo && litTo - litAt > 1) run = growRun(run, cell);
         const x = cell.cx * k + ox;
         const y = cell.cy * k + oy;
-        // A dot that is off the canvas is not drawn: at a high zoom most of the desk is not on
-        // screen, and a frame that draws dots nobody can see is a frame wasted.
-        if (x + radius < 0 || y + radius < 0 || x - radius > ov.width || y - radius > ov.height) continue;
-        let fill: string;
-        let ring = ringDark;
-        if (pic && !off) {
-          const c = sampleLed(pic, cell, mode);
-          // A lit LED reads brighter than the picture it sits on: the dot is lifted a little, so
-          // it stands out as a light and not as a hole in the effect.
-          const lit: RGB = [
-            Math.round(c[0] + (255 - c[0]) * 0.28),
-            Math.round(c[1] + (255 - c[1]) * 0.28),
-            Math.round(c[2] + (255 - c[2]) * 0.28),
-          ];
-          fill = `rgb(${lit[0]} ${lit[1]} ${lit[2]})`;
-          if (luminance(lit) < 120) ring = ringLight;
-        } else {
-          // No picture, or no device: the dots still show where the LEDs sit.
-          fill = unlit;
-          ring = ringDark;
-        }
-        if (isPoint) {
-          // The soft edge: the dot's own colour, fading out past the ring.
-          const halo = octx.createRadialGradient(x, y, radius * 0.6, x, y, radius * 1.9);
-          halo.addColorStop(0, fill.replace("rgb(", "rgba(").replace(")", " / 0.55)"));
-          halo.addColorStop(1, fill.replace("rgb(", "rgba(").replace(")", " / 0)"));
+        if (x + haloR < 0 || y + haloR < 0 || x - haloR > ov.width || y - haloR > ov.height) continue;
+        const c = pic && !off ? sampleLed(pic, cell, samplingRef.current) : null;
+        if (!c) {
           octx.beginPath();
-          octx.arc(x, y, radius * 1.9, 0, Math.PI * 2);
-          octx.fillStyle = halo;
+          octx.arc(x, y, radius + dpr * 1.25, 0, Math.PI * 2);
+          octx.fillStyle = ringDark;
+          octx.fill();
+          octx.beginPath();
+          octx.arc(x, y, radius, 0, Math.PI * 2);
+          octx.fillStyle = unlit;
+          octx.fill();
+          continue;
+        }
+        const rgb = `${c[0]} ${c[1]} ${c[2]}`;
+        const peak = Math.max(c[0], c[1], c[2]) / 255;
+        // The halo: the light around the LED, tone-mapped so two lights never make white.
+        const alpha = toneMap(0.45 + peak * 1.6);
+        const grad = octx.createRadialGradient(x, y, 0, x, y, haloR);
+        grad.addColorStop(0, `rgba(${rgb} / ${alpha})`);
+        grad.addColorStop(0.35, `rgba(${rgb} / ${alpha * 0.5})`);
+        grad.addColorStop(1, `rgba(${rgb} / 0)`);
+        octx.beginPath();
+        octx.arc(x, y, haloR, 0, Math.PI * 2);
+        octx.fillStyle = grad;
+        octx.fill();
+        if (bodyLight) {
+          // The light on the part's own body: the same colour, spread a little past the halo, so
+          // the part is lit from where its LED is and fades away from it.
+          const reach = haloR * 1.25;
+          const body = octx.createRadialGradient(x, y, 0, x, y, reach);
+          body.addColorStop(0, `rgba(${rgb} / ${alpha * 0.26})`);
+          body.addColorStop(1, `rgba(${rgb} / 0)`);
+          octx.beginPath();
+          octx.arc(x, y, reach, 0, Math.PI * 2);
+          octx.fillStyle = body;
           octx.fill();
         }
+        // The LED itself: its own colour, with a hot centre.
+        const coreR = Math.max(radius * 1.3, CORE_PX * dpr);
+        const hot: RGB = [
+          Math.round(c[0] + (255 - c[0]) * 0.6),
+          Math.round(c[1] + (255 - c[1]) * 0.6),
+          Math.round(c[2] + (255 - c[2]) * 0.6),
+        ];
+        const core = octx.createRadialGradient(x, y, 0, x, y, coreR);
+        core.addColorStop(0, `rgb(${hot[0]} ${hot[1]} ${hot[2]})`);
+        core.addColorStop(0.28, `rgb(${c[0]} ${c[1]} ${c[2]})`);
+        core.addColorStop(1, `rgba(${rgb} / 0)`);
         octx.beginPath();
-        octx.arc(x, y, radius + dpr * 1.25, 0, Math.PI * 2);
-        octx.fillStyle = ring;
+        octx.arc(x, y, coreR, 0, Math.PI * 2);
+        octx.fillStyle = core;
         octx.fill();
-        octx.beginPath();
-        octx.arc(x, y, radius, 0, Math.PI * 2);
-        octx.fillStyle = fill;
-        octx.fill();
+        if (j === litAt && litTo - litAt === 1) {
+          // The LED the walker has lit: the mark on the desk, so the reader can match it with
+          // the light in the room.
+          markLit(marker, cell, led, v, kCss);
+        }
       }
+      if (run) markRun(marker, run, v, kCss);
+      // One least significant bit of noise over the halo, so the gradient does not band.
+      if (pattern) {
+        octx.globalCompositeOperation = "overlay";
+        octx.globalAlpha = 1 / 255;
+        octx.fillStyle = pattern;
+        octx.fill();
+        octx.globalAlpha = 1;
+        octx.globalCompositeOperation = "source-over";
+      }
+      octx.restore();
     }
-  }, [layoutOf, unlitColor]);
+  }, [layoutOf, unlitColor, devices]);
 
   const queuePaint = useCallback(() => {
     if (paintQueued.current) return;
@@ -1090,10 +1240,7 @@ export function PreviewStage({
     });
   }, [paintOverlay]);
 
-  /**
-   * Reads the editor's own draw, so the LED dots can be coloured from it: the picture the
-   * reader sees and the dots on it are the same picture.
-   */
+  /** Reads the editor's own draw, so the LED dots can be coloured from it. */
   const readEditorPicture = useCallback(() => {
     const layer = editorLayerRef.current;
     const canvas = layer?.querySelector("canvas") as HTMLCanvasElement | null;
@@ -1108,22 +1255,15 @@ export function PreviewStage({
     }
     try {
       const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      editorPicRef.current = {
-        width: canvas.width,
-        height: canvas.height,
-        data: img.data,
-        stride: 4,
-      };
+      editorPicRef.current = { width: canvas.width, height: canvas.height, data: img.data, stride: 4 };
     } catch {
       editorPicRef.current = null;
     }
   }, []);
 
-  /**
-   * The editor's draw animates on its own clock, so the dots have to follow it: while it is
-   * showing, the canvas is repainted every frame.
-   */
+  /** The editor's draw animates on its own clock, so the dots have to follow it. */
   useEffect(() => {
+    const editorDraws = !daemonLive && !!effect && !effectNeedsInput;
     if (!editorDraws) return;
     let raf = 0;
     const step = () => {
@@ -1133,9 +1273,9 @@ export function PreviewStage({
     };
     raf = requestAnimationFrame(step);
     return () => cancelAnimationFrame(raf);
-  }, [editorDraws, paintOverlay, readEditorPicture]);
+  }, [daemonLive, effect, effectNeedsInput, paintOverlay, readEditorPicture]);
 
-  /** Draws the whole view: the effect, the zones, the label and the LEDs. */
+  /** Draws the whole view: the effect, the parts and the LEDs. */
   const applyView = useCallback(
     (v: View) => {
       viewRef.current = v;
@@ -1147,28 +1287,29 @@ export function PreviewStage({
       }
       const geom = liveRef.current;
       for (let i = 0; i < geom.length; i++) {
-        const z = geom[i];
-        if (z) applyGeom(i, z, v);
+        if (geom[i]) applyGeom({ kind: "zone", index: i }, v);
       }
-      placeLabel(labelIndexRef.current, v);
+      const lms = liveLmRef.current;
+      for (let i = 0; i < lms.length; i++) {
+        if (lms[i]) applyGeom({ kind: "landmark", index: i }, v);
+      }
       const kk = ((stageRef.current?.clientWidth ?? CANVAS_W) / CANVAS_W) * v.scale;
-      caseGRef.current?.setAttribute('transform', `scale(${kk}) translate(${v.panX} ${v.panY})`);
-      caseSvgRef.current?.style.setProperty('--k', String(kk));
-      // The name tags are placed from the committed view: while the view moves they step aside.
+      gRef.current?.setAttribute("transform", `scale(${kk}) translate(${v.panX} ${v.panY})`);
+      svgRef.current?.style.setProperty("--k", String(kk));
       if (stageRef.current) stageRef.current.dataset.moving = "true";
       queuePaint();
     },
-    [applyGeom, placeLabel, queuePaint],
+    [applyGeom, queuePaint],
   );
+
   // Paint each arriving frame: the preview canvas, then the LED dots over it.
   useEffect(() => {
     const off = onFrame((frame) => {
-      frameRef.current = frame;
+      frameDataRef.current = frame;
       const pv = previewRef.current;
       const ctx = pv?.getContext("2d");
       if (ctx && frame.width === PREVIEW_W && frame.height === PREVIEW_H) {
-        if (!imageRef.current) imageRef.current = ctx.createImageData(PREVIEW_W, PREVIEW_H);
-        const img = imageRef.current;
+        const img = ctx.createImageData(PREVIEW_W, PREVIEW_H);
         const px = img.data;
         const src = frame.rgb;
         for (let i = 0, o = 0; i < src.length; i += 3, o += 4) {
@@ -1197,9 +1338,7 @@ export function PreviewStage({
       if (ov.width !== w) ov.width = w;
       if (ov.height !== h) ov.height = h;
       setStageBox((s) =>
-        s.w === stage.clientWidth && s.h === stage.clientHeight
-          ? s
-          : { w: stage.clientWidth, h: stage.clientHeight },
+        s.w === stage.clientWidth && s.h === stage.clientHeight ? s : { w: stage.clientWidth, h: stage.clientHeight },
       );
       queuePaint();
     };
@@ -1209,19 +1348,17 @@ export function PreviewStage({
     return () => ro.disconnect();
   }, [queuePaint]);
 
-  // When the layout changes outside a drag (a nudge, a load, a revert), the live geometry and
-  // the elements follow it. A drag owns the geometry while it lasts: the page re-renders on
-  // every frame of it, and the draft it is dragging is still the one it started from.
+  // When the layout changes outside a drag, the live geometry and the elements follow it.
   useLayoutEffect(() => {
     const v = viewRef.current;
     if (!dragRef.current) {
       liveRef.current = zones.map((z) => ({ ...z }));
-      zones.forEach((z, i) => applyGeom(i, z, v));
+      liveLmRef.current = landmarks.map((l) => ({ ...l }));
+      zones.forEach((z, i) => applyGeom({ kind: "zone", index: i }, v));
+      landmarks.forEach((_, i) => applyGeom({ kind: "landmark", index: i }, v));
     }
-    // The label comes and goes with the pointer, so it is placed whenever it changes, drag or not.
-    placeLabel(labelIndexRef.current, v);
     queuePaint();
-  }, [zones, applyGeom, placeLabel, queuePaint, selected, labelIndex, stageBox]);
+  }, [zones, landmarks, applyGeom, queuePaint, stageBox, litLed]);
 
   const toLogical = (e: { clientX: number; clientY: number }): Point => {
     const box = stageRef.current?.getBoundingClientRect();
@@ -1234,7 +1371,7 @@ export function PreviewStage({
     };
   };
 
-  /** What a drag says in words beside the pointer: where the zone is, how big, how far it is turned. */
+  /** What a drag says in words beside the pointer, in the reader's own unit. */
   const showReadout = useCallback((e: PointerEvent<HTMLDivElement>, text: string) => {
     const el = readoutRef.current;
     const stage = stageRef.current;
@@ -1248,46 +1385,78 @@ export function PreviewStage({
   }, []);
 
   /** Shows or hides the alignment guides. */
-  const applyGuides = useCallback((snap: { guideX: number | null; guideY: number | null }) => {
+  const applyGuides = useCallback((snap: { guideX: number | null; guideY: number | null; guideX2: number | null }) => {
     const els = guideEls.current;
     const v = viewRef.current;
     const base = (stageRef.current?.clientWidth ?? CANVAS_W) / CANVAS_W;
     const k = base * v.scale;
-    if (els.v) {
-      const gx = snap.guideX;
-      const on = gx !== null;
-      els.v.style.opacity = on ? "1" : "0";
-      els.v.style.visibility = on ? "visible" : "hidden";
-      if (gx !== null) els.v.style.left = `${(gx + v.panX) * k}px`;
-    }
-    if (els.h) {
-      const gy = snap.guideY;
-      const on = gy !== null;
-      els.h.style.opacity = on ? "1" : "0";
-      els.h.style.visibility = on ? "visible" : "hidden";
-      if (gy !== null) els.h.style.top = `${(gy + v.panY) * k}px`;
-    }
+    const set = (el: HTMLSpanElement | null, on: boolean, pos: number | null, axis: "x" | "y") => {
+      if (!el) return;
+      el.style.opacity = on ? "1" : "0";
+      el.style.visibility = on ? "visible" : "hidden";
+      if (pos === null) return;
+      if (axis === "x") el.style.left = `${(pos + v.panX) * k}px`;
+      else el.style.top = `${(pos + v.panY) * k}px`;
+    };
+    set(els.v, snap.guideX !== null, snap.guideX, "x");
+    set(els.v2, snap.guideX2 !== null, snap.guideX2, "x");
+    set(els.h, snap.guideY !== null, snap.guideY, "y");
   }, []);
 
-  const beginDrag = (kind: DragKind, index: number, e: PointerEvent<HTMLElement>, handle: HandleDef | null = null) => {
+  const beginDrag = (
+    kind: DragKind,
+    sel: Sel,
+    e: PointerEvent<HTMLElement>,
+    handle: HandleDef | null = null,
+  ) => {
     e.stopPropagation();
     e.preventDefault();
-    const z = liveRef.current[index];
-    if (!z) return;
-    onSelect(index);
-    // The zone under the finger names itself, even before it is picked.
-    setPressed(index);
+    const zone = sel.kind === "zone" ? liveRef.current[sel.index] : undefined;
+    const landmark = sel.kind === "landmark" ? liveLmRef.current[sel.index] : undefined;
+    if (!zone && !landmark) return;
+    // A move of a part that is already picked keeps the whole selection: the drag moves them
+    // all. A resize or a turn is about one part, so it picks that one.
+    const already = selectionRef.current.some((s) => s.kind === sel.kind && s.index === sel.index);
+    if (!already || kind !== "move") onSelect([sel]);
+    setPressed(sel);
+    const origs: Drag["origs"] = [];
+    if (sel.kind === "zone" && zone) {
+      // Every picked part moves together.
+      for (const s of selectionRef.current) {
+        if (s.kind !== "zone") continue;
+        const z = liveRef.current[s.index];
+        if (z) origs.push({ sel: s, zone: { ...z } });
+      }
+      if (!origs.some((o) => o.sel.index === sel.index) && zone) {
+        origs.push({ sel, zone: { ...zone } });
+      }
+    } else if (landmark) {
+      origs.push({ sel, landmark: { ...landmark } });
+    }
+    // The case carries everything inside it: moving the PC moves the parts in it.
+    const riders: { index: number; zone: PlacedZone }[] = [];
+    if (sel.kind === "landmark" && landmark && landmark.kind === "case") {
+      const b = landmarkBounds(landmark);
+      liveRef.current.forEach((z, i) => {
+        const zb = boundsOf(z);
+        const cx = zb.x + zb.width / 2;
+        const cy = zb.y + zb.height / 2;
+        if (cx >= b.x && cx <= b.x + b.width && cy >= b.y && cy <= b.y + b.height) {
+          riders.push({ index: i, zone: { ...z } });
+        }
+      });
+    }
     dragRef.current = {
       kind,
-      index,
+      sel,
+      origs,
       start: toLogical(e),
-      orig: { ...z },
       handle,
+      riders,
     };
-    const el = zoneEls.current[index];
+    const el = sel.kind === "zone" ? zoneEls.current[sel.index] : lmEls.current[sel.index];
     if (el) el.dataset.dragging = "true";
     onDraggingChange?.(true);
-    // The arrow keys work on the picked zone once the stage has the focus.
     stageRef.current?.focus({ preventScroll: true });
     stageRef.current?.setPointerCapture(e.pointerId);
   };
@@ -1308,11 +1477,11 @@ export function PreviewStage({
   const onStageMove = (e: PointerEvent<HTMLDivElement>) => {
     const pan = panRef.current;
     if (pan) {
-      // Drag-to-pan on empty space.
       const box = stageRef.current?.getBoundingClientRect();
       if (!box) return;
       const base = box.width / CANVAS_W;
       const k = base * pan.orig.scale;
+      userView.current = true;
       const next: View = {
         ...pan.orig,
         panX: pan.orig.panX + (e.clientX - pan.start.x) / k,
@@ -1321,98 +1490,170 @@ export function PreviewStage({
       applyView(clampView(next));
       return;
     }
+    // The marquee: a rubber band on the empty desk that picks everything under it.
+    const mq = marqueeRef.current;
+    if (mq && !dragRef.current) {
+      const box = stageRef.current?.getBoundingClientRect();
+      if (!box) return;
+      const px = e.clientX - box.left;
+      const py = e.clientY - box.top;
+      const next = {
+        x: Math.min(mq.x, px),
+        y: Math.min(mq.y, py),
+        w: Math.abs(px - mq.x),
+        h: Math.abs(py - mq.y),
+      };
+      marqueeRef.current = next;
+      setMarquee(next);
+      return;
+    }
     const d = dragRef.current;
     if (!d) return;
     const p = toLogical(e);
-    const o = d.orig;
+    const o = d.origs.find((x) => x.sel.index === d.sel.index && x.sel.kind === d.sel.kind);
+    if (!o) return;
     const dx = p.x - d.start.x;
     const dy = p.y - d.start.y;
-    const cur = liveRef.current[d.index];
-    if (!cur) return;
     const base = (stageRef.current?.clientWidth ?? CANVAS_W) / CANVAS_W;
     const threshold = SNAP_PIXELS / (base * viewRef.current.scale);
-    const others = [CANVAS_BOX, ...liveRef.current.filter((_, i) => i !== d.index)];
-    let next: PlacedZone;
-    let readout: string;
+    const u = unitRef.current;
+    // The parts that are not moving: they are what a part snaps to.
+    const moving = new Set(d.origs.map((x) => (x.sel.kind === "zone" ? x.sel.index : -1)));
+    const others = liveRef.current
+      .filter((_, i) => !moving.has(i))
+      .map((z) => boundsOf(z));
+    // The case's panels: a part can sit against the top, the floor, the front or the back.
+    const caseBox = liveLmRef.current.find((l) => l.kind === "case") ?? derivedCase;
+    const panels = caseBox
+      ? {
+          x: [caseBox.x, caseBox.x + caseBox.width / 2, caseBox.x + caseBox.width],
+          y: [caseBox.y, caseBox.y + caseBox.height / 2, caseBox.y + caseBox.height],
+        }
+      : { x: [], y: [] };
+
     if (d.kind === "move") {
-      // The zone snaps to the grid, or to another zone's line; Alt frees it.
+      const src = o.zone ?? o.landmark;
+      if (!src) return;
       const want = {
-        x: clamp(o.x + dx, 0, CANVAS_W - o.width),
-        y: clamp(o.y + dy, 0, CANVAS_H - o.height),
-        width: o.width,
-        height: o.height,
+        x: clamp(src.x + dx, -src.width / 2, CANVAS_W - src.width / 2),
+        y: clamp(src.y + dy, -src.height / 2, CANVAS_H - src.height / 2),
+        width: src.width,
+        height: src.height,
       };
-      const snap = snapMove(want, others, threshold, e.altKey);
-      next = {
-        ...cur,
-        x: clamp(snap.x, 0, CANVAS_W - o.width),
-        y: clamp(snap.y, 0, CANVAS_H - o.height),
-      };
-      // A case slot pulls the zone in by its centre; Alt frees it. A slot beats a guide.
-      const sp = specRef.current;
-      const slot = sp && !e.altKey ? nearestSlot(next, sp, SLOT_REACH_PX / (base * viewRef.current.scale)) : null;
-      if (slot) {
-        next = {
-          ...next,
-          x: clamp(slot.x + slot.w / 2 - o.width / 2, 0, CANVAS_W - o.width),
-          y: clamp(slot.y + slot.h / 2 - o.height / 2, 0, CANVAS_H - o.height),
-        };
-        applyGuides({ guideX: null, guideY: null });
-      } else {
-        applyGuides({ guideX: snap.guideX, guideY: snap.guideY });
+      const free = e.ctrlKey || e.metaKey || e.altKey;
+      const snap = snapMove(want, [CANVAS_BOX, ...others], panels, threshold, free);
+      // The equal spacing: the gaps on either side become the same.
+      const eq = free ? null : equalSpacing(want, others, threshold);
+      const nextX = eq?.x ?? snap.x;
+      const nextY = eq?.y ?? snap.y;
+      const deltaX = nextX - src.x;
+      const deltaY = nextY - src.y;
+      // Every picked part moves by the same amount, and the case carries what is inside it.
+      for (const orig of d.origs) {
+        if (orig.zone) {
+          liveRef.current[orig.sel.index] = { ...orig.zone, x: orig.zone.x + deltaX, y: orig.zone.y + deltaY };
+        }
       }
-      const gap = snap.gapX !== null && snap.gapY !== null ? Math.min(snap.gapX, snap.gapY) : (snap.gapX ?? snap.gapY);
-      const where = slot
-        ? ` · snaps to ${slot.label}`
-        : gap === null ? "" : gap < 0.05 ? " · on the guide" : ` · ${gap.toFixed(1)} u to the guide`;
-      readout = `x ${next.x.toFixed(0)} · y ${next.y.toFixed(0)}${where}`;
-    } else if (d.kind === "resize" && d.handle) {
-      // The dragged edge snaps to the grid and to other zones' lines while the zone is square to
-      // the canvas; a turned zone follows the pointer freely. Alt frees it, as it does for a move.
+      for (const ri of d.riders) {
+        const z = liveRef.current[ri.index];
+        if (!z) continue;
+        // From where it started, not from where it is: the case carries its parts by the same
+        // distance, every frame of the drag.
+        liveRef.current[ri.index] = { ...z, x: ri.zone.x + deltaX, y: ri.zone.y + deltaY };
+      }
+      if (o.landmark) {
+        liveLmRef.current[d.sel.index] = { ...o.landmark, x: o.landmark.x + deltaX, y: o.landmark.y + deltaY };
+      }
+      const primary = liveRef.current[d.sel.index];
+      applyGuides({
+        guideX: eq?.lineA ?? snap.guideX,
+        guideY: snap.guideY,
+        guideX2: eq?.lineB ?? null,
+      });
+      const where = eq
+        ? " · even spacing"
+        : snap.gapX !== null && snap.gapX < 0.05
+          ? " · on the guide"
+          : "";
+      const pos = `${formatUnits(nextX, u)} · ${formatUnits(nextY, u)}${where}`;
+      showReadout(e, pos);
+      for (const orig of d.origs) {
+        if (orig.sel.kind === "zone") applyGeom(orig.sel, viewRef.current);
+      }
+      for (const ri of d.riders) applyGeom({ kind: "zone", index: ri.index }, viewRef.current);
+      if (d.sel.kind === "landmark") applyGeom(d.sel, viewRef.current);
+      if (d.sel.kind === "zone" && primary) notifyLive(d.sel.index);
+      queuePaint();
+      return;
+    }
+
+    if (d.kind === "resize" && d.handle) {
+      const src = o.zone ?? o.landmark;
+      if (!src) return;
       let q = { x: clamp(p.x, 0, CANVAS_W), y: clamp(p.y, 0, CANVAS_H) };
       let guideX: number | null = null;
       let guideY: number | null = null;
-      const square = Math.abs(Math.sin((o.rotation_deg * Math.PI) / 180)) < 1e-6 && Math.cos((o.rotation_deg * Math.PI) / 180) > 0;
-      if (square && !e.altKey) {
+      const square = Math.abs(Math.sin((src.rotation_deg * Math.PI) / 180)) < 1e-6 && Math.cos((src.rotation_deg * Math.PI) / 180) > 0;
+      if (square && !(e.ctrlKey || e.metaKey || e.altKey)) {
         if (d.handle.sx !== 0) {
-          const line = nearestLine(q.x, others.flatMap((z) => zoneLines(z, "x")), threshold);
+          const lines = [...others.flatMap((z) => zoneLines(z, "x")), ...panels.x];
+          const line = nearestLine(q.x, lines, threshold);
           guideX = line;
-          q = { ...q, x: line ?? gridOf(q.x) };
+          q = { ...q, x: line ?? q.x };
         }
         if (d.handle.sy !== 0) {
-          const line = nearestLine(q.y, others.flatMap((z) => zoneLines(z, "y")), threshold);
+          const lines = [...others.flatMap((z) => zoneLines(z, "y")), ...panels.y];
+          const line = nearestLine(q.y, lines, threshold);
           guideY = line;
-          q = { ...q, y: line ?? gridOf(q.y) };
+          q = { ...q, y: line ?? q.y };
         }
       }
-      next = resizeBy(o, d.handle, q, e.shiftKey, e.altKey);
-      // Shift rescales the box after the snap, so the guide would no longer be where the edge is.
-      if (e.shiftKey) {
-        guideX = null;
-        guideY = null;
+      const next = resizeBy(src, d.handle, q, e.shiftKey, e.altKey);
+      if (d.sel.kind === "zone") {
+        const cur = liveRef.current[d.sel.index];
+        if (!cur) return;
+        liveRef.current[d.sel.index] = { ...cur, ...next };
+        applyGeom(d.sel, viewRef.current);
+        notifyLive(d.sel.index);
+      } else {
+        const cur = liveLmRef.current[d.sel.index];
+        if (!cur) return;
+        liveLmRef.current[d.sel.index] = { ...cur, ...next };
+        applyGeom(d.sel, viewRef.current);
       }
-      applyGuides({ guideX, guideY });
-      readout = `w ${next.width.toFixed(0)} · h ${next.height.toFixed(0)}${e.shiftKey ? " · locked" : ""}`;
-    } else {
-      const cx = o.x + o.width / 2;
-      const cy = o.y + o.height / 2;
-      let deg = (Math.atan2(p.y - cy, p.x - cx) * 180) / Math.PI + 90;
-      deg = ((deg % 360) + 360) % 360;
-      if (e.shiftKey) deg = Math.round(deg / 15) * 15;
-      next = { ...cur, rotation_deg: Math.round((deg % 360) * 10) / 10 };
-      applyGuides({ guideX: null, guideY: null });
-      readout = `${next.rotation_deg.toFixed(1)}°${e.shiftKey ? " · 15° steps" : ""}`;
+      applyGuides({ guideX, guideY, guideX2: null });
+      showReadout(e, `${formatUnits(next.width, u)} × ${formatUnits(next.height, u)}${e.shiftKey ? " · locked" : ""}`);
+      queuePaint();
+      return;
     }
-    showReadout(e, readout);
-    liveRef.current[d.index] = next;
-    applyGeom(d.index, next, viewRef.current);
-    placeLabel(labelIndexRef.current, viewRef.current);
-    notifyLive(d.index);
+
+    // The rotate handle.
+    const src = o.zone ?? o.landmark;
+    if (!src) return;
+    const cx = src.x + src.width / 2;
+    const cy = src.y + src.height / 2;
+    let deg = (Math.atan2(p.y - cy, p.x - cx) * 180) / Math.PI + 90;
+    deg = ((deg % 360) + 360) % 360;
+    if (e.shiftKey) deg = Math.round(deg / 15) * 15;
+    const rounded = Math.round((deg % 360) * 10) / 10;
+    if (d.sel.kind === "zone") {
+      const cur = liveRef.current[d.sel.index];
+      if (!cur) return;
+      liveRef.current[d.sel.index] = { ...cur, rotation_deg: rounded };
+      applyGeom(d.sel, viewRef.current);
+      notifyLive(d.sel.index);
+    } else {
+      const cur = liveLmRef.current[d.sel.index];
+      if (!cur) return;
+      liveLmRef.current[d.sel.index] = { ...cur, rotation_deg: rounded };
+      applyGeom(d.sel, viewRef.current);
+    }
+    applyGuides({ guideX: null, guideY: null, guideX2: null });
+    showReadout(e, `${rounded.toFixed(1)}°${e.shiftKey ? " · 15° steps" : ""}`);
     queuePaint();
   };
 
   const endDrag = (e: PointerEvent<HTMLDivElement>) => {
-    // The finger is off the zone: its label goes with it.
     setPressed(null);
     const pan = panRef.current;
     if (pan) {
@@ -1420,17 +1661,35 @@ export function PreviewStage({
       if (stageRef.current?.hasPointerCapture(e.pointerId)) {
         stageRef.current.releasePointerCapture(e.pointerId);
       }
-      // The view is written back to React when the gesture is over.
       setView(viewRef.current);
+      return;
+    }
+    // The marquee ends: everything under the band is picked.
+    const mq = marqueeRef.current;
+    if (mq) {
+      marqueeRef.current = null;
+      setMarquee(null);
+      if (mq.w > 4 || mq.h > 4) {
+        const picked: Sel[] = [];
+        zones.forEach((z, i) => {
+          const b = boundsOf(z);
+          const box = { x: (b.x + view.panX) * k, y: (b.y + view.panY) * k, w: b.width * k, h: b.height * k };
+          if (overlaps(mq, box)) picked.push({ kind: "zone", index: i });
+        });
+        onSelect(picked);
+      }
+      if (stageRef.current?.hasPointerCapture(e.pointerId)) {
+        stageRef.current.releasePointerCapture(e.pointerId);
+      }
       return;
     }
     const d = dragRef.current;
     if (!d) return;
     dragRef.current = null;
-    const el = zoneEls.current[d.index];
+    const el = d.sel.kind === "zone" ? zoneEls.current[d.sel.index] : lmEls.current[d.sel.index];
     if (el) delete el.dataset.dragging;
     onDraggingChange?.(false);
-    applyGuides({ guideX: null, guideY: null });
+    applyGuides({ guideX: null, guideY: null, guideX2: null });
     if (readoutRef.current) {
       readoutRef.current.style.opacity = "0";
       readoutRef.current.style.visibility = "hidden";
@@ -1442,55 +1701,109 @@ export function PreviewStage({
     if (stageRef.current?.hasPointerCapture(e.pointerId)) {
       stageRef.current.releasePointerCapture(e.pointerId);
     }
-    const g = liveRef.current[d.index];
-    if (!g) return;
-    const o = d.orig;
-    const patch: Partial<PlacedZone> = {};
-    if (Math.abs(g.x - o.x) > 1e-6) patch.x = g.x;
-    if (Math.abs(g.y - o.y) > 1e-6) patch.y = g.y;
-    if (Math.abs(g.width - o.width) > 1e-6) patch.width = g.width;
-    if (Math.abs(g.height - o.height) > 1e-6) patch.height = g.height;
-    if (Math.abs(g.rotation_deg - o.rotation_deg) > 1e-6) patch.rotation_deg = g.rotation_deg;
-    if (Object.keys(patch).length > 0) onChange(d.index, patch);
+    // One drag is one change, so one undo step.
+    const patches: { index: number; patch: Partial<PlacedZone> }[] = [];
+    for (const orig of d.origs) {
+      if (orig.sel.kind !== "zone" || !orig.zone) continue;
+      const now = liveRef.current[orig.sel.index];
+      if (!now) continue;
+      const patch: Partial<PlacedZone> = {};
+      if (Math.abs(now.x - orig.zone.x) > 1e-6) patch.x = now.x;
+      if (Math.abs(now.y - orig.zone.y) > 1e-6) patch.y = now.y;
+      if (Math.abs(now.width - orig.zone.width) > 1e-6) patch.width = now.width;
+      if (Math.abs(now.height - orig.zone.height) > 1e-6) patch.height = now.height;
+      if (Math.abs(now.rotation_deg - orig.zone.rotation_deg) > 1e-6) patch.rotation_deg = now.rotation_deg;
+      if (Object.keys(patch).length > 0) patches.push({ index: orig.sel.index, patch });
+    }
+    // The parts the case carried.
+    for (const ri of d.riders) {
+      const now = liveRef.current[ri.index];
+      if (!now) continue;
+      const patch: Partial<PlacedZone> = {};
+      if (Math.abs(now.x - ri.zone.x) > 1e-6) patch.x = now.x;
+      if (Math.abs(now.y - ri.zone.y) > 1e-6) patch.y = now.y;
+      if (Object.keys(patch).length > 0 && !patches.some((p) => p.index === ri.index)) {
+        patches.push({ index: ri.index, patch });
+      }
+    }
+    if (patches.length > 0) onChangeZones(patches);
+    if (d.sel.kind === "landmark") {
+      const now = liveLmRef.current[d.sel.index];
+      const start = d.origs.find((x) => x.sel.kind === "landmark")?.landmark;
+      if (now && start) {
+        const patch: Partial<Landmark> = {};
+        if (Math.abs(now.x - start.x) > 1e-6) patch.x = now.x;
+        if (Math.abs(now.y - start.y) > 1e-6) patch.y = now.y;
+        if (Math.abs(now.width - start.width) > 1e-6) patch.width = now.width;
+        if (Math.abs(now.height - start.height) > 1e-6) patch.height = now.height;
+        if (Math.abs(now.rotation_deg - start.rotation_deg) > 1e-6) patch.rotation_deg = now.rotation_deg;
+        if (Object.keys(patch).length > 0) onChangeLandmark(d.sel.index, patch);
+      }
+    }
   };
 
-  // The keys work on the picked zone, as in Figma: the arrows nudge it by 1 (Shift: 10) and
-  // Delete or Backspace takes it off the desk (it hides; the zone list brings it back), and Escape
-  // lets go of it. They answer only while the focus is on the canvas or on nothing, so the arrow
-  // keys still move a slider or a segment in the panel beside it.
+  // The keys: the arrows nudge, Enter opens the size, L and E change the mode.
   useEffect(() => {
     const onKey = (e: globalThis.KeyboardEvent) => {
-      const index = selectedRef.current;
-      if (index === null) return;
-      if (e.ctrlKey || e.metaKey || e.altKey) return;
       const target = e.target as HTMLElement | null;
       const stage = stageRef.current;
       const onCanvas = !!target && !!stage && stage.contains(target);
       const onNothing = !target || target === document.body;
-      if (!onCanvas && !onNothing) return;
-      // The zone's own buttons (the label's remove button, a handle) keep their own keys.
       if (target && target.closest("button, input, select, textarea")) return;
-      const z = zonesRef.current[index];
-      if (!z) return;
-      const step = e.shiftKey ? 10 : 1;
-      let patch: Partial<PlacedZone> | null = null;
-      if (e.key === "ArrowLeft") patch = { x: clamp(z.x - step, 0, CANVAS_W - z.width) };
-      else if (e.key === "ArrowRight") patch = { x: clamp(z.x + step, 0, CANVAS_W - z.width) };
-      else if (e.key === "ArrowUp") patch = { y: clamp(z.y - step, 0, CANVAS_H - z.height) };
-      else if (e.key === "ArrowDown") patch = { y: clamp(z.y + step, 0, CANVAS_H - z.height) };
-      else if ((e.key === "Delete" || e.key === "Backspace") && z.visible) patch = { visible: false };
-      else if (e.key === "Escape") {
-        e.preventDefault();
-        onSelect(null);
+      // The mode keys work everywhere on the page, as long as the reader is not typing.
+      const key = e.key.toLowerCase();
+      if (key === "l" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        onMode("lights");
         return;
       }
-      if (!patch) return;
-      e.preventDefault();
-      onChange(index, patch);
+      if (key === "e" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        onMode("effect");
+        return;
+      }
+      if (!onCanvas && !onNothing) return;
+      const sel = selectionRef.current[0];
+      if (!sel) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.key === "Enter") {
+        e.preventDefault();
+        setSizing(sel);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setSizing(null);
+        onSelect([]);
+        return;
+      }
+      const z = sel.kind === "zone" ? zonesRef.current[sel.index] : undefined;
+      const lm = sel.kind === "landmark" ? liveLmRef.current[sel.index] : undefined;
+      const step = ((e.shiftKey ? NUDGE_MM_BIG : NUDGE_MM) / MM_PER_UNIT);
+      if (z) {
+        const patch: Partial<PlacedZone> = {};
+        if (e.key === "ArrowLeft") patch.x = clamp(z.x - step, -z.width / 2, CANVAS_W - z.width / 2);
+        else if (e.key === "ArrowRight") patch.x = clamp(z.x + step, -z.width / 2, CANVAS_W - z.width / 2);
+        else if (e.key === "ArrowUp") patch.y = clamp(z.y - step, -z.height / 2, CANVAS_H - z.height / 2);
+        else if (e.key === "ArrowDown") patch.y = clamp(z.y + step, -z.height / 2, CANVAS_H - z.height / 2);
+        else if (e.key === "Delete" || e.key === "Backspace") patch.visible = false;
+        else return;
+        e.preventDefault();
+        onChangeZones([{ index: sel.index, patch }]);
+        return;
+      }
+      if (lm) {
+        const patch: Partial<Landmark> = {};
+        if (e.key === "ArrowLeft") patch.x = lm.x - step;
+        else if (e.key === "ArrowRight") patch.x = lm.x + step;
+        else if (e.key === "ArrowUp") patch.y = lm.y - step;
+        else if (e.key === "ArrowDown") patch.y = lm.y + step;
+        else return;
+        e.preventDefault();
+        onChangeLandmark(sel.index, patch);
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onChange, onSelect]);
+  }, [onChangeZones, onChangeLandmark, onMode, onSelect]);
 
   const onDragOver = (e: DragEvent<HTMLDivElement>) => {
     if (Array.from(e.dataTransfer.types).includes(dropPayloadType)) {
@@ -1521,8 +1834,6 @@ export function PreviewStage({
     }, VIEW_COMMIT_MS);
   }, []);
 
-  // The view belongs to the layout: it is remembered per layout, and restored when the editor
-  // comes back to it. A layout that was never zoomed has no entry at all.
   useEffect(() => {
     if (!layoutId) return;
     if (view.scale === 1 && view.panX === 0 && view.panY === 0) forgetView(layoutId);
@@ -1531,9 +1842,6 @@ export function PreviewStage({
 
   /**
    * Eases the view to a new one, with the house curve.
-   *
-   * The wheel does not always use this: a mouse notch does, a trackpad's continuous deltas do
-   * not. The buttons and the fit control are a single, discrete action, so they move.
    */
   const animateTo = useCallback(
     (target: View, ms: number = ZOOM_MS) => {
@@ -1542,12 +1850,9 @@ export function PreviewStage({
         zoomRaf.current = null;
       }
       const from = { ...viewRef.current };
-      // The reader asked for less motion, in the system or in the editor's own switch: the view
-      // lands at once.
       const still =
         reduced ||
-        (typeof document !== "undefined" &&
-          document.documentElement.getAttribute("data-motion") === "reduced");
+        (typeof document !== "undefined" && document.documentElement.getAttribute("data-motion") === "reduced");
       if (still) {
         applyView(target);
         setView(target);
@@ -1575,14 +1880,13 @@ export function PreviewStage({
     [applyView, reduced],
   );
 
-  // The wheel zooms around the pointer. React's own wheel listener is passive, so the page would
-  // scroll as well: a native, non-passive listener does the work.
+  // The wheel zooms around the pointer.
   useEffect(() => {
     const stage = stageRef.current;
     if (!stage) return;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
-      // A wheel gesture wins over an eased zoom that is still running.
+      userView.current = true;
       if (zoomRaf.current !== null) {
         cancelAnimationFrame(zoomRaf.current);
         zoomRaf.current = null;
@@ -1594,13 +1898,9 @@ export function PreviewStage({
       const base = box.width / CANVAS_W;
       const factor = Math.exp(-e.deltaY * 0.0016);
       const scale = clamp(v.scale * factor, MIN_SCALE, MAX_SCALE);
-      // The logical point under the pointer stays under the pointer.
       const lx = px / (base * v.scale) - v.panX;
       const ly = py / (base * v.scale) - v.panY;
       const next = clampView({ scale, panX: px / (base * scale) - lx, panY: py / (base * scale) - ly });
-      // A mouse notch is a step the reader can see: the view eases to it over WHEEL_MS, and the
-      // next notch retargets from where the canvas is now, so nothing queues up. A trackpad's
-      // small, continuous deltas and a ctrl+wheel are applied at once.
       const notch = !e.ctrlKey && (e.deltaMode === 1 || Math.abs(e.deltaY) >= NOTCH_DELTA);
       if (notch) {
         animateTo(next, WHEEL_MS);
@@ -1613,7 +1913,6 @@ export function PreviewStage({
     return () => stage.removeEventListener("wheel", onWheel);
   }, [applyView, commitView, animateTo]);
 
-  // An eased zoom that is still running when the canvas goes away must not keep painting.
   useEffect(
     () => () => {
       if (zoomRaf.current !== null) cancelAnimationFrame(zoomRaf.current);
@@ -1622,6 +1921,7 @@ export function PreviewStage({
   );
 
   const zoomBy = (factor: number) => {
+    userView.current = true;
     const box = stageRef.current?.getBoundingClientRect();
     if (!box) return;
     const v = viewRef.current;
@@ -1636,387 +1936,663 @@ export function PreviewStage({
   };
 
   const fit = () => {
-    animateTo({ ...FIT_VIEW });
+    userView.current = true;
+    animateTo(wholeView(stageBox.w, stageBox.h));
   };
 
-  const selectedZone = selected !== null ? zones[selected] : undefined;
-
-  // The view is committed: the name tags can be placed again.
   useEffect(() => {
     if (stageRef.current) delete stageRef.current.dataset.moving;
   }, [view]);
 
-  const spec = useMemo(() => caseSpec(caseForm), [caseForm]);
-  const specRef = useRef(spec);
-  specRef.current = spec;
+  /** The middle of the parts on the desk, in canvas units: the view opens looking at them. */
+  const contentCentre = (): number => {
+    let minX = Infinity;
+    let maxX = -Infinity;
+    for (const z of liveRef.current) {
+      minX = Math.min(minX, z.x);
+      maxX = Math.max(maxX, z.x + z.width);
+    }
+    for (const l of liveLmRef.current) {
+      minX = Math.min(minX, l.x);
+      maxX = Math.max(maxX, l.x + l.width);
+    }
+    if (!Number.isFinite(minX) || !Number.isFinite(maxX)) return CANVAS_W / 2;
+    return (minX + maxX) / 2;
+  };
 
-  const tags = useMemo(
-    () => (tagsOn && stageBox.w > 0 ? layoutTags(zones, devices, stageBox.w, stageBox.h, view, labelIndex, phone, spec?.slots ?? []) : []),
-    [tagsOn, zones, devices, stageBox, view, labelIndex, phone, spec],
-  );
+  // The stage is measured: until the reader zooms or pans, the desk fills it and the view
+  // looks at the parts.
+  if (!userView.current && stageBox.w > 0 && stageBox.h > 0) {
+    const hero = heroView(stageBox.w, stageBox.h, contentCentre());
+    if (Math.abs(hero.scale - view.scale) > 1e-6 || Math.abs(hero.panX - view.panX) > 1e-6) {
+      viewRef.current = hero;
+      setView(hero);
+    }
+  }
 
   const base = (stageBox.w || CANVAS_W) / CANVAS_W;
   const k = base * view.scale;
 
-  /**
-   * The scale bar: a round number of desk units that is about as wide as the bar itself, so
-   * the reader can measure a zone with it. It says what the bar is in words - a share of the
-   * desk - and keeps the units beside it as the precise value.
-   */
+  /** The part that is picked, and the one that is only hovered. */
+  const primary = selection[0] ?? null;
+  const hovered = pressed ?? hover;
+  const selZone = primary?.kind === "zone" ? zones[primary.index] : undefined;
+  const selLm = primary?.kind === "landmark" ? landmarks[primary.index] : undefined;
+
+  /** The name of a part: what a person would call it. */
+  const nameOf = (sel: Sel): string => {
+    if (sel.kind === "landmark") {
+      const l = landmarks[sel.index];
+      if (!l) return "";
+      return l.label?.trim() || PART_LABEL[l.kind];
+    }
+    const z = zones[sel.index];
+    if (!z) return "";
+    return placementName(devices, z, zones);
+  };
+
+  /** The size of a part, in the reader's unit. */
+  const sizeOf = (sel: Sel): string => {
+    const o = sel.kind === "zone" ? zones[sel.index] : landmarks[sel.index];
+    if (!o) return "";
+    return `${formatUnits(o.width, unit)} × ${formatUnits(o.height, unit)}`;
+  };
+
+  /** Where a tag sits: just above the part, or below it when there is no room. */
+  const tagBox = (sel: Sel): Box => {
+    if (sel.kind === "zone") {
+      const o = zones[sel.index];
+      if (!o) return { x: 0, y: 0, w: 0, h: 0 };
+      const b = boundsOf(o);
+      return { x: (b.x + view.panX) * k, y: (b.y + view.panY) * k, w: b.width * k, h: b.height * k };
+    }
+    const o = landmarks[sel.index];
+    if (!o) return { x: 0, y: 0, w: 0, h: 0 };
+    const b = landmarkBounds(o);
+    return { x: (b.x + view.panX) * k, y: (b.y + view.panY) * k, w: b.width * k, h: b.height * k };
+  };
+
+  /** The tags: one for the part under the pointer, one for each picked part. They never stack. */
+  const tags = useMemo(() => {
+    const out: { sel: Sel; text: string; x: number; y: number; w: number; selected: boolean; accent: number }[] = [];
+    const taken: Box[] = [];
+    const add = (sel: Sel, text: string, selected: boolean) => {
+      // A dimmed part carries no label.
+      if (spotlight !== null && !spotlight.some((x) => x.kind === sel.kind && x.index === sel.index)) return;
+      const b = tagBox(sel);
+      const w = Math.ceil(16 + text.length * 7.2);
+      const h = 22;
+      const x = clamp(b.x, 2, Math.max(2, (stageBox.w || CANVAS_W) - w - 2));
+      let y = b.y - h - 6;
+      if (y < 2) y = b.y + b.h + 6;
+      const box = { x, y, w, h };
+      if (taken.some((t) => overlaps(box, t, 2))) return;
+      taken.push(box);
+      out.push({
+        sel,
+        text,
+        x,
+        y,
+        w,
+        selected,
+        accent:
+          sel.kind === "zone"
+            ? accentOf(devices, zones[sel.index]?.device_id ?? "")
+            : -1,
+      });
+    };
+    if (hovered && !selection.some((s) => s.kind === hovered.kind && s.index === hovered.index)) {
+      add(hovered, nameOf(hovered), false);
+    }
+    for (const s of selection) {
+      const o = s.kind === "zone" ? zones[s.index] : landmarks[s.index];
+      if (!o) continue;
+      add(s, sizeOf(s), true);
+    }
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hovered, selection, zones, landmarks, devices, unit, view, stageBox.w, spotlight]);
+
+  /** The scale bar: a real length, in the reader's unit. */
   const scaleBar = useMemo(() => {
     if (!stageBox.w) return null;
     const pxPerUnit = base * view.scale;
-    const steps = [1, 2, 5, 10, 20, 40, 80, 160, 320];
-    const raw = 120 / pxPerUnit;
-    let units = steps[0] as number;
-    for (const s of steps) if (s <= raw) units = s;
-    // The bar's share of the desk's width, when that share is a clean one.
-    const denom = CANVAS_W / units;
-    const share =
-      Number.isInteger(denom) && denom >= 2 && denom <= 16 ? `1/${denom} of the desk` : null;
-    return { units, px: Math.round(units * pxPerUnit), share };
-  }, [base, view.scale, stageBox.w]);
+    const pxPerCm = pxPerUnit * 2.5;
+    const stepsCm = [1, 2, 5, 10, 20];
+    const stepsIn = [1, 2, 5, 10];
+    const steps = unit === "in" ? stepsIn : stepsCm;
+    const raw = 120 / pxPerCm;
+    let value = steps[0] as number;
+    for (const s of steps) if (s <= raw) value = s;
+    const px = Math.round(value * (unit === "in" ? pxPerCm / 2.54 : pxPerCm));
+    return { value, px, text: unit === "in" ? `${value} in` : `${value} cm` };
+  }, [base, view.scale, stageBox.w, unit]);
 
-  // The label's text: the zone's plain name, the hardware's name muted after it, and its LEDs.
-  const labelZone = labelIndex !== null ? zones[labelIndex] : undefined;
-  const labelFound = labelZone ? findZoneInfo(devices, labelZone.device_id, labelZone.zone_index) : null;
-  const labelMissing = labelIndex !== null && missing.has(labelIndex);
-  const labelFriendly = labelZone?.label?.trim() ? labelZone.label.trim() : null;
-  const labelPlain = labelZone ? plainName(devices, labelZone.device_id, labelZone.zone_index) : null;
-  const labelText = labelPlain ? (labelFound ? (labelFriendly ?? labelPlain.name) : "Not connected") : "";
-  const labelSub = labelPlain && labelFound ? (labelFriendly ? labelPlain.name : labelPlain.hardware) : null;
-  const labelLeds = labelFound ? `${labelFound.zone.led_count} LEDs` : null;
-  const labelAccent = labelZone ? accentOf(devices, labelZone.device_id) : -1;
+  const frameObj = selZone ?? selLm;
+
+  /** The picked parts that carry lights: the ones that can be aligned and spread. */
+  const pickedZones = useMemo(
+    () =>
+      selection
+        .filter((s) => s.kind === "zone")
+        .map((s) => ({ index: s.index, zone: zones[s.index] }))
+        .filter((p): p is { index: number; zone: PlacedZone } => !!p.zone),
+    [selection, zones],
+  );
+
+  /** Lines the picked parts up, or spreads them out, as one change. */
+  const arrange = (how: "left" | "hcenter" | "right" | "top" | "vcenter" | "bottom" | "spreadH" | "spreadV") => {
+    if (pickedZones.length < 2) return;
+    const boxes = pickedZones.map((p) => ({ index: p.index, zone: p.zone }));
+    const minX = Math.min(...boxes.map((b) => b.zone.x));
+    const maxX = Math.max(...boxes.map((b) => b.zone.x + b.zone.width));
+    const minY = Math.min(...boxes.map((b) => b.zone.y));
+    const maxY = Math.max(...boxes.map((b) => b.zone.y + b.zone.height));
+    const patches = boxes.map((b) => {
+      const z = b.zone;
+      let x = z.x;
+      let y = z.y;
+      if (how === "left") x = minX;
+      else if (how === "right") x = maxX - z.width;
+      else if (how === "hcenter") x = (minX + maxX - z.width) / 2;
+      else if (how === "top") y = minY;
+      else if (how === "bottom") y = maxY - z.height;
+      else if (how === "vcenter") y = (minY + maxY - z.height) / 2;
+      else if (how === "spreadH") {
+        const sorted = [...boxes].sort((p, q) => p.zone.x - q.zone.x);
+        const first = sorted[0];
+        const last = sorted[sorted.length - 1];
+        if (!first || !last) return { index: b.index, patch: {} as Partial<PlacedZone> };
+        const span = last.zone.x - (first.zone.x + first.zone.width);
+        const used = sorted.reduce((sum, s) => sum + s.zone.width, 0);
+        const gap = (span - used) / Math.max(1, sorted.length - 1);
+        let at = first.zone.x + first.zone.width;
+        for (const s of sorted) {
+          if (s.index === b.index) {
+            x = at;
+            break;
+          }
+          at += s.zone.width + gap;
+        }
+      } else if (how === "spreadV") {
+        const sorted = [...boxes].sort((p, q) => p.zone.y - q.zone.y);
+        const first = sorted[0];
+        const last = sorted[sorted.length - 1];
+        if (!first || !last) return { index: b.index, patch: {} as Partial<PlacedZone> };
+        const span = last.zone.y - (first.zone.y + first.zone.height);
+        const used = sorted.reduce((sum, s) => sum + s.zone.height, 0);
+        const gap = (span - used) / Math.max(1, sorted.length - 1);
+        let at = first.zone.y + first.zone.height;
+        for (const s of sorted) {
+          if (s.index === b.index) {
+            y = at;
+            break;
+          }
+          at += s.zone.height + gap;
+        }
+      }
+      return { index: b.index, patch: { x, y } as Partial<PlacedZone> };
+    });
+    onChangeZones(patches.filter((p) => Object.keys(p.patch).length > 0));
+  };
 
   return (
     <>
-    <div
-      ref={stageRef}
-      className={`stage ${desk.desk} ${desk.canvas}`}
-      data-editor-draw={editorDraws ? "true" : "false"}
-      tabIndex={-1}
-      onPointerMove={onStageMove}
-      onPointerUp={endDrag}
-      onPointerCancel={endDrag}
-      onDragOver={onDragOver}
-      onDrop={onDropHere}
-      onPointerDown={(e) => {
-        onSelect(null);
-        // Empty space: drag to pan.
-        panRef.current = { start: { x: e.clientX, y: e.clientY }, orig: { ...viewRef.current } };
-        stageRef.current?.setPointerCapture(e.pointerId);
-      }}
-    >
-      {fading && !editorGone && (
-        // The picture that is fading out. It sits under the new one, which fades in over it.
-        <div
-          className={desk.editorPreview}
-          data-editor-fading="true"
-          aria-hidden="true"
-          style={{
-            transform: `translate(${view.panX * base * view.scale}px, ${view.panY * base * view.scale}px) scale(${base * view.scale})`,
-          }}
-        >
-          <EffectPreview id={fading.id} className={desk.editorCanvas} />
-        </div>
-      )}
-      {drawnNow && !editorGone && (
-        // The editor's own draw of the running effect. It is drawn in the canvas's own
-        // 320 x 200 units, so it lines up with the zones, and the daemon's frames fade in over
-        // it when they arrive.
-        <div
-          ref={editorLayerRef}
-          className={`${desk.editorPreview} ${fading ? desk.editorFadeIn : ""}`}
-          data-editor-preview="true"
-          aria-hidden="true"
-          style={{
-            opacity: editorDraws ? 1 : 0,
-            transform: `translate(${view.panX * base * view.scale}px, ${view.panY * base * view.scale}px) scale(${base * view.scale})`,
-          }}
-        >
-          <EffectPreview id={drawnNow.id} className={desk.editorCanvas} />
-        </div>
-      )}
-      <canvas
-        ref={previewRef}
-        className="stage-canvas"
-        width={PREVIEW_W}
-        height={PREVIEW_H}
-        aria-hidden="true"
-        style={{
-          transformOrigin: "0 0",
-          transform: `translate(${view.panX * base * view.scale}px, ${view.panY * base * view.scale}px) scale(${view.scale})`,
-          // The daemon's frames take over from the editor's own draw with a crossfade.
-          opacity: daemonLive ? 1 : 0,
-        }}
-      />
-      {/* The picture is the backdrop, not the subject: a quiet veil keeps the zones' outlines
-          and dots readable over any effect. */}
-      <div className={desk.veil} aria-hidden="true" />
-      {spec && (
-        <CaseBackdrop
-          spec={spec}
-          zones={zones}
-          k={k}
-          panX={view.panX}
-          panY={view.panY}
-          svgRef={caseSvgRef}
-          gRef={caseGRef}
-        />
-      )}
-      <canvas ref={overlayRef} className="stage-leds" aria-hidden="true" />
-
       <div
-        ref={readoutRef}
-        className={desk.readout}
-        data-readout="true"
-        aria-hidden="true"
-        style={{ opacity: 0, visibility: "hidden" }}
-      />
-
-      <span
-        ref={(el) => {
-          guideEls.current.v = el;
+        ref={stageRef}
+        className={`stage ${desk.desk} ${desk.canvas}`}
+        data-editor-draw={!daemonLive && !!effect && !effectNeedsInput ? "true" : "false"}
+        data-mode={mode}
+        tabIndex={-1}
+        onPointerMove={onStageMove}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+        onDragOver={onDragOver}
+        onDrop={onDropHere}
+        onPointerDown={(e) => {
+          // Empty space: a marquee, or a pan with the middle button.
+          if (e.button === 1) {
+            panRef.current = { start: { x: e.clientX, y: e.clientY }, orig: { ...viewRef.current } };
+            stageRef.current?.setPointerCapture(e.pointerId);
+            e.preventDefault();
+            return;
+          }
+          onSelect([]);
+          setSizing(null);
+          const box = stageRef.current?.getBoundingClientRect();
+          const ox = box ? e.clientX - box.left : e.clientX;
+          const oy = box ? e.clientY - box.top : e.clientY;
+          marqueeRef.current = { x: ox, y: oy, w: 0, h: 0 };
+          setMarquee({ ...marqueeRef.current });
+          stageRef.current?.setPointerCapture(e.pointerId);
         }}
-        className={desk.guideV}
-        data-guide="v"
-        aria-hidden="true"
-      />
-      <span
-        ref={(el) => {
-          guideEls.current.h = el;
-        }}
-        className={desk.guideH}
-        data-guide="h"
-        aria-hidden="true"
-      />
-
-      {zones.map((z, i) => {
-        const found = findZoneInfo(devices, z.device_id, z.zone_index);
-        const accent = accentOf(devices, z.device_id);
-        const isSel = selected === i;
-        const isMissing = missing.has(i);
-        const style = {
-          left: `${(z.x + view.panX) * k}px`,
-          top: `${(z.y + view.panY) * k}px`,
-          width: `${z.width * k}px`,
-          height: `${z.height * k}px`,
-          transform: `rotate(${z.rotation_deg}deg)`,
-          "--zc": isMissing ? "var(--down)" : `var(${ACCENTS[accent] ?? "--a1"})`,
-        } as CSSProperties;
-        const name = found ? found.zone.name : "device not found";
-        const count = found ? found.zone.led_count : 0;
-        return (
+      >
+        {fading && !editorGone && (
           <div
-            key={zoneKey(z)}
-            ref={(el) => {
-              zoneEls.current[i] = el;
+            className={desk.editorPreview}
+            data-editor-fading="true"
+            aria-hidden="true"
+            style={{
+              transform: `translate(${view.panX * base * view.scale}px, ${view.panY * base * view.scale}px) scale(${base * view.scale})`,
             }}
-            className={`zrect ${desk.zone}`}
-            role="button"
-            tabIndex={0}
-            aria-pressed={isSel}
-            data-zone-index={i}
-            aria-label={`${found?.device.name ?? z.device_id} ${name}, ${count} LEDs${z.visible ? "" : ", hidden"}`}
-            data-hidden={!z.visible}
-            data-selected={isSel}
-            data-missing={isMissing}
-            data-twin={
-              isMissing &&
-              zones.some(
-                (o, j) =>
-                  j !== i &&
-                  !missing.has(j) &&
-                  Math.abs(o.x - z.x) < 0.5 &&
-                  Math.abs(o.y - z.y) < 0.5 &&
-                  Math.abs(o.width - z.width) < 0.5 &&
-                  Math.abs(o.height - z.height) < 0.5,
-              )
-            }
-            data-hover={hover === i}
-            data-identify={identifying === i}
-            data-shape={found ? resolveShape(z.shape, found.zone.kind) : "none"}
-            style={style}
-            onPointerDown={(e) => beginDrag("move", i, e)}
-            onPointerEnter={() => setHover(i)}
-            onPointerLeave={() => setHover((h) => (h === i ? null : h))}
-            onFocus={() => onSelect(i)}
           >
-            {found && !isMissing && (
-              <ZoneArt kind={plainOf(devices, z).kind} fan={plainOf(devices, z).fan} />
-            )}
+            <EffectPreview id={fading.id} className={desk.editorCanvas} />
           </div>
-        );
-      })}
-
-      {selectedZone && selected !== null && !missing.has(selected) && (
-        // Figma's selection frame: eight resize handles and a rotation handle, drawn in the
-        // zone's own turned box. The frame never takes a click itself; its handles do.
-        <div
-          ref={frameEl}
-          className={desk.frame}
-          data-frame="true"
-          data-narrow-x={selectedZone.width * k < EDGE_HANDLE_MIN_PX}
-          data-narrow-y={selectedZone.height * k < EDGE_HANDLE_MIN_PX}
+        )}
+        {drawnNow && !editorGone && (
+          // The editor's own draw of the running effect. It is drawn in the canvas's own
+          // 320 x 200 units, so it lines up with the zones, and the daemon's frames fade in over
+          // it when they arrive. In the lights mode it is hidden, but it is still there: the
+          // editor reads its pixels to know what colour each LED is.
+          <div
+            ref={editorLayerRef}
+            className={`${desk.editorPreview} ${fading ? desk.editorFadeIn : ""}`}
+            data-editor-preview="true"
+            data-mode={mode}
+            aria-hidden="true"
+            style={{
+              opacity: !daemonLive && !!effect && !effectNeedsInput ? (mode === "effect" ? 1 : 0) : 0,
+              transform: `translate(${view.panX * base * view.scale}px, ${view.panY * base * view.scale}px) scale(${base * view.scale})`,
+            }}
+          >
+            <EffectPreview id={drawnNow.id} className={desk.editorCanvas} />
+          </div>
+        )}
+        <canvas
+          ref={previewRef}
+          className="stage-canvas"
+          width={PREVIEW_W}
+          height={PREVIEW_H}
+          aria-hidden="true"
           style={{
-            left: `${(selectedZone.x + view.panX) * k}px`,
-            top: `${(selectedZone.y + view.panY) * k}px`,
-            width: `${selectedZone.width * k}px`,
-            height: `${selectedZone.height * k}px`,
-            transform: `rotate(${selectedZone.rotation_deg}deg)`,
+            transformOrigin: "0 0",
+            transform: `translate(${view.panX * base * view.scale}px, ${view.panY * base * view.scale}px) scale(${view.scale})`,
+            opacity: daemonLive && mode === "effect" ? 1 : 0,
           }}
-        >
-          <span className={desk.stem} aria-hidden="true" />
-          <span
-            className={desk.rotateHandle}
-            data-handle="rotate"
-            role="button"
-            tabIndex={-1}
-            aria-label="Rotate this zone"
-            onPointerDown={(e) => beginDrag("rotate", selected, e)}
-          />
-          {HANDLES.map((h) => (
-            <span
-              key={h.id}
-              className={desk.handle}
-              data-handle={h.id}
-              role="button"
-              tabIndex={-1}
-              aria-label={`Resize this zone from the ${h.id} handle`}
-              style={{
-                left: `${(h.sx + 1) * 50}%`,
-                top: `${(h.sy + 1) * 50}%`,
-                cursor: handleCursor(h, selectedZone.rotation_deg),
+        />
+        <CanvasFurniture svgRef={svgRef} gRef={gRef} unit={unit} k={k} />
+        <canvas ref={overlayRef} className="stage-leds" aria-hidden="true" />
+        {/* The mark on the LED the setup's walker has lit. */}
+        <span ref={litMarkerRef} className={desk.litMarker} aria-hidden="true" hidden />
+
+        {guides.length > 0 && (
+          // Faint outlines of a typical small, mid and full tower behind the case: guides to
+          // compare against, not a picker. Their names are buttons that snap the case.
+          <div className={desk.guides} data-guides="true">
+            {guides.map((g) => (
+              <div
+                key={g.id}
+                className={desk.guide}
+                data-guide-id={g.id}
+                style={{
+                  left: `${(g.x + view.panX) * k}px`,
+                  top: `${(g.y + view.panY) * k}px`,
+                  width: `${g.width * k}px`,
+                  height: `${g.height * k}px`,
+                }}
+              >
+                <button
+                  type="button"
+                  className={desk.guideTag}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={g.onPick}
+                  aria-label={`Use a ${g.name.toLowerCase()}, ${g.size}`}
+                  style={{ "--lead": `${(g.x - g.labelX) * k + 6}px` } as CSSProperties}
+                >
+                  <span>{g.name}</span>
+                  <span className={desk.guideSize}>{g.size}</span>
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {landmarks.map((l, i) => {
+          if (l.visible === false) return null;
+          const isSel = selection.some((s) => s.kind === "landmark" && s.index === i);
+          const isHover = hovered?.kind === "landmark" && hovered.index === i;
+          const style = {
+            left: `${(l.x + view.panX) * k}px`,
+            top: `${(l.y + view.panY) * k}px`,
+            width: `${l.width * k}px`,
+            height: `${l.height * k}px`,
+            transform: `rotate(${l.rotation_deg}deg)`,
+          } as CSSProperties;
+          return (
+            <div
+              key={`lm-${i}`}
+              ref={(el) => {
+                lmEls.current[i] = el;
               }}
-              onPointerDown={(e) => beginDrag("resize", selected, e, h)}
-            />
-          ))}
-        </div>
-      )}
-
-      {tags.length > 0 && (
-        // The leader lines: each name tag is tied to its zone, so no name sits between two zones
-        // and could belong to either.
-        <svg className={desk.leaders} aria-hidden="true">
-          {tags.map((t) =>
-            t.lead ? (
-              <g key={t.key}>
-                <line x1={t.lead.x1} y1={t.lead.y1} x2={t.lead.x2} y2={t.lead.y2} />
-                <circle cx={t.lead.x2} cy={t.lead.y2} r={2.5} />
-              </g>
-            ) : null,
-          )}
-        </svg>
-      )}
-
-      {tags.map((t) => (
-        // A solid chip beside each zone: its icon, its name and the hardware's name muted, in a
-        // colour that holds on any picture.
-        <div
-          key={t.key}
-          className={desk.tag}
-          data-tag="true"
-          data-zone-index={t.index}
-          data-missing={t.missing}
-          style={
-            {
-              left: `${t.x}px`,
-              top: `${t.y}px`,
-              "--zc": t.missing ? "var(--down)" : `var(${ACCENTS[t.accent] ?? "--a1"})`,
-            } as CSSProperties
-          }
-        >
-          <KindIcon kind={t.kind} fan={t.fan} size={15} />
-          {phone ? (
-            <span className="sr-only">{t.text}</span>
-          ) : (
-            <>
-              <span>{t.text}</span>
-              {t.sub && <span className={desk.tagSub}>{t.sub}</span>}
-            </>
-          )}
-        </div>
-      ))}
-
-      {labelIndex !== null && labelZone && (
-        // The zone's name, beside it while it is hovered, held or picked. Nothing else on the
-        // canvas is text.
-        <div
-          key={labelIndex}
-          ref={labelEl}
-          className={desk.label}
-          data-zone-label="true"
-          data-zone-index={labelIndex}
-          data-selected={selected === labelIndex}
-          data-missing={labelMissing}
-          style={
-            {
-              "--zc": labelMissing ? "var(--down)" : `var(${ACCENTS[labelAccent] ?? "--a1"})`,
-            } as CSSProperties
-          }
-        >
-          {labelPlain && <KindIcon kind={labelPlain.kind} fan={labelPlain.fan} size={15} />}
-          <span className={desk.labelText}>{labelText}</span>
-          {labelSub && <span className={desk.tagSub}>{labelSub}</span>}
-          {labelLeds && <span className={desk.tagSub}>{labelLeds}</span>}
-          {removable(labelIndex) && (
-            // A ghost cannot be picked on the canvas, so its label is the way to it: once the
-            // zone is picked the label carries the way to take it off the layout. The editor's
-            // own small button is used, not a raw one.
-            <span
-              className={desk.labelRemove}
+              className={`${desk.zone} ${desk.landmark}`}
+              role="button"
+              tabIndex={0}
+              aria-pressed={isSel}
+              aria-label={`${l.label?.trim() || PART_LABEL[l.kind]}, a landmark without lights`}
+              data-landmark="true"
+              data-pulse={pulse.some((s) => s.kind === "landmark" && s.index === i)}
+              data-kind={l.kind}
+              data-selected={isSel}
+              data-hover={isHover}
+              data-dim={isDim({ kind: "landmark", index: i })}
+              data-locked={l.locked === true}
+              data-outside={outsideOf(l.x, l.y, l.width, l.height)}
+              style={style}
               onPointerDown={(e) => {
                 e.stopPropagation();
-                e.preventDefault();
+                if (l.locked === true) {
+                  e.preventDefault();
+                  return;
+                }
+                // A part inside the case wins the pointer over the case: the case is taken by
+                // its edge band, its handles, or where nothing else is under the pointer.
+                if (l.kind === "case" && !onEdgeBand(e, e.currentTarget) && partUnder(e)) {
+                  e.preventDefault();
+                  return;
+                }
+                if (e.shiftKey) {
+                  e.preventDefault();
+                  const has = selection.some((s) => s.kind === "landmark" && s.index === i);
+                  onSelect(has ? selection.filter((s) => !(s.kind === "landmark" && s.index === i)) : [...selection, { kind: "landmark", index: i }]);
+                  return;
+                }
+                beginDrag("move", { kind: "landmark", index: i }, e);
               }}
+              onPointerEnter={() => setHover({ kind: "landmark", index: i })}
+              onPointerLeave={() => setHover((h) => (h?.kind === "landmark" && h.index === i ? null : h))}
+              onFocus={() => onSelect([{ kind: "landmark", index: i }])}
             >
-              <Chip
-                icon={<X size={10} weight="bold" />}
-                label={`Remove ${labelText} from the layout`}
-                onClick={() => onRemoveZone?.(labelIndex)}
-              >
-                {null}
-              </Chip>
-            </span>
-          )}
-        </div>
-      )}
+              <PartArt kind={l.kind} facing={l.facing} />
+              {unlockBadge && l.locked === true && (
+                <button
+                  type="button"
+                  className={desk.lockBadge}
+                  aria-label={`Unlock the ${(l.label?.trim() || PART_LABEL[l.kind]).toLowerCase()}`}
+                  title="Locked. Click to unlock"
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onChangeLandmark(i, { locked: false });
+                  }}
+                >
+                  <LockSimple size={12} weight="fill" aria-hidden="true" />
+                </button>
+              )}
+            </div>
+          );
+        })}
 
-    </div>
+        {derivedCase && (
+          // The case of an old layout, drawn from its form until the daemon migrates it. It is
+          // a picture, not a part: it cannot be picked.
+          <div
+            className={`${desk.zone} ${desk.landmark} ${desk.derived}`}
+            aria-hidden="true"
+            data-derived="true"
+            data-kind="case"
+            style={{
+              left: `${(derivedCase.x + view.panX) * k}px`,
+              top: `${(derivedCase.y + view.panY) * k}px`,
+              width: `${derivedCase.width * k}px`,
+              height: `${derivedCase.height * k}px`,
+            }}
+          >
+            <PartArt kind="case" facing={derivedCase.facing} />
+          </div>
+        )}
+
+        {zones.map((z, i) => {
+          const found = findZoneInfo(devices, z.device_id, z.zone_index);
+          const accent = accentOf(devices, z.device_id);
+          const isSel = selection.some((s) => s.kind === "zone" && s.index === i);
+          const isMissing = missing.has(i);
+          const kind = partOf(z, devices, found?.zone ?? null);
+          const facing = z.part?.facing ?? "viewer";
+          const key = `zone:${zoneKey(z)}`;
+          const style = {
+            left: `${(z.x + view.panX) * k}px`,
+            top: `${(z.y + view.panY) * k}px`,
+            width: `${z.width * k}px`,
+            height: `${z.height * k}px`,
+            transform: `rotate(${z.rotation_deg}deg)`,
+            "--zc": isMissing ? "var(--down)" : `var(${ACCENTS[accent] ?? "--a1"})`,
+          } as CSSProperties;
+          const name = found ? found.zone.name : "device not found";
+          const count = found ? found.zone.led_count : 0;
+          return (
+            <div
+              key={key}
+              ref={(el) => {
+                zoneEls.current[i] = el;
+              }}
+              className={`zrect ${desk.zone}`}
+              role="button"
+              tabIndex={0}
+              aria-pressed={isSel}
+              data-zone-index={i}
+              aria-label={`${found?.device.name ?? z.device_id} ${name}, ${count} LEDs${z.visible ? "" : ", hidden"}`}
+              data-hidden={!z.visible}
+              data-selected={isSel}
+              data-missing={isMissing}
+              data-kind={kind}
+              data-locked={z.locked === true}
+              data-outside={outsideOf(z.x, z.y, z.width, z.height)}
+              data-hover={hovered?.kind === "zone" && hovered.index === i}
+              data-dim={isDim({ kind: "zone", index: i })}
+              data-identify={identifying === i}
+              data-pulse={pulse.some((s) => s.kind === "zone" && s.index === i)}
+              data-shape={found ? resolveShape(z.shape, found.zone.kind) : "none"}
+              style={style}
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                if (z.locked === true) {
+                  e.preventDefault();
+                  return;
+                }
+                if (e.shiftKey) {
+                  // Shift-click picks one more part, or lets one go.
+                  e.preventDefault();
+                  const has = selection.some((s) => s.kind === "zone" && s.index === i);
+                  onSelect(has ? selection.filter((s) => !(s.kind === "zone" && s.index === i)) : [...selection, { kind: "zone", index: i }]);
+                  return;
+                }
+                beginDrag("move", { kind: "zone", index: i }, e);
+              }}
+              onPointerEnter={() => setHover({ kind: "zone", index: i })}
+              onPointerLeave={() => setHover((h) => (h?.kind === "zone" && h.index === i ? null : h))}
+              onFocus={() => onSelect([{ kind: "zone", index: i }])}
+            >
+              <PartArt kind={kind} facing={facing} />
+              {isMissing && <span className={desk.offline}>offline</span>}
+            </div>
+          );
+        })}
+
+        {frameObj && selection.length === 1 && (
+          // The selection: eight resize handles and a rotation handle, in the part's own turned
+          // box. The frame never takes a click itself; its handles do.
+          <div
+            ref={frameEl}
+            className={desk.frame}
+            data-frame="true"
+            data-narrow-x={frameObj.width * k < EDGE_HANDLE_MIN_PX}
+            data-narrow-y={frameObj.height * k < EDGE_HANDLE_MIN_PX}
+            style={{
+              left: `${(frameObj.x + view.panX) * k}px`,
+              top: `${(frameObj.y + view.panY) * k}px`,
+              width: `${frameObj.width * k}px`,
+              height: `${frameObj.height * k}px`,
+              transform: `rotate(${frameObj.rotation_deg}deg)`,
+            }}
+          >
+            <span className={desk.stem} aria-hidden="true" />
+            <span
+              className={desk.rotateHandle}
+              data-handle="rotate"
+              role="button"
+              tabIndex={-1}
+              aria-label="Rotate this part"
+              onPointerDown={(e) => beginDrag("rotate", primary as Sel, e)}
+            />
+            {HANDLES.map((h) => (
+              <span
+                key={h.id}
+                className={desk.handle}
+                data-handle={h.id}
+                role="button"
+                tabIndex={-1}
+                aria-label={`Resize this part from the ${h.id} handle`}
+                style={{
+                  left: `${(h.sx + 1) * 50}%`,
+                  top: `${(h.sy + 1) * 50}%`,
+                  cursor: handleCursor(h, frameObj.rotation_deg),
+                }}
+                onPointerDown={(e) => beginDrag("resize", primary as Sel, e, h)}
+              />
+            ))}
+          </div>
+        )}
+
+        {selection.length > 1 && (
+          // More than one part is picked: each gets a quiet outline, no handles.
+          <div className={desk.multi} aria-hidden="true">
+            {selection.map((s) => {
+              if (s.kind === "zone") {
+                const o = zones[s.index];
+                if (!o) return null;
+                const b = boundsOf(o);
+                return (
+                  <span
+                    key={`${s.kind}-${s.index}`}
+                    className={desk.multiBox}
+                    style={{
+                      left: `${(b.x + view.panX) * k}px`,
+                      top: `${(b.y + view.panY) * k}px`,
+                      width: `${b.width * k}px`,
+                      height: `${b.height * k}px`,
+                      transform: `rotate(${o.rotation_deg}deg)`,
+                    }}
+                  />
+                );
+              }
+              const o = landmarks[s.index];
+              if (!o) return null;
+              const b = landmarkBounds(o);
+              return (
+                <span
+                  key={`${s.kind}-${s.index}`}
+                  className={desk.multiBox}
+                  style={{
+                    left: `${(b.x + view.panX) * k}px`,
+                    top: `${(b.y + view.panY) * k}px`,
+                    width: `${b.width * k}px`,
+                    height: `${b.height * k}px`,
+                    transform: `rotate(${o.rotation_deg}deg)`,
+                  }}
+                />
+              );
+            })}
+          </div>
+        )}
+
+        {marquee && (
+          <div
+            className={desk.marquee}
+            aria-hidden="true"
+            style={{ left: marquee.x, top: marquee.y, width: marquee.w, height: marquee.h }}
+          />
+        )}
+
+        {hint && (
+          <div className={desk.hint} data-hint="true">
+            <b>L</b> lights · <b>E</b> effect
+          </div>
+        )}
+
+        <div
+          ref={readoutRef}
+          className={desk.readout}
+          data-readout="true"
+          aria-hidden="true"
+          style={{ opacity: 0, visibility: "hidden" }}
+        />
+
+        <span
+          ref={(el) => {
+            guideEls.current.v = el;
+          }}
+          className={desk.guideV}
+          data-guide="v"
+          aria-hidden="true"
+        />
+        <span
+          ref={(el) => {
+            guideEls.current.v2 = el;
+          }}
+          className={desk.guideV2}
+          data-guide="v2"
+          aria-hidden="true"
+        />
+        <span
+          ref={(el) => {
+            guideEls.current.h = el;
+          }}
+          className={desk.guideH}
+          data-guide="h"
+          aria-hidden="true"
+        />
+
+        {tags.map((t) => (
+          <div
+            key={`${t.sel.kind}-${t.sel.index}`}
+            className={desk.tag}
+            data-tag="true"
+            data-selected={t.selected}
+            style={
+              {
+                left: `${t.x}px`,
+                top: `${t.y}px`,
+                "--zc": t.accent < 0 ? "var(--line-2)" : `var(${ACCENTS[t.accent] ?? "--a1"})`,
+              } as CSSProperties
+            }
+          >
+            <span className={t.selected ? desk.tagFig : undefined}>{t.text}</span>
+          </div>
+        ))}
+
+        {sizing && (
+          <SizeEditor
+            unit={unit}
+            zone={sizing.kind === "zone" ? zones[sizing.index] : undefined}
+            landmark={sizing.kind === "landmark" ? landmarks[sizing.index] : undefined}
+            onChange={(patch) => {
+              if (sizing.kind === "zone") onChangeZones([{ index: sizing.index, patch }]);
+              else onChangeLandmark(sizing.index, patch);
+            }}
+            onClose={() => setSizing(null)}
+          />
+        )}
+      </div>
       <div className={desk.toolbar}>
         {scaleBar ? (
-          // The scale: how long a line on the desk is, in the daemon's own units.
-          <div
-            className={desk.scaleBar}
-            role="img"
-            aria-label={`Scale: ${scaleBar.units} of the desk's ${CANVAS_W} units${
-              scaleBar.share ? `, ${scaleBar.share}` : ""
-            }`}
-          >
+          <div className={desk.scaleBar} role="img" aria-label={`Scale: ${scaleBar.text}`}>
             <span className={desk.scaleLine} style={{ width: `${scaleBar.px}px` }} />
             <span className={desk.scaleLabel}>
-              {scaleBar.share && <span className={desk.scaleShare}>{scaleBar.share}</span>}
-              <span className="fig">{scaleBar.units} units</span>
+              <span className="fig">{scaleBar.text}</span>
             </span>
           </div>
         ) : (
           <span />
         )}
         <div className={desk.controls}>
-          {onCaseForm && (
-            <Select
-              value={caseForm}
-              label="Case"
-              options={CASE_OPTIONS}
-              onChange={(v) => onCaseForm(v as CaseForm)}
-            />
-          )}
-          <IconButton
-            label={tagsOn ? "Hide the zone names" : "Show the zone names"}
-            icon={<Tag size={13} weight={tagsOn ? "fill" : "regular"} />}
-            size="sm"
-            pressed={tagsOn}
-            onClick={toggleTags}
+          <Segmented<StageMode>
+            label="What the canvas shows"
+            value={mode}
+            options={[
+              { value: "effect", label: "Effect" },
+              { value: "lights", label: "Lights (approximate)" },
+            ]}
+            onChange={onMode}
           />
           <IconButton label="Zoom out" icon={<Minus size={13} />} size="sm" onClick={() => zoomBy(1 / 1.3)} />
           <span className={desk.zoomValue}>{Math.round(view.scale * 100)}%</span>
@@ -2024,12 +2600,189 @@ export function PreviewStage({
           <IconButton label="Fit the canvas" icon={<ArrowsOut size={13} />} size="sm" onClick={fit} />
         </div>
       </div>
+      {pickedZones.length > 1 && (
+        <div className={desk.toolbarRow}>
+          <span className={desk.toolbarLabel}>Line up</span>
+          <IconButton label="Line the parts up on the left" icon={<AlignLeft size={13} />} size="sm" onClick={() => arrange("left")} />
+          <IconButton label="Line the parts up in the middle" icon={<AlignCenterHorizontal size={13} />} size="sm" onClick={() => arrange("hcenter")} />
+          <IconButton label="Line the parts up on the right" icon={<AlignRight size={13} />} size="sm" onClick={() => arrange("right")} />
+          <IconButton label="Line the parts up at the top" icon={<AlignTop size={13} />} size="sm" onClick={() => arrange("top")} />
+          <IconButton label="Line the parts up in the middle" icon={<AlignCenterVertical size={13} />} size="sm" onClick={() => arrange("vcenter")} />
+          <IconButton label="Line the parts up at the bottom" icon={<AlignBottom size={13} />} size="sm" onClick={() => arrange("bottom")} />
+          <IconButton label="Spread the parts out across" icon={<AlignCenterHorizontal size={13} />} size="sm" onClick={() => arrange("spreadH")} />
+          <IconButton label="Spread the parts out down" icon={<AlignCenterVertical size={13} />} size="sm" onClick={() => arrange("spreadV")} />
+        </div>
+      )}
       <p className={desk.legend}>
-        Dots are LEDs showing the live colour. The picture behind is the effect.
+        {mode === "lights"
+          ? "Each LED is a dot in its own colour. The halo stays inside its part, so the picture is close, not exact."
+          : "Each cell is one LED, in the colour it reads from the effect."}
         {phone && " Tap anything for its name."}
       </p>
     </>
   );
+}
+
+/** True when a part sits outside the frame of the effect area. */
+function outsideOf(x: number, y: number, w: number, h: number): boolean {
+  return x < -0.5 || y < -0.5 || x + w > CANVAS_W + 0.5 || y + h > CANVAS_H + 0.5;
+}
+
+/**
+ * The distance between two neighbouring LEDs of a part, in canvas units: the pitch of the
+ * light. The halo is a little over one pitch, so the light of a row of LEDs runs together
+ * without becoming one blob.
+ */
+function firstPitch(local: LocalLeds, horizontal: boolean): number {
+  const led = local.leds.find((l) => !!l);
+  if (!led) return 4;
+  if (local.shape === "strip") return Math.max(0.5, horizontal ? led.w : led.h);
+  return Math.max(0.5, Math.min(led.w, led.h));
+}
+
+/** The box (canvas units) that holds the lit cells so far. */
+function growRun(
+  run: [number, number, number, number] | null,
+  cell: CanvasCell,
+): [number, number, number, number] {
+  const [x0, y0, x1, y1] = cell.bounds;
+  if (!run) return [x0, y0, x1, y1];
+  return [Math.min(run[0], x0), Math.min(run[1], y0), Math.max(run[2], x1), Math.max(run[3], y1)];
+}
+
+/** Puts the mark round a whole lit run (a fan): the same ring, as wide as the run. */
+function markRun(
+  marker: HTMLElement | null,
+  run: [number, number, number, number],
+  v: View,
+  kCss: number,
+): void {
+  if (!marker) return;
+  const pad = 4;
+  marker.style.left = `${(run[0] + v.panX) * kCss - pad}px`;
+  marker.style.top = `${(run[1] + v.panY) * kCss - pad}px`;
+  marker.style.width = `${Math.max(20, (run[2] - run[0]) * kCss) + pad * 2}px`;
+  marker.style.height = `${Math.max(20, (run[3] - run[1]) * kCss) + pad * 2}px`;
+  marker.dataset.run = "true";
+  marker.hidden = false;
+}
+
+/**
+ * Puts the mark on the LED the setup's walker has lit: a bright ring in the accent colour, with
+ * a slow pulse, so the reader can match the light in the room with the cell on the drawing at
+ * any zoom.
+ */
+function markLit(
+  marker: HTMLElement | null,
+  cell: CanvasCell,
+  led: { w: number; h: number },
+  v: View,
+  kCss: number,
+): void {
+  if (!marker) return;
+  delete marker.dataset.run;
+  // A ring round the cell, big enough to be found at a glance, and never smaller than the cell.
+  const d = Math.max(20, Math.min(led.w, led.h) * kCss);
+  marker.style.left = `${(cell.cx + v.panX) * kCss - d / 2}px`;
+  marker.style.top = `${(cell.cy + v.panY) * kCss - d / 2}px`;
+  marker.style.width = `${d}px`;
+  marker.style.height = `${d}px`;
+  marker.hidden = false;
+}
+
+/**
+ * The outline of a part on the overlay canvas: its own box, turned with the part, and a margin
+ * round it. A part's halo is clipped to this, so no light ever leaves the part it belongs to.
+ */
+function partPath(
+  ctx: CanvasRenderingContext2D,
+  z: PlacedZone,
+  k: number,
+  ox: number,
+  oy: number,
+  margin: number,
+): void {
+  const t = zoneTransform(z);
+  const hw = (z.width / 2) * k + margin;
+  const hh = (z.height / 2) * k + margin;
+  const cx = t.cx * k + ox;
+  const cy = t.cy * k + oy;
+  ctx.beginPath();
+  for (const [lx, ly] of [
+    [-hw, -hh],
+    [hw, -hh],
+    [hw, hh],
+    [-hw, hh],
+  ] as const) {
+    const x = cx + lx * t.cos - ly * t.sin;
+    const y = cy + lx * t.sin + ly * t.cos;
+    if (lx === -hw && ly === -hh) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+}
+
+/**
+ * The typed size of a part: width and height, in the reader's unit, with Tab moving between
+ * them and Enter letting go. It is opened with Enter on a picked part.
+ */
+function SizeEditor({
+  unit,
+  zone,
+  landmark,
+  onChange,
+  onClose,
+}: {
+  unit: LengthUnit;
+  zone?: PlacedZone;
+  landmark?: Landmark;
+  onChange: (patch: Partial<PlacedZone> | Partial<Landmark>) => void;
+  onClose: () => void;
+}) {
+  const o = zone ?? landmark;
+  if (!o) return null;
+  const wMm = unitsToMm(o.width);
+  const hMm = unitsToMm(o.height);
+  return (
+    <div className={desk.sizeEditor} data-size-editor="true" onKeyDown={(e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        onClose();
+      }
+    }}>
+      <label className={desk.sizeField}>
+        <span>Width</span>
+        <NumberField
+          label="Width"
+          value={lengthNumber(wMm, unit)}
+          min={0}
+          max={lengthNumber(CANVAS_W * MM_PER_UNIT, unit)}
+          decimals={unit === "in" ? 2 : 1}
+          unit={unitWord(unit)}
+          onCommit={(v) => onChange({ width: mmFromLength(v, unit) / MM_PER_UNIT })}
+        />
+      </label>
+      <label className={desk.sizeField}>
+        <span>Height</span>
+        <NumberField
+          label="Height"
+          value={lengthNumber(hMm, unit)}
+          min={0}
+          max={lengthNumber(CANVAS_H * MM_PER_UNIT, unit)}
+          decimals={unit === "in" ? 2 : 1}
+          unit={unitWord(unit)}
+          onCommit={(v) => onChange({ height: mmFromLength(v, unit) / MM_PER_UNIT })}
+        />
+      </label>
+    </div>
+  );
+}
+
+/** A zone's LED layout, kept until the zone's own shape changes. */
+interface LedLayout {
+  sig: string;
+  local: LocalLeds;
 }
 
 /**
@@ -2038,13 +2791,7 @@ export function PreviewStage({
  */
 function clampView(v: View): View {
   const scale = clamp(v.scale, MIN_SCALE, MAX_SCALE);
-  // The pan is in canvas units, so the view is the same on any screen: at or above 1 the canvas
-  // covers the stage and can be panned, below 1 it is centred.
-  const spanX = CANVAS_W * (1 / scale - 1);
-  const spanY = CANVAS_H * (1 / scale - 1);
-  return {
-    scale,
-    panX: scale >= 1 ? clamp(v.panX, spanX, 0) : spanX / 2,
-    panY: scale >= 1 ? clamp(v.panY, spanY, 0) : spanY / 2,
-  };
+  const pan = scale >= 1 ? clamp(v.panX, CANVAS_W * (1 / scale - 1), 0) : (CANVAS_W * (1 / scale - 1)) / 2;
+  const panY = scale >= 1 ? clamp(v.panY, CANVAS_H * (1 / scale - 1), 0) : (CANVAS_H * (1 / scale - 1)) / 2;
+  return { scale, panX: pan, panY };
 }

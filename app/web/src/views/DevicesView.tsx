@@ -1,10 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState, type CSSProperties, type ReactElement } from "react";
+import { useState, type CSSProperties, type ReactElement } from "react";
 import {
   ArrowClockwise,
-  ArrowLeft,
-  ArrowRight,
   Cpu,
   Crosshair,
   GraphicsCard,
@@ -14,21 +12,18 @@ import {
   Microphone,
   Mouse,
   Plugs,
-  X,
 } from "@phosphor-icons/react";
 import type { Icon } from "@phosphor-icons/react";
-import { Button, IconButton } from "@/components/Button";
+import { Button } from "@/components/Button";
 import { EmptyState } from "@/components/EmptyState";
-import { NumberField } from "@/components/NumberField";
 import { Panel, StateDot } from "@/components/Panel";
 import { Skeleton } from "@/components/Skeleton";
-import { api } from "@/lib/endpoints";
-import { messageOf } from "@/lib/errors";
 import { refreshDevices, useSnap } from "@/lib/store";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { DeviceKind } from "@/proto/DeviceKind";
 import type { ZoneInfo } from "@/proto/ZoneInfo";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
+import { IdentifyWalker } from "@/views/editor/IdentifyWalker";
 
 const KIND_ICON: Record<DeviceKind, Icon> = {
   motherboard: Cpu,
@@ -295,125 +290,3 @@ export function DevicesView() {
   );
 }
 
-/**
- * Walks a lit LED along one zone (POST identify). ← and → step it. "This is the last LED" sets the
- * zone's length to the LED just lit. Leaving the walker, or the page, sends `stop: true`.
- */
-function IdentifyWalker({
-  device,
-  zone,
-  onClose,
-}: {
-  device: DeviceInfo;
-  zone: ZoneInfo;
-  onClose: () => void;
-}) {
-  const [led, setLed] = useState(0);
-  const [error, setError] = useState<string | null>(null);
-  const [note, setNote] = useState<string | null>(null);
-  const stopped = useRef(false);
-  const maxIndex = Math.max(0, zone.max_leds - 1);
-
-  const stop = () => {
-    if (stopped.current) return;
-    stopped.current = true;
-    void api.identify(device.id, { zone: zone.index, led: 0, stop: true }).catch(() => undefined);
-  };
-
-  // Light the current LED whenever it changes.
-  useEffect(() => {
-    stopped.current = false;
-    let cancelled = false;
-    api
-      .identify(device.id, { zone: zone.index, led, stop: false })
-      .then(() => {
-        if (!cancelled) setError(null);
-      })
-      .catch((e: unknown) => {
-        if (!cancelled) setError(messageOf(e));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [device.id, zone.index, led]);
-
-  // Stop on unmount (leaving the page or closing the walker) and when the zone changes.
-  useEffect(() => {
-    const id = device.id;
-    const index = zone.index;
-    return () => {
-      if (stopped.current) return;
-      stopped.current = true;
-      void api.identify(id, { zone: index, led: 0, stop: true }).catch(() => undefined);
-    };
-  }, [device.id, zone.index]);
-
-  // ← and → step the walker when focus is not in a text field.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const t = e.target as HTMLElement | null;
-      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")) return;
-      if (e.key === "ArrowRight") setLed((v) => Math.min(maxIndex, v + 1));
-      if (e.key === "ArrowLeft") setLed((v) => Math.max(0, v - 1));
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [maxIndex]);
-
-  const setLength = async () => {
-    setError(null);
-    setNote(null);
-    try {
-      await api.patchZone(device.id, zone.index, { led_count: led + 1 });
-      await refreshDevices();
-      stop();
-      setNote(`${zone.name} is now ${led + 1} LEDs.`);
-    } catch (e) {
-      setError(messageOf(e));
-    }
-  };
-
-  const exit = () => {
-    stop();
-    onClose();
-  };
-
-  return (
-    <Panel
-      title={`Identify ${zone.name}`}
-      actions={<IconButton label="Stop walking" icon={<X size={16} />} onClick={exit} />}
-    >
-      <div className="stack" style={{ gap: 14 }}>
-        <p className="dim one-line" style={{ whiteSpace: "normal" }}>
-          {device.name}
-        </p>
-        <div className="walker-led">
-          <span className="walker-big"><AnimatedNumber value={led + 1} /></span>
-          <span className="mute">of {zone.max_leds} LEDs</span>
-        </div>
-        <p className="mute" style={{ fontSize: 14, marginTop: -4 }}>
-          Set to <span className="fig"><AnimatedNumber value={zone.led_count} /></span>
-        </p>
-        <div className="walker-keys">
-          <IconButton label="Previous LED" icon={<ArrowLeft size={18} />} disabled={led <= 0} onClick={() => setLed((v) => Math.max(0, v - 1))} />
-          <IconButton label="Next LED" icon={<ArrowRight size={18} />} disabled={led >= maxIndex} onClick={() => setLed((v) => Math.min(maxIndex, v + 1))} />
-          <NumberField
-            label="LED number"
-            min={1}
-            max={maxIndex + 1}
-            value={led + 1}
-            onCommit={(v) => setLed(v - 1)}
-          />
-        </div>
-        <Button variant="primary" onClick={() => void setLength()}>
-          This is the last LED
-        </Button>
-        <p className="mute fig" style={{ fontSize: 14 }}>
-          {zone.min_leds}–{zone.max_leds}
-        </p>
-        {note && <StateDot tone="ok">{note}</StateDot>}
-        {error && <p className="error-line">{error}</p>}
-      </div>
-    </Panel>
-  );
-}

@@ -6,7 +6,12 @@
 // The desk canvas draws every pointer move without a React render, so the geometry is split in
 // two: `zoneLedOffsets` gives the LED positions in the zone's own frame (they only change when
 // the zone is resized or reversed) and `zoneTransform` gives the frame's place and angle.
+//
+// One zone can drive several parts (three fans daisy-chained on one ARGB header are three
+// placements of the same zone). A placement with `leds` owns a run of the zone's LEDs and draws
+// only those, sized from its own run, the way the engine samples them.
 
+import { MM_PER_UNIT } from "@/lib/caseForms";
 import type { PlacedZone } from "@/proto/PlacedZone";
 import type { ZoneInfo } from "@/proto/ZoneInfo";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
@@ -15,6 +20,107 @@ import type { ZoneShape } from "@/proto/ZoneShape";
 
 const CANVAS_W = 320;
 const CANVAS_H = 200;
+
+/** The units a person reads: centimetres or inches. */
+export type LengthUnit = "cm" | "in";
+
+/** Where the owner's choice of unit is remembered on this machine. */
+export const UNIT_KEY = "canvas-rgb.units";
+
+/** The regions that measure in inches: the United States, Liberia and Myanmar. */
+const IMPERIAL_REGIONS = new Set(["US", "LR", "MM"]);
+
+/**
+ * The unit a region reads in. The system's language tag carries the region ("en-US"): the first
+ * tag that names one decides, and a tag with no region ("en") says nothing. Everywhere else is cm.
+ */
+export function unitForLocale(tags: readonly string[]): LengthUnit {
+  for (const tag of tags) {
+    let region: string | undefined;
+    try {
+      const loc = new Intl.Locale(tag);
+      region = loc.region?.toUpperCase();
+    } catch {
+      region = /[-_]([A-Za-z]{2})/.exec(tag)?.[1]?.toUpperCase();
+    }
+    if (region) return IMPERIAL_REGIONS.has(region) ? "in" : "cm";
+  }
+  return "cm";
+}
+
+/** The unit this machine's region uses, until the owner picks one. */
+export function systemUnit(): LengthUnit {
+  if (typeof navigator === "undefined") return "cm";
+  const tags = navigator.languages?.length ? navigator.languages : [navigator.language];
+  return unitForLocale(tags.filter(Boolean));
+}
+
+/** The owner's unit: what they picked last, else what their region uses. */
+export function initialUnit(): LengthUnit {
+  try {
+    const u = window.localStorage.getItem(UNIT_KEY);
+    if (u === "cm" || u === "in") return u;
+  } catch {
+    // Not remembered: the region decides.
+  }
+  return systemUnit();
+}
+
+/** Remembers the owner's pick. */
+export function rememberUnit(unit: LengthUnit): void {
+  try {
+    window.localStorage.setItem(UNIT_KEY, unit);
+  } catch {
+    // Still used for this session.
+  }
+}
+
+/** How many canvas units one centimetre is: 4 mm to the unit. */
+export const UNITS_PER_CM = 10 / MM_PER_UNIT;
+
+/** A length in millimetres, from a length in canvas units. */
+export function unitsToMm(units: number): number {
+  return units * MM_PER_UNIT;
+}
+
+/** A length in canvas units, from a length in millimetres. */
+export function mmToUnits(mm: number): number {
+  return mm / MM_PER_UNIT;
+}
+
+/**
+ * A length in the reader's own unit, in words: "12.0 cm" or "4.72 in". The editor never shows
+ * a canvas unit: they mean nothing outside this file.
+ */
+export function formatLength(mm: number, unit: LengthUnit): string {
+  if (unit === "in") return `${(mm / 25.4).toFixed(2)} in`;
+  return `${(mm / 10).toFixed(1)} cm`;
+}
+
+/** The same, from a length in canvas units. */
+export function formatUnits(units: number, unit: LengthUnit): string {
+  return formatLength(unitsToMm(units), unit);
+}
+
+/** A length in the reader's unit, from millimetres: the number without its unit. */
+export function lengthValue(mm: number, unit: LengthUnit): string {
+  return unit === "in" ? (mm / 25.4).toFixed(2) : (mm / 10).toFixed(1);
+}
+
+/** A length in the reader's unit, from millimetres: the number itself. */
+export function lengthNumber(mm: number, unit: LengthUnit): number {
+  return unit === "in" ? mm / 25.4 : mm / 10;
+}
+
+/** A length in millimetres, from a number in the reader's unit. */
+export function mmFromLength(value: number, unit: LengthUnit): number {
+  return unit === "in" ? value * 25.4 : value * 10;
+}
+
+/** The unit word a readout carries. */
+export function unitWord(unit: LengthUnit): string {
+  return unit === "in" ? "in" : "cm";
+}
 
 export interface Point {
   x: number;
@@ -38,6 +144,21 @@ export function findZoneInfo(
   const zone = device?.zones.find((z) => z.index === zoneIndex);
   if (!device || !zone) return null;
   return { device, zone };
+}
+
+/**
+ * The key of one placement: the zone it belongs to and, when the zone is split, where its run
+ * of LEDs starts. Two placements of the same zone are two different parts, so they are two
+ * different keys.
+ */
+export function zoneKey(z: PlacedZone): string {
+  const base = `${z.device_id}#${z.zone_index}`;
+  return z.leds ? `${base}@${z.leds.start}` : base;
+}
+
+/** The key of the zone itself, without the run: one zone is one zone however it is split. */
+export function zoneOwnerKey(z: PlacedZone): string {
+  return `${z.device_id}#${z.zone_index}`;
 }
 
 export function zoneTransform(z: PlacedZone): ZoneTransform {
@@ -110,23 +231,36 @@ export interface LocalLeds {
  *   matrix   the device's own map (`auto` on a matrix zone)
  *
  * `reversed` flips the order of the LEDs along the shape; a matrix keeps its map.
+ *
+ * A placement that owns a run of the zone's LEDs (`leds`) lays out only that run, and sizes its
+ * cells from the run's own count: three fans daisy-chained on one header are three rings of
+ * their own LEDs, not three arcs of one big ring. The engine samples a slice the same way.
  */
 export function zoneLocalLeds(z: PlacedZone, info: ZoneInfo): LocalLeds {
   const shape = resolveShape(z.shape, info.kind);
-  const n = Math.max(0, info.led_count);
+  const total = Math.max(0, info.led_count);
+  const slice = z.leds;
+  // A matrix zone is never split: its map owns every LED, and a slice on it is ignored (the
+  // engine says so too, `crates/canvas-core/src/geometry.rs`).
+  const split = slice && shape !== "matrix";
+  // The shape is sized by the slice: a run of twelve LEDs gets a ring of twelve, not a ring of
+  // the whole zone. `count` is the run's own count, `take` is how many of them the zone still
+  // has: a zone that shrank under the run keeps the run's shape and is flagged, never clipped.
+  const count = split ? slice.count : total;
+  const take = split ? Math.max(0, Math.min(slice.count, total - slice.start)) : total;
   const w = z.width;
   const h = z.height;
   const leds: (LocalLed | null)[] = [];
-  if (n === 0) return { shape, leds, radius: 1 };
+  if (take === 0) return { shape, leds, radius: 1 };
   const kind = info.kind;
   if (shape === "matrix" && kind.type === "matrix") {
     const cw = w / kind.width;
     const ch = h / kind.height;
-    for (let i = 0; i < n; i++) leds.push(null);
+    for (let i = 0; i < total; i++) leds.push(null);
     for (let r = 0; r < kind.height; r++) {
       for (let c = 0; c < kind.width; c++) {
         const idx = kind.map[r * kind.width + c];
-        if (idx === null || idx === undefined || idx >= n) continue;
+        if (idx === null || idx === undefined || idx >= total) continue;
         leds[idx] = { x: -w / 2 + (c + 0.5) * cw, y: -h / 2 + (r + 0.5) * ch, w: cw, h: ch };
       }
     }
@@ -138,10 +272,10 @@ export function zoneLocalLeds(z: PlacedZone, info: ZoneInfo): LocalLeds {
   const b = h / 2;
   // Ramanujan's approximation of the ellipse perimeter, as the daemon uses.
   const perimeterOfEllipse = Math.PI * (3 * (a + b) - Math.sqrt((3 * a + b) * (a + 3 * b)));
-  const cols = z.shape.type === "grid" ? Math.min(Math.max(1, z.shape.columns), n) : 1;
-  const rows = Math.ceil(n / cols);
-  for (let i = 0; i < n; i++) {
-    const slot = z.reversed ? n - 1 - i : i;
+  const cols = z.shape.type === "grid" ? Math.min(Math.max(1, z.shape.columns), count) : 1;
+  const rows = Math.ceil(count / cols);
+  for (let i = 0; i < take; i++) {
+    const slot = z.reversed ? count - 1 - i : i;
     switch (shape) {
       case "point":
       case "matrix":
@@ -150,19 +284,19 @@ export function zoneLocalLeds(z: PlacedZone, info: ZoneInfo): LocalLeds {
       case "strip":
         leds.push(
           horizontal
-            ? { x: -w / 2 + ((slot + 0.5) * w) / n, y: 0, w: w / n, h }
-            : { x: 0, y: -h / 2 + ((slot + 0.5) * h) / n, w, h: h / n },
+            ? { x: -w / 2 + ((slot + 0.5) * w) / count, y: 0, w: w / count, h }
+            : { x: 0, y: -h / 2 + ((slot + 0.5) * h) / count, w, h: h / count },
         );
         break;
       case "ring": {
-        const size = Math.min(perimeterOfEllipse / n, Math.min(w, h));
-        const t = (2 * Math.PI * slot) / n;
+        const size = Math.min(perimeterOfEllipse / count, Math.min(w, h));
+        const t = (2 * Math.PI * slot) / count;
         leds.push({ x: a * Math.sin(t), y: -b * Math.cos(t), w: size, h: size });
         break;
       }
       case "outline": {
-        const size = Math.min(perimeterOfRect / n, Math.min(w, h));
-        const d = (perimeterOfRect * slot) / n;
+        const size = Math.min(perimeterOfRect / count, Math.min(w, h));
+        const d = (perimeterOfRect * slot) / count;
         let x: number;
         let y: number;
         if (d < w) {
@@ -194,13 +328,13 @@ export function zoneLocalLeds(z: PlacedZone, info: ZoneInfo): LocalLeds {
   let radius: number;
   switch (shape) {
     case "strip":
-      radius = Math.min(((horizontal ? w : h) / n) * 0.22, (horizontal ? h : w) * 0.14);
+      radius = Math.min(((horizontal ? w : h) / count) * 0.22, (horizontal ? h : w) * 0.14);
       break;
     case "ring":
-      radius = Math.min((perimeterOfEllipse / n) * 0.22, Math.min(w, h) * 0.1);
+      radius = Math.min((perimeterOfEllipse / count) * 0.22, Math.min(w, h) * 0.1);
       break;
     case "outline":
-      radius = Math.min((perimeterOfRect / n) * 0.22, Math.min(w, h) * 0.1);
+      radius = Math.min((perimeterOfRect / count) * 0.22, Math.min(w, h) * 0.1);
       break;
     case "grid":
       radius = Math.min(w / cols, h / rows) * 0.22;
@@ -352,6 +486,29 @@ export function reshapeBox(z: PlacedZone, shape: ZoneShape): Partial<PlacedZone>
     x: Math.min(Math.max(0, cx - nw / 2), CANVAS_W - nw),
     y: Math.min(Math.max(0, cy - nh / 2), CANVAS_H - nh),
   };
+}
+
+/**
+ * The name of a placement: the owner's own name, or the plain name of the zone. When one zone
+ * is several parts (three fans daisy-chained on one header), the parts are numbered, so the
+ * reader can tell them apart: "Front fan 1", "Front fan 2", "Front fan 3".
+ */
+export function placementName(
+  devices: DeviceInfo[] | null,
+  zone: PlacedZone,
+  all: PlacedZone[],
+): string {
+  const own = zone.label?.trim();
+  if (own) return own;
+  const plain = plainName(devices, zone.device_id, zone.zone_index).name;
+  const siblings = all
+    .filter((z) => z.device_id === zone.device_id && z.zone_index === zone.zone_index)
+    .sort((a, b) => (a.leds?.start ?? 0) - (b.leds?.start ?? 0));
+  if (siblings.length < 2) return plain;
+  const at = siblings.findIndex(
+    (z) => z === zone || (z.leds?.start === zone.leds?.start && z.leds?.count === zone.leds?.count),
+  );
+  return `${plain} ${at + 1}`;
 }
 
 /** What a zone is called to a person: the plain name and, muted beside it, the hardware's own. */

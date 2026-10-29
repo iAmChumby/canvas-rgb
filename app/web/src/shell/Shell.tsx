@@ -15,6 +15,7 @@ import { ToastProvider, ToastHost, useToast } from "@/components/Toast";
 import { CommandPalette, type Command } from "@/components/CommandPalette";
 import { DaemonDown } from "@/components/DaemonDown";
 import { links, playingLine } from "@/lib/status";
+import { useTakeover } from "@/views/editor/takeover";
 
 const PAGE_PATHS: Record<string, string> = {
   layout: "/",
@@ -44,6 +45,8 @@ function Frame({ children }: { children: ReactNode }) {
   const statusError = useSnap((s) => s.statusError);
   const effects = useSnap((s) => s.effects);
   const toast = useToast();
+  /** The onboarding has the whole window: the rail, the strip and the banners are hidden. */
+  const takeover = useTakeover();
   const [paletteOpen, setPaletteOpen] = useState(false);
   /** The status details hang under the strip's mark. The palette can open them too, so the
    *  state lives here. */
@@ -236,17 +239,23 @@ function Frame({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <div className="app" data-live={status ? "on" : "off"}>
-      <div className="rail-col">
-        <Rail pathname={current} />
-      </div>
+    <div className="app" data-live={status ? "on" : "off"} data-takeover={takeover ? "on" : "off"}>
+      {!takeover && (
+        <div className="rail-col">
+          <Rail pathname={current} />
+        </div>
+      )}
       <div className="main">
-        <StatusStrip
-          onOpenPalette={() => setPaletteOpen(true)}
-          detailsOpen={detailsOpen}
-          onDetailsOpen={setDetailsOpen}
-        />
-        <GlobalBanners />
+        {!takeover && (
+          <>
+            <StatusStrip
+              onOpenPalette={() => setPaletteOpen(true)}
+              detailsOpen={detailsOpen}
+              onDetailsOpen={setDetailsOpen}
+            />
+            <GlobalBanners />
+          </>
+        )}
         <main className="content">
           {/* The toast floats: it takes no room in the page, so the page's first content does not
               move when one appears. */}
@@ -259,7 +268,7 @@ function Frame({ children }: { children: ReactNode }) {
             />
           ) : !answered ? null : (
             <>
-              <StandingNotices />
+              {!takeover && <StandingNotices />}
               <div className="page-enter" key={current}>
                 {children}
               </div>

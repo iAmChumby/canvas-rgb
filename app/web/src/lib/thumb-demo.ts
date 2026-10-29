@@ -54,7 +54,28 @@ function seedOf(id: string): number {
  * by the id's seed. It stands in for the daemon's renderer when there is no daemon, and it knows
  * nothing about any effect. It loops: `t` runs 0..1 and every term is periodic in it.
  */
+/** The onboarding's wave: one slow, soft sweep of the brand blue, then a calm glow. */
+const helloShade: Shade = (x, _y, t) => {
+  const front = -0.3 + t * 1.9;
+  const d = (x - front) / 0.28;
+  const bump = Math.exp(-d * d);
+  const glow = 0.2 + 0.1 * Math.sin(TAU * t);
+  const v = clamp01(Math.max(glow, bump * 0.9));
+  return [143 * v + 20, 180 * v + 24, 232 * v + 30];
+};
+
+/** The onboarding's sweep: a bright band crosses once, and the canvas holds dim. */
+const sweepShade: Shade = (x, _y, t) => {
+  const front = -0.2 + t * 1.5;
+  const d = (x - front) / 0.1;
+  const band = Math.exp(-d * d);
+  const v = clamp01(0.1 + band * 0.9);
+  return [200 * v + 30 * band, 215 * v + 20 * band, 255 * v];
+};
+
 function shadeFor(id: string): Shade {
+  if (id === "onboard-hello") return helloShade;
+  if (id === "onboard-sweep") return sweepShade;
   const base = seedOf(id);
   return (x, y, t) => {
     const ripple = Math.sin(TAU * (x * 2 + y - t)) * Math.sin(TAU * (y * 3 - t));
@@ -119,6 +140,8 @@ export function thumbnailBytes(id: string): ArrayBuffer {
  * (a fixture effect) gets the generic source above.
  */
 export async function demoThumbnail(id: string): Promise<ArrayBuffer> {
+  // The onboarding's own effects have no render file: they are drawn here.
+  if (id.startsWith("onboard-")) return thumbnailBytes(id);
   try {
     const res = await fetch(`/demo-thumbs/${encodeURIComponent(id)}.png`);
     if (!res.ok) return thumbnailBytes(id);

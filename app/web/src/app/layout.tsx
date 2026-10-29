@@ -6,6 +6,7 @@ import "@/styles/app.css";
 import "@/styles/motion.css";
 import "@/styles/hardware.css";
 import { Shell } from "@/shell/Shell";
+import { OnboardingGate } from "@/views/editor/OnboardingGate";
 
 export const metadata: Metadata = {
   title: "canvas-rgb",
@@ -26,6 +27,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </head>
       <body>
         <Shell>{children}</Shell>
+        <OnboardingGate />
       </body>
     </html>
   );

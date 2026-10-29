@@ -15,8 +15,13 @@ import {
   applyFanScenarios,
   applyLayoutScenarios,
   applyStatusScenarios,
+  conflictClearsMs,
   daemonDown,
+  foundOnRescan,
+  onboardingDone,
+  openRgbConnecting,
   saveError,
+  wakingMs,
 } from "@/lib/demoScenarios";
 import {
   DEVICES,
@@ -25,6 +30,8 @@ import {
   FAN_PROFILES,
   HTML_FIXTURE,
   INITIAL_SETTINGS,
+  ONBOARD_EFFECTS,
+  isHiddenEffect,
   LAYOUT_DESK,
   CHIONE_DISPLAY,
   DISPLAY_DEFAULT,
@@ -56,6 +63,8 @@ import type { ImportEffectResponse } from "@/proto/ImportEffectResponse";
 import type { FailedEffect } from "@/proto/FailedEffect";
 
 const BASE = "/api/v1";
+const DEMO_LAYOUTS_KEY = "canvas-rgb.demo-layouts";
+const DEMO_ONBOARDED_KEY = "canvas-rgb.demo-onboarded";
 const APP_VERSION = "0.1.0";
 const SCHEMA_VERSION = 1;
 
@@ -79,6 +88,10 @@ interface DemoState {
   fanProfiles: FanProfile[];
   activeProfile: string;
   zonePanel: boolean;
+  /** The owner reached the end of the onboarding. */
+  onboardingComplete: boolean;
+  /** The devices a rescan finds (`?state=found-on-rescan`), held back until it is asked for. */
+  held: DeviceInfo[];
   serviceUp: boolean;
   conflicts: Status["conflicts"];
   startedAt: number;
@@ -97,14 +110,36 @@ function initialState(): DemoState {
   const s = scenario();
   const effects: Record<string, DemoEffect> = {};
   for (const e of EFFECTS) effects[e.schema.id] = e;
+  for (const e of ONBOARD_EFFECTS) effects[e.schema.id] = e;
   if (s.has("html")) effects[HTML_FIXTURE.schema.id] = HTML_FIXTURE;
   const profile = FAN_PROFILES[0];
   const fanModes: Record<string, FanMode> = {};
   for (const h of FAN_HEADERS) fanModes[h.id] = profile?.headers[h.id] ?? { mode: "bios" };
   const favorites = new Set(EFFECTS.filter((e) => e.summary.favorite).map((e) => e.schema.id));
   const layouts = applyLayoutScenarios([{ ...LAYOUT_DESK, zones: LAYOUT_DESK.zones.map((z) => ({ ...z })) }], LAYOUT_DESK.id);
+  // `?state=persist`: saved layouts are kept in localStorage, so a reload sees what was saved,
+  // as it does with the daemon. Used by the onboarding's reload checks.
+  if (s.has("persist")) {
+    try {
+      const kept = window.localStorage.getItem(DEMO_LAYOUTS_KEY);
+      if (kept) layouts.layouts = JSON.parse(kept) as Layout[];
+    } catch {
+      // Starts from the fixture.
+    }
+  }
+  let onboarded = onboardingDone();
+  if (s.has("persist")) {
+    try {
+      if (window.localStorage.getItem(DEMO_ONBOARDED_KEY) === "1") onboarded = true;
+    } catch {
+      // Not remembered.
+    }
+  }
+  const everyDevice = DEVICES.map((d) => ({ ...d, zones: d.zones.map((z) => ({ ...z })) }));
   return {
     settings: { ...INITIAL_SETTINGS },
+    onboardingComplete: onboarded,
+    held: foundOnRescan() ? everyDevice : [],
     devices: applyDeviceScenarios(DEVICES.map((d) => ({ ...d, zones: d.zones.map((z) => ({ ...z })) }))),
     effects,
     favorites,
@@ -118,7 +153,7 @@ function initialState(): DemoState {
     activeProfile: profile?.name ?? "Default",
     zonePanel: s.has("first-run"),
     serviceUp: !s.has("service-down"),
-    conflicts: s.has("conflict") ? [{ kind: "signal_rgb", process: true, service: false }] : [],
+    conflicts: s.has("conflict") || s.has("conflict-clears") ? [{ kind: "signal_rgb", process: true, service: false }] : [],
     startedAt: Date.now(),
     // No display has a saved source yet: the daemon leaves the pump head alone.
     displayConfig: null,
@@ -261,7 +296,9 @@ function fansStatus(): FansStatus {
 
 function statusNow(): Status {
   const s = st();
-  const connected = s.devices.filter((d) => d.connected).length;
+  const elapsedMs = Date.now() - s.startedAt;
+  const waking = openRgbConnecting() || elapsedMs < wakingMs();
+  const connected = waking ? 0 : s.devices.filter((d) => d.connected).length;
   const down = !s.serviceUp;
   const fps = s.settings.fps;
   const jitter = Math.sin(Date.now() / 1700) * 0.12;
@@ -279,11 +316,12 @@ function statusNow(): Status {
     preview_subscribers: 1,
     active_layout: s.activeLayout,
     active_effect: s.activeEffect,
-    openrgb: "connected",
+    openrgb: waking ? "connecting" : "connected",
     service: down ? "down" : "connected",
     service_down_ms: down ? 14000 + elapsed : null,
-    conflicts: s.conflicts,
+    conflicts: conflictClearsMs() > 0 && elapsed * 1000 > conflictClearsMs() ? [] : s.conflicts,
     show_zone_panel: s.zonePanel,
+    onboarding_complete: s.onboardingComplete,
   });
 }
 
@@ -616,7 +654,15 @@ export async function demoRequest(method: string, path: string, body: unknown): 
   }
 
   if (head === "devices") {
-    if (seg.length === 1 && method === "GET") return { devices: s.devices };
+    if (seg.length === 1 && method === "GET") {
+      // A rescan (the onboarding's "Rescan" asks with ?rescan=1) finds what was held back.
+      if (url.searchParams.get("rescan") === "1" && s.held.length > 0) {
+        s.devices = s.held;
+        s.held = [];
+      }
+      const waking = openRgbConnecting() || Date.now() - s.startedAt < wakingMs();
+      return { devices: waking ? [] : s.devices };
+    }
     if (seg.length === 5 && seg[2] === "zones" && method === "PATCH") {
       const id = seg[1] ?? "";
       const zoneIndex = Number(seg[3]);
@@ -636,6 +682,8 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       const device = s.devices.find((d) => d.id === id);
       if (!device) fail(404, "not_found", `no device ${id}`);
       if (!device.connected) fail(503, "service_unavailable", `${device.name} is not connected`);
+      // A test page can collect the requests: `window.__identify = []` before the walk.
+      (globalThis as { __identify?: unknown[] }).__identify?.push({ id, at: Date.now(), ...(body as object) });
       return { ok: true };
     }
     return bad();
@@ -643,7 +691,9 @@ export async function demoRequest(method: string, path: string, body: unknown): 
 
   if (head === "effects") {
     if (seg.length === 1 && method === "GET") {
-      const list = Object.values(s.effects).map((e) => ({ ...e.summary, favorite: s.favorites.has(e.schema.id) }));
+      const list = Object.values(s.effects)
+        .filter((e) => !isHiddenEffect(e.schema.id))
+        .map((e) => ({ ...e.summary, favorite: s.favorites.has(e.schema.id) }));
       return { effects: list, active: s.activeEffect, failed: s.failedEffects };
     }
     if (seg[1] === "import" && method === "POST") {
@@ -792,6 +842,13 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       const idx = s.layouts.findIndex((l) => l.id === id);
       if (idx < 0) s.layouts.push(next);
       else s.layouts[idx] = next;
+      if (scenario().has("persist")) {
+        try {
+          window.localStorage.setItem(DEMO_LAYOUTS_KEY, JSON.stringify(s.layouts));
+        } catch {
+          // Kept in memory only.
+        }
+      }
       return next;
     }
     return bad();
@@ -859,6 +916,16 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       return { ...s.settings };
     }
     return bad();
+  }
+
+  if (head === "onboarding" && seg[1] === "complete" && method === "POST") {
+    s.onboardingComplete = true;
+    try {
+      window.localStorage.setItem(DEMO_ONBOARDED_KEY, "1");
+    } catch {
+      // Not remembered across a reload.
+    }
+    return { ok: true };
   }
 
   if (head === "first-run" && seg[1] === "dismiss-zone-panel" && method === "POST") {
