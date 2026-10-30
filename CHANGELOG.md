@@ -6,6 +6,12 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- Displays shows the ZEUS CAST notice only while ZEUS CAST is running, and the display reads "waiting for ZEUS CAST" then. (#14)
+- The boot colour waits until OpenRGB has found your devices, so it lands on them instead of on nothing. (#18)
+- The daemon writes why it stopped to its log on every exit, and the service names exit codes. (#19)
+
 ## [0.1.1] - 2026-10-29
 
 ### Added
