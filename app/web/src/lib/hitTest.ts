@@ -229,20 +229,23 @@ export function hitTest(input: HitInput): HitTarget {
   const first = stack[0];
   if (!first) return { kind: "desk" };
   if (!input.under) return first;
+  // The next part below the one that is picked and under the pointer; when the picked part is
+  // not under the pointer (or nothing is picked), the top one.
   const picked = input.selection[0];
   const at = picked ? stack.findIndex((t) => same(t.ref, picked)) : -1;
   if (at >= 0) return stack[(at + 1) % stack.length] as PartHit;
-  return stack[1] ?? first;
+  return first;
 }
 
 /**
- * The parts a case carries when it moves: every zone and landmark whose middle is inside the case's
- * own (turned) box. The case itself and any other case are not carried.
+ * The parts a case carries when it moves: every unlocked zone and landmark whose middle is inside
+ * the case's own (turned) box. The case itself, any other case and locked parts are not carried.
  */
 export function partsInsideCase(box: HitPart, parts: HitPart[]): PartRef[] {
   const out: PartRef[] = [];
   for (const p of parts) {
-    if (p.isCase || same(p.ref, box.ref)) continue;
+    // A locked part stays where it is, whatever moves around it.
+    if (p.isCase || p.locked || same(p.ref, box.ref)) continue;
     const mid = { x: p.x + p.width / 2, y: p.y + p.height / 2 };
     const q = toLocal(box, mid);
     if (Math.abs(q.x) <= box.width / 2 && Math.abs(q.y) <= box.height / 2) out.push(p.ref);

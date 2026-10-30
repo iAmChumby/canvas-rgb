@@ -37,7 +37,7 @@ export function FanCurveEditor({
   const [width, setWidth] = useState(360);
   const drag = useRef<number | null>(null);
   /** Where the press landed, and whether it has travelled far enough to be a drag. */
-  const press = useRef<{ x: number; y: number; moved: boolean; touch: boolean } | null>(null);
+  const press = useRef<{ x: number; y: number; moved: boolean; touch: boolean; start: CurvePoint[] } | null>(null);
 
   useEffect(() => {
     const el = wrapRef.current;
@@ -92,7 +92,7 @@ export function FanCurveEditor({
   const onDown = (i: number, e: PointerEvent<SVGCircleElement>) => {
     e.preventDefault();
     drag.current = i;
-    press.current = { x: e.clientX, y: e.clientY, moved: false, touch: e.pointerType === "touch" };
+    press.current = { x: e.clientX, y: e.clientY, moved: false, touch: e.pointerType === "touch", start: points.map((p) => ({ ...p })) };
     e.currentTarget.setPointerCapture(e.pointerId);
   };
 
@@ -124,6 +124,16 @@ export function FanCurveEditor({
     if (!d) return;
     const { lo, hi } = boundsFor(i);
     update(i, { temp_c: clamp(Math.round(d.t), lo, Math.max(lo, hi)), percent: Math.round(d.p) }, true);
+  };
+
+  /** The browser took the pointer (a cancel): the drag is over and the curve goes back to how it was. */
+  const onCancel = (e: PointerEvent<SVGCircleElement>) => {
+    const pr = press.current;
+    if (drag.current === null) return;
+    drag.current = null;
+    press.current = null;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+    if (pr?.moved) onChange(pr.start);
   };
 
   const onKey = (i: number, e: KeyboardEvent<SVGCircleElement>) => {
@@ -247,6 +257,8 @@ export function FanCurveEditor({
               onPointerDown={(e) => onDown(idx, e)}
               onPointerMove={onMove}
               onPointerUp={onUp}
+              onPointerCancel={onCancel}
+              onLostPointerCapture={onUp}
               onKeyDown={(e) => onKey(idx, e)}
             />
           );

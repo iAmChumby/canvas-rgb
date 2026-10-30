@@ -1521,7 +1521,8 @@ export function PreviewStage({
     if (el) el.dataset.dragging = "true";
     if (stageRef.current && kind !== "resize") stageRef.current.style.cursor = "grabbing";
     onDraggingChange?.(true);
-    stageRef.current?.focus({ preventScroll: true });
+    // A move leaves focus on the part pressed (set by the press); a handle drag has no element.
+    if (kind !== "move") stageRef.current?.focus({ preventScroll: true });
     if (!stageRef.current?.hasPointerCapture(e.pointerId)) stageRef.current?.setPointerCapture(e.pointerId);
   };
 
@@ -1537,6 +1538,8 @@ export function PreviewStage({
       return;
     }
     if (e.button !== 0) return;
+    // Whatever press came before is over: a stale one can never turn this press into a move.
+    pendingRef.current = null;
     const target = hitAt(e);
     if (target.kind === "handle") {
       const sel = target.ref as Sel;
@@ -1556,7 +1559,9 @@ export function PreviewStage({
     // A part, or the case by its edge or its body.
     const sel = target.ref as Sel;
     e.preventDefault();
-    stage.focus({ preventScroll: true });
+    // Focus goes to the part pressed (so Tab continues from it), without scrolling the page.
+    const partEl = sel.kind === "zone" ? zoneEls.current[sel.index] : lmEls.current[sel.index];
+    (partEl ?? stage).focus({ preventScroll: true });
     const picked = selectionRef.current.some((s) => s.kind === sel.kind && s.index === sel.index);
     if (e.shiftKey && !e.altKey) {
       // Shift-click picks one more part, or lets one go.
@@ -2293,6 +2298,7 @@ export function PreviewStage({
         onPointerMove={onStageMove}
         onPointerUp={endDrag}
         onPointerCancel={endDrag}
+        onLostPointerCapture={endDrag}
         onPointerLeave={() => {
           // Off the desk: nothing is hovered. (A held press keeps the pointer by capture.)
           if (dragRef.current || pendingRef.current) return;

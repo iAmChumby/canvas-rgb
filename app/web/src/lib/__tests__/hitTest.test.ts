@@ -173,6 +173,22 @@ describe("hitTest: handles of the selected part", () => {
     expect(onFan).toMatchObject({ kind: "part", ref: { kind: "zone", index: 0 } });
   });
 
+  it("lets a fan at the case's top edge be pressed just below the north handle", () => {
+    // The top fan slot sits 3 units under the roof edge (caseForms.ts), under the north handle.
+    const topFan = part("zone", 0, 140, 30, 30, 30);
+    const parts = [topFan, c];
+    const north = { x: 160, y: 27 };
+    expect(hitTest(input(parts, north.x, north.y + 0.3, { selection: sel }))).toMatchObject({
+      kind: "handle",
+      handle: { id: "n" },
+    });
+    // 3.5 units (16 px) below the edge is inside the fan and past the handle reach of 8 px: the fan.
+    expect(hitTest(input(parts, north.x, north.y + 3.5, { selection: sel }))).toMatchObject({
+      kind: "part",
+      ref: { kind: "zone", index: 0 },
+    });
+  });
+
   it("finds the corner handles", () => {
     const hit = hitTest(input([c], 220, 149, { selection: sel }));
     expect(hit).toMatchObject({ kind: "handle", handle: { id: "se" } });
@@ -239,8 +255,12 @@ describe("hitStack and Alt-click: the part underneath", () => {
 
   it("Alt-click takes the next one down from the picked part", () => {
     const at = { x: 140, y: 75 };
-    // Nothing picked: the second in the stack.
-    expect(hitTest(input(parts, at.x, at.y, { under: true }))).toMatchObject({ ref: { kind: "landmark", index: 1 } });
+    // Nothing picked: the top of the stack.
+    expect(hitTest(input(parts, at.x, at.y, { under: true }))).toMatchObject({ ref: { kind: "zone", index: 0 } });
+    // Something picked that is not under the pointer: also the top.
+    expect(
+      hitTest(input(parts, at.x, at.y, { under: true, selection: [{ kind: "zone", index: 9 }] })),
+    ).toMatchObject({ ref: { kind: "zone", index: 0 } });
     // The fan is picked: the gpu.
     expect(
       hitTest(input(parts, at.x, at.y, { under: true, selection: [{ kind: "zone", index: 0 }] })),
@@ -288,6 +308,13 @@ describe("partsInsideCase", () => {
     const inMiddle = part("zone", 1, 150, 80, 6, 6);
     const got = partsInsideCase(tilted, [inCorner, inMiddle, tilted]);
     expect(got).toEqual([{ kind: "zone", index: 1 }]);
+  });
+
+  it("leaves a locked part, zone or landmark, where it is", () => {
+    const lockedFan = part("zone", 0, 110, 40, 30, 30, { locked: true });
+    const lockedCpu = part("landmark", 1, 170, 90, 16, 16, { locked: true });
+    const freeFan = part("zone", 1, 110, 100, 30, 30);
+    expect(partsInsideCase(caseBox(0), [lockedFan, lockedCpu, freeFan])).toEqual([{ kind: "zone", index: 1 }]);
   });
 
   it("uses the middle of a turned part", () => {
