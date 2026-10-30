@@ -125,8 +125,12 @@ async fn the_boot_color_is_written_to_every_device_when_no_daemon_is_connected()
     let (root, exe) = install();
     let mut sup = supervisor(&processes, &root, &exe, fake.port(), None);
     let boot = Rgb8::new(10, 20, 30);
-    sup.tick(Instant::now(), false, Some(boot)).await;
+    let now = Instant::now();
+    sup.tick(now, false, Some(boot)).await;
     assert_eq!(sup.state(), OpenRgbServerState::Running);
+    assert!(!sup.boot_written(), "the count has been seen once; it must hold still before the write");
+    // The service ticks once a second: the second tick sees the same count and writes.
+    sup.tick(now + Duration::from_secs(1), false, Some(boot)).await;
     assert_eq!(wait_for_colors(&fake, 0, &[boot; 4]).await, vec![boot; 4]);
     assert_eq!(wait_for_colors(&fake, 1, &[boot; 6]).await, vec![boot; 6]);
 }
@@ -151,7 +155,9 @@ async fn an_absent_boot_color_means_black() {
     let processes = FakeProcesses::new();
     let (root, exe) = install();
     let mut sup = supervisor(&processes, &root, &exe, fake.port(), None);
-    sup.tick(Instant::now(), false, None).await;
+    let now = Instant::now();
+    sup.tick(now, false, None).await;
+    sup.tick(now + Duration::from_secs(1), false, None).await;
     assert_eq!(wait_for_colors(&fake, 0, &[Rgb8::BLACK; 3]).await, vec![Rgb8::BLACK; 3]);
 }
 
@@ -164,4 +170,103 @@ async fn the_boot_color_is_not_written_while_a_daemon_is_connected() {
     sup.tick(Instant::now(), true, Some(Rgb8::new(9, 9, 9))).await;
     assert_eq!(sup.state(), OpenRgbServerState::Running);
     assert_eq!(fake.colors(0), vec![Rgb8::BLACK; 3], "the daemon owns the devices");
+}
+
+// ---- #18: the boot color waits for OpenRGB to finish detecting ----
+
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+/// A log sink the tests read back.
+#[derive(Clone, Default)]
+struct LogBuf(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuf {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl LogBuf {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+    fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync {
+        let buf = self.clone();
+        tracing_subscriber::fmt().with_ansi(false).with_writer(move || buf.clone()).finish()
+    }
+}
+
+#[tokio::test]
+async fn the_boot_color_waits_until_openrgb_has_found_its_devices() {
+    // Real OpenRGB announced its first controller ~1.2 s after start and finished at ~2.1 s.
+    // The fake compresses that: nothing for 250 ms, then one device every 250 ms.
+    let fake = FakeOpenRgbServer::start_detecting(
+        vec![device(0, 4), device(1, 6), device(2, 3)],
+        Duration::from_millis(250),
+        Duration::from_millis(300),
+    )
+    .await
+    .unwrap();
+    let processes = FakeProcesses::new();
+    let (root, exe) = install();
+    let mut sup = supervisor(&processes, &root, &exe, fake.port(), None);
+    let boot = Rgb8::new(10, 20, 30);
+
+    // The first tick connects at once, while the server still lists no device. Before the fix
+    // it wrote to nobody here and never wrote again.
+    sup.tick(Instant::now(), false, Some(boot)).await;
+    assert_eq!(sup.state(), OpenRgbServerState::Running);
+    assert!(!sup.boot_written(), "no device is detected yet, so nothing was painted");
+
+    // Real time passes between ticks, so the fake's devices appear one by one (the count is
+    // 0, 1, 2, then 3) and the write must wait for the count to hold still.
+    for _ in 0..40 {
+        if sup.boot_written() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        sup.tick(Instant::now(), false, Some(boot)).await;
+    }
+    assert!(sup.boot_written(), "the boot color was written once detection settled");
+    assert_eq!(wait_for_colors(&fake, 0, &[boot; 4]).await, vec![boot; 4]);
+    assert_eq!(wait_for_colors(&fake, 1, &[boot; 6]).await, vec![boot; 6]);
+    assert_eq!(wait_for_colors(&fake, 2, &[boot; 3]).await, vec![boot; 3], "the last device to appear is painted too");
+}
+
+#[tokio::test]
+async fn a_pc_with_no_devices_logs_that_nothing_was_painted() {
+    let logs = LogBuf::default();
+    let _default = tracing::subscriber::set_default(logs.subscriber());
+    let fake = FakeOpenRgbServer::start(Vec::new()).await.unwrap();
+    let processes = FakeProcesses::new();
+    let (root, exe) = install();
+    let mut sup = supervisor(&processes, &root, &exe, fake.port(), None);
+    let mut now = Instant::now();
+    for _ in 0..8 {
+        sup.tick(now, false, Some(Rgb8::new(1, 2, 3))).await;
+        now += Duration::from_secs(1);
+    }
+    assert!(!sup.boot_written(), "nothing was painted, so the boot color is not marked written");
+    let text = logs.text();
+    assert!(text.contains("WARN"), "{text}");
+    assert!(text.contains("0 devices") && text.contains("nothing was written"), "{text}");
+}
+
+#[test]
+fn a_write_to_zero_devices_is_a_warning_and_a_write_to_some_is_info() {
+    let logs = LogBuf::default();
+    tracing::subscriber::with_default(logs.subscriber(), || {
+        crate::openrgb::log_device_write("painted the test color", 0);
+        crate::openrgb::log_device_write("painted the test color", 3);
+    });
+    let text = logs.text();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2, "{text}");
+    assert!(lines[0].contains("WARN") && lines[0].contains("0 devices"), "{}", lines[0]);
+    assert!(lines[1].contains("INFO") && lines[1].contains("3 devices"), "{}", lines[1]);
 }

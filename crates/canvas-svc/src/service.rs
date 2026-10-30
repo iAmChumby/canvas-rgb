@@ -47,7 +47,7 @@ impl Core {
         self.fans.tick(now);
         if self.daemon.tick(now) == DaemonAction::WriteBlack {
             match self.openrgb.write_color_all(Rgb8::BLACK).await {
-                Ok(devices) => tracing::info!(devices, "wrote black after the daemon restart limit"),
+                Ok(devices) => crate::openrgb::log_device_write("wrote black after the daemon restart limit to", devices),
                 Err(e) => tracing::warn!(error = %e, "could not write black after the daemon restart limit"),
             }
         }
