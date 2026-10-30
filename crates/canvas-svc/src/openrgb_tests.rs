@@ -393,3 +393,52 @@ async fn the_restart_limit_black_waits_for_detection_and_paints_late_devices() {
     // The boot color (9,9,9) never went out: black replaced it.
     assert_eq!(fake.colors(0), vec![Rgb8::BLACK; 4]);
 }
+
+// ---- #18 review: the end of the 15 s watch window is logged ----
+
+/// Drives a `PaintJob` on synthetic clocks against a live fake: settles, writes, runs `between`,
+/// then jumps `WATCH_WINDOW` past the first write. Returns the log text.
+async fn run_job_to_window_end(fake: &FakeOpenRgbServer, between: Duration) -> String {
+    use crate::openrgb::{PaintJob, WATCH_WINDOW};
+    use canvas_proto::traits::DeviceAdapter;
+    let logs = LogBuf::default();
+    let _default = tracing::subscriber::set_default(logs.subscriber());
+    let mut session = OpenRgbAdapter::new(SERVER_HOST, fake.port());
+    session.connect().await.unwrap();
+    let mut job = PaintJob::new("boot color", Rgb8::new(1, 2, 3), None);
+    let t0 = Instant::now();
+    assert!(!job.step(t0, &mut session).await);
+    let t1 = t0 + Duration::from_secs(1);
+    assert!(!job.step(t1, &mut session).await);
+    assert!(!job.painted.is_empty(), "the first write was made");
+    tokio::time::sleep(between).await;
+    assert!(job.step(t1 + WATCH_WINDOW, &mut session).await, "the window has ended");
+    logs.text()
+}
+
+#[tokio::test]
+async fn the_watch_window_ending_with_all_devices_painted_says_so() {
+    let fake = FakeOpenRgbServer::start(vec![device(0, 4), device(1, 2)]).await.unwrap();
+    let text = run_job_to_window_end(&fake, Duration::ZERO).await;
+    let line = text.lines().find(|l| l.contains("watch ended")).unwrap_or_else(|| panic!("no window-end line:
+{text}"));
+    assert!(line.contains("INFO") && line.contains("15 s") && line.contains("all 2 devices were painted"), "{line}");
+}
+
+#[tokio::test]
+async fn the_watch_window_ending_with_an_unpainted_device_warns_with_the_count() {
+    // Device 0 is listed at once; device 1 is announced 300 ms later, after the first write and
+    // before the window's last pass, which only counts and does not paint.
+    let fake = FakeOpenRgbServer::start_detecting(
+        vec![device(0, 4), device(1, 2)],
+        Duration::from_millis(50),
+        Duration::from_millis(300),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let text = run_job_to_window_end(&fake, Duration::from_millis(500)).await;
+    let line = text.lines().find(|l| l.contains("watch ended")).unwrap_or_else(|| panic!("no window-end line:
+{text}"));
+    assert!(line.contains("WARN") && line.contains("1 devices are still unpainted") && line.contains("15 s"), "{line}");
+}

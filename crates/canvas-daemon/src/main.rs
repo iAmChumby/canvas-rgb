@@ -227,7 +227,8 @@ async fn daemon_main() -> Exit {
     };
     canvas_daemon::exit_log::log_stop_requested(reason);
 
-    // The process ends within QUIT_DEADLINE of this point, whatever is still running.
+    // The process ends within QUIT_DEADLINE of this point, whatever is still running: the
+    // watchdog reserves `logging::FLUSH_LIMIT` of it for the final log flush.
     arm_exit_watchdog(QUIT_DEADLINE);
 
     quit_sequence(&app).await;
@@ -320,11 +321,13 @@ const WATCHDOG_EXIT_CODE: i32 = 0;
 /// The backstop: after `after`, the process ends whatever is still running.
 fn arm_exit_watchdog(after: std::time::Duration) {
     std::thread::spawn(move || {
-        std::thread::sleep(after);
+        // The flush below may take up to FLUSH_LIMIT, so the sleep leaves that much of `after`.
+        std::thread::sleep(after.saturating_sub(canvas_daemon::logging::FLUSH_LIMIT));
         tracing::warn!("the quit deadline passed; ending the process");
         canvas_daemon::exit_log::log_stop_exit(StopReason::QuitDeadline, WATCHDOG_EXIT_CODE);
-        // Drain the log writer so the closing line is in the file before the process ends.
-        canvas_daemon::logging::close();
+        // Drain the log writer so the closing line is in the file before the process ends. The
+        // drain is bounded: a stuck writer must not hold the exit past the deadline.
+        canvas_daemon::logging::close_within_limit();
         std::process::exit(WATCHDOG_EXIT_CODE);
     });
 }

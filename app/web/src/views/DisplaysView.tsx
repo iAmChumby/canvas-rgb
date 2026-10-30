@@ -413,8 +413,7 @@ export function DisplaysView() {
         <Panel>
           <EmptyState icon={<ThermometerSimple size={22} />} title="No display has a source yet">
             The daemon drives a display only while it has a saved source, so a display that has
-            never been set up is left alone. Nothing is sent to it. canvas-rgb checks for the
-            GAMDIAS app ZEUS CAST every few seconds and lets go of the display while it runs.
+            never been set up is left alone. Nothing is sent to it.
           </EmptyState>
         </Panel>
       ) : (

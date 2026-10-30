@@ -34,6 +34,26 @@ pub fn close() {
     drop(guard);
 }
 
+/// The longest a process that is already ending waits for the log to drain. The appender's own
+/// bound on `WorkerGuard::drop` is about 1.1 s, which is too long for the quit watchdog.
+pub const FLUSH_LIMIT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Runs `work` on a helper thread and waits at most `limit` for it. Returns whether it finished.
+/// A stuck `work` is left behind on its thread; the caller is about to end the process.
+pub fn run_bounded(limit: std::time::Duration, work: impl FnOnce() + Send + 'static) -> bool {
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        work();
+        let _ = done.send(());
+    });
+    finished.recv_timeout(limit).is_ok()
+}
+
+/// [`close`], but it gives up after [`FLUSH_LIMIT`]. Returns whether the log drained in time.
+pub fn close_within_limit() -> bool {
+    run_bounded(FLUSH_LIMIT, close)
+}
+
 /// The non-blocking file writer for `name` in `dir`, and the guard that flushes it.
 fn file_writer(
     dir: &std::path::Path,
@@ -192,6 +212,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert!(text.contains("the very last line"), "the last line reached the file: {} bytes", text.len());
         close(); // a second close does nothing
+    }
+
+    #[test]
+    fn a_bounded_run_gives_up_on_a_stuck_step_and_waits_for_a_quick_one() {
+        let limit = std::time::Duration::from_millis(250);
+        let started = std::time::Instant::now();
+        let finished = run_bounded(limit, || std::thread::sleep(std::time::Duration::from_secs(5)));
+        let took = started.elapsed();
+        assert!(!finished, "a 5 s step does not finish inside {limit:?}");
+        assert!(took < std::time::Duration::from_millis(1000), "gave up after {took:?}, not 5 s");
+        assert!(run_bounded(limit, || {}), "a quick step finishes");
     }
 
     #[test]

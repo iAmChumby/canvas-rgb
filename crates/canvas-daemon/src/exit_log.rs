@@ -127,9 +127,16 @@ pub fn panic_message(info: &PanicHookInfo<'_>) -> String {
 }
 
 /// Makes every panic leave a line (message, `file:line:col`, thread) before the default hook
-/// runs. A panic on the main thread then ends the process, and `main` drops the log guard on
-/// the way out, which flushes the line; a panic in a task is logged and the daemon carries on.
+/// runs.
+///
+/// A panic on the thread that installed the hook (the main thread) ends the process, and the log
+/// guard is a `static` that Rust never drops at exit, so the hook drains the log itself, bounded
+/// by [`crate::logging::FLUSH_LIMIT`], before the default hook runs. A panic on any other thread
+/// (a task) is logged and the daemon carries on: the hook leaves the log open there, because
+/// closing it would silence every later line for everyone, and the writer thread drains the
+/// line by itself.
 pub fn install_panic_hook() {
+    let main_thread = std::thread::current().id();
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let location = info
@@ -142,6 +149,9 @@ pub fn install_panic_hook() {
             thread = thread.name().unwrap_or("<unnamed>"),
             "the daemon panicked"
         );
+        if thread.id() == main_thread {
+            crate::logging::close_within_limit();
+        }
         previous(info);
     }));
 }

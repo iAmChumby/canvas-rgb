@@ -82,7 +82,7 @@ pub struct OpenRgbSupervisor {
 /// One color painted onto every device OpenRGB reports, once detection has settled, and then onto
 /// each controller that appears late. Shared by the boot color and the restart-limit black, so
 /// neither can write to "whoever is listed right now" and stop (class `cause:unchecked-state`, #18).
-struct PaintJob {
+pub(crate) struct PaintJob {
     /// Completes the log sentences: "<label> written to N devices".
     label: &'static str,
     color: Rgb8,
@@ -91,21 +91,22 @@ struct PaintJob {
     last_count: usize,
     last_change: Option<Instant>,
     /// The devices already painted.
-    painted: HashSet<DeviceId>,
+    pub(crate) painted: HashSet<DeviceId>,
     /// When the first write succeeded; the watch window runs from here.
     first_write: Option<Instant>,
     warned: bool,
 }
 
 impl PaintJob {
-    fn new(label: &'static str, color: Rgb8, started: Option<Instant>) -> Self {
+    pub(crate) fn new(label: &'static str, color: Rgb8, started: Option<Instant>) -> Self {
         Self { label, color, started, last_count: 0, last_change: None, painted: HashSet::new(), first_write: None, warned: false }
     }
 
     /// One pass. Returns true when the job is over (the watch window has passed).
-    async fn step(&mut self, now: Instant, session: &mut dyn DeviceAdapter) -> bool {
+    pub(crate) async fn step(&mut self, now: Instant, session: &mut dyn DeviceAdapter) -> bool {
         let started = *self.started.get_or_insert(now);
         if self.first_write.is_some_and(|first| now.saturating_duration_since(first) >= WATCH_WINDOW) {
+            self.report_window_end(session).await;
             return true;
         }
         let devices = match session.discover().await {
@@ -153,6 +154,37 @@ impl PaintJob {
             Err(e) => tracing::warn!(error = %e, "{} not written to a late device yet", self.label),
         }
         false
+    }
+
+    /// The watch window ended: say how many devices OpenRGB lists that never got the color. A
+    /// controller announced after this is not painted, and the log must say if any were left.
+    async fn report_window_end(&self, session: &mut dyn DeviceAdapter) {
+        let window = WATCH_WINDOW.as_secs();
+        match session.discover().await {
+            Ok(devices) => {
+                let unpainted = devices.iter().filter(|d| d.led_count() > 0 && !self.painted.contains(&d.id)).count();
+                if unpainted == 0 {
+                    tracing::info!(
+                        devices = self.painted.len(),
+                        "{} watch ended after {window} s: all {} devices were painted",
+                        self.label,
+                        self.painted.len()
+                    );
+                } else {
+                    tracing::warn!(
+                        unpainted,
+                        painted = self.painted.len(),
+                        "{} watch ended after {window} s: {unpainted} devices are still unpainted; a controller OpenRGB announces after {window} s is not painted",
+                        self.label
+                    );
+                }
+            }
+            Err(e) => tracing::warn!(
+                error = %e,
+                "{} watch ended after {window} s; could not read which devices are still unpainted",
+                self.label
+            ),
+        }
     }
 
     /// The cap passed with nothing written: say how many devices OpenRGB reports, settled or not.
