@@ -63,7 +63,8 @@
   /* A one pixel keyline outside the outline, so it holds on any picture. It is hard-edged: a
      line, not a glow. */
   box-shadow: 0 0 0 1px var(--zone-halo);
-  cursor: grab;
+  /* No cursor of its own: the stage sets it from the hit-test, so it follows the part a press
+     would land on and not the element the browser happens to see. */
   transform-origin: 50% 50%;
   z-index: 2;
   transition:
@@ -74,8 +75,14 @@
 /* A landmark is a drawing, not a light: it is quieter, and it is never sampled. */
 .desk .landmark {
   border-color: var(--landmark-line);
-  cursor: grab;
   z-index: 1;
+}
+
+/* The case is the floor of the stack, whatever order it was added in: every other part, light
+   or no light, is above it. (The press goes to the stage's hit-test, which also puts the case
+   last; this keeps what is drawn the same as what is picked.) */
+.desk .zone.landmark[data-kind="case"] {
+  z-index: 0;
 }
 
 /* The case of an old layout, drawn from its form until the daemon migrates it: a picture, not
@@ -90,18 +97,12 @@
 }
 
 .desk .zone[data-dragging="true"] {
-  cursor: grabbing;
   transition: none;
 }
 
 .desk .zone[data-selected="true"] {
   border-color: var(--live);
   z-index: 4;
-}
-
-/* The case never sits on top of the parts in it, selected or not: the parts win the pointer. */
-.desk .zone.landmark[data-kind="case"][data-selected="true"] {
-  z-index: 1;
 }
 
 /* The onboarding's spotlight: every part but the one being asked about is a quiet outline. No
@@ -123,11 +124,6 @@
 .desk .zone[data-hidden="true"] {
   border-style: dashed;
   opacity: 0.45;
-}
-
-/* A part that cannot be moved says so, quietly. */
-.desk .zone[data-locked="true"] {
-  cursor: not-allowed;
 }
 
 .desk .zone[data-locked="true"]::after {
@@ -164,7 +160,6 @@
   border-color: var(--down);
   opacity: 0.85;
   z-index: 2;
-  pointer-events: none;
 }
 
 .desk .zone[data-missing="true"]:hover {
@@ -319,8 +314,9 @@
   box-sizing: border-box;
   background: var(--panel);
   border: 1.5px solid var(--live);
-  pointer-events: auto;
-  touch-action: none;
+  /* Drawn, not hit: the stage's hit-test finds a handle from its geometry (lib/hitTest.ts),
+     with a reach of 8 px for a mouse and 12 px for a finger, and sets the cursor itself. */
+  pointer-events: none;
 }
 
 .desk .handle {
@@ -328,14 +324,6 @@
   height: 9px;
   border-radius: 2px;
   transform: translate(-50%, -50%);
-}
-
-/* A handle is a nine pixel mark with a generous target: the hit area reaches past the mark. */
-.desk .handle::before,
-.desk .rotateHandle::before {
-  content: "";
-  position: absolute;
-  inset: -7px;
 }
 
 .desk .handle:hover,
@@ -358,7 +346,13 @@
   height: 11px;
   border-radius: 50%;
   transform: translate(-50%, -50%);
-  cursor: grab;
+}
+
+/* A locked part keeps its frame (it is picked) but has nothing to grab: no handles, no grip. */
+.desk .frame[data-locked="true"] .handle,
+.desk .frame[data-locked="true"] .rotateHandle,
+.desk .frame[data-locked="true"] .stem {
+  display: none;
 }
 
 .desk .stem {
@@ -392,10 +386,6 @@
     height: 15px;
   }
 
-  .desk .handle::before,
-  .desk .rotateHandle::before {
-    inset: -10px;
-  }
 }
 
 /* ---------- the alignment guides ---------- */

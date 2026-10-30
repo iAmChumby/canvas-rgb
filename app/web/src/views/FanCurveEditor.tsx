@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } fr
 import type { CurvePoint } from "@/proto/CurvePoint";
 import { HOT_FLOOR, HOT_CPU_FAN_FLOOR, HOT_TEMP_C, CPU_FAN } from "@/lib/fan-rules";
 import { clamp } from "@/lib/format";
+import { dragThresholdPx } from "@/lib/hitTest";
 
 const TEMP_MIN = 20;
 const TEMP_MAX = 100;
@@ -35,6 +36,8 @@ export function FanCurveEditor({
   const wrapRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(360);
   const drag = useRef<number | null>(null);
+  /** Where the press landed, and whether it has travelled far enough to be a drag. */
+  const press = useRef<{ x: number; y: number; moved: boolean; touch: boolean } | null>(null);
 
   useEffect(() => {
     const el = wrapRef.current;
@@ -89,12 +92,19 @@ export function FanCurveEditor({
   const onDown = (i: number, e: PointerEvent<SVGCircleElement>) => {
     e.preventDefault();
     drag.current = i;
+    press.current = { x: e.clientX, y: e.clientY, moved: false, touch: e.pointerType === "touch" };
     e.currentTarget.setPointerCapture(e.pointerId);
   };
 
   const onMove = (e: PointerEvent<SVGCircleElement>) => {
     const i = drag.current;
     if (i === null) return;
+    // A press that has not travelled a few pixels is a click: it does not nudge the point.
+    const pr = press.current;
+    if (pr && !pr.moved) {
+      if (Math.hypot(e.clientX - pr.x, e.clientY - pr.y) < dragThresholdPx(pr.touch ? "touch" : "mouse")) return;
+      pr.moved = true;
+    }
     const d = toData(e);
     if (!d) return;
     const { lo, hi } = boundsFor(i);
@@ -105,7 +115,11 @@ export function FanCurveEditor({
     const i = drag.current;
     if (i === null) return;
     drag.current = null;
+    const moved = press.current?.moved ?? true;
+    press.current = null;
     if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+    // A click that never became a drag leaves the curve as it was: nothing to commit.
+    if (!moved) return;
     const d = toData(e);
     if (!d) return;
     const { lo, hi } = boundsFor(i);

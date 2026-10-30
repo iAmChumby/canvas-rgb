@@ -28,8 +28,12 @@ elements with `pointer-events: none`, so a press on such an element lands on wha
 - [#3](https://github.com/iAmChumby/canvas-rgb/issues/3): grabbing a part inside the case drags the
   whole case. Offline zones have `pointer-events: none` (`app/web/src/views/desk.module.css`), so the
   case's `partUnder()` guard in `PreviewStage.tsx` finds no part and starts a case move.
-- **Class fix:** none yet. Where to look for siblings: every nested draggable in the editor (parts in
-  the case, fan curve points, the desk).
+- **Class fix:** done (#3). The layout stage no longer asks the DOM what is under the pointer: one
+  geometric hit-test, `app/web/src/lib/hitTest.ts`, picks the target from live geometry (rotation
+  included) by a fixed rule, with unit tests. Siblings: the fan curve points now need 4 px of travel
+  before they move (a click no longer nudges them); no other `elementsFromPoint` or
+  `pointer-events: none` remains on a draggable. Left: overlapping curve points 1 °C apart pick the
+  first in sorted order, not the nearest.
 
 ### `cause:platform-api`: a Windows API called the wrong way
 
