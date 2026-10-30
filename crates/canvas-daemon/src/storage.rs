@@ -466,7 +466,7 @@ pub fn validate_bundle(bundle: &ExportBundle) -> Result<(), ImportError> {
 pub fn import_bundle(home: &Path, bundle: &ExportBundle) -> Result<(), ImportError> {
     validate_bundle(bundle)?;
     // A snapshot before the import so a bad import is recoverable (G10).
-    let _ = snapshot(home, "pre-import");
+    crate::logging::warn_if_err("the pre-import snapshot could not be taken; the import goes on without one", snapshot(home, "pre-import"));
 
     let config = ConfigFile {
         schema_version: CONFIG_SCHEMA,

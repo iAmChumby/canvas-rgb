@@ -190,6 +190,7 @@ function DisplayCard({ row, fans }: { row: DisplayStatus; fans: FansStatus | nul
   // What the pump head would show with the source in the editor, in the unit it is written in.
   const preview = previewValue(draft.source, draft.unit, fans, row.shown?.value ?? null);
   const shown = row.shown;
+  const blockedBy = row.info.blocked_by;
 
   const set = (patch: Partial<DisplayConfig>) => {
     setDraft((prev) => ({ ...prev, ...patch }));
@@ -228,13 +229,27 @@ function DisplayCard({ row, fans }: { row: DisplayStatus; fans: FansStatus | nul
 
   return (
     <Panel
+      className="display-panel"
       title={row.info.name}
       actions={
-        <StateDot tone={row.info.connected ? "ok" : "down"}>
-          {row.info.connected ? "connected" : "not connected"}
+        // The daemon measures whether the vendor app holds the display (#14); the editor only
+        // repeats it. `blocked_by` wins over the plain connected flag.
+        <StateDot tone={blockedBy ? "warn" : row.info.connected ? "ok" : "down"}>
+          {blockedBy ? `waiting for ${blockedBy}` : row.info.connected ? "connected" : "not connected"}
         </StateDot>
       }
     >
+      {/* The slot keeps the notice's height in every state (min-height in CSS), so the card does
+          not move when the vendor app starts or exits. Idle, it is an empty block: no vendor
+          sentence in the DOM or the accessibility tree. */}
+      <div className="display-notice-slot">
+        {blockedBy ? (
+          <p className="rule rule-warn display-notice" role="status">
+            <WarningOctagon size={16} weight="fill" aria-hidden="true" /> {blockedBy} is running, so
+            canvas-rgb leaves the display alone until it closes.
+          </p>
+        ) : null}
+      </div>
       <div className="display-card">
         <div className="display-readout">
           {/* The big number is what the source would read, not what the display shows: it says so,
@@ -367,10 +382,6 @@ export function DisplaysView() {
       <div className="page-head">
         <h1>Displays</h1>
       </div>
-
-      <p className="rule rule-warn">
-        <WarningOctagon size={16} weight="fill" aria-hidden="true" /> Close ZEUS CAST first; both would write the display.
-      </p>
 
       {displaysUnsupported ? (
         // The daemon answered 404: it is older than the display support. That is a version to fix,

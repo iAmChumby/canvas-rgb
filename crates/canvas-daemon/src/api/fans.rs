@@ -94,7 +94,7 @@ pub async fn patch_profile(
         let mut guard = app.fans_last.write().await;
         if let Some(fans) = guard.as_mut() {
             fans.active_profile = request.name.clone();
-            let _ = crate::storage::save_fans_last(&home, fans);
+            crate::logging::warn_if_err("could not save the daemon's copy of the fans file", crate::storage::save_fans_last(&home, fans));
         }
     }
 
@@ -133,7 +133,7 @@ pub async fn delete_profile(
         let mut guard = app.fans_last.write().await;
         if let Some(fans) = guard.as_mut() {
             fans.profiles.retain(|p| p.name != name);
-            let _ = crate::storage::save_fans_last(&home, fans);
+            crate::logging::warn_if_err("could not save the daemon's copy of the fans file", crate::storage::save_fans_last(&home, fans));
         }
     }
 
@@ -191,7 +191,7 @@ pub async fn put_profile(
             Some(existing) => *existing = profile.clone(),
             None => fans.profiles.push(profile.clone()),
         }
-        let _ = crate::storage::save_fans_last(&home, &fans);
+        crate::logging::warn_if_err("could not save the daemon's copy of the fans file", crate::storage::save_fans_last(&home, &fans));
         *guard = Some(fans.clone());
         (home, fans)
     };

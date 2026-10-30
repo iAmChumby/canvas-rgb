@@ -77,6 +77,16 @@ or acts as if a step worked without checking that it did.
   OpenRGB has found any device (`devices=0`), and the service moves on as if it had worked.
 - [#19](https://github.com/iAmChumby/canvas-rgb/issues/19): the daemon's exits leave no line, so
   the service's "crashed" is the only account and it is a guess.
-- **Class fix:** due. Every user-facing claim about system state comes from a field the daemon or
-  service measured, never from a constant; every step that can do nothing (zero devices, a skipped
-  write) logs that it did nothing.
+- **Class fix:** done (PR #23). Every user-facing claim about system state comes from a field the
+  daemon or service measured, never from a constant: `DisplayInfo.blocked_by` (spine) replaces the
+  hard-coded ZEUS CAST warning, and the onboarding tag names what was checked ("SignalRGB not seen").
+  Every step that can do nothing says so: `log_device_write` (WARN at zero devices; one copy in the
+  service, one in the daemon) and `warn_if_err` in place of `let _ =` where a success was reported.
+- **Sibling search:** every area (`crates/*`, the tray, the editor, the installer). Fixed in PR #23:
+  the tray's silent menu, tooltip and icon updates, the daemon's quit that said `quitting` without
+  reaching the main task, and the dropped saves after a reported success. Filed: #24 (the
+  uninstaller skips an unreadable SignalRGB restore record and still says it finished). Left on
+  purpose: `composite.rs` `ensure_royuan` (the keyboard is optional), `state.rs` `try_send` (a full
+  queue drops a refresh hint), and best-effort UI calls that claim nothing afterwards.
+- **How to check a new notice or log line:** name the field or the measurement behind it. If there
+  is none, it is this bug.

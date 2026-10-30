@@ -9,6 +9,7 @@ pub mod composite;
 pub mod conflict;
 pub mod displays;
 pub mod elevated;
+pub mod exit_log;
 pub mod first_run;
 pub mod identify;
 pub mod logging;
@@ -88,6 +89,13 @@ pub fn is_driven(id: &canvas_proto::DeviceId) -> bool {
     !NOT_DRIVEN.iter().any(|path| id.contains(path))
 }
 
+/// How many of `devices` the engine's `write_solid` reaches: connected, driven, and with LEDs.
+/// The engine skips a sink with no LEDs, so counting every sink would report a write to a device
+/// that got none (class `cause:unchecked-state`, #18).
+pub fn solid_write_targets(devices: &[canvas_proto::DeviceInfo]) -> usize {
+    devices.iter().filter(|d| d.connected && is_driven(&d.id) && d.led_count() > 0).count()
+}
+
 /// The daemon's version, as reported by `/status`.
 pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
@@ -107,5 +115,45 @@ mod tests {
         assert!(!super::is_driven(&DeviceId(keyboard.0.to_lowercase())));
         assert!(super::is_driven(&mic));
         assert!(super::is_driven(&DeviceId("openrgb:A1B2C3D4E5F6".into())));
+    }
+
+    fn device(id: &str, leds: u32, connected: bool) -> canvas_proto::DeviceInfo {
+        use canvas_proto::device::{DeviceKind, ZoneInfo, ZoneKind};
+        canvas_proto::DeviceInfo {
+            id: DeviceId(id.into()),
+            name: id.into(),
+            vendor: String::new(),
+            kind: DeviceKind::Motherboard,
+            adapter: "openrgb".into(),
+            adapter_index: 0,
+            serial: String::new(),
+            location: String::new(),
+            zones: vec![ZoneInfo {
+                index: 0,
+                name: "Zone".into(),
+                kind: ZoneKind::Linear,
+                led_count: leds,
+                min_leds: leds,
+                max_leds: leds,
+                resizable: false,
+            }],
+            connected,
+        }
+    }
+
+    /// `write_solid` skips a sink with no LEDs, so the "queued black for N devices" line counts
+    /// only the devices it writes: not a zero-LED header, a disconnected device or a device that
+    /// is never driven.
+    #[test]
+    fn the_solid_write_count_skips_devices_the_engine_skips() {
+        let devices = vec![
+            device("openrgb:a", 4, true),
+            device("openrgb:empty-header", 0, true),
+            device("openrgb:gone", 4, false),
+            device(r"openrgb:HID#VID_3151&PID_4015&MI_02", 4, true),
+            device("openrgb:b", 9, true),
+        ];
+        assert_eq!(super::solid_write_targets(&devices), 2);
+        assert_eq!(super::solid_write_targets(&[device("openrgb:empty-header", 0, true)]), 0);
     }
 }

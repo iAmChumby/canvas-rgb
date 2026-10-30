@@ -6,4 +6,10 @@ export type DisplayInfo = { id: DeviceId, name: string,
 /**
  * Digits the display has (the CHIONE: 4).
  */
-digits: number, max_decimals: number, modes: Array<DisplayMode>, connected: boolean, };
+digits: number, max_decimals: number, modes: Array<DisplayMode>, connected: boolean, 
+/**
+ * The vendor app holding the display right now (`"ZEUS CAST"`), measured by the daemon's
+ * process check. While it is set the daemon leaves the display closed. `None` when no
+ * vendor app is running (#14).
+ */
+blocked_by: string | null, };

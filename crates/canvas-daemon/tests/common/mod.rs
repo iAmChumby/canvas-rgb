@@ -317,6 +317,7 @@ pub fn chione_info() -> canvas_proto::display::DisplayInfo {
             canvas_proto::display::DisplayMode::FanRpm,
         ],
         connected: false,
+        blocked_by: None,
     }
 }
 

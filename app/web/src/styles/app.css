@@ -2110,6 +2110,37 @@ button.chip:hover {
 
 /* ---------- displays: one number on a pump head ---------- */
 
+/* The slot holds the vendor-app notice's height while idle, so the card below never moves (#14).
+   Idle it is an empty block; the min-heights below are the measured heights of the notice. */
+.display-notice-slot {
+  margin-bottom: var(--s3);
+  min-height: 39.3px; /* one line */
+}
+
+@media (max-width: 607px) {
+  .display-notice-slot {
+    min-height: 59.6px; /* two lines */
+  }
+}
+
+@media (max-width: 355px) {
+  .display-notice-slot {
+    min-height: 79.9px; /* three lines */
+  }
+}
+
+.display-notice {
+  margin: 0;
+}
+
+/* Narrow: the status takes its own line in every state, so "waiting for ZEUS CAST" wrapping
+   the header cannot move the card below it. */
+@media (max-width: 520px) {
+  .display-panel .panel-head .state {
+    flex-basis: 100%;
+  }
+}
+
 .display-card {
   display: grid;
   grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);

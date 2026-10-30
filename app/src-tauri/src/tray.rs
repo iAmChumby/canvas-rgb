@@ -261,14 +261,21 @@ fn apply<R: Runtime>(app: &AppHandle<R>, snap: &Snapshot) {
     };
     match build_menu(app, snap) {
         Ok(menu) => {
-            let _ = tray.set_menu(Some(menu));
+            if let Err(e) = tray.set_menu(Some(menu)) {
+                log::append(&format!("could not set the tray menu: {e}"));
+            }
         }
         Err(e) => log::append(&format!("could not build the tray menu: {e}")),
     }
-    let _ = tray.set_tooltip(Some(tooltip(snap)));
+    if let Err(e) = tray.set_tooltip(Some(tooltip(snap))) {
+        log::append(&format!("could not set the tray tooltip: {e}"));
+    }
     match icon_for(snap.fan_service_down) {
         Ok(icon) => {
-            let _ = tray.set_icon(Some(icon));
+            // The icon carries the fan-fault warning; a failed set leaves the old state on show.
+            if let Err(e) = tray.set_icon(Some(icon)) {
+                log::append(&format!("could not set the tray icon: {e}"));
+            }
         }
         Err(e) => log::append(&format!("could not load the tray icon: {e}")),
     }

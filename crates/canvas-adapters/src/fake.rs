@@ -19,6 +19,31 @@ pub struct FakeOpenRgbServer {
 
 struct FakeState {
     devices: Vec<FakeDevice>,
+    /// When set, device `i` is announced only once `first + i * step` has passed since `since`,
+    /// as real OpenRGB finds its controllers one by one while it detects.
+    detection: Option<Detection>,
+}
+
+#[derive(Clone, Copy)]
+struct Detection {
+    since: std::time::Instant,
+    first: std::time::Duration,
+    step: std::time::Duration,
+}
+
+impl FakeState {
+    /// How many controllers the server announces right now.
+    fn visible(&self) -> usize {
+        match self.detection {
+            None => self.devices.len(),
+            Some(d) => {
+                let elapsed = d.since.elapsed();
+                (0..self.devices.len())
+                    .filter(|i| elapsed >= d.first + d.step * (*i as u32))
+                    .count()
+            }
+        }
+    }
 }
 
 struct FakeDevice {
@@ -38,6 +63,22 @@ impl FakeOpenRgbServer {
     /// position). Zone LED counts and matrix maps are reported as given; a zone accepts
     /// RESIZEZONE only when its `resizable` flag is set and its size range is non-empty.
     pub async fn start(devices: Vec<DeviceInfo>) -> std::io::Result<Self> {
+        Self::start_inner(devices, None).await
+    }
+
+    /// Like [`start`](Self::start), but the devices appear over time, as in a real OpenRGB
+    /// that is still detecting: the controller count is 0 until `first` has passed, and device
+    /// `i` is announced `first + i * step` after the server started.
+    pub async fn start_detecting(
+        devices: Vec<DeviceInfo>,
+        first: std::time::Duration,
+        step: std::time::Duration,
+    ) -> std::io::Result<Self> {
+        let detection = Detection { since: std::time::Instant::now(), first, step };
+        Self::start_inner(devices, Some(detection)).await
+    }
+
+    async fn start_inner(devices: Vec<DeviceInfo>, detection: Option<Detection>) -> std::io::Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
         let port = listener.local_addr()?.port();
         let devices = devices.into_iter().map(|info| {
@@ -45,7 +86,7 @@ impl FakeOpenRgbServer {
             let initial_zone_leds = info.zones.iter().map(|zone| zone.led_count).collect();
             FakeDevice { info, initial_zone_leds, colors, custom_mode_writes: 0 }
         }).collect();
-        let state = Arc::new(Mutex::new(FakeState { devices }));
+        let state = Arc::new(Mutex::new(FakeState { devices, detection }));
         let connections: Arc<Mutex<Vec<AbortHandle>>> = Arc::new(Mutex::new(Vec::new()));
         let acceptor = {
             let state = Arc::clone(&state);
@@ -154,8 +195,8 @@ fn handle(state: &Mutex<FakeState>, device: u32, packet_id: u32, payload: &[u8])
             });
             reply(0, packet_id, &client.min(CLIENT_MAX_PROTOCOL_VERSION).to_le_bytes())
         }
-        REQUEST_CONTROLLER_COUNT => reply(0, packet_id, &(state.devices.len() as u32).to_le_bytes()),
-        REQUEST_CONTROLLER_DATA => match state.devices.get(device as usize) {
+        REQUEST_CONTROLLER_COUNT => reply(0, packet_id, &(state.visible() as u32).to_le_bytes()),
+        REQUEST_CONTROLLER_DATA => match state.devices.get(device as usize).filter(|_| (device as usize) < state.visible()) {
             Some(target) => match wire_controller(target).encode() {
                 Ok(body) => reply(device, packet_id, &body),
                 Err(_) => Vec::new(),

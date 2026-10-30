@@ -480,6 +480,8 @@ impl ChioneDisplay {
             max_decimals: MAX_DECIMALS,
             modes: vec![DisplayMode::Temperature, DisplayMode::FanRpm],
             connected: self.dev.is_some(),
+            // The adapter cannot see other processes; the daemon sets this from its own check.
+            blocked_by: None,
         }
     }
 }

@@ -212,7 +212,10 @@ pub async fn put_layout(
     if active == id {
         app.engine.set_layout(layout.clone(), devices);
         if let Some(effect) = &layout.effect {
-            let _ = crate::apply_effect(&app, &effect.id, &effect.props).await;
+            crate::logging::warn_if_err(
+                &format!("the saved layout was updated but its effect {} did not start", effect.id),
+                crate::apply_effect(&app, &effect.id, &effect.props).await,
+            );
         }
     }
 
@@ -248,7 +251,10 @@ pub async fn put_active_layout(
     let devices = app.devices.read().await.clone();
     app.engine.set_layout(layout.clone(), devices);
     if let Some(effect) = &layout.effect {
-        let _ = crate::apply_effect(&app, &effect.id, &effect.props).await;
+        crate::logging::warn_if_err(
+            &format!("the layout became active but its effect {} did not start", effect.id),
+            crate::apply_effect(&app, &effect.id, &effect.props).await,
+        );
     }
     tracing::info!(layout = %layout.id, "the active layout changed");
 
