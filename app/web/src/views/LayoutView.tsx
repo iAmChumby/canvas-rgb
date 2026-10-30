@@ -759,6 +759,31 @@ export function LayoutView() {
     [commit],
   );
 
+  /**
+   * A change to zones and landmarks together, as one undo step: a drag of a case that carries
+   * zones and landmarks, or of a pick that mixes the two, is one step, not one per part.
+   */
+  const changeParts = useCallback(
+    (
+      zonePatches: { index: number; patch: Partial<PlacedZone> }[],
+      landmarkPatches: { index: number; patch: Partial<Landmark> }[],
+    ) => {
+      if (zonePatches.length === 0 && landmarkPatches.length === 0) return;
+      commit((l) => ({
+        ...l,
+        zones: l.zones.map((z, i) => {
+          const hit = zonePatches.find((p) => p.index === i);
+          return hit ? { ...z, ...hit.patch } : z;
+        }),
+        landmarks: (l.landmarks ?? []).map((m, i) => {
+          const hit = landmarkPatches.find((p) => p.index === i);
+          return hit ? { ...m, ...hit.patch } : m;
+        }),
+      }));
+    },
+    [commit],
+  );
+
   /** A change to a landmark: the case, a CPU, a box. */
   const changeLandmark = useCallback(
     (index: number, patch: Partial<Landmark>) => {
@@ -967,11 +992,18 @@ export function LayoutView() {
     [reduced],
   );
 
-  // Picking a part reveals its inspector: on a phone the two are a screen apart.
+  // Picking a part reveals its inspector: on a phone the two are a screen apart. Not while the
+  // part is held: the page scrolling under a drag would carry the part away from the finger.
+  const revealedFor = useRef<Sel[] | null>(null);
   useEffect(() => {
-    if (!phone || selection.length === 0) return;
+    if (!phone || selection.length === 0) {
+      revealedFor.current = null;
+      return;
+    }
+    if (dragging || revealedFor.current === selection) return;
+    revealedFor.current = selection;
     reveal(inspectorRef.current);
-  }, [phone, selection, reveal]);
+  }, [phone, selection, reveal, dragging]);
 
   /** The way back to the canvas. */
   const backToCanvas = () => {
@@ -1018,6 +1050,7 @@ export function LayoutView() {
       onSelect={onSelectStage}
       onChangeZones={changeZones}
       onChangeLandmark={changeLandmark}
+      onChangeParts={changeParts}
       onDrop={onDropUnplaced}
       onDraggingChange={(d) => {
         setDragging(d);

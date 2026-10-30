@@ -50,6 +50,18 @@ import {
   type Point,
 } from "@/lib/zones";
 import { clamp } from "@/lib/format";
+import {
+  EDGE_HANDLE_MIN_PX,
+  HANDLES,
+  dragThresholdPx,
+  hitTest,
+  marqueePick,
+  partsInsideCase,
+  type HandleDef,
+  type HitPart,
+  type HitTarget,
+  type PointerKind,
+} from "@/lib/hitTest";
 import { usePrefersReducedMotion } from "@/lib/motion";
 import { FIT_VIEW, forgetView, readView, writeView } from "@/lib/viewPrefs";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
@@ -87,12 +99,7 @@ const COMPACT_KINDS: ReadonlySet<PartKind> = new Set<PartKind>([
 const SNAP_PIXELS = 8;
 /** The smallest a part can be, in canvas units. */
 const MIN_SIZE = 2;
-/**
- * A part's edge handle is hidden when the edge is shorter than this, in css pixels: on a tiny
- * part the eight handles would sit on top of each other, so only the corners stay.
- */
-const EDGE_HANDLE_MIN_PX = 44;
-/** How much the pointer may move, in mm, before the drag is a drag and not a click. */
+/** How far an arrow key nudges the picked part, in mm; with Shift, the big step. */
 const NUDGE_MM = 1;
 const NUDGE_MM_BIG = 10;
 /** The halo's margin past the part's own outline, in css pixels. */
@@ -221,28 +228,6 @@ const NOTCH_DELTA = 40;
 /** Where the one-time hint about the two modes is remembered. */
 const HINT_KEY = "canvas-rgb.mode-hint";
 
-/**
- * The eight resize handles, as Figma lays them out: four corners and four edges. `sx` and `sy`
- * say which way the handle pulls the box (-1 the left or top edge, 1 the right or bottom edge, 0
- * the axis it leaves alone).
- */
-type HandleId = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w";
-interface HandleDef {
-  id: HandleId;
-  sx: -1 | 0 | 1;
-  sy: -1 | 0 | 1;
-}
-const HANDLES: HandleDef[] = [
-  { id: "nw", sx: -1, sy: -1 },
-  { id: "n", sx: 0, sy: -1 },
-  { id: "ne", sx: 1, sy: -1 },
-  { id: "e", sx: 1, sy: 0 },
-  { id: "se", sx: 1, sy: 1 },
-  { id: "s", sx: 0, sy: 1 },
-  { id: "sw", sx: -1, sy: 1 },
-  { id: "w", sx: -1, sy: 0 },
-];
-
 /** The resize cursor for a handle on a part turned by `rotation` degrees. */
 function handleCursor(h: HandleDef, rotation: number): string {
   const angle = (Math.atan2(h.sy, h.sx) * 180) / Math.PI + rotation;
@@ -264,17 +249,43 @@ function overlaps(a: Box, b: Box, pad = 0): boolean {
 
 type DragKind = "move" | "resize" | "rotate" | "marquee";
 
+/** A part as it was when a drag began. */
+interface Orig {
+  sel: Sel;
+  zone?: PlacedZone;
+  landmark?: Landmark;
+}
+
 /** A part being dragged: what it was, where the pointer was, and what it is now. */
 interface Drag {
   kind: DragKind;
   /** The part the pointer is on. */
   sel: Sel;
   /** Every part the drag moves, with where it started. */
-  origs: { sel: Sel; zone?: PlacedZone; landmark?: Landmark }[];
+  origs: Orig[];
   start: Point;
   handle: HandleDef | null;
-  /** The parts the drag carries with it: the case and everything inside it. */
-  riders: { index: number; zone: PlacedZone }[];
+  /** The parts the drag carries with it: a case and everything inside it, zones and landmarks. */
+  riders: Orig[];
+}
+
+/**
+ * A press on a part that has not travelled far enough to be a drag. If it ends here it was a
+ * click: it picked the part and changed nothing, so it makes no undo step.
+ */
+interface Pending {
+  sel: Sel;
+  pointerId: number;
+  /** Where the press landed, in client pixels. */
+  x: number;
+  y: number;
+  /** Where it landed on the desk, in canvas units: the drag starts from here, so nothing jumps. */
+  start: Point;
+  thresholdPx: number;
+  /** A locked part is picked by a press and never moved. */
+  locked: boolean;
+  /** Pressing a part in a many-part pick keeps the pick for a drag; a plain click narrows to it. */
+  collapse: boolean;
 }
 
 /** The view: how the 320 x 200 canvas is drawn into the stage. It never touches the layout. */
@@ -585,8 +596,13 @@ export interface StageProps {
   /** A change to one or more zones, as one undo step. */
   onChangeZones: (patches: { index: number; patch: Partial<PlacedZone> }[]) => void;
   onChangeLandmark: (index: number, patch: Partial<Landmark>) => void;
+  /** A change to zones and landmarks together, as one undo step: what a drag of a mixed pick or of a case commits. */
+  onChangeParts: (
+    zones: { index: number; patch: Partial<PlacedZone> }[],
+    landmarks: { index: number; patch: Partial<Landmark> }[],
+  ) => void;
   onDrop: (deviceId: string, zoneIndex: number, x: number, y: number) => void;
-  /** Told when a drag starts and ends, so the page can hold off replacing the layout. */
+  /** Told when a press or a drag starts and ends, so the page can hold off replacing the layout or scrolling. */
   onDraggingChange?: (dragging: boolean) => void;
   /**
    * Told the live geometry of the zone being dragged, at most once per animation frame, so the
@@ -640,25 +656,9 @@ export interface StageProps {
   caseForm?: CaseForm;
 }
 
-/** The width of the case's edge band, in pixels. */
-const EDGE_BAND_PX = 8;
-
-/** True when the pointer is within the edge band of the element's box. */
-function onEdgeBand(e: { clientX: number; clientY: number }, el: HTMLElement): boolean {
-  const r = el.getBoundingClientRect();
-  return (
-    e.clientX - r.left < EDGE_BAND_PX ||
-    r.right - e.clientX < EDGE_BAND_PX ||
-    e.clientY - r.top < EDGE_BAND_PX ||
-    r.bottom - e.clientY < EDGE_BAND_PX
-  );
-}
-
-/** True when another part (not the case) is under the pointer. */
-function partUnder(e: { clientX: number; clientY: number }): boolean {
-  return document
-    .elementsFromPoint(e.clientX, e.clientY)
-    .some((el) => el instanceof HTMLElement && (el.dataset.zoneIndex !== undefined || (el.dataset.landmark === "true" && el.dataset.kind !== "case")));
+/** The hit-test's name for the kind of pointer an event came from. */
+function pointerKind(type: string): PointerKind {
+  return type === "touch" ? "touch" : type === "pen" ? "pen" : "mouse";
 }
 
 /** A reference outline behind the case, in canvas units. */
@@ -755,6 +755,7 @@ export function PreviewStage({
   onSelect,
   onChangeZones,
   onChangeLandmark,
+  onChangeParts,
   onDrop,
   onDraggingChange,
   onLiveChange,
@@ -793,6 +794,11 @@ export function PreviewStage({
   const editorPicRef = useRef<Picture | null>(null);
   const frameDataRef = useRef<Frame | null>(null);
   const dragRef = useRef<Drag | null>(null);
+  const pendingRef = useRef<Pending | null>(null);
+  /** The pointer that owns the press or drag in progress: no other pointer may steer it. */
+  const activePointer = useRef<number | null>(null);
+  /** The part the pointer is over, so the hover only re-renders when it changes. */
+  const hoverRef = useRef<Sel | null>(null);
   const marqueeRef = useRef<Box | null>(null);
   const panRef = useRef<{ start: Point; orig: View } | null>(null);
   const liveRef = useRef<PlacedZone[]>(zones.map((z) => ({ ...z })));
@@ -947,7 +953,7 @@ export function PreviewStage({
     return local;
   }, []);
 
-  /** Writes the selection frame onto its element: the part's box, its handles' cursors. */
+  /** Writes the selection frame onto its element: the part's box and which edge handles fit. */
   const applyFrame = useCallback((z: PlacedZone | Landmark, v: View) => {
     const el = frameEl.current;
     const stage = stageRef.current;
@@ -961,10 +967,6 @@ export function PreviewStage({
     el.style.transform = `rotate(${z.rotation_deg}deg)`;
     el.dataset.narrowX = z.width * k < EDGE_HANDLE_MIN_PX ? "true" : "false";
     el.dataset.narrowY = z.height * k < EDGE_HANDLE_MIN_PX ? "true" : "false";
-    for (const handle of HANDLES) {
-      const h = el.querySelector<HTMLElement>(`[data-handle="${handle.id}"]`);
-      if (h) h.style.cursor = handleCursor(handle, z.rotation_deg);
-    }
   }, []);
 
   /** Writes one part's geometry onto its element. No React involved. */
@@ -983,9 +985,9 @@ export function PreviewStage({
         el.style.height = `${obj.height * k}px`;
         el.style.transform = `rotate(${obj.rotation_deg}deg)`;
       }
-      if (sel.kind === "zone" && selectionRef.current.some((s) => s.kind === "zone" && s.index === sel.index)) {
-        applyFrame(obj, v);
-      }
+      // The frame follows the one part that is picked, a landmark as well as a zone.
+      const only = selectionRef.current.length === 1 ? selectionRef.current[0] : undefined;
+      if (only && only.kind === sel.kind && only.index === sel.index) applyFrame(obj, v);
     },
     [applyFrame],
   );
@@ -1403,13 +1405,61 @@ export function PreviewStage({
     set(els.h, snap.guideY !== null, snap.guideY, "y");
   }, []);
 
+  /** Every part that can be hit, in its live geometry (the drag's, while one is under way). */
+  const hitParts = (): HitPart[] => {
+    const out: HitPart[] = [];
+    liveRef.current.forEach((z, index) => {
+      out.push({
+        ref: { kind: "zone", index },
+        x: z.x,
+        y: z.y,
+        width: z.width,
+        height: z.height,
+        rotation_deg: z.rotation_deg,
+        isCase: false,
+        locked: z.locked === true,
+        offline: missingRef.current.has(index),
+      });
+    });
+    liveLmRef.current.forEach((l, index) => {
+      if (l.visible === false) return;
+      out.push({
+        ref: { kind: "landmark", index },
+        x: l.x,
+        y: l.y,
+        width: l.width,
+        height: l.height,
+        rotation_deg: l.rotation_deg,
+        isCase: l.kind === "case",
+        locked: l.locked === true,
+      });
+    });
+    return out;
+  };
+
+  /** Css pixels per canvas unit, now. */
+  const pxPerUnit = (): number =>
+    ((stageRef.current?.clientWidth ?? CANVAS_W) / CANVAS_W) * viewRef.current.scale;
+
+  /** What is under the pointer: the one place a press or a hover is turned into a part. */
+  const hitAt = (e: { clientX: number; clientY: number; pointerType: string; altKey: boolean }): HitTarget =>
+    hitTest({
+      point: toLogical(e),
+      parts: hitParts(),
+      selection: selectionRef.current,
+      k: pxPerUnit(),
+      pointer: pointerKind(e.pointerType),
+      under: e.altKey,
+    });
+
+  /** Starts a move, a resize or a turn. A move starts from `startAt` when the press came earlier. */
   const beginDrag = (
     kind: DragKind,
     sel: Sel,
     e: PointerEvent<HTMLElement>,
     handle: HandleDef | null = null,
+    startAt?: Point,
   ) => {
-    e.stopPropagation();
     e.preventDefault();
     const zone = sel.kind === "zone" ? liveRef.current[sel.index] : undefined;
     const landmark = sel.kind === "landmark" ? liveLmRef.current[sel.index] : undefined;
@@ -1419,46 +1469,166 @@ export function PreviewStage({
     const already = selectionRef.current.some((s) => s.kind === sel.kind && s.index === sel.index);
     if (!already || kind !== "move") onSelect([sel]);
     setPressed(sel);
-    const origs: Drag["origs"] = [];
-    if (sel.kind === "zone" && zone) {
-      // Every picked part moves together.
-      for (const s of selectionRef.current) {
-        if (s.kind !== "zone") continue;
+    const members: Sel[] = already && kind === "move" ? selectionRef.current : [sel];
+    const origOf = (s: Sel): Orig | null => {
+      if (s.kind === "zone") {
         const z = liveRef.current[s.index];
-        if (z) origs.push({ sel: s, zone: { ...z } });
+        return z ? { sel: s, zone: { ...z } } : null;
       }
-      if (!origs.some((o) => o.sel.index === sel.index) && zone) {
-        origs.push({ sel, zone: { ...zone } });
-      }
-    } else if (landmark) {
-      origs.push({ sel, landmark: { ...landmark } });
+      const l = liveLmRef.current[s.index];
+      return l ? { sel: s, landmark: { ...l } } : null;
+    };
+    const isPrimary = (s: Sel) => s.kind === sel.kind && s.index === sel.index;
+    // Every picked part moves together, whatever mix of zones and landmarks the pick holds. A
+    // locked part is picked but stays where it is.
+    const origs: Orig[] = [];
+    for (const m of members) {
+      const o = origOf(m);
+      if (!o) continue;
+      const locked = o.zone?.locked === true || o.landmark?.locked === true;
+      if (kind === "move" && locked && !isPrimary(m)) continue;
+      origs.push(o);
     }
-    // The case carries everything inside it: moving the PC moves the parts in it.
-    const riders: { index: number; zone: PlacedZone }[] = [];
-    if (sel.kind === "landmark" && landmark && landmark.kind === "case") {
-      const b = landmarkBounds(landmark);
-      liveRef.current.forEach((z, i) => {
-        const zb = boundsOf(z);
-        const cx = zb.x + zb.width / 2;
-        const cy = zb.y + zb.height / 2;
-        if (cx >= b.x && cx <= b.x + b.width && cy >= b.y && cy <= b.y + b.height) {
-          riders.push({ index: i, zone: { ...z } });
+    if (!origs.some((o) => isPrimary(o.sel))) {
+      const o = origOf(sel);
+      if (o) origs.push(o);
+    }
+    // A case carries everything inside it, zones and landmarks, by the middle of each part
+    // against the case's own turned box: moving the PC moves the parts in it.
+    const riders: Orig[] = [];
+    if (kind === "move") {
+      const parts = hitParts();
+      const taken = (ref: Sel) =>
+        origs.some((x) => x.sel.kind === ref.kind && x.sel.index === ref.index) ||
+        riders.some((x) => x.sel.kind === ref.kind && x.sel.index === ref.index);
+      for (const o of origs) {
+        if (o.landmark?.kind !== "case") continue;
+        const box = parts.find((p) => p.ref.kind === "landmark" && p.ref.index === o.sel.index);
+        if (!box) continue;
+        for (const ref of partsInsideCase(box, parts)) {
+          const r = origOf(ref);
+          if (r && !taken(ref)) riders.push(r);
         }
-      });
+      }
     }
     dragRef.current = {
       kind,
       sel,
       origs,
-      start: toLogical(e),
+      start: startAt ?? toLogical(e),
       handle,
       riders,
     };
     const el = sel.kind === "zone" ? zoneEls.current[sel.index] : lmEls.current[sel.index];
     if (el) el.dataset.dragging = "true";
+    if (stageRef.current && kind !== "resize") stageRef.current.style.cursor = "grabbing";
     onDraggingChange?.(true);
-    stageRef.current?.focus({ preventScroll: true });
-    stageRef.current?.setPointerCapture(e.pointerId);
+    // A move leaves focus on the part pressed (set by the press); a handle drag has no element.
+    if (kind !== "move") stageRef.current?.focus({ preventScroll: true });
+    if (!stageRef.current?.hasPointerCapture(e.pointerId)) stageRef.current?.setPointerCapture(e.pointerId);
+  };
+
+  /** A press on the stage: the hit-test says what it landed on, and what that does follows. */
+  const onStagePointerDown = (e: PointerEvent<HTMLDivElement>) => {
+    const stage = stageRef.current;
+    if (!stage) return;
+    // Empty space with the middle button: a pan.
+    if (e.button === 1) {
+      if (activePointer.current !== null) return;
+      activePointer.current = e.pointerId;
+      panRef.current = { start: { x: e.clientX, y: e.clientY }, orig: { ...viewRef.current } };
+      stage.setPointerCapture(e.pointerId);
+      e.preventDefault();
+      return;
+    }
+    if (e.button !== 0) return;
+    // A second finger (or any other pointer) never takes over a press or drag in progress. A new
+    // primary pointer means the old one is gone (its end event was lost), so it starts afresh.
+    if (activePointer.current !== null && activePointer.current !== e.pointerId && !e.isPrimary) return;
+    activePointer.current = e.pointerId;
+    // Whatever press came before is over: a stale one can never turn this press into a move.
+    pendingRef.current = null;
+    const target = hitAt(e);
+    if (target.kind === "handle") {
+      const sel = target.ref as Sel;
+      beginDrag(target.handle === "rotate" ? "rotate" : "resize", sel, e, target.handle === "rotate" ? null : target.handle);
+      return;
+    }
+    if (target.kind === "desk") {
+      // The empty desk: a marquee picks what it touches.
+      onSelect([]);
+      setSizing(null);
+      const box = stage.getBoundingClientRect();
+      marqueeRef.current = { x: e.clientX - box.left, y: e.clientY - box.top, w: 0, h: 0 };
+      setMarquee({ ...marqueeRef.current });
+      stage.setPointerCapture(e.pointerId);
+      return;
+    }
+    // A part, or the case by its edge or its body.
+    const sel = target.ref as Sel;
+    e.preventDefault();
+    // Focus goes to the part pressed (so Tab continues from it), without scrolling the page.
+    const partEl = sel.kind === "zone" ? zoneEls.current[sel.index] : lmEls.current[sel.index];
+    (partEl ?? stage).focus({ preventScroll: true });
+    const picked = selectionRef.current.some((s) => s.kind === sel.kind && s.index === sel.index);
+    if (e.shiftKey && !e.altKey) {
+      // Shift-click picks one more part, or lets one go.
+      onSelect(
+        picked
+          ? selectionRef.current.filter((s) => !(s.kind === sel.kind && s.index === sel.index))
+          : [...selectionRef.current, sel],
+      );
+      return;
+    }
+    if (!picked) onSelect([sel]);
+    setPressed(sel);
+    pendingRef.current = {
+      sel,
+      pointerId: e.pointerId,
+      x: e.clientX,
+      y: e.clientY,
+      start: toLogical(e),
+      thresholdPx: dragThresholdPx(pointerKind(e.pointerType)),
+      locked: target.locked,
+      collapse: picked && selectionRef.current.length > 1,
+    };
+    // The page holds off (on a phone it would scroll the inspector into view, and the part
+    // would run away under the finger) until the press is over.
+    onDraggingChange?.(true);
+    stage.setPointerCapture(e.pointerId);
+  };
+
+  /** Lights the handle the pointer is over (data-hover), and none other. */
+  const setHandleHover = (id: string | null) => {
+    const frame = frameEl.current;
+    if (!frame) return;
+    for (const h of frame.querySelectorAll<HTMLElement>("[data-handle]")) {
+      if (h.dataset.handle === id) h.dataset.hover = "true";
+      else delete h.dataset.hover;
+    }
+  };
+
+  /** Hover and cursor, from the same hit-test a press uses. */
+  const onStageHover = (e: PointerEvent<HTMLDivElement>) => {
+    const stage = stageRef.current;
+    if (!stage || e.pointerType === "touch") return;
+    const target = hitAt(e);
+    let cursor = "";
+    let over: Sel | null = null;
+    if (target.kind === "handle") {
+      const part = target.ref.kind === "zone" ? liveRef.current[target.ref.index] : liveLmRef.current[target.ref.index];
+      cursor = target.handle === "rotate" ? "grab" : handleCursor(target.handle, part?.rotation_deg ?? 0);
+    } else if (target.kind !== "desk") {
+      over = target.ref as Sel;
+      cursor = target.locked ? "not-allowed" : "grab";
+    }
+    stage.style.cursor = cursor;
+    setHandleHover(target.kind === "handle" ? (target.handle === "rotate" ? "rotate" : target.handle.id) : null);
+    const was = hoverRef.current;
+    if (was?.kind !== over?.kind || was?.index !== over?.index) {
+      hoverRef.current = over;
+      setHover(over);
+    }
   };
 
   /** Tells the page where the dragged zone is, at most once per animation frame. */
@@ -1475,6 +1645,8 @@ export function PreviewStage({
   );
 
   const onStageMove = (e: PointerEvent<HTMLDivElement>) => {
+    // Only the pointer that began the press or drag steers it.
+    if (activePointer.current !== null && e.pointerId !== activePointer.current) return;
     const pan = panRef.current;
     if (pan) {
       const box = stageRef.current?.getBoundingClientRect();
@@ -1489,6 +1661,16 @@ export function PreviewStage({
       };
       applyView(clampView(next));
       return;
+    }
+    // A press on a part becomes a drag only once the pointer has travelled a few pixels. Until
+    // then it is a click that has not finished: nothing moves, and no undo step is made.
+    const pend = pendingRef.current;
+    if (pend && pend.pointerId === e.pointerId && !dragRef.current) {
+      if (Math.hypot(e.clientX - pend.x, e.clientY - pend.y) < pend.thresholdPx) return;
+      // A locked part is picked by the press and does not move: the press stays a click.
+      if (pend.locked) return;
+      pendingRef.current = null;
+      beginDrag("move", pend.sel, e, null, pend.start);
     }
     // The marquee: a rubber band on the empty desk that picks everything under it.
     const mq = marqueeRef.current;
@@ -1508,7 +1690,10 @@ export function PreviewStage({
       return;
     }
     const d = dragRef.current;
-    if (!d) return;
+    if (!d) {
+      if (!pendingRef.current) onStageHover(e);
+      return;
+    }
     const p = toLogical(e);
     const o = d.origs.find((x) => x.sel.index === d.sel.index && x.sel.kind === d.sel.kind);
     if (!o) return;
@@ -1517,13 +1702,17 @@ export function PreviewStage({
     const base = (stageRef.current?.clientWidth ?? CANVAS_W) / CANVAS_W;
     const threshold = SNAP_PIXELS / (base * viewRef.current.scale);
     const u = unitRef.current;
-    // The parts that are not moving: they are what a part snaps to.
-    const moving = new Set(d.origs.map((x) => (x.sel.kind === "zone" ? x.sel.index : -1)));
+    // The parts that are not moving (nor carried): they are what a part snaps to.
+    const moving = new Set(
+      [...d.origs, ...d.riders].map((x) => (x.sel.kind === "zone" ? x.sel.index : -1)),
+    );
     const others = liveRef.current
       .filter((_, i) => !moving.has(i))
       .map((z) => boundsOf(z));
-    // The case's panels: a part can sit against the top, the floor, the front or the back.
-    const caseBox = liveLmRef.current.find((l) => l.kind === "case") ?? derivedCase;
+    // The case's panels: a part can sit against the top, the floor, the front or the back. A
+    // case that is itself moving has no panels to snap to: they would move with it.
+    const caseMoves = d.origs.some((x) => x.landmark?.kind === "case");
+    const caseBox = caseMoves ? null : (liveLmRef.current.find((l) => l.kind === "case") ?? derivedCase);
     const panels = caseBox
       ? {
           x: [caseBox.x, caseBox.x + caseBox.width / 2, caseBox.x + caseBox.width],
@@ -1548,21 +1737,18 @@ export function PreviewStage({
       const nextY = eq?.y ?? snap.y;
       const deltaX = nextX - src.x;
       const deltaY = nextY - src.y;
-      // Every picked part moves by the same amount, and the case carries what is inside it.
-      for (const orig of d.origs) {
+      // Every picked part moves by the same amount, and a case carries what is inside it. Each
+      // goes from where it started, not from where it is, so every frame of the drag is exact.
+      for (const orig of [...d.origs, ...d.riders]) {
         if (orig.zone) {
           liveRef.current[orig.sel.index] = { ...orig.zone, x: orig.zone.x + deltaX, y: orig.zone.y + deltaY };
+        } else if (orig.landmark) {
+          liveLmRef.current[orig.sel.index] = {
+            ...orig.landmark,
+            x: orig.landmark.x + deltaX,
+            y: orig.landmark.y + deltaY,
+          };
         }
-      }
-      for (const ri of d.riders) {
-        const z = liveRef.current[ri.index];
-        if (!z) continue;
-        // From where it started, not from where it is: the case carries its parts by the same
-        // distance, every frame of the drag.
-        liveRef.current[ri.index] = { ...z, x: ri.zone.x + deltaX, y: ri.zone.y + deltaY };
-      }
-      if (o.landmark) {
-        liveLmRef.current[d.sel.index] = { ...o.landmark, x: o.landmark.x + deltaX, y: o.landmark.y + deltaY };
       }
       const primary = liveRef.current[d.sel.index];
       applyGuides({
@@ -1577,11 +1763,7 @@ export function PreviewStage({
           : "";
       const pos = `${formatUnits(nextX, u)} · ${formatUnits(nextY, u)}${where}`;
       showReadout(e, pos);
-      for (const orig of d.origs) {
-        if (orig.sel.kind === "zone") applyGeom(orig.sel, viewRef.current);
-      }
-      for (const ri of d.riders) applyGeom({ kind: "zone", index: ri.index }, viewRef.current);
-      if (d.sel.kind === "landmark") applyGeom(d.sel, viewRef.current);
+      for (const orig of [...d.origs, ...d.riders]) applyGeom(orig.sel, viewRef.current);
       if (d.sel.kind === "zone" && primary) notifyLive(d.sel.index);
       queuePaint();
       return;
@@ -1653,8 +1835,27 @@ export function PreviewStage({
     queuePaint();
   };
 
+  /** The end of a press: pointerup, cancel or lost capture, from the pointer that owns it only. */
   const endDrag = (e: PointerEvent<HTMLDivElement>) => {
+    if (activePointer.current !== null && e.pointerId !== activePointer.current) return;
+    endPress(e);
+    activePointer.current = null;
+  };
+
+  const endPress = (e: PointerEvent<HTMLDivElement>) => {
     setPressed(null);
+    // A press that never became a drag was a click: it picked the part (a click on one of
+    // several picked parts picks just that one) and changed nothing, so no undo step is made.
+    const pend = pendingRef.current;
+    if (pend && pend.pointerId === e.pointerId && !dragRef.current) {
+      pendingRef.current = null;
+      if (pend.collapse && e.type === "pointerup") onSelect([pend.sel]);
+      if (stageRef.current?.hasPointerCapture(e.pointerId)) {
+        stageRef.current.releasePointerCapture(e.pointerId);
+      }
+      onDraggingChange?.(false);
+      return;
+    }
     const pan = panRef.current;
     if (pan) {
       panRef.current = null;
@@ -1670,13 +1871,11 @@ export function PreviewStage({
       marqueeRef.current = null;
       setMarquee(null);
       if (mq.w > 4 || mq.h > 4) {
-        const picked: Sel[] = [];
-        zones.forEach((z, i) => {
-          const b = boundsOf(z);
-          const box = { x: (b.x + view.panX) * k, y: (b.y + view.panY) * k, w: b.width * k, h: b.height * k };
-          if (overlaps(mq, box)) picked.push({ kind: "zone", index: i });
-        });
-        onSelect(picked);
+        // The band in canvas units; it picks zones and landmarks alike.
+        const v = viewRef.current;
+        const kk = pxPerUnit();
+        const band = { x: mq.x / kk - v.panX, y: mq.y / kk - v.panY, width: mq.w / kk, height: mq.h / kk };
+        onSelect(marqueePick(band, hitParts()).map((r) => r as Sel));
       }
       if (stageRef.current?.hasPointerCapture(e.pointerId)) {
         stageRef.current.releasePointerCapture(e.pointerId);
@@ -1701,45 +1900,25 @@ export function PreviewStage({
     if (stageRef.current?.hasPointerCapture(e.pointerId)) {
       stageRef.current.releasePointerCapture(e.pointerId);
     }
-    // One drag is one change, so one undo step.
-    const patches: { index: number; patch: Partial<PlacedZone> }[] = [];
-    for (const orig of d.origs) {
-      if (orig.sel.kind !== "zone" || !orig.zone) continue;
-      const now = liveRef.current[orig.sel.index];
-      if (!now) continue;
-      const patch: Partial<PlacedZone> = {};
-      if (Math.abs(now.x - orig.zone.x) > 1e-6) patch.x = now.x;
-      if (Math.abs(now.y - orig.zone.y) > 1e-6) patch.y = now.y;
-      if (Math.abs(now.width - orig.zone.width) > 1e-6) patch.width = now.width;
-      if (Math.abs(now.height - orig.zone.height) > 1e-6) patch.height = now.height;
-      if (Math.abs(now.rotation_deg - orig.zone.rotation_deg) > 1e-6) patch.rotation_deg = now.rotation_deg;
-      if (Object.keys(patch).length > 0) patches.push({ index: orig.sel.index, patch });
+    // One drag is one change, so one undo step: every zone and landmark it moved, together.
+    const zonePatches: { index: number; patch: Partial<PlacedZone> }[] = [];
+    const landmarkPatches: { index: number; patch: Partial<Landmark> }[] = [];
+    for (const orig of [...d.origs, ...d.riders]) {
+      const src = orig.zone ?? orig.landmark;
+      const now = orig.sel.kind === "zone" ? liveRef.current[orig.sel.index] : liveLmRef.current[orig.sel.index];
+      if (!src || !now) continue;
+      const patch: Partial<PlacedZone> & Partial<Landmark> = {};
+      if (Math.abs(now.x - src.x) > 1e-6) patch.x = now.x;
+      if (Math.abs(now.y - src.y) > 1e-6) patch.y = now.y;
+      if (Math.abs(now.width - src.width) > 1e-6) patch.width = now.width;
+      if (Math.abs(now.height - src.height) > 1e-6) patch.height = now.height;
+      if (Math.abs(now.rotation_deg - src.rotation_deg) > 1e-6) patch.rotation_deg = now.rotation_deg;
+      if (Object.keys(patch).length === 0) continue;
+      if (orig.sel.kind === "zone") zonePatches.push({ index: orig.sel.index, patch });
+      else landmarkPatches.push({ index: orig.sel.index, patch });
     }
-    // The parts the case carried.
-    for (const ri of d.riders) {
-      const now = liveRef.current[ri.index];
-      if (!now) continue;
-      const patch: Partial<PlacedZone> = {};
-      if (Math.abs(now.x - ri.zone.x) > 1e-6) patch.x = now.x;
-      if (Math.abs(now.y - ri.zone.y) > 1e-6) patch.y = now.y;
-      if (Object.keys(patch).length > 0 && !patches.some((p) => p.index === ri.index)) {
-        patches.push({ index: ri.index, patch });
-      }
-    }
-    if (patches.length > 0) onChangeZones(patches);
-    if (d.sel.kind === "landmark") {
-      const now = liveLmRef.current[d.sel.index];
-      const start = d.origs.find((x) => x.sel.kind === "landmark")?.landmark;
-      if (now && start) {
-        const patch: Partial<Landmark> = {};
-        if (Math.abs(now.x - start.x) > 1e-6) patch.x = now.x;
-        if (Math.abs(now.y - start.y) > 1e-6) patch.y = now.y;
-        if (Math.abs(now.width - start.width) > 1e-6) patch.width = now.width;
-        if (Math.abs(now.height - start.height) > 1e-6) patch.height = now.height;
-        if (Math.abs(now.rotation_deg - start.rotation_deg) > 1e-6) patch.rotation_deg = now.rotation_deg;
-        if (Object.keys(patch).length > 0) onChangeLandmark(d.sel.index, patch);
-      }
-    }
+    if (zonePatches.length > 0 || landmarkPatches.length > 0) onChangeParts(zonePatches, landmarkPatches);
+    if (stageRef.current) stageRef.current.style.cursor = "";
   };
 
   // The keys: the arrows nudge, Enter opens the size, L and E change the mode.
@@ -2147,25 +2326,20 @@ export function PreviewStage({
         onPointerMove={onStageMove}
         onPointerUp={endDrag}
         onPointerCancel={endDrag}
+        onLostPointerCapture={endDrag}
+        onPointerLeave={() => {
+          // Off the desk: nothing is hovered. (A held press keeps the pointer by capture.)
+          if (dragRef.current || pendingRef.current) return;
+          if (stageRef.current) stageRef.current.style.cursor = "";
+          setHandleHover(null);
+          hoverRef.current = null;
+          setHover(null);
+        }}
         onDragOver={onDragOver}
         onDrop={onDropHere}
-        onPointerDown={(e) => {
-          // Empty space: a marquee, or a pan with the middle button.
-          if (e.button === 1) {
-            panRef.current = { start: { x: e.clientX, y: e.clientY }, orig: { ...viewRef.current } };
-            stageRef.current?.setPointerCapture(e.pointerId);
-            e.preventDefault();
-            return;
-          }
-          onSelect([]);
-          setSizing(null);
-          const box = stageRef.current?.getBoundingClientRect();
-          const ox = box ? e.clientX - box.left : e.clientX;
-          const oy = box ? e.clientY - box.top : e.clientY;
-          marqueeRef.current = { x: ox, y: oy, w: 0, h: 0 };
-          setMarquee({ ...marqueeRef.current });
-          stageRef.current?.setPointerCapture(e.pointerId);
-        }}
+        // One handler for the whole desk: what a press lands on is decided from the parts'
+        // geometry (lib/hitTest.ts), not from which element the browser says is on top.
+        onPointerDown={onStagePointerDown}
       >
         {fading && !editorGone && (
           <div
@@ -2270,6 +2444,7 @@ export function PreviewStage({
               aria-pressed={isSel}
               aria-label={`${l.label?.trim() || PART_LABEL[l.kind]}, a landmark without lights`}
               data-landmark="true"
+              data-landmark-index={i}
               data-pulse={pulse.some((s) => s.kind === "landmark" && s.index === i)}
               data-kind={l.kind}
               data-selected={isSel}
@@ -2278,29 +2453,10 @@ export function PreviewStage({
               data-locked={l.locked === true}
               data-outside={outsideOf(l.x, l.y, l.width, l.height)}
               style={style}
-              onPointerDown={(e) => {
-                e.stopPropagation();
-                if (l.locked === true) {
-                  e.preventDefault();
-                  return;
-                }
-                // A part inside the case wins the pointer over the case: the case is taken by
-                // its edge band, its handles, or where nothing else is under the pointer.
-                if (l.kind === "case" && !onEdgeBand(e, e.currentTarget) && partUnder(e)) {
-                  e.preventDefault();
-                  return;
-                }
-                if (e.shiftKey) {
-                  e.preventDefault();
-                  const has = selection.some((s) => s.kind === "landmark" && s.index === i);
-                  onSelect(has ? selection.filter((s) => !(s.kind === "landmark" && s.index === i)) : [...selection, { kind: "landmark", index: i }]);
-                  return;
-                }
-                beginDrag("move", { kind: "landmark", index: i }, e);
+              onFocus={(e) => {
+                // The keyboard picks a part by focusing it; a press is the stage's to decide.
+                if (e.currentTarget.matches(":focus-visible")) onSelect([{ kind: "landmark", index: i }]);
               }}
-              onPointerEnter={() => setHover({ kind: "landmark", index: i })}
-              onPointerLeave={() => setHover((h) => (h?.kind === "landmark" && h.index === i ? null : h))}
-              onFocus={() => onSelect([{ kind: "landmark", index: i }])}
             >
               <PartArt kind={l.kind} facing={l.facing} />
               {unlockBadge && l.locked === true && (
@@ -2383,24 +2539,10 @@ export function PreviewStage({
               data-pulse={pulse.some((s) => s.kind === "zone" && s.index === i)}
               data-shape={found ? resolveShape(z.shape, found.zone.kind) : "none"}
               style={style}
-              onPointerDown={(e) => {
-                e.stopPropagation();
-                if (z.locked === true) {
-                  e.preventDefault();
-                  return;
-                }
-                if (e.shiftKey) {
-                  // Shift-click picks one more part, or lets one go.
-                  e.preventDefault();
-                  const has = selection.some((s) => s.kind === "zone" && s.index === i);
-                  onSelect(has ? selection.filter((s) => !(s.kind === "zone" && s.index === i)) : [...selection, { kind: "zone", index: i }]);
-                  return;
-                }
-                beginDrag("move", { kind: "zone", index: i }, e);
+              onFocus={(e) => {
+                // The keyboard picks a part by focusing it; a press is the stage's to decide.
+                if (e.currentTarget.matches(":focus-visible")) onSelect([{ kind: "zone", index: i }]);
               }}
-              onPointerEnter={() => setHover({ kind: "zone", index: i })}
-              onPointerLeave={() => setHover((h) => (h?.kind === "zone" && h.index === i ? null : h))}
-              onFocus={() => onSelect([{ kind: "zone", index: i }])}
             >
               <PartArt kind={kind} facing={facing} />
               {isMissing && <span className={desk.offline}>offline</span>}
@@ -2410,11 +2552,12 @@ export function PreviewStage({
 
         {frameObj && selection.length === 1 && (
           // The selection: eight resize handles and a rotation handle, in the part's own turned
-          // box. The frame never takes a click itself; its handles do.
+          // box. They are drawn here and found by the stage's hit-test; none takes a click itself.
           <div
             ref={frameEl}
             className={desk.frame}
             data-frame="true"
+            data-locked={frameObj.locked === true}
             data-narrow-x={frameObj.width * k < EDGE_HANDLE_MIN_PX}
             data-narrow-y={frameObj.height * k < EDGE_HANDLE_MIN_PX}
             style={{
@@ -2432,7 +2575,6 @@ export function PreviewStage({
               role="button"
               tabIndex={-1}
               aria-label="Rotate this part"
-              onPointerDown={(e) => beginDrag("rotate", primary as Sel, e)}
             />
             {HANDLES.map((h) => (
               <span
@@ -2445,9 +2587,7 @@ export function PreviewStage({
                 style={{
                   left: `${(h.sx + 1) * 50}%`,
                   top: `${(h.sy + 1) * 50}%`,
-                  cursor: handleCursor(h, frameObj.rotation_deg),
                 }}
-                onPointerDown={(e) => beginDrag("resize", primary as Sel, e, h)}
               />
             ))}
           </div>
