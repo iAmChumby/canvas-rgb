@@ -192,6 +192,17 @@ function Read-RestoreFile {
     return (ConvertFrom-Json -InputObject $text)
 }
 
+# Read-RestoreFile behind the fail-closed check: a junction or symbolic link anywhere from the record up to the
+# drive root is named and NOT followed (the read would follow it), and the record is never deleted. Throws on it.
+function Read-RestoreFileSafe {
+    param([string]$Path)
+    $bad = Get-ReparseInChain -Path $Path
+    if ($bad) {
+        throw "STOP: '$bad' is a junction or symbolic link, so the restore record '$Path' was not read. It is never followed, deleted or changed. Check it yourself and remove or fix it."
+    }
+    return (Read-RestoreFile -Path $Path)
+}
+
 # ---------------------------------------------------------------- OpenRGB lock
 
 # Returns @{ Ok; Message; Url; File; Sha256 }. Refuses while url or sha256 is UNSET or empty.

@@ -197,10 +197,16 @@ function Set-UserPathEntry { Write-Host 'STUB Set-UserPathEntry'; return $false 
     }
 
     # uninstall-elevated.ps1 runs as a temp COPY; lib.ps1 gets stubs so no service, HKLM key, process or admin check is real.
-    function Invoke-ElevatedUninstallSandbox([string]$Name, [string]$RecordText, [switch]$Purge) {
+    function Invoke-ElevatedUninstallSandbox([string]$Name, [string]$RecordText, [switch]$Purge, [string]$SignalService = '', [switch]$JunctionHome) {
         $root = Join-Path $dir $Name
         $scripts = Join-Path $root 'scripts'; $pd = Join-Path $root 'PD\canvas-rgb'; $inst = Join-Path $root 'install'
-        New-Item -ItemType Directory -Path $scripts, $pd, $inst -Force | Out-Null
+        New-Item -ItemType Directory -Path $scripts, $inst -Force | Out-Null
+        if ($JunctionHome) {
+            # machine home = a junction to a folder elsewhere (the real record lives in the target)
+            $real = Join-Path $root 'real-home'
+            New-Item -ItemType Directory -Path $real, (Split-Path $pd) -Force | Out-Null
+            & cmd.exe /c mklink /J "$pd" "$real" | Out-Null
+        } else { New-Item -ItemType Directory -Path $pd -Force | Out-Null }
         [System.IO.File]::WriteAllText((Join-Path $inst 'canvas-rgbd.exe'), 'x')
         # GetFolderPath('CommonPrograms') returns '' once %ProgramData% points at a fake folder: point the copy at a temp folder.
         $src = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\uninstall-elevated.ps1') -Raw
@@ -212,7 +218,7 @@ function Set-UserPathEntry { Write-Host 'STUB Set-UserPathEntry'; return $false 
 
 function Test-IsAdmin { return $true }
 function Assert-MachineHomeSafe { param($Path) Write-Host 'STUB Assert-MachineHomeSafe' }
-function Get-Service { Write-Host 'STUB Get-Service' }
+function Get-Service { param($Name) Write-Host 'STUB Get-Service'; if ($Name -eq '__SIGNAL__') { [pscustomobject]@{ Name = $Name; Status = 'Stopped' } } }
 function Set-Service { Write-Host 'STUB Set-Service' }
 function Get-Process { }
 function Get-CimInstance { }
@@ -222,7 +228,7 @@ function Remove-Item {
     Microsoft.PowerShell.Management\Remove-Item -LiteralPath $LiteralPath -Recurse:$Recurse -Force:$Force
 }
 '@
-        Add-Content -LiteralPath (Join-Path $scripts 'lib.ps1') -Value $stubs
+        Add-Content -LiteralPath (Join-Path $scripts 'lib.ps1') -Value $stubs.Replace('__SIGNAL__', $(if ($SignalService) { $SignalService } else { 'no-such-service' }))
         $rec = Join-Path $pd 'signalrgb-restore.json'
         if ($null -ne $RecordText) { [System.IO.File]::WriteAllText($rec, $RecordText) }
         $log = Join-Path $root 'elevated.log'
@@ -256,6 +262,90 @@ function Remove-Item {
         $r = Invoke-ElevatedUninstallSandbox 'e24c' $null
         Assert-Equal $r.Code 0 $r.Out
         Assert-True (-not ($r.Out -match 'unreadable')) $r.Out
+    }
+
+    Test-Case 'uninstall-elevated.ps1: the by-hand command names the SignalRGB service that exists on this PC' {
+        $r = Invoke-ElevatedUninstallSandbox 'e24d' '{not json' -SignalService 'SignalRgb.Service'
+        Assert-True ($r.Out -match 'Set-Service -Name SignalRgb\.Service -StartupType Automatic') $r.Out
+        Assert-True (-not ($r.Out -match 'SignalRgbService -StartupType')) "must not name the other candidate:`n$($r.Out)"
+        Assert-True (-not ($r.Out -match 'STUB Set-Service')) 'nothing may be restored from an unreadable record'
+    }
+
+    Test-Case 'uninstall-elevated.ps1: with no SignalRGB service found, the candidates are listed and no command is invented' {
+        $r = Invoke-ElevatedUninstallSandbox 'e24e' '{not json'
+        Assert-True ($r.Out -match 'No SignalRGB service was found \(looked for: SignalRgb\.Service, SignalRgbService\)') $r.Out
+        Assert-True (-not ($r.Out -match 'Set-Service -Name')) $r.Out
+    }
+
+    Test-Case 'uninstall-elevated.ps1: a junction at the machine home is named and not followed (the record behind it is not read, restored or deleted)' {
+        $good = '{"service":{"name":"SignalRgb.Service","startType":"Manual"}}'
+        $r = Invoke-ElevatedUninstallSandbox 'e24f' $good -SignalService 'SignalRgb.Service' -JunctionHome
+        try {
+            Assert-True ($r.Out -match 'restore record unreadable') $r.Out
+            Assert-True ($r.Out -match 'junction or symbolic link') $r.Out
+            Assert-True ($r.Out.Contains($r.Pd)) "must name the path:`n$($r.Out)"
+            Assert-True (-not ($r.Out -match 'STUB Set-Service')) "the record behind the junction must not be used:`n$($r.Out)"
+            Assert-Equal $r.Code 2 $r.Out
+            Assert-Equal ([System.IO.File]::ReadAllText($r.Record)) $good 'the record behind the junction must be untouched'
+        } finally { & cmd.exe /c rmdir "$($r.Pd)" | Out-Null }
+    }
+
+    Test-Case 'uninstall.ps1 -WhatIf: a junction at the machine home is named in the plan, and the record behind it is not read' {
+        $pdRoot = Join-Path $dir 'PD24j'; $ad = Join-Path $dir 'AD24j'; $real = Join-Path $dir 'real24j'
+        New-Item -ItemType Directory -Path $pdRoot, $ad, $real -Force | Out-Null
+        $link = Join-Path $pdRoot 'canvas-rgb'
+        [System.IO.File]::WriteAllText((Join-Path $real 'signalrgb-restore.json'), '{"service":{"name":"SignalRgb.Service","startType":"Manual"}}')
+        & cmd.exe /c mklink /J "$link" "$real" | Out-Null
+        try {
+            $cmd = '$env:ProgramData=''{0}''; $env:APPDATA=''{1}''; & ''{2}'' -WhatIf; exit $LASTEXITCODE' -f $pdRoot, $ad, (Join-Path $PSScriptRoot '..\uninstall.ps1')
+            $out = & powershell.exe -NoProfile -Command $cmd 2>&1 | Out-String
+            Assert-True ($out -match 'restore record unreadable.*junction or symbolic link') $out
+            Assert-True (-not ($out -match 'restore SignalRgb\.Service StartType')) "the record behind the junction must not be read:`n$out"
+            Assert-True (Test-Path -LiteralPath (Join-Path $real 'signalrgb-restore.json')) 'the record must be untouched'
+        } finally { & cmd.exe /c rmdir "$link" | Out-Null }
+    }
+
+    # uninstall.ps1 as a temp copy: Start-Process (the UAC child) is a stub returning a chosen exit code, and
+    # uninstall-user.ps1 is a fake that only says it ran.
+    function Invoke-UninstallDriverSandbox([string]$Name, [int]$ChildExit) {
+        $root = Join-Path $dir $Name
+        $scripts = Join-Path $root 'scripts'; $inst = Join-Path $root 'install'
+        New-Item -ItemType Directory -Path $scripts, $inst, (Join-Path $root 'PD'), (Join-Path $root 'AD'), (Join-Path $root 'TEMP') -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $inst 'canvas-rgbd.exe'), 'x')
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\uninstall.ps1') -Destination $scripts
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\lib.ps1') -Destination $scripts
+        [System.IO.File]::WriteAllText((Join-Path $scripts 'uninstall-user.ps1'), "Write-Host 'FAKE per-user step ran'`nexit 0`n")
+        $stubs = @'
+
+function Test-IsAdmin { return $false }
+function Start-Process { Write-Host 'STUB Start-Process'; [pscustomobject]@{ ExitCode = __EXIT__ } }
+'@
+        Add-Content -LiteralPath (Join-Path $scripts 'lib.ps1') -Value $stubs.Replace('__EXIT__', "$ChildExit")
+        $cmd = '$env:ProgramData=''{0}''; $env:APPDATA=''{1}''; $env:TEMP=''{2}''; & ''{3}'' -InstallDir ''{4}''; exit $LASTEXITCODE' -f (Join-Path $root 'PD'), (Join-Path $root 'AD'), (Join-Path $root 'TEMP'), (Join-Path $scripts 'uninstall.ps1'), $inst
+        $out = & powershell.exe -NoProfile -Command $cmd 2>&1 | Out-String
+        return @{ Out = $out; Code = $LASTEXITCODE }
+    }
+
+    Test-Case 'uninstall.ps1: an elevated child that exits 2 still runs the per-user steps, then ends "finished, except" with exit 1' {
+        $r = Invoke-UninstallDriverSandbox 'd24a' 2
+        Assert-True ($r.Out -match 'STUB Start-Process') "the UAC stub must be in effect:`n$($r.Out)"
+        Assert-True ($r.Out -match 'FAKE per-user step ran') "per-user steps must still run:`n$($r.Out)"
+        Assert-True ($r.Out -match 'uninstall finished, except') $r.Out
+        Assert-True (-not ($r.Out -match 'uninstall finished\.')) "must not end with a plain finished:`n$($r.Out)"
+        Assert-Equal $r.Code 1 $r.Out
+    }
+
+    Test-Case 'uninstall.ps1: an elevated child that exits 1 still stops before the per-user steps' {
+        $r = Invoke-UninstallDriverSandbox 'd24b' 1
+        Assert-True ($r.Out -match 'Per-user steps were not run') $r.Out
+        Assert-True (-not ($r.Out -match 'FAKE per-user step ran')) $r.Out
+        Assert-Equal $r.Code 1 $r.Out
+    }
+
+    Test-Case 'uninstall.ps1: an elevated child that exits 0 ends "uninstall finished." with exit 0' {
+        $r = Invoke-UninstallDriverSandbox 'd24c' 0
+        Assert-True ($r.Out -match 'uninstall finished\.') $r.Out
+        Assert-Equal $r.Code 0 $r.Out
     }
 
     # ---- item 12: Uninstall in Installed apps knows a non-default folder

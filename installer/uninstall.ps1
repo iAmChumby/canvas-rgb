@@ -35,10 +35,10 @@ $userRestorePath = Join-Path $appData $c.RestoreFile
 
 $machineRestore = $null
 $machineRestoreError = $null
-try { $machineRestore = Read-RestoreFile -Path $machineRestorePath } catch { $machineRestoreError = "$machineRestorePath ($($_.Exception.Message))" }
+try { $machineRestore = Read-RestoreFileSafe -Path $machineRestorePath } catch { $machineRestoreError = "$machineRestorePath ($($_.Exception.Message))" }
 $userRestore = $null
 $userRestoreError = $null
-try { $userRestore = Read-RestoreFile -Path $userRestorePath } catch { $userRestoreError = "$userRestorePath ($($_.Exception.Message))" }
+try { $userRestore = Read-RestoreFileSafe -Path $userRestorePath } catch { $userRestoreError = "$userRestorePath ($($_.Exception.Message))" }
 $serviceExists = [bool](Get-Service -Name $c.ServiceName -ErrorAction SilentlyContinue)
 
 $plan = Get-UninstallPlan -E @{

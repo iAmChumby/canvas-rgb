@@ -28,7 +28,7 @@ $backupDir = Join-Path $appData 'signalrgb-startup-backup'
 $startupDir = [Environment]::GetFolderPath('Startup')
 $userRestore = $null
 $userRestoreError = $null
-try { $userRestore = Read-RestoreFile -Path $userRestorePath } catch { $userRestoreError = $_.Exception.Message }
+try { $userRestore = Read-RestoreFileSafe -Path $userRestorePath } catch { $userRestoreError = $_.Exception.Message }
 if ($userRestoreError) {
     # Never swallow this: the record is the only way back to SignalRGB's start-up entries. Keep the file (a later
     # retry, or Luke, can still use it), say so, and fail the run so nothing reports a plain "finished".

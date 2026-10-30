@@ -177,6 +177,19 @@ try {
         Assert-True ($rs.Contains('INSTALLER_ARGS: &str = "/SILENT /NORESTART /UPDATE"')) 'tray passes /SILENT /NORESTART /UPDATE'
         Assert-True ($rs -notmatch 'SUPPRESSMSGBOXES"') 'no /SUPPRESSMSGBOXES in the args'
     }
+    Test-Case 'iss: InitializeUninstall treats elevated exit 2 as "carry on" (the service is already gone) and every other non-zero as an abort' {
+        $m = [regex]::Match($iss, 'function InitializeUninstall[\s\S]*?\nend;')
+        Assert-True $m.Success 'InitializeUninstall not found'
+        $b = $m.Value
+        Assert-True ($b -match 'Ran and \(Code = 2\)') 'exit 2 must be handled as its own branch'
+        Assert-True ($b -match 'except') 'the message for exit 2 must say what was not restored'
+        $i2 = $b.IndexOf('Code = 2'); $iFail = $b.IndexOf('(not Ran) or (Code <> 0)')
+        Assert-True ($i2 -ge 0 -and $iFail -gt $i2) 'the abort branch must come after the exit 2 branch'
+        $iFalse = $b.IndexOf('Result := False', $iFail)
+        Assert-True ($iFalse -gt $iFail) 'every other non-zero code (and a failed launch) must still abort'
+        Assert-True (-not $b.Substring($i2, $iFail - $i2).Contains('Result := False')) 'the exit 2 branch must not abort the uninstall'
+    }
+
     Test-Case 'iss: every payload script the [Code] section runs is a [Files] source' {
         foreach ($f in 'setup-elevated.ps1', 'setup-user.ps1', 'uninstall-elevated.ps1', 'uninstall-user.ps1', 'stop-canvas.ps1', 'fetch-openrgb.ps1', 'preflight.ps1', 'lib.ps1', 'openrgb.lock.json') {
             Assert-True (Test-Path -LiteralPath (Join-Path $instDir $f)) "$f missing from installer\"

@@ -31,11 +31,20 @@ try {
     $rf = Join-Path $programData $c.RestoreFile
     $rec = $null
     $recError = $null
-    try { $rec = Read-RestoreFile -Path $rf } catch { $recError = $_.Exception.Message }
+    try { $rec = Read-RestoreFileSafe -Path $rf } catch { $recError = $_.Exception.Message }
     if ($recError) {
         Say "  restore record unreadable: $rf ($recError)"
         Say "  The SignalRGB service start type will NOT be restored. The record is kept as it is."
-        Say "  To restore by hand: run  Set-Service -Name SignalRgbService -StartupType Automatic  in an elevated PowerShell (use the start type the record lists, if it can be read). Fix or remove the record, then run the uninstall again."
+        # The record cannot say which service it was, so look up which of the known names exists on this PC.
+        $present = @($c.SignalRgbServiceNames | Where-Object { Get-Service -Name $_ -ErrorAction SilentlyContinue })
+        if ($present.Count -eq 1) {
+            Say "  To restore by hand, in an elevated PowerShell:  Set-Service -Name $($present[0]) -StartupType Automatic  (Automatic is SignalRGB's usual setting; the record's own value could not be read)."
+        } elseif ($present.Count -gt 1) {
+            Say "  To restore by hand, in an elevated PowerShell, for the one you use:  $(($present | ForEach-Object { "Set-Service -Name $_ -StartupType Automatic" }) -join '   or   ')  (the record's own start type could not be read)."
+        } else {
+            Say "  No SignalRGB service was found (looked for: $(@($c.SignalRgbServiceNames) -join ', ')), so there is nothing to restore by hand for the service."
+        }
+        Say "  Fix or remove the record, then run the uninstall again."
     }
 
     # 1. Stop the service FIRST. Its 1 Hz tick re-drives every manual header (each duty write sets the
