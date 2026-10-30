@@ -150,6 +150,9 @@ pub mod windows_watcher {
     /// The window class name.
     const CLASS_NAME: PCWSTR = w!("CanvasRgbPowerWatcher");
 
+    /// `ENDSESSION_LOGOFF` in the `lParam` of `WM_ENDSESSION`: the user is logging off.
+    const ENDSESSION_LOGOFF: u32 = 0x8000_0000;
+
     /// The message the hidden window posts to itself when the display state changes.
     const WM_DISPLAY_STATE: u32 = WM_APP + 1;
     /// The message the hidden window posts to itself when the session changes.
@@ -289,12 +292,18 @@ pub mod windows_watcher {
                 LRESULT(0)
             }
             WM_QUERYENDSESSION => {
+                tracing::warn!(logoff = lparam.0 as u32 & ENDSESSION_LOGOFF != 0, "WM_QUERYENDSESSION: Windows asks whether the session may end");
                 if let Some(sender) = sender(hwnd) {
                     let _ = sender.send(PowerEvent::Shutdown);
                 }
                 LRESULT(1)
             }
             WM_ENDSESSION => {
+                tracing::warn!(
+                    session_ending = wparam.0 != 0,
+                    logoff = lparam.0 as u32 & ENDSESSION_LOGOFF != 0,
+                    "WM_ENDSESSION received"
+                );
                 if let Some(sender) = sender(hwnd) {
                     let _ = sender.send(PowerEvent::Shutdown);
                 }

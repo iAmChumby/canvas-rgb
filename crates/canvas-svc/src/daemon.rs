@@ -51,6 +51,11 @@ fn same_image(a: &Path, b: &Path) -> bool {
     norm(a) == norm(b)
 }
 
+/// The log reason for a daemon that exited: the code in hex with its NTSTATUS name (#19).
+fn exited_reason(code: i32) -> String {
+    format!("exited with code {}", crate::process::describe_exit_code(code))
+}
+
 /// What the caller must do after a supervision pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DaemonAction {
@@ -204,7 +209,7 @@ impl DaemonSupervisor {
             match child.try_wait() {
                 Ok(Some(code)) => {
                     self.child = None;
-                    return self.crashed(now, &format!("exited with code {code}"));
+                    return self.crashed(now, &exited_reason(code));
                 }
                 Ok(None) => {}
                 Err(e) => tracing::warn!(error = %e, "could not query the daemon process"),
@@ -574,5 +579,11 @@ mod tests {
         processes.add_running(9001, r"C:\svc\canvas-rgbd.exe", 1);
         sup.start(Instant::now());
         assert!(!processes.running_ended(9001));
+    }
+
+    #[test]
+    fn a_daemon_exit_reason_is_hex_with_the_status_name() {
+        assert_eq!(exited_reason(-1_073_741_502), "exited with code 0xC0000142 STATUS_DLL_INIT_FAILED");
+        assert_eq!(exited_reason(1), "exited with code 0x00000001");
     }
 }

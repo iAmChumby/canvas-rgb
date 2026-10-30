@@ -56,6 +56,29 @@ pub fn init(name: &str) -> std::io::Result<LogGuard> {
     Ok(LogGuard { _writer: guard })
 }
 
+/// Logs a failure that a step would otherwise drop, and hands back the value on success. Use it
+/// where the step goes on whatever happens: the log then says the step did not work, instead of
+/// the next line reading as if it had (class `cause:unchecked-state`, #19).
+pub fn warn_if_err<T, E: std::fmt::Display>(what: &str, result: Result<T, E>) -> Option<T> {
+    match result {
+        Ok(value) => Some(value),
+        Err(error) => {
+            tracing::warn!(%error, "{what}");
+            None
+        }
+    }
+}
+
+/// Logs how many devices a step reached: INFO for some, WARN for none. A step that reached no
+/// device did nothing, and the log must say so (class `cause:unchecked-state`, #18).
+pub fn log_device_write(what: &str, devices: usize) {
+    if devices == 0 {
+        tracing::warn!(devices, "{what} 0 devices: nothing was written");
+    } else {
+        tracing::info!(devices, "{what} {devices} devices");
+    }
+}
+
 /// Removes log files older than [`KEEP_DAYS`] days.
 pub fn prune_old_logs(dir: &std::path::Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -96,6 +119,48 @@ pub fn over_budget(dir: &std::path::Path, prefix: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs `run` under a subscriber that collects its lines.
+    fn captured(run: impl FnOnce()) -> String {
+        #[derive(Clone, Default)]
+        struct Buf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buf = Buf::default();
+        let sink = buf.clone();
+        let subscriber = tracing_subscriber::fmt().with_ansi(false).with_writer(move || sink.clone()).finish();
+        tracing::subscriber::with_default(subscriber, run);
+        let text = String::from_utf8_lossy(&buf.0.lock().unwrap()).into_owned();
+        text
+    }
+
+    #[test]
+    fn a_dropped_error_is_logged_and_a_value_passes_through() {
+        let text = captured(|| {
+            assert_eq!(warn_if_err("could not save the thing", Err::<u8, _>("disk full")), None);
+            assert_eq!(warn_if_err("could not save the thing", Ok::<u8, &str>(5)), Some(5));
+        });
+        assert_eq!(text.lines().count(), 1, "{text}");
+        assert!(text.contains("WARN") && text.contains("could not save the thing") && text.contains("disk full"), "{text}");
+    }
+
+    #[test]
+    fn a_write_to_zero_devices_is_a_warning() {
+        let text = captured(|| {
+            log_device_write("queued black for", 0);
+            log_device_write("queued black for", 2);
+        });
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[0].contains("WARN") && lines[0].contains("0 devices") && lines[0].contains("nothing was written"), "{text}");
+        assert!(lines[1].contains("INFO") && lines[1].contains("2 devices"), "{text}");
+    }
 
     #[test]
     fn old_logs_are_pruned() {

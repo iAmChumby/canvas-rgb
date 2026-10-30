@@ -5,6 +5,7 @@
 //! the screen and audio capture, the storage, the logs, the first run, the sleep
 //! handling, the SignalRGB conflict check and the pipe client to the service.
 
+use canvas_daemon::exit_log::StopReason;
 use canvas_daemon::state::App;
 use canvas_proto::api::LinkState;
 use canvas_proto::traits::{DeviceAdapter, EngineSettings};
@@ -12,20 +13,22 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 fn main() -> std::process::ExitCode {
-    // The daemon never runs elevated.
-    if let Err(e) = canvas_daemon::elevated::ElevatedError::check() {
-        eprintln!("error: {e}");
-        return std::process::ExitCode::from(1);
-    }
-
-    // The logs go to a rolling daily file (G8).
-    let _log_guard = match canvas_daemon::logging::init("canvas-rgbd") {
+    // The logs go to a rolling daily file (G8). They start first, so even a refused start
+    // leaves a line (#19).
+    let log_guard = match canvas_daemon::logging::init("canvas-rgbd") {
         Ok(guard) => Some(guard),
         Err(e) => {
             eprintln!("warning: could not open the log file: {e}");
             None
         }
     };
+    canvas_daemon::exit_log::install_panic_hook();
+
+    // The daemon never runs elevated.
+    if let Err(e) = canvas_daemon::elevated::ElevatedError::check() {
+        eprintln!("error: {e}");
+        return finish(log_guard, Exit::new(1, format!("refusing to start: {e}")));
+    }
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -35,17 +38,36 @@ fn main() -> std::process::ExitCode {
         Ok(runtime) => runtime,
         Err(e) => {
             eprintln!("error: could not start the tokio runtime: {e}");
-            return std::process::ExitCode::from(1);
+            return finish(log_guard, Exit::new(1, format!("could not start the tokio runtime: {e}")));
         }
     };
 
-    let code = runtime.block_on(daemon_main());
+    let exit = runtime.block_on(daemon_main());
     // A task still blocked must not hold the daemon up (G3): the runtime gets a short
     // grace, then it is dropped without waiting for blocked workers.
     runtime.shutdown_timeout(RUNTIME_GRACE);
+    finish(log_guard, exit)
+}
+
+/// Why `main` is ending the process and with which code. Every path out of `main` builds one,
+/// and [`finish`] writes it to the log (#19).
+struct Exit {
+    code: i32,
+    reason: String,
+}
+
+impl Exit {
+    fn new(code: i32, reason: impl Into<String>) -> Self {
+        Self { code, reason: reason.into() }
+    }
+}
+
+/// Logs the exit, flushes the log file (dropping the guard), and ends the process.
+fn finish(log_guard: Option<canvas_daemon::logging::LogGuard>, exit: Exit) -> std::process::ExitCode {
+    canvas_daemon::exit_log::log_exit(&exit.reason, exit.code);
     // Dropping the guard flushes the log file before the process ends.
-    drop(_log_guard);
-    std::process::exit(code)
+    drop(log_guard);
+    std::process::exit(exit.code)
 }
 
 /// The quit path's bounds (G3). The whole path ends well inside `QUIT_DEADLINE`.
@@ -57,7 +79,7 @@ const ENGINE_STOP_LIMIT: std::time::Duration = std::time::Duration::from_millis(
 const RUNTIME_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// The daemon's main loop. Returns the process exit code.
-async fn daemon_main() -> i32 {
+async fn daemon_main() -> Exit {
     // A snapshot before anything is changed (G10).
     if let Err(e) = canvas_daemon::storage::snapshot(&canvas_daemon::paths::home(), "startup") {
         tracing::warn!(error = %e, "could not take the startup snapshot");
@@ -68,7 +90,7 @@ async fn daemon_main() -> i32 {
         Ok(token) => token,
         Err(e) => {
             tracing::error!(error = %e, "could not create the API token");
-            return 1;
+            return Exit::new(1, format!("could not create the API token: {e}; exiting"));
         }
     };
 
@@ -187,8 +209,9 @@ async fn daemon_main() -> i32 {
     let listener = match tokio::net::TcpListener::bind(&address).await {
         Ok(listener) => listener,
         Err(e) => {
-            tracing::error!(error = %e, address = %address, "could not bind the API");
-            return 1;
+            let holders = port_holders(app.store.read().await.config.api_port);
+            tracing::error!(error = %e, address = %address, holders = %holders, "could not bind the API; exiting");
+            return Exit::new(1, format!("could not bind the API on {address} ({e}); {holders}; exiting"));
         }
     };
     tracing::info!(address = %address, "the API is listening");
@@ -200,18 +223,12 @@ async fn daemon_main() -> i32 {
         }
     });
 
-    // Wait for the quit signal: Ctrl+C, console close, or the API's quit route.
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            tracing::info!(reason = "ctrl-c", "the daemon was asked to stop");
-        }
-        _ = console_close() => {
-            tracing::info!(reason = "console-close", "the daemon was asked to stop");
-        }
-        Some(()) = quit_rx.recv() => {
-            tracing::info!(reason = "api", "the daemon was asked to stop");
-        }
-    }
+    // Wait for the quit signal: Ctrl+C, console close/logoff/shutdown, or the API's quit route.
+    let reason = tokio::select! {
+        reason = console_stop() => reason,
+        Some(()) = quit_rx.recv() => StopReason::Api,
+    };
+    canvas_daemon::exit_log::log_stop_requested(reason);
 
     // The process ends within QUIT_DEADLINE of this point, whatever is still running.
     arm_exit_watchdog(QUIT_DEADLINE);
@@ -220,7 +237,26 @@ async fn daemon_main() -> i32 {
     server.abort();
 
     tracing::info!("canvas-rgbd has stopped");
-    0
+    Exit::new(0, format!("stopped: {}", reason.describe()))
+}
+
+/// Who holds `port`, for the line logged when the API cannot bind it: "the port 9430 is held by
+/// pid 4242 (canvas-rgbd.exe)", or why that could not be found out.
+fn port_holders(port: u16) -> String {
+    match canvas_daemon::peer::listener_pids(port) {
+        Some(pids) if pids.is_empty() => format!("port {port} has no listener now (it was taken and released)"),
+        Some(pids) => {
+            let named: Vec<String> = pids
+                .iter()
+                .map(|pid| match canvas_daemon::peer::image_name(*pid) {
+                    Some(image) => format!("pid {pid} ({image})"),
+                    None => format!("pid {pid}"),
+                })
+                .collect();
+            format!("port {port} is held by {}", named.join(", "))
+        }
+        None => format!("could not read who listens on port {port}"),
+    }
 }
 
 /// The quit path (G3), in order. Each step has a bound, so no step holds the daemon up.
@@ -258,8 +294,10 @@ async fn write_on_quit(app: &Arc<App>) {
     match on_quit {
         canvas_proto::config::OnQuit::Black => {
             app.identify.stop();
+            // The engine holds one sink per driven device; with none, nothing can be written.
+            let sinks = app.engine.stats().sinks as usize;
             app.engine.write_solid(canvas_proto::Rgb8::BLACK);
-            tracing::info!(reason = "quit", "wrote black to every device");
+            canvas_daemon::logging::log_device_write("queued black for", sinks);
             tokio::time::sleep(BLACK_GRACE).await;
         }
         canvas_proto::config::OnQuit::LeaveLastFrame => {
@@ -283,20 +321,47 @@ fn arm_exit_watchdog(after: std::time::Duration) {
     std::thread::spawn(move || {
         std::thread::sleep(after);
         tracing::warn!("the quit deadline passed; ending the process");
+        // The log writer runs on its own thread; give it a moment to write the line.
+        std::thread::sleep(std::time::Duration::from_millis(150));
         std::process::exit(0);
     });
 }
 
-/// Console close, logoff and shutdown: the same quit as Ctrl+C.
-async fn console_close() {
+/// Waits for Ctrl+C or a console control event and says which one: close, logoff or shutdown
+/// (the three the system sends a console process before it ends it), or Ctrl+Break.
+async fn console_stop() -> StopReason {
     #[cfg(windows)]
     {
-        if let Ok(mut close) = tokio::signal::windows::ctrl_close() {
-            close.recv().await;
-            return;
+        use tokio::signal::windows as sig;
+        // A signal that cannot be registered never fires; the others still do.
+        macro_rules! watch {
+            ($register:expr, $name:literal) => {
+                async {
+                    match $register {
+                        Ok(mut signal) => {
+                            signal.recv().await;
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, event = $name, "a console control event cannot be watched");
+                            std::future::pending::<()>().await
+                        }
+                    }
+                }
+            };
+        }
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => StopReason::CtrlC,
+            _ = watch!(sig::ctrl_close(), "CTRL_CLOSE_EVENT") => StopReason::ConsoleClose,
+            _ = watch!(sig::ctrl_logoff(), "CTRL_LOGOFF_EVENT") => StopReason::ConsoleLogoff,
+            _ = watch!(sig::ctrl_shutdown(), "CTRL_SHUTDOWN_EVENT") => StopReason::ConsoleShutdown,
+            _ = watch!(sig::ctrl_break(), "CTRL_BREAK_EVENT") => StopReason::CtrlBreak,
         }
     }
-    std::future::pending::<()>().await
+    #[cfg(not(windows))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        StopReason::CtrlC
+    }
 }
 
 /// Reads the zone sizes from `zones.json`.

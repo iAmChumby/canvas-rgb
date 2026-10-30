@@ -9,6 +9,7 @@ pub mod composite;
 pub mod conflict;
 pub mod displays;
 pub mod elevated;
+pub mod exit_log;
 pub mod first_run;
 pub mod identify;
 pub mod logging;

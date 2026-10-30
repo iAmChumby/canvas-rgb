@@ -832,9 +832,9 @@ async fn run(app: &std::sync::Arc<crate::state::App>) {
                 schema_version: canvas_proto::config::ZONES_SCHEMA,
                 sizes: guard.clone(),
             };
-            let _ = crate::storage::write_json(
-                &home.join(canvas_proto::config::ZONES_FILE),
-                &file,
+            crate::logging::warn_if_err(
+                "the first run could not save the zone sizes",
+                crate::storage::write_json(&home.join(canvas_proto::config::ZONES_FILE), &file),
             );
         }
     }
@@ -872,7 +872,7 @@ async fn run(app: &std::sync::Arc<crate::state::App>) {
             Some(existing) => *existing = layout.clone(),
             None => store.layouts.layouts.push(layout.clone()),
         }
-        let _ = store.save_layouts();
+        crate::logging::warn_if_err("the first run could not save the layouts", store.save_layouts());
     }
     let device_list = app.devices.read().await.clone();
     app.engine.set_layout(layout.clone(), device_list);
@@ -890,7 +890,7 @@ async fn run(app: &std::sync::Arc<crate::state::App>) {
             .write()
             .await;
         store.config.first_run_done = true;
-        let _ = store.save_config();
+        crate::logging::warn_if_err("the first run could not save first_run_done; it will run again", store.save_config());
     }
     tracing::info!("the first run is done");
 }
