@@ -7,7 +7,7 @@
 ; one Installed apps entry (canvas-rgb_is1).
 
 #ifndef AppVersion
-  #define AppVersion "0.1.1"
+  #define AppVersion "0.1.2"
 #endif
 #ifndef PayloadDir
   #define PayloadDir "..\..\dist\payload"
