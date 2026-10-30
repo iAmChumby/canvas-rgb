@@ -147,6 +147,35 @@ try {
         Assert-True ($iss -match 'False, False\);') 'checkbox page, nothing ticked'
         Assert-True ($iss -notmatch '(?i)Source:.*pawn') 'PawnIO must not be a [Files] source'
     }
+    Test-Case 'iss: /UPDATE relaunches the tray with --after-update, every other silent run with --onboard' {
+        Assert-True ($iss -match "(?s)function IsUpdateRun: Boolean;.*?Uppercase\(ParamStr\(I\)\) = '/UPDATE'") 'IsUpdateRun reads /UPDATE'
+        Assert-True ($iss -match "(?s)if IsUpdateRun then\s+ExecAsOriginalUser\(ExpandConstant\('\{app\}\\canvas-rgb\.exe'\), '--after-update'") '/UPDATE starts --after-update'
+        Assert-True ($iss -match "(?s)else\s+ExecAsOriginalUser\(ExpandConstant\('\{app\}\\canvas-rgb\.exe'\), '--onboard'") 'other silent runs keep --onboard'
+        Assert-True ($iss -match "WizardSilent and \(not IsVerySilent\)") '/VERYSILENT still starts nothing'
+        Assert-True ($iss -match 'Parameters: "--onboard"[^\r\n]*skipifsilent') 'the wizard launch is unchanged'
+    }
+    Test-Case 'iss: /UPDATE writes update-result.json on every exit and starts the tray again after a failure' {
+        $a = $iss.IndexOf('procedure DeinitializeSetup;')
+        Assert-True ($a -gt 0) 'DeinitializeSetup exists'
+        $body = $iss.Substring($a, $iss.IndexOf('// ---- uninstall') - $a)
+        Assert-True ($body -match 'if not IsUpdateRun then Exit;') 'only for /UPDATE'
+        $je = $iss.Substring($iss.IndexOf('function JsonEscape'), 700)
+        Assert-True ($je.Contains('N < 32') -and $je.Contains("'\u00'")) 'JsonEscape writes every control character below 0x20 as \u00XX'
+        foreach ($n in '"version":"{#AppVersion}"', '"ok":', '"message":"', 'update-result.json', 'FPrepError', 'FFailText') { Assert-True ($body.Contains($n)) "result file has $n" }
+        Assert-True ($body -match "(?s)\(not Ok\) and FileExists\(Exe\).*?'--after-update'") 'a failure relaunches the tray quietly'
+        Assert-True ($iss -match 'Type: files; Name: "\{app\}\\update-result\.json"') 'uninstall removes the file'
+        Assert-True ($iss.IndexOf('DeleteFile(ExpandConstant(''{app}\update-result.json''))') -gt 0) 'a stale result is deleted at the start of a run'
+        foreach ($m in 'FPrepError := Text;') { Assert-True ($iss.Contains($m)) "PrepareToInstall failures are remembered ($m)" }
+        $p = $iss.IndexOf('function PrepareToInstall'); $q = $iss.IndexOf('procedure CurStepChanged')
+        $prep = $iss.Substring($p, $q - $p)
+        Assert-True ((([regex]::Matches($prep, 'Result := PrepFail\(')).Count) -eq 4) 'all four PrepareToInstall failures go through PrepFail'
+        Assert-True (-not ($prep -match "Result := '[^']")) 'no failure bypasses PrepFail'
+    }
+    Test-Case 'iss and tray agree on the installer switches (no /SUPPRESSMSGBOXES: the failure page must show)' {
+        $rs = Get-Content -LiteralPath (Join-Path $instDir '..\app\src-tauri\src\update\launch.rs') -Raw
+        Assert-True ($rs.Contains('INSTALLER_ARGS: &str = "/SILENT /NORESTART /UPDATE"')) 'tray passes /SILENT /NORESTART /UPDATE'
+        Assert-True ($rs -notmatch 'SUPPRESSMSGBOXES"') 'no /SUPPRESSMSGBOXES in the args'
+    }
     Test-Case 'iss: every payload script the [Code] section runs is a [Files] source' {
         foreach ($f in 'setup-elevated.ps1', 'setup-user.ps1', 'uninstall-elevated.ps1', 'uninstall-user.ps1', 'stop-canvas.ps1', 'fetch-openrgb.ps1', 'preflight.ps1', 'lib.ps1', 'openrgb.lock.json') {
             Assert-True (Test-Path -LiteralPath (Join-Path $instDir $f)) "$f missing from installer\"
