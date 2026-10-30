@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- Toasts in the editor go away after a few seconds again instead of staying on screen. (#12)
+
 ## [0.1.2] - 2026-10-29
 
 ### Fixed

@@ -90,3 +90,15 @@ or acts as if a step worked without checking that it did.
   queue drops a refresh hint), and best-effort UI calls that claim nothing afterwards.
 - **How to check a new notice or log line:** name the field or the measurement behind it. If there
   is none, it is this bug.
+
+### `cause:react-lifecycle`: an effect restarts because a parent re-rendered
+
+An effect lists a callback or object that a parent creates inline. The shell re-renders every
+second on the status poll, so the effect tears down and starts again before it can finish.
+
+- [#12](https://github.com/iAmChumby/canvas-rgb/issues/12): toasts never cleared. `ToastHost` passed
+  `onDone={() => remove(t.id)}`, the timer effect depended on it, and the 1 s status tick restarted
+  the 2.6 s timer forever. Fix: the timer depends on the toast id only; the callback lives in a ref.
+  Regression test: `components/__tests__/Toast.test.tsx` (the editor's first unit test, run in CI).
+- **Class fix:** not yet (one bug). Sibling search found no second case: every other effect with a
+  callback dependency only re-binds a listener or is guarded by a ref (table in the PR for #12).
