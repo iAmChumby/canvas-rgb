@@ -77,12 +77,39 @@ jobs:
           "### SHA-256`n`n``$h  $($exe.Name)``" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
           Set-Content -Path "dist/$($exe.Name).sha256" -Value "$h  $($exe.Name)" -Encoding ascii
 
+      # The tray's updater trusts one minisign key. The signature carries the version (--app-version), so a
+      # tampered latest.json cannot pair a new version number with an older signed installer.
+      # The private key is the UPDATE_SIGNING_KEY secret (backup: outside the repo, see docs/releasing.md).
+      - name: Sign the installer for the updater
+        shell: pwsh
+        timeout-minutes: 5 # a signing run takes seconds; a stuck npx download or prompt must not hold the release
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        run: |
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) { throw 'the UPDATE_SIGNING_KEY secret is not set' }
+          $v = $env:GITHUB_REF_NAME.TrimStart('v')
+          $exe = Get-ChildItem dist -Filter 'canvas-rgb-setup-*.exe' | Select-Object -First 1
+          npx --yes @tauri-apps/cli@2.12.4 signer sign --app-version $v $exe.FullName
+          if ($LASTEXITCODE -ne 0) { throw "signer sign failed ($LASTEXITCODE)" }
+          if (-not (Test-Path "$($exe.FullName).sig")) { throw 'no .sig file was written' }
+
+      - name: Write latest.json
+        shell: pwsh
+        run: |
+          $v = $env:GITHUB_REF_NAME.TrimStart('v')
+          pwsh -NoProfile -File tools/make-update-manifest.ps1 -Version $v -SigFile "dist/canvas-rgb-setup-$v.exe.sig" -OutFile dist/latest.json
+          if ($LASTEXITCODE -ne 0) { throw 'make-update-manifest.ps1 failed' }
+          Get-Content dist/latest.json
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: installer
           path: |
             dist/canvas-rgb-setup-*.exe
             dist/canvas-rgb-setup-*.exe.sha256
+            dist/canvas-rgb-setup-*.exe.sig
+            dist/latest.json
           if-no-files-found: error
 
   publish:
@@ -104,4 +131,6 @@ jobs:
           files: |
             dist/canvas-rgb-setup-*.exe
             dist/canvas-rgb-setup-*.exe.sha256
+            dist/canvas-rgb-setup-*.exe.sig
+            dist/latest.json
           generate_release_notes: true
