@@ -27,7 +27,16 @@ $failed = $false
 $backupDir = Join-Path $appData 'signalrgb-startup-backup'
 $startupDir = [Environment]::GetFolderPath('Startup')
 $userRestore = $null
-try { $userRestore = Read-RestoreFile -Path $userRestorePath } catch { }
+$userRestoreError = $null
+try { $userRestore = Read-RestoreFileSafe -Path $userRestorePath } catch { $userRestoreError = $_.Exception.Message }
+if ($userRestoreError) {
+    # Never swallow this: the record is the only way back to SignalRGB's start-up entries. Keep the file (a later
+    # retry, or Luke, can still use it), say so, and fail the run so nothing reports a plain "finished".
+    $failed = $true
+    Write-Host "restore record unreadable: $userRestorePath ($userRestoreError)"
+    Write-Host "SignalRGB's start-up setting was NOT restored. The record was kept as it is."
+    Write-Host "To restore by hand: move the shortcuts in $backupDir back into $startupDir, and re-add any SignalRGB value that was in HKCU\Software\Microsoft\Windows\CurrentVersion\Run (the record lists them if it can be read). Fix or remove the record, then run the uninstall again."
+}
 
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 foreach ($n in $c.RunKeyDaemon, $c.RunKeyTray) {
@@ -62,7 +71,9 @@ if ($userRestore) {
 }
 $bin = Join-Path $InstallDir 'bin'
 if (Set-UserPathEntry -Entry $bin -Remove) { Write-Host "PATH: removed $bin" } else { Write-Host "PATH: $bin was not on the user PATH" }
-if ($PurgeConfig -and (Test-Path -LiteralPath $appData)) {
+if ($PurgeConfig -and $userRestoreError) {
+    Write-Host "kept $appData (-PurgeConfig skipped: it holds the unreadable restore record)"
+} elseif ($PurgeConfig -and (Test-Path -LiteralPath $appData)) {
     try {
         Remove-UserTreeNoFollow -Root $appData
         Write-Host "deleted $appData (-PurgeConfig)"

@@ -34,15 +34,18 @@ $machineRestorePath = Join-Path $programData $c.RestoreFile
 $userRestorePath = Join-Path $appData $c.RestoreFile
 
 $machineRestore = $null
-try { $machineRestore = Read-RestoreFile -Path $machineRestorePath } catch { }
+$machineRestoreError = $null
+try { $machineRestore = Read-RestoreFileSafe -Path $machineRestorePath } catch { $machineRestoreError = "$machineRestorePath ($($_.Exception.Message))" }
 $userRestore = $null
-try { $userRestore = Read-RestoreFile -Path $userRestorePath } catch { }
+$userRestoreError = $null
+try { $userRestore = Read-RestoreFileSafe -Path $userRestorePath } catch { $userRestoreError = "$userRestorePath ($($_.Exception.Message))" }
 $serviceExists = [bool](Get-Service -Name $c.ServiceName -ErrorAction SilentlyContinue)
 
 $plan = Get-UninstallPlan -E @{
     InstallDir = $InstallDir; ProgramDataDir = $programData; AppDataDir = $appData
     PurgeConfig = [bool]$PurgeConfig; ServiceExists = $serviceExists
     MachineRestore = $machineRestore; UserRestore = $userRestore
+    MachineRestoreError = $machineRestoreError; UserRestoreError = $userRestoreError
 }
 $plan | ForEach-Object { Write-Host $_ }
 
@@ -66,7 +69,9 @@ if ($PurgeConfig) { $childArgs += ' -PurgeConfig' }
 Write-Host 'Requesting elevation (the one UAC prompt)...'
 $p = Start-Process -FilePath 'powershell.exe' -ArgumentList $childArgs -Verb RunAs -Wait -PassThru
 if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log | ForEach-Object { Write-Host $_ } }
-if ($p.ExitCode -ne 0) { Fail "Elevated step failed (exit $($p.ExitCode)). Per-user steps were not run." }
+# Exit 2 = the elevated work finished except the SignalRGB machine record (unreadable, kept): carry on with the per-user steps.
+$elevatedPartial = ($p.ExitCode -eq 2)
+if ($p.ExitCode -ne 0 -and -not $elevatedPartial) { Fail "Elevated step failed (exit $($p.ExitCode)). Per-user steps were not run." }
 Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
 
 # Per-user steps, unelevated (uninstall-user.ps1 is shared with the Inno uninstaller).
@@ -74,6 +79,7 @@ $userArgs = @{ InstallDir = $InstallDir }
 if ($PurgeConfig) { $userArgs.PurgeConfig = $true }
 & (Join-Path $PSScriptRoot 'uninstall-user.ps1') @userArgs
 if (-not $?) { Fail 'The per-user step failed.' }
+if ($elevatedPartial) { Fail 'uninstall finished, except: the SignalRGB service start type was not restored (unreadable machine record, kept). See the messages above.' }
 Write-Host ''
 Write-Host 'uninstall finished.'
 exit 0

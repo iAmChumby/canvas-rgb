@@ -556,6 +556,7 @@ function InitializeUninstall: Boolean;
 var
   Code: Integer;
   Log, Args: String;
+  Ran: Boolean;
 begin
   Result := True;
   FPurge := '';
@@ -579,7 +580,16 @@ begin
 
   Log := ExpandConstant('{tmp}\canvas-rgb-uninstall-elevated.log');
   Args := '-InstallDir "' + ExpandConstant('{app}') + '" -InnoMode -LogFile "' + Log + '"' + FPurge;
-  if not RunPs(ExpandConstant('{app}\installer\uninstall-elevated.ps1'), Args, False, Code) or (Code <> 0) then
+  Ran := RunPs(ExpandConstant('{app}\installer\uninstall-elevated.ps1'), Args, False, Code);
+  if Ran and (Code = 2) then
+  begin
+    // Exit 2: the elevated work finished, except the SignalRGB service start type (its restore record is unreadable and kept).
+    // The service is already gone, so the uninstall carries on; say what was not restored.
+    if not UninstallSilent then
+      MsgBox('canvas-rgb is being removed, except one thing: SignalRGB''s start-up setting was not put back (its saved record is unreadable, so it was kept).' + #13#10 + #13#10 +
+        LogTail(Log), mbInformation, MB_OK);
+  end
+  else if (not Ran) or (Code <> 0) then
   begin
     if not UninstallSilent then
       MsgBox('canvas-rgb could not stop running or give the fans back to your motherboard (code ' + IntToStr(Code) + '). Nothing was removed.' + #13#10 + #13#10 +

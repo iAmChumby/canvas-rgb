@@ -192,6 +192,17 @@ function Read-RestoreFile {
     return (ConvertFrom-Json -InputObject $text)
 }
 
+# Read-RestoreFile behind the fail-closed check: a junction or symbolic link anywhere from the record up to the
+# drive root is named and NOT followed (the read would follow it), and the record is never deleted. Throws on it.
+function Read-RestoreFileSafe {
+    param([string]$Path)
+    $bad = Get-ReparseInChain -Path $Path
+    if ($bad) {
+        throw "STOP: '$bad' is a junction or symbolic link, so the restore record '$Path' was not read. It is never followed, deleted or changed. Check it yourself and remove or fix it."
+    }
+    return (Read-RestoreFile -Path $Path)
+}
+
 # ---------------------------------------------------------------- OpenRGB lock
 
 # Returns @{ Ok; Message; Url; File; Sha256 }. Refuses while url or sha256 is UNSET or empty.
@@ -537,6 +548,8 @@ function Get-UninstallPlan {
     $L.Add("  4. remove the Installed apps entry and the Start menu shortcut, then $($E.InstallDir)")
     if ($E.MachineRestore -and $E.MachineRestore.service) {
         $L.Add("  5. restore $($E.MachineRestore.service.name) StartType to $($E.MachineRestore.service.startType) (from $($E.ProgramDataDir)\$($c.RestoreFile))")
+    } elseif ($E.MachineRestoreError) {
+        $L.Add("  5. restore record unreadable: $($E.MachineRestoreError). The SignalRGB service will NOT be restored; the record is kept")
     } else {
         $L.Add("  5. no machine SignalRGB restore record: the SignalRGB service is left as is")
     }
@@ -547,6 +560,8 @@ function Get-UninstallPlan {
     if ($E.UserRestore) {
         foreach ($r in @($E.UserRestore.runValues)) { $L.Add("  8. restore HKCU Run value $($r.name) = $($r.data)") }
         foreach ($s in @($E.UserRestore.startupShortcuts)) { $L.Add("  8. restore Startup shortcut $($s.originalPath)") }
+    } elseif ($E.UserRestoreError) {
+        $L.Add("  8. restore record unreadable: $($E.UserRestoreError). SignalRGB's start-up setting will NOT be restored; the record is kept and this uninstall will exit non-zero")
     } else {
         $L.Add('  8. no user SignalRGB restore record: SignalRGB autostart left as is')
     }
