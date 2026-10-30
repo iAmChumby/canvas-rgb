@@ -519,6 +519,7 @@ var
   Code: Integer;
   Ok: Boolean;
   Msg, Json, Exe: String;
+  Lines: TArrayOfString;
 begin
   if not IsUpdateRun then Exit;
   try
@@ -533,7 +534,11 @@ begin
     Json := '{"version":"{#AppVersion}","ok":';
     if Ok then Json := Json + 'true' else Json := Json + 'false';
     Json := Json + ',"code":' + IntToStr(FFailCode) + ',"message":"' + JsonEscape(Msg) + '"}';
-    SaveStringToFile(ExpandConstant('{app}\update-result.json'), Json, False);
+    // The plain save-string function takes an AnsiString (jrsoftware.org/ishelp/topic_scriptfunctions.htm),
+    // so a non-ASCII message would be cut to the system code page. This writes UTF-8 with no BOM.
+    SetArrayLength(Lines, 1);
+    Lines[0] := Json;
+    SaveStringsToUTF8FileWithoutBOM(ExpandConstant('{app}\update-result.json'), Lines, False);
     Exe := ExpandConstant('{app}\canvas-rgb.exe');
     if (not Ok) and FileExists(Exe) then
       ExecAsOriginalUser(Exe, '--after-update', ExpandConstant('{app}'), SW_SHOWNORMAL, ewNoWait, Code);

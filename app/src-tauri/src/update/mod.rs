@@ -38,6 +38,7 @@ const PROGRESS_EVERY: Duration = Duration::from_millis(100);
 /// One download may take this long in all.
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// True when the arguments hold `--after-update` (the installer's `/UPDATE` relaunch).
 pub fn has_after_update_arg<S: AsRef<str>>(args: &[S]) -> bool {
@@ -92,7 +93,11 @@ pub struct InstallResult {
 }
 
 fn read_result(path: &Path) -> Option<InstallResult> {
-    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+    // Lenient: the installer writes UTF-8 without a BOM, but a BOM or a stray byte must not hide its report.
+    let bytes = std::fs::read(path).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    let bom = char::from_u32(0xFEFF).unwrap_or(' ');
+    serde_json::from_str(text.trim_start_matches(bom)).ok()
 }
 
 /// How a start with a `pending` version ends. Only the running version and the installer's own
@@ -258,6 +263,9 @@ impl Controller {
                 Settled::Failed(message) => {
                     log::append(&format!("update: {} did not install: {message}", pending.version));
                     i.install_failed_for = Some(pending.version.clone());
+                    // The editor's failed-install banner and the tooltip name this version; the
+                    // plugin object is gone after a restart, so Try again checks first.
+                    i.available = Some(pending);
                     i.phase = UpdatePhase::InstallFailed { message };
                 }
             }
@@ -411,11 +419,12 @@ impl Controller {
 
     /// Downloads, checks and starts the installer for an update from [`begin_install`]. Ends when
     /// the installer has been started (and, if this tray outlives it, when it has ended).
-    pub async fn run_install(&self, update: &Update) -> UpdateState {
+    pub async fn run_install(self: &Arc<Self>, update: &Update) -> UpdateState {
         let (state, started) = self.start_install(update).await;
         if let Some(handle) = started {
             // Normally the installer stops this tray. If it ends first, its result file says why.
-            launch::wait_and_close(handle);
+            // The wait is unbounded, so it takes a blocking thread, not an async worker.
+            let _ = tauri::async_runtime::spawn_blocking(move || launch::wait_and_close(handle)).await;
             self.reconcile_pending();
             return self.state();
         }
@@ -423,16 +432,61 @@ impl Controller {
     }
 
     /// Everything up to the installer running. Returns the process to wait on, if any.
-    pub async fn start_install(&self, update: &Update) -> (UpdateState, launch::Started) {
+    pub async fn start_install(self: &Arc<Self>, update: &Update) -> (UpdateState, launch::Started) {
         match self.fetch(update).await {
-            Ok(path) => self.launch_stage(update, &path),
-            Err(phase) => (self.set_phase(phase), None),
+            Ok(path) => {
+                // ShellExecuteExW waits for the permission prompt: a blocking thread, not an async worker.
+                let (this, update) = (self.clone(), update.clone());
+                match tauri::async_runtime::spawn_blocking(move || this.launch_stage(&update, &path)).await {
+                    Ok(out) => out,
+                    Err(e) => {
+                        log::append(&format!("update: the installer start panicked: {e}"));
+                        let message = "canvas-rgb could not start the installer.".to_string();
+                        (self.set_phase(UpdatePhase::InstallFailed { message }), None)
+                    }
+                }
+            }
+            Err(phase) => {
+                // Name the version in the tray tooltip, as `launch_stage` does.
+                let state = self.change(|i| {
+                    if matches!(phase, UpdatePhase::InstallFailed { .. }) {
+                        i.install_failed_for = Some(update.version.clone());
+                    }
+                    i.phase = phase;
+                });
+                (state, None)
+            }
         }
+    }
+
+    /// Try again with no live release object (after a restart): checks the feed first, then installs
+    /// only a release at least as new as the one that was on offer. A check that finds nothing or
+    /// fails leaves its own honest phase; nothing is silently dropped.
+    pub async fn check_and_install<R: Runtime>(self: &Arc<Self>, app: &AppHandle<R>) -> UpdateState {
+        let wanted = self.lock().available.as_ref().and_then(|a| a.version.parse::<Version>().ok());
+        let state = self.check(app, true).await;
+        if state.phase != UpdatePhase::Available {
+            return state;
+        }
+        let found = state.available.as_ref().and_then(|a| a.version.parse::<Version>().ok());
+        if matches!((&wanted, &found), (Some(w), Some(f)) if f < w) || found.is_none() {
+            return state;
+        }
+        match self.begin_install() {
+            Some(update) => self.run_install(&update).await,
+            None => self.state(),
+        }
+    }
+
+    /// True when Try again has no release object to install and may start a check.
+    pub fn needs_check_to_install(&self) -> bool {
+        let inner = self.lock();
+        !in_flight(&inner.phase) && inner.update.is_none()
     }
 
     /// `begin_install` then `run_install`.
     #[cfg(test)]
-    pub async fn install(&self) -> UpdateState {
+    pub async fn install(self: &Arc<Self>) -> UpdateState {
         match self.begin_install() {
             Some(update) => self.start_install(&update).await.0,
             None => self.state(),
@@ -597,7 +651,7 @@ pub(crate) async fn classify(e: &tauri_plugin_updater::Error, endpoint: &Url) ->
         // The plugin swallows a non-success status, so ask once more to learn which one it was.
         E::ReleaseNotFound => {
             let endpoint = endpoint.clone();
-            tauri::async_runtime::spawn_blocking(move || probe(&endpoint))
+            tauri::async_runtime::spawn_blocking(move || probe(&endpoint, PROBE_TIMEOUT))
                 .await
                 .unwrap_or(CheckFailReason::Other)
         }
@@ -605,16 +659,34 @@ pub(crate) async fn classify(e: &tauri_plugin_updater::Error, endpoint: &Url) ->
     }
 }
 
+fn unreachable(kind: std::io::ErrorKind) -> bool {
+    use std::io::ErrorKind as K;
+    matches!(
+        kind,
+        K::ConnectionRefused
+            | K::ConnectionReset
+            | K::ConnectionAborted
+            | K::NotConnected
+            | K::AddrNotAvailable
+            | K::HostUnreachable
+            | K::NetworkUnreachable
+            | K::NetworkDown
+    )
+}
+
 /// One plain GET of the feed after the plugin found no manifest: 403/429 with
 /// `x-ratelimit-remaining: 0` is the rate limit, no connection is offline, the rest is other.
-fn probe(endpoint: &Url) -> CheckFailReason {
+fn probe(endpoint: &Url, timeout: Duration) -> CheckFailReason {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(10)))
+        .timeout_global(Some(timeout))
         .build()
         .into();
     match agent.get(endpoint.as_str()).call() {
-        Err(_) => CheckFailReason::Offline,
+        // As in `classify`: only a failure to reach the host is offline; a timeout is something else.
+        Err(ureq::Error::ConnectionFailed | ureq::Error::HostNotFound) => CheckFailReason::Offline,
+        Err(ureq::Error::Io(e)) if unreachable(e.kind()) => CheckFailReason::Offline,
+        Err(_) => CheckFailReason::Other,
         Ok(resp) => {
             let status = resp.status().as_u16();
             let exhausted = resp
@@ -710,6 +782,15 @@ pub fn update_install<R: Runtime>(app: AppHandle<R>) -> UpdateState {
             let state = ctl.state();
             tauri::async_runtime::spawn(async move {
                 ctl.run_install(&update).await;
+            });
+            state
+        }
+        None if ctl.needs_check_to_install() => {
+            // No release object (the tray restarted): check first, install what that finds.
+            let state = ctl.state();
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                ctl.check_and_install(&app).await;
             });
             state
         }

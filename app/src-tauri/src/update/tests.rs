@@ -724,6 +724,7 @@ fn a_missing_asset_is_an_install_failure_not_a_signature_failure() {
     assert!(matches!(h.install().phase, UpdatePhase::InstallFailed { .. }));
     assert!(h.seen.calls.lock().unwrap().is_empty());
     assert_eq!(h.stored().pending, None);
+    assert_eq!(h.ctl.failed_version().as_deref(), Some("0.1.1"), "the tooltip names the version that failed");
 }
 
 #[test]
@@ -752,7 +753,7 @@ fn the_host_list_stops_a_download_before_any_request() {
         let mut inner = strict.lock();
         inner.update.as_mut().unwrap().download_url = "http://evil.example/setup.exe".parse().unwrap();
     }
-    let s = tauri::async_runtime::block_on(strict.install());
+    let s = tauri::async_runtime::block_on(Arc::new(strict).install());
     assert!(matches!(s.phase, UpdatePhase::InstallFailed { .. }), "{:?}", s.phase);
     assert_eq!(h.server.hits("/setup.exe"), 0, "no request went out");
 }
@@ -909,6 +910,8 @@ fn start_with_a_failed_install_reports_the_installers_message() {
     assert_eq!(s.phase, UpdatePhase::InstallFailed { message: "Setup could not finish.".into() });
     assert_eq!(s.updated_to, None);
     assert_eq!(state::load(&h.dir.path().join("update.json")).pending, None);
+    assert_eq!(s.available, Some(info("0.1.1")), "the failed release is on offer again, so the editor can name it");
+    assert_eq!(ctl.failed_version().as_deref(), Some("0.1.1"));
 }
 
 #[test]
@@ -1204,7 +1207,7 @@ fn an_http_download_address_is_refused_before_any_request() {
     let mut ctl = Controller::new(settings, v("0.1.0"), Arc::new(|_: &Path| Ok(None)), Box::new(|_| {}));
     assert_eq!(tauri::async_runtime::block_on(ctl.check(&h.handle, true)).phase, UpdatePhase::Available);
     ctl.settings.policy = DownloadPolicy { https_only: true, hosts: vec!["127.0.0.1".into()] };
-    let s = tauri::async_runtime::block_on(ctl.install());
+    let s = tauri::async_runtime::block_on(Arc::new(ctl).install());
     assert!(matches!(s.phase, UpdatePhase::InstallFailed { .. }), "{:?}", s.phase);
     assert_eq!(h.server.hits("/setup.exe"), 0);
 }
@@ -1274,4 +1277,149 @@ fn a_corrupt_state_file_is_kept_aside_not_overwritten() {
     let bad = dir.path().join("update.json.bad");
     assert_eq!(std::fs::read_to_string(&bad).unwrap(), r#"{"pending": {"version": "0.1.1", "notes": "n""#);
     assert!(!path.exists(), "the damaged file is not left in place to be overwritten unseen");
+}
+
+// ---- review fixes: restart after a failed install, off-thread start, probe, result file ----
+
+/// A tray that restarted after a failed `/UPDATE` run: `pending` is stored, the installer's report is
+/// on disk, and no plugin `Update` object exists. Returns the controller and a launch counter.
+fn restarted(h: &Harness, current: &str, pending: &str) -> (Arc<Controller>, Arc<AtomicU32>) {
+    state::save(&h.dir.path().join("update.json"), &Stored { pending: Some(info(pending)), ..Stored::default() }).unwrap();
+    std::fs::write(
+        h.dir.path().join("update-result.json"),
+        format!(r#"{{"version":"{pending}","ok":false,"code":10,"message":"Setup could not finish."}}"#),
+    )
+    .unwrap();
+    let launches = Arc::new(AtomicU32::new(0));
+    let counter = launches.clone();
+    let ctl = Arc::new(Controller::new(
+        h.ctl.settings.clone(),
+        v(current),
+        Arc::new(move |_: &Path| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok(None)
+        }),
+        Box::new(|_| {}),
+    ));
+    ctl.reconcile_pending();
+    (ctl, launches)
+}
+
+#[test]
+fn try_again_after_a_restart_checks_first_and_installs_the_release() {
+    let h = harness("0.1.0", "test.key.pub", Launch::Starts);
+    good_release(&h);
+    let (ctl, launches) = restarted(&h, "0.1.0", "0.1.1");
+    assert!(matches!(ctl.state().phase, UpdatePhase::InstallFailed { .. }));
+    assert!(ctl.begin_install().is_none(), "no live release object after a restart");
+    assert!(ctl.needs_check_to_install());
+    let s = tauri::async_runtime::block_on(ctl.check_and_install(&h.handle));
+    assert_eq!(h.server.hits("/latest.json"), 1, "it checked first");
+    assert_eq!(launches.load(Ordering::SeqCst), 1, "then started the installer");
+    assert!(matches!(s.phase, UpdatePhase::InstallFailed { ref message } if message.contains("cannot follow")), "{:?}", s.phase);
+}
+
+#[test]
+fn try_again_after_a_restart_says_so_when_the_check_fails_or_finds_nothing() {
+    // The feed is down.
+    let h = harness("0.1.0", "test.key.pub", Launch::Starts);
+    h.server.set("/latest.json", Resp::status(500));
+    let (ctl, launches) = restarted(&h, "0.1.0", "0.1.1");
+    let s = tauri::async_runtime::block_on(ctl.check_and_install(&h.handle));
+    assert!(matches!(s.phase, UpdatePhase::CheckFailed { .. }), "{:?}", s.phase);
+    assert_eq!(launches.load(Ordering::SeqCst), 0);
+
+    // The feed has nothing newer than what runs.
+    let h = harness("0.1.0", "test.key.pub", Launch::Starts);
+    h.server.release("0.1.0", &fixture_text("payload.bin.sig"), fixture("payload.bin"));
+    let (ctl, launches) = restarted(&h, "0.1.0", "0.1.1");
+    let s = tauri::async_runtime::block_on(ctl.check_and_install(&h.handle));
+    assert_eq!(s.phase, UpdatePhase::UpToDate);
+    assert_eq!(launches.load(Ordering::SeqCst), 0);
+
+    // The feed now offers something older than the release that failed: shown, not installed.
+    let h = harness("0.1.0", "test.key.pub", Launch::Starts);
+    good_release(&h);
+    let (ctl, launches) = restarted(&h, "0.1.0", "0.1.2");
+    let s = tauri::async_runtime::block_on(ctl.check_and_install(&h.handle));
+    assert_eq!(s.phase, UpdatePhase::Available);
+    assert_eq!(s.available.map(|a| a.version).as_deref(), Some("0.1.1"));
+    assert_eq!(launches.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn try_again_after_a_restart_is_single_flight() {
+    let h = harness("0.1.0", "test.key.pub", Launch::Starts);
+    good_release(&h);
+    let (ctl, _) = restarted(&h, "0.1.0", "0.1.1");
+    ctl.set_phase(UpdatePhase::Installing);
+    assert!(!ctl.needs_check_to_install(), "an operation runs");
+    let hits = h.server.hits("/latest.json");
+    let s = tauri::async_runtime::block_on(ctl.check_and_install(&h.handle));
+    assert_eq!(s.phase, UpdatePhase::Installing);
+    assert_eq!(h.server.hits("/latest.json"), hits, "no request went out");
+}
+
+#[test]
+fn the_installer_start_runs_off_the_async_thread() {
+    let h = harness("0.1.0", "test.key.pub", Launch::Starts);
+    good_release(&h);
+    let seen: Arc<Mutex<Option<std::thread::ThreadId>>> = Arc::default();
+    let sink = seen.clone();
+    let ctl = Arc::new(Controller::new(
+        h.ctl.settings.clone(),
+        v("0.1.0"),
+        Arc::new(move |_: &Path| {
+            *sink.lock().unwrap() = Some(std::thread::current().id());
+            Ok(None)
+        }),
+        Box::new(|_| {}),
+    ));
+    tauri::async_runtime::block_on(ctl.check(&h.handle, true));
+    let update = ctl.begin_install().unwrap();
+    let here = std::thread::current().id();
+    tauri::async_runtime::block_on(ctl.start_install(&update));
+    let ran_on = seen.lock().unwrap().expect("the launcher ran");
+    assert_ne!(ran_on, here, "ShellExecuteExW must not wait on the calling (async) thread");
+}
+
+#[test]
+fn the_probe_maps_a_timeout_after_connecting_to_other_and_a_refusal_to_offline() {
+    let silent = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url: Url = format!("http://127.0.0.1:{}/latest.json", silent.local_addr().unwrap().port()).parse().unwrap();
+    let keep = std::thread::spawn(move || {
+        let held: Vec<_> = silent.incoming().take(1).flatten().collect();
+        std::thread::sleep(Duration::from_millis(1200));
+        drop(held);
+    });
+    assert_eq!(probe(&url, Duration::from_millis(300)), CheckFailReason::Other);
+    keep.join().unwrap();
+
+    let dead = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url: Url = format!("http://127.0.0.1:{}/latest.json", dead.local_addr().unwrap().port()).parse().unwrap();
+    drop(dead);
+    assert_eq!(probe(&url, Duration::from_secs(5)), CheckFailReason::Offline);
+}
+
+#[test]
+fn the_result_file_is_read_with_a_bom_and_with_non_ascii_or_bad_bytes() {
+    let dir = TempDir::new();
+    let path = dir.path().join("update-result.json");
+    let body = r#"{"version":"0.1.1","ok":false,"code":10,"message":"Setup stopped"}"#;
+    let mut with_bom = vec![0xEF, 0xBB, 0xBF];
+    with_bom.extend_from_slice(body.as_bytes());
+    std::fs::write(&path, &with_bom).unwrap();
+    let r = read_result(&path).expect("a BOM does not hide the report");
+    assert_eq!((r.version.as_str(), r.ok), ("0.1.1", false));
+
+    std::fs::write(&path, r#"{"version":"0.1.1","ok":false,"message":"Zoë — fini"}"#.as_bytes()).unwrap();
+    assert_eq!(read_result(&path).unwrap().message, "Zoë — fini", "UTF-8 round-trips");
+
+    // An ANSI byte (0xE9) in the message: lossy, but still parsed.
+    let mut ansi = br#"{"version":"0.1.1","ok":false,"message":"Caf"#.to_vec();
+    ansi.push(0xE9);
+    ansi.extend_from_slice(br#""}"#);
+    std::fs::write(&path, &ansi).unwrap();
+    let r = read_result(&path).expect("a stray byte does not hide the report");
+    assert!(r.message.starts_with("Caf") && !r.ok);
 }

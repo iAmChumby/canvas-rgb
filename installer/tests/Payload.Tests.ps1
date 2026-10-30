@@ -161,6 +161,7 @@ try {
         Assert-True ($body -match 'if not IsUpdateRun then Exit;') 'only for /UPDATE'
         $je = $iss.Substring($iss.IndexOf('function JsonEscape'), 700)
         Assert-True ($je.Contains('N < 32') -and $je.Contains("'\u00'")) 'JsonEscape writes every control character below 0x20 as \u00XX'
+        Assert-True ($body.Contains('SaveStringsToUTF8FileWithoutBOM(ExpandConstant(''{app}\update-result.json'')') -and -not $body.Contains('SaveStringToFile')) 'the result is written as UTF-8 without a BOM (SaveStringToFile writes an AnsiString)'
         foreach ($n in '"version":"{#AppVersion}"', '"ok":', '"message":"', 'update-result.json', 'FPrepError', 'FFailText') { Assert-True ($body.Contains($n)) "result file has $n" }
         Assert-True ($body -match "(?s)\(not Ok\) and FileExists\(Exe\).*?'--after-update'") 'a failure relaunches the tray quietly'
         Assert-True ($iss -match 'Type: files; Name: "\{app\}\\update-result\.json"') 'uninstall removes the file'
