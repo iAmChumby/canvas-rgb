@@ -678,6 +678,7 @@ export const CHIONE_DISPLAY: DisplayInfo = {
   max_decimals: 1,
   modes: ["temperature", "fan_rpm"],
   connected: true,
+  blocked_by: null,
 };
 
 /** What a display shows before anything has been saved for it: nothing at all. */

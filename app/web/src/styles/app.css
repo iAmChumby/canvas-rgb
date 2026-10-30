@@ -2110,6 +2110,23 @@ button.chip:hover {
 
 /* ---------- displays: one number on a pump head ---------- */
 
+/* The vendor-app notice keeps its height while idle, so the card below never moves (#14). */
+.display-notice {
+  margin-bottom: var(--s3);
+}
+
+/* Narrow: the status takes its own line in every state, so "waiting for ZEUS CAST" wrapping
+   the header cannot move the card below it. */
+@media (max-width: 520px) {
+  .display-panel .panel-head .state {
+    flex-basis: 100%;
+  }
+}
+
+.display-notice-idle {
+  visibility: hidden;
+}
+
 .display-card {
   display: grid;
   grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);

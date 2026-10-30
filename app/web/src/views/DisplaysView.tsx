@@ -21,6 +21,9 @@ import type { FansStatus } from "@/proto/FansStatus";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { useTweenNumber } from "@/components/Motion";
 
+/** Sizes the idle notice (invisible, hidden from assistive tech); never shown as a claim. */
+const VENDOR_SIZER = "ZEUS CAST";
+
 /** The source of a display, as one string: the picker works on keys, not on the spine's shape. */
 function sourceKey(source: DisplaySource): string {
   switch (source.kind) {
@@ -190,6 +193,7 @@ function DisplayCard({ row, fans }: { row: DisplayStatus; fans: FansStatus | nul
   // What the pump head would show with the source in the editor, in the unit it is written in.
   const preview = previewValue(draft.source, draft.unit, fans, row.shown?.value ?? null);
   const shown = row.shown;
+  const blockedBy = row.info.blocked_by;
 
   const set = (patch: Partial<DisplayConfig>) => {
     setDraft((prev) => ({ ...prev, ...patch }));
@@ -228,13 +232,26 @@ function DisplayCard({ row, fans }: { row: DisplayStatus; fans: FansStatus | nul
 
   return (
     <Panel
+      className="display-panel"
       title={row.info.name}
       actions={
-        <StateDot tone={row.info.connected ? "ok" : "down"}>
-          {row.info.connected ? "connected" : "not connected"}
+        // The daemon measures whether the vendor app holds the display (#14); the editor only
+        // repeats it. `blocked_by` wins over the plain connected flag.
+        <StateDot tone={blockedBy ? "warn" : row.info.connected ? "ok" : "down"}>
+          {blockedBy ? `waiting for ${blockedBy}` : row.info.connected ? "connected" : "not connected"}
         </StateDot>
       }
     >
+      {/* The notice is always laid out, so the card does not move when the vendor app starts or
+          exits: when nothing blocks the display it is invisible and hidden from assistive tech. */}
+      <p
+        className={blockedBy ? "rule rule-warn display-notice" : "rule rule-warn display-notice display-notice-idle"}
+        role={blockedBy ? "status" : undefined}
+        aria-hidden={blockedBy ? undefined : true}
+      >
+        <WarningOctagon size={16} weight="fill" aria-hidden="true" />{" "}
+        {blockedBy ?? VENDOR_SIZER} is running, so canvas-rgb leaves the display alone until it closes.
+      </p>
       <div className="display-card">
         <div className="display-readout">
           {/* The big number is what the source would read, not what the display shows: it says so,
@@ -368,10 +385,6 @@ export function DisplaysView() {
         <h1>Displays</h1>
       </div>
 
-      <p className="rule rule-warn">
-        <WarningOctagon size={16} weight="fill" aria-hidden="true" /> Close ZEUS CAST first; both would write the display.
-      </p>
-
       {displaysUnsupported ? (
         // The daemon answered 404: it is older than the display support. That is a version to fix,
         // not a failure, so it does not read like one.
@@ -402,7 +415,8 @@ export function DisplaysView() {
         <Panel>
           <EmptyState icon={<ThermometerSimple size={22} />} title="No display has a source yet">
             The daemon drives a display only while it has a saved source, so a display that has
-            never been set up is left alone. Nothing is sent to it.
+            never been set up is left alone. Nothing is sent to it. If the GAMDIAS app ZEUS CAST is
+            running, canvas-rgb waits until it closes, so the two never write the display at once.
           </EmptyState>
         </Panel>
       ) : (

@@ -26,7 +26,14 @@ fn not_found_info(config: &DisplayConfig) -> DisplayInfo {
         max_decimals: config.decimals,
         modes: Vec::new(),
         connected: false,
+        blocked_by: None,
     }
+}
+
+/// The vendor app holding the display, from the poll loop's own process check (#14). Only a
+/// display with a saved config is polled, so only those can report it; the rest say `None`.
+fn blocked_by(vendor_blocked: bool) -> Option<String> {
+    vendor_blocked.then(|| crate::displays::VENDOR_NAME.to_string())
 }
 
 /// `GET /api/v1/displays`. Every saved config, with what the display shows now, and every display
@@ -46,7 +53,7 @@ pub async fn list_displays(State(app): State<Arc<App>>) -> Json<Vec<DisplayStatu
             .iter()
             .chain(runtime.found.iter())
             .find(|f| f.id == config.device)
-            .map(|f| DisplayInfo { connected: runtime.connected, ..f.clone() })
+            .map(|f| DisplayInfo { connected: runtime.connected, blocked_by: blocked_by(runtime.vendor_blocked), ..f.clone() })
             .unwrap_or_else(|| not_found_info(config));
         // A blank is reported as `shown: None`, not as a value with no number.
         let shown = runtime.shown.get(&config.device).filter(|v| v.value.is_some()).copied();
@@ -57,7 +64,7 @@ pub async fn list_displays(State(app): State<Arc<App>>) -> Json<Vec<DisplayStatu
     // while it has a saved config).
     for info in found.iter().filter(|i| !configs.iter().any(|c| c.device == i.id)) {
         list.push(DisplayStatus {
-            info: DisplayInfo { connected: false, ..info.clone() },
+            info: DisplayInfo { connected: false, blocked_by: None, ..info.clone() },
             config: default_config(info.id.clone()),
             shown: None,
         });

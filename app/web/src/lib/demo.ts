@@ -156,7 +156,8 @@ function initialState(): DemoState {
     conflicts: s.has("conflict") || s.has("conflict-clears") ? [{ kind: "signal_rgb", process: true, service: false }] : [],
     startedAt: Date.now(),
     // No display has a saved source yet: the daemon leaves the pump head alone.
-    displayConfig: null,
+    // `?state=display-saved` (or `vendor-blocked`) starts with a source saved, as a configured PC has.
+    displayConfig: s.has("display-saved") || s.has("vendor-blocked") ? { ...DISPLAY_DEFAULT } : null,
     displayApiValue: null,
     // The daemon never opens a device it was not told to: both start with reads off.
     peripherals: PERIPHERALS.map((p) => ({ ...p, values: { ...p.values } })),
@@ -364,6 +365,8 @@ function setActiveProps(over: Props): void {
 
 /** The display the CHIONE adapter finds: the pump head, four digits. */
 function displayInfo(): DisplayInfo {
+  // `?state=vendor-blocked`: ZEUS CAST holds the display, as the daemon's poll loop reports it.
+  if (scenario().has("vendor-blocked")) return { ...CHIONE_DISPLAY, connected: false, blocked_by: "ZEUS CAST" };
   return { ...CHIONE_DISPLAY };
 }
 

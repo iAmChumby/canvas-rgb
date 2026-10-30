@@ -48,6 +48,8 @@ pub const IDLE_POLL: Duration = Duration::from_secs(60);
 pub const VENDOR_POLL: Duration = Duration::from_secs(5);
 /// The vendor app's executable, matched without regard to case.
 pub const VENDOR_EXE: &str = "ZEUS CAST.exe";
+/// The vendor app's name as the API reports it in `DisplayInfo.blocked_by` and the editor shows it.
+pub const VENDOR_NAME: &str = "ZEUS CAST";
 /// The enumeration the routes report is cached this long, so a page that polls does not
 /// enumerate on every request.
 pub const DISCOVERY_CACHE: Duration = Duration::from_secs(5);
@@ -130,6 +132,9 @@ pub struct Runtime {
     pub refusal_warnings: u32,
     /// The vendor app is running, so the display is held closed. Logged once per run of it.
     pub vendor_blocked: bool,
+    /// When the vendor app was last looked for while the display was open. The write pass runs
+    /// every 250 ms; the process snapshot runs once per `VENDOR_POLL` (#14).
+    vendor_checked: Option<Instant>,
     /// Retry pacing: no adapter call before this instant.
     pub retry_at: Option<Instant>,
     /// The last backoff wait after an adapter error.
@@ -511,6 +516,26 @@ pub async fn tick(app: &App, now: Instant) -> Duration {
     if let Some(at) = hub.runtime.read().await.retry_at {
         if now < at {
             return at - now;
+        }
+    }
+
+    // The vendor app can start while the display is open. Look for it once per poll, and let go
+    // of the display when it does, so what the API reports is what the loop saw (#14).
+    if adapter.is_connected() {
+        let due = hub.runtime.read().await.vendor_checked.is_none_or(|at| now >= at + VENDOR_POLL);
+        if due {
+            let check = hub.vendor_check();
+            let vendor = tokio::task::spawn_blocking(move || check()).await.unwrap_or(false);
+            hub.runtime.write().await.vendor_checked = Some(now);
+            if vendor {
+                let _ = adapter.disconnect().await;
+                let mut runtime = hub.runtime.write().await;
+                runtime.vendor_blocked = true;
+                runtime.connected = false;
+                runtime.retry_at = Some(now + VENDOR_POLL);
+                tracing::warn!("{VENDOR_EXE} started; the display is closed until it exits");
+                return VENDOR_POLL;
+            }
         }
     }
 

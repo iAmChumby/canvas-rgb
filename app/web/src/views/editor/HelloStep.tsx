@@ -199,7 +199,7 @@ function Ladder({
       tertiary={onBack ? null : { label: "Set up later", onClick: onLater }}
     >
       <ol className={s.ladder}>
-        <Rung done={noOtherApps} tag={noOtherApps ? "none seen" : undefined}>
+        <Rung done={noOtherApps} tag={noOtherApps ? "SignalRGB not seen" : undefined}>
           Quit other RGB apps.
         </Rung>
         <Rung>Replug it, or try another port.</Rung>

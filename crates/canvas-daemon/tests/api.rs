@@ -1713,6 +1713,44 @@ async fn the_display_is_not_opened_while_the_vendor_app_runs() {
     assert!(!app.displays.runtime.read().await.vendor_blocked);
 }
 
+/// #14: the editor warned about ZEUS CAST on every visit because the API never said whether it ran.
+/// `info.blocked_by` follows the poll loop's own process check, both ways, within one poll.
+#[tokio::test]
+async fn the_api_reports_the_vendor_app_within_one_poll_of_it_starting_and_exiting() {
+    let (router, app, _home, _log) = build_with_display(true);
+    let running = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let running = running.clone();
+        app.displays
+            .set_vendor_check(Arc::new(move || running.load(std::sync::atomic::Ordering::SeqCst)));
+    }
+    put_config(&router, &config(DisplaySource::Fixed { value: 5.0 }, DisplayUnit::Celsius, 0, None)).await;
+    let blocked_by = || async {
+        let status = json(router.clone().oneshot(request("GET", routes::DISPLAYS)).await.unwrap()).await;
+        status[0]["info"]["blocked_by"].clone()
+    };
+
+    // ZEUS CAST is not running: connected, nothing blocks it.
+    let t0 = Instant::now();
+    pass(&app, t0).await;
+    assert_eq!(blocked_by().await, serde_json::Value::Null, "not running: no warning");
+    let connected = json(router.clone().oneshot(request("GET", routes::DISPLAYS)).await.unwrap()).await;
+    assert_eq!(connected[0]["info"]["connected"], serde_json::json!(true));
+
+    // It starts while the display is open: the next vendor poll reports it by name, closes the
+    // display, and the status reads as not connected.
+    running.store(true, std::sync::atomic::Ordering::SeqCst);
+    pass(&app, t0 + displays::VENDOR_POLL).await;
+    assert_eq!(blocked_by().await, serde_json::json!("ZEUS CAST"));
+    let held = json(router.clone().oneshot(request("GET", routes::DISPLAYS)).await.unwrap()).await;
+    assert_eq!(held[0]["info"]["connected"], serde_json::json!(false));
+
+    // It exits: the next poll clears it.
+    running.store(false, std::sync::atomic::Ordering::SeqCst);
+    pass(&app, t0 + displays::VENDOR_POLL * 2).await;
+    assert_eq!(blocked_by().await, serde_json::Value::Null, "exited: the warning goes");
+}
+
 #[tokio::test]
 async fn the_real_vendor_check_matches_a_process_name_exactly() {
     // Not the real machine's answer (ZEUS CAST may be running here); only that it runs and returns.
