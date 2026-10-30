@@ -10,7 +10,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 - Displays shows the ZEUS CAST notice only while ZEUS CAST is running, and the display reads "waiting for ZEUS CAST" then. (#14)
 - The boot colour waits until OpenRGB has found your devices, so it lands on them instead of on nothing. (#18)
-- The daemon writes why it stopped to its log on every exit, and the service names exit codes. (#19)
+- The daemon writes why it stopped to its log: a quit, closing its window, logoff, shutdown, a panic, or a port that is taken. The service logs every time it ends the daemon and names exit codes such as `0xC0000142 STATUS_DLL_INIT_FAILED`. (#19)
 
 ## [0.1.1] - 2026-10-29
 
