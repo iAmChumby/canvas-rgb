@@ -38,6 +38,10 @@ jobs:
         working-directory: app/web
         run: npm ci && npm run build # build runs typecheck, lint and next build
 
+      - name: Test the editor
+        working-directory: app/web
+        run: npm test # vitest, jsdom
+
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: clippy, rustfmt

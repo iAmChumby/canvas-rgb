@@ -88,23 +88,29 @@ export function ToastHost() {
   return (
     <div className="toast-host" role="status" aria-live="polite">
       {items.map((t) => (
-        <Toast key={t.id} item={t} onDone={() => remove(t.id)} />
+        <Toast key={t.id} item={t} remove={remove} />
       ))}
     </div>
   );
 }
 
-function Toast({ item, onDone }: { item: ToastItem; onDone: () => void }) {
+function Toast({ item, remove }: { item: ToastItem; remove: (id: number) => void }) {
   const [leaving, setLeaving] = useState(false);
+  // The timers depend on the id alone. A parent that re-renders (the shell does, every second)
+  // must never restart them, so the latest `remove` is read from a ref, not from the deps.
+  const removeRef = useRef(remove);
+  useEffect(() => {
+    removeRef.current = remove;
+  });
 
   useEffect(() => {
     const hold = setTimeout(() => setLeaving(true), LIFETIME_MS);
-    const drop = setTimeout(onDone, LIFETIME_MS + 200);
+    const drop = setTimeout(() => removeRef.current(item.id), LIFETIME_MS + 200);
     return () => {
       clearTimeout(hold);
       clearTimeout(drop);
     };
-  }, [item.id, onDone]);
+  }, [item.id]);
 
   return (
     <div
