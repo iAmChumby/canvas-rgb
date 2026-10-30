@@ -13,22 +13,20 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 fn main() -> std::process::ExitCode {
-    // The logs go to a rolling daily file (G8). They start first, so even a refused start
-    // leaves a line (#19).
-    let log_guard = match canvas_daemon::logging::init("canvas-rgbd") {
-        Ok(guard) => Some(guard),
-        Err(e) => {
-            eprintln!("warning: could not open the log file: {e}");
-            None
-        }
-    };
-    canvas_daemon::exit_log::install_panic_hook();
-
-    // The daemon never runs elevated.
+    // The daemon never runs elevated. This comes before the log: the logger creates and prunes
+    // files in a user-writable folder, and an elevated process must not touch one. A refused
+    // start is reported on stderr (a console-started admin run has one).
     if let Err(e) = canvas_daemon::elevated::ElevatedError::check() {
         eprintln!("error: {e}");
-        return finish(log_guard, Exit::new(1, format!("refusing to start: {e}")));
+        return std::process::ExitCode::from(1);
     }
+
+    // The logs go to a rolling daily file (G8). They start before anything else can fail, so
+    // every later refused start leaves a line (#19).
+    if let Err(e) = canvas_daemon::logging::init("canvas-rgbd") {
+        eprintln!("warning: could not open the log file: {e}");
+    }
+    canvas_daemon::exit_log::install_panic_hook();
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -38,7 +36,7 @@ fn main() -> std::process::ExitCode {
         Ok(runtime) => runtime,
         Err(e) => {
             eprintln!("error: could not start the tokio runtime: {e}");
-            return finish(log_guard, Exit::new(1, format!("could not start the tokio runtime: {e}")));
+            return finish(Exit::new(1, format!("could not start the tokio runtime: {e}")));
         }
     };
 
@@ -46,7 +44,7 @@ fn main() -> std::process::ExitCode {
     // A task still blocked must not hold the daemon up (G3): the runtime gets a short
     // grace, then it is dropped without waiting for blocked workers.
     runtime.shutdown_timeout(RUNTIME_GRACE);
-    finish(log_guard, exit)
+    finish(exit)
 }
 
 /// Why `main` is ending the process and with which code. Every path out of `main` builds one,
@@ -62,11 +60,10 @@ impl Exit {
     }
 }
 
-/// Logs the exit, flushes the log file (dropping the guard), and ends the process.
-fn finish(log_guard: Option<canvas_daemon::logging::LogGuard>, exit: Exit) -> std::process::ExitCode {
+/// Logs the exit, flushes the log file, and ends the process.
+fn finish(exit: Exit) -> std::process::ExitCode {
     canvas_daemon::exit_log::log_exit(&exit.reason, exit.code);
-    // Dropping the guard flushes the log file before the process ends.
-    drop(log_guard);
+    canvas_daemon::logging::close();
     std::process::exit(exit.code)
 }
 
@@ -240,6 +237,7 @@ async fn daemon_main() -> Exit {
     Exit::new(0, format!("stopped: {}", reason.describe()))
 }
 
+
 /// Who holds `port`, for the line logged when the API cannot bind it: "the port 9430 is held by
 /// pid 4242 (canvas-rgbd.exe)", or why that could not be found out.
 fn port_holders(port: u16) -> String {
@@ -294,10 +292,10 @@ async fn write_on_quit(app: &Arc<App>) {
     match on_quit {
         canvas_proto::config::OnQuit::Black => {
             app.identify.stop();
-            // The engine holds one sink per driven device; with none, nothing can be written.
-            let sinks = app.engine.stats().sinks as usize;
+            // The engine skips a sink with no LEDs, so only the devices it writes are counted.
+            let targets = canvas_daemon::solid_write_targets(&app.devices.read().await);
             app.engine.write_solid(canvas_proto::Rgb8::BLACK);
-            canvas_daemon::logging::log_device_write("queued black for", sinks);
+            canvas_daemon::logging::log_device_write("queued black for", targets);
             tokio::time::sleep(BLACK_GRACE).await;
         }
         canvas_proto::config::OnQuit::LeaveLastFrame => {
@@ -316,14 +314,18 @@ fn kill_openrgb_server(app: &App) {
     }
 }
 
+/// The exit code of the watchdog's forced exit: the quit was requested, so it is not a failure.
+const WATCHDOG_EXIT_CODE: i32 = 0;
+
 /// The backstop: after `after`, the process ends whatever is still running.
 fn arm_exit_watchdog(after: std::time::Duration) {
     std::thread::spawn(move || {
         std::thread::sleep(after);
         tracing::warn!("the quit deadline passed; ending the process");
-        // The log writer runs on its own thread; give it a moment to write the line.
-        std::thread::sleep(std::time::Duration::from_millis(150));
-        std::process::exit(0);
+        canvas_daemon::exit_log::log_stop_exit(StopReason::QuitDeadline, WATCHDOG_EXIT_CODE);
+        // Drain the log writer so the closing line is in the file before the process ends.
+        canvas_daemon::logging::close();
+        std::process::exit(WATCHDOG_EXIT_CODE);
     });
 }
 
@@ -334,27 +336,32 @@ async fn console_stop() -> StopReason {
     {
         use tokio::signal::windows as sig;
         // A signal that cannot be registered never fires; the others still do.
+        use canvas_daemon::exit_log::{
+            CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
+        };
+        // Each branch resolves to the reason its Win32 event type maps to.
         macro_rules! watch {
-            ($register:expr, $name:literal) => {
+            ($register:expr, $name:literal, $ctrl_type:expr) => {
                 async {
                     match $register {
                         Ok(mut signal) => {
                             signal.recv().await;
+                            StopReason::from_ctrl_type($ctrl_type).unwrap_or(StopReason::CtrlC)
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, event = $name, "a console control event cannot be watched");
-                            std::future::pending::<()>().await
+                            std::future::pending::<StopReason>().await
                         }
                     }
                 }
             };
         }
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => StopReason::CtrlC,
-            _ = watch!(sig::ctrl_close(), "CTRL_CLOSE_EVENT") => StopReason::ConsoleClose,
-            _ = watch!(sig::ctrl_logoff(), "CTRL_LOGOFF_EVENT") => StopReason::ConsoleLogoff,
-            _ = watch!(sig::ctrl_shutdown(), "CTRL_SHUTDOWN_EVENT") => StopReason::ConsoleShutdown,
-            _ = watch!(sig::ctrl_break(), "CTRL_BREAK_EVENT") => StopReason::CtrlBreak,
+            _ = tokio::signal::ctrl_c() => StopReason::from_ctrl_type(canvas_daemon::exit_log::CTRL_C_EVENT).unwrap_or(StopReason::CtrlC),
+            reason = watch!(sig::ctrl_close(), "CTRL_CLOSE_EVENT", CTRL_CLOSE_EVENT) => reason,
+            reason = watch!(sig::ctrl_logoff(), "CTRL_LOGOFF_EVENT", CTRL_LOGOFF_EVENT) => reason,
+            reason = watch!(sig::ctrl_shutdown(), "CTRL_SHUTDOWN_EVENT", CTRL_SHUTDOWN_EVENT) => reason,
+            reason = watch!(sig::ctrl_break(), "CTRL_BREAK_EVENT", CTRL_BREAK_EVENT) => reason,
         }
     }
     #[cfg(not(windows))]

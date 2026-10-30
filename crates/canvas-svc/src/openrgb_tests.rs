@@ -270,3 +270,126 @@ fn a_write_to_zero_devices_is_a_warning_and_a_write_to_some_is_info() {
     assert!(lines[0].contains("WARN") && lines[0].contains("0 devices"), "{}", lines[0]);
     assert!(lines[1].contains("INFO") && lines[1].contains("3 devices"), "{}", lines[1]);
 }
+
+// ---- #18 review: late controllers, the unsettled cap, and the restart-limit black ----
+
+/// Polls `fake.custom_mode_writes(index)` until it is above zero (the adapter writes a device's
+/// colors only after switching it to custom mode), or gives up after 2 s.
+async fn wait_for_write(fake: &FakeOpenRgbServer, index: u32) -> u32 {
+    let mut writes = 0;
+    for _ in 0..100 {
+        writes = fake.custom_mode_writes(index);
+        if writes > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    writes
+}
+
+/// Real OpenRGB announces controllers over seconds. Here devices 0 and 1 settle and get the boot
+/// color, and device 2 is announced about 1.6 s after that, at the service's real 1 s tick. Before
+/// the fix the supervisor locked `boot_written` after the first stable tick and never saw it.
+#[tokio::test]
+async fn a_controller_announced_after_the_boot_write_is_painted_too() {
+    let fake = FakeOpenRgbServer::start_detecting(
+        vec![device(0, 4), device(1, 6), device(2, 3)],
+        Duration::from_millis(200),
+        Duration::from_millis(1650),
+    )
+    .await
+    .unwrap();
+    let processes = FakeProcesses::new();
+    let (root, exe) = install();
+    let mut sup = supervisor(&processes, &root, &exe, fake.port(), None);
+    let boot = Rgb8::new(10, 20, 30);
+
+    let mut ticker = tokio::time::interval(Duration::from_secs(1));
+    let mut written_with_two = false;
+    for _ in 0..10 {
+        ticker.tick().await;
+        sup.tick(Instant::now(), false, Some(boot)).await;
+        if sup.boot_written() && fake.colors(2) != vec![boot; 3] {
+            written_with_two = true;
+        }
+        if fake.colors(2) == vec![boot; 3] {
+            break;
+        }
+    }
+    assert!(written_with_two, "the boot color was written while device 2 was still unannounced");
+    assert_eq!(wait_for_colors(&fake, 0, &[boot; 4]).await, vec![boot; 4]);
+    assert_eq!(wait_for_colors(&fake, 1, &[boot; 6]).await, vec![boot; 6]);
+    assert_eq!(wait_for_colors(&fake, 2, &[boot; 3]).await, vec![boot; 3], "the late controller got the boot color");
+}
+
+/// The 5 s cap used to warn only for a count of zero. A count that is above zero but still
+/// changing at the cap now logs how many devices OpenRGB reports.
+#[tokio::test]
+async fn an_unsettled_nonzero_count_at_the_cap_is_logged_with_the_count() {
+    let logs = LogBuf::default();
+    let _default = tracing::subscriber::set_default(logs.subscriber());
+    // A device is announced every second, so the count differs at every tick and never settles.
+    let devices: Vec<_> = (0..9).map(|i| device(i, 2)).collect();
+    let fake = FakeOpenRgbServer::start_detecting(devices, Duration::from_millis(500), Duration::from_secs(1))
+        .await
+        .unwrap();
+    let processes = FakeProcesses::new();
+    let (root, exe) = install();
+    let mut sup = supervisor(&processes, &root, &exe, fake.port(), None);
+
+    let mut ticker = tokio::time::interval(Duration::from_secs(1));
+    for _ in 0..7 {
+        ticker.tick().await;
+        sup.tick(Instant::now(), false, Some(Rgb8::new(1, 2, 3))).await;
+    }
+    assert!(!sup.boot_written(), "the count never held still, so nothing was painted");
+    let text = logs.text();
+    let line = text
+        .lines()
+        .find(|l| l.contains("not written: OpenRGB has found"))
+        .unwrap_or_else(|| panic!("no warning at the cap for a nonzero, unsettled count:\n{text}"));
+    assert!(line.contains("WARN") && line.contains("nothing was written"), "{line}");
+    assert!(!line.contains("found 0 devices"), "the count is above zero: {line}");
+    assert_eq!(text.matches("not written: OpenRGB has found").count(), 1, "the cap warns once:\n{text}");
+}
+
+/// The restart-limit black used to discover once and paint whoever was listed (nobody, while
+/// OpenRGB was still detecting), then forget. It now waits for detection like the boot color.
+#[tokio::test]
+async fn the_restart_limit_black_waits_for_detection_and_paints_late_devices() {
+    let logs = LogBuf::default();
+    let _default = tracing::subscriber::set_default(logs.subscriber());
+    let fake = FakeOpenRgbServer::start_detecting(
+        vec![device(0, 4), device(1, 6)],
+        Duration::from_millis(250),
+        Duration::from_millis(300),
+    )
+    .await
+    .unwrap();
+    let processes = FakeProcesses::new();
+    let (root, exe) = install();
+    let mut sup = supervisor(&processes, &root, &exe, fake.port(), None);
+
+    sup.request_black(Instant::now());
+    assert!(sup.black_pending());
+    // The first tick connects while the server lists no device: nothing may be written, and the
+    // old "wrote black ... to 0 devices" outcome must not be logged.
+    sup.tick(Instant::now(), false, Some(Rgb8::new(9, 9, 9))).await;
+    assert_eq!(fake.custom_mode_writes(0), 0);
+    assert!(!logs.text().contains("0 devices"), "{}", logs.text());
+
+    let mut ticker = tokio::time::interval(Duration::from_millis(250));
+    for _ in 0..40 {
+        ticker.tick().await;
+        sup.tick(Instant::now(), false, Some(Rgb8::new(9, 9, 9))).await;
+        if fake.custom_mode_writes(0) > 0 && fake.custom_mode_writes(1) > 0 {
+            break;
+        }
+    }
+    assert!(wait_for_write(&fake, 0).await > 0, "device 0 got the black write");
+    assert!(wait_for_write(&fake, 1).await > 0, "device 1 got the black write");
+    let text = logs.text();
+    assert!(text.contains("black after the daemon restart limit written to"), "{text}");
+    // The boot color (9,9,9) never went out: black replaced it.
+    assert_eq!(fake.colors(0), vec![Rgb8::BLACK; 4]);
+}

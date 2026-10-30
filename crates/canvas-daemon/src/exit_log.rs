@@ -23,9 +23,33 @@ pub enum StopReason {
     ConsoleShutdown,
     /// The API's quit route (the tray's Quit, or the CLI).
     Api,
+    /// `WM_ENDSESSION`: Windows is ending the session and will end this process next.
+    SessionEnding,
+    /// The quit sequence did not finish inside its deadline; the watchdog ended the process.
+    QuitDeadline,
 }
 
+/// The `dwCtrlType` values the system passes a console process (`SetConsoleCtrlHandler`).
+pub const CTRL_C_EVENT: u32 = 0;
+pub const CTRL_BREAK_EVENT: u32 = 1;
+pub const CTRL_CLOSE_EVENT: u32 = 2;
+pub const CTRL_LOGOFF_EVENT: u32 = 5;
+pub const CTRL_SHUTDOWN_EVENT: u32 = 6;
+
 impl StopReason {
+    /// The reason for a console control event, by its Win32 `dwCtrlType`. `None` for a value
+    /// the system does not send a console process.
+    pub fn from_ctrl_type(ctrl_type: u32) -> Option<Self> {
+        match ctrl_type {
+            CTRL_C_EVENT => Some(Self::CtrlC),
+            CTRL_BREAK_EVENT => Some(Self::CtrlBreak),
+            CTRL_CLOSE_EVENT => Some(Self::ConsoleClose),
+            CTRL_LOGOFF_EVENT => Some(Self::ConsoleLogoff),
+            CTRL_SHUTDOWN_EVENT => Some(Self::ConsoleShutdown),
+            _ => None,
+        }
+    }
+
     /// The short name logged in the `reason` field.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -35,6 +59,8 @@ impl StopReason {
             Self::ConsoleLogoff => "console-logoff",
             Self::ConsoleShutdown => "console-shutdown",
             Self::Api => "api",
+            Self::SessionEnding => "session-ending",
+            Self::QuitDeadline => "quit-deadline",
         }
     }
 
@@ -47,6 +73,8 @@ impl StopReason {
             Self::ConsoleLogoff => "the user is logging off (CTRL_LOGOFF_EVENT)",
             Self::ConsoleShutdown => "the PC is shutting down (CTRL_SHUTDOWN_EVENT)",
             Self::Api => "the API's quit route was called",
+            Self::SessionEnding => "Windows is ending the session (WM_ENDSESSION)",
+            Self::QuitDeadline => "the quit deadline passed before the quit sequence finished",
         }
     }
 }
@@ -64,6 +92,26 @@ pub fn log_exit(reason: &str, code: i32) {
     } else {
         tracing::error!(reason, code, "canvas-rgbd is exiting");
     }
+}
+
+/// The closing line for an exit that follows a stop reason: "stopped: <what happened>", with
+/// the explicit exit `code`.
+pub fn log_stop_exit(reason: StopReason, code: i32) {
+    log_exit(&format!("stopped: {}", reason.describe()), code);
+}
+
+/// `WM_ENDSESSION` with the session ending: Windows ends this process as soon as the handler
+/// returns, so the closing line is written and flushed here, on the window's thread. `logoff` is
+/// the `ENDSESSION_LOGOFF` bit.
+pub fn end_session_exit(logoff: bool) {
+    tracing::info!(
+        reason = StopReason::SessionEnding.as_str(),
+        logoff,
+        "the daemon was asked to stop: {}",
+        StopReason::SessionEnding.describe()
+    );
+    log_stop_exit(StopReason::SessionEnding, 0);
+    crate::logging::close();
 }
 
 /// A panic's payload as text. `panic!("x")` carries a `&str`, `panic!("{x}")` a `String`.
@@ -158,6 +206,8 @@ mod tests {
             StopReason::ConsoleLogoff,
             StopReason::ConsoleShutdown,
             StopReason::Api,
+            StopReason::SessionEnding,
+            StopReason::QuitDeadline,
         ];
         let mut names: Vec<_> = all.iter().map(|r| r.as_str()).collect();
         names.sort_unstable();
@@ -178,6 +228,38 @@ mod tests {
         assert_eq!(lines.len(), 2, "{text}");
         assert!(lines[0].contains("ERROR") && lines[0].contains("taken by pid 4242") && lines[0].contains("code=1"), "{}", lines[0]);
         assert!(lines[1].contains("INFO") && lines[1].contains("reason=\"api\"") && lines[1].contains("code=0"), "{}", lines[1]);
+    }
+
+    /// The Win32 values are written as literals here, from the `SetConsoleCtrlHandler` docs, so
+    /// a swapped arm in `from_ctrl_type` (or a wrong constant) fails.
+    #[test]
+    fn each_console_event_maps_to_its_own_reason() {
+        assert_eq!(StopReason::from_ctrl_type(0), Some(StopReason::CtrlC));
+        assert_eq!(StopReason::from_ctrl_type(1), Some(StopReason::CtrlBreak));
+        assert_eq!(StopReason::from_ctrl_type(2), Some(StopReason::ConsoleClose));
+        assert_eq!(StopReason::from_ctrl_type(5), Some(StopReason::ConsoleLogoff));
+        assert_eq!(StopReason::from_ctrl_type(6), Some(StopReason::ConsoleShutdown));
+        for unknown in [3, 4, 7, 100] {
+            assert_eq!(StopReason::from_ctrl_type(unknown), None, "{unknown}");
+        }
+        assert_eq!(
+            (CTRL_C_EVENT, CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT),
+            (0, 1, 2, 5, 6)
+        );
+    }
+
+    #[test]
+    fn a_session_end_leaves_a_closing_line_with_its_code() {
+        let (_, text) = capture(|| end_session_exit(true));
+        assert!(text.contains("WM_ENDSESSION") && text.contains("session-ending"), "{text}");
+        let closing = text.lines().find(|l| l.contains("canvas-rgbd is exiting")).expect("a closing line");
+        assert!(closing.contains("code=0") && closing.contains("WM_ENDSESSION"), "{closing}");
+    }
+
+    #[test]
+    fn the_watchdog_exit_names_the_deadline_and_its_code() {
+        let (_, text) = capture(|| log_stop_exit(StopReason::QuitDeadline, 0));
+        assert!(text.contains("quit deadline passed") && text.contains("code=0"), "{text}");
     }
 
     #[test]

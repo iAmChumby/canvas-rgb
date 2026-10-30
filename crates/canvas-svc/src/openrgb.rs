@@ -7,7 +7,8 @@
 use crate::process::{ChildProcess, ProcessSpawner};
 use canvas_proto::pipe::OpenRgbServerState;
 use canvas_proto::traits::DeviceAdapter;
-use canvas_proto::Rgb8;
+use canvas_proto::{DeviceId, Rgb8};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -20,6 +21,10 @@ pub const DETECTION_SETTLE: Duration = Duration::from_millis(750);
 /// The longest the boot color waits for OpenRGB to find a device (the issue's log shows the first
 /// controller at about 1.2 s and detection done at about 2.1 s).
 pub const DETECTION_CAP: Duration = Duration::from_secs(5);
+
+/// After a color is first written, the service keeps watching this long (until the daemon takes
+/// over, if sooner) and paints any controller that OpenRGB announces late.
+pub const WATCH_WINDOW: Duration = Duration::from_secs(15);
 
 /// Creates the adapter the service uses to talk to the server. Tests point it at a fake server.
 pub type AdapterFactory = Box<dyn FnMut() -> Box<dyn DeviceAdapter> + Send>;
@@ -66,17 +71,121 @@ pub struct OpenRgbSupervisor {
     disabled: Option<String>,
     /// Set once the boot color has been written for the current server run.
     boot_written: bool,
-    /// The device count seen while waiting for detection to finish (reset with each session).
-    detection: Option<Detection>,
+    /// The boot-color paint in progress: waits for detection, writes, then watches for late
+    /// controllers. Reset with each new OpenRGB session until the first write.
+    boot_job: Option<PaintJob>,
+    /// Black after the daemon's restart limit. It runs the same wait-and-watch as the boot color.
+    black_job: Option<PaintJob>,
     starts: u32,
 }
 
-/// What the boot-color wait has seen so far.
-struct Detection {
-    started: Instant,
+/// One color painted onto every device OpenRGB reports, once detection has settled, and then onto
+/// each controller that appears late. Shared by the boot color and the restart-limit black, so
+/// neither can write to "whoever is listed right now" and stop (class `cause:unchecked-state`, #18).
+struct PaintJob {
+    /// Completes the log sentences: "<label> written to N devices".
+    label: &'static str,
+    color: Rgb8,
+    /// When the wait began (set by the first step, or by the request).
+    started: Option<Instant>,
     last_count: usize,
-    last_change: Instant,
-    warned_empty: bool,
+    last_change: Option<Instant>,
+    /// The devices already painted.
+    painted: HashSet<DeviceId>,
+    /// When the first write succeeded; the watch window runs from here.
+    first_write: Option<Instant>,
+    warned: bool,
+}
+
+impl PaintJob {
+    fn new(label: &'static str, color: Rgb8, started: Option<Instant>) -> Self {
+        Self { label, color, started, last_count: 0, last_change: None, painted: HashSet::new(), first_write: None, warned: false }
+    }
+
+    /// One pass. Returns true when the job is over (the watch window has passed).
+    async fn step(&mut self, now: Instant, session: &mut dyn DeviceAdapter) -> bool {
+        let started = *self.started.get_or_insert(now);
+        if self.first_write.is_some_and(|first| now.saturating_duration_since(first) >= WATCH_WINDOW) {
+            return true;
+        }
+        let devices = match session.discover().await {
+            Ok(devices) => devices,
+            Err(e) => {
+                tracing::warn!(error = %e, "{} not written yet", self.label);
+                return false;
+            }
+        };
+        let count = devices.len();
+        let last_change = match self.last_change {
+            Some(at) if count == self.last_count => at,
+            _ => {
+                self.last_count = count;
+                self.last_change = Some(now);
+                now
+            }
+        };
+        if self.first_write.is_none() {
+            let settled = count > 0 && now.saturating_duration_since(last_change) >= DETECTION_SETTLE;
+            if settled {
+                match self.paint_unpainted(session, &devices).await {
+                    Ok(_) if !self.painted.is_empty() => {
+                        self.first_write = Some(now);
+                        log_device_write(&format!("{} written to", self.label), self.painted.len());
+                        return false;
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, "{} not written yet", self.label);
+                        return false;
+                    }
+                }
+            }
+            if now.saturating_duration_since(started) >= DETECTION_CAP && !self.warned {
+                self.warned = true;
+                self.warn_unsettled(count);
+            }
+            return false;
+        }
+        // Written once: a controller announced later is painted as soon as it shows up.
+        match self.paint_unpainted(session, &devices).await {
+            Ok(0) => {}
+            Ok(late) => tracing::info!(devices = late, "{} also written to {late} devices that appeared late", self.label),
+            Err(e) => tracing::warn!(error = %e, "{} not written to a late device yet", self.label),
+        }
+        false
+    }
+
+    /// The cap passed with nothing written: say how many devices OpenRGB reports, settled or not.
+    fn warn_unsettled(&self, count: usize) {
+        if count == 0 {
+            log_device_write(&format!("{} not written: OpenRGB has found", self.label), 0);
+        } else {
+            tracing::warn!(
+                devices = count,
+                "{} not written: OpenRGB has found {count} devices, but the count had not settled within {} s, so nothing was written",
+                self.label,
+                DETECTION_CAP.as_secs()
+            );
+        }
+    }
+
+    /// Writes the color to each device not painted yet that has LEDs. Returns how many it wrote.
+    async fn paint_unpainted(
+        &mut self,
+        session: &mut dyn DeviceAdapter,
+        devices: &[canvas_proto::DeviceInfo],
+    ) -> Result<usize, canvas_proto::AdapterError> {
+        let mut wrote = 0;
+        for device in devices {
+            if device.led_count() == 0 || self.painted.contains(&device.id) {
+                continue;
+            }
+            session.write_frame(&device.id, &vec![self.color; device.led_count() as usize]).await?;
+            self.painted.insert(device.id.clone());
+            wrote += 1;
+        }
+        Ok(wrote)
+    }
 }
 
 impl OpenRgbSupervisor {
@@ -100,7 +209,8 @@ impl OpenRgbSupervisor {
             state: OpenRgbServerState::NotStarted,
             disabled: None,
             boot_written: false,
-            detection: None,
+            boot_job: None,
+            black_job: None,
             starts: 0,
         }
     }
@@ -144,7 +254,7 @@ impl OpenRgbSupervisor {
                 self.child = Some(child);
                 self.session = None;
                 self.boot_written = false;
-                self.detection = None;
+                self.boot_job = None;
                 self.state = OpenRgbServerState::Starting;
                 self.starts += 1;
                 tracing::info!(reason, port = self.port, "OpenRGB server started");
@@ -215,82 +325,72 @@ impl OpenRgbSupervisor {
             let mut adapter = (self.adapter)();
             if adapter.connect().await.is_ok() {
                 self.session = Some(adapter);
-                self.detection = None;
+                // A new connection restarts the wait for detection, until something is written.
+                if !self.boot_written {
+                    self.boot_job = None;
+                }
+                if let Some(job) = self.black_job.as_mut().filter(|job| job.first_write.is_none()) {
+                    *job = PaintJob::new(job.label, job.color, job.started);
+                }
                 self.state = OpenRgbServerState::Running;
             }
         }
-        if !daemon_connected && !self.boot_written {
-            self.write_boot_color(now, boot.unwrap_or(Rgb8::BLACK)).await;
+        if self.black_job.is_some() {
+            // The daemon has been given up on: black wins over the boot color.
+            self.step_black(now).await;
+        } else if !daemon_connected && (!self.boot_written || self.boot_job.is_some()) {
+            self.step_boot(now, boot.unwrap_or(Rgb8::BLACK)).await;
+        }
+    }
+
+    /// The daemon hit its restart limit: paint every device black once OpenRGB has found them, and
+    /// keep watching for late ones. The boot color is over, and black replaces it.
+    pub fn request_black(&mut self, now: Instant) {
+        if self.black_job.is_some() {
+            return;
+        }
+        self.boot_written = true;
+        self.boot_job = None;
+        self.black_job = Some(PaintJob::new("black after the daemon restart limit", Rgb8::BLACK, Some(now)));
+    }
+
+    /// Whether a restart-limit black is still being painted or watched.
+    pub fn black_pending(&self) -> bool {
+        self.black_job.is_some()
+    }
+
+    async fn step_black(&mut self, now: Instant) {
+        let (Some(job), Some(session)) = (self.black_job.as_mut(), self.session.as_mut()) else {
+            // No OpenRGB connection to paint through: say so once the cap passes.
+            if let Some(job) = self.black_job.as_mut() {
+                let waited = now.saturating_duration_since(job.started.unwrap_or(now));
+                if waited >= DETECTION_CAP && !job.warned {
+                    job.warned = true;
+                    tracing::warn!("{} not written: no OpenRGB connection after {} s", job.label, DETECTION_CAP.as_secs());
+                }
+            }
+            return;
+        };
+        if job.step(now, session.as_mut()).await {
+            self.black_job = None;
         }
     }
 
     /// Paints the boot color once OpenRGB has finished detecting: the device count must be above
-    /// zero and unchanged for [`DETECTION_SETTLE`]. After [`DETECTION_CAP`] with no device it logs
-    /// that nothing was painted and keeps watching; a device that shows up later is still painted.
-    async fn write_boot_color(&mut self, now: Instant, color: Rgb8) {
+    /// zero and unchanged for [`DETECTION_SETTLE`]. After [`DETECTION_CAP`] with nothing written it
+    /// logs the count it sees and keeps watching. After the first write it keeps watching for
+    /// [`WATCH_WINDOW`] (or until the daemon connects) and paints controllers announced late.
+    async fn step_boot(&mut self, now: Instant, color: Rgb8) {
         let Some(session) = self.session.as_mut() else { return };
-        let devices = match session.discover().await {
-            Ok(devices) => devices,
-            Err(e) => {
-                tracing::warn!(error = %e, "boot color not written yet");
-                return;
-            }
-        };
-        let count = devices.len();
-        let seen = self.detection.get_or_insert(Detection {
-            started: now,
-            last_count: count,
-            last_change: now,
-            warned_empty: false,
-        });
-        if count != seen.last_count {
-            seen.last_count = count;
-            seen.last_change = now;
+        let job = self.boot_job.get_or_insert_with(|| PaintJob::new("boot color", color, None));
+        let finished = job.step(now, session.as_mut()).await;
+        if job.first_write.is_some() {
+            self.boot_written = true;
         }
-        let waited = now.saturating_duration_since(seen.started);
-        let settled = count > 0 && now.saturating_duration_since(seen.last_change) >= DETECTION_SETTLE;
-        if !settled {
-            if count == 0 && waited >= DETECTION_CAP && !seen.warned_empty {
-                seen.warned_empty = true;
-                log_device_write("boot color not written: OpenRGB has found", 0);
-            }
-            return;
-        }
-        match paint_devices(session.as_mut(), &devices, color).await {
-            Ok(written) => {
-                self.boot_written = true;
-                log_device_write("boot color written to", written);
-            }
-            Err(e) => tracing::warn!(error = %e, "boot color not written yet"),
+        if finished {
+            self.boot_job = None;
         }
     }
-
-    /// Writes one color to every device now (the service's black-on-stop path).
-    pub async fn write_color_all(&mut self, color: Rgb8) -> Result<usize, String> {
-        match self.session.as_mut() {
-            Some(session) => paint(session.as_mut(), color).await.map_err(|e| e.to_string()),
-            None => Err("OpenRGB is not connected".into()),
-        }
-    }
-}
-
-/// Writes `color` to every LED of every device the adapter reports.
-pub async fn paint(adapter: &mut dyn DeviceAdapter, color: Rgb8) -> Result<usize, canvas_proto::AdapterError> {
-    let devices = adapter.discover().await?;
-    paint_devices(adapter, &devices, color).await
-}
-
-/// Writes `color` to every LED of each of `devices`. Returns how many devices it wrote to.
-async fn paint_devices(
-    adapter: &mut dyn DeviceAdapter,
-    devices: &[canvas_proto::DeviceInfo],
-    color: Rgb8,
-) -> Result<usize, canvas_proto::AdapterError> {
-    for device in devices {
-        let colors = vec![color; device.led_count() as usize];
-        adapter.write_frame(&device.id, &colors).await?;
-    }
-    Ok(devices.len())
 }
 
 /// Logs how many devices a step touched: INFO for some, WARN for none. A step that reached no

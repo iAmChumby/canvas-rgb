@@ -37,8 +37,13 @@ pub async fn quit(State(app): State<Arc<App>>) -> Response {
     app.shutting_down.store(1, std::sync::atomic::Ordering::SeqCst);
     let _ = routes::QUIT;
 
-    // Ask the main task to stop; it does the actual exit.
-    let _ = app.quit_tx.send(());
+    // Ask the main task to stop; it does the actual exit. If it cannot be asked (its receiver is
+    // gone), the reply says so instead of claiming the daemon is quitting.
+    if crate::logging::warn_if_err("the quit request could not reach the main task", app.quit_tx.send(())).is_none() {
+        app.shutting_down.store(0, std::sync::atomic::Ordering::SeqCst);
+        return crate::api::ApiFailure::internal("the daemon could not be asked to stop; it is still running")
+            .into_response();
+    }
 
     axum::Json(serde_json::json!({ "quitting": true })).into_response()
 }

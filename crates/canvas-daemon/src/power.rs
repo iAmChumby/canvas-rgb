@@ -307,6 +307,12 @@ pub mod windows_watcher {
                 if let Some(sender) = sender(hwnd) {
                     let _ = sender.send(PowerEvent::Shutdown);
                 }
+                // wParam is TRUE when the session really ends (FALSE: it was cancelled). Windows
+                // ends this process once the handler returns, so the closing line is written and
+                // flushed now (#19).
+                if wparam.0 != 0 {
+                    crate::exit_log::end_session_exit(lparam.0 as u32 & ENDSESSION_LOGOFF != 0);
+                }
                 LRESULT(0)
             }
             WM_WTSSESSION_CHANGE => {

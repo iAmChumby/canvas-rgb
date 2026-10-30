@@ -115,7 +115,7 @@ impl DaemonSupervisor {
                 );
                 continue;
             }
-            tracing::warn!(pid, image = %stale.image.display(), "ending a stale daemon from a previous service instance");
+            tracing::warn!(pid, image = %stale.image.display(), "terminating the daemon (pid {pid}): a stale daemon from a previous service instance");
             if let Err(e) = stale.process.kill() {
                 tracing::warn!(pid, error = %e, "could not end the stale daemon");
                 continue;
@@ -168,7 +168,7 @@ impl DaemonSupervisor {
     pub fn stop(&mut self) {
         self.stopped = true;
         if let Some(mut child) = self.child.take() {
-            tracing::info!(pid = child.id(), "the service is stopping; ending the daemon it launched");
+            tracing::info!(pid = child.id(), "terminating the daemon (pid {}): the service is stopping", child.id());
             if let Err(e) = child.kill() {
                 tracing::warn!(error = %e, "could not end the daemon");
             }
@@ -219,7 +219,10 @@ impl DaemonSupervisor {
                 .is_some_and(|hb| now.saturating_duration_since(hb) >= HEARTBEAT_TIMEOUT);
             if stale {
                 if let Some(mut child) = self.child.take() {
-                    let _ = child.kill();
+                    tracing::warn!(pid = child.id(), "terminating the daemon (pid {}): it missed heartbeats for 5 s", child.id());
+                    if let Err(e) = child.kill() {
+                        tracing::warn!(error = %e, "could not terminate the daemon that missed heartbeats");
+                    }
                 }
                 return self.crashed(now, "missed heartbeats for 5 s");
             }
@@ -579,6 +582,55 @@ mod tests {
         processes.add_running(9001, r"C:\svc\canvas-rgbd.exe", 1);
         sup.start(Instant::now());
         assert!(!processes.running_ended(9001));
+    }
+
+    /// Runs `run` under a subscriber that collects its lines.
+    fn logged(run: impl FnOnce()) -> String {
+        #[derive(Clone, Default)]
+        struct Buf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let buf = Buf::default();
+        let sink = buf.clone();
+        let subscriber = tracing_subscriber::fmt().with_ansi(false).with_writer(move || sink.clone()).finish();
+        tracing::subscriber::with_default(subscriber, run);
+        let text = String::from_utf8_lossy(&buf.0.lock().unwrap()).into_owned();
+        text
+    }
+
+    /// Every place the service ends the daemon says why, with the pid, in the line before the kill.
+    #[test]
+    fn every_daemon_kill_is_preceded_by_a_line_naming_the_reason() {
+        // 1. Missed heartbeats.
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        sup.start(t0);
+        let text = logged(|| {
+            sup.tick(t0 + Duration::from_secs(6));
+        });
+        assert!(text.contains("terminating the daemon (pid") && text.contains("missed heartbeats"), "{text}");
+        assert_eq!(processes.spawns().len(), 2);
+
+        // 2. The service stops.
+        let (mut sup, _processes) = supervisor();
+        sup.start(Instant::now());
+        let text = logged(|| sup.stop());
+        assert!(text.contains("terminating the daemon (pid") && text.contains("the service is stopping"), "{text}");
+
+        // 3. A stale daemon from a previous service instance.
+        let (mut sup, processes) = supervisor();
+        processes.set_console(1);
+        processes.add_running(9001, r"C:\svc\canvas-rgbd.exe", 1);
+        let text = logged(|| sup.start(Instant::now()));
+        assert!(text.contains("terminating the daemon (pid 9001)") && text.contains("stale daemon"), "{text}");
+        assert!(processes.running_ended(9001));
     }
 
     #[test]

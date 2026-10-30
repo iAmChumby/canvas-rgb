@@ -6,7 +6,6 @@ use crate::fans::{FanController, FanError};
 use crate::openrgb::OpenRgbSupervisor;
 use canvas_proto::api::error_codes;
 use canvas_proto::pipe::{PipeRequest, PipeResponse, PROTOCOL_VERSION};
-use canvas_proto::Rgb8;
 use std::time::Instant;
 
 pub struct Core {
@@ -46,10 +45,8 @@ impl Core {
     pub async fn tick(&mut self, now: Instant) {
         self.fans.tick(now);
         if self.daemon.tick(now) == DaemonAction::WriteBlack {
-            match self.openrgb.write_color_all(Rgb8::BLACK).await {
-                Ok(devices) => crate::openrgb::log_device_write("wrote black after the daemon restart limit to", devices),
-                Err(e) => tracing::warn!(error = %e, "could not write black after the daemon restart limit"),
-            }
+            // Not "whoever is listed right now": the same wait for detection as the boot color.
+            self.openrgb.request_black(now);
         }
         let connected = self.daemon.is_connected(now);
         let boot = self.fans.boot_color();

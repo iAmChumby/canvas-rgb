@@ -17,23 +17,28 @@ pub const MAX_BYTES_PER_DAY: u64 = canvas_proto::consts::LOG_MAX_BYTES_PER_DAY;
 /// How many days of logs are kept.
 pub const KEEP_DAYS: u32 = canvas_proto::consts::LOG_KEEP_DAYS;
 
-/// The guard that flushes the log writer. Keep it alive for the process's life.
-pub struct LogGuard {
-    _writer: WorkerGuard,
+/// The guard that flushes the log writer. It lives here, not in `main`, so any thread that is
+/// about to end the process (the quit watchdog, the `WM_ENDSESSION` handler) can flush with
+/// [`close`] instead of sleeping and hoping.
+static GUARD: std::sync::Mutex<Option<WorkerGuard>> = std::sync::Mutex::new(None);
+
+fn hold(guard: WorkerGuard) {
+    *GUARD.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(guard);
 }
 
-impl LogGuard {
-    pub fn writer(&self) -> &WorkerGuard {
-        &self._writer
-    }
+/// Flushes every queued line to the file and stops the log writer. Returns once the writer has
+/// drained (or after the appender's own 1 s bound). Lines logged after this are dropped, so call
+/// it only on the way out of the process. Safe to call twice.
+pub fn close() {
+    let guard = GUARD.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
+    drop(guard);
 }
 
-/// Starts the file logger. `name` is the file stem, e.g. `canvas-rgbd`.
-pub fn init(name: &str) -> std::io::Result<LogGuard> {
-    let dir = crate::paths::log_dir();
-    std::fs::create_dir_all(&dir)?;
-    prune_old_logs(&dir);
-
+/// The non-blocking file writer for `name` in `dir`, and the guard that flushes it.
+fn file_writer(
+    dir: &std::path::Path,
+    name: &str,
+) -> std::io::Result<(tracing_appender::non_blocking::NonBlocking, WorkerGuard)> {
     let appender = RollingFileAppender::builder()
         .rotation(Rotation::DAILY)
         .filename_prefix(name)
@@ -41,9 +46,19 @@ pub fn init(name: &str) -> std::io::Result<LogGuard> {
         // Two, not one: at build time the appender prunes down to max - 1 files, so with 1 it
         // deleted the day's own log on every daemon start.
         .max_log_files(2)
-        .build(&dir)
+        .build(dir)
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    let (writer, guard) = tracing_appender::non_blocking(appender);
+    Ok(tracing_appender::non_blocking(appender))
+}
+
+/// Starts the file logger. `name` is the file stem, e.g. `canvas-rgbd`. The daemon calls this
+/// only after the elevation check: it creates and prunes files in a user-writable folder, which
+/// an elevated process must never do.
+pub fn init(name: &str) -> std::io::Result<()> {
+    let dir = crate::paths::log_dir();
+    std::fs::create_dir_all(&dir)?;
+    prune_old_logs(&dir);
+    let (writer, guard) = file_writer(&dir, name)?;
 
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("canvas_daemon=info,canvas_rgbd=info,warn"));
@@ -53,7 +68,8 @@ pub fn init(name: &str) -> std::io::Result<LogGuard> {
         .with(filter)
         .with(fmt::layer().with_writer(writer).with_ansi(false).with_target(true));
     let _ = subscriber.try_init();
-    Ok(LogGuard { _writer: guard })
+    hold(guard);
+    Ok(())
 }
 
 /// Logs a failure that a step would otherwise drop, and hands back the value on success. Use it
@@ -149,6 +165,33 @@ mod tests {
         });
         assert_eq!(text.lines().count(), 1, "{text}");
         assert!(text.contains("WARN") && text.contains("could not save the thing") && text.contains("disk full"), "{text}");
+    }
+
+    /// `close` is the flush the quit watchdog and the `WM_ENDSESSION` handler rely on: a line
+    /// logged just before it is in the file when it returns, with no sleep.
+    #[test]
+    fn close_flushes_the_last_line_to_the_file() {
+        let dir = std::env::temp_dir().join(format!("canvas-rgb-flush-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (writer, guard) = file_writer(&dir, "canvas-rgbd").unwrap();
+        hold(guard);
+        let subscriber = tracing_subscriber::fmt().with_ansi(false).with_writer(writer).finish();
+        tracing::subscriber::with_default(subscriber, || {
+            for i in 0..200 {
+                tracing::info!("filler line {i}");
+            }
+            tracing::info!("the very last line");
+        });
+        close();
+        let text: String = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| std::fs::read_to_string(e.path()).unwrap_or_default())
+            .collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(text.contains("the very last line"), "the last line reached the file: {} bytes", text.len());
+        close(); // a second close does nothing
     }
 
     #[test]
