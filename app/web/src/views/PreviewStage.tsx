@@ -795,6 +795,8 @@ export function PreviewStage({
   const frameDataRef = useRef<Frame | null>(null);
   const dragRef = useRef<Drag | null>(null);
   const pendingRef = useRef<Pending | null>(null);
+  /** The pointer that owns the press or drag in progress: no other pointer may steer it. */
+  const activePointer = useRef<number | null>(null);
   /** The part the pointer is over, so the hover only re-renders when it changes. */
   const hoverRef = useRef<Sel | null>(null);
   const marqueeRef = useRef<Box | null>(null);
@@ -951,7 +953,7 @@ export function PreviewStage({
     return local;
   }, []);
 
-  /** Writes the selection frame onto its element: the part's box, its handles' cursors. */
+  /** Writes the selection frame onto its element: the part's box and which edge handles fit. */
   const applyFrame = useCallback((z: PlacedZone | Landmark, v: View) => {
     const el = frameEl.current;
     const stage = stageRef.current;
@@ -1532,12 +1534,18 @@ export function PreviewStage({
     if (!stage) return;
     // Empty space with the middle button: a pan.
     if (e.button === 1) {
+      if (activePointer.current !== null) return;
+      activePointer.current = e.pointerId;
       panRef.current = { start: { x: e.clientX, y: e.clientY }, orig: { ...viewRef.current } };
       stage.setPointerCapture(e.pointerId);
       e.preventDefault();
       return;
     }
     if (e.button !== 0) return;
+    // A second finger (or any other pointer) never takes over a press or drag in progress. A new
+    // primary pointer means the old one is gone (its end event was lost), so it starts afresh.
+    if (activePointer.current !== null && activePointer.current !== e.pointerId && !e.isPrimary) return;
+    activePointer.current = e.pointerId;
     // Whatever press came before is over: a stale one can never turn this press into a move.
     pendingRef.current = null;
     const target = hitAt(e);
@@ -1590,6 +1598,16 @@ export function PreviewStage({
     stage.setPointerCapture(e.pointerId);
   };
 
+  /** Lights the handle the pointer is over (data-hover), and none other. */
+  const setHandleHover = (id: string | null) => {
+    const frame = frameEl.current;
+    if (!frame) return;
+    for (const h of frame.querySelectorAll<HTMLElement>("[data-handle]")) {
+      if (h.dataset.handle === id) h.dataset.hover = "true";
+      else delete h.dataset.hover;
+    }
+  };
+
   /** Hover and cursor, from the same hit-test a press uses. */
   const onStageHover = (e: PointerEvent<HTMLDivElement>) => {
     const stage = stageRef.current;
@@ -1605,6 +1623,7 @@ export function PreviewStage({
       cursor = target.locked ? "not-allowed" : "grab";
     }
     stage.style.cursor = cursor;
+    setHandleHover(target.kind === "handle" ? (target.handle === "rotate" ? "rotate" : target.handle.id) : null);
     const was = hoverRef.current;
     if (was?.kind !== over?.kind || was?.index !== over?.index) {
       hoverRef.current = over;
@@ -1626,6 +1645,8 @@ export function PreviewStage({
   );
 
   const onStageMove = (e: PointerEvent<HTMLDivElement>) => {
+    // Only the pointer that began the press or drag steers it.
+    if (activePointer.current !== null && e.pointerId !== activePointer.current) return;
     const pan = panRef.current;
     if (pan) {
       const box = stageRef.current?.getBoundingClientRect();
@@ -1814,7 +1835,14 @@ export function PreviewStage({
     queuePaint();
   };
 
+  /** The end of a press: pointerup, cancel or lost capture, from the pointer that owns it only. */
   const endDrag = (e: PointerEvent<HTMLDivElement>) => {
+    if (activePointer.current !== null && e.pointerId !== activePointer.current) return;
+    endPress(e);
+    activePointer.current = null;
+  };
+
+  const endPress = (e: PointerEvent<HTMLDivElement>) => {
     setPressed(null);
     // A press that never became a drag was a click: it picked the part (a click on one of
     // several picked parts picks just that one) and changed nothing, so no undo step is made.
@@ -2303,6 +2331,7 @@ export function PreviewStage({
           // Off the desk: nothing is hovered. (A held press keeps the pointer by capture.)
           if (dragRef.current || pendingRef.current) return;
           if (stageRef.current) stageRef.current.style.cursor = "";
+          setHandleHover(null);
           hoverRef.current = null;
           setHover(null);
         }}

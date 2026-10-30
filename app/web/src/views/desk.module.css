@@ -285,7 +285,8 @@
 
 /*
  * Figma's selection: the zone's own box in the live colour with a handle on every corner and
- * every edge, and a rotation handle on a stem. The frame never takes a click; its handles do.
+ * every edge, and a rotation handle on a stem. Nothing in the frame takes a click: the stage's
+ * hit-test finds the handle (lib/hitTest.ts) and lights it with data-hover.
  * It is turned with the zone, so the handles turn too.
  */
 .desk .frame {
@@ -326,8 +327,8 @@
   transform: translate(-50%, -50%);
 }
 
-.desk .handle:hover,
-.desk .rotateHandle:hover {
+.desk .handle[data-hover="true"],
+.desk .rotateHandle[data-hover="true"] {
   background: var(--live);
 }
 

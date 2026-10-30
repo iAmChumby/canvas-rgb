@@ -33,7 +33,8 @@ elements with `pointer-events: none`, so a press on such an element lands on wha
   included) by a fixed rule, with unit tests. Siblings: the fan curve points now need 4 px of travel
   before they move (a click no longer nudges them); no other `elementsFromPoint` or
   `pointer-events: none` remains on a draggable. Left: overlapping curve points 1 °C apart pick the
-  first in sorted order, not the nearest.
+  first in sorted order, not the nearest; arrow-key nudging moves a selected case alone and ignores
+  locks (unchanged from before #3; pointer drags carry and respect locks).
 
 ### `cause:platform-api`: a Windows API called the wrong way
 

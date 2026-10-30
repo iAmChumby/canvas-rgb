@@ -37,7 +37,7 @@ export function FanCurveEditor({
   const [width, setWidth] = useState(360);
   const drag = useRef<number | null>(null);
   /** Where the press landed, and whether it has travelled far enough to be a drag. */
-  const press = useRef<{ x: number; y: number; moved: boolean; touch: boolean; start: CurvePoint[] } | null>(null);
+  const press = useRef<{ x: number; y: number; moved: boolean; touch: boolean; start: CurvePoint[]; id: number } | null>(null);
 
   useEffect(() => {
     const el = wrapRef.current;
@@ -90,15 +90,18 @@ export function FanCurveEditor({
   };
 
   const onDown = (i: number, e: PointerEvent<SVGCircleElement>) => {
+    // A second finger never takes a point that is already held.
+    if (drag.current !== null) return;
     e.preventDefault();
     drag.current = i;
-    press.current = { x: e.clientX, y: e.clientY, moved: false, touch: e.pointerType === "touch", start: points.map((p) => ({ ...p })) };
+    press.current = { x: e.clientX, y: e.clientY, moved: false, touch: e.pointerType === "touch", start: points.map((p) => ({ ...p })), id: e.pointerId };
     e.currentTarget.setPointerCapture(e.pointerId);
   };
 
   const onMove = (e: PointerEvent<SVGCircleElement>) => {
     const i = drag.current;
     if (i === null) return;
+    if (press.current && e.pointerId !== press.current.id) return;
     // A press that has not travelled a few pixels is a click: it does not nudge the point.
     const pr = press.current;
     if (pr && !pr.moved) {
@@ -114,6 +117,7 @@ export function FanCurveEditor({
   const onUp = (e: PointerEvent<SVGCircleElement>) => {
     const i = drag.current;
     if (i === null) return;
+    if (press.current && e.pointerId !== press.current.id) return;
     drag.current = null;
     const moved = press.current?.moved ?? true;
     press.current = null;
@@ -130,6 +134,8 @@ export function FanCurveEditor({
   const onCancel = (e: PointerEvent<SVGCircleElement>) => {
     const pr = press.current;
     if (drag.current === null) return;
+    if (press.current && e.pointerId !== press.current.id) return;
+
     drag.current = null;
     press.current = null;
     if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
