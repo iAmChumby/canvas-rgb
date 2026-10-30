@@ -65,7 +65,7 @@ import type { FailedEffect } from "@/proto/FailedEffect";
 const BASE = "/api/v1";
 const DEMO_LAYOUTS_KEY = "canvas-rgb.demo-layouts";
 const DEMO_ONBOARDED_KEY = "canvas-rgb.demo-onboarded";
-const APP_VERSION = "0.1.2";
+const APP_VERSION = "0.1.3";
 const SCHEMA_VERSION = 1;
 
 function scenario(): Set<string> {
