@@ -1,0 +1,170 @@
+/* ---------- updates: the Updates page and the Settings > Updates panel ----------
+   Tokens only. The key's slot is the fader's slot (hardware.css), 4 px high, fed by real bytes. */
+
+.upd-arrow {
+  vertical-align: -1px;
+}
+
+/* The key and the slot under it are one unit: the slot is as wide as the key. */
+.upd-key {
+  display: inline-flex;
+  flex-direction: column;
+  gap: var(--s2);
+  max-width: 100%;
+}
+
+.upd-slot {
+  position: relative;
+  height: 4px;
+  overflow: hidden;
+  /* The fader's slot radius (hardware.css .slider-track): no token exists for 2 px. */
+  border-radius: 2px;
+  background: var(--sunk);
+  box-shadow: var(--well), inset 0 0 0 1px var(--line);
+  pointer-events: none;
+}
+
+.upd-slot-fill {
+  position: absolute;
+  inset: 0;
+  background: var(--live);
+  transform: scaleX(var(--p, 0));
+  transform-origin: left center;
+  transition: transform 260ms var(--ease);
+}
+
+/* The length is not known: the slot is lit end to end, and the megabytes say how far. */
+.upd-slot-fill[data-unknown="true"] {
+  background: var(--live-soft);
+  transform: none;
+}
+
+/* The state line keeps two lines of room, so a longer sentence does not move what is under it. */
+.upd-state {
+  display: grid;
+  margin: var(--s4) 0 0;
+  font-size: var(--t14);
+}
+
+.upd-state-cur,
+.upd-state-size {
+  grid-area: 1 / 1;
+}
+
+.upd-state-size {
+  visibility: hidden;
+}
+
+.upd-state .state {
+  white-space: normal;
+  align-items: flex-start;
+}
+
+.upd-state .state-dot {
+  margin-top: 0.45em;
+}
+
+.upd-uac {
+  margin: var(--s3) 0 0;
+  color: var(--mute);
+  font-size: var(--t14);
+  text-wrap: pretty;
+}
+
+.upd-more {
+  margin-top: var(--s4);
+  min-height: 28px;
+}
+
+.upd-note {
+  font-size: var(--t14);
+}
+
+/* The Settings status row: the dot and its words on the left, Undo or What's new on the right.
+   Its height is the height of a small key, so Undo appearing moves nothing. */
+.upd-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2) var(--s4);
+  /* A `.field` row's height (app.css). */
+  min-height: 48px;
+  padding-top: var(--s2);
+}
+
+.upd-status-acts {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.panel > .upd-note {
+  margin: var(--s2) 0 0;
+}
+
+/* The release notes: a short bar marks each item, in the tone of its heading. */
+.notes-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--dim);
+  font-size: var(--t15);
+}
+
+.notes-list li {
+  position: relative;
+  padding-left: var(--s4);
+  text-wrap: pretty;
+}
+
+.notes-list li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.7em;
+  width: 8px;
+  height: 2px;
+  background: var(--tone, var(--line-2));
+}
+
+.notes-list strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* The same chip as `.effect-hint code` (motion.css): its padding, radius, ground and colour. */
+.notes-list code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--sunk);
+  color: var(--dim);
+  font-family: var(--fm);
+  font-size: var(--t14);
+  overflow-wrap: anywhere;
+}
+
+/* The key while the update runs: fully lit and still, so the progress reads as the key's own
+   state, not as a dead control. */
+.btn[aria-busy="true"]:disabled {
+  opacity: 1;
+  cursor: default;
+}
+
+/* The ghost link starts at the row's left edge, so its words line up with the keys above it. */
+.upd-banner-acts .btn-ghost {
+  padding-left: 0;
+}
+
+/* The banner's keys sit under its words, in one row where the width allows. */
+.upd-banner-acts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+  margin-top: var(--s2);
+  padding-bottom: var(--s1);
+}

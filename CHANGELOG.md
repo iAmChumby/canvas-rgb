@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Added
+
+- canvas-rgb checks for a newer release once a day and installs it when you click Update now. (#21)
+
 ## [0.1.0] - 2026-10-29
 
 The first release.

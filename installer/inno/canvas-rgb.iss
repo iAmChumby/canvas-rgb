@@ -79,6 +79,8 @@ Name: "{autoprograms}\canvas-rgb"; Filename: "{app}\canvas-rgb.exe"; Comment: "L
 Type: filesandordirs; Name: "{app}\openrgb"
 Type: filesandordirs; Name: "{app}\bin"
 Type: filesandordirs; Name: "{app}\uninstall"
+; Written by a /UPDATE run (see DeinitializeSetup).
+Type: files; Name: "{app}\update-result.json"
 
 [Messages]
 ; Shown by Inno AFTER InitializeUninstall has already stopped canvas-rgb and handed the fans back.
@@ -104,6 +106,7 @@ var
   FOpenRgbZip: AnsiString;
   FFailCode: Integer;       // 0 = ok; else the exit code Setup returns (GetCustomSetupExitCode)
   FFailText: String;
+  FPrepError: String;       // why PrepareToInstall stopped Setup, for the /UPDATE result file
   FPurge: String;           // ' -PurgeConfig' or empty
 
 function ScriptsOk: Boolean;
@@ -137,6 +140,16 @@ begin
   Result := False;
   for I := 1 to ParamCount do
     if Uppercase(ParamStr(I)) = '/VERYSILENT' then Result := True;
+end;
+
+// True for /UPDATE, the switch the tray passes when it runs this setup to update itself.
+function IsUpdateRun: Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  for I := 1 to ParamCount do
+    if Uppercase(ParamStr(I)) = '/UPDATE' then Result := True;
 end;
 
 function PsExe: String;
@@ -360,6 +373,13 @@ begin
     Result := Result + Space + 'Leave it as it is.' + NewLine;
 end;
 
+// Remembers why Setup stopped before copying, then returns it for PrepareToInstall.
+function PrepFail(const Text: String): String;
+begin
+  FPrepError := Text;
+  Result := Text;
+end;
+
 // Before any file is copied: fetch and verify OpenRGB (nothing is changed if this fails), then stop a running install.
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
@@ -367,6 +387,8 @@ var
   Dl, Log, Args: String;
 begin
   Result := '';
+  // A result file from an earlier run says nothing about this one.
+  DeleteFile(ExpandConstant('{app}\update-result.json'));
   Log := ExpandConstant('{tmp}\canvas-rgb-prepare.log');
   ExtractTemporaryFile('lib.ps1');
   ExtractTemporaryFile('preflight.ps1');
@@ -381,7 +403,7 @@ begin
   if GetPawnIoPath <> '' then Args := Args + ' -PawnIoInstaller "' + GetPawnIoPath + '"';
   if not RunPs(ExpandConstant('{tmp}\preflight.ps1'), Args, False, Code) or (Code <> 0) then
   begin
-    Result := 'Setup found a problem before copying anything. Nothing was changed.' + #13#10 + #13#10 + LogTail(Log);
+    Result := PrepFail('Setup found a problem before copying anything. Nothing was changed.' + #13#10 + #13#10 + LogTail(Log));
     Exit;
   end;
 
@@ -389,18 +411,18 @@ begin
   Dl := ExpandConstant('{tmp}\openrgb-dl');
   if not RunPs(ExpandConstant('{tmp}\fetch-openrgb.ps1'), '-OutDir "' + Dl + '"', False, Code) or (Code <> 0) then
   begin
-    Result := 'Setup could not download the lighting component (OpenRGB), or it did not pass its safety check (code ' + IntToStr(Code) + '). Nothing was changed. Check your internet connection and run setup again.';
+    Result := PrepFail('Setup could not download the lighting component (OpenRGB), or it did not pass its safety check (code ' + IntToStr(Code) + '). Nothing was changed. Check your internet connection and run setup again.');
     Exit;
   end;
   if not LoadStringFromFile(Dl + '\zip-path.txt', FOpenRgbZip) then
   begin
-    Result := 'The lighting component (OpenRGB) download left no file behind. Nothing was changed.';
+    Result := PrepFail('The lighting component (OpenRGB) download left no file behind. Nothing was changed.');
     Exit;
   end;
 
   WizardForm.PreparingLabel.Caption := 'Closing canvas-rgb if it is running...';
   if not RunPs(ExpandConstant('{tmp}\stop-canvas.ps1'), '-LogFile "' + Log + '"', False, Code) or (Code <> 0) then
-    Result := 'canvas-rgb is still running in the background and would not stop (code ' + IntToStr(Code) + '). Nothing was changed. ' + LogTail(Log);
+    Result := PrepFail('canvas-rgb is still running in the background and would not stop (code ' + IntToStr(Code) + '). Nothing was changed. ' + LogTail(Log));
 end;
 
 // After the files are in {app}: the elevated machine-wide script, then the per-user script as the logged-in
@@ -441,8 +463,14 @@ begin
   { The tray, in the user's session, on the onboarding. Every mode except /VERYSILENT starts it once:
     the wizard does it through the ticked "Launch canvas-rgb" ([Run], --onboard), /SILENT does it here
     ([Run] has skipifsilent). The tray is also single-instance, so a stray second launch only focuses it. }
+  { /UPDATE (the tray updating itself) relaunches it with --after-update: it starts quietly, with no window. }
   if WizardSilent and (not IsVerySilent) then
-    ExecAsOriginalUser(ExpandConstant('{app}\canvas-rgb.exe'), '--onboard', ExpandConstant('{app}'), SW_SHOWNORMAL, ewNoWait, Code);
+  begin
+    if IsUpdateRun then
+      ExecAsOriginalUser(ExpandConstant('{app}\canvas-rgb.exe'), '--after-update', ExpandConstant('{app}'), SW_SHOWNORMAL, ewNoWait, Code)
+    else
+      ExecAsOriginalUser(ExpandConstant('{app}\canvas-rgb.exe'), '--onboard', ExpandConstant('{app}'), SW_SHOWNORMAL, ewNoWait, Code);
+  end;
 end;
 
 // A post-copy failure cannot undo the copied files (Abort there is not documented to exit Setup, and a
@@ -459,6 +487,63 @@ begin
   begin
     WizardForm.FinishedHeadingLabel.Caption := 'canvas-rgb setup did not finish';
     WizardForm.FinishedLabel.Caption := FFailText;
+  end;
+end;
+
+// Escapes a string for the result file (a JSON string without its quotes): backslash, quote, and every
+// character below 0x20 as \u00XX.
+function JsonEscape(const S: String): String;
+var
+  I, N: Integer;
+  C: String;
+begin
+  Result := '';
+  for I := 1 to Length(S) do
+  begin
+    C := Copy(S, I, 1);
+    N := Ord(S[I]);
+    if (C = '\') or (C = '"') then Result := Result + '\' + C
+    else if N < 32 then Result := Result + '\u00' + Copy('0123456789abcdef', (N div 16) + 1, 1) + Copy('0123456789abcdef', (N mod 16) + 1, 1)
+    else Result := Result + C;
+  end;
+end;
+
+// /UPDATE only. The tray that started this run is gone (stop-canvas.ps1 ends it), so the outcome goes in a
+// file the next tray reads: {app}\update-result.json. It lives in {app} (admin-writable, user-readable)
+// rather than in a user's profile: a profile folder here belongs to whoever approved the permission
+// prompt, which is another account when a standard user typed an admin's password. On a failure the tray
+// is started again (--after-update, quietly) so it can show the message; a tray that is still running
+// ignores the second launch.
+procedure DeinitializeSetup;
+var
+  Code: Integer;
+  Ok: Boolean;
+  Msg, Json, Exe: String;
+  Lines: TArrayOfString;
+begin
+  if not IsUpdateRun then Exit;
+  try
+    Ok := FScriptsOk;
+    Msg := '';
+    if not Ok then
+    begin
+      if FFailText <> '' then Msg := FFailText
+      else if FPrepError <> '' then Msg := FPrepError
+      else Msg := 'Setup did not finish.';
+    end;
+    Json := '{"version":"{#AppVersion}","ok":';
+    if Ok then Json := Json + 'true' else Json := Json + 'false';
+    Json := Json + ',"code":' + IntToStr(FFailCode) + ',"message":"' + JsonEscape(Msg) + '"}';
+    // The plain save-string function takes an AnsiString (jrsoftware.org/ishelp/topic_scriptfunctions.htm),
+    // so a non-ASCII message would be cut to the system code page. This writes UTF-8 with no BOM.
+    SetArrayLength(Lines, 1);
+    Lines[0] := Json;
+    SaveStringsToUTF8FileWithoutBOM(ExpandConstant('{app}\update-result.json'), Lines, False);
+    Exe := ExpandConstant('{app}\canvas-rgb.exe');
+    if (not Ok) and FileExists(Exe) then
+      ExecAsOriginalUser(Exe, '--after-update', ExpandConstant('{app}'), SW_SHOWNORMAL, ewNoWait, Code);
+  except
+    // The install folder is not set when Setup stopped very early: there is nothing to report to.
   end;
 end;
 

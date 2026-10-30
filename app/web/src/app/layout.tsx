@@ -5,6 +5,7 @@ import "@/styles/tokens.css";
 import "@/styles/app.css";
 import "@/styles/motion.css";
 import "@/styles/hardware.css";
+import "@/styles/update.css";
 import { Shell } from "@/shell/Shell";
 import { OnboardingGate } from "@/views/editor/OnboardingGate";
 

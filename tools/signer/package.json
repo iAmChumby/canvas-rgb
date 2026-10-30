@@ -1,0 +1,9 @@
+{
+  "name": "canvas-rgb-signer",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Pins the Tauri CLI that the release workflow's sign job uses. Installed with npm ci --ignore-scripts; the lockfile carries the integrity hashes.",
+  "dependencies": {
+    "@tauri-apps/cli": "2.12.4"
+  }
+}

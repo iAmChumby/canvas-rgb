@@ -23,6 +23,7 @@ const PAGE_PATHS: Record<string, string> = {
   devices: "/devices/",
   fans: "/fans/",
   settings: "/settings/",
+  updates: "/updates/",
 };
 
 /**
