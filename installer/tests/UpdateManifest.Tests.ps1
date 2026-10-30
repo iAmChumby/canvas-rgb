@@ -91,20 +91,57 @@ try {
         $m = Get-Content -LiteralPath $out -Raw | ConvertFrom-Json
         Assert-True $m.notes.Contains('Fourteen built-in effects') 'real notes'
     }
-    Test-Case 'release workflow: signs with the version bound, publishes latest.json and the .sig' {
+    Test-Case 'release workflow: the key lives only in the sign job, which installs a lockfile-pinned CLI' {
         $wf = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\..\.github\workflows\release.yml') -Raw
-        Assert-True ($wf.Contains('@tauri-apps/cli@2.12.4 signer sign')) 'pinned signer'
-        Assert-True ($wf -match 'signer sign[^\r\n]*--app-version') 'signature carries the version'
-        Assert-True ($wf.Contains('secrets.UPDATE_SIGNING_KEY')) 'key from the secret'
-        # Non-interactive by construction: key and (empty) password come from the environment, never a prompt or -p.
-        $step = $wf.Substring($wf.IndexOf('name: Sign the installer for the updater'), 1200)
+        $wf = (($wf -split '?
+') | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"   # comments say where the key is; only code counts
+        # Split into jobs at the two-space-indented keys under jobs:.
+        $jobs = @{}
+        $names = [regex]::Matches($wf, '(?m)^  ([a-z]+):\s*$')
+        for ($i = 0; $i -lt $names.Count; $i++) {
+            $end = if ($i + 1 -lt $names.Count) { $names[$i + 1].Index } else { $wf.Length }
+            $jobs[$names[$i].Groups[1].Value] = $wf.Substring($names[$i].Index, $end - $names[$i].Index)
+        }
+        Assert-True ($jobs.ContainsKey('build') -and $jobs.ContainsKey('sign') -and $jobs.ContainsKey('publish')) 'build, sign and publish jobs'
+        # The secret is read once in the whole file, in the sign job.
+        Assert-Equal @([regex]::Matches($wf, 'UPDATE_SIGNING_KEY')).Count 2 'UPDATE_SIGNING_KEY: the env line and an error message'
+        Assert-Equal @([regex]::Matches($wf, 'secrets\.')).Count 1 'the key is the only secret the workflow reads'
+        Assert-True ($jobs['sign'].Contains('secrets.UPDATE_SIGNING_KEY')) 'key read in the sign job'
+        Assert-True (-not $jobs['build'].Contains('UPDATE_SIGNING_KEY') -and -not $jobs['build'].Contains('TAURI_SIGNING')) 'build job never sees the key'
+        Assert-True (-not $jobs['publish'].Contains('UPDATE_SIGNING_KEY') -and -not $jobs['publish'].Contains('TAURI_SIGNING')) 'publish job never sees the key'
+        Assert-True (-not $jobs['build'].Contains('signer sign')) 'build job does not sign'
+        Assert-True ($wf -notmatch '(?m)^\s*(?:- )?run:.*\bnpx\b' -and $wf -notmatch '(?m)^\s+npx\b') 'no npx anywhere'
+        # Sign job: no project build, a locked install without lifecycle scripts, the key in one step only.
+        $sign = $jobs['sign']
+        Assert-True ($sign -match '(?m)^    needs: build\s*$') 'sign needs build'
+        Assert-True ($sign -match '(?m)^    timeout-minutes:\s*\d+') 'the sign job has a timeout-minutes'
+        Assert-True ($sign -match '(?ms)permissions:\s*\r?\n\s+contents: read') 'sign job is read-only'
+        Assert-True ($sign.Contains('npm ci --ignore-scripts --prefix tools/signer')) 'locked, script-free install from tools/signer'
+        Assert-True ($sign -notmatch 'cargo|npm run|build-installer|working-directory: app') 'sign job runs no project build'
+        Assert-True ($sign -match 'tools/signer/node_modules/\.bin/tauri\.cmd" signer sign[^\r\n]*--app-version') 'signature carries the version, from the installed .bin'
+        $step = $sign.Substring($sign.IndexOf('name: Sign the installer for the updater'))
+        $step = $step.Substring(0, $step.IndexOf('name: Write latest.json'))
         Assert-True ($step -match 'timeout-minutes:\s*\d+') 'the signing step has a timeout-minutes'
+        Assert-True ($step.Contains('secrets.UPDATE_SIGNING_KEY')) 'key from the secret, in the signing step'
+        Assert-Equal @([regex]::Matches($sign, 'secrets\.UPDATE_SIGNING_KEY')).Count 1 'key in exactly one step'
         Assert-True ($step.Contains('TAURI_SIGNING_PRIVATE_KEY_PASSWORD')) 'the password comes from the environment'
-        Assert-True ($step -notmatch 'signer sign[^
-]*\s(-p|--password|-f|--private-key-path)\s') 'no -p / -f arguments on the command line'
-        Assert-True ($wf.Contains('tools/make-update-manifest.ps1')) 'manifest script'
-        Assert-True ($wf.Contains('dist/latest.json')) 'latest.json published'
-        Assert-True ($wf.Contains('dist/canvas-rgb-setup-*.exe.sig')) '.sig published'
+        Assert-True ($step -notmatch 'signer sign[^\r\n]*\s(-p|--password|-f|--private-key-path)\s') 'no -p / -f arguments on the command line'
+        Assert-True ($sign.Contains('Get-FileHash') -and $sign.Contains('.sha256')) 'the exe is checked against its .sha256 before signing'
+        Assert-True ($sign.Contains('tools/make-update-manifest.ps1')) 'manifest script'
+        Assert-True ($sign.Contains('dist/latest.json') -and $sign.Contains('dist/canvas-rgb-setup-*.exe.sig')) 'sign job uploads latest.json and the .sig'
+        # The lockfile pins the CLI exactly and carries integrity hashes.
+        $dir2 = Join-Path $PSScriptRoot '..\..\tools\signer'
+        $pkg = Get-Content -LiteralPath (Join-Path $dir2 'package.json') -Raw | ConvertFrom-Json
+        Assert-Equal $pkg.dependencies.'@tauri-apps/cli' '2.12.4' 'package.json pins the CLI exactly'
+        # (Regex, not ConvertFrom-Json: Windows PowerShell 5.1 cannot read the lockfile's "" root key.)
+        $lock = Get-Content -LiteralPath (Join-Path $dir2 'package-lock.json') -Raw
+        Assert-True ($lock -match '(?s)"node_modules/@tauri-apps/cli": \{\s*"version": "2\.12\.4",\s*"resolved": "https://registry\.npmjs\.org/[^"]+",\s*"integrity": "sha512-') 'lockfile resolves the CLI to 2.12.4 with an integrity hash'
+        # Publish gets both artifacts and uploads the same four files.
+        Assert-True ($jobs['publish'] -match 'needs: \[build, sign\]') 'publish needs build and sign'
+        Assert-True ($jobs['publish'].Contains('name: signature') -and $jobs['publish'].Contains('name: installer')) 'publish downloads both artifacts'
+        foreach ($f in 'dist/canvas-rgb-setup-*.exe', 'dist/canvas-rgb-setup-*.exe.sha256', 'dist/canvas-rgb-setup-*.exe.sig', 'dist/latest.json') {
+            Assert-True ($jobs['publish'].Contains($f)) "publish uploads $f"
+        }
     }
 }
 finally { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }

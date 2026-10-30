@@ -4,7 +4,7 @@ name: Release
 # The installer is NOT code-signed, so Windows SmartScreen warns on first run ("Windows protected your PC":
 # More info, then Run anyway). Compare the SHA-256 below with the one in the job log before running it.
 # Every third-party action is pinned to a full commit SHA (tag in the comment). The build job is read-only;
-# only the small upload job holds contents: write.
+# only the small upload job holds contents: write. The update signing key lives in the sign job alone.
 on:
   push:
     tags:
@@ -77,12 +77,70 @@ jobs:
           "### SHA-256`n`n``$h  $($exe.Name)``" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
           Set-Content -Path "dist/$($exe.Name).sha256" -Value "$h  $($exe.Name)" -Encoding ascii
 
-      # The tray's updater trusts one minisign key. The signature carries the version (--app-version), so a
-      # tampered latest.json cannot pair a new version number with an older signed installer.
-      # The private key is the UPDATE_SIGNING_KEY secret (backup: outside the repo, see docs/releasing.md).
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: installer
+          path: |
+            dist/canvas-rgb-setup-*.exe
+            dist/canvas-rgb-setup-*.exe.sha256
+          if-no-files-found: error
+
+  # The only job that sees the update signing key. It runs no project build code: it installs the Tauri CLI
+  # from a committed lockfile (integrity hashes, no install scripts) and signs the exe the build job made,
+  # after checking that exe against the build job's .sha256. windows-latest: the same runner image as the
+  # build, so the win32-x64 CLI binary the lockfile pins is the one that runs (and make-update-manifest.ps1
+  # was written and tested for Windows PowerShell).
+  # The tray's updater trusts one minisign key. The signature carries the version (--app-version), so a
+  # tampered latest.json cannot pair a new version number with an older signed installer.
+  # The private key is the UPDATE_SIGNING_KEY secret (backup: outside the repo, see docs/releasing.md).
+  sign:
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      # Only the signer pin, the changelog and the manifest script: nothing that builds the project.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            tools/signer
+            tools/make-update-manifest.ps1
+            CHANGELOG.md
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: installer
+          path: dist
+
+      - name: Checksum still matches
+        shell: pwsh
+        run: |
+          $sums = @(Get-ChildItem dist -Filter 'canvas-rgb-setup-*.exe.sha256')
+          if ($sums.Count -ne 1) { throw "expected one .sha256, found $($sums.Count)" }
+          $line = (Get-Content -LiteralPath $sums[0].FullName -Raw).Trim()
+          if ($line -notmatch '^([0-9a-f]{64})  (canvas-rgb-setup-[0-9.]+\.exe)$') { throw "unreadable checksum line: $line" }
+          $got = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path dist $Matches[2])).Hash.ToLowerInvariant()
+          if ($got -ne $Matches[1]) { throw "SHA-256 mismatch for $($Matches[2]): $got" }
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      # Lockfile-pinned, hash-checked, no lifecycle scripts, no npx.
+      - name: Install the pinned Tauri CLI
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          npm ci --ignore-scripts --prefix tools/signer
+          if ($LASTEXITCODE -ne 0) { throw "npm ci failed ($LASTEXITCODE)" }
+
+      # The key is in this one step's environment and nowhere else in the workflow's build path.
       - name: Sign the installer for the updater
         shell: pwsh
-        timeout-minutes: 5 # a signing run takes seconds; a stuck npx download or prompt must not hold the release
+        timeout-minutes: 5 # a signing run takes seconds; a prompt must not hold the release
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
@@ -90,7 +148,7 @@ jobs:
           if (-not $env:TAURI_SIGNING_PRIVATE_KEY) { throw 'the UPDATE_SIGNING_KEY secret is not set' }
           $v = $env:GITHUB_REF_NAME.TrimStart('v')
           $exe = Get-ChildItem dist -Filter 'canvas-rgb-setup-*.exe' | Select-Object -First 1
-          npx --yes @tauri-apps/cli@2.12.4 signer sign --app-version $v $exe.FullName
+          & "$PWD/tools/signer/node_modules/.bin/tauri.cmd" signer sign --app-version $v $exe.FullName
           if ($LASTEXITCODE -ne 0) { throw "signer sign failed ($LASTEXITCODE)" }
           if (-not (Test-Path "$($exe.FullName).sig")) { throw 'no .sig file was written' }
 
@@ -104,16 +162,14 @@ jobs:
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: installer
+          name: signature
           path: |
-            dist/canvas-rgb-setup-*.exe
-            dist/canvas-rgb-setup-*.exe.sha256
             dist/canvas-rgb-setup-*.exe.sig
             dist/latest.json
           if-no-files-found: error
 
   publish:
-    needs: build
+    needs: [build, sign]
     runs-on: ubuntu-latest
     permissions:
       contents: write # the only job that can write to the release
@@ -121,6 +177,11 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: installer
+          path: dist
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: signature
           path: dist
 
       - name: Checksum still matches

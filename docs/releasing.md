@@ -68,7 +68,7 @@ push and the release workflow runs it before it builds.
    `## [Unreleased]` above it, and update the compare links at the bottom.
 4. Commit: `Release: 0.1.1`.
 5. Tag and push: `git tag v0.1.1` then `git push origin main v0.1.1`. The release workflow checks
-   that the tag matches `Cargo.toml`, builds `canvas-rgb-setup-0.1.1.exe`, signs it, writes
+   that the tag matches `Cargo.toml`, builds `canvas-rgb-setup-0.1.1.exe`, signs it in a separate job, writes
    `latest.json` and attaches the installer, its `.sha256`, its `.sig` and `latest.json` to the
    GitHub release.
 6. Paste the version's changelog section into the GitHub release notes.
@@ -86,10 +86,27 @@ The workflow signs with `signer sign --app-version <version>`, which writes the 
 signature. The tray rejects a signature made for another version, so a tampered `latest.json` cannot
 point a new version number at an older signed installer.
 
+**Where the key can be read.** Only the `sign` job holds `UPDATE_SIGNING_KEY`, and only in the one step
+that signs. The `build` job runs the project's build code (npm, cargo, the installer build) and never
+sees the key; it uploads the unsigned setup exe and its `.sha256`. The `sign` job runs on
+`windows-latest` (the build's runner image, so the win32-x64 CLI binary it installs is the one that runs)
+with `contents: read` and `timeout-minutes: 10`. It checks out only `tools/signer`, `CHANGELOG.md` and
+`tools/make-update-manifest.ps1`, downloads the build artifact, verifies the exe against its `.sha256`,
+then runs `npm ci --ignore-scripts --prefix tools/signer`. `tools/signer/package.json` pins
+`@tauri-apps/cli` to exactly 2.12.4 and `package-lock.json` carries the integrity hashes, so the CLI
+is the audited package, with no install scripts and no `npx` download. The step calls
+`tools/signer/node_modules/.bin/tauri.cmd signer sign` directly, then `make-update-manifest.ps1`, and uploads
+the `.sig` and `latest.json` as the `signature` artifact. The `publish` job (the only one with
+`contents: write`) downloads both artifacts and attaches the exe, `.sha256`, `.sig` and `latest.json`.
+
 The signing step reads the key from `TAURI_SIGNING_PRIVATE_KEY` and the password from
 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (empty), with no `-f` or `-p` on the command line, and runs under
 `timeout-minutes: 5`. `signer sign` never prompts: a missing password is read as empty and a wrong one
 fails at once with "Wrong password for that key" (checked locally with `@tauri-apps/cli@2.12.4`).
+
+**Bumping the signer.** Edit the version in `tools/signer/package.json`, run
+`npm install --package-lock-only --ignore-scripts` in `tools/signer`, and commit both files. The
+workflow test checks the pin and the lockfile's integrity hash.
 
 **`latest.json`.** `tools/make-update-manifest.ps1` writes it from the version, that version's
 section of `CHANGELOG.md` (these are the "What's new" notes the editor shows), the `.sig` file and
@@ -105,7 +122,7 @@ checked once after the download and again right before the installer starts.
 **If the key is lost or leaks.** Installed copies trust only that key, so a new key cannot reach
 them through the updater:
 
-1. Generate a new key with `npx @tauri-apps/cli signer generate`, store it as `UPDATE_SIGNING_KEY`
+1. Generate a new key with `npm exec --prefix tools/signer -- tauri signer generate` (after `npm ci --ignore-scripts --prefix tools/signer`), store it as `UPDATE_SIGNING_KEY`
    and back it up outside the repo.
 2. Put the new public key in `rules.rs` and `tauri.conf.json`, release the next version, and have
    people install that one by hand (the installer from the GitHub release). Copies still holding the
