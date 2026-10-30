@@ -1,5 +1,5 @@
 import { act, cleanup, render, screen } from "@testing-library/react";
-import { useEffect, useState } from "react";
+import { StrictMode, useEffect, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ToastHost, ToastProvider, useToast } from "@/components/Toast";
 
@@ -33,12 +33,14 @@ function Parent() {
   );
 }
 
-function mount() {
-  render(
+function mount({ strict = false } = {}) {
+  const tree = (
     <ToastProvider>
       <Parent />
-    </ToastProvider>,
+    </ToastProvider>
   );
+  // The app runs under StrictMode (next.config.ts), which mounts every effect twice.
+  render(strict ? <StrictMode>{tree}</StrictMode> : tree);
 }
 
 /** Advances fake time in `step` ms slices, re-rendering the parent after each slice. */
@@ -65,6 +67,16 @@ describe("ToastHost", () => {
 
     runWithRerenders(3000, 500);
 
+    expect(screen.queryByText("Quiet is the active profile")).toBeNull();
+  });
+
+  it("clears a toast on time under StrictMode, where effects mount twice", () => {
+    mount({ strict: true });
+    act(() => push("Quiet is the active profile"));
+    runWithRerenders(2000, 500);
+    expect(screen.queryByText("Quiet is the active profile")).not.toBeNull();
+
+    runWithRerenders(1000, 500);
     expect(screen.queryByText("Quiet is the active profile")).toBeNull();
   });
 

@@ -101,4 +101,6 @@ second on the status poll, so the effect tears down and starts again before it c
   the 2.6 s timer forever. Fix: the timer depends on the toast id only; the callback lives in a ref.
   Regression test: `components/__tests__/Toast.test.tsx` (the editor's first unit test, run in CI).
 - **Class fix:** not yet (one bug). Sibling search found no second case: every other effect with a
-  callback dependency only re-binds a listener or is guarded by a ref (table in the PR for #12).
+  callback dependency only re-binds a listener, is guarded by a ref, or is a `useMemo` (`CommandPalette.tsx:96`,
+  `Popover.tsx:113`, `IdentifyWalker.tsx:144` re-bind listeners; `OnboardingGate.tsx:23`,
+  `LayoutView.tsx:922`, `Onboarding.tsx:310` are ref-guarded one-time actions).
