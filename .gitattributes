@@ -1,0 +1,2 @@
+# Signed test fixtures: their bytes are covered by signatures, so no line-ending conversion.
+app/src-tauri/tests/fixtures/update/** -text
