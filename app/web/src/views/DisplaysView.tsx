@@ -21,9 +21,6 @@ import type { FansStatus } from "@/proto/FansStatus";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { useTweenNumber } from "@/components/Motion";
 
-/** Sizes the idle notice (invisible, hidden from assistive tech); never shown as a claim. */
-const VENDOR_SIZER = "ZEUS CAST";
-
 /** The source of a display, as one string: the picker works on keys, not on the spine's shape. */
 function sourceKey(source: DisplaySource): string {
   switch (source.kind) {
@@ -242,16 +239,17 @@ function DisplayCard({ row, fans }: { row: DisplayStatus; fans: FansStatus | nul
         </StateDot>
       }
     >
-      {/* The notice is always laid out, so the card does not move when the vendor app starts or
-          exits: when nothing blocks the display it is invisible and hidden from assistive tech. */}
-      <p
-        className={blockedBy ? "rule rule-warn display-notice" : "rule rule-warn display-notice display-notice-idle"}
-        role={blockedBy ? "status" : undefined}
-        aria-hidden={blockedBy ? undefined : true}
-      >
-        <WarningOctagon size={16} weight="fill" aria-hidden="true" />{" "}
-        {blockedBy ?? VENDOR_SIZER} is running, so canvas-rgb leaves the display alone until it closes.
-      </p>
+      {/* The slot keeps the notice's height in every state (min-height in CSS), so the card does
+          not move when the vendor app starts or exits. Idle, it is an empty block: no vendor
+          sentence in the DOM or the accessibility tree. */}
+      <div className="display-notice-slot">
+        {blockedBy ? (
+          <p className="rule rule-warn display-notice" role="status">
+            <WarningOctagon size={16} weight="fill" aria-hidden="true" /> {blockedBy} is running, so
+            canvas-rgb leaves the display alone until it closes.
+          </p>
+        ) : null}
+      </div>
       <div className="display-card">
         <div className="display-readout">
           {/* The big number is what the source would read, not what the display shows: it says so,
@@ -415,8 +413,8 @@ export function DisplaysView() {
         <Panel>
           <EmptyState icon={<ThermometerSimple size={22} />} title="No display has a source yet">
             The daemon drives a display only while it has a saved source, so a display that has
-            never been set up is left alone. Nothing is sent to it. If the GAMDIAS app ZEUS CAST is
-            running, canvas-rgb waits until it closes, so the two never write the display at once.
+            never been set up is left alone. Nothing is sent to it. canvas-rgb checks for the
+            GAMDIAS app ZEUS CAST every few seconds and lets go of the display while it runs.
           </EmptyState>
         </Panel>
       ) : (

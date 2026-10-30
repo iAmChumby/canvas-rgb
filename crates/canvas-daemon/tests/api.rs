@@ -1713,6 +1713,46 @@ async fn the_display_is_not_opened_while_the_vendor_app_runs() {
     assert!(!app.displays.runtime.read().await.vendor_blocked);
 }
 
+/// #14 review: a vendor check that panics is "unknown", never "not running". The display stays
+/// closed (no connect, no write) until a check succeeds.
+#[tokio::test]
+async fn a_panicking_vendor_check_keeps_the_display_closed() {
+    let (router, app, _home, log) = build_with_display(true);
+    let broken = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    {
+        let broken = broken.clone();
+        app.displays.set_vendor_check(Arc::new(move || {
+            if broken.load(std::sync::atomic::Ordering::SeqCst) {
+                panic!("process snapshot failed");
+            }
+            false
+        }));
+    }
+    put_config(&router, &config(DisplaySource::Fixed { value: 5.0 }, DisplayUnit::Celsius, 0, None)).await;
+
+    let t0 = Instant::now();
+    assert_eq!(pass(&app, t0).await, displays::VENDOR_POLL);
+    assert_eq!(pass(&app, t0 + displays::VENDOR_POLL).await, displays::VENDOR_POLL);
+    assert_eq!(log.lock().unwrap().connects, 0, "unknown: nothing is opened");
+    assert!(log.lock().unwrap().writes.is_empty(), "unknown: nothing is written");
+    assert!(app.displays.runtime.read().await.vendor_unknown);
+    assert!(!app.displays.runtime.read().await.vendor_blocked, "unknown is not claimed as ZEUS CAST");
+
+    // The check recovers: the display opens and writes.
+    broken.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(pass(&app, t0 + displays::VENDOR_POLL * 2).await, Duration::from_millis(250));
+    assert_eq!(log.lock().unwrap().connects, 1);
+    assert_eq!(log.lock().unwrap().writes.len(), 1);
+    assert!(!app.displays.runtime.read().await.vendor_unknown);
+
+    // It breaks again while the display is open: the display is closed at the next vendor poll.
+    broken.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(pass(&app, t0 + displays::VENDOR_POLL * 3).await, displays::VENDOR_POLL);
+    assert!(app.displays.runtime.read().await.vendor_unknown);
+    let status = json(router.clone().oneshot(request("GET", routes::DISPLAYS)).await.unwrap()).await;
+    assert_eq!(status[0]["info"]["connected"], serde_json::json!(false));
+}
+
 /// #14: the editor warned about ZEUS CAST on every visit because the API never said whether it ran.
 /// `info.blocked_by` follows the poll loop's own process check, both ways, within one poll.
 #[tokio::test]

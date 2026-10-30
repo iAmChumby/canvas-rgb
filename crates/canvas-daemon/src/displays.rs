@@ -132,6 +132,9 @@ pub struct Runtime {
     pub refusal_warnings: u32,
     /// The vendor app is running, so the display is held closed. Logged once per run of it.
     pub vendor_blocked: bool,
+    /// The vendor check itself failed (it panicked), so whether the app runs is unknown and the
+    /// display stays closed. Logged once per run of failures.
+    pub vendor_unknown: bool,
     /// When the vendor app was last looked for while the display was open. The write pass runs
     /// every 250 ms; the process snapshot runs once per `VENDOR_POLL` (#14).
     vendor_checked: Option<Instant>,
@@ -482,6 +485,19 @@ async fn fail(
     wait
 }
 
+/// The vendor check panicked, so nothing is known about the vendor app. Keep the display closed
+/// (no write) and look again at the next poll; the first failure of a run is logged.
+async fn vendor_unknown(hub: &DisplayHub, now: Instant) -> Duration {
+    let mut runtime = hub.runtime.write().await;
+    if !runtime.vendor_unknown {
+        runtime.vendor_unknown = true;
+        tracing::warn!("the {VENDOR_EXE} check failed; the display stays closed until a check succeeds");
+    }
+    runtime.connected = false;
+    runtime.retry_at = Some(now + VENDOR_POLL);
+    VENDOR_POLL
+}
+
 /// One pass of the display task. Returns how long to wait before the next pass.
 ///
 /// With no saved config it does nothing but sleep: it does not enumerate or open anything. With a
@@ -525,9 +541,15 @@ pub async fn tick(app: &App, now: Instant) -> Duration {
         let due = hub.runtime.read().await.vendor_checked.is_none_or(|at| now >= at + VENDOR_POLL);
         if due {
             let check = hub.vendor_check();
-            let vendor = tokio::task::spawn_blocking(move || check()).await.unwrap_or(false);
+            let vendor = tokio::task::spawn_blocking(move || check()).await.ok();
             hub.runtime.write().await.vendor_checked = Some(now);
-            if vendor {
+            if vendor.is_none() {
+                // Unknown is not "not running": close the display and look again next poll.
+                let _ = adapter.disconnect().await;
+                return vendor_unknown(hub, now).await;
+            }
+            hub.runtime.write().await.vendor_unknown = false;
+            if vendor == Some(true) {
                 let _ = adapter.disconnect().await;
                 let mut runtime = hub.runtime.write().await;
                 runtime.vendor_blocked = true;
@@ -558,9 +580,12 @@ pub async fn tick(app: &App, now: Instant) -> Duration {
         }
         // The vendor app owns the display while it runs. Look again on the next poll.
         let check = hub.vendor_check();
-        let vendor = tokio::task::spawn_blocking(move || check()).await.unwrap_or(false);
+        let Ok(vendor) = tokio::task::spawn_blocking(move || check()).await else {
+            return vendor_unknown(hub, now).await;
+        };
         {
             let mut runtime = hub.runtime.write().await;
+            runtime.vendor_unknown = false;
             if vendor {
                 if !runtime.vendor_blocked {
                     runtime.vendor_blocked = true;
