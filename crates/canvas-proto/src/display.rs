@@ -47,6 +47,11 @@ pub struct DisplayInfo {
     pub max_decimals: u8,
     pub modes: Vec<DisplayMode>,
     pub connected: bool,
+    /// The vendor app holding the display right now (`"ZEUS CAST"`), measured by the daemon's
+    /// process check. While it is set the daemon leaves the display closed. `None` when no
+    /// vendor app is running (#14).
+    #[serde(default)]
+    pub blocked_by: Option<String>,
 }
 
 /// Where a display's number comes from. Sensor and header ids are the ones `canvas-svc` reports
