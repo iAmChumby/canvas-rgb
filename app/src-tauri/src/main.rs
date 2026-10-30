@@ -14,6 +14,7 @@ mod log;
 mod onboard;
 mod peer;
 mod tray;
+mod update;
 
 use tauri::RunEvent;
 
@@ -28,23 +29,39 @@ fn main() {
         // Registered first, as the plugin's docs require: a second launch opens the editor
         // in the running tray instead of starting another tray icon.
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
-            if onboard::has_onboard_arg(&args) {
+            if update::has_after_update_arg(&args) {
+                // The installer's relaunch: stay quiet, never open the editor.
+            } else if onboard::has_onboard_arg(&args) {
                 tray::open_onboarding(app);
             } else {
                 editor::open(app, None);
             }
         }))
         .plugin(tauri_plugin_opener::init())
+        // Verify-only (see update/mod.rs). Its own commands stay out of the editor's capability file.
+        .plugin(tauri_plugin_updater::Builder::new().pubkey(update::rules::PUBKEY).build())
         .invoke_handler(tauri::generate_handler![
             commands::get_api_config,
             commands::open_logs_folder,
+            update::update_state,
+            update::update_check_now,
+            update::update_install,
+            update::update_later,
+            update::update_skip,
+            update::update_unskip,
+            update::update_set_auto,
+            update::update_dismiss_updated,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
-            tray::build(&handle)?;
-            // `--onboard` (the installer launch) opens the window now, not on a poll.
             let args: Vec<String> = std::env::args().collect();
-            if onboard::has_onboard_arg(&args) {
+            update::init(&handle, &args);
+            tray::build(&handle)?;
+            if update::has_after_update_arg(&args) {
+                // `--after-update` (the installer's /UPDATE relaunch) opens no window, not even the onboarding.
+                tray::stay_quiet(&handle);
+            } else if onboard::has_onboard_arg(&args) {
+                // `--onboard` (the installer launch) opens the window now, not on a poll.
                 tray::open_onboarding(&handle);
             }
             tray::start(handle);

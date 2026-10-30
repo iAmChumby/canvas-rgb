@@ -13,6 +13,13 @@
       "csp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' http://127.0.0.1:9430 ws://127.0.0.1:9430 http://ipc.localhost ipc://localhost"
     }
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVFMzExRTFDOTg2QjI2MTMKUldRVEptdVlIQjR4N2hFYUs3Q1YvdFliZlA3NzdQVGRXakU4SWtTaUFPLzAwcndCYWx1ZlZxaTcK",
+      "endpoints": ["https://github.com/iAmChumby/canvas-rgb/releases/latest/download/latest.json"],
+      "requireSignedVersion": true
+    }
+  },
   "bundle": {
     "active": false,
     "icon": [

@@ -20,7 +20,7 @@ use canvas_proto::fans::{FansStatus, PIPE_LOST_WARN_MS};
 
 use canvas_proto::consts;
 
-use crate::{api, commands, editor, log, onboard};
+use crate::{api, commands, editor, log, onboard, update};
 
 pub const TRAY_ID: &str = "main";
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -48,6 +48,10 @@ pub struct Snapshot {
     pub show_zone_panel: bool,
     /// The user reached Done in the onboarding. Offline snapshots say `true`: no answer, no open.
     pub onboarding_complete: bool,
+    /// A newer release the person has not skipped (#21). Set from the update state, not the poll.
+    pub update: Option<String>,
+    /// An update whose install did not finish (shown until the next check or install).
+    pub update_failed: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +72,8 @@ impl Snapshot {
             signalrgb: false,
             show_zone_panel: false,
             onboarding_complete: true,
+            update: None,
+            update_failed: None,
         }
     }
 }
@@ -108,16 +114,38 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
 
 /// Starts the background poll. Call once, after `build`.
 pub fn start<R: Runtime>(app: AppHandle<R>) {
-    std::thread::spawn(move || loop {
-        refresh(&app);
-        std::thread::sleep(POLL_INTERVAL);
+    std::thread::spawn(move || {
+        let mut daemon_answered = false;
+        loop {
+            daemon_answered |= refresh(&app);
+            // The automatic update check starts after the first successful poll, then runs when due.
+            if daemon_answered {
+                update::controller(&app).tick(&app);
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        }
     });
 }
 
+/// `--after-update`: no window opens in this run, not even the poll's onboarding open.
+pub fn stay_quiet<R: Runtime>(app: &AppHandle<R>) {
+    let state = app.state::<TrayState>();
+    state.onboarding_opened.store(true, Ordering::SeqCst);
+    // The "size your ARGB headers" panel is the other automatic open; it stays shut too.
+    state.zone_panel_opened.store(true, Ordering::SeqCst);
+}
+
+/// True once, when the poll should open the editor for the ARGB-header panel (G7).
+fn zone_panel_due(state: &TrayState, snap: &Snapshot) -> bool {
+    snap.show_zone_panel && snap.onboarding_complete && !state.zone_panel_opened.swap(true, Ordering::SeqCst)
+}
+
 /// Polls the daemon and applies the result to the tray if it changed. Blocking: call it off
-/// the UI thread.
-pub fn refresh<R: Runtime>(app: &AppHandle<R>) {
-    let snap = poll();
+/// the UI thread. Returns whether the daemon answered.
+pub fn refresh<R: Runtime>(app: &AppHandle<R>) -> bool {
+    let mut snap = poll();
+    snap.update = update::offered_version(app);
+    snap.update_failed = update::failed_version(app);
     let state = app.state::<TrayState>();
     let changed = {
         let mut last = state.last.lock().unwrap_or_else(|p| p.into_inner());
@@ -137,13 +165,11 @@ pub fn refresh<R: Runtime>(app: &AppHandle<R>) {
     }
     // The old "size your ARGB headers" panel stays off until the onboarding is done, so the
     // two never open the window twice.
-    if snap.show_zone_panel
-        && snap.onboarding_complete
-        && !state.zone_panel_opened.swap(true, Ordering::SeqCst)
-    {
+    if zone_panel_due(&state, &snap) {
         editor::open(app, None);
     }
     auto_open_for_onboarding(app, &snap);
+    snap.daemon
 }
 
 /// Opens the editor on Layout for the onboarding, now. Used for `--onboard`, which does not
@@ -224,6 +250,8 @@ fn poll() -> Snapshot {
             .any(|c| matches!(c, Conflict::SignalRgb { process, service } if *process || *service)),
         show_zone_panel: status.show_zone_panel,
         onboarding_complete: status.onboarding_complete,
+        update: None,
+        update_failed: None,
     }
 }
 
@@ -247,6 +275,18 @@ fn apply<R: Runtime>(app: &AppHandle<R>, snap: &Snapshot) {
 }
 
 fn tooltip(snap: &Snapshot) -> String {
+    let mut line = tooltip_base(snap);
+    // Warnings keep the front of the line; the update notes follow them.
+    if let Some(version) = &snap.update_failed {
+        line.push_str(&format!(" · update to {version} did not finish"));
+    }
+    if let Some(version) = &snap.update {
+        line.push_str(&format!(" · update {version} available"));
+    }
+    line
+}
+
+fn tooltip_base(snap: &Snapshot) -> String {
     if !snap.daemon {
         return TOOLTIP_OFFLINE.to_string();
     }
@@ -283,7 +323,17 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, snap: &Snapshot) -> tauri::Result<
         ("power:running", "Resume lighting")
     };
 
-    let items: Vec<Box<dyn IsMenuItem<R>>> = vec![
+    let mut items: Vec<Box<dyn IsMenuItem<R>>> = Vec::new();
+    if let Some(version) = &snap.update {
+        items.push(Box::new(MenuItem::with_id(
+            app,
+            "update",
+            format!("Update to {version}…"),
+            true,
+            None::<&str>,
+        )?));
+    }
+    items.extend::<Vec<Box<dyn IsMenuItem<R>>>>(vec![
         Box::new(MenuItem::with_id(app, power_id, power_text, snap.daemon, None::<&str>)?),
         Box::new(effects_submenu(app, snap)?),
         Box::new(fans_submenu(app, snap)?),
@@ -291,9 +341,10 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, snap: &Snapshot) -> tauri::Result<
         Box::new(PredefinedMenuItem::separator(app)?),
         Box::new(MenuItem::with_id(app, "editor", "Open editor", true, None::<&str>)?),
         Box::new(MenuItem::with_id(app, "logs", "Open logs folder", true, None::<&str>)?),
+        Box::new(MenuItem::with_id(app, "update-check", "Check for updates", true, None::<&str>)?),
         Box::new(PredefinedMenuItem::separator(app)?),
         Box::new(MenuItem::with_id(app, "quit", "Quit canvas-rgb", true, None::<&str>)?),
-    ];
+    ]);
     let refs: Vec<&dyn IsMenuItem<R>> = items.iter().map(|item| item.as_ref()).collect();
     Menu::with_items(app, &refs)
 }
@@ -389,6 +440,8 @@ fn on_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
         match id {
             "editor" => editor::open(app, None),
             "fans" => editor::open(app, Some("fans")),
+            "update" => editor::open(app, Some("updates")),
+            "update-check" => update::check_in_background(app),
             "logs" => {
                 if let Err(e) = commands::open_logs(app) {
                     log::append(&e);
@@ -427,4 +480,87 @@ fn quit<R: Runtime>(app: &AppHandle<R>) {
         let handle = app.clone();
         let _ = app.run_on_main_thread(move || handle.exit(0));
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snap() -> Snapshot {
+        Snapshot { daemon: true, running: true, onboarding_complete: true, ..Snapshot::offline() }
+    }
+
+    #[test]
+    fn the_update_note_follows_the_tooltip_and_the_warnings() {
+        let mut s = snap();
+        assert_eq!(tooltip(&s), "canvas-rgb: lighting on");
+        s.update = Some("0.1.1".into());
+        assert_eq!(tooltip(&s), "canvas-rgb: lighting on \u{b7} update 0.1.1 available");
+        s.fan_service_down = true;
+        assert_eq!(tooltip(&s), format!("{TOOLTIP_FAN_SERVICE_DOWN} \u{b7} update 0.1.1 available"));
+        s.daemon = false;
+        assert_eq!(tooltip(&s), format!("{TOOLTIP_OFFLINE} \u{b7} update 0.1.1 available"));
+    }
+
+    #[test]
+    fn no_update_means_no_note() {
+        let mut s = snap();
+        s.signalrgb = true;
+        assert_eq!(tooltip(&s), TOOLTIP_SIGNALRGB);
+    }
+
+    #[test]
+    fn a_failed_install_shows_in_the_tooltip_after_the_warnings_and_before_the_offer() {
+        let mut s = snap();
+        s.update_failed = Some("0.1.1".into());
+        assert_eq!(tooltip(&s), "canvas-rgb: lighting on \u{b7} update to 0.1.1 did not finish");
+        s.fan_service_down = true;
+        s.update = Some("0.1.2".into());
+        assert_eq!(
+            tooltip(&s),
+            format!("{TOOLTIP_FAN_SERVICE_DOWN} \u{b7} update to 0.1.1 did not finish \u{b7} update 0.1.2 available")
+        );
+    }
+
+    #[test]
+    fn after_update_keeps_every_automatic_open_shut() {
+        let panel = Snapshot { show_zone_panel: true, onboarding_complete: true, ..snap() };
+        // Control: a normal start opens the editor for the ARGB panel, once.
+        let normal = TrayState::default();
+        assert!(zone_panel_due(&normal, &panel));
+        assert!(!zone_panel_due(&normal, &panel), "only once");
+        // `--after-update`: never.
+        let app = tauri::test::mock_app();
+        app.manage(TrayState::default());
+        stay_quiet(app.handle());
+        let quiet = app.state::<TrayState>();
+        assert!(!zone_panel_due(&quiet, &panel), "the ARGB panel stays shut");
+        assert!(quiet.onboarding_opened.load(Ordering::SeqCst), "the onboarding open is spent");
+    }
+
+    fn menu_ids(snap: &Snapshot) -> Vec<String> {
+        let app = tauri::test::mock_app();
+        let menu = build_menu(app.handle(), snap).unwrap();
+        menu.items().unwrap().iter().map(|item| item.id().as_ref().to_string()).collect()
+    }
+
+    #[test]
+    fn the_menu_has_check_for_updates_and_the_update_row_only_when_offered() {
+        let plain = menu_ids(&snap());
+        assert!(plain.contains(&"update-check".to_string()), "{plain:?}");
+        assert!(!plain.contains(&"update".to_string()), "{plain:?}");
+        assert_eq!(plain.first().map(String::as_str), Some("power:paused"), "{plain:?}");
+        let offered = menu_ids(&Snapshot { update: Some("0.1.1".into()), ..snap() });
+        assert_eq!(offered.first().map(String::as_str), Some("update"), "the row sits on top: {offered:?}");
+        assert!(offered.contains(&"update-check".to_string()));
+        for id in ["editor", "logs", "quit"] {
+            assert!(offered.contains(&id.to_string()), "{id} in {offered:?}");
+        }
+    }
+
+    #[test]
+    fn a_new_update_version_changes_the_snapshot_so_the_menu_rebuilds() {
+        let b = Snapshot { update: Some("0.1.1".into()), ..snap() };
+        assert_ne!(snap(), b);
+    }
 }
