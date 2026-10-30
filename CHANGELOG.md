@@ -6,6 +6,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-29
+
 ### Added
 
 - canvas-rgb checks for a newer release once a day and installs it when you click Update now. (#21)
@@ -26,5 +28,6 @@ The first release.
 - Settings for the Attack Shark X6 mouse and the 8BitDo Ultimate 2 controller.
 - The editor, the tray app, the `canvas-rgb` CLI and the Windows installer.
 
-[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/iAmChumby/canvas-rgb/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/iAmChumby/canvas-rgb/releases/tag/v0.1.0
