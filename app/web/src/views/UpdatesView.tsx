@@ -5,8 +5,9 @@ import { ArrowRight } from "@phosphor-icons/react";
 import { Button, Swap } from "@/components/Button";
 import { Panel, StateDot } from "@/components/Panel";
 import { SkeletonLines } from "@/components/Skeleton";
-import { canUpdate, updateCheckNow, updateInstall, updateSkip } from "@/lib/host";
+import { canUpdate, openLogsFolder, tauriHost, updateCheckNow, updateInstall, updateSkip } from "@/lib/host";
 import { parseInline, parseNotes, type NoteBlock } from "@/lib/releaseNotes";
+import { messageOf } from "@/lib/errors";
 import { useSnap } from "@/lib/store";
 import { sendUpdate } from "@/lib/updateActions";
 import {
@@ -171,7 +172,22 @@ export function UpdatesView() {
                   </Button>
                 )}
                 {isSkipped(u) && <span className="mute upd-note">{avail.version} is skipped. Update now still works.</span>}
-                {!acts && <span className="mute upd-note">Tray app only</span>}
+                {u.phase.kind === "install_failed" && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={tauriHost() === null}
+                    onClick={() => {
+                      setErr(null);
+                      openLogsFolder().catch((e: unknown) => setErr(messageOf(e)));
+                    }}
+                  >
+                    Open logs folder
+                  </Button>
+                )}
+                {(!acts || (u.phase.kind === "install_failed" && tauriHost() === null)) && (
+                  <span className="mute upd-note">Tray app only</span>
+                )}
               </div>
               {err && <p className="error-line">{err}</p>}
             </Panel>

@@ -17,6 +17,7 @@
   position: relative;
   height: 4px;
   overflow: hidden;
+  /* The fader's slot radius (hardware.css .slider-track): no token exists for 2 px. */
   border-radius: 2px;
   background: var(--sunk);
   box-shadow: var(--well), inset 0 0 0 1px var(--line);
@@ -87,7 +88,8 @@
   align-items: center;
   justify-content: space-between;
   gap: var(--s2) var(--s4);
-  min-height: 44px;
+  /* A `.field` row's height (app.css). */
+  min-height: 48px;
   padding-top: var(--s2);
 }
 
@@ -134,23 +136,27 @@
   font-weight: 600;
 }
 
+/* The same chip as `.effect-hint code` (motion.css): its padding, radius, ground and colour. */
 .notes-list code {
-  padding: 1px 5px;
+  padding: 1px 4px;
   border-radius: 4px;
   background: var(--sunk);
-  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--dim);
   font-family: var(--fm);
-  font-size: 0.9em;
-  color: var(--ink);
+  font-size: var(--t14);
   overflow-wrap: anywhere;
 }
 
-/* The key while the update runs: pressed in and fully lit, so the progress reads as the key's own
+/* The key while the update runs: fully lit and still, so the progress reads as the key's own
    state, not as a dead control. */
 .btn[aria-busy="true"]:disabled {
   opacity: 1;
-  transform: translateY(1px);
   cursor: default;
+}
+
+/* The ghost link starts at the row's left edge, so its words line up with the keys above it. */
+.upd-banner-acts .btn-ghost {
+  padding-left: 0;
 }
 
 /* The banner's keys sit under its words, in one row where the width allows. */

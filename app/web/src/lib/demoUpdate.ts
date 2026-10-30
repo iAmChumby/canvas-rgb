@@ -4,7 +4,7 @@
 //
 // Names: idle, checking, up-to-date, available, snoozed, skipped, downloading, downloading-unknown,
 // verifying, verify-failed, uac, declined, installing, offline, rate-limited, check-failed,
-// install-failed, updated. With a fixture the controls work on this in-memory state, so the
+// install-failed, install-failed-text, updated. With a fixture the controls work on this in-memory state, so the
 // flow can be clicked through: Update now walks the install phases.
 
 import type { UpdateState } from "@/proto/UpdateState";
@@ -94,6 +94,8 @@ export function fixtureState(name: string): UpdateState | null {
       return { ...s, phase: { kind: "check_failed", reason: "other" } };
     case "install-failed":
       return avail({ kind: "install_failed", message: "the installer exited with code 5" });
+    case "install-failed-text":
+      return avail({ kind: "install_failed", message: "Setup could not replace canvas-rgb.exe because it is in use" });
     case "updated":
       return { ...s, current_version: NEXT, updated_to: info(), phase: { kind: "up_to_date" } };
     default:

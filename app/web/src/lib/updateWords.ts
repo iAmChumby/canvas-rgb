@@ -81,6 +81,18 @@ export function slotFill(u: UpdateState): number | null {
   }
 }
 
+/**
+ * What the installer said, when it said a sentence a person can read. An exit code, a hex code or
+ * a bare word is not one, and gets the plain line instead.
+ */
+export function installerSentence(message: string): string {
+  const m = message.trim();
+  const raw = /exit(ed)?\s+(with\s+)?code|0x[0-9a-f]+|error\s*\d+|^\W*\d+\W*$/i.test(m);
+  if (m === "" || raw || !/\s/.test(m)) return "The installer stopped before it finished.";
+  const cap = m.charAt(0).toUpperCase() + m.slice(1);
+  return /[.!?]$/.test(cap) ? cap : `${cap}.`;
+}
+
 /** The state line of the updates page: what is happening, in the settled words. */
 export function stateLine(u: UpdateState): string {
   const v = u.available?.version ?? "";
@@ -109,14 +121,14 @@ export function stateLine(u: UpdateState): string {
           ? "Could not check for updates: GitHub rate limit."
           : "Could not check for updates.";
     case "install_failed":
-      return `The update did not finish: ${p.message}. canvas-rgb is still on ${u.current_version}.`;
+      return `${installerSentence(p.message)} canvas-rgb is still on ${u.current_version}.`;
     case "up_to_date":
     case "idle":
     case "available":
     default:
       if (u.available) return `${u.available.version} available.`;
       if (u.updated_to) return `Updated to ${u.updated_to.version}.`;
-      return `Up to date. Checked ${fmtChecked(u.last_check)}.`;
+      return "Up to date.";
   }
 }
 

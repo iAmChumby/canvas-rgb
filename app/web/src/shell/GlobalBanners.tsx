@@ -2,13 +2,13 @@
 
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { ArrowCircleUp, CheckCircle, Lightning, SquaresFour, Warning, WarningOctagon } from "@phosphor-icons/react";
+import { ArrowCircleUp, CheckCircle, FolderOpen, WarningCircle, Lightning, SquaresFour, Warning, WarningOctagon } from "@phosphor-icons/react";
 import { Banner } from "@/components/Banner";
 import { Button, ButtonLink } from "@/components/Button";
 import { api } from "@/lib/endpoints";
-import { canUpdate, updateDismissUpdated, updateInstall, updateLater, updateSkip } from "@/lib/host";
+import { canUpdate, openLogsFolder, tauriHost, updateDismissUpdated, updateInstall, updateLater, updateSkip } from "@/lib/host";
 import { sendUpdate } from "@/lib/updateActions";
-import { isInstalling, isSkipped } from "@/lib/updateWords";
+import { installerSentence, isInstalling, isSkipped } from "@/lib/updateWords";
 import { messageOf } from "@/lib/errors";
 import { fmtSeconds } from "@/lib/format";
 import { patchSnap, useSnap } from "@/lib/store";
@@ -142,9 +142,18 @@ export function GlobalBanners() {
     !update.snoozed &&
     !isSkipped(update) &&
     !isInstalling(update) &&
+    update.phase.kind !== "install_failed" &&
     !onUpdates &&
     canUpdate();
   const later = () => void sendUpdate(updateLater);
+
+  // The install stopped and the tray came back quietly: the person has to be told here, not only
+  // on the Updates page. X hides it for this run (the state stays in Settings and on the page).
+  const failed =
+    update !== null && update.available !== null && update.phase.kind === "install_failed" ? update.phase.message : null;
+  const failedKey = update?.available ? `${update.available.version}|${failed}` : "";
+  const [failedHidden, setFailedHidden] = useState<string | null>(null);
+  const showFailed = failed !== null && failedHidden !== failedKey && !onUpdates && canUpdate();
 
   return (
     <div className="banners">
@@ -194,6 +203,38 @@ export function GlobalBanners() {
               <ButtonLink href="/updates/" variant="ghost" size="sm">
                 What&rsquo;s new
               </ButtonLink>
+            </div>
+          </Banner>
+        )}
+        {showFailed && update && update.available && failed !== null && (
+          <Banner
+            tone="down"
+            icon={<WarningCircle size={20} weight="fill" />}
+            title={`The update to ${update.available.version} did not finish`}
+            onDismiss={() => setFailedHidden(failedKey)}
+            dismissLabel="Dismiss"
+          >
+            {installerSentence(failed)} canvas-rgb is still on {update.current_version}.
+            <div className="upd-banner-acts">
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => {
+                  void sendUpdate(updateInstall);
+                  router.push("/updates/");
+                }}
+              >
+                Try again
+              </Button>
+              <Button
+                size="sm"
+                icon={<FolderOpen size={16} />}
+                disabled={tauriHost() === null}
+                onClick={() => void openLogsFolder().catch(() => undefined)}
+              >
+                Open logs folder
+              </Button>
+              {tauriHost() === null && <span className="mute upd-note">Tray app only</span>}
             </div>
           </Banner>
         )}
