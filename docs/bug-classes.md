@@ -84,8 +84,8 @@ or acts as if a step worked without checking that it did.
   service, one in the daemon) and `warn_if_err` in place of `let _ =` where a success was reported.
 - **Sibling search:** every area (`crates/*`, the tray, the editor, the installer). Fixed in PR #23:
   the tray's silent menu, tooltip and icon updates, the daemon's quit that said `quitting` without
-  reaching the main task, and the dropped saves after a reported success. Filed: #24 (the
-  uninstaller skips an unreadable SignalRGB restore record and still says it finished). Left on
+  reaching the main task, and the dropped saves after a reported success. Fixed after: #24 (the
+  uninstaller skipped an unreadable SignalRGB restore record and still said it finished). Left on
   purpose: `composite.rs` `ensure_royuan` (the keyboard is optional), `state.rs` `try_send` (a full
   queue drops a refresh hint), and best-effort UI calls that claim nothing afterwards.
 - **How to check a new notice or log line:** name the field or the measurement behind it. If there

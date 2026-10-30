@@ -26,6 +26,18 @@ try {
     Assert-InstallDirSafe -Path $InstallDir
     Assert-MachineHomeSafe -Path $programData
 
+    # 0b. Read the SignalRGB machine record NOW, before anything is deleted. An unreadable record is reported and
+    #     kept; the uninstall carries on and ends with exit 2 (finished, except the record), never a plain success.
+    $rf = Join-Path $programData $c.RestoreFile
+    $rec = $null
+    $recError = $null
+    try { $rec = Read-RestoreFile -Path $rf } catch { $recError = $_.Exception.Message }
+    if ($recError) {
+        Say "  restore record unreadable: $rf ($recError)"
+        Say "  The SignalRGB service start type will NOT be restored. The record is kept as it is."
+        Say "  To restore by hand: run  Set-Service -Name SignalRgbService -StartupType Automatic  in an elevated PowerShell (use the start type the record lists, if it can be read). Fix or remove the record, then run the uninstall again."
+    }
+
     # 1. Stop the service FIRST. Its 1 Hz tick re-drives every manual header (each duty write sets the
     #    manual bit again), so a --restore-bios run beside a live service is undone within a second.
     #    Its shutdown hands every header back to BIOS. A service that will not stop is a hard stop:
@@ -107,9 +119,9 @@ try {
     }
 
     # 4. Restore the SignalRGB service from its record.
-    $rf = Join-Path $programData $c.RestoreFile
-    $rec = Read-RestoreFile -Path $rf
-    if ($rec -and $rec.service) {
+    if ($recError) {
+        Say '  SignalRGB service left as is (unreadable record, see above)'
+    } elseif ($rec -and $rec.service) {
         $t = [string]$rec.service.startType
         if (@('Automatic', 'Manual', 'Disabled') -notcontains $t) { $t = 'Automatic' }
         if (Get-Service -Name $rec.service.name -ErrorAction SilentlyContinue) {
@@ -122,11 +134,17 @@ try {
     }
 
     # 5. Machine data.
-    if ($PurgeConfig -and (Test-Path -LiteralPath $programData)) {
+    if ($PurgeConfig -and $recError) {
+        Say "  kept $programData (-PurgeConfig skipped: it holds the unreadable restore record)"
+    } elseif ($PurgeConfig -and (Test-Path -LiteralPath $programData)) {
         Remove-Item -LiteralPath $programData -Recurse -Force
         Say "  deleted $programData (-PurgeConfig)"
     } else {
         Say "  kept $programData"
+    }
+    if ($recError) {
+        Say '[elevated] finished, except: the SignalRGB service was not restored (unreadable record kept)'
+        exit 2
     }
     Say '[elevated] done'
     exit 0

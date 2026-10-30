@@ -124,6 +124,140 @@ try {
         Assert-True (Test-Path -LiteralPath (Join-Path $d 'thesis.docx')) 'the folder must be untouched'
     }
 
+    # ---- #24: an unreadable SignalRGB restore record is named, kept, and the uninstall does not say "finished"
+
+    Test-Case 'uninstall.ps1 -WhatIf: an unreadable user record shows "restore record unreadable" in the plan, with its path' {
+        $pd = Join-Path $dir 'PD24'; $ad = Join-Path $dir 'AD24'
+        New-Item -ItemType Directory -Path $pd, (Join-Path $ad 'canvas-rgb') -Force | Out-Null
+        $rec = Join-Path $ad 'canvas-rgb\signalrgb-restore.json'
+        [System.IO.File]::WriteAllText($rec, '{not json')
+        $cmd = '$env:ProgramData=''{0}''; $env:APPDATA=''{1}''; & ''{2}'' -WhatIf; exit $LASTEXITCODE' -f $pd, $ad, (Join-Path $PSScriptRoot '..\uninstall.ps1')
+        $out = & powershell.exe -NoProfile -Command $cmd 2>&1 | Out-String
+        Assert-Equal $LASTEXITCODE 0 $out
+        Assert-True ($out -match 'restore record unreadable') "plan must say the record is unreadable:`n$out"
+        Assert-True $out.Contains($rec) "plan must name the record path:`n$out"
+        Assert-True (-not ($out -match 'no user SignalRGB restore record')) "must not claim there is no record:`n$out"
+        Assert-Equal ([System.IO.File]::ReadAllText($rec)) '{not json' 'the record must be left as it was'
+    }
+
+    Test-Case 'Get-UninstallPlan: an unreadable machine record says so instead of "no machine record"' {
+        $t = (Get-UninstallPlan -E @{
+            InstallDir = 'C:\Fake\PF\canvas-rgb'; ProgramDataDir = 'C:\Fake\PD\canvas-rgb'; AppDataDir = 'C:\Fake\AD\canvas-rgb'
+            PurgeConfig = $false; ServiceExists = $false; MachineRestore = $null; UserRestore = $null
+            MachineRestoreError = 'bad json' }) -join "`n"
+        Assert-True ($t -match 'restore record unreadable.*bad json') $t
+        Assert-True (-not ($t -match 'no machine SignalRGB restore record')) $t
+    }
+
+    # uninstall-user.ps1 touches HKCU Run and the user PATH, so it runs as a temp COPY whose lib.ps1 is followed
+    # by stubs for the registry cmdlets and Set-UserPathEntry (functions beat cmdlets). The real script text runs.
+    function Invoke-UserUninstallSandbox([string]$Name, [string]$RecordText, [switch]$Purge) {
+        $root = Join-Path $dir $Name
+        $scripts = Join-Path $root 'scripts'; $ad = Join-Path $root 'AD'; $inst = Join-Path $root 'install'
+        New-Item -ItemType Directory -Path $scripts, (Join-Path $ad 'canvas-rgb'), $inst -Force | Out-Null
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\uninstall-user.ps1') -Destination $scripts
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\lib.ps1') -Destination $scripts
+        $stubs = @'
+
+function Get-ItemProperty { Write-Host 'STUB Get-ItemProperty'; return $null }
+function Set-ItemProperty { Write-Host 'STUB Set-ItemProperty' }
+function Remove-ItemProperty { Write-Host 'STUB Remove-ItemProperty' }
+function Set-UserPathEntry { Write-Host 'STUB Set-UserPathEntry'; return $false }
+'@
+        Add-Content -LiteralPath (Join-Path $scripts 'lib.ps1') -Value $stubs
+        $rec = Join-Path $ad 'canvas-rgb\signalrgb-restore.json'
+        if ($null -ne $RecordText) { [System.IO.File]::WriteAllText($rec, $RecordText) }
+        $extra = if ($Purge) { ' -PurgeConfig' } else { '' }
+        $cmd = '$env:APPDATA=''{0}''; & ''{1}'' -InstallDir ''{2}''{3}; exit $LASTEXITCODE' -f $ad, (Join-Path $scripts 'uninstall-user.ps1'), $inst, $extra
+        $out = & powershell.exe -NoProfile -Command $cmd 2>&1 | Out-String
+        return @{ Out = $out; Code = $LASTEXITCODE; Record = $rec }
+    }
+
+    Test-Case 'uninstall-user.ps1: a corrupt restore.json is named, SignalRGB is reported unrestored, the run exits non-zero, the record is kept' {
+        $r = Invoke-UserUninstallSandbox 'u24a' '{not json'
+        Assert-True ($r.Out -match 'STUB Remove-ItemProperty|STUB Get-ItemProperty') "sandbox stubs must be in effect:`n$($r.Out)"
+        Assert-True $r.Out.Contains($r.Record) "must name the record path:`n$($r.Out)"
+        Assert-True ($r.Out -match 'restore record unreadable') $r.Out
+        Assert-True ($r.Out -match "SignalRGB.*NOT restored") "must say SignalRGB's start-up setting was not restored:`n$($r.Out)"
+        Assert-True ($r.Out -match 'by hand') "must say how to restore by hand:`n$($r.Out)"
+        Assert-True ($r.Code -ne 0) "expected non-zero exit, got $($r.Code)"
+        Assert-Equal ([System.IO.File]::ReadAllText($r.Record)) '{not json' 'the record must be kept untouched'
+    }
+
+    Test-Case 'uninstall-user.ps1: -PurgeConfig does not delete the folder that holds an unreadable record' {
+        $r = Invoke-UserUninstallSandbox 'u24b' '{not json' -Purge
+        Assert-True ($r.Code -ne 0) "expected non-zero exit, got $($r.Code)"
+        Assert-True (Test-Path -LiteralPath $r.Record) "the unreadable record must survive -PurgeConfig:`n$($r.Out)"
+    }
+
+    Test-Case 'uninstall-user.ps1: no record at all still exits 0 (nothing to restore is not a failure)' {
+        $r = Invoke-UserUninstallSandbox 'u24c' $null
+        Assert-Equal $r.Code 0 $r.Out
+        Assert-True (-not ($r.Out -match 'unreadable')) $r.Out
+    }
+
+    # uninstall-elevated.ps1 runs as a temp COPY; lib.ps1 gets stubs so no service, HKLM key, process or admin check is real.
+    function Invoke-ElevatedUninstallSandbox([string]$Name, [string]$RecordText, [switch]$Purge) {
+        $root = Join-Path $dir $Name
+        $scripts = Join-Path $root 'scripts'; $pd = Join-Path $root 'PD\canvas-rgb'; $inst = Join-Path $root 'install'
+        New-Item -ItemType Directory -Path $scripts, $pd, $inst -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $inst 'canvas-rgbd.exe'), 'x')
+        # GetFolderPath('CommonPrograms') returns '' once %ProgramData% points at a fake folder: point the copy at a temp folder.
+        $src = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\uninstall-elevated.ps1') -Raw
+        $src = $src.Replace("[Environment]::GetFolderPath('CommonPrograms')", "'$(Join-Path $root 'StartMenu')'")
+        Assert-True ($src.Contains('StartMenu')) 'the sandbox copy must not read the real Start menu folder'
+        [System.IO.File]::WriteAllText((Join-Path $scripts 'uninstall-elevated.ps1'), $src)
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\lib.ps1') -Destination $scripts
+        $stubs = @'
+
+function Test-IsAdmin { return $true }
+function Assert-MachineHomeSafe { param($Path) Write-Host 'STUB Assert-MachineHomeSafe' }
+function Get-Service { Write-Host 'STUB Get-Service' }
+function Set-Service { Write-Host 'STUB Set-Service' }
+function Get-Process { }
+function Get-CimInstance { }
+function Remove-Item {
+    param([string]$LiteralPath, [switch]$Recurse, [switch]$Force)
+    if ($LiteralPath -like 'HK*') { Write-Host "STUB refused registry delete $LiteralPath"; return }
+    Microsoft.PowerShell.Management\Remove-Item -LiteralPath $LiteralPath -Recurse:$Recurse -Force:$Force
+}
+'@
+        Add-Content -LiteralPath (Join-Path $scripts 'lib.ps1') -Value $stubs
+        $rec = Join-Path $pd 'signalrgb-restore.json'
+        if ($null -ne $RecordText) { [System.IO.File]::WriteAllText($rec, $RecordText) }
+        $log = Join-Path $root 'elevated.log'
+        $extra = if ($Purge) { ' -PurgeConfig' } else { '' }
+        $cmd = '$env:ProgramData=''{0}''; & ''{1}'' -InstallDir ''{2}'' -LogFile ''{3}''{4}; exit $LASTEXITCODE' -f (Join-Path $root 'PD'), (Join-Path $scripts 'uninstall-elevated.ps1'), $inst, $log, $extra
+        $out = & powershell.exe -NoProfile -Command $cmd 2>&1 | Out-String
+        return @{ Out = $out; Code = $LASTEXITCODE; Record = $rec; Install = $inst; Pd = $pd }
+    }
+
+    Test-Case 'uninstall-elevated.ps1: a corrupt machine record is named before anything is deleted, kept, and the run ends non-zero after the other steps' {
+        $r = Invoke-ElevatedUninstallSandbox 'e24a' '{not json'
+        Assert-True ($r.Out -match 'STUB Get-Service') "sandbox stubs must be in effect:`n$($r.Out)"
+        Assert-True $r.Out.Contains($r.Record) $r.Out
+        Assert-True ($r.Out -match 'restore record unreadable') $r.Out
+        Assert-True ($r.Out -match 'NOT be restored') $r.Out
+        Assert-True ($r.Out -match 'by hand') $r.Out
+        Assert-True ($r.Out.IndexOf('restore record unreadable') -lt $r.Out.IndexOf('removed')) "must be reported before any removal:`n$($r.Out)"
+        Assert-True (-not (Test-Path -LiteralPath $r.Install)) 'the install dir step must still run'
+        Assert-Equal $r.Code 2 $r.Out
+        Assert-Equal ([System.IO.File]::ReadAllText($r.Record)) '{not json' 'the record must be kept untouched'
+    }
+
+    Test-Case 'uninstall-elevated.ps1: -PurgeConfig keeps the machine folder that holds an unreadable record' {
+        $r = Invoke-ElevatedUninstallSandbox 'e24b' '{not json' -Purge
+        Assert-True (Test-Path -LiteralPath $r.Record) "the unreadable record must survive -PurgeConfig:`n$($r.Out)"
+        Assert-True ($r.Out -match 'kept .*PurgeConfig skipped') $r.Out
+        Assert-Equal $r.Code 2 $r.Out
+    }
+
+    Test-Case 'uninstall-elevated.ps1: no machine record still exits 0' {
+        $r = Invoke-ElevatedUninstallSandbox 'e24c' $null
+        Assert-Equal $r.Code 0 $r.Out
+        Assert-True (-not ($r.Out -match 'unreadable')) $r.Out
+    }
+
     # ---- item 12: Uninstall in Installed apps knows a non-default folder
 
     Test-Case 'Get-UninstallCommand carries the actual install folder, quoted' {
