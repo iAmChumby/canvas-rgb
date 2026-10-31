@@ -16,6 +16,9 @@ pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Starts the daemon in the active user session.
 pub trait SessionLauncher: Send {
+    /// Starts the daemon. An error of kind [`io::ErrorKind::NotConnected`] means no user is logged
+    /// on yet (no console session, or `WTSQueryUserToken` found no token: os error 1008); the
+    /// supervisor waits for a session on that and does not count it as a crash.
     fn launch(&mut self, exe: &Path) -> io::Result<Box<dyn ChildProcess>>;
 
     /// Every `canvas-rgbd.exe` process running right now, with its image path and session.
@@ -73,6 +76,9 @@ pub struct DaemonSupervisor {
     restarts: VecDeque<Instant>,
     quitting: bool,
     stopped: bool,
+    /// The last launch found no user session. Not a crash: the next ticks launch again until a user
+    /// is logged on (#6).
+    waiting_for_session: bool,
 }
 
 impl DaemonSupervisor {
@@ -86,6 +92,7 @@ impl DaemonSupervisor {
             restarts: VecDeque::new(),
             quitting: false,
             stopped: false,
+            waiting_for_session: false,
         }
     }
 
@@ -145,12 +152,22 @@ impl DaemonSupervisor {
         match self.launcher.launch(&self.exe) {
             Ok(child) => {
                 self.child = Some(child);
+                self.waiting_for_session = false;
                 // The first heartbeat gets the same 5 s the rest do.
                 self.last_heartbeat = Some(now);
                 tracing::info!(exe = %self.exe.display(), "daemon started in the user session");
             }
+            Err(e) if e.kind() == io::ErrorKind::NotConnected => {
+                self.child = None;
+                // Logged once; the ticks that follow retry without a line each.
+                if !self.waiting_for_session {
+                    tracing::info!(error = %e, "no user is logged on yet; waiting for a session to start the daemon");
+                }
+                self.waiting_for_session = true;
+            }
             Err(e) => {
                 self.child = None;
+                self.waiting_for_session = false;
                 tracing::error!(error = %e, "could not start the daemon");
             }
         }
@@ -226,6 +243,11 @@ impl DaemonSupervisor {
                 }
                 return self.crashed(now, "missed heartbeats for 5 s");
             }
+            return DaemonAction::None;
+        }
+        // No process because no user was logged on: launch again, no crash counted (#6).
+        if self.waiting_for_session {
+            self.launch(now);
             return DaemonAction::None;
         }
         // No process: the last launch failed, so count it as a crash and try again.
@@ -346,11 +368,16 @@ mod windows_launcher {
             unsafe {
                 let session = WTSGetActiveConsoleSessionId();
                 if session == u32::MAX {
-                    return Err(io::Error::other("no active console session"));
+                    return Err(io::Error::new(io::ErrorKind::NotConnected, "no active console session"));
                 }
                 let mut token: HANDLE = std::ptr::null_mut();
                 if WTSQueryUserToken(session, &mut token) == 0 {
-                    return Err(io::Error::last_os_error());
+                    let error = io::Error::last_os_error();
+                    // ERROR_NO_TOKEN (1008): the console session has no logged-on user yet.
+                    if error.raw_os_error() == Some(1008) {
+                        return Err(io::Error::new(io::ErrorKind::NotConnected, error));
+                    }
+                    return Err(error);
                 }
                 let mut env: *mut c_void = std::ptr::null_mut();
                 let have_env = CreateEnvironmentBlock(&mut env, token, FALSE) != 0;
@@ -364,6 +391,7 @@ mod windows_launcher {
                 startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
                 startup.lpDesktop = desktop.as_mut_ptr();
                 let mut info: PROCESS_INFORMATION = std::mem::zeroed();
+                // token: the logged-on user's own (WTSQueryUserToken above), non-elevated; never the service's.
                 let created = CreateProcessAsUserW(
                     token,
                     std::ptr::null(),
@@ -546,6 +574,36 @@ mod tests {
         }
         assert_eq!(action, DaemonAction::WriteBlack);
         assert!(sup.stopped());
+    }
+
+    #[test]
+    fn no_user_session_yet_is_waiting_not_a_crash_and_the_daemon_starts_at_logon() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_no_session(true);
+        let text = logged(|| sup.start(t0));
+        assert!(text.contains("waiting for a session"), "{text}");
+        // Far more ticks than DAEMON_RESTART_LIMIT: none counts, none stops the supervisor.
+        let mut now = t0;
+        let mut ticks_text = String::new();
+        for _ in 0..(DAEMON_RESTART_LIMIT + 10) {
+            now += Duration::from_secs(1);
+            ticks_text.push_str(&logged(|| assert_eq!(sup.tick(now), DaemonAction::None)));
+        }
+        assert!(!sup.stopped(), "waiting for a session never stops restarts");
+        assert!(!ticks_text.contains("waiting for a session"), "the wait is logged once: {ticks_text}");
+        assert!(processes.spawns().is_empty());
+        // A user logs on: the next tick starts the daemon.
+        processes.set_no_session(false);
+        now += Duration::from_secs(1);
+        sup.tick(now);
+        assert_eq!(processes.spawns().len(), 1);
+        assert!(sup.daemon_pid().is_some());
+        // And a real crash afterwards still counts.
+        processes.exit_last();
+        now += Duration::from_secs(1);
+        sup.tick(now);
+        assert_eq!(processes.spawns().len(), 2);
     }
 
     #[test]

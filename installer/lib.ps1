@@ -437,7 +437,7 @@ function Get-SetupPlan {
     $L.Add('')
     $L.Add('Unelevated, after the UAC child returns:')
     $L.Add("  12. create $($E.AppDataDir)\$($c.TokenFile) only if missing (64 lowercase hex from 32 random bytes, current user only)")
-    $L.Add("  13. HKCU Run: $($c.RunKeyDaemon) = ""$($E.InstallDir)\$($c.DaemonExe)""; $($c.RunKeyTray) = ""$($E.InstallDir)\$($c.TrayExe)""")
+    $L.Add("  13. HKCU Run: $($c.RunKeyTray) = ""$($E.InstallDir)\$($c.TrayExe)""; delete any stale $($c.RunKeyDaemon) value (only the service starts the daemon)")
     if ($E.SignalRgb -eq 'Y') {
         $L.Add("  14. record SignalRGB's HKCU Run value and Startup shortcut in $($E.AppDataDir)\$($c.RestoreFile), then remove them")
     } else {

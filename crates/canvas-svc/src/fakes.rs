@@ -492,6 +492,8 @@ pub struct FakeProcesses {
     running: Arc<Mutex<Vec<RunningRecord>>>,
     /// The console session; `u32::MAX` means none.
     console: Arc<AtomicU32>,
+    /// While set, every spawn fails the way a launch does before anyone has logged on.
+    no_session: Arc<AtomicBool>,
 }
 
 type RunningRecord = (u32, PathBuf, u32, Arc<AtomicBool>);
@@ -548,7 +550,15 @@ impl FakeProcesses {
         self.fail_spawns.store(n, Ordering::SeqCst);
     }
 
+    /// While `true`, spawns fail as "no user session yet" (`ErrorKind::NotConnected`).
+    pub fn set_no_session(&self, none: bool) {
+        self.no_session.store(none, Ordering::SeqCst);
+    }
+
     fn start(&self, exe: &Path, args: &[String]) -> io::Result<Box<dyn ChildProcess>> {
+        if self.no_session.load(Ordering::SeqCst) {
+            return Err(io::Error::new(io::ErrorKind::NotConnected, "no user session yet (fake)"));
+        }
         let pending = self.fail_spawns.load(Ordering::SeqCst);
         if pending > 0 {
             self.fail_spawns.store(pending - 1, Ordering::SeqCst);
