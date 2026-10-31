@@ -1,6 +1,8 @@
 // The peripheral shapes the editor works with, and the words it uses for them.
 
 import type { PeripheralInfo } from "@/proto/PeripheralInfo";
+import type { ReadProgress } from "@/proto/ReadProgress";
+import type { LoadStage } from "@/components/Loading";
 
 /**
  * A peripheral as the list shows it. The battery is an extra the daemon may add when the
@@ -76,4 +78,26 @@ export function choiceWord(id: string): string {
     return text.charAt(0).toUpperCase() + text.slice(1);
   }
   return id;
+}
+
+/** What a peripheral is called in a sentence about reading it: "mouse", "controller". */
+export function nounOf(kind: PeripheralInfo["kind"]): string {
+  if (kind === "mouse") return "mouse";
+  if (kind === "game_controller") return "controller";
+  return "keyboard";
+}
+
+/**
+ * The words for the stage of a device read ("Waking the mouse", "Reading settings · 3 of 5").
+ * `idle` is a read that has not reported yet: it reads as the settings being read, which is what
+ * the daemon is doing.
+ */
+export function readStage(progress: ReadProgress | null, noun: string): LoadStage {
+  const stage = progress?.stage ?? "idle";
+  if (stage === "opening") return { label: `Opening the ${noun}` };
+  if (stage === "waking") return { label: `Waking the ${noun}` };
+  if (stage === "reading" && progress && progress.total > 0) {
+    return { label: "Reading settings", done: progress.done, total: progress.total };
+  }
+  return { label: "Reading settings" };
 }

@@ -12,6 +12,8 @@ import {
 } from "@phosphor-icons/react";
 import { Button, IconButton } from "@/components/Button";
 import { Panel, StateDot } from "@/components/Panel";
+import { ErrorPanel, LoadFrame, type LoadState } from "@/components/Loading";
+import { PeripheralDetailShape, PeripheralListShape } from "@/components/LoadShapes";
 import { Toggle } from "@/components/Toggle";
 import { Select } from "@/components/Select";
 import { ControllerOutline, type PadButton } from "@/components/ControllerOutline";
@@ -20,8 +22,9 @@ import { useMediaQuery } from "@/components/MediaQuery";
 import { useToast } from "@/components/Toast";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
-import { choiceWord, kindWord, type PeripheralRow } from "@/lib/peripherals";
+import { choiceWord, kindWord, nounOf, readStage, type PeripheralRow } from "@/lib/peripherals";
 import type { PeripheralDetail } from "@/proto/PeripheralDetail";
+import type { ReadProgress } from "@/proto/ReadProgress";
 import type { PropertyDef } from "@/proto/PropertyDef";
 import type { PropertySchema } from "@/proto/PropertySchema";
 import type { PropValue } from "@/proto/PropValue";
@@ -68,6 +71,46 @@ function sameValue(a: PropValue | undefined, b: PropValue): boolean {
   return a.value === b.value;
 }
 
+/** How often the stage of an open read is asked for while the placeholder stands. */
+const STAGE_POLL_MS = 300;
+
+/**
+ * The last read of each device in this session. A device that is picked again shows these values
+ * at once, marked as refreshing, while the new read runs.
+ */
+const lastRead = new Map<string, PeripheralDetail>();
+
+/**
+ * The stage of the read of `id` that is open now, asked for every `STAGE_POLL_MS` while `active`.
+ * The daemon answers at once, also while the read of the device is still waiting for it.
+ */
+function useReadProgress(id: string | null, active: boolean): ReadProgress | null {
+  const [seen, setSeen] = useState<{ id: string; progress: ReadProgress } | null>(null);
+  useEffect(() => {
+    if (!id || !active) return;
+    let stop = false;
+    const ask = () => {
+      api
+        .peripheralRead(id)
+        .then((progress) => {
+          if (!stop) setSeen({ id, progress });
+        })
+        .catch(() => {
+          // A daemon without the route still reads: the stage line stays "Reading settings".
+        });
+    };
+    const first = setTimeout(ask, 100);
+    const timer = setInterval(ask, STAGE_POLL_MS);
+    return () => {
+      stop = true;
+      clearTimeout(first);
+      clearInterval(timer);
+      setSeen(null);
+    };
+  }, [id, active]);
+  return active && seen && seen.id === id ? seen.progress : null;
+}
+
 export function PeripheralsView() {
   const [list, setList] = useState<PeripheralRow[] | null>(null);
   const [listError, setListError] = useState<string | null>(null);
@@ -88,12 +131,20 @@ export function PeripheralsView() {
   // On a wide page the first device is open already; on a phone the list comes first.
   const selectedId = pickedId ?? (narrow ? null : (list?.[0]?.id ?? null));
 
-  const detail = loaded && loaded.id === selectedId ? loaded.detail : null;
+  // What this device held when it was read: from this page, or from an earlier visit. While the
+  // device is read again these stay on screen, marked as refreshing.
+  const fresh = loaded && loaded.id === selectedId ? loaded.detail : null;
+  const detail = fresh ?? (selectedId ? (lastRead.get(selectedId) ?? null) : null);
+  const [reloading, setReloading] = useState(false);
+  const reading = selectedId !== null && !detailError && (fresh === null || reloading);
+  const progress = useReadProgress(selectedId, reading);
 
   // Reads one device again: after a write, or after the access changed.
   const loadDetail = useCallback(async (id: string) => {
+    setReloading(true);
     try {
       const d = await api.peripheral(id);
+      lastRead.set(id, d);
       setLoaded({ id, detail: d });
       setStaged({});
       setSaveError(null);
@@ -101,6 +152,8 @@ export function PeripheralsView() {
     } catch (e) {
       setLoaded(null);
       setDetailError(messageOf(e));
+    } finally {
+      setReloading(false);
     }
   }, []);
 
@@ -127,6 +180,7 @@ export function PeripheralsView() {
     api
       .peripheral(selectedId)
       .then((d) => {
+        lastRead.set(selectedId, d);
         if (stop) return;
         setLoaded({ id: selectedId, detail: d });
         setStaged({});
@@ -199,31 +253,45 @@ export function PeripheralsView() {
   };
 
   const rows = list ?? [];
-  const detailPane = detail ? (
-    <PeripheralDetail
-      detail={detail}
-      values={values}
-      changedCount={Object.keys(changed).length}
-      saving={saving}
-      saveError={saveError}
-      pickedStage={pickedStage}
-      pickedButton={pickedButton}
-      onPickStage={setPickedStage}
-      onPickButton={setPickedButton}
-      onChange={onChange}
-      onApply={() => void apply()}
-      onRevert={revert}
-      onAccess={(next) => void setAccess(next)}
-    />
-  ) : detailError ? (
-    <Panel title="The device">
-      <p className="error-line">{detailError}</p>
-    </Panel>
-  ) : (
-    <Panel title="The device">
-      <p className="mute">Reading the device.</p>
-    </Panel>
+  const noun = nounOf(rows.find((r) => r.id === selectedId)?.kind ?? "mouse");
+  // The detail pane is one frame in every state: the placeholder, the error and the empty state
+  // are as tall as the panels they stand for, and a device read before keeps its values on
+  // screen, marked as refreshing, while it is read again.
+  const detailState: LoadState = detailError ? "error" : detail ? "ready" : "loading";
+  // With no device to show (the list is empty or could not be read) the list says so, and there is
+  // no page to hold a place for.
+  const noDetail = listError !== null || (list !== null && rows.length === 0);
+  const pickedKind = rows.find((r) => r.id === selectedId)?.kind ?? rows[0]?.kind ?? "mouse";
+  const detailPane = noDetail ? null : (
+    <LoadFrame
+      state={detailState}
+      shape={<PeripheralDetailShape kind={pickedKind} />}
+      stage={reading ? readStage(progress, selectedId ? noun : "device") : null}
+      refreshing={detail !== null && reading}
+      label="Reading the device"
+      error={<ErrorPanel title="The device could not be read" message={detailError} />}
+    >
+      {detail && (
+        <PeripheralDetail
+          detail={detail}
+          values={values}
+          changedCount={Object.keys(changed).length}
+          saving={saving}
+          saveError={saveError}
+          pickedStage={pickedStage}
+          pickedButton={pickedButton}
+          onPickStage={setPickedStage}
+          onPickButton={setPickedButton}
+          onChange={onChange}
+          onApply={() => void apply()}
+          onRevert={revert}
+          onAccess={(next) => void setAccess(next)}
+        />
+      )}
+    </LoadFrame>
   );
+
+  const listState: LoadState = listError ? "error" : list === null ? "loading" : rows.length === 0 ? "empty" : "ready";
 
   return (
     <div className="stack">
@@ -231,16 +299,21 @@ export function PeripheralsView() {
         <h1>Peripherals</h1>
       </div>
 
-      {listError && <p className="error-line">{listError}</p>}
-
       <div className="peripheral-grid" data-step={narrow && selectedId ? "detail" : "list"}>
         <div className="peripheral-list" hidden={narrow && !!selectedId}>
-          {list === null ? (
-            <p className="mute">Looking for devices.</p>
-          ) : rows.length === 0 ? (
-            <p className="mute">No device is plugged in that canvas-rgb can configure.</p>
-          ) : (
-            rows.map((p) => {
+          <LoadFrame
+            className="load-col"
+            state={listState}
+            shape={<PeripheralListShape />}
+            label="Looking for devices"
+            error={<ErrorPanel title="The devices could not be listed" message={listError} />}
+            empty={
+              <Panel title="No device found">
+                <p className="mute">None that canvas-rgb can configure is plugged in.</p>
+              </Panel>
+            }
+          >
+            {rows.map((p) => {
               const Glyph = KIND_GLYPH[p.kind];
               const battery = p.battery ?? null;
               return (
@@ -250,7 +323,10 @@ export function PeripheralsView() {
                   className="peripheral-row"
                   data-on={p.id === selectedId ? "true" : "false"}
                   aria-current={p.id === selectedId ? "true" : undefined}
-                  onClick={() => setSelectedId(p.id)}
+                  onClick={() => {
+                    setDetailError(null);
+                    setSelectedId(p.id);
+                  }}
                 >
                   <span className="peripheral-icon" aria-hidden="true">
                     <Glyph size={18} />
@@ -272,14 +348,19 @@ export function PeripheralsView() {
                   )}
                 </button>
               );
-            })
-          )}
+            })}
+          </LoadFrame>
         </div>
 
         <div className="peripheral-detail" hidden={narrow && !selectedId}>
           {narrow && selectedId && (
             <div className="peripheral-back">
-              <IconButton label="Back to the peripherals" icon={<CaretLeft size={18} />} onClick={() => setSelectedId(null)} />
+              <IconButton label="Back to the peripherals" icon={<CaretLeft size={18} />} onClick={() => {
+                  // The next pick reads the device again: what it held stays on screen as known.
+                  setLoaded(null);
+                  setSelectedId(null);
+                }}
+              />
               <span>Peripherals</span>
             </div>
           )}

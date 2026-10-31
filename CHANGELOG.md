@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Changed
+
+- Every page waits the same way. A loading panel has the shape of the page it will hold (the DPI chips, the fan table, the display card, the desk canvas), so nothing moves when the data arrives; the error and the empty state stand in the same frame; a load that ends in under 150 ms shows no placeholder at all; and values the page already knows stay on screen, dimmed, while they are read again. Reading a mouse says what it is doing, "Opening the mouse", "Waking the mouse", "Reading settings, 3 of 5", through a new `GET /api/v1/peripherals/{id}/read` route. (#11)
+
 ### Fixed
 
 - After the PC wakes from sleep, the fan profile comes back. The service now hears sleep and wake, holds every fan write, including a profile you apply by hand, for 5 seconds after the wake while the firmware lets go of the fan controller, then applies the profile again. If a sleep notice arrives and no wake notice follows, the hold ends on its own after about a minute. Before, a write during the wake could trip the safety handback, which kept the fans on BIOS until you applied a profile by hand. A failed duty check now logs every reading and the mode bit. (#29)

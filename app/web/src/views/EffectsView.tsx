@@ -24,7 +24,8 @@ import { EmptyState } from "@/components/EmptyState";
 import { Enter } from "@/components/Motion";
 import { Highlighted, matchEffect } from "@/components/Search";
 import { useMediaQuery } from "@/components/MediaQuery";
-import { Skeleton, SkeletonLines } from "@/components/Skeleton";
+import { ErrorPanel, LoadFrame, type LoadState } from "@/components/Loading";
+import { EffectDetailShape, EffectGalleryShape } from "@/components/LoadShapes";
 import { useToast } from "@/components/Toast";
 import { PropertyControls, type Values } from "@/views/PropertyControls";
 import { api } from "@/lib/endpoints";
@@ -272,18 +273,24 @@ export function EffectsView() {
     }, 240);
   };
 
+  const galleryState: LoadState =
+    effects === null ? (effectsError ? "error" : "loading") : list.length === 0 ? "empty" : "ready";
   const gallery = (
+    <LoadFrame
+      state={galleryState}
+      shape={<EffectGalleryShape />}
+      label="Loading the effects"
+      error={<ErrorPanel title="The effects could not be read" message={effectsError} />}
+      empty={
+        <Panel className="effect-empty">
+          <EmptyState icon={<MagnifyingGlass size={22} />} title="No effect matches that">
+            Try fewer words, or clear the filter and the category.
+          </EmptyState>
+        </Panel>
+      }
+    >
     <div className="effect-gallery">
-      {effects === null
-        ? Array.from({ length: 12 }, (_, i) => (
-            <div className="effect-card effect-card-skeleton" key={`skeleton-${i}`} aria-hidden="true">
-              <Skeleton className="skeleton-preview" />
-              <span className="effect-card-meta">
-                <Skeleton className="skeleton-line" height={20} width="55%" />
-              </span>
-            </div>
-          ))
-        : list.map((row, i) => {
+      {list.map((row, i) => {
         const e = row.effect;
         const html = e.id.startsWith("html:");
         const selected = e.id === selectedId;
@@ -333,12 +340,8 @@ export function EffectsView() {
           </Enter>
         );
       })}
-      {list.length === 0 && (
-        <Panel className="effect-empty">
-          <p className="mute">No effect matches that.</p>
-        </Panel>
-      )}
     </div>
+    </LoadFrame>
   );
 
   const detailPane = (
@@ -357,11 +360,14 @@ export function EffectsView() {
           for one.
         </EmptyState>
       )}
-      {!noLayout && !detail && (
-        <Panel title="Loading">
-          <SkeletonLines rows={4} />
-        </Panel>
-      )}
+      {!(noLayout && !detail) && (
+      <LoadFrame
+        className="stack"
+        state={detail ? "ready" : error ? "error" : "loading"}
+        shape={<EffectDetailShape />}
+        label="Loading the effect"
+        error={<ErrorPanel title="The effect could not be read" message={error} />}
+      >
       {detail && (
         <>
           <Panel>
@@ -452,6 +458,8 @@ export function EffectsView() {
             {error && <p className="error-line" style={{ marginTop: 8 }}>{error}</p>}
           </Panel>
         </>
+      )}
+      </LoadFrame>
       )}
     </div>
   );
@@ -579,7 +587,7 @@ export function EffectsView() {
         </div>
       )}
 
-      {effectsError && <p className="error-line">{effectsError}</p>}
+      {effects !== null && effectsError && <p className="error-line">{effectsError}</p>}
 
       {narrow ? (
         <div

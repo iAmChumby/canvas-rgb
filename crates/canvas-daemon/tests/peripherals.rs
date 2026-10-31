@@ -224,6 +224,106 @@ async fn a_get_with_reads_on_reads_the_device() {
     assert_eq!(fake.log().reads, 1);
 }
 
+/// The path of the fake peripheral's read stage.
+fn read_path_of(id: &str) -> String {
+    format!("{}/{id}/read", routes::PERIPHERALS)
+}
+
+/// The stage the read route reports now, as `(stage, done, total)`.
+async fn stage_now(router: &axum::Router, id: &str) -> (String, u64, u64) {
+    let response = call(router, "GET", &read_path_of(id)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json(response).await;
+    (
+        body.get("stage").and_then(|v| v.as_str()).unwrap_or("?").to_string(),
+        body.get("done").and_then(|v| v.as_u64()).unwrap_or(u64::MAX),
+        body.get("total").and_then(|v| v.as_u64()).unwrap_or(u64::MAX),
+    )
+}
+
+#[tokio::test]
+async fn a_read_reports_its_stages_in_order_while_the_device_read_is_still_open() {
+    use canvas_proto::peripheral::{ReadProgress, ReadStage};
+
+    let fake = FakePeripheral::default();
+    let (router, _app, _home) = build(fake.clone());
+    let id = fake.id().0.clone();
+    assert_eq!(stage_now(&router, &id).await, ("idle".into(), 0, 0), "nothing is reading yet");
+    let access = call_with_body(&router, "PUT", &access_path_of(&id), r#"{"reads":true,"writes":false}"#).await;
+    assert_eq!(access.status(), StatusCode::OK);
+
+    // The device dropped off: the read has to open it again, and every step is held so the test can
+    // look at the stage while the read is open.
+    let (reached_tx, mut reached_rx) = tokio::sync::mpsc::unbounded_channel();
+    let go = Arc::new(tokio::sync::Semaphore::new(0));
+    let sent = [
+        ReadProgress::at(ReadStage::Waking),
+        ReadProgress::reading(0, 2),
+        ReadProgress::reading(1, 2),
+        ReadProgress::reading(2, 2),
+    ];
+    {
+        let mut log = fake.0.lock().unwrap();
+        log.connected = false;
+        log.stages = sent.to_vec();
+        log.gate = Some(common::StageGate { reached: reached_tx, go: go.clone() });
+        log.gate_connect = true;
+    }
+
+    let reader = {
+        let router = router.clone();
+        let path = path_of(&id);
+        tokio::spawn(async move { call(&router, "GET", &path).await.status() })
+    };
+
+    let mut seen = Vec::new();
+    // The open, then the four reported steps.
+    for _ in 0..5 {
+        reached_rx.recv().await.expect("the read reaches its next step");
+        seen.push(stage_now(&router, &id).await);
+        go.add_permits(1);
+    }
+    assert_eq!(reader.await.expect("the read ends"), StatusCode::OK);
+
+    let want: Vec<(String, u64, u64)> = vec![
+        ("opening".into(), 0, 0),
+        ("waking".into(), 0, 0),
+        ("reading".into(), 0, 2),
+        ("reading".into(), 1, 2),
+        ("reading".into(), 2, 2),
+    ];
+    assert_eq!(seen, want, "the stages come in the order the read went through them");
+    assert_eq!(stage_now(&router, &id).await, ("idle".into(), 0, 0), "the stage is cleared when the read ends");
+}
+
+#[tokio::test]
+async fn a_read_that_reports_nothing_is_one_stage_and_then_idle() {
+    let fake = FakePeripheral::default();
+    let (router, _app, _home) = build(fake.clone());
+    let id = fake.id().0.clone();
+    call_with_body(&router, "PUT", &access_path_of(&id), r#"{"reads":true,"writes":false}"#).await;
+    let (reached_tx, mut reached_rx) = tokio::sync::mpsc::unbounded_channel();
+    let go = Arc::new(tokio::sync::Semaphore::new(0));
+    {
+        let mut log = fake.0.lock().unwrap();
+        // One step held by the gate, with no stage reported by the adapter.
+        log.stages = vec![canvas_proto::peripheral::ReadProgress::at(canvas_proto::peripheral::ReadStage::Reading)];
+        log.gate = Some(common::StageGate { reached: reached_tx, go: go.clone() });
+    }
+    let reader = {
+        let router = router.clone();
+        let path = path_of(&id);
+        tokio::spawn(async move { call(&router, "GET", &path).await.status() })
+    };
+    reached_rx.recv().await.expect("the read is open");
+    assert_eq!(stage_now(&router, &id).await, ("reading".into(), 0, 0));
+    go.add_permits(1);
+    assert_eq!(reader.await.expect("the read ends"), StatusCode::OK);
+    assert_eq!(stage_now(&router, &id).await, ("idle".into(), 0, 0));
+    // An id that is not a device is idle too: asking opens nothing.
+    assert_eq!(stage_now(&router, "nothing-here").await, ("idle".into(), 0, 0));
+}
+
 #[tokio::test]
 async fn the_access_is_saved_and_survives_a_restart() {
     let fake = FakePeripheral::default();

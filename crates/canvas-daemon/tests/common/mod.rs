@@ -9,7 +9,7 @@
 
 use canvas_proto::device::{AdapterCapabilities, DeviceId, DeviceInfo, ZoneInfo, ZoneKind};
 use canvas_proto::peripheral::{
-    PeripheralInfo, PeripheralKind, PeripheralSchema, PeripheralSection,
+    PeripheralInfo, PeripheralKind, PeripheralSchema, PeripheralSection, ReadProgress,
 };
 use canvas_proto::props::{PropKind, PropValue, Props, PropertyDef, PropertySchema};
 use canvas_proto::traits::{
@@ -407,6 +407,32 @@ pub struct PeripheralLog {
     pub values: Props,
     /// The schema the fake describes.
     pub schema: PeripheralSchema,
+    /// The stages a read reports through the sink, in order. Empty: the fake reports none.
+    pub stages: Vec<ReadProgress>,
+    /// Where the daemon asked the read to report (`set_read_sink`).
+    pub sink: SinkSlot,
+    /// When set, a read stops after each reported stage until the test lets it go on.
+    pub gate: Option<StageGate>,
+    /// The gate also holds `connect`, so the "opening" stage can be looked at.
+    pub gate_connect: bool,
+}
+
+/// The sink the daemon gave the fake. `ReadSink` has no `Debug`, so the log holds it in here.
+#[derive(Clone, Default)]
+pub struct SinkSlot(pub Option<canvas_adapters::ReadSink>);
+
+impl std::fmt::Debug for SinkSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SinkSlot({})", if self.0.is_some() { "set" } else { "none" })
+    }
+}
+
+/// Holds a read between its stages so a test can look at the stage while the read is open: the
+/// read sends on `reached` after each stage and waits for a permit on `go`.
+#[derive(Clone, Debug)]
+pub struct StageGate {
+    pub reached: tokio::sync::mpsc::UnboundedSender<()>,
+    pub go: Arc<tokio::sync::Semaphore>,
 }
 
 /// The id of the fake peripheral.
@@ -484,6 +510,10 @@ impl Default for FakePeripheral {
             writes_enabled: false,
             values,
             schema,
+            stages: Vec::new(),
+            sink: SinkSlot(None),
+            gate: None,
+            gate_connect: false,
         })))
     }
 }
@@ -548,6 +578,15 @@ impl canvas_proto::traits::PeripheralAdapter for FakePeripheral {
     }
 
     async fn connect(&mut self) -> Result<(), AdapterError> {
+        // A gated connect stops like a slow open does, so a test can look at the "opening" stage.
+        let gate = {
+            let log = self.0.lock().unwrap();
+            if log.gate_connect { log.gate.clone() } else { None }
+        };
+        if let Some(gate) = gate {
+            let _ = gate.reached.send(());
+            gate.go.acquire().await.expect("the gate stays open").forget();
+        }
         let mut log = self.0.lock().unwrap();
         log.connects += 1;
         log.connected = true;
@@ -581,15 +620,28 @@ impl canvas_proto::traits::PeripheralAdapter for FakePeripheral {
     }
 
     async fn read_settings(&mut self, device: &DeviceId) -> Result<Props, AdapterError> {
-        let mut log = self.0.lock().unwrap();
-        if &log.schema.device != device {
-            return Err(AdapterError::UnknownDevice(device.clone()));
+        let (stages, sink, gate) = {
+            let mut log = self.0.lock().unwrap();
+            if &log.schema.device != device {
+                return Err(AdapterError::UnknownDevice(device.clone()));
+            }
+            if !log.connected {
+                return Err(AdapterError::NotConnected);
+            }
+            log.reads += 1;
+            (log.stages.clone(), log.sink.0.clone(), log.gate.clone())
+        };
+        // The way the real adapter does it: report each stage, and carry on.
+        for stage in stages {
+            if let Some(sink) = &sink {
+                sink(stage);
+            }
+            if let Some(gate) = &gate {
+                let _ = gate.reached.send(());
+                gate.go.acquire().await.expect("the gate stays open").forget();
+            }
         }
-        if !log.connected {
-            return Err(AdapterError::NotConnected);
-        }
-        log.reads += 1;
-        Ok(log.values.clone())
+        Ok(self.0.lock().unwrap().values.clone())
     }
 
     async fn write_settings(&mut self, device: &DeviceId, props: &Props) -> Result<(), AdapterError> {
@@ -630,5 +682,9 @@ impl canvas_proto::traits::PeripheralAdapter for FakePeripheral {
 impl canvas_daemon::peripherals::Peripheral for FakePeripheral {
     fn set_config_writes(&mut self, on: bool) {
         self.0.lock().unwrap().writes_enabled = on;
+    }
+
+    fn set_read_sink(&mut self, sink: Option<canvas_adapters::ReadSink>) {
+        self.0.lock().unwrap().sink = SinkSlot(sink);
     }
 }

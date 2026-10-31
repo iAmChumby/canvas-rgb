@@ -66,6 +66,7 @@ pub fn router(app: Arc<App>) -> Router {
             get(peripherals::get_peripheral).patch(peripherals::patch_peripheral),
         )
         .route(routes::PERIPHERAL_ACCESS, put(peripherals::put_peripheral_access))
+        .route(routes::PERIPHERAL_READ, get(peripherals::get_peripheral_read))
         .route(routes::FANS, get(fans::get_fans))
         .route(routes::FAN_HEADER, patch(fans::patch_header))
         .route(routes::FAN_PROFILE, get(fans::get_profile).patch(fans::patch_profile))
