@@ -817,7 +817,7 @@ async fn a_tile_given_up_while_a_request_waited_for_a_slot_is_worded_once() {
             let count = builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
             if count > 1 {
                 // Both slots are busy for a while, then the tile is given up.
-                std::thread::sleep(std::time::Duration::from_millis(400));
+                std::thread::sleep(std::time::Duration::from_millis(1500));
                 return Err("the effect could not be built".to_string());
             }
             Ok(Box::new(common::FakeEffect::new("race")) as Box<dyn canvas_proto::traits::Effect>)

@@ -554,7 +554,7 @@ pub async fn thumbnail(
         let _slot = slot;
         // Another render may have finished while this one waited for the slot.
         if let Some(bytes) = rendering.thumbnails.get(generation, &effect_id) {
-            return TileOutcome::Tile((*bytes).clone());
+            return TileOutcome::Tile(bytes);
         }
         if let Some(why) = rendering.thumbnails.failure(generation, &effect_id) {
             return TileOutcome::AlreadyGivenUp(why);
@@ -562,28 +562,35 @@ pub async fn thumbnail(
         let result = crate::create_effect_for_tile(&user, &effect_id)
             .map_err(crate::thumbnail::RenderError::Failed)
             .and_then(|mut effect| crate::thumbnail::render_within(effect.as_mut(), &props, budget));
+        // The answer is cached before the slot is handed back (the permit drops when this
+        // closure returns). A request that waits for the slot then finds the tile, or the
+        // reason it was given up, and does not render the same tile again.
         match result {
-            Ok(bytes) => TileOutcome::Tile(bytes),
-            Err(error) => TileOutcome::Failed(error),
+            Ok(bytes) => {
+                let bytes = Arc::new(bytes);
+                rendering.thumbnails.put(generation, &effect_id, bytes.clone());
+                TileOutcome::Tile(bytes)
+            }
+            Err(error) => {
+                rendering.thumbnails.put_failure(generation, &effect_id, &error);
+                TileOutcome::Failed(error)
+            }
         }
     })
     .await;
-    // A render that panics ends its task: that is a failed render like any other, not a 500,
-    // so it is remembered and the library does not run it again on every open.
-    let outcome = joined.unwrap_or_else(|error| TileOutcome::Failed(crate::thumbnail::RenderError::Failed(render_task_failure(error))));
 
-    match outcome {
-        TileOutcome::Tile(bytes) => {
-            let bytes = Arc::new(bytes);
-            app.thumbnails.put(generation, &schema.id, bytes.clone());
-            Ok(binary_response(&bytes))
-        }
-        TileOutcome::AlreadyGivenUp(why) => Err(ApiFailure::service_unavailable(given_up(&id, &why))),
-        TileOutcome::Failed(error) => {
-            // The render was given up. It is remembered (a failure of the effect until the
-            // effect changes, a timeout for a while), so the next open of the library does
-            // not render it again for the whole budget, and the answer says what happened
-            // instead of being a bare 500.
+    match joined {
+        Ok(TileOutcome::Tile(bytes)) => Ok(binary_response(&bytes)),
+        Ok(TileOutcome::AlreadyGivenUp(why)) => Err(ApiFailure::service_unavailable(given_up(&id, &why))),
+        // The render was given up, and the cache already remembers it (a failure of the effect
+        // until the effect changes, a timeout for a while), so the next open of the library does
+        // not render it again for the whole budget; the answer says what happened instead of
+        // being a bare 500.
+        Ok(TileOutcome::Failed(error)) => Err(ApiFailure::service_unavailable(given_up(&id, error.reason()))),
+        // A render that panics ends its task: that is a failed render like any other, not a 500,
+        // so it is remembered and the library does not run it again on every open.
+        Err(error) => {
+            let error = crate::thumbnail::RenderError::Failed(render_task_failure(error));
             app.thumbnails.put_failure(generation, &schema.id, &error);
             Err(ApiFailure::service_unavailable(given_up(&id, error.reason())))
         }
@@ -592,9 +599,9 @@ pub async fn thumbnail(
 
 /// How a tile render ended, inside the blocking task.
 enum TileOutcome {
-    /// The tile, rendered (or found in the cache after the wait for the slot).
-    Tile(Vec<u8>),
-    /// The render was given up just now.
+    /// The tile, rendered and cached (or found in the cache after the wait for the slot).
+    Tile(Arc<Vec<u8>>),
+    /// The render was given up just now, and the reason is cached.
     Failed(crate::thumbnail::RenderError),
     /// Another request gave this tile up while this one waited for the slot; the cache
     /// already holds the reason.
