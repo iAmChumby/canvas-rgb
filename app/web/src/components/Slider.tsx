@@ -54,6 +54,8 @@ export function Slider({
   const [dragFrac, setDragFrac] = useState<number | null>(null);
   // The last snapped value sent, so `onChange` runs once per step crossed, not once per move.
   const sent = useRef(value);
+  // The one pointer that owns the drag: a second finger can neither move, end nor commit it.
+  const owner = useRef<number | null>(null);
   const span = max - min || 1;
   const decimals = decimalsOf(step);
   const p = dragFrac ?? Math.min(1, Math.max(0, (value - min) / span));
@@ -88,7 +90,8 @@ export function Slider({
   };
 
   const onPointerDown = (e: PointerEvent<HTMLDivElement>) => {
-    if (disabled) return;
+    if (disabled || owner.current !== null) return;
+    owner.current = e.pointerId;
     e.currentTarget.setPointerCapture(e.pointerId);
     setDragging(true);
     sent.current = value;
@@ -96,27 +99,32 @@ export function Slider({
   };
 
   const onPointerMove = (e: PointerEvent<HTMLDivElement>) => {
-    if (disabled) return;
+    if (disabled || e.pointerId !== owner.current) return;
     if (!e.currentTarget.hasPointerCapture(e.pointerId)) return;
     follow(e.clientX);
   };
 
   // Release: the cap settles onto the committed step with the eased transition, because the
   // drag's own position is dropped in the same render that turns the transitions back on.
-  const onPointerUp = (e: PointerEvent<HTMLDivElement>) => {
-    if (disabled) return;
-    if (!e.currentTarget.hasPointerCapture(e.pointerId)) return;
-    e.currentTarget.releasePointerCapture(e.pointerId);
-    const committed = follow(e.clientX);
+  /** Ends the drag whatever happened meanwhile, so the cap never stays frozen at the pointer. */
+  const end = (e: PointerEvent<HTMLDivElement>) => {
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+    owner.current = null;
     setDragging(false);
     setDragFrac(null);
-    onCommit?.(committed);
+  };
+
+  // A slider disabled mid-drag still ends the drag on release, but commits nothing.
+  const onPointerUp = (e: PointerEvent<HTMLDivElement>) => {
+    if (e.pointerId !== owner.current) return;
+    const committed = disabled ? null : follow(e.clientX);
+    end(e);
+    if (committed !== null) onCommit?.(committed);
   };
 
   const onPointerCancel = (e: PointerEvent<HTMLDivElement>) => {
-    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
-    setDragging(false);
-    setDragFrac(null);
+    if (e.pointerId !== owner.current) return;
+    end(e);
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
