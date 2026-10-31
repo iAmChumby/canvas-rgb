@@ -494,6 +494,12 @@ pub struct FakeProcesses {
     console: Arc<AtomicU32>,
     /// While set, every spawn fails the way a launch does before anyone has logged on.
     no_session: Arc<AtomicBool>,
+    /// Sessions whose user has logged off (the console id does not change).
+    dead_sessions: Arc<Mutex<Vec<u32>>>,
+    /// A killed process needs this many `try_wait` polls before it is gone.
+    slow_kill_polls: Arc<AtomicU32>,
+    /// Launches that happened while an earlier daemon had not exited yet.
+    overlaps: Arc<AtomicU32>,
 }
 
 type RunningRecord = (u32, PathBuf, u32, Arc<AtomicBool>);
@@ -550,12 +556,36 @@ impl FakeProcesses {
         self.fail_spawns.store(n, Ordering::SeqCst);
     }
 
+    /// Marks the user of `session` as logged off while the console id stays what it was.
+    pub fn log_off(&self, session: u32) {
+        self.dead_sessions.lock().unwrap_or_else(|p| p.into_inner()).push(session);
+    }
+
+    /// The user of `session` is logged on again.
+    pub fn log_on(&self, session: u32) {
+        self.dead_sessions.lock().unwrap_or_else(|p| p.into_inner()).retain(|s| *s != session);
+    }
+
+    /// A killed process takes `polls` `try_wait` calls to be gone.
+    pub fn set_slow_kill(&self, polls: u32) {
+        self.slow_kill_polls.store(polls, Ordering::SeqCst);
+    }
+
+    /// How many launches started while an earlier daemon was still running.
+    pub fn overlaps(&self) -> u32 {
+        self.overlaps.load(Ordering::SeqCst)
+    }
+
     /// While `true`, spawns fail as "no user session yet" (`ErrorKind::NotConnected`).
     pub fn set_no_session(&self, none: bool) {
         self.no_session.store(none, Ordering::SeqCst);
     }
 
     fn start(&self, exe: &Path, args: &[String]) -> io::Result<Box<dyn ChildProcess>> {
+        let console = self.console.load(Ordering::SeqCst);
+        if self.dead_sessions.lock().unwrap_or_else(|p| p.into_inner()).contains(&console) {
+            return Err(io::Error::new(io::ErrorKind::NotConnected, "nobody is logged on in the console session (fake)"));
+        }
         if self.no_session.load(Ordering::SeqCst) {
             return Err(io::Error::new(io::ErrorKind::NotConnected, "no user session yet (fake)"));
         }
@@ -567,26 +597,50 @@ impl FakeProcesses {
         let exited = Arc::new(AtomicBool::new(false));
         let pid = {
             let mut spawns = self.spawns.lock().unwrap_or_else(|p| p.into_inner());
+            if spawns.iter().any(|s| !s.2.load(Ordering::SeqCst)) {
+                self.overlaps.fetch_add(1, Ordering::SeqCst);
+            }
             let pid = 4000 + spawns.len() as u32;
             spawns.push((exe.to_path_buf(), args.to_vec(), Arc::clone(&exited)));
             pid
         };
-        Ok(Box::new(FakeChild { exited, pid }))
+        Ok(Box::new(FakeChild {
+            exited,
+            pid,
+            slow_kill: self.slow_kill_polls.load(Ordering::SeqCst),
+            dying: None,
+        }))
     }
 }
 
 struct FakeChild {
     exited: Arc<AtomicBool>,
     pid: u32,
+    /// Polls a killed process needs before it has exited (0 = at once).
+    slow_kill: u32,
+    /// Polls left before a killed process exits.
+    dying: Option<u32>,
 }
 
 impl ChildProcess for FakeChild {
     fn try_wait(&mut self) -> io::Result<Option<i32>> {
+        if let Some(left) = self.dying {
+            if left == 0 {
+                self.exited.store(true, Ordering::SeqCst);
+                self.dying = None;
+            } else {
+                self.dying = Some(left - 1);
+            }
+        }
         Ok(self.exited.load(Ordering::SeqCst).then_some(1))
     }
 
     fn kill(&mut self) -> io::Result<()> {
-        self.exited.store(true, Ordering::SeqCst);
+        if self.slow_kill > 0 {
+            self.dying = Some(self.slow_kill);
+        } else {
+            self.exited.store(true, Ordering::SeqCst);
+        }
         Ok(())
     }
 
@@ -621,7 +675,7 @@ impl crate::daemon::SessionLauncher for FakeLauncher {
             .map(|(pid, image, session, flag)| crate::daemon::RunningDaemon {
                 image: image.clone(),
                 session: *session,
-                process: Box::new(FakeChild { exited: Arc::clone(flag), pid: *pid }),
+                process: Box::new(FakeChild { exited: Arc::clone(flag), pid: *pid, slow_kill: 0, dying: None }),
             })
             .collect()
     }
@@ -631,6 +685,10 @@ impl crate::daemon::SessionLauncher for FakeLauncher {
             u32::MAX => None,
             session => Some(session),
         }
+    }
+
+    fn session_alive(&mut self, session: u32) -> bool {
+        !self.0.dead_sessions.lock().unwrap_or_else(|p| p.into_inner()).contains(&session)
     }
 }
 

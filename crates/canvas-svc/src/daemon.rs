@@ -27,9 +27,17 @@ pub trait SessionLauncher: Send {
         Vec::new()
     }
 
-    /// The active console session, or `None` when there is none.
+    /// The active console session, or `None` when there is none. `None` is also what a switch in
+    /// progress reports for a moment, so the supervisor treats it as "unknown", never as a move.
     fn console_session(&mut self) -> Option<u32> {
         None
+    }
+
+    /// Whether a user is still logged on in `session`. A logoff leaves the console session id as it
+    /// was, so this (not the id) tells the supervisor the daemon's session has ended. Unknown counts
+    /// as logged on.
+    fn session_alive(&mut self, _session: u32) -> bool {
+        true
     }
 }
 
@@ -44,6 +52,33 @@ pub struct RunningDaemon {
 
 /// How long the service waits for a stale daemon to exit after ending it.
 const STALE_EXIT_WAIT: Duration = Duration::from_secs(5);
+
+/// A different console session must stay the active one this long before the daemon is moved to it.
+/// A console that flips back and forth every second (or reports no session for a moment during a
+/// switch) must not cost a kill and a launch per flip: moves bypass the crash budget, so this settle
+/// time is their bound, one move per `SESSION_SETTLE` at most.
+pub const SESSION_SETTLE: Duration = Duration::from_secs(3);
+
+/// Ends `child` (already told to die) and waits up to `STALE_EXIT_WAIT` for it to go, so the next
+/// launch does not start while the old daemon still holds the API port (it would lose the bind and
+/// count as a crash).
+fn wait_for_exit(child: &mut dyn ChildProcess, pid: u32) {
+    let deadline = Instant::now() + STALE_EXIT_WAIT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                tracing::warn!(pid, "the old daemon did not exit within 5 s");
+                break;
+            }
+            Err(e) => {
+                tracing::warn!(pid, error = %e, "could not wait for the old daemon");
+                break;
+            }
+        }
+    }
+}
 
 /// Compares two Windows paths without regard to case or a verbatim (`\\?\`) prefix.
 fn same_image(a: &Path, b: &Path) -> bool {
@@ -81,6 +116,8 @@ pub struct DaemonSupervisor {
     waiting_for_session: bool,
     /// The console session the running daemon was launched into (`None` when the launcher cannot say).
     child_session: Option<u32>,
+    /// A different console session seen while the daemon runs, and since when (see `SESSION_SETTLE`).
+    pending_move: Option<(u32, Instant)>,
 }
 
 impl DaemonSupervisor {
@@ -96,6 +133,7 @@ impl DaemonSupervisor {
             stopped: false,
             waiting_for_session: false,
             child_session: None,
+            pending_move: None,
         }
     }
 
@@ -151,10 +189,37 @@ impl DaemonSupervisor {
         }
     }
 
-    /// The daemon launched into `was` is no longer in the active console session: another user took
-    /// the console (fast user switching) or its user logged off. Not the daemon's fault.
-    fn session_moved(&mut self, was: Option<u32>) -> bool {
-        was.is_some() && self.launcher.console_session() != was
+    /// The daemon that was launched into `was` has lost its session: its user logged off (the
+    /// console id can stay the same) or another session definitely holds the console. A console that
+    /// reports no session is unknown, not a move. Used for a daemon that already exited.
+    fn session_ended(&mut self, was: Option<u32>) -> bool {
+        let Some(was) = was else { return false };
+        !self.launcher.session_alive(was) || self.launcher.console_session().is_some_and(|c| c != was)
+    }
+
+    /// The same question for a daemon that is still running: a logoff is immediate, a move to
+    /// another console session only after it has held for `SESSION_SETTLE`.
+    fn session_changed(&mut self, now: Instant) -> bool {
+        let Some(was) = self.child_session else {
+            self.pending_move = None;
+            return false;
+        };
+        if !self.launcher.session_alive(was) {
+            return true;
+        }
+        match self.launcher.console_session() {
+            Some(c) if c != was => match self.pending_move {
+                Some((target, since)) if target == c => now.saturating_duration_since(since) >= SESSION_SETTLE,
+                _ => {
+                    self.pending_move = Some((c, now));
+                    false
+                }
+            },
+            _ => {
+                self.pending_move = None;
+                false
+            }
+        }
     }
 
     fn launch(&mut self, now: Instant) {
@@ -238,7 +303,7 @@ impl DaemonSupervisor {
                 Ok(Some(code)) => {
                     self.child = None;
                     let was = self.child_session;
-                    if self.session_moved(was) {
+                    if self.session_ended(was) {
                         // Its session logged off or lost the console: the exit is not a crash.
                         tracing::info!(code, "the daemon ended with its session; starting one in the active session");
                         self.launch(now);
@@ -249,13 +314,15 @@ impl DaemonSupervisor {
                 Ok(None) => {}
                 Err(e) => tracing::warn!(error = %e, "could not query the daemon process"),
             }
-            let was = self.child_session;
-            if self.session_moved(was) {
+            if self.session_changed(now) {
+                self.pending_move = None;
                 if let Some(mut child) = self.child.take() {
                     tracing::info!(pid = child.id(), "terminating the daemon (pid {}): the active console session changed", child.id());
                     if let Err(e) = child.kill() {
                         tracing::warn!(error = %e, "could not end the daemon of the old session");
                     }
+                    let pid = child.id();
+                    wait_for_exit(child.as_mut(), pid);
                 }
                 self.launch(now);
                 return DaemonAction::None;
@@ -269,6 +336,8 @@ impl DaemonSupervisor {
                     if let Err(e) = child.kill() {
                         tracing::warn!(error = %e, "could not terminate the daemon that missed heartbeats");
                     }
+                    let pid = child.id();
+                    wait_for_exit(child.as_mut(), pid);
                 }
                 return self.crashed(now, "missed heartbeats for 5 s");
             }
@@ -343,6 +412,20 @@ mod windows_launcher {
             // SAFETY: a plain query with no arguments.
             let session = unsafe { WTSGetActiveConsoleSessionId() };
             (session != u32::MAX).then_some(session)
+        }
+
+        fn session_alive(&mut self, session: u32) -> bool {
+            // SAFETY: a plain query; the token handle, when there is one, is closed here.
+            unsafe {
+                let mut token: HANDLE = std::ptr::null_mut();
+                if WTSQueryUserToken(session, &mut token) != 0 {
+                    CloseHandle(token);
+                    return true;
+                }
+                // ERROR_NO_TOKEN (1008): nobody is logged on in that session any more. Any other
+                // error is unknown, which counts as alive.
+                io::Error::last_os_error().raw_os_error() != Some(1008)
+            }
         }
 
         fn running_daemons(&mut self) -> Vec<RunningDaemon> {
@@ -635,59 +718,126 @@ mod tests {
         assert_eq!(processes.spawns().len(), 2);
     }
 
+    /// Ticks once a second for `secs` seconds from `from`; returns the time reached.
+    fn run_ticks(sup: &mut DaemonSupervisor, from: Instant, secs: u64) -> Instant {
+        let mut now = from;
+        for _ in 0..secs {
+            now += Duration::from_secs(1);
+            sup.on_heartbeat(now);
+            assert_eq!(sup.tick(now), DaemonAction::None);
+            assert!(!sup.stopped());
+        }
+        now
+    }
+
     #[test]
-    fn a_console_session_change_moves_the_daemon_without_counting_a_crash() {
+    fn a_console_session_change_moves_the_daemon_once_it_has_settled() {
         let (mut sup, processes) = supervisor();
         let t0 = Instant::now();
         processes.set_console(1);
         sup.start(t0);
-        let mut now = t0;
-        // Fast user switching back and forth, more often than the restart limit allows crashes.
-        for session in [2, 1, 2, 1, 2, 1] {
+        processes.set_console(2);
+        // Inside the settle time nothing moves.
+        let now = run_ticks(&mut sup, t0, 3);
+        assert_eq!(processes.spawns().len(), 1);
+        let text = logged(|| {
+            let _ = run_ticks(&mut sup, now, 2);
+        });
+        assert!(text.contains("the active console session changed"), "{text}");
+        assert_eq!(processes.spawns().len(), 2);
+        // Moves are not crashes: six more, far past the restart limit.
+        let mut now = now + Duration::from_secs(2);
+        for session in [1, 2, 1, 2, 1, 2] {
             processes.set_console(session);
-            now += Duration::from_secs(1);
-            let text = logged(|| assert_eq!(sup.tick(now), DaemonAction::None));
-            assert!(text.contains("the active console session changed"), "{text}");
-            assert!(!sup.stopped());
+            now = run_ticks(&mut sup, now, 5);
         }
-        assert_eq!(processes.spawns().len(), 7, "one launch per session change, plus the first");
-        // Same session, a real exit: still a crash.
-        processes.exit_last();
-        now += Duration::from_secs(1);
-        sup.tick(now);
         assert_eq!(processes.spawns().len(), 8);
         assert!(!sup.stopped());
     }
 
+    /// A console that flips every second, or two other sessions alternating, never settles, so the
+    /// daemon is never killed (moves bypass the crash budget; the settle time is their bound).
     #[test]
-    fn a_daemon_that_ends_with_its_logged_off_session_is_not_a_crash() {
+    fn a_console_that_flips_every_second_never_moves_the_daemon() {
         let (mut sup, processes) = supervisor();
         let t0 = Instant::now();
         processes.set_console(1);
         sup.start(t0);
         let mut now = t0;
-        // Three logoffs inside the window would stop restarts if each counted.
-        for next in [2, 3, 4, 5] {
-            processes.exit_last();
-            processes.set_console(next);
-            now += Duration::from_secs(10);
-            assert_eq!(sup.tick(now), DaemonAction::None);
-            assert!(!sup.stopped());
+        for i in 0..30 {
+            processes.set_console(if i % 2 == 0 { 2 } else { 1 });
+            now = run_ticks(&mut sup, now, 1);
         }
-        assert_eq!(processes.spawns().len(), 5);
-        // A logoff to no console session at all waits for one, still without a crash.
-        processes.exit_last();
+        for i in 0..30 {
+            processes.set_console(if i % 2 == 0 { 2 } else { 3 });
+            now = run_ticks(&mut sup, now, 1);
+        }
+        assert_eq!(processes.spawns().len(), 1, "no kill and no launch");
+        assert!(sup.daemon_pid().is_some());
+        // Held on one other session for the settle time, it moves exactly once.
+        processes.set_console(3);
+        run_ticks(&mut sup, now, 5);
+        assert_eq!(processes.spawns().len(), 2);
+    }
+
+    /// The console id reads "none" for a moment during a switch: the running daemon stays.
+    #[test]
+    fn no_console_session_for_a_moment_does_not_kill_a_healthy_daemon() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        sup.start(t0);
         processes.clear_console();
-        processes.set_no_session(true);
-        now += Duration::from_secs(10);
-        sup.tick(now);
+        let now = run_ticks(&mut sup, t0, 20);
+        assert_eq!(processes.spawns().len(), 1);
+        assert!(sup.daemon_pid().is_some());
+        // The same session comes back: still the same daemon.
+        processes.set_console(1);
+        run_ticks(&mut sup, now, 5);
+        assert_eq!(processes.spawns().len(), 1);
+    }
+
+    /// A logoff leaves the console session id as it was; only the session's user going away shows it.
+    #[test]
+    fn a_logoff_with_the_same_console_id_is_not_a_crash() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        sup.start(t0);
+        let mut now = t0;
+        // Four logoffs inside the 300 s window would stop restarts if each counted.
+        for round in 1..=4 {
+            processes.exit_last();
+            processes.log_off(1);
+            now = run_ticks(&mut sup, now, 2);
+            assert_eq!(processes.spawns().len(), round, "waiting for a user, nothing launched");
+            processes.log_on(1);
+            now = run_ticks(&mut sup, now, 2);
+            assert_eq!(processes.spawns().len(), round + 1);
+        }
+        // A daemon still running when its user logs off is replaced too (it is told to end first).
+        processes.log_off(1);
+        now = run_ticks(&mut sup, now, 2);
+        assert!(sup.daemon_pid().is_none());
+        processes.log_on(1);
+        run_ticks(&mut sup, now, 2);
+        assert!(sup.daemon_pid().is_some());
         assert!(!sup.stopped());
-        processes.set_no_session(false);
-        processes.set_console(6);
-        now += Duration::from_secs(10);
-        sup.tick(now);
-        assert_eq!(processes.spawns().len(), 6);
-        assert!(!sup.stopped());
+    }
+
+    /// The old daemon must be gone before the new one starts, or the new one loses port 9430 and
+    /// counts as a crash.
+    #[test]
+    fn the_old_daemon_has_exited_before_the_new_one_launches() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        processes.set_slow_kill(3);
+        sup.start(t0);
+        processes.set_console(2);
+        run_ticks(&mut sup, t0, 6);
+        assert_eq!(processes.spawns().len(), 2);
+        assert_eq!(processes.overlaps(), 0, "a launch started while the old daemon still ran");
     }
 
     #[test]
