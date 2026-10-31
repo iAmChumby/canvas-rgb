@@ -6,7 +6,7 @@ name: Release
 # The installer is NOT code-signed, so Windows SmartScreen warns on first run ("Windows protected your PC":
 # More info, then Run anyway). Compare the SHA-256 below with the one in the job log before running it.
 # Every third-party action is pinned to a full commit SHA (tag in the comment). The build job is read-only;
-# only the small upload job holds contents: write. The update signing key lives in the sign job alone.
+# only the publish job holds contents: write. The update signing key lives in the sign job alone.
 on:
   push:
     tags:
