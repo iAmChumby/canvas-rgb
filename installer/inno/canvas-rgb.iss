@@ -9,6 +9,14 @@
 #ifndef AppVersion
   #define AppVersion "0.1.3"
 #endif
+; VersionInfoVersion must be numeric x.x.x.x: a test build such as 0.2.1-dev.12 keeps its full string in
+; AppVersion and uses only the part before the "-" here.
+#define PreIdx Pos("-", AppVersion)
+#if PreIdx > 0
+  #define NumericVersion Copy(AppVersion, 1, PreIdx - 1)
+#else
+  #define NumericVersion AppVersion
+#endif
 #ifndef PayloadDir
   #define PayloadDir "..\..\dist\payload"
 #endif
@@ -30,7 +38,7 @@ AppPublisherURL=https://github.com/iAmChumby/canvas-rgb
 AppSupportURL=https://github.com/iAmChumby/canvas-rgb/issues
 AppUpdatesURL=https://github.com/iAmChumby/canvas-rgb/releases
 AppCopyright=Copyright 2026 Luke Edwards
-VersionInfoVersion={#AppVersion}
+VersionInfoVersion={#NumericVersion}
 DefaultDirName={code:GetDefaultDir}
 UsePreviousAppDir=yes
 DisableProgramGroupPage=yes
@@ -150,6 +158,19 @@ begin
   Result := False;
   for I := 1 to ParamCount do
     if Uppercase(ParamStr(I)) = '/UPDATE' then Result := True;
+end;
+
+// True for /SERVICEUPDATE, the switch the canvas-rgb service passes when it runs this setup itself (#43).
+// Setup then runs as SYSTEM, so "the original user" is SYSTEM, not the person at the keyboard: the per-user
+// script and the tray relaunch are skipped here, and the service does both as the console user once
+// setup ends (setup-user.ps1, then canvas-rgb.exe --after-update).
+function IsServiceUpdateRun: Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  for I := 1 to ParamCount do
+    if Uppercase(ParamStr(I)) = '/SERVICEUPDATE' then Result := True;
 end;
 
 function PsExe: String;
@@ -451,14 +472,20 @@ begin
     Exit;
   end;
 
-  WizardForm.StatusLabel.Caption := 'Setting up canvas-rgb for your account...';
-  Args := '-InstallDir "' + ExpandConstant('{app}') + '" -SignalRgb ' + GetSignalRgb;
-  if not RunPs(ExpandConstant('{app}\installer\setup-user.ps1'), Args, True, Code) or (Code <> 0) then
+  { /SERVICEUPDATE: setup runs as SYSTEM, so ExecAsOriginalUser would run the per-user script as SYSTEM and
+    write SYSTEM's HKCU and profile. The service runs setup-user.ps1 as the console user after setup ends. The
+    elevated script above still counts, so the run is ok. }
+  if not IsServiceUpdateRun then
   begin
-    FFailCode := 11;
-    FFailText := 'Setup could not set up canvas-rgb for your account (code ' + IntToStr(Code) + '). The background part is installed. Run this setup again to finish.';
-    SuppressibleMsgBox(FFailText, mbError, MB_OK, IDOK);
-    Exit;
+    WizardForm.StatusLabel.Caption := 'Setting up canvas-rgb for your account...';
+    Args := '-InstallDir "' + ExpandConstant('{app}') + '" -SignalRgb ' + GetSignalRgb;
+    if not RunPs(ExpandConstant('{app}\installer\setup-user.ps1'), Args, True, Code) or (Code <> 0) then
+    begin
+      FFailCode := 11;
+      FFailText := 'Setup could not set up canvas-rgb for your account (code ' + IntToStr(Code) + '). The background part is installed. Run this setup again to finish.';
+      SuppressibleMsgBox(FFailText, mbError, MB_OK, IDOK);
+      Exit;
+    end;
   end;
   FScriptsOk := True;
   { The service owns launching the daemon (in the user's session). Starting canvas-rgbd.exe here raced it:
@@ -469,7 +496,8 @@ begin
   { /UPDATE (the tray updating itself) relaunches it with --after-update: it starts quietly, with no window. }
   // token: ExecAsOriginalUser starts the tray as the person who started Setup. That is the non-elevated user only
   // because the tray starts Setup unelevated and Setup raises itself (#28): never start Setup with an elevating verb.
-  if WizardSilent and (not IsVerySilent) then
+  { /SERVICEUPDATE never relaunches the tray from here (the original user is SYSTEM): the service starts it. }
+  if WizardSilent and (not IsVerySilent) and (not IsServiceUpdateRun) then
   begin
     if IsUpdateRun then
       ExecAsOriginalUser(ExpandConstant('{app}\canvas-rgb.exe'), '--after-update', ExpandConstant('{app}'), SW_SHOWNORMAL, ewNoWait, Code)
@@ -546,7 +574,8 @@ begin
     SaveStringsToUTF8FileWithoutBOM(ExpandConstant('{app}\update-result.json'), Lines, False);
     Exe := ExpandConstant('{app}\canvas-rgb.exe');
     // token: the original user's, non-elevated (see CurStepChanged).
-    if (not Ok) and FileExists(Exe) then
+    // /SERVICEUPDATE: the original user is SYSTEM, so no relaunch here; the service starts the tray.
+    if (not Ok) and FileExists(Exe) and (not IsServiceUpdateRun) then
       ExecAsOriginalUser(Exe, '--after-update', ExpandConstant('{app}'), SW_SHOWNORMAL, ewNoWait, Code);
   except
     // The install folder is not set when Setup stopped very early: there is nothing to report to.

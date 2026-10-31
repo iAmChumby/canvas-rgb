@@ -79,8 +79,9 @@ The tray checks for a newer release by itself (once a day, or from Settings) and
 person clicks Update now. Two things make that safe, and both come from the release workflow.
 
 **The signing key.** The installer is signed with a minisign key made by `tauri signer generate`.
-The public half is compiled into the tray (`app/src-tauri/src/update/rules.rs`, repeated in
-`plugins.updater.pubkey` in `app/src-tauri/tauri.conf.json`; a test keeps the two equal). The private
+The public half is one constant, `canvas_proto::consts::UPDATE_PUBKEY`: the tray (`app/src-tauri/src/update/rules.rs`) and the
+service both check against it, and `plugins.updater.pubkey` in `app/src-tauri/tauri.conf.json` repeats it (a test keeps
+the two equal). The private
 half is the Actions secret `UPDATE_SIGNING_KEY` (no password), with a backup kept outside the repo.
 The workflow signs with `signer sign --app-version <version>`, which writes the version into the
 signature. The tray rejects a signature made for another version, so a tampered `latest.json` cannot
@@ -119,12 +120,32 @@ that is not `https` on `github.com`, `objects.githubusercontent.com` or
 `release-assets.githubusercontent.com`; a redirect to any other host; a file whose signature fails,
 checked once after the download and again right before the installer starts.
 
+**Installing through the service (#43).** After the download and the signature check, the tray asks the
+daemon (`POST /api/v1/update/install`, with the installer's path and the release's signature text) and the
+daemon passes the request to the service on its pipe. The service stages its own copy, checks it against
+`UPDATE_PUBKEY` again, refuses a signed version that is not strictly newer than its own, and runs setup as
+SYSTEM, so no permission prompt appears and the tray comes back as the user. When the daemon or the service
+is down (503 or no connection), the tray starts setup itself and setup raises its own permission prompt, as
+before. A refusal (422 invalid file, signature or version; 409 an install already runs) ends the update with
+the service's message and starts nothing. The same path is a command:
+`canvas-rgb update --file <installer> --sig <installer.sig>` prints the version the service started and exits
+non-zero on any refusal.
+
+**Test builds.** `.github/workflows/test-build.yml` runs on every push to `main` and by hand (Actions, Test
+build, Run workflow). It builds the installer at `<major>.<minor>.<patch+1>-dev.<run number>` (set in the
+runner only, never committed), signs it in a separate job with the same key, and uploads
+`canvas-rgb-setup-<version>.exe`, its `.sha256` and its `.sig` as the workflow artifact
+`canvas-rgb-test-build-<version>` (kept 14 days). It makes no tag and no release, and no job has
+`contents: write`. The tray's feed never offers it (GitHub's `latest` skips pre-releases and the tray ignores
+them); install it with the `update` command above on a PC running an older build. Being newer than the last
+release and older than the next, it passes the service's version rule once.
+
 **If the key is lost or leaks.** Installed copies trust only that key, so a new key cannot reach
 them through the updater:
 
 1. Generate a new key with `npm exec --prefix tools/signer -- tauri signer generate` (after `npm ci --ignore-scripts --prefix tools/signer`), store it as `UPDATE_SIGNING_KEY`
    and back it up outside the repo.
-2. Put the new public key in `rules.rs` and `tauri.conf.json`, release the next version, and have
+2. Put the new public key in `canvas-proto`'s `consts.rs` and `tauri.conf.json`, release the next version, and have
    people install that one by hand (the installer from the GitHub release). Copies still holding the
    old key keep working, and offer nothing they could verify, until they are reinstalled.
 3. If the old private key leaked, delete the compromised releases' `latest.json` at once: with no

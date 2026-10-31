@@ -18,6 +18,7 @@
 //! The OS calls for step 1 sit behind [`PeerProbe`], so tests use a fake.
 
 use crate::service::Core;
+use crate::update_install::{win::ImpersonatingReader, ClientFileReader, RefusingReader};
 use canvas_proto::api::error_codes;
 use canvas_proto::pipe::{decode_body, decode_len, encode, PipeRequest, PipeResponse, PIPE_NAME};
 use std::ffi::c_void;
@@ -53,6 +54,10 @@ pub trait PeerProbe: Send {
     fn client_process_id(&self) -> io::Result<u32>;
     /// The session attached to the physical console (`0xFFFFFFFF` when none is attached).
     fn console_session_id(&self) -> u32;
+    /// Reads files as this client (impersonating it). The default refuses every read.
+    fn file_reader(&self) -> Box<dyn ClientFileReader> {
+        Box::new(RefusingReader)
+    }
 }
 
 /// A client that passed [`admit`].
@@ -146,6 +151,10 @@ impl PeerProbe for WinPeer {
         // SAFETY: takes no pointers and cannot fail in a way that matters: 0xFFFFFFFF means no console session.
         unsafe { WTSGetActiveConsoleSessionId() }
     }
+
+    fn file_reader(&self) -> Box<dyn ClientFileReader> {
+        Box::new(ImpersonatingReader::of(self.handle()))
+    }
 }
 
 /// Builds the probe for each new connection.
@@ -224,6 +233,40 @@ async fn write_response(pipe: &mut NamedPipeServer, response: &PipeResponse) -> 
     pipe.flush().await
 }
 
+/// `InstallUpdate`: the caller admitted the client again (the console session may have changed since it
+/// connected); this refuses on that, then installs on a blocking thread. The core lock is held only to get the installer, never while
+/// the file is read or setup is started.
+async fn install_update(
+    core: &Arc<Mutex<Core>>,
+    who: Admitted,
+    readmit: Result<Admitted, Rejected>,
+    reader: Box<dyn ClientFileReader>,
+    installer: String,
+    signature: String,
+) -> PipeResponse {
+    if let Err(rejected) = readmit {
+        tracing::warn!(
+            pid = ?rejected.pid,
+            session = ?rejected.session,
+            reason = %rejected.reason,
+            "refused InstallUpdate: the client no longer passes admission"
+        );
+        return error(error_codes::UNAUTHORIZED, rejected.reason);
+    }
+    let updates = core.lock().await.updates.clone();
+    let Some(updates) = updates else {
+        tracing::warn!(pid = who.pid, session = who.session, "refused InstallUpdate: updates are not available (the machine home is not secured)");
+        return error(error_codes::SERVICE_UNAVAILABLE, "the service cannot install updates: the machine home is not secured");
+    };
+    match tokio::task::spawn_blocking(move || updates.install(who, &installer, &signature, reader)).await {
+        Ok(response) => response,
+        Err(e) => {
+            tracing::error!(pid = who.pid, session = who.session, error = %e, "the update install thread failed");
+            error(error_codes::INTERNAL, "the update install thread failed")
+        }
+    }
+}
+
 /// Admits one client, then reads requests from it until it disconnects. The first message must
 /// be `Hello`.
 pub async fn handle_client(mut pipe: NamedPipeServer, core: Arc<Mutex<Core>>, peer: Box<dyn PeerProbe>) {
@@ -274,6 +317,13 @@ pub async fn handle_client(mut pipe: NamedPipeServer, core: Arc<Mutex<Core>>, pe
             greeted = true;
         }
         let response = match request {
+            Ok(PipeRequest::InstallUpdate { installer, signature }) => {
+                // Everything that touches the probe happens before the first await: it is not `Sync`.
+                let launched = core.lock().await.daemon.daemon_pid();
+                let readmit = admit(peer.as_ref(), launched);
+                let reader = peer.file_reader();
+                install_update(&core, who, readmit, reader, installer, signature).await
+            }
             Ok(request) => core.lock().await.handle(request, Instant::now()),
             Err(e) => error(error_codes::VALIDATION, format!("invalid request: {e}")),
         };
@@ -657,6 +707,105 @@ mod tests {
         .await;
         assert!(matches!(&response, PipeResponse::Error { code, .. } if code == "validation"), "{response:?}");
         assert!(closed(&mut client).await, "the pipe closes when the first message is not Hello");
+    }
+
+    // ---- InstallUpdate over a real pipe, on the update fakes (#43) ----
+
+    /// A probe whose console session the test can move after the client has connected, and whose
+    /// file reads come from memory.
+    #[derive(Clone)]
+    struct UpdatePeer {
+        session: u32,
+        pid: u32,
+        console: Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    impl PeerProbe for UpdatePeer {
+        fn client_session_id(&self) -> io::Result<u32> {
+            Ok(self.session)
+        }
+        fn client_process_id(&self) -> io::Result<u32> {
+            Ok(self.pid)
+        }
+        fn console_session_id(&self) -> u32 {
+            self.console.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn file_reader(&self) -> Box<dyn crate::update_install::ClientFileReader> {
+            crate::update_install_tests::FakeReader::of(crate::update_install_tests::PAYLOAD)
+        }
+    }
+
+    fn install_request() -> PipeRequest {
+        PipeRequest::InstallUpdate {
+            installer: crate::update_install_tests::SOURCE.into(),
+            signature: crate::update_install_tests::SIG_011.into(),
+        }
+    }
+
+    /// A pipe server whose core can install updates on a rig that has installed version 0.1.0.
+    async fn update_pipe(tag: &str, session: u32) -> (String, crate::update_install_tests::Rig, Arc<std::sync::atomic::AtomicU32>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let name = unique_name(tag);
+        let first = create_instance(&name, true).unwrap();
+        let rig = crate::update_install_tests::rig("0.1.0");
+        let mut core = test_core(dir.path().to_path_buf());
+        core.updates = Some(Arc::clone(&rig.installer));
+        let console = Arc::new(std::sync::atomic::AtomicU32::new(CONSOLE));
+        let factory_peer = UpdatePeer { session, pid: 77, console: Arc::clone(&console) };
+        let peers: PeerFactory = Arc::new(move |_: &NamedPipeServer| -> Box<dyn PeerProbe> { Box::new(factory_peer.clone()) });
+        tokio::spawn(serve(Arc::new(Mutex::new(core)), name.clone(), first, peers));
+        (name, rig, console, dir)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn install_update_over_the_pipe_starts_setup_and_a_second_request_conflicts() {
+        let (name, rig, _console, _dir) = update_pipe("install-ok", CONSOLE).await;
+        let mut client = connect(&name).await;
+        greet(&mut client).await;
+        let first = round_trip(&mut client, &install_request()).await;
+        assert_eq!(first, PipeResponse::UpdateStarted { version: "0.1.1".into() });
+        assert_eq!(rig.launches(), 1);
+        let second = round_trip(&mut client, &install_request()).await;
+        assert!(matches!(&second, PipeResponse::Error { code, .. } if code == error_codes::CONFLICT), "{second:?}");
+        assert_eq!(rig.launches(), 1, "the second request started nothing");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_non_console_client_cannot_install_an_update() {
+        let (name, rig, _console, _dir) = update_pipe("install-wrong-session", CONSOLE + 1).await;
+        let mut client = connect(&name).await;
+        let response = read_response(&mut client).await;
+        assert!(matches!(&response, PipeResponse::Error { code, .. } if code == error_codes::UNAUTHORIZED), "{response:?}");
+        // The pipe is closed: even if the request is written it is never read.
+        let _ = client.write_all(&encode(&install_request()).unwrap()).await;
+        assert!(closed(&mut client).await);
+        assert_eq!(rig.launches(), 0);
+        assert!(rig.staged_files().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_client_whose_session_left_the_console_after_connecting_is_refused_at_the_request() {
+        let (name, rig, console, _dir) = update_pipe("install-moved", CONSOLE).await;
+        let mut client = connect(&name).await;
+        greet(&mut client).await;
+        console.store(CONSOLE + 1, std::sync::atomic::Ordering::SeqCst);
+        let response = round_trip(&mut client, &install_request()).await;
+        assert!(matches!(&response, PipeResponse::Error { code, .. } if code == error_codes::UNAUTHORIZED), "{response:?}");
+        assert_eq!(rig.launches(), 0);
+        assert!(rig.staged_files().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn install_update_is_unavailable_when_the_service_has_no_installer() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = unique_name("install-none");
+        let first = create_instance(&name, true).unwrap();
+        let core = Arc::new(Mutex::new(test_core(dir.path().to_path_buf())));
+        tokio::spawn(serve(Arc::clone(&core), name.clone(), first, peers(peer(CONSOLE, 77))));
+        let mut client = connect(&name).await;
+        greet(&mut client).await;
+        let response = round_trip(&mut client, &install_request()).await;
+        assert!(matches!(&response, PipeResponse::Error { code, .. } if code == error_codes::SERVICE_UNAVAILABLE), "{response:?}");
     }
 
     /// Real Win32, no fake: a client in this process must show this process's PID and session.

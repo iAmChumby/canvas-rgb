@@ -20,6 +20,7 @@ use crate::process::{ProcessSpawner, StdSpawner};
 use crate::secure::{windows_acl, SecureDir};
 use crate::service::{Core, PowerEvent};
 use crate::store::{self, ChipState};
+use crate::update_install::UpdateInstaller;
 use canvas_adapters::openrgb::OpenRgbAdapter;
 use canvas_proto::config::FansFile;
 use canvas_proto::consts::{DAEMON_EXE, OPENRGB_HOST, OPENRGB_PORT};
@@ -168,7 +169,11 @@ pub fn build_core(boot: &Boot, deps: Deps) -> Core {
 
     let mut daemon = DaemonSupervisor::new(deps.install_dir.join(DAEMON_EXE), deps.launcher);
     daemon.start(now);
-    Core::new(fans, openrgb, daemon)
+    let mut core = Core::new(fans, openrgb, daemon);
+    if boot.secured() {
+        core.updates = Some(Arc::new(UpdateInstaller::production(home.to_path_buf(), deps.install_dir.clone())));
+    }
+    core
 }
 
 /// Step 3: claims the pipe, then runs until `stop` completes, then restores BIOS. `power`
@@ -183,6 +188,16 @@ pub async fn run(
     let name = pipe_server::pipe_name();
     let first = pipe_server::create_instance(&name, true)?;
     let core = Arc::new(AsyncMutex::new(build_core(&boot, deps)));
+    // A pending update (#43): the new service finishes it once setup has ended. On its own thread, so
+    // the service is up and answering while it waits.
+    if let Some(updates) = core.lock().await.updates.clone() {
+        let spawned = std::thread::Builder::new().name("update-resume".into()).spawn(move || {
+            updates.resume_pending();
+        });
+        if let Err(e) = spawned {
+            tracing::error!(error = %e, "could not start the pending-update thread");
+        }
+    }
     let pipe_core = Arc::clone(&core);
     tokio::spawn(async move {
         if let Err(e) = pipe_server::serve(pipe_core, name, first, pipe_server::win_peers()).await {

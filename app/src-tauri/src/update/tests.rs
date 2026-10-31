@@ -250,6 +250,10 @@ fn spawn_stub(stub: &Path) -> Result<Started, RunError> {
 }
 
 fn harness(current: &str, pubkey_file: &str, how: Launch) -> Harness {
+    harness_with_service(current, pubkey_file, how, None)
+}
+
+fn harness_with_service(current: &str, pubkey_file: &str, how: Launch, service: Option<ServiceAsker>) -> Harness {
     isolate_log();
     let server = FakeServer::start();
     let dir = TempDir::new();
@@ -310,12 +314,16 @@ fn harness(current: &str, pubkey_file: &str, how: Launch) -> Harness {
     });
     let states: Arc<Mutex<Vec<UpdateState>>> = Arc::default();
     let sink = states.clone();
-    let ctl = Arc::new(Controller::new(
+    let mut controller = Controller::new(
         settings,
         v(current),
         launcher,
         Box::new(move |s: &UpdateState| sink.lock().unwrap().push(s.clone())),
-    ));
+    );
+    if let Some(service) = service {
+        controller = controller.with_service(service);
+    }
+    let ctl = Arc::new(controller);
     Harness { _app: app, handle, ctl, server, dir, states, seen }
 }
 
@@ -789,6 +797,92 @@ fn a_launch_failure_clears_pending() {
     assert_eq!(h.stored().pending, None);
 }
 
+// ---- the service path (#43) ----
+
+/// What the fake service saw when the tray asked.
+#[derive(Debug, Clone)]
+struct Asked {
+    signature: String,
+    /// The tray's copy could not be written to while the service looked at it.
+    file_held: bool,
+    /// `pending` was already in the state file (the tray may die during the install).
+    pending_in_state_file: Option<String>,
+}
+
+/// A service that answers `answer` and records every request.
+fn fake_service(answer: ServiceAnswer) -> (ServiceAsker, Arc<Mutex<Vec<Asked>>>) {
+    let asked: Arc<Mutex<Vec<Asked>>> = Arc::default();
+    let log = asked.clone();
+    let asker: ServiceAsker = Arc::new(move |path: &Path, signature: &str| {
+        // `<dir>/updates/<installer>`: the state file sits beside `updates`.
+        let state_file = path.parent().unwrap().parent().unwrap().join("update.json");
+        log.lock().unwrap().push(Asked {
+            signature: signature.to_string(),
+            file_held: std::fs::OpenOptions::new().write(true).open(path).is_err(),
+            pending_in_state_file: state::load(&state_file).pending.map(|p| p.version),
+        });
+        answer.clone()
+    });
+    (asker, asked)
+}
+
+#[test]
+fn a_service_that_accepts_installs_with_no_launch_and_the_release_signature() {
+    let (asker, asked) = fake_service(ServiceAnswer::Started);
+    let h = harness_with_service("0.1.0", "test.key.pub", Launch::Fails, Some(asker));
+    good_release(&h);
+    h.check(true);
+    let s = h.install();
+    assert_eq!(s.phase, UpdatePhase::Installing);
+    let asked = asked.lock().unwrap();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].signature, fixture_text("payload.bin.sig"), "the release's own signature text");
+    assert!(asked[0].file_held, "the file stays held while the service reads it");
+    assert_eq!(asked[0].pending_in_state_file.as_deref(), Some("0.1.1"), "pending is saved before the ask");
+    assert!(h.seen.calls.lock().unwrap().is_empty(), "the tray did not start the installer itself");
+    assert_eq!(h.stored().pending.map(|p| p.version).as_deref(), Some("0.1.1"), "pending stays for the next start");
+}
+
+#[test]
+fn a_service_that_is_down_falls_back_to_the_launch() {
+    let (asker, asked) = fake_service(ServiceAnswer::Unavailable);
+    let h = harness_with_service("0.1.0", "test.key.pub", Launch::Starts, Some(asker));
+    good_release(&h);
+    h.check(true);
+    let s = h.install();
+    assert_eq!(s.phase, UpdatePhase::Installing);
+    assert_eq!(asked.lock().unwrap().len(), 1, "asked first");
+    let calls = h.seen.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1, "then launched once");
+    assert_eq!(calls[0].pending_in_state_file.as_deref(), Some("0.1.1"));
+    assert!(calls[0].write_blocked && calls[0].delete_blocked);
+}
+
+#[test]
+fn a_service_that_refuses_ends_the_update_with_no_launch() {
+    let (asker, asked) = fake_service(ServiceAnswer::Refused("the version is not newer".into()));
+    let h = harness_with_service("0.1.0", "test.key.pub", Launch::Starts, Some(asker));
+    good_release(&h);
+    h.check(true);
+    let s = h.install();
+    match s.phase {
+        UpdatePhase::InstallFailed { message } => assert!(message.contains("the version is not newer"), "{message}"),
+        other => panic!("expected InstallFailed, got {other:?}"),
+    }
+    assert_eq!(asked.lock().unwrap().len(), 1);
+    assert!(h.seen.calls.lock().unwrap().is_empty(), "no fallback after a refusal");
+    assert_eq!(h.stored().pending, None, "nothing started, so nothing pending");
+}
+
+#[test]
+fn without_a_service_to_ask_the_launch_runs_as_before() {
+    let h = harness("0.1.0", "test.key.pub", Launch::Starts);
+    good_release(&h);
+    h.check(true);
+    assert_eq!(h.install().phase, UpdatePhase::Installing);
+    assert_eq!(h.seen.calls.lock().unwrap().len(), 1);
+}
+
 #[test]
 fn a_file_changed_after_the_download_fails_the_second_check_and_is_deleted() {
     let h = harness("0.1.0", "test.key.pub", Launch::Starts);
@@ -1045,6 +1139,7 @@ fn tauri_conf_repeats_the_compiled_key_and_feed_and_requires_a_signed_version() 
     let conf: serde_json::Value = serde_json::from_str(include_str!("../../tauri.conf.json")).unwrap();
     let u = &conf["plugins"]["updater"];
     assert_eq!(u["pubkey"], rules::PUBKEY);
+    assert_eq!(rules::PUBKEY, canvas_proto::consts::UPDATE_PUBKEY, "the tray and the service share one key");
     assert_eq!(u["endpoints"], serde_json::json!([rules::ENDPOINT]));
     assert_eq!(u["requireSignedVersion"], true);
     assert!(!u.to_string().contains("dangerous"), "no dangerous switch in the shipped config");

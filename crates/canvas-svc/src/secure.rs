@@ -35,6 +35,10 @@ use std::path::{Path, PathBuf};
 /// all inheritable, protected (`P`).
 pub const SECURE_SDDL: &str = "O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)";
 
+/// Owner SYSTEM. DACL: SYSTEM full, Administrators full, nobody else, inheritable, protected. For
+/// folders no ordinary user may even read, such as the update staging folder (#43).
+pub const PRIVATE_SDDL: &str = "O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
+
 /// Subfolders the service creates inside the home, so they are secured and checked with it.
 pub const SUBDIRS: [&str; 2] = ["openrgb", "logs"];
 
@@ -70,6 +74,11 @@ pub trait FsAcl: Send {
     fn file_id(&self, p: &Path) -> io::Result<FileId>;
     /// Creates a directory whose owner and DACL come from [`SECURE_SDDL`] at birth.
     fn create_dir_protected(&mut self, p: &Path) -> io::Result<()>;
+    /// Creates a directory whose owner and DACL come from [`PRIVATE_SDDL`] at birth: SYSTEM and
+    /// Administrators only. The update staging folder is made this way (#43).
+    fn create_dir_private(&mut self, _p: &Path) -> io::Result<()> {
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
     /// Replaces the DACL of `p` with [`SECURE_SDDL`]'s protected DACL. The owner is not changed.
     fn apply_protected_dacl(&mut self, p: &Path) -> io::Result<()>;
     /// True if the entry's DACL has any ACCESS_ALLOWED ACE granting a write-class right to any SID other
@@ -86,12 +95,12 @@ pub trait SecureDir: Send {
     fn trusted(&self, path: &Path) -> bool;
 }
 
-fn refused(path: &Path, why: &str) -> io::Error {
+pub(crate) fn refused(path: &Path, why: &str) -> io::Error {
     io::Error::other(format!("{}: {why}", path.display()))
 }
 
 /// Logs the offending path at ERROR and returns the failure. Nothing is deleted or renamed.
-fn offending(path: &Path, what: &str) -> io::Error {
+pub(crate) fn offending(path: &Path, what: &str) -> io::Error {
     tracing::error!(
         path = %path.display(),
         "machine home: {what}. canvas-rgb will not read or launch from the home until it is removed. \
@@ -102,7 +111,7 @@ fn offending(path: &Path, what: &str) -> io::Error {
 
 /// Read-only check of everything under `dir`. Fails on the first junction, symlink, or entry whose
 /// owner is not trusted. A junction is never followed: it is refused before its children are read.
-fn check_tree(fs: &dyn FsAcl, dir: &Path) -> io::Result<()> {
+pub(crate) fn check_tree(fs: &dyn FsAcl, dir: &Path) -> io::Result<()> {
     for child in fs.list(dir)? {
         if fs.is_reparse(&child)? {
             return Err(offending(&child, "a junction or symlink is in the home"));
@@ -211,10 +220,14 @@ struct SddlDescriptor(*mut std::ffi::c_void);
 #[cfg(windows)]
 impl SddlDescriptor {
     fn parse() -> io::Result<Self> {
+        Self::parse_sddl(SECURE_SDDL)
+    }
+
+    fn parse_sddl(text: &str) -> io::Result<Self> {
         use std::ffi::c_void;
         use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
 
-        let sddl: Vec<u16> = SECURE_SDDL.encode_utf16().chain(Some(0)).collect();
+        let sddl: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
         let mut raw: *mut c_void = std::ptr::null_mut();
         // SAFETY: `sddl` is NUL-terminated; `raw` receives a LocalAlloc'd buffer freed in Drop.
         let ok = unsafe {
@@ -372,6 +385,25 @@ impl FsAcl for WinFs {
         use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
 
         let descriptor = SddlDescriptor::parse()?;
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor.0,
+            bInheritHandle: 0,
+        };
+        let target = wide(p.as_os_str());
+        // SAFETY: `target` is NUL-terminated; `attributes` points at the descriptor, alive for the call.
+        let ok = unsafe { CreateDirectoryW(target.as_ptr(), &attributes) };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    fn create_dir_private(&mut self, p: &Path) -> io::Result<()> {
+        use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+        use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
+
+        let descriptor = SddlDescriptor::parse_sddl(PRIVATE_SDDL)?;
         let attributes = SECURITY_ATTRIBUTES {
             nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
             lpSecurityDescriptor: descriptor.0,

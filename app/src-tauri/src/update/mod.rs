@@ -1,14 +1,20 @@
 //! Auto-update (#21). The tray checks the release feed, downloads the installer, checks its
-//! signature and starts it. The plugin (`tauri-plugin-updater`) is used verify-only: `check()` and
-//! `download()` (which returns the bytes only after the signature passed). `install()` and
-//! `download_and_install()` are never called; our Inno installer runs instead, elevated, after
-//! a second signature check on the file we are about to start.
+//! signature and hands it over. The plugin (`tauri-plugin-updater`) is used verify-only: `check()`
+//! and `download()` (which returns the bytes only after the signature passed). `install()` and
+//! `download_and_install()` are never called; our Inno installer runs instead, after a second
+//! signature check on the file we are about to hand over.
+//!
+//! The hand-over asks the service first (`service`, #43): it checks the file against the release
+//! key again and runs setup as SYSTEM, so no permission prompt appears and the tray comes back as
+//! the user. With no service to ask, the tray starts setup itself, non-elevated, and setup raises
+//! its own permission prompt (`launch`). A service that refuses the file ends the update.
 //!
 //! The editor never touches the network or the file system here. It reads [`UpdateState`] and sends
 //! the person's choices through the commands at the bottom.
 
 mod launch;
 pub mod rules;
+mod service;
 mod state;
 #[cfg(test)]
 mod tests;
@@ -29,6 +35,7 @@ use url::Url;
 
 use crate::log;
 use rules::DownloadPolicy;
+use service::{ServiceAnswer, ServiceAsker};
 use state::Stored;
 
 /// The file the installer writes into its install folder when it ran with `/UPDATE`.
@@ -171,6 +178,8 @@ pub struct Controller {
     current: Version,
     inner: Mutex<Inner>,
     launcher: Launcher,
+    /// Asked before the launcher. The default has no service, so the launcher always runs.
+    service: ServiceAsker,
     on_change: Box<dyn Fn(&UpdateState) + Send + Sync>,
 }
 
@@ -193,8 +202,15 @@ impl Controller {
                 install_failed_for: None,
             }),
             launcher,
+            service: Arc::new(|_: &Path, _: &str| ServiceAnswer::Unavailable),
             on_change,
         }
+    }
+
+    /// Replaces the "ask the service" step.
+    pub fn with_service(mut self, service: ServiceAsker) -> Self {
+        self.service = service;
+        self
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -605,6 +621,8 @@ impl Controller {
     pub fn launch_stage(&self, update: &Update, path: &Path) -> (UpdateState, launch::Started) {
         self.set_phase(UpdatePhase::Verifying);
         let pending = info_of(update);
+        // Set when the service took the install: setup runs as SYSTEM and there is no process of ours to follow.
+        let service_started = std::cell::Cell::new(false);
         let outcome = launch::run_locked(
             path,
             &|bytes| match update.verify(bytes) {
@@ -620,12 +638,26 @@ impl Controller {
                     i.stored.pending = Some(pending.clone());
                     // Stamped before the start: the installer writes its result after this.
                     i.stored.pending_since_ms = SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_millis() as u64);
-                    i.phase = UpdatePhase::WaitingForUac;
                 });
-                (self.launcher)(p)
+                match (self.service)(p, &update.signature) {
+                    ServiceAnswer::Started => {
+                        log::append(&format!("update: the service started the install of {}", pending.version));
+                        service_started.set(true);
+                        Ok(None)
+                    }
+                    ServiceAnswer::Refused(message) => {
+                        log::append(&format!("update: the service refused {}: {message}", pending.version));
+                        Err(launch::RunError::Failed(format!("The update was refused: {message}")))
+                    }
+                    ServiceAnswer::Unavailable => {
+                        self.set_phase(UpdatePhase::WaitingForUac);
+                        (self.launcher)(p)
+                    }
+                }
             },
         );
         match outcome {
+            Ok(None) if service_started.get() => (self.set_phase(UpdatePhase::Installing), None),
             Ok(Some(handle)) => (self.set_phase(UpdatePhase::Installing), Some(handle)),
             Ok(None) => {
                 // Started, but nothing to follow. `pending` stays: if the installer does finish, the
@@ -785,7 +817,9 @@ pub fn init<R: Runtime>(app: &AppHandle<R>, args: &[String]) {
         }
     });
     let launcher: Launcher = Arc::new(|path| launch::start_non_elevated(path, launch::INSTALLER_ARGS));
-    let controller = Arc::new(Controller::new(Settings::production(), current, launcher, on_change));
+    let controller = Arc::new(
+        Controller::new(Settings::production(), current, launcher, on_change).with_service(Arc::new(service::ask_daemon)),
+    );
     app.manage(controller.clone());
     if has_after_update_arg(args) {
         log::append("update: started by the installer (--after-update)");

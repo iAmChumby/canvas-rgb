@@ -15,6 +15,7 @@ pub mod preview;
 pub mod render;
 pub mod settings;
 pub mod status;
+pub mod update;
 
 use axum::routing::{get, patch, post, put};
 use axum::Router;
@@ -82,6 +83,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route(routes::CONFIG_EXPORT, get(settings::config_export))
         .route(routes::CONFIG_IMPORT, post(settings::config_import))
         .route(routes::QUIT, post(status::quit))
+        .route(routes::UPDATE_INSTALL, post(update::install))
         .route(routes::DIAG_READBACK, get(diag::readback))
         .route("/api/v1/diag/fail-sensor", post(diag::fail_sensor))
         .route(routes::PREVIEW, get(preview::preview));

@@ -27,6 +27,8 @@ pub enum ApiError {
     Http { status: u16, message: String },
     /// The response did not parse as the expected type.
     Decode(String),
+    /// The request was sent and no answer came in time. Whether the daemon acted is UNKNOWN.
+    TimedOut,
 }
 
 impl std::fmt::Display for ApiError {
@@ -37,6 +39,7 @@ impl std::fmt::Display for ApiError {
             ApiError::NotTrusted(message) => write!(f, "{message}"),
             ApiError::Http { status, message } => write!(f, "HTTP {status}: {message}"),
             ApiError::Decode(e) => write!(f, "unexpected response: {e}"),
+            ApiError::TimedOut => write!(f, "the daemon did not answer in time"),
         }
     }
 }
@@ -88,22 +91,28 @@ pub fn read_token() -> Result<String, ApiError> {
 impl Client {
     /// `GET /api/v1/status`: the one route that needs no token.
     pub fn status(&self) -> Result<Status, ApiError> {
-        self.request(Method::Get, routes::STATUS, None, false)
+        self.request(Method::Get, routes::STATUS, None, false, None)
     }
 
     /// Authenticated `GET`.
     pub fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
-        self.request(Method::Get, path, None, true)
+        self.request(Method::Get, path, None, true, None)
     }
 
     /// Authenticated `POST` with a JSON body (`{}` when the route takes none).
     pub fn post<T: Serialize, R: DeserializeOwned>(&self, path: &str, body: &T) -> Result<R, ApiError> {
-        self.request(Method::Post, path, Some(encode(body)?), true)
+        self.request(Method::Post, path, Some(encode(body)?), true, None)
+    }
+
+    /// Authenticated `POST` that may take longer than the usual budget (the update install: the
+    /// service copies and checks a whole installer before it answers).
+    pub fn post_slow<T: Serialize, R: DeserializeOwned>(&self, path: &str, body: &T, timeout: Duration) -> Result<R, ApiError> {
+        self.request(Method::Post, path, Some(encode(body)?), true, Some(timeout))
     }
 
     /// Authenticated `PATCH` with a JSON body.
     pub fn patch<T: Serialize, R: DeserializeOwned>(&self, path: &str, body: &T) -> Result<R, ApiError> {
-        self.request(Method::Patch, path, Some(encode(body)?), true)
+        self.request(Method::Patch, path, Some(encode(body)?), true, None)
     }
 
     fn request<R: DeserializeOwned>(
@@ -112,6 +121,7 @@ impl Client {
         path: &str,
         body: Option<String>,
         authenticated: bool,
+        timeout: Option<Duration>,
     ) -> Result<R, ApiError> {
         let url = format!("{}{}", self.base, path);
         let auth = if authenticated {
@@ -137,11 +147,17 @@ impl Client {
                 if let Some(auth) = &auth {
                     req = req.header("Authorization", auth);
                 }
+                if let Some(timeout) = timeout {
+                    req = req.config().timeout_global(Some(timeout)).build();
+                }
                 req.content_type("application/json").send(body.as_bytes())
             }
         };
 
-        let mut response = response.map_err(|_| ApiError::Unreachable)?;
+        let mut response = response.map_err(|e| match e {
+            ureq::Error::Timeout(_) => ApiError::TimedOut,
+            _ => ApiError::Unreachable,
+        })?;
         let status = response.status().as_u16();
         let text = response.body_mut().read_to_string().unwrap_or_default();
         if status >= 400 {

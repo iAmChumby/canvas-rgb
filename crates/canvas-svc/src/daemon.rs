@@ -381,7 +381,7 @@ impl DaemonSupervisor {
 }
 
 #[cfg(windows)]
-pub use windows_launcher::WtsLauncher;
+pub use windows_launcher::{launch_as_console_user, WtsLauncher};
 
 #[cfg(windows)]
 mod windows_launcher {
@@ -477,61 +477,69 @@ mod windows_launcher {
         }
 
         fn launch(&mut self, exe: &Path) -> io::Result<Box<dyn ChildProcess>> {
-            // SAFETY: each Win32 call gets pointers into buffers that live until the call returns,
-            // and every handle is closed on every path.
-            unsafe {
-                let session = WTSGetActiveConsoleSessionId();
-                if session == u32::MAX {
-                    return Err(io::Error::new(io::ErrorKind::NotConnected, "no active console session"));
-                }
-                let mut token: HANDLE = std::ptr::null_mut();
-                if WTSQueryUserToken(session, &mut token) == 0 {
-                    let error = io::Error::last_os_error();
-                    // ERROR_NO_TOKEN (1008): the console session has no logged-on user yet.
-                    if error.raw_os_error() == Some(1008) {
-                        return Err(io::Error::new(io::ErrorKind::NotConnected, error));
-                    }
-                    return Err(error);
-                }
-                let mut env: *mut c_void = std::ptr::null_mut();
-                let have_env = CreateEnvironmentBlock(&mut env, token, FALSE) != 0;
-                let mut command: Vec<u16> = format!("\"{}\"", exe.display()).encode_utf16().chain(Some(0)).collect();
-                let mut desktop: Vec<u16> = "winsta0\\default".encode_utf16().chain(Some(0)).collect();
-                let dir: Vec<u16> = exe
-                    .parent()
-                    .map(|p| p.as_os_str().encode_wide().chain(Some(0)).collect())
-                    .unwrap_or_else(|| vec![0]);
-                let mut startup: STARTUPINFOW = std::mem::zeroed();
-                startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
-                startup.lpDesktop = desktop.as_mut_ptr();
-                let mut info: PROCESS_INFORMATION = std::mem::zeroed();
-                // token: the logged-on user's own (WTSQueryUserToken above), non-elevated; never the service's.
-                let created = CreateProcessAsUserW(
-                    token,
-                    std::ptr::null(),
-                    command.as_mut_ptr(),
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    FALSE,
-                    // The daemon is a console program: without CREATE_NO_WINDOW the owner's desktop
-                    // gets a terminal window for it, and closing that window ends the daemon.
-                    CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
-                    if have_env { env } else { std::ptr::null() },
-                    dir.as_ptr(),
-                    &startup,
-                    &mut info,
-                );
-                let error = io::Error::last_os_error();
-                if have_env {
-                    DestroyEnvironmentBlock(env);
-                }
-                CloseHandle(token);
-                if created == 0 {
-                    return Err(error);
-                }
-                CloseHandle(info.hThread);
-                Ok(Box::new(WinChild { process: info.hProcess, pid: info.dwProcessId }))
+            launch_as_console_user(&format!("\"{}\"", exe.display()), exe.parent())
+        }
+    }
+
+    /// Starts `command_line` (the exe, quoted, then its arguments) in the active console session with
+    /// the logged-on user's own token: `WTSQueryUserToken` then `CreateProcessAsUserW`, non-elevated,
+    /// never the service's. The daemon launch uses it, and so do the update steps that must run as
+    /// the user (#43). `dir` is the working directory. An error of kind [`io::ErrorKind::NotConnected`]
+    /// means no user is logged on in the console session.
+    pub fn launch_as_console_user(command_line: &str, dir: Option<&Path>) -> io::Result<Box<dyn ChildProcess>> {
+        // SAFETY: each Win32 call gets pointers into buffers that live until the call returns,
+        // and every handle is closed on every path.
+        unsafe {
+            let session = WTSGetActiveConsoleSessionId();
+            if session == u32::MAX {
+                return Err(io::Error::new(io::ErrorKind::NotConnected, "no active console session"));
             }
+            let mut token: HANDLE = std::ptr::null_mut();
+            if WTSQueryUserToken(session, &mut token) == 0 {
+                let error = io::Error::last_os_error();
+                // ERROR_NO_TOKEN (1008): the console session has no logged-on user yet.
+                if error.raw_os_error() == Some(1008) {
+                    return Err(io::Error::new(io::ErrorKind::NotConnected, error));
+                }
+                return Err(error);
+            }
+            let mut env: *mut c_void = std::ptr::null_mut();
+            let have_env = CreateEnvironmentBlock(&mut env, token, FALSE) != 0;
+            let mut command: Vec<u16> = command_line.encode_utf16().chain(Some(0)).collect();
+            let mut desktop: Vec<u16> = "winsta0\\default".encode_utf16().chain(Some(0)).collect();
+            let dir: Vec<u16> = dir
+                .map(|p| p.as_os_str().encode_wide().chain(Some(0)).collect())
+                .unwrap_or_else(|| vec![0]);
+            let mut startup: STARTUPINFOW = std::mem::zeroed();
+            startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+            startup.lpDesktop = desktop.as_mut_ptr();
+            let mut info: PROCESS_INFORMATION = std::mem::zeroed();
+            // token: the logged-on user's own (WTSQueryUserToken above), non-elevated; never the service's.
+            let created = CreateProcessAsUserW(
+                token,
+                std::ptr::null(),
+                command.as_mut_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                FALSE,
+                // The daemon is a console program: without CREATE_NO_WINDOW the owner's desktop
+                // gets a terminal window for it, and closing that window ends the daemon.
+                CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
+                if have_env { env } else { std::ptr::null() },
+                dir.as_ptr(),
+                &startup,
+                &mut info,
+            );
+            let error = io::Error::last_os_error();
+            if have_env {
+                DestroyEnvironmentBlock(env);
+            }
+            CloseHandle(token);
+            if created == 0 {
+                return Err(error);
+            }
+            CloseHandle(info.hThread);
+            Ok(Box::new(WinChild { process: info.hProcess, pid: info.dwProcessId }))
         }
     }
 

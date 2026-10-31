@@ -22,6 +22,7 @@ pub mod secure;
 pub mod service;
 pub mod store;
 pub mod temps;
+pub mod update_install;
 pub mod winsvc;
 
 #[cfg(test)]
@@ -32,3 +33,5 @@ mod fans_tests;
 mod gpu_fans_tests;
 #[cfg(test)]
 mod openrgb_tests;
+#[cfg(test)]
+pub(crate) mod update_install_tests;

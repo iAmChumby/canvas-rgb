@@ -1,0 +1,175 @@
+name: Test build
+
+# A signed, installable build of main for testing the update path (#43). It is NOT a release: no tag, no
+# GitHub release, no publish job, and nothing here has contents: write. The installer and its signature
+# are a workflow artifact, kept for 14 days. Run `canvas-rgb update --file <installer> --sig <installer.sig>`
+# on a PC that runs an older build to install it through the service with no permission prompt.
+#
+# Its version is <major>.<minor>.<patch+1>-dev.<run number> from Cargo.toml: newer than the release it
+# follows (the service refuses anything not strictly newer), older than the next release (a dev build
+# sorts before its own release in semver). The version is set in the runner only and never committed.
+#
+# The shape is release.yml's: every third-party action pinned to a full commit SHA, a read-only build job,
+# and the update signing key in one step of the sign job, which builds no project code.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+# A newer push replaces a build still running; they would only pile up on the runners.
+concurrency:
+  group: test-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Every copy of the version matches
+        shell: pwsh
+        run: pwsh -NoProfile -File tools/set-version.ps1 -Check
+
+      - name: Set the dev version (this runner only)
+        id: version
+        shell: pwsh
+        run: |
+          $cargo = Get-Content Cargo.toml -Raw
+          if ($cargo -notmatch '(?ms)\[workspace\.package\].*?^\s*version\s*=\s*"(\d+)\.(\d+)\.(\d+)"') { throw 'Cargo.toml has no plain x.y.z workspace version' }
+          $v = "$($Matches[1]).$($Matches[2]).$([int]$Matches[3] + 1)-dev.$env:GITHUB_RUN_NUMBER"
+          pwsh -NoProfile -File tools/set-version.ps1 $v
+          if ($LASTEXITCODE -ne 0) { throw 'set-version.ps1 failed' }
+          pwsh -NoProfile -File tools/set-version.ps1 -Check
+          if ($LASTEXITCODE -ne 0) { throw 'the version copies differ after set-version.ps1' }
+          "version=$v" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          Write-Host "dev version: $v"
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/web/package-lock.json
+
+      - run: npm ci
+        working-directory: app/web
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+
+      - name: Installer tests
+        shell: pwsh
+        run: pwsh -NoProfile -File installer/tests/run-all.ps1
+
+      # No Inno Setup action is used: the Chocolatey package is installed directly (as release.yml does).
+      - name: Install Inno Setup 6
+        shell: pwsh
+        run: choco install innosetup --version 6.7.1 --no-progress -y
+
+      # Web build, cargo release build, payload staging and ISCC, in one script.
+      - name: Build the installer
+        shell: pwsh
+        run: powershell -NoProfile -File tools/build-installer.ps1
+
+      - name: SHA-256
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem dist -Filter 'canvas-rgb-setup-*.exe' | Select-Object -First 1
+          $h = (Get-FileHash -Algorithm SHA256 $exe.FullName).Hash.ToLowerInvariant()
+          Write-Host "$h  $($exe.Name)"
+          "### SHA-256`n`n``$h  $($exe.Name)``" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          Set-Content -Path "dist/$($exe.Name).sha256" -Value "$h  $($exe.Name)" -Encoding ascii
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: unsigned-installer
+          path: |
+            dist/canvas-rgb-setup-*.exe
+            dist/canvas-rgb-setup-*.exe.sha256
+          retention-days: 1
+          if-no-files-found: error
+
+  # The only job that sees the update signing key. It runs no project build code: it installs the Tauri CLI
+  # from a committed lockfile (integrity hashes, no install scripts) and signs the exe the build job made,
+  # after checking that exe against the build job's .sha256. The signature carries the dev version
+  # (--app-version), which the service reads back and compares with its own.
+  sign:
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      # Only the signer pin: nothing that builds the project.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            tools/signer
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: unsigned-installer
+          path: dist
+
+      - name: Checksum still matches
+        shell: pwsh
+        run: |
+          $sums = @(Get-ChildItem dist -Filter 'canvas-rgb-setup-*.exe.sha256')
+          if ($sums.Count -ne 1) { throw "expected one .sha256, found $($sums.Count)" }
+          $line = (Get-Content -LiteralPath $sums[0].FullName -Raw).Trim()
+          if ($line -notmatch '^([0-9a-f]{64})  (canvas-rgb-setup-[0-9A-Za-z.-]+\.exe)$') { throw "unreadable checksum line: $line" }
+          $got = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path dist $Matches[2])).Hash.ToLowerInvariant()
+          if ($got -ne $Matches[1]) { throw "SHA-256 mismatch for $($Matches[2]): $got" }
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      # Lockfile-pinned, hash-checked, no lifecycle scripts, no npx.
+      - name: Install the pinned Tauri CLI
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          npm ci --ignore-scripts --prefix tools/signer
+          if ($LASTEXITCODE -ne 0) { throw "npm ci failed ($LASTEXITCODE)" }
+
+      # The key is in this one step's environment and nowhere else in the workflow's build path.
+      - name: Sign the installer for the updater
+        shell: pwsh
+        timeout-minutes: 5
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+          DEV_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) { throw 'the UPDATE_SIGNING_KEY secret is not set' }
+          if ($env:DEV_VERSION -notmatch '^\d+\.\d+\.\d+-dev\.\d+$') { throw "unexpected dev version: $env:DEV_VERSION" }
+          $exe = Get-ChildItem dist -Filter 'canvas-rgb-setup-*.exe' | Select-Object -First 1
+          if ($exe.Name -ne "canvas-rgb-setup-$env:DEV_VERSION.exe") { throw "installer $($exe.Name) is not the build for $env:DEV_VERSION" }
+          & "$PWD/tools/signer/node_modules/.bin/tauri.cmd" signer sign --app-version $env:DEV_VERSION $exe.FullName
+          if ($LASTEXITCODE -ne 0) { throw "signer sign failed ($LASTEXITCODE)" }
+          if (-not (Test-Path "$($exe.FullName).sig")) { throw 'no .sig file was written' }
+
+      # The one artifact to download: installer, checksum and signature, named for the dev version.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: canvas-rgb-test-build-${{ needs.build.outputs.version }}
+          path: |
+            dist/canvas-rgb-setup-*.exe
+            dist/canvas-rgb-setup-*.exe.sha256
+            dist/canvas-rgb-setup-*.exe.sig
+          retention-days: 14
+          if-no-files-found: error

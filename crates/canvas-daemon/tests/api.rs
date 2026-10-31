@@ -562,6 +562,7 @@ struct FakePipe {
 #[derive(Clone, Copy)]
 enum FakeReply {
     Ok,
+    Started(&'static str),
     Error(&'static str),
     Down,
 }
@@ -574,6 +575,9 @@ impl canvas_daemon::pipe_client::PipeLink for FakePipe {
     ) -> Result<canvas_proto::pipe::PipeResponse, canvas_daemon::pipe_client::PipeError> {
         match self.reply {
             FakeReply::Ok => Ok(canvas_proto::pipe::PipeResponse::Ok),
+            FakeReply::Started(version) => Ok(canvas_proto::pipe::PipeResponse::UpdateStarted {
+                version: version.to_string(),
+            }),
             FakeReply::Error(code) => Ok(canvas_proto::pipe::PipeResponse::Error {
                 code: code.to_string(),
                 message: format!("the service said {code}"),
@@ -644,6 +648,90 @@ async fn deleting_a_fan_profile_with_the_service_down_is_a_503() {
         .await
         .expect("the router answers");
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+fn install_body(installer: &str, signature: &str) -> String {
+    serde_json::json!({ "installer": installer, "signature": signature }).to_string()
+}
+
+#[tokio::test]
+async fn an_update_the_service_starts_is_a_202_with_the_version() {
+    let (router, _app, _home) = build_with_pipe(FakeReply::Started("0.2.1"));
+    let response = router
+        .oneshot(request_with_body("POST", routes::UPDATE_INSTALL, &install_body(r"C:\x\setup.exe", "c2ln")))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(json(response).await.get("version").and_then(|v| v.as_str()), Some("0.2.1"));
+}
+
+#[tokio::test]
+async fn an_update_the_service_refuses_is_a_422_and_the_message_comes_through() {
+    let (router, _app, _home) = build_with_pipe(FakeReply::Error("validation"));
+    let response = router
+        .oneshot(request_with_body("POST", routes::UPDATE_INSTALL, &install_body(r"C:\x\setup.exe", "c2ln")))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = json(response).await;
+    assert_eq!(body.get("error").and_then(|v| v.as_str()), Some("validation"));
+    assert_eq!(body.get("message").and_then(|v| v.as_str()), Some("the service said validation"));
+}
+
+#[tokio::test]
+async fn an_update_while_one_runs_is_a_409() {
+    let (router, _app, _home) = build_with_pipe(FakeReply::Error("conflict"));
+    let response = router
+        .oneshot(request_with_body("POST", routes::UPDATE_INSTALL, &install_body(r"C:\x\setup.exe", "c2ln")))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn an_update_with_the_service_down_is_a_503() {
+    let (router, _app, _home) = build_with_pipe(FakeReply::Down);
+    let response = router
+        .oneshot(request_with_body("POST", routes::UPDATE_INSTALL, &install_body(r"C:\x\setup.exe", "c2ln")))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(json(response).await.get("error").and_then(|v| v.as_str()), Some("service_unavailable"));
+}
+
+#[tokio::test]
+async fn a_bad_update_body_is_a_422_before_the_service_hears_of_it() {
+    // The fake would answer 202; a 422 proves the daemon refused first.
+    for body in [
+        install_body("setup.exe", "c2ln"),
+        install_body(r"C:\x\setup.exe", ""),
+        install_body(r"C:\x\setup.exe", &"a".repeat(4097)),
+    ] {
+        let (router, _app, _home) = build_with_pipe(FakeReply::Started("0.2.1"));
+        let response = router
+            .oneshot(request_with_body("POST", routes::UPDATE_INSTALL, &body))
+            .await
+            .expect("the router answers");
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+}
+
+#[tokio::test]
+async fn the_update_route_needs_the_token() {
+    let (router, _app, _home) = build_with_pipe(FakeReply::Started("0.2.1"));
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(routes::UPDATE_INSTALL)
+                .header("host", "127.0.0.1:9430")
+                .header("content-type", "application/json")
+                .body(Body::from(install_body(r"C:\x\setup.exe", "c2ln")))
+                .expect("the request builds"),
+        )
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
