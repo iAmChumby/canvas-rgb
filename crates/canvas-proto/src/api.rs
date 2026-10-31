@@ -37,6 +37,15 @@ pub mod routes {
     /// parser's message and nothing is written. `DELETE` on [`EFFECT`] removes a user effect's
     /// file (built-ins refuse).
     pub const EFFECTS_IMPORT: &str = "/api/v1/effects/import";
+    /// `POST` with [`super::PresetCreate`]: saves a user preset for the effect. Answers
+    /// [`super::PresetsResponse`]. 409 when the name equals, ignoring ASCII case, a built-in or
+    /// user preset of that effect; 404 for an unknown effect.
+    pub const EFFECT_PRESETS: &str = "/api/v1/effects/{id}/presets";
+    /// `PUT` with [`super::PresetReplace`] overwrites and/or renames one user preset; `DELETE`
+    /// removes it. Both answer [`super::PresetsResponse`]. 404 for a missing preset or effect;
+    /// 409 when `expected` is not what is stored (changed in another window) or `rename_to`
+    /// clashes.
+    pub const EFFECT_PRESET: &str = "/api/v1/effects/{id}/presets/{name}";
     pub const LAYOUTS: &str = "/api/v1/layouts";
     pub const LAYOUT: &str = "/api/v1/layouts/{id}";
     /// `PUT` with [`super::SetActiveLayout`].
@@ -306,12 +315,42 @@ pub struct EffectDetail {
     pub props: Props,
 }
 
+/// A new user preset: props only, never a copy of the effect.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PresetCreate {
+    pub name: String,
+    pub props: Props,
+}
+
+/// Overwrite and/or rename a user preset.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PresetReplace {
+    /// The new name, or none to keep it.
+    #[serde(default)]
+    pub rename_to: Option<String>,
+    pub props: Props,
+    /// The props the client last saw for this preset. A mismatch is a conflict, so an edit made
+    /// in another window is never overwritten silently.
+    pub expected: Props,
+}
+
+/// The effect's user presets after a change, in their stored order.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PresetsResponse {
+    pub user_presets: Vec<Preset>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ActivateEffect {
-    /// Overrides on top of the saved values or defaults.
+    /// Overrides on top of the saved values or defaults (or on top of the preset).
     #[serde(default)]
     pub props: Props,
+    /// A built-in preset (`schema.presets`) or a user preset, by name. A preset's props sit on
+    /// the defaults, not on the saved values, so two presets never leak into each other.
     pub preset: Option<String>,
 }
 
