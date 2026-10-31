@@ -79,6 +79,8 @@ pub struct DaemonSupervisor {
     /// The last launch found no user session. Not a crash: the next ticks launch again until a user
     /// is logged on (#6).
     waiting_for_session: bool,
+    /// The console session the running daemon was launched into (`None` when the launcher cannot say).
+    child_session: Option<u32>,
 }
 
 impl DaemonSupervisor {
@@ -93,6 +95,7 @@ impl DaemonSupervisor {
             quitting: false,
             stopped: false,
             waiting_for_session: false,
+            child_session: None,
         }
     }
 
@@ -148,10 +151,18 @@ impl DaemonSupervisor {
         }
     }
 
+    /// The daemon launched into `was` is no longer in the active console session: another user took
+    /// the console (fast user switching) or its user logged off. Not the daemon's fault.
+    fn session_moved(&mut self, was: Option<u32>) -> bool {
+        was.is_some() && self.launcher.console_session() != was
+    }
+
     fn launch(&mut self, now: Instant) {
+        let session = self.launcher.console_session();
         match self.launcher.launch(&self.exe) {
             Ok(child) => {
                 self.child = Some(child);
+                self.child_session = session;
                 self.waiting_for_session = false;
                 // The first heartbeat gets the same 5 s the rest do.
                 self.last_heartbeat = Some(now);
@@ -226,10 +237,28 @@ impl DaemonSupervisor {
             match child.try_wait() {
                 Ok(Some(code)) => {
                     self.child = None;
+                    let was = self.child_session;
+                    if self.session_moved(was) {
+                        // Its session logged off or lost the console: the exit is not a crash.
+                        tracing::info!(code, "the daemon ended with its session; starting one in the active session");
+                        self.launch(now);
+                        return DaemonAction::None;
+                    }
                     return self.crashed(now, &exited_reason(code));
                 }
                 Ok(None) => {}
                 Err(e) => tracing::warn!(error = %e, "could not query the daemon process"),
+            }
+            let was = self.child_session;
+            if self.session_moved(was) {
+                if let Some(mut child) = self.child.take() {
+                    tracing::info!(pid = child.id(), "terminating the daemon (pid {}): the active console session changed", child.id());
+                    if let Err(e) = child.kill() {
+                        tracing::warn!(error = %e, "could not end the daemon of the old session");
+                    }
+                }
+                self.launch(now);
+                return DaemonAction::None;
             }
             let stale = self
                 .last_heartbeat
@@ -604,6 +633,61 @@ mod tests {
         now += Duration::from_secs(1);
         sup.tick(now);
         assert_eq!(processes.spawns().len(), 2);
+    }
+
+    #[test]
+    fn a_console_session_change_moves_the_daemon_without_counting_a_crash() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        sup.start(t0);
+        let mut now = t0;
+        // Fast user switching back and forth, more often than the restart limit allows crashes.
+        for session in [2, 1, 2, 1, 2, 1] {
+            processes.set_console(session);
+            now += Duration::from_secs(1);
+            let text = logged(|| assert_eq!(sup.tick(now), DaemonAction::None));
+            assert!(text.contains("the active console session changed"), "{text}");
+            assert!(!sup.stopped());
+        }
+        assert_eq!(processes.spawns().len(), 7, "one launch per session change, plus the first");
+        // Same session, a real exit: still a crash.
+        processes.exit_last();
+        now += Duration::from_secs(1);
+        sup.tick(now);
+        assert_eq!(processes.spawns().len(), 8);
+        assert!(!sup.stopped());
+    }
+
+    #[test]
+    fn a_daemon_that_ends_with_its_logged_off_session_is_not_a_crash() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        sup.start(t0);
+        let mut now = t0;
+        // Three logoffs inside the window would stop restarts if each counted.
+        for next in [2, 3, 4, 5] {
+            processes.exit_last();
+            processes.set_console(next);
+            now += Duration::from_secs(10);
+            assert_eq!(sup.tick(now), DaemonAction::None);
+            assert!(!sup.stopped());
+        }
+        assert_eq!(processes.spawns().len(), 5);
+        // A logoff to no console session at all waits for one, still without a crash.
+        processes.exit_last();
+        processes.clear_console();
+        processes.set_no_session(true);
+        now += Duration::from_secs(10);
+        sup.tick(now);
+        assert!(!sup.stopped());
+        processes.set_no_session(false);
+        processes.set_console(6);
+        now += Duration::from_secs(10);
+        sup.tick(now);
+        assert_eq!(processes.spawns().len(), 6);
+        assert!(!sup.stopped());
     }
 
     #[test]
