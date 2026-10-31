@@ -88,6 +88,7 @@ try {
             Say "  PawnIO installer signature accepted (publisher $((Get-AuthenticodeSignature -LiteralPath $staged).SignerCertificate.Subject)); running the protected copy $staged"
             $pa = @{ FilePath = $staged; Wait = $true; PassThru = $true }
             if ($PawnIoArgs) { $pa.ArgumentList = $PawnIoArgs }
+            # token: this script's own, elevated (the PawnIO installer needs it).
             $pp = Start-Process @pa
             Say "  PawnIO installer exit code $($pp.ExitCode)"
             if ($pp.ExitCode -ne 0) { throw "PawnIO installer failed (exit $($pp.ExitCode))" }

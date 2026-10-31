@@ -55,21 +55,40 @@ APIs, so the tests pass.
   silent, and a failed power registration leaves no trace. Candidate: no Windows API result is
   discarded with `let _ =`; every one is logged, and every subscription logs its first event.
 
-### `cause:process-launch`: a process started outside the service's launch rules
+### `cause:process-launch`: a process started outside the service's launch rules, or with the wrong token
 
 The service owns starting the daemon in the user's session, with no window. Any other path that
-starts `canvas-rgbd.exe` skips those rules.
+starts `canvas-rgbd.exe` skips those rules. Any process started with a token other than the one the
+next step needs breaks what that step does.
 
 - 46c30c1: the service launched the daemon without `CREATE_NO_WINDOW`, so a console window showed;
   the installer also started the daemon itself and raced the service for the API port
   (`installer/inno/canvas-rgb.iss`, the comment above the tray launch).
 - [#6](https://github.com/iAmChumby/canvas-rgb/issues/6): the daemon runs in a visible console
-  after logon. `installer/setup-user.ps1` still writes an HKCU Run key that starts the daemon from
-  Explorer, and the service counts "no user logged on yet" as a crash and stops retrying before
+  after logon. `installer/setup-user.ps1` still wrote an HKCU Run key that started the daemon from
+  Explorer, and the service counted "no user logged on yet" as a crash and stopped retrying before
   logon.
-- **Class fix:** due (second bug). One launcher (the service), a daemon that cannot show a console
-  whoever starts it, and a check that fails when anything outside `canvas-svc` starts
-  `canvas-rgbd.exe`.
+- [#28](https://github.com/iAmChumby/canvas-rgb/issues/28): an update from the tray left no tray. The
+  tray started Setup with the `runas` verb, so Setup was elevated from its first instruction; its
+  `ExecAsOriginalUser` relaunch then started the tray elevated, and the tray refuses to run elevated.
+- **Class fix:** done (#6, #28). The service is the one launcher; the daemon is a windows-subsystem
+  program in release builds, so no path can show a console; and `crates/canvas-svc/tests/process_launch.rs`
+  (part of `cargo test --workspace`, so CI) scans `crates/`, `app/src-tauri/`, `installer/` and `tools/`
+  and fails with `file:line` when (1) anything outside `canvas-svc` starts or registers
+  `canvas-rgbd.exe` (a process start, a Run-key write, an Inno `[Run]` entry), (2) any code starts a
+  process with an elevating verb (`runas`, `-Verb RunAs`; the allow-list holds the two script-install
+  scripts that elevate only their own machine-wide child), or (3) a process start has no `token:`
+  comment within 8 lines above saying which token it runs with. A new launch site needs that comment;
+  that is the point.
+- **Sibling search** (every area): the tray starts one process, the installer (`update/launch.rs`;
+  fixed, #28). The Inno script's `Exec` calls are `RunPs` (machine script as Setup's admin token, user
+  script as the original user), the PawnIO page and the tray relaunches, all as the original user
+  except `RunPs` for the machine step; each now carries its `token:` line. The daemon starts OpenRGB
+  with its own token and `CREATE_NO_WINDOW` (a windows-subsystem parent would otherwise give a console
+  child its own window). The service starts OpenRGB as itself and the daemon through
+  `WTSQueryUserToken`. `tools/*.ps1` start only the build tools (ISCC and similar, with the developer's own token); none starts the daemon or the tray. `installer/setup.ps1` and `uninstall.ps1` elevate a
+  PowerShell child on purpose (allow-listed); nothing in them relaunches the tray.
+- **How to check a new launch:** add the `token:` line, then run `cargo test -p canvas-svc --test process_launch`.
 
 ### `cause:unchecked-state`: the system states something it never checked
 
