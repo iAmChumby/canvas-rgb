@@ -55,6 +55,28 @@ APIs, so the tests pass.
   silent, and a failed power registration leaves no trace. Candidate: no Windows API result is
   discarded with `let _ =`; every one is logged, and every subscription logs its first event.
 
+### `cause:sleep-state`: a state a sleep resets and the code never restores
+
+Hardware or a chip falls back to its own state when the PC sleeps, and the program set that state
+once per connection or once per start and trusts it forever.
+
+- [#29](https://github.com/iAmChumby/canvas-rgb/issues/29): the service's 1 Hz fan loop kept writing
+  through the resume transition. A duty write landed while firmware still owned the fan controller,
+  its readback failed for the full `READBACK_SETTLE`, and the safety handback (correct in itself) stayed
+  until the user re-applied a profile (`crates/canvas-svc/src/fans.rs`). The service accepted no power
+  notifications (`crates/canvas-svc/src/winsvc.rs`). Fixed: `SERVICE_CONTROL_POWEREVENT` pauses writes
+  on suspend and, after `RESUME_GRACE`, re-applies every header that was under control; a wall-clock
+  gap between ticks (`SystemTime`, because `Instant` may not count a sleep) is the fallback signal; a
+  handback inside the window is retried once; a failed readback logs every reading and the mode bit.
+  Regression tests: `fans_tests.rs`, on a `FakeChip` that models firmware owning the controller.
+  UNKNOWN until one real wake: whether the chip resets or firmware only holds it, and for how long.
+- **Sibling search (#29, canvas-svc):** the GPU fans (NVML) re-assert manual mode on every speed write,
+  so the same re-apply covers them. The daemon supervisor's 5 s heartbeat check compares `Instant`s; if
+  `Instant` counts the sleep, a wake looks like a missed heartbeat, so a resume now refreshes the
+  heartbeat clock (`Core::on_power`, `Core::tick`). Sensor-loss timeouts get a fresh clock when the
+  grace ends. Left, UNKNOWN: the OpenRGB supervisor's timers (`openrgb.rs:327`) also take an
+  `Instant` tick; not checked for a sleep.
+
 ### `cause:process-launch`: a process started outside the service's launch rules
 
 The service owns starting the daemon in the user's session, with no window. Any other path that
