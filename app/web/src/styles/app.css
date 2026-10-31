@@ -2176,10 +2176,17 @@ button.chip:hover {
   border-color: var(--line);
 }
 
+/* A narrow slot with no cell border; the readout's gap sits on both sides of it. */
+.digit-dot-slot {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  width: 5px;
+  height: 48px;
+  padding-bottom: 5px;
+}
+
 .digit-dot {
-  position: absolute;
-  right: 3px;
-  bottom: 5px;
   width: 5px;
   height: 5px;
   border-radius: 50%;
