@@ -4,8 +4,10 @@
 use crate::daemon::{DaemonAction, DaemonSupervisor};
 use crate::fans::{FanController, FanError};
 use crate::openrgb::OpenRgbSupervisor;
+use crate::update_install::UpdateInstaller;
 use canvas_proto::api::error_codes;
 use canvas_proto::pipe::{PipeRequest, PipeResponse, PROTOCOL_VERSION};
+use std::sync::Arc;
 use std::time::Instant;
 
 /// A power notification the SCM sends the service (`SERVICE_CONTROL_POWEREVENT`).
@@ -19,6 +21,8 @@ pub struct Core {
     pub fans: FanController,
     pub openrgb: OpenRgbSupervisor,
     pub daemon: DaemonSupervisor,
+    /// Installs signed updates (#43). `None` when the machine home is not secured: updates are refused.
+    pub updates: Option<Arc<UpdateInstaller>>,
 }
 
 fn error(code: &str, message: impl Into<String>) -> PipeResponse {
@@ -44,7 +48,7 @@ fn ok_or(result: Result<(), FanError>) -> PipeResponse {
 
 impl Core {
     pub fn new(fans: FanController, openrgb: OpenRgbSupervisor, daemon: DaemonSupervisor) -> Self {
-        Self { fans, openrgb, daemon }
+        Self { fans, openrgb, daemon, updates: None }
     }
 
     /// One pass per second. The fan loop and the OpenRGB supervisor run whether or not a
@@ -121,6 +125,9 @@ impl Core {
                 self.daemon.on_quitting();
                 PipeResponse::Ok
             }
+            // The pipe server answers this one itself: it reads a file as the client and blocks, which
+            // must not happen under the core lock.
+            PipeRequest::InstallUpdate { .. } => error(error_codes::INTERNAL, "InstallUpdate is answered by the pipe server"),
         }
     }
 }

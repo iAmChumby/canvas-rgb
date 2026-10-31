@@ -1,14 +1,20 @@
 //! Auto-update (#21). The tray checks the release feed, downloads the installer, checks its
-//! signature and starts it. The plugin (`tauri-plugin-updater`) is used verify-only: `check()` and
-//! `download()` (which returns the bytes only after the signature passed). `install()` and
-//! `download_and_install()` are never called; our Inno installer runs instead, elevated, after
-//! a second signature check on the file we are about to start.
+//! signature and hands it over. The plugin (`tauri-plugin-updater`) is used verify-only: `check()`
+//! and `download()` (which returns the bytes only after the signature passed). `install()` and
+//! `download_and_install()` are never called; our Inno installer runs instead, after a second
+//! signature check on the file we are about to hand over.
+//!
+//! The hand-over asks the service first (`service`, #43): it checks the file against the release
+//! key again and runs setup as SYSTEM, so no permission prompt appears and the tray comes back as
+//! the user. With no service to ask, the tray starts setup itself, non-elevated, and setup raises
+//! its own permission prompt (`launch`). A service that refuses the file ends the update.
 //!
 //! The editor never touches the network or the file system here. It reads [`UpdateState`] and sends
 //! the person's choices through the commands at the bottom.
 
 mod launch;
 pub mod rules;
+pub(crate) mod service;
 mod state;
 #[cfg(test)]
 mod tests;
@@ -29,12 +35,17 @@ use url::Url;
 
 use crate::log;
 use rules::DownloadPolicy;
+use service::{ServiceAnswer, ServiceAsker};
 use state::Stored;
 
 /// The file the installer writes into its install folder when it ran with `/UPDATE`.
 pub const RESULT_FILE: &str = "update-result.json";
 
 const PROGRESS_EVERY: Duration = Duration::from_millis(100);
+/// How long a service-driven install may run before the tray stops waiting for its result file.
+pub const SERVICE_FOLLOW_BOUND: Duration = Duration::from_secs(30 * 60);
+/// How often the tray looks for that result file while it waits.
+const SERVICE_POLL_EVERY: Duration = Duration::from_secs(5);
 /// One download may take this long in all.
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
@@ -171,6 +182,10 @@ pub struct Controller {
     current: Version,
     inner: Mutex<Inner>,
     launcher: Launcher,
+    /// Asked before the launcher. The default has no service, so the launcher always runs.
+    service: ServiceAsker,
+    /// Milliseconds since the Unix epoch. The tests move it.
+    clock: Box<dyn Fn() -> u64 + Send + Sync>,
     on_change: Box<dyn Fn(&UpdateState) + Send + Sync>,
 }
 
@@ -193,8 +208,28 @@ impl Controller {
                 install_failed_for: None,
             }),
             launcher,
+            service: Arc::new(|_: &Path, _: &str| ServiceAnswer::Unavailable),
+            clock: Box::new(|| SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)),
             on_change,
         }
+    }
+
+    /// Replaces the clock the wait for a service-driven install is measured on.
+    #[cfg(test)]
+    pub fn with_clock(mut self, clock: Box<dyn Fn() -> u64 + Send + Sync>) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// True while a start stamped `since_ms` is younger than [`SERVICE_FOLLOW_BOUND`].
+    fn within_follow_bound(&self, since_ms: Option<u64>) -> bool {
+        since_ms.is_some_and(|t| (self.clock)().saturating_sub(t) < SERVICE_FOLLOW_BOUND.as_millis() as u64)
+    }
+
+    /// Replaces the "ask the service" step.
+    pub fn with_service(mut self, service: ServiceAsker) -> Self {
+        self.service = service;
+        self
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -267,6 +302,13 @@ impl Controller {
     /// sweeps the downloaded installer away. Runs at start, and after an installer the tray
     /// outlived.
     pub fn reconcile_pending(&self) {
+        self.reconcile(true);
+    }
+
+    /// `wait_for_service`: a pending update without a report yet, started less than
+    /// [`SERVICE_FOLLOW_BOUND`] ago, is kept as Installing. Off when the installer process this tray
+    /// started has just ended: then no report really means it ended without finishing.
+    fn reconcile(&self, wait_for_service: bool) {
         // The moment the installer was started is stored with `pending`, so a result file left by an
         // earlier run is ignored here too, also after the tray restarted.
         let since = since_of(self.lock().stored.pending_since_ms);
@@ -274,11 +316,32 @@ impl Controller {
             None => read_result(&self.settings.result_path),
             Some(t) => read_fresh_result(&self.settings.result_path, t),
         };
+        let since_ms = self.lock().stored.pending_since_ms;
+        let within_bound = self.within_follow_bound(since_ms);
         self.change(|i| {
+            // A service-driven install may still be running: setup has not written its report yet and
+            // this tray was started beside it. That is waiting, not "ended without finishing".
+            // A pending update older than the running version was superseded (by a command-line
+            // install, say): it neither failed nor waits.
+            if let (Some(p), Some(running)) = (i.stored.pending.as_ref(), Some(&self.current)) {
+                if p.version.parse::<Version>().is_ok_and(|pv| (pv.major, pv.minor, pv.patch) < (running.major, running.minor, running.patch)) {
+                    i.stored.pending = None;
+                    i.stored.pending_since_ms = None;
+                    return;
+                }
+            }
+            if let Some(p) = i.stored.pending.as_ref() {
+                let reported = result.as_ref().is_some_and(|r| r.version == p.version);
+                if wait_for_service && within_bound && !reported && p.version != self.current.to_string() {
+                    i.phase = UpdatePhase::Installing;
+                    return;
+                }
+            }
             let Some(pending) = i.stored.pending.take() else { return };
             i.stored.pending_since_ms = None;
             match settle(&pending.version, &self.current.to_string(), result.as_ref()) {
                 Settled::Updated => {
+                    i.stored.last_settled = Some(pending.version.clone());
                     i.stored.updated_to = Some(pending);
                     i.phase = UpdatePhase::Idle;
                 }
@@ -298,6 +361,89 @@ impl Controller {
                 Err(why) => log::append(&format!("update: not clearing the updates folder: {why}")),
             }
         }
+    }
+
+    /// One look at a service-driven install this tray is waiting on. Returns true while the caller
+    /// should look again.
+    /// - A report for the pending version written after the start: ok means setup is done and the
+    ///   restart is next (stop looking); a failure is settled and shown with its message.
+    /// - No report and the bound not reached: look again.
+    /// - No report past the bound: keep `pending` (the install may still finish) and show the
+    ///   "cannot follow" text.
+    pub fn follow_service_install(&self) -> bool {
+        let (pending, since_ms) = {
+            let inner = self.lock();
+            (inner.stored.pending.as_ref().map(|p| p.version.clone()), inner.stored.pending_since_ms)
+        };
+        let Some(pending) = pending else { return false };
+        let fresh = match since_of(since_ms) {
+            Some(t) => read_fresh_result(&self.settings.result_path, t),
+            None => None,
+        }
+        .filter(|r| r.version == pending);
+        match fresh {
+            Some(r) if r.ok => {
+                self.set_phase(UpdatePhase::Installing);
+                false
+            }
+            Some(_) => {
+                self.reconcile_pending();
+                false
+            }
+            None if self.within_follow_bound(since_ms) => true,
+            None => {
+                log::append(&format!("update: no report for {pending} in time; cannot follow the install"));
+                let message = "Windows started the installer, but canvas-rgb cannot follow it. If canvas-rgb does not restart on its own soon, run the update again.".to_string();
+                self.change(|i| i.install_failed_for = Some(pending.clone()));
+                self.set_phase(UpdatePhase::InstallFailed { message });
+                false
+            }
+        }
+    }
+
+    /// True when a start is waiting on a service-driven install ([`follow_service_install`]).
+    pub fn is_following(&self) -> bool {
+        let inner = self.lock();
+        inner.stored.pending.is_some() && inner.phase == UpdatePhase::Installing
+    }
+
+    /// Looks for the report every few seconds on a blocking thread until [`follow_service_install`]
+    /// says stop.
+    pub fn spawn_follow(self: &Arc<Self>) {
+        let this = self.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            while this.follow_service_install() {
+                std::thread::sleep(SERVICE_POLL_EVERY);
+            }
+        });
+    }
+
+    /// A start by the installer (`--after-update`) with no `pending`: the update was not started by
+    /// this tray (the CLI, an agent or the service did it), so nothing was recorded. When the
+    /// installer's report is ok for the running version and that version is not the one last
+    /// recorded, it is recorded as `updated_to` the way a tray-started update is.
+    pub fn settle_unrecorded_update(&self) {
+        let Some(report) = read_result(&self.settings.result_path) else { return };
+        let running = self.current.to_string();
+        self.change(|i| {
+            if !report.ok || report.version != running {
+                return;
+            }
+            // A pending update for this very version settles in `reconcile_pending`, with its notes.
+            if i.stored.pending.as_ref().is_some_and(|p| p.version == running) {
+                return;
+            }
+            // Any other pending update is a stale one (an earlier attempt that ended unknown): this
+            // install superseded it.
+            i.stored.pending = None;
+            i.stored.pending_since_ms = None;
+            i.install_failed_for = None;
+            if i.stored.last_settled.as_deref() == Some(running.as_str()) {
+                return;
+            }
+            i.stored.last_settled = Some(running.clone());
+            i.stored.updated_to = Some(UpdateInfo { version: running, notes: String::new(), pub_date: None });
+        });
     }
 
     /// The installer process ended while this tray still runs. Setup raises its own permission
@@ -326,7 +472,7 @@ impl Controller {
             });
             return;
         }
-        self.reconcile_pending();
+        self.reconcile(false);
     }
 
     // ---- the person's choices ----
@@ -482,6 +628,11 @@ impl Controller {
             self.settle_after_installer(code);
             return self.state();
         }
+        if state.phase == UpdatePhase::Installing {
+            // The service took the install: no process of ours to wait on. Its report says how it went
+            // if setup ends before it stops this tray.
+            self.spawn_follow();
+        }
         state
     }
 
@@ -605,6 +756,9 @@ impl Controller {
     pub fn launch_stage(&self, update: &Update, path: &Path) -> (UpdateState, launch::Started) {
         self.set_phase(UpdatePhase::Verifying);
         let pending = info_of(update);
+        // Set when the service was asked and setup may be running as SYSTEM: there is no process of ours
+        // to follow, and nothing may be launched beside it.
+        let asked: std::cell::RefCell<Option<ServiceAnswer>> = std::cell::RefCell::new(None);
         let outcome = launch::run_locked(
             path,
             &|bytes| match update.verify(bytes) {
@@ -620,12 +774,37 @@ impl Controller {
                     i.stored.pending = Some(pending.clone());
                     // Stamped before the start: the installer writes its result after this.
                     i.stored.pending_since_ms = SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_millis() as u64);
-                    i.phase = UpdatePhase::WaitingForUac;
                 });
-                (self.launcher)(p)
+                match (self.service)(p, &update.signature) {
+                    answer @ ServiceAnswer::Started => {
+                        log::append(&format!("update: the service started the install of {}", pending.version));
+                        *asked.borrow_mut() = Some(answer);
+                        Ok(None)
+                    }
+                    ServiceAnswer::Unknown(why) => {
+                        log::append(&format!("update: no answer about {} from the service ({why}); it may be installing", pending.version));
+                        *asked.borrow_mut() = Some(ServiceAnswer::Unknown(why));
+                        Ok(None)
+                    }
+                    ServiceAnswer::Refused(message) => {
+                        log::append(&format!("update: the service refused {}: {message}", pending.version));
+                        Err(launch::RunError::Failed(format!("The update was refused: {message}")))
+                    }
+                    ServiceAnswer::Unavailable => {
+                        self.set_phase(UpdatePhase::WaitingForUac);
+                        (self.launcher)(p)
+                    }
+                }
             },
         );
         match outcome {
+            Ok(None) if matches!(*asked.borrow(), Some(ServiceAnswer::Started)) => (self.set_phase(UpdatePhase::Installing), None),
+            Ok(None) if matches!(*asked.borrow(), Some(ServiceAnswer::Unknown(_))) => {
+                // `pending` stays: if the service did install, the next start settles it.
+                let message = "canvas-rgb may be installing the update; it restarts on its own.".to_string();
+                self.change(|i| i.install_failed_for = Some(pending.version.clone()));
+                (self.set_phase(UpdatePhase::InstallFailed { message }), None)
+            }
             Ok(Some(handle)) => (self.set_phase(UpdatePhase::Installing), Some(handle)),
             Ok(None) => {
                 // Started, but nothing to follow. `pending` stays: if the installer does finish, the
@@ -785,12 +964,28 @@ pub fn init<R: Runtime>(app: &AppHandle<R>, args: &[String]) {
         }
     });
     let launcher: Launcher = Arc::new(|path| launch::start_non_elevated(path, launch::INSTALLER_ARGS));
-    let controller = Arc::new(Controller::new(Settings::production(), current, launcher, on_change));
+    let controller = Arc::new(
+        Controller::new(Settings::production(), current, launcher, on_change).with_service(Arc::new(service::ask_daemon)),
+    );
     app.manage(controller.clone());
     if has_after_update_arg(args) {
         log::append("update: started by the installer (--after-update)");
+        controller.settle_unrecorded_update();
     }
     controller.reconcile_pending();
+    if controller.is_following() {
+        controller.spawn_follow();
+    }
+}
+
+/// The installer's relaunch reached this running tray through the single-instance plugin: setup
+/// ended before it stopped this tray, so look at what it reported.
+pub fn forwarded_after_update<R: Runtime>(app: &AppHandle<R>) {
+    let Some(controller) = app.try_state::<Arc<Controller>>().map(|c| c.inner().clone()) else { return };
+    controller.reconcile_pending();
+    if controller.is_following() {
+        controller.spawn_follow();
+    }
 }
 
 /// The controller. Panics before `init`, like any missing managed state.

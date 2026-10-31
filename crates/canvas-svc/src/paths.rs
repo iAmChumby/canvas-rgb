@@ -38,3 +38,9 @@ pub fn logs_dir(home: &Path) -> PathBuf {
 pub fn openrgb_config_dir(home: &Path) -> PathBuf {
     home.join("openrgb")
 }
+
+/// `<home>/updates`: where the service stages an installer before it checks and runs it (#43).
+/// With the real home this is [`consts::update_staging_dir`].
+pub fn updates_dir(home: &Path) -> PathBuf {
+    home.join("updates")
+}

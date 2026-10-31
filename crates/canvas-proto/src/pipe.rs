@@ -35,6 +35,14 @@ pub enum PipeRequest {
     FailSensor { source: TempSource, failed: bool },
     /// Daemon is quitting on purpose; do not restart it (G3).
     DaemonQuitting,
+    /// Install a signed canvas-rgb installer as SYSTEM, with no permission prompt (#43). The
+    /// service reads `installer` as the pipe client (impersonating it, never as SYSTEM), stages a
+    /// copy in [`crate::consts::update_staging_dir`], checks `signature` (the `.sig` file's text)
+    /// against [`crate::consts::UPDATE_PUBKEY`] on the staged bytes, refuses a signed version that
+    /// is not newer than its own, and runs it with [`crate::consts::SERVICE_SETUP_ARGS`].
+    /// Answered with `UpdateStarted` once setup is running; every refusal is `Error` with code
+    /// `validation` (bad file, bad signature, old version), or `conflict` (an install is running).
+    InstallUpdate { installer: String, signature: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +61,8 @@ pub enum PipeResponse {
     Ok,
     FanStatus { status: FansStatus },
     OpenRgb { state: OpenRgbServerState, port: u16 },
+    /// `InstallUpdate` passed every check and setup is running. `version` is the signed one.
+    UpdateStarted { version: String },
     /// `code` uses [`crate::api::error_codes`].
     Error { code: String, message: String },
 }
@@ -112,5 +122,15 @@ mod tests {
         assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize, bytes.len() - 4);
         assert_eq!(decode::<PipeRequest>(&bytes).unwrap(), req);
         assert!(matches!(decode::<PipeRequest>(&bytes[..6]), Err(FrameError::Truncated)));
+    }
+
+    #[test]
+    fn install_update_wire_shape() {
+        let req = PipeRequest::InstallUpdate { installer: r"C:\x\setup.exe".into(), signature: "c2ln".into() };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["op"], "install_update");
+        assert_eq!(decode::<PipeRequest>(&encode(&req).unwrap()).unwrap(), req);
+        let res = PipeResponse::UpdateStarted { version: "0.2.1".into() };
+        assert_eq!(serde_json::to_value(&res).unwrap()["result"], "update_started");
     }
 }

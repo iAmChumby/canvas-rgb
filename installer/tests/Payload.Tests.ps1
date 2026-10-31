@@ -160,6 +160,31 @@ try {
         Assert-True ($iss -match "WizardSilent and \(not IsVerySilent\)") '/VERYSILENT still starts nothing'
         Assert-True ($iss -match 'Parameters: "--onboard"[^\r\n]*skipifsilent') 'the wizard launch is unchanged'
     }
+    Test-Case 'iss: /SERVICEUPDATE skips the per-user script and both tray relaunches, and still counts the run ok (#43)' {
+        Assert-True ($iss -match "(?s)function IsServiceUpdateRun: Boolean;.*?Uppercase\(ParamStr\(I\)\) = '/SERVICEUPDATE'") 'IsServiceUpdateRun reads /SERVICEUPDATE'
+        Assert-True ($iss -match "(?s)if not IsServiceUpdateRun then\s+begin\s+WizardForm\.StatusLabel\.Caption := 'Setting up canvas-rgb for your account\.\.\.';.*?setup-user\.ps1'\), Args, True.*?FScriptsOk := True;") 'setup-user.ps1 only runs when it is not a service update, and FScriptsOk is set either way'
+        Assert-True ($iss -match "WizardSilent and \(not IsVerySilent\) and \(not IsServiceUpdateRun\)") 'the CurStepChanged relaunch skips a service update'
+        Assert-True ($iss -match "\(not Ok\) and FileExists\(Exe\) and \(not IsServiceUpdateRun\)") 'the DeinitializeSetup relaunch skips a service update'
+        $a = $iss.IndexOf('procedure DeinitializeSetup;')
+        $body = $iss.Substring($a, $iss.IndexOf('// ---- uninstall') - $a)
+        Assert-True ($body -match 'if not IsUpdateRun then Exit;' -and $body.Contains('update-result.json')) 'update-result.json is still written (the guard is /UPDATE, not /SERVICEUPDATE)'
+    }
+    Test-Case 'scripts that run as SYSTEM call sc.exe by absolute path, never by a name PATH could resolve (#43)' {
+        foreach ($f in 'setup-elevated.ps1', 'uninstall-elevated.ps1') {
+            $t = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot "..\$f"))
+            Assert-True ($t -notmatch '(?m)^\s*&\s+sc\.exe ') "$f must not call a bare sc.exe"
+            Assert-True ($t.Contains('Join-Path $env:SystemRoot ' + [char]39 + 'System32\sc.exe' + [char]39)) "$f resolves sc.exe under SystemRoot"
+        }
+    }
+    Test-Case 'iss: a failed /SERVICEUPDATE starts the service so something finishes the update (#43)' {
+        $a = $iss.IndexOf('procedure DeinitializeSetup;')
+        $body = $iss.Substring($a, $iss.IndexOf('// ---- uninstall') - $a)
+        Assert-True ($body -match '(?s)\(not Ok\) and IsServiceUpdateRun then\s+Exec\(' -and $body.Contains("'start canvas-rgb-svc'") -and $body.Contains('{sys}'+[char]92+'sc.exe')) 'a failed service update starts the service with sc.exe'
+        Assert-True ($body.IndexOf('update-result.json') -lt $body.IndexOf('start canvas-rgb-svc')) 'the result file is written before the service starts'
+        Assert-True ($body -match '(?s)token:[^
+]*\s+if \(not Ok\) and IsServiceUpdateRun') 'the Exec says which token it runs with'
+        Assert-True (-not $iss.Contains('CheckForMutexes') -and -not $iss.Contains('CreateMutex') -and -not $iss.Contains('FBlocked')) 'no Global named mutex: any standard user could create it and block every install'
+    }
     Test-Case 'iss: /UPDATE writes update-result.json on every exit and starts the tray again after a failure' {
         $a = $iss.IndexOf('procedure DeinitializeSetup;')
         Assert-True ($a -gt 0) 'DeinitializeSetup exists'

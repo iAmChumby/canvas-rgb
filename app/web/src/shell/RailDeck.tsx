@@ -12,6 +12,7 @@ import { messageOf } from "@/lib/errors";
 import { getSnap, patchSnap, refreshAll, refreshStatus, useSnap } from "@/lib/store";
 import type { FansStatus } from "@/proto/FansStatus";
 import { RailStrip } from "@/shell/RailStrip";
+import { RunningPresetName } from "@/shell/RunningPresetName";
 
 /**
  * The deck: what the lights are doing, and what the machine is doing.
@@ -157,7 +158,10 @@ function LightsPanel({
       <RailStrip effectId={activeId} paused={paused} />
 
       <div className="rail-deck-row">
-        <span className="rail-deck-name">{activeName ?? (known ? "Nothing is running" : "—")}</span>
+        <span className="rail-deck-name">
+          {activeName ?? (known ? "Nothing is running" : "—")}
+          <RunningPresetName effectId={activeId} />
+        </span>
         {devices !== null && (
           <span className="rail-deck-count">
             <span className="fig">{devices}</span> devices

@@ -1,0 +1,2 @@
+# Signed fixtures: their bytes are covered by signatures, so no line-ending conversion.
+* -text

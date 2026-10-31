@@ -8,6 +8,9 @@ export function Chip({
   icon,
   pressed,
   html,
+  marked,
+  pending,
+  className,
   onClick,
   label,
   title,
@@ -16,15 +19,31 @@ export function Chip({
   icon?: ReactNode;
   pressed?: boolean;
   html?: boolean;
+  /** The values on the lights differ from what this chip names: its LED turns amber. */
+  marked?: boolean;
+  /** The change this chip stands for is on its way to the daemon: it is held, not pressable. */
+  pending?: boolean;
+  className?: string;
   onClick?: () => void;
   label?: string;
   /** The native tooltip. It explains the chip without changing its name. */
   title?: string;
 }) {
-  const cls = ["chip", html && "chip-html", pressed && "chip-on"].filter(Boolean).join(" ");
+  const cls = ["chip", html && "chip-html", pressed && "chip-on", marked && "chip-marked", pending && "chip-pending", className]
+    .filter(Boolean)
+    .join(" ");
   if (onClick) {
     return (
-      <button type="button" className={cls} aria-pressed={pressed ?? false} aria-label={label} title={title} onClick={onClick}>
+      <button
+        type="button"
+        className={cls}
+        aria-pressed={pressed ?? false}
+        aria-busy={pending || undefined}
+        disabled={pending}
+        aria-label={label}
+        title={title}
+        onClick={onClick}
+      >
         {icon}
         {children}
       </button>

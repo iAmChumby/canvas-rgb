@@ -11,17 +11,25 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
+import { Button } from "@/components/Button";
 import { CheckCircle, Info, Warning, WarningOctagon } from "@phosphor-icons/react";
 
 export type ToastTone = "ok" | "warn" | "down" | "info";
+
+/** A single answer a toast offers, "Undo": it runs once and the toast goes. */
+export interface ToastAction {
+  label: string;
+  onClick: () => void;
+}
 
 interface ToastItem {
   id: number;
   tone: ToastTone;
   text: string;
+  action?: ToastAction;
 }
 
-type Push = (text: string, tone?: ToastTone) => void;
+type Push = (text: string, tone?: ToastTone, action?: ToastAction) => void;
 
 interface ToastState {
   push: Push;
@@ -46,6 +54,8 @@ export function useToasts(): ToastState {
 }
 
 const LIFETIME_MS = 2600;
+/** A toast that offers an answer stays long enough to read it and reach it. */
+const ACTION_LIFETIME_MS = 7000;
 
 const ICONS: Record<ToastTone, ReactNode> = {
   ok: <CheckCircle size={16} weight="fill" />,
@@ -64,9 +74,9 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 
   // One toast at a time: the newest replaces the one before it. A stack would grow the lane
   // and push the page down.
-  const push = useCallback((text: string, tone: ToastTone = "ok") => {
+  const push = useCallback((text: string, tone: ToastTone = "ok", action?: ToastAction) => {
     const id = nextId.current++;
-    setItems([{ id, tone, text }]);
+    setItems([{ id, tone, text, action }]);
   }, []);
 
   const remove = useCallback((id: number) => {
@@ -104,12 +114,15 @@ function Toast({ item, remove }: { item: ToastItem; remove: (id: number) => void
   });
 
   useEffect(() => {
-    const hold = setTimeout(() => setLeaving(true), LIFETIME_MS);
-    const drop = setTimeout(() => removeRef.current(item.id), LIFETIME_MS + 200);
+    const life = item.action ? ACTION_LIFETIME_MS : LIFETIME_MS;
+    const hold = setTimeout(() => setLeaving(true), life);
+    const drop = setTimeout(() => removeRef.current(item.id), life + 200);
     return () => {
       clearTimeout(hold);
       clearTimeout(drop);
     };
+    // The action is fixed for the life of the item
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [item.id]);
 
   return (
@@ -122,6 +135,19 @@ function Toast({ item, remove }: { item: ToastItem; remove: (id: number) => void
         {ICONS[item.tone]}
       </span>
       <span className="toast-text">{item.text}</span>
+      {item.action && (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="toast-action"
+          onClick={() => {
+            item.action?.onClick();
+            removeRef.current(item.id);
+          }}
+        >
+          {item.action.label}
+        </Button>
+      )}
     </div>
   );
 }

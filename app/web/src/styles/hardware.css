@@ -16,6 +16,10 @@
   --well: inset 0 1px 0 rgba(0, 0, 0, 0.6);
   /* an unlit LED */
   --led-off: rgba(255, 255, 255, 0.14);
+  /* a latched key's face */
+  --raised-press: color-mix(in oklab, var(--raised) 92%, black);
+  /* the LED that says "these values differ from the preset": amber, apart from the status colours */
+  --modified: #f2a93b;
   --press-in: 60ms;
   --release: 240ms;
 }
@@ -24,6 +28,8 @@
   --skirt: rgba(15, 18, 24, 0.22);
   --well: inset 0 1px 0 rgba(15, 18, 24, 0.14);
   --led-off: rgba(15, 18, 24, 0.16);
+  --raised-press: color-mix(in oklab, var(--raised) 90%, var(--ink));
+  --modified: #a5620a;
 }
 
 @media (prefers-color-scheme: light) {
@@ -31,6 +37,8 @@
     --skirt: rgba(15, 18, 24, 0.22);
     --well: inset 0 1px 0 rgba(15, 18, 24, 0.14);
     --led-off: rgba(15, 18, 24, 0.16);
+    --raised-press: color-mix(in oklab, var(--raised) 90%, var(--ink));
+    --modified: #a5620a;
   }
 }
 

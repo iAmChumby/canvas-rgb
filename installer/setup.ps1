@@ -71,7 +71,7 @@ if ($devServer) { Fail 'A process listens on port 3000 (a Next.js dev server?). 
 $lockTool = Join-Path $repo 'tools\with-build-lock.ps1'
 function Invoke-Locked([string[]]$Command) {
     Write-Host "build: $($Command -join ' ')"
-    & powershell.exe -NoProfile -File $lockTool @Command
+    & (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -NoProfile -File $lockTool @Command
     if ($LASTEXITCODE -ne 0) { Fail "build failed (exit $LASTEXITCODE): $($Command -join ' ')" }
 }
 

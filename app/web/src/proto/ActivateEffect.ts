@@ -3,6 +3,11 @@ import type { PropValue } from "./PropValue";
 
 export type ActivateEffect = { 
 /**
- * Overrides on top of the saved values or defaults.
+ * Overrides on top of the saved values or defaults (or on top of the preset).
  */
-props: { [key in string]: PropValue }, preset: string | null, };
+props: { [key in string]: PropValue }, 
+/**
+ * A built-in preset (`schema.presets`) or a user preset, by name. A preset's props sit on
+ * the defaults, not on the saved values, so two presets never leak into each other.
+ */
+preset: string | null, };

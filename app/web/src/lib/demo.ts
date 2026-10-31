@@ -51,6 +51,9 @@ import type { ExportBundle } from "@/proto/ExportBundle";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { PropValue } from "@/proto/PropValue";
 import type { PropKind } from "@/proto/PropKind";
+import type { Preset } from "@/proto/Preset";
+import type { PresetCreate } from "@/proto/PresetCreate";
+import type { PresetReplace } from "@/proto/PresetReplace";
 import type { DisplayConfig } from "@/proto/DisplayConfig";
 import type { DisplayInfo } from "@/proto/DisplayInfo";
 import type { DisplayStatus } from "@/proto/DisplayStatus";
@@ -80,6 +83,8 @@ interface DemoState {
   effects: Record<string, DemoEffect>;
   favorites: Set<string>;
   saved: Record<string, Props>;
+  /** The owner's presets per effect, in the order they were saved. */
+  userPresets: Record<string, Preset[]>;
   activeEffect: string | null;
   layouts: Layout[];
   activeLayout: string;
@@ -106,6 +111,25 @@ interface DemoState {
   failedEffects: FailedEffect[];
 }
 
+/**
+ * `?state=presets`: Aurora has two presets of the owner's, and the one on the lights is
+ * "Slow dusk" - so the strip opens with a key lit, as it does for a PC that has used presets.
+ */
+function seededPresets(): Record<string, Preset[]> {
+  const aurora = EFFECTS.find((e) => e.schema.id === "aurora");
+  if (!aurora) return {};
+  const c = (value: string): PropValue => ({ type: "color", value });
+  const n = (value: number): PropValue => ({ type: "number", value });
+  return {
+    aurora: [
+      { name: "Slow dusk", props: { ...aurora.defaults, color1: c("#8fb4e8"), color2: c("#b49cf0"), color3: c("#5fd0c0"), speed: n(8), scale: n(3) } },
+      { name: "Late shift", props: { ...aurora.defaults, color1: c("#ffb703"), color2: c("#e5484d"), color3: c("#3a0ca3"), speed: n(35) } },
+    ],
+    // The user effect of `?state=html`, so its delete asks what to do with the presets.
+    "html:fixture-sample": [{ name: "Calm", props: { speed: n(12) } }],
+  };
+}
+
 function initialState(): DemoState {
   const s = scenario();
   const effects: Record<string, DemoEffect> = {};
@@ -127,6 +151,11 @@ function initialState(): DemoState {
       // Starts from the fixture.
     }
   }
+  if (s.has("presets")) {
+    const dusk = seededPresets().aurora?.[0];
+    const layout = layouts.layouts.find((l) => l.id === layouts.active);
+    if (dusk && layout) layout.effect = { id: "aurora", props: { ...dusk.props } };
+  }
   let onboarded = onboardingDone();
   if (s.has("persist")) {
     try {
@@ -144,6 +173,7 @@ function initialState(): DemoState {
     effects,
     favorites,
     saved: {},
+    userPresets: s.has("presets") ? seededPresets() : {},
     activeEffect: "aurora",
     layouts: layouts.layouts,
     activeLayout: layouts.active,
@@ -612,7 +642,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
   // The daemon does not answer at all.
   if (daemonDown()) fail(503, "service_unavailable", "the daemon is not answering");
   // Every write is refused.
-  if (method !== "GET" && saveError()) fail(500, "internal", "the daemon refused the change");
+  if (method !== "GET" && saveError()) fail(500, "internal", "could not save the effects: access is denied (os error 5)");
 
   const url = new URL(path, "http://demo.invalid");
   const pathname = decodeURIComponent(url.pathname);
@@ -726,9 +756,52 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       return {
         schema: e.schema,
         favorite: s.favorites.has(id),
-        user_presets: [],
+        user_presets: (s.userPresets[id] ?? []).map((p) => ({ ...p, props: { ...p.props } })),
         props: currentProps(e),
       };
+    }
+    if (seg.length >= 3 && seg[2] === "presets") {
+      const e = effectOrNotFound(id);
+      const list = (s.userPresets[id] ??= []);
+      const taken = (name: string, except?: string) =>
+        [...e.schema.presets, ...list].some(
+          (p) => p.name.toLowerCase() === name.toLowerCase() && p.name.toLowerCase() !== except?.toLowerCase(),
+        );
+      const clean = (raw: string): string => {
+        const name = raw.trim();
+        if (name.length === 0) fail(422, "validation", "a preset needs a name");
+        if ([...name].length > 40) fail(422, "validation", "a preset name is at most 40 characters");
+        return name;
+      };
+      const answer = () => ({ user_presets: list.map((p) => ({ ...p, props: { ...p.props } })) });
+      if (seg.length === 3 && method === "POST") {
+        const req = body as PresetCreate;
+        const name = clean(req.name);
+        if (taken(name)) fail(409, "conflict", `${name} is already a preset of this effect`);
+        list.push({ name, props: { ...req.props } });
+        return answer();
+      }
+      const name = seg[3] ?? "";
+      const at = list.findIndex((p) => p.name === name);
+      if (seg.length === 4 && method === "PUT") {
+        const req = body as PresetReplace;
+        const rename = req.rename_to == null ? null : clean(req.rename_to);
+        const found = list[at];
+        if (!found) fail(404, "not_found", `no preset named ${name}`);
+        if (JSON.stringify(found.props) !== JSON.stringify(req.expected)) {
+          fail(409, "conflict", `${name} was changed in another window`);
+        }
+        if (rename && taken(rename, name)) fail(409, "conflict", `${rename} is already a preset of this effect`);
+        found.props = { ...req.props };
+        if (rename) found.name = rename;
+        return answer();
+      }
+      if (seg.length === 4 && method === "DELETE") {
+        if (at < 0) fail(404, "not_found", `no preset named ${name}`);
+        list.splice(at, 1);
+        return answer();
+      }
+      return bad();
     }
     if (seg.length === 3 && seg[2] === "thumbnail" && method === "GET") {
       effectOrNotFound(id);
@@ -739,9 +812,11 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       const req = body as { props?: Props; preset?: string | null };
       let base: Props = { ...e.defaults, ...(s.saved[id] ?? {}) };
       if (req.preset) {
-        const preset = e.schema.presets.find((p) => p.name === req.preset);
-        if (!preset) fail(422, "validation", `no preset named ${req.preset}`);
-        base = { ...preset.props };
+        const want = req.preset.toLowerCase();
+        const preset = [...e.schema.presets, ...(s.userPresets[id] ?? [])].find((p) => p.name.toLowerCase() === want);
+        if (!preset) fail(404, "not_found", `no preset named ${req.preset}`);
+        // A preset sits on the defaults, never on the saved values.
+        base = { ...e.defaults, ...preset.props };
       }
       const next = mergeProps(base, req.props ?? {});
       s.activeEffect = id;
@@ -765,6 +840,8 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       if (!e) fail(404, "not_found", `no user effect with the id ${id}`);
       delete s.effects[id];
       delete s.saved[id];
+      // The presets go with the effect unless the query keeps them.
+      if (url.searchParams.get("keep_presets") !== "true") delete s.userPresets[id];
       s.favorites.delete(id);
       if (s.activeEffect === id) s.activeEffect = null;
       return { ok: true };
@@ -989,7 +1066,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
         effects: {
           schema_version: SCHEMA_VERSION,
           saved: s.saved,
-          presets: {},
+          presets: s.userPresets,
           favorites: [...s.favorites],
         },
         fans: {
