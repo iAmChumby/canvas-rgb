@@ -749,6 +749,72 @@ mod tests {
         panic!("the wait for the sink to write its stage should have given up");
     }
 
+    /// The never-opening gate, run in the default suite.
+    ///
+    /// The proof above needs CANVAS_RGB_GATE_NEVER_OPENS, so a plain `cargo test` skips it and a
+    /// regression of the guard (a binary that hangs after the failure) would only show as a CI
+    /// job that never ends. This test runs the proof as a child process of this same test binary
+    /// under a hard deadline: the child must fail, with the wait's own message, before the
+    /// deadline. A child that is still running at the deadline is killed and the test fails.
+    #[test]
+    fn a_gate_that_never_opens_ends_the_binary_with_a_failure_within_the_deadline() {
+        use std::io::Read;
+        use std::process::{Command, Stdio};
+
+        /// Far over the 10 s the wait gives up after, far under what a hung job costs.
+        const HARD_DEADLINE: Duration = Duration::from_secs(45);
+
+        let exe = std::env::current_exe().expect("the path of this test binary");
+        // `module_path!()` starts with the crate's name; the test harness names tests without it.
+        let module = module_path!().split_once("::").map_or("", |(_, rest)| rest);
+        let proof = format!("{module}::a_gate_that_never_opens_fails_the_test_and_does_not_hang_the_binary");
+
+        // token: the test runner's own, non-elevated; the child is this same test binary.
+        let mut child = Command::new(exe)
+            .args([proof.as_str(), "--exact", "--test-threads=1", "--nocapture"])
+            .env("CANVAS_RGB_GATE_NEVER_OPENS", "1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the proof starts");
+        // Drained on threads, so a child that writes a lot cannot block on a full pipe.
+        let drain = |mut pipe: Box<dyn Read + Send>| {
+            std::thread::spawn(move || {
+                let mut text = String::new();
+                let _ = pipe.read_to_string(&mut text);
+                text
+            })
+        };
+        let out = drain(Box::new(child.stdout.take().expect("piped")));
+        let err = drain(Box::new(child.stderr.take().expect("piped")));
+
+        let started = Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("the child can be polled") {
+                break Some(status);
+            }
+            if started.elapsed() > HARD_DEADLINE {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let text = format!("{}{}", out.join().unwrap_or_default(), err.join().unwrap_or_default());
+
+        let status = status.unwrap_or_else(|| {
+            panic!("a gate that never opens hung the binary for {HARD_DEADLINE:?}; the guard no longer releases it
+{text}")
+        });
+        assert!(!status.success(), "a gate that never opens must fail the test, not pass it
+{text}");
+        assert!(
+            text.contains("gave up"),
+            "the child failed, but not with the wait's own message
+{text}"
+        );
+    }
+
     #[test]
     fn an_unknown_device_has_both_off() {
         let file = PeripheralsFile::default();
