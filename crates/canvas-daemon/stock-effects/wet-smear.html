@@ -101,10 +101,16 @@ function presentInit(gw, gh) {
   }
 }
 // Only the rows with Y % PARTS === part are worked out per call, so one frame pays a quarter of the
-// upsample; the sim moves slowly enough that a row a few frames old is not visible.
-var PARTS = 4, PART = 0;
-function present(ctx, buf, gw, gh) {
+// upsample. The four parts all read one snapshot of the grid, taken when part 0 runs: the picture is
+// up to three frames old, every row of it the same age. Reading the live grid made the rows of one
+// picture four different moments, and an edge that moves fast (the library tile runs the sim at twice
+// the default rate) came out as a comb, one tooth every few rows.
+var PARTS = 4, PART = 0, SNAP = null;
+function present(ctx, live, gw, gh) {
   if (!IMG) presentInit(gw, gh);
+  if (!SNAP) SNAP = new Float32Array(live.length);
+  if (PART === 0) SNAP.set(live);
+  var buf = SNAP;
   var X, Y, o, r0, r1, r2, wy0, wy1, wy2, p0, p1, p2, wx0, wx1, wx2, a0, a1, a2, b0, b1, b2, c0, c1, c2;
   for (Y = PART; Y < PH; Y += PARTS) {
     o = Y * PW * 4;

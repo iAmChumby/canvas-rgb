@@ -1,5 +1,9 @@
 //! Throwaway: renders one effect with a recipe given on the command line and prints its score.
 //! cargo run -p canvas-daemon --example tile_probe -- <id> <warm> <loop> <fade> [key=value ...] [--sheet dir]
+//! cargo run -p canvas-daemon --example tile_probe -- <id> own [--file effect.html] [--repeat n] [--sheet dir]
+//!
+//! `own` renders the tile with the effect's own recipe (what the library serves) instead of one given
+//! on the command line. `--file` loads an `html:` effect from a file on disk instead of the stock copy.
 use canvas_proto::props::{PropValue, PropertySchema, Props, ThumbnailRecipe};
 use canvas_proto::traits::{Canvas, Effect, Inputs};
 
@@ -22,17 +26,34 @@ impl Effect for Wrap {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let id = &args[0];
-    let mut recipe = ThumbnailRecipe {
-        warm_up_s: args[1].parse().unwrap(),
-        loop_s: args[2].parse().unwrap(),
-        crossfade_frames: args[3].parse().unwrap(),
-        ..Default::default()
+    let own = args[1] == "own";
+    let mut recipe = if own {
+        ThumbnailRecipe::default()
+    } else {
+        ThumbnailRecipe {
+            warm_up_s: args[1].parse().unwrap(),
+            loop_s: args[2].parse().unwrap(),
+            crossfade_frames: args[3].parse().unwrap(),
+            ..Default::default()
+        }
     };
     let mut sheet = None;
+    let mut file: Option<String> = None;
     let mut budget = std::time::Duration::from_secs(900);
     let mut repeat = 1usize;
-    let mut i = 4;
+    let mut steps = false;
+    let mut i = if own { 2 } else { 4 };
     while i < args.len() {
+        if args[i] == "--steps" {
+            steps = true;
+            i += 1;
+            continue;
+        }
+        if args[i] == "--file" {
+            file = Some(args[i + 1].clone());
+            i += 2;
+            continue;
+        }
         if args[i] == "--sheet" {
             sheet = Some(args[i + 1].clone());
             i += 2;
@@ -64,13 +85,16 @@ fn main() {
     let started = std::time::Instant::now();
     for round in 0..repeat {
         let inner: Box<dyn Effect> = if let Some(stem) = id.strip_prefix("html:") {
-            let (_, src) = canvas_daemon::user_effects::STOCK_EFFECTS.iter().find(|(s, _)| *s == stem).unwrap();
-            canvas_daemon::user_effects::html_builder_seeded(canvas_daemon::thumbnail::TILE_SEED)(id, src).unwrap()
+            let src = match &file {
+                Some(path) => std::fs::read_to_string(path).expect("the effect file"),
+                None => canvas_daemon::user_effects::STOCK_EFFECTS.iter().find(|(s, _)| *s == stem).unwrap().1.to_string(),
+            };
+            canvas_daemon::user_effects::html_builder_seeded(canvas_daemon::thumbnail::TILE_SEED)(id, &src).unwrap()
         } else {
             canvas_effects::create(id).unwrap()
         };
-        let mut effect = Wrap(inner, recipe.clone());
-        let body = canvas_daemon::thumbnail::render_within(&mut effect, &Props::new(), budget)
+        let mut effect: Box<dyn Effect> = if own { inner } else { Box::new(Wrap(inner, recipe.clone())) };
+        let body = canvas_daemon::thumbnail::render_within(effect.as_mut(), &Props::new(), budget)
             .unwrap_or_else(|why| panic!("{why}"));
         let s = canvas_daemon::thumbnail::score(&body).unwrap();
         println!(
@@ -78,6 +102,19 @@ fn main() {
             s.lit_avg * 100.0, s.lit_first * 100.0, s.lit_last * 100.0, s.rows_lit, s.cols_lit,
             s.seam * 100.0, s.step * 100.0, s.max_step * 100.0, s.band_rows, started.elapsed()
         );
+        if steps && round == 0 {
+            // The step between each pair of frames, as a share of full scale: where the tile moves.
+            let frame_len = 64 * 40 * 3;
+            let frames: Vec<&[u8]> = body[6..].chunks_exact(frame_len).collect();
+            let list: Vec<String> = frames
+                .windows(2)
+                .map(|p| {
+                    let sum: u64 = p[0].iter().zip(p[1]).map(|(a, b)| (*a as i32 - *b as i32).unsigned_abs() as u64).sum();
+                    format!("{:.1}", sum as f64 / (frame_len as f64 * 255.0) * 100.0)
+                })
+                .collect();
+            println!("   steps %: {}", list.join(" "));
+        }
         let problems = canvas_daemon::thumbnail::problems(&s, effect.schema().thumbnail.as_ref());
         for problem in &problems {
             println!("   problem: {problem}");

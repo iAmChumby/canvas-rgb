@@ -7,7 +7,13 @@
 //!
 //! `cargo test -p canvas-daemon --test tile_quality -- --nocapture` prints the table.
 
+mod common;
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
 use canvas_daemon::thumbnail::{self, TileScore};
+use std::sync::Arc;
+use tower::ServiceExt;
 use canvas_daemon::user_effects::{html_builder_seeded, STOCK_EFFECTS};
 use canvas_proto::props::{Props, ThumbnailRecipe};
 use canvas_proto::traits::{Canvas, Effect, Inputs};
@@ -32,7 +38,8 @@ fn shipped() -> Vec<(String, Box<dyn Effect>)> {
 fn measure(effect: &mut dyn Effect) -> (TileScore, Option<ThumbnailRecipe>) {
     let schema = effect.schema();
     // The budget the daemon uses is for release builds; a debug build of a paint effect is slower.
-    let body = thumbnail::render_within(effect, &Props::new(), std::time::Duration::from_secs(600)).expect("the render fits the test budget");
+    let body = thumbnail::render_within(effect, &Props::new(), std::time::Duration::from_secs(600))
+        .unwrap_or_else(|why| panic!("the tile of {} was given up: {why}", schema.id));
     (thumbnail::score(&body).expect("the render is well formed"), schema.thumbnail)
 }
 
@@ -92,10 +99,10 @@ fn every_built_in_tile_passes_the_bar_or_says_why_not() {
     hold_to_the_bar(false);
 }
 
-/// The paint effects fit their 100 ms frame budget in release; CI runs this one with
+/// The paint effects take minutes to render in a debug build; CI runs this one with
 /// `--release --include-ignored`.
 #[test]
-#[cfg_attr(debug_assertions, ignore = "the paint effects fit the 100 ms frame budget in release; CI runs these with --release")]
+#[cfg_attr(debug_assertions, ignore = "the paint effects take minutes to render in a debug build; CI runs these with --release")]
 fn every_stock_tile_passes_the_bar_or_says_why_not() {
     hold_to_the_bar(true);
 }
@@ -246,7 +253,7 @@ fn the_tile_of_a_seeded_effect_is_the_same_every_time() {
 
 /// The same, for the stock HTML effects. They are slower, so this runs in release.
 #[test]
-#[cfg_attr(debug_assertions, ignore = "the paint effects fit the 100 ms frame budget in release; CI runs these with --release")]
+#[cfg_attr(debug_assertions, ignore = "the paint effects take minutes to render in a debug build; CI runs these with --release")]
 fn the_tiles_of_the_stock_effects_are_the_same_every_time() {
     for id in ["html:ink-drop", "html:wet-smear", "html:palette-knife"] {
         let build = html_builder_seeded(thumbnail::TILE_SEED);
@@ -304,23 +311,39 @@ fn the_rain_tile_is_bright() {
     );
 }
 
-/// The Wet Smear tile must be bright: the smear setting that blends the paint into mud
-/// takes the tile from 94 % lit to 70 %, and a muddy tile reads as a broken one.
-#[test]
-fn the_wet_smear_tile_is_bright() {
-    let build = html_builder_seeded(thumbnail::TILE_SEED);
-    let source = STOCK_EFFECTS
+/// The stock wet-smear file.
+fn wet_smear_source() -> &'static str {
+    STOCK_EFFECTS
         .iter()
         .find(|(stem, _)| *stem == "wet-smear")
         .map(|(_, source)| *source)
-        .expect("a stock effect");
-    let mut effect = build("html:wet-smear", source).expect("the effect builds");
-    let (score, _) = measure(effect.as_mut());
+        .expect("a stock effect")
+}
+
+/// The Wet Smear tile must be bright: the smear setting that blends the paint into mud
+/// takes the tile from 94 % lit to 70 %, and a muddy tile reads as a broken one.
+///
+/// The effect is built directly, in tile mode, so a failure can print what the effect
+/// reported (`errors()`): a frame that was dropped or that threw shows there, and the number
+/// alone would not say why the tile is dim.
+#[test]
+fn the_wet_smear_tile_is_bright() {
+    let mut effect = canvas_html::HtmlEffect::from_source_seeded(
+        "html:wet-smear",
+        wet_smear_source(),
+        &Props::new(),
+        thumbnail::TILE_SEED,
+    )
+    .expect("the effect builds")
+    .tile_mode();
+    let (score, _) = measure(&mut effect);
     assert!(
         score.lit_avg >= 0.85,
-        "the wet smear tile is only {:.0} % lit",
-        score.lit_avg * 100.0
+        "the wet smear tile is only {:.0} % lit; the effect reported {:?}",
+        score.lit_avg * 100.0,
+        effect.errors()
     );
+    assert!(effect.errors().is_empty(), "the wet smear tile reported errors: {:?}", effect.errors());
 }
 
 /// The Wet Smear tile must not carry a half-pixel checkerboard.
@@ -332,13 +355,14 @@ fn the_wet_smear_tile_is_bright() {
 /// where it is a pixel wide.
 #[test]
 fn the_wet_smear_tile_has_no_checkerboard() {
-    let build = html_builder_seeded(thumbnail::TILE_SEED);
-    let source = STOCK_EFFECTS
-        .iter()
-        .find(|(stem, _)| *stem == "wet-smear")
-        .map(|(_, source)| *source)
-        .expect("a stock effect");
-    let mut effect = build("html:wet-smear", source).expect("the effect builds");
+    let mut effect = canvas_html::HtmlEffect::from_source_seeded(
+        "html:wet-smear",
+        wet_smear_source(),
+        &Props::new(),
+        thumbnail::TILE_SEED,
+    )
+    .expect("the effect builds")
+    .tile_mode();
     let schema = effect.schema();
     // The effect's own canvas, so the picture is not scaled on the way in.
     let (w, h) = (80u32, 50u32);
@@ -364,10 +388,222 @@ fn the_wet_smear_tile_has_no_checkerboard() {
             total += 1;
         }
     }
+    assert!(effect.errors().is_empty(), "the wet smear reported errors: {:?}", effect.errors());
     let fraction = alternating as f64 / total as f64;
     assert!(
         fraction < 0.015,
         "{} % of the tile's pixels alternate from one to the next: the picture carries a half-pixel checkerboard",
         (fraction * 100.0 * 10.0).round() / 10.0
     );
+}
+
+// ---------------------------------------------------------------- what ships
+
+/// The token the API test uses.
+const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+/// Asks the daemon's own API (the router, the real effects and the real stock effects, the
+/// fakes only under the engine and the device) for the tile of every id, the way the library does.
+async fn tiles_served_by_the_api(ids: &[String]) -> Vec<(String, Vec<u8>)> {
+    let home = std::env::temp_dir().join(format!("canvas-rgb-tiles-{}-{:?}", std::process::id(), std::thread::current().id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).expect("a temp folder");
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let app = Arc::new(canvas_daemon::state::App::new(
+        canvas_daemon::storage::Store::at(&home),
+        Arc::new(common::FakeEngine::default()),
+        Box::new(common::FakeAdapter::default()),
+        TOKEN.to_string(),
+        "0.1.0-test".to_string(),
+        tx,
+    ));
+    let router = canvas_daemon::api::router(app);
+    let mut out = Vec::new();
+    for id in ids {
+        let request = Request::builder()
+            .method("GET")
+            .uri(format!("/api/v1/effects/{id}/thumbnail"))
+            .header("host", "127.0.0.1:9430")
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .body(Body::empty())
+            .expect("the request builds");
+        let response = router.clone().oneshot(request).await.expect("the router answers");
+        assert_eq!(response.status(), StatusCode::OK, "the API did not serve the tile of {id}");
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("the body");
+        out.push((id.clone(), bytes.to_vec()));
+    }
+    let _ = std::fs::remove_dir_all(&home);
+    out
+}
+
+/// The recipe an effect ships with, by id.
+fn recipe_of(id: &str) -> Option<ThumbnailRecipe> {
+    match STOCK_EFFECTS.iter().find(|(stem, _)| format!("html:{stem}") == id) {
+        Some((_, source)) => {
+            let build = html_builder_seeded(thumbnail::TILE_SEED);
+            build(id, source).expect("a stock effect builds").schema().thumbnail
+        }
+        None => canvas_effects::create(id).expect("a built-in effect builds").schema().thumbnail,
+    }
+}
+
+/// Holds the tiles the API serves to the bar. These are the bytes the library shows: the
+/// daemon's tile for each effect at its defaults, scored the same way as everything else.
+async fn served_tiles_hold_to_the_bar(stock: bool) {
+    let ids: Vec<String> = shipped()
+        .into_iter()
+        .map(|(id, _)| id)
+        .filter(|id| id.starts_with("html:") == stock)
+        .collect();
+    let mut rows = Vec::new();
+    let mut failures = Vec::new();
+    for (id, body) in tiles_served_by_the_api(&ids).await {
+        let score = thumbnail::score(&body).expect("the served tile is well formed");
+        let recipe = recipe_of(&id);
+        for problem in thumbnail::problems(&score, recipe.as_ref()) {
+            failures.push(format!("{id}: {problem}"));
+        }
+        rows.push((id, score, recipe));
+    }
+    println!("what the daemon serves:");
+    print_table(&rows);
+    assert!(failures.is_empty(), "tiles the API serves, under the bar:
+{}", failures.join("
+"));
+}
+
+#[tokio::test]
+async fn the_tiles_the_daemon_serves_for_the_built_in_effects_pass_the_bar() {
+    served_tiles_hold_to_the_bar(false).await;
+}
+
+#[tokio::test]
+#[cfg_attr(debug_assertions, ignore = "the paint effects take minutes to render in a debug build; CI runs these with --release")]
+async fn the_tiles_the_daemon_serves_for_the_stock_effects_pass_the_bar() {
+    served_tiles_hold_to_the_bar(true).await;
+}
+
+/// The frame strips the editor's demo serves (`app/web/public/demo-thumbs`) are the tiles the
+/// static demo shows, so they are held to the same bar, measured on the PNG files themselves
+/// (what ships), not on a separate preview render.
+#[test]
+fn the_demo_strips_the_editor_ships_pass_the_bar() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../app/web/public/demo-thumbs");
+    let mut rows = Vec::new();
+    let mut failures = Vec::new();
+    for id in canvas_proto::EFFECT_IDS {
+        let path = dir.join(format!("{id}.png"));
+        let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("the demo strip {} is missing: {e}", path.display()));
+        let body = thumbnail::body_from_strip_png(&bytes).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let score = thumbnail::score(&body).expect("the strip is well formed");
+        let recipe = recipe_of(id);
+        for problem in thumbnail::problems(&score, recipe.as_ref()) {
+            failures.push(format!("{id}: {problem}"));
+        }
+        rows.push((id.to_string(), score, recipe));
+    }
+    println!("the demo strips, measured on the PNG files:");
+    print_table(&rows);
+    assert!(failures.is_empty(), "demo strips under the bar:
+{}", failures.join("
+"));
+}
+
+/// How much one set of rows of a picture disagrees with its neighbours, as a ratio.
+///
+/// The Wet Smear draws a quarter of its rows per frame (rows Y with Y % 4 = the frame's part).
+/// The library tile reads the picture after four frames, a whole cycle of parts. If the four parts
+/// read the live grid, row Y % 4 = 0 comes from the first frame and row Y % 4 = 3 from the last,
+/// so a moving edge is displaced by three frames between a row 0 and the row above it (a row 3),
+/// and by one frame between every other pair of neighbours. That row pair differs more than the
+/// others, and this is how much more. If the four parts read one snapshot, every pair of rows is the
+/// same moment and the ratio is about 1.
+fn row_phase_ratio(canvas: &Canvas) -> f64 {
+    let (w, h) = (canvas.width, canvas.height);
+    let at = |x: u32, y: u32| canvas.get(x, y).iter().map(|v| *v as f64).sum::<f64>();
+    let mut by_phase = [0.0f64; 4];
+    for y in 1..h {
+        for x in 0..w {
+            by_phase[(y % 4) as usize] += (at(x, y) - at(x, y - 1)).abs();
+        }
+    }
+    by_phase[0] / ((by_phase[1] + by_phase[2] + by_phase[3]) / 3.0)
+}
+
+/// The Wet Smear at the speed the library tile runs it, on the effect's own canvas, read the way the
+/// tile reads it (after steps of four 60 Hz frames): the row-phase ratio of each of 40 pictures.
+fn wet_smear_row_phase_ratios(source: &str) -> Vec<f64> {
+    let mut effect =
+        canvas_html::HtmlEffect::from_source_seeded("html:wet-smear", source, &Props::new(), thumbnail::TILE_SEED)
+            .expect("the effect builds")
+            .tile_mode();
+    let mut props = effect.schema().defaults();
+    // The tile's own showcase speed.
+    props.insert("speed".to_string(), canvas_proto::PropValue::Number(100.0));
+    effect.init(&props);
+    let mut canvas = Canvas::new(80, 50);
+    let step = 1.0 / 15.0;
+    for _ in 0..150 {
+        effect.update(step, &mut canvas, &Inputs::default());
+    }
+    let mut ratios = Vec::new();
+    for _ in 0..40 {
+        effect.update(step, &mut canvas, &Inputs::default());
+        ratios.push(row_phase_ratio(&canvas));
+    }
+    assert!(effect.errors().is_empty(), "the wet smear reported errors: {:?}", effect.errors());
+    ratios
+}
+
+/// The Wet Smear's tile has no comb along its stroke edges: the four parts of its picture all read
+/// one snapshot of the sim, so every row of a picture is the same moment. Reading the live grid
+/// made the tile (which runs the sim at twice the default rate) a row of teeth on every moving edge:
+/// the row-phase ratio was 1.6 on average and up to 2.4; with one snapshot it is 0.99 and at most 1.01.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "the paint effects take minutes to render in a debug build; CI runs these with --release")]
+fn the_wet_smear_tile_has_no_comb_along_its_edges() {
+    let ratios = wet_smear_row_phase_ratios(wet_smear_source());
+    let worst = ratios.iter().cloned().fold(0.0, f64::max);
+    let mean = ratios.iter().sum::<f64>() / ratios.len() as f64;
+    println!("row-phase ratio: mean {mean:.3}, worst {worst:.3} over {} pictures", ratios.len());
+    assert!(
+        worst < 1.1,
+        "the wet smear's rows are different moments: the row-phase ratio reached {worst:.2} (mean {mean:.2}); one snapshot gives about 1.0"
+    );
+}
+
+/// The step between each pair of consecutive frames of a tile body, as a share of full scale.
+fn steps_of(body: &[u8]) -> Vec<f64> {
+    let frame_len = thumbnail::WIDTH as usize * thumbnail::HEIGHT as usize * 3;
+    let frames: Vec<&[u8]> = body[6..].chunks_exact(frame_len).collect();
+    frames
+        .windows(2)
+        .map(|pair| {
+            let sum: u64 = pair[0].iter().zip(pair[1]).map(|(a, b)| (*a as i32 - *b as i32).unsigned_abs() as u64).sum();
+            sum as f64 / (frame_len as f64 * 255.0)
+        })
+        .collect()
+}
+
+/// A paint effect's tile moves through its whole loop. Palette Knife's old recipe held one
+/// painting for two thirds of the loop (frame steps of 0.2 to 0.4 % from frame 8 on, 15 of 23
+/// steps under half a percent); a tile that stands still that long reads as a frozen picture.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "the paint effects take minutes to render in a debug build; CI runs these with --release")]
+fn no_stock_tile_stands_still_for_a_third_of_its_loop() {
+    let mut failures = Vec::new();
+    for (stem, source) in STOCK_EFFECTS {
+        let id = format!("html:{stem}");
+        let mut effect = html_builder_seeded(thumbnail::TILE_SEED)(&id, source).expect("a stock effect builds");
+        let body = thumbnail::render_within(effect.as_mut(), &Props::new(), std::time::Duration::from_secs(600))
+            .unwrap_or_else(|why| panic!("the tile of {id} was given up: {why}"));
+        let steps = steps_of(&body);
+        let still = steps.iter().filter(|s| **s < 0.005).count();
+        println!("{id}: {still} of {} steps under 0.5 %", steps.len());
+        if still * 3 > steps.len() {
+            failures.push(format!("{id}: {still} of {} frame steps are under 0.5 %: the tile stands still for most of its loop", steps.len()));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("
+"));
 }
