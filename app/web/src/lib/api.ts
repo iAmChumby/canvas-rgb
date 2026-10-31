@@ -8,6 +8,7 @@ import type { ApiError } from "@/proto/ApiError";
 import { fetchApiConfig, isDemo } from "@/lib/host";
 import { demoRequest } from "@/lib/demo";
 import { ApiFailure, messageOf } from "@/lib/errors";
+import { routes } from "@/proto/routes";
 
 export { ApiFailure, isUnreachable, messageOf } from "@/lib/errors";
 
@@ -45,91 +46,179 @@ export function dropApiConfig(): void {
 export type Method = "GET" | "PUT" | "PATCH" | "POST" | "DELETE";
 
 /**
- * How long a request may take before the editor gives up on it. A request that never answers
- * would leave the area pending for good: no error, no button, and nothing to try again. The
- * daemon answers in well under a second, so this is only the ceiling for a daemon that has
- * stopped mid-call.
+ * The deadline of a request that answers in a moment. A request that never answers would
+ * leave the area pending for good: no error, no button, and nothing to try again. The daemon
+ * answers in well under a second, so this is only the ceiling for a daemon that has stopped
+ * mid-call.
  */
 export const REQUEST_TIMEOUT_MS = 10_000;
 
-/** Sends one request to the daemon and returns the raw response, or throws ApiFailure. */
-async function send(method: Method, path: string, body?: unknown): Promise<Response> {
-  let config: ApiConfig;
-  try {
-    config = await apiConfig();
-  } catch (e) {
-    throw new ApiFailure(0, "unreachable", `The tray app did not provide the API address: ${messageOf(e)}`);
+/**
+ * The deadline of the routes that wait on a device.
+ *
+ * The read of a peripheral is the slow one: the mouse may be asleep, and the adapter then
+ * makes two passes over its five reports with a wait for the mouse to wake in between. The
+ * worst case comes from the adapter's own constants
+ * (`crates/canvas-adapters/src/attack_shark_x6/mod.rs`, next to `Pace`):
+ *
+ * - one pass, every report refused: 5 reports x 2 attempts (`GRANT_ATTEMPTS`) x 250 ms
+ *   (`grant_wait`) = 2.5 s, plus the pause between the reports, 4 x 500 ms (`report_pause`)
+ *   = 2.0 s -> 4.5 s;
+ * - the wait for the mouse to wake: up to 5 s (`wake_wait`);
+ * - a second pass, the mouse awake and the grant given at once: 5 x 250 ms = 1.25 s, plus
+ *   4 x 500 ms = 2.0 s -> 3.25 s.
+ *
+ * 4.5 s + 5 s + 3.25 s = 12.75 s. The route also enumerates the USB bus and opens the device
+ * before it reads it, so the deadline is twice the worst case: 30 s.
+ */
+export const PERIPHERAL_TIMEOUT_MS = 30_000;
+
+/**
+ * The deadline of the effect import: the file is parsed (the effect's script runs), written
+ * and the whole effects folder is parsed again. A library of effects takes a while.
+ */
+export const EFFECT_IMPORT_TIMEOUT_MS = 60_000;
+
+/**
+ * The deadline of the config export and import: the whole configuration moves, and the export
+ * asks the fan service over the pipe before it answers.
+ */
+export const CONFIG_TRANSFER_TIMEOUT_MS = 60_000;
+
+/**
+ * The deadline of the device rescan: the USB bus is looked at again, from the start.
+ */
+export const DEVICE_RESCAN_TIMEOUT_MS = 30_000;
+
+/**
+ * The deadline of one route. The default is short; the routes that wait on a device, or that
+ * move a lot of work, get the time their worst case needs. The route is matched on its path,
+ * so a request to the same route always gets the same deadline.
+ */
+export function deadlineFor(path: string): number {
+  // The peripherals: the enumeration opens the USB devices, and the read of one waits for a
+  // sleeping mouse to wake.
+  if (path.startsWith(routes.peripherals)) return PERIPHERAL_TIMEOUT_MS;
+  // The effect import: the file is parsed, written and the folder is parsed again.
+  if (path.startsWith(routes.effectsImport)) return EFFECT_IMPORT_TIMEOUT_MS;
+  // The config export and import: the whole configuration moves.
+  if (path.startsWith(routes.configExport) || path.startsWith(routes.configImport)) {
+    return CONFIG_TRANSFER_TIMEOUT_MS;
   }
+  // The rescan: the USB bus is looked at again.
+  if (path.startsWith(routes.devices) && path.includes("rescan")) return DEVICE_RESCAN_TIMEOUT_MS;
+  return REQUEST_TIMEOUT_MS;
+}
 
-  const headers: Record<string, string> = { Authorization: `Bearer ${config.token}` };
-  if (body !== undefined) headers["Content-Type"] = "application/json";
-
-  // The request has a deadline: a call that never comes back is turned into an error, so the
-  // frame can say what happened and offer a way to try again.
+/**
+ * Sends one request to the daemon and returns the body it read, or throws ApiFailure.
+ *
+ * The deadline covers the whole request: the tray's lookup of the address and the token, the
+ * call itself, and the body that comes with it. A request that hangs anywhere in that chain
+ * is given up on, so the area is never left pending with no error and no way to try again.
+ */
+async function send<T>(
+  method: Method,
+  path: string,
+  body: unknown | undefined,
+  read: (res: Response) => Promise<T>,
+): Promise<T> {
+  const budget = deadlineFor(path);
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-
-  let res: Response;
-  try {
-    res = await fetch(config.base_url + path, {
-      method,
-      headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
-      cache: "no-store",
-      signal: controller.signal,
-    });
-  } catch {
-    if (controller.signal.aborted) {
-      // The deadline passed. The daemon may be busy or gone: either way the editor waits no
-      // longer for this answer.
-      throw new ApiFailure(
-        0,
-        "timeout",
-        `canvas-rgb did not answer within ${Math.round(REQUEST_TIMEOUT_MS / 1000)} seconds. It may be stopped, or busy.`,
+  // The deadline: it ends the request, and it is what the frame says when it passes.
+  let stopTimer: () => void = () => {};
+  const deadline = new Promise<never>((_resolve, reject) => {
+    const timer = setTimeout(() => {
+      controller.abort();
+      reject(
+        new ApiFailure(
+          0,
+          "timeout",
+          `canvas-rgb did not answer within ${Math.round(budget / 1000)} seconds. It may be stopped, or busy.`,
+        ),
       );
-    }
-    // The listener may be gone, or another process may be about to take its place: the token is
-    // not trusted again until the tray has checked the listener once more.
-    dropApiConfig();
-    // A cross-origin request that fails like this is either a service that is down or a reply the
-    // browser was not allowed to read. Say so, instead of blaming the network.
-    throw new ApiFailure(
-      0,
-      "unreachable",
-      "canvas-rgb did not answer. It may be stopped, or the browser was not allowed to read its reply.",
-    );
+    }, budget);
+    stopTimer = () => clearTimeout(timer);
+  });
+
+  try {
+    const work = (async () => {
+      let config: ApiConfig;
+      try {
+        config = await apiConfig();
+      } catch (e) {
+        throw new ApiFailure(0, "unreachable", `The tray app did not provide the API address: ${messageOf(e)}`);
+      }
+
+      const headers: Record<string, string> = { Authorization: `Bearer ${config.token}` };
+      if (body !== undefined) headers["Content-Type"] = "application/json";
+
+      let res: Response;
+      try {
+        res = await fetch(config.base_url + path, {
+          method,
+          headers,
+          body: body === undefined ? undefined : JSON.stringify(body),
+          cache: "no-store",
+          signal: controller.signal,
+        });
+      } catch {
+        if (controller.signal.aborted) {
+          // The deadline passed. The daemon may be busy or gone: either way the editor waits no
+          // longer for this answer.
+          throw new ApiFailure(
+            0,
+            "timeout",
+            `canvas-rgb did not answer within ${Math.round(budget / 1000)} seconds. It may be stopped, or busy.`,
+          );
+        }
+        // The listener may be gone, or another process may be about to take its place: the token is
+        // not trusted again until the tray has checked the listener once more.
+        dropApiConfig();
+        // A cross-origin request that fails like this is either a service that is down or a reply the
+        // browser was not allowed to read. Say so, instead of blaming the network.
+        throw new ApiFailure(
+          0,
+          "unreachable",
+          "canvas-rgb did not answer. It may be stopped, or the browser was not allowed to read its reply.",
+        );
+      }
+
+      if (res.status === 401) dropApiConfig(); // the token changed (a purge and reinstall): ask again
+
+      if (!res.ok) {
+        let parsed: Partial<ApiError> = {};
+        try {
+          parsed = (await res.json()) as Partial<ApiError>;
+        } catch {
+          parsed = {};
+        }
+        const code = typeof parsed.error === "string" ? parsed.error : "http";
+        const message =
+          typeof parsed.message === "string" && parsed.message.length > 0
+            ? parsed.message
+            : `HTTP ${res.status}`;
+        throw new ApiFailure(res.status, code, message);
+      }
+      // The body is read under the same deadline: a body that never finishes is a timeout too.
+      return await read(res);
+    })();
+    return await Promise.race([work, deadline]);
   } finally {
-    clearTimeout(timer);
+    stopTimer();
   }
-
-  if (res.status === 401) dropApiConfig(); // the token changed (a purge and reinstall): ask again
-
-  if (!res.ok) {
-    let parsed: Partial<ApiError> = {};
-    try {
-      parsed = (await res.json()) as Partial<ApiError>;
-    } catch {
-      parsed = {};
-    }
-    const code = typeof parsed.error === "string" ? parsed.error : "http";
-    const message =
-      typeof parsed.message === "string" && parsed.message.length > 0
-        ? parsed.message
-        : `HTTP ${res.status}`;
-    throw new ApiFailure(res.status, code, message);
-  }
-  return res;
 }
 
 export async function request<T>(method: Method, path: string, body?: unknown): Promise<T> {
   if (isDemo()) {
     return (await demoRequest(method, path, body)) as T;
   }
-  const res = await send(method, path, body);
-  if (res.status === 204) return undefined as T;
-  const text = await res.text();
-  if (text.length === 0) return undefined as T;
-  return JSON.parse(text) as T;
+  return send(method, path, body, async (res) => {
+    if (res.status === 204) return undefined as T;
+    const text = await res.text();
+    if (text.length === 0) return undefined as T;
+    return JSON.parse(text) as T;
+  });
 }
 
 /** A GET whose answer is binary (the effect thumbnails). */
@@ -137,6 +226,5 @@ export async function requestBinary(path: string): Promise<ArrayBuffer> {
   if (isDemo()) {
     return (await demoRequest("GET", path, undefined)) as ArrayBuffer;
   }
-  const res = await send("GET", path);
-  return res.arrayBuffer();
+  return send("GET", path, undefined, (res) => res.arrayBuffer());
 }

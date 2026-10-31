@@ -256,6 +256,20 @@ const KNOWN_STAGE_COUNT: usize = 6;
 const KNOWN_ACTIVE_STAGE: u8 = 2;
 
 /// The quiet times the mouse needs between its calls.
+///
+/// These four constants and `GRANT_ATTEMPTS` and `codec::READ_ORDER` are the whole worst case
+/// of one read, and the editor's deadline for `GET /peripherals/{id}` is computed from it
+/// (`app/web/src/lib/api.ts`, `PERIPHERAL_TIMEOUT_MS`):
+///
+/// - one pass over the five reports of `codec::READ_ORDER`, every report refused:
+///   5 reports x 2 attempts (`GRANT_ATTEMPTS`) x 250 ms (`grant_wait`) = 2.5 s, plus the pause
+///   between the reports, 4 x 500 ms (`report_pause`) = 2.0 s -> 4.5 s;
+/// - the wait for the mouse to wake: up to 5 s (`wake_wait`);
+/// - a second pass, the mouse awake and the grant given at once: 5 x 250 ms = 1.25 s, plus
+///   4 x 500 ms = 2.0 s -> 3.25 s.
+///
+/// 4.5 s + 5 s + 3.25 s = 12.75 s. The route enumerates the USB bus and opens the device
+/// before it reads it, so the deadline is twice the worst case: 30 s.
 #[derive(Clone, Copy, Debug)]
 struct Pace {
     /// Between a read request and the receiver's grant (research 3.5: 250 ms).
