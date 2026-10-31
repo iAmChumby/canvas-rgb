@@ -96,6 +96,7 @@ impl Effect for SolidEffect {
                 kind: PropKind::Color { default: Rgb8::WHITE },
             }],
             presets: vec![],
+            thumbnail: None,
         }
     }
 
@@ -129,6 +130,7 @@ impl Effect for TimingEffect {
             needs: InputNeeds::default(),
             properties: vec![],
             presets: vec![],
+            thumbnail: None,
         }
     }
 
@@ -154,6 +156,7 @@ impl Effect for CountingEffect {
             needs: InputNeeds::default(),
             properties: vec![],
             presets: vec![],
+            thumbnail: None,
         }
     }
 
@@ -178,6 +181,7 @@ impl Effect for GradientEffect {
             needs: InputNeeds::default(),
             properties: vec![],
             presets: vec![],
+            thumbnail: None,
         }
     }
 
@@ -236,6 +240,7 @@ impl Effect for NeedyEffect {
             },
             properties: vec![],
             presets: vec![],
+            thumbnail: None,
         }
     }
 

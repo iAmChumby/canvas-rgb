@@ -3,7 +3,7 @@
 //! as one PNG frame strip: 64 px wide, the 24 frames stacked top to bottom. The editor's demo
 //! backend serves these files, so the demo gallery shows the real effects.
 //!
-//! Usage: cargo run -p canvas-daemon --example render_demo_thumbs [out_dir]
+//! Usage: cargo run -p canvas-daemon --example render_demo_thumbs [out_dir [preview_dir]]
 //! Default out_dir: app/web/public/demo-thumbs
 
 use canvas_proto::{PropValue, Props, Rgb8, EFFECT_IDS};
@@ -52,6 +52,29 @@ fn main() {
         println!("{id:<16} {w}x{h} x {frames} frames  {size:>7} bytes  {} levels  {}", 256u32 >> dropped, path.display());
     }
     println!("total {total} bytes for {} effects", EFFECT_IDS.len());
+
+    // With a second argument, also write every shipped tile (the built-ins and the stock HTML
+    // effects) as a GIF and a contact sheet of its frames, with its score, into that folder.
+    if let Some(preview) = std::env::args().nth(2) {
+        let preview = PathBuf::from(preview);
+        std::fs::create_dir_all(&preview).expect("create the preview folder");
+        let build = canvas_daemon::user_effects::html_builder();
+        let mut shipped: Vec<(String, Box<dyn canvas_proto::traits::Effect>)> = EFFECT_IDS
+            .iter()
+            .map(|id| (id.to_string(), canvas_effects::create(id).expect("a built-in effect builds")))
+            .collect();
+        for (stem, source) in canvas_daemon::user_effects::STOCK_EFFECTS {
+            let id = format!("html:{stem}");
+            shipped.push((stem.to_string(), build(&id, source).expect("a stock effect builds")));
+        }
+        for (name, mut effect) in shipped {
+            let body = canvas_daemon::thumbnail::render(effect.as_mut(), &Props::new());
+            let score = canvas_daemon::thumbnail::score(&body).expect("a well formed tile");
+            canvas_daemon::cli::write_tile_gif(&preview.join(format!("{name}.gif")), &body).expect("the GIF");
+            canvas_daemon::cli::write_tile_sheet(&preview.join(format!("{name}-sheet.png")), &body).expect("the sheet");
+            println!("{name:<16} lit {:>3.0} %  rows {} cols {}  seam {:.1} % step {:.1} %", score.lit_avg * 100.0, score.rows_lit, score.cols_lit, score.seam * 100.0, score.step * 100.0);
+        }
+    }
 }
 
 /// The demo runs Aurora on the editor's own accents (blue, violet, teal: `--a1`, `--a2`, `--a3`

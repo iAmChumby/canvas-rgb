@@ -172,6 +172,10 @@ impl HtmlEffect {
             needs: InputNeeds::default(),
             properties: properties.clone(),
             presets: Vec::new(),
+            thumbnail: match &parsed.thumbnail {
+                Some(meta) => Some(thumbnail_recipe(meta, &properties)?),
+                None => None,
+            },
         };
         apply_overrides(&mut schema, default_overrides);
 
@@ -569,6 +573,65 @@ fn property_kind(
         // An unknown type is treated as a text field rather than failing the load.
         _ => Ok(PropKind::Choice { options: vec![default.clone()], default }),
     }
+}
+
+/// Builds the library tile's recipe from a `<meta thumbnail ...>` tag:
+///
+/// ```html
+/// <meta thumbnail warm_up="1" loop="4.5" crossfade="0" props="speed=100;ink1=#ff0000" dark_on_purpose="a spark on black" />
+/// ```
+///
+/// Every attribute is optional and the renderer's defaults fill what is missing: `warm_up`
+/// and `loop` are seconds, `crossfade` is a frame count, `props` is `key=value` pairs
+/// separated by `;` (each key must be one of the file's properties, each value valid for
+/// that property's type) and `dark_on_purpose` is the reason a mostly dark tile is right.
+fn thumbnail_recipe(
+    meta: &parse::MetaTag,
+    properties: &[PropertyDef],
+) -> Result<canvas_proto::props::ThumbnailRecipe, HtmlError> {
+    let mut recipe = canvas_proto::props::ThumbnailRecipe::default();
+    let seconds = |name: &str| -> Result<Option<f64>, HtmlError> {
+        match meta.attr(name).map(str::trim).filter(|v| !v.is_empty()) {
+            None => Ok(None),
+            Some(v) => match v.parse::<f64>() {
+                Ok(n) if n.is_finite() && n >= 0.0 => Ok(Some(n)),
+                _ => Err(HtmlError::Parse(format!("thumbnail {name}: {v:?} is not a number of seconds"))),
+            },
+        }
+    };
+    if let Some(n) = seconds("warm_up")? {
+        recipe.warm_up_s = n;
+    }
+    if let Some(n) = seconds("loop")? {
+        recipe.loop_s = n;
+    }
+    if let Some(n) = seconds("crossfade")? {
+        recipe.crossfade_frames = n as u32;
+    }
+    if let Some(reason) = meta.attr("dark_on_purpose").map(str::trim).filter(|v| !v.is_empty()) {
+        recipe.dark_on_purpose = Some(reason.to_string());
+    }
+    for pair in meta.attr("props").unwrap_or("").split(';').map(str::trim).filter(|p| !p.is_empty()) {
+        let Some((key, text)) = pair.split_once('=') else {
+            return Err(HtmlError::Parse(format!("thumbnail props: {pair:?} is not key=value")));
+        };
+        let (key, text) = (key.trim(), text.trim());
+        let Some(def) = properties.iter().find(|d| d.key == key) else {
+            return Err(HtmlError::Parse(format!("thumbnail props: the file has no property {key:?}")));
+        };
+        let bad = || HtmlError::Parse(format!("thumbnail props: {text:?} is not a valid {key}"));
+        let value = match &def.kind {
+            PropKind::Color { .. } => PropValue::Color(text.parse().map_err(|_| bad())?),
+            PropKind::Number { .. } => PropValue::Number(text.parse::<f64>().map_err(|_| bad())?),
+            PropKind::Hue { .. } => PropValue::Hue(text.parse::<f64>().map_err(|_| bad())?),
+            PropKind::Bool { .. } => {
+                PropValue::Bool(matches!(text.to_ascii_lowercase().as_str(), "true" | "1"))
+            }
+            PropKind::Choice { .. } => PropValue::Choice(text.to_string()),
+        };
+        recipe.props.insert(key.to_string(), value);
+    }
+    Ok(recipe)
 }
 
 /// Replaces the schema's declared defaults with the overrides.

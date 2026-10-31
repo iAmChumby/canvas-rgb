@@ -34,6 +34,8 @@ pub struct ParsedEffect {
     pub metas: Vec<MetaTag>,
     /// Inline script bodies, in document order.
     pub scripts: Vec<String>,
+    /// The `<meta thumbnail ...>` tag, when the file has one: how its library tile is rendered.
+    pub thumbnail: Option<MetaTag>,
     /// The canvas element's attributes (`id`, `width`, `height`).
     pub canvas: Option<MetaTag>,
 }
@@ -90,6 +92,10 @@ pub fn parse(html: &str) -> ParsedEffect {
                 let tag = MetaTag { attrs };
                 if tag.attr("property").is_some() {
                     out.metas.push(tag);
+                } else if tag.attr("thumbnail").is_some() {
+                    if out.thumbnail.is_none() {
+                        out.thumbnail = Some(tag);
+                    }
                 } else if out.description.is_none() {
                     if let Some(d) = tag.attr("description") {
                         if !d.trim().is_empty() {

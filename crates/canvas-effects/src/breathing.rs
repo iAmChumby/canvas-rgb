@@ -44,6 +44,8 @@ impl Breathing {
                 ("min_brightness", number_kind(0.0)),
             ],
         )
+        // The tile covers one whole 4 s breath, so it ends where it began, and never dims below 15 %.
+        .thumbnail(crate::schema::recipe(1.0, 4.0, 0, vec![("min_brightness", crate::schema::num(15.0))]))
         .build()
     }
 
