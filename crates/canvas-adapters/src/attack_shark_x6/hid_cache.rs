@@ -90,18 +90,24 @@ impl<S: Scan> HidCache<S> {
         Ok(true)
     }
 
+    /// Scans. The attempt is stamped before it runs, so a scan that fails is not retried by
+    /// every later call: the next attempt waits for the ttl like a good one, and the old list
+    /// (if there is one) stays in use meanwhile.
     fn scan_now(&self, slot: &mut Slot<S>) -> Result<(), String> {
-        match slot.scan.as_mut() {
-            Some(scan) => scan.rescan()?,
-            None => slot.scan = Some(S::first()?),
-        }
         slot.at = Some(Instant::now());
-        Ok(())
+        match slot.scan.as_mut() {
+            Some(scan) => scan.rescan(),
+            None => {
+                slot.scan = Some(S::first()?);
+                Ok(())
+            }
+        }
     }
 
     /// Runs `f` on the context, rescanning first when the list is older than the ttl.
     ///
     /// The lock is held while `f` runs, so callers on several threads share one scan.
+    #[cfg(test)]
     pub(crate) fn with<R>(&self, f: impl FnOnce(&S) -> R) -> Result<R, String> {
         let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
         self.refresh(&mut slot)?;
@@ -133,7 +139,11 @@ impl<S: Scan> HidCache<S> {
             return first;
         }
         slot.forced_at = Some(Instant::now());
-        self.scan_now(&mut slot)?;
+        if let Err(why) = self.scan_now(&mut slot) {
+            // The first answer stands: a failed rescan must not turn "not there" into an error.
+            tracing::warn!("the HID rescan failed: {why}");
+            return first;
+        }
         match slot.scan.as_ref() {
             Some(scan) => f(scan),
             None => first,
@@ -165,6 +175,27 @@ mod tests {
     }
 
     static SERIAL: Mutex<()> = Mutex::new(());
+
+    /// A scanner whose rescans can be made to fail.
+    static FAIL_RESCAN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    struct Flaky;
+
+    impl Scan for Flaky {
+        fn first() -> Result<Self, String> {
+            SCANS.fetch_add(1, Ordering::SeqCst);
+            Ok(Flaky)
+        }
+
+        fn rescan(&mut self) -> Result<(), String> {
+            SCANS.fetch_add(1, Ordering::SeqCst);
+            if FAIL_RESCAN.load(Ordering::SeqCst) {
+                Err("the rescan failed".into())
+            } else {
+                Ok(())
+            }
+        }
+    }
 
     fn counted(f: impl FnOnce()) -> u32 {
         let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
@@ -228,6 +259,37 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(found, Some(7));
+        });
+        assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn a_failed_rescan_is_not_repeated_by_every_call() {
+        let n = counted(|| {
+            FAIL_RESCAN.store(false, Ordering::SeqCst);
+            let cache = HidCache::<Flaky>::with_ttl(Duration::from_millis(300));
+            cache.with(|_| ()).unwrap();
+            std::thread::sleep(Duration::from_millis(350));
+            FAIL_RESCAN.store(true, Ordering::SeqCst);
+            assert!(cache.with(|_| ()).is_err(), "the attempt that fails says so");
+            for _ in 0..5 {
+                cache.with(|_| ()).expect("the old list is used until the next ttl");
+            }
+            FAIL_RESCAN.store(false, Ordering::SeqCst);
+        });
+        assert_eq!(n, 2, "the first scan and one failed attempt, not one per call");
+    }
+
+    #[test]
+    fn a_failed_forced_rescan_keeps_the_first_answer() {
+        let n = counted(|| {
+            FAIL_RESCAN.store(false, Ordering::SeqCst);
+            let cache = HidCache::<Flaky>::with_ttl(Duration::from_secs(60));
+            cache.with(|_| ()).unwrap();
+            FAIL_RESCAN.store(true, Ordering::SeqCst);
+            let found = cache.with_retry(|_| Ok::<Option<()>, String>(None));
+            assert_eq!(found, Ok(None), "not there stays not there, not an error");
+            FAIL_RESCAN.store(false, Ordering::SeqCst);
         });
         assert_eq!(n, 2);
     }

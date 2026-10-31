@@ -204,7 +204,9 @@ impl PeripheralHub {
         let mut adapters = self.adapters.lock().await;
         let (index, _) = owner_of(&mut adapters, device).await?;
         let adapter = adapters[index].as_mut();
-        // A shared read of a device that has since been closed or unplugged is not an answer.
+        // A shared read of a device that has since been closed is not an answer. `is_connected`
+        // only says the adapter still holds its handle: an unplug shows on the next I/O, so for
+        // up to `read_cache` after an unplug the shared values are served as they were read.
         if adapter.is_connected() {
             if let Some(props) = self.shared_read(device) {
                 return Ok(props);

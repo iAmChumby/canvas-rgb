@@ -614,8 +614,14 @@ impl<S: HidSource> HidOpener<S> {
 
 impl<S: HidSource> Opener for HidOpener<S> {
     fn present(&self) -> bool {
+        // A miss on an old list rescans once (bounded per ttl): the daemon's `discover_now` asks
+        // this when an id is missing from its list, and a receiver plugged in since the last
+        // scan has to be found.
         self.cache
-            .with(|api| api.find_path(self.product_id, CONFIG_USAGE_PAGE, CONFIG_USAGE).is_some())
+            .with_retry(|api| {
+                Ok(api.find_path(self.product_id, CONFIG_USAGE_PAGE, CONFIG_USAGE).map(|_| ()))
+            })
+            .map(|found| found.is_some())
             .unwrap_or(false)
     }
 
@@ -1655,19 +1661,25 @@ mod tests {
         static SCANS: Cell<u32> = const { Cell::new(0) };
         /// Opens that fail because the path in the list is stale, before they work again.
         static STALE_OPENS: Cell<u32> = const { Cell::new(0) };
+        /// Whether the fake receiver is plugged in. A scan takes a snapshot of it.
+        static PLUGGED: Cell<bool> = const { Cell::new(true) };
     }
 
     /// A machine whose HID list is counted: a `HidApi` that scans nothing real.
-    struct CountingApi;
+    struct CountingApi {
+        /// The receiver as the last scan saw it.
+        plugged: bool,
+    }
 
     impl hid_cache::Scan for CountingApi {
         fn first() -> Result<Self, String> {
             SCANS.with(|s| s.set(s.get() + 1));
-            Ok(CountingApi)
+            Ok(CountingApi { plugged: PLUGGED.with(Cell::get) })
         }
 
         fn rescan(&mut self) -> Result<(), String> {
             SCANS.with(|s| s.set(s.get() + 1));
+            self.plugged = PLUGGED.with(Cell::get);
             Ok(())
         }
     }
@@ -1694,7 +1706,7 @@ mod tests {
 
     impl HidSource for CountingApi {
         fn find_path(&self, product_id: u16, usage_page: u16, _usage: u16) -> Option<std::ffi::CString> {
-            (product_id == PRODUCT_ID).then(|| std::ffi::CString::new(format!("fake/{usage_page:04x}")).unwrap())
+            (self.plugged && product_id == PRODUCT_ID).then(|| std::ffi::CString::new(format!("fake/{usage_page:04x}")).unwrap())
         }
 
         fn open_config_at(&self, _path: &std::ffi::CStr) -> Result<Box<dyn FeatureTransport>, String> {
@@ -1716,7 +1728,8 @@ mod tests {
     #[test]
     fn many_present_and_open_calls_scan_the_machine_once() {
         SCANS.with(|s| s.set(0));
-        let opener = HidOpener::<CountingApi>::new(PRODUCT_ID);
+        // A long ttl, so a slow runner cannot expire the list in the middle of the test.
+        let opener = HidOpener::<CountingApi>::with_scan_ttl(PRODUCT_ID, Duration::from_secs(3600));
         // The Peripherals view's calls, over and over: a discover (present), a connect (the two
         // opens), and the same again.
         for _ in 0..4 {
@@ -1731,16 +1744,30 @@ mod tests {
     fn a_path_that_no_longer_opens_rescans_once() {
         SCANS.with(|s| s.set(0));
         STALE_OPENS.with(|s| s.set(1));
-        let opener = HidOpener::<CountingApi>::new(PRODUCT_ID);
+        let opener = HidOpener::<CountingApi>::with_scan_ttl(PRODUCT_ID, Duration::from_secs(3600));
         assert!(opener.present());
         assert!(opener.open_config().unwrap().is_some(), "the retry opens it");
         assert_eq!(scans(), 2, "the first scan, and one rescan for the stale path");
     }
 
+    /// `discover_now` asks `present()` when an id is missing from the daemon's list: a receiver
+    /// plugged in after the last scan must be found, inside the ttl.
+    #[test]
+    fn a_receiver_plugged_in_after_the_last_scan_is_found_inside_the_ttl() {
+        SCANS.with(|s| s.set(0));
+        PLUGGED.with(|p| p.set(false));
+        let opener = HidOpener::<CountingApi>::with_scan_ttl(PRODUCT_ID, Duration::from_secs(3600));
+        assert!(!opener.present());
+        PLUGGED.with(|p| p.set(true));
+        assert!(opener.present(), "a miss on an old list rescans once and finds it");
+        assert_eq!(scans(), 2);
+        PLUGGED.with(|p| p.set(true));
+    }
+
     #[test]
     fn a_receiver_that_is_not_there_is_not_found_after_one_rescan() {
         SCANS.with(|s| s.set(0));
-        let opener = HidOpener::<CountingApi>::new(PRODUCT_ID + 1);
+        let opener = HidOpener::<CountingApi>::with_scan_ttl(PRODUCT_ID + 1, Duration::from_secs(3600));
         assert!(!opener.present());
         assert!(opener.open_config().unwrap().is_none());
         assert!(opener.open_config().unwrap().is_none());
