@@ -80,14 +80,17 @@ describe("Slider (#13)", () => {
   });
 
   it("ends the drag on release even when the slider was disabled meanwhile, and commits nothing", () => {
-    const { el, p, onCommit, disable } = setup();
+    const { el, p, onChange, onCommit, disable } = setup();
     fireEvent.pointerDown(el, { clientX: 7 + 10, pointerId: 1 });
     fireEvent.pointerMove(el, { clientX: 7 + 37, pointerId: 1 });
     disable();
     fireEvent.pointerUp(el, { clientX: 7 + 37, pointerId: 1 });
     expect(el.dataset.dragging).toBe("false");
-    expect(p()).toBeCloseTo(0.25);
+    expect(p()).toBeCloseTo(0);
     expect(onCommit).not.toHaveBeenCalled();
+    // The value from before the drag goes back, so the parent holds no uncommitted value.
+    expect(onChange.mock.calls.at(-1)).toEqual([0]);
+    expect(el.getAttribute("aria-valuenow")).toBe("0");
   });
 
   it("lets only the first pointer move, end and commit the drag", () => {

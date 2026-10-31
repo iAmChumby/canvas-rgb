@@ -56,6 +56,8 @@ export function Slider({
   const sent = useRef(value);
   // The one pointer that owns the drag: a second finger can neither move, end nor commit it.
   const owner = useRef<number | null>(null);
+  // The value before the drag: a drag that cannot commit puts this back.
+  const before = useRef(value);
   const span = max - min || 1;
   const decimals = decimalsOf(step);
   const p = dragFrac ?? Math.min(1, Math.max(0, (value - min) / span));
@@ -95,6 +97,7 @@ export function Slider({
     e.currentTarget.setPointerCapture(e.pointerId);
     setDragging(true);
     sent.current = value;
+    before.current = value;
     follow(e.clientX);
   };
 
@@ -114,12 +117,14 @@ export function Slider({
     setDragFrac(null);
   };
 
-  // A slider disabled mid-drag still ends the drag on release, but commits nothing.
+  // A slider disabled mid-drag still ends the drag on release, but commits nothing: the value
+  // it had before the drag goes back, so no parent is left holding a value it never committed.
   const onPointerUp = (e: PointerEvent<HTMLDivElement>) => {
     if (e.pointerId !== owner.current) return;
     const committed = disabled ? null : follow(e.clientX);
     end(e);
     if (committed !== null) onCommit?.(committed);
+    else if (sent.current !== before.current) onChange(before.current);
   };
 
   const onPointerCancel = (e: PointerEvent<HTMLDivElement>) => {
@@ -161,6 +166,7 @@ export function Slider({
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerCancel}
+      onLostPointerCapture={onPointerCancel}
       onKeyDown={onKeyDown}
     >
       <div className="slider-track" />

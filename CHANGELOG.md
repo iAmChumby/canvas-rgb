@@ -13,7 +13,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Changed
 
-- Dragging a slider moves its cap and fill with the pointer, pixel for pixel, between steps; the value still changes one step at a time and the cap settles onto the step on release. (#13)
+- Dragging a slider moves its cap and fill with the pointer, pixel for pixel, between steps; the value itself stays on the slider's steps and the cap settles onto the chosen step on release. (#13)
 
 ## [0.1.3] - 2026-10-29
 
