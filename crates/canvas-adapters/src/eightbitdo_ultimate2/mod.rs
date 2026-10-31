@@ -253,24 +253,24 @@ impl VendorTransport for HidVendor {
     }
 }
 
-/// Finds the pad's collections with hidapi.
-struct HidOpener;
+/// What the opener needs from a HID context: `hidapi::HidApi` in the product, a counting fake in
+/// the tests.
+trait HidSource: crate::attack_shark_x6::hid_cache::Scan {
+    /// The path of the first collection with this product id, usage page and usage.
+    fn find_path(&self, product_id: u16, usage_page: u16, usage: u16) -> Option<std::ffi::CString>;
+    /// True when any collection has this product id.
+    fn has_product(&self, product_id: u16) -> bool;
+    /// Opens a vendor collection.
+    fn open_vendor_at(&self, path: &std::ffi::CStr) -> Result<Box<dyn VendorTransport>, String>;
+    /// Opens a gamepad collection.
+    fn open_gamepad_at(&self, path: &std::ffi::CStr) -> Result<Box<dyn InputTransport>, String>;
+    /// Opens every collection of the vendor that will open.
+    fn open_all(&self) -> OpenedCollections;
+}
 
-impl HidOpener {
-    /// Every HID device the pad shows, with the metadata the adapter matches on.
-    fn devices() -> Vec<hidapi::DeviceInfo> {
-        hidapi::HidApi::new().map(|api| api.device_list().cloned().collect()).unwrap_or_default()
-    }
-
-    /// The path of the first collection that matches.
-    fn find(
-        devices: &[hidapi::DeviceInfo],
-        product_id: u16,
-        usage_page: u16,
-        usage: u16,
-    ) -> Option<std::ffi::CString> {
-        devices
-            .iter()
+impl HidSource for hidapi::HidApi {
+    fn find_path(&self, product_id: u16, usage_page: u16, usage: u16) -> Option<std::ffi::CString> {
+        self.device_list()
             .find(|d| {
                 d.vendor_id() == VENDOR_ID
                     && d.product_id() == product_id
@@ -280,59 +280,97 @@ impl HidOpener {
             .map(|d| d.path().to_owned())
     }
 
-    /// The label a collection is logged under.
-    fn label(d: &hidapi::DeviceInfo) -> String {
-        format!(
-            "pid={:04x} if={} up={:04x} u={:04x}",
-            d.product_id(),
-            d.interface_number(),
-            d.usage_page(),
-            d.usage()
-        )
+    fn has_product(&self, product_id: u16) -> bool {
+        self.device_list().any(|d| d.product_id() == product_id)
+    }
+
+    fn open_vendor_at(&self, path: &std::ffi::CStr) -> Result<Box<dyn VendorTransport>, String> {
+        let dev = self.open_path(path).map_err(|e| e.to_string())?;
+        Ok(Box::new(HidVendor(std::sync::Mutex::new(dev))))
+    }
+
+    fn open_gamepad_at(&self, path: &std::ffi::CStr) -> Result<Box<dyn InputTransport>, String> {
+        let dev = self.open_path(path).map_err(|e| e.to_string())?;
+        Ok(Box::new(HidCollection(std::sync::Mutex::new(dev))))
+    }
+
+    fn open_all(&self) -> OpenedCollections {
+        let mut out: OpenedCollections = Vec::new();
+        for d in self.device_list().filter(|d| d.vendor_id() == VENDOR_ID) {
+            let label = format!(
+                "pid={:04x} if={} up={:04x} u={:04x}",
+                d.product_id(),
+                d.interface_number(),
+                d.usage_page(),
+                d.usage()
+            );
+            match self.open_path(d.path()) {
+                Ok(dev) => out.push((label, Box::new(HidCollection(std::sync::Mutex::new(dev))))),
+                // Windows holds the keyboard and mouse collections exclusively: the research saw
+                // the same (2.2d: "Keyboard/mouse collections unreadable (Windows exclusive)").
+                Err(e) => tracing::warn!("the collection {label} cannot be opened: {e}"),
+            }
+        }
+        out
     }
 }
 
-impl Opener for HidOpener {
+/// Finds the pad's collections with hidapi.
+///
+/// One HID context serves every call (`crate::attack_shark_x6::hid_cache`): each step of a
+/// connect used to build its own `HidApi`, which scans every HID device on the machine
+/// (issue #7). Every method looks up through `with_retry`: a miss or a failed open on an old list
+/// rescans once per ttl, so a replugged pad is found.
+struct HidOpener<S: HidSource = hidapi::HidApi> {
+    cache: crate::attack_shark_x6::hid_cache::HidCache<S>,
+}
+
+impl<S: HidSource> Default for HidOpener<S> {
+    fn default() -> Self {
+        Self { cache: Default::default() }
+    }
+}
+
+impl<S: HidSource> Opener for HidOpener<S> {
     fn personalities(&self) -> Vec<Personality> {
-        let devices = Self::devices();
-        let mut out = Vec::new();
-        // The XInput personality: the vendor collection on the vendor page.
-        if Self::find(&devices, PRODUCT_ID_XINPUT, VENDOR_USAGE_PAGE_XINPUT, VENDOR_USAGE).is_some()
-        {
-            out.push(Personality::XInput);
-        }
-        // The DInput personality: the pad's own product id.
-        if devices.iter().any(|d| d.product_id() == PRODUCT_ID_DINPUT) {
-            out.push(Personality::DInput);
-        }
-        // The idle receiver: the vendor collection on the other vendor page.
-        if Self::find(&devices, PRODUCT_ID_IDLE, VENDOR_USAGE_PAGE_IDLE, VENDOR_USAGE).is_some() {
-            out.push(Personality::Idle);
-        }
-        out
+        let found = self.cache.with_retry(|api| {
+            let mut out = Vec::new();
+            // The XInput personality: the vendor collection on the vendor page.
+            if api.find_path(PRODUCT_ID_XINPUT, VENDOR_USAGE_PAGE_XINPUT, VENDOR_USAGE).is_some() {
+                out.push(Personality::XInput);
+            }
+            // The DInput personality: the pad's own product id.
+            if api.has_product(PRODUCT_ID_DINPUT) {
+                out.push(Personality::DInput);
+            }
+            // The idle receiver: the vendor collection on the other vendor page.
+            if api.find_path(PRODUCT_ID_IDLE, VENDOR_USAGE_PAGE_IDLE, VENDOR_USAGE).is_some() {
+                out.push(Personality::Idle);
+            }
+            // No personality is a miss: it rescans once (per ttl) in case the pad just arrived.
+            Ok((!out.is_empty()).then_some(out))
+        });
+        found.ok().flatten().unwrap_or_default()
     }
 
     fn open_vendor(
         &self,
         personality: Personality,
     ) -> Result<Option<Box<dyn VendorTransport>>, String> {
-        let devices = Self::devices();
         // The DInput personality has no vendor collection of its own; the wired pad in DInput
         // mode may still have one on the vendor page.
         let pages: &[u16] = match personality.vendor_usage_page() {
             Some(page) => &[page, VENDOR_USAGE_PAGE_XINPUT][..],
             None => &[VENDOR_USAGE_PAGE_XINPUT][..],
         };
-        for page in pages {
-            let Some(path) = Self::find(&devices, personality.product_id(), *page, VENDOR_USAGE)
-            else {
-                continue;
-            };
-            let api = hidapi::HidApi::new().map_err(|e| e.to_string())?;
-            let dev = api.open_path(&path).map_err(|e| e.to_string())?;
-            return Ok(Some(Box::new(HidVendor(std::sync::Mutex::new(dev)))));
-        }
-        Ok(None)
+        self.cache.with_retry(|api| {
+            for page in pages {
+                if let Some(path) = api.find_path(personality.product_id(), *page, VENDOR_USAGE) {
+                    return api.open_vendor_at(&path).map(Some);
+                }
+            }
+            Ok(None)
+        })
     }
 
     fn open_gamepad(
@@ -346,33 +384,22 @@ impl Opener for HidOpener {
         if personality != Personality::DInput {
             return Ok(None);
         }
-        let devices = Self::devices();
-        let Some(path) = Self::find(
-            &devices,
-            personality.product_id(),
-            GAMEPAD_USAGE_PAGE,
-            GAMEPAD_USAGE,
-        ) else {
-            return Ok(None);
-        };
-        let api = hidapi::HidApi::new().map_err(|e| e.to_string())?;
-        let dev = api.open_path(&path).map_err(|e| e.to_string())?;
-        Ok(Some(Box::new(HidCollection(std::sync::Mutex::new(dev)))))
+        self.cache.with_retry(|api| {
+            match api.find_path(personality.product_id(), GAMEPAD_USAGE_PAGE, GAMEPAD_USAGE) {
+                None => Ok(None),
+                Some(path) => api.open_gamepad_at(&path).map(Some),
+            }
+        })
     }
 
     fn open_collections(&self) -> Result<OpenedCollections, String> {
-        let api = hidapi::HidApi::new().map_err(|e| e.to_string())?;
-        let mut out: OpenedCollections = Vec::new();
-        for d in api.device_list().filter(|d| d.vendor_id() == VENDOR_ID) {
-            let label = Self::label(d);
-            match api.open_path(d.path()) {
-                Ok(dev) => out.push((label, Box::new(HidCollection(std::sync::Mutex::new(dev))))),
-                // Windows holds the keyboard and mouse collections exclusively: the research saw
-                // the same (2.2d: "Keyboard/mouse collections unreadable (Windows exclusive)").
-                Err(e) => tracing::warn!("the collection {label} cannot be opened: {e}"),
-            }
-        }
-        Ok(out)
+        // Nothing opened is a miss (stale paths all failed, or the pad just arrived): rescan once
+        // per ttl and open again.
+        let opened = self.cache.with_retry(|api| {
+            let all = api.open_all();
+            Ok((!all.is_empty()).then_some(all))
+        })?;
+        Ok(opened.unwrap_or_default())
     }
 }
 
@@ -984,7 +1011,7 @@ impl EightBitDoUltimate2 {
     /// The adapter for the 8BitDo Ultimate 2 Wireless.
     pub fn new() -> Self {
         Self {
-            opener: Arc::new(HidOpener),
+            opener: Arc::new(HidOpener::<hidapi::HidApi>::default()),
             xinput: Arc::new(SystemXInput),
             personality: None,
             bound: None,
@@ -2488,5 +2515,143 @@ mod tests {
         let probe = a.paddle_probe(0.0).await.unwrap();
         assert_eq!(probe.opened, vec!["pid=310b if=2 up=ff7a u=0001".to_string()]);
         assert!(s.lock().unwrap().sent.is_empty(), "the probe sent nothing");
+    }
+
+    // ------------------------------------------------------ the HID context (issue #7)
+
+    use crate::attack_shark_x6::hid_cache::{HidCache, Scan};
+    use std::cell::Cell;
+
+    thread_local! {
+        static SCANS: Cell<u32> = const { Cell::new(0) };
+        static STALE_OPENS: Cell<u32> = const { Cell::new(0) };
+        static PLUGGED: Cell<bool> = const { Cell::new(true) };
+    }
+
+    struct CountingApi {
+        plugged: bool,
+    }
+
+    impl Scan for CountingApi {
+        fn first() -> Result<Self, String> {
+            SCANS.with(|s| s.set(s.get() + 1));
+            Ok(CountingApi { plugged: PLUGGED.with(Cell::get) })
+        }
+
+        fn rescan(&mut self) -> Result<(), String> {
+            SCANS.with(|s| s.set(s.get() + 1));
+            self.plugged = PLUGGED.with(Cell::get);
+            Ok(())
+        }
+    }
+
+    fn stale_open() -> bool {
+        STALE_OPENS.with(|s| s.replace(s.get().saturating_sub(1)) > 0)
+    }
+
+    struct NullVendor;
+
+    impl InputTransport for NullVendor {
+        fn read_input(&mut self, _buf: &mut [u8], _timeout_ms: i32) -> Result<usize, String> {
+            Ok(0)
+        }
+    }
+
+    impl VendorTransport for NullVendor {
+        fn send_report(&mut self, _data: &[u8]) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    impl HidSource for CountingApi {
+        fn find_path(&self, product_id: u16, _page: u16, _usage: u16) -> Option<std::ffi::CString> {
+            (self.plugged && product_id == PRODUCT_ID_DINPUT)
+                .then(|| std::ffi::CString::new("fake/8bitdo").unwrap())
+        }
+
+        fn has_product(&self, product_id: u16) -> bool {
+            self.plugged && product_id == PRODUCT_ID_DINPUT
+        }
+
+        fn open_vendor_at(&self, _p: &std::ffi::CStr) -> Result<Box<dyn VendorTransport>, String> {
+            if stale_open() {
+                return Err("the path is gone".into());
+            }
+            Ok(Box::new(NullVendor))
+        }
+
+        fn open_gamepad_at(&self, _p: &std::ffi::CStr) -> Result<Box<dyn InputTransport>, String> {
+            if stale_open() {
+                return Err("the path is gone".into());
+            }
+            Ok(Box::new(NullVendor))
+        }
+
+        fn open_all(&self) -> OpenedCollections {
+            if !self.plugged || stale_open() {
+                return Vec::new();
+            }
+            vec![("fake".to_string(), Box::new(NullVendor) as Box<dyn InputTransport>)]
+        }
+    }
+
+    fn opener() -> HidOpener<CountingApi> {
+        SCANS.with(|s| s.set(0));
+        STALE_OPENS.with(|s| s.set(0));
+        PLUGGED.with(|s| s.set(true));
+        HidOpener { cache: HidCache::with_ttl(Duration::from_secs(3600)) }
+    }
+
+    fn scans() -> u32 {
+        SCANS.with(Cell::get)
+    }
+
+    #[test]
+    fn a_stale_vendor_path_is_rescanned_once_and_opens_on_the_retry() {
+        let o = opener();
+        assert!(!o.personalities().is_empty());
+        STALE_OPENS.with(|s| s.set(1));
+        assert!(o.open_vendor(Personality::DInput).unwrap().is_some());
+        assert_eq!(scans(), 2, "the first scan and one forced rescan");
+    }
+
+    #[test]
+    fn a_stale_gamepad_path_is_rescanned_once_and_opens_on_the_retry() {
+        let o = opener();
+        assert!(!o.personalities().is_empty());
+        STALE_OPENS.with(|s| s.set(1));
+        assert!(o.open_gamepad(Personality::DInput).unwrap().is_some());
+        assert_eq!(scans(), 2);
+    }
+
+    #[test]
+    fn the_collections_are_opened_again_after_one_rescan_when_none_opened() {
+        let o = opener();
+        assert!(!o.personalities().is_empty());
+        STALE_OPENS.with(|s| s.set(1));
+        assert_eq!(o.open_collections().unwrap().len(), 1);
+        assert_eq!(scans(), 2);
+    }
+
+    #[test]
+    fn a_missing_pad_is_rescanned_at_most_once_per_ttl() {
+        let o = opener();
+        PLUGGED.with(|s| s.set(false));
+        for _ in 0..5 {
+            assert!(o.personalities().is_empty());
+            assert!(o.open_vendor(Personality::DInput).unwrap().is_none());
+            assert!(o.open_gamepad(Personality::DInput).unwrap().is_none());
+        }
+        assert_eq!(scans(), 2, "the first scan and one forced rescan, not one per call");
+    }
+
+    #[test]
+    fn a_pad_plugged_in_after_the_last_scan_is_found_inside_the_ttl() {
+        let o = opener();
+        PLUGGED.with(|s| s.set(false));
+        assert!(o.personalities().is_empty());
+        PLUGGED.with(|s| s.set(true));
+        assert!(!o.personalities().is_empty());
+        assert_eq!(scans(), 2);
     }
 }
