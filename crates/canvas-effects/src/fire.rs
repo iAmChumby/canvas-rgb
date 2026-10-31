@@ -66,7 +66,7 @@ impl Fire {
         // At the defaults the flames cool within the bottom fifth of the canvas. Full intensity and
         // low cooling carry the heat to the top, four seconds of warm-up let it climb there, and the
         // end crossfades into the start because the tongues of flame never repeat.
-        .thumbnail(crate::schema::recipe(4.0, 2.0, 8, vec![("intensity", crate::schema::num(100.0)), ("cooling", crate::schema::num(9.0))]))
+        .thumbnail(crate::schema::recipe(4.0, 2.0, 8, vec![("intensity", crate::schema::num(100.0)), ("cooling", crate::schema::num(6.0))]))
         .build()
     }
 
@@ -155,6 +155,12 @@ impl Effect for Fire {
         self.intensity = p::number(&self.schema, props, "intensity") as f32;
         self.palette = p::choice(&self.schema, props, "palette");
         self.cooling = p::number(&self.schema, props, "cooling") as f32;
+        // The library tile is rendered with a fixed seed, so the tile is the same fire
+        // every time. On the lights the seed comes from the clock, so every run of the
+        // effect is a different fire.
+        if let Some(seed) = p::tile_seed(props) {
+            self.rng = Rng::new(seed);
+        }
         self.ramp = Self::build_ramp(&self.palette);
         self.lut = Self::build_lut(&self.ramp);
     }

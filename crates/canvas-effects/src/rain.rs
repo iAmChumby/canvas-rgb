@@ -100,6 +100,12 @@ impl Effect for Rain {
         self.background = to_linear(p::color(&self.schema, props, "background"));
         self.density = p::number(&self.schema, props, "density").max(1.0) as u32;
         self.speed = p::number(&self.schema, props, "speed").max(1.0) as f32;
+        // The library tile is rendered with a fixed seed, so the tile is the same rain
+        // every time. On the lights the seed comes from the clock, so every run of the
+        // effect is a different rain.
+        if let Some(seed) = p::tile_seed(props) {
+            self.rng = Rng::new(seed);
+        }
         let len = p::number(&self.schema, props, "trail_length").max(1.0) as f32;
         if self.trail.len() != len as usize {
             self.trail.resize(len as usize, [0.0, 0.0, 0.0]);

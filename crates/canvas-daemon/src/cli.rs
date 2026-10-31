@@ -553,8 +553,15 @@ const PREVIEW_SHEET_GAP: usize = 4;
 /// frames, so the picture can be looked at and not only measured.
 pub fn check_tile(path: &str, preview_dir: Option<&str>) -> Result<TileCheck, String> {
     let source = std::fs::read_to_string(path).map_err(|e| format!("could not read {path}: {e}"))?;
-    let mut effect = canvas_html::HtmlEffect::from_source("check", &source, &canvas_proto::props::Props::new())
-        .map_err(|e| e.to_string())?;
+    // The tile is rendered with the fixed tile seed, so the check scores the same picture
+    // every time it is run.
+    let mut effect = canvas_html::HtmlEffect::from_source_seeded(
+        "check",
+        &source,
+        &canvas_proto::props::Props::new(),
+        crate::thumbnail::TILE_SEED,
+    )
+    .map_err(|e| e.to_string())?;
     let schema = effect.schema();
     let body = crate::thumbnail::render(&mut effect, &schema.defaults())?;
     let score = crate::thumbnail::score(&body).ok_or("the tile render was malformed")?;
@@ -1319,6 +1326,12 @@ mod tests {
         let tile = check_tile(&file.path(), None).expect("the tile renders");
         assert!(tile.problems.iter().any(|p| p.contains("<meta thumbnail> tag was ignored")), "{:?}", tile.problems);
         assert!(tile.recipe.is_none());
+        // The tile is a picture and not a blank frame.
+        assert!(
+            tile.score.lit_avg > 0.5,
+            "the tile is blank: only {:.0} % of it is lit",
+            tile.score.lit_avg * 100.0
+        );
     }
 
     #[test]

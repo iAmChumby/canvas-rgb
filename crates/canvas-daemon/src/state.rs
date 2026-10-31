@@ -160,8 +160,9 @@ impl App {
             openrgb: tokio::sync::RwLock::new(LinkState::Down),
             shutting_down: AtomicU32::new(0),
             quit_tx,
-            user_effects: Arc::new(crate::user_effects::UserEffects::with_stock(
+            user_effects: Arc::new(crate::user_effects::UserEffects::with_stock_and_tiles(
                 crate::user_effects::html_builder(),
+                crate::user_effects::html_builder_seeded(crate::thumbnail::TILE_SEED),
                 crate::user_effects::STOCK_EFFECTS,
             )),
             effects_dir: crate::paths::effects_dir(),

@@ -58,7 +58,7 @@ fn main() {
     if let Some(preview) = std::env::args().nth(2) {
         let preview = PathBuf::from(preview);
         std::fs::create_dir_all(&preview).expect("create the preview folder");
-        let build = canvas_daemon::user_effects::html_builder();
+        let build = canvas_daemon::user_effects::html_builder_seeded(canvas_daemon::thumbnail::TILE_SEED);
         let mut shipped: Vec<(String, Box<dyn canvas_proto::traits::Effect>)> = EFFECT_IDS
             .iter()
             .map(|id| (id.to_string(), canvas_effects::create(id).expect("a built-in effect builds")))
@@ -72,7 +72,7 @@ fn main() {
             let score = canvas_daemon::thumbnail::score(&body).expect("a well formed tile");
             canvas_daemon::cli::write_tile_gif(&preview.join(format!("{name}.gif")), &body).expect("the GIF");
             canvas_daemon::cli::write_tile_sheet(&preview.join(format!("{name}-sheet.png")), &body).expect("the sheet");
-            println!("{name:<16} lit {:>3.0} %  rows {} cols {}  seam {:.1} % step {:.1} %", score.lit_avg * 100.0, score.rows_lit, score.cols_lit, score.seam * 100.0, score.step * 100.0);
+            println!("{name:<16} lit {:>3.0} %  rows {} cols {}  seam {:.1} % step {:.1} % max {:.1} % band {}", score.lit_avg * 100.0, score.rows_lit, score.cols_lit, score.seam * 100.0, score.step * 100.0, score.max_step * 100.0, score.band_rows);
         }
     }
 }

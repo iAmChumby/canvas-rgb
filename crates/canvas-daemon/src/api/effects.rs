@@ -535,28 +535,50 @@ pub async fn thumbnail(
     if let Some(bytes) = app.thumbnails.get(generation, &schema.id) {
         return Ok(binary_response(&bytes));
     }
-
-    // At most CONCURRENT_RENDERS renders run at once; a request that waited for a slot may
-    // find the tile already rendered by the one ahead of it.
-    let _slot = app.thumbnails.render_slot().await;
-    if let Some(bytes) = app.thumbnails.get(generation, &schema.id) {
-        return Ok(binary_response(&bytes));
+    // A render that was given up is remembered: the library is told the tile was given up
+    // instead of asking for it again on every open.
+    if let Some(why) = app.thumbnails.failure(generation, &schema.id) {
+        return Err(ApiFailure::service_unavailable(why));
     }
 
     let user = app.user_effects.clone();
     let effect_id = schema.id.clone();
     let props = schema.defaults();
+    let rendering = Arc::clone(&app);
+    // The permit is taken before the render and handed to the render task, so it is held
+    // for as long as the render runs: a request whose client goes away does not let a
+    // third render in while this one is still going.
+    let slot = app.thumbnails.acquire_slot().await;
     let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
-        let mut effect = crate::create_effect(&user, &effect_id)?;
+        let _slot = slot;
+        // Another render may have finished while this one waited for the slot.
+        if let Some(bytes) = rendering.thumbnails.get(generation, &effect_id) {
+            return Ok((*bytes).clone());
+        }
+        if let Some(why) = rendering.thumbnails.failure(generation, &effect_id) {
+            return Err(why);
+        }
+        let mut effect = crate::create_effect_for_tile(&user, &effect_id)?;
         crate::thumbnail::render(effect.as_mut(), &props)
     })
     .await
-    .map_err(|e| ApiFailure::internal(format!("the thumbnail render stopped: {e}")))?
-    .map_err(|e| ApiFailure::internal(format!("could not render the thumbnail: {e}")))?;
+    .map_err(|e| ApiFailure::internal(format!("the thumbnail render stopped: {e}")))?;
 
-    let bytes = Arc::new(bytes);
-    app.thumbnails.put(generation, &schema.id, bytes.clone());
-    Ok(binary_response(&bytes))
+    match bytes {
+        Ok(bytes) => {
+            let bytes = Arc::new(bytes);
+            app.thumbnails.put(generation, &schema.id, bytes.clone());
+            Ok(binary_response(&bytes))
+        }
+        Err(why) => {
+            // The render was given up. It is remembered, so the next open of the library
+            // does not render it again for the whole budget, and the answer says what
+            // happened instead of being a bare 500.
+            let why = format!("the tile for {id} was given up: {why}");
+            app.thumbnails.put_failure(generation, &schema.id, why.clone());
+            Err(ApiFailure::service_unavailable(why))
+        }
+    }
 }
 
 fn binary_response(bytes: &[u8]) -> axum::response::Response {

@@ -49,13 +49,30 @@ pub const BAR_LIT_AVG: f64 = 0.60;
 /// The quality bar: the last frame differs from the first by at most this share of full
 /// scale (mean absolute difference over every channel of every pixel).
 pub const BAR_SEAM: f64 = 0.10;
+/// The quality bar: no two frames of the loop differ by more than this share of full
+/// scale. A tile that jumps hard inside its loop reads as a broken tile: the picture
+/// blinks rather than moves.
+pub const BAR_MAX_STEP: f64 = 0.10;
 /// The quality bar: every row and every column is lit, over the whole loop, in at least this
 /// share of its pixels (a single lit pixel does not make a row lit).
 pub const BAR_LINE_SHARE: f64 = 0.25;
+/// The quality bar: at the top or the bottom of a frame, at most this many rows may be
+/// completely unlit.
+///
+/// The rows are counted per frame, not over the loop: a band of black across the top of
+/// a tile is a band of black in every frame, even when some other frame of the loop lit
+/// those rows. A flame that never reaches the top of its tile is caught here.
+pub const BAR_BAND_ROWS: usize = 3;
 /// The longest a thumbnail render may run, in wall-clock time, before it is given up. A
 /// recipe at its limits (30 s of warm-up, a 30 s loop and a crossfade) asks an HTML effect for
 /// thousands of frames at up to 100 ms each; this stops that costing minutes of a core.
 pub const RENDER_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The seed every library tile is rendered with.
+///
+/// The same tile has to be the same picture every time it is rendered, so the tile path
+/// gives every effect this seed instead of the clock's. See [`canvas_effects::TILE_SEED`].
+pub const TILE_SEED: u32 = canvas_effects::TILE_SEED;
 
 /// Renders the thumbnail of `effect` at `props`, within [`RENDER_BUDGET`]. Returns the whole
 /// binary body, or why the render was given up.
@@ -81,6 +98,14 @@ pub fn render_within(
     let recipe = sanitize(schema.thumbnail.unwrap_or_default());
     let mut props = props.clone();
     props.extend(recipe.props.clone());
+    // The tile path renders with a fixed seed, so the tile is the same picture every time
+    // it is rendered: the library asks for a tile when it opens, and the tile test renders
+    // every effect again and again. An effect that draws from the clock (Fire, Rain)
+    // would draw a different picture each time.
+    props.insert(
+        canvas_effects::TILE_SEED_PROP.to_string(),
+        canvas_proto::PropValue::Number(TILE_SEED as f64),
+    );
     effect.init(&props);
 
     let synthetic = Synthetic { screen: needs.screen, audio: needs.audio, loop_s: recipe.loop_s };
@@ -191,6 +216,9 @@ pub struct TileScore {
     /// The largest difference between two consecutive frames, inside the loop: a hard cut
     /// shows here.
     pub max_step: f64,
+    /// The largest number of rows at the top or the bottom of a frame that hold no lit
+    /// pixel at all: a band of black across a tile.
+    pub band_rows: usize,
 }
 
 /// Measures a thumbnail body (the binary format above). `None` when the body is malformed.
@@ -210,14 +238,33 @@ pub fn score(body: &[u8]) -> Option<TileScore> {
     // Which pixels are lit in some frame, and the lit share of each frame.
     let mut ever = vec![false; w * h];
     let mut shares = Vec::with_capacity(n);
+    // The rows of each frame that hold no lit pixel at all, so a band of black at the top
+    // or the bottom of a frame can be seen.
+    let mut band_rows = 0usize;
     for frame in &frames {
         let mut lit = 0usize;
+        let mut row_lit = vec![0usize; h];
         for i in 0..w * h {
             let px = &frame[i * 3..i * 3 + 3];
             if lightness(px) >= LIT_LIGHTNESS {
                 lit += 1;
                 ever[i] = true;
+                row_lit[i / w] += 1;
             }
+        }
+        // The dark run at the top, then the dark run at the bottom. A frame with no lit row
+        // at all is dark, not banded: the lit-share bar is what catches that one.
+        let lit_rows = row_lit.iter().filter(|n| **n > 0).count();
+        if lit_rows > 0 {
+            let mut top = 0usize;
+            while top < h && row_lit[top] == 0 {
+                top += 1;
+            }
+            let mut bottom = 0usize;
+            while bottom < h && row_lit[h - 1 - bottom] == 0 {
+                bottom += 1;
+            }
+            band_rows = band_rows.max(top).max(bottom);
         }
         shares.push(lit as f64 / (w * h) as f64);
     }
@@ -241,6 +288,7 @@ pub fn score(body: &[u8]) -> Option<TileScore> {
         seam: diff(frames[0], frames[n - 1]),
         step: if steps.is_empty() { 0.0 } else { steps.iter().sum::<f64>() / steps.len() as f64 },
         max_step: steps.iter().copied().fold(0.0, f64::max),
+        band_rows,
     })
 }
 
@@ -289,7 +337,7 @@ pub fn problems(score: &TileScore, recipe: Option<&ThumbnailRecipe>) -> Vec<Stri
     }
     if score.rows_lit < HEIGHT as usize {
         out.push(format!(
-            "only {} of {} rows are lit (at least {:.0} % of the row, over the loop)",
+            "only {} of {} rows are lit (at least {:.0} % of the row, at some point over the loop)",
             score.rows_lit,
             HEIGHT,
             BAR_LINE_SHARE * 100.0
@@ -297,7 +345,7 @@ pub fn problems(score: &TileScore, recipe: Option<&ThumbnailRecipe>) -> Vec<Stri
     }
     if score.cols_lit < WIDTH as usize {
         out.push(format!(
-            "only {} of {} columns are lit (at least {:.0} % of the column, over the loop)",
+            "only {} of {} columns are lit (at least {:.0} % of the column, at some point over the loop)",
             score.cols_lit,
             WIDTH,
             BAR_LINE_SHARE * 100.0
@@ -308,6 +356,20 @@ pub fn problems(score: &TileScore, recipe: Option<&ThumbnailRecipe>) -> Vec<Stri
             "the loop jumps by {:.1} % where it restarts; the bar is {:.0} % (or set loop_jump_on_purpose in the recipe, with the reason)",
             score.seam * 100.0,
             BAR_SEAM * 100.0
+        ));
+    }
+    if score.max_step > BAR_MAX_STEP {
+        out.push(format!(
+            "two frames of the loop differ by {:.1} %; the bar is {:.0} %, so the tile must not cut hard inside its loop",
+            score.max_step * 100.0,
+            BAR_MAX_STEP * 100.0
+        ));
+    }
+    if score.band_rows > BAR_BAND_ROWS {
+        out.push(format!(
+            "{} rows at the top or the bottom of a frame are completely unlit; the bar is {} (a band of black across a tile is a broken tile)",
+            score.band_rows,
+            BAR_BAND_ROWS
         ));
     }
     out
@@ -420,7 +482,7 @@ pub struct ThumbnailCache {
     inner: Mutex<CacheState>,
     /// How many renders may run at once. The library asks for every tile together, and each
     /// render can take seconds of a core.
-    gate: tokio::sync::Semaphore,
+    gate: Arc<tokio::sync::Semaphore>,
 }
 
 /// Thumbnails rendered at the same time, at most.
@@ -430,23 +492,40 @@ impl Default for ThumbnailCache {
     fn default() -> Self {
         Self {
             inner: Mutex::default(),
-            gate: tokio::sync::Semaphore::new(CONCURRENT_RENDERS),
+            gate: Arc::new(tokio::sync::Semaphore::new(CONCURRENT_RENDERS)),
         }
     }
+}
+
+/// One entry of the cache: the rendered tile, or the reason the render was given up.
+#[derive(Clone)]
+enum CacheEntry {
+    /// The tile, rendered.
+    Rendered(Arc<Vec<u8>>),
+    /// The render was given up: this is why.
+    GivenUp(String),
 }
 
 #[derive(Default)]
 struct CacheState {
     generation: u64,
-    entries: HashMap<String, Arc<Vec<u8>>>,
+    entries: HashMap<String, CacheEntry>,
 }
 
 impl ThumbnailCache {
-    /// Waits for one of the [`CONCURRENT_RENDERS`] render slots. Drop the permit when the
-    /// render is done.
-    pub async fn render_slot(&self) -> tokio::sync::SemaphorePermit<'_> {
+    /// Waits for one of the [`CONCURRENT_RENDERS`] render slots and hands back a permit the
+    /// caller owns.
+    ///
+    /// The permit is owned, not borrowed: the caller hands it to the render task, so it is
+    /// held for as long as the render runs. A client that goes away does not hand a slot
+    /// back while the render is still going.
+    pub async fn acquire_slot(&self) -> tokio::sync::OwnedSemaphorePermit {
         // The semaphore is never closed.
-        self.gate.acquire().await.expect("the render gate is never closed")
+        self.gate
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("the render gate is never closed")
     }
 
     /// The cached thumbnail for `id`, if the cache belongs to `generation`.
@@ -456,7 +535,23 @@ impl ThumbnailCache {
             state.entries.clear();
             state.generation = generation;
         }
-        state.entries.get(id).cloned()
+        match state.entries.get(id) {
+            Some(CacheEntry::Rendered(bytes)) => Some(bytes.clone()),
+            _ => None,
+        }
+    }
+
+    /// Why the render of `id` was given up, if it was. The cache belongs to `generation`.
+    pub fn failure(&self, generation: u64, id: &str) -> Option<String> {
+        let mut state = lock(&self.inner);
+        if state.generation != generation {
+            state.entries.clear();
+            state.generation = generation;
+        }
+        match state.entries.get(id) {
+            Some(CacheEntry::GivenUp(why)) => Some(why.clone()),
+            _ => None,
+        }
     }
 
     /// Stores a thumbnail rendered for `generation`. A render that finished after the set
@@ -464,7 +559,20 @@ impl ThumbnailCache {
     pub fn put(&self, generation: u64, id: &str, bytes: Arc<Vec<u8>>) {
         let mut state = lock(&self.inner);
         if state.generation == generation {
-            state.entries.insert(id.to_string(), bytes);
+            state.entries.insert(id.to_string(), CacheEntry::Rendered(bytes));
+        }
+    }
+
+    /// Stores the reason a render was given up. A render that finished after the set
+    /// changed is dropped rather than cached.
+    ///
+    /// The failure is remembered so the library does not ask for the tile again on every
+    /// open: without it, every open would render the tile again, for up to
+    /// [`RENDER_BUDGET`], and hold a render slot while it did.
+    pub fn put_failure(&self, generation: u64, id: &str, why: String) {
+        let mut state = lock(&self.inner);
+        if state.generation == generation {
+            state.entries.insert(id.to_string(), CacheEntry::GivenUp(why));
         }
     }
 
@@ -651,6 +759,7 @@ mod tests {
             seam: 0.09,
             step: 0.01,
             max_step: 0.02,
+            band_rows: 0,
         };
         assert!(problems(&lit, None).is_empty());
         // 30 % over a tile that normally moves 25 % a frame is still a pop.
@@ -661,6 +770,87 @@ mod tests {
         // The reason for a jump does not lift the lit bar.
         let dim = TileScore { lit_avg: 0.1, ..flicker };
         assert_eq!(problems(&dim, Some(&on_purpose)).len(), 1);
+    }
+
+    /// The seam bar is 10 %, and a seam just above it must fail. The bar is a number, not
+    /// a mood: this pins it.
+    #[test]
+    fn a_seam_just_above_the_bar_fails() {
+        let base = TileScore {
+            lit_first: 1.0,
+            lit_last: 1.0,
+            lit_avg: 1.0,
+            rows_lit: HEIGHT as usize,
+            cols_lit: WIDTH as usize,
+            seam: BAR_SEAM,
+            step: 0.01,
+            max_step: 0.02,
+            band_rows: 0,
+        };
+        // Exactly at the bar passes.
+        assert!(problems(&base, None).is_empty());
+        // A hair above it fails.
+        let over = TileScore { seam: BAR_SEAM + 0.01, ..base };
+        assert!(
+            problems(&over, None).iter().any(|p| p.contains("loop jumps")),
+            "a seam of {:.1} % must fail", (BAR_SEAM + 0.01) * 100.0
+        );
+        // 11 % is just above the bar, and it fails.
+        let eleven = TileScore { seam: 0.11, ..base };
+        assert!(problems(&eleven, None).iter().any(|p| p.contains("loop jumps")));
+    }
+
+    /// The hard-cut bar: two frames that differ by more than the bar fail, and the bar
+    /// covers every tile, not only the ones that move.
+    #[test]
+    fn a_hard_cut_inside_the_loop_fails() {
+        let base = TileScore {
+            lit_first: 1.0,
+            lit_last: 1.0,
+            lit_avg: 1.0,
+            rows_lit: HEIGHT as usize,
+            cols_lit: WIDTH as usize,
+            seam: 0.0,
+            step: 0.01,
+            max_step: BAR_MAX_STEP,
+            band_rows: 0,
+        };
+        assert!(problems(&base, None).is_empty());
+        let cut = TileScore { max_step: BAR_MAX_STEP + 0.01, ..base };
+        assert!(
+            problems(&cut, None).iter().any(|p| p.contains("must not cut hard")),
+            "a cut of {:.1} % must fail", (BAR_MAX_STEP + 0.01) * 100.0
+        );
+        // The seam bar and the cut bar are separate: a tile may have a small seam and still
+        // cut hard inside its loop.
+        let pop = TileScore { seam: 0.2, max_step: 0.3, ..base };
+        assert_eq!(problems(&pop, None).len(), 2);
+    }
+
+    /// A band of black across the top or the bottom of a frame is a broken tile, even when
+    /// some other frame of the loop lit those rows.
+    #[test]
+    fn a_band_of_black_rows_in_a_frame_fails() {
+        let base = TileScore {
+            lit_first: 1.0,
+            lit_last: 1.0,
+            lit_avg: 1.0,
+            rows_lit: HEIGHT as usize,
+            cols_lit: WIDTH as usize,
+            seam: 0.0,
+            step: 0.01,
+            max_step: 0.02,
+            band_rows: 0,
+        };
+        assert!(problems(&base, None).is_empty());
+        let band = TileScore { band_rows: BAR_BAND_ROWS + 1, ..base };
+        assert!(
+            problems(&band, None).iter().any(|p| p.contains("completely unlit")),
+            "a band of {} rows must fail", BAR_BAND_ROWS + 1
+        );
+        // A band of one row under the bar passes.
+        let one = TileScore { band_rows: 1, ..base };
+        assert!(problems(&one, None).is_empty());
     }
 
     /// Alternates a bright frame and a black one, so the loop's end meets its start with a jump.
@@ -749,17 +939,21 @@ mod tests {
 
     #[tokio::test]
     async fn only_two_renders_run_at_once() {
-        let cache = ThumbnailCache::default();
+        let cache = std::sync::Arc::new(ThumbnailCache::default());
         let mut held = Vec::new();
         for _ in 0..2 {
-            held.push(cache.render_slot().await);
+            held.push(cache.acquire_slot().await);
         }
         // A third has to wait until a slot is given back.
-        let waiting = tokio::time::timeout(std::time::Duration::from_millis(100), cache.render_slot()).await;
-        assert!(waiting.is_err(), "a render slot was free beyond the limit");
+        let waiting = {
+            let cache = cache.clone();
+            tokio::spawn(async move { cache.acquire_slot().await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!waiting.is_finished(), "a render slot was free beyond the limit");
         held.pop();
-        let freed = tokio::time::timeout(std::time::Duration::from_millis(500), cache.render_slot()).await;
-        assert!(freed.is_ok(), "a released slot is not handed on");
+        let freed = waiting.await.expect("the waiting task ends");
+        drop(freed);
     }
 
     #[test]

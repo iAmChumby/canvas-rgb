@@ -83,19 +83,37 @@ that is not valid for its property, `yes` for a boolean) is ignored with a warni
 effect loads and runs with the default tile, and `effects check` lists the warning as a
 problem. The tile never changes how the effect runs on the lights.
 
+A property tag the file describes badly (a colour with no default, a combobox with no
+values) is ignored the same way: the effect loads and runs, the editor shows one property
+less, and the warning says which one.
+
 A render is stopped after 20 seconds (`RENDER_BUDGET`) and the library shows no tile for that
 effect; at most two tiles render at once. The library plays every tile at 12 frames a second,
 24 frames in 2 seconds, so `loop` is simulated time: a 16 s loop plays 8 times faster than the
 effect runs.
+
+A tile is rendered with a fixed seed, so the same effect always draws the same tile: an
+effect that draws from the clock (Fire, Rain) would draw a different picture every time the
+library opened.
+
+A render that runs out of its budget is remembered, and the answer says the tile was given
+up (the library shows no tile for that effect). The library does not ask for it again on
+every open.
 
 The quality bar a tile has to pass, measured on the 24 frames (a pixel is lit when its
 lightness, the CIE L\* of its colour, is at least 12 of 100: a near-black or dim grey is
 not lit and a vivid blue or violet is):
 
 - at least 60 % of the pixels lit on average (unless `dark_on_purpose` is set);
-- every row and every column lit: at least 25 % of its pixels lit in some frame of the loop;
+- every row and every column lit at some point over the loop (the union of the frames): at
+  least 25 % of the row's or the column's pixels lit in one of the frames;
 - the loop seam, the last frame against the first, differs by at most 10 % (mean absolute
-  difference over all channels), unless `loop_jump_on_purpose` is set.
+  difference over all channels), unless `loop_jump_on_purpose` is set;
+- no two frames of the loop differ by more than 10 %: the tile may not cut hard inside its
+  loop;
+- at the top or the bottom of a frame, at most 3 rows may be completely unlit: a band of
+  black across a tile is a broken tile. The rows are counted per frame, so a band that only
+  some other frame of the loop lit still fails.
 
 `effects check` prints the tile's scores and fails a tile under the bar. The thresholds
 are the `BAR_*` constants in `crates/canvas-daemon/src/thumbnail.rs`.

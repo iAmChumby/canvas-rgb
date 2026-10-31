@@ -74,9 +74,9 @@ impl Aurora {
             vec![("speed", number_kind(6.0)), ("scale", number_kind(0.5))],
         )
         // The flow repeats only every 30 s or so at the defaults, longer than a tile, so the end of the
-        // loop crossfades into the start. A slow speed keeps the two blended frames alike, so the
-        // dissolve shows no ghost pattern.
-        .thumbnail(crate::schema::recipe(1.0, 1.0, 6, vec![("speed", crate::schema::num(3.0))]))
+        // loop crossfades into the start. The flow drifts slowly (speed 1 over a one second loop), so the
+        // two pictures the crossfade blends are close enough that the dissolve shows no ghost pattern.
+        .thumbnail(crate::schema::recipe(1.0, 1.0, 6, vec![("speed", crate::schema::num(1.0))]))
         .build()
     }
 

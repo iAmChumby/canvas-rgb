@@ -43,6 +43,25 @@ pub fn html_builder() -> Builder {
     })
 }
 
+/// The builder that runs the same HTML effects with a fixed seed, so a library tile is
+/// the same picture every time it is rendered.
+///
+/// The lights get [`html_builder`], whose seed comes from the clock: every run of an
+/// effect is a little different. A tile is rendered again and again, so it needs a seed
+/// that does not move.
+pub fn html_builder_seeded(seed: u32) -> Builder {
+    Arc::new(move |id: &str, source: &str| {
+        canvas_html::HtmlEffect::from_source_seeded(id, source, &Props::new(), seed)
+            .map(|effect| {
+                for warning in effect.warnings() {
+                    tracing::warn!(id, %warning, "a user effect loaded with a part of its file ignored");
+                }
+                Box::new(effect) as Box<dyn Effect>
+            })
+            .map_err(|e| e.to_string())
+    })
+}
+
 /// The HTML effects that ship inside the daemon, as (file stem, source). Each one has the id
 /// `html:<stem>`, exactly as if its file sat in the effects folder, but it needs no file: it
 /// is in the library on a fresh install and survives the folder being emptied. A file in the
@@ -80,6 +99,9 @@ struct State {
 /// The user HTML effects found in the effects folder.
 pub struct UserEffects {
     builder: Builder,
+    /// The builder a library tile is rendered with: the same file, run with a fixed seed,
+    /// so a tile is the same picture every time it is rendered.
+    tile_builder: Builder,
     state: RwLock<State>,
     /// The effects shipped inside the daemon; see [`STOCK_EFFECTS`].
     stock: Vec<StockEffect>,
@@ -96,6 +118,20 @@ impl UserEffects {
     /// Like [`UserEffects::new`], with effects that ship inside the daemon. A stock effect
     /// that does not build is logged and left out.
     pub fn with_stock(builder: Builder, stock: &[(&str, &str)]) -> Self {
+        Self::build(builder.clone(), builder, stock)
+    }
+
+    /// Like [`UserEffects::with_stock`], with a builder of its own for library tiles: the
+    /// same file run with a fixed seed, so a tile is the same picture every time.
+    pub fn with_stock_and_tiles(
+        builder: Builder,
+        tile_builder: Builder,
+        stock: &[(&str, &str)],
+    ) -> Self {
+        Self::build(builder, tile_builder, stock)
+    }
+
+    fn build(builder: Builder, tile_builder: Builder, stock: &[(&str, &str)]) -> Self {
         let stock = stock
             .iter()
             .filter_map(|(stem, source)| {
@@ -115,6 +151,7 @@ impl UserEffects {
             .collect();
         Self {
             builder,
+            tile_builder,
             state: RwLock::new(State::default()),
             stock,
             generation: AtomicU64::new(0),
@@ -149,16 +186,27 @@ impl UserEffects {
     /// Builds a fresh instance of a loaded user effect. `None` when `id` is not a loaded
     /// user effect; the caller then tries the built-ins.
     pub fn create(&self, id: &str) -> Option<Result<Box<dyn Effect>, String>> {
-        let source = {
-            let state = read_lock(&self.state);
-            state
-                .loaded
-                .values()
-                .find(|e| e.schema.id == id)
-                .map(|e| e.source.clone())
-        }
-        .or_else(|| self.stock.iter().find(|e| e.schema.id == id).map(|e| e.source.clone()))?;
+        let source = self.source_of(id)?;
         Some((self.builder)(id, &source))
+    }
+
+    /// Builds a fresh instance of a user effect for a library tile: the same file, run
+    /// with the tile builder's fixed seed, so the tile is the same picture every time it
+    /// is rendered. `None` when `id` is not a loaded user effect.
+    pub fn create_for_tile(&self, id: &str) -> Option<Result<Box<dyn Effect>, String>> {
+        let source = self.source_of(id)?;
+        Some((self.tile_builder)(id, &source))
+    }
+
+    /// The source of a loaded or stock user effect.
+    fn source_of(&self, id: &str) -> Option<Arc<str>> {
+        let state = read_lock(&self.state);
+        state
+            .loaded
+            .values()
+            .find(|e| e.schema.id == id)
+            .map(|e| e.source.clone())
+            .or_else(|| self.stock.iter().find(|e| e.schema.id == id).map(|e| e.source.clone()))
     }
 
     /// The files that failed to parse at their last scan, with the error.
@@ -727,6 +775,39 @@ mod tests {
             .collect();
         assert!(leftovers.is_empty(), "the temp files are gone: {leftovers:?}");
     }
+    #[test]
+    fn a_library_tile_is_built_with_the_tile_builder() {
+        // The lights get the builder that seeds from the clock; a tile gets the seeded one,
+        // so a tile is the same picture every time it is rendered.
+        let calls: Arc<std::sync::Mutex<Vec<&'static str>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let make = |name: &'static str| {
+            let calls = calls.clone();
+            Arc::new(move |id: &str, _source: &str| {
+                calls.lock().unwrap().push(name);
+                Ok(Box::new(FakeHtml {
+                    schema: PropertySchema {
+                        id: id.to_string(),
+                        name: id.to_string(),
+                        description: String::new(),
+                        needs: Default::default(),
+                        properties: Vec::new(),
+                        presets: Vec::new(),
+                        thumbnail: None,
+                    },
+                }) as Box<dyn Effect>)
+            }) as Builder
+        };
+        let dir = TempDir::new("tile-builder");
+        dir.write("live.html", "Live\n<canvas></canvas>");
+        let effects = UserEffects::with_stock_and_tiles(make("lights"), make("tiles"), &[]);
+        effects.rescan(&dir.0);
+        effects.create("html:live").expect("a loaded effect").expect("the effect builds");
+        effects.create_for_tile("html:live").expect("a loaded effect").expect("the effect builds");
+        let calls = calls.lock().unwrap().clone();
+        assert!(calls.contains(&"lights"), "the effect on the lights was not built: {calls:?}");
+        assert!(calls.contains(&"tiles"), "the tile was not built with the tile builder: {calls:?}");
+    }
+
     #[test]
     fn the_stock_effects_are_listed_and_build_with_the_real_engine() {
         let effects = UserEffects::with_stock(html_builder(), STOCK_EFFECTS);

@@ -30,10 +30,16 @@ fn main() {
     };
     let mut sheet = None;
     let mut budget = std::time::Duration::from_secs(900);
+    let mut repeat = 1usize;
     let mut i = 4;
     while i < args.len() {
         if args[i] == "--sheet" {
             sheet = Some(args[i + 1].clone());
+            i += 2;
+            continue;
+        }
+        if args[i] == "--repeat" {
+            repeat = args[i + 1].parse().expect("a number of renders");
             i += 2;
             continue;
         }
@@ -53,25 +59,46 @@ fn main() {
         recipe.props.insert(k.to_string(), value);
         i += 1;
     }
-    let inner: Box<dyn Effect> = if let Some(stem) = id.strip_prefix("html:") {
-        let (_, src) = canvas_daemon::user_effects::STOCK_EFFECTS.iter().find(|(s, _)| *s == stem).unwrap();
-        canvas_daemon::user_effects::html_builder()(id, src).unwrap()
-    } else {
-        canvas_effects::create(id).unwrap()
-    };
-    let mut effect = Wrap(inner, recipe);
+    let mut first: Option<Vec<u8>> = None;
+    let mut identical = true;
     let started = std::time::Instant::now();
-    let body = canvas_daemon::thumbnail::render_within(&mut effect, &Props::new(), budget)
-        .unwrap_or_else(|why| panic!("{why}"));
-    let s = canvas_daemon::thumbnail::score(&body).unwrap();
-    println!(
-        "{id}: lit {:.0}% ({:.0}>{:.0}) rows {} cols {} seam {:.1}% step {:.1}% max {:.1}%  [{:.1?}]",
-        s.lit_avg * 100.0, s.lit_first * 100.0, s.lit_last * 100.0, s.rows_lit, s.cols_lit,
-        s.seam * 100.0, s.step * 100.0, s.max_step * 100.0, started.elapsed()
-    );
+    for round in 0..repeat {
+        let inner: Box<dyn Effect> = if let Some(stem) = id.strip_prefix("html:") {
+            let (_, src) = canvas_daemon::user_effects::STOCK_EFFECTS.iter().find(|(s, _)| *s == stem).unwrap();
+            canvas_daemon::user_effects::html_builder_seeded(canvas_daemon::thumbnail::TILE_SEED)(id, src).unwrap()
+        } else {
+            canvas_effects::create(id).unwrap()
+        };
+        let mut effect = Wrap(inner, recipe.clone());
+        let body = canvas_daemon::thumbnail::render_within(&mut effect, &Props::new(), budget)
+            .unwrap_or_else(|why| panic!("{why}"));
+        let s = canvas_daemon::thumbnail::score(&body).unwrap();
+        println!(
+            "{id}: lit {:.0}% ({:.0}>{:.0}) rows {} cols {} seam {:.1}% step {:.1}% max {:.1}% band {}  [{:.1?}]",
+            s.lit_avg * 100.0, s.lit_first * 100.0, s.lit_last * 100.0, s.rows_lit, s.cols_lit,
+            s.seam * 100.0, s.step * 100.0, s.max_step * 100.0, s.band_rows, started.elapsed()
+        );
+        let problems = canvas_daemon::thumbnail::problems(&s, effect.schema().thumbnail.as_ref());
+        for problem in &problems {
+            println!("   problem: {problem}");
+        }
+        match &first {
+            None => first = Some(body),
+            Some(before) => {
+                if before != &body {
+                    identical = false;
+                    println!("   render {round} differs from the first");
+                }
+            }
+        }
+    }
+    if repeat > 1 {
+        println!("{id}: {repeat} renders, identical: {identical}");
+    }
     if let Some(dir) = sheet {
         std::fs::create_dir_all(&dir).unwrap();
         let name = id.replace(':', "-");
+        let body = first.expect("a render");
         canvas_daemon::cli::write_tile_sheet(&std::path::Path::new(&dir).join(format!("{name}-sheet.png")), &body).unwrap();
     }
 }

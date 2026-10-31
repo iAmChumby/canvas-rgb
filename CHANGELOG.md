@@ -9,6 +9,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Fixed
 
 - A part of an effect file that cannot be read is ignored with a warning, and the effect still loads and runs: a `<meta property>` tag the file describes badly (a colour with no default or a bad one, a combobox with no values) used to take the whole effect away: it was gone from the library and from the lights, with only a line in the log. (#16)
+- The library's tile renders are capped at two at a time, and the cap holds when a client goes away: the slot belongs to the render and not to the request, so a client that disconnects while its tile is rendering no longer lets a third render start. (#16)
+- A tile that cannot be rendered within 20 seconds is given up, and the library remembers it: the answer says the tile was given up instead of being a bare error, and the library does not render it again for every open. (#16)
 
 ### Changed
 

@@ -10,6 +10,7 @@ use axum::http::{Request, StatusCode};
 use canvas_daemon::api;
 use canvas_daemon::state::App;
 use canvas_proto::api::{routes, ApiError};
+use canvas_proto::traits::Effect;
 use common::{FakeAdapter, FakeEngine};
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -552,6 +553,166 @@ async fn the_thumbnail_of_an_unknown_effect_is_a_404() {
         .await
         .expect("the router answers");
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+/// The app with a user-effects folder holding the named HTML effects, built by the fake
+/// builder the test gives.
+fn build_with_user_effects(
+    names: &[&str],
+    builder: canvas_daemon::user_effects::Builder,
+) -> (axum::Router, Arc<App>, TempHome) {
+    let home = TempHome::new();
+    let store = canvas_daemon::storage::Store::at(&home.path);
+    let engine = Arc::new(FakeEngine::default());
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(
+        store,
+        engine,
+        Box::new(FakeAdapter::default()),
+        TOKEN.to_string(),
+        "0.1.0-test".to_string(),
+        tx,
+    );
+    app.user_effects = Arc::new(canvas_daemon::user_effects::UserEffects::new(builder));
+    let folder = home.path.join("effects");
+    std::fs::create_dir_all(&folder).expect("the effects folder is created");
+    for name in names {
+        std::fs::write(folder.join(format!("{name}.html")), format!("{name}\n<canvas></canvas>"))
+            .expect("the effect file is written");
+    }
+    app.user_effects.rescan(&folder);
+    let app = Arc::new(app);
+    (api::router(app.clone()), app, home)
+}
+
+/// A slow effect that counts the renders running at the same time.
+struct SlowEffect {
+    running: Arc<std::sync::atomic::AtomicUsize>,
+    peak: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Effect for SlowEffect {
+    fn schema(&self) -> canvas_proto::props::PropertySchema {
+        canvas_proto::props::PropertySchema {
+            id: "slow".into(),
+            name: "Slow".into(),
+            description: String::new(),
+            needs: Default::default(),
+            properties: Vec::new(),
+            presets: Vec::new(),
+            thumbnail: None,
+        }
+    }
+    fn init(&mut self, _props: &canvas_proto::props::Props) {}
+    fn update(
+        &mut self,
+        _dt: f32,
+        _canvas: &mut canvas_proto::traits::Canvas,
+        _inputs: &canvas_proto::traits::Inputs,
+    ) {
+        // Every update is slow, so a render takes a while.
+        std::thread::sleep(std::time::Duration::from_millis(8));
+    }
+}
+
+impl Drop for SlowEffect {
+    fn drop(&mut self) {
+        // The effect lives as long as its render, so the count is the number of renders
+        // running at the same time.
+        let now = self.running.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        self.peak.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// The render cap holds even when a client goes away.
+///
+/// The permit belongs to the render, not to the request: a client that disconnects while
+/// its tile is rendering must not hand a slot back, or more renders run at once than the
+/// cap allows.
+#[tokio::test]
+async fn at_most_two_tiles_render_at_once_even_when_a_client_goes_away() {
+    let running = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let builder: canvas_daemon::user_effects::Builder = {
+        let running = running.clone();
+        let peak = peak.clone();
+        Arc::new(move |_id: &str, _source: &str| {
+            let now = running.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            peak.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
+            Ok(Box::new(SlowEffect { running: running.clone(), peak: peak.clone() })
+                as Box<dyn canvas_proto::traits::Effect>)
+        })
+    };
+    let names = ["slow-0", "slow-1", "slow-2", "slow-3"];
+    let (router, _app, _home) = build_with_user_effects(&names, builder);
+
+    // The first client goes away while its tile is rendering.
+    let abandoned = router
+        .clone()
+        .oneshot(request("GET", "/api/v1/effects/html:slow-0/thumbnail"));
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(40), abandoned).await;
+
+    // Three more ask for a tile at the same time.
+    let mut waiting = Vec::new();
+    for name in &names[1..] {
+        let router = router.clone();
+        let path = format!("/api/v1/effects/html:{name}/thumbnail");
+        waiting.push(tokio::spawn(async move {
+            let _ = router.oneshot(request("GET", &path)).await;
+        }));
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+
+    let peak = peak.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        peak <= 2,
+        "{peak} tiles rendered at once; the cap is {}",
+        canvas_daemon::thumbnail::CONCURRENT_RENDERS
+    );
+}
+
+/// A tile that cannot be rendered is remembered, so the library does not ask for it again
+/// on every open, and the answer says the tile was given up.
+#[tokio::test]
+async fn a_tile_that_cannot_be_rendered_says_so_and_is_not_rendered_again() {
+    let builds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let builder: canvas_daemon::user_effects::Builder = {
+        let builds = builds.clone();
+        Arc::new(move |_id: &str, _source: &str| {
+            let count = builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if count > 1 {
+                // The effect built when the folder was scanned, but it cannot be built
+                // again, so the tile render fails.
+                return Err("the effect could not be built".to_string());
+            }
+            Ok(Box::new(common::FakeEffect::new("broken")) as Box<dyn canvas_proto::traits::Effect>)
+        })
+    };
+    let (router, _app, _home) = build_with_user_effects(&["broken"], builder);
+
+    let response = router
+        .clone()
+        .oneshot(request("GET", "/api/v1/effects/html:broken/thumbnail"))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = json(response).await;
+    let message = body.get("message").and_then(|m| m.as_str()).unwrap_or_default();
+    assert!(message.contains("given up"), "the answer does not say the tile was given up: {message}");
+
+    // The second request is answered from the remembered failure: the effect is not built
+    // again, so the library does not pay for the render on every open.
+    let after_the_first = builds.load(std::sync::atomic::Ordering::SeqCst);
+    let response = router
+        .oneshot(request("GET", "/api/v1/effects/html:broken/thumbnail"))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        builds.load(std::sync::atomic::Ordering::SeqCst),
+        after_the_first,
+        "the effect was built again for the second request"
+    );
 }
 
 /// A fake service. It answers every request the same way.
