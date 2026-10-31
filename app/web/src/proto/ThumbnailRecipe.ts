@@ -31,4 +31,9 @@ props: { [key in string]: PropValue },
  * Set when the effect is dark on purpose: the reason, which exempts the tile from the
  * lit-share bar (never from the rows, columns or seam bars).
  */
-dark_on_purpose?: string, };
+dark_on_purpose?: string, 
+/**
+ * Set when the loop is meant to jump where it restarts (a flicker, a strobe): the reason,
+ * which exempts the tile from the seam bar and from nothing else.
+ */
+loop_jump_on_purpose?: string, };

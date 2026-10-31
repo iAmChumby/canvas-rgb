@@ -95,6 +95,11 @@ pub struct ThumbnailRecipe {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub dark_on_purpose: Option<String>,
+    /// Set when the loop is meant to jump where it restarts (a flicker, a strobe): the reason,
+    /// which exempts the tile from the seam bar and from nothing else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub loop_jump_on_purpose: Option<String>,
 }
 
 fn default_warm_up_s() -> f64 {
@@ -114,6 +119,7 @@ impl Default for ThumbnailRecipe {
             crossfade_frames: 0,
             props: Props::new(),
             dark_on_purpose: None,
+            loop_jump_on_purpose: None,
         }
     }
 }
@@ -175,6 +181,7 @@ mod tests {
             crossfade_frames: 6,
             props: [("speed".to_string(), PropValue::Number(90.0))].into_iter().collect(),
             dark_on_purpose: Some("a spark on black".into()),
+            loop_jump_on_purpose: Some("a strobe".into()),
         };
         let json = serde_json::to_string(&recipe).expect("writes");
         assert_eq!(serde_json::from_str::<ThumbnailRecipe>(&json).expect("reads"), recipe);
