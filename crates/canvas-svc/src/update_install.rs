@@ -132,6 +132,9 @@ pub trait UserCommands: Send {
 /// means the PID was reused, so it is not the process.
 pub trait ProcessProbe: Send {
     fn alive(&mut self, pid: u32, created: u64) -> bool;
+    /// Ends the process started as `pid` at `created`, only if it is that process (a reused PID is left
+    /// alone). `true` when it is gone afterwards.
+    fn terminate(&mut self, pid: u32, created: u64) -> bool;
 }
 
 // ---- configuration ----
@@ -627,10 +630,13 @@ impl UpdateInstaller {
         match self.read_marker(&marker) {
             Ok(pending) => {
                 if pending.setup_pid != 0 && lock(&self.probe).alive(pending.setup_pid, pending.setup_created) {
-                    return Err(Refusal::conflict(format!(
-                        "an earlier update to {} is still running (setup pid {})",
-                        pending.version, pending.setup_pid
-                    )));
+                    if !self.marker_is_overdue(&pending) {
+                        return Err(Refusal::conflict(format!(
+                            "an earlier update to {} is still running (setup pid {})",
+                            pending.version, pending.setup_pid
+                        )));
+                    }
+                    self.end_stranded_setup(&pending);
                 }
                 tracing::warn!(version = %pending.version, "a leftover update marker whose setup has ended is superseded by this install");
                 self.discard(updates, &pending);
@@ -643,6 +649,24 @@ impl UpdateInstaller {
             }
             Err(e) => Err(Refusal::internal(format!("an update marker is in the way and cannot be trusted: {e}"))),
         }
+    }
+
+    /// The marker is older than the longest wait for setup: that setup is hung, or was stranded suspended
+    /// by a service crash between the marker write and the resume.
+    fn marker_is_overdue(&self, pending: &PendingUpdate) -> bool {
+        now_unix().saturating_sub(pending.started_unix) > self.cfg.setup_wait_limit.as_secs()
+    }
+
+    /// Ends an overdue setup (PID and creation time verified by the probe). No job object ties setup to
+    /// the service: a setup that is running must survive the service being stopped.
+    fn end_stranded_setup(&self, pending: &PendingUpdate) {
+        let gone = lock(&self.probe).terminate(pending.setup_pid, pending.setup_created);
+        tracing::warn!(
+            setup_pid = pending.setup_pid,
+            version = %pending.version,
+            gone,
+            "ended a setup process that outlived the wait limit (hung, or stranded suspended)"
+        );
     }
 
     /// A fresh private folder (SYSTEM and Administrators only) for setup's `TMP` and `TEMP`.
@@ -874,6 +898,11 @@ impl UpdateInstaller {
             return None;
         }
         tracing::info!(version = %pending.version, setup_pid = pending.setup_pid, "a pending update was found; waiting for setup to end");
+        if pending.setup_pid != 0 && self.marker_is_overdue(&pending) && lock(&self.probe).alive(pending.setup_pid, pending.setup_created) {
+            self.end_stranded_setup(&pending);
+            self.discard(&updates, &pending);
+            return None;
+        }
         if pending.setup_pid != 0 {
             let deadline = Instant::now() + self.cfg.setup_wait_limit;
             while lock(&self.probe).alive(pending.setup_pid, pending.setup_created) {
@@ -895,30 +924,70 @@ impl UpdateInstaller {
     /// console user. Both non-elevated: this is the root fix for #28.
     fn finish_user_steps(&self, pending: &PendingUpdate) -> Finish {
         let app = &self.cfg.app_dir;
-        let script = app.join("installer").join("setup-user.ps1");
-        let script_line = format!(
-            "\"{}\" -NoProfile -ExecutionPolicy Bypass -File \"{}\" -InstallDir \"{}\" -SignalRgb N",
-            self.cfg.powershell.display(),
-            script.display(),
-            app.display()
-        );
-        match self.run_as_user(&script_line, app, true) {
-            Ok(code) => tracing::info!(version = %pending.version, ?code, "setup-user.ps1 ran as the console user"),
-            Err(e) if e.kind() == io::ErrorKind::NotConnected => {
-                tracing::warn!(version = %pending.version, error = %e, "no user is logged on at the console; the update stays pending");
-                return Finish::NoUser;
+        let run_script = self.setup_reported_success(pending);
+        if run_script {
+            let script = app.join("installer").join("setup-user.ps1");
+            let script_line = format!(
+                "\"{}\" -NoProfile -ExecutionPolicy Bypass -File \"{}\" -InstallDir \"{}\" -SignalRgb N",
+                self.cfg.powershell.display(),
+                script.display(),
+                app.display()
+            );
+            match self.run_as_user(&script_line, app, true) {
+                Ok(code) => tracing::info!(version = %pending.version, ?code, "setup-user.ps1 ran as the console user"),
+                Err(e) if e.kind() == io::ErrorKind::NotConnected => {
+                    tracing::warn!(version = %pending.version, error = %e, "no user is logged on at the console; the update stays pending");
+                    return Finish::NoUser;
+                }
+                Err(e) => tracing::error!(version = %pending.version, error = %e, "setup-user.ps1 could not be run as the console user"),
             }
-            Err(e) => tracing::error!(version = %pending.version, error = %e, "setup-user.ps1 could not be run as the console user"),
         }
+        // The tray starts either way: after a failed setup it is what shows update-result.json.
         let tray_line = format!("\"{}\" --after-update", app.join("canvas-rgb.exe").display());
         match self.run_as_user(&tray_line, app, false) {
             Ok(_) => tracing::info!(version = %pending.version, "canvas-rgb.exe --after-update started as the console user"),
+            Err(e) if e.kind() == io::ErrorKind::NotConnected && !run_script => {
+                tracing::warn!(version = %pending.version, error = %e, "no user is logged on at the console; the update stays pending");
+                return Finish::NoUser;
+            }
             Err(e) if e.kind() == io::ErrorKind::NotConnected => {
                 tracing::warn!(version = %pending.version, error = %e, "no user is logged on at the console; the tray was not started");
             }
             Err(e) => tracing::error!(version = %pending.version, error = %e, "the tray could not be started as the console user"),
         }
         Finish::Done
+    }
+
+    /// Whether `{app}\update-result.json` is fresh (written at or after the marker's start time) and says
+    /// `ok:true` for the marker's version. Only then is the per-user script run: after a failed or
+    /// missing setup the files it would configure may be half-installed.
+    fn setup_reported_success(&self, pending: &PendingUpdate) -> bool {
+        let path = self.cfg.app_dir.join("update-result.json");
+        let written = match std::fs::metadata(&path).and_then(|m| m.modified()) {
+            Ok(t) => t.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "no update-result.json: setup-user.ps1 is skipped");
+                return false;
+            }
+        };
+        if written < pending.started_unix {
+            tracing::warn!(path = %path.display(), written, started = pending.started_unix, "update-result.json is older than this update: setup-user.ps1 is skipped");
+            return false;
+        }
+        let parsed = std::fs::read(&path).ok().and_then(|text| serde_json::from_slice::<serde_json::Value>(&text).ok());
+        let Some(result) = parsed else {
+            tracing::warn!(path = %path.display(), "update-result.json is unreadable: setup-user.ps1 is skipped");
+            return false;
+        };
+        let ok = result.get("ok").and_then(serde_json::Value::as_bool) == Some(true);
+        let same_version = result
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|v| v.trim_start_matches('v') == pending.version.trim_start_matches('v'));
+        if !ok || !same_version {
+            tracing::warn!(path = %path.display(), ok, same_version, "setup did not report success for this version: setup-user.ps1 is skipped");
+        }
+        ok && same_version
     }
 
     /// Starts `command_line` as the console user, waiting up to `user_session_wait` for one to appear.
@@ -973,7 +1042,8 @@ pub mod win {
     use windows_sys::Win32::System::Threading::{
         CreateProcessW, GetCurrentThread, GetExitCodeProcess, GetProcessTimes, OpenProcess, OpenThreadToken,
         ResumeThread, TerminateProcess, WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED,
-        CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, STARTUPINFOW,
+        CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+        STARTUPINFOW,
     };
 
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
@@ -1125,14 +1195,26 @@ pub mod win {
         Ok((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
     }
 
-    /// The environment block setup gets: this process's environment with `TMP` and `TEMP` replaced by
-    /// `tmp`, as UTF-16 `NAME=value\0` entries sorted by name and ended by an extra NUL.
+    /// The environment block setup gets: this process's environment with `TMP` and `TEMP` at `tmp`, and
+    /// `PATH` and `PSModulePath` fixed to system-only values built from the real `SystemRoot`, so
+    /// nothing a user could write to is searched by the scripts setup runs as SYSTEM. UTF-16
+    /// `NAME=value\0` entries sorted by name and ended by an extra NUL.
     pub fn build_env_block(vars: Vec<(OsString, OsString)>, tmp: &Path) -> Vec<u16> {
         use std::os::windows::ffi::OsStrExt;
+        let find = |name: &str| {
+            vars.iter()
+                .find(|(k, _)| k.to_string_lossy().eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.to_string_lossy().into_owned())
+        };
+        let root = find("SystemRoot").unwrap_or_else(|| r"C:\Windows".to_string());
+        let program_files = find("ProgramFiles").unwrap_or_else(|| r"C:\Program Files".to_string());
+        let path = format!(r"{root}\System32;{root};{root}\System32\Wbem;{root}\System32\WindowsPowerShell\v1.0");
+        let ps_modules = format!(r"{program_files}\WindowsPowerShell\Modules;{root}\System32\WindowsPowerShell\v1.0\Modules");
+        let replaced = ["TMP", "TEMP", "PATH", "PSMODULEPATH"];
         let mut entries: Vec<(String, Vec<u16>)> = Vec::new();
-        for (key, value) in vars {
+        for (key, value) in &vars {
             let name = key.to_string_lossy().into_owned();
-            if name.eq_ignore_ascii_case("TMP") || name.eq_ignore_ascii_case("TEMP") || name.is_empty() {
+            if name.is_empty() || replaced.iter().any(|r| name.eq_ignore_ascii_case(r)) {
                 continue;
             }
             let mut entry: Vec<u16> = key.encode_wide().collect();
@@ -1140,11 +1222,17 @@ pub mod win {
             entry.extend(value.encode_wide());
             entries.push((name.to_uppercase(), entry));
         }
-        for name in ["TEMP", "TMP"] {
+        let fixed: [(&str, Vec<u16>); 4] = [
+            ("Path", path.encode_utf16().collect()),
+            ("PSModulePath", ps_modules.encode_utf16().collect()),
+            ("TEMP", tmp.as_os_str().encode_wide().collect()),
+            ("TMP", tmp.as_os_str().encode_wide().collect()),
+        ];
+        for (name, value) in fixed {
             let mut entry: Vec<u16> = name.encode_utf16().collect();
             entry.push(u16::from(b'='));
-            entry.extend(tmp.as_os_str().encode_wide());
-            entries.push((name.to_string(), entry));
+            entry.extend(value);
+            entries.push((name.to_uppercase(), entry));
         }
         entries.sort_by(|a, b| a.0.cmp(&b.0));
         let mut block = Vec::new();
@@ -1299,6 +1387,25 @@ pub mod win {
                 let running = WaitForSingleObject(process, 0) == WAIT_TIMEOUT;
                 CloseHandle(process);
                 same && running
+            }
+        }
+
+        fn terminate(&mut self, pid: u32, created: u64) -> bool {
+            // SAFETY: a plain open; the handle is closed on every path. The creation time is checked
+            // on the handle that is then terminated, so a reused PID is never ended.
+            unsafe {
+                let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE | PROCESS_TERMINATE, 0, pid);
+                if process.is_null() {
+                    return io::Error::last_os_error().raw_os_error() == Some(ERROR_INVALID_PARAMETER);
+                }
+                let ours = creation_time(process).map(|t| t == created).unwrap_or(false);
+                let gone = if ours {
+                    TerminateProcess(process, 1) != 0 && WaitForSingleObject(process, 5000) != WAIT_TIMEOUT
+                } else {
+                    true
+                };
+                CloseHandle(process);
+                gone
             }
         }
     }

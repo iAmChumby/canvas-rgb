@@ -28,6 +28,8 @@ concurrency:
 
 jobs:
   build:
+    # A dispatch from any other branch does nothing: nothing is built that could be signed.
+    if: github.ref == 'refs/heads/main'
     runs-on: windows-latest
     permissions:
       contents: read

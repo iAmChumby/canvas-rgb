@@ -93,6 +93,7 @@ async fn the_production_run_loop_resumes_a_pending_update_on_start() {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
     rig.leave_pending(0, 0, now);
     assert!(rig.marker_exists());
+    rig.write_result(true, "0.1.1");
 
     let fan_home = tempfile::tempdir().unwrap();
     let mut core = crate::pipe_server::tests::test_core(fan_home.path().to_path_buf());

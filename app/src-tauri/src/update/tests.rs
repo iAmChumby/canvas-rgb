@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::thread::JoinHandle;
 
@@ -1646,6 +1646,108 @@ fn plant_result(h: &Harness, version: &str, ok: bool, age: Duration) {
     file.set_modified(std::time::SystemTime::now() - age).unwrap();
 }
 
+// ---- following a service-driven install (#43) ----
+
+fn now_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64
+}
+
+/// A service accepted the install: `pending` is saved, the phase is Installing, nothing launched.
+/// Returns the harness and a controller on the same files whose clock is `clock`.
+fn service_install_started(clock: Arc<AtomicU64>) -> (Harness, Arc<Controller>) {
+    let (asker, _asked) = fake_service(ServiceAnswer::Started);
+    let h = harness_with_service("0.1.0", "test.key.pub", Launch::Fails, Some(asker));
+    good_release(&h);
+    h.check(true);
+    assert_eq!(h.install().phase, UpdatePhase::Installing);
+    clock.store(h.stored().pending_since_ms.unwrap(), Ordering::SeqCst);
+    let c = clock.clone();
+    let ctl = Arc::new(
+        Controller::new(h.ctl.settings.clone(), v("0.1.0"), Arc::new(|_: &Path| Ok(None)), Box::new(|_| {}))
+            .with_clock(Box::new(move || c.load(Ordering::SeqCst))),
+    );
+    (h, ctl)
+}
+
+fn plant_report(h: &Harness, version: &str, ok: bool, message: &str) {
+    std::fs::write(
+        h.dir.path().join("update-result.json"),
+        format!(r#"{{"version":"{version}","ok":{ok},"code":0,"message":"{message}"}}"#),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_tray_waiting_on_the_service_sees_a_failed_report_and_shows_its_message() {
+    let clock = Arc::new(AtomicU64::new(0));
+    let (h, ctl) = service_install_started(clock.clone());
+    ctl.reconcile_pending();
+    assert!(ctl.is_following(), "pending, no report, young: waiting");
+    assert!(ctl.follow_service_install(), "no report yet: look again");
+    clock.fetch_add(60_000, Ordering::SeqCst);
+    assert!(ctl.follow_service_install(), "a minute on: still looking");
+    std::thread::sleep(Duration::from_millis(30));
+    plant_report(&h, "0.1.1", false, "OpenRGB could not be downloaded");
+    assert!(!ctl.follow_service_install(), "a report arrived: stop looking");
+    assert_eq!(
+        ctl.state().phase,
+        UpdatePhase::InstallFailed { message: "OpenRGB could not be downloaded".into() }
+    );
+    assert_eq!(state::load(&h.dir.path().join("update.json")).pending, None);
+    assert!(h.seen.calls.lock().unwrap().is_empty(), "nothing launched");
+}
+
+#[test]
+fn an_ok_report_while_the_tray_lives_waits_for_the_restart() {
+    let clock = Arc::new(AtomicU64::new(0));
+    let (h, ctl) = service_install_started(clock);
+    std::thread::sleep(Duration::from_millis(30));
+    plant_report(&h, "0.1.1", true, "");
+    assert!(!ctl.follow_service_install(), "setup is done: stop looking");
+    assert_eq!(ctl.state().phase, UpdatePhase::Installing);
+    assert!(state::load(&h.dir.path().join("update.json")).pending.is_some(), "pending stays for the new tray");
+}
+
+#[test]
+fn a_report_older_than_the_start_or_for_another_version_is_not_this_installs() {
+    let clock = Arc::new(AtomicU64::new(0));
+    let (h, ctl) = service_install_started(clock);
+    plant_result(&h, "0.1.1", false, Duration::from_secs(3600));
+    assert!(ctl.follow_service_install(), "a stale failure is ignored");
+    std::thread::sleep(Duration::from_millis(30));
+    plant_report(&h, "0.0.9", false, "old");
+    assert!(ctl.follow_service_install(), "another version's report is ignored");
+    assert!(state::load(&h.dir.path().join("update.json")).pending.is_some());
+}
+
+#[test]
+fn past_the_bound_with_no_report_the_tray_says_it_cannot_follow_and_keeps_pending() {
+    let clock = Arc::new(AtomicU64::new(0));
+    let (h, ctl) = service_install_started(clock.clone());
+    clock.fetch_add(SERVICE_FOLLOW_BOUND.as_millis() as u64 + 1, Ordering::SeqCst);
+    assert!(!ctl.follow_service_install());
+    match ctl.state().phase {
+        UpdatePhase::InstallFailed { message } => assert!(message.contains("cannot follow"), "{message}"),
+        other => panic!("expected InstallFailed, got {other:?}"),
+    }
+    assert!(state::load(&h.dir.path().join("update.json")).pending.is_some(), "the install may still finish");
+}
+
+#[test]
+fn a_tray_started_beside_a_running_service_install_keeps_pending() {
+    let clock = Arc::new(AtomicU64::new(0));
+    let (h, ctl) = service_install_started(clock.clone());
+    clock.fetch_add(5 * 60_000, Ordering::SeqCst);
+    ctl.reconcile_pending();
+    assert_eq!(ctl.state().phase, UpdatePhase::Installing, "not 'ended without finishing'");
+    assert!(state::load(&h.dir.path().join("update.json")).pending.is_some());
+    // The same start after the bound has passed does settle it.
+    clock.fetch_add(SERVICE_FOLLOW_BOUND.as_millis() as u64, Ordering::SeqCst);
+    ctl.reconcile_pending();
+    assert_eq!(ctl.state().phase, UpdatePhase::InstallFailed { message: "The installer ended without finishing.".into() });
+    assert_eq!(state::load(&h.dir.path().join("update.json")).pending, None);
+}
+
 /// Inno deletes update-result.json only in PrepareToInstall, which never runs when Setup's own
 /// permission prompt is declined. Fails on the code that trusted any file present: an ok:true
 /// result from the last update read as "The installer ended without finishing".
@@ -1702,7 +1804,12 @@ fn after_a_restart_a_result_older_than_the_start_is_ignored() {
         } else {
             plant_result(&h, &pending, true, age);
         }
-        let ctl = Arc::new(Controller::new(h.ctl.settings.clone(), v("0.1.0"), Arc::new(|_: &Path| Ok(None)), Box::new(|_| {})));
+        // Long after the start, so the tray is not still waiting for a service-driven install.
+        let later = now_ms() + 31 * 60 * 1000;
+        let ctl = Arc::new(
+            Controller::new(h.ctl.settings.clone(), v("0.1.0"), Arc::new(|_: &Path| Ok(None)), Box::new(|_| {}))
+                .with_clock(Box::new(move || later)),
+        );
         ctl.reconcile_pending();
         assert_eq!(ctl.state().phase, UpdatePhase::InstallFailed { message: want.into() }, "age {age:?}");
     }

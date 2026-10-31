@@ -101,16 +101,17 @@ try {
 
     # 7. Service: auto start, restart after 5 s.
     $svcExe = Join-Path $InstallDir $c.ServiceExe
+    $sc = Join-Path $env:SystemRoot 'System32\sc.exe'   # absolute: a bare name resolves through PATH, which a user may control
     if (-not (Get-Service -Name $c.ServiceName -ErrorAction SilentlyContinue)) {
         $a = Get-ServiceCreateArgs -ServiceExePath $svcExe
-        & sc.exe @a | ForEach-Object { Say "  sc create: $_" }
+        & $sc @a | ForEach-Object { Say "  sc create: $_" }
         if ($LASTEXITCODE -ne 0) { throw "sc.exe create failed (exit $LASTEXITCODE)" }
     } else {
-        & sc.exe config $c.ServiceName binPath= ('"' + $svcExe + '"') start= auto | ForEach-Object { Say "  sc config: $_" }
+        & $sc config $c.ServiceName binPath= ('"' + $svcExe + '"') start= auto | ForEach-Object { Say "  sc config: $_" }
         if ($LASTEXITCODE -ne 0) { throw "sc.exe config failed (exit $LASTEXITCODE)" }
     }
     $f = Get-ServiceRecoveryArgs
-    & sc.exe @f | ForEach-Object { Say "  sc failure: $_" }
+    & $sc @f | ForEach-Object { Say "  sc failure: $_" }
     if ($LASTEXITCODE -ne 0) { throw "sc.exe failure failed (exit $LASTEXITCODE)" }
     Start-Service -Name $c.ServiceName
     (Get-Service -Name $c.ServiceName).WaitForStatus('Running', [TimeSpan]::FromSeconds(30))

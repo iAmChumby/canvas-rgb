@@ -116,29 +116,10 @@ var
   FFailText: String;
   FPrepError: String;       // why PrepareToInstall stopped Setup, for the /UPDATE result file
   FPurge: String;           // ' -PurgeConfig' or empty
-  FBlocked: Boolean;        // another canvas-rgb setup was already running: this one did nothing
 
 function ScriptsOk: Boolean;
 begin
   Result := FScriptsOk;
-end;
-
-// Two setups must not overlap (the tray's permission-prompt fallback could start one while the service's
-// is running). Every setup checks this mutex; the setup that actually installs (IsAdmin: the elevated
-// process, never the un-elevated one that only respawns it) creates it. Inno's SetupMutex= would create it
-// in whichever process starts first, which on the permission-prompt path could be the un-elevated parent
-// the elevated child then collides with; this form cannot collide with its own parent.
-function InitializeSetup: Boolean;
-begin
-  Result := True;
-  if CheckForMutexes('Global\canvas-rgb-setup-running') then
-  begin
-    FBlocked := True;
-    SuppressibleMsgBox('Another canvas-rgb setup is already running. Wait for it to finish, then run this again.', mbError, MB_OK, IDOK);
-    Result := False;
-    Exit;
-  end;
-  if IsAdmin then CreateMutex('Global\canvas-rgb-setup-running');
 end;
 
 function GetParam(const Name, Default: String): String;
@@ -573,7 +554,6 @@ var
   Msg, Json, Exe: String;
   Lines: TArrayOfString;
 begin
-  if FBlocked then Exit;
   if not IsUpdateRun then Exit;
   try
     Ok := FScriptsOk;

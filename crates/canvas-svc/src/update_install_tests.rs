@@ -197,6 +197,8 @@ impl UserCommands for FakeUser {
 pub(crate) struct ProbeState {
     pub procs: Mutex<HashMap<u32, (u64, u32)>>,
     pub asked: AtomicU32,
+    /// pids the service ended (only when pid and creation time both matched).
+    pub terminated: Mutex<Vec<u32>>,
 }
 
 struct FakeProbe(Arc<ProbeState>);
@@ -214,6 +216,15 @@ impl ProcessProbe for FakeProbe {
             }
             _ => false,
         }
+    }
+
+    fn terminate(&mut self, pid: u32, created: u64) -> bool {
+        let mut procs = self.0.procs.lock().unwrap();
+        if procs.get(&pid).is_some_and(|(real, _)| *real == created) {
+            procs.remove(&pid);
+            self.0.terminated.lock().unwrap().push(pid);
+        }
+        true
     }
 }
 
@@ -321,6 +332,12 @@ impl Rig {
         pending
     }
 
+    /// What setup writes at the end of a /UPDATE run: `{app}\update-result.json`.
+    pub fn write_result(&self, ok: bool, version: &str) {
+        let json = format!("{{\"version\":\"{version}\",\"ok\":{ok},\"code\":0,\"message\":\"\"}}");
+        std::fs::write(self.app.join("update-result.json"), json).unwrap();
+    }
+
     pub fn marker_exists(&self) -> bool {
         self.installer.marker_path().exists()
     }
@@ -328,6 +345,15 @@ impl Rig {
 
 fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+}
+
+/// Runs `f` on its own thread and fails the test if it has not finished within 10 s.
+fn with_deadline<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(Duration::from_secs(10)).expect("did not finish within 10 s")
 }
 
 fn code_of(r: &PipeResponse) -> String {
@@ -747,6 +773,7 @@ fn the_old_service_still_alive_when_setup_ends_finishes_the_update() {
     assert!(matches!(r.install(PAYLOAD, SIG_011), PipeResponse::UpdateStarted { .. }));
     let staged = r.setup.launches.lock().unwrap()[0].0.clone();
     assert!(r.commands().is_empty(), "nothing runs while setup runs");
+    r.write_result(true, "0.1.1");
     r.setup.exited.store(true, Ordering::SeqCst);
     wait_until("the update to finish", || !r.installer.is_busy());
     assert_eq!(r.commands(), vec![ps_line(&r), format!("\"{}\\canvas-rgb.exe\" --after-update", r.app.display())]);
@@ -758,6 +785,7 @@ fn the_old_service_still_alive_when_setup_ends_finishes_the_update() {
 fn the_new_service_finishes_on_start_after_waiting_for_the_setup_pid() {
     let r = rig("0.1.1");
     r.leave_pending(5000, 99, now());
+    r.write_result(true, "0.1.1");
     r.probe.procs.lock().unwrap().insert(5000, (99, 3));
     let outcome = r.installer.resume_pending();
     assert_eq!(outcome, Some(Finish::Done));
@@ -773,9 +801,11 @@ fn the_new_service_finishes_on_start_after_waiting_for_the_setup_pid() {
 fn a_reused_pid_is_not_mistaken_for_setup() {
     let r = rig("0.1.1");
     r.leave_pending(5000, 99, now());
+    r.write_result(true, "0.1.1");
     // Something else now has pid 5000 (another creation time) and runs for a long time.
     r.probe.procs.lock().unwrap().insert(5000, (100, u32::MAX));
     assert_eq!(r.installer.resume_pending(), Some(Finish::Done));
+    assert!(r.probe.terminated.lock().unwrap().is_empty(), "a stranger with a reused pid is never ended");
     assert_eq!(r.probe.asked.load(Ordering::SeqCst), 1, "one look, no waiting for a stranger");
     assert_eq!(r.commands().len(), 2);
 }
@@ -813,7 +843,9 @@ fn resume_keeps_trying_until_a_user_logs_on_well_past_two_minutes_worth_of_attem
         std::thread::sleep(Duration::from_millis(400));
         user.no_user.store(false, Ordering::SeqCst);
     });
-    let outcome = r.installer.resume_pending();
+    r.write_result(true, "0.1.1");
+    let installer = Arc::clone(&r.installer);
+    let outcome = with_deadline(move || installer.resume_pending());
     logon.join().unwrap();
     assert_eq!(outcome, Some(Finish::Done));
     assert_eq!(r.commands().len(), 2, "setup-user.ps1 and the tray ran once a user was there");
@@ -904,14 +936,18 @@ fn a_refused_install_leaves_no_temp_folder() {
 }
 
 #[test]
-fn the_environment_block_replaces_tmp_and_temp_and_keeps_the_rest() {
+fn the_environment_block_sets_tmp_temp_path_and_psmodulepath_and_keeps_the_rest() {
     use crate::update_install::win::build_env_block;
     use std::ffi::OsString;
     let vars = vec![
         (OsString::from("Temp"), OsString::from(r"C:\Windows\Temp")),
         (OsString::from("TMP"), OsString::from(r"C:\Windows\Temp")),
-        (OsString::from("SystemRoot"), OsString::from(r"C:\Windows")),
-        (OsString::from("Path"), OsString::from(r"C:\Windows\System32")),
+        (OsString::from("SystemRoot"), OsString::from(r"D:\Win")),
+        (OsString::from("ProgramFiles"), OsString::from(r"D:\Programs")),
+        // A user-writable folder first on the service's own PATH and module path must not leak through.
+        (OsString::from("Path"), OsString::from(r"C:\Users\someone\evil;D:\Win\System32")),
+        (OsString::from("PSModulePath"), OsString::from(r"C:\Users\someone\Documents\PowerShell\Modules")),
+        (OsString::from("windir"), OsString::from(r"D:\Win")),
     ];
     let tmp = Path::new(r"C:\ProgramData\canvas-rgb\updates\tmp-1");
     let block = build_env_block(vars, tmp);
@@ -921,12 +957,16 @@ fn the_environment_block_replaces_tmp_and_temp_and_keeps_the_rest() {
     assert_eq!(
         entries,
         vec![
-            r"Path=C:\Windows\System32",
-            r"SystemRoot=C:\Windows",
+            r"Path=D:\Win\System32;D:\Win;D:\Win\System32\Wbem;D:\Win\System32\WindowsPowerShell\v1.0",
+            r"ProgramFiles=D:\Programs",
+            r"PSModulePath=D:\Programs\WindowsPowerShell\Modules;D:\Win\System32\WindowsPowerShell\v1.0\Modules",
+            r"SystemRoot=D:\Win",
             r"TEMP=C:\ProgramData\canvas-rgb\updates\tmp-1",
             r"TMP=C:\ProgramData\canvas-rgb\updates\tmp-1",
+            r"windir=D:\Win",
         ]
     );
+    assert!(!text.contains("evil"), "nothing user-writable is searched");
 }
 
 #[test]
@@ -1048,18 +1088,23 @@ async fn impersonated_read(tag: &str, qos: Option<u32>, path: PathBuf) -> io::Re
         options.security_qos_flags(flags);
     }
     let mut client = options.open(&name).unwrap();
-    server.connect().await.unwrap();
+    let ten = Duration::from_secs(10);
+    tokio::time::timeout(ten, server.connect()).await.expect("the pipe client connects within 10 s").unwrap();
     // The server must have read from the pipe before it can impersonate.
     client.write_all(b"x").await.unwrap();
     let mut one = [0u8; 1];
     let mut server = server;
-    server.read_exact(&mut one).await.unwrap();
+    tokio::time::timeout(ten, server.read_exact(&mut one)).await.expect("the server reads the client's byte within 10 s").unwrap();
     let handle = server.as_raw_handle() as usize;
-    let result = tokio::task::spawn_blocking(move || {
-        let mut reader = crate::update_install::win::ImpersonatingReader::of(handle as *mut std::ffi::c_void);
-        reader.read(&path, MAX_INSTALLER_BYTES)
-    })
+    let result = tokio::time::timeout(
+        ten,
+        tokio::task::spawn_blocking(move || {
+            let mut reader = crate::update_install::win::ImpersonatingReader::of(handle as *mut std::ffi::c_void);
+            reader.read(&path, MAX_INSTALLER_BYTES)
+        }),
+    )
     .await
+    .expect("the impersonated read finishes within 10 s")
     .unwrap();
     drop(client);
     drop(server);
@@ -1095,7 +1140,11 @@ fn the_real_probe_tells_a_running_process_from_a_reused_pid() {
     assert!(probe.alive(child.id(), created), "the true creation time: alive");
     assert!(!probe.alive(child.id(), created + 1), "a wrong creation time is a different process");
     child.kill().unwrap();
-    child.wait().unwrap();
+    let end = Instant::now() + Duration::from_secs(10);
+    while child.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < end, "the killed child did not exit within 10 s");
+        std::thread::sleep(Duration::from_millis(10));
+    }
     assert!(!probe.alive(child.id(), created), "an ended process is not alive");
 }
 
@@ -1136,4 +1185,92 @@ fn a_real_setup_process_that_is_dropped_before_resume_is_terminated() {
     assert!(!marker.exists(), "it never ran");
     let mut probe = crate::update_install::win::WinProbe;
     assert!(!probe.alive(pid, created), "and the process is gone");
+}
+
+// ---- update-result.json gates the per-user script ----
+
+#[test]
+fn setup_user_runs_only_for_a_fresh_ok_result_for_this_version_and_the_tray_always_starts() {
+    let tray = |r: &Rig| format!("\"{}\\canvas-rgb.exe\" --after-update", r.app.display());
+    // (label, how the result file is arranged)
+    type Arrange = fn(&Rig);
+    let cases: [(&str, Arrange, bool); 6] = [
+        ("no result file", |_| {}, false),
+        ("a failed setup", |r| r.write_result(false, "0.1.1"), false),
+        ("another version", |r| r.write_result(true, "0.0.9"), false),
+        ("a stale file from an earlier run", |r| {
+            r.write_result(true, "0.1.1");
+            let old = std::time::SystemTime::now() - Duration::from_secs(3600);
+            std::fs::File::options().write(true).open(r.app.join("update-result.json")).unwrap().set_modified(old).unwrap();
+        }, false),
+        ("an unreadable file", |r| std::fs::write(r.app.join("update-result.json"), b"{ nope").unwrap(), false),
+        ("a fresh ok result", |r| r.write_result(true, "0.1.1"), true),
+    ];
+    for (label, arrange, runs_script) in cases {
+        let r = rig("0.1.1");
+        r.leave_pending(0, 0, now());
+        arrange(&r);
+        assert_eq!(r.installer.resume_once(), Some(Finish::Done), "{label}");
+        let commands = r.commands();
+        if runs_script {
+            assert_eq!(commands, vec![ps_line(&r), tray(&r)], "{label}");
+        } else {
+            assert_eq!(commands, vec![tray(&r)], "{label}: no per-user script, but the tray starts so the failure shows");
+        }
+        assert!(r.staged_files().is_empty(), "{label}: cleaned up");
+    }
+}
+
+// ---- a setup that outlives the wait limit ----
+
+#[test]
+fn a_hung_or_stranded_setup_older_than_the_wait_limit_is_ended_and_the_new_install_goes_ahead() {
+    let r = rig("0.1.0");
+    // The rig's wait limit is 5 s; this marker is 100 s old and its setup is still there.
+    let old = r.leave_pending(7000, 1, now() - 100);
+    r.probe.procs.lock().unwrap().insert(7000, (1, u32::MAX));
+    assert!(matches!(r.install(PAYLOAD, SIG_011), PipeResponse::UpdateStarted { .. }));
+    assert_eq!(*r.probe.terminated.lock().unwrap(), vec![7000], "the verified setup process was ended");
+    assert!(!Path::new(&old.staged).exists(), "and its staged file discarded");
+}
+
+#[test]
+fn a_young_marker_with_a_live_setup_is_still_a_conflict_and_nothing_is_ended() {
+    let r = rig("0.1.0");
+    r.leave_pending(7000, 1, now());
+    r.probe.procs.lock().unwrap().insert(7000, (1, u32::MAX));
+    assert_eq!(code_of(&r.install(PAYLOAD, SIG_011)), error_codes::CONFLICT);
+    assert!(r.probe.terminated.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_stranded_setup_is_ended_by_the_new_service_on_start() {
+    let r = rig("0.1.1");
+    let old = r.leave_pending(5000, 99, now() - 100);
+    r.probe.procs.lock().unwrap().insert(5000, (99, u32::MAX));
+    assert_eq!(r.installer.resume_once(), None);
+    assert_eq!(*r.probe.terminated.lock().unwrap(), vec![5000]);
+    assert!(!r.marker_exists());
+    assert!(!Path::new(&old.staged).exists());
+    assert!(r.commands().is_empty(), "nothing finishes for a setup that never completed");
+}
+
+#[test]
+fn a_stranded_pid_that_was_reused_by_another_process_is_not_ended() {
+    let r = rig("0.1.0");
+    r.leave_pending(7000, 1, now() - 100);
+    r.probe.procs.lock().unwrap().insert(7000, (2, u32::MAX));
+    assert!(matches!(r.install(PAYLOAD, SIG_011), PipeResponse::UpdateStarted { .. }));
+    assert!(r.probe.terminated.lock().unwrap().is_empty());
+}
+
+// ---- dev builds order correctly ----
+
+#[test]
+fn dev_builds_order_between_the_release_before_and_the_release_after() {
+    assert!(check_newer("0.1.2-dev.5", "0.1.1").is_ok(), "a dev build is newer than the release before it");
+    assert!(check_newer("0.1.2", "0.1.2-dev.5").is_ok(), "the release is newer than its dev builds");
+    assert!(check_newer("0.1.2-dev.6", "0.1.2-dev.5").is_ok(), "a later dev build is newer");
+    assert!(check_newer("0.1.2-dev.5", "0.1.2-dev.5").unwrap_err().message.contains("replay"), "not newer than itself");
+    assert!(check_newer("0.1.2-dev.5", "0.1.2").unwrap_err().message.contains("downgrade"), "a dev build never replaces its release");
 }
