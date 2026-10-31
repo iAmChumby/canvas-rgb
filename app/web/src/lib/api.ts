@@ -37,6 +37,16 @@ export async function apiConfig(): Promise<ApiConfig> {
   return pendingConfig as Promise<ApiConfig>;
 }
 
+/**
+ * Lets go of a lookup that is still running. A lookup that hangs would otherwise be shared by
+ * every later request, and each of them would wait out its deadline on the same dead promise.
+ * The next request asks the tray again. A lookup that finishes late is dropped too: only the
+ * lookup that is current may fill the cache.
+ */
+function abandonPendingConfig(): void {
+  pendingConfig = null;
+}
+
 /** Forgets the token. The next request fetches it again, which runs the tray's peer check again. */
 export function dropApiConfig(): void {
   cachedConfig = null;
@@ -54,7 +64,7 @@ export type Method = "GET" | "PUT" | "PATCH" | "POST" | "DELETE";
 export const REQUEST_TIMEOUT_MS = 10_000;
 
 /**
- * The deadline of the routes that wait on a device.
+ * The deadline of the peripherals: the routes that open a device and read it.
  *
  * The read of a peripheral is the slow one: the mouse may be asleep, and the adapter then
  * makes two passes over its five reports with a wait for the mouse to wake in between. The
@@ -91,9 +101,41 @@ export const CONFIG_TRANSFER_TIMEOUT_MS = 60_000;
 export const DEVICE_RESCAN_TIMEOUT_MS = 30_000;
 
 /**
+ * The deadline of the resize of a zone (`PATCH /devices/{id}/zones/{zone}`): the daemon takes
+ * the OpenRGB adapter's lock and waits on OpenRGB's replies while it holds it. The handler
+ * (`crates/canvas-daemon/src/api/devices.rs`) stops at its first failed request, so a stuck
+ * OpenRGB costs one reply timeout, not one per request. The constant is `REPLY_TIMEOUT`,
+ * 5 s (`crates/canvas-adapters/src/openrgb.rs`). The handler takes the lock twice, and each
+ * time it can wait out one stalled reply of whoever holds it, then waits on its own:
+ *
+ * - lock 1, held by a call that is stalled on a reply: 5 s;
+ * - `set_zone_size` (the resize, then an enumeration of the controllers), one stalled
+ *   reply: 5 s;
+ * - lock 2, held by a call that is stalled on a reply: 5 s;
+ * - `discover` (an enumeration again), one stalled reply: 5 s.
+ *
+ * 4 x 5 s = 20 s. A resize that landed must not be reported as a timeout, so the deadline
+ * adds half again as margin: 30 s.
+ */
+export const ZONE_RESIZE_TIMEOUT_MS = 30_000;
+
+/**
  * The deadline of one route. The default is short; the routes that wait on a device, or that
  * move a lot of work, get the time their worst case needs. The route is matched on its path,
  * so a request to the same route always gets the same deadline.
+ *
+ * Every route that awaits an adapter has a line here or a reason it keeps the default:
+ *
+ * - the peripherals, the zone resize, the effect import, the config transfer and the rescan
+ *   have named deadlines above;
+ * - `DELETE /displays/{id}` waits for the lock of the display adapter, which the display task
+ *   holds for one pass. A pass is one connect (CHIONE: 500 ms `QUERY_WAIT` + up to 1000 ms
+ *   `QUERY_REPLY_TIMEOUT_MS` = 1.5 s, `crates/canvas-adapters/src/chione.rs`) and then one
+ *   write and ack read per display (`ACK_TIMEOUT_MS`, 100 ms each); its own disconnect is
+ *   immediate. About 1.6 s for the one display the machine has, so the default 10 s covers it;
+ * - `GET /diag/readback` waits on OpenRGB for each device, but the editor never calls it.
+ *
+ * The other routes answer from memory or from a file and wait on no device.
  */
 export function deadlineFor(path: string): number {
   // The peripherals: the enumeration opens the USB devices, and the read of one waits for a
@@ -105,6 +147,8 @@ export function deadlineFor(path: string): number {
   if (path.startsWith(routes.configExport) || path.startsWith(routes.configImport)) {
     return CONFIG_TRANSFER_TIMEOUT_MS;
   }
+  // The zone resize: the daemon waits on OpenRGB while it holds the adapter.
+  if (path.startsWith(routes.devices) && path.includes("/zones/")) return ZONE_RESIZE_TIMEOUT_MS;
   // The rescan: the USB bus is looked at again.
   if (path.startsWith(routes.devices) && path.includes("rescan")) return DEVICE_RESCAN_TIMEOUT_MS;
   return REQUEST_TIMEOUT_MS;
@@ -129,6 +173,9 @@ async function send<T>(
   let stopTimer: () => void = () => {};
   const deadline = new Promise<never>((_resolve, reject) => {
     const timer = setTimeout(() => {
+      // If the deadline passed during the tray's lookup, that lookup is dead for every request
+      // after this one too: the next request asks the tray again.
+      abandonPendingConfig();
       controller.abort();
       reject(
         new ApiFailure(

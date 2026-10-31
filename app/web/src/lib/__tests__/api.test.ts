@@ -5,6 +5,7 @@ import {
   EFFECT_IMPORT_TIMEOUT_MS,
   PERIPHERAL_TIMEOUT_MS,
   REQUEST_TIMEOUT_MS,
+  ZONE_RESIZE_TIMEOUT_MS,
   deadlineFor,
   dropApiConfig,
   request,
@@ -128,6 +129,38 @@ describe("the request deadline", () => {
     await settled;
   });
 
+  it("asks the tray again after a lookup that hung, instead of waiting on the dead one", async () => {
+    vi.useFakeTimers();
+    // The tray's first lookup never finishes; the tray answers every lookup after it.
+    let lookups = 0;
+    (window as unknown as { __TAURI__?: unknown }).__TAURI__ = {
+      core: {
+        invoke: async (cmd: string) => {
+          if (cmd !== CMD_GET_API_CONFIG) return null;
+          lookups += 1;
+          if (lookups === 1) return new Promise<never>(() => {});
+          return { base_url: "http://127.0.0.1:9430", token: "test-token" };
+        },
+      },
+      event: { listen: async () => () => undefined },
+    };
+    dropApiConfig();
+    vi.stubGlobal("fetch", slowFetch(5));
+
+    const first = request("GET", "/api/v1/effects");
+    const failed = expect(first).rejects.toThrow(/did not answer within/);
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 50);
+    await failed;
+
+    // "Try again": the tray answers now, and the request must reach it. It must not wait out
+    // another ten seconds on the lookup that never finished.
+    const second = request("GET", "/api/v1/effects");
+    const ok = expect(second).resolves.toBeTruthy();
+    await vi.advanceTimersByTimeAsync(100);
+    await ok;
+    expect(lookups).toBe(2);
+  });
+
   it("gives up on a body that never finishes", async () => {
     vi.useFakeTimers();
     // The headers arrive, and then nothing: the body is read under the same deadline.
@@ -135,6 +168,16 @@ describe("the request deadline", () => {
     const call = request("GET", "/api/v1/effects");
     const settled = expect(call).rejects.toThrow(/did not answer within/);
     await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 50);
+    await settled;
+  });
+
+  it("does not give up on a zone resize at the default deadline", async () => {
+    vi.useFakeTimers();
+    // OpenRGB is slow to answer the resize and the enumeration after it: 12 s in all.
+    vi.stubGlobal("fetch", slowFetch(12_000));
+    const call = request("PATCH", "/api/v1/devices/openrgb%3A0/zones/1", { led_count: 30 });
+    const settled = expect(call).resolves.toBeTruthy();
+    await vi.advanceTimersByTimeAsync(12_000);
     await settled;
   });
 
@@ -159,6 +202,8 @@ describe("the deadlines of the routes", () => {
     expect(EFFECT_IMPORT_TIMEOUT_MS).toBe(60_000);
     expect(CONFIG_TRANSFER_TIMEOUT_MS).toBe(60_000);
     expect(DEVICE_RESCAN_TIMEOUT_MS).toBe(30_000);
+    // 4 stalled replies x 5 s (OpenRGB's REPLY_TIMEOUT) = 20 s, and half again as margin.
+    expect(ZONE_RESIZE_TIMEOUT_MS).toBe(30_000);
   });
 
   it("gives the slow routes their own deadline and the rest the short one", () => {
@@ -169,7 +214,12 @@ describe("the deadlines of the routes", () => {
     expect(deadlineFor("/api/v1/config/export")).toBe(CONFIG_TRANSFER_TIMEOUT_MS);
     expect(deadlineFor("/api/v1/config/import")).toBe(CONFIG_TRANSFER_TIMEOUT_MS);
     expect(deadlineFor("/api/v1/devices?rescan=1")).toBe(DEVICE_RESCAN_TIMEOUT_MS);
+    // The resize of a zone waits on OpenRGB while it holds the adapter: it has its own deadline.
+    expect(deadlineFor("/api/v1/devices/openrgb%3A0/zones/2")).toBe(ZONE_RESIZE_TIMEOUT_MS);
     // Everything else is short: the daemon answers in well under a second.
+    // The delete of a display waits for one pass of the display task (about 1.6 s): the short
+    // deadline covers it, and a longer one would be a claim nothing supports.
+    expect(deadlineFor("/api/v1/displays/chione")).toBe(REQUEST_TIMEOUT_MS);
     expect(deadlineFor("/api/v1/status")).toBe(REQUEST_TIMEOUT_MS);
     expect(deadlineFor("/api/v1/effects")).toBe(REQUEST_TIMEOUT_MS);
     expect(deadlineFor("/api/v1/devices")).toBe(REQUEST_TIMEOUT_MS);
