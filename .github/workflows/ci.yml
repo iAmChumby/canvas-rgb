@@ -38,6 +38,16 @@ jobs:
         working-directory: app/web
         run: npm ci && npm run build # build runs typecheck, lint and next build
 
+      # The phone's bottom nav, measured in a real browser: jsdom has no layout, so it cannot see a
+      # label pushed off the edge (#42). Playwright comes from tools/poison-compare/js; the runner's
+      # own Chrome stands in for a downloaded Chromium.
+      - name: Install Playwright for the nav check
+        working-directory: tools/poison-compare/js
+        run: npm ci
+
+      - name: Check the phone nav
+        run: node tools/nav-check.mjs
+
       - name: Test the editor
         working-directory: app/web
         run: npm test # vitest, jsdom

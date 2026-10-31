@@ -2482,6 +2482,7 @@ button.chip:hover {
     height: var(--rail-h);
     flex-direction: row;
     justify-content: space-around;
+    gap: 0;
     padding: var(--s1) var(--s2);
     border-top: 1px solid var(--line);
     background: var(--panel);
@@ -2498,14 +2499,39 @@ button.chip:hover {
     display: none;
   }
 
+  /* Seven pages do not fit in 360 px with their words: Settings alone is 54 px wide at 14 px.
+     The quiet links share the width as icons, and the active page keeps its name, so the word
+     that is drawn is always drawn whole. min-width: 0 lets a quiet link be narrower than its
+     label was: a flex item stops at its content's width unless told otherwise, which is what
+     pushed the last links off the right edge. */
   .rail-link {
     flex-direction: column;
     justify-content: center;
     gap: 2px;
     height: 56px;
     flex: 1 1 0;
+    min-width: 0;
     padding: var(--s1);
     font-size: var(--t14);
+  }
+
+  .rail-link[aria-current="page"] {
+    flex: 0 0 auto;
+    padding: var(--s1) var(--s2);
+  }
+
+  /* The name stays in the page for screen readers; only the active link draws it. */
+  .rail-link:not([aria-current="page"]) .rail-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+
+  .rail-link .rail-label {
+    white-space: nowrap;
   }
 
   .rail-marker {
