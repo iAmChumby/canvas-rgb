@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::thread::JoinHandle;
-use std::time::SystemTime;
 
 use canvas_proto::tauri::{CheckFailReason, UpdateInfo, UpdatePhase, UpdateState};
 use semver::Version;
@@ -222,6 +221,9 @@ enum Launch {
     NoHandle,
     /// Starts a harmless real program and hands over its process handle.
     Process,
+    /// As `Process`, and writes the installer's report while it "runs": after the tray stamped the
+    /// start, as the real installer does.
+    ProcessWithReport(&'static str),
     Declined,
     Fails,
 }
@@ -281,6 +283,7 @@ fn harness(current: &str, pubkey_file: &str, how: Launch) -> Harness {
 
     let seen = LaunchSeen::default();
     let (seen2, state_path) = (seen.clone(), settings.state_path.clone());
+    let report_path = settings.result_path.clone();
     let stub = dir.path().join("stub.exe");
     #[cfg(windows)]
     {
@@ -297,6 +300,10 @@ fn harness(current: &str, pubkey_file: &str, how: Launch) -> Harness {
             Launch::Starts => Ok::<Started, RunError>(Some(launch::ProcessHandle(0))),
             Launch::NoHandle => Ok(None),
             Launch::Process => spawn_stub(&stub),
+            Launch::ProcessWithReport(report) => {
+                std::fs::write(&report_path, report).map_err(|e| RunError::Failed(e.to_string()))?;
+                spawn_stub(&stub)
+            }
             Launch::Declined => Err(RunError::Declined),
             Launch::Fails => Err(RunError::Failed("boom".into())),
         }
@@ -407,6 +414,7 @@ fn state_file_round_trips() {
         skipped_version: Some("0.1.1".into()),
         snoozed_at: Some("2026-10-29T13:00:00Z".into()),
         pending: Some(info("0.1.2")),
+        pending_since_ms: Some(1_790_000_000_000),
         updated_to: Some(info("0.1.0")),
     };
     state::save(&path, &stored).unwrap();
@@ -1153,17 +1161,15 @@ fn the_tray_waits_for_a_real_process_and_then_reads_the_installers_report() {
             "Installed, but the old canvas-rgb is still running. Quit it and start it again.",
         ),
     ] {
-        let h = harness("0.1.0", "test.key.pub", Launch::Process);
+        // The report is written by the launcher, after the tray stamped the start, as the real
+        // installer does; a file already there before the start would be a previous run's.
+        let how = match report {
+            Some(report) => Launch::ProcessWithReport(report),
+            None => Launch::Process,
+        };
+        let h = harness("0.1.0", "test.key.pub", how);
         good_release(&h);
         h.check(true);
-        if let Some(report) = report {
-            let path = h.dir.path().join("update-result.json");
-            std::fs::write(&path, report).unwrap();
-            // The installer writes its report while it runs, after the tray started it: a minute
-            // ahead stands in for that (an older file is a previous run's and is ignored).
-            let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-            file.set_modified(SystemTime::now() + Duration::from_secs(60)).unwrap();
-        }
         let update = h.ctl.begin_install().unwrap();
         let s = tauri::async_runtime::block_on(h.ctl.run_install(&update));
         assert_eq!(s.phase, UpdatePhase::InstallFailed { message: want.into() });
@@ -1451,7 +1457,7 @@ fn a_setup_that_ends_cancelled_with_no_result_is_declined_not_failed() {
     h.check(true);
     assert_eq!(h.install().phase, UpdatePhase::Installing);
     assert!(h.stored().pending.is_some());
-    h.ctl.settle_after_installer(Some(launch::SETUP_CANCELLED_CODE), SystemTime::now());
+    h.ctl.settle_after_installer(Some(launch::SETUP_CANCELLED_CODE));
     assert_eq!(h.ctl.state().phase, UpdatePhase::Declined);
     assert_eq!(h.stored().pending, None);
 }
@@ -1462,7 +1468,7 @@ fn a_setup_that_ends_any_other_way_is_settled_from_its_result() {
     good_release(&h);
     h.check(true);
     h.install();
-    h.ctl.settle_after_installer(Some(4), SystemTime::now());
+    h.ctl.settle_after_installer(Some(4));
     assert!(matches!(h.ctl.state().phase, UpdatePhase::InstallFailed { .. }), "{:?}", h.ctl.state().phase);
 }
 
@@ -1487,10 +1493,9 @@ fn a_decline_is_declined_even_with_a_stale_ok_result_from_the_last_update() {
         h.check(true);
         h.install();
         let pending = h.stored().pending.unwrap().version;
-        let since = std::time::SystemTime::now() - Duration::from_secs(60);
         let version = if older_version { "0.0.9".to_string() } else { pending };
         plant_result(&h, &version, true, age);
-        h.ctl.settle_after_installer(Some(launch::SETUP_CANCELLED_CODE), since);
+        h.ctl.settle_after_installer(Some(launch::SETUP_CANCELLED_CODE));
         assert_eq!(h.ctl.state().phase, UpdatePhase::Declined, "stale {version} age {age:?}");
         assert_eq!(h.stored().pending, None);
     }
@@ -1503,11 +1508,37 @@ fn a_fresh_result_for_this_version_is_read_not_called_a_decline() {
     h.check(true);
     h.install();
     let pending = h.stored().pending.unwrap().version;
-    let since = std::time::SystemTime::now() - Duration::from_secs(60);
     plant_result(&h, &pending, true, Duration::ZERO);
-    h.ctl.settle_after_installer(Some(launch::SETUP_CANCELLED_CODE), since);
+    h.ctl.settle_after_installer(Some(launch::SETUP_CANCELLED_CODE));
     match h.ctl.state().phase {
         UpdatePhase::InstallFailed { message } => assert!(message.contains("still running"), "{message}"),
         other => panic!("the fresh result was not used: {other:?}"),
+    }
+}
+
+/// The tray restarts while the pending record is still there (it died during the prompt, or the
+/// install is still running): a result left by an earlier run must not be read as this one's.
+#[test]
+fn after_a_restart_a_result_older_than_the_start_is_ignored() {
+    for (age, want) in [
+        (Duration::from_secs(3600), "The installer ended without finishing."),
+        (Duration::ZERO, "Installed, but the old canvas-rgb is still running. Quit it and start it again."),
+    ] {
+        let h = harness("0.1.0", "test.key.pub", Launch::Starts);
+        good_release(&h);
+        h.check(true);
+        h.install();
+        let pending = h.stored().pending.unwrap().version;
+        assert!(h.stored().pending_since_ms.is_some(), "the start is stored with the pending record");
+        // A previous run's ok:true report for this version (age an hour), or one written just now.
+        std::thread::sleep(Duration::from_millis(30));
+        if age == Duration::ZERO {
+            plant_result(&h, &pending, true, Duration::ZERO);
+        } else {
+            plant_result(&h, &pending, true, age);
+        }
+        let ctl = Arc::new(Controller::new(h.ctl.settings.clone(), v("0.1.0"), Arc::new(|_: &Path| Ok(None)), Box::new(|_| {})));
+        ctl.reconcile_pending();
+        assert_eq!(ctl.state().phase, UpdatePhase::InstallFailed { message: want.into() }, "age {age:?}");
     }
 }

@@ -15,7 +15,7 @@ mod tests;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use canvas_proto::tauri::{
     CheckFailReason, UpdateInfo, UpdatePhase, UpdateState, AFTER_UPDATE_ARG, EVT_UPDATE_STATE,
@@ -109,6 +109,10 @@ fn read_fresh_result(path: &Path, since: SystemTime) -> Option<InstallResult> {
         return None;
     }
     read_result(path)
+}
+
+fn since_of(ms: Option<u64>) -> Option<SystemTime> {
+    ms.map(|ms| UNIX_EPOCH + Duration::from_millis(ms))
 }
 
 /// How a start with a `pending` version ends. Only the running version and the installer's own
@@ -263,18 +267,16 @@ impl Controller {
     /// sweeps the downloaded installer away. Runs at start, and after an installer the tray
     /// outlived.
     pub fn reconcile_pending(&self) {
-        self.reconcile_since(None);
-    }
-
-    /// [`reconcile_pending`] for an installer this tray started at `since`: a result file older
-    /// than that belongs to an earlier run and is ignored.
-    fn reconcile_since(&self, since: Option<SystemTime>) {
+        // The moment the installer was started is stored with `pending`, so a result file left by an
+        // earlier run is ignored here too, also after the tray restarted.
+        let since = since_of(self.lock().stored.pending_since_ms);
         let result = match since {
             None => read_result(&self.settings.result_path),
             Some(t) => read_fresh_result(&self.settings.result_path, t),
         };
         self.change(|i| {
             let Some(pending) = i.stored.pending.take() else { return };
+            i.stored.pending_since_ms = None;
             match settle(&pending.version, &self.current.to_string(), result.as_ref()) {
                 Settled::Updated => {
                     i.stored.updated_to = Some(pending);
@@ -302,22 +304,29 @@ impl Controller {
     /// prompt (#28), so a Setup that exits with "cancelled before install" and wrote no result file
     /// was declined at that prompt: nothing started, no pending version, the Declined phase. Any
     /// other end is settled from the result file as before.
-    /// `since` is when this tray started Setup: only a result written after it counts, and only for
-    /// the pending version (a stale `ok` from the previous update must not turn a decline into a
-    /// failure).
-    pub fn settle_after_installer(&self, exit_code: Option<u32>, since: SystemTime) {
-        let pending = self.lock().stored.pending.as_ref().map(|p| p.version.clone());
-        let fresh = read_fresh_result(&self.settings.result_path, since)
-            .filter(|r| pending.as_deref() == Some(r.version.as_str()));
+    /// Only a result written after the tray started Setup counts (`pending_since_ms`), and only for
+    /// the pending version: a stale `ok` from the previous update must not turn a decline into a
+    /// failure.
+    pub fn settle_after_installer(&self, exit_code: Option<u32>) {
+        let (pending, since) = {
+            let inner = self.lock();
+            (inner.stored.pending.as_ref().map(|p| p.version.clone()), since_of(inner.stored.pending_since_ms))
+        };
+        let fresh = match since {
+            Some(t) => read_fresh_result(&self.settings.result_path, t),
+            None => read_result(&self.settings.result_path),
+        }
+        .filter(|r| pending.as_deref() == Some(r.version.as_str()));
         if exit_code == Some(launch::SETUP_CANCELLED_CODE) && fresh.is_none() {
             log::append("update: setup ended with code 2 and no result: the permission prompt was declined");
             self.change(|i| {
                 i.stored.pending = None;
+                i.stored.pending_since_ms = None;
                 i.phase = UpdatePhase::Declined;
             });
             return;
         }
-        self.reconcile_since(Some(since));
+        self.reconcile_pending();
     }
 
     // ---- the person's choices ----
@@ -462,7 +471,6 @@ impl Controller {
     /// Downloads, checks and starts the installer for an update from [`begin_install`]. Ends when
     /// the installer has been started (and, if this tray outlives it, when it has ended).
     pub async fn run_install(self: &Arc<Self>, update: &Update) -> UpdateState {
-        let since = SystemTime::now();
         let (state, started) = self.start_install(update).await;
         if let Some(handle) = started {
             // Normally the installer stops this tray. If it ends first, its result file says why.
@@ -471,7 +479,7 @@ impl Controller {
                 .await
                 .ok()
                 .flatten();
-            self.settle_after_installer(code, since);
+            self.settle_after_installer(code);
             return self.state();
         }
         state
@@ -610,6 +618,8 @@ impl Controller {
                 // Before the start: the tray dies during the install, and the next start reads this.
                 self.change(|i| {
                     i.stored.pending = Some(pending.clone());
+                    // Stamped before the start: the installer writes its result after this.
+                    i.stored.pending_since_ms = SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_millis() as u64);
                     i.phase = UpdatePhase::WaitingForUac;
                 });
                 (self.launcher)(p)
@@ -633,6 +643,7 @@ impl Controller {
                 // Nothing started: no pending version.
                 let state = self.change(|i| {
                     i.stored.pending = None;
+                    i.stored.pending_since_ms = None;
                     if matches!(phase, UpdatePhase::InstallFailed { .. }) {
                         i.install_failed_for = Some(pending.version.clone());
                     }
