@@ -1,6 +1,6 @@
 //! The `cause:process-launch` class check (docs/bug-classes.md; #6 and #28).
 //!
-//! Three rules, run over the repo's own source on every `cargo test --workspace` (so in CI):
+//! Four rules, run over the repo's own source on every `cargo test --workspace` (so in CI):
 //!
 //! 1. Nothing outside `crates/canvas-svc` starts `canvas-rgbd.exe`. The service launches the daemon
 //!    in the user's session with no window; any other path skips those rules (#6). A line that names
@@ -9,8 +9,15 @@
 //! 2. No code asks Windows to start a process elevated with an elevating `ShellExecute` verb or
 //!    `Start-Process -Verb RunAs`, except the commented allow-list below (#28: setup started
 //!    elevated relaunched the tray elevated).
-//! 3. Every place that starts a process says which token it runs with: a comment containing
-//!    `token:` on the same line or in the 8 lines above it.
+//! 3. Every place that starts a process says which token it runs with: a comment (not code: a
+//!    `let token: u32` does not count) containing `token:` on the same line or in the 8 lines above it.
+//! 4. A file outside `canvas-svc` that names the daemon (`canvas-rgbd`, `DaemonExe`, `daemon_path`,
+//!    in code, or in the `[Code]` section of the Inno script) may not start any process at all unless a
+//!    line-level allow-list entry says why. This catches `Command::new(&daemon_path)`, where rule 1's
+//!    "daemon name and launch on one line" cannot see the daemon. Residual gap, accepted: a launch of
+//!    the daemon through a path read from a config file or built in a file that never names the daemon
+//!    is invisible to a text scan; rule 3 still forces the author to write which token it runs with,
+//!    and review of that line is where it would be caught.
 //!
 //! The scan reads `*.rs`, `*.ps1`, `*.iss`, `*.cmd` and `*.bat` under `crates/`, `app/src-tauri/`,
 //! `installer/` and `tools/`. Comment lines never count as a launch. Test files are skipped (a
@@ -21,7 +28,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Names that mean "the daemon".
-const DAEMON_NAMES: &[&str] = &["canvas-rgbd", "canvas_rgbd", "DaemonExe", "RunKeyDaemon"];
+const DAEMON_NAMES: &[&str] = &["canvas-rgbd", "canvas_rgbd", "DaemonExe", "RunKeyDaemon", "daemon_path"];
 
 /// Things that start a process or register one to start at logon. `Exec(` does not match
 /// `ExecAsOriginalUser(`; both are listed.
@@ -55,26 +62,69 @@ const PROCESS_STARTS: &[&str] = &[
     "ShellExecuteW(",
 ];
 
-/// Spellings of an elevating start.
-const ELEVATING: &[&str] = &[
-    "\"runas\"",
-    "'runas'",
-    "-Verb RunAs",
-    "-Verb 'RunAs'",
-    "-Verb \"RunAs\"",
-];
+/// True when the line names the elevating verb in any spelling: `"runas"`, `-Verb RunAs`,
+/// `-Verb:RunAs`, `-verb runas`, `Verb = 'RunAs'`, `Verb='runas'`, `w!("RunAs")`. Case-insensitive,
+/// and `runas` must be a whole word, so the Inno flag `runasoriginaluser` is not a hit.
+fn names_elevation(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    let bytes = lower.as_bytes();
+    let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut from = 0;
+    while let Some(at) = lower[from..].find("runas") {
+        let start = from + at;
+        let end = start + "runas".len();
+        let before_ok = start == 0 || !word(bytes[start - 1]);
+        let after_ok = end >= bytes.len() || !word(bytes[end]);
+        if before_ok && after_ok {
+            return true;
+        }
+        from = end;
+    }
+    false
+}
 
-/// Rule 2 allow-list: (path suffix, why). Each entry is the script installer elevating its own
+/// Rule 2 allow-list, one entry per line: (path suffix, text the line must contain, why). A second
+/// elevating line in the same file is a finding. Each entry is the script installer elevating its own
 /// PowerShell child once (the machine-wide half); the per-user half then runs as the person, in a
 /// separate non-elevated process, and nothing here relaunches the tray.
-const ELEVATION_ALLOWED: &[(&str, &str)] = &[
+const ELEVATION_ALLOWED: &[(&str, &str, &str)] = &[
     (
         "installer/setup.ps1",
+        "Start-Process -FilePath 'powershell.exe' -ArgumentList $childArgs -Verb RunAs",
         "script install: elevates its machine-wide child (setup-elevated.ps1)",
     ),
     (
         "installer/uninstall.ps1",
+        "Start-Process -FilePath 'powershell.exe' -ArgumentList $childArgs -Verb RunAs",
         "script uninstall: elevates its machine-wide child (uninstall-elevated.ps1)",
+    ),
+];
+
+/// Rule 4 allow-list, one entry per line: (path suffix, text the line must contain, why). A process
+/// start in a file that also names the daemon, and is not the daemon.
+const DAEMON_FILE_STARTS_ALLOWED: &[(&str, &str, &str)] = &[
+    (
+        "installer/inno/canvas-rgb.iss",
+        "ExecAsOriginalUser(PsExe",
+        "RunPs runs installer PowerShell scripts, never the daemon",
+    ),
+    ("installer/inno/canvas-rgb.iss", "Exec(PsExe", "RunPs runs installer PowerShell scripts, never the daemon"),
+    (
+        "installer/inno/canvas-rgb.iss",
+        "ExecAsOriginalUser(ExpandConstant('{win}\\explorer.exe')",
+        "opens the PawnIO page in the person's browser",
+    ),
+    (
+        "installer/inno/canvas-rgb.iss",
+        "ExecAsOriginalUser(ExpandConstant('{app}\\canvas-rgb.exe')",
+        "starts the tray (canvas-rgb.exe), not the daemon",
+    ),
+    ("installer/inno/canvas-rgb.iss", "ExecAsOriginalUser(Exe, '--after-update'", "starts the tray again after a failure"),
+    ("installer/setup-elevated.ps1", "Start-Process @pa", "runs the signature-checked PawnIO installer"),
+    (
+        "installer/setup.ps1",
+        "Start-Process -FilePath 'powershell.exe' -ArgumentList $childArgs -Verb RunAs",
+        "elevates the machine-wide child script, not the daemon",
     ),
 ];
 
@@ -100,56 +150,102 @@ fn is_comment(trimmed: &str, ext: &str) -> bool {
     }
 }
 
+/// The comment part of a line (from its comment marker on), or `None` for pure code.
+fn comment_part<'a>(line: &'a str, ext: &str) -> Option<&'a str> {
+    let trimmed = line.trim_start();
+    if is_comment(trimmed, ext) {
+        return Some(trimmed);
+    }
+    let marker = match ext {
+        "rs" => line.find("//"),
+        "ps1" => line.find('#'),
+        "iss" => [line.find("//"), line.find('{')].into_iter().flatten().min(),
+        "cmd" | "bat" => line.to_lowercase().find("& rem ").or_else(|| line.find("&::")),
+        _ => None,
+    }?;
+    Some(&line[marker..])
+}
+
+fn says_token(line: &str, ext: &str) -> bool {
+    comment_part(line, ext).is_some_and(|c| c.contains("token:"))
+}
+
+fn allowed(list: &[(&str, &str, &str)], rel: &str, line: &str) -> bool {
+    list.iter().any(|(suffix, text, _why)| rel.ends_with(suffix) && line.contains(text))
+}
+
 /// Scans one file's text. `rel` is the repo-relative path with `/` separators.
 fn scan_text(rel: &str, text: &str) -> Vec<Finding> {
     let ext = rel.rsplit('.').next().unwrap_or("");
     let in_service = rel.starts_with("crates/canvas-svc/");
     let lines: Vec<&str> = text.lines().collect();
-    let mut found = Vec::new();
+
+    // Which lines are code that names the daemon (rule 4's "this file names the daemon"). In the
+    // Inno script only [Code] counts: [Files] must list canvas-rgbd.exe to ship it.
     let mut section = String::new();
-    for (i, raw) in lines.iter().enumerate() {
+    let mut sections = Vec::with_capacity(lines.len());
+    for raw in &lines {
         let trimmed = raw.trim();
         if ext == "iss" && trimmed.starts_with('[') && trimmed.ends_with(']') {
             section = trimmed.to_string();
         }
+        sections.push(section.clone());
+    }
+    let code_line = |i: usize| {
+        let t = lines[i].trim();
+        !t.is_empty() && !is_comment(t, ext) && !TEXT_LINES.iter().any(|x| lines[i].contains(x))
+    };
+    let file_names_daemon = (0..lines.len()).any(|i| {
+        code_line(i)
+            && (ext != "iss" || sections[i] == "[Code]")
+            && DAEMON_NAMES.iter().any(|n| lines[i].contains(n))
+    });
+
+    let mut found = Vec::new();
+    for (i, raw) in lines.iter().enumerate() {
+        let trimmed = raw.trim();
         if trimmed.is_empty() || is_comment(trimmed, ext) {
             continue;
         }
-        let at = |rule: u8| Finding {
-            file: rel.to_string(),
-            line: i + 1,
-            rule,
-            text: trimmed.to_string(),
-        };
+        let at = |rule: u8| Finding { file: rel.to_string(), line: i + 1, rule, text: trimmed.to_string() };
+        let section = sections[i].as_str();
         let names_daemon = DAEMON_NAMES.iter().any(|n| raw.contains(n));
+        let is_text = TEXT_LINES.iter().any(|t| raw.contains(t));
+        let starts_process = PROCESS_STARTS.iter().any(|p| raw.contains(p));
 
         // Rule 1: only the service starts the daemon.
+        let mut rule1 = false;
         if !in_service && names_daemon {
             let launches = LAUNCHES.iter().any(|l| raw.contains(l));
             let run_entry = ext == "iss" && section == "[Run]";
             if launches || run_entry {
                 found.push(at(1));
+                rule1 = true;
             }
         }
 
-        // Rule 2: no elevating start, unless allow-listed.
-        if ELEVATING.iter().any(|e| raw.contains(e))
-            && !TEXT_LINES.iter().any(|t| raw.contains(t))
-            && !ELEVATION_ALLOWED
-                .iter()
-                .any(|(suffix, _)| rel.ends_with(suffix))
-        {
+        // Rule 2: no elevating start, unless that exact line is allow-listed.
+        if names_elevation(raw) && !is_text && !allowed(ELEVATION_ALLOWED, rel, raw) {
             found.push(at(2));
         }
 
-        // Rule 3: a process start names its token.
-        if PROCESS_STARTS.iter().any(|p| raw.contains(p))
-            && !TEXT_LINES.iter().any(|t| raw.contains(t))
-        {
+        // Rule 3: a process start names its token, in a comment.
+        if starts_process && !is_text {
             let from = i.saturating_sub(8);
-            if !lines[from..=i].iter().any(|l| l.contains("token:")) {
+            if !lines[from..=i].iter().any(|l| says_token(l, ext)) {
                 found.push(at(3));
             }
+        }
+
+        // Rule 4: no process start in a file that names the daemon.
+        if !in_service
+            && starts_process
+            && !is_text
+            && !rule1
+            && file_names_daemon
+            && !allowed(DAEMON_FILE_STARTS_ALLOWED, rel, raw)
+        {
+            found.push(at(4));
         }
     }
     found
@@ -229,6 +325,7 @@ fn only_the_service_starts_the_daemon_and_every_launch_names_its_token() {
             let what = match f.rule {
                 1 => "starts or registers canvas-rgbd outside canvas-svc (only the service launches the daemon)",
                 2 => "starts a process with an elevating verb (start setup unelevated and let it raise itself)",
+                4 => "starts a process in a file that names the daemon (only the service launches it; allow-list the line if it is not the daemon)",
                 _ => "starts a process without a `token:` comment saying which token it runs with",
             };
             format!("{}:{}: {what}: {}", f.file, f.line, f.text)
@@ -293,7 +390,7 @@ fn rule_2_catches_the_elevated_tray_launch_of_issue_28() {
     assert!(scan_text("docs/x.ps1", hand).iter().any(|f| f.rule == 2));
     assert!(scan_text(
         "installer/setup.ps1",
-        "$p = Start-Process -FilePath 'powershell.exe' -Verb RunAs # token: elevated"
+        "$p = Start-Process -FilePath 'powershell.exe' -ArgumentList $childArgs -Verb RunAs # token: elevated"
     )
     .is_empty());
 }
@@ -315,4 +412,72 @@ fn rule_3_wants_a_token_comment_within_eight_lines() {
         "\n".repeat(9)
     );
     assert_eq!(scan_text("crates/a/src/lib.rs", &far).len(), 1);
+}
+
+// ---- the scanner against the evasions a reviewer found ----
+
+fn rules(rel: &str, text: &str) -> Vec<u8> {
+    scan_text(rel, text).iter().map(|f| f.rule).collect()
+}
+
+#[test]
+fn rule_2_matches_every_spelling_of_the_elevating_verb() {
+    let spellings = [
+        "Start-Process x -Verb:RunAs",
+        "Start-Process x -verb runas",
+        "Start-Process x -VERB 'RUNAS'",
+        "$a = @{ Verb = 'RunAs' }",
+        "$a = @{ Verb='runas' }",
+        "$a = @{ Verb = \"RunAs\" }",
+        "lpVerb: w!(\"RunAs\"),",
+        "let verb = \"RUNAS\";",
+    ];
+    for line in spellings {
+        let ext = if line.contains("w!") || line.contains("let ") { "crates/a/src/x.rs" } else { "tools/x.ps1" };
+        assert!(rules(ext, line).contains(&2), "missed: {line}");
+    }
+    // Not the elevating verb: an Inno flag that merely contains the letters.
+    assert!(rules("installer/inno/canvas-rgb.iss", "Filename: \"{app}\\canvas-rgb.exe\"; Flags: nowait runasoriginaluser").is_empty());
+}
+
+#[test]
+fn rule_3_needs_token_in_a_comment_not_in_code() {
+    let code = "fn f() {\n    let token: u32 = 1;\n    let c = std::process::Command::new(\"x\");\n}";
+    assert_eq!(rules("crates/a/src/lib.rs", code), vec![3]);
+    let trailing = "fn f() {\n    let c = std::process::Command::new(\"x\"); // token: the user's\n}";
+    assert!(rules("crates/a/src/lib.rs", trailing).is_empty());
+    let ps = "$token: = 1\nStart-Process x";
+    assert_eq!(rules("tools/x.ps1", ps), vec![3]);
+    let ps_ok = "# token: the person's\nStart-Process x";
+    assert!(rules("tools/x.ps1", ps_ok).is_empty());
+    let iss_ok = "{ token: the original user's }\nExec(A, B, C, SW_HIDE, ewWait, Code);";
+    assert!(rules("installer/inno/canvas-rgb.iss", iss_ok).is_empty());
+    let iss_code = "[Code]\nvar token: Integer;\nExec(A, B, C, SW_HIDE, ewWait, Code);";
+    assert_eq!(rules("installer/inno/canvas-rgb.iss", iss_code), vec![3]);
+}
+
+#[test]
+fn the_elevation_allow_list_is_per_line_not_per_file() {
+    let allowed_line = "# token: elevated\n$p = Start-Process -FilePath 'powershell.exe' -ArgumentList $childArgs -Verb RunAs -Wait";
+    assert!(rules("installer/setup.ps1", allowed_line).is_empty());
+    let second = format!("{allowed_line}\n# token: elevated\nStart-Process -FilePath 'tray.exe' -Verb RunAs");
+    assert_eq!(rules("installer/setup.ps1", &second), vec![2]);
+}
+
+#[test]
+fn rule_4_catches_a_daemon_launch_through_a_variable_path() {
+    let sneaky = "struct S { daemon_path: PathBuf }\nfn go(s: &S) {\n    // token: the user's\n    let p = &s.daemon_path;\n    let c = Command::new(p);\n}";
+    assert_eq!(rules("crates/canvas-daemon/src/x.rs", sneaky), vec![4]);
+    // Naming the daemon on the launching line itself is rule 1.
+    assert_eq!(rules("crates/canvas-daemon/src/x.rs", "// token: x\nCommand::new(&s.daemon_path);"), vec![1]);
+    // The service is the one place that may.
+    assert!(rules("crates/canvas-svc/src/x.rs", sneaky).is_empty());
+    // A file that never names the daemon is not flagged by rule 4 (the accepted residual gap above).
+    let other = "fn go() {\n    // token: the user's\n    let c = Command::new(\"node\");\n}";
+    assert!(rules("tools/y/src/main.rs", other).is_empty());
+    // Inno: [Files] listing the exe does not make every Exec a finding; naming it in [Code] does.
+    let files = "[Files]\nSource: \"x\\canvas-rgbd.exe\"; DestDir: \"{app}\"\n[Code]\n// token: x\nExec(A, B, C, SW_HIDE, ewWait, Code);";
+    assert!(rules("installer/inno/canvas-rgb.iss", files).is_empty());
+    let code = "[Code]\nDaemon := '{app}\\canvas-rgbd.exe';\n// token: x\nExec(Daemon, B, C, SW_HIDE, ewWait, Code);";
+    assert_eq!(rules("installer/inno/canvas-rgb.iss", code), vec![4]);
 }

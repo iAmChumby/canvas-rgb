@@ -77,8 +77,8 @@ next step needs breaks what that step does.
   and fails with `file:line` when (1) anything outside `canvas-svc` starts or registers
   `canvas-rgbd.exe` (a process start, a Run-key write, an Inno `[Run]` entry), (2) any code starts a
   process with an elevating verb (`runas`, `-Verb RunAs`; the allow-list holds the two script-install
-  scripts that elevate only their own machine-wide child), or (3) a process start has no `token:`
-  comment within 8 lines above saying which token it runs with. A new launch site needs that comment;
+  scripts that elevate only their own machine-wide child), (3) a process start has no `token:`
+  comment (a real comment, not code) within 8 lines above saying which token it runs with, or (4) a file that names the daemon starts any process (the daemon launched through a variable path). Allow-list entries are per line. A new launch site needs the comment;
   that is the point.
 - **Sibling search** (every area): the tray starts one process, the installer (`update/launch.rs`;
   fixed, #28). The Inno script's `Exec` calls are `RunPs` (machine script as Setup's admin token, user

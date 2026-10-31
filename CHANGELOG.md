@@ -10,7 +10,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 - Updating from the tray brings the tray back running as you, not elevated: the tray starts Setup without administrator rights and Setup asks for permission itself, so the relaunched tray no longer refuses to run. If you decline the permission prompt, the tray says so instead of reporting a failed install. (#28)
 - The daemon no longer opens a console window at logon, and no longer runs twice. Setup stops writing the logon entry that started it from Explorer and deletes the one older installs left behind, and the daemon is a windowless program. (#6)
-- The fan service waits for you to log on instead of counting "no user yet" as three crashes, so the daemon starts at logon after a reboot instead of staying down with the lights black. (#6)
+- The fan service waits for you to log on instead of counting "no user yet" as three crashes, so the daemon starts at logon after a reboot instead of staying down with the lights black. (#6) A switch to another user, or a logoff, moves the daemon to the new session without counting a crash. (#6)
 - In the layout editor, the part under the pointer is the one that moves: parts inside the case, offline parts and parts near its edge no longer drag the whole case, and moving the case carries everything inside it. Alt-click picks the part underneath. (#3)
 - Uninstalling with an unreadable SignalRGB restore record says so, keeps the record, finishes the other steps (in the Inno uninstaller too) and prints the service name and command to restore SignalRGB by hand, instead of skipping the restore and saying it finished. (#24)
 
