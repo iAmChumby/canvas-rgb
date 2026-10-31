@@ -581,6 +581,12 @@
   border-radius: var(--r-md);
 }
 
+/* The title of an error or an empty card in a load frame is read text: 14 px at the least
+   (ui-taste). The loaded panels keep the 13 px of the case print. */
+.load-frame .load-note .panel-title {
+  font-size: var(--t14);
+}
+
 /* A placeholder panel as tall as the panel it stands for: its height is set per panel and per width
    (--sh-w on a wide page, --sh-n on a phone), and its rows spread over it. */
 .skel-body {

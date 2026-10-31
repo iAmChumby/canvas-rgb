@@ -312,11 +312,12 @@ export function DevicesView() {
 
         <div className="stack" style={{ position: "sticky", top: 16 }}>
           {devices === null ? (
-            devicesError ? null : (
+            devicesError || total === 0 ? null : (
               // The walker points at a device that is still coming: it shows a placeholder, not
               // its own words. When the list could not be read there is no device to point at, so
               // the column says nothing: a grey skeleton next to an error reads as a page that
-              // is still loading.
+              // is still loading. The same holds for a machine the daemon says has no devices (a
+              // known zero): there is nothing to point at, so the column draws nothing.
               <Panel>
                 <div className="stack" style={{ gap: 8 }}>
                   <Skeleton width="54%" height={16} />

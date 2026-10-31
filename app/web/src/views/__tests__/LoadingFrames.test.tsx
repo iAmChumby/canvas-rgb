@@ -159,11 +159,9 @@ describe("the retry", () => {
     expect(frame()?.dataset.state).toBe("loading");
     expect(screen.queryByText("The effects could not be read")).toBeNull();
     expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
-    // The hold is awaited: it does not land in a later test, and nothing is left pending.
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 400));
-    });
-    expect(getSnap().pending).toEqual([]);
+    // The hold is awaited on its condition, not on a guessed sleep: it does not land in a later
+    // test, and nothing is left pending. The timeout is generous so a slow machine still passes.
+    await waitFor(() => expect(getSnap().pending).toEqual([]), { timeout: 5_000 });
   });
 
   it("keeps the gallery when a refresh fails after the list was read", async () => {
@@ -252,6 +250,19 @@ describe("the devices list", () => {
     render(<DevicesView />);
     await waitFor(() => expect(frame()?.dataset.state).toBe("loading"));
     expect(screen.queryAllByTestId("device-card")).toHaveLength(0);
+    // The walker has no device to point at either: the right column draws no placeholder.
+    expect(document.querySelectorAll(".devices-grid > .stack .skeleton")).toHaveLength(0);
+  });
+
+  it("draws the walker's placeholder while the number of devices is not known", async () => {
+    patchSnap({
+      status: { ...status, devices_connected: 0, devices_total: undefined as unknown as number },
+      devices: null,
+      devicesTotal: null,
+      devicesError: null,
+    });
+    render(<DevicesView />);
+    expect(document.querySelectorAll(".devices-grid > .stack .skeleton").length).toBeGreaterThan(0);
   });
 
   it("shows no grey placeholder beside the error", async () => {
