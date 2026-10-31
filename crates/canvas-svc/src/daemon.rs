@@ -198,7 +198,9 @@ impl DaemonSupervisor {
     }
 
     /// The same question for a daemon that is still running: a logoff is immediate, a move to
-    /// another console session only after it has held for `SESSION_SETTLE`.
+    /// another console session only after it has held for `SESSION_SETTLE`, and only to a session
+    /// with a user in it. "Switch user" puts the logon screen on the console (no user token there):
+    /// the daemon stays with the user it runs for until someone logs on in the new session.
     fn session_changed(&mut self, now: Instant) -> bool {
         let Some(was) = self.child_session else {
             self.pending_move = None;
@@ -208,7 +210,7 @@ impl DaemonSupervisor {
             return true;
         }
         match self.launcher.console_session() {
-            Some(c) if c != was => match self.pending_move {
+            Some(c) if c != was && self.launcher.session_alive(c) => match self.pending_move {
                 Some((target, since)) if target == c => now.saturating_duration_since(since) >= SESSION_SETTLE,
                 _ => {
                     self.pending_move = Some((c, now));
@@ -752,6 +754,26 @@ mod tests {
             now = run_ticks(&mut sup, now, 5);
         }
         assert_eq!(processes.spawns().len(), 8);
+        assert!(!sup.stopped());
+    }
+
+    /// "Switch user": the logon screen takes the console (a session with no user). The daemon of
+    /// the user who is still logged on keeps running; it moves once someone logs on there.
+    #[test]
+    fn a_console_on_the_logon_screen_does_not_take_the_daemon_away() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        sup.start(t0);
+        let pid = sup.daemon_pid().expect("the daemon runs in session 1");
+        processes.log_off(2);
+        processes.set_console(2);
+        let now = run_ticks(&mut sup, t0, 10);
+        assert_eq!(sup.daemon_pid(), Some(pid), "the healthy daemon of session 1 is not killed");
+        assert_eq!(processes.spawns().len(), 1);
+        processes.log_on(2);
+        let _ = run_ticks(&mut sup, now, 5);
+        assert_eq!(processes.spawns().len(), 2, "a user logged on in session 2: the daemon moves");
         assert!(!sup.stopped());
     }
 

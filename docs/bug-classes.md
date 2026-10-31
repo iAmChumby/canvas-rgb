@@ -75,7 +75,7 @@ next step needs breaks what that step does.
   program in release builds, so no path can show a console; and `crates/canvas-svc/tests/process_launch.rs`
   (part of `cargo test --workspace`, so CI) scans `crates/`, `app/src-tauri/`, `installer/` and `tools/`
   and fails with `file:line` when (1) anything outside `canvas-svc` starts or registers
-  `canvas-rgbd.exe` (a process start, a Run-key write, an Inno `[Run]` entry), (2) any code starts a
+  `canvas-rgbd.exe` through the calls it knows (PowerShell `&` and `start`, and a `.cmd` `start`, are not scanned: every `& tool` line would need a token note) (a process start, a Run-key write, an Inno `[Run]` entry), (2) any code starts a
   process with an elevating verb (`runas`, `-Verb RunAs`; the allow-list holds the two script-install
   scripts that elevate only their own machine-wide child), (3) a process start has no `token:`
   comment (a real comment, not code) within 8 lines above saying which token it runs with, or (4) a file that names the daemon starts any process (the daemon launched through a variable path). Allow-list entries are per line, and the scan fails on an entry that matches no line. A new launch site needs the comment;
