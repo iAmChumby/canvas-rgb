@@ -45,6 +45,12 @@ pub const RESUME_GRACE: Duration = Duration::from_secs(5);
 /// reached the service (the tick is 1 s; 30 s leaves room for a stalled machine).
 pub const TICK_GAP_RESUME: Duration = Duration::from_secs(30);
 
+/// A suspend with no resume holds fan writes at most this many ticks (1 s each). Ticks only run
+/// while the machine is awake, so 60 of them mean a resume notification never came; without the cap
+/// a missed resume would freeze the fans at their last duty with no temperature read, and the chip
+/// has no hardware watchdog (`HARDWARE_WATCHDOG`).
+pub const SUSPEND_HOLD_CAP_TICKS: u32 = 60;
+
 /// hardware_watchdog as settled from public sources (see the report): neither the nct6687d
 /// driver nor LibreHardwareMonitor's NCT677X handling reaches a chip watchdog register.
 pub const HARDWARE_WATCHDOG: Option<bool> = Some(false);
@@ -86,10 +92,12 @@ struct Slot {
 struct SleepState {
     /// Between a suspend event and the matching resume: no writes.
     suspended: bool,
+    /// Ticks seen since the suspend event; bounds the hold (`SUSPEND_HOLD_CAP_TICKS`).
+    held_ticks: u32,
     /// After a resume: no tick writes until this instant.
     grace_until: Option<Instant>,
     /// Headers to re-apply when the grace ends: those under manual control before the sleep, plus
-    /// any whose safety handback happened inside the window (retried once).
+    /// every header the user applied inside the window (held, not written, until then).
     reapply: BTreeSet<usize>,
     /// Wall-clock time of the previous tick, for the gap fallback.
     last_wall: Option<SystemTime>,
@@ -326,6 +334,13 @@ impl FanController {
         if ch >= self.slots.len() || !self.writes_allowed {
             return;
         }
+        if self.sleep.in_window(now) {
+            // Issue #29: a write during the resume transition is exactly what failed. The config is
+            // already saved; the header is applied when the window ends.
+            tracing::info!(channel = ch, "apply held until the resume grace ends");
+            self.sleep.reapply.insert(ch);
+            return;
+        }
         self.slots[ch].handed_back = false;
         self.slots[ch].override_reason = None;
         match self.desired(ch) {
@@ -334,7 +349,6 @@ impl FanController {
                 if self.slots[ch].manual_since.is_none() {
                     if let Err(reason) = self.engage(ch, now) {
                         self.hand_back(ch, reason);
-                        self.retry_after_grace(ch, now);
                         return;
                     }
                 }
@@ -390,6 +404,7 @@ impl FanController {
     /// last duty, and firmware takes over whatever it takes over.
     pub fn on_suspend(&mut self) {
         self.sleep.suspended = true;
+        self.sleep.held_ticks = 0;
         self.sleep.grace_until = None;
         let held = self.controlled();
         tracing::info!(headers = ?held, "suspend: fan writes paused");
@@ -416,17 +431,8 @@ impl FanController {
         std::mem::take(&mut self.sleep.resumed)
     }
 
-    /// A write that failed inside the suspend/resume window is not a verdict on the chip: firmware
-    /// may still own the controller. The header is back on BIOS (hand_back ran) and is re-applied
-    /// once when the window ends. A second failure then sticks as before.
-    fn retry_after_grace(&mut self, ch: usize, now: Instant) {
-        if self.sleep.in_window(now) {
-            tracing::info!(channel = ch, "handback inside the resume window: one retry after the grace");
-            self.sleep.reapply.insert(ch);
-        }
-    }
-
-    /// Re-applies the headers queued for the end of a grace window. One attempt each.
+    /// Re-applies the headers queued for the end of a grace window. One attempt each; a failure
+    /// here is a real failure and the handback sticks.
     fn reapply_after_grace(&mut self, now: Instant) {
         let queued = std::mem::take(&mut self.sleep.reapply);
         if queued.is_empty() {
@@ -491,7 +497,17 @@ impl FanController {
     /// [`FanController::tick`] with the wall clock passed in, so tests can move it.
     pub fn tick_at(&mut self, now: Instant, wall: SystemTime) {
         let gap = self.sleep.last_wall.and_then(|previous| wall.duration_since(previous).ok());
-        if !self.sleep.suspended && gap.is_some_and(|g| g > TICK_GAP_RESUME) {
+        let gap_resume = gap.is_some_and(|g| g > TICK_GAP_RESUME);
+        if self.sleep.suspended {
+            self.sleep.held_ticks += 1;
+            if gap_resume {
+                tracing::warn!(gap_s = gap.map_or(0, |g| g.as_secs()), "suspended, but the wall clock jumped and no resume event came: treating it as a resume");
+                self.on_resume(now, "tick gap while suspended");
+            } else if self.sleep.held_ticks > SUSPEND_HOLD_CAP_TICKS {
+                tracing::warn!(ticks = self.sleep.held_ticks, "suspended with no resume event while the machine is awake: ending the hold");
+                self.on_resume(now, "suspend hold cap");
+            }
+        } else if gap_resume {
             tracing::warn!(gap_s = gap.map_or(0, |g| g.as_secs()), "no power event, but the wall clock jumped between ticks: treating it as a resume");
             self.on_resume(now, "tick gap");
         }
@@ -570,10 +586,7 @@ impl FanController {
                     slot.override_reason = reason;
                 }
             }
-            Err(e) => {
-                self.hand_back(ch, format!("write failed: {e}"));
-                self.retry_after_grace(ch, now);
-            }
+            Err(e) => self.hand_back(ch, format!("write failed: {e}")),
         }
     }
 

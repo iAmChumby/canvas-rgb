@@ -2,7 +2,7 @@
 
 use crate::chip::{FanChip, Nct6687, COMMAND_REG, MODE_REG, MSI_ALT1_MAP, SYS_MODE_REG};
 use crate::fakes::{FakeChip, FakeTemp};
-use crate::fans::{curve_percent, FanController, FanError, RESUME_GRACE};
+use crate::fans::{curve_percent, FanController, FanError, RESUME_GRACE, SUSPEND_HOLD_CAP_TICKS};
 use crate::paths;
 use crate::store;
 use crate::temps::TempReader;
@@ -717,7 +717,7 @@ fn an_ordinary_tick_gap_is_not_a_resume() {
 }
 
 #[test]
-fn a_handback_inside_the_resume_window_is_retried_once_after_the_grace() {
+fn an_apply_inside_the_resume_window_is_held_and_applied_after_the_grace() {
     let t0 = Instant::now();
     let mut r = driven_rig(t0);
     r.fans.on_suspend();
@@ -725,20 +725,36 @@ fn a_handback_inside_the_resume_window_is_retried_once_after_the_grace() {
     let t1 = t0 + Duration::from_secs(60);
     r.fans.on_resume(t1, "test");
 
-    // A user applies a second header inside the window; firmware owns the controller, so it fails.
+    // A user applies a second header inside the window. The write that failed in #29 was exactly
+    // this kind, so nothing reaches the chip until the grace ends.
+    let before = r.chip.writes();
     r.fans.set_header_mode("pump_fan", FanMode::Fixed { percent: 60 }, t1 + Duration::from_secs(1)).unwrap();
-    assert!(!r.chip.manual(1), "the failed write handed pump_fan back");
-    assert!(header(&r.fans.status(), "pump_fan").override_reason.is_some());
+    r.fans.set_profile("Default", t1 + Duration::from_secs(2)).unwrap();
+    assert_eq!(r.chip.writes(), before, "no chip write for an apply inside the window");
+    assert!(!r.chip.manual(1));
 
     r.chip.release_to_service();
     r.fans.tick_at(t1 + RESUME_GRACE + Duration::from_secs(1), wall(70));
-    assert!(r.chip.manual(1), "the retry after the grace took pump_fan back");
+    assert!(r.chip.manual(1), "the held apply landed after the grace");
     assert!(header(&r.fans.status(), "pump_fan").override_reason.is_none());
     assert_under_control(&mut r);
 }
 
 #[test]
-fn a_real_persistent_failure_still_hands_back_and_stays_back_after_the_one_retry() {
+fn an_apply_while_suspended_is_held() {
+    let t0 = Instant::now();
+    let mut r = driven_rig(t0);
+    r.fans.on_suspend();
+    let before = r.chip.writes();
+    r.fans.set_header_mode("pump_fan", FanMode::Fixed { percent: 60 }, t0 + Duration::from_secs(2)).unwrap();
+    assert_eq!(r.chip.writes(), before, "no chip write while suspended");
+    r.fans.on_resume(t0 + Duration::from_secs(3), "test");
+    r.fans.tick_at(t0 + Duration::from_secs(3) + RESUME_GRACE, wall(10));
+    assert!(r.chip.manual(1), "applied after the resume grace");
+}
+
+#[test]
+fn a_real_persistent_failure_still_hands_back_and_stays_back_after_the_grace() {
     let t0 = Instant::now();
     let mut r = driven_rig(t0);
     r.fans.on_suspend();
@@ -749,29 +765,82 @@ fn a_real_persistent_failure_still_hands_back_and_stays_back_after_the_one_retry
     let t1 = t0 + Duration::from_secs(60);
     r.fans.on_resume(t1, "test");
     r.fans.set_header_mode("pump_fan", FanMode::Fixed { percent: 60 }, t1 + Duration::from_secs(1)).unwrap();
-    assert!(!r.chip.manual(1), "handed back inside the window");
 
-    // Inside the grace the loop leaves the chip alone, so nothing gets handed back by a tick.
+    // Inside the grace the loop leaves the chip alone.
     let in_grace = r.chip.writes();
     r.fans.tick_at(t1 + Duration::from_secs(2), wall(62));
-    assert_eq!(r.chip.writes(), in_grace, "no tick write inside the grace");
+    assert_eq!(r.chip.writes(), in_grace, "no write inside the grace");
 
-    let before_retry = r.chip.writes();
     r.fans.tick_at(t1 + RESUME_GRACE + Duration::from_secs(1), wall(70));
-    assert!(r.chip.writes() > before_retry, "the one retry wrote to the chip");
+    assert!(r.chip.writes() > in_grace, "the re-apply after the grace wrote to the chip");
     assert!(!r.chip.manual(1), "pump_fan stays on BIOS");
     assert!(!r.chip.manual(SYS_FAN1), "sys_fan1 stays on BIOS");
     let status = r.fans.status();
     assert!(header(&status, "pump_fan").override_reason.as_deref().is_some_and(|m| m.starts_with("write failed")));
     assert!(header(&status, "sys_fan1").override_reason.as_deref().is_some_and(|m| m.starts_with("write failed")));
 
-    // Sticky: a later tick makes no third attempt, even if the chip recovers.
+    // Sticky: a later tick makes no further attempt, even if the chip recovers.
     r.chip.set_drop_duty_writes(false);
     let settled = r.chip.writes();
     r.fans.tick_at(t1 + RESUME_GRACE + Duration::from_secs(2), wall(71));
     r.fans.tick_at(t1 + RESUME_GRACE + Duration::from_secs(3), wall(72));
-    assert_eq!(r.chip.writes(), settled, "no write after the retry failed");
+    assert_eq!(r.chip.writes(), settled, "no write after the handback");
     assert!(!r.chip.manual(1) && !r.chip.manual(SYS_FAN1));
+}
+
+#[test]
+fn a_suspend_with_no_resume_event_ends_its_hold_instead_of_freezing_the_fans() {
+    let t0 = Instant::now();
+    let mut r = driven_rig(t0);
+    r.fans.on_suspend();
+    // The machine never slept, or the resume notification was lost: ticks keep coming, one a
+    // second, with a steady wall clock. Firmware has the chip reset but does not hold it.
+    r.chip.simulate_resume();
+    r.chip.release_to_service();
+    let mut held_until_cap = true;
+    for s in 2..=(u64::from(SUSPEND_HOLD_CAP_TICKS) + RESUME_GRACE.as_secs() + 10) {
+        r.fans.tick_at(t0 + Duration::from_secs(s), wall(s));
+        if s <= u64::from(SUSPEND_HOLD_CAP_TICKS) / 2 {
+            held_until_cap &= !r.chip.manual(SYS_FAN1);
+        }
+    }
+    assert!(held_until_cap, "the hold is real before the cap");
+    assert!(r.fans.take_resumed(), "the cap ended the hold through the resume path");
+    assert_under_control(&mut r);
+}
+
+#[test]
+fn a_wall_clock_gap_while_suspended_is_a_resume_with_no_event() {
+    let t0 = Instant::now();
+    let mut r = driven_rig(t0);
+    r.fans.on_suspend();
+    r.chip.simulate_resume();
+    r.chip.release_to_service();
+    // Slept, woke, and the resume event never arrived: the first tick sees an 8 h gap.
+    r.fans.tick_at(t0 + Duration::from_secs(2), wall(8 * 3600));
+    for s in 1..=RESUME_GRACE.as_secs() + 1 {
+        r.fans.tick_at(t0 + Duration::from_secs(2 + s), wall(8 * 3600 + s));
+    }
+    assert_under_control(&mut r);
+}
+
+#[test]
+fn the_grace_constant_is_what_decides_when_writes_resume() {
+    let t0 = Instant::now();
+    let mut r = driven_rig(t0);
+    r.fans.on_suspend();
+    // Firmware lets go of the controller 3 s after the wake, on the chip's own clock. Nothing in
+    // the test releases it: only RESUME_GRACE decides whether the first write lands too early.
+    let firmware_busy = Duration::from_secs(3);
+    r.chip.set_clock(Duration::ZERO);
+    r.chip.simulate_resume_for(firmware_busy);
+    let t1 = t0 + Duration::from_secs(3600);
+    r.fans.on_resume(t1, "test");
+    for s in 1..=RESUME_GRACE.as_secs() + 1 {
+        r.chip.set_clock(Duration::from_secs(s));
+        r.fans.tick_at(t1 + Duration::from_secs(s), wall(5000 + s));
+    }
+    assert_under_control(&mut r);
 }
 
 #[test]

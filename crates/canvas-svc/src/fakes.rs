@@ -51,6 +51,10 @@ struct Sim {
     /// Firmware owns the fan controller (the resume transition): mode and duty writes are
     /// ignored and the duty reads back as the BIOS value, until [`FakeChip::release_to_service`].
     firmware_owned: bool,
+    /// The chip's own clock, moved by tests ([`FakeChip::set_clock`]); firmware ownership set with
+    /// [`FakeChip::simulate_resume_for`] ends when this reaches `owned_until`.
+    clock: Duration,
+    owned_until: Option<Duration>,
     /// The EC's fan configuration window (engine status PHASE set, LOCK clear).
     cfg_open: bool,
     /// The EC checked the last configuration (engine status CHECK_DONE).
@@ -111,6 +115,8 @@ impl FakeChip {
             drop_duty_writes: false,
             drop_commands: false,
             firmware_owned: false,
+            clock: Duration::ZERO,
+            owned_until: None,
             cfg_open: false,
             cfg_checked: false,
             writes: 0,
@@ -145,9 +151,25 @@ impl FakeChip {
         sim.firmware_owned = true;
     }
 
+    /// Like [`FakeChip::simulate_resume`], but firmware lets go by itself `owned_for` after the chip's
+    /// clock (see [`FakeChip::set_clock`]), so a test can check that the controller's own grace is
+    /// what decides when writes land.
+    pub fn simulate_resume_for(&self, owned_for: Duration) {
+        self.simulate_resume();
+        let mut sim = lock(&self.sim);
+        sim.owned_until = Some(sim.clock + owned_for);
+    }
+
+    /// Moves the chip's clock. Tests keep it in step with the `Instant`s they give the controller.
+    pub fn set_clock(&self, clock: Duration) {
+        lock(&self.sim).clock = clock;
+    }
+
     /// Firmware lets go of the fan controller: writes land again.
     pub fn release_to_service(&self) {
-        lock(&self.sim).firmware_owned = false;
+        let mut sim = lock(&self.sim);
+        sim.firmware_owned = false;
+        sim.owned_until = None;
     }
 
     /// Sets a board sensor in degrees C (half-degree bit from the fraction).
@@ -235,11 +257,16 @@ impl Sim {
 
     /// The duty register as the EC answers it: the BIOS value while firmware owns the controller.
     fn duty_value(&self, ch: usize) -> u8 {
-        if self.firmware_owned {
+        if self.owned() {
             BIOS_RAW_DUTY
         } else {
             self.duty_raw[ch]
         }
+    }
+
+    /// Whether firmware owns the fan controller at the chip's current clock.
+    fn owned(&self) -> bool {
+        self.firmware_owned && self.owned_until.is_none_or(|until| self.clock < until)
     }
 
     fn ec_read(&self, reg: u16) -> u8 {
@@ -284,7 +311,7 @@ impl Sim {
         // A fan-mode register (0xA00, or 0x80F for MSI AM5 system fans): each header follows
         // its own bit in its own register.
         if self.map.channels.iter().any(|c| c.mode_reg == reg) {
-            if self.firmware_owned {
+            if self.owned() {
                 return;
             }
             for (ch, c) in self.map.channels.iter().enumerate() {
@@ -296,7 +323,7 @@ impl Sim {
             return;
         }
         if let Some(ch) = self.channel_of_pwm_write(reg) {
-            if self.cfg_open && !self.drop_duty_writes && !self.firmware_owned {
+            if self.cfg_open && !self.drop_duty_writes && !self.owned() {
                 self.duty_raw[ch] = value;
             }
             return;

@@ -66,8 +66,9 @@ once per connection or once per start and trusts it forever.
   until the user re-applied a profile (`crates/canvas-svc/src/fans.rs`). The service accepted no power
   notifications (`crates/canvas-svc/src/winsvc.rs`). Fixed: `SERVICE_CONTROL_POWEREVENT` pauses writes
   on suspend and, after `RESUME_GRACE`, re-applies every header that was under control; a wall-clock
-  gap between ticks (`SystemTime`, because `Instant` may not count a sleep) is the fallback signal; a
-  handback inside the window is retried once; a failed readback logs every reading and the mode bit.
+  gap between ticks (`SystemTime`, because `Instant` may not count a sleep) is the fallback signal; an
+  apply inside the window is held until it ends; a suspend with no resume ends its hold after
+  `SUSPEND_HOLD_CAP_TICKS`; a failed readback logs every reading and the mode bit.
   Regression tests: `fans_tests.rs`, on a `FakeChip` that models firmware owning the controller.
   UNKNOWN until one real wake: whether the chip resets or firmware only holds it, and for how long.
 - **Sibling search (#29, canvas-svc):** the GPU fans (NVML) re-assert manual mode on every speed write,
