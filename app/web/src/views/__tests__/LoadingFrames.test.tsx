@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { ToastProvider } from "@/components/Toast";
-import { patchSnap, refreshDevices, refreshDisplays, refreshEffects } from "@/lib/store";
+import { getSnap, patchSnap, refreshDevices, refreshDisplays, refreshEffects } from "@/lib/store";
 import { DevicesView } from "@/views/DevicesView";
 import { DisplaysView } from "@/views/DisplaysView";
 import { EffectsView } from "@/views/EffectsView";
@@ -84,8 +84,13 @@ function expectGoodErrorFrame(title: string, raw: string) {
   expect(details).not.toBeNull();
   expect(details?.open).toBe(false);
   expect(details?.textContent).toContain(raw);
-  // The raw words are nowhere else: not in the line the reader sees.
-  expect(alerts[0]?.textContent ?? "").not.toContain(raw);
+  // The raw words are nowhere else in the frame: not in the line the reader sees, and not
+  // anywhere else outside the disclosure.
+  const frameEl = document.querySelector(".load-frame") as HTMLElement | null;
+  expect(frameEl).not.toBeNull();
+  const outside = frameEl?.cloneNode(true) as HTMLElement;
+  outside.querySelectorAll("details").forEach((d) => d.remove());
+  expect(outside.textContent ?? "").not.toContain(raw);
   // And there is a way to ask again.
   expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
 }
@@ -154,6 +159,11 @@ describe("the retry", () => {
     expect(frame()?.dataset.state).toBe("loading");
     expect(screen.queryByText("The effects could not be read")).toBeNull();
     expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+    // The hold is awaited: it does not land in a later test, and nothing is left pending.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 400));
+    });
+    expect(getSnap().pending).toEqual([]);
   });
 
   it("keeps the gallery when a refresh fails after the list was read", async () => {
@@ -227,6 +237,33 @@ describe("the devices list", () => {
     await waitFor(() => expect(screen.getAllByTestId("device-card").length).toBeGreaterThan(0));
     // Twelve devices, eleven of them connected: the placeholder draws all twelve.
     expect(screen.getAllByTestId("device-card")).toHaveLength(12);
+  });
+
+  it("draws no card when the daemon says it has no devices", async () => {
+    // The daemon knows it has none: that is a known zero, not a number that is missing. The
+    // placeholder draws no card, and not the three it draws when it knows nothing.
+    patchSnap({
+      status: { ...status, devices_connected: 0, devices_total: 0 },
+      devices: null,
+      // A list that came before and is out of date: it must not draw twelve cards either.
+      devicesTotal: 12,
+      devicesError: null,
+    });
+    render(<DevicesView />);
+    await waitFor(() => expect(frame()?.dataset.state).toBe("loading"));
+    expect(screen.queryAllByTestId("device-card")).toHaveLength(0);
+  });
+
+  it("shows no grey placeholder beside the error", async () => {
+    // The right column holds the walker. Next to an error a grey skeleton reads as a page
+    // that is still loading, so the column says nothing instead.
+    setUrl("/devices/?state=fail:devices");
+    await act(async () => {
+      await refreshDevices();
+    });
+    render(<DevicesView />);
+    await screen.findByText("The devices could not be read");
+    expect(document.querySelectorAll(".devices-grid > .stack .skeleton")).toHaveLength(0);
   });
 });
 

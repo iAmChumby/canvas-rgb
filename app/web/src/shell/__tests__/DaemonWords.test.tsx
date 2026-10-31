@@ -43,10 +43,11 @@ const status: Status = {
 
 describe("the words on the page", () => {
   it("says canvas-rgb, not the daemon, when canvas-rgb is not answering", () => {
-    render(<DaemonDown onRetry={async () => undefined} />);
-    const heading = screen.getByRole("heading", { level: 1 });
-    expect(heading.textContent ?? "").toMatch(/canvas-rgb/);
-    expect(heading.textContent ?? "").not.toMatch(/daemon/i);
+    const { container } = render(<DaemonDown onRetry={async () => undefined} />);
+    // The whole page, not only the heading: the line under it is what a person reads next.
+    const page = container.textContent ?? "";
+    expect(page).toMatch(/canvas-rgb/);
+    expect(page).not.toMatch(/daemon/i);
   });
 
   it("says canvas-rgb, not the daemon, when the fan service is away", () => {

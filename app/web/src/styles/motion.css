@@ -573,6 +573,14 @@
   border-radius: var(--r-md);
 }
 
+/* The card inside an error or an empty frame wears the same radius: the frame is a
+   placeholder, and the card in it is one too. The loaded panels and cards keep their own
+   16 px: this is the frame's card only. */
+.load-frame .load-note .panel,
+.load-frame .load-note .empty-state {
+  border-radius: var(--r-md);
+}
+
 /* A placeholder panel as tall as the panel it stands for: its height is set per panel and per width
    (--sh-w on a wide page, --sh-n on a phone), and its rows spread over it. */
 .skel-body {
@@ -701,11 +709,13 @@
   border-radius: var(--r-md);
 }
 
+/* The zones of the desk in the placeholder: the neutral skeleton tone, not the accent. An
+   accent-outlined box reads as a part that is selected. */
 .skel-zone {
   position: absolute;
-  border: 1px solid color-mix(in srgb, var(--live) 55%, transparent);
+  border: 1px dashed var(--line-2);
   border-radius: 3px;
-  background: color-mix(in srgb, var(--live) 9%, transparent);
+  background: color-mix(in srgb, var(--raised) 60%, var(--line-2));
 }
 
 .skel-zone-a {

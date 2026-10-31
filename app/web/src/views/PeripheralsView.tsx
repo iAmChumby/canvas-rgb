@@ -119,6 +119,9 @@ export function PeripheralsView() {
   // never lands on the wrong device.
   const [loaded, setLoaded] = useState<{ id: string; detail: PeripheralDetail } | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
+  // The change that is on the device already, and whose refresh failed: the page says the
+  // change was saved, because it was.
+  const [changeSaved, setChangeSaved] = useState(false);
   // The edits that are not on the device yet.
   const [staged, setStaged] = useState<Props>({});
   const [saving, setSaving] = useState(false);
@@ -139,21 +142,31 @@ export function PeripheralsView() {
   const reading = selectedId !== null && !detailError && (fresh === null || reloading);
   const progress = useReadProgress(selectedId, reading);
 
-  // Reads one device again: after a write, or after the access changed.
-  const loadDetail = useCallback(async (id: string) => {
+  // The number of the read that is on its way. An answer that is older than the newest one is
+  // dropped: a slow reload of one device must not put its error on another.
+  const detailRequest = useRef(0);
+
+  // Reads one device again: after a write, or after the access changed. `landed` says that the
+  // change is already on the device, so a failed refresh is not a failed change.
+  const loadDetail = useCallback(async (id: string, landed = false) => {
+    const n = ++detailRequest.current;
     setReloading(true);
     try {
       const d = await api.peripheral(id);
+      if (n !== detailRequest.current) return;
       lastRead.set(id, d);
       setLoaded({ id, detail: d });
       setStaged({});
       setSaveError(null);
       setDetailError(null);
+      setChangeSaved(false);
     } catch (e) {
+      if (n !== detailRequest.current) return;
       setLoaded(null);
       setDetailError(messageOf(e));
+      setChangeSaved(landed);
     } finally {
-      setReloading(false);
+      if (n === detailRequest.current) setReloading(false);
     }
   }, []);
 
@@ -197,23 +210,27 @@ export function PeripheralsView() {
 
   useEffect(() => {
     if (!selectedId) return;
+    // The read of a device that is picked again. The counter drops an answer that belongs to
+    // a device that is no longer the one on screen: a slow reload of one device must not put
+    // its error on another.
+    const n = ++detailRequest.current;
     let stop = false;
     api
       .peripheral(selectedId)
       .then((d) => {
+        if (stop || n !== detailRequest.current) return;
         lastRead.set(selectedId, d);
-        if (stop) return;
         setLoaded({ id: selectedId, detail: d });
         setStaged({});
         setSaveError(null);
         setDetailError(null);
-        setPickedStage(null);
-        setPickedButton(null);
+        setChangeSaved(false);
       })
       .catch((e: unknown) => {
-        if (stop) return;
+        if (stop || n !== detailRequest.current) return;
         setLoaded(null);
         setDetailError(messageOf(e));
+        setChangeSaved(false);
       });
     return () => {
       stop = true;
@@ -245,14 +262,18 @@ export function PeripheralsView() {
     setSaveError(null);
     try {
       await api.patchPeripheral(detail.info.id, changed);
-      await loadDetail(detail.info.id);
-      toast("The settings are on the device");
     } catch (e) {
+      // The change itself failed: nothing was changed.
       setSaveError(messageOf(e));
       toast(messageOf(e), "down");
-    } finally {
       setSaving(false);
+      return;
     }
+    // The change is on the device. The read that follows only refreshes the page: when it
+    // fails, the change is still saved.
+    await loadDetail(detail.info.id, true);
+    toast("The settings are on the device");
+    setSaving(false);
   };
 
   const revert = () => {
@@ -266,11 +287,14 @@ export function PeripheralsView() {
     const writes = next.writes ?? detail.access.writes;
     try {
       await api.putPeripheralAccess(detail.info.id, { reads, writes });
-      await loadDetail(detail.info.id);
     } catch (e) {
+      // The change itself failed: nothing was changed.
       setSaveError(messageOf(e));
       toast(messageOf(e), "down");
+      return;
     }
+    // The access is saved. The read that follows only refreshes the page.
+    await loadDetail(detail.info.id, true);
   };
 
   const rows = list ?? [];
@@ -293,11 +317,17 @@ export function PeripheralsView() {
       error={
         <ErrorPanel
           title="The device could not be read"
-          summary="canvas-rgb could not read that device. Nothing was changed."
+          summary={
+            changeSaved
+              ? // The change is on the device; only the page could not be refreshed.
+                "The change was saved, but the page could not be refreshed."
+              : "canvas-rgb could not read that device. Nothing was changed."
+          }
           message={detailError}
           onRetry={() => {
             if (!selectedId) return;
             setDetailError(null);
+            setChangeSaved(false);
             void loadDetail(selectedId);
           }}
         />
@@ -365,6 +395,11 @@ export function PeripheralsView() {
                   aria-current={p.id === selectedId ? "true" : undefined}
                   onClick={() => {
                     setDetailError(null);
+                    setChangeSaved(false);
+                    // A new device: the stage and the button that were picked belong to the
+                    // one that was on screen.
+                    setPickedStage(null);
+                    setPickedButton(null);
                     setSelectedId(p.id);
                   }}
                 >

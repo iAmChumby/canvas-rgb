@@ -140,7 +140,8 @@ export function DevicesView() {
   // How many lights the daemon has already counted: the placeholder draws as many cards.
   const counted = useSnap((s) => s.status?.devices_connected ?? 0);
   // How many devices the daemon has, connected or not. The status route knows the total, so the
-  // placeholder draws as many cards as the list will show, from the very first load.
+  // placeholder draws as many cards as the list will show, from the very first load. A daemon
+  // that does not report a total (an older one) leaves it out, and the number is null then.
   const total = useSnap((s) => s.status?.devices_total ?? null);
   // The length of the last list that came: the total for a daemon that does not report one.
   const listed = useSnap((s) => s.devicesTotal);
@@ -202,7 +203,12 @@ export function DevicesView() {
                 ? "empty"
                 : "ready"
           }
-          shape={<DeviceListShape cards={total || listed || (counted > 0 ? counted : 3)} />}
+          shape={
+            // A known zero is a known zero: a machine with no devices has none, so the
+            // placeholder draws no card. Only a number that is not known at all falls through
+            // to the next one.
+            <DeviceListShape cards={total ?? listed ?? (counted > 0 ? counted : 3)} />
+          }
           label="Looking for devices"
           error={
             <ErrorPanel
@@ -306,14 +312,18 @@ export function DevicesView() {
 
         <div className="stack" style={{ position: "sticky", top: 16 }}>
           {devices === null ? (
-            // The walker points at a device that is still coming: it shows a placeholder, not
-            // its own words.
-            <Panel>
-              <div className="stack" style={{ gap: 8 }}>
-                <Skeleton width="54%" height={16} />
-                <Skeleton width="78%" height={14} />
-              </div>
-            </Panel>
+            devicesError ? null : (
+              // The walker points at a device that is still coming: it shows a placeholder, not
+              // its own words. When the list could not be read there is no device to point at, so
+              // the column says nothing: a grey skeleton next to an error reads as a page that
+              // is still loading.
+              <Panel>
+                <div className="stack" style={{ gap: 8 }}>
+                  <Skeleton width="54%" height={16} />
+                  <Skeleton width="78%" height={14} />
+                </div>
+              </Panel>
+            )
           ) : walkDevice && walkZone ? (
             <IdentifyWalker
               key={`${walkDevice.id}#${walkZone.index}`}

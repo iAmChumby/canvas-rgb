@@ -675,7 +675,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
   // scenario makes every answer take long enough for the editor's skeletons to show.
   await new Promise((resolve) => setTimeout(resolve, answerDelayMs()));
   // The daemon does not answer at all.
-  if (daemonDown()) fail(503, "service_unavailable", "the daemon is not answering");
+  if (daemonDown()) fail(503, "service_unavailable", "canvas-rgb is not answering");
   // Every write is refused.
   if (method !== "GET" && saveError()) fail(500, "internal", "could not save the effects: access is denied (os error 5)");
 
