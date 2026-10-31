@@ -29,10 +29,16 @@ fn main() {
         ..Default::default()
     };
     let mut sheet = None;
+    let mut budget = std::time::Duration::from_secs(900);
     let mut i = 4;
     while i < args.len() {
         if args[i] == "--sheet" {
             sheet = Some(args[i + 1].clone());
+            i += 2;
+            continue;
+        }
+        if args[i] == "--budget" {
+            budget = std::time::Duration::from_secs(args[i + 1].parse().expect("a budget in seconds"));
             i += 2;
             continue;
         }
@@ -55,8 +61,8 @@ fn main() {
     };
     let mut effect = Wrap(inner, recipe);
     let started = std::time::Instant::now();
-    let body = canvas_daemon::thumbnail::render_within(&mut effect, &Props::new(), std::time::Duration::from_secs(900))
-        .expect("renders");
+    let body = canvas_daemon::thumbnail::render_within(&mut effect, &Props::new(), budget)
+        .unwrap_or_else(|why| panic!("{why}"));
     let s = canvas_daemon::thumbnail::score(&body).unwrap();
     println!(
         "{id}: lit {:.0}% ({:.0}>{:.0}) rows {} cols {} seam {:.1}% step {:.1}% max {:.1}%  [{:.1?}]",

@@ -64,9 +64,9 @@ effect actually draws.
 
 The same command renders the effect's library tile (64x40, 24 frames) the way the daemon
 does and scores it against the bar in `docs/effects.md` ("The library tile"): at least 60 %
-lit on average, every row and column lit, no jump where the loop restarts. A tile under the
-bar makes the check exit non-zero. The numbers are printed as `tile`, `tile seam` and
-`tile bar`.
+lit on average, every row and column lit, no jump of more than 10 % where the loop
+restarts. A tile under the bar makes the check exit non-zero. The numbers are printed as
+`tile`, `tile seam` and `tile bar`.
 
 ```
 canvas-rgb effects check my-effect.html --preview tile-preview

@@ -133,6 +133,30 @@ fn the_tiles_of_moving_effects_move_and_do_not_cut() {
 }
 
 #[test]
+fn the_breathing_tile_is_not_the_solid_tile() {
+    // Breathing's tile must show the pulse, not stand still like Solid. Its first frame is
+    // half way through the swell, so it is dimmer than Solid's flat colour.
+    let mut breathing = canvas_effects::create("breathing").expect("Breathing builds");
+    let mut solid = canvas_effects::create("solid").expect("Solid builds");
+    let body = |effect: &mut Box<dyn Effect>| {
+        thumbnail::render_within(effect.as_mut(), &Props::new(), std::time::Duration::from_secs(60))
+            .expect("the render fits the test budget")
+    };
+    let first_mean = |body: &[u8]| -> f64 {
+        let w = u16::from_le_bytes([body[0], body[1]]) as usize;
+        let h = u16::from_le_bytes([body[2], body[3]]) as usize;
+        let frame = &body[6..6 + w * h * 3];
+        frame.iter().map(|v| *v as f64).sum::<f64>() / frame.len() as f64
+    };
+    let breathing_mean = first_mean(&body(&mut breathing));
+    let solid_mean = first_mean(&body(&mut solid));
+    assert!(
+        breathing_mean < solid_mean - 5.0,
+        "the breathing tile's first frame is as bright as Solid's ({breathing_mean} against {solid_mean})"
+    );
+}
+
+#[test]
 fn a_dark_tile_without_a_stated_reason_is_a_problem_and_with_one_it_is_not() {
     let dark = TileScore {
         lit_first: 0.1,

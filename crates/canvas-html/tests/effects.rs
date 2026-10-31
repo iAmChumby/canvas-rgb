@@ -1077,6 +1077,7 @@ fn a_bad_thumbnail_meta_is_ignored_with_a_warning_and_the_effect_still_runs() {
         (r#"<meta thumbnail props="speed=NaN" />"#, "not a valid speed"),
         (r#"<meta thumbnail props="speed" />"#, "key=value"),
         (r#"<meta thumbnail props="glow=yes" />"#, "not a valid glow"),
+        (r#"<meta thumbnail props="style=z" />"#, "not a valid style"),
     ] {
         let mut effect = HtmlEffect::from_source("html:t", &with_recipe(tag), &Props::new())
             .unwrap_or_else(|e| panic!("{tag} must not stop the effect loading: {e}"));

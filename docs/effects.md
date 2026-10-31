@@ -89,7 +89,8 @@ effect; at most two tiles render at once. The library plays every tile at 12 fra
 effect runs.
 
 The quality bar a tile has to pass, measured on the 24 frames (a pixel is lit when its
-R + G + B is above 45 of 765):
+lightness, the CIE L\* of its colour, is at least 12 of 100: a near-black or dim grey is
+not lit and a vivid blue or violet is):
 
 - at least 60 % of the pixels lit on average (unless `dark_on_purpose` is set);
 - every row and every column lit: at least 25 % of its pixels lit in some frame of the loop;

@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Changed
+
+- Every effect's library tile now passes a stated quality bar: at least 60 % of its pixels lit on average, every row and every column lit over the loop, and no jump of more than 10 % where the loop restarts (a tile that is meant to jump, a strobe, says so in its own recipe and is exempt from that bar only). An effect can say how its tile is rendered (warm-up, loop length, a crossfade, showcase settings): Rainbow Wave is no longer half black, Fire fills the tile and flickers, Rain is full from the first frame, Breathing shows its swell, Audio Spectrum and Screen Ambience move instead of standing still, and Palette Knife crossfades instead of cutting. Effect files carry the same in a `<meta thumbnail>` tag, and `canvas-rgb effects check` scores the tile, fails one under the bar and writes a GIF and a contact sheet with `--preview <dir>`. A tag that does not parse is ignored with a warning, and the effect still loads and runs. The library plays every tile at 12 frames a second, so a tile's loop is simulated time: Breathing's 4 s breath plays at twice the speed the effect runs, Wet Smear's at eight times and Palette Knife's at twelve times; a tile with no recipe of its own is rendered in steps of up to a fifteenth of a second, so it can differ slightly from the effect on the lights. A tile that cannot be rendered within 20 seconds is given up and the library shows none for that effect. (#16)
+
 ## [0.2.0] - 2026-10-31
 
 ### Added
@@ -27,7 +31,6 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Changed
 
-- Every effect's library tile now passes a stated quality bar (60 % lit on average, every row and column lit, no jump where the loop restarts). An effect can say how its tile is rendered (warm-up, loop length, a crossfade, showcase settings): Rainbow Wave is no longer half black, Fire fills the tile, Rain is full from the first frame and Breathing loops without a pop. Effect files carry the same in a `<meta thumbnail>` tag, and `canvas-rgb effects check` scores the tile, fails one under the bar and writes a GIF and a contact sheet with `--preview <dir>`. (#16)
 - The Displays preview draws the decimal point in its own slot between the digit cells (`4` `6` `.` `9`), not inside a cell; the row keeps its shape while the number counts. (#8)
 - Dragging a slider moves its cap and fill with the pointer, pixel for pixel, between steps; the value itself stays on the slider's steps and the cap settles onto the chosen step on release. (#13)
 

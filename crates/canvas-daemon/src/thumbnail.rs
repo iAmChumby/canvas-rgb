@@ -37,8 +37,13 @@ const MAX_RECIPE_SECONDS: f64 = 30.0;
 /// The shortest loop a recipe may ask for, in seconds.
 const MIN_LOOP_SECONDS: f64 = 0.5;
 
-/// A pixel is lit when its R + G + B (0..=255 each) is above this.
-pub const LIT_SUM: u32 = 45;
+/// A pixel is lit when its lightness (CIE L*, 0..=100) is at least this.
+///
+/// Lightness, not the sum of the channels: the sum counted a near-black grey as lit, so a
+/// black tile could pass the lit bar. L* measures what a pixel looks like, so a blue or a
+/// violet counts for what it is and not for how little green it has. A neutral grey has to
+/// be brighter than about 31 of 255 to count.
+pub const LIT_LIGHTNESS: f64 = 12.0;
 /// The quality bar: the average lit share of the frames is at least this.
 pub const BAR_LIT_AVG: f64 = 0.60;
 /// The quality bar: the last frame differs from the first by at most this share of full
@@ -163,8 +168,8 @@ fn crossfade(mut tiles: Vec<Vec<u8>>, fade: usize) -> Vec<Vec<u8>> {
     tiles
 }
 
-/// What a tile measures, the way the issue's table did: a pixel is lit when R + G + B is
-/// above [`LIT_SUM`].
+/// What a tile measures, the way the issue's table did: a pixel is lit when its lightness is
+/// at least [`LIT_LIGHTNESS`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TileScore {
     /// The share of lit pixels in the first frame, 0..=1.
@@ -209,7 +214,7 @@ pub fn score(body: &[u8]) -> Option<TileScore> {
         let mut lit = 0usize;
         for i in 0..w * h {
             let px = &frame[i * 3..i * 3 + 3];
-            if px[0] as u32 + px[1] as u32 + px[2] as u32 > LIT_SUM {
+            if lightness(px) >= LIT_LIGHTNESS {
                 lit += 1;
                 ever[i] = true;
             }
@@ -237,6 +242,34 @@ pub fn score(body: &[u8]) -> Option<TileScore> {
         step: if steps.is_empty() { 0.0 } else { steps.iter().sum::<f64>() / steps.len() as f64 },
         max_step: steps.iter().copied().fold(0.0, f64::max),
     })
+}
+
+/// The lightness of one pixel, 0..=100: the CIE L* of its sRGB values.
+///
+/// L* is the perceptual lightness: it is 0 for black and 100 for white, and it weighs the
+/// channels the way the eye does after the gamma curve, so a blue or a violet is as light as
+/// it looks and not as light as its channel sum says.
+pub fn lightness(px: &[u8]) -> f64 {
+    let y = 0.2126 * linear(px[0]) + 0.7152 * linear(px[1]) + 0.0722 * linear(px[2]);
+    if y <= 0.008_856 {
+        903.3 * y
+    } else {
+        116.0 * y.cbrt() - 16.0
+    }
+}
+
+/// One sRGB channel (0..=255) as a linear light, 0..=1.
+fn linear(channel: u8) -> f64 {
+    static LINEAR: std::sync::OnceLock<[f64; 256]> = std::sync::OnceLock::new();
+    let table = LINEAR.get_or_init(|| {
+        let mut t = [0.0f64; 256];
+        for (i, v) in t.iter_mut().enumerate() {
+            let c = i as f64 / 255.0;
+            *v = if c <= 0.040_45 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
+        }
+        t
+    });
+    table[channel as usize]
 }
 
 /// What a tile fails of the bar, as sentences. Empty when it passes.
@@ -486,6 +519,46 @@ mod tests {
         }
     }
 
+    /// A tile of one flat colour, scored.
+    fn score_of_a_flat_colour(rgb: [u8; 3]) -> TileScore {
+        let mut body = Vec::new();
+        for v in [8u16, 8, 1] {
+            body.extend_from_slice(&v.to_le_bytes());
+        }
+        for _ in 0..8 * 8 {
+            body.extend_from_slice(&rgb);
+        }
+        score(&body).expect("a well formed tile")
+    }
+
+    #[test]
+    fn a_dim_grey_is_not_lit_and_a_vivid_colour_is() {
+        // A near-black grey adds up to 48, so the old "R + G + B above 45" rule counted it
+        // as lit.
+        let dim = score_of_a_flat_colour([16, 16, 16]);
+        assert_eq!(dim.lit_avg, 0.0, "a near-black grey is lit");
+        // A dim grey is not lit either.
+        assert_eq!(score_of_a_flat_colour([30, 30, 30]).lit_avg, 0.0, "a dim grey is lit");
+        // A mid grey is light enough.
+        assert_eq!(score_of_a_flat_colour([45, 45, 45]).lit_avg, 1.0, "a mid grey is not lit");
+        // A vivid violet, the Solid effect's default, is lit: lightness weighs the channels
+        // the way the eye does, so the blue and the red count.
+        assert_eq!(score_of_a_flat_colour([96, 0, 252]).lit_avg, 1.0, "a violet is not lit");
+        // A vivid blue too.
+        assert_eq!(score_of_a_flat_colour([0, 0, 255]).lit_avg, 1.0, "a blue is not lit");
+        // A lit grey.
+        assert_eq!(score_of_a_flat_colour([90, 90, 90]).lit_avg, 1.0, "a light grey is not lit");
+    }
+
+    #[test]
+    fn the_lightness_of_a_pixel_is_its_perceptual_light() {
+        assert!(lightness(&[0, 0, 0]) < 0.001);
+        assert!((lightness(&[255, 255, 255]) - 100.0).abs() < 0.01);
+        // A dim grey is well under the bar; a vivid colour is over it.
+        assert!(lightness(&[30, 30, 30]) < LIT_LIGHTNESS);
+        assert!(lightness(&[96, 0, 252]) >= LIT_LIGHTNESS);
+    }
+
     #[test]
     fn the_header_and_length_match_the_format() {
         let updates = Arc::new(AtomicU32::new(0));
@@ -549,15 +622,17 @@ mod tests {
     }
 
     #[test]
-    fn the_score_reads_the_issue_measures() {
+    fn the_score_reads_the_tile_the_bar_measures() {
         // Two 2x1 frames: the first has one lit pixel, the second two; the seam is the
-        // difference between them.
+        // difference between them. The pixels are ones the bar counts as lit (a dark red
+        // and a dark green): the bar counts a pixel by its lightness, so the channel a
+        // colour sits in does not decide it.
         let mut body = Vec::new();
         for v in [2u16, 1, 2] {
             body.extend_from_slice(&v.to_le_bytes());
         }
         body.extend_from_slice(&[100, 0, 0, 0, 0, 0]);
-        body.extend_from_slice(&[100, 0, 0, 0, 0, 50]);
+        body.extend_from_slice(&[100, 0, 0, 0, 50, 0]);
         let s = score(&body).expect("well formed");
         assert_eq!((s.lit_first, s.lit_last, s.lit_avg), (0.5, 1.0, 0.75));
         assert_eq!((s.rows_lit, s.cols_lit), (1, 2));
@@ -673,13 +748,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_a_few_renders_run_at_once() {
+    async fn only_two_renders_run_at_once() {
         let cache = ThumbnailCache::default();
         let mut held = Vec::new();
-        for _ in 0..CONCURRENT_RENDERS {
+        for _ in 0..2 {
             held.push(cache.render_slot().await);
         }
-        // One more has to wait until a slot is given back.
+        // A third has to wait until a slot is given back.
         let waiting = tokio::time::timeout(std::time::Duration::from_millis(100), cache.render_slot()).await;
         assert!(waiting.is_err(), "a render slot was free beyond the limit");
         held.pop();

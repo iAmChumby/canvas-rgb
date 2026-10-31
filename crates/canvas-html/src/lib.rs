@@ -661,7 +661,13 @@ fn thumbnail_recipe(
                 "false" | "0" => PropValue::Bool(false),
                 _ => return Err(bad()),
             },
-            PropKind::Choice { .. } => PropValue::Choice(text.to_string()),
+            PropKind::Choice { options, .. } => {
+                // A choice the file does not offer is not a valid value for it.
+                if !options.iter().any(|o| o == text) {
+                    return Err(bad());
+                }
+                PropValue::Choice(text.to_string())
+            }
         };
         recipe.props.insert(key.to_string(), value);
     }

@@ -373,6 +373,7 @@ fn effects_check(cli: &Cli, args: &canvas_daemon::cli::CheckArgs) -> Result<(), 
                     "max_step": t.score.max_step,
                     "bar": {
                         "lit_avg": canvas_daemon::thumbnail::BAR_LIT_AVG,
+                        "lit_lightness": canvas_daemon::thumbnail::LIT_LIGHTNESS,
                         "seam": canvas_daemon::thumbnail::BAR_SEAM,
                         "line_share": canvas_daemon::thumbnail::BAR_LINE_SHARE,
                     },
@@ -439,8 +440,9 @@ fn effects_check(cli: &Cli, args: &canvas_daemon::cli::CheckArgs) -> Result<(), 
                 s.step * 100.0
             );
             println!(
-                "tile bar    {:.0} % lit on average, every row and column {:.0} % lit over the loop, seam under {:.0} %",
+                "tile bar    {:.0} % lit on average (a pixel is lit when its lightness is at least {:.0} of 100), every row and column {:.0} % lit over the loop, seam under {:.0} %",
                 canvas_daemon::thumbnail::BAR_LIT_AVG * 100.0,
+                canvas_daemon::thumbnail::LIT_LIGHTNESS,
                 canvas_daemon::thumbnail::BAR_LINE_SHARE * 100.0,
                 canvas_daemon::thumbnail::BAR_SEAM * 100.0
             );
