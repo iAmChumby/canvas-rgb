@@ -159,6 +159,85 @@ struct Discovery {
     found: Vec<PeripheralInfo>,
 }
 
+/// The hook the unit tests use to hold the sink between the check of the flag and the write of
+/// the stage. It is only compiled into a test build, and it is the only way the race between
+/// the two can be made to happen on purpose.
+#[cfg(test)]
+mod sink_hook {
+    use std::sync::{Condvar, Mutex, OnceLock};
+
+    #[derive(Default)]
+    struct Gate {
+        /// A sink is at the gate.
+        reached: bool,
+        /// The gate is open: the sink carries on.
+        open: bool,
+        /// The sink has written its stage.
+        written: bool,
+    }
+
+    static GATE: OnceLock<(Mutex<Gate>, Condvar)> = OnceLock::new();
+
+    fn gate() -> &'static (Mutex<Gate>, Condvar) {
+        GATE.get_or_init(|| (Mutex::new(Gate::default()), Condvar::new()))
+    }
+
+    /// Waits at the gate, with the progress lock held. The test opens the gate.
+    pub(crate) fn pause() {
+        let (lock, cv) = gate();
+        let mut g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        if g.open {
+            return;
+        }
+        g.reached = true;
+        cv.notify_all();
+        while !g.open {
+            g = cv.wait(g).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
+    /// The sink has written its stage.
+    pub(crate) fn written() {
+        let (lock, cv) = gate();
+        let mut g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        g.written = true;
+        cv.notify_all();
+    }
+
+    /// Opens the gate: the sink writes its stage and carries on.
+    pub(crate) fn open() {
+        let (lock, cv) = gate();
+        let mut g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        g.open = true;
+        cv.notify_all();
+    }
+
+    /// Waits until a sink is at the gate.
+    pub(crate) fn wait_until_reached() {
+        let (lock, cv) = gate();
+        let mut g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        while !g.reached {
+            g = cv.wait(g).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
+    /// Waits until the sink has written its stage.
+    pub(crate) fn wait_until_written() {
+        let (lock, cv) = gate();
+        let mut g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        while !g.written {
+            g = cv.wait(g).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
+    /// Puts the gate back, for the next test.
+    pub(crate) fn reset() {
+        let (lock, _cv) = gate();
+        let mut g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        *g = Gate::default();
+    }
+}
+
 impl PeripheralHub {
     /// The hub with these adapters. The daemon builds it with the real adapters; the tests
     /// build it with fakes.
@@ -285,7 +364,15 @@ impl PeripheralHub {
             Arc::new(move |p: ReadProgress| {
                 let mut progress = progress.lock().unwrap_or_else(|e| e.into_inner());
                 if live.load(std::sync::atomic::Ordering::SeqCst) {
+                    // The hook pauses here, between the check of the flag and the write of the
+                    // stage, with the lock held. The old order checked the flag outside the lock,
+                    // so the clear could slip in between and the stage came back; the test that
+                    // uses this hook fails on that order every run.
+                    #[cfg(test)]
+                    sink_hook::pause();
                     progress.insert(id.clone(), p);
+                    #[cfg(test)]
+                    sink_hook::written();
                 }
             })
         };
@@ -415,6 +502,149 @@ pub async fn apply_saved(app: &App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use canvas_proto::peripheral::{PeripheralInfo, PeripheralKind, PeripheralSchema};
+
+    /// A peripheral that is never opened for real: it takes the sink the daemon gives it, calls
+    /// it on a thread of its own and then keeps the read open, so the test can cancel the read
+    /// while the sink is still at the hook.
+    struct HeldPeripheral {
+        id: DeviceId,
+        connected: StdMutex<bool>,
+        sink: StdMutex<Option<ReadSink>>,
+    }
+
+    impl HeldPeripheral {
+        fn new(id: DeviceId) -> Self {
+            Self { id, connected: StdMutex::new(false), sink: StdMutex::new(None) }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl canvas_proto::traits::PeripheralAdapter for HeldPeripheral {
+        fn name(&self) -> &'static str {
+            "held"
+        }
+
+        async fn connect(&mut self) -> Result<(), AdapterError> {
+            *self.connected.lock().unwrap() = true;
+            Ok(())
+        }
+
+        async fn disconnect(&mut self) -> Result<(), AdapterError> {
+            *self.connected.lock().unwrap() = false;
+            Ok(())
+        }
+
+        fn is_connected(&self) -> bool {
+            *self.connected.lock().unwrap()
+        }
+
+        async fn discover(&mut self) -> Result<Vec<PeripheralInfo>, AdapterError> {
+            Ok(vec![PeripheralInfo {
+                id: self.id.clone(),
+                name: "Held Mouse".into(),
+                vendor: "fake".into(),
+                kind: PeripheralKind::Mouse,
+                adapter: "held".into(),
+                serial: String::new(),
+                location: String::new(),
+                connected: true,
+            }])
+        }
+
+        async fn describe(&mut self, device: &DeviceId) -> Result<PeripheralSchema, AdapterError> {
+            if &self.id != device {
+                return Err(AdapterError::UnknownDevice(device.clone()));
+            }
+            Ok(PeripheralSchema {
+                device: device.clone(),
+                kind: PeripheralKind::Mouse,
+                sections: Vec::new(),
+                read_only: Vec::new(),
+                unreported: Vec::new(),
+            })
+        }
+
+        async fn read_settings(&mut self, _device: &DeviceId) -> Result<Props, AdapterError> {
+            // The sink runs on a thread of its own: the hook holds it at the gate, and a read that
+            // is held must not block the runtime.
+            if let Some(sink) = self.sink.lock().unwrap().clone() {
+                tokio::task::spawn_blocking(move || sink(ReadProgress::reading(1, 2)));
+            }
+            // The read stays open until the request is dropped.
+            std::future::pending::<()>().await;
+            Ok(Props::new())
+        }
+
+        async fn write_settings(
+            &mut self,
+            _device: &DeviceId,
+            _props: &Props,
+        ) -> Result<(), AdapterError> {
+            Ok(())
+        }
+
+        fn writes_enabled(&self) -> bool {
+            true
+        }
+    }
+
+    impl Peripheral for HeldPeripheral {
+        fn set_config_writes(&mut self, _on: bool) {}
+
+        fn set_read_sink(&mut self, sink: Option<ReadSink>) {
+            *self.sink.lock().unwrap() = sink;
+        }
+    }
+
+    /// The check of the flag and the write of the stage are one step: a report that arrives after
+    /// the read ended must not bring the stage back.
+    ///
+    /// The hook holds the sink between the check and the write, so the clear of the ended read
+    /// lands exactly there. With the check and the write under one lock the clear waits for the
+    /// sink and takes the stage away again. With the old order (the check outside the lock) the
+    /// clear slips in between, the sink writes the stage afterwards and the stage comes back:
+    /// this test fails on that order every run.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_report_that_arrives_after_the_read_ended_does_not_bring_the_stage_back() {
+        sink_hook::reset();
+        let id = DeviceId("held:one".into());
+        let hub = Arc::new(PeripheralHub::with_read_cache(
+            vec![Box::new(HeldPeripheral::new(id.clone()))],
+            Duration::ZERO,
+        ));
+
+        let reader = {
+            let hub = hub.clone();
+            let id = id.clone();
+            tokio::spawn(async move { hub.read(&id).await })
+        };
+
+        // The sink is at the gate: it has checked the flag and has not written the stage yet.
+        sink_hook::wait_until_reached();
+
+        // The reader goes away while the sink waits: the stage is cleared.
+        reader.abort();
+        // The clear takes the lock, and the sink holds it: on the fixed order the clear waits for
+        // the gate, and on the old one it finishes right away. The test waits a moment to see
+        // which happened, then lets the sink write.
+        let mut reader = reader;
+        let cleared = tokio::time::timeout(Duration::from_secs(1), &mut reader).await.is_ok();
+        sink_hook::open();
+        // The sink has written its stage.
+        sink_hook::wait_until_written();
+        if !cleared {
+            // The clear was waiting for the lock: it runs now that the sink is done.
+            let _ = tokio::time::timeout(Duration::from_secs(10), &mut reader).await;
+        }
+
+        assert_eq!(
+            hub.read_progress(&id),
+            ReadProgress::IDLE,
+            "a report that arrived after the read ended brought the stage back"
+        );
+        sink_hook::reset();
+    }
 
     #[test]
     fn an_unknown_device_has_both_off() {

@@ -18,10 +18,32 @@ use canvas_proto::props::PropValue;
 use common::{FakeAdapter, FakeEngine, FakePeripheral};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tower::ServiceExt;
 
 /// The token the tests use.
 const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+/// How long a held read may take to reach its next step, and how long the read itself may take
+/// to end. A test that waits for good is a test that never finishes: every wait here is
+/// bounded, and a timeout fails the test with the step it was waiting for.
+const WAIT: Duration = Duration::from_secs(10);
+
+/// Waits for the next step of a held read, and fails the test when it does not come.
+async fn next_step(reached: &mut tokio::sync::mpsc::UnboundedReceiver<()>, what: &str) {
+    tokio::time::timeout(WAIT, reached.recv())
+        .await
+        .unwrap_or_else(|_| panic!("{what}: no step within {WAIT:?}"))
+        .unwrap_or_else(|| panic!("{what}: the channel closed"));
+}
+
+/// Waits for a read to end, and fails the test when it does not.
+async fn ends<T>(reader: tokio::task::JoinHandle<T>, what: &str) -> T {
+    tokio::time::timeout(WAIT, reader)
+        .await
+        .unwrap_or_else(|_| panic!("{what}: the read did not end within {WAIT:?}"))
+        .unwrap_or_else(|e| panic!("{what}: the read task failed: {e}"))
+}
 
 /// A temporary directory that is removed when it is dropped.
 struct TempHome {
@@ -279,11 +301,11 @@ async fn a_read_reports_its_stages_in_order_while_the_device_read_is_still_open(
     let mut seen = Vec::new();
     // The open, then the four reported steps.
     for _ in 0..5 {
-        reached_rx.recv().await.expect("the read reaches its next step");
+        next_step(&mut reached_rx, "the read reaches its next step").await;
         seen.push(stage_now(&router, &id).await);
         go.add_permits(1);
     }
-    assert_eq!(reader.await.expect("the read ends"), StatusCode::OK);
+    assert_eq!(ends(reader, "the read ends").await, StatusCode::OK);
 
     let want: Vec<(String, u64, u64)> = vec![
         ("opening".into(), 0, 0),
@@ -315,10 +337,10 @@ async fn a_read_that_reports_nothing_is_one_stage_and_then_idle() {
         let path = path_of(&id);
         tokio::spawn(async move { call(&router, "GET", &path).await.status() })
     };
-    reached_rx.recv().await.expect("the read is open");
+    next_step(&mut reached_rx, "the read is open").await;
     assert_eq!(stage_now(&router, &id).await, ("reading".into(), 0, 0));
     go.add_permits(1);
-    assert_eq!(reader.await.expect("the read ends"), StatusCode::OK);
+    assert_eq!(ends(reader, "the read ends").await, StatusCode::OK);
     assert_eq!(stage_now(&router, &id).await, ("idle".into(), 0, 0));
     // An id that is not a device is idle too: asking opens nothing.
     assert_eq!(stage_now(&router, "nothing-here").await, ("idle".into(), 0, 0));
@@ -345,7 +367,7 @@ async fn start_held_read(
         let path = path_of(&id);
         tokio::spawn(async move { json(call(&router, "GET", &path).await).await })
     };
-    reached_rx.recv().await.expect("the read is open");
+    next_step(&mut reached_rx, "the read is open").await;
     (reader, reached_rx, go)
 }
 
@@ -361,7 +383,7 @@ async fn a_cancelled_read_leaves_the_stage_idle_even_when_the_device_still_repor
 
     // The editor navigated away: the request is dropped while the device thread is mid-read.
     reader.abort();
-    let _ = reader.await;
+    let _ = tokio::time::timeout(WAIT, reader).await.expect("the dropped read ends within the timeout");
     assert_eq!(stage_now(&router, &id).await, ("idle".into(), 0, 0), "a dropped read clears its stage");
 
     // The device thread does not know yet and reports once more through the sink it was given.
@@ -375,46 +397,6 @@ async fn a_cancelled_read_leaves_the_stage_idle_even_when_the_device_still_repor
 }
 
 #[tokio::test]
-async fn a_late_report_never_outlives_the_end_of_its_read() {
-    use canvas_proto::peripheral::ReadProgress;
-
-    // Check-then-insert raced the clear: a sink that had passed its check could write after the
-    // read ended. This is a smoke guard, not a proof: the window is nanoseconds and 3000 rounds
-    // never hit it on the old order. The fix (one lock for the flag and the clear) holds by
-    // construction. Many sinks hammer while reads end; after each end the stage must stay idle.
-    let fake = FakePeripheral::default();
-    let (router, _app, _home) = build(fake.clone());
-    let id = fake.id().0.clone();
-    for round in 0..200 {
-        let (reader, _reached, _go) = start_held_read(&router, &fake).await;
-        let sink = fake.0.lock().unwrap().sink.0.clone().expect("a sink");
-        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let hammers: Vec<_> = (0..3)
-            .map(|_| {
-                let sink = sink.clone();
-                let stop = stop.clone();
-                std::thread::spawn(move || {
-                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                        sink(ReadProgress::reading(1, 2));
-                    }
-                })
-            })
-            .collect();
-        reader.abort();
-        let _ = reader.await;
-        // Every report the hammers make from here on happens after the read ended.
-        for _ in 0..50 {
-            let now = stage_now(&router, &id).await;
-            assert_eq!(now, ("idle".into(), 0, 0), "round {round}: a late report brought the stage back");
-        }
-        stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        for h in hammers {
-            h.join().expect("the hammer ends");
-        }
-    }
-}
-
-#[tokio::test]
 async fn a_read_that_fails_leaves_the_stage_idle() {
     let fake = FakePeripheral::default();
     let (router, _app, _home) = build(fake.clone());
@@ -423,9 +405,9 @@ async fn a_read_that_fails_leaves_the_stage_idle() {
     assert_eq!(stage_now(&router, &id).await.0, "reading");
     fake.0.lock().unwrap().fail_read = 1;
     go.add_permits(1);
-    reached.recv().await.expect("the second stage");
+    next_step(&mut reached, "the second stage").await;
     go.add_permits(1);
-    let body = reader.await.expect("the read ends");
+    let body = ends(reader, "the read ends").await;
     assert!(body.get("problem").is_some_and(|p| p.is_string()), "the read failed and says so: {body}");
     assert_eq!(stage_now(&router, &id).await, ("idle".into(), 0, 0), "an error ends in idle, not in reading");
 }
