@@ -58,6 +58,39 @@ runtime does not know is read as a text field.
 A colour default may be `#rgb` or `#rrggbb`. A number default that is not a number falls
 back to `min`.
 
+## The library tile
+
+The Effects library shows each effect as a 64x40 tile that loops 24 frames. The daemon
+renders it with no device involved: 1 second of warm-up, then 2 seconds at the schema
+defaults. An effect that builds up slowly, has a period of its own, or looks poor at its
+defaults says how its tile is rendered with one optional tag:
+
+```html
+<meta thumbnail warm_up="1" loop="4.5" crossfade="0" props="speed=100;ink1=#ff0000" />
+```
+
+| Attribute | What it is |
+| --- | --- |
+| `warm_up` | Seconds the effect runs before the first tile frame. Default 1, at most 30. |
+| `loop` | Seconds the 24 frames cover. Set it to the effect's period (or a whole number of periods) so the loop closes. Default 2, from 0.5 to 30. |
+| `crossfade` | Frames at the end of the loop that fade into its start, for an effect with no period. Default 0, at most 12. |
+| `props` | `key=value` pairs separated by `;`, laid over the defaults for the tile only: the showcase look. A key must be one of the file's properties and a value valid for its type. |
+| `dark_on_purpose` | The reason a mostly dark tile is right. It exempts the tile from the lit-share bar below, and from nothing else. |
+
+The tile never changes how the effect runs on the lights.
+
+The quality bar a tile has to pass, measured on the 24 frames (a pixel is lit when its
+R + G + B is above 45 of 765):
+
+- at least 60 % of the pixels lit on average (unless `dark_on_purpose` is set);
+- every row and every column lit in at least one frame;
+- the loop seam, the last frame against the first, differs by at most 10 % (mean absolute
+  difference over all channels) or by at most 1.5 times the tile's own average step between
+  frames, so a fast effect that changes a lot every frame is not penalised for it.
+
+`effects check` prints the tile's scores and fails a tile under the bar. The thresholds
+are the `BAR_*` constants in `crates/canvas-daemon/src/thumbnail.rs`.
+
 ## The globals rule
 
 A property named `speed` is a global named `speed`. The value is installed as a global
@@ -250,14 +283,27 @@ The check needs no daemon. It parses the file with the same runtime the daemon u
 renders 120 frames on the 320x200 canvas. It prints the name, the properties, the frame
 times, and whether the picture moves and whether it is more than one flat colour.
 
-The command exits non-zero when the file does not parse, and when every frame is the
-same or the picture is one flat colour. Both mean the effect is probably broken.
+It also renders the effect's library tile (see [The library tile](#the-library-tile)) and
+prints how lit it is, whether every row and column is lit, and how much the loop jumps
+where it restarts, next to the bar.
+
+The command exits non-zero when the file does not parse, when every frame is the same or
+the picture is one flat colour (both mean the effect is probably broken), and when the
+tile is under the bar.
 
 ```
 canvas-rgb effects check my-effect.html --png frame.png
 ```
 
 writes frame 60 as a PNG.
+
+```
+canvas-rgb effects check my-effect.html --preview tile-preview
+```
+
+writes the tile into the folder as `my-effect.gif` (the loop at the library's 12 frames a
+second) and `my-effect-sheet.png` (all 24 frames in a grid), so the picture can be looked
+at, not only measured.
 
 In a checkout of this repository, the binary has to be built first:
 

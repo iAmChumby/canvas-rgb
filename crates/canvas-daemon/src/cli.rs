@@ -94,7 +94,7 @@ pub struct ImportArgs {
     pub replace: bool,
 }
 
-/// `canvas-rgb effects check <file> [--png <path>]`
+/// `canvas-rgb effects check <file> [--png <path>] [--preview <dir>]`
 #[derive(Debug, Args)]
 pub struct CheckArgs {
     /// The HTML file to check.
@@ -102,6 +102,9 @@ pub struct CheckArgs {
     /// Write frame 60 as a PNG.
     #[arg(long)]
     pub png: Option<String>,
+    /// Write the library tile as a GIF and a contact sheet of its frames into this folder.
+    #[arg(long, value_name = "DIR")]
+    pub preview: Option<String>,
 }
 
 /// `canvas-rgb output ...`
@@ -489,6 +492,121 @@ fn write_png(path: &str, width: u32, height: u32, rgb: &[u8]) -> Result<(), Stri
     writer
         .write_image_data(rgb)
         .map_err(|e| format!("could not write the PNG {path}: {e}"))
+}
+
+/// What `effects check` found in the effect's library tile (see [`crate::thumbnail`]).
+#[derive(Debug, Clone)]
+pub struct TileCheck {
+    /// The tile's measures, the same ones the quality bar reads.
+    pub score: crate::thumbnail::TileScore,
+    /// What the tile fails of the bar. Empty when it passes.
+    pub problems: Vec<String>,
+    /// The recipe the file carries (`<meta thumbnail ...>`), when it has one.
+    pub recipe: Option<canvas_proto::props::ThumbnailRecipe>,
+    /// The GIF of the tile, when a preview folder was given.
+    pub gif: Option<String>,
+    /// The contact sheet of the tile's frames, when a preview folder was given.
+    pub sheet: Option<String>,
+}
+
+/// The factor the preview GIF is scaled up by (64x40 becomes 320x200).
+const PREVIEW_GIF_SCALE: usize = 5;
+/// The factor the contact sheet's frames are scaled up by.
+const PREVIEW_SHEET_SCALE: usize = 2;
+/// The contact sheet's columns, and the gap between frames in pixels.
+const PREVIEW_SHEET_COLUMNS: usize = 6;
+const PREVIEW_SHEET_GAP: usize = 4;
+
+/// Renders the effect's library tile exactly as the daemon does, scores it against the
+/// quality bar, and (given a folder) writes the tile as a GIF and a contact sheet of its
+/// frames, so the picture can be looked at and not only measured.
+pub fn check_tile(path: &str, preview_dir: Option<&str>) -> Result<TileCheck, String> {
+    let source = std::fs::read_to_string(path).map_err(|e| format!("could not read {path}: {e}"))?;
+    let mut effect = canvas_html::HtmlEffect::from_source("check", &source, &canvas_proto::props::Props::new())
+        .map_err(|e| e.to_string())?;
+    let schema = effect.schema();
+    let body = crate::thumbnail::render(&mut effect, &schema.defaults());
+    let score = crate::thumbnail::score(&body).ok_or("the tile render was malformed")?;
+    let problems = crate::thumbnail::problems(&score, schema.thumbnail.as_ref());
+
+    let (mut gif, mut sheet) = (None, None);
+    if let Some(dir) = preview_dir {
+        std::fs::create_dir_all(dir).map_err(|e| format!("could not create {dir}: {e}"))?;
+        let stem = std::path::Path::new(path)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "effect".to_string());
+        let gif_path = std::path::Path::new(dir).join(format!("{stem}.gif"));
+        let sheet_path = std::path::Path::new(dir).join(format!("{stem}-sheet.png"));
+        write_tile_gif(&gif_path, &body)?;
+        write_tile_sheet(&sheet_path, &body)?;
+        gif = Some(gif_path.to_string_lossy().into_owned());
+        sheet = Some(sheet_path.to_string_lossy().into_owned());
+    }
+    Ok(TileCheck { score, problems, recipe: schema.thumbnail, gif, sheet })
+}
+
+/// The width, height and RGB frames of a thumbnail body.
+fn tile_frames(body: &[u8]) -> (usize, usize, Vec<&[u8]>) {
+    let w = u16::from_le_bytes([body[0], body[1]]) as usize;
+    let h = u16::from_le_bytes([body[2], body[3]]) as usize;
+    (w, h, body[6..].chunks_exact(w * h * 3).collect())
+}
+
+/// Scales an RGB frame up by whole pixels.
+fn scale_up(frame: &[u8], w: usize, h: usize, factor: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(w * h * factor * factor * 3);
+    for y in 0..h * factor {
+        for x in 0..w * factor {
+            let i = ((y / factor) * w + x / factor) * 3;
+            out.extend_from_slice(&frame[i..i + 3]);
+        }
+    }
+    out
+}
+
+/// Writes the tile as a looping GIF at the library's 12 frames a second.
+pub fn write_tile_gif(path: &std::path::Path, body: &[u8]) -> Result<(), String> {
+    let (w, h, frames) = tile_frames(body);
+    let (gw, gh) = (w * PREVIEW_GIF_SCALE, h * PREVIEW_GIF_SCALE);
+    let file = std::fs::File::create(path).map_err(|e| format!("could not create {}: {e}", path.display()))?;
+    let mut encoder = gif::Encoder::new(std::io::BufWriter::new(file), gw as u16, gh as u16, &[])
+        .map_err(|e| format!("could not write the GIF {}: {e}", path.display()))?;
+    encoder
+        .set_repeat(gif::Repeat::Infinite)
+        .map_err(|e| format!("could not write the GIF {}: {e}", path.display()))?;
+    for frame in frames {
+        let rgb = scale_up(frame, w, h, PREVIEW_GIF_SCALE);
+        let mut f = gif::Frame::from_rgb_speed(gw as u16, gh as u16, &rgb, 10);
+        // Hundredths of a second: 12 frames a second is 8.
+        f.delay = 8;
+        encoder
+            .write_frame(&f)
+            .map_err(|e| format!("could not write the GIF {}: {e}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Writes every frame of the tile in a grid, in order, left to right and top to bottom.
+pub fn write_tile_sheet(path: &std::path::Path, body: &[u8]) -> Result<(), String> {
+    let (w, h, frames) = tile_frames(body);
+    let (fw, fh) = (w * PREVIEW_SHEET_SCALE, h * PREVIEW_SHEET_SCALE);
+    let columns = PREVIEW_SHEET_COLUMNS.min(frames.len().max(1));
+    let rows = frames.len().div_ceil(columns);
+    let gap = PREVIEW_SHEET_GAP;
+    let (sw, sh) = (columns * fw + (columns + 1) * gap, rows * fh + (rows + 1) * gap);
+    // A mid grey between the frames, so a black frame still shows its edge.
+    let mut sheet = vec![0x40u8; sw * sh * 3];
+    for (n, frame) in frames.iter().enumerate() {
+        let big = scale_up(frame, w, h, PREVIEW_SHEET_SCALE);
+        let (ox, oy) = (gap + (n % columns) * (fw + gap), gap + (n / columns) * (fh + gap));
+        for y in 0..fh {
+            let from = y * fw * 3;
+            let to = ((oy + y) * sw + ox) * 3;
+            sheet[to..to + fw * 3].copy_from_slice(&big[from..from + fw * 3]);
+        }
+    }
+    write_png(&path.to_string_lossy(), sw as u32, sh as u32, &sheet)
 }
 
 /// A CLI error.
@@ -1072,6 +1190,68 @@ mod tests {
             "the message names the budget: {:?}",
             report.errors
         );
+    }
+
+    /// A bright picture that comes back to where it began every 60 frames, with a tile
+    /// recipe that makes the 24-frame tile cover exactly one turn (1 s).
+    const BRIGHT_LOOP: &str = r##"<head>
+  <title>Bright loop</title>
+  <meta thumbnail warm_up="0" loop="1" />
+</head>
+<body><canvas id="stage" width="320" height="200"></canvas></body>
+<script>
+  var ctx = document.getElementById("stage").getContext("2d");
+  var t = 0;
+  function draw() {
+    t++;
+    var v = Math.round(170 + 60 * Math.sin(t * Math.PI * 2 / 60));
+    ctx.fillStyle = "rgb(" + v + "," + (255 - v) + ",200)";
+    ctx.fillRect(0, 0, 320, 200);
+    window.requestAnimationFrame(draw);
+  }
+  window.requestAnimationFrame(draw);
+</script>"##;
+
+    /// A near-black picture that pulses a little.
+    const DARK_PULSE: &str = r##"<head>
+  <title>Dark pulse</title>
+</head>
+<body><canvas id="stage" width="320" height="200"></canvas></body>
+<script>
+  var ctx = document.getElementById("stage").getContext("2d");
+  var t = 0;
+  function draw() {
+    t++;
+    var v = 4 + (t % 6);
+    ctx.fillStyle = "rgb(" + v + "," + v + "," + v + ")";
+    ctx.fillRect(0, 0, 320, 200);
+    window.requestAnimationFrame(draw);
+  }
+  window.requestAnimationFrame(draw);
+</script>"##;
+
+    #[test]
+    fn a_bright_looping_tile_passes_the_bar_and_writes_its_preview() {
+        let file = TempFile::new("bright-tile", BRIGHT_LOOP);
+        let dir = std::env::temp_dir().join(format!("canvas-rgb-tile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let tile = check_tile(&file.path(), Some(&dir.to_string_lossy())).expect("the tile renders");
+        assert!(tile.problems.is_empty(), "{:?}", tile.problems);
+        assert_eq!(tile.score.rows_lit, crate::thumbnail::HEIGHT as usize);
+
+        let gif = std::fs::read(tile.gif.as_ref().expect("a GIF path")).expect("the GIF is there");
+        assert_eq!(&gif[..6], b"GIF89a");
+        let sheet = std::fs::read(tile.sheet.as_ref().expect("a sheet path")).expect("the sheet is there");
+        assert_eq!(&sheet[..8], &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_dark_tile_fails_the_bar_and_writes_nothing_unasked() {
+        let file = TempFile::new("dark-tile", DARK_PULSE);
+        let tile = check_tile(&file.path(), None).expect("the tile renders");
+        assert!(!tile.problems.is_empty(), "a near-black tile must fail the bar");
+        assert!(tile.gif.is_none() && tile.sheet.is_none());
     }
 
     #[test]

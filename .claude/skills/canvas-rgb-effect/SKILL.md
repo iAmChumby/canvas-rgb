@@ -60,6 +60,32 @@ one of:
 `--png frame.png` writes frame 60 as a PNG, which is the quickest way to see what an
 effect actually draws.
 
+### The library tile has to pass too
+
+The same command renders the effect's library tile (64x40, 24 frames) the way the daemon
+does and scores it against the bar in `docs/effects.md` ("The library tile"): at least 60 %
+lit on average, every row and column lit, no jump where the loop restarts. A tile under the
+bar makes the check exit non-zero. The numbers are printed as `tile`, `tile seam` and
+`tile bar`.
+
+```
+canvas-rgb effects check my-effect.html --preview tile-preview
+```
+
+writes `tile-preview/my-effect.gif` and `tile-preview/my-effect-sheet.png` (all 24 frames in
+a grid). **Look at the sheet** (open the PNG) before calling the tile good: the numbers say
+how lit it is and not whether it is beautiful or whether the loop reads as a loop.
+
+When the tile fails, fix it in the file with one `<meta thumbnail ...>` tag and run the
+check again; do not change the effect to suit the tile:
+
+- the effect builds up slowly (rain, ink): raise `warm_up`;
+- the effect has a period: set `loop` to the period, or a whole number of periods;
+- the effect has no period: set `crossfade` (up to 12 frames);
+- the defaults make a poor tile: `props="key=value;key=value"` is the showcase look;
+- the effect is dark on purpose: `dark_on_purpose="why"` (the reason is printed; it
+  exempts the lit share only).
+
 ## 4. Install it
 
 ```
@@ -69,6 +95,23 @@ canvas-rgb effects import my-effect.html
 The daemon writes the file into `%APPDATA%\canvas-rgb\effects\`. A file of the same
 name is only overwritten with `--replace`. The effect's id is `html:` plus the file's
 name without the extension.
+
+## 5. Look at it in the app before calling it done
+
+An effect is done when you have looked at it in the editor, not when the check passes.
+
+1. Open the editor's Effects view (the library tile and the live preview of the effect).
+2. Take a screenshot at **1440** wide and one at **390** wide (light and dark if the effect
+   uses the editor's colours). Headless Chromium over the editor's static build does this
+   without a dev server: copy `.build/displays-shots.mjs` and open `/effects/`.
+3. Open each PNG and look at it: the tile is not black, cropped or flat; the name and the
+   badge fit at 390; the preview moves.
+4. Fix what you saw and shoot again. Say in your report which PNGs you looked at.
+
+Importing writes into the real effects folder of the machine, so in a session where the
+installed app is not yours to touch, do step 2 on the static demo build with the effect's
+tile rendered by `cargo run -p canvas-daemon --example render_demo_thumbs`, and say that you
+did.
 
 ## Porting someone else's effect
 
