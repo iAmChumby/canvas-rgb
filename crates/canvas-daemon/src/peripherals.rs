@@ -145,8 +145,11 @@ struct ReadingGuard {
 
 impl Drop for ReadingGuard {
     fn drop(&mut self) {
+        // One lock covers the flag and the clear, and the sink checks the flag under the same
+        // lock, so a sink that passed its check cannot write after this clear.
+        let mut progress = self.progress.lock().unwrap_or_else(|e| e.into_inner());
         self.live.store(false, std::sync::atomic::Ordering::SeqCst);
-        self.progress.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.id);
+        progress.remove(&self.id);
     }
 }
 
@@ -280,8 +283,9 @@ impl PeripheralHub {
             let progress = self.progress.clone();
             let id = device.0.clone();
             Arc::new(move |p: ReadProgress| {
+                let mut progress = progress.lock().unwrap_or_else(|e| e.into_inner());
                 if live.load(std::sync::atomic::Ordering::SeqCst) {
-                    progress.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), p);
+                    progress.insert(id.clone(), p);
                 }
             })
         };
