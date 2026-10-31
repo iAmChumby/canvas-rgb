@@ -179,9 +179,30 @@ pub(crate) struct UserState {
     pub no_user: AtomicBool,
     /// While set, started steps never exit.
     pub hang: AtomicBool,
+    /// Set when the service ended a started step.
+    pub killed: AtomicBool,
 }
 
 struct FakeUser(Arc<UserState>, FakeProcesses);
+
+/// A user-step child that records being killed.
+struct KillSpy {
+    inner: Box<dyn ChildProcess>,
+    state: Arc<UserState>,
+}
+
+impl ChildProcess for KillSpy {
+    fn try_wait(&mut self) -> io::Result<Option<i32>> {
+        self.inner.try_wait()
+    }
+    fn kill(&mut self) -> io::Result<()> {
+        self.state.killed.store(true, Ordering::SeqCst);
+        self.inner.kill()
+    }
+    fn id(&self) -> u32 {
+        self.inner.id()
+    }
+}
 
 impl UserCommands for FakeUser {
     fn start(&mut self, command_line: &str, _dir: &Path) -> io::Result<Box<dyn ChildProcess>> {
@@ -194,7 +215,7 @@ impl UserCommands for FakeUser {
         if !self.0.hang.load(Ordering::SeqCst) {
             self.1.exit_last();
         }
-        Ok(child)
+        Ok(Box::new(KillSpy { inner: child, state: Arc::clone(&self.0) }))
     }
 }
 
@@ -270,6 +291,7 @@ pub(crate) fn rig_with(
     // The install folder as the finish step needs it.
     std::fs::create_dir_all(app.join("installer")).unwrap();
     std::fs::write(app.join("installer").join("setup-user.ps1"), b"# fake").unwrap();
+    std::fs::write(app.join("installer").join("lib.ps1"), b"# fake").unwrap();
     std::fs::write(app.join("canvas-rgb.exe"), b"MZ fake").unwrap();
     let mut cfg = UpdateConfig {
         home: home.clone(),
@@ -1307,6 +1329,11 @@ fn app_breakers() -> Vec<(&'static str, Breaker)> {
             r.writable.lock().unwrap().push(p.clone());
             p
         }),
+        ("lib.ps1 (dot-sourced by setup-user.ps1) is writable by non-admins", |r| {
+            let p = r.app.join("installer").join("lib.ps1");
+            r.writable.lock().unwrap().push(p.clone());
+            p
+        }),
         ("canvas-rgb.exe is owned by someone else", |r| {
             let p = r.app.join("canvas-rgb.exe");
             r.untrusted.lock().unwrap().push(p.clone());
@@ -1431,6 +1458,8 @@ fn a_setup_user_that_hits_the_step_limit_is_logged_as_a_warning_and_the_tray_sti
     r.user.hang.store(true, Ordering::SeqCst);
     let (outcome, logs) = capture_logs(|| r.installer.resume_once());
     assert_eq!(outcome, Some(Finish::Done));
+    assert!(r.user.killed.load(Ordering::SeqCst), "the hung script was ended before the tray started");
+    assert!(logs.contains("ended the user step that hit the wait limit"), "{logs}");
     assert_eq!(r.commands().len(), 2, "the tray started after the hung script");
     let line = logs.lines().find(|l| l.contains("did not finish within the wait limit")).unwrap_or_else(|| panic!("no warning in: {logs}"));
     assert!(line.contains("WARN"), "{line}");

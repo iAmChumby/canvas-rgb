@@ -508,7 +508,8 @@ impl UpdateInstaller {
         }
         let installer = app.join("installer");
         let folders = [app.to_path_buf(), installer.clone()];
-        let files = [installer.join("setup-user.ps1"), app.join("canvas-rgb.exe")];
+        // setup-user.ps1 dot-sources lib.ps1, so it is run as part of the script.
+        let files = [installer.join("setup-user.ps1"), installer.join("lib.ps1"), app.join("canvas-rgb.exe")];
         let result = app.join("update-result.json");
         let mut all: Vec<(PathBuf, bool)> = folders.into_iter().map(|p| (p, true)).collect();
         all.extend(files.into_iter().map(|p| (p, false)));
@@ -1080,6 +1081,11 @@ impl UpdateInstaller {
                 Err(e) => tracing::warn!(error = %e, "could not query the user step"),
             }
             if Instant::now() >= deadline {
+                // The tray must not start while the script may still be writing the user's HKCU.
+                match child.kill() {
+                    Ok(()) => tracing::warn!(command = command_line, "ended the user step that hit the wait limit"),
+                    Err(e) => tracing::warn!(command = command_line, error = %e, "could not end the user step that hit the wait limit"),
+                }
                 return Ok(None);
             }
             std::thread::sleep(self.cfg.poll);
