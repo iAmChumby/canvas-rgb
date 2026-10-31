@@ -139,10 +139,11 @@ export function DevicesView() {
   const devicesError = useSnap((s) => s.devicesError);
   // How many lights the daemon has already counted: the placeholder draws as many cards.
   const counted = useSnap((s) => s.status?.devices_connected ?? 0);
-  // How many devices the daemon has, connected or not. The status route knows only the connected
-  // ones, so the total is the one the list had the last time it came: the placeholder draws as
-  // many cards as the list will show.
-  const total = useSnap((s) => s.devicesTotal);
+  // How many devices the daemon has, connected or not. The status route knows the total, so the
+  // placeholder draws as many cards as the list will show, from the very first load.
+  const total = useSnap((s) => s.status?.devices_total ?? null);
+  // The length of the last list that came: the total for a daemon that does not report one.
+  const listed = useSnap((s) => s.devicesTotal);
   // A load that is in flight after a Try again: the frame shows its placeholder until it ends.
   const retrying = useSnap((s) => s.pending.includes("devices"));
   const openrgb = useSnap((s) => s.status?.openrgb ?? "connected");
@@ -201,7 +202,7 @@ export function DevicesView() {
                 ? "empty"
                 : "ready"
           }
-          shape={<DeviceListShape cards={total ?? (counted > 0 ? counted : 3)} />}
+          shape={<DeviceListShape cards={total || listed || (counted > 0 ? counted : 3)} />}
           label="Looking for devices"
           error={
             <ErrorPanel
@@ -238,6 +239,7 @@ export function DevicesView() {
                 className="device"
                 style={{ "--tone": `var(${accent})` } as CSSProperties}
                 aria-label={d.name}
+                data-testid="device-card"
               >
                 <div className="device-head">
                   <div className="row-title" style={{ minWidth: 0 }}>

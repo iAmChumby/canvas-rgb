@@ -44,6 +44,14 @@ export function dropApiConfig(): void {
 
 export type Method = "GET" | "PUT" | "PATCH" | "POST" | "DELETE";
 
+/**
+ * How long a request may take before the editor gives up on it. A request that never answers
+ * would leave the area pending for good: no error, no button, and nothing to try again. The
+ * daemon answers in well under a second, so this is only the ceiling for a daemon that has
+ * stopped mid-call.
+ */
+export const REQUEST_TIMEOUT_MS = 10_000;
+
 /** Sends one request to the daemon and returns the raw response, or throws ApiFailure. */
 async function send(method: Method, path: string, body?: unknown): Promise<Response> {
   let config: ApiConfig;
@@ -56,6 +64,11 @@ async function send(method: Method, path: string, body?: unknown): Promise<Respo
   const headers: Record<string, string> = { Authorization: `Bearer ${config.token}` };
   if (body !== undefined) headers["Content-Type"] = "application/json";
 
+  // The request has a deadline: a call that never comes back is turned into an error, so the
+  // frame can say what happened and offer a way to try again.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
   let res: Response;
   try {
     res = await fetch(config.base_url + path, {
@@ -63,8 +76,18 @@ async function send(method: Method, path: string, body?: unknown): Promise<Respo
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
       cache: "no-store",
+      signal: controller.signal,
     });
   } catch {
+    if (controller.signal.aborted) {
+      // The deadline passed. The daemon may be busy or gone: either way the editor waits no
+      // longer for this answer.
+      throw new ApiFailure(
+        0,
+        "timeout",
+        `canvas-rgb did not answer within ${Math.round(REQUEST_TIMEOUT_MS / 1000)} seconds. It may be stopped, or busy.`,
+      );
+    }
     // The listener may be gone, or another process may be about to take its place: the token is
     // not trusted again until the tray has checked the listener once more.
     dropApiConfig();
@@ -75,6 +98,8 @@ async function send(method: Method, path: string, body?: unknown): Promise<Respo
       "unreachable",
       "canvas-rgb did not answer. It may be stopped, or the browser was not allowed to read its reply.",
     );
+  } finally {
+    clearTimeout(timer);
   }
 
   if (res.status === 401) dropApiConfig(); // the token changed (a purge and reinstall): ask again

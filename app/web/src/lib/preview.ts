@@ -161,12 +161,12 @@ async function diagnose(baseUrl: string): Promise<void> {
   try {
     const res = await fetch(`${baseUrl}${routes.status}`, { cache: "no-store" });
     if (res.ok) {
-      detail = "The daemon refused the preview socket. Every other call works.";
+      detail = "canvas-rgb refused the preview socket. Every other call works.";
     } else {
-      detail = `The daemon answered the status route with HTTP ${res.status}.`;
+      detail = `canvas-rgb answered the status route with HTTP ${res.status}.`;
     }
   } catch {
-    detail = "The daemon is not answering on 127.0.0.1:9430.";
+    detail = "canvas-rgb is not answering on 127.0.0.1:9430.";
   }
   refusals += 1;
   setStatus({ state: "refused", error: detail });

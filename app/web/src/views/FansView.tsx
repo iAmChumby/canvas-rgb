@@ -191,6 +191,9 @@ export function FansView() {
 
   const selected = fans ? (fans.headers.find((h) => h.id === selectedId) ?? fans.headers[0] ?? null) : null;
   const headers = fans?.headers ?? [];
+  // A refresh that failed after the readings were read does not take the page away: the numbers
+  // stay and the page says they may be old.
+  const stale = fans !== null && fansError !== null;
 
   return (
     <div className="stack">
@@ -203,9 +206,16 @@ export function FansView() {
         )}
       </div>
 
+      {stale && (
+        <div className="rule rule-warn" role="status">
+          The fan readings may be out of date.
+          <Details>{fansError}</Details>
+        </div>
+      )}
+
       <LoadFrame
         className="stack"
-        state={retrying ? "loading" : fansError ? "error" : fans ? "ready" : "loading"}
+        state={retrying ? "loading" : fansError && fans === null ? "error" : fans ? "ready" : "loading"}
         shape={<FansShape />}
         label="Reading the fans"
         error={errorNode}
@@ -664,8 +674,8 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
         {header.override_reason && (
           <p className={handedBack ? "rule rule-warn" : "rule"}>
             {handedBack
-              ? "The daemon handed this header back to BIOS"
-              : "The daemon overrode this"}
+              ? "canvas-rgb handed this header back to BIOS"
+              : "canvas-rgb overrode this"}
             : {header.override_reason}
           </p>
         )}

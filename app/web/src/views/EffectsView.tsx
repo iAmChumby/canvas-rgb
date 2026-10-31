@@ -502,9 +502,16 @@ export function EffectsView() {
       empty={
         <div className="stack">
           <Panel className="effect-empty">
-            <EmptyState icon={<MagnifyingGlass size={22} />} title="No effect matches that">
-              Try fewer words, or clear the filter and the category.
-            </EmptyState>
+            {effects !== null && effects.length === 0 ? (
+              // There is no effect at all: the filter is not the reason.
+              <EmptyState icon={<Waveform size={22} />} title="No effects yet">
+                This machine has no effect to run. Import an HTML effect to add one.
+              </EmptyState>
+            ) : (
+              <EmptyState icon={<MagnifyingGlass size={22} />} title="No effect matches that">
+                Try fewer words, or clear the filter and the category.
+              </EmptyState>
+            )}
           </Panel>
           {failedStrip}
         </div>

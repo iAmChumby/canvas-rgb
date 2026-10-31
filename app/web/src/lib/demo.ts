@@ -698,7 +698,8 @@ export async function demoRequest(method: string, path: string, body: unknown): 
           : head;
     const wait = holdMs(area);
     if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
-    if (failsArea(area)) fail(500, "internal", `canvas-rgb could not read the ${area}`);
+    // The daemon's own words: the route that failed and why, the way the service says it.
+    if (failsArea(area)) fail(500, "internal", `could not read the ${area}: the request came back with an error`);
     if (emptyArea(area)) {
       if (area === "peripherals") return { peripherals: [] };
       if (area === "displays") return [];

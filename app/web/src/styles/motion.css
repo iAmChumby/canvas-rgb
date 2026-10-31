@@ -330,12 +330,13 @@
   padding: 0;
 }
 
-/* The preview holds the effect's own colours when it arrives: the placeholder carries the same
-   accent, so the gallery reads as a gallery and not as a grid of grey boxes. */
+/* The preview holds the effect's own colours when it arrives. The placeholder is a
+   placeholder: it wears the skeleton tone every other placeholder wears, so it reads as a
+   placeholder in both themes and not as a picture that failed to load. */
 .effect-card-skeleton .skeleton-preview {
   aspect-ratio: 16 / 10;
   border-radius: 0;
-  background: color-mix(in srgb, var(--live) 12%, var(--sunk));
+  background: color-mix(in srgb, var(--raised) 60%, var(--line-2));
 }
 
 .effect-card-skeleton .skeleton-line {
@@ -522,10 +523,16 @@
 
 /* On a phone the row above the frame is the way back (an arrow, then the page's name). The line sits
    in that row, on the right, as it sits in the page head on a wide page, and the name steps aside
-   while the line is there so the two never meet. */
+   while the line is there so the two never meet. The name is only hidden from the eye: it stays
+   in the accessibility tree, so a reader still hears where the arrow goes. */
 @media (max-width: 720px) {
   .peripheral-detail:has(.load-stage) .peripheral-back > span:last-child {
-    visibility: hidden;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
 }
 
@@ -555,6 +562,15 @@
 /* Placeholder boxes the shapes share (components/LoadShapes.tsx). */
 .skel-title {
   height: 16.3px;
+}
+
+/* The placeholders wear the corner radius of the taste rules (6 to 10 px), not the 16 px the
+   loaded panels and cards have. The loaded content keeps its own radius: this is the
+   placeholder's shape only. */
+.load-shape .panel,
+.load-shape .device,
+.load-shape .effect-card {
+  border-radius: var(--r-md);
 }
 
 /* A placeholder panel as tall as the panel it stands for: its height is set per panel and per width
@@ -627,16 +643,34 @@
   border-top: 0;
 }
 
-/* A zone row of a device card: the LED strip is a pill that takes the room the strip takes. */
-.skel-zone {
+/* A zone row of a device card: the row is the one the loaded view has, with the plain strip in
+   it. It is not the layout canvas's zone box (that one is `.skel-zone`, an absolute box on the
+   desk). */
+.skel-dev-zone {
   pointer-events: none;
 }
 
+/* The LED strip in the placeholder: the plain strip the loaded view draws for a zone with no
+   LEDs yet, in the neutral skeleton tone. The device's accent would read as a selected
+   control. */
 .skel-led-strip {
   width: auto;
+  color: var(--line-2);
 }
 
+/* The canvas box holds the drawing and, under it, the view switch and the notes, as the real
+   one does: the drawing is as tall as the loaded drawing, not as the whole box.
+
+   The heights below cannot come from the loaded canvas: the desk takes the height of the
+   taller column of the layout grid, and that height comes from the panels beside it, so it is
+   content-driven and not a constant. These are the desk's measured height at 1440 and at 390,
+   and the tools' height with it. They live here, next to the only rules that use them, so
+   there is one source. */
 .skel-canvas {
+  --skel-stage-w: 806.4px;
+  --skel-stage-n: 223.8px;
+  --skel-tools-w: 113.6px;
+  --skel-tools-n: 161.1px;
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;

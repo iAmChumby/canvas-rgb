@@ -139,10 +139,24 @@ export function useSnap<T>(select: (s: Snap) => T): T {
 let pendingAreas: string[] = [];
 
 /**
- * The number of the last request per area. A late answer from an older request is dropped: a
- * slow failure must not land on a page that has already moved on.
+ * The request each pending area is waiting for. The area is free again when that request has
+ * settled: a request that never answers would leave the area pending for good, with no error
+ * and no way to try again.
+ */
+const pendingRequest = new Map<string, number>();
+
+/**
+ * The number of the last request per area. It numbers the requests, so the pending marker can
+ * tell which one the area is waiting for.
  */
 const requests = new Map<string, number>();
+
+/**
+ * The number of the last answer that landed per area. An answer is dropped only when a NEWER
+ * one has already landed: an answer that is slower than the poll must still reach the page,
+ * even when a newer request is already on its way.
+ */
+const answered = new Map<string, number>();
 
 /** Starts a request for an area and returns its number. */
 function beginRequest(area: string): number {
@@ -151,9 +165,19 @@ function beginRequest(area: string): number {
   return n;
 }
 
-/** True when this answer is the newest one for its area. */
+/**
+ * True when this answer is not older than the one that landed last. The newest request on its
+ * way does not count: only an answer that has already landed does.
+ */
 function isNewest(area: string, n: number): boolean {
-  return requests.get(area) === n;
+  const last = answered.get(area);
+  return last === undefined || n >= last;
+}
+
+/** Records that an answer landed: an older answer that arrives after it is dropped. */
+function markAnswered(area: string, n: number): void {
+  const last = answered.get(area);
+  if (last === undefined || n > last) answered.set(area, n);
 }
 
 /** Marks an area as in flight, or not. */
@@ -168,28 +192,38 @@ function markPending(area: string, on: boolean): void {
 
 /**
  * Runs a load the reader asked for again. The area is marked as in flight while it runs, so the
- * frame goes back to its placeholder and the button cannot be pressed twice.
+ * frame goes back to its placeholder and the button cannot be pressed twice. The area is free
+ * again when the request it asked for has settled.
  */
-async function retryArea(area: string, work: () => Promise<void>): Promise<void> {
+async function retryArea(area: string, work: (n: number) => Promise<void>): Promise<void> {
   if (pendingAreas.includes(area)) return;
+  const n = beginRequest(area);
+  pendingRequest.set(area, n);
   markPending(area, true);
   try {
-    await work();
+    await work(n);
   } finally {
-    markPending(area, false);
+    // The newest request for the area has settled: the frame may show its content again, and
+    // the button comes back with it.
+    if (pendingRequest.get(area) === n) {
+      pendingRequest.delete(area);
+      markPending(area, false);
+    }
   }
 }
 
-export async function refreshStatus(): Promise<void> {
-  const n = beginRequest("status");
+export async function refreshStatus(n?: number): Promise<void> {
+  const req = n ?? beginRequest("status");
   try {
     const status = await api.status();
-    if (!isNewest("status", n)) return;
+    if (!isNewest("status", req)) return;
+    markAnswered("status", req);
     patchSnap({ status, statusError: null });
     lastStatusFailureAt = 0;
     statusFailures = 0;
   } catch (e) {
-    if (!isNewest("status", n)) return;
+    if (!isNewest("status", req)) return;
+    markAnswered("status", req);
     statusFailures += 1;
     // The last status is old after the second miss in a row (about DOWN_RETRY_MS later). Clearing it
     // is what lets the strip and the daemon-down page say the daemon is gone.
@@ -198,11 +232,12 @@ export async function refreshStatus(): Promise<void> {
   }
 }
 
-export async function refreshFans(): Promise<void> {
-  const n = beginRequest("fans");
+export async function refreshFans(n?: number): Promise<void> {
+  const req = n ?? beginRequest("fans");
   try {
     const fans = await api.fans();
-    if (!isNewest("fans", n)) return;
+    if (!isNewest("fans", req)) return;
+    markAnswered("fans", req);
     const rpm = { ...snap.rpm };
     for (const h of fans.headers) {
       const prev = rpm[h.id] ?? [];
@@ -210,78 +245,90 @@ export async function refreshFans(): Promise<void> {
     }
     patchSnap({ fans, fansError: null, rpm });
   } catch (e) {
-    if (!isNewest("fans", n)) return;
+    if (!isNewest("fans", req)) return;
+    markAnswered("fans", req);
     patchSnap({ fansError: messageOf(e) });
   }
 }
 
-export async function refreshDevices(): Promise<void> {
-  const n = beginRequest("devices");
+export async function refreshDevices(n?: number): Promise<void> {
+  const req = n ?? beginRequest("devices");
   try {
     const devices = (await api.devices()).devices;
-    if (!isNewest("devices", n)) return;
+    if (!isNewest("devices", req)) return;
+    markAnswered("devices", req);
     patchSnap({ devices, devicesError: null, devicesTotal: devices.length });
   } catch (e) {
-    if (!isNewest("devices", n)) return;
+    if (!isNewest("devices", req)) return;
+    markAnswered("devices", req);
     patchSnap({ devicesError: messageOf(e) });
   }
 }
 
-export async function refreshEffects(): Promise<void> {
-  const n = beginRequest("effects");
+export async function refreshEffects(n?: number): Promise<void> {
+  const req = n ?? beginRequest("effects");
   try {
     const r = await api.effects();
-    if (!isNewest("effects", n)) return;
+    if (!isNewest("effects", req)) return;
+    markAnswered("effects", req);
     patchSnap({ effects: r.effects, effectsFailed: r.failed ?? [], effectsError: null });
   } catch (e) {
-    if (!isNewest("effects", n)) return;
+    if (!isNewest("effects", req)) return;
+    markAnswered("effects", req);
     patchSnap({ effectsError: messageOf(e) });
   }
 }
 
-export async function refreshLayouts(): Promise<void> {
-  const n = beginRequest("layouts");
+export async function refreshLayouts(n?: number): Promise<void> {
+  const req = n ?? beginRequest("layouts");
   try {
     const r = await api.layouts();
-    if (!isNewest("layouts", n)) return;
+    if (!isNewest("layouts", req)) return;
+    markAnswered("layouts", req);
     patchSnap({ layouts: r.layouts, activeLayout: r.active, layoutsError: null });
   } catch (e) {
-    if (!isNewest("layouts", n)) return;
+    if (!isNewest("layouts", req)) return;
+    markAnswered("layouts", req);
     patchSnap({ layoutsError: messageOf(e) });
   }
 }
 
-export async function refreshRender(): Promise<void> {
-  const n = beginRequest("render");
+export async function refreshRender(n?: number): Promise<void> {
+  const req = n ?? beginRequest("render");
   try {
     const render = await api.render();
-    if (!isNewest("render", n)) return;
+    if (!isNewest("render", req)) return;
+    markAnswered("render", req);
     patchSnap({ render });
   } catch {
     // The status error already says whether the daemon answers.
   }
 }
 
-export async function refreshSettings(): Promise<void> {
-  const n = beginRequest("settings");
+export async function refreshSettings(n?: number): Promise<void> {
+  const req = n ?? beginRequest("settings");
   try {
     const settings = await api.settings();
-    if (!isNewest("settings", n)) return;
+    if (!isNewest("settings", req)) return;
+    markAnswered("settings", req);
     patchSnap({ settings, settingsError: null });
   } catch (e) {
-    if (!isNewest("settings", n)) return;
+    if (!isNewest("settings", req)) return;
+    markAnswered("settings", req);
     patchSnap({ settingsError: messageOf(e) });
   }
 }
 
-export async function refreshDisplays(): Promise<void> {
-  const n = beginRequest("displays");
+export async function refreshDisplays(n?: number): Promise<void> {
+  const req = n ?? beginRequest("displays");
   try {
     const displays = await api.displays();
-    if (!isNewest("displays", n)) return;
+    if (!isNewest("displays", req)) return;
+    markAnswered("displays", req);
     patchSnap({ displays, displaysError: null, displaysUnsupported: false });
   } catch (e) {
-    if (!isNewest("displays", n)) return;
+    if (!isNewest("displays", req)) return;
+    markAnswered("displays", req);
     // A daemon that is older than the display routes answers 404. That is not a failure to read
     // the displays: the page says the daemon is old and what to do about it.
     const unsupported = e instanceof ApiFailure && e.status === 404;
@@ -307,8 +354,12 @@ export const retryDisplays = (): Promise<void> => retryArea("displays", refreshD
  */
 export async function refreshUpdate(): Promise<void> {
   if (!canUpdate()) return;
+  const n = beginRequest("update");
   try {
     const state = await getUpdateState();
+    // A tray that answers late must not overwrite a newer answer.
+    if (!isNewest("update", n)) return;
+    markAnswered("update", n);
     if (state) patchSnap({ update: state });
   } catch {
     // A tray without the update commands: the editor shows nothing about updates.

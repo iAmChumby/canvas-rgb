@@ -18,7 +18,7 @@ import { openLogsFolder, tauriHost } from "@/lib/host";
 import { getSnap, patchSnap, refreshAll, refreshRender, refreshSettings, retrySettings, useSnap } from "@/lib/store";
 import { fmt1, fmtInt } from "@/lib/format";
 import { useToast } from "@/components/Toast";
-import { ErrorPanel, LoadFrame } from "@/components/Loading";
+import { ErrorPanel, Details, LoadFrame } from "@/components/Loading";
 import { SettingsShape } from "@/components/LoadShapes";
 import {
   applyMotion,
@@ -159,6 +159,16 @@ export function SettingsView() {
       <div className="page-head">
         <h1>Settings</h1>
       </div>
+
+      {settingsError && (
+        // A refresh that failed after the settings were read does not take the page away: the
+        // settings stay and the page says they may be old. The raw words are behind the
+        // disclosure.
+        <div className="rule rule-warn" role="status">
+          The settings may be out of date.
+          <Details>{settingsError}</Details>
+        </div>
+      )}
 
       <div className="settings-grid">
         <div className="stack">

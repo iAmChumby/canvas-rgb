@@ -27,7 +27,7 @@ import {
 import type { UpdateState } from "@/proto/UpdateState";
 
 /** How long the tray has to answer before the page says that it did not. */
-const TRAY_TIMEOUT_MS = 5000;
+export const TRAY_TIMEOUT_MS = 5000;
 
 /** The panel title tone: what a heading of the changelog means, as a token. */function noteTone(title: string): string {
   const t = title.toLowerCase();
@@ -120,12 +120,15 @@ export function UpdatesView() {
   const [err, setErr] = useState<string | null>(null);
   // The tray has not answered for this long: the page says so, instead of waiting for good.
   const [silent, setSilent] = useState(false);
+  // How many times the page has asked the tray. Every ask gets its own deadline: a Try again
+  // must end in an answer or in the error again, never in a placeholder that waits for good.
+  const [asked, setAsked] = useState(0);
 
   useEffect(() => {
     if (u) return;
     const timer = setTimeout(() => setSilent(true), TRAY_TIMEOUT_MS);
     return () => clearTimeout(timer);
-  }, [u]);
+  }, [u, asked]);
 
   if (!u) {
     return (
@@ -145,6 +148,7 @@ export function UpdatesView() {
               summary="The tray app did not answer. Start it, then try again."
               onRetry={() => {
                 setSilent(false);
+                setAsked((n) => n + 1);
                 void refreshUpdate();
               }}
             />

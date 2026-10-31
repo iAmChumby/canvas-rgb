@@ -312,7 +312,7 @@ export function EffectDetailShape() {
         </div>
         <Skeleton width="70%" height={14} />
       </SkelPanel>
-      <SkelRows rows={6} size={[374.3, 454.5]} />
+      <SkelRows rows={6} size={[374.3, 454.5]} row={[52, 65.3]} />
     </div>
   );
 }
@@ -373,6 +373,25 @@ export function SettingsShape() {
  */
 const ZONE_RHYTHM = [1, 1, 1, 4, 1, 1, 1, 1, 1, 1, 1, 1] as const;
 
+/**
+ * The LED strip of a zone in the placeholder: the plain strip the loaded view draws for a zone
+ * with no LEDs yet, in the neutral skeleton tone (the device's accent would read as a selected
+ * control).
+ */
+function SkelLedStrip() {
+  return (
+    <svg
+      className="zone-strip-svg skel-led-strip"
+      viewBox="0 0 200 22"
+      preserveAspectRatio="xMidYMid meet"
+      style={{ height: 22 }}
+      aria-hidden="true"
+    >
+      <line x1="40" y1="11" x2="160" y2="11" stroke="currentColor" strokeWidth="1.5" strokeDasharray="4 4" />
+    </svg>
+  );
+}
+
 export function DeviceListShape({ cards = 3 }: { cards?: number }) {
   // A plain block, not the frame's flex column: the cards sit 12 px apart by `.device + .device`, as the real ones do.
   return (
@@ -384,7 +403,7 @@ export function DeviceListShape({ cards = 3 }: { cards?: number }) {
           "--dev-n": `${97.4 + zones * 108.1}px`,
         } as CSSProperties;
         return (
-        <section className="device device-skeleton" style={vars} key={i}>
+        <section className="device device-skeleton" style={vars} key={i} data-testid="device-card">
           <div className="device-head">
             <Skeleton className="skeleton-icon" />
             <span className="stack" style={{ gap: 4, minWidth: 0, flex: "1 1 160px" }}>
@@ -393,11 +412,11 @@ export function DeviceListShape({ cards = 3 }: { cards?: number }) {
             </span>
           </div>
           {Array.from({ length: zones }, (_, z) => (
-            <div className="zone-strip skel-zone" key={z}>
+            <div className="zone-strip skel-dev-zone" key={z}>
               <span className="zone-strip-name">
                 <Skeleton height={14} width="70%" />
               </span>
-              <Skeleton className="zone-strip-svg skel-led-strip" height={22} radius={11} />
+              <SkelLedStrip />
               <span className="zone-strip-count">
                 <Skeleton height={14} width={64} />
               </span>
@@ -410,15 +429,41 @@ export function DeviceListShape({ cards = 3 }: { cards?: number }) {
   );
 }
 
-/** The updates page while the tray has not answered: the panel the state goes in. */
+/**
+ * The updates page while the tray has not answered: the panel the update state goes in, and the
+ * notes of the release that is waiting. The shape is as tall as the loaded page (measured on the
+ * release the demo offers: the panel 260.1 px and the three note panels 165.3, 113.8 and 84 px
+ * at 1440; 321, 230.5, 157.3 and 105.8 px on a phone), so the frame does not grow when the tray
+ * answers.
+ */
 export function UpdatesShape() {
   return (
     <div className="settings-grid">
       <div className="stack">
-        <SkelPanel>
-          <Skeleton width="62%" height={16} />
-          <Skeleton width="100%" height={14} style={{ marginTop: 12 }} />
-          <Skeleton width="84%" height={14} style={{ marginTop: 8 }} />
+        <SkelPanel title={false} size={[260.1, 321]}>
+          <div className="stack" style={{ gap: 12 }}>
+            {/* The key, the state line, the note under it and the way to skip the version. */}
+            <Skeleton width={148} height={32} radius={8} />
+            <Skeleton width="54%" height={14} />
+            <Skeleton width="98%" height={14} />
+            <Skeleton width="92%" height={14} />
+            <Skeleton width="64%" height={14} />
+            <Skeleton width={124} height={30} radius={8} />
+          </div>
+        </SkelPanel>
+      </div>
+      <div className="stack">
+        {/* The notes of the release: one panel per group. */}
+        <SkelPanel size={[165.3, 230.5]}>
+          <Skeleton width="92%" height={14} />
+          <Skeleton width="86%" height={14} />
+        </SkelPanel>
+        <SkelPanel size={[113.8, 157.3]}>
+          <Skeleton width="88%" height={14} />
+          <Skeleton width="64%" height={14} />
+        </SkelPanel>
+        <SkelPanel size={[84, 105.8]}>
+          <Skeleton width="78%" height={14} />
         </SkelPanel>
       </div>
     </div>

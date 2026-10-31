@@ -6,7 +6,8 @@ import { DevicesView } from "@/views/DevicesView";
 import { DisplaysView } from "@/views/DisplaysView";
 import { EffectsView } from "@/views/EffectsView";
 import { PeripheralsView } from "@/views/PeripheralsView";
-import { UpdatesView } from "@/views/UpdatesView";
+import { UpdatesView, TRAY_TIMEOUT_MS } from "@/views/UpdatesView";
+import type { Status } from "@/proto/Status";
 
 // The frames of every view in its states: the error frame says it in one line and keeps the raw
 // words behind a disclosure, the retry goes back to the placeholder while it runs, and the
@@ -48,6 +49,29 @@ afterEach(() => {
 const setUrl = (url: string) => window.history.replaceState({}, "", url);
 const frame = () => document.querySelector(".load-frame") as HTMLElement | null;
 
+/** The status a daemon with twelve devices (eleven of them connected) would report. */
+const status: Status = {
+  version: "0.2.0",
+  power: "running",
+  brightness: 100,
+  fps_target: 30,
+  fps_measured: 30,
+  frame_time_ms: 33.3,
+  frames_rendered: 0,
+  parked: false,
+  devices_connected: 11,
+  devices_total: 12,
+  preview_subscribers: 0,
+  active_layout: "desk",
+  active_effect: null,
+  openrgb: "connected",
+  service: "connected",
+  service_down_ms: null,
+  conflicts: [],
+  show_zone_panel: false,
+  onboarding_complete: true,
+};
+
 /** The error frame: one line, a way to try again, and the raw words behind the disclosure. */
 function expectGoodErrorFrame(title: string, raw: string) {
   expect(screen.getByText(title)).toBeTruthy();
@@ -60,6 +84,8 @@ function expectGoodErrorFrame(title: string, raw: string) {
   expect(details).not.toBeNull();
   expect(details?.open).toBe(false);
   expect(details?.textContent).toContain(raw);
+  // The raw words are nowhere else: not in the line the reader sees.
+  expect(alerts[0]?.textContent ?? "").not.toContain(raw);
   // And there is a way to ask again.
   expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
 }
@@ -72,7 +98,7 @@ describe("the error frame", () => {
     });
     render(<DisplaysView />);
     await screen.findByText("The displays could not be read");
-    expectGoodErrorFrame("The displays could not be read", "canvas-rgb could not read the displays");
+    expectGoodErrorFrame("The displays could not be read", "could not read the displays: the request came back with an error");
   });
 
   it("says it in one line and keeps the raw words behind the details (effects)", async () => {
@@ -86,7 +112,7 @@ describe("the error frame", () => {
       </ToastProvider>,
     );
     await screen.findByText("The effects could not be read");
-    expectGoodErrorFrame("The effects could not be read", "canvas-rgb could not read the effects");
+    expectGoodErrorFrame("The effects could not be read", "could not read the effects: the request came back with an error");
   });
 
   it("says it in one line and keeps the raw words behind the details (peripherals)", async () => {
@@ -95,7 +121,7 @@ describe("the error frame", () => {
     await screen.findByText("The peripherals could not be listed");
     expectGoodErrorFrame(
       "The peripherals could not be listed",
-      "canvas-rgb could not read the peripherals",
+      "could not read the peripherals: the request came back with an error",
     );
   });
 
@@ -106,7 +132,7 @@ describe("the error frame", () => {
     });
     render(<DevicesView />);
     await screen.findByText("The devices could not be read");
-    expectGoodErrorFrame("The devices could not be read", "canvas-rgb could not read the devices");
+    expectGoodErrorFrame("The devices could not be read", "could not read the devices: the request came back with an error");
   });
 });
 
@@ -174,21 +200,33 @@ describe("the gallery's cards", () => {
       (gallery as Node).compareDocumentPosition(strip as Node) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
   });
+
+  it("says there are no effects when there are none, not that the filter hides them", async () => {
+    // The list came back empty: the filter is not the reason.
+    patchSnap({ effects: [], effectsError: null });
+    render(
+      <ToastProvider>
+        <EffectsView />
+      </ToastProvider>,
+    );
+    expect(screen.getByText("No effects yet")).toBeTruthy();
+    expect(screen.queryByText("No effect matches that")).toBeNull();
+  });
 });
 
 describe("the devices list", () => {
-  it("draws a card for every device the daemon has, not only the connected ones", async () => {
-    setUrl("/devices/?state=complete");
-    await act(async () => {
-      await refreshDevices();
+  it("draws a card for every device the daemon has, on the very first load", async () => {
+    // The status route says how many devices there are: the placeholder draws them all, so the
+    // list adds no card when it comes.
+    patchSnap({
+      status: { ...status, devices_connected: 11, devices_total: 12 },
+      devices: null,
+      devicesTotal: null,
     });
-    // The list is read again: the placeholder stands in for it.
-    patchSnap({ devices: null });
-    setUrl("/devices/?state=hold:devices:300");
     render(<DevicesView />);
-    await waitFor(() => expect(document.querySelectorAll(".device-skeleton").length).toBeGreaterThan(0));
+    await waitFor(() => expect(screen.getAllByTestId("device-card").length).toBeGreaterThan(0));
     // Twelve devices, eleven of them connected: the placeholder draws all twelve.
-    expect(document.querySelectorAll(".device-skeleton")).toHaveLength(12);
+    expect(screen.getAllByTestId("device-card")).toHaveLength(12);
   });
 });
 
@@ -198,7 +236,25 @@ describe("the updates page", () => {
     render(<UpdatesView />);
     expect(frame()?.dataset.state).toBe("loading");
     await act(async () => {
-      vi.advanceTimersByTime(6000);
+      await vi.advanceTimersByTime(TRAY_TIMEOUT_MS);
+    });
+    expect(frame()?.dataset.state).toBe("error");
+    expect(screen.getByText("No answer from the tray")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
+  });
+
+  it("ends in the error again after every Try again", async () => {
+    vi.useFakeTimers();
+    render(<UpdatesView />);
+    await act(async () => {
+      await vi.advanceTimersByTime(TRAY_TIMEOUT_MS);
+    });
+    expect(screen.getByText("No answer from the tray")).toBeTruthy();
+    // Try again: the page waits for the tray once more, and the deadline runs again.
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(frame()?.dataset.state).toBe("loading");
+    await act(async () => {
+      await vi.advanceTimersByTime(TRAY_TIMEOUT_MS);
     });
     expect(frame()?.dataset.state).toBe("error");
     expect(screen.getByText("No answer from the tray")).toBeTruthy();

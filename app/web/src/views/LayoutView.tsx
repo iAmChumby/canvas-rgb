@@ -25,7 +25,7 @@ import {
 import { Button, IconButton, Swap } from "@/components/Button";
 import { Panel, Field } from "@/components/Panel";
 import { EmptyState } from "@/components/EmptyState";
-import { ErrorPanel, LoadFrame } from "@/components/Loading";
+import { Details, ErrorPanel, LoadFrame } from "@/components/Loading";
 import { LayoutShape } from "@/components/LoadShapes";
 import { Segmented } from "@/components/Segmented";
 import { NumberField, TextField } from "@/components/NumberField";
@@ -684,7 +684,7 @@ export function LayoutView() {
     }
     if (effectNeedsInput) {
       return {
-        text: "This effect reads the screen or the audio, so the preview is the daemon's frame.",
+        text: "This effect reads the screen or the audio, so the preview is the frame from canvas-rgb.",
         down: true,
       };
     }
@@ -1137,7 +1137,10 @@ export function LayoutView() {
   return (
     <div className="stack">
       <div className="page-head">
-        <h1>{draft.name}</h1>
+        {/* The page keeps one name in every state: the layout's own name stands beside it once
+            it is known. */}
+        <h1>Layout</h1>
+        <span className="mute fig">{draft.name}</span>
         <Button
           variant="default"
           icon={<CompassTool size={16} />}
@@ -1147,6 +1150,15 @@ export function LayoutView() {
           Map my PC again
         </Button>
       </div>
+
+      {layoutsError && (
+        // A refresh that failed after the layout was read does not take the page away: the desk
+        // stays and the page says it may be old. The raw words are behind the disclosure.
+        <div className="rule rule-warn" role="status">
+          The layout may be out of date.
+          <Details>{layoutsError}</Details>
+        </div>
+      )}
 
       {newLights.fresh.length > 0 && (
         <div className="new-light" role="status">
