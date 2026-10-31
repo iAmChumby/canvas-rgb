@@ -544,11 +544,21 @@ fn acl_grants_nonadmin_write(dacl: *mut windows_sys::Win32::Security::ACL) -> io
         }
         // SAFETY: `SidStart` is inside the ACE, which is inside the ACL.
         let sid = unsafe { std::ptr::addr_of!((*allowed).SidStart) } as *mut c_void;
-        if !owner_is_trusted_sid(&sid_string(sid)?) {
+        if !writer_is_trusted_sid(&sid_string(sid)?) {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+/// `NT SERVICE\TrustedInstaller`. Every folder under `C:\Program Files` carries a full-control ACE
+/// for it (the install folder included), and it can already replace System32.
+pub const TRUSTED_INSTALLER_SID: &str = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
+
+/// Who may hold write access on a trusted path: the trusted owners, plus TrustedInstaller. The
+/// owner rule stays [`TRUSTED_OWNER_SIDS`] only.
+pub fn writer_is_trusted_sid(sid: &str) -> bool {
+    owner_is_trusted_sid(sid) || sid == TRUSTED_INSTALLER_SID
 }
 
 /// ACE types that cannot grant access: the deny, audit, alarm and label families. Every other type
@@ -706,6 +716,32 @@ mod win_tests {
     fn an_inherit_only_users_write_ace_does_not_count() {
         // IO = INHERIT_ONLY_ACE: it applies to children, not to this directory.
         assert!(!check("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;OIIO;FW;;;BU)").unwrap());
+    }
+
+    #[test]
+    fn a_program_files_style_dacl_with_trustedinstaller_has_no_nonadmin_write() {
+        // The DACL Inno leaves on C:\Program Files\canvas-rgb (read with Get-Acl, 2026-10-31).
+        let sddl = format!(
+            "D:P(A;;FA;;;{TRUSTED_INSTALLER_SID})(A;CIIO;GA;;;{TRUSTED_INSTALLER_SID})(A;;FA;;;SY)(A;OICIIO;GA;;;SY)\
+             (A;;FA;;;BA)(A;OICIIO;GA;;;BA)(A;;0x1200a9;;;BU)(A;OICIIO;GXGR;;;BU)(A;OICIIO;GA;;;CO)\
+             (A;;0x1200a9;;;AC)(A;OICIIO;GXGR;;;AC)"
+        );
+        assert!(!check(&sddl).unwrap());
+        // Any other service SID with write is still refused.
+        assert!(check("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;S-1-5-80-1-2-3-4-5)").unwrap());
+    }
+
+    #[test]
+    fn the_real_system32_folder_has_no_nonadmin_write() {
+        let root = std::env::var_os("SystemRoot").expect("SystemRoot");
+        assert!(!has_nonadmin_write_on(&Path::new(&root).join("System32")).unwrap());
+    }
+
+    #[test]
+    fn trustedinstaller_may_write_but_never_owns() {
+        assert!(writer_is_trusted_sid(TRUSTED_INSTALLER_SID));
+        assert!(!owner_is_trusted_sid(TRUSTED_INSTALLER_SID));
+        assert!(!writer_is_trusted_sid("S-1-5-32-545"), "Users");
     }
 
     #[test]

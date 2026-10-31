@@ -920,6 +920,54 @@ fn an_update_started_elsewhere_is_recorded_when_the_installer_starts_the_tray() 
 }
 
 #[test]
+fn a_stale_pending_does_not_hide_a_newer_install_from_the_command_line() {
+    // pending=0.1.4 from a tray install that ended unknown; `canvas-rgb update` then installed 0.1.5.
+    let h = harness("0.1.5", "test.key.pub", Launch::Starts);
+    state::save(
+        &h.dir.path().join("update.json"),
+        &Stored { pending: Some(info("0.1.4")), pending_since_ms: Some(now_ms()), ..Stored::default() },
+    )
+    .unwrap();
+    std::fs::write(h.dir.path().join("update-result.json"), r#"{"version":"0.1.5","ok":true}"#).unwrap();
+    let ctl = after_update_controller(&h, "0.1.5");
+    ctl.settle_unrecorded_update();
+    ctl.reconcile_pending();
+    let s = ctl.state();
+    assert_eq!(s.updated_to.as_ref().map(|u| u.version.as_str()), Some("0.1.5"));
+    assert_eq!(s.phase, UpdatePhase::Idle, "0.1.4 is not reported as failed or installing");
+    assert_eq!(state::load(&h.dir.path().join("update.json")).pending, None);
+}
+
+#[test]
+fn a_pending_older_than_the_running_version_is_dropped_without_a_failure() {
+    let h = harness("0.1.5", "test.key.pub", Launch::Starts);
+    state::save(
+        &h.dir.path().join("update.json"),
+        &Stored { pending: Some(info("0.1.4")), pending_since_ms: Some(now_ms()), ..Stored::default() },
+    )
+    .unwrap();
+    let ctl = after_update_controller(&h, "0.1.5");
+    ctl.reconcile_pending();
+    assert_eq!(ctl.state().phase, UpdatePhase::Idle);
+    assert_eq!(state::load(&h.dir.path().join("update.json")).pending, None);
+}
+
+#[test]
+fn a_pending_for_the_running_version_still_settles_with_its_notes() {
+    let h = harness("0.1.5", "test.key.pub", Launch::Starts);
+    state::save(
+        &h.dir.path().join("update.json"),
+        &Stored { pending: Some(info("0.1.5")), pending_since_ms: Some(now_ms()), ..Stored::default() },
+    )
+    .unwrap();
+    std::fs::write(h.dir.path().join("update-result.json"), r#"{"version":"0.1.5","ok":true}"#).unwrap();
+    let ctl = after_update_controller(&h, "0.1.5");
+    ctl.settle_unrecorded_update();
+    ctl.reconcile_pending();
+    assert_eq!(ctl.state().updated_to, Some(info("0.1.5")), "the pending's notes travel with it");
+}
+
+#[test]
 fn an_unrecorded_report_that_does_not_match_is_ignored() {
     let h = harness("0.1.1", "test.key.pub", Launch::Starts);
     let result_path = h.dir.path().join("update-result.json");

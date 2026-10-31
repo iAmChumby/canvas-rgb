@@ -492,6 +492,50 @@ impl UpdateInstaller {
         Ok(Some(dir))
     }
 
+    /// The install folder is trusted with the same rules as the staging folder, because the update
+    /// reads `update-result.json` there and starts `setup-user.ps1` and `canvas-rgb.exe` from it: no
+    /// reparse point on the path to it, the folder, `installer\` and the files the finish step runs owned
+    /// by SYSTEM or Administrators, and none of them writable by anyone else. Changes nothing; names the
+    /// first path that fails.
+    pub fn check_app_dir(&self) -> io::Result<()> {
+        let fs = lock(&self.fs);
+        let app = self.cfg.app_dir.as_path();
+        for ancestor in app.ancestors() {
+            // The drive root has no attributes worth reading; a missing ancestor is the folder's own failure below.
+            if ancestor.parent().is_some() && fs.exists(ancestor)? && fs.is_reparse(ancestor)? {
+                return Err(offending(ancestor, "the install path goes through a junction or symlink"));
+            }
+        }
+        let installer = app.join("installer");
+        let folders = [app.to_path_buf(), installer.clone()];
+        let files = [installer.join("setup-user.ps1"), app.join("canvas-rgb.exe")];
+        let result = app.join("update-result.json");
+        let mut all: Vec<(PathBuf, bool)> = folders.into_iter().map(|p| (p, true)).collect();
+        all.extend(files.into_iter().map(|p| (p, false)));
+        // A result file left by an earlier run is read too, so it is checked when it is there.
+        if fs.exists(&result)? {
+            all.push((result, false));
+        }
+        for (path, is_folder) in all {
+            if !fs.exists(&path)? {
+                return Err(offending(&path, "an install path the update needs is missing"));
+            }
+            if fs.is_reparse(&path)? {
+                return Err(offending(&path, "an install path is a junction or symlink"));
+            }
+            if fs.is_dir(&path)? != is_folder {
+                return Err(refused(&path, if is_folder { "is not a folder" } else { "is not a file" }));
+            }
+            if !fs.owner_trusted(&path)? {
+                return Err(offending(&path, "an install path is owned by someone other than SYSTEM or Administrators"));
+            }
+            if fs.has_nonadmin_write(&path)? {
+                return Err(offending(&path, "an install path has write access granted to a non-admin principal"));
+            }
+        }
+        Ok(())
+    }
+
     // ---- install ----
 
     /// Handles one `InstallUpdate`. `who` is the admitted pipe client (for the log), `reader` reads the
@@ -521,6 +565,9 @@ impl UpdateInstaller {
         // The slot is taken before anything is read, so concurrent requests cannot each hold a buffer
         // of up to 256 MiB.
         let guard = BusyGuard::claim(&self.busy).ok_or_else(|| Refusal::conflict("an update is already being installed"))?;
+
+        self.check_app_dir()
+            .map_err(|e| Refusal::internal(format!("the install folder cannot be trusted, so no update is staged: {e}")))?;
 
         let updates = self
             .secure_updates_dir(true)
@@ -924,6 +971,14 @@ impl UpdateInstaller {
     /// console user. Both non-elevated: this is the root fix for #28.
     fn finish_user_steps(&self, pending: &PendingUpdate) -> Finish {
         let app = &self.cfg.app_dir;
+        if let Err(e) = self.check_app_dir() {
+            tracing::error!(
+                version = %pending.version,
+                error = %e,
+                "the install folder cannot be trusted: setup-user.ps1 and the tray are not started"
+            );
+            return Finish::Done;
+        }
         let run_script = self.setup_reported_success(pending);
         if run_script {
             let script = app.join("installer").join("setup-user.ps1");
@@ -934,7 +989,17 @@ impl UpdateInstaller {
                 app.display()
             );
             match self.run_as_user(&script_line, app, true) {
-                Ok(code) => tracing::info!(version = %pending.version, ?code, "setup-user.ps1 ran as the console user"),
+                Ok(Some(0)) => tracing::info!(version = %pending.version, "setup-user.ps1 ran as the console user and exited 0"),
+                Ok(Some(code)) => tracing::warn!(
+                    version = %pending.version,
+                    code = %crate::process::describe_exit_code(code),
+                    "setup-user.ps1 exited with a non-zero code; the tray still starts"
+                ),
+                Ok(None) => tracing::warn!(
+                    version = %pending.version,
+                    limit_s = self.cfg.user_step_limit.as_secs_f32(),
+                    "setup-user.ps1 did not finish within the wait limit; the tray still starts"
+                ),
                 Err(e) if e.kind() == io::ErrorKind::NotConnected => {
                     tracing::warn!(version = %pending.version, error = %e, "no user is logged on at the console; the update stays pending");
                     return Finish::NoUser;
@@ -1015,7 +1080,6 @@ impl UpdateInstaller {
                 Err(e) => tracing::warn!(error = %e, "could not query the user step"),
             }
             if Instant::now() >= deadline {
-                tracing::error!(command = command_line, "the user step is still running after the wait limit; carrying on");
                 return Ok(None);
             }
             std::thread::sleep(self.cfg.poll);

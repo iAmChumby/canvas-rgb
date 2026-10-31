@@ -321,6 +321,15 @@ impl Controller {
         self.change(|i| {
             // A service-driven install may still be running: setup has not written its report yet and
             // this tray was started beside it. That is waiting, not "ended without finishing".
+            // A pending update older than the running version was superseded (by a command-line
+            // install, say): it neither failed nor waits.
+            if let (Some(p), Some(running)) = (i.stored.pending.as_ref(), Some(&self.current)) {
+                if p.version.parse::<Version>().is_ok_and(|pv| (pv.major, pv.minor, pv.patch) < (running.major, running.minor, running.patch)) {
+                    i.stored.pending = None;
+                    i.stored.pending_since_ms = None;
+                    return;
+                }
+            }
             if let Some(p) = i.stored.pending.as_ref() {
                 let reported = result.as_ref().is_some_and(|r| r.version == p.version);
                 if wait_for_service && within_bound && !reported && p.version != self.current.to_string() {
@@ -417,9 +426,18 @@ impl Controller {
         let Some(report) = read_result(&self.settings.result_path) else { return };
         let running = self.current.to_string();
         self.change(|i| {
-            if i.stored.pending.is_some() || !report.ok || report.version != running {
+            if !report.ok || report.version != running {
                 return;
             }
+            // A pending update for this very version settles in `reconcile_pending`, with its notes.
+            if i.stored.pending.as_ref().is_some_and(|p| p.version == running) {
+                return;
+            }
+            // Any other pending update is a stale one (an earlier attempt that ended unknown): this
+            // install superseded it.
+            i.stored.pending = None;
+            i.stored.pending_since_ms = None;
+            i.install_failed_for = None;
             if i.stored.last_settled.as_deref() == Some(running.as_str()) {
                 return;
             }

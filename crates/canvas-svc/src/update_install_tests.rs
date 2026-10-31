@@ -41,6 +41,8 @@ pub(crate) fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
 /// The real filesystem under a temp folder; only the owner and DACL answers are faked.
 pub(crate) struct TreeFs {
     pub untrusted: Arc<Mutex<Vec<PathBuf>>>,
+    /// Paths a non-admin principal may write.
+    pub writable: Arc<Mutex<Vec<PathBuf>>>,
 }
 
 impl FsAcl for TreeFs {
@@ -71,8 +73,8 @@ impl FsAcl for TreeFs {
     fn apply_protected_dacl(&mut self, _p: &Path) -> io::Result<()> {
         Ok(())
     }
-    fn has_nonadmin_write(&self, _p: &Path) -> io::Result<bool> {
-        Ok(false)
+    fn has_nonadmin_write(&self, p: &Path) -> io::Result<bool> {
+        Ok(self.writable.lock().unwrap().iter().any(|w| w == p))
     }
 }
 
@@ -175,6 +177,8 @@ impl SetupLauncher for FakeSetup {
 pub(crate) struct UserState {
     pub commands: Mutex<Vec<String>>,
     pub no_user: AtomicBool,
+    /// While set, started steps never exit.
+    pub hang: AtomicBool,
 }
 
 struct FakeUser(Arc<UserState>, FakeProcesses);
@@ -187,7 +191,9 @@ impl UserCommands for FakeUser {
         self.0.commands.lock().unwrap().push(command_line.to_string());
         // A child that has already exited.
         let child = crate::process::ProcessSpawner::spawn(&mut crate::fakes::FakeSpawner(self.1.clone()), Path::new("user-step.exe"), &[])?;
-        self.1.exit_last();
+        if !self.0.hang.load(Ordering::SeqCst) {
+            self.1.exit_last();
+        }
         Ok(child)
     }
 }
@@ -237,6 +243,7 @@ pub(crate) struct Rig {
     pub user: Arc<UserState>,
     pub probe: Arc<ProbeState>,
     pub untrusted: Arc<Mutex<Vec<PathBuf>>>,
+    pub writable: Arc<Mutex<Vec<PathBuf>>>,
 }
 
 impl Drop for Rig {
@@ -260,7 +267,10 @@ pub(crate) fn rig_with(
     let home = dir.path().join("home");
     let app = dir.path().join("app");
     std::fs::create_dir_all(home.join("logs")).unwrap();
-    std::fs::create_dir_all(&app).unwrap();
+    // The install folder as the finish step needs it.
+    std::fs::create_dir_all(app.join("installer")).unwrap();
+    std::fs::write(app.join("installer").join("setup-user.ps1"), b"# fake").unwrap();
+    std::fs::write(app.join("canvas-rgb.exe"), b"MZ fake").unwrap();
     let mut cfg = UpdateConfig {
         home: home.clone(),
         app_dir: app.clone(),
@@ -275,17 +285,18 @@ pub(crate) fn rig_with(
     };
     tweak(&mut cfg);
     let untrusted = Arc::new(Mutex::new(Vec::new()));
+    let writable = Arc::new(Mutex::new(Vec::new()));
     let setup = Arc::new(SetupState::default());
     let user = Arc::new(UserState::default());
     let probe = Arc::new(ProbeState::default());
     let installer = UpdateInstaller::new(
         cfg,
-        Box::new(TreeFs { untrusted: Arc::clone(&untrusted) }),
+        Box::new(TreeFs { untrusted: Arc::clone(&untrusted), writable: Arc::clone(&writable) }),
         Box::new(FakeSetup(Arc::clone(&setup))),
         Box::new(FakeUser(Arc::clone(&user), FakeProcesses::new())),
         Box::new(FakeProbe(Arc::clone(&probe))),
     );
-    Rig { dir, home, app, installer: Arc::new(wrap(installer)), setup, user, probe, untrusted }
+    Rig { dir, home, app, installer: Arc::new(wrap(installer)), setup, user, probe, untrusted, writable }
 }
 
 impl Rig {
@@ -1273,4 +1284,167 @@ fn dev_builds_order_between_the_release_before_and_the_release_after() {
     assert!(check_newer("0.1.2-dev.6", "0.1.2-dev.5").is_ok(), "a later dev build is newer");
     assert!(check_newer("0.1.2-dev.5", "0.1.2-dev.5").unwrap_err().message.contains("replay"), "not newer than itself");
     assert!(check_newer("0.1.2-dev.5", "0.1.2").unwrap_err().message.contains("downgrade"), "a dev build never replaces its release");
+}
+
+// ---- the install folder is trusted before it is used ----
+
+/// Ways {app} can be untrustworthy. Each arranges the rig and names the path the refusal must mention.
+type Breaker = fn(&Rig) -> PathBuf;
+
+fn app_breakers() -> Vec<(&'static str, Breaker)> {
+    vec![
+        ("the folder is writable by non-admins", |r| {
+            r.writable.lock().unwrap().push(r.app.clone());
+            r.app.clone()
+        }),
+        ("installer\\ is writable by non-admins", |r| {
+            let p = r.app.join("installer");
+            r.writable.lock().unwrap().push(p.clone());
+            p
+        }),
+        ("setup-user.ps1 is writable by non-admins", |r| {
+            let p = r.app.join("installer").join("setup-user.ps1");
+            r.writable.lock().unwrap().push(p.clone());
+            p
+        }),
+        ("canvas-rgb.exe is owned by someone else", |r| {
+            let p = r.app.join("canvas-rgb.exe");
+            r.untrusted.lock().unwrap().push(p.clone());
+            p
+        }),
+        ("the folder is owned by someone else", |r| {
+            r.untrusted.lock().unwrap().push(r.app.clone());
+            r.app.clone()
+        }),
+        ("canvas-rgb.exe is missing", |r| {
+            let p = r.app.join("canvas-rgb.exe");
+            std::fs::remove_file(&p).unwrap();
+            p
+        }),
+        ("a leftover update-result.json is writable by non-admins", |r| {
+            r.write_result(true, "0.1.1");
+            let p = r.app.join("update-result.json");
+            r.writable.lock().unwrap().push(p.clone());
+            p
+        }),
+        ("installer\\ is a junction", |r| {
+            let p = r.app.join("installer");
+            let elsewhere = r.dir.path().join("elsewhere-installer");
+            std::fs::create_dir_all(&elsewhere).unwrap();
+            std::fs::write(elsewhere.join("setup-user.ps1"), b"# evil").unwrap();
+            std::fs::remove_dir_all(&p).unwrap();
+            mklink_junction(&p, &elsewhere);
+            p
+        }),
+    ]
+}
+
+#[test]
+fn an_untrusted_install_folder_refuses_the_install_before_anything_is_staged() {
+    for (label, breaker) in app_breakers() {
+        let r = rig("0.1.0");
+        let path = breaker(&r);
+        let before: Vec<_> = walk(&r.app);
+        let response = r.install(PAYLOAD, SIG_011);
+        assert_eq!(code_of(&response), error_codes::INTERNAL, "{label}: {response:?}");
+        assert!(message_of(&response).contains(path.to_string_lossy().as_ref()), "{label}: names {}: {response:?}", path.display());
+        assert_eq!(r.launches(), 0, "{label}");
+        assert!(!r.updates().exists(), "{label}: nothing was staged (not even the staging folder was needed)");
+        assert_eq!(walk(&r.app), before, "{label}: nothing on disk changed in the install folder");
+        assert!(!r.installer.is_busy(), "{label}");
+    }
+}
+
+#[test]
+fn an_untrusted_install_folder_skips_the_finish_steps() {
+    for (label, breaker) in app_breakers() {
+        let r = rig("0.1.1");
+        r.leave_pending(0, 0, now());
+        r.write_result(true, "0.1.1");
+        // The marker and staged file are in place; now the folder goes bad.
+        let _ = breaker(&r);
+        assert_eq!(r.installer.resume_once(), Some(Finish::Done), "{label}");
+        assert!(r.commands().is_empty(), "{label}: neither setup-user.ps1 nor the tray was started");
+    }
+}
+
+/// Every path under `root` with its length, sorted: a cheap "nothing changed" fingerprint.
+fn walk(root: &Path) -> Vec<(PathBuf, u64)> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            let meta = std::fs::symlink_metadata(e.path()).unwrap();
+            out.push((e.path(), meta.len()));
+            if meta.is_dir() {
+                stack.push(e.path());
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+// ---- setup-user.ps1's outcome is logged, and the tray starts regardless ----
+
+/// Captures what the install code logs on this thread.
+fn capture_logs<T>(f: impl FnOnce() -> T) -> (T, String) {
+    #[derive(Clone)]
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+    impl io::Write for Sink {
+        fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let sink = Sink(Arc::new(Mutex::new(Vec::new())));
+    let writer = sink.clone();
+    let subscriber = tracing_subscriber::fmt().with_writer(move || writer.clone()).with_ansi(false).with_max_level(tracing::Level::TRACE).finish();
+    let out = tracing::subscriber::with_default(subscriber, f);
+    let text = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+    (out, text)
+}
+
+#[test]
+fn a_non_zero_setup_user_exit_is_logged_as_a_warning_with_the_code_and_the_tray_still_starts() {
+    let r = rig("0.1.1");
+    r.leave_pending(0, 0, now());
+    r.write_result(true, "0.1.1");
+    // The fake step exits with code 1.
+    let (outcome, logs) = capture_logs(|| r.installer.resume_once());
+    assert_eq!(outcome, Some(Finish::Done));
+    assert_eq!(r.commands().len(), 2, "the tray started after the failing script");
+    let line = logs.lines().find(|l| l.contains("non-zero code")).unwrap_or_else(|| panic!("no warning in: {logs}"));
+    assert!(line.contains("WARN"), "{line}");
+    assert!(line.contains("0x00000001"), "the code is in the line: {line}");
+}
+
+#[test]
+fn a_setup_user_that_hits_the_step_limit_is_logged_as_a_warning_and_the_tray_still_starts() {
+    let r = rig_with("0.1.1", PUB_TEST, |c| c.user_step_limit = Duration::from_millis(30), |i| i);
+    r.leave_pending(0, 0, now());
+    r.write_result(true, "0.1.1");
+    r.user.hang.store(true, Ordering::SeqCst);
+    let (outcome, logs) = capture_logs(|| r.installer.resume_once());
+    assert_eq!(outcome, Some(Finish::Done));
+    assert_eq!(r.commands().len(), 2, "the tray started after the hung script");
+    let line = logs.lines().find(|l| l.contains("did not finish within the wait limit")).unwrap_or_else(|| panic!("no warning in: {logs}"));
+    assert!(line.contains("WARN"), "{line}");
+}
+
+/// Real Win32, no fake: the folder Inno installed on this PC must pass the install-folder check, or
+/// every update through the service is refused. Skips (and says so) where nothing is installed.
+#[test]
+fn the_real_installed_folder_passes_the_install_folder_check() {
+    let app = PathBuf::from(r"C:\Program Files\canvas-rgb");
+    if !app.join("canvas-rgb.exe").exists() {
+        eprintln!("UNKNOWN: no install at {}; the check was not run", app.display());
+        return;
+    }
+    let installer = UpdateInstaller::production(std::env::temp_dir(), app);
+    installer.check_app_dir().expect("the real install folder must pass check_app_dir");
 }
