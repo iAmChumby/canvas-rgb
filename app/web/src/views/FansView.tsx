@@ -13,7 +13,8 @@ import { Slider } from "@/components/Slider";
 import { Sparkline, Figure } from "@/components/Readout";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { useMediaQuery } from "@/components/MediaQuery";
-import { SkeletonLines } from "@/components/Skeleton";
+import { Details, LoadFrame } from "@/components/Loading";
+import { FansShape } from "@/components/LoadShapes";
 import { useToast } from "@/components/Toast";
 import { FanCurveEditor } from "@/views/FanCurveEditor";
 import { api } from "@/lib/endpoints";
@@ -151,12 +152,9 @@ export function FansView() {
     await refreshFans();
   };
 
-  if (fansError) {
-    return (
+  // The error sits in the frame the page loads into, so the page keeps its shape.
+  const errorNode = fansError ? (
       <div className="stack">
-        <div className="page-head">
-          <h1>Fans</h1>
-        </div>
         {/* One card says it: the title, how long, what keeps working, and the way to try again.
             The status strip says it in its own words; this page does not repeat the strip. */}
         <Panel>
@@ -170,10 +168,8 @@ export function FansView() {
               </Button>
             }
           >
-            The daemon has not heard from it for {downFor}. Fan control is unavailable until the
-            service is back. The lights are unaffected, and the fans stay under BIOS control in the
-            meantime.
-            <span className="state-detail">the daemon said: {fansError}</span>
+            No answer for {downFor}. The fans stay under BIOS control; the lights are unaffected.
+            <Details>{fansError}</Details>
           </EmptyState>
         </Panel>
         {known.length > 0 && (
@@ -190,34 +186,31 @@ export function FansView() {
           </Panel>
         )}
       </div>
-    );
-  }
+  ) : null;
 
-  if (!fans) {
-    return (
-      <div className="stack">
-        <div className="page-head">
-          <h1>Fans</h1>
-        </div>
-        <Panel title="Reading the fans">
-          <SkeletonLines rows={5} />
-        </Panel>
-      </div>
-    );
-  }
-
-  const selected = fans.headers.find((h) => h.id === selectedId) ?? fans.headers[0] ?? null;
-  const headers = fans.headers;
+  const selected = fans ? (fans.headers.find((h) => h.id === selectedId) ?? fans.headers[0] ?? null) : null;
+  const headers = fans?.headers ?? [];
 
   return (
     <div className="stack">
       <div className="page-head">
         <h1>Fans</h1>
-        <span className="mute fig">
-          {fans.chip ?? "No chip"} · floor <AnimatedNumber value={fans.floor_percent} />%
-        </span>
+        {fans && !fansError && (
+          <span className="mute fig">
+            {fans.chip ?? "No chip"} · floor <AnimatedNumber value={fans.floor_percent} />%
+          </span>
+        )}
       </div>
 
+      <LoadFrame
+        className="stack"
+        state={fansError ? "error" : fans ? "ready" : "loading"}
+        shape={<FansShape />}
+        label="Reading the fans"
+        error={errorNode}
+      >
+      {fans && (
+      <>
       <ProfilesPanel fans={fans} />
 
       <div className="fans-grid">
@@ -299,6 +292,9 @@ export function FansView() {
           )}
         </div>
       </div>
+      </>
+      )}
+      </LoadFrame>
     </div>
   );
 }

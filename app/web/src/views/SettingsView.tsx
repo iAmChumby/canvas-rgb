@@ -18,7 +18,8 @@ import { openLogsFolder, tauriHost } from "@/lib/host";
 import { getSnap, patchSnap, refreshAll, refreshRender, refreshSettings, useSnap } from "@/lib/store";
 import { fmt1, fmtInt } from "@/lib/format";
 import { useToast } from "@/components/Toast";
-import { SkeletonLines } from "@/components/Skeleton";
+import { ErrorPanel, LoadFrame } from "@/components/Loading";
+import { SettingsShape } from "@/components/LoadShapes";
 import {
   applyMotion,
   applyTheme,
@@ -54,13 +55,18 @@ export function SettingsView() {
         <div className="page-head">
           <h1>Settings</h1>
         </div>
-        <Panel title={settingsError ? "The settings could not be read" : "Reading the settings"}>
-          {settingsError ? (
-            <p className="error-line">{settingsError}</p>
-          ) : (
-            <SkeletonLines rows={5} />
-          )}
-        </Panel>
+        <LoadFrame
+          state={settingsError ? "error" : "loading"}
+          shape={<SettingsShape />}
+          label="Reading the settings"
+          error={
+            <ErrorPanel
+              title="The settings could not be read"
+              message={settingsError}
+              onRetry={() => void refreshSettings()}
+            />
+          }
+        />
       </div>
     );
   }

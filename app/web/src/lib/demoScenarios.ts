@@ -143,6 +143,39 @@ export function onboardingDone(): boolean {
   return has(OB_COMPLETE);
 }
 
+/**
+ * The loading states, one per area: `hold:<area>[:<ms>]` makes the GETs of that area wait (60 s
+ * when no time is given, which is "still loading" for a screenshot), `fail:<area>` makes them
+ * answer 500, `empty:<area>` makes them answer with nothing in them. The areas are the first
+ * path segment (`fans`, `layouts`, `settings`, `displays`, `devices`) and `effects`, `effect`,
+ * `peripherals`, `peripheral` for the list and the detail of the last two.
+ */
+export function holdMs(area: string): number {
+  for (const t of tokens()) {
+    const [kind, name, ms] = t.split(":");
+    if (kind === "hold" && name === area) return ms ? Number(ms) || 0 : 60000;
+  }
+  return 0;
+}
+
+/** True when the GETs of this area are made to fail. */
+export function failsArea(area: string): boolean {
+  return has(`fail:${area}`);
+}
+
+/** True when the GETs of this area answer with nothing in them. */
+export function emptyArea(area: string): boolean {
+  return has(`empty:${area}`);
+}
+
+/** A peripheral read that takes long enough to see its stages: opening, waking, five reports. */
+export const SLOW_READ = "slow-read";
+
+/** True when reads of a peripheral run through their stages. */
+export function slowRead(): boolean {
+  return has(SLOW_READ);
+}
+
 /** How long the demo waits before it answers. */
 export function answerDelayMs(): number {
   return slow() ? 700 : 2;

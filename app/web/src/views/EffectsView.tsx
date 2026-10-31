@@ -24,14 +24,15 @@ import { EmptyState } from "@/components/EmptyState";
 import { Enter } from "@/components/Motion";
 import { Highlighted, matchEffect } from "@/components/Search";
 import { useMediaQuery } from "@/components/MediaQuery";
-import { Skeleton, SkeletonLines } from "@/components/Skeleton";
+import { ErrorPanel, LoadFrame, type LoadState } from "@/components/Loading";
+import { EffectDetailShape, EffectGalleryShape } from "@/components/LoadShapes";
 import { useToast } from "@/components/Toast";
 import { PropertyControls, type Values } from "@/views/PropertyControls";
 import { PresetStrip } from "@/views/PresetStrip";
 import { api } from "@/lib/endpoints";
 import { ApiFailure, messageOf } from "@/lib/errors";
 import { EFFECT_CATEGORIES, categoryOf, type EffectCategory } from "@/lib/effectCategories";
-import { getSnap, refreshAll, useSnap } from "@/lib/store";
+import { getSnap, refreshAll, refreshEffects, useSnap } from "@/lib/store";
 import { fillDefaults, nextFreeName } from "@/lib/presetMatch";
 import { appliedName, runningOf, setApplied, setShown } from "@/lib/runningPreset";
 import type { EffectDetail } from "@/proto/EffectDetail";
@@ -442,18 +443,64 @@ export function EffectsView() {
     }, 240);
   };
 
+  // The files that did not parse. They stand inside the gallery's frame, because they come with
+  // the list: above the frame they would push the page down when the list lands.
+  const failedStrip =
+    failed.length > 0 ? (
+      <div className="failed-strip" data-open={showFailed ? "true" : "false"}>
+        <button
+          type="button"
+          className="failed-strip-head"
+          aria-expanded={showFailed}
+          onClick={() => setShowFailed((v) => !v)}
+        >
+          <FileHtml size={14} aria-hidden="true" />
+          <span>
+            {failed.length} file{failed.length === 1 ? "" : "s"} did not parse
+          </span>
+        </button>
+        {showFailed && (
+          <div className="failed-strip-body">
+            {failed.map((f) => (
+              <p key={f.file} className="failed-line">
+                <span className="fig">{f.file}</span>
+                <span className="failed-error">{f.error}</span>
+              </p>
+            ))}
+          </div>
+        )}
+      </div>
+    ) : null;
+
+  const galleryState: LoadState =
+    effects === null ? (effectsError ? "error" : "loading") : list.length === 0 ? "empty" : "ready";
   const gallery = (
+    <LoadFrame
+      className="stack"
+      state={galleryState}
+      shape={<EffectGalleryShape />}
+      label="Loading the effects"
+      error={
+        <ErrorPanel
+          title="The effects could not be read"
+          message={effectsError}
+          onRetry={() => void refreshEffects()}
+        />
+      }
+      empty={
+        <div className="stack">
+          {failedStrip}
+          <Panel className="effect-empty">
+            <EmptyState icon={<MagnifyingGlass size={22} />} title="No effect matches that">
+              Try fewer words, or clear the filter and the category.
+            </EmptyState>
+          </Panel>
+        </div>
+      }
+    >
+    {failedStrip}
     <div className="effect-gallery">
-      {effects === null
-        ? Array.from({ length: 12 }, (_, i) => (
-            <div className="effect-card effect-card-skeleton" key={`skeleton-${i}`} aria-hidden="true">
-              <Skeleton className="skeleton-preview" />
-              <span className="effect-card-meta">
-                <Skeleton className="skeleton-line" height={20} width="55%" />
-              </span>
-            </div>
-          ))
-        : list.map((row, i) => {
+      {list.map((row, i) => {
         const e = row.effect;
         const html = e.id.startsWith("html:");
         const selected = e.id === selectedId;
@@ -503,12 +550,8 @@ export function EffectsView() {
           </Enter>
         );
       })}
-      {list.length === 0 && (
-        <Panel className="effect-empty">
-          <p className="mute">No effect matches that.</p>
-        </Panel>
-      )}
     </div>
+    </LoadFrame>
   );
 
   const detailPane = (
@@ -527,11 +570,23 @@ export function EffectsView() {
           for one.
         </EmptyState>
       )}
-      {!noLayout && !detail && (
-        <Panel title="Loading">
-          <SkeletonLines rows={4} />
-        </Panel>
-      )}
+      {!(noLayout && !detail) && (
+      <LoadFrame
+        className="stack"
+        state={detail ? "ready" : error ? "error" : "loading"}
+        shape={<EffectDetailShape />}
+        label="Loading the effect"
+        error={
+          <ErrorPanel
+            title="The effect could not be read"
+            message={error}
+            onRetry={() => {
+              setError(null);
+              setReloadTick((t) => t + 1);
+            }}
+          />
+        }
+      >
       {detail && (
         <>
           <Panel>
@@ -642,6 +697,8 @@ export function EffectsView() {
           </Panel>
         </>
       )}
+      </LoadFrame>
+      )}
     </div>
   );
 
@@ -706,7 +763,10 @@ export function EffectsView() {
             aria-label="Search effects"
           />
         </span>
-        <span className="mute fig"><AnimatedNumber value={list.length} /> effects</span>
+        {/* A count is shown once the list is known: "0 effects" while loading or on an error would be a false answer. */}
+        <span className="mute fig" data-testid="effect-count">
+          {effects === null ? "–" : <AnimatedNumber value={list.length} />} effects
+        </span>
         <FileButton
           accept=".html,text/html"
           icon={<UploadSimple size={16} />}
@@ -716,32 +776,6 @@ export function EffectsView() {
           Import
         </FileButton>
       </div>
-
-      {failed.length > 0 && (
-        <div className="failed-strip" data-open={showFailed ? "true" : "false"}>
-          <button
-            type="button"
-            className="failed-strip-head"
-            aria-expanded={showFailed}
-            onClick={() => setShowFailed((v) => !v)}
-          >
-            <FileHtml size={14} aria-hidden="true" />
-            <span>
-              {failed.length} file{failed.length === 1 ? "" : "s"} did not parse
-            </span>
-          </button>
-          {showFailed && (
-            <div className="failed-strip-body">
-              {failed.map((f) => (
-                <p key={f.file} className="failed-line">
-                  <span className="fig">{f.file}</span>
-                  <span className="failed-error">{f.error}</span>
-                </p>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
 
       {(replaceWith || importError) && (
         <div className="import-note" data-tone={replaceWith ? "ask" : "down"}>
@@ -768,7 +802,7 @@ export function EffectsView() {
         </div>
       )}
 
-      {effectsError && <p className="error-line">{effectsError}</p>}
+      {effects !== null && effectsError && <p className="error-line">{effectsError}</p>}
 
       {narrow ? (
         <div

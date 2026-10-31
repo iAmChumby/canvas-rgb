@@ -22,8 +22,14 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use std::sync::{Arc, Mutex as StdMutex};
+
+use canvas_adapters::attack_shark_x6::AttackSharkX6;
+use canvas_adapters::ReadSink;
 use canvas_proto::device::DeviceId;
-use canvas_proto::peripheral::{PeripheralAccess, PeripheralInfo, PeripheralSchema};
+use canvas_proto::peripheral::{
+    PeripheralAccess, PeripheralInfo, PeripheralSchema, ReadProgress, ReadStage,
+};
 use canvas_proto::props::Props;
 use canvas_proto::traits::{AdapterError, PeripheralAdapter};
 
@@ -87,11 +93,20 @@ pub fn save(home: &Path, file: &PeripheralsFile) -> std::io::Result<()> {
 pub trait Peripheral: PeripheralAdapter {
     /// Turns config writes on or off. Nothing is written to the hardware while they are off.
     fn set_config_writes(&mut self, on: bool);
+
+    /// Where this adapter reports the stage of a read, for the adapters whose read takes long
+    /// enough to be worth reporting. An adapter that reports nothing keeps this default, and its
+    /// read shows as one stage.
+    fn set_read_sink(&mut self, _sink: Option<ReadSink>) {}
 }
 
 impl Peripheral for canvas_adapters::attack_shark_x6::AttackSharkX6 {
     fn set_config_writes(&mut self, on: bool) {
         self.set_writes_enabled(on);
+    }
+
+    fn set_read_sink(&mut self, sink: Option<ReadSink>) {
+        AttackSharkX6::set_read_sink(self, sink);
     }
 }
 
@@ -115,6 +130,27 @@ pub struct PeripheralHub {
     /// How long a read is shared. [`READ_CACHE`] in the daemon; the tests set it to zero to
     /// count the reads the hub made before it shared any.
     read_cache: Duration,
+    /// The stage of the read that is running, per device id. A plain lock, never held across an
+    /// await and never the adapters' lock: asking for it must answer while a read is still open.
+    progress: Arc<StdMutex<BTreeMap<String, ReadProgress>>>,
+}
+
+/// Clears the stage of a read when the read ends or its request is dropped, and stops a sink that
+/// is still running on the blocking thread from writing it back.
+struct ReadingGuard {
+    id: String,
+    live: Arc<std::sync::atomic::AtomicBool>,
+    progress: Arc<StdMutex<BTreeMap<String, ReadProgress>>>,
+}
+
+impl Drop for ReadingGuard {
+    fn drop(&mut self) {
+        // One lock covers the flag and the clear, and the sink checks the flag under the same
+        // lock, so a sink that passed its check cannot write after this clear.
+        let mut progress = self.progress.lock().unwrap_or_else(|e| e.into_inner());
+        self.live.store(false, std::sync::atomic::Ordering::SeqCst);
+        progress.remove(&self.id);
+    }
 }
 
 /// One enumeration and the moment it was taken.
@@ -137,8 +173,25 @@ impl PeripheralHub {
             read_cache,
             adapters: tokio::sync::Mutex::new(adapters),
             discovery: tokio::sync::Mutex::new(None),
+            progress: Arc::new(StdMutex::new(BTreeMap::new())),
             reads: std::sync::Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// The stage of the read of this device that is running now, [`ReadProgress::IDLE`] when none
+    /// is. Never waits on a device: it answers while a read is open.
+    pub fn read_progress(&self, device: &DeviceId) -> ReadProgress {
+        self.progress
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&device.0)
+            .copied()
+            .unwrap_or(ReadProgress::IDLE)
+    }
+
+    /// Records the stage of a read of this device.
+    fn set_progress(&self, device: &DeviceId, stage: ReadProgress) {
+        self.progress.lock().unwrap_or_else(|e| e.into_inner()).insert(device.0.clone(), stage);
     }
 
     /// Every peripheral the adapters see, cached for [`DISCOVERY_CACHE`].
@@ -204,6 +257,14 @@ impl PeripheralHub {
         let mut adapters = self.adapters.lock().await;
         let (index, _) = owner_of(&mut adapters, device).await?;
         let adapter = adapters[index].as_mut();
+        // The stage the editor shows while this read is open. The guard clears it however the
+        // read ends, also when the request is dropped.
+        let live = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let _guard = ReadingGuard {
+            id: device.0.clone(),
+            live: live.clone(),
+            progress: self.progress.clone(),
+        };
         // A shared read of a device that has since been closed is not an answer. `is_connected`
         // only says the adapter still holds its handle: an unplug shows on the next I/O, so for
         // up to `read_cache` after an unplug the shared values are served as they were read.
@@ -213,9 +274,24 @@ impl PeripheralHub {
             }
         }
         if !adapter.is_connected() {
+            self.set_progress(device, ReadProgress::at(ReadStage::Opening));
             adapter.connect().await?;
         }
+        // An adapter that reports nothing is in one stage: reading, with no count.
+        self.set_progress(device, ReadProgress::at(ReadStage::Reading));
+        let sink: ReadSink = {
+            let progress = self.progress.clone();
+            let id = device.0.clone();
+            Arc::new(move |p: ReadProgress| {
+                let mut progress = progress.lock().unwrap_or_else(|e| e.into_inner());
+                if live.load(std::sync::atomic::Ordering::SeqCst) {
+                    progress.insert(id.clone(), p);
+                }
+            })
+        };
+        adapter.set_read_sink(Some(sink));
         let result = adapter.read_settings(device).await;
+        adapter.set_read_sink(None);
         match &result {
             Ok(props) => {
                 self.reads

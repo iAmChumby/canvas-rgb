@@ -125,6 +125,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use canvas_proto::color::Rgb8;
 use canvas_proto::device::DeviceId;
+use canvas_proto::peripheral::{ReadProgress, ReadStage};
 use canvas_proto::props::{PropKind, PropValue, PropertyDef, Props};
 use canvas_proto::traits::AdapterError;
 
@@ -733,10 +734,12 @@ fn read_report(
 /// Blocking: call it from `spawn_blocking`. A report that could not be read leaves its own
 /// properties unread; the other reports are still read. The first failure is kept, for the case
 /// where nothing at all could be read.
-fn read_all(config: &mut dyn FeatureTransport, pace: Pace) -> ReadPass {
+fn read_all(config: &mut dyn FeatureTransport, pace: Pace, report: &dyn Fn(ReadProgress)) -> ReadPass {
     let mut out = ReadPass::default();
     let order = codec::READ_ORDER;
+    let total = order.len() as u32;
     let mut refused = 0usize;
+    report(ReadProgress::reading(0, total));
     for (i, kind) in order.iter().enumerate() {
         match read_report(config, *kind, pace) {
             Ok(frame) => out.reports.push((*kind, frame)),
@@ -750,6 +753,9 @@ fn read_all(config: &mut dyn FeatureTransport, pace: Pace) -> ReadPass {
                 }
             }
         }
+        // A report counts as done once it was tried, answered or not: the count says how far the
+        // read is, not how much of it worked.
+        report(ReadProgress::reading(i as u32 + 1, total));
         if i + 1 < order.len() {
             std::thread::sleep(pace.report_pause);
         }
@@ -875,6 +881,8 @@ pub struct AttackSharkX6 {
     writes_enabled: bool,
     pace: Pace,
     cache: Cache,
+    /// Where a read reports its stage, when a caller wants to hear it.
+    progress: Option<crate::ReadSink>,
 }
 
 impl Default for AttackSharkX6 {
@@ -900,12 +908,19 @@ impl AttackSharkX6 {
             writes_enabled: false,
             pace: Pace::default(),
             cache: Cache::default(),
+            progress: None,
         }
     }
 
     /// Turns config writes on or off. They are off until a caller says otherwise.
     pub fn set_writes_enabled(&mut self, on: bool) {
         self.writes_enabled = on;
+    }
+
+    /// Where a read reports its stage: the report it is on, and that it is waiting for the mouse
+    /// to wake. The pacing of the read is the same with or without one.
+    pub fn set_read_sink(&mut self, sink: Option<crate::ReadSink>) {
+        self.progress = sink;
     }
 
     /// The stable id of this mouse.
@@ -1391,15 +1406,22 @@ impl PeripheralAdapter for AttackSharkX6 {
         // The status collection comes along: it is the only way to hear that the mouse woke up.
         let mut events = self.events.take();
         let pace = self.pace;
+        let sink = self.progress.clone();
         let (config, events, pass) = tokio::task::spawn_blocking(move || {
-            let mut pass = read_all(&mut *config, pace);
+            let report = move |p: ReadProgress| {
+                if let Some(sink) = sink.as_ref() {
+                    sink(p);
+                }
+            };
+            let mut pass = read_all(&mut *config, pace, &report);
             if pass.all_refused {
                 // Every read was refused: the mouse is asleep. Wait for it to wake (any movement
                 // wakes it) and read once more before giving up.
                 if let Some(events) = events.as_mut() {
+                    report(ReadProgress::at(ReadStage::Waking));
                     if wait_for_wake(&mut **events, pace.wake_wait) {
                         tracing::info!("the mouse sent a status event: it is awake. Reading again.");
-                        pass = read_all(&mut *config, pace);
+                        pass = read_all(&mut *config, pace, &report);
                     } else {
                         tracing::info!("the mouse stayed asleep");
                     }
@@ -2212,6 +2234,55 @@ mod tests {
         a.read_settings(&a.device_id()).await.unwrap();
         // The event is still queued: the read did not touch the status collection.
         assert_eq!(s.lock().unwrap().events.len(), 1);
+    }
+
+    // ---------------------------------------------------------------------------- read stages
+
+    /// A sink that records every stage the read reports.
+    fn recorder() -> (crate::ReadSink, Arc<Mutex<Vec<ReadProgress>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink_seen = seen.clone();
+        let sink: crate::ReadSink = Arc::new(move |p| sink_seen.lock().unwrap().push(p));
+        (sink, seen)
+    }
+
+    #[tokio::test]
+    async fn a_read_reports_each_of_the_five_reports_in_order() {
+        let (mut a, _s) = rig();
+        let (sink, seen) = recorder();
+        a.set_read_sink(Some(sink));
+        a.connect().await.unwrap();
+        a.read_settings(&a.device_id()).await.unwrap();
+        let want: Vec<ReadProgress> = (0..=5).map(|n| ReadProgress::reading(n, 5)).collect();
+        assert_eq!(*seen.lock().unwrap(), want);
+    }
+
+    #[tokio::test]
+    async fn a_read_of_a_sleeping_mouse_reports_the_wait_for_it_to_wake() {
+        let (mut a, s) = rig();
+        {
+            let mut s = s.lock().unwrap();
+            s.grant = 0;
+            s.grant_when_awake = Some(1);
+            s.events.push_back(vec![0x03, 0x10, 0x40, 0x01, 0x0a]);
+        }
+        let (sink, seen) = recorder();
+        a.set_read_sink(Some(sink));
+        a.connect().await.unwrap();
+        a.read_settings(&a.device_id()).await.unwrap();
+        let mut want: Vec<ReadProgress> = (0..=5).map(|n| ReadProgress::reading(n, 5)).collect();
+        want.push(ReadProgress::at(ReadStage::Waking));
+        want.extend((0..=5).map(|n| ReadProgress::reading(n, 5)));
+        assert_eq!(*seen.lock().unwrap(), want);
+    }
+
+    #[tokio::test]
+    async fn a_read_without_a_sink_reads_the_same() {
+        let (mut a, s) = rig();
+        a.connect().await.unwrap();
+        a.read_settings(&a.device_id()).await.unwrap();
+        // Five requests, one per report, with no sink set.
+        assert_eq!(s.lock().unwrap().sent.len(), 5);
     }
 
     // --------------------------------------------------------------------------------- events

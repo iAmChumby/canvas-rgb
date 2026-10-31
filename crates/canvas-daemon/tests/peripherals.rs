@@ -224,6 +224,212 @@ async fn a_get_with_reads_on_reads_the_device() {
     assert_eq!(fake.log().reads, 1);
 }
 
+/// The path of the fake peripheral's read stage.
+fn read_path_of(id: &str) -> String {
+    format!("{}/{id}/read", routes::PERIPHERALS)
+}
+
+/// The stage the read route reports now, as `(stage, done, total)`.
+async fn stage_now(router: &axum::Router, id: &str) -> (String, u64, u64) {
+    let response = call(router, "GET", &read_path_of(id)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json(response).await;
+    (
+        body.get("stage").and_then(|v| v.as_str()).unwrap_or("?").to_string(),
+        body.get("done").and_then(|v| v.as_u64()).unwrap_or(u64::MAX),
+        body.get("total").and_then(|v| v.as_u64()).unwrap_or(u64::MAX),
+    )
+}
+
+#[tokio::test]
+async fn a_read_reports_its_stages_in_order_while_the_device_read_is_still_open() {
+    use canvas_proto::peripheral::{ReadProgress, ReadStage};
+
+    let fake = FakePeripheral::default();
+    let (router, _app, _home) = build(fake.clone());
+    let id = fake.id().0.clone();
+    assert_eq!(stage_now(&router, &id).await, ("idle".into(), 0, 0), "nothing is reading yet");
+    let access = call_with_body(&router, "PUT", &access_path_of(&id), r#"{"reads":true,"writes":false}"#).await;
+    assert_eq!(access.status(), StatusCode::OK);
+
+    // The device dropped off: the read has to open it again, and every step is held so the test can
+    // look at the stage while the read is open.
+    let (reached_tx, mut reached_rx) = tokio::sync::mpsc::unbounded_channel();
+    let go = Arc::new(tokio::sync::Semaphore::new(0));
+    let sent = [
+        ReadProgress::at(ReadStage::Waking),
+        ReadProgress::reading(0, 2),
+        ReadProgress::reading(1, 2),
+        ReadProgress::reading(2, 2),
+    ];
+    {
+        let mut log = fake.0.lock().unwrap();
+        log.connected = false;
+        log.stages = sent.to_vec();
+        log.gate = Some(common::StageGate { reached: reached_tx, go: go.clone() });
+        log.gate_connect = true;
+    }
+
+    let reader = {
+        let router = router.clone();
+        let path = path_of(&id);
+        tokio::spawn(async move { call(&router, "GET", &path).await.status() })
+    };
+
+    let mut seen = Vec::new();
+    // The open, then the four reported steps.
+    for _ in 0..5 {
+        reached_rx.recv().await.expect("the read reaches its next step");
+        seen.push(stage_now(&router, &id).await);
+        go.add_permits(1);
+    }
+    assert_eq!(reader.await.expect("the read ends"), StatusCode::OK);
+
+    let want: Vec<(String, u64, u64)> = vec![
+        ("opening".into(), 0, 0),
+        ("waking".into(), 0, 0),
+        ("reading".into(), 0, 2),
+        ("reading".into(), 1, 2),
+        ("reading".into(), 2, 2),
+    ];
+    assert_eq!(seen, want, "the stages come in the order the read went through them");
+    assert_eq!(stage_now(&router, &id).await, ("idle".into(), 0, 0), "the stage is cleared when the read ends");
+}
+
+#[tokio::test]
+async fn a_read_that_reports_nothing_is_one_stage_and_then_idle() {
+    let fake = FakePeripheral::default();
+    let (router, _app, _home) = build(fake.clone());
+    let id = fake.id().0.clone();
+    call_with_body(&router, "PUT", &access_path_of(&id), r#"{"reads":true,"writes":false}"#).await;
+    let (reached_tx, mut reached_rx) = tokio::sync::mpsc::unbounded_channel();
+    let go = Arc::new(tokio::sync::Semaphore::new(0));
+    {
+        let mut log = fake.0.lock().unwrap();
+        // One step held by the gate, with no stage reported by the adapter.
+        log.stages = vec![canvas_proto::peripheral::ReadProgress::at(canvas_proto::peripheral::ReadStage::Reading)];
+        log.gate = Some(common::StageGate { reached: reached_tx, go: go.clone() });
+    }
+    let reader = {
+        let router = router.clone();
+        let path = path_of(&id);
+        tokio::spawn(async move { call(&router, "GET", &path).await.status() })
+    };
+    reached_rx.recv().await.expect("the read is open");
+    assert_eq!(stage_now(&router, &id).await, ("reading".into(), 0, 0));
+    go.add_permits(1);
+    assert_eq!(reader.await.expect("the read ends"), StatusCode::OK);
+    assert_eq!(stage_now(&router, &id).await, ("idle".into(), 0, 0));
+    // An id that is not a device is idle too: asking opens nothing.
+    assert_eq!(stage_now(&router, "nothing-here").await, ("idle".into(), 0, 0));
+}
+
+/// Starts a read of the fake that stops at its first reported stage, and waits for it to get there.
+async fn start_held_read(
+    router: &axum::Router,
+    fake: &FakePeripheral,
+) -> (tokio::task::JoinHandle<serde_json::Value>, tokio::sync::mpsc::UnboundedReceiver<()>, Arc<tokio::sync::Semaphore>) {
+    use canvas_proto::peripheral::{ReadProgress, ReadStage};
+    let id = fake.id().0.clone();
+    let access = call_with_body(router, "PUT", &access_path_of(&id), r#"{"reads":true,"writes":false}"#).await;
+    assert_eq!(access.status(), StatusCode::OK);
+    let (reached_tx, mut reached_rx) = tokio::sync::mpsc::unbounded_channel();
+    let go = Arc::new(tokio::sync::Semaphore::new(0));
+    {
+        let mut log = fake.0.lock().unwrap();
+        log.stages = vec![ReadProgress::at(ReadStage::Reading), ReadProgress::reading(1, 2)];
+        log.gate = Some(common::StageGate { reached: reached_tx, go: go.clone() });
+    }
+    let reader = {
+        let router = router.clone();
+        let path = path_of(&id);
+        tokio::spawn(async move { json(call(&router, "GET", &path).await).await })
+    };
+    reached_rx.recv().await.expect("the read is open");
+    (reader, reached_rx, go)
+}
+
+#[tokio::test]
+async fn a_cancelled_read_leaves_the_stage_idle_even_when_the_device_still_reports() {
+    use canvas_proto::peripheral::ReadProgress;
+
+    let fake = FakePeripheral::default();
+    let (router, _app, _home) = build(fake.clone());
+    let id = fake.id().0.clone();
+    let (reader, _reached, _go) = start_held_read(&router, &fake).await;
+    assert_eq!(stage_now(&router, &id).await.0, "reading", "the read is open and says so");
+
+    // The editor navigated away: the request is dropped while the device thread is mid-read.
+    reader.abort();
+    let _ = reader.await;
+    assert_eq!(stage_now(&router, &id).await, ("idle".into(), 0, 0), "a dropped read clears its stage");
+
+    // The device thread does not know yet and reports once more through the sink it was given.
+    let sink = fake.0.lock().unwrap().sink.0.clone().expect("the daemon gave the adapter a sink");
+    sink(ReadProgress::reading(2, 2));
+    assert_eq!(
+        stage_now(&router, &id).await,
+        ("idle".into(), 0, 0),
+        "a report that arrives after the read ended must not bring the stage back"
+    );
+}
+
+#[tokio::test]
+async fn a_late_report_never_outlives_the_end_of_its_read() {
+    use canvas_proto::peripheral::ReadProgress;
+
+    // Check-then-insert raced the clear: a sink that had passed its check could write after the
+    // read ended. This is a smoke guard, not a proof: the window is nanoseconds and 3000 rounds
+    // never hit it on the old order. The fix (one lock for the flag and the clear) holds by
+    // construction. Many sinks hammer while reads end; after each end the stage must stay idle.
+    let fake = FakePeripheral::default();
+    let (router, _app, _home) = build(fake.clone());
+    let id = fake.id().0.clone();
+    for round in 0..200 {
+        let (reader, _reached, _go) = start_held_read(&router, &fake).await;
+        let sink = fake.0.lock().unwrap().sink.0.clone().expect("a sink");
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hammers: Vec<_> = (0..3)
+            .map(|_| {
+                let sink = sink.clone();
+                let stop = stop.clone();
+                std::thread::spawn(move || {
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        sink(ReadProgress::reading(1, 2));
+                    }
+                })
+            })
+            .collect();
+        reader.abort();
+        let _ = reader.await;
+        // Every report the hammers make from here on happens after the read ended.
+        for _ in 0..50 {
+            let now = stage_now(&router, &id).await;
+            assert_eq!(now, ("idle".into(), 0, 0), "round {round}: a late report brought the stage back");
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        for h in hammers {
+            h.join().expect("the hammer ends");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_read_that_fails_leaves_the_stage_idle() {
+    let fake = FakePeripheral::default();
+    let (router, _app, _home) = build(fake.clone());
+    let id = fake.id().0.clone();
+    let (reader, mut reached, go) = start_held_read(&router, &fake).await;
+    assert_eq!(stage_now(&router, &id).await.0, "reading");
+    fake.0.lock().unwrap().fail_read = 1;
+    go.add_permits(1);
+    reached.recv().await.expect("the second stage");
+    go.add_permits(1);
+    let body = reader.await.expect("the read ends");
+    assert!(body.get("problem").is_some_and(|p| p.is_string()), "the read failed and says so: {body}");
+    assert_eq!(stage_now(&router, &id).await, ("idle".into(), 0, 0), "an error ends in idle, not in reading");
+}
+
 #[tokio::test]
 async fn the_access_is_saved_and_survives_a_restart() {
     let fake = FakePeripheral::default();
@@ -616,18 +822,23 @@ async fn an_unknown_peripheral_is_not_found() {
 async fn the_peripheral_routes_need_the_token() {
     let fake = FakePeripheral::default();
     let (router, _app, _home) = build(fake.clone());
-    let response = router
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(routes::PERIPHERALS)
-                .header("host", "127.0.0.1:9430")
-                .body(Body::empty())
-                .expect("the request builds"),
-        )
-        .await
-        .expect("the router answers");
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let id = fake.id().0.clone();
+    // The list, one device, its access and its read stage: none answers without the token.
+    for path in [routes::PERIPHERALS.to_string(), path_of(&id), access_path_of(&id), read_path_of(&id)] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(&path)
+                    .header("host", "127.0.0.1:9430")
+                    .body(Body::empty())
+                    .expect("the request builds"),
+            )
+            .await
+            .expect("the router answers");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "GET {path} needs the token");
+    }
 }
 
 /// An API that answers with what it was given, and records what it was asked for.

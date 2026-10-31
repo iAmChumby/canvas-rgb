@@ -23,6 +23,7 @@ const SERVICE_BANNER_MS = 10_000;
  * and nothing is pushed down after it has been painted.
  */
 export function StandingNotices() {
+  const pathname = usePathname();
   const status = useSnap((s) => s.status);
   const devices = useSnap((s) => s.devices);
   const [err, setErr] = useState<string | null>(null);
@@ -86,10 +87,13 @@ export function StandingNotices() {
           tone="work"
           icon={<SquaresFour size={20} weight="fill" />}
           title="There is no layout yet"
+          // The Layout page is where it is made: a link to itself would say nothing.
           actions={
-            <ButtonLink href="/" variant="primary" size="sm">
-              Open the Layout
-            </ButtonLink>
+            pathname === "/" ? undefined : (
+              <ButtonLink href="/" variant="primary" size="sm">
+                Open the Layout
+              </ButtonLink>
+            )
           }
         >
           Nothing can run until the desk canvas has a zone in it.

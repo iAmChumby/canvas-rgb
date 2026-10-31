@@ -11,6 +11,13 @@ pub mod royuan;
 pub mod zones;
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+use canvas_proto::peripheral::ReadProgress;
+
+/// Where an adapter reports the stage of a long device read (see `ReadProgress`). Called from the
+/// adapter's blocking thread, so it must be quick and must not wait on the device.
+pub type ReadSink = Arc<dyn Fn(ReadProgress) + Send + Sync>;
 
 /// Bumped on every resume from sleep. An adapter that set a hardware mode when it connected
 /// compares its own copy with this one and sets the mode again when they differ (#5).

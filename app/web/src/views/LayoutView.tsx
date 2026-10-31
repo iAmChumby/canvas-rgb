@@ -15,6 +15,7 @@ import {
   DotsThree,
   FloppyDisk,
   GridFour,
+  SquaresFour,
   Lightbulb,
   MagicWand,
   Plus,
@@ -23,6 +24,9 @@ import {
 } from "@phosphor-icons/react";
 import { Button, IconButton, Swap } from "@/components/Button";
 import { Panel, Field } from "@/components/Panel";
+import { EmptyState } from "@/components/EmptyState";
+import { ErrorPanel, LoadFrame } from "@/components/Loading";
+import { LayoutShape } from "@/components/LoadShapes";
 import { Segmented } from "@/components/Segmented";
 import { NumberField, TextField } from "@/components/NumberField";
 import { Select } from "@/components/Select";
@@ -348,6 +352,7 @@ export function LayoutView() {
   const effects = useSnap((s) => s.effects);
   const settings = useSnap((s) => s.settings);
   const layoutsError = useSnap((s) => s.layoutsError);
+  const layoutsLoaded = useSnap((s) => s.layouts !== null);
 
   const [base, setBase] = useState<Layout | null>(null);
   const [selection, setSelection] = useState<Sel[]>([]);
@@ -1023,11 +1028,25 @@ export function LayoutView() {
         <div className="page-head">
           <h1>Layout</h1>
         </div>
-        <Panel>
-          <p className="mute">
-            {layoutsError ? `Layout unreadable: ${layoutsError}` : "Loading"}
-          </p>
-        </Panel>
+        <LoadFrame
+          state={layoutsError ? "error" : layoutsLoaded && !server ? "empty" : "loading"}
+          shape={<LayoutShape />}
+          label="Reading the layout"
+          error={
+            <ErrorPanel
+              title="The layout could not be read"
+              message={layoutsError}
+              onRetry={() => void refreshLayouts()}
+            />
+          }
+          empty={
+            <Panel>
+              <EmptyState icon={<SquaresFour size={24} />} title="No desk to show">
+                There is no layout yet, so there is no canvas to place zones on.
+              </EmptyState>
+            </Panel>
+          }
+        />
       </div>
     );
   }

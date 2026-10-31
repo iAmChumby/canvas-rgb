@@ -165,6 +165,14 @@
 /* The devices list while it is coming: the shape of the cards that will arrive. */
 .device-skeleton {
   pointer-events: none;
+  /* The height its zones make (--dev-w on a wide page, --dev-n on a phone), set per card. */
+  min-height: var(--dev-w, 140px);
+}
+
+@media (max-width: 720px) {
+  .device-skeleton {
+    min-height: var(--dev-n, 206px);
+  }
 }
 
 .device-skeleton .skeleton-icon {
@@ -359,7 +367,8 @@
 
 .skeleton {
   border-radius: var(--r-sm);
-  background: var(--raised);
+  /* A step darker than the controls at rest, so a placeholder reads on a panel in both themes. */
+  background: color-mix(in srgb, var(--raised) 60%, var(--line-2));
   animation: canvas-fade var(--dur-slow) var(--ease) both;
 }
 
@@ -371,6 +380,297 @@
 .skeleton-line:last-child {
   margin-bottom: 0;
   width: 62%;
+}
+
+/* ==========================================================================
+   The loading frame (components/Loading.tsx)
+   The shape of the coming content, the error and the empty state share one grid cell, so the
+   frame is as tall in all of them. Under the delay the shape holds its room and stays unseen.
+   ========================================================================== */
+
+.load-frame {
+  position: relative;
+  min-width: 0;
+}
+
+.load-frame:not([data-state="ready"]) {
+  display: grid;
+  align-content: start;
+}
+
+/* A frame whose ready content is a column of rows (the peripheral list). */
+.load-frame.load-col[data-state="ready"] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.load-frame > .load-shape,
+.load-frame > .load-note {
+  grid-area: 1 / 1;
+  min-width: 0;
+}
+
+.load-shape {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+  pointer-events: none;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+.load-frame[data-state="loading"][data-shown="false"] > .load-shape {
+  opacity: 0;
+}
+
+.load-frame[data-state="error"] > .load-shape,
+.load-frame[data-state="empty"] > .load-shape {
+  visibility: hidden;
+}
+
+.load-note {
+  align-self: start;
+  animation: canvas-fade var(--dur) var(--ease) both;
+}
+
+.load-note-action {
+  margin-top: var(--s3);
+}
+
+/* The raw words of an error, folded away. */
+.load-detail {
+  margin-top: var(--s3);
+}
+
+.load-detail > summary {
+  width: fit-content;
+  color: var(--mute);
+  font-size: var(--t14);
+  cursor: pointer;
+}
+
+.load-detail > summary:hover {
+  color: var(--ink);
+}
+
+.load-detail > .state-detail {
+  margin-top: var(--s2);
+}
+
+/* Known values stay on screen while they are read again: dimmed, and not to be edited. */
+.load-frame[data-state="ready"] > * {
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+.load-frame[data-refreshing="true"] > :not(.load-stage) {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+/* What the device read is doing. It sits on the frame's top edge, outside the flow, so showing
+   or changing it moves nothing. */
+.load-stage {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + var(--s2));
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  max-width: 100%;
+  height: 28px;
+  padding: 0 var(--s3);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background: var(--raised);
+  color: var(--ink);
+  font-size: var(--t14);
+  white-space: nowrap;
+  animation: canvas-fade var(--dur) var(--ease) both;
+}
+
+/* On a phone the row above the frame is the way back (an arrow, then the page's name). The line sits
+   in that row, on the right, as it sits in the page head on a wide page, and the name steps aside
+   while the line is there so the two never meet. */
+@media (max-width: 720px) {
+  .peripheral-detail:has(.load-stage) .peripheral-back > span:last-child {
+    visibility: hidden;
+  }
+}
+
+.load-stage-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.load-ticks {
+  display: inline-flex;
+  gap: 3px;
+}
+
+.load-tick {
+  width: 10px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line-2);
+  transition: background-color var(--dur-instant) var(--ease);
+}
+
+.load-tick[data-on="true"] {
+  background: var(--a1);
+}
+
+/* Placeholder boxes the shapes share (components/LoadShapes.tsx). */
+.skel-title {
+  height: 16.3px;
+}
+
+/* A placeholder panel as tall as the panel it stands for: its height is set per panel and per width
+   (--sh-w on a wide page, --sh-n on a phone), and its rows spread over it. */
+.skel-body {
+  min-width: 0;
+}
+
+.skel-sized {
+  display: flex;
+  flex-direction: column;
+  min-height: var(--sh-w);
+}
+
+.skel-sized > .skel-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.skel-prop {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s4);
+  height: var(--row-w, 52px);
+}
+
+
+/* Items that share the height of their panel, a hairline between them, like the rows of a table. */
+.skel-rows {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+
+.skel-row {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--s2);
+  min-height: 28px;
+  padding: var(--s2) 0;
+  border-top: 1px solid var(--line);
+}
+
+.skel-row:first-child {
+  border-top: 0;
+}
+
+.skel-pad {
+  height: 100%;
+  min-height: 780px;
+}
+
+.skel-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  margin-top: var(--s3);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--line);
+}
+
+.skel-chips-bare {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
+/* A zone row of a device card: the LED strip is a pill that takes the room the strip takes. */
+.skel-zone {
+  pointer-events: none;
+}
+
+.skel-led-strip {
+  width: auto;
+}
+
+.skel-canvas {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--s3);
+  min-height: 920px;
+}
+
+/* The drawing: as tall as the loaded one (806.4 px at 1440, 223.8 px on a phone). Under it come the
+   view switch and the notes. */
+.skel-stage {
+  flex: none;
+  width: 100%;
+  height: 806.4px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+}
+
+.skel-canvas-tools {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+
+.skel-preview {
+  aspect-ratio: 16 / 10;
+}
+
+.skel-save .savebar {
+  height: 47.8px;
+  padding-block: 0;
+}
+
+@media (max-width: 960px) {
+  .skel-canvas {
+    flex: none;
+    min-height: 384.9px;
+  }
+
+  .skel-stage {
+    height: 223.8px;
+  }
+}
+
+@media (max-width: 720px) {
+  .skel-sized {
+    min-height: var(--sh-n);
+  }
+
+  .skel-prop {
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    gap: var(--s2);
+    height: var(--row-n, 66px);
+  }
+
+  .skel-save {
+    height: 0;
+    overflow: hidden;
+  }
+
+  /* The head wraps on a phone: the state takes its own row under the name. */
+  .skel-head-status {
+    flex: 1 1 100%;
+  }
 }
 
 /* ==========================================================================

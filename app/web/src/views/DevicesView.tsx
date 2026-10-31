@@ -17,7 +17,8 @@ import type { Icon } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
 import { EmptyState } from "@/components/EmptyState";
 import { Panel, StateDot } from "@/components/Panel";
-import { Skeleton } from "@/components/Skeleton";
+import { ErrorPanel, LoadFrame } from "@/components/Loading";
+import { DeviceListShape } from "@/components/LoadShapes";
 import { refreshDevices, useSnap } from "@/lib/store";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { DeviceKind } from "@/proto/DeviceKind";
@@ -135,6 +136,8 @@ interface WalkTarget {
 export function DevicesView() {
   const devices = useSnap((s) => s.devices);
   const devicesError = useSnap((s) => s.devicesError);
+  // How many lights the daemon has already counted: the placeholder draws as many cards.
+  const counted = useSnap((s) => s.status?.devices_connected ?? 0);
   const openrgb = useSnap((s) => s.status?.openrgb ?? "connected");
   // The first-run banner links here with ?walk=<device id>. That device's first resizable zone opens
   // in the walker until the user closes it or picks another zone.
@@ -166,7 +169,7 @@ export function DevicesView() {
         <h1>Devices</h1>
       </div>
 
-      {devicesError && <Panel><p className="error-line">{devicesError}</p></Panel>}
+      {devicesError && devices !== null && <Panel><p className="error-line">{devicesError}</p></Panel>}
       {openrgb !== "connected" && (
         <p className="rule rule-warn">
           OpenRGB is not connected.
@@ -174,27 +177,28 @@ export function DevicesView() {
       )}
 
       <div className="devices-grid">
-        <div>
-          {devices === null && !devicesError ? (
-            // The shape of the list that is coming, so nothing jumps when it lands.
-            [0, 1, 2].map((i) => (
-              <section className="device device-skeleton" key={`skeleton-${i}`} aria-hidden="true">
-                <div className="device-head">
-                  <Skeleton className="skeleton-icon" />
-                  <span className="stack" style={{ gap: 4, minWidth: 0 }}>
-                    <Skeleton height={16} width="52%" />
-                    <Skeleton height={12} width="34%" />
-                  </span>
-                </div>
-                <div className="zone-strip">
-                  <Skeleton height={14} width="28%" />
-                  <Skeleton height={14} width="42%" />
-                  <Skeleton height={14} width="14%" />
-                </div>
-              </section>
-            ))
-          ) : (
-          (devices ?? []).map((d, di) => {
+        <LoadFrame
+          state={devices === null ? (devicesError ? "error" : "loading") : devices.length === 0 ? "empty" : "ready"}
+          shape={<DeviceListShape cards={counted > 0 ? counted : 3} />}
+          label="Looking for devices"
+          error={<ErrorPanel title="The devices could not be read" message={devicesError} onRetry={() => void refreshDevices()} />}
+          empty={
+            <Panel>
+              <EmptyState
+                icon={<Memory size={22} />}
+                title="No device found"
+                action={
+                  <Button size="sm" icon={<ArrowClockwise size={16} />} onClick={() => void refreshDevices()}>
+                    Try again
+                  </Button>
+                }
+              >
+                OpenRGB reports no lights. Plug one in or start OpenRGB, then try again.
+              </EmptyState>
+            </Panel>
+          }
+        >
+          {(devices ?? []).map((d, di) => {
             const Glyph = KIND_ICON[d.kind];
             const accent = ACCENTS[di % ACCENTS.length];
             const tag = deviceTag(d);
@@ -231,12 +235,11 @@ export function DevicesView() {
                       title={`${d.name} reports no zones`}
                       action={
                         <Button size="sm" icon={<ArrowClockwise size={16} />} onClick={() => void refreshDevices()}>
-                          Ask the daemon again
+                          Try again
                         </Button>
                       }
                     >
-                      The daemon sees this device, but it has not reported any zones for it yet. Ask
-                      it again once the device is lit and connected over OpenRGB.
+                      OpenRGB lists this device but no zones for it yet. Try again once it is lit.
                     </EmptyState>
                   </div>
                 ) : (
@@ -267,9 +270,8 @@ export function DevicesView() {
                 )}
               </section>
             );
-          })
-          )}
-        </div>
+          })}
+        </LoadFrame>
 
         <div className="stack" style={{ position: "sticky", top: 16 }}>
           {walkDevice && walkZone ? (
