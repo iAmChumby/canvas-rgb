@@ -138,7 +138,10 @@ export function PeripheralsView() {
   // device is read again these stay on screen, marked as refreshing.
   const fresh = loaded && loaded.id === selectedId ? loaded.detail : null;
   const detail = fresh ?? (selectedId ? (lastRead.get(selectedId) ?? null) : null);
-  const [reloading, setReloading] = useState(false);
+  // The device whose reload is out. It is an id, not a flag: a reload of one device that is
+  // still out when another is picked marks only the device it belongs to.
+  const [reloadingId, setReloadingId] = useState<string | null>(null);
+  const reloading = reloadingId !== null && reloadingId === selectedId;
   const reading = selectedId !== null && !detailError && (fresh === null || reloading);
   const progress = useReadProgress(selectedId, reading);
 
@@ -150,7 +153,7 @@ export function PeripheralsView() {
   // change is already on the device, so a failed refresh is not a failed change.
   const loadDetail = useCallback(async (id: string, landed = false) => {
     const n = ++detailRequest.current;
-    setReloading(true);
+    setReloadingId(id);
     try {
       const d = await api.peripheral(id);
       if (n !== detailRequest.current) return;
@@ -166,7 +169,7 @@ export function PeripheralsView() {
       setDetailError(messageOf(e));
       setChangeSaved(landed);
     } finally {
-      if (n === detailRequest.current) setReloading(false);
+      if (n === detailRequest.current) setReloadingId(null);
     }
   }, []);
 
@@ -219,6 +222,9 @@ export function PeripheralsView() {
       .peripheral(selectedId)
       .then((d) => {
         if (stop || n !== detailRequest.current) return;
+        // This read is newer than any reload that was out: that reload is dropped when it
+        // lands, so its marker is cleared here, or the device would stay "refreshing" for good.
+        setReloadingId(null);
         lastRead.set(selectedId, d);
         setLoaded({ id: selectedId, detail: d });
         setStaged({});
@@ -228,6 +234,7 @@ export function PeripheralsView() {
       })
       .catch((e: unknown) => {
         if (stop || n !== detailRequest.current) return;
+        setReloadingId(null);
         setLoaded(null);
         setDetailError(messageOf(e));
         setChangeSaved(false);

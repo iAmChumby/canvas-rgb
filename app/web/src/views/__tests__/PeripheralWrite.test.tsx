@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ToastProvider } from "@/components/Toast";
 import { PeripheralsView } from "@/views/PeripheralsView";
@@ -165,5 +165,84 @@ describe("two devices at once", () => {
     // The page still shows the device that was picked, with no error on it.
     expect(screen.queryByText("The device could not be read")).toBeNull();
     expect(screen.getAllByText("Quick Mouse").length).toBeGreaterThan(0);
+  });
+});
+
+describe("a reload that is still out when another device is picked", () => {
+  /** Two devices; a write to the first starts a reload of it that stays out until `settle` runs. */
+  async function reloadOfFirstIsOut() {
+    const first = info("x6:first", "First Mouse");
+    const second = info("x6:second", "Second Mouse");
+    api.peripherals.mockResolvedValue({ peripherals: [first, second] });
+    api.putPeripheralAccess.mockResolvedValue({ reads: true, writes: false });
+    let firstReads = 0;
+    let settle!: { resolve: (d: PeripheralDetail) => void; reject: (e: unknown) => void };
+    api.peripheral.mockImplementation((id: string) => {
+      if (id === "x6:second") return Promise.resolve(detail("x6:second", "Second Mouse"));
+      firstReads += 1;
+      // The first read of the first device answers; the reload after the write does not; a read
+      // after that answers again.
+      if (firstReads !== 2) return Promise.resolve(detail("x6:first", "First Mouse"));
+      return new Promise<PeripheralDetail>((resolve, reject) => {
+        settle = { resolve, reject };
+      });
+    });
+    render(
+      <ToastProvider>
+        <PeripheralsView />
+      </ToastProvider>,
+    );
+    const reads = await screen.findByRole("switch", { name: "Read settings from this device" });
+    // The write lands, and the reload of the first device starts.
+    fireEvent.click(reads);
+    await waitFor(() => expect(firstReads).toBe(2));
+    // The second device is picked while that reload is out, and its read answers at once.
+    fireEvent.click(screen.getByText("Second Mouse"));
+    await screen.findByRole("heading", { level: 2, name: "Second Mouse" });
+    return { settle: () => settle };
+  }
+
+  /** The frames on the page that are waiting or refreshing. */
+  const busy = () => document.querySelectorAll('.load-frame[aria-busy="true"]');
+
+  it("does not leave the second device refreshing for good", async () => {
+    await reloadOfFirstIsOut();
+    // The second device is on screen and nothing reads it: no frame is busy.
+    await waitFor(() => expect(busy()).toHaveLength(0));
+  });
+
+  it("does not leave the first device refreshing when it is picked again", async () => {
+    await reloadOfFirstIsOut();
+    // Back to the first device: its read answers, and the reload that was dropped must not
+    // keep the page marked as refreshing.
+    fireEvent.click(screen.getByText("First Mouse"));
+    await screen.findByRole("heading", { level: 2, name: "First Mouse" });
+    await waitFor(() => expect(busy()).toHaveLength(0));
+  });
+
+  it("drops a late failure of the first device's reload", async () => {
+    const { settle } = await reloadOfFirstIsOut();
+    await act(async () => {
+      settle().reject(new Error("the first mouse did not answer"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // The error belongs to the first device, which is not on screen.
+    expect(screen.queryByText("The device could not be read")).toBeNull();
+    expect(screen.queryByText("the first mouse did not answer")).toBeNull();
+    expect(screen.getByRole("heading", { level: 2, name: "Second Mouse" })).toBeTruthy();
+    expect(busy()).toHaveLength(0);
+  });
+
+  it("drops a late answer of the first device's reload", async () => {
+    const { settle } = await reloadOfFirstIsOut();
+    await act(async () => {
+      settle().resolve(detail("x6:first", "First Mouse"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // The second device stays on screen, read and not busy.
+    expect(screen.getByRole("heading", { level: 2, name: "Second Mouse" })).toBeTruthy();
+    expect(busy()).toHaveLength(0);
   });
 });
