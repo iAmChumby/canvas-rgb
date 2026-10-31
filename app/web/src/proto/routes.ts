@@ -20,6 +20,8 @@ export const routes = {
   peripherals: "/api/v1/peripherals",
   peripheral: (id: string) => `/api/v1/peripherals/${encodeURIComponent(id)}`,
   peripheralAccess: (id: string) => `/api/v1/peripherals/${encodeURIComponent(id)}/access`,
+  // GET the stage of the read of one peripheral that is open now (ReadProgress); answers at once.
+  peripheralRead: (id: string) => `/api/v1/peripherals/${encodeURIComponent(id)}/read`,
   // GET binary: u16 LE w, u16 LE h, u16 LE frames, then frames*w*h*3 RGB (64x40, 24 frames, 12 fps).
   effectThumbnail: (id: string) => `/api/v1/effects/${encodeURIComponent(id)}/thumbnail`,
   effectFavorite: (id: string) => `/api/v1/effects/${id}/favorite`,
