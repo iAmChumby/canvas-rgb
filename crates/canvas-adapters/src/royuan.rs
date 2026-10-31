@@ -108,6 +108,10 @@ pub struct RoyuanAdapter {
     last_sent: Option<(Rgb8, Instant)>,
     /// Last colour handed to `write_frame` that went out (for `read_back`).
     last_color: Rgb8,
+    /// The resume count when the keyboard last got its direct-mode report.
+    seen_resume: u64,
+    /// Set after a resume: the next write sends the direct-mode report again (#5).
+    direct_pending: bool,
 }
 
 impl Default for RoyuanAdapter {
@@ -122,7 +126,7 @@ impl RoyuanAdapter {
     }
 
     fn with_opener(opener: Box<dyn Opener>) -> Self {
-        Self { opener, dev: None, last_sent: None, last_color: Rgb8::BLACK }
+        Self { opener, dev: None, last_sent: None, last_color: Rgb8::BLACK, seen_resume: crate::resume_epoch(), direct_pending: false }
     }
 
     fn check_id(&self, id: &DeviceId) -> Result<(), AdapterError> {
@@ -142,6 +146,8 @@ impl RoyuanAdapter {
         dev.send_feature(&direct_mode_report()).map_err(AdapterError::Protocol)?;
         self.dev = Some(dev);
         self.last_sent = None;
+        self.seen_resume = crate::resume_epoch();
+        self.direct_pending = false;
         Ok(())
     }
 
@@ -149,6 +155,19 @@ impl RoyuanAdapter {
         let Some(dev) = self.dev.as_mut() else {
             return Err(AdapterError::NotConnected);
         };
+        if crate::resume_epoch() != self.seen_resume {
+            self.seen_resume = crate::resume_epoch();
+            self.direct_pending = true;
+        }
+        if self.direct_pending {
+            if let Err(e) = dev.send_feature(&direct_mode_report()) {
+                self.dev = None;
+                self.last_sent = None;
+                return Err(AdapterError::Protocol(e));
+            }
+            self.direct_pending = false;
+            self.last_sent = None;
+        }
         if let Some((last, at)) = self.last_sent {
             if last == color && now.saturating_duration_since(at) < KEEPALIVE {
                 return Ok(());
@@ -259,6 +278,8 @@ impl DeviceAdapter for RoyuanAdapter {
 
 #[cfg(test)]
 mod tests {
+    // The serial guard is held across awaits on purpose: it keeps tests that count reports apart.
+    #![allow(clippy::await_holding_lock)]
     use super::*;
     use std::sync::{Arc, Mutex};
 
@@ -299,6 +320,12 @@ mod tests {
         }
     }
 
+    /// `note_resume` bumps a process-wide counter, so the tests that count reports run one at a time.
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn rig(present: bool) -> (RoyuanAdapter, Arc<Mutex<Shared>>) {
         let shared = Arc::new(Mutex::new(Shared { present, ..Default::default() }));
         (RoyuanAdapter::with_opener(Box::new(FakeOpener(shared.clone()))), shared)
@@ -331,6 +358,7 @@ mod tests {
 
     #[tokio::test]
     async fn discover_empty_when_absent() {
+        let _serial = serial();
         let (mut a, _) = rig(false);
         assert!(a.discover().await.unwrap().is_empty());
         assert!(matches!(a.connect().await, Err(AdapterError::NotConnected)));
@@ -339,6 +367,7 @@ mod tests {
 
     #[tokio::test]
     async fn discover_describes_one_led_keyboard() {
+        let _serial = serial();
         let (mut a, _) = rig(true);
         let d = a.discover().await.unwrap();
         assert_eq!(d.len(), 1);
@@ -352,6 +381,7 @@ mod tests {
 
     #[tokio::test]
     async fn direct_mode_sent_once_per_connect() {
+        let _serial = serial();
         let (mut a, s) = rig(true);
         a.connect().await.unwrap();
         a.connect().await.unwrap();
@@ -363,7 +393,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn after_note_resume_the_next_write_sends_direct_mode_before_the_colour() {
+        let _serial = serial();
+        let (mut a, s) = rig(true);
+        let id = device_id();
+        a.connect().await.unwrap();
+        let red = [Rgb8::new(255, 0, 0)];
+        a.write_frame(&id, &red).await.unwrap();
+        assert_eq!(direct_count(&s.lock().unwrap()), 1);
+        a.write_frame(&id, &red).await.unwrap();
+        assert_eq!(direct_count(&s.lock().unwrap()), 1, "no resume: no repeat");
+
+        // The production path: the daemon calls note_resume; the adapter notices on its next write.
+        crate::note_resume();
+        a.write_frame(&id, &red).await.unwrap();
+        let g = s.lock().unwrap();
+        assert_eq!(direct_count(&g), 2, "direct mode went out again");
+        let n = g.sent.len();
+        assert_eq!(g.sent[n - 2].as_slice(), direct_mode_report(), "before the colour");
+        assert_eq!(&g.sent[n - 2][1..10], &[0x07, 0x15, 0x04, 0x04, 0x07, 0x00, 0x00, 0x00, 0xD4]);
+        assert_eq!(g.sent[n - 1].as_slice(), color_report(red[0]), "the colour follows");
+        drop(g);
+        a.write_frame(&id, &red).await.unwrap();
+        assert_eq!(direct_count(&s.lock().unwrap()), 2, "once per resume");
+    }
+
+    #[tokio::test]
     async fn unchanged_colour_not_resent_within_a_second() {
+        let _serial = serial();
         let (mut a, s) = rig(true);
         let id = device_id();
         a.connect().await.unwrap();
@@ -383,6 +440,7 @@ mod tests {
 
     #[tokio::test]
     async fn changed_colour_is_sent() {
+        let _serial = serial();
         let (mut a, s) = rig(true);
         let id = device_id();
         a.connect().await.unwrap();
@@ -398,6 +456,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_frame_sends_black() {
+        let _serial = serial();
         let (mut a, s) = rig(true);
         let id = device_id();
         a.connect().await.unwrap();
@@ -409,6 +468,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_send_closes_and_reconnect_resends_direct_mode() {
+        let _serial = serial();
         let (mut a, s) = rig(true);
         let id = device_id();
         a.connect().await.unwrap();
@@ -427,6 +487,7 @@ mod tests {
 
     #[tokio::test]
     async fn unsupported_and_unknown() {
+        let _serial = serial();
         let (mut a, _) = rig(true);
         let id = device_id();
         assert!(matches!(a.set_zone_size(&id, 0, 5).await, Err(AdapterError::Unsupported(_))));
