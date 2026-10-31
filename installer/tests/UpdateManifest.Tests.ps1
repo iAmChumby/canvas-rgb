@@ -34,10 +34,51 @@ function Get-WorkflowStep {
     return ($step -join "`n")
 }
 
+# The keys of a step's with: block, by indentation: a key of the block has the with: line's indent plus
+# two. The same text under env: or anywhere else in the step is not a key of with:.
+function Get-StepWith {
+    param([string]$Step)
+    $keys = @{}
+    $lines = $Step -split "`n"
+    $w = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($w -lt 0) {
+            if ($lines[$i] -match '^(\s*)with:\s*$') { $w = $Matches[1].Length }
+            continue
+        }
+        if ($lines[$i].Trim() -eq '') { continue }
+        $indent = $lines[$i].Length - $lines[$i].TrimStart().Length
+        if ($indent -le $w) { break }
+        if ($indent -eq $w + 2 -and $lines[$i] -match '^\s*([A-Za-z_-]+):\s*(.*)$') { $keys[$Matches[1]] = $Matches[2].Trim() }
+    }
+    return $keys
+}
+
+# Runs a shell script with the bash the Windows runner uses (Git for Windows), the way GitHub runs a
+# bash step by default: --noprofile --norc -eo pipefail. Bounded: a hung run is killed and fails.
+function Invoke-RunnerBash {
+    param([string]$WorkDir, [string]$ScriptName)
+    $bash = Join-Path $env:ProgramFiles 'Git\bin\bash.exe'
+    if (-not (Test-Path -LiteralPath $bash)) { throw "Git bash is missing at [$bash]: the release step runs under it on the runner, so this test cannot pass without it" }
+    $out = Join-Path $WorkDir 'out.txt'
+    $err = Join-Path $WorkDir 'err.txt'
+    $p = Start-Process -FilePath $bash -ArgumentList @('--noprofile', '--norc', '-eo', 'pipefail', $ScriptName) -WorkingDirectory $WorkDir -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
+    $null = $p.Handle
+    if (-not $p.WaitForExit(30000)) {
+        try { $p.Kill() } catch { }
+        throw "bash ran longer than 30 seconds on $ScriptName and was killed"
+    }
+    return @{ Exit = $p.ExitCode; Out = (Get-Content -LiteralPath $out -Raw); Err = (Get-Content -LiteralPath $err -Raw) }
+}
+
 # tools/make-update-manifest.ps1 on a temp CHANGELOG and signature file: no network, no signing key.
 # CANVAS_RGB_MANIFEST_SCRIPT points the suite at another copy of the script, so the same tests can
 # run against an older one: a test that only passes on the new script is the proof the fix is needed.
 $script = if ($env:CANVAS_RGB_MANIFEST_SCRIPT) { $env:CANVAS_RGB_MANIFEST_SCRIPT } else { Join-Path $PSScriptRoot '..\..\tools\make-update-manifest.ps1' }
+# The release job runs the script under pwsh; this PC has only Windows PowerShell 5.1. Use pwsh when it
+# is there, and say which one ran.
+$ps = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell.exe' }
+Write-Host "script runs under: $ps"
 $dir = Join-Path ([System.IO.Path]::GetTempPath()) ("canvas-rgb-manifest-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $dir | Out-Null
 try {
@@ -59,7 +100,24 @@ try {
         param([string]$Out, [string]$NotesFile = '')
         $cmd = @('-NoProfile', '-File', $script, '-Version', '0.1.1', '-SigFile', $sig, '-ChangelogFile', $changelog, '-OutFile', $Out, '-PubDate', '2026-11-02T10:00:00Z')
         if ($NotesFile) { $cmd += @('-NotesFile', $NotesFile) }
-        & powershell.exe @cmd 2>&1 | Out-String
+        & $ps @cmd 2>&1 | Out-String
+    }
+
+    # The script on a changelog made of these lines: its exit code, its own stderr (the caller's command
+    # line is not in it), the notes file and the manifest.
+    function Invoke-Changelog {
+        param([string[]]$Lines, [string]$Version = '0.1.1', [string]$Name)
+        $ErrorActionPreference = 'Continue'
+        $cl = Join-Path $dir "$Name-CHANGELOG.md"
+        [System.IO.File]::WriteAllText($cl, ($Lines -join "`n"), (New-Object System.Text.UTF8Encoding($false)))
+        $o = Join-Path $dir "$Name.json"
+        $n = Join-Path $dir "$Name-notes.md"
+        Remove-Item -LiteralPath $o, $n -ErrorAction SilentlyContinue
+        $p = Start-Process -FilePath $ps -ArgumentList @('-NoProfile', '-File', "`"$script`"", '-Version', $Version, '-SigFile', "`"$sig`"", '-ChangelogFile', "`"$cl`"", '-OutFile', "`"$o`"", '-NotesFile', "`"$n`"") -NoNewWindow -Wait -PassThru -RedirectStandardOutput (Join-Path $dir "$Name.out") -RedirectStandardError (Join-Path $dir "$Name.err")
+        $m = Get-Content -LiteralPath (Join-Path $dir "$Name.err") -Raw
+        $text = $null
+        if (Test-Path -LiteralPath $n) { $text = [System.IO.File]::ReadAllText($n) }
+        return @{ Exit = $p.ExitCode; Err = "$m"; NotesText = $text }
     }
 
     Test-Case 'manifest: version, notes, pub_date and the windows-x86_64 entry' {
@@ -94,7 +152,7 @@ try {
         $out = Join-Path $dir 'none.json'
         # The child's own stderr, and nothing else: the call's own arguments would answer the
         # question on their own, so the version in them proves nothing.
-        $p = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-File', "`"$script`"", '-Version', '0.9.9', '-SigFile', "`"$sig`"", '-ChangelogFile', "`"$changelog`"", '-OutFile', "`"$out`"") -NoNewWindow -Wait -PassThru -RedirectStandardOutput (Join-Path $dir 'none.out') -RedirectStandardError (Join-Path $dir 'none.err')
+        $p = Start-Process -FilePath $ps -ArgumentList @('-NoProfile', '-File', "`"$script`"", '-Version', '0.9.9', '-SigFile', "`"$sig`"", '-ChangelogFile', "`"$changelog`"", '-OutFile', "`"$out`"") -NoNewWindow -Wait -PassThru -RedirectStandardOutput (Join-Path $dir 'none.out') -RedirectStandardError (Join-Path $dir 'none.err')
         Assert-True ($p.ExitCode -ne 0) 'non-zero exit'
         $msg = Get-Content -LiteralPath (Join-Path $dir 'none.err') -Raw
         Assert-True ($msg -match "no '## \[0\.9\.9\]") "the script's own message names the missing version: $msg"
@@ -104,13 +162,13 @@ try {
     Test-Case 'manifest: a pre-release version, a non-https url and an empty signature are refused' {
         $ErrorActionPreference = 'Continue'  # a failing script writes to stderr; the exit code is what is checked
         $out = Join-Path $dir 'bad.json'
-        & powershell.exe -NoProfile -File $script -Version 0.2.0-beta.1 -SigFile $sig -ChangelogFile $changelog -OutFile $out 2>&1 | Out-Null
+        & $ps -NoProfile -File $script -Version 0.2.0-beta.1 -SigFile $sig -ChangelogFile $changelog -OutFile $out 2>&1 | Out-Null
         Assert-True ($LASTEXITCODE -ne 0) 'pre-release refused'
-        & powershell.exe -NoProfile -File $script -Version 0.1.1 -SigFile $sig -ChangelogFile $changelog -OutFile $out -Url 'http://github.com/x.exe' 2>&1 | Out-Null
+        & $ps -NoProfile -File $script -Version 0.1.1 -SigFile $sig -ChangelogFile $changelog -OutFile $out -Url 'http://github.com/x.exe' 2>&1 | Out-Null
         Assert-True ($LASTEXITCODE -ne 0) 'http refused'
         $empty = Join-Path $dir 'empty.sig'
         [System.IO.File]::WriteAllText($empty, "`n")
-        & powershell.exe -NoProfile -File $script -Version 0.1.1 -SigFile $empty -ChangelogFile $changelog -OutFile $out 2>&1 | Out-Null
+        & $ps -NoProfile -File $script -Version 0.1.1 -SigFile $empty -ChangelogFile $changelog -OutFile $out 2>&1 | Out-Null
         Assert-True ($LASTEXITCODE -ne 0) 'empty signature refused'
         Assert-True (-not (Test-Path -LiteralPath $out)) 'no file'
     }
@@ -119,7 +177,7 @@ try {
         $empty = Join-Path $dir 'EMPTY-CHANGELOG.md'
         [System.IO.File]::WriteAllText($empty, (@('# Changelog', '', '## [0.2.0] - 2026-11-03', '## [0.1.1] - 2026-11-02', '', '### Added', '', '- x', '') -join "`n"))
         $out = Join-Path $dir 'empty.json'
-        $msg = & powershell.exe -NoProfile -File $script -Version 0.2.0 -SigFile $sig -ChangelogFile $empty -OutFile $out 2>&1 | Out-String
+        $msg = & $ps -NoProfile -File $script -Version 0.2.0 -SigFile $sig -ChangelogFile $empty -OutFile $out 2>&1 | Out-String
         Assert-True ($LASTEXITCODE -ne 0) 'non-zero exit'
         Assert-True ($msg -match 'empty') "says the section is empty: $msg"
         Assert-True (-not (Test-Path -LiteralPath $out)) 'no file'
@@ -127,7 +185,7 @@ try {
     Test-Case 'manifest: the real CHANGELOG.md has a 0.1.0 section the script can read' {
         $real = Join-Path $PSScriptRoot '..\..\CHANGELOG.md'
         $out = Join-Path $dir 'real.json'
-        & powershell.exe -NoProfile -File $script -Version 0.1.0 -SigFile $sig -ChangelogFile $real -OutFile $out 2>&1 | Out-Null
+        & $ps -NoProfile -File $script -Version 0.1.0 -SigFile $sig -ChangelogFile $real -OutFile $out 2>&1 | Out-Null
         Assert-Equal $LASTEXITCODE 0
         $m = Get-Content -LiteralPath $out -Raw | ConvertFrom-Json
         Assert-True $m.notes.Contains('Fourteen built-in effects') 'real notes'
@@ -204,7 +262,7 @@ try {
     Test-Case 'notes: the last section stops before the compare links' {
         $out = Join-Path $dir 'last-latest.json'
         $notes = Join-Path $dir 'last-notes.md'
-        & powershell.exe -NoProfile -File $script -Version 0.1.0 -SigFile $sig -ChangelogFile $changelog -OutFile $out -NotesFile $notes -PubDate '2026-11-02T10:00:00Z' 2>&1 | Out-Null
+        & $ps -NoProfile -File $script -Version 0.1.0 -SigFile $sig -ChangelogFile $changelog -OutFile $out -NotesFile $notes -PubDate '2026-11-02T10:00:00Z' 2>&1 | Out-Null
         Assert-Equal $LASTEXITCODE 0
         $text = [System.IO.File]::ReadAllText($notes)
         Assert-True (-not $text.Contains('example.invalid')) 'no compare link in the notes'
@@ -218,7 +276,7 @@ try {
         $real = Join-Path $PSScriptRoot '..\..\CHANGELOG.md'
         $out = Join-Path $dir 'real-last.json'
         $notes = Join-Path $dir 'real-last-notes.md'
-        & powershell.exe -NoProfile -File $script -Version 0.1.0 -SigFile $sig -ChangelogFile $real -OutFile $out -NotesFile $notes -PubDate '2026-11-02T10:00:00Z' 2>&1 | Out-Null
+        & $ps -NoProfile -File $script -Version 0.1.0 -SigFile $sig -ChangelogFile $real -OutFile $out -NotesFile $notes -PubDate '2026-11-02T10:00:00Z' 2>&1 | Out-Null
         Assert-Equal $LASTEXITCODE 0
         $text = [System.IO.File]::ReadAllText($notes)
         Assert-True (-not $text.Contains('https://github.com')) 'no compare link in the notes'
@@ -233,7 +291,7 @@ try {
         $notes = Join-Path $dir 'missing-notes.md'
         # The child's own stderr, and nothing else: the call's own arguments would answer the
         # question on their own, so the version in them proves nothing.
-        $p = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-File', "`"$script`"", '-Version', '0.9.9', '-SigFile', "`"$sig`"", '-ChangelogFile', "`"$changelog`"", '-OutFile', "`"$out`"", '-NotesFile', "`"$notes`"") -NoNewWindow -Wait -PassThru -RedirectStandardOutput (Join-Path $dir 'missing.out') -RedirectStandardError (Join-Path $dir 'missing.err')
+        $p = Start-Process -FilePath $ps -ArgumentList @('-NoProfile', '-File', "`"$script`"", '-Version', '0.9.9', '-SigFile', "`"$sig`"", '-ChangelogFile', "`"$changelog`"", '-OutFile', "`"$out`"", '-NotesFile', "`"$notes`"") -NoNewWindow -Wait -PassThru -RedirectStandardOutput (Join-Path $dir 'missing.out') -RedirectStandardError (Join-Path $dir 'missing.err')
         Assert-True ($p.ExitCode -ne 0) 'non-zero exit'
         $msg = Get-Content -LiteralPath (Join-Path $dir 'missing.err') -Raw
         Assert-True ($msg -match "no '## \[0\.9\.9\]") "the script's own message names the missing version: $msg"
@@ -273,7 +331,7 @@ try {
         [System.IO.File]::WriteAllText($bad, $text, (New-Object System.Text.UTF8Encoding($false)))
         $out = Join-Path $dir 'sub.json'
         $notes = Join-Path $dir 'sub-notes.md'
-        $p = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-File', "`"$script`"", '-Version', '0.1.1', '-SigFile', "`"$sig`"", '-ChangelogFile', "`"$bad`"", '-OutFile', "`"$out`"", '-NotesFile', "`"$notes`"") -NoNewWindow -Wait -PassThru -RedirectStandardOutput (Join-Path $dir 'sub.out') -RedirectStandardError (Join-Path $dir 'sub.err')
+        $p = Start-Process -FilePath $ps -ArgumentList @('-NoProfile', '-File', "`"$script`"", '-Version', '0.1.1', '-SigFile', "`"$sig`"", '-ChangelogFile', "`"$bad`"", '-OutFile', "`"$out`"", '-NotesFile', "`"$notes`"") -NoNewWindow -Wait -PassThru -RedirectStandardOutput (Join-Path $dir 'sub.out') -RedirectStandardError (Join-Path $dir 'sub.err')
         Assert-True ($p.ExitCode -ne 0) 'non-zero exit'
         $msg = Get-Content -LiteralPath (Join-Path $dir 'sub.err') -Raw
         Assert-True ($msg -match 'line 9') "the message names the line: $msg"
@@ -295,7 +353,7 @@ try {
         [System.IO.File]::WriteAllText($bad, $text, (New-Object System.Text.UTF8Encoding($false)))
         $out = Join-Path $dir 'link.json'
         $notes = Join-Path $dir 'link-notes.md'
-        $p = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-File', "`"$script`"", '-Version', '0.1.1', '-SigFile', "`"$sig`"", '-ChangelogFile', "`"$bad`"", '-OutFile', "`"$out`"", '-NotesFile', "`"$notes`"") -NoNewWindow -Wait -PassThru -RedirectStandardOutput (Join-Path $dir 'link.out') -RedirectStandardError (Join-Path $dir 'link.err')
+        $p = Start-Process -FilePath $ps -ArgumentList @('-NoProfile', '-File', "`"$script`"", '-Version', '0.1.1', '-SigFile', "`"$sig`"", '-ChangelogFile', "`"$bad`"", '-OutFile', "`"$out`"", '-NotesFile', "`"$notes`"") -NoNewWindow -Wait -PassThru -RedirectStandardOutput (Join-Path $dir 'link.out') -RedirectStandardError (Join-Path $dir 'link.err')
         Assert-True ($p.ExitCode -ne 0) 'non-zero exit'
         $msg = Get-Content -LiteralPath (Join-Path $dir 'link.err') -Raw
         Assert-True ($msg -match 'line 9') "the message names the line: $msg"
@@ -315,7 +373,7 @@ try {
         [System.IO.File]::WriteAllText($bad, $text, (New-Object System.Text.UTF8Encoding($false)))
         $out = Join-Path $dir 'lastlink.json'
         $notes = Join-Path $dir 'lastlink-notes.md'
-        $p = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-File', "`"$script`"", '-Version', '0.1.1', '-SigFile', "`"$sig`"", '-ChangelogFile', "`"$bad`"", '-OutFile', "`"$out`"", '-NotesFile', "`"$notes`"") -NoNewWindow -Wait -PassThru -RedirectStandardOutput (Join-Path $dir 'lastlink.out') -RedirectStandardError (Join-Path $dir 'lastlink.err')
+        $p = Start-Process -FilePath $ps -ArgumentList @('-NoProfile', '-File', "`"$script`"", '-Version', '0.1.1', '-SigFile', "`"$sig`"", '-ChangelogFile', "`"$bad`"", '-OutFile', "`"$out`"", '-NotesFile', "`"$notes`"") -NoNewWindow -Wait -PassThru -RedirectStandardOutput (Join-Path $dir 'lastlink.out') -RedirectStandardError (Join-Path $dir 'lastlink.err')
         Assert-True ($p.ExitCode -ne 0) 'non-zero exit'
         $msg = Get-Content -LiteralPath (Join-Path $dir 'lastlink.err') -Raw
         Assert-True ($msg -match 'line 9') "the message names the line: $msg"
@@ -337,7 +395,7 @@ try {
         [System.IO.File]::WriteAllText($utf8Changelog, $text, (New-Object System.Text.UTF8Encoding($false)))
         $out = Join-Path $dir 'utf8-latest.json'
         $notes = Join-Path $dir 'utf8-notes.md'
-        & powershell.exe -NoProfile -File $script -Version 0.3.0 -SigFile $sig -ChangelogFile $utf8Changelog -OutFile $out -NotesFile $notes -PubDate '2026-11-05T10:00:00Z' 2>&1 | Out-Null
+        & $ps -NoProfile -File $script -Version 0.3.0 -SigFile $sig -ChangelogFile $utf8Changelog -OutFile $out -NotesFile $notes -PubDate '2026-11-05T10:00:00Z' 2>&1 | Out-Null
         Assert-Equal $LASTEXITCODE 0
         $expected = @('### Added', '', "- An em dash $emdash and an accent $accent.") -join "`n"
         # The notes file is the section, byte for byte.
@@ -349,6 +407,55 @@ try {
         Assert-True ($hex -match 'e2 80 94') 'the em dash is UTF-8 in latest.json'
         Assert-True ($hex -match 'c3 a9') 'the accent is UTF-8 in latest.json'
     }
+    Test-Case 'notes: a stray level-1 or level-2 heading inside the section fails, naming the line' {
+        foreach ($h in '# Stray', '## Notes', '## Known issues', '## Unreleased') {
+            $r = Invoke-Changelog -Name 'stray' -Lines @('# Changelog', '', '## [0.1.1] - 2026-11-02', '', '### Added', '', '- Something.', '', $h, '', 'More text.', '', '## [0.1.0] - 2026-10-29', '', '- Old.', '', '[0.1.0]: https://example.invalid/tag')
+            Assert-True ($r.Exit -ne 0) "[$h] gives a non-zero exit"
+            Assert-True ($r.Err -match 'line 9') "[$h]: the message names line 9: $($r.Err)"
+            Assert-True ($r.Err.Contains("'$h'")) "[$h]: the message quotes the line: $($r.Err)"
+            Assert-True ($r.Err -match 'not a version heading') "[$h]: the message says what is wrong"
+            Assert-True ($null -eq $r.NotesText) "[$h]: no notes file"
+        }
+    }
+    Test-Case 'notes: a ### subheading inside the section stays allowed' {
+        $r = Invoke-Changelog -Name 'sub3' -Lines @('# Changelog', '', '## [0.1.1] - 2026-11-02', '', '### Added', '', '- A.', '', '### Fixed', '', '- B.', '', '## [0.1.0] - 2026-10-29', '', '- Old.', '', '[0.1.0]: https://example.invalid/tag')
+        Assert-Equal $r.Exit 0 "exit: $($r.Err)"
+        Assert-Equal $r.NotesText "### Added`n`n- A.`n`n### Fixed`n`n- B.`n" 'both subheadings are in the notes'
+    }
+    Test-Case 'notes: a second heading for the same version fails instead of cutting the notes' {
+        $r = Invoke-Changelog -Name 'dup' -Lines @('# Changelog', '', '## [0.1.1] - 2026-11-02', '', '### Added', '', '- First half.', '', '## [0.1.1] - 2026-11-03', '', '- Second half.', '', '## [0.1.0] - 2026-10-29', '', '- Old.', '', '[0.1.0]: https://example.invalid/tag')
+        Assert-True ($r.Exit -ne 0) 'non-zero exit'
+        Assert-True ($r.Err -match 'line 9') "the message names line 9: $($r.Err)"
+        Assert-True ($r.Err -match 'second heading for 0\.1\.1') "the message says what is wrong: $($r.Err)"
+        Assert-True ($null -eq $r.NotesText) 'no notes file'
+    }
+    Test-Case 'notes: a pre-release heading ends the section, and a pre-release link label is a version link' {
+        $r = Invoke-Changelog -Name 'pre' -Lines @('# Changelog', '', '## [0.1.1] - 2026-11-02', '', '### Added', '', '- A.', '', '## [0.2.0-beta.1] - 2026-11-03', '', '- Beta only.', '', '## [0.1.0] - 2026-10-29', '', '- Old.', '', '[0.2.0-rc.1]: https://example.invalid/rc', '[0.1.0]: https://example.invalid/tag')
+        Assert-Equal $r.Exit 0 "exit: $($r.Err)"
+        Assert-Equal $r.NotesText "### Added`n`n- A.`n" 'the section stops at the pre-release heading'
+        $r2 = Invoke-Changelog -Name 'pre-last' -Version '0.1.0' -Lines @('# Changelog', '', '## [0.1.0] - 2026-10-29', '', '- Old.', '', '[0.2.0-rc.1]: https://example.invalid/rc', '[0.1.0]: https://example.invalid/tag')
+        Assert-Equal $r2.Exit 0 "exit with an rc link label in the compare block: $($r2.Err)"
+        Assert-Equal $r2.NotesText "- Old.`n" 'the compare block ends the last section'
+    }
+    Test-Case 'notes: [Unreleased] as a heading below the section ends it' {
+        $r = Invoke-Changelog -Name 'unrel-end' -Lines @('# Changelog', '', '## [0.1.1] - 2026-11-02', '', '### Added', '', '- Released.', '', '## [Unreleased]', '', '- Not released yet.', '', '## [0.1.0] - 2026-10-29', '', '- Old.', '', '[Unreleased]: https://example.invalid/compare', '[0.1.0]: https://example.invalid/tag')
+        Assert-Equal $r.Exit 0 "exit: $($r.Err)"
+        Assert-Equal $r.NotesText "### Added`n`n- Released.`n" 'the section stops at ## [Unreleased]'
+    }
+    Test-Case 'notes: link definitions with no space are accepted, labels are anchored and case-sensitive' {
+        $r = Invoke-Changelog -Name 'nospace' -Version '0.1.0' -Lines @('# Changelog', '', '## [0.1.0] - 2026-10-29', '', '- Old.', '', '[Unreleased]:https://example.invalid/compare', '[0.1.0]:https://example.invalid/tag')
+        Assert-Equal $r.Exit 0 "[x]:url with no space ends the section: $($r.Err)"
+        Assert-Equal $r.NotesText "- Old.`n" 'no link definition in the notes'
+        foreach ($label in 'Unreleased-x', 'unreleased', '0.1.0x', 'v0.1.0') {
+            $r = Invoke-Changelog -Name 'badlabel' -Version '0.1.0' -Lines @('# Changelog', '', '## [0.1.0] - 2026-10-29', '', '- Old.', '', "[$label]: https://example.invalid/x")
+            Assert-True ($r.Exit -ne 0) "[$label] is not a version link: non-zero exit"
+            Assert-True ($r.Err -match 'line 7') "[$label]: the message names line 7: $($r.Err)"
+            Assert-True ($r.Err -match 'not a version link') "[$label]: the message says what is wrong"
+        }
+        $r = Invoke-Changelog -Name 'lowerhead' -Version '0.1.1' -Lines @('# Changelog', '', '## [0.1.1] - 2026-11-02', '', '- A.', '', '## [unreleased]', '', '- B.')
+        Assert-True ($r.Exit -ne 0) 'a lower-case ## [unreleased] heading is not a version heading'
+        Assert-True ($r.Err -match 'not a version heading') "the message says what is wrong: $($r.Err)"
+    }
     Test-Case 'release workflow: the release body is the notes file, with the generated list after it' {
         $info = Get-WorkflowJobs (Join-Path $PSScriptRoot '..\..\.github\workflows\release.yml')
         $sign = $info.Jobs['sign']
@@ -358,8 +465,9 @@ try {
         Assert-True ($sign -match '(?ms)name: signature\s*\r?\n\s*path: \|.*?dist/release-notes\.md') 'the signature artifact carries the notes'
         # The release step itself carries the body, not another step of the job.
         $release = Get-WorkflowStep -Job $publish -Marker 'softprops/action-gh-release'
-        Assert-True ($release -match '(?m)^\s+body_path: dist/release-notes\.md\s*$') 'body_path is in the release step'
-        Assert-True ($release -match '(?m)^\s+generate_release_notes: true\s*$') 'the generated PR list is still on'
+        $with = Get-StepWith $release
+        Assert-Equal $with['body_path'] 'dist/release-notes.md' 'body_path is a key of the release step with: block'
+        Assert-Equal $with['generate_release_notes'] 'true' 'generate_release_notes is a key of the release step with: block'
         # The check runs before the release step.
         Assert-True ($publish.IndexOf('name: The release notes are there') -lt $publish.IndexOf('softprops/action-gh-release')) 'the check runs before the release'
     }
@@ -368,6 +476,7 @@ try {
         $publish = $info.Jobs['publish']
         $step = Get-WorkflowStep -Job $publish -Marker 'name: The release notes are there'
         Assert-True (-not $step.Contains('continue-on-error')) 'the step does not continue on error'
+        Assert-True ($step -notmatch '(?m)^(?:      - |        )if:') 'the check step has no if: key, so it always runs'
         # The step's own run: block, run with bash the way the runner runs it.
         $run = @()
         $inRun = $false
@@ -383,26 +492,24 @@ try {
         }
         $run = ($run -join "`n")
         Assert-True ($run.Trim() -ne '') 'the step has a run: block'
-        $bash = Get-Command bash -ErrorAction SilentlyContinue
-        Assert-True $bash 'bash is on the PATH: the test runs the step with it'
         $work = Join-Path $dir 'bash-step'
         New-Item -ItemType Directory -Path (Join-Path $work 'dist') -Force | Out-Null
         [System.IO.File]::WriteAllText((Join-Path $work 'step.sh'), ($run -replace "`r`n", "`n") + "`n", (New-Object System.Text.UTF8Encoding($false)))
         $notes = Join-Path $work 'dist\release-notes.md'
-        $out = Join-Path $work 'out.txt'
-        $err = Join-Path $work 'err.txt'
         Remove-Item -LiteralPath $notes -ErrorAction SilentlyContinue
-        $p = Start-Process -FilePath $bash.Source -ArgumentList @('step.sh') -WorkingDirectory $work -NoNewWindow -Wait -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
-        $missing = $p.ExitCode
+        $missing = Invoke-RunnerBash -WorkDir $work -ScriptName 'step.sh'
         [System.IO.File]::WriteAllText($notes, '')
-        $p = Start-Process -FilePath $bash.Source -ArgumentList @('step.sh') -WorkingDirectory $work -NoNewWindow -Wait -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
-        $empty = $p.ExitCode
-        [System.IO.File]::WriteAllText($notes, "### Added`n")
-        $p = Start-Process -FilePath $bash.Source -ArgumentList @('step.sh') -WorkingDirectory $work -NoNewWindow -Wait -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
-        $real = $p.ExitCode
-        Assert-True ($missing -ne 0) 'a missing notes file stops the release'
-        Assert-True ($empty -ne 0) 'an empty notes file stops the release'
-        Assert-Equal $real 0 'a real notes file lets the release through'
+        $empty = Invoke-RunnerBash -WorkDir $work -ScriptName 'step.sh'
+        # A notes line that starts with :: must not reach the log at column 0 (GitHub reads it as a workflow command).
+        [System.IO.File]::WriteAllText($notes, "::error::injected`n::set-output name=x::y`n### Added`n")
+        $real = Invoke-RunnerBash -WorkDir $work -ScriptName 'step.sh'
+        Assert-True ($missing.Exit -ne 0) 'a missing notes file stops the release'
+        Assert-True ($empty.Exit -ne 0) 'an empty notes file stops the release'
+        Assert-Equal $real.Exit 0 "a real notes file lets the release through: $($real.Err)"
+        $echoed = @($real.Out -split '\r?\n' | Where-Object { $_ -ne '' })
+        Assert-True ($echoed.Count -ge 3) "the step echoes the notes: $($real.Out)"
+        foreach ($l in $echoed) { Assert-True ($l -match '^\s+\S') "echoed line [$l] is indented, so it is never a workflow command" }
+        Assert-True ($real.Out.Contains('::error::injected')) 'the notes text is still shown'
     }
 }
 finally { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }

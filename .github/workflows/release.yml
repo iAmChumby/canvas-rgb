@@ -196,7 +196,8 @@ jobs:
             echo "dist/release-notes.md is missing or empty" >&2
             exit 1
           fi
-          head -n 5 dist/release-notes.md
+          # Indented, so a notes line that starts with :: is never read as a workflow command.
+          sed -n '1,5s/^/  /p' dist/release-notes.md
 
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:

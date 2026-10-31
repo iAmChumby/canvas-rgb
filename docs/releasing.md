@@ -73,7 +73,9 @@ push and the release workflow runs it before it builds.
    GitHub release.
 6. The workflow writes the release notes: the version's changelog section, then GitHub's list of merged
    pull requests. Check them with `gh release view vX.Y.Z --json body` — the body must start with the
-   section's first line.
+   section's first line. The script refuses a changelog it cannot read whole: inside a version's section only
+   `###` subheadings are allowed, so a stray `#` or `##` heading, a second heading for the same version, or a
+   link definition in the middle fails the release (naming the line) instead of cutting the notes short.
 
 ## Updates: the signing key and `latest.json`
 

@@ -3,11 +3,13 @@
   Writes latest.json, the feed the tray's updater reads (tauri-plugin-updater static format):
   { version, notes, pub_date, platforms: { "windows-x86_64": { signature, url } } }.
 .DESCRIPTION
-  notes is that version's section of CHANGELOG.md (the text under "## [X.Y.Z] - date", up to the next
-  version heading, or up to the compare links at the bottom of the file). The changelog is read as
-  UTF-8, so em dashes and accents survive. A heading that is not a version heading, or a link
-  definition inside the section, is refused: the section would be cut short there, and the notes
-  would be short without saying so.
+  notes is that version's section of CHANGELOG.md: the text under "## [X.Y.Z] - date", up to the next
+  version heading ("## [Unreleased]", "## [X.Y.Z]" or "## [X.Y.Z-pre.1]"), or up to the compare links at
+  the bottom of the file (link definitions whose labels name versions, then only blank lines to the end).
+  The changelog is read as UTF-8, so em dashes and accents survive. Inside the section only "###"
+  subheadings are allowed. The script throws, naming the line, on: a level-1 or level-2 heading that is
+  not a version heading, a second heading for the same version, or a link definition inside the section.
+  Cutting the section short there would make the notes short without saying so.
   signature is the contents of the installer's .sig file, as `tauri signer sign` wrote it.
   url is the release asset's address; the tray refuses anything that is not https on github.com or
   GitHub's asset hosts, so a wrong address here makes the update unusable, not unsafe.
@@ -49,18 +51,26 @@ for ($i = 0; $i -lt $lines.Count; $i++) {
 if ($start -lt 0) { throw "CHANGELOG.md has no '## [$Version] - YYYY-MM-DD' section." }
 
 # The section ends at the next version heading, or at the compare links at the bottom of the file.
-# Any other '## [' heading, or a link definition inside the section, is a mistake in the changelog:
-# ending there would cut the notes short without saying so, so the script refuses instead.
+# Anything else that would end it early is a mistake in the changelog, and ending there would cut the
+# notes short without saying so, so the script refuses instead: a level-1 or level-2 heading that is
+# not a version heading, a second heading for this same version, a link definition inside the section.
+# Version labels are case-sensitive: Unreleased, X.Y.Z, or X.Y.Z-pre.release.
+$labelPattern = '(Unreleased|\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?)'
 $end = -1
 for ($i = $start + 1; $i -lt $lines.Count; $i++) {
     $line = $lines[$i]
-    if ($line -match '^## \[') {
-        if ($line -match '^## \[(Unreleased|\d+\.\d+\.\d+)\]') { $end = $i; break }
-        throw "CHANGELOG.md line $($i + 1): '$line' is not a version heading. The section for $Version ends at a '## [X.Y.Z]' heading."
+    if ($line -cmatch "^## \[$labelPattern\]") {
+        if ($Matches[1] -ceq $Version) {
+            throw "CHANGELOG.md line $($i + 1): '$line' is a second heading for $Version. Each version has one section."
+        }
+        $end = $i; break
     }
-    if ($line -match '^\[([^\]]+)\]: ') {
+    if ($line -match '^#{1,2}\s' -or $line -match '^## \[') {
+        throw "CHANGELOG.md line $($i + 1): '$line' is not a version heading. The section for $Version ends at a '## [X.Y.Z]' heading, and holds only '###' subheadings."
+    }
+    if ($line -match '^\[([^\]]+)\]:') {
         $label = $Matches[1]
-        if ($label -notmatch '^(Unreleased|\d+\.\d+\.\d+)') {
+        if ($label -cnotmatch "^$labelPattern$") {
             throw "CHANGELOG.md line $($i + 1): '[$label]' is not a version link. The compare links at the bottom of the file name versions."
         }
         # The compare links are the last thing in the file: only link definitions and blank lines follow.
@@ -68,9 +78,10 @@ for ($i = $start + 1; $i -lt $lines.Count; $i++) {
         for ($j = $i + 1; $j -lt $lines.Count; $j++) {
             $next = $lines[$j]
             if (-not $next.Trim()) { continue }
-            if ($next -notmatch '^\[([^\]]+)\]: ') { $compareBlock = $false; break }
-            if ($Matches[1] -notmatch '^(Unreleased|\d+\.\d+\.\d+)') {
-                throw "CHANGELOG.md line $($j + 1): '[$($Matches[1])]' is not a version link. The compare links at the bottom of the file name versions."
+            if ($next -notmatch '^\[([^\]]+)\]:') { $compareBlock = $false; break }
+            $nextLabel = $Matches[1]
+            if ($nextLabel -cnotmatch "^$labelPattern$") {
+                throw "CHANGELOG.md line $($j + 1): '[$nextLabel]' is not a version link. The compare links at the bottom of the file name versions."
             }
         }
         if ($compareBlock) { $end = $i; break }
