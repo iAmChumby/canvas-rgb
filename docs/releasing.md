@@ -133,3 +133,11 @@ them through the updater:
 
 **Testing a feed by hand.** The unit tests run against a fake feed on 127.0.0.1 with a test-only key
 (`app/src-tauri/tests/fixtures/update`); nothing in them touches GitHub or the real key.
+
+**Installing by hand.** Start the setup exe from a normal, non-elevated shell or by double-click:
+`.\canvas-rgb-setup-X.Y.Z.exe /VERYSILENT /UPDATE`. Setup has `PrivilegesRequired=admin` and raises its
+own permission prompt. Never start it with `Start-Process -Verb RunAs` or from an administrator shell:
+Setup would then be elevated from its first instruction, `ExecAsOriginalUser` would have no
+non-elevated user to start the tray as, and the tray (which refuses to run elevated) would not come back
+(#28). The tray's updater starts Setup the same way (`app/src-tauri/src/update/launch.rs`). The check in
+`crates/canvas-svc/tests/process_launch.rs` fails on an elevating verb in the repo's code.
