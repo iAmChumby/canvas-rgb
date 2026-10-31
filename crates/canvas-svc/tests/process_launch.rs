@@ -28,7 +28,20 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Names that mean "the daemon".
-const DAEMON_NAMES: &[&str] = &["canvas-rgbd", "canvas_rgbd", "DaemonExe", "RunKeyDaemon", "daemon_path"];
+const DAEMON_NAMES: &[&str] = &[
+    "canvas-rgbd",
+    "canvas_rgbd",
+    "DaemonExe",
+    "DAEMON_EXE",
+    "RunKeyDaemon",
+    "daemon_path",
+];
+
+/// Whether the line names the daemon, in any letter case.
+fn names_daemon_in(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    DAEMON_NAMES.iter().any(|n| lower.contains(&n.to_lowercase()))
+}
 
 /// Things that start a process or register one to start at logon. `Exec(` does not match
 /// `ExecAsOriginalUser(`; both are listed.
@@ -51,6 +64,13 @@ const LAUNCHES: &[&str] = &[
 
 /// Things that start a process (the rule-3 subset: a Run-key write starts nothing by itself).
 const PROCESS_STARTS: &[&str] = &[
+    "CreateProcessA(",
+    "ShellExecuteA(",
+    "ShellExecuteExA(",
+    "WinExec(",
+    "saps ",
+    "Invoke-Item",
+    "[System.Diagnostics.Process]::Start(",
     "Start-Process",
     "Exec(",
     "ExecAsOriginalUser(",
@@ -101,32 +121,13 @@ const ELEVATION_ALLOWED: &[(&str, &str, &str)] = &[
 ];
 
 /// Rule 4 allow-list, one entry per line: (path suffix, text the line must contain, why). A process
-/// start in a file that also names the daemon, and is not the daemon.
-const DAEMON_FILE_STARTS_ALLOWED: &[(&str, &str, &str)] = &[
-    (
-        "installer/inno/canvas-rgb.iss",
-        "ExecAsOriginalUser(PsExe",
-        "RunPs runs installer PowerShell scripts, never the daemon",
-    ),
-    ("installer/inno/canvas-rgb.iss", "Exec(PsExe", "RunPs runs installer PowerShell scripts, never the daemon"),
-    (
-        "installer/inno/canvas-rgb.iss",
-        "ExecAsOriginalUser(ExpandConstant('{win}\\explorer.exe')",
-        "opens the PawnIO page in the person's browser",
-    ),
-    (
-        "installer/inno/canvas-rgb.iss",
-        "ExecAsOriginalUser(ExpandConstant('{app}\\canvas-rgb.exe')",
-        "starts the tray (canvas-rgb.exe), not the daemon",
-    ),
-    ("installer/inno/canvas-rgb.iss", "ExecAsOriginalUser(Exe, '--after-update'", "starts the tray again after a failure"),
-    ("installer/setup-elevated.ps1", "Start-Process @pa", "runs the signature-checked PawnIO installer"),
-    (
-        "installer/setup.ps1",
-        "Start-Process -FilePath 'powershell.exe' -ArgumentList $childArgs -Verb RunAs",
-        "elevates the machine-wide child script, not the daemon",
-    ),
-];
+/// start in a file that also names the daemon, and is not the daemon. The scan fails on an entry that
+/// matches no line, so this list cannot collect dead entries.
+const DAEMON_FILE_STARTS_ALLOWED: &[(&str, &str, &str)] = &[(
+    "installer/setup.ps1",
+    "Start-Process -FilePath 'powershell.exe' -ArgumentList $childArgs -Verb RunAs",
+    "elevates the machine-wide child script, not the daemon",
+)];
 
 /// Rule 3 lines that look like a launch but are text, not a call: the installer's printed plan
 /// (`$L.Add(...)`) describes steps in words.
@@ -170,12 +171,27 @@ fn says_token(line: &str, ext: &str) -> bool {
     comment_part(line, ext).is_some_and(|c| c.contains("token:"))
 }
 
-fn allowed(list: &[(&str, &str, &str)], rel: &str, line: &str) -> bool {
-    list.iter().any(|(suffix, text, _why)| rel.ends_with(suffix) && line.contains(text))
+/// Which allow-list entries suppressed a finding: (list id, index). 1 = elevation, 2 = daemon file.
+type Used = Vec<(u8, usize)>;
+
+fn allowed(list: &[(&str, &str, &str)], id: u8, rel: &str, line: &str, used: &mut Used) -> bool {
+    let mut hit = false;
+    for (i, (suffix, text, _why)) in list.iter().enumerate() {
+        if rel.ends_with(suffix) && line.contains(text) {
+            used.push((id, i));
+            hit = true;
+        }
+    }
+    hit
 }
+
 
 /// Scans one file's text. `rel` is the repo-relative path with `/` separators.
 fn scan_text(rel: &str, text: &str) -> Vec<Finding> {
+    scan_text_used(rel, text, &mut Vec::new())
+}
+
+fn scan_text_used(rel: &str, text: &str, used: &mut Used) -> Vec<Finding> {
     let ext = rel.rsplit('.').next().unwrap_or("");
     let in_service = rel.starts_with("crates/canvas-svc/");
     let lines: Vec<&str> = text.lines().collect();
@@ -198,7 +214,7 @@ fn scan_text(rel: &str, text: &str) -> Vec<Finding> {
     let file_names_daemon = (0..lines.len()).any(|i| {
         code_line(i)
             && (ext != "iss" || sections[i] == "[Code]")
-            && DAEMON_NAMES.iter().any(|n| lines[i].contains(n))
+            && names_daemon_in(lines[i])
     });
 
     let mut found = Vec::new();
@@ -209,7 +225,7 @@ fn scan_text(rel: &str, text: &str) -> Vec<Finding> {
         }
         let at = |rule: u8| Finding { file: rel.to_string(), line: i + 1, rule, text: trimmed.to_string() };
         let section = sections[i].as_str();
-        let names_daemon = DAEMON_NAMES.iter().any(|n| raw.contains(n));
+        let names_daemon = names_daemon_in(raw);
         let is_text = TEXT_LINES.iter().any(|t| raw.contains(t));
         let starts_process = PROCESS_STARTS.iter().any(|p| raw.contains(p));
 
@@ -225,7 +241,7 @@ fn scan_text(rel: &str, text: &str) -> Vec<Finding> {
         }
 
         // Rule 2: no elevating start, unless that exact line is allow-listed.
-        if names_elevation(raw) && !is_text && !allowed(ELEVATION_ALLOWED, rel, raw) {
+        if names_elevation(raw) && !is_text && !allowed(ELEVATION_ALLOWED, 1, rel, raw, used) {
             found.push(at(2));
         }
 
@@ -243,7 +259,7 @@ fn scan_text(rel: &str, text: &str) -> Vec<Finding> {
             && !is_text
             && !rule1
             && file_names_daemon
-            && !allowed(DAEMON_FILE_STARTS_ALLOWED, rel, raw)
+            && !allowed(DAEMON_FILE_STARTS_ALLOWED, 2, rel, raw, used)
         {
             found.push(at(4));
         }
@@ -288,13 +304,14 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn scan_repo() -> (usize, Vec<Finding>) {
+fn scan_repo() -> (usize, Vec<Finding>, Used) {
     let root = repo_root();
     let mut files = Vec::new();
     for dir in ["crates", "app/src-tauri", "installer", "tools"] {
         collect(&root.join(dir), &mut files);
     }
     let mut found = Vec::new();
+    let mut used = Used::new();
     for path in &files {
         let rel = path
             .strip_prefix(&root)
@@ -307,14 +324,14 @@ fn scan_repo() -> (usize, Vec<Finding>) {
         // Lossy: a non-UTF-8 byte must not hide a file from the scan.
         let text =
             String::from_utf8_lossy(&fs::read(path).expect("read a source file")).into_owned();
-        found.extend(scan_text(&rel, &text));
+        found.extend(scan_text_used(&rel, &text, &mut used));
     }
-    (files.len(), found)
+    (files.len(), found, used)
 }
 
 #[test]
 fn only_the_service_starts_the_daemon_and_every_launch_names_its_token() {
-    let (scanned, found) = scan_repo();
+    let (scanned, found, used) = scan_repo();
     assert!(
         scanned > 50,
         "the scan found only {scanned} files: the roots moved?"
@@ -336,6 +353,16 @@ fn only_the_service_starts_the_daemon_and_every_launch_names_its_token() {
         "process-launch findings:\n{}",
         report.join("\n")
     );
+    // An allow-list entry that suppressed nothing is a hole waiting for the next line that matches it.
+    let mut stale = Vec::new();
+    for (id, list) in [(1u8, ELEVATION_ALLOWED), (2u8, DAEMON_FILE_STARTS_ALLOWED)] {
+        for (i, (suffix, text, why)) in list.iter().enumerate() {
+            if !used.contains(&(id, i)) {
+                stale.push(format!("{suffix}: `{text}` ({why})"));
+            }
+        }
+    }
+    assert!(stale.is_empty(), "allow-list entries that matched no line (delete them):\n{}", stale.join("\n"));
 }
 
 // ---- the scanner itself: each rule fires on the shape of the bug it exists for ----
@@ -480,4 +507,29 @@ fn rule_4_catches_a_daemon_launch_through_a_variable_path() {
     assert!(rules("installer/inno/canvas-rgb.iss", files).is_empty());
     let code = "[Code]\nDaemon := '{app}\\canvas-rgbd.exe';\n// token: x\nExec(Daemon, B, C, SW_HIDE, ewWait, Code);";
     assert_eq!(rules("installer/inno/canvas-rgb.iss", code), vec![4]);
+}
+
+#[test]
+fn rule_4_matches_daemon_names_in_any_case_including_the_constant() {
+    let src = "const DAEMON_EXE: &str = \"x\";\nfn go() {\n    // token: x\n    let c = Command::new(p);\n}";
+    assert_eq!(rules("app/src-tauri/src/y.rs", src), vec![4]);
+    let upper = "// token: x\nlet n = \"CANVAS-RGBD.EXE\";\nlet c = Command::new(n);";
+    assert_eq!(rules("crates/canvas-daemon/src/y.rs", upper), vec![4]);
+}
+
+#[test]
+fn the_other_process_start_spellings_need_a_token_line() {
+    for call in ["CreateProcessA(x)", "ShellExecuteA(x)", "ShellExecuteExA(x)", "WinExec(x)", "saps x", "Invoke-Item x"] {
+        let file = if call.contains('(') { "crates/a/src/x.rs" } else { "tools/x.ps1" };
+        assert_eq!(rules(file, call), vec![3], "{call}");
+    }
+}
+
+#[test]
+fn a_used_allow_list_entry_is_recorded_and_an_unused_one_is_not() {
+    let mut used = Used::new();
+    let line = "# token: x\nStart-Process -FilePath 'powershell.exe' -ArgumentList $childArgs -Verb RunAs";
+    assert!(scan_text_used("installer/setup.ps1", line, &mut used).iter().all(|f| f.rule != 2));
+    assert!(used.contains(&(1, 0)));
+    assert!(!used.contains(&(1, 1)));
 }
