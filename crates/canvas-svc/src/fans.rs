@@ -9,6 +9,8 @@
 //!   BIOS until the user applies it again.
 //! - Every target is clamped by `runtime_floor` at write time, so no path drives a header below it.
 //! - Startup restores BIOS on every header before any profile is applied.
+//! - A sleep pauses the loop; after a resume the controller waits `RESUME_GRACE` for firmware
+//!   to give the fan controller back, then re-applies the profile (see `SleepState`).
 
 use crate::chip::FanChip;
 use crate::paths;
@@ -23,7 +25,7 @@ use canvas_proto::Rgb8;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 /// Readback tolerance for a written duty, in percentage points.
 pub const READBACK_TOLERANCE: u8 = 2;
@@ -46,9 +48,28 @@ pub const CURVE_STEP_DOWN_DROP_C: f32 = 5.0;
 /// (Fan Control's "Response time", the minimum time for a change to occur, doubled on a decrease
 /// by its Auto curve). Keeps a slow cool-down from leaving the fan high for good.
 pub const CURVE_STEP_DOWN_HOLD: Duration = Duration::from_secs(60);
+/// The hold alone steps the duty down only when the smoothed temperature asks for at least this many
+/// percentage points less. Without it a 50/54 C input dipped the duty by 1 % every hold period.
+pub const CURVE_STEP_DOWN_MIN_PERCENT: u8 = 3;
 /// A gap between two curve updates longer than this (a missing sensor, a sleep) restarts the
 /// smoothing from the current reading.
 const CURVE_RESEED: Duration = Duration::from_secs(10);
+/// How long the controller leaves the fan chip alone after a resume before it writes again.
+/// Issue #29: a duty write that landed in the resume transition, while firmware still owned the
+/// fan controller, read back the BIOS duty for the whole `READBACK_SETTLE` and tripped the safety
+/// handback. The logged wake took about 2 s from the clock reset (Kernel-General 1) to the
+/// Power-Troubleshooter line, so 5 s covers it with margin. UNKNOWN on real hardware: how long
+/// the firmware really holds the controller; the next real wake settles it.
+pub const RESUME_GRACE: Duration = Duration::from_secs(5);
+/// A wall-clock gap between two ticks longer than this is a sleep whose power event never
+/// reached the service (the tick is 1 s; 30 s leaves room for a stalled machine).
+pub const TICK_GAP_RESUME: Duration = Duration::from_secs(30);
+
+/// A suspend with no resume holds fan writes at most this many ticks (1 s each). Ticks only run
+/// while the machine is awake, so 60 of them mean a resume notification never came; without the cap
+/// a missed resume would freeze the fans at their last duty with no temperature read, and the chip
+/// has no hardware watchdog (`HARDWARE_WATCHDOG`).
+pub const SUSPEND_HOLD_CAP_TICKS: u32 = 60;
 
 /// hardware_watchdog as settled from public sources (see the report): neither the nct6687d
 /// driver nor LibreHardwareMonitor's NCT677X handling reaches a chip watchdog register.
@@ -80,6 +101,8 @@ impl From<FanValidationError> for FanError {
 /// that set the held duty, or `CURVE_STEP_DOWN_HOLD` to pass.
 #[derive(Default)]
 struct CurveState {
+    /// The mode this state was built for; a different curve starts it afresh.
+    mode: Option<FanMode>,
     smoothed: Option<f32>,
     last_at: Option<Instant>,
     held: Option<u8>,
@@ -113,7 +136,8 @@ impl CurveState {
             return raw;
         }
         let calm = curve_percent(points, smoothed);
-        let waited = self.changed_at.is_none_or(|t| now.saturating_duration_since(t) >= CURVE_STEP_DOWN_HOLD);
+        let waited = self.changed_at.is_none_or(|t| now.saturating_duration_since(t) >= CURVE_STEP_DOWN_HOLD)
+            && calm.saturating_add(CURVE_STEP_DOWN_MIN_PERCENT) <= held;
         if calm < held && (smoothed <= self.anchor - CURVE_STEP_DOWN_DROP_C || waited) {
             self.set(calm, smoothed, now);
             return calm;
@@ -136,6 +160,33 @@ struct Slot {
     /// Set by a safety or failure handback. Sticky until the user applies the header again.
     handed_back: bool,
     override_reason: Option<String>,
+}
+
+/// Sleep and resume bookkeeping. Rust's `Instant` on Windows reads QueryPerformanceCounter, and the
+/// std docs say it is "not specified whether system suspends count as elapsed time or not", so
+/// `Instant` cannot tell a sleep from a short tick. `SystemTime` follows the wall clock, which the
+/// OS sets from the RTC at resume, so a large `SystemTime` gap between ticks marks a sleep.
+#[derive(Default)]
+struct SleepState {
+    /// Between a suspend event and the matching resume: no writes.
+    suspended: bool,
+    /// Ticks seen since the suspend event; bounds the hold (`SUSPEND_HOLD_CAP_TICKS`).
+    held_ticks: u32,
+    /// After a resume: no tick writes until this instant.
+    grace_until: Option<Instant>,
+    /// Headers to re-apply when the grace ends: those under manual control before the sleep, plus
+    /// every header the user applied inside the window (held, not written, until then).
+    reapply: BTreeSet<usize>,
+    /// Wall-clock time of the previous tick, for the gap fallback.
+    last_wall: Option<SystemTime>,
+    /// Set by a resume; the service core takes it to refresh the daemon heartbeat clock.
+    resumed: bool,
+}
+
+impl SleepState {
+    fn in_window(&self, now: Instant) -> bool {
+        self.suspended || self.grace_until.is_some_and(|until| now < until)
+    }
 }
 
 /// Curve interpolation: linear between points, flat outside. Points must be sorted.
@@ -183,6 +234,7 @@ pub struct FanController {
     writes_allowed: bool,
     /// Set by the service once the state file passes the owner check.
     state_trusted: bool,
+    sleep: SleepState,
 }
 
 impl FanController {
@@ -216,6 +268,7 @@ impl FanController {
             bios_state: BiosState::default(),
             writes_allowed,
             state_trusted: false,
+            sleep: SleepState::default(),
         }
     }
 
@@ -359,8 +412,20 @@ impl FanController {
         if ch >= self.slots.len() || !self.writes_allowed {
             return;
         }
+        if self.sleep.in_window(now) {
+            // Issue #29: a write during the resume transition is exactly what failed. The config is
+            // already saved; the header is applied when the window ends.
+            tracing::info!(channel = ch, "apply held until the resume grace ends");
+            self.sleep.reapply.insert(ch);
+            return;
+        }
         self.slots[ch].handed_back = false;
-        self.slots[ch].curve = CurveState::default();
+        if self.slots[ch].manual_since.is_none() {
+            // A header taken over afresh starts its hysteresis afresh. One that stays under control
+            // keeps its held duty when the profile is applied again, unless its curve changed
+            // (`drive` notices that).
+            self.slots[ch].curve = CurveState::default();
+        }
         self.slots[ch].override_reason = None;
         match self.desired(ch) {
             FanMode::Bios => self.release(ch, "mode set to BIOS"),
@@ -411,6 +476,58 @@ impl FanController {
         tracing::info!(header = id, reason, "header returned to BIOS control");
     }
 
+    /// Headers this service drives in manual mode right now.
+    fn controlled(&self) -> BTreeSet<usize> {
+        (0..self.slots.len())
+            .filter(|&ch| self.slots[ch].manual_since.is_some() && !self.slots[ch].handed_back)
+            .collect()
+    }
+
+    /// The machine is going to sleep (`PBT_APMSUSPEND`): stop writing. The headers under control
+    /// now are re-applied after the resume. Nothing is handed back on purpose; the chip keeps the
+    /// last duty, and firmware takes over whatever it takes over.
+    pub fn on_suspend(&mut self) {
+        self.sleep.suspended = true;
+        self.sleep.held_ticks = 0;
+        self.sleep.grace_until = None;
+        let held = self.controlled();
+        tracing::info!(headers = ?held, "suspend: fan writes paused");
+        self.sleep.reapply.extend(held);
+    }
+
+    /// The machine woke (`PBT_APMRESUME*`, or a tick gap). Writes stay off for `RESUME_GRACE`,
+    /// then every header that was under control is re-applied, which clears a handback.
+    pub fn on_resume(&mut self, now: Instant, source: &str) {
+        self.sleep.suspended = false;
+        self.sleep.grace_until = Some(now + RESUME_GRACE);
+        self.sleep.resumed = true;
+        // The resume is handled. The next tick's wall-clock gap spans the sleep and must not count
+        // it a second time (that would restart the grace).
+        self.sleep.last_wall = None;
+        let held = self.controlled();
+        tracing::info!(source, headers = ?held, grace_ms = RESUME_GRACE.as_millis() as u64, "resume: fan writes held, profile re-applies after the grace");
+        self.sleep.reapply.extend(held);
+    }
+
+    /// True once after each resume. The service core uses it to refresh the daemon's heartbeat
+    /// clock, because a heartbeat that looks hours old after a sleep is not a crash.
+    pub fn take_resumed(&mut self) -> bool {
+        std::mem::take(&mut self.sleep.resumed)
+    }
+
+    /// Re-applies the headers queued for the end of a grace window. One attempt each; a failure
+    /// here is a real failure and the handback sticks.
+    fn reapply_after_grace(&mut self, now: Instant) {
+        let queued = std::mem::take(&mut self.sleep.reapply);
+        if queued.is_empty() {
+            return;
+        }
+        tracing::info!(headers = ?queued, "resume grace over: re-applying the profile");
+        for ch in queued {
+            self.apply_header(ch, now);
+        }
+    }
+
     /// Hands a header back to BIOS for safety and makes the handback sticky.
     fn hand_back(&mut self, ch: usize, reason: String) {
         let Some(chip) = self.chip.as_mut() else { return };
@@ -458,8 +575,47 @@ impl FanController {
     /// One 1 Hz pass: refresh temperatures, then drive every header in a manual mode.
     /// Does not depend on any pipe client being connected.
     pub fn tick(&mut self, now: Instant) {
+        self.tick_at(now, SystemTime::now());
+    }
+
+    /// [`FanController::tick`] with the wall clock passed in, so tests can move it.
+    pub fn tick_at(&mut self, now: Instant, wall: SystemTime) {
+        let gap = self.sleep.last_wall.and_then(|previous| wall.duration_since(previous).ok());
+        let gap_resume = gap.is_some_and(|g| g > TICK_GAP_RESUME);
+        if self.sleep.suspended {
+            self.sleep.held_ticks += 1;
+            if gap_resume {
+                tracing::warn!(gap_s = gap.map_or(0, |g| g.as_secs()), "suspended, but the wall clock jumped and no resume event came: treating it as a resume");
+                self.on_resume(now, "tick gap while suspended");
+            } else if self.sleep.held_ticks > SUSPEND_HOLD_CAP_TICKS {
+                tracing::warn!(ticks = self.sleep.held_ticks, "suspended with no resume event while the machine is awake: ending the hold");
+                self.on_resume(now, "suspend hold cap");
+            }
+        } else if gap_resume {
+            tracing::warn!(gap_s = gap.map_or(0, |g| g.as_secs()), "no power event, but the wall clock jumped between ticks: treating it as a resume");
+            self.on_resume(now, "tick gap");
+        }
+        self.sleep.last_wall = Some(wall);
+        if self.sleep.suspended {
+            return;
+        }
         self.refresh_temps(now);
         if !self.writes_allowed {
+            return;
+        }
+        if let Some(until) = self.sleep.grace_until {
+            if now < until {
+                return;
+            }
+            self.sleep.grace_until = None;
+            // `Instant` may or may not have counted the sleep, so a sensor's last good reading can
+            // look hours old, and a sensor that is slow to return after a wake (NVML) would trip the
+            // sensor-loss handback on the first write. Each sensor gets its full loss timeout from
+            // the end of the grace.
+            for last in self.last_good.values_mut() {
+                *last = now;
+            }
+            self.reapply_after_grace(now);
             return;
         }
         for ch in 0..self.slots.len() {
@@ -482,7 +638,11 @@ impl FanController {
             }
             FanMode::Curve { source, points } => {
                 if let Some(temp) = self.temp_cache.get(source).copied() {
-                    (self.slots[ch].curve.step(points, temp, now), Some(temp))
+                    let curve = &mut self.slots[ch].curve;
+                    if curve.mode.as_ref() != Some(&mode) {
+                        *curve = CurveState { mode: Some(mode.clone()), ..CurveState::default() };
+                    }
+                    (curve.step(points, temp, now), Some(temp))
                 } else {
                     let since = self.slots[ch].manual_since.unwrap_or(now);
                     let last = self.last_good.get(source).copied().unwrap_or(since);
@@ -537,6 +697,10 @@ impl FanController {
                 None => return Err("no duty readback".into()),
             }
             if started.elapsed() >= READBACK_SETTLE {
+                // Issue #29: the error keeps only the last reading. Log every reading and the mode
+                // bit, so a reset chip (manual = false) tells apart from one firmware still owns.
+                let manual = chip.read_manual(ch);
+                tracing::warn!(channel = ch, percent, ?seen, manual = ?manual, "the duty never settled");
                 let last = seen.last().copied().unwrap_or_default();
                 return Err(format!("readback {last}% for {percent}% after {} ms", READBACK_SETTLE.as_millis()));
             }

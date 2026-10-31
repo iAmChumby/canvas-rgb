@@ -47,13 +47,54 @@ APIs, so the tests pass.
   used the wrong driver type with an adapter (`crates/canvas-daemon/src/capture/screen.rs`). Both are
   fixed in 0.1.0; the issue stays open until they are confirmed on real lights.
 - [#5](https://github.com/iAmChumby/canvas-rgb/issues/5): after a wake, the RAM shows its own rainbow.
-  The daemon's message window never receives `WM_POWERBROADCAST` (no suspend or resume in the log
-  across two sleeps), and the registration results are discarded (`let _ =` in
-  `crates/canvas-daemon/src/power.rs`).
+  The daemon's message-only window never received `WM_POWERBROADCAST` (no suspend or resume in the log
+  across two sleeps), and the registration results were discarded (`let _ =` in
+  `crates/canvas-daemon/src/power.rs`). Fixed: sleep, wake and display state register with
+  `DEVICE_NOTIFY_CALLBACK` (no window), every `Register*Notification` result is logged and the first
+  notification is logged. Microsoft documents that a message-only window "does not receive broadcast
+  messages" (Window Features, Message-Only Windows); that is the likely cause but is UNKNOWN until one
+  real sleep logs `reason="suspend"` and `reason="resume"` (the first-notification line alone also fires for display-state changes, so it settles nothing). The display-state notifications were never
+  handled before; they are registered and logged now, and acting on them is a follow-up. See also `cause:sleep-state`.
 - **Class fix:** due (second bug). Each capture path logs a WARN when it fails to start
   (`crates/canvas-daemon/src/capture/mod.rs`), but a capture that starts and then gets no data stays
   silent, and a failed power registration leaves no trace. Candidate: no Windows API result is
   discarded with `let _ =`; every one is logged, and every subscription logs its first event.
+
+### `cause:sleep-state`: a state a sleep resets and the code never restores
+
+Hardware or a chip falls back to its own state when the PC sleeps, and the program set that state
+once per connection or once per start and trusts it forever.
+
+- [#5](https://github.com/iAmChumby/canvas-rgb/issues/5): the ENE DRAM sticks drop out of direct mode
+  over a sleep, and the daemon sent `SET_CUSTOM_MODE` once per OpenRGB connection
+  (`crates/canvas-adapters/src/openrgb.rs`). Fix built, pending a real wake: the mode is sent again after every resume and every
+  10 s while frames stream (`CUSTOM_MODE_KEEPALIVE`, a starting value to measure); the ROYUAN keyboard's
+  direct-mode report is sent again after a resume (`crates/canvas-adapters/src/royuan.rs`). One call,
+  `canvas_adapters::note_resume()`, reaches both. The keepalive covers the RAM even if the resume never reaches the daemon; the keyboard has no keepalive, so it depends on the resume arriving.
+- [#29](https://github.com/iAmChumby/canvas-rgb/issues/29): the service's 1 Hz fan loop kept writing
+  through the resume transition. A duty write landed while firmware still owned the fan controller,
+  its readback failed for the full `READBACK_SETTLE`, and the safety handback (correct in itself) stayed
+  until the user re-applied a profile (`crates/canvas-svc/src/fans.rs`). The service accepted no power
+  notifications (`crates/canvas-svc/src/winsvc.rs`). Fix built, pending a real wake: `SERVICE_CONTROL_POWEREVENT` pauses writes
+  on suspend and, after `RESUME_GRACE`, re-applies every header that was under control; a wall-clock
+  gap between ticks (`SystemTime`, because `Instant` may not count a sleep) is the fallback signal; an
+  apply inside the window is held until it ends; a suspend with no resume ends its hold after
+  `SUSPEND_HOLD_CAP_TICKS`; a failed readback logs every reading and the mode bit.
+  Regression tests: `fans_tests.rs`, on a `FakeChip` that models firmware owning the controller.
+  UNKNOWN until one real wake: whether the chip resets or firmware only holds it, and for how long.
+- **Sibling search (#29, canvas-svc):** the GPU fans (NVML) re-assert manual mode on every speed write,
+  so the same re-apply covers them. The daemon supervisor's 5 s heartbeat check compares `Instant`s; if
+  `Instant` counts the sleep, a wake looks like a missed heartbeat, so a resume now refreshes the
+  heartbeat clock (`Core::on_power`, `Core::tick`). Sensor-loss timeouts get a fresh clock when the
+  grace ends. Left, UNKNOWN: the OpenRGB supervisor's timers (`openrgb.rs:327`) also take an
+  `Instant` tick; not checked for a sleep.
+- **Class fix:** due (second bug). Candidate: every adapter or service that sets a mode once registers
+  for the resume event (one shared hook) and has a test that a resume makes it set the mode again.
+- **Sibling search (#5, canvas-adapters and canvas-daemon):** OpenRGB (every controller, GPU and
+  motherboard included): fixed. ROYUAN keyboard: fixed. CHIONE pump display: no mode state (every
+  250 ms packet carries its mode bytes; the 0xFF query is firmware info). Attack Shark X6 mouse and
+  8BitDo pad: settings are read and written on request, with no mode set at connect. Not covered:
+  the service's fan chip (#29, another fix).
 
 ### `cause:process-launch`: a process started outside the service's launch rules
 

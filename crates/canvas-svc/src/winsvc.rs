@@ -1,13 +1,16 @@
 //! Windows service plumbing (`windows-service`). The SCM calls `service_main`, which registers
 //! the control handler and runs the core. Stop, Shutdown and PreShutdown all end the core loop,
-//! which restores BIOS before the service reports Stopped.
+//! which restores BIOS before the service reports Stopped. Power events (suspend, resume) go to
+//! the fan controller through a channel; see `fans::RESUME_GRACE`.
 
 use crate::app;
+use crate::service::PowerEvent;
 use canvas_proto::consts::SERVICE_NAME;
 use std::ffi::OsString;
 use std::time::Duration;
 use windows_service::service::{
-    ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus, ServiceType,
+    PowerEventParam, ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
+    ServiceType,
 };
 use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
 use windows_service::{define_windows_service, service_dispatcher};
@@ -39,8 +42,26 @@ fn status(state: ServiceState, accept: ServiceControlAccept) -> ServiceStatus {
 
 fn run_service() -> Result<(), Box<dyn std::error::Error>> {
     let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let (power_tx, power_rx) = tokio::sync::mpsc::unbounded_channel::<PowerEvent>();
     let handler = move |control: ServiceControl| -> ServiceControlHandlerResult {
         match control {
+            ServiceControl::PowerEvent(param) => {
+                // Issue #29: every notification is logged, so the first real wake shows what arrived.
+                tracing::info!(?param, "service control: power event");
+                let event = match param {
+                    PowerEventParam::Suspend => Some(PowerEvent::Suspend),
+                    PowerEventParam::ResumeAutomatic
+                    | PowerEventParam::ResumeSuspend
+                    | PowerEventParam::ResumeCritical => Some(PowerEvent::Resume),
+                    _ => None,
+                };
+                if let Some(event) = event {
+                    if power_tx.send(event).is_err() {
+                        tracing::warn!(?event, "power event dropped: the service loop is gone");
+                    }
+                }
+                ServiceControlHandlerResult::NoError
+            }
             ServiceControl::Stop | ServiceControl::Shutdown | ServiceControl::Preshutdown => {
                 tracing::info!(?control, "service control: stopping; BIOS restore first");
                 let _ = stop_tx.send(());
@@ -51,14 +72,17 @@ fn run_service() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let handle = service_control_handler::register(SERVICE_NAME, handler)?;
-    let accept = ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN | ServiceControlAccept::PRESHUTDOWN;
+    let accept = ServiceControlAccept::STOP
+        | ServiceControlAccept::SHUTDOWN
+        | ServiceControlAccept::PRESHUTDOWN
+        | ServiceControlAccept::POWER_EVENT;
     handle.set_service_status(status(ServiceState::Running, accept))?;
 
     let boot = app::take_boot().ok_or("the machine home was not secured before the SCM dispatch")?;
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let result = runtime.block_on(app::run_scm(boot, async move {
         let _ = stop_rx.recv().await;
-    }));
+    }, power_rx));
 
     handle.set_service_status(status(ServiceState::Stopped, ServiceControlAccept::empty()))?;
     result.map_err(Into::into)
