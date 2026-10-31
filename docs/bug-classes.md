@@ -53,7 +53,7 @@ APIs, so the tests pass.
   `DEVICE_NOTIFY_CALLBACK` (no window), every `Register*Notification` result is logged and the first
   notification is logged. Microsoft documents that a message-only window "does not receive broadcast
   messages" (Window Features, Message-Only Windows); that is the likely cause but is UNKNOWN until one
-  real sleep logs `the first power notification arrived`. The display-state notifications were never
+  real sleep logs `reason="suspend"` and `reason="resume"` (the first-notification line alone also fires for display-state changes, so it settles nothing). The display-state notifications were never
   handled before; they are registered and logged now, and acting on them is a follow-up. See also `cause:sleep-state`.
 - **Class fix:** due (second bug). Each capture path logs a WARN when it fails to start
   (`crates/canvas-daemon/src/capture/mod.rs`), but a capture that starts and then gets no data stays
@@ -67,10 +67,10 @@ once per connection or once per start and trusts it forever.
 
 - [#5](https://github.com/iAmChumby/canvas-rgb/issues/5): the ENE DRAM sticks drop out of direct mode
   over a sleep, and the daemon sent `SET_CUSTOM_MODE` once per OpenRGB connection
-  (`crates/canvas-adapters/src/openrgb.rs`). Fixed: the mode is sent again after every resume and every
+  (`crates/canvas-adapters/src/openrgb.rs`). Fix built, pending a real wake: the mode is sent again after every resume and every
   10 s while frames stream (`CUSTOM_MODE_KEEPALIVE`, a starting value to measure); the ROYUAN keyboard's
   direct-mode report is sent again after a resume (`crates/canvas-adapters/src/royuan.rs`). One call,
-  `canvas_adapters::note_resume()`, reaches both.
+  `canvas_adapters::note_resume()`, reaches both. The keepalive covers the RAM even if the resume never reaches the daemon; the keyboard has no keepalive, so it depends on the resume arriving.
 - [#29](https://github.com/iAmChumby/canvas-rgb/issues/29): a sleep resets the fan chip and the service never
   takes it back (`crates/canvas-svc/src/fans.rs`).
 - **Class fix:** due (second bug). Candidate: every adapter or service that sets a mode once registers

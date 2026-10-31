@@ -289,7 +289,9 @@ async fn zone_store_round_trips_and_rejects_newer_schema() {
 const GREEN: Rgb8 = Rgb8 { r: 0, g: 255, b: 0 };
 
 #[tokio::test]
-async fn after_a_resume_the_next_frame_to_each_controller_is_preceded_by_set_custom_mode() {
+async fn after_a_custom_mode_reset_the_next_frame_to_each_controller_is_preceded_by_set_custom_mode() {
+    // The resume → reset path itself (power::handle → note_resume) is covered in
+    // crates/canvas-daemon/tests/power_resume.rs; this test covers what the reset does.
     let server = FakeOpenRgbServer::start(test_pc_devices()).await.expect("fake server");
     let mut adapter = connected(&server).await;
     let dram_a = DeviceId("openrgb:dram-a".into());
@@ -320,7 +322,8 @@ async fn after_a_resume_the_next_frame_to_each_controller_is_preceded_by_set_cus
 #[tokio::test]
 async fn the_keepalive_sends_set_custom_mode_on_schedule_without_stopping_frames() {
     let server = FakeOpenRgbServer::start(test_pc_devices()).await.expect("fake server");
-    let mut adapter = OpenRgbAdapter::with_keepalive("127.0.0.1", server.port(), Duration::from_millis(300));
+    let mut adapter = OpenRgbAdapter::with_keepalive("127.0.0.1", server.port(), Duration::from_millis(1500));
+    // Wide margins: the first block runs in well under 1.5 s on a loaded runner, the sleep is past it.
     adapter.connect().await.expect("connect");
     let dram = DeviceId("openrgb:dram-a".into());
 
@@ -329,7 +332,7 @@ async fn the_keepalive_sends_set_custom_mode_on_schedule_without_stopping_frames
     let _ = adapter.read_back(&dram).await.expect("settle");
     assert_eq!(server.custom_mode_writes(3), 1, "inside the interval: no repeat");
 
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    tokio::time::sleep(Duration::from_millis(1700)).await;
     adapter.write_frame(&dram, &[GREEN; 8]).await.expect("frame after the interval");
     assert_eq!(adapter.read_back(&dram).await.expect("readback"), vec![GREEN; 8], "the frame still lands");
     assert_eq!(server.custom_mode_writes(3), 2, "the interval passed: the mode was sent again");
