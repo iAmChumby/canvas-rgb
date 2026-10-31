@@ -1026,7 +1026,8 @@ fn palette_knife_loops_every_24_seconds() {
     assert_loop_closes("palette-knife", PALETTE_KNIFE, 24);
 }
 
-/// A small effect with a `<meta thumbnail ...>` tag.
+/// A small effect with a `<meta thumbnail ...>` tag. The script paints a colour, so a test
+/// can tell a picture from a blank canvas.
 fn with_recipe(tag: &str) -> String {
     format!(
         r##"<head><title>T</title>{tag}
@@ -1036,7 +1037,7 @@ fn with_recipe(tag: &str) -> String {
   <meta property="glow" label="Glow" type="boolean" default="true" />
 </head><body><canvas id="c" width="8" height="8"></canvas></body>
 <script>var ctx = document.getElementById("c").getContext("2d");
-function draw() {{ ctx.fillRect(0, 0, 8, 8); window.requestAnimationFrame(draw); }}
+function draw() {{ ctx.fillStyle = "#ff8800"; ctx.fillRect(0, 0, 8, 8); window.requestAnimationFrame(draw); }}
 window.requestAnimationFrame(draw);</script>"##
     )
 }
@@ -1084,7 +1085,55 @@ fn a_bad_thumbnail_meta_is_ignored_with_a_warning_and_the_effect_still_runs() {
         assert!(effect.schema().thumbnail.is_none(), "{tag}: no recipe");
         let warnings = effect.warnings().join(" ");
         assert!(warnings.contains(wants), "{tag}: {warnings}");
+        // The effect runs, and it paints.
+        let mut canvas = Canvas::new(8, 8);
+        effect.init(&effect.schema().defaults());
+        effect.update(DT, &mut canvas, &Inputs::default());
+        assert!(effect.errors().is_empty(), "{tag}: {:?}", effect.errors());
+        assert!(
+            canvas.pixels.iter().any(|p| p.iter().any(|v| *v > 0.1)),
+            "{tag}: the effect ran but painted nothing"
+        );
+    }
+}
+
+#[test]
+fn a_bad_property_meta_is_ignored_with_a_warning_and_the_effect_still_runs() {
+    // A property the file describes badly is one property the editor does not show: the
+    // effect loads, runs and keeps every other property. A bad property never takes the
+    // whole effect away (bug class `cause:bad-file-part`).
+    for (tag, key, wants) in [
+        (r#"<meta property="extra1" label="Extra 1" type="color" />"#, "extra1", "bad color default"),
+        (
+            r#"<meta property="extra2" label="Extra 2" type="color" default="not-a-colour" />"#,
+            "extra2",
+            "bad color default",
+        ),
+        (
+            r#"<meta property="extra3" label="Extra 3" type="combobox" />"#,
+            "extra3",
+            "no values",
+        ),
+    ] {
+        let effect = HtmlEffect::from_source("html:t", &with_recipe(tag), &Props::new())
+            .unwrap_or_else(|e| panic!("{tag} must not stop the effect loading: {e}"));
+        // The property is not in the schema.
+        assert!(
+            !effect.schema().properties.iter().any(|p| p.key == key),
+            "{tag}: the property {key} is still in the schema"
+        );
+        // The other properties are still there.
+        for keep in ["speed", "glow", "tint", "style"] {
+            assert!(
+                effect.schema().properties.iter().any(|p| p.key == keep),
+                "{tag}: the property {keep} is gone"
+            );
+        }
+        let warnings = effect.warnings().join(" ");
+        assert!(warnings.contains(wants), "{tag}: {warnings}");
+        assert!(warnings.contains(key), "{tag}: the warning does not name the property: {warnings}");
         // The effect runs.
+        let mut effect = effect;
         let mut canvas = Canvas::new(8, 8);
         effect.init(&effect.schema().defaults());
         effect.update(DT, &mut canvas, &Inputs::default());

@@ -150,7 +150,10 @@ impl HtmlEffect {
             .unwrap_or("canvas")
             .to_string();
 
-        // Build the property definitions.
+        // Build the property definitions. A property the file does not describe properly is
+        // ignored with a warning: the effect loads and runs, and the editor shows one
+        // property less. A bad property never takes the effect away.
+        let mut warnings: Vec<String> = Vec::new();
         let mut properties = Vec::new();
         for meta in &parsed.metas {
             let Some(key) = meta.attr("property") else { continue };
@@ -158,7 +161,13 @@ impl HtmlEffect {
                 continue;
             }
             let label = meta.attr("label").unwrap_or(key).to_string();
-            let kind = property_kind(meta, &label)?;
+            let kind = match property_kind(meta, &label) {
+                Ok(kind) => kind,
+                Err(error) => {
+                    warnings.push(ignored_part(&format!("<meta property={key:?}> tag"), &error));
+                    continue;
+                }
+            };
             properties.push(PropertyDef { key: key.to_string(), label, kind });
         }
 
@@ -166,7 +175,6 @@ impl HtmlEffect {
         let description = parsed.description.clone().unwrap_or_default();
 
         // The defaults are the file's, with the overrides applied on top.
-        let mut warnings: Vec<String> = Vec::new();
         let mut schema = PropertySchema {
             id: id.to_string(),
             name,
@@ -181,7 +189,7 @@ impl HtmlEffect {
                 Some(meta) => match thumbnail_recipe(meta, &properties) {
                     Ok(recipe) => Some(recipe),
                     Err(error) => {
-                        warnings.push(format!("the <meta thumbnail> tag was ignored: {error}"));
+                        warnings.push(ignored_part("<meta thumbnail> tag", &error));
                         None
                     }
                 },
@@ -506,6 +514,16 @@ impl HtmlEffect {
             }
         }
     }
+}
+
+/// The warning for a part of the file that was ignored.
+///
+/// A file may hold a part the runtime cannot read: a property whose type or default does
+/// not make sense, a tile tag that does not parse. The part is ignored and the effect
+/// loads and runs without it. This is the one place that says so, so every kind of part
+/// is reported the same way (bug class `cause:bad-file-part`).
+fn ignored_part(part: &str, error: &HtmlError) -> String {
+    format!("the {part} was ignored: {error}")
 }
 
 /// A seed for one instance's `Math.random`. The clock's nanoseconds are mixed with a

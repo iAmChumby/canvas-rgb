@@ -156,8 +156,29 @@ or acts as if a step worked without checking that it did.
 - **How to check a new notice or log line:** name the field or the measurement behind it. If there
   is none, it is this bug.
 
-### `cause:react-lifecycle`: an effect restarts because a parent re-rendered
+### `cause:bad-file-part`: a part of an effect file that cannot be read takes the whole effect away
 
+An effect file is a small HTML document: a head with tags and a body with a script. The
+runtime reads the tags and the script, and a part it cannot read must not take the rest of
+the file with it. A part that is ignored is reported as a warning, and the effect loads and
+runs without it.
+
+- [#16](https://github.com/iAmChumby/canvas-rgb/issues/16): a `<meta property>` tag the file
+  describes badly (a colour with no default or a bad one, a combobox with no values) made
+  `HtmlEffect::from_source` fail, so the effect was gone from the library and from the
+  lights, with only a warning in the log (`crates/canvas-html/src/lib.rs`). The same class
+  had already taken a `<meta thumbnail>` tag with a bad attribute away.
+- **Class fix:** done (#16). One helper builds the warning for an ignored part
+  (`ignored_part`), and both kinds of part use it: a property tag that does not parse and a
+  tile tag that does not parse. The property is dropped from the schema (the editor shows
+  one property less) and the effect runs. Two tests over both kinds
+  (`crates/canvas-html/tests/effects.rs`: `a_bad_property_meta_is_ignored_with_a_warning_and_the_effect_still_runs`
+  and `a_bad_thumbnail_meta_is_ignored_with_a_warning_and_the_effect_still_runs`), and the
+  daemon lists the warnings as problems in `canvas-rgb effects check`.
+- **How to check a new part of a file:** read it into a value, and on a bad one push a
+  warning and carry on. Never `?` out of the loader.
+
+### `cause:react-lifecycle`: an effect restarts because a parent re-rendered
 An effect lists a callback or object that a parent creates inline. The shell re-renders every
 second on the status poll, so the effect tears down and starts again before it can finish.
 
