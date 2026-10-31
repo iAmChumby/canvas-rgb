@@ -10,9 +10,9 @@ window.matchMedia ??= ((query: string) =>
 
 afterEach(cleanup);
 
-function readout(value: number | null, temperature: boolean) {
+function readout(value: number | null, temperature: boolean, decimals = 1) {
   const { container } = render(
-    <DigitReadout value={value} digits={4} decimals={1} temperature={temperature} unit="celsius" />,
+    <DigitReadout value={value} digits={4} decimals={decimals} temperature={temperature} unit="celsius" />,
   );
   return container.querySelector(".digit-readout")!;
 }
@@ -32,6 +32,13 @@ describe("DigitReadout (#8)", () => {
     expect(readout(5, true).querySelectorAll(".digit-dot-slot")).toHaveLength(1);
     cleanup();
     expect(readout(123.4, true).querySelectorAll(".digit-dot-slot")).toHaveLength(1);
+  });
+
+  it("keeps the slot with no decimals, as the display does (it shows 46.0)", () => {
+    // crates/canvas-adapters/src/chione.rs sends the tenths digit as 0 and keeps the point lit.
+    const row = readout(46, true, 0);
+    expect(row.querySelectorAll(".digit-dot-slot")).toHaveLength(1);
+    expect(row.querySelector(".digit-dot-slot")!.nextElementSibling!.textContent).toBe("0");
   });
 
   it("draws no dot slot for an RPM reading", () => {
