@@ -79,6 +79,25 @@ pub fn machine_log_dir() -> PathBuf {
     machine_data_dir().join("logs")
 }
 
+/// `%ProgramData%\canvas-rgb\updates\`: SYSTEM and Administrators only. The service stages an
+/// installer here before it checks the signature and runs it (#43).
+pub fn update_staging_dir() -> PathBuf {
+    machine_data_dir().join("updates")
+}
+
+/// The release signing key (minisign public key, as `tauri signer generate` writes it). The
+/// private half is the `UPDATE_SIGNING_KEY` Actions secret. The tray's updater and the service's
+/// install path (#43) both trust this key and only this key.
+pub const UPDATE_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVFMzExRTFDOTg2QjI2MTMKUldRVEptdVlIQjR4N2hFYUs3Q1YvdFliZlA3NzdQVGRXakU4SWtTaUFPLzAwcndCYWx1ZlZxaTcK";
+
+/// The Inno Setup switch that marks a run started by the service as SYSTEM (#43). Setup then
+/// skips every step that runs as the person who started it (the per-user script and the tray
+/// relaunch): the service does those as the console user once setup ends.
+pub const SETUP_SERVICE_UPDATE_SWITCH: &str = "/SERVICEUPDATE";
+
+/// The switches the service starts setup with. The log path is added after them.
+pub const SERVICE_SETUP_ARGS: &str = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /UPDATE /SERVICEUPDATE";
+
 /// `%ProgramData%\canvas-rgb\openrgb\`: the `--config` dir the OpenRGB server runs with.
 pub fn openrgb_config_dir() -> PathBuf {
     machine_data_dir().join("openrgb")

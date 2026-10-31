@@ -94,6 +94,12 @@ pub mod routes {
     /// `POST`, no body: the daemon applies `on_quit` (G3: black by default), tells the
     /// service it is quitting on purpose (`PipeRequest::DaemonQuitting`), and exits.
     pub const QUIT: &str = "/api/v1/quit";
+    /// `POST` [`InstallUpdateRequest`]: the daemon forwards it to the service as
+    /// `PipeRequest::InstallUpdate` (#43). `202` [`InstallUpdateResponse`] once setup runs;
+    /// `422 validation` for a refused file, signature or version; `409 conflict` while an install
+    /// runs; `503 service_unavailable` when the service is down (the tray then falls back to the
+    /// permission prompt).
+    pub const UPDATE_INSTALL: &str = "/api/v1/update/install";
     /// Diagnostics: current colors as the adapter reads them back from the hardware.
     pub const DIAG_READBACK: &str = "/api/v1/diag/readback";
     /// WebSocket. Binary messages: `u16 LE width, u16 LE height, width*height*3 RGB bytes`,
@@ -238,6 +244,23 @@ pub struct OnboardingSession {
 #[ts(export)]
 pub struct PatchZone {
     pub led_count: u32,
+}
+
+/// Body of `POST /api/v1/update/install` (#43).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct InstallUpdateRequest {
+    /// Absolute path of the installer, readable by the calling user.
+    pub installer: String,
+    /// The text of the installer's `.sig` file (base64 minisign signature, as the release ships it).
+    pub signature: String,
+}
+
+/// `202` answer of `POST /api/v1/update/install`: setup is running for this signed version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct InstallUpdateResponse {
+    pub version: String,
 }
 
 /// Shows the owner where a light is. While an identify is active the engine renders nothing
