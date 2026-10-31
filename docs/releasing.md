@@ -76,6 +76,12 @@ push and the release workflow runs it before it builds.
    section's first line. The script refuses a changelog it cannot read whole: inside a version's section only
    `###` subheadings are allowed, so a stray `#` or `##` heading, a second heading for the same version, or a
    link definition in the middle fails the release (naming the line) instead of cutting the notes short.
+   Headings and link definitions may be indented by 1-3 spaces, as in Markdown. Enforced: those three throws,
+   plus a compare-link label at the end of the file that names no version. Unsupported and not detected:
+   headings or `## [x]` lines inside fenced code blocks (read as real headings), `## [Unreleased]` or a
+   pre-release heading in the middle of a released section (ends it there), a duplicate version heading that
+   is not the next version heading (unseen), and any other Markdown layout (setext headings, tab or 4-space
+   indents). Keep the changelog in the Keep a Changelog layout.
 
 ## Updates: the signing key and `latest.json`
 

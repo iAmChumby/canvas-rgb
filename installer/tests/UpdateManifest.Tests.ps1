@@ -17,7 +17,8 @@ function Get-WorkflowJobs {
     return @{ Text = $text; Jobs = $jobs }
 }
 
-# One step of a job: the line that starts it, up to the line before the next step.
+# One step of a job: from its own "- " line (so keys written above name:/uses:, like "- if:", are part of
+# it) up to the line before the next step. The marker finds a line inside the step.
 function Get-WorkflowStep {
     param([string]$Job, [string]$Marker)
     $lines = $Job -split "`n"
@@ -26,6 +27,7 @@ function Get-WorkflowStep {
         if ($lines[$i] -like "*$Marker*") { $start = $i; break }
     }
     if ($start -lt 0) { throw "no step matching [$Marker]" }
+    while ($start -gt 0 -and $lines[$start] -notmatch '^ {6}- ') { $start-- }
     $step = @()
     for ($i = $start; $i -lt $lines.Count; $i++) {
         if ($i -gt $start -and $lines[$i] -match '^ {6}- ') { break }
@@ -54,12 +56,14 @@ function Get-StepWith {
     return $keys
 }
 
-# Runs a shell script with the bash the Windows runner uses (Git for Windows), the way GitHub runs a
-# bash step by default: --noprofile --norc -eo pipefail. Bounded: a hung run is killed and fails.
+# Runs a shell script with Git for Windows' bash, the way GitHub runs a bash step by default:
+# --noprofile --norc -eo pipefail. The publish job runs on ubuntu-latest, not Windows, so this is a
+# proxy for it (the same bash, the same flags, a different OS); the real run is the CI release. Bounded:
+# a hung run is killed and fails.
 function Invoke-RunnerBash {
     param([string]$WorkDir, [string]$ScriptName)
     $bash = Join-Path $env:ProgramFiles 'Git\bin\bash.exe'
-    if (-not (Test-Path -LiteralPath $bash)) { throw "Git bash is missing at [$bash]: the release step runs under it on the runner, so this test cannot pass without it" }
+    if (-not (Test-Path -LiteralPath $bash)) { throw "Git bash is missing at [$bash]: the publish job's bash step is tested with it here as a proxy for ubuntu-latest, so this test cannot pass without it" }
     $out = Join-Path $WorkDir 'out.txt'
     $err = Join-Path $WorkDir 'err.txt'
     $p = Start-Process -FilePath $bash -ArgumentList @('--noprofile', '--norc', '-eo', 'pipefail', $ScriptName) -WorkingDirectory $WorkDir -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
@@ -79,6 +83,13 @@ $script = if ($env:CANVAS_RGB_MANIFEST_SCRIPT) { $env:CANVAS_RGB_MANIFEST_SCRIPT
 # is there, and say which one ran.
 $ps = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell.exe' }
 Write-Host "script runs under: $ps"
+Test-Case 'the script is run by the PowerShell this suite says it is' {
+    # The child prints its own major version; pwsh must be 7 or later, Windows PowerShell is 5.
+    $major = [int]((& $ps -NoProfile -Command '$PSVersionTable.PSVersion.Major' | Out-String).Trim())
+    if ($ps -eq 'pwsh') { Assert-True ($major -ge 7) "pwsh reported major version $major, expected 7 or later" }
+    else { Assert-Equal $major 5 'powershell.exe is Windows PowerShell 5' }
+    Write-Host "      child PowerShell major version: $major"
+}
 $dir = Join-Path ([System.IO.Path]::GetTempPath()) ("canvas-rgb-manifest-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $dir | Out-Null
 try {
@@ -456,6 +467,57 @@ try {
         Assert-True ($r.Exit -ne 0) 'a lower-case ## [unreleased] heading is not a version heading'
         Assert-True ($r.Err -match 'not a version heading') "the message says what is wrong: $($r.Err)"
     }
+    Test-Case 'notes: headings and link definitions indented by 1-3 spaces are still headings and links' {
+        # An indented version heading ends the section, like a column-0 one.
+        foreach ($pad in ' ', '  ', '   ') {
+            $r = Invoke-Changelog -Name 'indent-end' -Version '0.2.0' -Lines @('# Changelog', '', '## [0.2.0] - 2026-11-02', '', '### Added', '', '- New.', '', "$pad## [0.1.1] - 2026-10-29", '', '- Old.', '', '[0.1.1]: https://example.invalid/tag')
+            Assert-Equal $r.Exit 0 "[$pad## [0.1.1]] exit: $($r.Err)"
+            Assert-Equal $r.NotesText "### Added`n`n- New.`n" "[$pad## [0.1.1]] the section stops at the indented heading"
+        }
+        # The section's own heading may be indented.
+        $r = Invoke-Changelog -Name 'indent-start' -Version '0.2.0' -Lines @('# Changelog', '', '  ## [0.2.0] - 2026-11-02', '', '- New.', '', '[0.2.0]: https://example.invalid/tag')
+        Assert-Equal $r.Exit 0 "an indented start heading is found: $($r.Err)"
+        Assert-Equal $r.NotesText "- New.`n" 'the notes of the indented start heading'
+        # An indented stray heading and an indented second heading for the same version throw.
+        foreach ($h in '  ## Notes', ' # Stray', '   ## [0.2.0] - 2026-11-03') {
+            $r = Invoke-Changelog -Name 'indent-stray' -Version '0.2.0' -Lines @('# Changelog', '', '## [0.2.0] - 2026-11-02', '', '- New.', '', $h, '', 'More.', '', '## [0.1.1] - 2026-10-29', '', '- Old.')
+            Assert-True ($r.Exit -ne 0) "[$h] gives a non-zero exit"
+            Assert-True ($r.Err -match 'line 7') "[$h]: the message names line 7: $($r.Err)"
+            Assert-True ($null -eq $r.NotesText) "[$h]: no notes file"
+        }
+        # An indented link definition inside the section throws; indented compare links at the end are accepted.
+        $r = Invoke-Changelog -Name 'indent-link' -Version '0.2.0' -Lines @('# Changelog', '', '## [0.2.0] - 2026-11-02', '', '- New.', '', '  [ref]: https://example.invalid/ref', '', '- More.', '', '## [0.1.1] - 2026-10-29', '', '- Old.')
+        Assert-True ($r.Exit -ne 0) 'an indented link definition inside the section fails'
+        Assert-True ($r.Err -match 'line 7') "the message names line 7: $($r.Err)"
+        $r = Invoke-Changelog -Name 'indent-links' -Version '0.2.0' -Lines @('# Changelog', '', '## [0.2.0] - 2026-11-02', '', '- New.', '', '  [Unreleased]: https://example.invalid/compare', ' [0.2.0]: https://example.invalid/tag')
+        Assert-Equal $r.Exit 0 "indented compare links end the section: $($r.Err)"
+        Assert-Equal $r.NotesText "- New.`n" 'no link definition in the notes'
+        # An indented ### subheading stays allowed, and four spaces is a code block: content, not a heading.
+        $r = Invoke-Changelog -Name 'indent-sub' -Version '0.2.0' -Lines @('# Changelog', '', '## [0.2.0] - 2026-11-02', '', '  ### Added', '', '- New.', '', '    ## [0.1.1] - 2026-10-29', '', '- Old.')
+        Assert-Equal $r.Exit 0 "exit: $($r.Err)"
+        Assert-True ($r.NotesText.Contains('### Added') -and $r.NotesText.Contains('    ## [0.1.1] - 2026-10-29')) 'an indented ### and a 4-space line are notes text'
+    }
+    Test-Case 'notes: an invalid compare-link label after a valid one at the end of the file fails' {
+        $r = Invoke-Changelog -Name 'later-bad' -Version '0.1.1' -Lines @('# Changelog', '', '## [0.1.1] - 2026-11-02', '', '- A.', '', '[Unreleased]: https://example.invalid/compare', '[ref]: https://example.invalid/ref')
+        Assert-True ($r.Exit -ne 0) 'non-zero exit'
+        Assert-True ($r.Err -match 'line 8') "the message names line 8: $($r.Err)"
+        Assert-True ($r.Err -match 'not a version link') "the message says what is wrong: $($r.Err)"
+        Assert-True ($null -eq $r.NotesText) 'no notes file'
+    }
+    Test-Case 'notes: with no -ChangelogFile the script reads CHANGELOG.md next to its tools folder' {
+        # A temp copy of the repo layout: <root>\tools\make-update-manifest.ps1 and <root>\CHANGELOG.md.
+        # Windows PowerShell 5.1 leaves $PSScriptRoot empty in a param default, so this fails there if the default sits in the param block.
+        $ErrorActionPreference = 'Continue'
+        $root = Join-Path $dir 'repo-layout'
+        New-Item -ItemType Directory -Path (Join-Path $root 'tools') -Force | Out-Null
+        Copy-Item -LiteralPath $script -Destination (Join-Path $root 'tools\make-update-manifest.ps1')
+        [System.IO.File]::WriteAllText((Join-Path $root 'CHANGELOG.md'), (@('# Changelog', '', '## [0.1.1] - 2026-11-02', '', '- From the default file.', '', '[0.1.1]: https://example.invalid/tag') -join "`n"), (New-Object System.Text.UTF8Encoding($false)))
+        $out = Join-Path $dir 'default.json'
+        $p = Start-Process -FilePath $ps -ArgumentList @('-NoProfile', '-File', "`"$(Join-Path $root 'tools\make-update-manifest.ps1')`"", '-Version', '0.1.1', '-SigFile', "`"$sig`"", '-OutFile', "`"$out`"", '-PubDate', '2026-11-02T10:00:00Z') -NoNewWindow -Wait -PassThru -RedirectStandardOutput (Join-Path $dir 'default.out') -RedirectStandardError (Join-Path $dir 'default.err')
+        Assert-Equal $p.ExitCode 0 "exit: $(Get-Content -LiteralPath (Join-Path $dir 'default.err') -Raw)"
+        $m = Get-Content -LiteralPath $out -Encoding UTF8 -Raw | ConvertFrom-Json
+        Assert-Equal $m.notes '- From the default file.' 'the notes come from the CHANGELOG.md next to tools'
+    }
     Test-Case 'release workflow: the release body is the notes file, with the generated list after it' {
         $info = Get-WorkflowJobs (Join-Path $PSScriptRoot '..\..\.github\workflows\release.yml')
         $sign = $info.Jobs['sign']
@@ -464,7 +526,9 @@ try {
         Assert-True ($sign -match '-NotesFile dist/release-notes\.md') 'the sign job passes -NotesFile'
         Assert-True ($sign -match '(?ms)name: signature\s*\r?\n\s*path: \|.*?dist/release-notes\.md') 'the signature artifact carries the notes'
         # The release step itself carries the body, not another step of the job.
+        Assert-Equal ([regex]::Matches($publish, 'uses:\s*softprops/action-gh-release').Count) 1 'exactly one softprops/action-gh-release step in the publish job'
         $release = Get-WorkflowStep -Job $publish -Marker 'softprops/action-gh-release'
+        Assert-True ($release -notmatch '(?m)^(?: {6}- | {8})(?:if|continue-on-error):') 'the release step has no if: and no continue-on-error, so it always runs'
         $with = Get-StepWith $release
         Assert-Equal $with['body_path'] 'dist/release-notes.md' 'body_path is a key of the release step with: block'
         Assert-Equal $with['generate_release_notes'] 'true' 'generate_release_notes is a key of the release step with: block'
@@ -475,8 +539,7 @@ try {
         $info = Get-WorkflowJobs (Join-Path $PSScriptRoot '..\..\.github\workflows\release.yml')
         $publish = $info.Jobs['publish']
         $step = Get-WorkflowStep -Job $publish -Marker 'name: The release notes are there'
-        Assert-True (-not $step.Contains('continue-on-error')) 'the step does not continue on error'
-        Assert-True ($step -notmatch '(?m)^(?:      - |        )if:') 'the check step has no if: key, so it always runs'
+        Assert-True ($step -notmatch '(?m)^(?: {6}- | {8})(?:if|continue-on-error):') 'the check step has no if: and no continue-on-error, so it always runs'
         # The step's own run: block, run with bash the way the runner runs it.
         $run = @()
         $inRun = $false
@@ -500,16 +563,17 @@ try {
         $missing = Invoke-RunnerBash -WorkDir $work -ScriptName 'step.sh'
         [System.IO.File]::WriteAllText($notes, '')
         $empty = Invoke-RunnerBash -WorkDir $work -ScriptName 'step.sh'
-        # A notes line that starts with :: must not reach the log at column 0 (GitHub reads it as a workflow command).
-        [System.IO.File]::WriteAllText($notes, "::error::injected`n::set-output name=x::y`n### Added`n")
+        # A notes line that starts with :: must never reach the log: the runner reads workflow commands from any line.
+        $noteText = "::error::injected`n::set-output name=x::y`n### Added`n"
+        [System.IO.File]::WriteAllText($notes, $noteText)
         $real = Invoke-RunnerBash -WorkDir $work -ScriptName 'step.sh'
         Assert-True ($missing.Exit -ne 0) 'a missing notes file stops the release'
         Assert-True ($empty.Exit -ne 0) 'an empty notes file stops the release'
         Assert-Equal $real.Exit 0 "a real notes file lets the release through: $($real.Err)"
-        $echoed = @($real.Out -split '\r?\n' | Where-Object { $_ -ne '' })
-        Assert-True ($echoed.Count -ge 3) "the step echoes the notes: $($real.Out)"
-        foreach ($l in $echoed) { Assert-True ($l -match '^\s+\S') "echoed line [$l] is indented, so it is never a workflow command" }
-        Assert-True ($real.Out.Contains('::error::injected')) 'the notes text is still shown'
+        $bytes = (New-Object System.Text.UTF8Encoding($false)).GetByteCount($noteText)
+        Assert-True ($real.Out -match "(?m)\b3 lines, $bytes bytes") "the step prints the line and byte count: $($real.Out)"
+        Assert-True (-not $real.Out.Contains('::')) "the step prints no :: at all: $($real.Out)"
+        Assert-True (-not $real.Out.Contains('injected') -and -not $real.Out.Contains('Added')) "the step prints no notes text: $($real.Out)"
     }
 }
 finally { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
