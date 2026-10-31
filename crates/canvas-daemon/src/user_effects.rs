@@ -33,7 +33,12 @@ pub type Builder = Arc<dyn Fn(&str, &str) -> Result<Box<dyn Effect>, String> + S
 pub fn html_builder() -> Builder {
     Arc::new(|id: &str, source: &str| {
         canvas_html::HtmlEffect::from_source(id, source, &Props::new())
-            .map(|effect| Box::new(effect) as Box<dyn Effect>)
+            .map(|effect| {
+                for warning in effect.warnings() {
+                    tracing::warn!(id, %warning, "a user effect loaded with a part of its file ignored");
+                }
+                Box::new(effect) as Box<dyn Effect>
+            })
             .map_err(|e| e.to_string())
     })
 }

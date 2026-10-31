@@ -1025,3 +1025,90 @@ fn wet_smear_loops_every_16_seconds() {
 fn palette_knife_loops_every_24_seconds() {
     assert_loop_closes("palette-knife", PALETTE_KNIFE, 24);
 }
+
+/// A small effect with a `<meta thumbnail ...>` tag.
+fn with_recipe(tag: &str) -> String {
+    format!(
+        r##"<head><title>T</title>{tag}
+  <meta property="speed" label="Speed" type="number" min="0" max="100" default="30" />
+  <meta property="tint" label="Tint" type="color" default="#ff0000" />
+  <meta property="style" label="Style" type="combobox" values="a,b" default="a" />
+  <meta property="glow" label="Glow" type="boolean" default="true" />
+</head><body><canvas id="c" width="8" height="8"></canvas></body>
+<script>var ctx = document.getElementById("c").getContext("2d");
+function draw() {{ ctx.fillRect(0, 0, 8, 8); window.requestAnimationFrame(draw); }}
+window.requestAnimationFrame(draw);</script>"##
+    )
+}
+
+#[test]
+fn a_thumbnail_meta_becomes_the_effects_recipe() {
+    let html = with_recipe(
+        r##"<meta thumbnail warm_up="3" loop="4.5" crossfade="6" props="speed=90; tint=#00ff80; style=b" dark_on_purpose="a spark on black" />"##,
+    );
+    let effect = HtmlEffect::from_source("html:t", &html, &Props::new()).expect("the file loads");
+    assert!(effect.warnings().is_empty());
+    let recipe = effect.schema().thumbnail.expect("a recipe");
+    assert_eq!((recipe.warm_up_s, recipe.loop_s, recipe.crossfade_frames), (3.0, 4.5, 6));
+    assert_eq!(recipe.dark_on_purpose.as_deref(), Some("a spark on black"));
+    assert_eq!(recipe.props.get("speed"), Some(&PropValue::Number(90.0)));
+    assert_eq!(recipe.props.get("style"), Some(&PropValue::Choice("b".into())));
+    assert_eq!(
+        recipe.props.get("tint"),
+        Some(&PropValue::Color("#00ff80".parse().expect("a hex color")))
+    );
+}
+
+#[test]
+fn a_file_without_a_thumbnail_meta_has_no_recipe_and_a_bare_one_takes_the_defaults() {
+    let none = HtmlEffect::from_source("html:t", &with_recipe(""), &Props::new()).expect("loads");
+    assert!(none.schema().thumbnail.is_none());
+    let bare = HtmlEffect::from_source("html:t", &with_recipe(r#"<meta thumbnail />"#), &Props::new()).expect("loads");
+    assert_eq!(bare.schema().thumbnail, Some(canvas_proto::props::ThumbnailRecipe::default()));
+}
+
+#[test]
+fn a_bad_thumbnail_meta_is_ignored_with_a_warning_and_the_effect_still_runs() {
+    for (tag, wants) in [
+        (r#"<meta thumbnail loop="4.5s" />"#, "loop"),
+        (r#"<meta thumbnail props="nope=1" />"#, "no property"),
+        (r#"<meta thumbnail props="speed=fast" />"#, "not a valid speed"),
+        (r#"<meta thumbnail props="speed=inf" />"#, "not a valid speed"),
+        (r#"<meta thumbnail props="speed=NaN" />"#, "not a valid speed"),
+        (r#"<meta thumbnail props="speed" />"#, "key=value"),
+        (r#"<meta thumbnail props="glow=yes" />"#, "not a valid glow"),
+    ] {
+        let mut effect = HtmlEffect::from_source("html:t", &with_recipe(tag), &Props::new())
+            .unwrap_or_else(|e| panic!("{tag} must not stop the effect loading: {e}"));
+        assert!(effect.schema().thumbnail.is_none(), "{tag}: no recipe");
+        let warnings = effect.warnings().join(" ");
+        assert!(warnings.contains(wants), "{tag}: {warnings}");
+        // The effect runs.
+        let mut canvas = Canvas::new(8, 8);
+        effect.init(&effect.schema().defaults());
+        effect.update(DT, &mut canvas, &Inputs::default());
+        assert!(effect.errors().is_empty(), "{tag}: {:?}", effect.errors());
+    }
+}
+
+#[test]
+fn a_boolean_in_a_recipe_takes_true_false_1_or_0_and_a_number_is_held_to_its_range() {
+    let html = with_recipe(r#"<meta thumbnail props="glow=0;speed=500" loop_jump_on_purpose="a strobe" />"#);
+    let effect = HtmlEffect::from_source("html:t", &html, &Props::new()).expect("loads");
+    let recipe = effect.schema().thumbnail.expect("a recipe");
+    assert_eq!(recipe.props.get("glow"), Some(&PropValue::Bool(false)));
+    assert_eq!(recipe.props.get("speed"), Some(&PropValue::Number(100.0)));
+    assert_eq!(recipe.loop_jump_on_purpose.as_deref(), Some("a strobe"));
+}
+
+#[test]
+fn a_number_prop_that_is_not_finite_or_out_of_range_never_reaches_the_script() {
+    let mut effect = HtmlEffect::from_source("html:t", &with_recipe(""), &Props::new()).expect("loads");
+    let mut props = Props::new();
+    props.insert("speed".into(), PropValue::Number(f64::NAN));
+    effect.init(&props);
+    assert_eq!(effect.values().get("speed"), Some(&PropValue::Number(30.0)));
+    props.insert("speed".into(), PropValue::Number(1e9));
+    effect.init(&props);
+    assert_eq!(effect.values().get("speed"), Some(&PropValue::Number(100.0)));
+}

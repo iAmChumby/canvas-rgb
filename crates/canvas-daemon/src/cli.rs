@@ -525,9 +525,10 @@ pub fn check_tile(path: &str, preview_dir: Option<&str>) -> Result<TileCheck, St
     let mut effect = canvas_html::HtmlEffect::from_source("check", &source, &canvas_proto::props::Props::new())
         .map_err(|e| e.to_string())?;
     let schema = effect.schema();
-    let body = crate::thumbnail::render(&mut effect, &schema.defaults());
+    let body = crate::thumbnail::render(&mut effect, &schema.defaults())?;
     let score = crate::thumbnail::score(&body).ok_or("the tile render was malformed")?;
-    let problems = crate::thumbnail::problems(&score, schema.thumbnail.as_ref());
+    let mut problems: Vec<String> = effect.warnings().to_vec();
+    problems.extend(crate::thumbnail::problems(&score, schema.thumbnail.as_ref()));
 
     let (mut gif, mut sheet) = (None, None);
     if let Some(dir) = preview_dir {
@@ -1244,6 +1245,19 @@ mod tests {
         let sheet = std::fs::read(tile.sheet.as_ref().expect("a sheet path")).expect("the sheet is there");
         assert_eq!(&sheet[..8], &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_bad_thumbnail_tag_is_reported_and_the_effect_is_still_checked() {
+        let bad = BRIGHT_LOOP.replace(r#"loop="1""#, r#"loop="1s""#);
+        let file = TempFile::new("bad-tile-tag", &bad);
+        // The effect itself still loads and runs.
+        let report = check_effect(&file.path(), None).expect("the effect loads");
+        assert!(report.moves);
+        // The tile check names the ignored tag, and the tile is rendered with the defaults.
+        let tile = check_tile(&file.path(), None).expect("the tile renders");
+        assert!(tile.problems.iter().any(|p| p.contains("<meta thumbnail> tag was ignored")), "{:?}", tile.problems);
+        assert!(tile.recipe.is_none());
     }
 
     #[test]

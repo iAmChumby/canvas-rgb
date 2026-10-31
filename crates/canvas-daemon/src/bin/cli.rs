@@ -369,10 +369,11 @@ fn effects_check(cli: &Cli, args: &canvas_daemon::cli::CheckArgs) -> Result<(), 
                     "cols_lit": t.score.cols_lit,
                     "seam": t.score.seam,
                     "step": t.score.step,
+                    "max_step": t.score.max_step,
                     "bar": {
                         "lit_avg": canvas_daemon::thumbnail::BAR_LIT_AVG,
                         "seam": canvas_daemon::thumbnail::BAR_SEAM,
-                        "seam_steps": canvas_daemon::thumbnail::BAR_SEAM_STEPS,
+                        "line_share": canvas_daemon::thumbnail::BAR_LINE_SHARE,
                     },
                     "dark_on_purpose": t.recipe.as_ref().and_then(|r| r.dark_on_purpose.clone()),
                     "problems": t.problems,
@@ -437,11 +438,14 @@ fn effects_check(cli: &Cli, args: &canvas_daemon::cli::CheckArgs) -> Result<(), 
                 s.step * 100.0
             );
             println!(
-                "tile bar    {:.0} % lit on average, every row and column lit, seam under {:.0} % or {} times the step",
+                "tile bar    {:.0} % lit on average, every row and column {:.0} % lit over the loop, seam under {:.0} %",
                 canvas_daemon::thumbnail::BAR_LIT_AVG * 100.0,
-                canvas_daemon::thumbnail::BAR_SEAM * 100.0,
-                canvas_daemon::thumbnail::BAR_SEAM_STEPS
+                canvas_daemon::thumbnail::BAR_LINE_SHARE * 100.0,
+                canvas_daemon::thumbnail::BAR_SEAM * 100.0
             );
+            if let Some(reason) = tile.recipe.as_ref().and_then(|r| r.loop_jump_on_purpose.as_deref()) {
+                println!("tile jump   on purpose: {reason}");
+            }
             if let Some(reason) = tile.recipe.as_ref().and_then(|r| r.dark_on_purpose.as_deref()) {
                 println!("tile dark   on purpose: {reason}");
             }

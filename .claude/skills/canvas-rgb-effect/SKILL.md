@@ -84,7 +84,11 @@ check again; do not change the effect to suit the tile:
 - the effect has no period: set `crossfade` (up to 12 frames);
 - the defaults make a poor tile: `props="key=value;key=value"` is the showcase look;
 - the effect is dark on purpose: `dark_on_purpose="why"` (the reason is printed; it
-  exempts the lit share only).
+  exempts the lit share only);
+- the loop is meant to jump (a strobe): `loop_jump_on_purpose="why"` (exempts the seam only).
+
+A `<meta thumbnail>` tag that does not parse is ignored with a warning, and the check lists
+it: read the problem lines.
 
 ## 4. Install it
 

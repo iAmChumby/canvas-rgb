@@ -76,17 +76,25 @@ defaults says how its tile is rendered with one optional tag:
 | `crossfade` | Frames at the end of the loop that fade into its start, for an effect with no period. Default 0, at most 12. |
 | `props` | `key=value` pairs separated by `;`, laid over the defaults for the tile only: the showcase look. A key must be one of the file's properties and a value valid for its type. |
 | `dark_on_purpose` | The reason a mostly dark tile is right. It exempts the tile from the lit-share bar below, and from nothing else. |
+| `loop_jump_on_purpose` | The reason the loop is meant to jump where it restarts (a strobe). It exempts the tile from the seam bar below, and from nothing else. |
 
-The tile never changes how the effect runs on the lights.
+A tag that does not parse (`loop="4.5s"`, a `props` key the file does not have, a value
+that is not valid for its property, `yes` for a boolean) is ignored with a warning: the
+effect loads and runs with the default tile, and `effects check` lists the warning as a
+problem. The tile never changes how the effect runs on the lights.
+
+A render is stopped after 20 seconds (`RENDER_BUDGET`) and the library shows no tile for that
+effect; at most two tiles render at once. The library plays every tile at 12 frames a second,
+24 frames in 2 seconds, so `loop` is simulated time: a 16 s loop plays 8 times faster than the
+effect runs.
 
 The quality bar a tile has to pass, measured on the 24 frames (a pixel is lit when its
 R + G + B is above 45 of 765):
 
 - at least 60 % of the pixels lit on average (unless `dark_on_purpose` is set);
-- every row and every column lit in at least one frame;
+- every row and every column lit: at least 25 % of its pixels lit in some frame of the loop;
 - the loop seam, the last frame against the first, differs by at most 10 % (mean absolute
-  difference over all channels) or by at most 1.5 times the tile's own average step between
-  frames, so a fast effect that changes a lot every frame is not penalised for it.
+  difference over all channels), unless `loop_jump_on_purpose` is set.
 
 `effects check` prints the tile's scores and fails a tile under the bar. The thresholds
 are the `BAR_*` constants in `crates/canvas-daemon/src/thumbnail.rs`.

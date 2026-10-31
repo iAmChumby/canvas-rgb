@@ -82,6 +82,8 @@ pub struct HtmlEffect {
     canvas_id: String,
     /// The embedded JS engine.
     runtime: JsRuntime,
+    /// Things in the file that were ignored and the effect still loaded (a bad thumbnail tag).
+    warnings: Vec<String>,
     /// The fractional frame accumulator.
     accumulator: f32,
     /// The effect clock in seconds, driven by the sum of `dt`.
@@ -164,6 +166,7 @@ impl HtmlEffect {
         let description = parsed.description.clone().unwrap_or_default();
 
         // The defaults are the file's, with the overrides applied on top.
+        let mut warnings: Vec<String> = Vec::new();
         let mut schema = PropertySchema {
             id: id.to_string(),
             name,
@@ -172,8 +175,16 @@ impl HtmlEffect {
             needs: InputNeeds::default(),
             properties: properties.clone(),
             presets: Vec::new(),
+            // A tile recipe that does not parse is ignored with a warning: the tile only
+            // decides how the library draws the effect, and must never take the effect away.
             thumbnail: match &parsed.thumbnail {
-                Some(meta) => Some(thumbnail_recipe(meta, &properties)?),
+                Some(meta) => match thumbnail_recipe(meta, &properties) {
+                    Ok(recipe) => Some(recipe),
+                    Err(error) => {
+                        warnings.push(format!("the <meta thumbnail> tag was ignored: {error}"));
+                        None
+                    }
+                },
                 None => None,
             },
         };
@@ -206,6 +217,7 @@ impl HtmlEffect {
             accumulator: 0.0,
             time: 0.0,
             reported: Vec::new(),
+            warnings,
             values: Props::new(),
             loaded: false,
             blit_key: (0, 0, 0, 0),
@@ -430,6 +442,17 @@ impl HtmlEffect {
         &self.reported
     }
 
+    /// The property values the effect is running with, after they were held to their ranges.
+    pub fn values(&self) -> &Props {
+        &self.values
+    }
+
+    /// What the loader ignored while the effect still loaded: a `<meta thumbnail>` tag that
+    /// did not parse. The effect runs as if the tag were not there.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
     /// Copies the rendered pixels into the engine's canvas, resampling if the render
     /// target is a different size than the effect's canvas.
     ///
@@ -611,6 +634,9 @@ fn thumbnail_recipe(
     if let Some(reason) = meta.attr("dark_on_purpose").map(str::trim).filter(|v| !v.is_empty()) {
         recipe.dark_on_purpose = Some(reason.to_string());
     }
+    if let Some(reason) = meta.attr("loop_jump_on_purpose").map(str::trim).filter(|v| !v.is_empty()) {
+        recipe.loop_jump_on_purpose = Some(reason.to_string());
+    }
     for pair in meta.attr("props").unwrap_or("").split(';').map(str::trim).filter(|p| !p.is_empty()) {
         let Some((key, text)) = pair.split_once('=') else {
             return Err(HtmlError::Parse(format!("thumbnail props: {pair:?} is not key=value")));
@@ -622,11 +648,19 @@ fn thumbnail_recipe(
         let bad = || HtmlError::Parse(format!("thumbnail props: {text:?} is not a valid {key}"));
         let value = match &def.kind {
             PropKind::Color { .. } => PropValue::Color(text.parse().map_err(|_| bad())?),
-            PropKind::Number { .. } => PropValue::Number(text.parse::<f64>().map_err(|_| bad())?),
-            PropKind::Hue { .. } => PropValue::Hue(text.parse::<f64>().map_err(|_| bad())?),
-            PropKind::Bool { .. } => {
-                PropValue::Bool(matches!(text.to_ascii_lowercase().as_str(), "true" | "1"))
+            PropKind::Number { min, max, .. } => {
+                let n = text.parse::<f64>().ok().filter(|n| n.is_finite()).ok_or_else(bad)?;
+                PropValue::Number(n.clamp(*min, *max))
             }
+            PropKind::Hue { .. } => {
+                let h = text.parse::<f64>().ok().filter(|h| h.is_finite()).ok_or_else(bad)?;
+                PropValue::Hue(h.clamp(0.0, 360.0))
+            }
+            PropKind::Bool { .. } => match text.to_ascii_lowercase().as_str() {
+                "true" | "1" => PropValue::Bool(true),
+                "false" | "0" => PropValue::Bool(false),
+                _ => return Err(bad()),
+            },
             PropKind::Choice { .. } => PropValue::Choice(text.to_string()),
         };
         recipe.props.insert(key.to_string(), value);
@@ -669,6 +703,21 @@ impl Effect for HtmlEffect {
         let mut merged = self.schema.defaults();
         for (key, value) in props {
             merged.insert(key.clone(), value.clone());
+        }
+        // A number outside its declared range, or not a number at all, is held to the range
+        // (or the default): a value from a preset, a recipe or the API never reaches the
+        // script as NaN or infinity.
+        for def in &self.schema.properties {
+            let Some(value) = merged.get_mut(&def.key) else { continue };
+            match (&def.kind, value) {
+                (PropKind::Number { min, max, default, .. }, PropValue::Number(n)) => {
+                    *n = if n.is_finite() { n.clamp(*min, *max) } else { *default };
+                }
+                (PropKind::Hue { default }, PropValue::Hue(h)) => {
+                    *h = if h.is_finite() { h.clamp(0.0, 360.0) } else { *default };
+                }
+                _ => {}
+            }
         }
         self.values = merged.clone();
         // A props change on a live instance only sets the globals; the script is not

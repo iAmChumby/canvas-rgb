@@ -22,7 +22,7 @@ fn main() {
         let mut effect = canvas_effects::create(id).expect("a built-in effect builds");
         let mut props = effect.schema().defaults();
         demo_palette(id, &mut props);
-        let body = canvas_daemon::thumbnail::render(effect.as_mut(), &props);
+        let body = canvas_daemon::thumbnail::render_within(effect.as_mut(), &props, std::time::Duration::from_secs(600)).expect("the render fits the example budget");
         let w = u16::from_le_bytes([body[0], body[1]]) as u32;
         let h = u16::from_le_bytes([body[2], body[3]]) as u32;
         let frames = u16::from_le_bytes([body[4], body[5]]) as u32;
@@ -68,7 +68,7 @@ fn main() {
             shipped.push((stem.to_string(), build(&id, source).expect("a stock effect builds")));
         }
         for (name, mut effect) in shipped {
-            let body = canvas_daemon::thumbnail::render(effect.as_mut(), &Props::new());
+            let body = canvas_daemon::thumbnail::render_within(effect.as_mut(), &Props::new(), std::time::Duration::from_secs(600)).expect("the render fits the example budget");
             let score = canvas_daemon::thumbnail::score(&body).expect("a well formed tile");
             canvas_daemon::cli::write_tile_gif(&preview.join(format!("{name}.gif")), &body).expect("the GIF");
             canvas_daemon::cli::write_tile_sheet(&preview.join(format!("{name}-sheet.png")), &body).expect("the sheet");

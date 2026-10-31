@@ -44,8 +44,9 @@ impl Breathing {
                 ("min_brightness", number_kind(0.0)),
             ],
         )
-        // The tile covers one whole 4 s breath, so it ends where it began, and never dims below 15 %.
-        .thumbnail(crate::schema::recipe(1.0, 4.0, 0, vec![("min_brightness", crate::schema::num(15.0))]))
+        // The tile covers one whole 4 s breath, so it loops; two seconds of warm-up put the first
+        // frame half way through the swell, so the still tile is dimmer than Solid and reads as a pulse.
+        .thumbnail(crate::schema::recipe(2.0, 4.0, 0, vec![]))
         .build()
     }
 

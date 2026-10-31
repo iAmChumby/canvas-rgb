@@ -154,10 +154,16 @@ pub fn recipe(
         crossfade_frames,
         props: props.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
         dark_on_purpose: None,
+        loop_jump_on_purpose: None,
     }
 }
 
 /// A number value for a recipe's showcase props.
 pub fn num(value: f64) -> PropValue {
     PropValue::Number(value)
+}
+
+/// A colour value (`#rrggbb`) for a recipe's showcase props.
+pub fn col(hex: &str) -> PropValue {
+    PropValue::Color(hex.parse().unwrap_or(Rgb8::BLACK))
 }

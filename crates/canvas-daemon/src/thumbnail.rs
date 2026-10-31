@@ -44,15 +44,33 @@ pub const BAR_LIT_AVG: f64 = 0.60;
 /// The quality bar: the last frame differs from the first by at most this share of full
 /// scale (mean absolute difference over every channel of every pixel).
 pub const BAR_SEAM: f64 = 0.10;
-/// The seam may also be as large as this many times the tile's own average step between
-/// frames: an effect that changes 17 % a frame (a colour cycle) restarts its loop with a
-/// 17 % step, and that is no pop. A seam over both limits is a pop.
-pub const BAR_SEAM_STEPS: f64 = 1.5;
+/// The quality bar: every row and every column is lit, over the whole loop, in at least this
+/// share of its pixels (a single lit pixel does not make a row lit).
+pub const BAR_LINE_SHARE: f64 = 0.25;
+/// The longest a thumbnail render may run, in wall-clock time, before it is given up. A
+/// recipe at its limits (30 s of warm-up, a 30 s loop and a crossfade) asks an HTML effect for
+/// thousands of frames at up to 100 ms each; this stops that costing minutes of a core.
+pub const RENDER_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
 
-/// Renders the thumbnail of `effect` at `props`. Returns the whole binary body.
+/// Renders the thumbnail of `effect` at `props`, within [`RENDER_BUDGET`]. Returns the whole
+/// binary body, or why the render was given up.
 ///
 /// The effect's own recipe applies: its showcase props are laid over `props`.
-pub fn render(effect: &mut dyn Effect, props: &Props) -> Vec<u8> {
+pub fn render(effect: &mut dyn Effect, props: &Props) -> Result<Vec<u8>, String> {
+    render_within(effect, props, RENDER_BUDGET)
+}
+
+/// [`render`] with the time budget given.
+pub fn render_within(
+    effect: &mut dyn Effect,
+    props: &Props,
+    budget: std::time::Duration,
+) -> Result<Vec<u8>, String> {
+    let started = std::time::Instant::now();
+    let over_budget = || {
+        (started.elapsed() > budget)
+            .then(|| format!("the thumbnail render ran past its {} s budget and was stopped", budget.as_secs()))
+    };
     let schema = effect.schema();
     let needs = schema.needs;
     let recipe = sanitize(schema.thumbnail.unwrap_or_default());
@@ -60,10 +78,7 @@ pub fn render(effect: &mut dyn Effect, props: &Props) -> Vec<u8> {
     props.extend(recipe.props.clone());
     effect.init(&props);
 
-    let synthetic = Synthetic {
-        screen: needs.screen.then(|| Arc::new(gradient_screen())),
-        audio: needs.audio.then(|| Arc::new(sloped_spectrum())),
-    };
+    let synthetic = Synthetic { screen: needs.screen, audio: needs.audio, loop_s: recipe.loop_s };
     let mut canvas = Canvas::new(RENDER_WIDTH, RENDER_HEIGHT);
     let mut time = 0.0f64;
 
@@ -72,6 +87,9 @@ pub fn render(effect: &mut dyn Effect, props: &Props) -> Vec<u8> {
     for _ in 0..warm_up_steps {
         effect.update(warm_up_dt as f32, &mut canvas, &synthetic.inputs(time));
         time += warm_up_dt;
+        if let Some(why) = over_budget() {
+            return Err(why);
+        }
     }
 
     // One recorded frame covers loop_s / FRAMES seconds, cut into steps of at most MAX_STEP_S.
@@ -84,6 +102,9 @@ pub fn render(effect: &mut dyn Effect, props: &Props) -> Vec<u8> {
         for _ in 0..sub_steps {
             effect.update(sub_dt as f32, &mut canvas, &synthetic.inputs(time));
             time += sub_dt;
+            if let Some(why) = over_budget() {
+                return Err(why);
+            }
         }
         let mut tile = Vec::with_capacity(WIDTH as usize * HEIGHT as usize * 3);
         downsample(&canvas, &mut tile);
@@ -98,7 +119,7 @@ pub fn render(effect: &mut dyn Effect, props: &Props) -> Vec<u8> {
     for tile in tiles {
         out.extend_from_slice(&tile);
     }
-    out
+    Ok(out)
 }
 
 /// How many updates cover `seconds` with no step longer than [`MAX_STEP_S`].
@@ -152,16 +173,19 @@ pub struct TileScore {
     pub lit_last: f64,
     /// The share of lit pixels, averaged over the frames.
     pub lit_avg: f64,
-    /// Rows that are lit at some point in some frame, out of [`HEIGHT`].
+    /// Rows lit over the loop (at least [`BAR_LINE_SHARE`] of the row's pixels lit in some
+    /// frame), out of [`HEIGHT`].
     pub rows_lit: usize,
-    /// Columns that are lit at some point in some frame, out of [`WIDTH`].
+    /// Columns lit over the loop, out of [`WIDTH`].
     pub cols_lit: usize,
     /// The last frame against the first: mean absolute difference over every channel,
     /// as a share of full scale. This is the jump when the loop restarts.
     pub seam: f64,
-    /// The same difference between consecutive frames, averaged: what a normal step looks
-    /// like for this effect, for reading the seam against.
+    /// The same difference between consecutive frames, averaged: how much the tile moves.
     pub step: f64,
+    /// The largest difference between two consecutive frames, inside the loop: a hard cut
+    /// shows here.
+    pub max_step: f64,
 }
 
 /// Measures a thumbnail body (the binary format above). `None` when the body is malformed.
@@ -178,8 +202,8 @@ pub fn score(body: &[u8]) -> Option<TileScore> {
     }
     let frames: Vec<&[u8]> = body[6..].chunks_exact(frame_len).collect();
 
-    let mut rows = vec![false; h];
-    let mut cols = vec![false; w];
+    // Which pixels are lit in some frame, and the lit share of each frame.
+    let mut ever = vec![false; w * h];
     let mut shares = Vec::with_capacity(n);
     for frame in &frames {
         let mut lit = 0usize;
@@ -187,12 +211,17 @@ pub fn score(body: &[u8]) -> Option<TileScore> {
             let px = &frame[i * 3..i * 3 + 3];
             if px[0] as u32 + px[1] as u32 + px[2] as u32 > LIT_SUM {
                 lit += 1;
-                rows[i / w] = true;
-                cols[i % w] = true;
+                ever[i] = true;
             }
         }
         shares.push(lit as f64 / (w * h) as f64);
     }
+    let rows_lit = (0..h)
+        .filter(|y| (0..w).filter(|x| ever[y * w + x]).count() as f64 >= BAR_LINE_SHARE * w as f64)
+        .count();
+    let cols_lit = (0..w)
+        .filter(|x| (0..h).filter(|y| ever[y * w + x]).count() as f64 >= BAR_LINE_SHARE * h as f64)
+        .count();
     let diff = |a: &[u8], b: &[u8]| -> f64 {
         let sum: u64 = a.iter().zip(b).map(|(x, y)| (*x as i32 - *y as i32).unsigned_abs() as u64).sum();
         sum as f64 / (a.len() as f64 * 255.0)
@@ -202,20 +231,22 @@ pub fn score(body: &[u8]) -> Option<TileScore> {
         lit_first: shares[0],
         lit_last: shares[n - 1],
         lit_avg: shares.iter().sum::<f64>() / n as f64,
-        rows_lit: rows.iter().filter(|r| **r).count(),
-        cols_lit: cols.iter().filter(|c| **c).count(),
+        rows_lit,
+        cols_lit,
         seam: diff(frames[0], frames[n - 1]),
         step: if steps.is_empty() { 0.0 } else { steps.iter().sum::<f64>() / steps.len() as f64 },
+        max_step: steps.iter().copied().fold(0.0, f64::max),
     })
 }
 
 /// What a tile fails of the bar, as sentences. Empty when it passes.
 ///
-/// An effect whose recipe sets `dark_on_purpose` is exempt from the lit-share bar only:
-/// its rows, columns and seam are still held to the bar.
+/// A recipe that sets `dark_on_purpose` is exempt from the lit-share bar only, and one that
+/// sets `loop_jump_on_purpose` from the seam bar only; each states its reason.
 pub fn problems(score: &TileScore, recipe: Option<&ThumbnailRecipe>) -> Vec<String> {
     let mut out = Vec::new();
     let dark = recipe.and_then(|r| r.dark_on_purpose.as_deref()).is_some();
+    let jumps = recipe.and_then(|r| r.loop_jump_on_purpose.as_deref()).is_some();
     if !dark && score.lit_avg < BAR_LIT_AVG {
         out.push(format!(
             "the tile is {:.0} % lit on average; the bar is {:.0} % (or set dark_on_purpose in the recipe, with the reason)",
@@ -224,32 +255,50 @@ pub fn problems(score: &TileScore, recipe: Option<&ThumbnailRecipe>) -> Vec<Stri
         ));
     }
     if score.rows_lit < HEIGHT as usize {
-        out.push(format!("only {} of {} rows are ever lit", score.rows_lit, HEIGHT));
+        out.push(format!(
+            "only {} of {} rows are lit (at least {:.0} % of the row, over the loop)",
+            score.rows_lit,
+            HEIGHT,
+            BAR_LINE_SHARE * 100.0
+        ));
     }
     if score.cols_lit < WIDTH as usize {
-        out.push(format!("only {} of {} columns are ever lit", score.cols_lit, WIDTH));
-    }
-    if score.seam > BAR_SEAM && score.seam > BAR_SEAM_STEPS * score.step {
         out.push(format!(
-            "the loop jumps by {:.1} % where it restarts, against {:.1} % for a normal step; the bar is {:.0} % or {} times the step",
+            "only {} of {} columns are lit (at least {:.0} % of the column, over the loop)",
+            score.cols_lit,
+            WIDTH,
+            BAR_LINE_SHARE * 100.0
+        ));
+    }
+    if !jumps && score.seam > BAR_SEAM {
+        out.push(format!(
+            "the loop jumps by {:.1} % where it restarts; the bar is {:.0} % (or set loop_jump_on_purpose in the recipe, with the reason)",
             score.seam * 100.0,
-            score.step * 100.0,
-            BAR_SEAM * 100.0,
-            BAR_SEAM_STEPS
+            BAR_SEAM * 100.0
         ));
     }
     out
 }
 
 /// The synthetic capture data handed to an effect, for the inputs it asks for.
+///
+/// The data moves, once round per loop: the picture or the spectrum at `time` equals the one
+/// at `time + loop_s`, so the tile of an effect that follows its input closes its loop and is
+/// not a still frame.
 struct Synthetic {
-    screen: Option<Arc<ScreenFrame>>,
-    audio: Option<Arc<AudioSpectrum>>,
+    screen: bool,
+    audio: bool,
+    loop_s: f64,
 }
 
 impl Synthetic {
     fn inputs(&self, time: f64) -> Inputs {
-        Inputs { time, screen: self.screen.clone(), audio: self.audio.clone() }
+        let phase = (time / self.loop_s).fract();
+        Inputs {
+            time,
+            screen: self.screen.then(|| Arc::new(gradient_screen(phase))),
+            audio: self.audio.then(|| Arc::new(moving_spectrum(phase))),
+        }
     }
 }
 
@@ -285,19 +334,34 @@ fn downsample(canvas: &Canvas, out: &mut Vec<u8>) {
 }
 
 /// A fixed gradient standing in for the primary monitor.
-fn gradient_screen() -> ScreenFrame {
+/// The picture slides sideways by one whole width over a loop (`phase` 0..1), so it closes.
+fn gradient_screen(phase: f64) -> ScreenFrame {
     let (w, h) = (RENDER_WIDTH, RENDER_HEIGHT);
+    let tau = std::f64::consts::TAU;
     let mut pixels = Vec::with_capacity((w * h) as usize);
     for y in 0..h {
+        let g = (y * 255 / (h - 1)) as u8;
         for x in 0..w {
+            let along = x as f64 / w as f64 + phase;
             pixels.push(Rgb8 {
-                r: (x * 255 / (w - 1)) as u8,
-                g: (y * 255 / (h - 1)) as u8,
-                b: 128,
+                r: (127.5 + 127.5 * (tau * along).sin()) as u8,
+                g,
+                b: (127.5 + 127.5 * (tau * (along + 0.33)).sin()) as u8,
             });
         }
     }
     ScreenFrame { width: w, height: h, pixels }
+}
+
+/// The sloped spectrum with a wave running up through its bands once per loop (`phase` 0..1).
+fn moving_spectrum(phase: f64) -> AudioSpectrum {
+    let mut spectrum = sloped_spectrum();
+    let bands = spectrum.magnitudes.len() as f64;
+    for (i, magnitude) in spectrum.magnitudes.iter_mut().enumerate() {
+        let wave = (std::f64::consts::TAU * (phase + 2.0 * i as f64 / bands)).sin();
+        *magnitude *= (0.7 + 0.3 * wave) as f32;
+    }
+    spectrum
 }
 
 /// A fixed spectrum sloping down from the bass to the treble.
@@ -319,9 +383,23 @@ fn sloped_spectrum() -> AudioSpectrum {
 /// Every entry belongs to one generation of the user-effects set. A `get` for a different
 /// generation drops everything first, so an edited or removed user effect never serves a
 /// stale thumbnail.
-#[derive(Default)]
 pub struct ThumbnailCache {
     inner: Mutex<CacheState>,
+    /// How many renders may run at once. The library asks for every tile together, and each
+    /// render can take seconds of a core.
+    gate: tokio::sync::Semaphore,
+}
+
+/// Thumbnails rendered at the same time, at most.
+pub const CONCURRENT_RENDERS: usize = 2;
+
+impl Default for ThumbnailCache {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::default(),
+            gate: tokio::sync::Semaphore::new(CONCURRENT_RENDERS),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -331,6 +409,13 @@ struct CacheState {
 }
 
 impl ThumbnailCache {
+    /// Waits for one of the [`CONCURRENT_RENDERS`] render slots. Drop the permit when the
+    /// render is done.
+    pub async fn render_slot(&self) -> tokio::sync::SemaphorePermit<'_> {
+        // The semaphore is never closed.
+        self.gate.acquire().await.expect("the render gate is never closed")
+    }
+
     /// The cached thumbnail for `id`, if the cache belongs to `generation`.
     pub fn get(&self, generation: u64, id: &str) -> Option<Arc<Vec<u8>>> {
         let mut state = lock(&self.inner);
@@ -405,7 +490,7 @@ mod tests {
     fn the_header_and_length_match_the_format() {
         let updates = Arc::new(AtomicU32::new(0));
         let mut effect = Counter { updates: updates.clone(), recipe: None };
-        let bytes = render(&mut effect, &Props::new());
+        let bytes = render(&mut effect, &Props::new()).expect("renders");
 
         assert_eq!(u16::from_le_bytes([bytes[0], bytes[1]]), WIDTH);
         assert_eq!(u16::from_le_bytes([bytes[2], bytes[3]]), HEIGHT);
@@ -421,7 +506,7 @@ mod tests {
         let updates = Arc::new(AtomicU32::new(0));
         let recipe = ThumbnailRecipe { warm_up_s: 3.0, loop_s: 4.0, ..Default::default() };
         let mut effect = Counter { updates: updates.clone(), recipe: Some(recipe) };
-        let bytes = render(&mut effect, &Props::new());
+        let bytes = render(&mut effect, &Props::new()).expect("renders");
         assert_eq!(bytes.len(), 6 + FRAMES as usize * WIDTH as usize * HEIGHT as usize * 3);
         // 3 s of warm-up is 45 steps; a 4 s loop is 4 / 24 s a frame, 3 steps each.
         assert_eq!(updates.load(Ordering::SeqCst), 45 + 3 * FRAMES as u32);
@@ -432,7 +517,7 @@ mod tests {
         let updates = Arc::new(AtomicU32::new(0));
         let recipe = ThumbnailRecipe { crossfade_frames: 6, ..Default::default() };
         let mut effect = Counter { updates: updates.clone(), recipe: Some(recipe) };
-        let bytes = render(&mut effect, &Props::new());
+        let bytes = render(&mut effect, &Props::new()).expect("renders");
         assert_eq!(bytes.len(), 6 + FRAMES as usize * WIDTH as usize * HEIGHT as usize * 3);
         assert_eq!(updates.load(Ordering::SeqCst), 15 + 2 * (FRAMES as u32 + 6));
     }
@@ -481,19 +566,97 @@ mod tests {
     }
 
     #[test]
-    fn a_seam_as_small_as_a_normal_step_is_not_a_pop() {
-        let fast = TileScore {
+    fn the_seam_bar_is_strict_and_only_a_stated_reason_lifts_it() {
+        let lit = TileScore {
             lit_first: 1.0,
             lit_last: 1.0,
             lit_avg: 1.0,
             rows_lit: HEIGHT as usize,
             cols_lit: WIDTH as usize,
-            seam: 0.17,
-            step: 0.167,
+            seam: 0.09,
+            step: 0.01,
+            max_step: 0.02,
         };
-        assert!(problems(&fast, None).is_empty());
-        let popping = TileScore { seam: 0.43, step: 0.019, ..fast };
-        assert_eq!(problems(&popping, None).len(), 1);
+        assert!(problems(&lit, None).is_empty());
+        // 30 % over a tile that normally moves 25 % a frame is still a pop.
+        let flicker = TileScore { seam: 0.30, step: 0.25, ..lit };
+        assert_eq!(problems(&flicker, None).len(), 1);
+        let on_purpose = ThumbnailRecipe { loop_jump_on_purpose: Some("a strobe".into()), ..Default::default() };
+        assert!(problems(&flicker, Some(&on_purpose)).is_empty());
+        // The reason for a jump does not lift the lit bar.
+        let dim = TileScore { lit_avg: 0.1, ..flicker };
+        assert_eq!(problems(&dim, Some(&on_purpose)).len(), 1);
+    }
+
+    /// Alternates a bright frame and a black one, so the loop's end meets its start with a jump.
+    struct Strobe {
+        on: bool,
+    }
+
+    impl Effect for Strobe {
+        fn schema(&self) -> PropertySchema {
+            PropertySchema {
+                id: "strobe".into(),
+                name: "Strobe".into(),
+                description: String::new(),
+                needs: Default::default(),
+                properties: Vec::new(),
+                presets: Vec::new(),
+                // One update a frame (1/15 s each), so the strobe changes every frame.
+                thumbnail: Some(ThumbnailRecipe { warm_up_s: 0.0, loop_s: 1.6, ..Default::default() }),
+            }
+        }
+        fn init(&mut self, _props: &Props) {}
+        fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &Inputs) {
+            self.on = !self.on;
+            let v = if self.on { 1.0 } else { 0.0 };
+            canvas.pixels.fill([v, v, v]);
+        }
+    }
+
+    #[test]
+    fn a_flickering_tile_fails_the_strict_seam() {
+        let mut effect = Strobe { on: false };
+        let body = render(&mut effect, &Props::new()).expect("renders");
+        let s = score(&body).expect("well formed");
+        assert!(s.seam > BAR_SEAM, "seam {}", s.seam);
+        assert!(problems(&s, None).iter().any(|p| p.contains("loop jumps")));
+    }
+
+    #[test]
+    fn one_lit_pixel_does_not_make_a_row_or_column_lit() {
+        // 8x8, one frame. A row needs 25 % of its 8 pixels, which is 2.
+        let header = |frames: u16| {
+            let mut body = Vec::new();
+            for v in [8u16, 8, frames] {
+                body.extend_from_slice(&v.to_le_bytes());
+            }
+            body
+        };
+        let mut one = header(1);
+        let mut frame = vec![0u8; 8 * 8 * 3];
+        frame[0] = 255; // pixel (0, 0)
+        one.extend_from_slice(&frame);
+        let s = score(&one).expect("well formed");
+        assert_eq!((s.rows_lit, s.cols_lit), (0, 0));
+
+        // A second lit pixel in row 0 (x = 1) makes row 0 lit; the columns still hold one each.
+        frame[3] = 255;
+        let mut two = header(1);
+        two.extend_from_slice(&frame);
+        let s = score(&two).expect("well formed");
+        assert_eq!((s.rows_lit, s.cols_lit), (1, 0));
+    }
+
+    #[test]
+    fn a_render_that_runs_past_its_budget_is_stopped() {
+        let updates = Arc::new(AtomicU32::new(0));
+        let mut effect = Counter { updates: updates.clone(), recipe: None };
+        let error = render_within(&mut effect, &Props::new(), std::time::Duration::ZERO)
+            .expect_err("a zero budget stops the render");
+        assert!(error.contains("budget"), "{error}");
+        // It stopped at the first update, not after the whole recipe.
+        assert_eq!(updates.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -507,6 +670,36 @@ mod tests {
         assert!(cache.get(1, "a").is_none());
         cache.put(0, "a", Arc::new(vec![9]));
         assert!(cache.is_empty());
+    }
+
+    #[tokio::test]
+    async fn only_a_few_renders_run_at_once() {
+        let cache = ThumbnailCache::default();
+        let mut held = Vec::new();
+        for _ in 0..CONCURRENT_RENDERS {
+            held.push(cache.render_slot().await);
+        }
+        // One more has to wait until a slot is given back.
+        let waiting = tokio::time::timeout(std::time::Duration::from_millis(100), cache.render_slot()).await;
+        assert!(waiting.is_err(), "a render slot was free beyond the limit");
+        held.pop();
+        let freed = tokio::time::timeout(std::time::Duration::from_millis(500), cache.render_slot()).await;
+        assert!(freed.is_ok(), "a released slot is not handed on");
+    }
+
+    #[test]
+    fn the_synthetic_inputs_move_once_round_per_loop() {
+        let s = Synthetic { screen: true, audio: true, loop_s: 2.0 };
+        let at = |t: f64| s.inputs(t);
+        let (a, b, c) = (at(0.5), at(1.0), at(2.5));
+        let spectrum = |i: &Inputs| i.audio.as_ref().expect("audio").magnitudes.clone();
+        assert_ne!(spectrum(&a), spectrum(&b), "the spectrum moves");
+        for (x, y) in spectrum(&a).iter().zip(spectrum(&c)) {
+            assert!((x - y).abs() < 1e-4, "the spectrum is the same one loop later");
+        }
+        let screen = |i: &Inputs| i.screen.as_ref().expect("screen").pixels.clone();
+        assert_ne!(screen(&a), screen(&b), "the screen moves");
+        assert_eq!(screen(&a), screen(&c), "the screen is the same one loop later");
     }
 
     #[test]

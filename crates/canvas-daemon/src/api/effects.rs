@@ -303,12 +303,19 @@ pub async fn thumbnail(
         return Ok(binary_response(&bytes));
     }
 
+    // At most CONCURRENT_RENDERS renders run at once; a request that waited for a slot may
+    // find the tile already rendered by the one ahead of it.
+    let _slot = app.thumbnails.render_slot().await;
+    if let Some(bytes) = app.thumbnails.get(generation, &schema.id) {
+        return Ok(binary_response(&bytes));
+    }
+
     let user = app.user_effects.clone();
     let effect_id = schema.id.clone();
     let props = schema.defaults();
     let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
         let mut effect = crate::create_effect(&user, &effect_id)?;
-        Ok(crate::thumbnail::render(effect.as_mut(), &props))
+        crate::thumbnail::render(effect.as_mut(), &props)
     })
     .await
     .map_err(|e| ApiFailure::internal(format!("the thumbnail render stopped: {e}")))?
