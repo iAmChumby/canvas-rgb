@@ -191,6 +191,7 @@ jobs:
         run: cd dist && sha256sum -c *.sha256
 
       - name: The release notes are there
+        shell: bash
         run: |
           if [ ! -s dist/release-notes.md ]; then
             echo "dist/release-notes.md is missing or empty" >&2

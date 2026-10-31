@@ -6,14 +6,12 @@
   notes is that version's section of CHANGELOG.md: the text under "## [X.Y.Z] - date", up to the next
   version heading ("## [Unreleased]", "## [X.Y.Z]" or "## [X.Y.Z-pre.1]"), or up to the compare links at
   the bottom of the file (link definitions whose labels name versions, then only blank lines to the end).
-  The changelog is read as UTF-8. Headings and link definitions may be indented by 1-3 spaces, as in
-  Markdown. The script throws, naming the line, on: a level-1 or level-2 heading (including a bare "#" or
-  "##") that is not a version heading, a second heading for the same version, a link definition inside the
-  section, and, wherever the released version sits, a link label in the compare links at the end of the
-  file that names no version. Not detected: headings or "## [x]" lines inside fenced code blocks,
-  "## [Unreleased]" or a pre-release heading in the middle of a released section (ends it there), a
-  duplicate version heading that is not the next version heading, and other layouts (setext headings,
-  tab or 4-space indents).
+  The changelog is read as UTF-8; headings and links may be indented 1-3 spaces. The script throws (exit
+  1), naming the line, on: a "#" or "##" heading that is not a version heading (a bare one too), a heading
+  of any level with a bracketed version ("### [0.1.0]"), a second heading for the same version, a link
+  definition inside the section, and a compare-link label at the end of the file that names no version.
+  Fences are not tracked: a "#" or "##" line in a code block is refused too. Not detected: setext
+  headings, tab or 4-space indents, a mid-section "## [Unreleased]" (it ends the section).
   signature is the contents of the installer's .sig file, as `tauri signer sign` wrote it.
   url is the release asset's address; the tray refuses anything that is not https on github.com or
   GitHub's asset hosts, so a wrong address here makes the update unusable, not unsafe.
@@ -86,8 +84,8 @@ for ($i = $start + 1; $i -lt $lines.Count; $i++) {
         }
         $end = $i; break
     }
-    if ($line -match '^ {0,3}#{1,2}(\s|$)' -or $line -match '^ {0,3}## \[') {
-        throw "CHANGELOG.md line $($i + 1): '$line' is not a version heading. The section for $Version ends at a '## [X.Y.Z]' heading, and holds only '###' subheadings."
+    if ($line -match '^ {0,3}#{1,2}(\s|$)' -or $line -match '^ {0,3}## \[' -or $line -cmatch "^ {0,3}#{1,6}\s+\[$labelPattern\]") {
+        throw "CHANGELOG.md line $($i + 1): '$line' is not a version heading. The section for $Version ends at a '## [X.Y.Z]' heading, and holds only '###' subheadings that name no version."
     }
     if ($line -match $linkDef) {
         if ($i -ge $tail) { $end = $i; break }

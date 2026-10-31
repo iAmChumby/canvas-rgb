@@ -73,13 +73,12 @@ push and the release workflow runs it before it builds.
    GitHub release.
 6. The workflow writes the release notes: the version's changelog section, then GitHub's list of merged
    pull requests. Check them with `gh release view vX.Y.Z --json body`; the body must start with the
-   section's first line. The script fails the release, naming the line, on: a `#` or `##` heading inside the
-   section that is not a version heading (a bare `#` or `##` too), a second heading for the same version, a
-   link definition inside the section, and a link label in the compare links at the end of the file that
-   names no version. Headings and link definitions may be indented by 1-3 spaces. Not detected: headings or
-   `## [x]` lines inside fenced code blocks, `## [Unreleased]` or a pre-release heading in the middle of a
-   released section, a duplicate version heading that is not the next version heading, and other layouts
-   (setext headings, tab or 4-space indents). Keep the changelog in the Keep a Changelog layout.
+   section's first line. The script fails the release (exit 1), naming the line, on: a `#` or `##`
+   heading that is not a version heading (a bare one too), a heading of any level with a bracketed version
+   (`### [0.1.0]`), a second heading for the same version, a link definition inside the section, and a compare-link label at the end of the
+   file that names no version. Fences are not tracked: a `#` or `##` line in a code block is refused too.
+   Not detected: setext headings, tab or 4-space indents, a mid-section `## [Unreleased]` (it ends the
+   section). Indents of 1-3 spaces are allowed.
 
 ## Updates: the signing key and `latest.json`
 
