@@ -46,6 +46,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         }
         Command::Config(ConfigCommand::Export { file }) => config_export(cli, file),
         Command::Config(ConfigCommand::Import { file }) => config_import(cli, file),
+        Command::Update(args) => update(cli, args),
     }
 }
 
@@ -774,6 +775,26 @@ fn config_import(cli: &Cli, file: &str) -> Result<(), CliError> {
         print_json(cli, &answer);
     } else {
         println!("imported {file}");
+    }
+    Ok(())
+}
+
+/// `canvas-rgb update --file <installer> --sig <sig file>`.
+///
+/// The service runs setup as SYSTEM, so there is no permission prompt. Any refusal (a bad
+/// signature, an older version, an install already running, the service down) exits non-zero
+/// with the service's message.
+fn update(cli: &Cli, args: &canvas_daemon::cli::UpdateArgs) -> Result<(), CliError> {
+    let request = args.request()?;
+    let client = client(cli)?;
+    let body = serde_json::to_string(&request)
+        .map_err(|e| CliError::Other(format!("could not build the request: {e}")))?;
+    let answer = client.request("POST", canvas_proto::api::routes::UPDATE_INSTALL, Some(&body))?;
+    if cli.json {
+        print_json(cli, &answer);
+    } else {
+        let version = answer.get("version").and_then(|v| v.as_str()).unwrap_or("?");
+        println!("the service started the update to {version}");
     }
     Ok(())
 }

@@ -32,6 +32,9 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 libloading = "0.8"
+base64 = "0.22"
+minisign-verify = "0.3"
+semver = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.8"

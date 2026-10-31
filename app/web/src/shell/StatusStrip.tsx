@@ -13,6 +13,7 @@ import { messageOf } from "@/lib/errors";
 import { links, playing, problems, type Tone } from "@/lib/status";
 import { patchSnap, refreshStatus, useSnap } from "@/lib/store";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
+import { RunningPresetName, useTrackRunningPreset } from "@/shell/RunningPresetName";
 
 /** What the strip says when nothing is wrong. */
 const ALL_GOOD = "All connected";
@@ -82,6 +83,7 @@ export function StatusStrip({
 
   // What is playing.
   const now = playing(status, effects);
+  useTrackRunningPreset(status?.active_effect ?? null);
   const list = problems(status, offline);
   const tone: Tone = list[0]?.tone ?? "ok";
   // On a phone the row has room for the link's name, not for the whole sentence. The full
@@ -119,7 +121,10 @@ export function StatusStrip({
         <span className="strip-now">
           <span className="strip-swatch" data-paused={paused ? "true" : "false"} aria-hidden="true" />
           <span className="strip-now-text">
-            <span className="strip-effect-name">{now.name}</span>
+            <span className="strip-effect-name">
+              {now.name}
+              <RunningPresetName effectId={status?.active_effect ?? null} />
+            </span>
             {now.detail && (
               <span className="strip-now-detail" data-count={now.count ? "true" : "false"}>
                 {now.detail}

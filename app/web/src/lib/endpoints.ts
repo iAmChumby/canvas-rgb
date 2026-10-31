@@ -15,6 +15,9 @@ import type { OnboardingSession } from "@/proto/OnboardingSession";
 import type { EffectsResponse } from "@/proto/EffectsResponse";
 import type { EffectDetail } from "@/proto/EffectDetail";
 import type { ActivateEffect } from "@/proto/ActivateEffect";
+import type { PresetCreate } from "@/proto/PresetCreate";
+import type { PresetReplace } from "@/proto/PresetReplace";
+import type { PresetsResponse } from "@/proto/PresetsResponse";
 import type { ImportEffect } from "@/proto/ImportEffect";
 import type { ImportEffectResponse } from "@/proto/ImportEffectResponse";
 import type { SetFavorite } from "@/proto/SetFavorite";
@@ -64,10 +67,19 @@ export const api = {
   patchActiveProps: (props: Props) => request<unknown>("PATCH", routes.effectActiveProps, props),
   setFavorite: (id: string, body: SetFavorite) =>
     request<unknown>("PUT", routes.effectFavorite(id), body),
+  /** Saves the values as a user preset of the effect. */
+  createPreset: (id: string, body: PresetCreate) =>
+    request<PresetsResponse>("POST", routes.effectPresets(id), body),
+  /** Overwrites and/or renames a user preset. `expected` is what the window last saw. */
+  replacePreset: (id: string, name: string, body: PresetReplace) =>
+    request<PresetsResponse>("PUT", routes.effectPreset(id, name), body),
+  deletePreset: (id: string, name: string) =>
+    request<PresetsResponse>("DELETE", routes.effectPreset(id, name)),
   /** Adds a user effect from an HTML file the reader chose. */
   importEffect: (body: ImportEffect) => request<ImportEffectResponse>("POST", routes.effectsImport, body),
   /** Removes a user effect. Only the `html:` ids can go. */
-  deleteEffect: (id: string) => request<unknown>("DELETE", routes.effect(id)),
+  deleteEffect: (id: string, keepPresets = false) =>
+    request<unknown>("DELETE", `${routes.effect(id)}${keepPresets ? "?keep_presets=true" : ""}`),
 
   /** Every peripheral the adapters see. The list opens nothing. */
   peripherals: () => request<{ peripherals: PeripheralRow[] }>("GET", routes.peripherals),

@@ -45,6 +45,9 @@ pub struct Stored {
     pub pending_since_ms: Option<u64>,
     /// Set after an update until the person dismisses "Updated to X.Y.Z"; keeps the release notes.
     pub updated_to: Option<UpdateInfo>,
+    /// The last version this tray recorded as installed. An installer report for it is not news
+    /// (a stale `update-result.json`).
+    pub last_settled: Option<String>,
 }
 
 impl Default for Stored {
@@ -59,6 +62,7 @@ impl Default for Stored {
             pending: None,
             pending_since_ms: None,
             updated_to: None,
+            last_settled: None,
         }
     }
 }

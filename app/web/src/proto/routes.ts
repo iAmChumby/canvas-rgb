@@ -10,6 +10,10 @@ export const routes = {
   effects: "/api/v1/effects",
   effect: (id: string) => `/api/v1/effects/${id}`,
   effectActivate: (id: string) => `/api/v1/effects/${id}/activate`,
+  // POST a PresetCreate: saves a user preset (409 on a name taken by a built-in or user preset).
+  effectPresets: (id: string) => `/api/v1/effects/${id}/presets`,
+  // PUT a PresetReplace (overwrite and/or rename; 409 when `expected` is stale); DELETE removes it.
+  effectPreset: (id: string, name: string) => `/api/v1/effects/${id}/presets/${encodeURIComponent(name)}`,
   effectActiveProps: "/api/v1/effects/active/props",
   // POST an ImportEffect: a SignalRGB-format HTML effect to add to the effects folder.
   // 409 when the name is taken and no replace is asked for; 422 when the file does not parse.

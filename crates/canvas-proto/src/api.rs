@@ -35,8 +35,21 @@ pub mod routes {
     /// `POST` with [`super::ImportEffect`], answers [`super::ImportEffectResponse`]. The daemon
     /// parses the file before it writes it; a file that does not parse is refused with the
     /// parser's message and nothing is written. `DELETE` on [`EFFECT`] removes a user effect's
-    /// file (built-ins refuse).
+    /// file (built-ins refuse). Its presets go with it unless the query says
+    /// `?keep_presets=true` ([`super::DeleteEffectQuery`]).
     pub const EFFECTS_IMPORT: &str = "/api/v1/effects/import";
+    /// `POST` with [`super::PresetCreate`]: saves a user preset for the effect. Answers
+    /// [`super::PresetsResponse`]. 409 when the name equals, ignoring ASCII case, a built-in or
+    /// user preset of that effect; 404 for an unknown effect; 422 for an empty name, one over 40
+    /// characters, one with a control, bidirectional or other invisible format character, or
+    /// props over the caps (64 keys, 8 KiB). Keys the effect does not have are dropped and numbers
+    /// are clamped to the schema's range.
+    pub const EFFECT_PRESETS: &str = "/api/v1/effects/{id}/presets";
+    /// `PUT` with [`super::PresetReplace`] overwrites and/or renames one user preset; `DELETE`
+    /// removes it. Both answer [`super::PresetsResponse`]. 404 for a missing preset or effect;
+    /// 409 when `expected` is not what is stored (changed in another window) or `rename_to`
+    /// clashes; 422 for a bad name or props over the caps, as for [`EFFECT_PRESETS`].
+    pub const EFFECT_PRESET: &str = "/api/v1/effects/{id}/presets/{name}";
     pub const LAYOUTS: &str = "/api/v1/layouts";
     pub const LAYOUT: &str = "/api/v1/layouts/{id}";
     /// `PUT` with [`super::SetActiveLayout`].
@@ -81,6 +94,12 @@ pub mod routes {
     /// `POST`, no body: the daemon applies `on_quit` (G3: black by default), tells the
     /// service it is quitting on purpose (`PipeRequest::DaemonQuitting`), and exits.
     pub const QUIT: &str = "/api/v1/quit";
+    /// `POST` [`InstallUpdateRequest`]: the daemon forwards it to the service as
+    /// `PipeRequest::InstallUpdate` (#43). `202` [`InstallUpdateResponse`] once setup runs;
+    /// `422 validation` for a refused file, signature or version; `409 conflict` while an install
+    /// runs; `503 service_unavailable` when the service is down (the tray then falls back to the
+    /// permission prompt).
+    pub const UPDATE_INSTALL: &str = "/api/v1/update/install";
     /// Diagnostics: current colors as the adapter reads them back from the hardware.
     pub const DIAG_READBACK: &str = "/api/v1/diag/readback";
     /// WebSocket. Binary messages: `u16 LE width, u16 LE height, width*height*3 RGB bytes`,
@@ -227,6 +246,23 @@ pub struct PatchZone {
     pub led_count: u32,
 }
 
+/// Body of `POST /api/v1/update/install` (#43).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct InstallUpdateRequest {
+    /// Absolute path of the installer, readable by the calling user.
+    pub installer: String,
+    /// The text of the installer's `.sig` file (base64 minisign signature, as the release ships it).
+    pub signature: String,
+}
+
+/// `202` answer of `POST /api/v1/update/install`: setup is running for this signed version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct InstallUpdateResponse {
+    pub version: String,
+}
+
 /// Shows the owner where a light is. While an identify is active the engine renders nothing
 /// else: every LED on every device is black except the target, so the target is the only
 /// light in the room. The target is `count` LEDs from `led` (default 1) in a bright colour.
@@ -306,12 +342,52 @@ pub struct EffectDetail {
     pub props: Props,
 }
 
+/// A new user preset: props only, never a copy of the effect.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PresetCreate {
+    pub name: String,
+    pub props: Props,
+}
+
+/// Overwrite and/or rename a user preset.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PresetReplace {
+    /// The new name, or none to keep it.
+    #[serde(default)]
+    pub rename_to: Option<String>,
+    pub props: Props,
+    /// The props the client last saw for this preset. A mismatch is a conflict, so an edit made
+    /// in another window is never overwritten silently.
+    pub expected: Props,
+}
+
+/// Query of `DELETE /api/v1/effects/{id}`: what happens to the user presets of the effect that
+/// is removed. Left out, they are deleted with it; with `keep_presets=true` they stay in
+/// `effects.json`, so importing the same file again brings them back.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DeleteEffectQuery {
+    #[serde(default)]
+    pub keep_presets: bool,
+}
+
+/// The effect's user presets after a change, in their stored order.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PresetsResponse {
+    pub user_presets: Vec<Preset>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ActivateEffect {
-    /// Overrides on top of the saved values or defaults.
+    /// Overrides on top of the saved values or defaults (or on top of the preset).
     #[serde(default)]
     pub props: Props,
+    /// A built-in preset (`schema.presets`) or a user preset, by name. A preset's props sit on
+    /// the defaults, not on the saved values, so two presets never leak into each other.
     pub preset: Option<String>,
 }
 

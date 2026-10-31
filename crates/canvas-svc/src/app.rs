@@ -20,6 +20,7 @@ use crate::process::{ProcessSpawner, StdSpawner};
 use crate::secure::{windows_acl, SecureDir};
 use crate::service::{Core, PowerEvent};
 use crate::store::{self, ChipState};
+use crate::update_install::{Finish, UpdateInstaller};
 use canvas_adapters::openrgb::OpenRgbAdapter;
 use canvas_proto::config::FansFile;
 use canvas_proto::consts::{DAEMON_EXE, OPENRGB_HOST, OPENRGB_PORT};
@@ -28,6 +29,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::net::windows::named_pipe::NamedPipeServer;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -82,6 +84,8 @@ pub struct Deps {
     pub launcher: Box<dyn SessionLauncher>,
     pub adapter: AdapterFactory,
     pub install_dir: PathBuf,
+    /// The update installer. `None` builds the production one (when the home is secured).
+    pub updates: Option<Arc<UpdateInstaller>>,
 }
 
 /// The production dependencies: real processes, the user session launcher, and the loopback
@@ -92,6 +96,7 @@ pub fn production_deps() -> Deps {
         launcher: Box::new(crate::daemon::WtsLauncher),
         adapter: Box::new(|| Box::new(OpenRgbAdapter::new(OPENRGB_HOST, OPENRGB_PORT))),
         install_dir: install_dir(),
+        updates: None,
     }
 }
 
@@ -168,7 +173,11 @@ pub fn build_core(boot: &Boot, deps: Deps) -> Core {
 
     let mut daemon = DaemonSupervisor::new(deps.install_dir.join(DAEMON_EXE), deps.launcher);
     daemon.start(now);
-    Core::new(fans, openrgb, daemon)
+    let mut core = Core::new(fans, openrgb, daemon);
+    if boot.secured() {
+        core.updates = Some(deps.updates.unwrap_or_else(|| Arc::new(UpdateInstaller::production(home.to_path_buf(), deps.install_dir.clone()))));
+    }
+    core
 }
 
 /// Step 3: claims the pipe, then runs until `stop` completes, then restores BIOS. `power`
@@ -177,18 +186,46 @@ pub async fn run(
     boot: Boot,
     deps: Deps,
     stop: impl Future<Output = ()>,
-    mut power: UnboundedReceiver<PowerEvent>,
+    power: UnboundedReceiver<PowerEvent>,
 ) -> io::Result<()> {
     // The pipe is claimed before anything else, so a squatter fails the service loudly.
     let name = pipe_server::pipe_name();
     let first = pipe_server::create_instance(&name, true)?;
     let core = Arc::new(AsyncMutex::new(build_core(&boot, deps)));
+    run_core(core, name, first, stop, power).await
+}
+
+/// Starts the thread that finishes a pending update (#43): the new service finishes an update once
+/// setup has ended. On its own thread, so the service is up and answering while it waits. `None` when
+/// the service has no installer (the home is not secured).
+pub fn start_update_resume(updates: Option<Arc<UpdateInstaller>>) -> Option<std::thread::JoinHandle<Option<Finish>>> {
+    let updates = updates?;
+    match std::thread::Builder::new().name("update-resume".into()).spawn(move || updates.resume_pending()) {
+        Ok(handle) => Some(handle),
+        Err(e) => {
+            tracing::error!(error = %e, "could not start the pending-update thread");
+            None
+        }
+    }
+}
+
+/// The part of [`run`] after the core is built: serves the pipe, resumes a pending update, runs the
+/// 1 Hz loop, and restores BIOS on stop.
+pub async fn run_core(
+    core: Arc<AsyncMutex<Core>>,
+    name: String,
+    first: NamedPipeServer,
+    stop: impl Future<Output = ()>,
+    mut power: UnboundedReceiver<PowerEvent>,
+) -> io::Result<()> {
     let pipe_core = Arc::clone(&core);
     tokio::spawn(async move {
         if let Err(e) = pipe_server::serve(pipe_core, name, first, pipe_server::win_peers()).await {
             tracing::error!(error = %e, "pipe server stopped");
         }
     });
+    let updates = core.lock().await.updates.clone();
+    start_update_resume(updates);
     let mut ticker = tokio::time::interval(Duration::from_secs(1));
     tokio::pin!(stop);
     loop {
