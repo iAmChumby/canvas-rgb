@@ -5,6 +5,13 @@
 //! the screen and audio capture, the storage, the logs, the first run, the sleep
 //! handling, the SignalRGB conflict check and the pipe client to the service.
 
+// A release build is a windows-subsystem program: whoever starts it (the service, a shell, Explorer,
+// an old Run key), Windows gives it no console window (#6). Closing a console used to end the daemon.
+// With no console, stdout and stderr have no handle and Rust's `eprintln!` skips silently, so a
+// message that matters goes to the log file, never only to stderr. Debug builds keep the console
+// for `cargo run` and the tests.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use canvas_daemon::exit_log::StopReason;
 use canvas_daemon::state::App;
 use canvas_proto::api::LinkState;
@@ -15,7 +22,8 @@ use std::sync::Arc;
 fn main() -> std::process::ExitCode {
     // The daemon never runs elevated. This comes before the log: the logger creates and prunes
     // files in a user-writable folder, and an elevated process must not touch one. A refused
-    // start is reported on stderr (a console-started admin run has one).
+    // start is reported on stderr (a console-started admin run has one; the release build has none,
+    // and the tray's own dialog tells the person).
     if let Err(e) = canvas_daemon::elevated::ElevatedError::check() {
         eprintln!("error: {e}");
         return std::process::ExitCode::from(1);
