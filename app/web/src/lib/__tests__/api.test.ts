@@ -161,6 +161,72 @@ describe("the request deadline", () => {
     expect(lookups).toBe(2);
   });
 
+  it("keeps the answer of the lookup that is current when an abandoned lookup answers late", async () => {
+    vi.useFakeTimers();
+    // The tray's first lookup hangs and the deadline gives up on it. The second lookup answers
+    // at once, with a token of its own. The first one answers late, with a token of its own.
+    let lookups = 0;
+    let releaseFirst!: (c: { base_url: string; token: string }) => void;
+    const firstLookup = new Promise<{ base_url: string; token: string }>((resolve) => {
+      releaseFirst = resolve;
+    });
+    (window as unknown as { __TAURI__?: unknown }).__TAURI__ = {
+      core: {
+        invoke: async (cmd: string) => {
+          if (cmd !== CMD_GET_API_CONFIG) return null;
+          lookups += 1;
+          if (lookups === 1) return firstLookup;
+          return { base_url: "http://127.0.0.1:9430", token: "second-token" };
+        },
+      },
+      event: { listen: async () => () => undefined },
+    };
+    dropApiConfig();
+
+    // Every request remembers the token it was sent, so the cache is read back from them.
+    const sent: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        const headers = init?.headers as Record<string, string> | undefined;
+        sent.push(headers?.Authorization ?? "");
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ ok: true }),
+          json: async () => ({ ok: true }),
+        } as unknown as Response;
+      }),
+    );
+
+    // The first request waits on the lookup that hangs, and the deadline gives up on it.
+    const first = request("GET", "/api/v1/effects");
+    const failed = expect(first).rejects.toThrow(/did not answer within/);
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 50);
+    await failed;
+
+    // "Try again": a new lookup, which answers at once.
+    const second = request("GET", "/api/v1/effects");
+    const ok = expect(second).resolves.toBeTruthy();
+    await vi.advanceTimersByTimeAsync(10);
+    await ok;
+    expect(sent).toEqual(["Bearer second-token"]);
+
+    // The abandoned lookup answers late. The request that was already out takes its answer,
+    // but the answer is not the current one, so it must not become the cached one.
+    releaseFirst({ base_url: "http://127.0.0.1:9430", token: "first-token" });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(sent).toContain("Bearer first-token");
+
+    // The next request reads the cache: it must find the answer of the lookup that is current.
+    const third = request("GET", "/api/v1/effects");
+    const okThird = expect(third).resolves.toBeTruthy();
+    await vi.advanceTimersByTimeAsync(10);
+    await okThird;
+    expect(sent.at(-1)).toBe("Bearer second-token");
+    expect(lookups).toBe(2);
+  });
+
   it("gives up on a body that never finishes", async () => {
     vi.useFakeTimers();
     // The headers arrive, and then nothing: the body is read under the same deadline.
