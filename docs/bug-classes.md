@@ -71,8 +71,23 @@ once per connection or once per start and trusts it forever.
   10 s while frames stream (`CUSTOM_MODE_KEEPALIVE`, a starting value to measure); the ROYUAN keyboard's
   direct-mode report is sent again after a resume (`crates/canvas-adapters/src/royuan.rs`). One call,
   `canvas_adapters::note_resume()`, reaches both. The keepalive covers the RAM even if the resume never reaches the daemon; the keyboard has no keepalive, so it depends on the resume arriving.
-- [#29](https://github.com/iAmChumby/canvas-rgb/issues/29): a sleep resets the fan chip and the service never
-  takes it back (`crates/canvas-svc/src/fans.rs`).
+- [#29](https://github.com/iAmChumby/canvas-rgb/issues/29): the service's 1 Hz fan loop kept writing
+  through the resume transition. A duty write landed while firmware still owned the fan controller,
+  its readback failed for the full `READBACK_SETTLE`, and the safety handback (correct in itself) stayed
+  until the user re-applied a profile (`crates/canvas-svc/src/fans.rs`). The service accepted no power
+  notifications (`crates/canvas-svc/src/winsvc.rs`). Fix built, pending a real wake: `SERVICE_CONTROL_POWEREVENT` pauses writes
+  on suspend and, after `RESUME_GRACE`, re-applies every header that was under control; a wall-clock
+  gap between ticks (`SystemTime`, because `Instant` may not count a sleep) is the fallback signal; an
+  apply inside the window is held until it ends; a suspend with no resume ends its hold after
+  `SUSPEND_HOLD_CAP_TICKS`; a failed readback logs every reading and the mode bit.
+  Regression tests: `fans_tests.rs`, on a `FakeChip` that models firmware owning the controller.
+  UNKNOWN until one real wake: whether the chip resets or firmware only holds it, and for how long.
+- **Sibling search (#29, canvas-svc):** the GPU fans (NVML) re-assert manual mode on every speed write,
+  so the same re-apply covers them. The daemon supervisor's 5 s heartbeat check compares `Instant`s; if
+  `Instant` counts the sleep, a wake looks like a missed heartbeat, so a resume now refreshes the
+  heartbeat clock (`Core::on_power`, `Core::tick`). Sensor-loss timeouts get a fresh clock when the
+  grace ends. Left, UNKNOWN: the OpenRGB supervisor's timers (`openrgb.rs:327`) also take an
+  `Instant` tick; not checked for a sleep.
 - **Class fix:** due (second bug). Candidate: every adapter or service that sets a mode once registers
   for the resume event (one shared hook) and has a test that a resume makes it set the mode again.
 - **Sibling search (#5, canvas-adapters and canvas-daemon):** OpenRGB (every controller, GPU and

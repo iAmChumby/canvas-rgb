@@ -18,7 +18,7 @@ use crate::paths;
 use crate::pipe_server;
 use crate::process::{ProcessSpawner, StdSpawner};
 use crate::secure::{windows_acl, SecureDir};
-use crate::service::Core;
+use crate::service::{Core, PowerEvent};
 use crate::store::{self, ChipState};
 use canvas_adapters::openrgb::OpenRgbAdapter;
 use canvas_proto::config::FansFile;
@@ -28,6 +28,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::Mutex as AsyncMutex;
 
 /// The result of securing the machine home. Only [`secure_boot`] makes one. It keeps the
@@ -170,8 +171,14 @@ pub fn build_core(boot: &Boot, deps: Deps) -> Core {
     Core::new(fans, openrgb, daemon)
 }
 
-/// Step 3: claims the pipe, then runs until `stop` completes, then restores BIOS.
-pub async fn run(boot: Boot, deps: Deps, stop: impl Future<Output = ()>) -> io::Result<()> {
+/// Step 3: claims the pipe, then runs until `stop` completes, then restores BIOS. `power`
+/// carries the SCM's suspend and resume notifications.
+pub async fn run(
+    boot: Boot,
+    deps: Deps,
+    stop: impl Future<Output = ()>,
+    mut power: UnboundedReceiver<PowerEvent>,
+) -> io::Result<()> {
     // The pipe is claimed before anything else, so a squatter fails the service loudly.
     let name = pipe_server::pipe_name();
     let first = pipe_server::create_instance(&name, true)?;
@@ -187,6 +194,10 @@ pub async fn run(boot: Boot, deps: Deps, stop: impl Future<Output = ()>) -> io::
     loop {
         tokio::select! {
             _ = ticker.tick() => core.lock().await.tick(Instant::now()).await,
+            Some(event) = power.recv() => {
+                tracing::info!(?event, "power event");
+                core.lock().await.on_power(event, Instant::now());
+            }
             _ = &mut stop => break,
         }
     }
@@ -250,13 +261,24 @@ pub fn restore_bios_production(home: &Path) -> io::Result<usize> {
 
 /// Used by the console runner (`--console`).
 pub async fn run_console(boot: Boot) -> io::Result<()> {
-    run(boot, production_deps(), async {
-        let _ = tokio::signal::ctrl_c().await;
-    })
+    // The console runner gets no power events; the sender stays alive until the run ends.
+    let (_power_tx, power_rx) = tokio::sync::mpsc::unbounded_channel();
+    run(
+        boot,
+        production_deps(),
+        async {
+            let _ = tokio::signal::ctrl_c().await;
+        },
+        power_rx,
+    )
     .await
 }
 
 /// Used by the SCM entry point.
-pub async fn run_scm(boot: Boot, stop: impl Future<Output = ()>) -> io::Result<()> {
-    run(boot, production_deps(), stop).await
+pub async fn run_scm(
+    boot: Boot,
+    stop: impl Future<Output = ()>,
+    power: UnboundedReceiver<PowerEvent>,
+) -> io::Result<()> {
+    run(boot, production_deps(), stop, power).await
 }

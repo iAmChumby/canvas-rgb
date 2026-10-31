@@ -8,6 +8,13 @@ use canvas_proto::api::error_codes;
 use canvas_proto::pipe::{PipeRequest, PipeResponse, PROTOCOL_VERSION};
 use std::time::Instant;
 
+/// A power notification the SCM sends the service (`SERVICE_CONTROL_POWEREVENT`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PowerEvent {
+    Suspend,
+    Resume,
+}
+
 pub struct Core {
     pub fans: FanController,
     pub openrgb: OpenRgbSupervisor,
@@ -44,6 +51,9 @@ impl Core {
     /// daemon or tray is connected.
     pub async fn tick(&mut self, now: Instant) {
         self.fans.tick(now);
+        if self.fans.take_resumed() {
+            self.daemon.on_heartbeat(now);
+        }
         if self.daemon.tick(now) == DaemonAction::WriteBlack {
             // Not "whoever is listed right now": the same wait for detection as the boot color.
             self.openrgb.request_black(now);
@@ -51,6 +61,18 @@ impl Core {
         let connected = self.daemon.is_connected(now);
         let boot = self.fans.boot_color();
         self.openrgb.tick(now, connected, boot).await;
+    }
+
+    /// A suspend or resume from the SCM. A resume also gives the daemon a fresh heartbeat clock:
+    /// `Instant` may have counted the sleep, and a heartbeat hours old is not a crash.
+    pub fn on_power(&mut self, event: PowerEvent, now: Instant) {
+        match event {
+            PowerEvent::Suspend => self.fans.on_suspend(),
+            PowerEvent::Resume => {
+                self.fans.on_resume(now, "power event");
+                self.daemon.on_heartbeat(now);
+            }
+        }
     }
 
     /// Writes BIOS on every header and stops the OpenRGB server. Called on stop and shutdown.
