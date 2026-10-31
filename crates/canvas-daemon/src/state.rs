@@ -200,6 +200,11 @@ impl App {
         self.devices.read().await.iter().filter(|x| x.connected).count() as u32
     }
 
+    /// How many devices the daemon knows about, connected or not.
+    pub async fn devices_total(&self) -> u32 {
+        self.devices.read().await.len() as u32
+    }
+
     /// The status snapshot the API and the CLI read.
     pub async fn status(&self) -> Status {
         let stats = self.engine.stats();
@@ -228,6 +233,7 @@ impl App {
             frames_rendered: stats.frames_rendered,
             parked: stats.parked,
             devices_connected: self.devices_connected().await,
+            devices_total: self.devices_total().await,
             preview_subscribers: self.preview.subscribers(),
             active_layout,
             active_effect,

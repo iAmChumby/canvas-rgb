@@ -181,6 +181,11 @@ pub struct Status {
     /// True when the loop is parked (no device sinks, no preview subscriber).
     pub parked: bool,
     pub devices_connected: u32,
+    /// How many devices the daemon knows about, connected or not. The editor draws one card per
+    /// device while the list is on its way, so it needs the total and not only the connected
+    /// count. A daemon that does not send it (an older one) reports none.
+    #[serde(default)]
+    pub devices_total: u32,
     pub preview_subscribers: u32,
     pub active_layout: Option<String>,
     pub active_effect: Option<String>,

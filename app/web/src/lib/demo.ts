@@ -361,6 +361,9 @@ function statusNow(): Status {
   const elapsedMs = Date.now() - s.startedAt;
   const waking = openRgbConnecting() || elapsedMs < wakingMs();
   const connected = waking ? 0 : s.devices.filter((d) => d.connected).length;
+  // Every device the daemon knows about, connected or not: the editor draws one card per device
+  // while the list is on its way.
+  const total = waking ? 0 : s.devices.length;
   const down = !s.serviceUp;
   const fps = s.settings.fps;
   const jitter = Math.sin(Date.now() / 1700) * 0.12;
@@ -375,6 +378,7 @@ function statusNow(): Status {
     frames_rendered: Math.round((elapsed / 1000) * fps),
     parked: false,
     devices_connected: connected,
+    devices_total: total,
     preview_subscribers: 1,
     active_layout: s.activeLayout,
     active_effect: s.activeEffect,
