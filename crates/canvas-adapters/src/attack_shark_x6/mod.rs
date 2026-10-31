@@ -129,6 +129,7 @@ use canvas_proto::props::{PropKind, PropValue, PropertyDef, Props};
 use canvas_proto::traits::AdapterError;
 
 pub mod codec;
+pub(crate) mod hid_cache;
 
 use self::codec::{Event, Kind, LightChange};
 
@@ -525,23 +526,30 @@ impl FeatureTransport for HidFeature {
     }
 }
 
-/// Finds the mouse by vendor id, product id and the collection's usage page and usage.
-///
-/// The interface number is deliberately not part of the match: the research says to match by
-/// VID/PID plus caps, because the interface number moves between the receiver's firmware
-/// revisions (research section 8.1).
-struct HidOpener {
-    product_id: u16,
+/// What the opener needs from a HID context: `hidapi::HidApi` in the product, a counting fake in
+/// the tests.
+trait HidSource: hid_cache::Scan {
+    /// The path of the collection with this usage page and usage, by vendor id and product id.
+    fn find_path(
+        &self,
+        product_id: u16,
+        usage_page: u16,
+        usage: u16,
+    ) -> Option<std::ffi::CString>;
+    /// Opens the configuration collection at this path.
+    fn open_config_at(&self, path: &std::ffi::CStr) -> Result<Box<dyn FeatureTransport>, String>;
+    /// Opens the status collection at this path.
+    fn open_events_at(&self, path: &std::ffi::CStr) -> Result<Box<dyn EventTransport>, String>;
 }
 
-impl HidOpener {
+impl HidSource for hidapi::HidApi {
     fn find_path(
-        api: &hidapi::HidApi,
+        &self,
         product_id: u16,
         usage_page: u16,
         usage: u16,
     ) -> Option<std::ffi::CString> {
-        api.device_list()
+        self.device_list()
             .find(|d| {
                 d.vendor_id() == VENDOR_ID
                     && d.product_id() == product_id
@@ -550,39 +558,79 @@ impl HidOpener {
             })
             .map(|d| d.path().to_owned())
     }
+
+    fn open_config_at(&self, path: &std::ffi::CStr) -> Result<Box<dyn FeatureTransport>, String> {
+        let dev = self.open_path(path).map_err(|e| e.to_string())?;
+        // A second handle on the same collection, for the writes: hidapi pads a feature report
+        // and the X6's read request is eight bytes (research 3.5).
+        let writer = ExactFeature::open(path)?;
+        Ok(Box::new(HidFeature { device: std::sync::Mutex::new(dev), writer }))
+    }
+
+    fn open_events_at(&self, path: &std::ffi::CStr) -> Result<Box<dyn EventTransport>, String> {
+        let dev = self.open_path(path).map_err(|e| e.to_string())?;
+        Ok(Box::new(HidEvent(std::sync::Mutex::new(dev))))
+    }
 }
 
-impl Opener for HidOpener {
+/// Finds the mouse by vendor id, product id and the collection's usage page and usage.
+///
+/// The interface number is deliberately not part of the match: the research says to match by
+/// VID/PID plus caps, because the interface number moves between the receiver's firmware
+/// revisions (research section 8.1).
+///
+/// One HID context serves every call (see `hid_cache`): `present()`, `open_config()` and
+/// `open_events()` no longer each scan every HID device on the machine (issue #7).
+struct HidOpener<S: HidSource = hidapi::HidApi> {
+    product_id: u16,
+    cache: hid_cache::HidCache<S>,
+}
+
+impl<S: HidSource> HidOpener<S> {
+    fn new(product_id: u16) -> Self {
+        Self::with_scan_ttl(product_id, hid_cache::SCAN_TTL)
+    }
+
+    /// The opener with its own scan ttl. Zero scans on every call, as the code did before the
+    /// cache; the tests use it to count those scans.
+    fn with_scan_ttl(product_id: u16, ttl: Duration) -> Self {
+        Self { product_id, cache: hid_cache::HidCache::with_ttl(ttl) }
+    }
+
+    /// Finds the collection and opens it. A list that is a little old can name a path that is
+    /// gone, or miss one that just arrived: `with_retry` rescans once per ttl and tries again.
+    fn open_collection<T>(
+        &self,
+        usage_page: u16,
+        usage: u16,
+        open: impl Fn(&S, &std::ffi::CStr) -> Result<T, String>,
+    ) -> Result<Option<T>, String> {
+        self.cache.with_retry(|api| match api.find_path(self.product_id, usage_page, usage) {
+            None => Ok(None),
+            Some(path) => open(api, &path).map(Some),
+        })
+    }
+}
+
+impl<S: HidSource> Opener for HidOpener<S> {
     fn present(&self) -> bool {
-        hidapi::HidApi::new()
-            .map(|api| {
-                Self::find_path(&api, self.product_id, CONFIG_USAGE_PAGE, CONFIG_USAGE).is_some()
+        // A miss on an old list rescans once (bounded per ttl): the daemon's `discover_now` asks
+        // this when an id is missing from its list, and a receiver plugged in since the last
+        // scan has to be found.
+        self.cache
+            .with_retry(|api| {
+                Ok(api.find_path(self.product_id, CONFIG_USAGE_PAGE, CONFIG_USAGE).map(|_| ()))
             })
+            .map(|found| found.is_some())
             .unwrap_or(false)
     }
 
     fn open_config(&self) -> Result<Option<Box<dyn FeatureTransport>>, String> {
-        let api = hidapi::HidApi::new().map_err(|e| e.to_string())?;
-        let Some(path) = Self::find_path(&api, self.product_id, CONFIG_USAGE_PAGE, CONFIG_USAGE)
-        else {
-            return Ok(None);
-        };
-        let dev = api.open_path(&path).map_err(|e| e.to_string())?;
-        // A second handle on the same collection, for the writes: hidapi pads a feature report
-        // and the X6's read request is eight bytes (research 3.5).
-        let writer = ExactFeature::open(&path)?;
-        Ok(Some(Box::new(HidFeature { device: std::sync::Mutex::new(dev), writer })))
+        self.open_collection(CONFIG_USAGE_PAGE, CONFIG_USAGE, |api, path| api.open_config_at(path))
     }
 
     fn open_events(&self) -> Result<Option<Box<dyn EventTransport>>, String> {
-        let api = hidapi::HidApi::new().map_err(|e| e.to_string())?;
-        match Self::find_path(&api, self.product_id, EVENT_USAGE_PAGE, EVENT_USAGE) {
-            None => Ok(None),
-            Some(path) => {
-                let dev = api.open_path(&path).map_err(|e| e.to_string())?;
-                Ok(Some(Box::new(HidEvent(std::sync::Mutex::new(dev)))))
-            }
-        }
+        self.open_collection(EVENT_USAGE_PAGE, EVENT_USAGE, |api, path| api.open_events_at(path))
     }
 }
 
@@ -845,7 +893,7 @@ impl AttackSharkX6 {
     /// exists for the day it is settled.
     pub fn with_product_id(product_id: u16) -> Self {
         Self {
-            opener: Arc::new(HidOpener { product_id }),
+            opener: Arc::new(HidOpener::<hidapi::HidApi>::new(product_id)),
             product_id,
             config: None,
             events: None,
@@ -1602,6 +1650,163 @@ mod tests {
 
     fn choice(pairs: &[(&str, &str)]) -> Props {
         props_of(&pairs.iter().map(|(k, v)| (*k, PropValue::Choice((*v).into()))).collect::<Vec<_>>())
+    }
+
+    // ------------------------------------------------------------ the HID context (issue #7)
+
+    use std::cell::Cell;
+
+    thread_local! {
+        /// Full scans of the fake machine on this thread (each test runs on its own thread).
+        static SCANS: Cell<u32> = const { Cell::new(0) };
+        /// Opens that fail because the path in the list is stale, before they work again.
+        static STALE_OPENS: Cell<u32> = const { Cell::new(0) };
+        /// Whether the fake receiver is plugged in. A scan takes a snapshot of it.
+        static PLUGGED: Cell<bool> = const { Cell::new(true) };
+    }
+
+    /// A machine whose HID list is counted: a `HidApi` that scans nothing real.
+    struct CountingApi {
+        /// The receiver as the last scan saw it.
+        plugged: bool,
+    }
+
+    impl hid_cache::Scan for CountingApi {
+        fn first() -> Result<Self, String> {
+            SCANS.with(|s| s.set(s.get() + 1));
+            Ok(CountingApi { plugged: PLUGGED.with(Cell::get) })
+        }
+
+        fn rescan(&mut self) -> Result<(), String> {
+            SCANS.with(|s| s.set(s.get() + 1));
+            self.plugged = PLUGGED.with(Cell::get);
+            Ok(())
+        }
+    }
+
+    struct NullFeature;
+
+    impl FeatureTransport for NullFeature {
+        fn send_feature(&mut self, _data: &[u8]) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn get_feature(&mut self, _buf: &mut [u8]) -> Result<usize, String> {
+            Ok(0)
+        }
+    }
+
+    struct NullEvents;
+
+    impl EventTransport for NullEvents {
+        fn read_input(&mut self, _buf: &mut [u8], _timeout_ms: i32) -> Result<usize, String> {
+            Ok(0)
+        }
+    }
+
+    impl HidSource for CountingApi {
+        fn find_path(&self, product_id: u16, usage_page: u16, _usage: u16) -> Option<std::ffi::CString> {
+            (self.plugged && product_id == PRODUCT_ID).then(|| std::ffi::CString::new(format!("fake/{usage_page:04x}")).unwrap())
+        }
+
+        fn open_config_at(&self, _path: &std::ffi::CStr) -> Result<Box<dyn FeatureTransport>, String> {
+            if STALE_OPENS.with(|s| s.replace(s.get().saturating_sub(1)) > 0) {
+                return Err("the path is gone".into());
+            }
+            Ok(Box::new(NullFeature))
+        }
+
+        fn open_events_at(&self, _path: &std::ffi::CStr) -> Result<Box<dyn EventTransport>, String> {
+            Ok(Box::new(NullEvents))
+        }
+    }
+
+    fn scans() -> u32 {
+        SCANS.with(Cell::get)
+    }
+
+    #[test]
+    fn many_present_and_open_calls_scan_the_machine_once() {
+        SCANS.with(|s| s.set(0));
+        // A long ttl, so a slow runner cannot expire the list in the middle of the test.
+        let opener = HidOpener::<CountingApi>::with_scan_ttl(PRODUCT_ID, Duration::from_secs(3600));
+        // The Peripherals view's calls, over and over: a discover (present), a connect (the two
+        // opens), and the same again.
+        for _ in 0..4 {
+            assert!(opener.present());
+            assert!(opener.open_config().unwrap().is_some());
+            assert!(opener.open_events().unwrap().is_some());
+        }
+        assert_eq!(scans(), 1, "twelve calls, one scan of the HID devices (old code: twelve)");
+    }
+
+    #[test]
+    fn a_path_that_no_longer_opens_rescans_once() {
+        SCANS.with(|s| s.set(0));
+        STALE_OPENS.with(|s| s.set(1));
+        let opener = HidOpener::<CountingApi>::with_scan_ttl(PRODUCT_ID, Duration::from_secs(3600));
+        assert!(opener.present());
+        assert!(opener.open_config().unwrap().is_some(), "the retry opens it");
+        assert_eq!(scans(), 2, "the first scan, and one rescan for the stale path");
+    }
+
+    /// `discover_now` asks `present()` when an id is missing from the daemon's list: a receiver
+    /// plugged in after the last scan must be found, inside the ttl.
+    #[test]
+    fn a_receiver_plugged_in_after_the_last_scan_is_found_inside_the_ttl() {
+        SCANS.with(|s| s.set(0));
+        PLUGGED.with(|p| p.set(false));
+        let opener = HidOpener::<CountingApi>::with_scan_ttl(PRODUCT_ID, Duration::from_secs(3600));
+        assert!(!opener.present());
+        PLUGGED.with(|p| p.set(true));
+        assert!(opener.present(), "a miss on an old list rescans once and finds it");
+        assert_eq!(scans(), 2);
+        PLUGGED.with(|p| p.set(true));
+    }
+
+    #[test]
+    fn a_receiver_that_is_not_there_is_not_found_after_one_rescan() {
+        SCANS.with(|s| s.set(0));
+        let opener = HidOpener::<CountingApi>::with_scan_ttl(PRODUCT_ID + 1, Duration::from_secs(3600));
+        assert!(!opener.present());
+        assert!(opener.open_config().unwrap().is_none());
+        assert!(opener.open_config().unwrap().is_none());
+        assert!(opener.open_events().unwrap().is_none());
+        assert_eq!(scans(), 2, "present() scans; the opens force one rescan between them, not one each");
+    }
+
+    /// The old behaviour, as a test: with no list reuse every call scans, which is what building
+    /// a `HidApi` in each call did.
+    #[test]
+    fn without_the_cache_the_same_twelve_calls_scan_twelve_times() {
+        SCANS.with(|s| s.set(0));
+        let opener = HidOpener::<CountingApi>::with_scan_ttl(PRODUCT_ID, Duration::ZERO);
+        for _ in 0..4 {
+            assert!(opener.present());
+            assert!(opener.open_config().unwrap().is_some());
+            assert!(opener.open_events().unwrap().is_some());
+        }
+        assert_eq!(scans(), 12);
+    }
+
+    /// The sends of one view-open as the daemon makes them: the list route's discover, the
+    /// detail route's discover and describe, then the connect and the read.
+    #[tokio::test]
+    async fn one_view_open_sends_one_round_of_read_requests() {
+        let (mut a, s) = rig();
+        let id = a.device_id();
+        a.discover().await.unwrap();
+        a.discover().await.unwrap();
+        a.describe(&id).await.unwrap();
+        a.connect().await.unwrap();
+        a.read_settings(&id).await.unwrap();
+        let sent = s.lock().unwrap().sent.len();
+        assert_eq!(
+            sent,
+            codec::READ_ORDER.len(),
+            "one read request per report, nothing sent by the discovers, describe or connect"
+        );
+        assert_eq!(s.lock().unwrap().opens, 1);
     }
 
     // ------------------------------------------------------------------------------ discovery
