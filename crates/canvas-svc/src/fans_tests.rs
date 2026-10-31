@@ -952,5 +952,26 @@ fn applying_the_profile_again_keeps_the_held_duty_of_a_curve_that_did_not_change
     // A changed curve does start afresh.
     let other = FanMode::Curve { source: TempSource::Cpu, points: vec![point(30.0, 20), point(50.0, 40), point(70.0, 60)] };
     r.fans.set_header_mode("sys_fan1", other, t0 + Duration::from_secs(5)).unwrap();
-    assert!(tick_at_temp(&mut r, t0, 6, 62.0) < peak);
+    // Fresh state answers the new curve at 62 C exactly: 52 %, raw 133. A kept hold would sit at 140.
+    assert_eq!(tick_at_temp(&mut r, t0, 6, 62.0), 133, "a changed curve starts with no held duty");
+}
+
+#[test]
+fn a_small_steady_fall_steps_down_only_after_the_hold() {
+    // 66 C after a 70 C peak is 4 C lower: under the drop threshold, so only the hold can lower the
+    // duty. The Quiet curve asks for 65 % at 66 C, 5 % under the held 70 %.
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    r.cpu.set(Some(70.0));
+    r.fans.set_header_mode("sys_fan1", quiet_curve(), t0).unwrap();
+    let peak = tick_at_temp(&mut r, t0, 1, 70.0);
+    let mut duty = peak;
+    for s in 2..=30 {
+        duty = tick_at_temp(&mut r, t0, s, 66.0);
+    }
+    assert_eq!(duty, peak, "inside the hold the duty stays");
+    for s in 31..=90 {
+        duty = tick_at_temp(&mut r, t0, s, 66.0);
+    }
+    assert!(duty < peak, "after the hold the duty steps down: {peak} -> {duty}");
 }
