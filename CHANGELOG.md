@@ -11,6 +11,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - In the layout editor, the part under the pointer is the one that moves: parts inside the case, offline parts and parts near its edge no longer drag the whole case, and moving the case carries everything inside it. Alt-click picks the part underneath. (#3)
 - Uninstalling with an unreadable SignalRGB restore record says so, keeps the record, finishes the other steps (in the Inno uninstaller too) and prints the service name and command to restore SignalRGB by hand, instead of skipping the restore and saying it finished. (#24)
 
+### Changed
+
+- Dragging a slider moves its cap and fill with the pointer, pixel for pixel, between steps; the value still changes one step at a time and the cap settles onto the step on release. (#13)
+
 ## [0.1.3] - 2026-10-29
 
 ### Fixed

@@ -49,9 +49,14 @@ export function Slider({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [dragging, setDragging] = useState(false);
+  // While dragging, the cap and the fill follow the pointer itself, between steps; `value` (and
+  // `onChange`) see only the snapped steps. Null when no drag is on: then `value` places the cap.
+  const [dragFrac, setDragFrac] = useState<number | null>(null);
+  // The last snapped value sent, so `onChange` runs once per step crossed, not once per move.
+  const sent = useRef(value);
   const span = max - min || 1;
   const decimals = decimalsOf(step);
-  const p = Math.min(1, Math.max(0, (value - min) / span));
+  const p = dragFrac ?? Math.min(1, Math.max(0, (value - min) / span));
   const f = floor === undefined ? 0 : Math.min(1, Math.max(0, (floor - min) / span));
   const style = { "--p": String(p), "--f": String(f) } as CSSProperties;
 
@@ -61,39 +66,57 @@ export function Slider({
     return Number(Math.min(max, Math.max(min, stepped)).toFixed(decimals));
   };
 
-  /** The value under the pointer: the cap's centre is what follows the pointer. */
-  const atPointer = (clientX: number): number => {
+  /** Where the pointer is along the travel, 0..1: the cap's centre is what follows the pointer. */
+  const fracAt = (clientX: number): number | null => {
     const box = ref.current?.getBoundingClientRect();
-    if (!box) return value;
+    if (!box) return null;
     const travel = Math.max(0, box.width - CAP);
-    const frac = travel > 0 ? Math.min(1, Math.max(0, (clientX - box.left - CAP / 2) / travel)) : 0;
-    return quantise(min + frac * span);
+    return travel > 0 ? Math.min(1, Math.max(0, (clientX - box.left - CAP / 2) / travel)) : 0;
+  };
+
+  /** The cap follows the pointer; the snapped value goes out only when it changes. */
+  const follow = (clientX: number): number => {
+    const frac = fracAt(clientX);
+    if (frac === null) return value;
+    setDragFrac(frac);
+    const next = quantise(min + frac * span);
+    if (next !== sent.current) {
+      sent.current = next;
+      onChange(next);
+    }
+    return next;
   };
 
   const onPointerDown = (e: PointerEvent<HTMLDivElement>) => {
     if (disabled) return;
     e.currentTarget.setPointerCapture(e.pointerId);
     setDragging(true);
-    onChange(atPointer(e.clientX));
+    sent.current = value;
+    follow(e.clientX);
   };
 
   const onPointerMove = (e: PointerEvent<HTMLDivElement>) => {
     if (disabled) return;
     if (!e.currentTarget.hasPointerCapture(e.pointerId)) return;
-    onChange(atPointer(e.clientX));
+    follow(e.clientX);
   };
 
+  // Release: the cap settles onto the committed step with the eased transition, because the
+  // drag's own position is dropped in the same render that turns the transitions back on.
   const onPointerUp = (e: PointerEvent<HTMLDivElement>) => {
     if (disabled) return;
     if (!e.currentTarget.hasPointerCapture(e.pointerId)) return;
     e.currentTarget.releasePointerCapture(e.pointerId);
+    const committed = follow(e.clientX);
     setDragging(false);
-    onCommit?.(atPointer(e.clientX));
+    setDragFrac(null);
+    onCommit?.(committed);
   };
 
   const onPointerCancel = (e: PointerEvent<HTMLDivElement>) => {
     if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
     setDragging(false);
+    setDragFrac(null);
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
