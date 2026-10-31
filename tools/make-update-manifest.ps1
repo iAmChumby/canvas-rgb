@@ -7,15 +7,21 @@
   "## ["). signature is the contents of the installer's .sig file, as `tauri signer sign` wrote it.
   url is the release asset's address; the tray refuses anything that is not https on github.com or
   GitHub's asset hosts, so a wrong address here makes the update unusable, not unsafe.
+  -NotesFile writes that same section to a file: the release notes are the section, followed by
+  GitHub's list of merged pull requests. One extractor, so the two never drift.
 .EXAMPLE
   powershell -NoProfile -File tools/make-update-manifest.ps1 -Version 0.1.1 -SigFile dist/canvas-rgb-setup-0.1.1.exe.sig `
     -OutFile dist/latest.json
+.EXAMPLE
+  powershell -NoProfile -File tools/make-update-manifest.ps1 -Version 0.1.1 -SigFile dist/canvas-rgb-setup-0.1.1.exe.sig `
+    -OutFile dist/latest.json -NotesFile dist/release-notes.md
 #>
 param(
     [Parameter(Mandatory)][string]$Version,
     [Parameter(Mandatory)][string]$SigFile,
     [Parameter(Mandatory)][string]$OutFile,
     [string]$ChangelogFile = (Join-Path (Split-Path -Parent $PSScriptRoot) 'CHANGELOG.md'),
+    [string]$NotesFile = '',
     [string]$Repo = 'iAmChumby/canvas-rgb',
     [string]$Url = '',
     [string]$PubDate = ''
@@ -45,6 +51,15 @@ for ($i = $start + 1; $i -lt $lines.Count; $i++) {
 if ($end -le $start + 1) { throw "The CHANGELOG.md section for $Version is empty." }
 $notes = (($lines[($start + 1)..($end - 1)]) -join "`n").Trim()
 if (-not $notes) { throw "The CHANGELOG.md section for $Version is empty." }
+
+# The same notes, for the release page. Written only once the section is known to be there, so a
+# missing section leaves no notes file behind.
+if ($NotesFile) {
+    $notesDir = Split-Path -Parent $NotesFile
+    if ($notesDir -and -not (Test-Path -LiteralPath $notesDir)) { New-Item -ItemType Directory -Path $notesDir | Out-Null }
+    [System.IO.File]::WriteAllText($NotesFile, $notes + "`n", (New-Object System.Text.UTF8Encoding($false)))
+    Write-Host "wrote $NotesFile ($($notes.Length) characters of notes)"
+}
 
 $manifest = [ordered]@{
     version   = $Version

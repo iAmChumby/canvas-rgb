@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- Each release page opens with what changed in that version, before the list of merged pull requests. (#48)
+
 ## [0.2.0] - 2026-10-31
 
 ### Added
