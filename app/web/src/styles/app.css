@@ -2538,6 +2538,13 @@ button.chip:hover {
     grid-template-areas: "name count size" "svg svg svg";
     align-items: center;
     gap: var(--s2) var(--s3);
+    /* The card clips its rows to its corners, so a row with no padding put its words on the edge. */
+    padding: var(--s2) var(--s4) var(--s3);
+    border-top: 1px solid var(--line);
+  }
+
+  .zone-strip:first-of-type {
+    border-top: 0;
   }
 
   .zone-strip .zone-strip-name {

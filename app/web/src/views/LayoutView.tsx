@@ -1032,11 +1032,17 @@ export function LayoutView() {
           state={layoutsError ? "error" : layoutsLoaded && !server ? "empty" : "loading"}
           shape={<LayoutShape />}
           label="Reading the layout"
-          error={<ErrorPanel title="The layout could not be read" message={layoutsError} />}
+          error={
+            <ErrorPanel
+              title="The layout could not be read"
+              message={layoutsError}
+              onRetry={() => void refreshLayouts()}
+            />
+          }
           empty={
             <Panel>
               <EmptyState icon={<SquaresFour size={24} />} title="No desk to show">
-                The daemon holds no layout, so there is no canvas to place zones on.
+                There is no layout yet, so there is no canvas to place zones on.
               </EmptyState>
             </Panel>
           }

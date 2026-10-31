@@ -157,7 +157,8 @@ export function PeripheralsView() {
     }
   }, []);
 
-  useEffect(() => {
+  // Lists the devices. The first run and "Try again" both come through here.
+  const loadList = useCallback(() => {
     let stop = false;
     api
       .peripherals()
@@ -173,6 +174,7 @@ export function PeripheralsView() {
       stop = true;
     };
   }, []);
+  useEffect(() => loadList(), [loadList]);
 
   useEffect(() => {
     if (!selectedId) return;
@@ -269,7 +271,17 @@ export function PeripheralsView() {
       stage={reading ? readStage(progress, selectedId ? noun : "device") : null}
       refreshing={detail !== null && reading}
       label="Reading the device"
-      error={<ErrorPanel title="The device could not be read" message={detailError} />}
+      error={
+        <ErrorPanel
+          title="The device could not be read"
+          message={detailError}
+          onRetry={() => {
+            if (!selectedId) return;
+            setDetailError(null);
+            void loadDetail(selectedId);
+          }}
+        />
+      }
     >
       {detail && (
         <PeripheralDetail
@@ -306,7 +318,16 @@ export function PeripheralsView() {
             state={listState}
             shape={<PeripheralListShape />}
             label="Looking for devices"
-            error={<ErrorPanel title="The devices could not be listed" message={listError} />}
+            error={
+              <ErrorPanel
+                title="The devices could not be listed"
+                message={listError}
+                onRetry={() => {
+                  setListError(null);
+                  loadList();
+                }}
+              />
+            }
             empty={
               <Panel title="No device found">
                 <p className="mute">None that canvas-rgb can configure is plugged in.</p>

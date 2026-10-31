@@ -76,7 +76,20 @@ function StageChip({ stage }: { stage: LoadStage }) {
   );
 }
 
-/** The plain error: a titled panel with the daemon's words, and a way to try again. */
+/** The words behind a short message, folded away until asked for: the raw text of an error. */
+export function Details({ summary = "Details", children }: { summary?: string; children: ReactNode }) {
+  return (
+    <details className="load-detail">
+      <summary>{summary}</summary>
+      <p className="state-detail">{children}</p>
+    </details>
+  );
+}
+
+/**
+ * The plain error: a titled panel with what went wrong, and a way to try again. Pass `onRetry`
+ * wherever a load can be asked for again; a panel without one is a dead end.
+ */
 export function ErrorPanel({
   title,
   message,
@@ -154,9 +167,11 @@ export function LoadFrame({
           </div>
           {state === "error" && <div className="load-note">{error}</div>}
           {state === "empty" && <div className="load-note">{empty}</div>}
+          {/* The region stands while loading; its words come with the placeholder, so a load that
+              ends inside the delay is never announced. */}
           {loading && (
             <span className="sr-only" role="status">
-              {label}
+              {shown ? label : ""}
             </span>
           )}
         </>

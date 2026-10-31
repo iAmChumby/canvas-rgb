@@ -410,7 +410,13 @@ export function DisplaysView() {
         state={state}
         shape={<DisplayShape />}
         label="Reading the displays"
-        error={<ErrorPanel title="The displays could not be read" message={displaysError} />}
+        error={
+          <ErrorPanel
+            title="The displays could not be read"
+            message={displaysError}
+            onRetry={() => void refreshDisplays()}
+          />
+        }
         empty={
           <Panel>
             {displaysUnsupported ? (
@@ -418,21 +424,18 @@ export function DisplaysView() {
               // to fix, not a failure, so it does not read like one.
               <EmptyState
                 icon={<ArrowClockwise size={22} />}
-                title="This daemon is older than the editor"
+                title="canvas-rgb needs an update for displays"
                 action={
                   <Button size="sm" onClick={() => void refreshDisplays()}>
                     Check again
                   </Button>
                 }
               >
-                The daemon does not have the display routes yet: it was built before displays
-                existed. Update the daemon and the tray app to set a display up. Nothing else on
-                this page is affected, and no display is touched until one has a source.
+                The service running is older than this page; update canvas-rgb to set a display up.
               </EmptyState>
             ) : (
               <EmptyState icon={<ThermometerSimple size={22} />} title="No display has a source yet">
-                The daemon drives a display only while it has a saved source, so a display that has
-                never been set up is left alone. Nothing is sent to it.
+                Nothing is sent to a display until it has one.
               </EmptyState>
             )}
           </Panel>

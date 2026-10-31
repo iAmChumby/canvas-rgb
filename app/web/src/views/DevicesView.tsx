@@ -189,11 +189,11 @@ export function DevicesView() {
                 title="No device found"
                 action={
                   <Button size="sm" icon={<ArrowClockwise size={16} />} onClick={() => void refreshDevices()}>
-                    Ask the daemon again
+                    Try again
                   </Button>
                 }
               >
-                OpenRGB reports no lights. Plug one in or start OpenRGB, then ask again.
+                OpenRGB reports no lights. Plug one in or start OpenRGB, then try again.
               </EmptyState>
             </Panel>
           }
@@ -235,12 +235,11 @@ export function DevicesView() {
                       title={`${d.name} reports no zones`}
                       action={
                         <Button size="sm" icon={<ArrowClockwise size={16} />} onClick={() => void refreshDevices()}>
-                          Ask the daemon again
+                          Try again
                         </Button>
                       }
                     >
-                      The daemon sees this device, but it has not reported any zones for it yet. Ask
-                      it again once the device is lit and connected over OpenRGB.
+                      OpenRGB lists this device but no zones for it yet. Try again once it is lit.
                     </EmptyState>
                   </div>
                 ) : (

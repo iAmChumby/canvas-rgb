@@ -4,7 +4,8 @@ import { useState } from "react";
 import { ArrowRight } from "@phosphor-icons/react";
 import { Button, Swap } from "@/components/Button";
 import { Panel, StateDot } from "@/components/Panel";
-import { SkeletonLines } from "@/components/Skeleton";
+import { LoadFrame } from "@/components/Loading";
+import { UpdatesShape } from "@/components/LoadShapes";
 import { canUpdate, openLogsFolder, tauriHost, updateCheckNow, updateInstall, updateSkip } from "@/lib/host";
 import { parseInline, parseNotes, type NoteBlock } from "@/lib/releaseNotes";
 import { messageOf } from "@/lib/errors";
@@ -122,9 +123,9 @@ export function UpdatesView() {
         <div className="page-head">
           <h1>Updates</h1>
         </div>
-        <Panel title="Reading the update state">
-          <SkeletonLines rows={3} />
-        </Panel>
+        {/* The state comes from the tray, not the daemon: no error to show, and in a plain browser
+            without a fixture it never comes. The same frame as every page, in its loading state. */}
+        <LoadFrame state="loading" shape={<UpdatesShape />} label="Reading the update state" />
       </div>
     );
   }
