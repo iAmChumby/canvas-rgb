@@ -165,6 +165,7 @@ struct Discovery {
 #[cfg(test)]
 mod sink_hook {
     use std::sync::{Condvar, Mutex, OnceLock};
+    use std::time::{Duration, Instant};
 
     #[derive(Default)]
     struct Gate {
@@ -214,19 +215,33 @@ mod sink_hook {
 
     /// Waits until a sink is at the gate.
     pub(crate) fn wait_until_reached() {
-        let (lock, cv) = gate();
-        let mut g = lock.lock().unwrap_or_else(|e| e.into_inner());
-        while !g.reached {
-            g = cv.wait(g).unwrap_or_else(|e| e.into_inner());
-        }
+        wait_for("the sink to reach the gate", |g| g.reached);
     }
 
     /// Waits until the sink has written its stage.
     pub(crate) fn wait_until_written() {
+        wait_for("the sink to write its stage", |g| g.written);
+    }
+
+    /// How long a test waits for the sink before it gives up.
+    const GATE_TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// Waits for one step of the test, with a deadline. A regression fails the test with the
+    /// step it stopped at, instead of hanging the binary.
+    fn wait_for(step: &str, done: fn(&Gate) -> bool) {
         let (lock, cv) = gate();
         let mut g = lock.lock().unwrap_or_else(|e| e.into_inner());
-        while !g.written {
-            g = cv.wait(g).unwrap_or_else(|e| e.into_inner());
+        let deadline = Instant::now() + GATE_TIMEOUT;
+        while !done(&g) {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                panic!("the test waited {GATE_TIMEOUT:?} for {step} and gave up");
+            }
+            let (next, waited) = cv.wait_timeout(g, left).unwrap_or_else(|e| e.into_inner());
+            g = next;
+            if waited.timed_out() && !done(&g) {
+                panic!("the test waited {GATE_TIMEOUT:?} for {step} and gave up");
+            }
         }
     }
 
