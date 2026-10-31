@@ -35,6 +35,10 @@ use std::path::{Path, PathBuf};
 /// all inheritable, protected (`P`).
 pub const SECURE_SDDL: &str = "O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)";
 
+/// Owner SYSTEM. DACL: SYSTEM full, Administrators full, nobody else, inheritable, protected. For
+/// folders no ordinary user may even read, such as the update staging folder (#43).
+pub const PRIVATE_SDDL: &str = "O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
+
 /// Subfolders the service creates inside the home, so they are secured and checked with it.
 pub const SUBDIRS: [&str; 2] = ["openrgb", "logs"];
 
@@ -70,6 +74,11 @@ pub trait FsAcl: Send {
     fn file_id(&self, p: &Path) -> io::Result<FileId>;
     /// Creates a directory whose owner and DACL come from [`SECURE_SDDL`] at birth.
     fn create_dir_protected(&mut self, p: &Path) -> io::Result<()>;
+    /// Creates a directory whose owner and DACL come from [`PRIVATE_SDDL`] at birth: SYSTEM and
+    /// Administrators only. The update staging folder is made this way (#43).
+    fn create_dir_private(&mut self, _p: &Path) -> io::Result<()> {
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
     /// Replaces the DACL of `p` with [`SECURE_SDDL`]'s protected DACL. The owner is not changed.
     fn apply_protected_dacl(&mut self, p: &Path) -> io::Result<()>;
     /// True if the entry's DACL has any ACCESS_ALLOWED ACE granting a write-class right to any SID other
@@ -86,12 +95,12 @@ pub trait SecureDir: Send {
     fn trusted(&self, path: &Path) -> bool;
 }
 
-fn refused(path: &Path, why: &str) -> io::Error {
+pub(crate) fn refused(path: &Path, why: &str) -> io::Error {
     io::Error::other(format!("{}: {why}", path.display()))
 }
 
 /// Logs the offending path at ERROR and returns the failure. Nothing is deleted or renamed.
-fn offending(path: &Path, what: &str) -> io::Error {
+pub(crate) fn offending(path: &Path, what: &str) -> io::Error {
     tracing::error!(
         path = %path.display(),
         "machine home: {what}. canvas-rgb will not read or launch from the home until it is removed. \
@@ -102,7 +111,7 @@ fn offending(path: &Path, what: &str) -> io::Error {
 
 /// Read-only check of everything under `dir`. Fails on the first junction, symlink, or entry whose
 /// owner is not trusted. A junction is never followed: it is refused before its children are read.
-fn check_tree(fs: &dyn FsAcl, dir: &Path) -> io::Result<()> {
+pub(crate) fn check_tree(fs: &dyn FsAcl, dir: &Path) -> io::Result<()> {
     for child in fs.list(dir)? {
         if fs.is_reparse(&child)? {
             return Err(offending(&child, "a junction or symlink is in the home"));
@@ -211,10 +220,14 @@ struct SddlDescriptor(*mut std::ffi::c_void);
 #[cfg(windows)]
 impl SddlDescriptor {
     fn parse() -> io::Result<Self> {
+        Self::parse_sddl(SECURE_SDDL)
+    }
+
+    fn parse_sddl(text: &str) -> io::Result<Self> {
         use std::ffi::c_void;
         use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
 
-        let sddl: Vec<u16> = SECURE_SDDL.encode_utf16().chain(Some(0)).collect();
+        let sddl: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
         let mut raw: *mut c_void = std::ptr::null_mut();
         // SAFETY: `sddl` is NUL-terminated; `raw` receives a LocalAlloc'd buffer freed in Drop.
         let ok = unsafe {
@@ -386,6 +399,25 @@ impl FsAcl for WinFs {
         Ok(())
     }
 
+    fn create_dir_private(&mut self, p: &Path) -> io::Result<()> {
+        use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+        use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
+
+        let descriptor = SddlDescriptor::parse_sddl(PRIVATE_SDDL)?;
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor.0,
+            bInheritHandle: 0,
+        };
+        let target = wide(p.as_os_str());
+        // SAFETY: `target` is NUL-terminated; `attributes` points at the descriptor, alive for the call.
+        let ok = unsafe { CreateDirectoryW(target.as_ptr(), &attributes) };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     fn apply_protected_dacl(&mut self, p: &Path) -> io::Result<()> {
         use windows_sys::core::BOOL;
         use windows_sys::Win32::Security::Authorization::{SetNamedSecurityInfoW, SE_FILE_OBJECT};
@@ -493,7 +525,15 @@ fn acl_grants_nonadmin_write(dacl: *mut windows_sys::Win32::Security::ACL) -> io
         let header = ace as *const ACE_HEADER;
         // SAFETY: GetAce returned a valid ACE, so its header is readable.
         let (ace_type, ace_flags) = unsafe { ((*header).AceType, (*header).AceFlags) };
-        if ace_type != ACCESS_ALLOWED_ACE_TYPE || ace_flags & INHERIT_ONLY_ACE_FLAG != 0 {
+        if ace_flags & INHERIT_ONLY_ACE_FLAG != 0 {
+            continue;
+        }
+        if ace_type != ACCESS_ALLOWED_ACE_TYPE {
+            // Fail closed: an allow-type ACE this check does not parse (compound, object, callback,
+            // callback-object) or a type it does not know is treated as granting write.
+            if !ace_type_grants_nothing(ace_type) {
+                return Ok(true);
+            }
             continue;
         }
         let allowed = ace as *const ACCESS_ALLOWED_ACE;
@@ -504,11 +544,27 @@ fn acl_grants_nonadmin_write(dacl: *mut windows_sys::Win32::Security::ACL) -> io
         }
         // SAFETY: `SidStart` is inside the ACE, which is inside the ACL.
         let sid = unsafe { std::ptr::addr_of!((*allowed).SidStart) } as *mut c_void;
-        if !owner_is_trusted_sid(&sid_string(sid)?) {
+        if !writer_is_trusted_sid(&sid_string(sid)?) {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+/// `NT SERVICE\TrustedInstaller`. Every folder under `C:\Program Files` carries a full-control ACE
+/// for it (the install folder included), and it can already replace System32.
+pub const TRUSTED_INSTALLER_SID: &str = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
+
+/// Who may hold write access on a trusted path: the trusted owners, plus TrustedInstaller. The
+/// owner rule stays [`TRUSTED_OWNER_SIDS`] only.
+pub fn writer_is_trusted_sid(sid: &str) -> bool {
+    owner_is_trusted_sid(sid) || sid == TRUSTED_INSTALLER_SID
+}
+
+/// ACE types that cannot grant access: the deny, audit, alarm and label families. Every other type
+/// other than plain ACCESS_ALLOWED (0) is an allow-type this check does not parse, or unknown.
+pub(crate) fn ace_type_grants_nothing(ace_type: u8) -> bool {
+    matches!(ace_type, 1 | 2 | 3 | 6 | 7 | 8 | 10 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19)
 }
 
 /// The DACL check for `p`. A NULL DACL grants everyone everything, so it counts as true.
@@ -638,9 +694,54 @@ mod win_tests {
     }
 
     #[test]
+    fn a_callback_allow_ace_for_users_fails_closed_on_a_real_dacl() {
+        // A conditional (callback) allow ACE is not plain ACCESS_ALLOWED; the walk must not skip it.
+        assert!(check("D:P(A;;FA;;;SY)(A;;FA;;;BA)(XA;;FA;;;BU;(1==1))").unwrap());
+        // A callback ACE for a trusted SID is still an allow-type the check does not parse: closed too.
+        assert!(check("D:P(A;;FA;;;SY)(XA;;FA;;;BA;(1==1))").unwrap());
+    }
+
+    #[test]
+    fn allow_type_aces_other_than_plain_allowed_fail_closed() {
+        for t in [4u8, 5, 9, 11] {
+            assert!(!ace_type_grants_nothing(t), "type {t} is an allow type and must count as write");
+        }
+        assert!(!ace_type_grants_nothing(0x20), "an unknown type must count as write");
+        for t in [1u8, 2, 3, 6, 7, 8, 10, 12, 13, 14, 15, 16, 17, 18, 19] {
+            assert!(ace_type_grants_nothing(t), "type {t} grants nothing");
+        }
+    }
+
+    #[test]
     fn an_inherit_only_users_write_ace_does_not_count() {
         // IO = INHERIT_ONLY_ACE: it applies to children, not to this directory.
         assert!(!check("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;OIIO;FW;;;BU)").unwrap());
+    }
+
+    #[test]
+    fn a_program_files_style_dacl_with_trustedinstaller_has_no_nonadmin_write() {
+        // The DACL Inno leaves on C:\Program Files\canvas-rgb (read with Get-Acl, 2026-10-31).
+        let sddl = format!(
+            "D:P(A;;FA;;;{TRUSTED_INSTALLER_SID})(A;CIIO;GA;;;{TRUSTED_INSTALLER_SID})(A;;FA;;;SY)(A;OICIIO;GA;;;SY)\
+             (A;;FA;;;BA)(A;OICIIO;GA;;;BA)(A;;0x1200a9;;;BU)(A;OICIIO;GXGR;;;BU)(A;OICIIO;GA;;;CO)\
+             (A;;0x1200a9;;;AC)(A;OICIIO;GXGR;;;AC)"
+        );
+        assert!(!check(&sddl).unwrap());
+        // Any other service SID with write is still refused.
+        assert!(check("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;S-1-5-80-1-2-3-4-5)").unwrap());
+    }
+
+    #[test]
+    fn the_real_system32_folder_has_no_nonadmin_write() {
+        let root = std::env::var_os("SystemRoot").expect("SystemRoot");
+        assert!(!has_nonadmin_write_on(&Path::new(&root).join("System32")).unwrap());
+    }
+
+    #[test]
+    fn trustedinstaller_may_write_but_never_owns() {
+        assert!(writer_is_trusted_sid(TRUSTED_INSTALLER_SID));
+        assert!(!owner_is_trusted_sid(TRUSTED_INSTALLER_SID));
+        assert!(!writer_is_trusted_sid("S-1-5-32-545"), "Users");
     }
 
     #[test]

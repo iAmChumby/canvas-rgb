@@ -1,0 +1,153 @@
+{
+  "about": "When do live property values count as a saved preset? The editor's rule (app/web/src/lib/presetMatch.ts) is the only production rule: the daemon never asks the question. The daemon test (crates/canvas-daemon/tests/api.rs, the_preset_equality_fixture_holds) holds a second copy of the rule that pins this file, with JavaScript's rounding (a half rounds toward +infinity: Math.round(-2.5) is -2), so the file cannot say one thing to the editor and another to anyone porting the rule. The rule: fill every missing key with the schema default, round a number to its step, round a hue to a whole degree modulo 360, compare colours without regard to case, ignore keys the schema does not name, then compare key by key. The hue wrap and the colour case are additions to the consensus's 'rounded to the slider step'; the cases below pin them.",
+  "properties": [
+    { "key": "tint", "label": "Tint", "kind": { "type": "color", "default": "#00d8a0" } },
+    { "key": "speed", "label": "Speed", "kind": { "type": "number", "min": 0, "max": 100, "step": 1, "default": 20 } },
+    { "key": "scale", "label": "Scale", "kind": { "type": "number", "min": 0.25, "max": 20, "step": 0.25, "default": 0.75 } },
+    { "key": "mode", "label": "Mode", "kind": { "type": "choice", "options": ["Soft", "Hard"], "default": "Soft" } },
+    { "key": "glow", "label": "Glow", "kind": { "type": "bool", "default": false } },
+    { "key": "hue", "label": "Hue", "kind": { "type": "hue", "default": 0 } },
+    { "key": "offset", "label": "Offset", "kind": { "type": "number", "min": -10, "max": 10, "step": 1, "default": 0 } }
+  ],
+  "cases": [
+    {
+      "name": "identical props are equal",
+      "preset": { "speed": { "type": "number", "value": 40 } },
+      "live": { "speed": { "type": "number", "value": 40 } },
+      "equal": true
+    },
+    {
+      "name": "a one-key preset equals the defaults with that key",
+      "preset": { "speed": { "type": "number", "value": 40 } },
+      "live": {
+        "tint": { "type": "color", "value": "#00d8a0" },
+        "speed": { "type": "number", "value": 40 },
+        "scale": { "type": "number", "value": 0.75 },
+        "mode": { "type": "choice", "value": "Soft" },
+        "glow": { "type": "bool", "value": false },
+        "hue": { "type": "hue", "value": 0 }
+      },
+      "equal": true
+    },
+    {
+      "name": "a key left out of the live values is its default",
+      "preset": { "speed": { "type": "number", "value": 20 } },
+      "live": {},
+      "equal": true
+    },
+    {
+      "name": "another key changed is not equal",
+      "preset": { "speed": { "type": "number", "value": 40 } },
+      "live": {
+        "speed": { "type": "number", "value": 40 },
+        "glow": { "type": "bool", "value": true }
+      },
+      "equal": false
+    },
+    {
+      "name": "a number inside half a step rounds to the same value",
+      "preset": { "speed": { "type": "number", "value": 40 } },
+      "live": { "speed": { "type": "number", "value": 40.3 } },
+      "equal": true
+    },
+    {
+      "name": "a number past half a step is another value",
+      "preset": { "speed": { "type": "number", "value": 40 } },
+      "live": { "speed": { "type": "number", "value": 40.7 } },
+      "equal": false
+    },
+    {
+      "name": "a fractional step rounds to the step",
+      "preset": { "scale": { "type": "number", "value": 0.75 } },
+      "live": { "scale": { "type": "number", "value": 0.7 } },
+      "equal": true
+    },
+    {
+      "name": "colours compare without regard to case",
+      "preset": { "tint": { "type": "color", "value": "#FF5E00" } },
+      "live": { "tint": { "type": "color", "value": "#ff5e00" } },
+      "equal": true
+    },
+    {
+      "name": "another colour is not equal",
+      "preset": { "tint": { "type": "color", "value": "#ff5e00" } },
+      "live": { "tint": { "type": "color", "value": "#ff5e01" } },
+      "equal": false
+    },
+    {
+      "name": "another choice is not equal",
+      "preset": { "mode": { "type": "choice", "value": "Hard" } },
+      "live": { "mode": { "type": "choice", "value": "Soft" } },
+      "equal": false
+    },
+    {
+      "name": "a hue wraps at 360 degrees",
+      "preset": { "hue": { "type": "hue", "value": 0 } },
+      "live": { "hue": { "type": "hue", "value": 359.6 } },
+      "equal": true
+    },
+    {
+      "name": "a hue a degree away is another hue",
+      "preset": { "hue": { "type": "hue", "value": 10 } },
+      "live": { "hue": { "type": "hue", "value": 12 } },
+      "equal": false
+    },
+    {
+      "name": "a half step rounds up: 40.5 is 41",
+      "preset": { "speed": { "type": "number", "value": 41 } },
+      "live": { "speed": { "type": "number", "value": 40.5 } },
+      "equal": true
+    },
+    {
+      "name": "a half step does not round down: 40.5 is not 40",
+      "preset": { "speed": { "type": "number", "value": 40 } },
+      "live": { "speed": { "type": "number", "value": 40.5 } },
+      "equal": false
+    },
+    {
+      "name": "a negative half rounds toward plus infinity, as Math.round does: -2.5 is -2",
+      "preset": { "offset": { "type": "number", "value": -2 } },
+      "live": { "offset": { "type": "number", "value": -2.5 } },
+      "equal": true
+    },
+    {
+      "name": "a negative half is not -3",
+      "preset": { "offset": { "type": "number", "value": -3 } },
+      "live": { "offset": { "type": "number", "value": -2.5 } },
+      "equal": false
+    },
+    {
+      "name": "a negative value just past the half rounds away: -2.6 is -3",
+      "preset": { "offset": { "type": "number", "value": -3 } },
+      "live": { "offset": { "type": "number", "value": -2.6 } },
+      "equal": true
+    },
+    {
+      "name": "a negative value inside half a step is the same: -2.4 is -2",
+      "preset": { "offset": { "type": "number", "value": -2 } },
+      "live": { "offset": { "type": "number", "value": -2.4 } },
+      "equal": true
+    },
+    {
+      "name": "a negative hue wraps: -0.4 degrees is 0",
+      "preset": { "hue": { "type": "hue", "value": 0 } },
+      "live": { "hue": { "type": "hue", "value": -0.4 } },
+      "equal": true
+    },
+    {
+      "name": "a hue past 360 wraps: 370 is 10",
+      "preset": { "hue": { "type": "hue", "value": 10 } },
+      "live": { "hue": { "type": "hue", "value": 370 } },
+      "equal": true
+    },
+    {
+      "name": "a key the schema does not name is ignored",
+      "preset": { "speed": { "type": "number", "value": 40 } },
+      "live": {
+        "speed": { "type": "number", "value": 40 },
+        "ghost": { "type": "number", "value": 99 }
+      },
+      "equal": true
+    }
+  ]
+}

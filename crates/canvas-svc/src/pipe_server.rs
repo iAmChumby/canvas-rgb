@@ -18,6 +18,7 @@
 //! The OS calls for step 1 sit behind [`PeerProbe`], so tests use a fake.
 
 use crate::service::Core;
+use crate::update_install::{win::ImpersonatingReader, ClientFileReader, RefusingReader};
 use canvas_proto::api::error_codes;
 use canvas_proto::pipe::{decode_body, decode_len, encode, PipeRequest, PipeResponse, PIPE_NAME};
 use std::ffi::c_void;
@@ -53,6 +54,10 @@ pub trait PeerProbe: Send {
     fn client_process_id(&self) -> io::Result<u32>;
     /// The session attached to the physical console (`0xFFFFFFFF` when none is attached).
     fn console_session_id(&self) -> u32;
+    /// Reads files as this client (impersonating it). The default refuses every read.
+    fn file_reader(&self) -> Box<dyn ClientFileReader> {
+        Box::new(RefusingReader)
+    }
 }
 
 /// A client that passed [`admit`].
@@ -104,6 +109,26 @@ pub fn admit(peer: &dyn PeerProbe, launched_daemon: Option<u32>) -> Result<Admit
     Ok(Admitted { pid, session })
 }
 
+/// `InstallUpdate` is stricter than every other operation: it skips the daemon's API token and the
+/// 9430-owner check, so it is accepted only from the daemon this service launched. With no launched
+/// daemon, or a client that is not that daemon's process, it is refused.
+pub fn admit_install(peer: &dyn PeerProbe, launched_daemon: Option<u32>) -> Result<Admitted, Rejected> {
+    let who = admit(peer, launched_daemon)?;
+    match launched_daemon {
+        Some(daemon) if daemon == who.pid => Ok(who),
+        Some(daemon) => Err(Rejected {
+            pid: Some(who.pid),
+            session: Some(who.session),
+            reason: format!("InstallUpdate is only accepted from the launched daemon (pid {daemon}), not pid {}", who.pid),
+        }),
+        None => Err(Rejected {
+            pid: Some(who.pid),
+            session: Some(who.session),
+            reason: "InstallUpdate is only accepted from the daemon this service launched, and none is running".into(),
+        }),
+    }
+}
+
 /// The production probe: the Win32 calls on one connected pipe instance.
 pub struct WinPeer {
     /// The pipe handle as a number, so the probe is `Send`. Valid while the pipe instance lives,
@@ -145,6 +170,10 @@ impl PeerProbe for WinPeer {
     fn console_session_id(&self) -> u32 {
         // SAFETY: takes no pointers and cannot fail in a way that matters: 0xFFFFFFFF means no console session.
         unsafe { WTSGetActiveConsoleSessionId() }
+    }
+
+    fn file_reader(&self) -> Box<dyn ClientFileReader> {
+        Box::new(ImpersonatingReader::of(self.handle()))
     }
 }
 
@@ -224,6 +253,40 @@ async fn write_response(pipe: &mut NamedPipeServer, response: &PipeResponse) -> 
     pipe.flush().await
 }
 
+/// `InstallUpdate`: the caller admitted the client again (the console session may have changed since it
+/// connected); this refuses on that, then installs on a blocking thread. The core lock is held only to get the installer, never while
+/// the file is read or setup is started.
+async fn install_update(
+    core: &Arc<Mutex<Core>>,
+    who: Admitted,
+    readmit: Result<Admitted, Rejected>,
+    reader: Box<dyn ClientFileReader>,
+    installer: String,
+    signature: String,
+) -> PipeResponse {
+    if let Err(rejected) = readmit {
+        tracing::warn!(
+            pid = ?rejected.pid,
+            session = ?rejected.session,
+            reason = %rejected.reason,
+            "refused InstallUpdate: the client is not the launched daemon in the console session"
+        );
+        return error(error_codes::UNAUTHORIZED, rejected.reason);
+    }
+    let updates = core.lock().await.updates.clone();
+    let Some(updates) = updates else {
+        tracing::warn!(pid = who.pid, session = who.session, "refused InstallUpdate: updates are not available (the machine home is not secured)");
+        return error(error_codes::SERVICE_UNAVAILABLE, "the service cannot install updates: the machine home is not secured");
+    };
+    match tokio::task::spawn_blocking(move || updates.install(who, &installer, &signature, reader)).await {
+        Ok(response) => response,
+        Err(e) => {
+            tracing::error!(pid = who.pid, session = who.session, error = %e, "the update install thread failed");
+            error(error_codes::INTERNAL, "the update install thread failed")
+        }
+    }
+}
+
 /// Admits one client, then reads requests from it until it disconnects. The first message must
 /// be `Hello`.
 pub async fn handle_client(mut pipe: NamedPipeServer, core: Arc<Mutex<Core>>, peer: Box<dyn PeerProbe>) {
@@ -274,6 +337,13 @@ pub async fn handle_client(mut pipe: NamedPipeServer, core: Arc<Mutex<Core>>, pe
             greeted = true;
         }
         let response = match request {
+            Ok(PipeRequest::InstallUpdate { installer, signature }) => {
+                // Everything that touches the probe happens before the first await: it is not `Sync`.
+                let launched = core.lock().await.daemon.daemon_pid();
+                let readmit = admit_install(peer.as_ref(), launched);
+                let reader = peer.file_reader();
+                install_update(&core, who, readmit, reader, installer, signature).await
+            }
             Ok(request) => core.lock().await.handle(request, Instant::now()),
             Err(e) => error(error_codes::VALIDATION, format!("invalid request: {e}")),
         };
@@ -284,7 +354,7 @@ pub async fn handle_client(mut pipe: NamedPipeServer, core: Arc<Mutex<Core>>, pe
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::chip::MSI_ALT1_MAP;
     use crate::daemon::DaemonSupervisor;
@@ -335,7 +405,7 @@ mod tests {
         format!(r"\\.\pipe\canvas-rgb-svc-test-{tag}-{}", std::process::id())
     }
 
-    fn test_core(home: PathBuf) -> Core {
+    pub(crate) fn test_core(home: PathBuf) -> Core {
         let chip = FakeChip::new(MSI_ALT1_MAP);
         let chip_box: Box<dyn crate::chip::FanChip> =
             Box::new(crate::chip::Nct6687::detect(chip, MSI_ALT1_MAP).unwrap());
@@ -367,12 +437,17 @@ mod tests {
         read_response(client).await
     }
 
+    /// Reads one response. A regression that leaves the server silent fails after 10 s instead of hanging.
     async fn read_response(client: &mut NamedPipeClient) -> PipeResponse {
-        let mut prefix = [0u8; 4];
-        client.read_exact(&mut prefix).await.unwrap();
-        let mut body = vec![0u8; decode_len(prefix).unwrap() as usize];
-        client.read_exact(&mut body).await.unwrap();
-        decode_body(&body).unwrap()
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut prefix = [0u8; 4];
+            client.read_exact(&mut prefix).await.unwrap();
+            let mut body = vec![0u8; decode_len(prefix).unwrap() as usize];
+            client.read_exact(&mut body).await.unwrap();
+            decode_body(&body).unwrap()
+        })
+        .await
+        .expect("no response from the pipe server within 10 s")
     }
 
     /// True when the server has closed its end (EOF or a broken pipe). A 5 s timeout counts as open.
@@ -386,10 +461,14 @@ mod tests {
 
     /// Opens a client on the pipe, retrying while the server is still coming up.
     async fn connect(name: &str) -> NamedPipeClient {
+        let end = Instant::now() + Duration::from_secs(10);
         loop {
             match tokio::net::windows::named_pipe::ClientOptions::new().open(name) {
                 Ok(client) => return client,
-                Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+                Err(e) => {
+                    assert!(Instant::now() < end, "could not connect to {name} within 10 s: {e}");
+                    tokio::time::sleep(Duration::from_millis(10)).await
+                }
             }
         }
     }
@@ -657,6 +736,163 @@ mod tests {
         .await;
         assert!(matches!(&response, PipeResponse::Error { code, .. } if code == "validation"), "{response:?}");
         assert!(closed(&mut client).await, "the pipe closes when the first message is not Hello");
+    }
+
+    // ---- InstallUpdate over a real pipe, on the update fakes (#43) ----
+
+    /// A probe whose console session the test can move after the client has connected, and whose
+    /// file reads come from memory.
+    #[derive(Clone)]
+    struct UpdatePeer {
+        session: u32,
+        pid: u32,
+        console: Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    impl PeerProbe for UpdatePeer {
+        fn client_session_id(&self) -> io::Result<u32> {
+            Ok(self.session)
+        }
+        fn client_process_id(&self) -> io::Result<u32> {
+            Ok(self.pid)
+        }
+        fn console_session_id(&self) -> u32 {
+            self.console.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn file_reader(&self) -> Box<dyn crate::update_install::ClientFileReader> {
+            crate::update_install_tests::FakeReader::of(crate::update_install_tests::PAYLOAD)
+        }
+    }
+
+    fn install_request() -> PipeRequest {
+        PipeRequest::InstallUpdate {
+            installer: crate::update_install_tests::SOURCE.into(),
+            signature: crate::update_install_tests::SIG_011.into(),
+        }
+    }
+
+    /// A pipe server whose core can install updates on a rig that has installed version 0.1.0. The
+    /// service has launched a daemon, and the client is that daemon.
+    async fn update_pipe(tag: &str, session: u32) -> (String, crate::update_install_tests::Rig, Arc<std::sync::atomic::AtomicU32>, tempfile::TempDir) {
+        update_pipe_with(tag, session, true, 0).await
+    }
+
+    /// As [`update_pipe`], but `launched` says whether the service launched a daemon at all, and
+    /// `pid_delta` moves the client's pid away from the daemon's.
+    async fn update_pipe_with(
+        tag: &str,
+        session: u32,
+        launched: bool,
+        pid_delta: u32,
+    ) -> (String, crate::update_install_tests::Rig, Arc<std::sync::atomic::AtomicU32>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let name = unique_name(tag);
+        let first = create_instance(&name, true).unwrap();
+        let rig = crate::update_install_tests::rig("0.1.0");
+        let mut core = test_core(dir.path().to_path_buf());
+        core.updates = Some(Arc::clone(&rig.installer));
+        let pid = if launched {
+            core.daemon.start(Instant::now());
+            core.daemon.daemon_pid().expect("the launched daemon has a pid") + pid_delta
+        } else {
+            77
+        };
+        let console = Arc::new(std::sync::atomic::AtomicU32::new(CONSOLE));
+        let factory_peer = UpdatePeer { session, pid, console: Arc::clone(&console) };
+        let peers: PeerFactory = Arc::new(move |_: &NamedPipeServer| -> Box<dyn PeerProbe> { Box::new(factory_peer.clone()) });
+        tokio::spawn(serve(Arc::new(Mutex::new(core)), name.clone(), first, peers));
+        (name, rig, console, dir)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn install_update_is_refused_when_the_service_launched_no_daemon() {
+        // Any console-user process is admitted for the other operations when no daemon is running.
+        // InstallUpdate skips the daemon's token and port checks, so it is not.
+        let (name, rig, _console, _dir) = update_pipe_with("install-no-daemon", CONSOLE, false, 0).await;
+        let mut client = connect(&name).await;
+        greet(&mut client).await;
+        assert_eq!(round_trip(&mut client, &PipeRequest::Heartbeat).await, PipeResponse::Ok, "other operations are admitted as before");
+        let response = round_trip(&mut client, &install_request()).await;
+        assert!(matches!(&response, PipeResponse::Error { code, message } if code == error_codes::UNAUTHORIZED && message.contains("none is running")), "{response:?}");
+        assert_eq!(rig.launches(), 0);
+        assert!(rig.staged_files().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn install_update_is_refused_from_a_pid_that_is_not_the_launched_daemon() {
+        // The pid check at connect time is skipped by the fake factory, so build a client whose pid
+        // differs from the daemon's only at request time: connect as the daemon, then change pid.
+        let (name, rig, _console, _dir) = update_pipe_with("install-wrong-pid", CONSOLE, true, 1).await;
+        let mut client = connect(&name).await;
+        // The wrong pid is already refused at connect time with the daemon check.
+        let response = read_response(&mut client).await;
+        assert!(matches!(&response, PipeResponse::Error { code, .. } if code == error_codes::UNAUTHORIZED), "{response:?}");
+        assert_eq!(rig.launches(), 0);
+    }
+
+    #[test]
+    fn admit_install_needs_the_launched_daemon_and_logs_nothing_it_does_not_return() {
+        let none = admit_install(&peer(CONSOLE, 77), None).unwrap_err();
+        assert_eq!((none.pid, none.session), (Some(77), Some(CONSOLE)), "the refusal carries pid and session for the log");
+        assert!(none.reason.contains("none is running"), "{}", none.reason);
+        let wrong = admit_install(&peer(CONSOLE, 77), Some(78)).unwrap_err();
+        assert!(wrong.reason.contains("launched daemon"), "{}", wrong.reason);
+        assert_eq!(admit_install(&peer(CONSOLE, 78), Some(78)).unwrap(), Admitted { pid: 78, session: CONSOLE });
+        assert!(admit_install(&peer(CONSOLE + 1, 78), Some(78)).is_err(), "the console rule still applies");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn install_update_over_the_pipe_starts_setup_and_a_second_request_conflicts() {
+        let (name, rig, _console, _dir) = update_pipe("install-ok", CONSOLE).await;
+        let mut client = connect(&name).await;
+        greet(&mut client).await;
+        let first = round_trip(&mut client, &install_request()).await;
+        assert_eq!(first, PipeResponse::UpdateStarted { version: "0.1.1".into() });
+        assert_eq!(rig.launches(), 1);
+        let second = round_trip(&mut client, &install_request()).await;
+        assert!(matches!(&second, PipeResponse::Error { code, .. } if code == error_codes::CONFLICT), "{second:?}");
+        assert_eq!(rig.launches(), 1, "the second request started nothing");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_non_console_client_cannot_install_an_update() {
+        let (name, rig, _console, _dir) = update_pipe("install-wrong-session", CONSOLE + 1).await;
+        let mut client = connect(&name).await;
+        let response = read_response(&mut client).await;
+        assert!(matches!(&response, PipeResponse::Error { code, .. } if code == error_codes::UNAUTHORIZED), "{response:?}");
+        // The pipe is closed: even if the request is written it is never read.
+        let _ = client.write_all(&encode(&install_request()).unwrap()).await;
+        assert!(closed(&mut client).await);
+        assert_eq!(rig.launches(), 0);
+        assert!(rig.staged_files().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_client_whose_session_left_the_console_after_connecting_is_refused_at_the_request() {
+        let (name, rig, console, _dir) = update_pipe("install-moved", CONSOLE).await;
+        let mut client = connect(&name).await;
+        greet(&mut client).await;
+        console.store(CONSOLE + 1, std::sync::atomic::Ordering::SeqCst);
+        let response = round_trip(&mut client, &install_request()).await;
+        assert!(matches!(&response, PipeResponse::Error { code, .. } if code == error_codes::UNAUTHORIZED), "{response:?}");
+        assert_eq!(rig.launches(), 0);
+        assert!(rig.staged_files().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn install_update_is_unavailable_when_the_service_has_no_installer() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = unique_name("install-none");
+        let first = create_instance(&name, true).unwrap();
+        let mut core = test_core(dir.path().to_path_buf());
+        core.daemon.start(Instant::now());
+        let daemon = core.daemon.daemon_pid().expect("the launched daemon has a pid");
+        let core = Arc::new(Mutex::new(core));
+        tokio::spawn(serve(Arc::clone(&core), name.clone(), first, peers(peer(CONSOLE, daemon))));
+        let mut client = connect(&name).await;
+        greet(&mut client).await;
+        let response = round_trip(&mut client, &install_request()).await;
+        assert!(matches!(&response, PipeResponse::Error { code, .. } if code == error_codes::SERVICE_UNAVAILABLE), "{response:?}");
     }
 
     /// Real Win32, no fake: a client in this process must show this process's PID and session.

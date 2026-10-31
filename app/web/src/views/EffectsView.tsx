@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   CaretLeft,
   FileHtml,
@@ -28,10 +28,13 @@ import { ErrorPanel, LoadFrame, type LoadState } from "@/components/Loading";
 import { EffectDetailShape, EffectGalleryShape } from "@/components/LoadShapes";
 import { useToast } from "@/components/Toast";
 import { PropertyControls, type Values } from "@/views/PropertyControls";
+import { PresetStrip } from "@/views/PresetStrip";
 import { api } from "@/lib/endpoints";
 import { ApiFailure, messageOf } from "@/lib/errors";
 import { EFFECT_CATEGORIES, categoryOf, type EffectCategory } from "@/lib/effectCategories";
 import { getSnap, refreshAll, useSnap } from "@/lib/store";
+import { fillDefaults, nextFreeName } from "@/lib/presetMatch";
+import { appliedName, runningOf, setApplied, setShown } from "@/lib/runningPreset";
 import type { EffectDetail } from "@/proto/EffectDetail";
 import type { PropValue } from "@/proto/PropValue";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
@@ -62,6 +65,9 @@ export function EffectsView() {
   const [loaded, setLoaded] = useState<{ id: string; detail: EffectDetail } | null>(null);
   const [values, setValues] = useState<Values>({});
   const [error, setError] = useState<string | null>(null);
+  // Asks the detail to load again for the same effect: a preset was applied or changed, so the
+  // sliders and the preset list are read back from the daemon.
+  const [reloadTick, setReloadTick] = useState(0);
   const [favPop, setFavPop] = useState<string | null>(null);
   // The import: what is being sent, what the daemon said, and the file that is waiting for a
   // replace.
@@ -89,11 +95,15 @@ export function EffectsView() {
   const pendingFor = useRef<string | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const selectedRef = useRef<string | null>(null);
+  const valuesRef = useRef<Values>({});
   // The values the daemon has: a failed edit goes back to these.
   const saved = useRef<Values>({});
   useEffect(() => {
     selectedRef.current = selectedId;
   }, [selectedId]);
+  useEffect(() => {
+    valuesRef.current = values;
+  }, [values]);
 
   /** Sends the waiting values to the effect they were edited on, and to no other. */
   const flush = async () => {
@@ -146,7 +156,7 @@ export function EffectsView() {
     };
     // flush reads refs and stable setters only
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId, activeId]);
+  }, [selectedId, activeId, reloadTick]);
 
   useEffect(
     () => () => {
@@ -177,6 +187,145 @@ export function EffectsView() {
       setError(messageOf(e));
       toast(messageOf(e), "down");
     }
+  };
+
+  // The preset deleted last, while it can still be put back (8 s).
+  const [undo, setUndoState] = useState<{ name: string; run: () => Promise<void> } | null>(null);
+  const undoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const setUndo = (next: { name: string; run: () => Promise<void> } | null) => {
+    if (undoTimer.current) clearTimeout(undoTimer.current);
+    setUndoState(next);
+    if (next) undoTimer.current = setTimeout(() => setUndoState(null), 8000);
+  };
+  const detailRef = useRef<EffectDetail | null>(null);
+  useEffect(() => {
+    detailRef.current = loaded && loaded.id === selectedId ? loaded.detail : null;
+  });
+
+  /** Puts the daemon's answer to a preset change into the loaded detail. */
+  const setUserPresets = (id: string, user_presets: EffectDetail["user_presets"]) => {
+    setLoaded((l) => (l && l.id === id ? { ...l, detail: { ...l.detail, user_presets } } : l));
+  };
+
+  /** A preset another window removed or changed: say so and read the list again. */
+  const gone = (message: string) => {
+    toast(message, "warn");
+    setReloadTick((t) => t + 1);
+  };
+
+  const applyPreset = async (name: string) => {
+    const d = detailRef.current;
+    if (!d) return;
+    try {
+      await api.activateEffect(d.schema.id, { props: {}, preset: name });
+    } catch (e) {
+      if (e instanceof ApiFailure && e.status === 404) return gone("That preset was removed in another window");
+      throw e;
+    }
+    setApplied(d.schema.id, name);
+    await refreshAll();
+    setReloadTick((t) => t + 1);
+    toast(`${d.schema.name}: ${name}`);
+  };
+
+  const savePreset = async (name: string) => {
+    const d = detailRef.current;
+    if (!d) return;
+    const r = await api.createPreset(d.schema.id, {
+      name,
+      props: fillDefaults(d.schema.properties, valuesRef.current),
+    });
+    setUserPresets(d.schema.id, r.user_presets);
+    setApplied(d.schema.id, name);
+    toast(`Saved ${name}`);
+  };
+
+  const updatePreset = async (name: string) => {
+    const d = detailRef.current;
+    const preset = d?.user_presets.find((p) => p.name === name);
+    if (!d || !preset) return;
+    try {
+      const r = await api.replacePreset(d.schema.id, name, {
+        rename_to: null,
+        props: fillDefaults(d.schema.properties, valuesRef.current),
+        expected: preset.props,
+      });
+      setUserPresets(d.schema.id, r.user_presets);
+      setApplied(d.schema.id, name);
+      toast(`Updated ${name}`);
+    } catch (e) {
+      if (e instanceof ApiFailure && e.status === 404) return gone("That preset was removed in another window");
+      if (e instanceof ApiFailure && e.status === 409) return gone("Changed in another window");
+      throw e;
+    }
+  };
+
+  const renamePreset = async (name: string, to: string) => {
+    const d = detailRef.current;
+    const preset = d?.user_presets.find((p) => p.name === name);
+    if (!d || !preset) return;
+    try {
+      const r = await api.replacePreset(d.schema.id, name, {
+        rename_to: to,
+        props: preset.props,
+        expected: preset.props,
+      });
+      setUserPresets(d.schema.id, r.user_presets);
+      if (appliedName(d.schema.id) === name) setApplied(d.schema.id, to);
+      toast(`Renamed to ${to}`);
+    } catch (e) {
+      if (e instanceof ApiFailure && e.status === 404) return gone("That preset was removed in another window");
+      throw e;
+    }
+  };
+
+  const duplicatePreset = async (name: string) => {
+    const d = detailRef.current;
+    const preset = d?.user_presets.find((p) => p.name === name);
+    if (!d || !preset) return;
+    const copy = nextFreeName(name, [d.schema.presets, d.user_presets]);
+    const r = await api.createPreset(d.schema.id, { name: copy, props: preset.props });
+    setUserPresets(d.schema.id, r.user_presets);
+    toast(`Duplicated as ${copy}`);
+  };
+
+  const deletePreset = async (name: string) => {
+    const d = detailRef.current;
+    const preset = d?.user_presets.find((p) => p.name === name);
+    if (!d || !preset) return;
+    const id = d.schema.id;
+    const wasApplied = appliedName(id) === name;
+    try {
+      const r = await api.deletePreset(id, name);
+      setUserPresets(id, r.user_presets);
+    } catch (e) {
+      if (e instanceof ApiFailure && e.status === 404) return gone("That preset was removed in another window");
+      throw e;
+    }
+    // The live values stay as they are; they just no longer belong to a preset.
+    if (wasApplied) setApplied(id, null);
+    // One way back, shared by the toast and the strip: it works once, then both go.
+    let used = false;
+    const putBack = async () => {
+      if (used) return;
+      used = true;
+      setUndo(null);
+      try {
+        const r = await api.createPreset(id, { name, props: preset.props });
+        setUserPresets(id, r.user_presets);
+        if (wasApplied) setApplied(id, name);
+        // The store appends, so the preset comes back at the end of the list.
+        toast(`Put back ${name} at the end of the list`);
+      } catch (e) {
+        used = false;
+        throw e;
+      }
+    };
+    setUndo({ name, run: putBack });
+    toast(`Deleted ${name}`, "info", {
+      label: "Undo",
+      onClick: () => void putBack().catch((e: unknown) => toast(messageOf(e), "down")),
+    });
   };
 
   const toggleFavorite = async (id: string, favorite: boolean, name: string) => {
@@ -217,10 +366,10 @@ export function EffectsView() {
   };
 
   /** Removes a user effect. The one that is playing asks first. */
-  const deleteEffect = async (id: string, name: string) => {
+  const deleteEffect = async (id: string, name: string, keepPresets = false) => {
     setDeleting(null);
     try {
-      await api.deleteEffect(id);
+      await api.deleteEffect(id, keepPresets);
       await refreshAll();
       toast(`${name} is removed`);
     } catch (e) {
@@ -249,6 +398,27 @@ export function EffectsView() {
   const needsInput = detail ? detail.schema.needs.screen || detail.schema.needs.audio : false;
   // Nothing can run until there is a layout.
   const noLayout = status !== null && !status.active_layout;
+
+  // Which preset the values on screen mean, and whether they have moved off it. The rail and the
+  // strip read it from the same place.
+  const runningPreset = useMemo(
+    () => (detail && !stale ? runningOf(detail, { ...detail.props, ...values }) : null),
+    // runningOf also reads the name applied last, which every handler above changes together
+    // with the list or the values
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [detail, stale, values, reloadTick],
+  );
+  const runningKey = runningPreset ? `${runningPreset.name}|${runningPreset.modified}` : "";
+  useEffect(() => {
+    if (detail && !stale) {
+      // Values that equal a preset are that preset from now on: moving a slider then marks it
+      // modified instead of dropping its name.
+      if (runningPreset && !runningPreset.modified) setApplied(detail.schema.id, runningPreset.name);
+      setShown(detail.schema.id, runningPreset);
+    }
+    // runningKey stands for runningPreset
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detail?.schema.id, stale, runningKey]);
 
   // On a phone the detail becomes its own view: the gallery slides left and the detail comes
   // in from the right, with a back control.
@@ -407,7 +577,10 @@ export function EffectsView() {
                   {deleting === selectedId ? (
                     <>
                       <span>
-                        {running ? `${detail.schema.name} is playing. ` : ""}Delete it anyway?
+                        {running ? `${detail.schema.name} is playing. ` : ""}
+                        {detail.user_presets.length > 0
+                          ? `Delete it? It has ${detail.user_presets.length} preset${detail.user_presets.length === 1 ? "" : "s"} of yours.`
+                          : "Delete it anyway?"}
                       </span>
                       <div className="row-wrap">
                         <Button
@@ -415,8 +588,16 @@ export function EffectsView() {
                           size="sm"
                           onClick={() => void deleteEffect(selectedId, detail.schema.name)}
                         >
-                          Delete
+                          {detail.user_presets.length > 0 ? "Delete with presets" : "Delete"}
                         </Button>
+                        {detail.user_presets.length > 0 && (
+                          <Button
+                            size="sm"
+                            onClick={() => void deleteEffect(selectedId, detail.schema.name, true)}
+                          >
+                            Keep presets
+                          </Button>
+                        )}
                         <Button variant="ghost" size="sm" onClick={() => setDeleting(null)}>
                           Cancel
                         </Button>
@@ -437,17 +618,25 @@ export function EffectsView() {
             </div>
           </Panel>
 
-          {detail.schema.presets.length > 0 && (
-            <Panel title="Presets">
-              <div className="preset-row">
-                {detail.schema.presets.map((p) => (
-                  <Chip key={p.name} label={`Apply preset ${p.name}`} onClick={() => void activate(p.name)}>
-                    {p.name}
-                  </Chip>
-                ))}
-              </div>
-            </Panel>
-          )}
+          <PresetStrip
+            builtIn={detail.schema.presets}
+            user={detail.user_presets}
+            defs={detail.schema.properties}
+            live={{ ...detail.props, ...values }}
+            running={runningPreset}
+            disabled={stale}
+            onApply={applyPreset}
+            onSave={savePreset}
+            onUpdate={updatePreset}
+            onReset={applyPreset}
+            onRename={renamePreset}
+            onDuplicate={duplicatePreset}
+            onDelete={deletePreset}
+            undo={undo && detail.schema.id === selectedId ? { name: undo.name } : null}
+            onUndo={async () => {
+              if (undo) await undo.run();
+            }}
+          />
 
           <Panel title="Properties">
             <PropertyControls

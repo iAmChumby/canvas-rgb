@@ -71,7 +71,7 @@ if ($devServer) { Fail 'A process listens on port 3000 (a Next.js dev server?). 
 $lockTool = Join-Path $repo 'tools\with-build-lock.ps1'
 function Invoke-Locked([string[]]$Command) {
     Write-Host "build: $($Command -join ' ')"
-    & powershell.exe -NoProfile -File $lockTool @Command
+    & (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -NoProfile -File $lockTool @Command
     if ($LASTEXITCODE -ne 0) { Fail "build failed (exit $LASTEXITCODE): $($Command -join ' ')" }
 }
 
@@ -98,6 +98,7 @@ $child = Join-Path $PSScriptRoot 'setup-elevated.ps1'
 $childArgs = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -RepoRoot "{1}" -InstallDir "{2}" -OpenRgbZip "{3}" -DisableSignalRgb {4} -LogFile "{5}"' -f $child, $repo, $InstallDir, $zip, $SignalRgb, $log
 if ($PawnIoInstaller) { $childArgs += (' -PawnIoInstaller "{0}"' -f $PawnIoInstaller) }
 Write-Host 'Requesting elevation (the one UAC prompt)...'
+# token: a new elevated administrator token (UAC). The machine-wide half only; the per-user half runs as the person.
 $p = Start-Process -FilePath 'powershell.exe' -ArgumentList $childArgs -Verb RunAs -Wait -PassThru
 if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log | ForEach-Object { Write-Host $_ } }
 if ($p.ExitCode -ne 0) { Fail "Elevated step failed (exit $($p.ExitCode)). Per-user steps were not run." }

@@ -635,6 +635,74 @@ fn a_failed_startup_restore_does_not_apply_the_profile() {
     assert!(!chip.manual(SYS_FAN1), "no profile may take a header while the hand-back is failing");
 }
 
+// ---- Issue #17: a hovering temperature must not make the fan hunt. ----
+
+fn quiet_curve() -> FanMode {
+    FanMode::Curve { source: TempSource::Cpu, points: vec![point(30.0, 20), point(50.0, 45), point(70.0, 70)] }
+}
+
+/// Runs one tick a second at `temp`, returns the duty register after the tick.
+fn tick_at_temp(r: &mut Rig, t0: Instant, second: u64, temp: f32) -> u8 {
+    r.cpu.set(Some(temp));
+    r.fans.tick(t0 + Duration::from_secs(second));
+    r.chip.duty_raw(SYS_FAN1)
+}
+
+#[test]
+fn a_temperature_alternating_50_and_54_gives_a_steady_duty() {
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    r.cpu.set(Some(50.0));
+    r.fans.set_header_mode("sys_fan1", quiet_curve(), t0).unwrap();
+    let mut last = r.chip.duty_raw(SYS_FAN1);
+    let mut changes = 0;
+    for s in 1..=300 {
+        let duty = tick_at_temp(&mut r, t0, s, if s % 2 == 0 { 50.0 } else { 54.0 });
+        if duty != last {
+            changes += 1;
+            last = duty;
+        }
+    }
+    assert!(changes <= 2, "the duty changed {changes} times in 300 s");
+}
+
+#[test]
+fn a_real_rise_raises_the_duty_within_two_seconds() {
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    r.cpu.set(Some(50.0));
+    r.fans.set_header_mode("sys_fan1", quiet_curve(), t0).unwrap();
+    for s in 1..=5 {
+        tick_at_temp(&mut r, t0, s, 50.0);
+    }
+    let before = r.chip.duty_raw(SYS_FAN1);
+    tick_at_temp(&mut r, t0, 6, 70.0);
+    let after = tick_at_temp(&mut r, t0, 7, 70.0);
+    assert!(after >= 175 && after > before, "70 C asks for 70 %: {before} -> {after}");
+}
+
+#[test]
+fn a_real_fall_lowers_the_duty_after_the_drop_and_then_after_the_hold() {
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    r.cpu.set(Some(70.0));
+    r.fans.set_header_mode("sys_fan1", quiet_curve(), t0).unwrap();
+    let peak = tick_at_temp(&mut r, t0, 1, 70.0);
+    // One cool reading changes nothing.
+    assert_eq!(tick_at_temp(&mut r, t0, 2, 50.0), peak);
+    let mut after_drop = peak;
+    for s in 3..=20 {
+        after_drop = tick_at_temp(&mut r, t0, s, 50.0);
+    }
+    assert!(after_drop < peak, "20 C lower for 18 s lowers the duty: {peak} -> {after_drop}");
+    let mut settled = after_drop;
+    for s in 21..=100 {
+        settled = tick_at_temp(&mut r, t0, s, 50.0);
+    }
+    // 45 % is the curve's answer at 50 C; the hold only steps down for 3 % or more (CURVE_STEP_DOWN_MIN_PERCENT), so up to 8 raw units remain.
+    assert!(settled.abs_diff(115) <= 8, "after the hold the duty follows the curve: {settled}");
+}
+
 // ---- Issue #29: a sleep must not cost the user their fan profile. ----
 
 /// A wall-clock time `secs` after an arbitrary fixed origin.
@@ -866,4 +934,44 @@ fn a_curve_sensor_that_is_slow_after_the_wake_gets_its_full_timeout() {
     r.cpu.set(Some(60.0));
     r.fans.tick_at(t1 + RESUME_GRACE + Duration::from_secs(2), wall(8 * 3600 + 7));
     assert!(r.chip.manual(SYS_FAN1), "the curve drives the header once the sensor is back");
+}
+
+#[test]
+fn applying_the_profile_again_keeps_the_held_duty_of_a_curve_that_did_not_change() {
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    r.cpu.set(Some(70.0));
+    r.fans.set_header_mode("sys_fan1", quiet_curve(), t0).unwrap();
+    let peak = tick_at_temp(&mut r, t0, 1, 70.0);
+    // 62 C is within the drop threshold of 70 C, so the held duty stays.
+    assert_eq!(tick_at_temp(&mut r, t0, 2, 62.0), peak);
+    // Another header changes; sys_fan1's curve is the same, so its hysteresis must survive.
+    r.fans.set_header_mode("pump_fan", FanMode::Fixed { percent: 60 }, t0 + Duration::from_secs(3)).unwrap();
+    r.fans.set_profile("Default", t0 + Duration::from_secs(3)).unwrap();
+    assert_eq!(tick_at_temp(&mut r, t0, 4, 62.0), peak, "one apply dropped another header's held duty");
+    // A changed curve does start afresh.
+    let other = FanMode::Curve { source: TempSource::Cpu, points: vec![point(30.0, 20), point(50.0, 40), point(70.0, 60)] };
+    r.fans.set_header_mode("sys_fan1", other, t0 + Duration::from_secs(5)).unwrap();
+    // Fresh state answers the new curve at 62 C exactly: 52 %, raw 133. A kept hold would sit at 140.
+    assert_eq!(tick_at_temp(&mut r, t0, 6, 62.0), 133, "a changed curve starts with no held duty");
+}
+
+#[test]
+fn a_small_steady_fall_steps_down_only_after_the_hold() {
+    // 66 C after a 70 C peak is 4 C lower: under the drop threshold, so only the hold can lower the
+    // duty. The Quiet curve asks for 65 % at 66 C, 5 % under the held 70 %.
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    r.cpu.set(Some(70.0));
+    r.fans.set_header_mode("sys_fan1", quiet_curve(), t0).unwrap();
+    let peak = tick_at_temp(&mut r, t0, 1, 70.0);
+    let mut duty = peak;
+    for s in 2..=30 {
+        duty = tick_at_temp(&mut r, t0, s, 66.0);
+    }
+    assert_eq!(duty, peak, "inside the hold the duty stays");
+    for s in 31..=90 {
+        duty = tick_at_temp(&mut r, t0, s, 66.0);
+    }
+    assert!(duty < peak, "after the hold the duty steps down: {peak} -> {duty}");
 }

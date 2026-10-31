@@ -67,6 +67,7 @@ $child = Join-Path $PSScriptRoot 'uninstall-elevated.ps1'
 $childArgs = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -InstallDir "{1}" -LogFile "{2}"' -f $child, $InstallDir, $log
 if ($PurgeConfig) { $childArgs += ' -PurgeConfig' }
 Write-Host 'Requesting elevation (the one UAC prompt)...'
+# token: a new elevated administrator token (UAC). The machine-wide half only; the per-user half runs as the person.
 $p = Start-Process -FilePath 'powershell.exe' -ArgumentList $childArgs -Verb RunAs -Wait -PassThru
 if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log | ForEach-Object { Write-Host $_ } }
 # Exit 2 = the elevated work finished except the SignalRGB machine record (unreadable, kept): carry on with the per-user steps.

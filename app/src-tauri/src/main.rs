@@ -30,7 +30,9 @@ fn main() {
         // in the running tray instead of starting another tray icon.
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             if update::has_after_update_arg(&args) {
-                // The installer's relaunch: stay quiet, never open the editor.
+                // The installer's relaunch: stay quiet, never open the editor. Setup may have ended
+                // before it stopped this tray; read what it reported.
+                update::forwarded_after_update(app);
             } else if onboard::has_onboard_arg(&args) {
                 tray::open_onboarding(app);
             } else {

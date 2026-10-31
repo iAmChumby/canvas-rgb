@@ -167,6 +167,7 @@ pub fn start_server(exe: &std::path::Path, args: &[String]) -> Result<ServerProc
     let config_dir = crate::paths::openrgb_config_dir();
     std::fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
 
+    // token: the daemon's own (the logged-on user, non-elevated).
     let child = std::process::Command::new(exe)
         .args(args)
         .creation_flags(CREATE_NO_WINDOW)
@@ -183,6 +184,7 @@ pub fn start_server(exe: &std::path::Path, args: &[String]) -> Result<ServerProc
     if !exe.exists() {
         return Err(format!("{} does not exist", exe.display()));
     }
+    // token: the daemon's own (the logged-on user, non-elevated).
     let child = std::process::Command::new(exe)
         .args(args)
         .stdin(std::process::Stdio::null())

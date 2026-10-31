@@ -7,7 +7,15 @@
 ; one Installed apps entry (canvas-rgb_is1).
 
 #ifndef AppVersion
-  #define AppVersion "0.1.3"
+  #define AppVersion "0.2.0"
+#endif
+; VersionInfoVersion must be numeric x.x.x.x: a test build such as 0.2.1-dev.12 keeps its full string in
+; AppVersion and uses only the part before the "-" here.
+#define PreIdx Pos("-", AppVersion)
+#if PreIdx > 0
+  #define NumericVersion Copy(AppVersion, 1, PreIdx - 1)
+#else
+  #define NumericVersion AppVersion
 #endif
 #ifndef PayloadDir
   #define PayloadDir "..\..\dist\payload"
@@ -30,7 +38,7 @@ AppPublisherURL=https://github.com/iAmChumby/canvas-rgb
 AppSupportURL=https://github.com/iAmChumby/canvas-rgb/issues
 AppUpdatesURL=https://github.com/iAmChumby/canvas-rgb/releases
 AppCopyright=Copyright 2026 Luke Edwards
-VersionInfoVersion={#AppVersion}
+VersionInfoVersion={#NumericVersion}
 DefaultDirName={code:GetDefaultDir}
 UsePreviousAppDir=yes
 DisableProgramGroupPage=yes
@@ -152,6 +160,19 @@ begin
     if Uppercase(ParamStr(I)) = '/UPDATE' then Result := True;
 end;
 
+// True for /SERVICEUPDATE, the switch the canvas-rgb service passes when it runs this setup itself (#43).
+// Setup then runs as SYSTEM, so "the original user" is SYSTEM, not the person at the keyboard: the per-user
+// script and the tray relaunch are skipped here, and the service does both as the console user once
+// setup ends (setup-user.ps1, then canvas-rgb.exe --after-update).
+function IsServiceUpdateRun: Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  for I := 1 to ParamCount do
+    if Uppercase(ParamStr(I)) = '/SERVICEUPDATE' then Result := True;
+end;
+
 function PsExe: String;
 begin
   Result := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
@@ -162,6 +183,8 @@ var
   Params: String;
 begin
   Params := '-NoProfile -ExecutionPolicy Bypass -File "' + ScriptPath + '" ' + Args;
+  // token: ExecAsOriginalUser runs as the person who started Setup (non-elevated); Exec runs as Setup's own
+  // administrator token.
   if AsOriginalUser then
     Result := ExecAsOriginalUser(PsExe, Params, ExpandConstant('{sys}'), SW_HIDE, ewWaitUntilTerminated, Code)
   else
@@ -260,6 +283,7 @@ var
   Code: Integer;
 begin
   // Opened as the logged-in user (not with Setup's administrator rights).
+  // token: the original user's, non-elevated.
   ExecAsOriginalUser(ExpandConstant('{win}\explorer.exe'), '{#PawnIoUrl}', '', SW_SHOWNORMAL, ewNoWait, Code);
 end;
 
@@ -448,14 +472,20 @@ begin
     Exit;
   end;
 
-  WizardForm.StatusLabel.Caption := 'Setting up canvas-rgb for your account...';
-  Args := '-InstallDir "' + ExpandConstant('{app}') + '" -SignalRgb ' + GetSignalRgb;
-  if not RunPs(ExpandConstant('{app}\installer\setup-user.ps1'), Args, True, Code) or (Code <> 0) then
+  { /SERVICEUPDATE: setup runs as SYSTEM, so ExecAsOriginalUser would run the per-user script as SYSTEM and
+    write SYSTEM's HKCU and profile. The service runs setup-user.ps1 as the console user after setup ends. The
+    elevated script above still counts, so the run is ok. }
+  if not IsServiceUpdateRun then
   begin
-    FFailCode := 11;
-    FFailText := 'Setup could not set up canvas-rgb for your account (code ' + IntToStr(Code) + '). The background part is installed. Run this setup again to finish.';
-    SuppressibleMsgBox(FFailText, mbError, MB_OK, IDOK);
-    Exit;
+    WizardForm.StatusLabel.Caption := 'Setting up canvas-rgb for your account...';
+    Args := '-InstallDir "' + ExpandConstant('{app}') + '" -SignalRgb ' + GetSignalRgb;
+    if not RunPs(ExpandConstant('{app}\installer\setup-user.ps1'), Args, True, Code) or (Code <> 0) then
+    begin
+      FFailCode := 11;
+      FFailText := 'Setup could not set up canvas-rgb for your account (code ' + IntToStr(Code) + '). The background part is installed. Run this setup again to finish.';
+      SuppressibleMsgBox(FFailText, mbError, MB_OK, IDOK);
+      Exit;
+    end;
   end;
   FScriptsOk := True;
   { The service owns launching the daemon (in the user's session). Starting canvas-rgbd.exe here raced it:
@@ -464,7 +494,10 @@ begin
     the wizard does it through the ticked "Launch canvas-rgb" ([Run], --onboard), /SILENT does it here
     ([Run] has skipifsilent). The tray is also single-instance, so a stray second launch only focuses it. }
   { /UPDATE (the tray updating itself) relaunches it with --after-update: it starts quietly, with no window. }
-  if WizardSilent and (not IsVerySilent) then
+  // token: ExecAsOriginalUser starts the tray as the person who started Setup. That is the non-elevated user only
+  // because the tray starts Setup unelevated and Setup raises itself (#28): never start Setup with an elevating verb.
+  { /SERVICEUPDATE never relaunches the tray from here (the original user is SYSTEM): the service starts it. }
+  if WizardSilent and (not IsVerySilent) and (not IsServiceUpdateRun) then
   begin
     if IsUpdateRun then
       ExecAsOriginalUser(ExpandConstant('{app}\canvas-rgb.exe'), '--after-update', ExpandConstant('{app}'), SW_SHOWNORMAL, ewNoWait, Code)
@@ -540,7 +573,16 @@ begin
     Lines[0] := Json;
     SaveStringsToUTF8FileWithoutBOM(ExpandConstant('{app}\update-result.json'), Lines, False);
     Exe := ExpandConstant('{app}\canvas-rgb.exe');
-    if (not Ok) and FileExists(Exe) then
+    // token: the original user's, non-elevated (see CurStepChanged).
+    // /SERVICEUPDATE: the original user is SYSTEM, so no relaunch here; the service starts the tray.
+    // /SERVICEUPDATE that did not finish: setup-elevated.ps1 may have stopped the service and failed before
+    // it started the new one, which leaves nobody to start the tray. Start the service; it finds the marker,
+    // runs setup-user.ps1 and starts the tray, which shows update-result.json. The result is ignored (the
+    // service may already be running: error 1056).
+    // token: Setup's own (SYSTEM for a service update); sc.exe only starts the service.
+    if (not Ok) and IsServiceUpdateRun then
+      Exec(ExpandConstant('{sys}\sc.exe'), 'start canvas-rgb-svc', '', SW_HIDE, ewWaitUntilTerminated, Code);
+    if (not Ok) and FileExists(Exe) and (not IsServiceUpdateRun) then
       ExecAsOriginalUser(Exe, '--after-update', ExpandConstant('{app}'), SW_SHOWNORMAL, ewNoWait, Code);
   except
     // The install folder is not set when Setup stopped very early: there is nothing to report to.

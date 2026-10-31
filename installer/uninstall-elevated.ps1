@@ -91,7 +91,8 @@ try {
 
     # 2b. Delete the service (already stopped).
     if ($svc) {
-        & sc.exe delete $c.ServiceName | ForEach-Object { Say "  sc delete: $_" }
+        $sc = Join-Path $env:SystemRoot 'System32\sc.exe'   # absolute: a bare name resolves through PATH, which a user may control
+        & $sc delete $c.ServiceName | ForEach-Object { Say "  sc delete: $_" }
         if ($LASTEXITCODE -ne 0) { throw "sc.exe delete failed (exit $LASTEXITCODE)" }
         Say "  service $($c.ServiceName) deleted"
     }

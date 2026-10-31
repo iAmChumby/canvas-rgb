@@ -15,6 +15,7 @@ pub mod preview;
 pub mod render;
 pub mod settings;
 pub mod status;
+pub mod update;
 
 use axum::routing::{get, patch, post, put};
 use axum::Router;
@@ -47,6 +48,11 @@ pub fn router(app: Arc<App>) -> Router {
             post(effects::import_effect)
                 .layer(axum::extract::DefaultBodyLimit::max(effects::IMPORT_BODY_LIMIT)),
         )
+        .route(routes::EFFECT_PRESETS, post(effects::create_preset))
+        .route(
+            routes::EFFECT_PRESET,
+            put(effects::replace_preset).delete(effects::delete_preset),
+        )
         .route(routes::EFFECT_ACTIVATE, post(effects::activate))
         .route(routes::EFFECT_THUMBNAIL, get(effects::thumbnail))
         .route(routes::EFFECT_ACTIVE_PROPS, patch(effects::patch_active_props))
@@ -78,6 +84,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route(routes::CONFIG_EXPORT, get(settings::config_export))
         .route(routes::CONFIG_IMPORT, post(settings::config_import))
         .route(routes::QUIT, post(status::quit))
+        .route(routes::UPDATE_INSTALL, post(update::install))
         .route(routes::DIAG_READBACK, get(diag::readback))
         .route("/api/v1/diag/fail-sensor", post(diag::fail_sensor))
         .route(routes::PREVIEW, get(preview::preview));

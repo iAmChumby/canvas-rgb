@@ -52,6 +52,37 @@ pub enum Command {
     /// The configuration.
     #[command(subcommand)]
     Config(ConfigCommand),
+    /// Install a signed build through the service, with no permission prompt.
+    Update(UpdateArgs),
+}
+
+/// `canvas-rgb update --file <installer> --sig <installer.sig>`
+#[derive(Debug, Args)]
+pub struct UpdateArgs {
+    /// The installer (`canvas-rgb-<version>-setup.exe`).
+    #[arg(long)]
+    pub file: String,
+    /// The installer's `.sig` file from the release.
+    #[arg(long)]
+    pub sig: String,
+}
+
+impl UpdateArgs {
+    /// Builds the request body: the installer as an absolute path and the text of the `.sig`
+    /// file. The service checks the signature itself; this only fails on a missing file.
+    pub fn request(&self) -> Result<canvas_proto::api::InstallUpdateRequest, String> {
+        let installer = std::path::absolute(&self.file)
+            .map_err(|e| format!("could not resolve {}: {e}", self.file))?;
+        if !installer.is_file() {
+            return Err(format!("{} is not a file", installer.display()));
+        }
+        let signature = std::fs::read_to_string(&self.sig)
+            .map_err(|e| format!("could not read the signature file {}: {e}", self.sig))?;
+        Ok(canvas_proto::api::InstallUpdateRequest {
+            installer: installer.to_string_lossy().into_owned(),
+            signature: signature.trim().to_string(),
+        })
+    }
 }
 
 /// `canvas-rgb devices ...`
@@ -884,6 +915,36 @@ mod tests {
     use super::*;
     use canvas_proto::props::PropKind;
     use std::path::PathBuf;
+
+    #[test]
+    fn the_update_request_holds_an_absolute_path_and_the_trimmed_signature() {
+        let dir = std::env::temp_dir().join(format!("canvas-rgb-update-cli-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let installer = dir.join("setup.exe");
+        let sig = dir.join("setup.exe.sig");
+        std::fs::write(&installer, b"x").unwrap();
+        std::fs::write(&sig, "c2ln\r\n").unwrap();
+        let args = UpdateArgs {
+            file: installer.to_string_lossy().into_owned(),
+            sig: sig.to_string_lossy().into_owned(),
+        };
+        let request = args.request().unwrap();
+        assert!(std::path::Path::new(&request.installer).is_absolute());
+        assert_eq!(request.signature, "c2ln");
+
+        let missing = UpdateArgs { file: installer.to_string_lossy().into_owned(), sig: "no-such.sig".into() };
+        assert!(missing.request().is_err());
+        let no_file = UpdateArgs { file: dir.join("none.exe").to_string_lossy().into_owned(), sig: args.sig.clone() };
+        assert!(no_file.request().is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_update_command_parses() {
+        let cli = Cli::try_parse_from(["canvas-rgb", "update", "--file", "a.exe", "--sig", "a.sig"]).unwrap();
+        assert!(matches!(cli.command, Command::Update(_)));
+        assert!(Cli::try_parse_from(["canvas-rgb", "update", "--file", "a.exe"]).is_err());
+    }
 
     #[test]
     fn colors_are_parsed() {

@@ -30,3 +30,6 @@ pub const DIAG_FAIL_SENSOR: &[&str] = &["diag", "fail-sensor"];
 /// `canvas-rgb config export <file>` / `canvas-rgb config import <file>` (G10)
 pub const CONFIG_EXPORT: &[&str] = &["config", "export"];
 pub const CONFIG_IMPORT: &[&str] = &["config", "import"];
+/// `canvas-rgb update --file <installer> --sig <installer.sig>`: asks the service to install a
+/// signed build as SYSTEM, with no permission prompt (#43). Prints the signed version it started.
+pub const UPDATE: &[&str] = &["update"];

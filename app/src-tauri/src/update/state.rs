@@ -39,8 +39,15 @@ pub struct Stored {
     /// The release whose installer was started, with its notes. Written before the launch: the tray
     /// dies during the install, so this is how the next start knows what was attempted.
     pub pending: Option<UpdateInfo>,
+    /// When the installer for `pending` was started, in milliseconds since the Unix epoch. A result
+    /// file older than this is an earlier run's and is ignored, also after a tray restart (#28).
+    /// `None` in a state file written before this field existed: the result is then read as it is.
+    pub pending_since_ms: Option<u64>,
     /// Set after an update until the person dismisses "Updated to X.Y.Z"; keeps the release notes.
     pub updated_to: Option<UpdateInfo>,
+    /// The last version this tray recorded as installed. An installer report for it is not news
+    /// (a stale `update-result.json`).
+    pub last_settled: Option<String>,
 }
 
 impl Default for Stored {
@@ -53,7 +60,9 @@ impl Default for Stored {
             skipped_version: None,
             snoozed_at: None,
             pending: None,
+            pending_since_ms: None,
             updated_to: None,
+            last_settled: None,
         }
     }
 }

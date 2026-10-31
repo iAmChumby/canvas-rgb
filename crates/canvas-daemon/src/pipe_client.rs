@@ -18,6 +18,12 @@ pub const RECONNECT_INTERVAL: Duration = Duration::from_secs(2);
 /// The pipe name, from the spine.
 pub const PIPE_NAME: &str = canvas_proto::pipe::PIPE_NAME;
 
+/// The service reads an update installer as this client (`ImpersonateNamedPipeClient`, #43), so it
+/// may impersonate, not only identify, the daemon. Tokio's default is `SECURITY_IDENTIFICATION`,
+/// at which the service's impersonated open of the installer is refused.
+pub const PIPE_QOS: u32 = windows::Win32::Storage::FileSystem::SECURITY_IMPERSONATION.0
+    | windows::Win32::Storage::FileSystem::SECURITY_SQOS_PRESENT.0;
+
 /// A connected pipe client.
 pub struct PipeClient {
     pipe: NamedPipeClient,
@@ -26,7 +32,7 @@ pub struct PipeClient {
 impl PipeClient {
     /// Opens the pipe. Fails when the service is not listening.
     pub async fn connect() -> std::io::Result<Self> {
-        let pipe = ClientOptions::new().open(PIPE_NAME)?;
+        let pipe = ClientOptions::new().security_qos_flags(PIPE_QOS).open(PIPE_NAME)?;
         Ok(Self { pipe })
     }
 
@@ -138,5 +144,14 @@ mod tests {
         let frame = encode(&request).unwrap();
         let decoded: PipeRequest = canvas_proto::pipe::decode(&frame).unwrap();
         assert_eq!(decoded, request);
+    }
+}
+
+#[cfg(test)]
+mod qos_tests {
+    /// The service impersonates the daemon to read an installer (#43); identification level fails that.
+    #[test]
+    fn the_pipe_client_allows_impersonation() {
+        assert_eq!(super::PIPE_QOS, 0x0002_0000 | 0x0010_0000);
     }
 }

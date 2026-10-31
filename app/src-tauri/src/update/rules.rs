@@ -8,9 +8,10 @@ use url::Url;
 pub const ENDPOINT: &str = "https://github.com/iAmChumby/canvas-rgb/releases/latest/download/latest.json";
 
 /// The release signing key (minisign public key, as `tauri signer generate` writes it). The
-/// private half is the `UPDATE_SIGNING_KEY` Actions secret. `plugins.updater.pubkey` in
-/// `tauri.conf.json` repeats it for the plugin's own config; a test keeps the two equal.
-pub const PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVFMzExRTFDOTg2QjI2MTMKUldRVEptdVlIQjR4N2hFYUs3Q1YvdFliZlA3NzdQVGRXakU4SWtTaUFPLzAwcndCYWx1ZlZxaTcK";
+/// private half is the `UPDATE_SIGNING_KEY` Actions secret. The service checks installers against
+/// the same constant. `plugins.updater.pubkey` in `tauri.conf.json` repeats it for the plugin's own
+/// config; a test keeps the two equal.
+pub const PUBKEY: &str = canvas_proto::consts::UPDATE_PUBKEY;
 
 /// The manifest key of our one build (`platforms` in `latest.json`).
 pub const TARGET: &str = "windows-x86_64";

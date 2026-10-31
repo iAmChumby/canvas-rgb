@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::thread::JoinHandle;
 
@@ -221,6 +221,9 @@ enum Launch {
     NoHandle,
     /// Starts a harmless real program and hands over its process handle.
     Process,
+    /// As `Process`, and writes the installer's report while it "runs": after the tray stamped the
+    /// start, as the real installer does.
+    ProcessWithReport(&'static str),
     Declined,
     Fails,
 }
@@ -247,6 +250,10 @@ fn spawn_stub(stub: &Path) -> Result<Started, RunError> {
 }
 
 fn harness(current: &str, pubkey_file: &str, how: Launch) -> Harness {
+    harness_with_service(current, pubkey_file, how, None)
+}
+
+fn harness_with_service(current: &str, pubkey_file: &str, how: Launch, service: Option<ServiceAsker>) -> Harness {
     isolate_log();
     let server = FakeServer::start();
     let dir = TempDir::new();
@@ -280,6 +287,7 @@ fn harness(current: &str, pubkey_file: &str, how: Launch) -> Harness {
 
     let seen = LaunchSeen::default();
     let (seen2, state_path) = (seen.clone(), settings.state_path.clone());
+    let report_path = settings.result_path.clone();
     let stub = dir.path().join("stub.exe");
     #[cfg(windows)]
     {
@@ -296,18 +304,26 @@ fn harness(current: &str, pubkey_file: &str, how: Launch) -> Harness {
             Launch::Starts => Ok::<Started, RunError>(Some(launch::ProcessHandle(0))),
             Launch::NoHandle => Ok(None),
             Launch::Process => spawn_stub(&stub),
+            Launch::ProcessWithReport(report) => {
+                std::fs::write(&report_path, report).map_err(|e| RunError::Failed(e.to_string()))?;
+                spawn_stub(&stub)
+            }
             Launch::Declined => Err(RunError::Declined),
             Launch::Fails => Err(RunError::Failed("boom".into())),
         }
     });
     let states: Arc<Mutex<Vec<UpdateState>>> = Arc::default();
     let sink = states.clone();
-    let ctl = Arc::new(Controller::new(
+    let mut controller = Controller::new(
         settings,
         v(current),
         launcher,
         Box::new(move |s: &UpdateState| sink.lock().unwrap().push(s.clone())),
-    ));
+    );
+    if let Some(service) = service {
+        controller = controller.with_service(service);
+    }
+    let ctl = Arc::new(controller);
     Harness { _app: app, handle, ctl, server, dir, states, seen }
 }
 
@@ -406,7 +422,9 @@ fn state_file_round_trips() {
         skipped_version: Some("0.1.1".into()),
         snoozed_at: Some("2026-10-29T13:00:00Z".into()),
         pending: Some(info("0.1.2")),
+        pending_since_ms: Some(1_790_000_000_000),
         updated_to: Some(info("0.1.0")),
+        last_settled: Some("0.1.0".into()),
     };
     state::save(&path, &stored).unwrap();
     assert_eq!(state::load(&path), stored);
@@ -780,6 +798,209 @@ fn a_launch_failure_clears_pending() {
     assert_eq!(h.stored().pending, None);
 }
 
+// ---- the service path (#43) ----
+
+/// What the fake service saw when the tray asked.
+#[derive(Debug, Clone)]
+struct Asked {
+    signature: String,
+    /// The tray's copy could not be written to while the service looked at it.
+    file_held: bool,
+    /// `pending` was already in the state file (the tray may die during the install).
+    pending_in_state_file: Option<String>,
+}
+
+/// A service that answers `answer` and records every request.
+fn fake_service(answer: ServiceAnswer) -> (ServiceAsker, Arc<Mutex<Vec<Asked>>>) {
+    let asked: Arc<Mutex<Vec<Asked>>> = Arc::default();
+    let log = asked.clone();
+    let asker: ServiceAsker = Arc::new(move |path: &Path, signature: &str| {
+        // `<dir>/updates/<installer>`: the state file sits beside `updates`.
+        let state_file = path.parent().unwrap().parent().unwrap().join("update.json");
+        log.lock().unwrap().push(Asked {
+            signature: signature.to_string(),
+            file_held: std::fs::OpenOptions::new().write(true).open(path).is_err(),
+            pending_in_state_file: state::load(&state_file).pending.map(|p| p.version),
+        });
+        answer.clone()
+    });
+    (asker, asked)
+}
+
+#[test]
+fn a_service_that_accepts_installs_with_no_launch_and_the_release_signature() {
+    let (asker, asked) = fake_service(ServiceAnswer::Started);
+    let h = harness_with_service("0.1.0", "test.key.pub", Launch::Fails, Some(asker));
+    good_release(&h);
+    h.check(true);
+    let s = h.install();
+    assert_eq!(s.phase, UpdatePhase::Installing);
+    let asked = asked.lock().unwrap();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].signature, fixture_text("payload.bin.sig"), "the release's own signature text");
+    assert!(asked[0].file_held, "the file stays held while the service reads it");
+    assert_eq!(asked[0].pending_in_state_file.as_deref(), Some("0.1.1"), "pending is saved before the ask");
+    assert!(h.seen.calls.lock().unwrap().is_empty(), "the tray did not start the installer itself");
+    assert_eq!(h.stored().pending.map(|p| p.version).as_deref(), Some("0.1.1"), "pending stays for the next start");
+}
+
+#[test]
+fn a_service_that_is_down_falls_back_to_the_launch() {
+    let (asker, asked) = fake_service(ServiceAnswer::Unavailable);
+    let h = harness_with_service("0.1.0", "test.key.pub", Launch::Starts, Some(asker));
+    good_release(&h);
+    h.check(true);
+    let s = h.install();
+    assert_eq!(s.phase, UpdatePhase::Installing);
+    assert_eq!(asked.lock().unwrap().len(), 1, "asked first");
+    let calls = h.seen.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1, "then launched once");
+    assert_eq!(calls[0].pending_in_state_file.as_deref(), Some("0.1.1"));
+    assert!(calls[0].write_blocked && calls[0].delete_blocked);
+}
+
+#[test]
+fn a_service_that_refuses_ends_the_update_with_no_launch() {
+    let (asker, asked) = fake_service(ServiceAnswer::Refused("the version is not newer".into()));
+    let h = harness_with_service("0.1.0", "test.key.pub", Launch::Starts, Some(asker));
+    good_release(&h);
+    h.check(true);
+    let s = h.install();
+    match s.phase {
+        UpdatePhase::InstallFailed { message } => assert!(message.contains("the version is not newer"), "{message}"),
+        other => panic!("expected InstallFailed, got {other:?}"),
+    }
+    assert_eq!(asked.lock().unwrap().len(), 1);
+    assert!(h.seen.calls.lock().unwrap().is_empty(), "no fallback after a refusal");
+    assert_eq!(h.stored().pending, None, "nothing started, so nothing pending");
+}
+
+#[test]
+fn an_unknown_outcome_keeps_pending_and_never_launches() {
+    let (asker, asked) = fake_service(ServiceAnswer::Unknown("reset".into()));
+    let h = harness_with_service("0.1.0", "test.key.pub", Launch::Starts, Some(asker));
+    good_release(&h);
+    h.check(true);
+    let s = h.install();
+    match s.phase {
+        UpdatePhase::InstallFailed { message } => {
+            assert_eq!(message, "canvas-rgb may be installing the update; it restarts on its own.")
+        }
+        other => panic!("expected InstallFailed, got {other:?}"),
+    }
+    assert_eq!(asked.lock().unwrap().len(), 1);
+    assert!(h.seen.calls.lock().unwrap().is_empty(), "no second setup beside the service's");
+    assert_eq!(h.stored().pending.map(|p| p.version).as_deref(), Some("0.1.1"), "pending stays for the next start");
+}
+
+fn after_update_controller(h: &Harness, current: &str) -> Controller {
+    Controller::new(
+        Settings { ..Settings::production() }.with_dir(h.dir.path()),
+        v(current),
+        Arc::new(|_: &Path| Ok(None)),
+        Box::new(|_| {}),
+    )
+}
+
+#[test]
+fn an_update_started_elsewhere_is_recorded_when_the_installer_starts_the_tray() {
+    let h = harness("0.1.1", "test.key.pub", Launch::Starts);
+    let result_path = h.dir.path().join("update-result.json");
+    std::fs::write(&result_path, r#"{"version":"0.1.1","ok":true}"#).unwrap();
+    let ctl = after_update_controller(&h, "0.1.1");
+    ctl.settle_unrecorded_update();
+    let s = ctl.state();
+    assert_eq!(s.updated_to.as_ref().map(|u| u.version.as_str()), Some("0.1.1"));
+    assert_eq!(state::load(&h.dir.path().join("update.json")).last_settled.as_deref(), Some("0.1.1"));
+    // Dismissed, then a stale report on a later --after-update start: not news again.
+    ctl.dismiss_updated();
+    let again = after_update_controller(&h, "0.1.1");
+    again.settle_unrecorded_update();
+    assert_eq!(again.state().updated_to, None, "a version already recorded is not recorded twice");
+}
+
+#[test]
+fn a_stale_pending_does_not_hide_a_newer_install_from_the_command_line() {
+    // pending=0.1.4 from a tray install that ended unknown; `canvas-rgb update` then installed 0.1.5.
+    let h = harness("0.1.5", "test.key.pub", Launch::Starts);
+    state::save(
+        &h.dir.path().join("update.json"),
+        &Stored { pending: Some(info("0.1.4")), pending_since_ms: Some(now_ms()), ..Stored::default() },
+    )
+    .unwrap();
+    std::fs::write(h.dir.path().join("update-result.json"), r#"{"version":"0.1.5","ok":true}"#).unwrap();
+    let ctl = after_update_controller(&h, "0.1.5");
+    ctl.settle_unrecorded_update();
+    ctl.reconcile_pending();
+    let s = ctl.state();
+    assert_eq!(s.updated_to.as_ref().map(|u| u.version.as_str()), Some("0.1.5"));
+    assert_eq!(s.phase, UpdatePhase::Idle, "0.1.4 is not reported as failed or installing");
+    assert_eq!(state::load(&h.dir.path().join("update.json")).pending, None);
+}
+
+#[test]
+fn a_pending_older_than_the_running_version_is_dropped_without_a_failure() {
+    let h = harness("0.1.5", "test.key.pub", Launch::Starts);
+    state::save(
+        &h.dir.path().join("update.json"),
+        &Stored { pending: Some(info("0.1.4")), pending_since_ms: Some(now_ms()), ..Stored::default() },
+    )
+    .unwrap();
+    let ctl = after_update_controller(&h, "0.1.5");
+    ctl.reconcile_pending();
+    assert_eq!(ctl.state().phase, UpdatePhase::Idle);
+    assert_eq!(state::load(&h.dir.path().join("update.json")).pending, None);
+}
+
+#[test]
+fn a_pending_for_the_running_version_still_settles_with_its_notes() {
+    let h = harness("0.1.5", "test.key.pub", Launch::Starts);
+    state::save(
+        &h.dir.path().join("update.json"),
+        &Stored { pending: Some(info("0.1.5")), pending_since_ms: Some(now_ms()), ..Stored::default() },
+    )
+    .unwrap();
+    std::fs::write(h.dir.path().join("update-result.json"), r#"{"version":"0.1.5","ok":true}"#).unwrap();
+    let ctl = after_update_controller(&h, "0.1.5");
+    ctl.settle_unrecorded_update();
+    ctl.reconcile_pending();
+    assert_eq!(ctl.state().updated_to, Some(info("0.1.5")), "the pending's notes travel with it");
+}
+
+#[test]
+fn an_unrecorded_report_that_does_not_match_is_ignored() {
+    let h = harness("0.1.1", "test.key.pub", Launch::Starts);
+    let result_path = h.dir.path().join("update-result.json");
+    for report in [
+        r#"{"version":"0.1.0","ok":true}"#,                 // another version
+        r#"{"version":"0.1.1","ok":false,"message":"no"}"#, // failed
+    ] {
+        std::fs::write(&result_path, report).unwrap();
+        let ctl = after_update_controller(&h, "0.1.1");
+        ctl.settle_unrecorded_update();
+        assert_eq!(ctl.state().updated_to, None, "{report}");
+    }
+    // A running version that differs from the report's (the old tray is still up).
+    std::fs::write(&result_path, r#"{"version":"0.1.1","ok":true}"#).unwrap();
+    let ctl = after_update_controller(&h, "0.1.0");
+    ctl.settle_unrecorded_update();
+    assert_eq!(ctl.state().updated_to, None);
+    // No report at all.
+    std::fs::remove_file(&result_path).unwrap();
+    let ctl = after_update_controller(&h, "0.1.1");
+    ctl.settle_unrecorded_update();
+    assert_eq!(ctl.state().updated_to, None);
+}
+
+#[test]
+fn without_a_service_to_ask_the_launch_runs_as_before() {
+    let h = harness("0.1.0", "test.key.pub", Launch::Starts);
+    good_release(&h);
+    h.check(true);
+    assert_eq!(h.install().phase, UpdatePhase::Installing);
+    assert_eq!(h.seen.calls.lock().unwrap().len(), 1);
+}
+
 #[test]
 fn a_file_changed_after_the_download_fails_the_second_check_and_is_deleted() {
     let h = harness("0.1.0", "test.key.pub", Launch::Starts);
@@ -1036,6 +1257,7 @@ fn tauri_conf_repeats_the_compiled_key_and_feed_and_requires_a_signed_version() 
     let conf: serde_json::Value = serde_json::from_str(include_str!("../../tauri.conf.json")).unwrap();
     let u = &conf["plugins"]["updater"];
     assert_eq!(u["pubkey"], rules::PUBKEY);
+    assert_eq!(rules::PUBKEY, canvas_proto::consts::UPDATE_PUBKEY, "the tray and the service share one key");
     assert_eq!(u["endpoints"], serde_json::json!([rules::ENDPOINT]));
     assert_eq!(u["requireSignedVersion"], true);
     assert!(!u.to_string().contains("dangerous"), "no dangerous switch in the shipped config");
@@ -1152,12 +1374,15 @@ fn the_tray_waits_for_a_real_process_and_then_reads_the_installers_report() {
             "Installed, but the old canvas-rgb is still running. Quit it and start it again.",
         ),
     ] {
-        let h = harness("0.1.0", "test.key.pub", Launch::Process);
+        // The report is written by the launcher, after the tray stamped the start, as the real
+        // installer does; a file already there before the start would be a previous run's.
+        let how = match report {
+            Some(report) => Launch::ProcessWithReport(report),
+            None => Launch::Process,
+        };
+        let h = harness("0.1.0", "test.key.pub", how);
         good_release(&h);
         h.check(true);
-        if let Some(report) = report {
-            std::fs::write(h.dir.path().join("update-result.json"), report).unwrap();
-        }
         let update = h.ctl.begin_install().unwrap();
         let s = tauri::async_runtime::block_on(h.ctl.run_install(&update));
         assert_eq!(s.phase, UpdatePhase::InstallFailed { message: want.into() });
@@ -1422,4 +1647,218 @@ fn the_result_file_is_read_with_a_bom_and_with_non_ascii_or_bad_bytes() {
     std::fs::write(&path, &ansi).unwrap();
     let r = read_result(&path).expect("a stray byte does not hide the report");
     assert!(r.message.starts_with("Caf") && !r.ok);
+}
+
+// ---- which token starts the installer (#28) ----
+
+/// Setup must be started with the tray's own non-elevated token and raise its own permission
+/// prompt; started elevated, its `ExecAsOriginalUser` relaunch gave an elevated tray that refuses
+/// to run. Fails on the old code: `shell_execute_runas` passed the elevating verb.
+#[test]
+fn the_installer_is_started_without_an_elevating_verb() {
+    let request = launch::installer_request(launch::INSTALLER_ARGS);
+    assert_eq!(request.verb, None);
+    assert_eq!(request.args, launch::INSTALLER_ARGS);
+    let source = include_str!("launch.rs").to_lowercase();
+    assert!(!source.contains("runas"), "launch.rs must not name an elevating verb");
+}
+
+#[test]
+fn a_setup_that_ends_cancelled_with_no_result_is_declined_not_failed() {
+    let h = harness("0.1.0", "test.key.pub", Launch::Starts);
+    good_release(&h);
+    h.check(true);
+    assert_eq!(h.install().phase, UpdatePhase::Installing);
+    assert!(h.stored().pending.is_some());
+    h.ctl.settle_after_installer(Some(launch::SETUP_CANCELLED_CODE));
+    assert_eq!(h.ctl.state().phase, UpdatePhase::Declined);
+    assert_eq!(h.stored().pending, None);
+}
+
+#[test]
+fn a_setup_that_ends_any_other_way_is_settled_from_its_result() {
+    let h = harness("0.1.0", "test.key.pub", Launch::Starts);
+    good_release(&h);
+    h.check(true);
+    h.install();
+    h.ctl.settle_after_installer(Some(4));
+    assert!(matches!(h.ctl.state().phase, UpdatePhase::InstallFailed { .. }), "{:?}", h.ctl.state().phase);
+}
+
+// ---- a stale result file never decides this run (#28) ----
+
+fn plant_result(h: &Harness, version: &str, ok: bool, age: Duration) {
+    let path = h.dir.path().join("update-result.json");
+    std::fs::write(&path, format!(r#"{{"version":"{version}","ok":{ok},"code":0,"message":""}}"#)).unwrap();
+    let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    file.set_modified(std::time::SystemTime::now() - age).unwrap();
+}
+
+// ---- following a service-driven install (#43) ----
+
+fn now_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64
+}
+
+/// A service accepted the install: `pending` is saved, the phase is Installing, nothing launched.
+/// Returns the harness and a controller on the same files whose clock is `clock`.
+fn service_install_started(clock: Arc<AtomicU64>) -> (Harness, Arc<Controller>) {
+    let (asker, _asked) = fake_service(ServiceAnswer::Started);
+    let h = harness_with_service("0.1.0", "test.key.pub", Launch::Fails, Some(asker));
+    good_release(&h);
+    h.check(true);
+    assert_eq!(h.install().phase, UpdatePhase::Installing);
+    clock.store(h.stored().pending_since_ms.unwrap(), Ordering::SeqCst);
+    let c = clock.clone();
+    let ctl = Arc::new(
+        Controller::new(h.ctl.settings.clone(), v("0.1.0"), Arc::new(|_: &Path| Ok(None)), Box::new(|_| {}))
+            .with_clock(Box::new(move || c.load(Ordering::SeqCst))),
+    );
+    (h, ctl)
+}
+
+fn plant_report(h: &Harness, version: &str, ok: bool, message: &str) {
+    std::fs::write(
+        h.dir.path().join("update-result.json"),
+        format!(r#"{{"version":"{version}","ok":{ok},"code":0,"message":"{message}"}}"#),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_tray_waiting_on_the_service_sees_a_failed_report_and_shows_its_message() {
+    let clock = Arc::new(AtomicU64::new(0));
+    let (h, ctl) = service_install_started(clock.clone());
+    ctl.reconcile_pending();
+    assert!(ctl.is_following(), "pending, no report, young: waiting");
+    assert!(ctl.follow_service_install(), "no report yet: look again");
+    clock.fetch_add(60_000, Ordering::SeqCst);
+    assert!(ctl.follow_service_install(), "a minute on: still looking");
+    std::thread::sleep(Duration::from_millis(30));
+    plant_report(&h, "0.1.1", false, "OpenRGB could not be downloaded");
+    assert!(!ctl.follow_service_install(), "a report arrived: stop looking");
+    assert_eq!(
+        ctl.state().phase,
+        UpdatePhase::InstallFailed { message: "OpenRGB could not be downloaded".into() }
+    );
+    assert_eq!(state::load(&h.dir.path().join("update.json")).pending, None);
+    assert!(h.seen.calls.lock().unwrap().is_empty(), "nothing launched");
+}
+
+#[test]
+fn an_ok_report_while_the_tray_lives_waits_for_the_restart() {
+    let clock = Arc::new(AtomicU64::new(0));
+    let (h, ctl) = service_install_started(clock);
+    std::thread::sleep(Duration::from_millis(30));
+    plant_report(&h, "0.1.1", true, "");
+    assert!(!ctl.follow_service_install(), "setup is done: stop looking");
+    assert_eq!(ctl.state().phase, UpdatePhase::Installing);
+    assert!(state::load(&h.dir.path().join("update.json")).pending.is_some(), "pending stays for the new tray");
+}
+
+#[test]
+fn a_report_older_than_the_start_or_for_another_version_is_not_this_installs() {
+    let clock = Arc::new(AtomicU64::new(0));
+    let (h, ctl) = service_install_started(clock);
+    plant_result(&h, "0.1.1", false, Duration::from_secs(3600));
+    assert!(ctl.follow_service_install(), "a stale failure is ignored");
+    std::thread::sleep(Duration::from_millis(30));
+    plant_report(&h, "0.0.9", false, "old");
+    assert!(ctl.follow_service_install(), "another version's report is ignored");
+    assert!(state::load(&h.dir.path().join("update.json")).pending.is_some());
+}
+
+#[test]
+fn past_the_bound_with_no_report_the_tray_says_it_cannot_follow_and_keeps_pending() {
+    let clock = Arc::new(AtomicU64::new(0));
+    let (h, ctl) = service_install_started(clock.clone());
+    clock.fetch_add(SERVICE_FOLLOW_BOUND.as_millis() as u64 + 1, Ordering::SeqCst);
+    assert!(!ctl.follow_service_install());
+    match ctl.state().phase {
+        UpdatePhase::InstallFailed { message } => assert!(message.contains("cannot follow"), "{message}"),
+        other => panic!("expected InstallFailed, got {other:?}"),
+    }
+    assert!(state::load(&h.dir.path().join("update.json")).pending.is_some(), "the install may still finish");
+}
+
+#[test]
+fn a_tray_started_beside_a_running_service_install_keeps_pending() {
+    let clock = Arc::new(AtomicU64::new(0));
+    let (h, ctl) = service_install_started(clock.clone());
+    clock.fetch_add(5 * 60_000, Ordering::SeqCst);
+    ctl.reconcile_pending();
+    assert_eq!(ctl.state().phase, UpdatePhase::Installing, "not 'ended without finishing'");
+    assert!(state::load(&h.dir.path().join("update.json")).pending.is_some());
+    // The same start after the bound has passed does settle it.
+    clock.fetch_add(SERVICE_FOLLOW_BOUND.as_millis() as u64, Ordering::SeqCst);
+    ctl.reconcile_pending();
+    assert_eq!(ctl.state().phase, UpdatePhase::InstallFailed { message: "The installer ended without finishing.".into() });
+    assert_eq!(state::load(&h.dir.path().join("update.json")).pending, None);
+}
+
+/// Inno deletes update-result.json only in PrepareToInstall, which never runs when Setup's own
+/// permission prompt is declined. Fails on the code that trusted any file present: an ok:true
+/// result from the last update read as "The installer ended without finishing".
+#[test]
+fn a_decline_is_declined_even_with_a_stale_ok_result_from_the_last_update() {
+    // (version in the file, whether it is the pending version, how old the file is)
+    for (older_version, age) in [(true, Duration::ZERO), (false, Duration::from_secs(3600))] {
+        let h = harness("0.1.0", "test.key.pub", Launch::Starts);
+        good_release(&h);
+        h.check(true);
+        h.install();
+        let pending = h.stored().pending.unwrap().version;
+        let version = if older_version { "0.0.9".to_string() } else { pending };
+        plant_result(&h, &version, true, age);
+        h.ctl.settle_after_installer(Some(launch::SETUP_CANCELLED_CODE));
+        assert_eq!(h.ctl.state().phase, UpdatePhase::Declined, "stale {version} age {age:?}");
+        assert_eq!(h.stored().pending, None);
+    }
+}
+
+#[test]
+fn a_fresh_result_for_this_version_is_read_not_called_a_decline() {
+    let h = harness("0.1.0", "test.key.pub", Launch::Starts);
+    good_release(&h);
+    h.check(true);
+    h.install();
+    let pending = h.stored().pending.unwrap().version;
+    plant_result(&h, &pending, true, Duration::ZERO);
+    h.ctl.settle_after_installer(Some(launch::SETUP_CANCELLED_CODE));
+    match h.ctl.state().phase {
+        UpdatePhase::InstallFailed { message } => assert!(message.contains("still running"), "{message}"),
+        other => panic!("the fresh result was not used: {other:?}"),
+    }
+}
+
+/// The tray restarts while the pending record is still there (it died during the prompt, or the
+/// install is still running): a result left by an earlier run must not be read as this one's.
+#[test]
+fn after_a_restart_a_result_older_than_the_start_is_ignored() {
+    for (age, want) in [
+        (Duration::from_secs(3600), "The installer ended without finishing."),
+        (Duration::ZERO, "Installed, but the old canvas-rgb is still running. Quit it and start it again."),
+    ] {
+        let h = harness("0.1.0", "test.key.pub", Launch::Starts);
+        good_release(&h);
+        h.check(true);
+        h.install();
+        let pending = h.stored().pending.unwrap().version;
+        assert!(h.stored().pending_since_ms.is_some(), "the start is stored with the pending record");
+        // A previous run's ok:true report for this version (age an hour), or one written just now.
+        std::thread::sleep(Duration::from_millis(30));
+        if age == Duration::ZERO {
+            plant_result(&h, &pending, true, Duration::ZERO);
+        } else {
+            plant_result(&h, &pending, true, age);
+        }
+        // Long after the start, so the tray is not still waiting for a service-driven install.
+        let later = now_ms() + 31 * 60 * 1000;
+        let ctl = Arc::new(
+            Controller::new(h.ctl.settings.clone(), v("0.1.0"), Arc::new(|_: &Path| Ok(None)), Box::new(|_| {}))
+                .with_clock(Box::new(move || later)),
+        );
+        ctl.reconcile_pending();
+        assert_eq!(ctl.state().phase, UpdatePhase::InstallFailed { message: want.into() }, "age {age:?}");
+    }
 }
