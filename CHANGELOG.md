@@ -14,6 +14,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Changed
 
 - The Displays preview draws the decimal point in its own slot between the digit cells (`4` `6` `.` `9`), not inside a cell; the row keeps its shape while the number counts. (#8)
+- Dragging a slider moves its cap and fill with the pointer, pixel for pixel, between steps; the value itself stays on the slider's steps and the cap settles onto the chosen step on release. (#13)
 
 ## [0.1.3] - 2026-10-29
 
