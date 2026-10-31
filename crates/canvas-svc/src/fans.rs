@@ -32,6 +32,24 @@ pub const READBACK_SETTLE: Duration = Duration::from_secs(3);
 /// Readback polls while a duty settles.
 const READBACK_POLL: Duration = Duration::from_millis(100);
 
+/// Time constant of the exponential average (falling side only; a rise snaps the average up) that
+/// decides a curve's step down, in seconds. A 1 Hz
+/// Ryzen `Tctl` jumps about 4 C between reads under light load (issue #17); the average turns
+/// those spikes into a drift of about a degree.
+pub const CURVE_SMOOTHING_TAU_S: f32 = 4.0;
+/// Step down only after the smoothed temperature fell this many degrees below the temperature that
+/// raised the duty. Fan Control's curve "Hysteresis" is the same idea: the "minimum temperature
+/// difference for a change to occur" (https://getfancontrol.com/docs/). 5 C is above the 4 C
+/// spikes of issue #17.
+pub const CURVE_STEP_DOWN_DROP_C: f32 = 5.0;
+/// Or step down after the duty has been held this long and the smoothed temperature asks for less
+/// (Fan Control's "Response time", the minimum time for a change to occur, doubled on a decrease
+/// by its Auto curve). Keeps a slow cool-down from leaving the fan high for good.
+pub const CURVE_STEP_DOWN_HOLD: Duration = Duration::from_secs(60);
+/// A gap between two curve updates longer than this (a missing sensor, a sleep) restarts the
+/// smoothing from the current reading.
+const CURVE_RESEED: Duration = Duration::from_secs(10);
+
 /// hardware_watchdog as settled from public sources (see the report): neither the nct6687d
 /// driver nor LibreHardwareMonitor's NCT677X handling reaches a chip watchdog register.
 pub const HARDWARE_WATCHDOG: Option<bool> = Some(false);
@@ -56,8 +74,63 @@ impl From<FanValidationError> for FanError {
     }
 }
 
+/// Per-header state that smooths a curve and holds its output steady (issue #17). Step up is
+/// immediate: the raw reading is mapped through the curve, and any higher duty is taken at once.
+/// Step down needs the smoothed temperature to fall `CURVE_STEP_DOWN_DROP_C` below the temperature
+/// that set the held duty, or `CURVE_STEP_DOWN_HOLD` to pass.
+#[derive(Default)]
+struct CurveState {
+    smoothed: Option<f32>,
+    last_at: Option<Instant>,
+    held: Option<u8>,
+    /// The temperature that set `held`.
+    anchor: f32,
+    changed_at: Option<Instant>,
+}
+
+impl CurveState {
+    fn step(&mut self, points: &[CurvePoint], temp: f32, now: Instant) -> u8 {
+        let dt = self.last_at.map(|t| now.saturating_duration_since(t));
+        self.last_at = Some(now);
+        match (self.smoothed, dt) {
+            (Some(prev), Some(dt)) if dt <= CURVE_RESEED => {
+                let dt = dt.as_secs_f32();
+                self.smoothed = Some(if temp >= prev { temp } else { prev + (temp - prev) * dt / (CURVE_SMOOTHING_TAU_S + dt) });
+            }
+            _ => {
+                self.smoothed = Some(temp);
+                self.held = None;
+            }
+        }
+        let smoothed = self.smoothed.unwrap_or(temp);
+        let raw = curve_percent(points, temp);
+        let Some(held) = self.held else {
+            self.set(raw, temp, now);
+            return raw;
+        };
+        if raw > held {
+            self.set(raw, temp, now);
+            return raw;
+        }
+        let calm = curve_percent(points, smoothed);
+        let waited = self.changed_at.is_none_or(|t| now.saturating_duration_since(t) >= CURVE_STEP_DOWN_HOLD);
+        if calm < held && (smoothed <= self.anchor - CURVE_STEP_DOWN_DROP_C || waited) {
+            self.set(calm, smoothed, now);
+            return calm;
+        }
+        held
+    }
+
+    fn set(&mut self, percent: u8, anchor: f32, now: Instant) {
+        self.held = Some(percent);
+        self.anchor = anchor;
+        self.changed_at = Some(now);
+    }
+}
+
 #[derive(Default)]
 struct Slot {
+    curve: CurveState,
     /// `Some(time)` while this service holds the header in manual mode.
     manual_since: Option<Instant>,
     /// Set by a safety or failure handback. Sticky until the user applies the header again.
@@ -287,6 +360,7 @@ impl FanController {
             return;
         }
         self.slots[ch].handed_back = false;
+        self.slots[ch].curve = CurveState::default();
         self.slots[ch].override_reason = None;
         match self.desired(ch) {
             FanMode::Bios => self.release(ch, "mode set to BIOS"),
@@ -408,7 +482,7 @@ impl FanController {
             }
             FanMode::Curve { source, points } => {
                 if let Some(temp) = self.temp_cache.get(source).copied() {
-                    (curve_percent(points, temp), Some(temp))
+                    (self.slots[ch].curve.step(points, temp, now), Some(temp))
                 } else {
                     let since = self.slots[ch].manual_since.unwrap_or(now);
                     let last = self.last_good.get(source).copied().unwrap_or(since);

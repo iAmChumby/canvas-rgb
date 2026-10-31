@@ -8,6 +8,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
+- A fan on a curve holds a steady speed while the CPU temperature hovers, instead of flipping between two speeds every second. It speeds up at once when the temperature rises, and slows down only after the temperature has fallen 5 degrees below the reading that raised it, or after a minute. (#17)
 - In the layout editor, the part under the pointer is the one that moves: parts inside the case, offline parts and parts near its edge no longer drag the whole case, and moving the case carries everything inside it. Alt-click picks the part underneath. (#3)
 - Uninstalling with an unreadable SignalRGB restore record says so, keeps the record, finishes the other steps (in the Inno uninstaller too) and prints the service name and command to restore SignalRGB by hand, instead of skipping the restore and saying it finished. (#24)
 
