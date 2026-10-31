@@ -9,3 +9,22 @@ pub mod openrgb;
 mod protocol;
 pub mod royuan;
 pub mod zones;
+
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Bumped on every resume from sleep. An adapter that set a hardware mode when it connected
+/// compares its own copy with this one and sets the mode again when they differ (#5).
+static RESUME_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// The current resume count.
+pub(crate) fn resume_epoch() -> u64 {
+    RESUME_EPOCH.load(Ordering::SeqCst)
+}
+
+/// The system resumed from sleep: every device that was put into a host-driven mode may have
+/// fallen back to its built-in one. Tells the OpenRGB adapters (SET_CUSTOM_MODE again on the next
+/// frame) and bumps the epoch the USB adapters watch. Returns how many OpenRGB adapters were told.
+pub fn note_resume() -> usize {
+    RESUME_EPOCH.fetch_add(1, Ordering::SeqCst);
+    openrgb::reset_custom_mode_all()
+}

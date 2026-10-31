@@ -108,6 +108,10 @@ pub struct RoyuanAdapter {
     last_sent: Option<(Rgb8, Instant)>,
     /// Last colour handed to `write_frame` that went out (for `read_back`).
     last_color: Rgb8,
+    /// The resume count when the keyboard last got its direct-mode report.
+    seen_resume: u64,
+    /// Set after a resume: the next write sends the direct-mode report again (#5).
+    direct_pending: bool,
 }
 
 impl Default for RoyuanAdapter {
@@ -122,7 +126,7 @@ impl RoyuanAdapter {
     }
 
     fn with_opener(opener: Box<dyn Opener>) -> Self {
-        Self { opener, dev: None, last_sent: None, last_color: Rgb8::BLACK }
+        Self { opener, dev: None, last_sent: None, last_color: Rgb8::BLACK, seen_resume: crate::resume_epoch(), direct_pending: false }
     }
 
     fn check_id(&self, id: &DeviceId) -> Result<(), AdapterError> {
@@ -142,13 +146,34 @@ impl RoyuanAdapter {
         dev.send_feature(&direct_mode_report()).map_err(AdapterError::Protocol)?;
         self.dev = Some(dev);
         self.last_sent = None;
+        self.seen_resume = crate::resume_epoch();
+        self.direct_pending = false;
         Ok(())
+    }
+
+    /// Makes the next write send the direct-mode report again: a sleep may have put the
+    /// keyboard back on its built-in lighting while the USB handle stayed open.
+    pub fn reset_direct_mode(&mut self) {
+        self.direct_pending = true;
     }
 
     fn write_at(&mut self, color: Rgb8, now: Instant) -> Result<(), AdapterError> {
         let Some(dev) = self.dev.as_mut() else {
             return Err(AdapterError::NotConnected);
         };
+        if crate::resume_epoch() != self.seen_resume {
+            self.seen_resume = crate::resume_epoch();
+            self.direct_pending = true;
+        }
+        if self.direct_pending {
+            if let Err(e) = dev.send_feature(&direct_mode_report()) {
+                self.dev = None;
+                self.last_sent = None;
+                return Err(AdapterError::Protocol(e));
+            }
+            self.direct_pending = false;
+            self.last_sent = None;
+        }
         if let Some((last, at)) = self.last_sent {
             if last == color && now.saturating_duration_since(at) < KEEPALIVE {
                 return Ok(());
@@ -360,6 +385,23 @@ mod tests {
         assert!(!a.is_connected());
         a.connect().await.unwrap();
         assert_eq!(direct_count(&s.lock().unwrap()), 2);
+    }
+
+    #[tokio::test]
+    async fn after_a_resume_the_next_write_sends_direct_mode_again() {
+        let (mut a, s) = rig(true);
+        let id = device_id();
+        a.connect().await.unwrap();
+        let red = [Rgb8::new(255, 0, 0)];
+        a.write_frame(&id, &red).await.unwrap();
+        assert_eq!(direct_count(&s.lock().unwrap()), 1);
+        a.reset_direct_mode();
+        a.write_frame(&id, &red).await.unwrap();
+        let g = s.lock().unwrap();
+        assert_eq!(direct_count(&g), 2, "direct mode went out again");
+        let n = g.sent.len();
+        assert_eq!(g.sent[n - 2].as_slice(), direct_mode_report(), "before the colour");
+        assert_eq!(g.sent[n - 1].as_slice(), color_report(red[0]), "the colour follows");
     }
 
     #[tokio::test]

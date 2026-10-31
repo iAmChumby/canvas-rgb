@@ -10,9 +10,9 @@ use canvas_proto::{
     AdapterCapabilities, AdapterError, DeviceAdapter, DeviceId, DeviceInfo, DeviceKind, Rgb8,
     ZoneInfo, ZoneKind,
 };
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
@@ -30,6 +30,15 @@ const MAX_LEDS_PER_CONTROLLER: u64 = u16::MAX as u64;
 
 /// How long a request waits for its reply before the call fails.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How often `SET_CUSTOM_MODE` is sent again to a controller that is being streamed frames.
+///
+/// A starting value, to be measured (#5): the ENE DRAM sticks drop back to their built-in
+/// rainbow when a sleep cuts their power, and the resume event may never arrive. The cost of
+/// each re-send is one 16-byte packet per controller (a header with no payload), which OpenRGB
+/// turns into one SMBus mode write. Check the SMBus load on real hardware before lowering it.
+pub const CUSTOM_MODE_KEEPALIVE: Duration = Duration::from_secs(10);
+
 const ZONE_TYPE_SINGLE: i32 = 0;
 const ZONE_TYPE_LINEAR: i32 = 1;
 const ZONE_TYPE_MATRIX: i32 = 2;
@@ -48,7 +57,6 @@ struct Link {
     request_gate: tokio::sync::Mutex<()>,
 }
 
-#[derive(Default)]
 struct Session {
     /// Bumped on every connect and disconnect, so a stale reader cannot mark a newer session lost.
     epoch: u64,
@@ -57,8 +65,27 @@ struct Session {
     pending: Option<Pending>,
     reader: Option<JoinHandle<()>>,
     controllers: Vec<Controller>,
-    /// Controllers already switched to direct/custom mode on this connection.
-    custom_mode: HashSet<u32>,
+    /// When each controller was last switched to direct/custom mode on this connection.
+    /// A missing entry means the next frame sends `SET_CUSTOM_MODE` first.
+    custom_mode: HashMap<u32, Instant>,
+    /// How long a controller stays trusted to be in custom mode before the next frame
+    /// sends `SET_CUSTOM_MODE` again.
+    keepalive: Duration,
+}
+
+impl Default for Session {
+    fn default() -> Self {
+        Self {
+            epoch: 0,
+            connected: false,
+            protocol_version: 0,
+            pending: None,
+            reader: None,
+            controllers: Vec::new(),
+            custom_mode: HashMap::new(),
+            keepalive: CUSTOM_MODE_KEEPALIVE,
+        }
+    }
 }
 
 struct Pending {
@@ -104,23 +131,55 @@ impl Link {
         }
     }
 
+    fn reset_custom_mode(&self) {
+        guard(&self.session).custom_mode.clear();
+    }
+
     fn lose_current(&self) {
         let epoch = guard(&self.session).epoch;
         self.lose(epoch);
     }
 }
 
+/// Every live adapter's link, so a resume event (which the daemon hears far from the adapter,
+/// behind `Box<dyn DeviceAdapter>`) can reach all of them without a spine change.
+static LINKS: Mutex<Vec<Weak<Link>>> = Mutex::new(Vec::new());
+
+/// The system resumed from sleep: every controller may have lost power and fallen back to its
+/// built-in mode, so the next frame to each one sends `SET_CUSTOM_MODE` again. Returns how many
+/// adapters were told.
+pub fn reset_custom_mode_all() -> usize {
+    let mut links = guard(&LINKS);
+    links.retain(|link| link.strong_count() > 0);
+    links.iter().filter_map(Weak::upgrade).map(|link| link.reset_custom_mode()).count()
+}
+
 impl OpenRgbAdapter {
     pub fn new(host: &str, port: u16) -> Self {
-        Self {
-            host: host.to_string(),
-            port,
-            link: Arc::new(Link {
-                session: Mutex::new(Session::default()),
-                writer: tokio::sync::Mutex::new(None),
-                request_gate: tokio::sync::Mutex::new(()),
-            }),
+        let link = Arc::new(Link {
+            session: Mutex::new(Session::default()),
+            writer: tokio::sync::Mutex::new(None),
+            request_gate: tokio::sync::Mutex::new(()),
+        });
+        {
+            let mut links = guard(&LINKS);
+            links.retain(|link| link.strong_count() > 0);
+            links.push(Arc::downgrade(&link));
         }
+        Self { host: host.to_string(), port, link }
+    }
+
+    /// Like [`new`](Self::new) with another keepalive interval (tests use a short one).
+    pub fn with_keepalive(host: &str, port: u16, keepalive: Duration) -> Self {
+        let adapter = Self::new(host, port);
+        guard(&adapter.link.session).keepalive = keepalive;
+        adapter
+    }
+
+    /// Forgets which controllers are in custom mode: the next frame to each sends
+    /// `SET_CUSTOM_MODE` first. Called after a resume.
+    pub fn reset_custom_mode(&self) {
+        self.link.reset_custom_mode();
     }
 
     fn require_connected(&self) -> Result<(), AdapterError> {
@@ -241,12 +300,17 @@ impl OpenRgbAdapter {
         Ok(controllers)
     }
 
-    /// Switches a controller to direct/custom mode, once per connection, then sends a frame.
+    /// Switches a controller to direct/custom mode, then sends a frame. The mode is sent again
+    /// after a reset (resume, resize) and whenever the keepalive interval has passed, so a
+    /// controller that fell back to its built-in mode heals on its own.
     async fn send_leds(&self, index: u32, colors: &[Rgb8]) -> Result<(), AdapterError> {
-        let needs_mode = !guard(&self.link.session).custom_mode.contains(&index);
+        let needs_mode = {
+            let session = guard(&self.link.session);
+            session.custom_mode.get(&index).is_none_or(|at| at.elapsed() >= session.keepalive)
+        };
         if needs_mode {
             self.send(index, SET_CUSTOM_MODE, &[]).await?;
-            guard(&self.link.session).custom_mode.insert(index);
+            guard(&self.link.session).custom_mode.insert(index, Instant::now());
         }
         self.send(index, UPDATE_LEDS, &update_leds_payload(colors)?).await
     }

@@ -283,3 +283,63 @@ async fn zone_store_round_trips_and_rejects_newer_schema() {
     assert!(ZoneStore::load(&path).is_err(), "future schema refused");
     let _ = std::fs::remove_file(&path);
 }
+
+// ---- #5: a sleep resets the ENE DRAM sticks to their built-in mode
+
+const GREEN: Rgb8 = Rgb8 { r: 0, g: 255, b: 0 };
+
+#[tokio::test]
+async fn after_a_resume_the_next_frame_to_each_controller_is_preceded_by_set_custom_mode() {
+    let server = FakeOpenRgbServer::start(test_pc_devices()).await.expect("fake server");
+    let mut adapter = connected(&server).await;
+    let dram_a = DeviceId("openrgb:dram-a".into());
+    let dram_b = DeviceId("openrgb:dram-b".into());
+    adapter.write_frame(&dram_a, &[RED; 8]).await.expect("frame a");
+    adapter.write_frame(&dram_b, &[RED; 8]).await.expect("frame b");
+    adapter.write_frame(&dram_a, &[RED; 8]).await.expect("frame a again");
+    // Writes have no reply; a read_back on the same socket is ordered after them.
+    let _ = adapter.read_back(&dram_b).await.expect("settle");
+    assert_eq!((server.custom_mode_writes(3), server.custom_mode_writes(4)), (1, 1));
+
+    // The PC sleeps and wakes: the daemon tells the adapter.
+    adapter.reset_custom_mode();
+    assert_eq!((server.custom_mode_writes(3), server.custom_mode_writes(4)), (1, 1), "a reset sends nothing by itself");
+
+    adapter.write_frame(&dram_a, &[GREEN; 8]).await.expect("frame a after resume");
+    adapter.write_frame(&dram_b, &[GREEN; 8]).await.expect("frame b after resume");
+    // read_back is a request on the same socket, so it is ordered after both frames.
+    assert_eq!(adapter.read_back(&dram_a).await.expect("readback a"), vec![GREEN; 8]);
+    assert_eq!(server.custom_mode_writes(3), 2, "stick A re-entered custom mode once");
+    assert_eq!(server.custom_mode_writes(4), 2, "stick B re-entered custom mode once");
+
+    adapter.write_frame(&dram_a, &[GREEN; 8]).await.expect("steady frame");
+    let _ = adapter.read_back(&dram_a).await.expect("readback");
+    assert_eq!(server.custom_mode_writes(3), 2, "no further SET_CUSTOM_MODE while streaming");
+}
+
+#[tokio::test]
+async fn the_keepalive_sends_set_custom_mode_on_schedule_without_stopping_frames() {
+    let server = FakeOpenRgbServer::start(test_pc_devices()).await.expect("fake server");
+    let mut adapter = OpenRgbAdapter::with_keepalive("127.0.0.1", server.port(), Duration::from_millis(300));
+    adapter.connect().await.expect("connect");
+    let dram = DeviceId("openrgb:dram-a".into());
+
+    adapter.write_frame(&dram, &[RED; 8]).await.expect("first frame");
+    adapter.write_frame(&dram, &[RED; 8]).await.expect("second frame");
+    let _ = adapter.read_back(&dram).await.expect("settle");
+    assert_eq!(server.custom_mode_writes(3), 1, "inside the interval: no repeat");
+
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    adapter.write_frame(&dram, &[GREEN; 8]).await.expect("frame after the interval");
+    assert_eq!(adapter.read_back(&dram).await.expect("readback"), vec![GREEN; 8], "the frame still lands");
+    assert_eq!(server.custom_mode_writes(3), 2, "the interval passed: the mode was sent again");
+
+    adapter.write_frame(&dram, &[GREEN; 8]).await.expect("frame");
+    let _ = adapter.read_back(&dram).await.expect("readback");
+    assert_eq!(server.custom_mode_writes(3), 2, "the interval restarts after each send");
+}
+
+#[test]
+fn the_default_keepalive_is_ten_seconds() {
+    assert_eq!(canvas_adapters::openrgb::CUSTOM_MODE_KEEPALIVE, Duration::from_secs(10));
+}
