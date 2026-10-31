@@ -10,7 +10,7 @@
 use canvas_daemon::thumbnail::{self, TileScore};
 use canvas_daemon::user_effects::{html_builder_seeded, STOCK_EFFECTS};
 use canvas_proto::props::{Props, ThumbnailRecipe};
-use canvas_proto::traits::Effect;
+use canvas_proto::traits::{Canvas, Effect, Inputs};
 use canvas_proto::EFFECT_IDS;
 
 /// Every effect the library ships: the built-ins, then the stock HTML effects.
@@ -267,13 +267,6 @@ fn the_tiles_of_the_stock_effects_are_the_same_every_time() {
     }
 }
 
-/// The frames of a tile body.
-fn frames(body: &[u8]) -> Vec<&[u8]> {
-    let w = u16::from_le_bytes([body[0], body[1]]) as usize;
-    let h = u16::from_le_bytes([body[2], body[3]]) as usize;
-    body[6..].chunks_exact(w * h * 3).collect()
-}
-
 /// The Aurora's flow has no period a tile can close on, so the tile's end is crossfaded into
 /// its start. The two pictures the crossfade blends are a whole drift apart, and the blend
 /// shows both: a doubled ring beside the eye.
@@ -332,9 +325,11 @@ fn the_wet_smear_tile_is_bright() {
 
 /// The Wet Smear tile must not carry a half-pixel checkerboard.
 ///
-/// The effect's picture is a grid that is upsampled onto the canvas. A plain bilinear
+/// The effect's picture is a grid that is upsampled onto its canvas. A plain bilinear
 /// upsample leaves the weight between two cells alternating from pixel to pixel, so every
 /// soft edge comes out as a row of alternating pixels: a checkerboard over the whole tile.
+/// The tile is 64x40 and the canvas 80x50, so the checkerboard is measured on the canvas,
+/// where it is a pixel wide.
 #[test]
 fn the_wet_smear_tile_has_no_checkerboard() {
     let build = html_builder_seeded(thumbnail::TILE_SEED);
@@ -344,33 +339,35 @@ fn the_wet_smear_tile_has_no_checkerboard() {
         .map(|(_, source)| *source)
         .expect("a stock effect");
     let mut effect = build("html:wet-smear", source).expect("the effect builds");
-    let body = thumbnail::render_within(effect.as_mut(), &Props::new(), std::time::Duration::from_secs(600))
-        .expect("the render fits the test budget");
-    let w = u16::from_le_bytes([body[0], body[1]]) as usize;
-    // A checkerboard alternates every pixel, so the picture two pixels apart differs far
-    // more than the picture next to itself. On a smooth picture the two are about the same.
-    for (i, frame) in frames(&body).iter().enumerate() {
-        let mut near = 0f64;
-        let mut far = 0f64;
-        let mut count = 0f64;
-        for y in 0..(frame.len() / 3 / w) {
-            for x in 0..w - 2 {
-                let at = |dx: usize| {
-                    let o = (y * w + x + dx) * 3;
-                    frame[o] as f64 + frame[o + 1] as f64 + frame[o + 2] as f64
-                };
-                near += (at(0) - at(1)).abs();
-                far += (at(0) - at(2)).abs();
-                count += 1.0;
-            }
-        }
-        if count == 0.0 {
-            continue;
-        }
-        let ratio = far / near.max(1.0);
-        assert!(
-            ratio < 2.5,
-            "frame {i} carries a half-pixel checkerboard: the picture two pixels apart is {ratio:.1} times the picture next to itself"
-        );
+    let schema = effect.schema();
+    // The effect's own canvas, so the picture is not scaled on the way in.
+    let (w, h) = (80u32, 50u32);
+    let mut canvas = Canvas::new(w, h);
+    effect.init(&schema.defaults());
+    for _ in 0..120 {
+        effect.update(1.0 / 60.0, &mut canvas, &Inputs::default());
     }
+    // The share of the pixels whose colour alternates from one pixel to the next: on a
+    // smooth picture the step to the next pixel is half the step over two, and on a
+    // checkerboard it is the whole step. The old bilinear upsample left 2 % of the canvas
+    // alternating; the B-spline leaves 1 %.
+    let at = |x: u32, y: u32| canvas.get(x, y).iter().map(|v| *v as f64).sum::<f64>();
+    let mut alternating = 0usize;
+    let mut total = 0usize;
+    for y in 0..h {
+        for x in 0..w - 2 {
+            let near = (at(x + 1, y) - at(x, y)).abs();
+            let far = (at(x, y) - at(x + 2, y)).abs();
+            if near > far {
+                alternating += 1;
+            }
+            total += 1;
+        }
+    }
+    let fraction = alternating as f64 / total as f64;
+    assert!(
+        fraction < 0.015,
+        "{} % of the tile's pixels alternate from one to the next: the picture carries a half-pixel checkerboard",
+        (fraction * 100.0 * 10.0).round() / 10.0
+    );
 }
