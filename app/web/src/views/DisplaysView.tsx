@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import { ArrowClockwise, FloppyDisk, ThermometerSimple, WarningOctagon } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
 import { EmptyState } from "@/components/EmptyState";
@@ -81,7 +81,7 @@ export function displayDigits(
 }
 
 /** The big readout: the display's own number, as the pump head shows it. */
-function DigitReadout({
+export function DigitReadout({
   value,
   digits,
   decimals,
@@ -118,10 +118,18 @@ function DigitReadout({
   return (
     <div className="digit-readout" role="img" aria-label={`Would show ${value} ${mark}`}>
       {shown.cells.map((cell, i) => (
-        <span key={i} className="digit" data-blank={cell === null ? "true" : "false"}>
-          {cell ?? ""}
-          {shown.dot && i === shown.cells.length - 2 ? <span className="digit-dot" aria-hidden="true" /> : null}
-        </span>
+        <Fragment key={i}>
+          <span className="digit" data-blank={cell === null ? "true" : "false"}>
+            {cell ?? ""}
+          </span>
+          {/* The dot has its own slot between the last two cells, outside both of them. It is
+              there for every reading in the temperature mode, so the row never moves. */}
+          {shown.dot && i === shown.cells.length - 2 ? (
+            <span className="digit-dot-slot" aria-hidden="true">
+              <span className="digit-dot" />
+            </span>
+          ) : null}
+        </Fragment>
       ))}
       <span className="digit-unit">{mark}</span>
     </div>
