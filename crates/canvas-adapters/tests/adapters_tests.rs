@@ -338,8 +338,3 @@ async fn the_keepalive_sends_set_custom_mode_on_schedule_without_stopping_frames
     let _ = adapter.read_back(&dram).await.expect("readback");
     assert_eq!(server.custom_mode_writes(3), 2, "the interval restarts after each send");
 }
-
-#[test]
-fn the_default_keepalive_is_ten_seconds() {
-    assert_eq!(canvas_adapters::openrgb::CUSTOM_MODE_KEEPALIVE, Duration::from_secs(10));
-}

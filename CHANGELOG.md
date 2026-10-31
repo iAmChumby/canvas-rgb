@@ -10,7 +10,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 - In the layout editor, the part under the pointer is the one that moves: parts inside the case, offline parts and parts near its edge no longer drag the whole case, and moving the case carries everything inside it. Alt-click picks the part underneath. (#3)
 - Uninstalling with an unreadable SignalRGB restore record says so, keeps the record, finishes the other steps (in the Inno uninstaller too) and prints the service name and command to restore SignalRGB by hand, instead of skipping the restore and saying it finished. (#24)
-- After the PC wakes from sleep, the RAM shows the effect again instead of its built-in rainbow. The daemon now hears sleep and wake (it never did), puts every RGB controller back in direct mode on wake, and repeats that every 10 seconds while lights stream, so a reset it misses heals itself. The ROYUAN keyboard gets its direct mode again on wake too. (#5)
+- After the PC wakes from sleep, the RAM's direct mode is sent again on wake and every 10 seconds while lights stream, so the sticks show the effect instead of their built-in rainbow. The ROYUAN keyboard gets its direct mode again on wake too. The daemon now listens for sleep and wake through a callback instead of a message-only window, which Windows documents as receiving no broadcasts; confirmation on a real wake is pending. (#5)
 
 ## [0.1.3] - 2026-10-29
 

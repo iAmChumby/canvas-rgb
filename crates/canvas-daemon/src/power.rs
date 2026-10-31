@@ -81,8 +81,6 @@ pub fn on_resume() -> usize {
     canvas_adapters::note_resume()
 }
 
-/// `PBT_POWERSETTINGCHANGE` in the `Type` of a power notification.
-pub const PBT_POWERSETTINGCHANGE: u32 = 0x8013;
 /// `PBT_APMSUSPEND`: the system is suspending.
 pub const PBT_APMSUSPEND: u32 = 0x4;
 /// `PBT_APMRESUMESUSPEND`: resumed by user input (sent after the automatic one).
@@ -90,39 +88,16 @@ pub const PBT_APMRESUMESUSPEND: u32 = 0x7;
 /// `PBT_APMRESUMEAUTOMATIC`: sent on every resume.
 pub const PBT_APMRESUMEAUTOMATIC: u32 = 0x12;
 
-/// `GUID_CONSOLE_DISPLAY_STATE` in its in-memory layout: data 0 off, 1 on, 2 dimmed.
-pub const GUID_CONSOLE_DISPLAY_STATE: [u8; 16] = guid_bytes(0x6fe69556_704a_47a0_8f24_f84a1d60628a);
-/// `GUID_MONITOR_POWER_ON` in its in-memory layout: data 0 off, otherwise on.
-pub const GUID_MONITOR_POWER_ON: [u8; 16] = guid_bytes(0x02731015_4510_4526_99e6_e57a32befdd1);
-
-/// A GUID as the bytes Windows lays out in memory (Data1, Data2 and Data3 little endian), so the
-/// pure classifier needs no Windows types.
-const fn guid_bytes(value: u128) -> [u8; 16] {
-    let b = value.to_be_bytes();
-    [b[3], b[2], b[1], b[0], b[5], b[4], b[7], b[6], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]]
-}
-
-/// Turns one power notification (`Type` and, for a setting change, the setting's GUID bytes and
-/// its first data word) into the event the daemon acts on. Pure, so it is tested on any platform.
-pub fn classify_power_notification(kind: u32, setting: Option<([u8; 16], u32)>) -> Option<PowerEvent> {
+/// Turns one suspend or resume notification into the event the daemon acts on. Pure, so it is
+/// tested on any platform.
+///
+/// Display-state changes (`PBT_POWERSETTINGCHANGE`) are registered and logged but not acted on:
+/// TODO(follow-up to #5): monitors-off with "go black" on must pause the engine like Suspend
+/// does and resume on monitors-on, with a test; until then the engine would overwrite the black.
+pub fn classify_power_notification(kind: u32) -> Option<PowerEvent> {
     match kind {
         PBT_APMSUSPEND => Some(PowerEvent::Suspend),
         PBT_APMRESUMESUSPEND | PBT_APMRESUMEAUTOMATIC => Some(PowerEvent::Resume),
-        PBT_POWERSETTINGCHANGE => {
-            let (guid, data) = setting?;
-            if guid == GUID_CONSOLE_DISPLAY_STATE {
-                // 2 (dimmed) leaves the lighting alone.
-                match data {
-                    0 => Some(PowerEvent::MonitorsOff),
-                    1 => Some(PowerEvent::MonitorsOn),
-                    _ => None,
-                }
-            } else if guid == GUID_MONITOR_POWER_ON {
-                Some(if data == 0 { PowerEvent::MonitorsOff } else { PowerEvent::MonitorsOn })
-            } else {
-                None
-            }
-        }
         _ => None,
     }
 }
@@ -194,7 +169,7 @@ pub mod windows_watcher {
     use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, WPARAM};
     use windows::Win32::System::Power::{
         RegisterPowerSettingNotification, RegisterSuspendResumeNotification,
-        DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS, POWERBROADCAST_SETTING,
+        DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS,
     };
     use windows::Win32::System::RemoteDesktop::WTSRegisterSessionNotification;
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -335,29 +310,12 @@ pub mod windows_watcher {
     unsafe extern "system" fn power_callback(
         context: *const core::ffi::c_void,
         kind: u32,
-        setting: *const core::ffi::c_void,
+        _setting: *const core::ffi::c_void,
     ) -> u32 {
-        let setting_data = if kind == super::PBT_POWERSETTINGCHANGE && !setting.is_null() {
-            let broadcast = &*(setting as *const POWERBROADCAST_SETTING);
-            let data = if broadcast.DataLength >= 4 {
-                u32::from_le_bytes(std::ptr::read_unaligned(broadcast.Data.as_ptr() as *const [u8; 4]))
-            } else {
-                u32::MAX
-            };
-            let g = broadcast.PowerSetting;
-            let mut bytes = [0u8; 16];
-            bytes[..4].copy_from_slice(&g.data1.to_le_bytes());
-            bytes[4..6].copy_from_slice(&g.data2.to_le_bytes());
-            bytes[6..8].copy_from_slice(&g.data3.to_le_bytes());
-            bytes[8..].copy_from_slice(&g.data4);
-            Some((bytes, data))
-        } else {
-            None
-        };
         if !FIRST_NOTIFICATION.swap(true, Ordering::SeqCst) {
             tracing::info!(kind, "the first power notification arrived");
         }
-        let event = classify_power_notification(kind, setting_data);
+        let event = classify_power_notification(kind);
         tracing::debug!(kind, ?event, "a power notification");
         if let (Some(event), false) = (event, context.is_null()) {
             let sender = &*(context as *const Sender<PowerEvent>);
@@ -448,29 +406,10 @@ mod tests {
 
     #[test]
     fn suspend_and_both_resume_notifications_are_classified() {
-        assert_eq!(classify_power_notification(PBT_APMSUSPEND, None), Some(PowerEvent::Suspend));
-        assert_eq!(classify_power_notification(PBT_APMRESUMEAUTOMATIC, None), Some(PowerEvent::Resume));
-        assert_eq!(classify_power_notification(PBT_APMRESUMESUSPEND, None), Some(PowerEvent::Resume));
-        assert_eq!(classify_power_notification(0xA, None), None);
-    }
-
-    #[test]
-    fn display_state_changes_are_classified() {
-        let display = |data| classify_power_notification(PBT_POWERSETTINGCHANGE, Some((GUID_CONSOLE_DISPLAY_STATE, data)));
-        assert_eq!(display(0), Some(PowerEvent::MonitorsOff));
-        assert_eq!(display(1), Some(PowerEvent::MonitorsOn));
-        assert_eq!(display(2), None, "dimmed leaves the lighting alone");
-        let monitor = |data| classify_power_notification(PBT_POWERSETTINGCHANGE, Some((GUID_MONITOR_POWER_ON, data)));
-        assert_eq!(monitor(0), Some(PowerEvent::MonitorsOff));
-        assert_eq!(monitor(1), Some(PowerEvent::MonitorsOn));
-        assert_eq!(classify_power_notification(PBT_POWERSETTINGCHANGE, Some(([0; 16], 1))), None);
-    }
-
-    #[test]
-    fn guid_bytes_match_the_windows_layout() {
-        // {6fe69556-704a-47a0-8f24-f84a1d60628a}: Data1..3 little endian, Data4 as written.
-        assert_eq!(GUID_CONSOLE_DISPLAY_STATE[..4], [0x56, 0x95, 0xe6, 0x6f]);
-        assert_eq!(GUID_CONSOLE_DISPLAY_STATE[4..8], [0x4a, 0x70, 0xa0, 0x47]);
-        assert_eq!(GUID_CONSOLE_DISPLAY_STATE[8..], [0x8f, 0x24, 0xf8, 0x4a, 0x1d, 0x60, 0x62, 0x8a]);
+        assert_eq!(classify_power_notification(PBT_APMSUSPEND), Some(PowerEvent::Suspend));
+        assert_eq!(classify_power_notification(PBT_APMRESUMEAUTOMATIC), Some(PowerEvent::Resume));
+        assert_eq!(classify_power_notification(PBT_APMRESUMESUSPEND), Some(PowerEvent::Resume));
+        assert_eq!(classify_power_notification(0xA), None);
+        assert_eq!(classify_power_notification(0x8013), None, "display state is not acted on yet");
     }
 }

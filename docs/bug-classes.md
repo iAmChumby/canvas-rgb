@@ -54,7 +54,7 @@ APIs, so the tests pass.
   notification is logged. Microsoft documents that a message-only window "does not receive broadcast
   messages" (Window Features, Message-Only Windows); that is the likely cause but is UNKNOWN until one
   real sleep logs `the first power notification arrived`. The display-state notifications were never
-  handled before; they are now. See also `cause:sleep-state`.
+  handled before; they are registered and logged now, and acting on them is a follow-up. See also `cause:sleep-state`.
 - **Class fix:** due (second bug). Each capture path logs a WARN when it fails to start
   (`crates/canvas-daemon/src/capture/mod.rs`), but a capture that starts and then gets no data stays
   silent, and a failed power registration leaves no trace. Candidate: no Windows API result is

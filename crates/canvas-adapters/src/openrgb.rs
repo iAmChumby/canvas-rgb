@@ -71,6 +71,8 @@ struct Session {
     /// How long a controller stays trusted to be in custom mode before the next frame
     /// sends `SET_CUSTOM_MODE` again.
     keepalive: Duration,
+    /// Bumped by every `reset_custom_mode`, so a send in flight can tell it was overtaken.
+    resets: u64,
 }
 
 impl Default for Session {
@@ -84,6 +86,7 @@ impl Default for Session {
             controllers: Vec::new(),
             custom_mode: HashMap::new(),
             keepalive: CUSTOM_MODE_KEEPALIVE,
+            resets: 0,
         }
     }
 }
@@ -132,7 +135,9 @@ impl Link {
     }
 
     fn reset_custom_mode(&self) {
-        guard(&self.session).custom_mode.clear();
+        let mut session = guard(&self.session);
+        session.custom_mode.clear();
+        session.resets += 1;
     }
 
     fn lose_current(&self) {
@@ -309,8 +314,14 @@ impl OpenRgbAdapter {
             session.custom_mode.get(&index).is_none_or(|at| at.elapsed() >= session.keepalive)
         };
         if needs_mode {
+            // Stamped before the send. A resume that lands during the await bumps `resets`; the
+            // controller is then not recorded, so the next frame sends the mode again.
+            let (sent_at, resets) = (Instant::now(), guard(&self.link.session).resets);
             self.send(index, SET_CUSTOM_MODE, &[]).await?;
-            guard(&self.link.session).custom_mode.insert(index, Instant::now());
+            let mut session = guard(&self.link.session);
+            if session.resets == resets {
+                session.custom_mode.insert(index, sent_at);
+            }
         }
         self.send(index, UPDATE_LEDS, &update_leds_payload(colors)?).await
     }
