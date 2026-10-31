@@ -104,6 +104,14 @@
   /* the fader's cap: it travels in the slot, and the fill ends under it */
   --cap-w: 14px;
 
+  /* The layout canvas placeholder: the height of the loaded drawing (the desk), and the height of
+     the tools under it (the view switch and the notes). The canvas box is the drawing plus the
+     tools, so the box is derived from the two and never a third number. */
+  --skel-stage-w: 806.4px;
+  --skel-stage-n: 223.8px;
+  --skel-tools-w: 113.6px;
+  --skel-tools-n: 161.1px;
+
   /* radius: hardware-soft corners (design note, 2026-10-27: "rounded corners", a sleek piece of hardware) */
   --r-sm: 8px;
   --r-md: 10px;

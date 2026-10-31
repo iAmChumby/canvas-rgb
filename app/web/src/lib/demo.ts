@@ -694,7 +694,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
           : head;
     const wait = holdMs(area);
     if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
-    if (failsArea(area)) fail(500, "internal", `the daemon could not read the ${area}`);
+    if (failsArea(area)) fail(500, "internal", `canvas-rgb could not read the ${area}`);
     if (emptyArea(area)) {
       if (area === "peripherals") return { peripherals: [] };
       if (area === "displays") return [];

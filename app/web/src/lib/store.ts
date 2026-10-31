@@ -52,6 +52,9 @@ export interface Snap {
   fansError: string | null;
   devices: DeviceInfo[] | null;
   devicesError: string | null;
+  /** How many devices the daemon listed the last time it answered, connected or not. The status
+   * route knows only the connected ones, so this is the total the placeholder draws. */
+  devicesTotal: number | null;
   effects: EffectSummary[] | null;
   effectsError: string | null;
   /** The user effect files that did not parse. */
@@ -69,6 +72,9 @@ export interface Snap {
   rpm: Record<string, number[]>;
   /** The tray's update state. Null until the tray has answered, and in a browser with no fixture. */
   update: UpdateState | null;
+  /** The areas with a load in flight after a Try again: the frame shows its placeholder while one
+   * is asked for, and the button cannot be pressed twice. */
+  pending: readonly string[];
 }
 
 let snap: Snap = {
@@ -78,6 +84,7 @@ let snap: Snap = {
   fansError: null,
   devices: null,
   devicesError: null,
+  devicesTotal: null,
   effects: null,
   effectsError: null,
   effectsFailed: [],
@@ -92,6 +99,7 @@ let snap: Snap = {
   displaysUnsupported: false,
   rpm: {},
   update: null,
+  pending: [],
 };
 
 const listeners = new Set<() => void>();
@@ -123,12 +131,65 @@ export function useSnap<T>(select: (s: Snap) => T): T {
 
 // ---- refreshers ----
 
-export async function refreshStatus(): Promise<void> {
+/**
+ * The areas with a load in flight after a Try again. The frame shows its placeholder while one
+ * runs, so the error panel (and its button) is gone and a second press cannot start a second
+ * load.
+ */
+let pendingAreas: string[] = [];
+
+/**
+ * The number of the last request per area. A late answer from an older request is dropped: a
+ * slow failure must not land on a page that has already moved on.
+ */
+const requests = new Map<string, number>();
+
+/** Starts a request for an area and returns its number. */
+function beginRequest(area: string): number {
+  const n = (requests.get(area) ?? 0) + 1;
+  requests.set(area, n);
+  return n;
+}
+
+/** True when this answer is the newest one for its area. */
+function isNewest(area: string, n: number): boolean {
+  return requests.get(area) === n;
+}
+
+/** Marks an area as in flight, or not. */
+function markPending(area: string, on: boolean): void {
+  pendingAreas = on
+    ? pendingAreas.includes(area)
+      ? pendingAreas
+      : [...pendingAreas, area]
+    : pendingAreas.filter((a) => a !== area);
+  patchSnap({ pending: pendingAreas });
+}
+
+/**
+ * Runs a load the reader asked for again. The area is marked as in flight while it runs, so the
+ * frame goes back to its placeholder and the button cannot be pressed twice.
+ */
+async function retryArea(area: string, work: () => Promise<void>): Promise<void> {
+  if (pendingAreas.includes(area)) return;
+  markPending(area, true);
   try {
-    patchSnap({ status: await api.status(), statusError: null });
+    await work();
+  } finally {
+    markPending(area, false);
+  }
+}
+
+export async function refreshStatus(): Promise<void> {
+  const n = beginRequest("status");
+  try {
+    const status = await api.status();
+    if (!isNewest("status", n)) return;
+    patchSnap({ status, statusError: null });
     lastStatusFailureAt = 0;
     statusFailures = 0;
   } catch (e) {
+    if (!isNewest("status", n)) return;
     statusFailures += 1;
     // The last status is old after the second miss in a row (about DOWN_RETRY_MS later). Clearing it
     // is what lets the strip and the daemon-down page say the daemon is gone.
@@ -138,8 +199,10 @@ export async function refreshStatus(): Promise<void> {
 }
 
 export async function refreshFans(): Promise<void> {
+  const n = beginRequest("fans");
   try {
     const fans = await api.fans();
+    if (!isNewest("fans", n)) return;
     const rpm = { ...snap.rpm };
     for (const h of fans.headers) {
       const prev = rpm[h.id] ?? [];
@@ -147,65 +210,96 @@ export async function refreshFans(): Promise<void> {
     }
     patchSnap({ fans, fansError: null, rpm });
   } catch (e) {
+    if (!isNewest("fans", n)) return;
     patchSnap({ fansError: messageOf(e) });
   }
 }
 
 export async function refreshDevices(): Promise<void> {
+  const n = beginRequest("devices");
   try {
-    patchSnap({ devices: (await api.devices()).devices, devicesError: null });
+    const devices = (await api.devices()).devices;
+    if (!isNewest("devices", n)) return;
+    patchSnap({ devices, devicesError: null, devicesTotal: devices.length });
   } catch (e) {
+    if (!isNewest("devices", n)) return;
     patchSnap({ devicesError: messageOf(e) });
   }
 }
 
 export async function refreshEffects(): Promise<void> {
+  const n = beginRequest("effects");
   try {
     const r = await api.effects();
+    if (!isNewest("effects", n)) return;
     patchSnap({ effects: r.effects, effectsFailed: r.failed ?? [], effectsError: null });
   } catch (e) {
+    if (!isNewest("effects", n)) return;
     patchSnap({ effectsError: messageOf(e) });
   }
 }
 
 export async function refreshLayouts(): Promise<void> {
+  const n = beginRequest("layouts");
   try {
     const r = await api.layouts();
+    if (!isNewest("layouts", n)) return;
     patchSnap({ layouts: r.layouts, activeLayout: r.active, layoutsError: null });
   } catch (e) {
+    if (!isNewest("layouts", n)) return;
     patchSnap({ layoutsError: messageOf(e) });
   }
 }
 
 export async function refreshRender(): Promise<void> {
+  const n = beginRequest("render");
   try {
-    patchSnap({ render: await api.render() });
+    const render = await api.render();
+    if (!isNewest("render", n)) return;
+    patchSnap({ render });
   } catch {
     // The status error already says whether the daemon answers.
   }
 }
 
 export async function refreshSettings(): Promise<void> {
+  const n = beginRequest("settings");
   try {
-    patchSnap({ settings: await api.settings(), settingsError: null });
+    const settings = await api.settings();
+    if (!isNewest("settings", n)) return;
+    patchSnap({ settings, settingsError: null });
   } catch (e) {
+    if (!isNewest("settings", n)) return;
     patchSnap({ settingsError: messageOf(e) });
   }
 }
 
 export async function refreshDisplays(): Promise<void> {
+  const n = beginRequest("displays");
   try {
-    patchSnap({ displays: await api.displays(), displaysError: null, displaysUnsupported: false });
+    const displays = await api.displays();
+    if (!isNewest("displays", n)) return;
+    patchSnap({ displays, displaysError: null, displaysUnsupported: false });
   } catch (e) {
+    if (!isNewest("displays", n)) return;
     // A daemon that is older than the display routes answers 404. That is not a failure to read
     // the displays: the page says the daemon is old and what to do about it.
     const unsupported = e instanceof ApiFailure && e.status === 404;
     const message = unsupported
-      ? "This daemon has no display routes: it is older than the display support. Update the daemon and the tray app."
+      ? "This service is older than the display support: it has no display routes. Update canvas-rgb and the tray app."
       : messageOf(e);
     patchSnap({ displaysError: message, displaysUnsupported: unsupported });
   }
 }
+
+/** Asks for a load again, the way the Try again button does. */
+export const retryStatus = (): Promise<void> => retryArea("status", refreshStatus);
+export const retryFans = (): Promise<void> => retryArea("fans", refreshFans);
+export const retryDevices = (): Promise<void> => retryArea("devices", refreshDevices);
+export const retryEffects = (): Promise<void> => retryArea("effects", refreshEffects);
+export const retryLayouts = (): Promise<void> => retryArea("layouts", refreshLayouts);
+export const retrySettings = (): Promise<void> => retryArea("settings", refreshSettings);
+export const retryDisplays = (): Promise<void> => retryArea("displays", refreshDisplays);
 
 /**
  * Reads the update state from the tray. A plain browser has no tray: with no `?update=` fixture

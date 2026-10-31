@@ -4,7 +4,7 @@ import { Fragment, useMemo, useState } from "react";
 import { ArrowClockwise, FloppyDisk, ThermometerSimple, WarningOctagon } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
 import { EmptyState } from "@/components/EmptyState";
-import { ErrorPanel, LoadFrame, type LoadState } from "@/components/Loading";
+import { ErrorPanel, Details, LoadFrame, type LoadState } from "@/components/Loading";
 import { DisplayShape } from "@/components/LoadShapes";
 import { NumberField } from "@/components/NumberField";
 import { Field, Panel, StateDot } from "@/components/Panel";
@@ -14,7 +14,7 @@ import { Toggle } from "@/components/Toggle";
 import { useToast } from "@/components/Toast";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
-import { refreshDisplays, useSnap } from "@/lib/store";
+import { refreshDisplays, retryDisplays, useSnap } from "@/lib/store";
 import type { DisplayConfig } from "@/proto/DisplayConfig";
 import type { DisplaySource } from "@/proto/DisplaySource";
 import type { DisplayStatus } from "@/proto/DisplayStatus";
@@ -386,24 +386,35 @@ export function DisplaysView() {
   const displaysError = useSnap((s) => s.displaysError);
   const displaysUnsupported = useSnap((s) => s.displaysUnsupported);
   const fans = useSnap((s) => s.fans);
+  // A load that is in flight after a Try again: the frame shows its placeholder until it ends.
+  const retrying = useSnap((s) => s.pending.includes("displays"));
 
   // One frame in every state, so the page keeps its shape: the card that is coming, the error
-  // and the empty states all stand where the card stands.
+  // and the empty states all stand where the card stands. A refresh that failed after the cards
+  // were read keeps them: the page says they may be old instead of taking them away.
+  const stale = displays !== null && displaysError !== null && !displaysUnsupported;
   const state: LoadState = displaysUnsupported
     ? "empty"
-    : displaysError
-      ? "error"
-      : displays === null
-        ? "loading"
-        : displays.length === 0
-          ? "empty"
-          : "ready";
+    : displays === null
+      ? displaysError && !retrying
+        ? "error"
+        : "loading"
+      : displays.length === 0
+        ? "empty"
+        : "ready";
 
   return (
     <div className="stack">
       <div className="page-head">
         <h1>Displays</h1>
       </div>
+
+      {stale && (
+        <div className="rule rule-warn" role="status">
+          The displays may be out of date.
+          <Details>{displaysError}</Details>
+        </div>
+      )}
 
       <LoadFrame
         className="stack"
@@ -413,8 +424,9 @@ export function DisplaysView() {
         error={
           <ErrorPanel
             title="The displays could not be read"
+            summary="canvas-rgb could not read the displays. The lights are unaffected."
             message={displaysError}
-            onRetry={() => void refreshDisplays()}
+            onRetry={() => void retryDisplays()}
           />
         }
         empty={

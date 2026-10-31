@@ -157,9 +157,18 @@ export function PeripheralsView() {
     }
   }, []);
 
-  // Lists the devices. The first run and "Try again" both come through here.
+  // Lists the devices. The first run and "Try again" both come through here. The stop handle is
+  // kept, so a retry that is still running when the page goes away is dropped with it.
+  const listStop = useRef<(() => void) | null>(null);
+  const [listBusy, setListBusy] = useState(false);
+
   const loadList = useCallback(() => {
     let stop = false;
+    const handle = () => {
+      stop = true;
+    };
+    listStop.current?.();
+    listStop.current = handle;
     api
       .peripherals()
       .then((r) => {
@@ -169,12 +178,22 @@ export function PeripheralsView() {
       })
       .catch((e: unknown) => {
         if (!stop) setListError(messageOf(e));
+      })
+      .finally(() => {
+        if (!stop) setListBusy(false);
       });
-    return () => {
-      stop = true;
-    };
+    return handle;
   }, []);
   useEffect(() => loadList(), [loadList]);
+
+  // The retry: the frame goes back to its placeholder while the list is asked for again, so the
+  // button is gone and a second press cannot start a second load.
+  const retryList = () => {
+    if (listBusy) return;
+    setListError(null);
+    setListBusy(true);
+    loadList();
+  };
 
   useEffect(() => {
     if (!selectedId) return;
@@ -274,6 +293,7 @@ export function PeripheralsView() {
       error={
         <ErrorPanel
           title="The device could not be read"
+          summary="canvas-rgb could not read that device. Nothing was changed."
           message={detailError}
           onRetry={() => {
             if (!selectedId) return;
@@ -303,7 +323,8 @@ export function PeripheralsView() {
     </LoadFrame>
   );
 
-  const listState: LoadState = listError ? "error" : list === null ? "loading" : rows.length === 0 ? "empty" : "ready";
+  const listState: LoadState =
+    listError && !listBusy ? "error" : list === null ? "loading" : rows.length === 0 ? "empty" : "ready";
 
   return (
     <div className="stack">
@@ -320,12 +341,10 @@ export function PeripheralsView() {
             label="Looking for devices"
             error={
               <ErrorPanel
-                title="The devices could not be listed"
+                title="The peripherals could not be listed"
+                summary="canvas-rgb could not look for the peripherals. Nothing was changed."
                 message={listError}
-                onRetry={() => {
-                  setListError(null);
-                  loadList();
-                }}
+                onRetry={retryList}
               />
             }
             empty={

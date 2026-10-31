@@ -47,7 +47,7 @@ import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
 import { usePreviewStatus } from "@/lib/preview";
 import { usePrefersReducedMotion } from "@/lib/motion";
-import { getSnap, patchSnap, refreshAll, refreshLayouts, refreshSettings, useSnap } from "@/lib/store";
+import { getSnap, patchSnap, refreshAll, refreshLayouts, refreshSettings, retryLayouts, useSnap } from "@/lib/store";
 import {
   defaultRect,
   defaultShape,
@@ -353,6 +353,8 @@ export function LayoutView() {
   const settings = useSnap((s) => s.settings);
   const layoutsError = useSnap((s) => s.layoutsError);
   const layoutsLoaded = useSnap((s) => s.layouts !== null);
+  // A load that is in flight after a Try again: the frame shows its placeholder until it ends.
+  const retrying = useSnap((s) => s.pending.includes("layouts"));
 
   const [base, setBase] = useState<Layout | null>(null);
   const [selection, setSelection] = useState<Sel[]>([]);
@@ -670,7 +672,7 @@ export function LayoutView() {
     if (preview.state === "live") return null;
     if (editorDraws) {
       return {
-        text: "Preview drawn by the editor · the daemon's live preview is not available yet",
+        text: "Preview drawn by the editor · the live preview is not available yet",
         down: false,
       };
     }
@@ -689,7 +691,7 @@ export function LayoutView() {
     if (!runningEffect) {
       return { text: "No effect is running on this layout.", down: true };
     }
-    return { text: "The daemon's live preview is not available yet.", down: false };
+    return { text: "The live preview is not available yet.", down: false };
   }, [preview.state, preview.error, editorDraws, effectNeedsInput, runningEffect]);
 
   // The plain-language note under each setting: what it does in words, and the precise value.
@@ -1029,20 +1031,30 @@ export function LayoutView() {
           <h1>Layout</h1>
         </div>
         <LoadFrame
-          state={layoutsError ? "error" : layoutsLoaded && !server ? "empty" : "loading"}
+          state={
+            retrying
+              ? "loading"
+              : layoutsError
+                ? "error"
+                : layoutsLoaded && !server
+                  ? "empty"
+                  : "loading"
+          }
           shape={<LayoutShape />}
           label="Reading the layout"
           error={
             <ErrorPanel
               title="The layout could not be read"
+              summary="canvas-rgb could not read the layout. Nothing was changed."
               message={layoutsError}
-              onRetry={() => void refreshLayouts()}
+              onRetry={() => void retryLayouts()}
             />
           }
           empty={
             <Panel>
-              <EmptyState icon={<SquaresFour size={24} />} title="No desk to show">
-                There is no layout yet, so there is no canvas to place zones on.
+              <EmptyState icon={<SquaresFour size={24} />} title="There is no layout yet">
+                Make one here: the desk canvas is this page, and nothing can run until it has a
+                zone in it.
               </EmptyState>
             </Panel>
           }

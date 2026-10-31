@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, type ReactNode } from "react";
+import { CaretRight } from "@phosphor-icons/react";
 import { Panel } from "@/components/Panel";
 import { Button } from "@/components/Button";
 
@@ -80,30 +81,42 @@ function StageChip({ stage }: { stage: LoadStage }) {
 export function Details({ summary = "Details", children }: { summary?: string; children: ReactNode }) {
   return (
     <details className="load-detail">
-      <summary>{summary}</summary>
+      <summary>
+        <CaretRight className="load-detail-caret" size={14} aria-hidden="true" />
+        <span>{summary}</span>
+      </summary>
       <p className="state-detail">{children}</p>
     </details>
   );
 }
 
 /**
- * The plain error: a titled panel with what went wrong, and a way to try again. Pass `onRetry`
- * wherever a load can be asked for again; a panel without one is a dead end.
+ * The plain error: a titled panel with what went wrong, and a way to try again.
+ *
+ * The line under the title is the one the reader sees: one sentence in plain words, with no
+ * jargon and no raw answer from the service. The raw words stay behind the `Details`
+ * disclosure, where a person who wants them can open it. Pass `onRetry` wherever a load can
+ * be asked for again; a panel without one is a dead end.
  */
 export function ErrorPanel({
   title,
   message,
+  summary = "The answer did not arrive. Nothing was changed.",
   onRetry,
 }: {
   title: string;
-  message: ReactNode;
+  /** The raw words, shown only inside the disclosure. */
+  message?: ReactNode;
+  /** The one line the reader sees. */
+  summary?: string;
   onRetry?: () => void;
 }) {
   return (
     <Panel title={title}>
       <p className="error-line" role="alert">
-        {message}
+        {summary}
       </p>
+      {message ? <Details>{message}</Details> : null}
       {onRetry && (
         <div className="load-note-action">
           <Button size="sm" onClick={onRetry}>

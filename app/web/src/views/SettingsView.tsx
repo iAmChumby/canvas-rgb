@@ -15,7 +15,7 @@ import { messageOf } from "@/lib/errors";
 import { exportConfig, importConfigFile } from "@/lib/config-transfer";
 import { BLACK_HEX } from "@/lib/color";
 import { openLogsFolder, tauriHost } from "@/lib/host";
-import { getSnap, patchSnap, refreshAll, refreshRender, refreshSettings, useSnap } from "@/lib/store";
+import { getSnap, patchSnap, refreshAll, refreshRender, refreshSettings, retrySettings, useSnap } from "@/lib/store";
 import { fmt1, fmtInt } from "@/lib/format";
 import { useToast } from "@/components/Toast";
 import { ErrorPanel, LoadFrame } from "@/components/Loading";
@@ -34,6 +34,8 @@ import { UpdatesPanel } from "./UpdatesPanel";
 export function SettingsView() {
   const settings = useSnap((s) => s.settings);
   const settingsError = useSnap((s) => s.settingsError);
+  // A load that is in flight after a Try again: the frame shows its placeholder until it ends.
+  const retrying = useSnap((s) => s.pending.includes("settings"));
   const status = useSnap((s) => s.status);
   const layouts = useSnap((s) => s.layouts);
   const render = useSnap((s) => s.render);
@@ -56,14 +58,15 @@ export function SettingsView() {
           <h1>Settings</h1>
         </div>
         <LoadFrame
-          state={settingsError ? "error" : "loading"}
+          state={retrying ? "loading" : settingsError ? "error" : "loading"}
           shape={<SettingsShape />}
           label="Reading the settings"
           error={
             <ErrorPanel
               title="The settings could not be read"
+              summary="canvas-rgb could not read the settings. Nothing was changed."
               message={settingsError}
-              onRetry={() => void refreshSettings()}
+              onRetry={() => void retrySettings()}
             />
           }
         />

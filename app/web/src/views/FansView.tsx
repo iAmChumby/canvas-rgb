@@ -19,7 +19,7 @@ import { useToast } from "@/components/Toast";
 import { FanCurveEditor } from "@/views/FanCurveEditor";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
-import { refreshFans, useSnap } from "@/lib/store";
+import { refreshFans, retryFans as retryFansNow, useSnap } from "@/lib/store";
 import { baseFloor, hotRuleText } from "@/lib/fan-rules";
 import { clamp, fmtSeconds } from "@/lib/format";
 import type { CurvePoint } from "@/proto/CurvePoint";
@@ -130,6 +130,8 @@ export function FansView() {
   const fansError = useSnap((s) => s.fansError);
   const serviceDownMs = useSnap((s) => s.status?.service_down_ms ?? null);
   const rpm = useSnap((s) => s.rpm);
+  // A load that is in flight after a Try again: the frame shows its placeholder until it ends.
+  const retrying = useSnap((s) => s.pending.includes("fans"));
   const narrow = useMediaQuery("(max-width: 720px)");
   const [picked, setSelectedId] = useState<string | null>(null);
   // The first header is the default selection until one is clicked.
@@ -149,9 +151,8 @@ export function FansView() {
 
   // The "Try again" on the service-down state.
   const retryFans = async () => {
-    await refreshFans();
+    await retryFansNow();
   };
-
   // The error sits in the frame the page loads into, so the page keeps its shape.
   const errorNode = fansError ? (
       <div className="stack">
@@ -204,7 +205,7 @@ export function FansView() {
 
       <LoadFrame
         className="stack"
-        state={fansError ? "error" : fans ? "ready" : "loading"}
+        state={retrying ? "loading" : fansError ? "error" : fans ? "ready" : "loading"}
         shape={<FansShape />}
         label="Reading the fans"
         error={errorNode}

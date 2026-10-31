@@ -68,12 +68,12 @@ async function send(method: Method, path: string, body?: unknown): Promise<Respo
     // The listener may be gone, or another process may be about to take its place: the token is
     // not trusted again until the tray has checked the listener once more.
     dropApiConfig();
-    // A cross-origin request that fails like this is either a daemon that is down or a reply the
+    // A cross-origin request that fails like this is either a service that is down or a reply the
     // browser was not allowed to read. Say so, instead of blaming the network.
     throw new ApiFailure(
       0,
       "unreachable",
-      "The daemon did not answer. It may be down, or the browser was not allowed to read its reply.",
+      "canvas-rgb did not answer. It may be stopped, or the browser was not allowed to read its reply.",
     );
   }
 

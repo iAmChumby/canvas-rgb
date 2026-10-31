@@ -47,8 +47,10 @@ export function StandingNotices() {
   }, []);
 
   const conflict = status?.conflicts.find((c) => c.kind === "signal_rgb");
-  // Nothing can run until the desk canvas has a zone in it.
-  const noLayout = status !== null && !status.active_layout;
+  // Nothing can run until the desk canvas has a zone in it. The Layout page is where the layout is
+  // made: its own frame says it, so the banner would say it twice and push the page down.
+  const onLayout = pathname === "/";
+  const noLayout = status !== null && !status.active_layout && !onLayout;
 
   const firstResizable = devices?.find((d) => d.zones.some((z) => z.resizable));
   const walkHref = firstResizable
@@ -87,13 +89,10 @@ export function StandingNotices() {
           tone="work"
           icon={<SquaresFour size={20} weight="fill" />}
           title="There is no layout yet"
-          // The Layout page is where it is made: a link to itself would say nothing.
           actions={
-            pathname === "/" ? undefined : (
-              <ButtonLink href="/" variant="primary" size="sm">
-                Open the Layout
-              </ButtonLink>
-            )
+            <ButtonLink href="/" variant="primary" size="sm">
+              Open the Layout
+            </ButtonLink>
           }
         >
           Nothing can run until the desk canvas has a zone in it.

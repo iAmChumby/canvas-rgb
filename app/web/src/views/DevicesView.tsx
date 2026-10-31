@@ -17,9 +17,10 @@ import type { Icon } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
 import { EmptyState } from "@/components/EmptyState";
 import { Panel, StateDot } from "@/components/Panel";
-import { ErrorPanel, LoadFrame } from "@/components/Loading";
+import { ErrorPanel, Details, LoadFrame } from "@/components/Loading";
 import { DeviceListShape } from "@/components/LoadShapes";
-import { refreshDevices, useSnap } from "@/lib/store";
+import { Skeleton } from "@/components/Skeleton";
+import { refreshDevices, retryDevices, useSnap } from "@/lib/store";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { DeviceKind } from "@/proto/DeviceKind";
 import type { ZoneInfo } from "@/proto/ZoneInfo";
@@ -138,6 +139,12 @@ export function DevicesView() {
   const devicesError = useSnap((s) => s.devicesError);
   // How many lights the daemon has already counted: the placeholder draws as many cards.
   const counted = useSnap((s) => s.status?.devices_connected ?? 0);
+  // How many devices the daemon has, connected or not. The status route knows only the connected
+  // ones, so the total is the one the list had the last time it came: the placeholder draws as
+  // many cards as the list will show.
+  const total = useSnap((s) => s.devicesTotal);
+  // A load that is in flight after a Try again: the frame shows its placeholder until it ends.
+  const retrying = useSnap((s) => s.pending.includes("devices"));
   const openrgb = useSnap((s) => s.status?.openrgb ?? "connected");
   // The first-run banner links here with ?walk=<device id>. That device's first resizable zone opens
   // in the walker until the user closes it or picks another zone.
@@ -169,7 +176,14 @@ export function DevicesView() {
         <h1>Devices</h1>
       </div>
 
-      {devicesError && devices !== null && <Panel><p className="error-line">{devicesError}</p></Panel>}
+      {devicesError && devices !== null && (
+        // The list is on screen but the last read failed: the cards stay and the page says they
+        // may be old. The raw words are behind the disclosure.
+        <div className="rule rule-warn" role="status">
+          The device list may be out of date.
+          <Details>{devicesError}</Details>
+        </div>
+      )}
       {openrgb !== "connected" && (
         <p className="rule rule-warn">
           OpenRGB is not connected.
@@ -178,10 +192,25 @@ export function DevicesView() {
 
       <div className="devices-grid">
         <LoadFrame
-          state={devices === null ? (devicesError ? "error" : "loading") : devices.length === 0 ? "empty" : "ready"}
-          shape={<DeviceListShape cards={counted > 0 ? counted : 3} />}
+          state={
+            devices === null
+              ? devicesError && !retrying
+                ? "error"
+                : "loading"
+              : devices.length === 0
+                ? "empty"
+                : "ready"
+          }
+          shape={<DeviceListShape cards={total ?? (counted > 0 ? counted : 3)} />}
           label="Looking for devices"
-          error={<ErrorPanel title="The devices could not be read" message={devicesError} onRetry={() => void refreshDevices()} />}
+          error={
+            <ErrorPanel
+              title="The devices could not be read"
+              summary="canvas-rgb could not read the devices. The lights are unaffected."
+              message={devicesError}
+              onRetry={() => void retryDevices()}
+            />
+          }
           empty={
             <Panel>
               <EmptyState
@@ -274,7 +303,16 @@ export function DevicesView() {
         </LoadFrame>
 
         <div className="stack" style={{ position: "sticky", top: 16 }}>
-          {walkDevice && walkZone ? (
+          {devices === null ? (
+            // The walker points at a device that is still coming: it shows a placeholder, not
+            // its own words.
+            <Panel>
+              <div className="stack" style={{ gap: 8 }}>
+                <Skeleton width="54%" height={16} />
+                <Skeleton width="78%" height={14} />
+              </div>
+            </Panel>
+          ) : walkDevice && walkZone ? (
             <IdentifyWalker
               key={`${walkDevice.id}#${walkZone.index}`}
               device={walkDevice}

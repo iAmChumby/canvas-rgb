@@ -1,15 +1,15 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ArrowRight } from "@phosphor-icons/react";
 import { Button, Swap } from "@/components/Button";
 import { Panel, StateDot } from "@/components/Panel";
-import { LoadFrame } from "@/components/Loading";
+import { ErrorPanel, LoadFrame } from "@/components/Loading";
 import { UpdatesShape } from "@/components/LoadShapes";
 import { canUpdate, openLogsFolder, tauriHost, updateCheckNow, updateInstall, updateSkip } from "@/lib/host";
 import { parseInline, parseNotes, type NoteBlock } from "@/lib/releaseNotes";
 import { messageOf } from "@/lib/errors";
-import { useSnap } from "@/lib/store";
+import { refreshUpdate, useSnap } from "@/lib/store";
 import { sendUpdate } from "@/lib/updateActions";
 import {
   KEY_LABELS,
@@ -26,8 +26,10 @@ import {
 } from "@/lib/updateWords";
 import type { UpdateState } from "@/proto/UpdateState";
 
-/** The panel title tone: what a heading of the changelog means, as a token. */
-function noteTone(title: string): string {
+/** How long the tray has to answer before the page says that it did not. */
+const TRAY_TIMEOUT_MS = 5000;
+
+/** The panel title tone: what a heading of the changelog means, as a token. */function noteTone(title: string): string {
   const t = title.toLowerCase();
   if (t.startsWith("add")) return "var(--ok)";
   if (t.startsWith("fix")) return "var(--warn)";
@@ -116,6 +118,14 @@ function StateLine({ u }: { u: UpdateState }) {
 export function UpdatesView() {
   const u = useSnap((s) => s.update);
   const [err, setErr] = useState<string | null>(null);
+  // The tray has not answered for this long: the page says so, instead of waiting for good.
+  const [silent, setSilent] = useState(false);
+
+  useEffect(() => {
+    if (u) return;
+    const timer = setTimeout(() => setSilent(true), TRAY_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [u]);
 
   if (!u) {
     return (
@@ -123,9 +133,23 @@ export function UpdatesView() {
         <div className="page-head">
           <h1>Updates</h1>
         </div>
-        {/* The state comes from the tray, not the daemon: no error to show, and in a plain browser
-            without a fixture it never comes. The same frame as every page, in its loading state. */}
-        <LoadFrame state="loading" shape={<UpdatesShape />} label="Reading the update state" />
+        {/* The state comes from the tray, not the daemon: there is no error to show while the tray
+            is still answering. When it stays quiet the page says so and offers a way to ask again. */}
+        <LoadFrame
+          state={silent ? "error" : "loading"}
+          shape={<UpdatesShape />}
+          label="Reading the update state"
+          error={
+            <ErrorPanel
+              title="No answer from the tray"
+              summary="The tray app did not answer. Start it, then try again."
+              onRetry={() => {
+                setSilent(false);
+                void refreshUpdate();
+              }}
+            />
+          }
+        />
       </div>
     );
   }

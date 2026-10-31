@@ -213,9 +213,19 @@ export function DisplayShape() {
       <div className="display-notice-slot" />
       <div className="display-card">
         <div className="display-readout">
-          <Skeleton width={70} height={14} />
-          <Skeleton width="100%" height={96} radius={8} style={{ marginTop: 12 }} />
-          <Skeleton width={110} height={14} style={{ marginTop: 12 }} />
+          {/* The caption, then the cells the readout has: four digits and the point between two
+              of them, drawn in the readout's own shapes, so the card reads as a display and not
+              as a grey box. */}
+          <Skeleton className="skel-caption" width={64} height={12} />
+          <div className="skel-digits" aria-hidden="true">
+            <span className="skel-digit" />
+            <span className="skel-digit" />
+            <span className="skel-digit skel-digit-point" />
+            <span className="skel-digit" />
+            <span className="skel-digit" />
+          </div>
+          <Skeleton className="skel-now" width={124} height={14} style={{ marginTop: 12 }} />
+          <Skeleton className="skel-note" width={152} height={12} style={{ marginTop: 12 }} />
         </div>
         <div className="display-controls">
           <SkelProp label={80} control={180} />
@@ -236,7 +246,12 @@ export function LayoutShape() {
         {/* The canvas box holds the drawing and, under it, the view switch and the notes, as the real
             one does: the drawing is as tall as the loaded drawing, not as the whole box. */}
         <div className="skel-canvas">
-          <Skeleton className="skel-stage" />
+          {/* The desk: the case the zones sit in, and two zones on it, as the loaded canvas has. */}
+          <div className="skel-stage" aria-hidden="true">
+            <span className="skel-case" />
+            <span className="skel-zone skel-zone-a" />
+            <span className="skel-zone skel-zone-b" />
+          </div>
           <div className="skel-canvas-tools">
             <Skeleton width="58%" height={40} radius={8} />
             <Skeleton width="86%" height={14} />
@@ -266,6 +281,8 @@ export function EffectGalleryShape({ cards = 12 }: { cards?: number }) {
           <Skeleton className="skeleton-preview" />
           <span className="effect-card-meta">
             <Skeleton className="skeleton-line" height={21.8} width="55%" />
+            {/* One card in the row wears the chip the HTML effects wear. */}
+            {i === 2 && <Skeleton className="skeleton-chip" width={54} height={22} radius={6} />}
           </span>
         </div>
       ))}

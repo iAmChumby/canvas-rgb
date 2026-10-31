@@ -24,7 +24,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { Enter } from "@/components/Motion";
 import { Highlighted, matchEffect } from "@/components/Search";
 import { useMediaQuery } from "@/components/MediaQuery";
-import { ErrorPanel, LoadFrame, type LoadState } from "@/components/Loading";
+import { ErrorPanel, Details, LoadFrame, type LoadState } from "@/components/Loading";
 import { EffectDetailShape, EffectGalleryShape } from "@/components/LoadShapes";
 import { useToast } from "@/components/Toast";
 import { PropertyControls, type Values } from "@/views/PropertyControls";
@@ -32,7 +32,7 @@ import { PresetStrip } from "@/views/PresetStrip";
 import { api } from "@/lib/endpoints";
 import { ApiFailure, messageOf } from "@/lib/errors";
 import { EFFECT_CATEGORIES, categoryOf, type EffectCategory } from "@/lib/effectCategories";
-import { getSnap, refreshAll, refreshEffects, useSnap } from "@/lib/store";
+import { getSnap, refreshAll, retryEffects, useSnap } from "@/lib/store";
 import { fillDefaults, nextFreeName } from "@/lib/presetMatch";
 import { appliedName, runningOf, setApplied, setShown } from "@/lib/runningPreset";
 import type { EffectDetail } from "@/proto/EffectDetail";
@@ -55,6 +55,8 @@ export function EffectsView() {
   const failed = useSnap((s) => s.effectsFailed);
   const status = useSnap((s) => s.status);
   const activeId = useSnap((s) => s.status?.active_effect ?? null);
+  // A load that is in flight after a Try again: the frame shows its placeholder until it ends.
+  const retrying = useSnap((s) => s.pending.includes("effects"));
   const [filter, setFilter] = useState<"all" | "favorites">("all");
   const [category, setCategory] = useState<EffectCategory | null>(null);
   const [query, setQuery] = useState("");
@@ -472,8 +474,17 @@ export function EffectsView() {
       </div>
     ) : null;
 
+  // A refresh that failed after the list was read does not take the gallery away: the cards stay
+  // and the page says they may be old. Only a list that was never read has an error frame.
+  const listStale = effects !== null && effectsError !== null;
   const galleryState: LoadState =
-    effects === null ? (effectsError ? "error" : "loading") : list.length === 0 ? "empty" : "ready";
+    effects === null
+      ? effectsError && !retrying
+        ? "error"
+        : "loading"
+      : list.length === 0
+        ? "empty"
+        : "ready";
   const gallery = (
     <LoadFrame
       className="stack"
@@ -483,22 +494,22 @@ export function EffectsView() {
       error={
         <ErrorPanel
           title="The effects could not be read"
+          summary="canvas-rgb could not read the effect list. Nothing was changed."
           message={effectsError}
-          onRetry={() => void refreshEffects()}
+          onRetry={() => void retryEffects()}
         />
       }
       empty={
         <div className="stack">
-          {failedStrip}
           <Panel className="effect-empty">
             <EmptyState icon={<MagnifyingGlass size={22} />} title="No effect matches that">
               Try fewer words, or clear the filter and the category.
             </EmptyState>
           </Panel>
+          {failedStrip}
         </div>
       }
     >
-    {failedStrip}
     <div className="effect-gallery">
       {list.map((row, i) => {
         const e = row.effect;
@@ -551,6 +562,9 @@ export function EffectsView() {
         );
       })}
     </div>
+    {/* The files that did not parse stand under the gallery: they come with the list, and above
+        the cards they would push every card down. */}
+    {failedStrip}
     </LoadFrame>
   );
 
@@ -559,15 +573,14 @@ export function EffectsView() {
       {noLayout && (
         <EmptyState
           icon={<SquaresFour size={24} />}
-          title="There is no layout yet"
+          title="No layout to run on yet"
           action={
             <ButtonLink href="/" variant="primary" size="sm">
               Open the Layout
             </ButtonLink>
           }
         >
-          Nothing can run until the desk canvas has a zone in it. The effects are still here, ready
-          for one.
+          The effects are still here, ready for one.
         </EmptyState>
       )}
       {!(noLayout && !detail) && (
@@ -579,6 +592,7 @@ export function EffectsView() {
         error={
           <ErrorPanel
             title="The effect could not be read"
+            summary="canvas-rgb could not read that effect. The others are still here."
             message={error}
             onRetry={() => {
               setError(null);
@@ -765,7 +779,7 @@ export function EffectsView() {
         </span>
         {/* A count is shown once the list is known: "0 effects" while loading or on an error would be a false answer. */}
         <span className="mute fig" data-testid="effect-count">
-          {effects === null ? "–" : <AnimatedNumber value={list.length} />} effects
+          {effects === null || listStale ? "–" : <AnimatedNumber value={list.length} />} effects
         </span>
         <FileButton
           accept=".html,text/html"
@@ -802,7 +816,14 @@ export function EffectsView() {
         </div>
       )}
 
-      {effects !== null && effectsError && <p className="error-line">{effectsError}</p>}
+      {listStale && (
+        // The list is on screen but the last refresh failed: the cards may be old, and the count
+        // is a dash until the list is read again. The raw words are behind the disclosure.
+        <div className="rule rule-warn" role="status">
+          The effect list may be out of date.
+          <Details>{effectsError}</Details>
+        </div>
+      )}
 
       {narrow ? (
         <div
