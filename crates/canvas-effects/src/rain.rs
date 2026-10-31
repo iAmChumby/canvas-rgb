@@ -52,6 +52,9 @@ impl Rain {
             "Drizzle",
             vec![("density", number_kind(40.0)), ("speed", number_kind(60.0))],
         )
+        // The drops start above the canvas and need about three seconds to fill it; the rain has no
+        // period, so the end of the loop crossfades into the start.
+        .thumbnail(crate::schema::recipe(4.0, 2.0, 8, vec![("density", crate::schema::num(300.0)), ("trail_length", crate::schema::num(24.0))]))
         .build()
     }
 

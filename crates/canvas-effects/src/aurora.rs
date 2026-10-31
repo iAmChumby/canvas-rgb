@@ -73,6 +73,9 @@ impl Aurora {
             "Slow and wide",
             vec![("speed", number_kind(6.0)), ("scale", number_kind(0.5))],
         )
+        // The flow repeats only every 30 s or so at the defaults, longer than a tile, so the end of the
+        // loop crossfades into the start.
+        .thumbnail(crate::schema::recipe(1.0, 2.0, 8, vec![("speed", crate::schema::num(8.0))]))
         .build()
     }
 

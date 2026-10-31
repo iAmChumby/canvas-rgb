@@ -48,6 +48,10 @@ impl RainbowWave {
             "Wide arc",
             vec![("width", number_kind(150.0)), ("cycles", number_kind(2.0))],
         )
+        // The tile shows the band gliding through the middle of the canvas (a band covers 42 % of its
+        // travel, so a whole cycle is half black): vertical, as wide as it goes, from y = 40 to 160 over
+        // 5 s (phase 0.75 to 1.0 at speed 0.5), then the end crossfades into the start.
+        .thumbnail(crate::schema::recipe(15.0, 3.75, 8, vec![("speed", crate::schema::num(0.5)), ("direction", crate::schema::num(90.0)), ("cycles", crate::schema::num(2.0)), ("width", crate::schema::num(200.0))]))
         .build()
     }
 

@@ -59,6 +59,9 @@ impl Fire {
                 ("intensity", number_kind(90.0)),
             ],
         )
+        // At the defaults the flames cool within the bottom fifth of the canvas. Full intensity and
+        // low cooling carry the heat to the top, and three seconds of warm-up let it climb there.
+        .thumbnail(crate::schema::recipe(3.0, 2.0, 0, vec![("intensity", crate::schema::num(100.0)), ("cooling", crate::schema::num(12.0))]))
         .build()
     }
 

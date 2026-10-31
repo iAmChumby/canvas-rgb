@@ -2,9 +2,14 @@
 import type { InputNeeds } from "./InputNeeds";
 import type { Preset } from "./Preset";
 import type { PropertyDef } from "./PropertyDef";
+import type { ThumbnailRecipe } from "./ThumbnailRecipe";
 
 export type PropertySchema = { 
 /**
  * Stable id: one of [`crate::EFFECT_IDS`], or `html:` + the file stem for a user effect.
  */
-id: string, name: string, description: string, needs: InputNeeds, properties: Array<PropertyDef>, presets: Array<Preset>, };
+id: string, name: string, description: string, needs: InputNeeds, properties: Array<PropertyDef>, presets: Array<Preset>, 
+/**
+ * How the library tile is rendered. `None` is the renderer default.
+ */
+thumbnail?: ThumbnailRecipe, };

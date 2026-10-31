@@ -213,6 +213,7 @@ impl FakeEffect {
                 needs: Default::default(),
                 properties: Vec::new(),
                 presets: Vec::new(),
+                thumbnail: None,
             },
             updates: AtomicU64::new(0),
         }

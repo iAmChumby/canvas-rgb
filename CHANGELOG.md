@@ -27,6 +27,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Changed
 
+- Every effect's library tile now passes a stated quality bar (60 % lit on average, every row and column lit, no jump where the loop restarts). An effect can say how its tile is rendered (warm-up, loop length, a crossfade, showcase settings): Rainbow Wave is no longer half black, Fire fills the tile, Rain is full from the first frame and Breathing loops without a pop. Effect files carry the same in a `<meta thumbnail>` tag, and `canvas-rgb effects check` scores the tile, fails one under the bar and writes a GIF and a contact sheet with `--preview <dir>`. (#16)
 - The Displays preview draws the decimal point in its own slot between the digit cells (`4` `6` `.` `9`), not inside a cell; the row keeps its shape while the number counts. (#8)
 - Dragging a slider moves its cap and fill with the pointer, pixel for pixel, between steps; the value itself stays on the slider's steps and the cap settles onto the chosen step on release. (#13)
 

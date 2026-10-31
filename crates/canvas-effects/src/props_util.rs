@@ -167,6 +167,7 @@ mod tests {
                 },
             ],
             presets: vec![],
+            thumbnail: None,
         }
     }
 
