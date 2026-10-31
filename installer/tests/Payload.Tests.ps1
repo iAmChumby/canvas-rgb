@@ -169,6 +169,17 @@ try {
         $body = $iss.Substring($a, $iss.IndexOf('// ---- uninstall') - $a)
         Assert-True ($body -match 'if not IsUpdateRun then Exit;' -and $body.Contains('update-result.json')) 'update-result.json is still written (the guard is /UPDATE, not /SERVICEUPDATE)'
     }
+    Test-Case 'iss: a failed /SERVICEUPDATE starts the service so something finishes the update; two setups cannot overlap (#43)' {
+        $a = $iss.IndexOf('procedure DeinitializeSetup;')
+        $body = $iss.Substring($a, $iss.IndexOf('// ---- uninstall') - $a)
+        Assert-True ($body -match '(?s)\(not Ok\) and IsServiceUpdateRun then\s+Exec\(' -and $body.Contains("'start canvas-rgb-svc'") -and $body.Contains('{sys}'+[char]92+'sc.exe')) 'a failed service update starts the service with sc.exe'
+        Assert-True ($body.IndexOf('update-result.json') -lt $body.IndexOf('start canvas-rgb-svc')) 'the result file is written before the service starts'
+        Assert-True ($body -match "(?s)token:[^
+]*?
+\s*if \(not Ok\) and IsServiceUpdateRun") 'the Exec says which token it runs with'
+        Assert-True ($iss -match '(?s)function InitializeSetup: Boolean;.*?CheckForMutexes.*?if IsAdmin then CreateMutex' -and $iss.Contains('Global'+[char]92+'canvas-rgb-setup-running')) 'every setup checks the mutex; only the installing (admin) process creates it'
+        Assert-True ($body.Contains('if FBlocked then Exit;')) 'a blocked setup writes no update-result.json over the running one'
+    }
     Test-Case 'iss: /UPDATE writes update-result.json on every exit and starts the tray again after a failure' {
         $a = $iss.IndexOf('procedure DeinitializeSetup;')
         Assert-True ($a -gt 0) 'DeinitializeSetup exists'

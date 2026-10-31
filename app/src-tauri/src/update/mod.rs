@@ -14,7 +14,7 @@
 
 mod launch;
 pub mod rules;
-mod service;
+pub(crate) mod service;
 mod state;
 #[cfg(test)]
 mod tests;
@@ -295,6 +295,7 @@ impl Controller {
             i.stored.pending_since_ms = None;
             match settle(&pending.version, &self.current.to_string(), result.as_ref()) {
                 Settled::Updated => {
+                    i.stored.last_settled = Some(pending.version.clone());
                     i.stored.updated_to = Some(pending);
                     i.phase = UpdatePhase::Idle;
                 }
@@ -314,6 +315,25 @@ impl Controller {
                 Err(why) => log::append(&format!("update: not clearing the updates folder: {why}")),
             }
         }
+    }
+
+    /// A start by the installer (`--after-update`) with no `pending`: the update was not started by
+    /// this tray (the CLI, an agent or the service did it), so nothing was recorded. When the
+    /// installer's report is ok for the running version and that version is not the one last
+    /// recorded, it is recorded as `updated_to` the way a tray-started update is.
+    pub fn settle_unrecorded_update(&self) {
+        let Some(report) = read_result(&self.settings.result_path) else { return };
+        let running = self.current.to_string();
+        self.change(|i| {
+            if i.stored.pending.is_some() || !report.ok || report.version != running {
+                return;
+            }
+            if i.stored.last_settled.as_deref() == Some(running.as_str()) {
+                return;
+            }
+            i.stored.last_settled = Some(running.clone());
+            i.stored.updated_to = Some(UpdateInfo { version: running, notes: String::new(), pub_date: None });
+        });
     }
 
     /// The installer process ended while this tray still runs. Setup raises its own permission
@@ -621,8 +641,9 @@ impl Controller {
     pub fn launch_stage(&self, update: &Update, path: &Path) -> (UpdateState, launch::Started) {
         self.set_phase(UpdatePhase::Verifying);
         let pending = info_of(update);
-        // Set when the service took the install: setup runs as SYSTEM and there is no process of ours to follow.
-        let service_started = std::cell::Cell::new(false);
+        // Set when the service was asked and setup may be running as SYSTEM: there is no process of ours
+        // to follow, and nothing may be launched beside it.
+        let asked: std::cell::RefCell<Option<ServiceAnswer>> = std::cell::RefCell::new(None);
         let outcome = launch::run_locked(
             path,
             &|bytes| match update.verify(bytes) {
@@ -640,9 +661,14 @@ impl Controller {
                     i.stored.pending_since_ms = SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_millis() as u64);
                 });
                 match (self.service)(p, &update.signature) {
-                    ServiceAnswer::Started => {
+                    answer @ ServiceAnswer::Started => {
                         log::append(&format!("update: the service started the install of {}", pending.version));
-                        service_started.set(true);
+                        *asked.borrow_mut() = Some(answer);
+                        Ok(None)
+                    }
+                    ServiceAnswer::Unknown(why) => {
+                        log::append(&format!("update: no answer about {} from the service ({why}); it may be installing", pending.version));
+                        *asked.borrow_mut() = Some(ServiceAnswer::Unknown(why));
                         Ok(None)
                     }
                     ServiceAnswer::Refused(message) => {
@@ -657,7 +683,13 @@ impl Controller {
             },
         );
         match outcome {
-            Ok(None) if service_started.get() => (self.set_phase(UpdatePhase::Installing), None),
+            Ok(None) if matches!(*asked.borrow(), Some(ServiceAnswer::Started)) => (self.set_phase(UpdatePhase::Installing), None),
+            Ok(None) if matches!(*asked.borrow(), Some(ServiceAnswer::Unknown(_))) => {
+                // `pending` stays: if the service did install, the next start settles it.
+                let message = "canvas-rgb may be installing the update; it restarts on its own.".to_string();
+                self.change(|i| i.install_failed_for = Some(pending.version.clone()));
+                (self.set_phase(UpdatePhase::InstallFailed { message }), None)
+            }
             Ok(Some(handle)) => (self.set_phase(UpdatePhase::Installing), Some(handle)),
             Ok(None) => {
                 // Started, but nothing to follow. `pending` stays: if the installer does finish, the
@@ -823,6 +855,7 @@ pub fn init<R: Runtime>(app: &AppHandle<R>, args: &[String]) {
     app.manage(controller.clone());
     if has_after_update_arg(args) {
         log::append("update: started by the installer (--after-update)");
+        controller.settle_unrecorded_update();
     }
     controller.reconcile_pending();
 }

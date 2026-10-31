@@ -1,6 +1,7 @@
 name: Test build
 
-# A signed, installable build of main for testing the update path (#43). It is NOT a release: no tag, no
+# A signed, installable build for testing the update path (#43). Run it by hand, from main only. It is
+# NOT a release: no tag, no
 # GitHub release, no publish job, and nothing here has contents: write. The installer and its signature
 # are a workflow artifact, kept for 14 days. Run `canvas-rgb update --file <installer> --sig <installer.sig>`
 # on a PC that runs an older build to install it through the service with no permission prompt.
@@ -11,16 +12,16 @@ name: Test build
 #
 # The shape is release.yml's: every third-party action pinned to a full commit SHA, a read-only build job,
 # and the update signing key in one step of the sign job, which builds no project code.
+# Manual only. The build job runs npm lifecycle scripts and cargo build scripts, and the sign job signs what
+# they made with the release key, so a signed build is code that installs as SYSTEM with no prompt. A push
+# trigger would sign every main commit; a person starts this one, from main, when a test build is wanted.
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
 
 permissions:
   contents: read
 
-# A newer push replaces a build still running; they would only pile up on the runners.
+# A newer run replaces one still running; they would only pile up on the runners.
 concurrency:
   group: test-build
   cancel-in-progress: true
@@ -106,6 +107,8 @@ jobs:
   # (--app-version), which the service reads back and compares with its own.
   sign:
     needs: build
+    # Never signs a build of a branch: the key signs main's code only.
+    if: github.ref == 'refs/heads/main'
     runs-on: windows-latest
     timeout-minutes: 10
     permissions:

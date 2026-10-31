@@ -334,7 +334,7 @@ pub async fn handle_client(mut pipe: NamedPipeServer, core: Arc<Mutex<Core>>, pe
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::chip::MSI_ALT1_MAP;
     use crate::daemon::DaemonSupervisor;
@@ -385,7 +385,7 @@ mod tests {
         format!(r"\\.\pipe\canvas-rgb-svc-test-{tag}-{}", std::process::id())
     }
 
-    fn test_core(home: PathBuf) -> Core {
+    pub(crate) fn test_core(home: PathBuf) -> Core {
         let chip = FakeChip::new(MSI_ALT1_MAP);
         let chip_box: Box<dyn crate::chip::FanChip> =
             Box::new(crate::chip::Nct6687::detect(chip, MSI_ALT1_MAP).unwrap());
@@ -417,12 +417,17 @@ mod tests {
         read_response(client).await
     }
 
+    /// Reads one response. A regression that leaves the server silent fails after 10 s instead of hanging.
     async fn read_response(client: &mut NamedPipeClient) -> PipeResponse {
-        let mut prefix = [0u8; 4];
-        client.read_exact(&mut prefix).await.unwrap();
-        let mut body = vec![0u8; decode_len(prefix).unwrap() as usize];
-        client.read_exact(&mut body).await.unwrap();
-        decode_body(&body).unwrap()
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut prefix = [0u8; 4];
+            client.read_exact(&mut prefix).await.unwrap();
+            let mut body = vec![0u8; decode_len(prefix).unwrap() as usize];
+            client.read_exact(&mut body).await.unwrap();
+            decode_body(&body).unwrap()
+        })
+        .await
+        .expect("no response from the pipe server within 10 s")
     }
 
     /// True when the server has closed its end (EOF or a broken pipe). A 5 s timeout counts as open.
@@ -436,10 +441,14 @@ mod tests {
 
     /// Opens a client on the pipe, retrying while the server is still coming up.
     async fn connect(name: &str) -> NamedPipeClient {
+        let end = Instant::now() + Duration::from_secs(10);
         loop {
             match tokio::net::windows::named_pipe::ClientOptions::new().open(name) {
                 Ok(client) => return client,
-                Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+                Err(e) => {
+                    assert!(Instant::now() < end, "could not connect to {name} within 10 s: {e}");
+                    tokio::time::sleep(Duration::from_millis(10)).await
+                }
             }
         }
     }

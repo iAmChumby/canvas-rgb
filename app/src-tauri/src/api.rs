@@ -27,8 +27,9 @@ pub enum ApiError {
     Http { status: u16, message: String },
     /// The response did not parse as the expected type.
     Decode(String),
-    /// The request was sent and no answer came in time. Whether the daemon acted is UNKNOWN.
-    TimedOut,
+    /// The request may have reached the daemon, but no usable answer came back (a timeout, a reset,
+    /// a reply cut off). Whether the daemon acted is UNKNOWN.
+    Lost(String),
 }
 
 impl std::fmt::Display for ApiError {
@@ -39,7 +40,7 @@ impl std::fmt::Display for ApiError {
             ApiError::NotTrusted(message) => write!(f, "{message}"),
             ApiError::Http { status, message } => write!(f, "HTTP {status}: {message}"),
             ApiError::Decode(e) => write!(f, "unexpected response: {e}"),
-            ApiError::TimedOut => write!(f, "the daemon did not answer in time"),
+            ApiError::Lost(why) => write!(f, "no answer from the daemon: {why}"),
         }
     }
 }
@@ -59,17 +60,16 @@ pub struct Client {
 /// The one shared client (the agent keeps its connection pool and TLS config).
 pub fn client() -> &'static Client {
     static CLIENT: OnceLock<Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        let config = ureq::Agent::config_builder()
-            // Answer 4xx and 5xx with the response, so the API's own message can be shown.
-            .http_status_as_error(false)
-            .timeout_global(Some(TIMEOUT))
-            .build();
-        Client {
-            base: consts::api_base_url(),
-            agent: config.into(),
-        }
-    })
+    CLIENT.get_or_init(|| build_client(consts::api_base_url()))
+}
+
+fn build_client(base: String) -> Client {
+    let config = ureq::Agent::config_builder()
+        // Answer 4xx and 5xx with the response, so the API's own message can be shown.
+        .http_status_as_error(false)
+        .timeout_global(Some(TIMEOUT))
+        .build();
+    Client { base, agent: config.into() }
 }
 
 /// Reads the token file at call time (G9). Never cached: the daemon may rotate it.
@@ -155,8 +155,12 @@ impl Client {
         };
 
         let mut response = response.map_err(|e| match e {
-            ureq::Error::Timeout(_) => ApiError::TimedOut,
-            _ => ApiError::Unreachable,
+            // Nothing was sent: the connection never opened.
+            ureq::Error::ConnectionFailed | ureq::Error::HostNotFound => ApiError::Unreachable,
+            ureq::Error::Timeout(ureq::Timeout::Resolve | ureq::Timeout::Connect) => ApiError::Unreachable,
+            ureq::Error::Io(ref io) if io.kind() == std::io::ErrorKind::ConnectionRefused => ApiError::Unreachable,
+            // Anything else may have happened after the request went out.
+            other => ApiError::Lost(other.to_string()),
         })?;
         let status = response.status().as_u16();
         let text = response.body_mut().read_to_string().unwrap_or_default();
@@ -173,4 +177,26 @@ impl Client {
 
 fn encode<T: Serialize>(body: &T) -> Result<String, ApiError> {
     serde_json::to_string(body).map_err(|e| ApiError::Decode(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The update fallback rests on this: a daemon that is not listening must read as
+    /// `Unreachable` (nothing was sent), never `Lost` (maybe sent), or the tray would not fall back.
+    #[test]
+    fn a_closed_port_is_unreachable_and_the_updater_falls_back() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        // The listener is dropped: the port is closed.
+        let client = build_client(format!("http://127.0.0.1:{port}"));
+        let err = client
+            .request::<serde_json::Value>(Method::Get, "/api/v1/status", None, false, None)
+            .expect_err("nothing listens there");
+        assert!(matches!(err, ApiError::Unreachable), "got {err:?}");
+        assert_eq!(
+            crate::update::service::answer_of(Err(err)),
+            crate::update::service::ServiceAnswer::Unavailable
+        );
+    }
 }

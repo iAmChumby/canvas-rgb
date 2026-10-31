@@ -126,19 +126,28 @@ daemon passes the request to the service on its pipe. The service stages its own
 `UPDATE_PUBKEY` again, refuses a signed version that is not strictly newer than its own, and runs setup as
 SYSTEM, so no permission prompt appears and the tray comes back as the user. When the daemon or the service
 is down (503 or no connection), the tray starts setup itself and setup raises its own permission prompt, as
-before. A refusal (422 invalid file, signature or version; 409 an install already runs) ends the update with
-the service's message and starts nothing. The same path is a command:
+before. The tray falls back only when the request certainly never reached the service (no connection, a 503 from the
+daemon for an absent service pipe, an untrusted listener, no token). A refusal (422 invalid file, signature or
+version; 409 an install already runs; 403/500 for any other refusal, such as a staging folder that fails closed)
+ends the update with the service's message and starts nothing. A request that went out without a clear answer (a
+timeout, a reset, a 502 from the daemon, a reply lost because setup stopped the daemon) leaves `pending` set and
+shows "canvas-rgb may be installing the update; it restarts on its own": the tray never starts a second setup.
+When the tray starts with `--after-update` and nothing is pending (the update came from the command line), an ok
+`update-result.json` for the running version is recorded as "Updated to X" unless that version was already
+recorded. The same path is a command:
 `canvas-rgb update --file <installer> --sig <installer.sig>` prints the version the service started and exits
 non-zero on any refusal.
 
-**Test builds.** `.github/workflows/test-build.yml` runs on every push to `main` and by hand (Actions, Test
-build, Run workflow). It builds the installer at `<major>.<minor>.<patch+1>-dev.<run number>` (set in the
+**Test builds.** `.github/workflows/test-build.yml` runs by hand only (Actions, Test build, Run workflow);
+its `sign` job runs only for `main`.
+Trust boundary: anything the `build` job runs (npm lifecycle scripts, cargo build scripts) can end up signed with the
+release key, and a signed build installs as SYSTEM with no prompt, so dispatch test builds only from `main`. A dev
+version is newer than the release it follows, so the service accepts it once. It builds the installer at `<major>.<minor>.<patch+1>-dev.<run number>` (set in the
 runner only, never committed), signs it in a separate job with the same key, and uploads
 `canvas-rgb-setup-<version>.exe`, its `.sha256` and its `.sig` as the workflow artifact
 `canvas-rgb-test-build-<version>` (kept 14 days). It makes no tag and no release, and no job has
 `contents: write`. The tray's feed never offers it (GitHub's `latest` skips pre-releases and the tray ignores
-them); install it with the `update` command above on a PC running an older build. Being newer than the last
-release and older than the next, it passes the service's version rule once.
+them); install it with the `update` command above on a PC running an older build.
 
 **If the key is lost or leaks.** Installed copies trust only that key, so a new key cannot reach
 them through the updater:

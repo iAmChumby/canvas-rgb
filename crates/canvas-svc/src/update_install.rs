@@ -52,6 +52,7 @@ pub const MARKER_FILE: &str = "update-pending.json";
 pub const MARKER_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const STAGED_PREFIX: &str = "canvas-rgb-setup-";
 const STAGED_SUFFIX: &str = ".exe";
+const TMP_PREFIX: &str = "tmp-";
 /// `FILE_SHARE_READ`: readers only. No writer, no delete, no rename while the handle lives.
 const SHARE_READ: u32 = 1;
 
@@ -105,12 +106,19 @@ impl ClientFileReader for RefusingReader {
 /// so a reused PID is not mistaken for it.
 pub trait SetupProcess: ChildProcess {
     fn created(&self) -> u64;
+    /// Lets a process that was created suspended run. [`SetupLauncher::launch`] returns it suspended, so
+    /// the marker (with its PID and creation time) is on disk before a single instruction of setup runs.
+    /// A process dropped without being resumed is terminated.
+    fn resume(&mut self) -> io::Result<()>;
 }
 
-/// Starts setup as the service's own token (SYSTEM), with no window.
+/// Starts setup as the service's own token (SYSTEM), with no window, **suspended**.
 pub trait SetupLauncher: Send {
     /// `raw_args` is the exact argument text (`/VERYSILENT ... /LOG="..."`), `dir` the working directory.
-    fn launch(&mut self, exe: &Path, raw_args: &str, dir: &Path) -> io::Result<Box<dyn SetupProcess>>;
+    /// `tmp` is a private folder (SYSTEM and Administrators only): setup gets `TMP` and `TEMP` pointing
+    /// at it, so the files it unpacks and then runs as SYSTEM never sit in the system temp folder, where
+    /// ordinary users may create files.
+    fn launch(&mut self, exe: &Path, raw_args: &str, dir: &Path, tmp: &Path) -> io::Result<Box<dyn SetupProcess>>;
 }
 
 /// Starts a command as the console user, non-elevated.
@@ -144,8 +152,10 @@ pub struct UpdateConfig {
     pub setup_wait_limit: Duration,
     /// The longest wait for `setup-user.ps1`.
     pub user_step_limit: Duration,
-    /// The longest wait for a console user to appear.
+    /// The longest wait for a console user to appear within one finish attempt.
     pub user_session_wait: Duration,
+    /// How often a finish that found nobody logged on is tried again (until the marker is stale).
+    pub resume_retry: Duration,
 }
 
 impl UpdateConfig {
@@ -162,6 +172,7 @@ impl UpdateConfig {
             setup_wait_limit: Duration::from_secs(30 * 60),
             user_step_limit: Duration::from_secs(5 * 60),
             user_session_wait: Duration::from_secs(2 * 60),
+            resume_retry: Duration::from_secs(10),
         }
     }
 }
@@ -175,7 +186,7 @@ pub struct PendingUpdate {
     pub version: String,
     /// The staged installer (a file this service made, inside the staging folder).
     pub staged: String,
-    /// The setup process. `0` until setup has started.
+    /// The setup process. Known before setup runs: it is created suspended.
     pub setup_pid: u32,
     /// The setup process's creation time (a `FILETIME`), against PID reuse.
     pub setup_created: u64,
@@ -183,6 +194,10 @@ pub struct PendingUpdate {
     pub requester_session: u32,
     /// Seconds since the Unix epoch.
     pub started_unix: u64,
+    /// The private `TMP`/`TEMP` folder setup ran with (a folder this service made inside the staging
+    /// folder). Empty in a marker from before it existed.
+    #[serde(default)]
+    pub tmp_dir: String,
 }
 
 fn now_unix() -> u64 {
@@ -308,6 +323,35 @@ impl Drop for Staged {
     }
 }
 
+/// The private `TMP`/`TEMP` folder this service made for setup. Dropping it deletes the folder and what
+/// is in it unless `keep` was set; it only ever deletes the folder it made.
+struct SetupTmp {
+    path: PathBuf,
+    delete_on_drop: bool,
+}
+
+impl SetupTmp {
+    fn keep(&mut self) {
+        self.delete_on_drop = false;
+    }
+}
+
+impl Drop for SetupTmp {
+    fn drop(&mut self) {
+        if self.delete_on_drop {
+            remove_dir_logged(&self.path);
+        }
+    }
+}
+
+fn remove_dir_logged(path: &Path) {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!(path = %path.display(), error = %e, "could not delete the setup temp folder"),
+    }
+}
+
 fn remove_file_logged(path: &Path, what: &str) {
     match std::fs::remove_file(path) {
         Ok(()) => {}
@@ -341,6 +385,8 @@ pub struct UpdateInstaller {
     counter: AtomicU64,
     /// Test seam: runs between the staged write and the share-read reopen. `None` in production.
     seam: Option<StageSeam>,
+    /// Test seam: the watcher thread "fails to start". `false` in production.
+    fail_watcher: bool,
 }
 
 impl UpdateInstaller {
@@ -360,6 +406,7 @@ impl UpdateInstaller {
             busy: Arc::new(AtomicBool::new(false)),
             counter: AtomicU64::new(0),
             seam: None,
+            fail_watcher: false,
         }
     }
 
@@ -377,6 +424,12 @@ impl UpdateInstaller {
     /// Runs `seam` with the staged path between the write and the reopen. Tests only.
     pub fn with_stage_seam(mut self, seam: impl Fn(&Path) + Send + Sync + 'static) -> Self {
         self.seam = Some(Box::new(seam));
+        self
+    }
+
+    /// Makes the watcher thread fail to start. Tests only.
+    pub fn with_failing_watcher(mut self) -> Self {
+        self.fail_watcher = true;
         self
     }
 
@@ -462,15 +515,15 @@ impl UpdateInstaller {
 
     fn try_install(self: &Arc<Self>, who: Admitted, installer: &str, signature: &str, reader: &mut dyn ClientFileReader) -> Result<String, Refusal> {
         let source = validate_request(installer, signature)?;
+        // The slot is taken before anything is read, so concurrent requests cannot each hold a buffer
+        // of up to 256 MiB.
         let guard = BusyGuard::claim(&self.busy).ok_or_else(|| Refusal::conflict("an update is already being installed"))?;
 
         let updates = self
             .secure_updates_dir(true)
             .map_err(|e| Refusal::internal(format!("the update folder cannot be trusted: {e}")))?
             .ok_or_else(|| Refusal::internal("the update folder could not be made"))?;
-        if let Some(stale) = self.stale_marker_check(&updates)? {
-            return Err(stale);
-        }
+        self.supersede_or_refuse(&updates)?;
 
         // 1. Read it as the client.
         let bytes = reader
@@ -480,83 +533,138 @@ impl UpdateInstaller {
             return Err(Refusal::validation("the installer file is empty"));
         }
 
-        // 2. Stage it, and 3. verify what is on disk, through the handle that stays open.
-        let (mut staged, on_disk) = self.stage(&updates, &bytes)?;
-        drop(bytes);
+        // 2. Stage it (the first copy is dropped before the read-back), and 3. verify what is on disk,
+        // through the handle that stays open.
+        let (staged, on_disk) = self.stage(&updates, bytes)?;
         let version = verify_update(&self.cfg.pubkey, &self.cfg.own_version, &on_disk, signature)?;
         drop(on_disk);
         let version_text = version.to_string();
 
-        // 4. Marker first, then setup, while the handle is held.
+        // 4. A private TMP/TEMP for setup, then setup, created suspended.
+        let tmp = self.make_setup_tmp(&updates)?;
         let log = paths::logs_dir(&self.cfg.home).join(format!("setup-{version_text}.log"));
         let args = format!("{SERVICE_SETUP_ARGS} /LOG=\"{}\"", log.display());
-        let mut pending = PendingUpdate {
-            version: version_text.clone(),
-            staged: staged.path.to_string_lossy().into_owned(),
-            setup_pid: 0,
-            setup_created: 0,
-            requester_pid: who.pid,
-            requester_session: who.session,
-            started_unix: now_unix(),
+        let launched = lock(&self.setup).launch(&staged.path, &args, &updates, &tmp.path);
+        let process = launched.map_err(|e| Refusal::internal(format!("could not start setup: {e}")))?;
+        let process = Arc::new(Mutex::new(process));
+        // From here every failure ends the suspended process: nothing of setup has run yet.
+        let end_setup = |why: &str| {
+            let _ = lock(&process).kill();
+            tracing::error!(why, "ended the suspended setup process");
         };
-        self.write_marker(&updates, &pending).map_err(|e| Refusal::internal(format!("cannot write the update marker: {e}")))?;
-        let launched = lock(&self.setup).launch(&staged.path, &args, &updates);
-        let mut process = match launched {
-            Ok(process) => process,
-            Err(e) => {
-                self.remove_marker();
-                return Err(Refusal::internal(format!("could not start setup: {e}")));
+        let pending = {
+            let p = lock(&process);
+            PendingUpdate {
+                version: version_text.clone(),
+                staged: staged.path.to_string_lossy().into_owned(),
+                setup_pid: p.id(),
+                setup_created: p.created(),
+                requester_pid: who.pid,
+                requester_session: who.session,
+                started_unix: now_unix(),
+                tmp_dir: tmp.path.to_string_lossy().into_owned(),
             }
         };
-        pending.setup_pid = process.id();
-        pending.setup_created = process.created();
-        tracing::info!(pid = who.pid, session = who.session, setup_pid = pending.setup_pid, args = %args, "setup started as SYSTEM");
         if let Err(e) = self.write_marker(&updates, &pending) {
-            // Without the PID in the marker the new service cannot tell when setup ends.
-            let _ = process.kill();
+            end_setup("the update marker could not be written");
             self.remove_marker();
-            return Err(Refusal::internal(format!("cannot record the setup process in the update marker (setup was ended): {e}")));
+            return Err(Refusal::internal(format!("cannot write the update marker (setup was ended before it ran): {e}")));
         }
+        tracing::info!(pid = who.pid, session = who.session, setup_pid = pending.setup_pid, args = %args, "setup created suspended as SYSTEM; the marker is written");
 
-        // 5. Whoever is alive when setup ends finishes it. This thread is that for a setup that fails early.
+        // 5. The watcher exists before setup runs. It waits for the go-ahead below.
+        let (go, go_wait) = std::sync::mpsc::channel::<bool>();
         let me = Arc::clone(self);
-        let spawned = std::thread::Builder::new().name("update-finish".into()).spawn(move || {
-            me.watch_setup(process, pending, &mut staged);
-            drop(guard);
-        });
+        let watched = Arc::clone(&process);
+        let watcher_pending = pending.clone();
+        let work = move || {
+            let mut staged = staged;
+            let mut tmp = tmp;
+            if go_wait.recv() == Ok(true) {
+                let outcome = me.watch_setup(&watched, &watcher_pending, &mut staged, &mut tmp);
+                // The slot frees before a retry, so a new install is not locked out while nobody is logged on.
+                drop(guard);
+                if outcome == Some(Finish::NoUser) {
+                    me.resume_pending();
+                }
+            } else {
+                // Setup never ran: take back what was made for it.
+                staged.file.take();
+                me.discard(&me.updates_dir(), &watcher_pending);
+                drop(guard);
+            }
+        };
+        let spawned = if self.fail_watcher {
+            drop(work);
+            Err(io::Error::other("the watcher thread could not be started (injected)"))
+        } else {
+            std::thread::Builder::new().name("update-finish".into()).spawn(work).map(|_| ())
+        };
         if let Err(e) = spawned {
-            tracing::error!(error = %e, "could not start the update watcher; the new service finishes the update from the marker");
+            end_setup("the update watcher thread could not start");
+            self.remove_marker();
+            return Err(Refusal::internal(format!("cannot start the update watcher (setup was ended before it ran): {e}")));
         }
+        let resumed = lock(&process).resume();
+        if let Err(e) = resumed {
+            end_setup("setup could not be resumed");
+            let _ = go.send(false);
+            return Err(Refusal::internal(format!("could not let setup run: {e}")));
+        }
+        let _ = go.send(true);
         Ok(version_text)
     }
 
-    /// A marker that is still there when no install runs is an update nobody finished. A fresh one
-    /// blocks a new install (`conflict`); a stale one is cleared with the staged file it names.
-    fn stale_marker_check(&self, updates: &Path) -> Result<Option<Refusal>, Refusal> {
+    /// A marker still there when no install runs in this process is an update nobody finished. While its
+    /// setup process (PID and creation time) is alive it blocks a new install (`conflict`); once that
+    /// process has ended, the new install supersedes it: the staged file, the setup temp folder and the
+    /// marker are discarded.
+    fn supersede_or_refuse(&self, updates: &Path) -> Result<(), Refusal> {
         let marker = self.marker_path();
         if !matches!(lock(&self.fs).exists(&marker), Ok(true)) {
-            return Ok(None);
+            return Ok(());
         }
         match self.read_marker(&marker) {
-            Ok(pending) if now_unix().saturating_sub(pending.started_unix) <= MARKER_MAX_AGE.as_secs() => Ok(Some(Refusal::conflict(
-                format!("an earlier update to {} is still pending ({MARKER_FILE})", pending.version),
-            ))),
             Ok(pending) => {
-                tracing::warn!(version = %pending.version, "dropping a stale update marker");
+                if pending.setup_pid != 0 && lock(&self.probe).alive(pending.setup_pid, pending.setup_created) {
+                    return Err(Refusal::conflict(format!(
+                        "an earlier update to {} is still running (setup pid {})",
+                        pending.version, pending.setup_pid
+                    )));
+                }
+                tracing::warn!(version = %pending.version, "a leftover update marker whose setup has ended is superseded by this install");
                 self.discard(updates, &pending);
-                Ok(None)
+                Ok(())
             }
-            Err(e) => Err(Refusal::internal(format!("an update marker is in the way and cannot be read: {e}"))),
+            Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+                tracing::warn!(error = %e, "an unreadable update marker is removed");
+                self.remove_marker();
+                Ok(())
+            }
+            Err(e) => Err(Refusal::internal(format!("an update marker is in the way and cannot be trusted: {e}"))),
         }
     }
 
-    /// Writes `bytes` to a fresh file, `CREATE_NEW`, then reopens it share-read only and reads it
-    /// back. The returned bytes are what is on disk; the returned [`Staged`] holds the handle.
-    fn stage(&self, updates: &Path, bytes: &[u8]) -> Result<(Staged, Vec<u8>), Refusal> {
+    /// A fresh private folder (SYSTEM and Administrators only) for setup's `TMP` and `TEMP`.
+    fn make_setup_tmp(&self, updates: &Path) -> Result<SetupTmp, Refusal> {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        let n = self.counter.fetch_add(1, Ordering::SeqCst);
+        let path = updates.join(format!("{TMP_PREFIX}{}-{nanos}-{n}", std::process::id()));
+        lock(&self.fs)
+            .create_dir_private(&path)
+            .map_err(|e| Refusal::internal(format!("cannot make the setup temp folder {}: {e}", path.display())))?;
+        Ok(SetupTmp { path, delete_on_drop: true })
+    }
+
+    /// Writes `bytes` to a fresh file, `CREATE_NEW`, drops them, then reopens the file share-read only
+    /// and reads it back. The returned bytes are what is on disk; the returned [`Staged`] holds the
+    /// handle. At most one copy is in memory at a time.
+    fn stage(&self, updates: &Path, bytes: Vec<u8>) -> Result<(Staged, Vec<u8>), Refusal> {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
         let n = self.counter.fetch_add(1, Ordering::SeqCst);
         let name = format!("{STAGED_PREFIX}{}-{nanos}-{n}{STAGED_SUFFIX}", std::process::id());
         let path = updates.join(name);
+        let len = bytes.len();
 
         // share_mode(0): nobody else has it open while it is written.
         let mut writer = OpenOptions::new()
@@ -568,10 +676,11 @@ impl UpdateInstaller {
         // From here the file is ours: dropping `staged` deletes it on any refusal.
         let mut staged = Staged { path: path.clone(), file: None, delete_on_drop: true };
         writer
-            .write_all(bytes)
+            .write_all(&bytes)
             .and_then(|()| writer.sync_all())
             .map_err(|e| Refusal::internal(format!("cannot write the staged file {}: {e}", path.display())))?;
         drop(writer);
+        drop(bytes);
 
         if let Some(seam) = &self.seam {
             seam(&path);
@@ -582,7 +691,7 @@ impl UpdateInstaller {
             .share_mode(SHARE_READ)
             .open(&path)
             .map_err(|e| Refusal::internal(format!("cannot reopen the staged file {}: {e}", path.display())))?;
-        let mut on_disk = Vec::with_capacity(bytes.len());
+        let mut on_disk = Vec::with_capacity(len);
         Read::by_ref(&mut held)
             .take(MAX_INSTALLER_BYTES + 1)
             .read_to_end(&mut on_disk)
@@ -643,10 +752,33 @@ impl UpdateInstaller {
         Some(staged)
     }
 
-    /// Deletes the staged file the marker names (when valid) and the marker.
+    /// The setup temp folder the marker names, only when it is a folder this service could have made:
+    /// directly inside the staging folder, with the temp-folder name, and not a reparse point.
+    fn tmp_path_of(&self, updates: &Path, pending: &PendingUpdate) -> Option<PathBuf> {
+        if pending.tmp_dir.is_empty() {
+            return None;
+        }
+        let tmp = PathBuf::from(&pending.tmp_dir);
+        let name = tmp.file_name()?.to_string_lossy().into_owned();
+        let same_dir = tmp.parent().is_some_and(|p| p.to_string_lossy().eq_ignore_ascii_case(&updates.to_string_lossy()));
+        if !same_dir || !name.starts_with(TMP_PREFIX) {
+            tracing::warn!(tmp = %tmp.display(), "the update marker names a folder that is not a setup temp folder; leaving it alone");
+            return None;
+        }
+        if lock(&self.fs).is_reparse(&tmp).unwrap_or(false) {
+            tracing::warn!(tmp = %tmp.display(), "the setup temp folder is a reparse point; leaving it alone");
+            return None;
+        }
+        Some(tmp)
+    }
+
+    /// Deletes the staged file and the setup temp folder the marker names (when valid), then the marker.
     fn discard(&self, updates: &Path, pending: &PendingUpdate) {
         if let Some(staged) = self.staged_path_of(updates, pending) {
             remove_file_logged(&staged, "the staged installer");
+        }
+        if let Some(tmp) = self.tmp_path_of(updates, pending) {
+            remove_dir_logged(&tmp);
         }
         self.remove_marker();
     }
@@ -654,10 +786,18 @@ impl UpdateInstaller {
     // ---- after setup ----
 
     /// The old service, still alive when setup ends: waits for the setup process, then finishes.
-    fn watch_setup(&self, mut process: Box<dyn SetupProcess>, pending: PendingUpdate, staged: &mut Staged) {
+    /// `None` when setup outlived the wait limit.
+    fn watch_setup(
+        &self,
+        process: &Arc<Mutex<Box<dyn SetupProcess>>>,
+        pending: &PendingUpdate,
+        staged: &mut Staged,
+        tmp: &mut SetupTmp,
+    ) -> Option<Finish> {
         let deadline = Instant::now() + self.cfg.setup_wait_limit;
         loop {
-            match process.try_wait() {
+            let polled = lock(process).try_wait();
+            match polled {
                 Ok(Some(code)) => {
                     tracing::info!(
                         setup_pid = pending.setup_pid,
@@ -672,25 +812,43 @@ impl UpdateInstaller {
             if Instant::now() >= deadline {
                 tracing::error!(setup_pid = pending.setup_pid, "setup is still running after the wait limit; the marker stays for the next start");
                 staged.keep();
-                return;
+                tmp.keep();
+                return None;
             }
             std::thread::sleep(self.cfg.poll);
         }
         let updates = self.updates_dir();
-        match self.finish_user_steps(&pending) {
+        let outcome = self.finish_user_steps(pending);
+        match outcome {
             Finish::Done => {
                 // The handle closes before the delete.
                 staged.file.take();
-                self.discard(&updates, &pending);
+                self.discard(&updates, pending);
             }
-            Finish::NoUser => staged.keep(),
+            Finish::NoUser => {
+                staged.file.take();
+                staged.keep();
+                tmp.keep();
+            }
         }
+        Some(outcome)
     }
 
     /// The new service, on start: finishes an update whose setup the old service did not outlive.
-    /// Blocking: run it on its own thread.
+    /// When nobody is logged on it tries again every `resume_retry` until the marker is stale
+    /// ([`MARKER_MAX_AGE`]) or another install supersedes it. Blocking: run it on its own thread.
     pub fn resume_pending(self: &Arc<Self>) -> Option<Finish> {
-        let guard = BusyGuard::claim(&self.busy)?;
+        loop {
+            match self.resume_once() {
+                Some(Finish::NoUser) => std::thread::sleep(self.cfg.resume_retry),
+                other => return other,
+            }
+        }
+    }
+
+    /// One attempt of [`Self::resume_pending`]. The install slot is held only during the attempt.
+    pub(crate) fn resume_once(self: &Arc<Self>) -> Option<Finish> {
+        let _guard = BusyGuard::claim(&self.busy)?;
         let updates = match self.secure_updates_dir(false) {
             Ok(Some(dir)) => dir,
             Ok(None) => return None,
@@ -730,7 +888,6 @@ impl UpdateInstaller {
         if outcome == Finish::Done {
             self.discard(&updates, &pending);
         }
-        drop(guard);
         Some(outcome)
     }
 
@@ -804,10 +961,9 @@ pub mod win {
     use std::ffi::c_void;
     use std::io::{self, Read};
     use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
-    use std::os::windows::io::AsRawHandle;
-    use std::os::windows::process::CommandExt;
+    use std::ffi::OsString;
     use std::path::Path;
-    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, LocalFree, WAIT_TIMEOUT};
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT};
     use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
     use windows_sys::Win32::Security::{
         GetTokenInformation, RevertToSelf, TokenImpersonationLevel, TokenUser, TOKEN_QUERY, TOKEN_USER,
@@ -815,8 +971,9 @@ pub mod win {
     use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
     use windows_sys::Win32::System::Pipes::ImpersonateNamedPipeClient;
     use windows_sys::Win32::System::Threading::{
-        GetCurrentThread, GetProcessTimes, OpenProcess, OpenThreadToken, WaitForSingleObject, CREATE_NO_WINDOW,
-        PROCESS_QUERY_LIMITED_INFORMATION,
+        CreateProcessW, GetCurrentThread, GetExitCodeProcess, GetProcessTimes, OpenProcess, OpenThreadToken,
+        ResumeThread, TerminateProcess, WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED,
+        CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, STARTUPINFOW,
     };
 
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
@@ -958,7 +1115,7 @@ pub mod win {
     }
 
     /// Creation time of a process handle as one 64-bit `FILETIME` value.
-    fn creation_time(process: HANDLE) -> io::Result<u64> {
+    pub(crate) fn creation_time(process: HANDLE) -> io::Result<u64> {
         let zero = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
         let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
         // SAFETY: `process` is a live process handle with query access; the out-pointers are valid.
@@ -968,51 +1125,150 @@ pub mod win {
         Ok((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
     }
 
-    /// Starts setup with `std::process::Command`: the service's own token, no window.
+    /// The environment block setup gets: this process's environment with `TMP` and `TEMP` replaced by
+    /// `tmp`, as UTF-16 `NAME=value\0` entries sorted by name and ended by an extra NUL.
+    pub fn build_env_block(vars: Vec<(OsString, OsString)>, tmp: &Path) -> Vec<u16> {
+        use std::os::windows::ffi::OsStrExt;
+        let mut entries: Vec<(String, Vec<u16>)> = Vec::new();
+        for (key, value) in vars {
+            let name = key.to_string_lossy().into_owned();
+            if name.eq_ignore_ascii_case("TMP") || name.eq_ignore_ascii_case("TEMP") || name.is_empty() {
+                continue;
+            }
+            let mut entry: Vec<u16> = key.encode_wide().collect();
+            entry.push(u16::from(b'='));
+            entry.extend(value.encode_wide());
+            entries.push((name.to_uppercase(), entry));
+        }
+        for name in ["TEMP", "TMP"] {
+            let mut entry: Vec<u16> = name.encode_utf16().collect();
+            entry.push(u16::from(b'='));
+            entry.extend(tmp.as_os_str().encode_wide());
+            entries.push((name.to_string(), entry));
+        }
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut block = Vec::new();
+        for (_, entry) in entries {
+            block.extend(entry);
+            block.push(0);
+        }
+        block.push(0);
+        block
+    }
+
+    /// Starts setup with `CreateProcessW`: the service's own token, no window, **suspended**, with its
+    /// own environment block (`TMP` and `TEMP` at the private folder).
     pub struct StdSetupLauncher;
 
     impl SetupLauncher for StdSetupLauncher {
-        fn launch(&mut self, exe: &Path, raw_args: &str, dir: &Path) -> io::Result<Box<dyn SetupProcess>> {
+        fn launch(&mut self, exe: &Path, raw_args: &str, dir: &Path, tmp: &Path) -> io::Result<Box<dyn SetupProcess>> {
+            use std::os::windows::ffi::OsStrExt;
+            let mut command: Vec<u16> = format!("\"{}\" {raw_args}", exe.display()).encode_utf16().chain(Some(0)).collect();
+            let cwd: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
+            let env = build_env_block(std::env::vars_os().collect(), tmp);
+            // SAFETY: an all-zero STARTUPINFOW with `cb` set is the documented "no options" value.
+            let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };
+            startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+            // SAFETY: an all-zero PROCESS_INFORMATION is a valid out-buffer.
+            let mut info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
             // token: the service's own (LocalSystem), on purpose (#43): the installer has just been
             // signature-checked against the release key and is held open share-read; setup needs SYSTEM
             // to replace the service. The per-user steps never run from here: they go through
             // `launch_as_console_user`.
-            let mut command = std::process::Command::new(exe);
-            command
-                .raw_arg(raw_args)
-                .current_dir(dir)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .creation_flags(CREATE_NO_WINDOW);
-            let child = command.spawn()?;
-            let created = creation_time(child.as_raw_handle() as HANDLE)?;
-            Ok(Box::new(SetupChild { child, created }))
+            // SAFETY: `command`, `env`, `cwd`, `startup` and `info` live past the call; the environment is
+            // UTF-16 (CREATE_UNICODE_ENVIRONMENT) and double-NUL ended. No handle is inherited.
+            let created = unsafe {
+                CreateProcessW(
+                    std::ptr::null(),
+                    command.as_mut_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    0,
+                    CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
+                    env.as_ptr() as *const c_void,
+                    cwd.as_ptr(),
+                    &startup,
+                    &mut info,
+                )
+            };
+            if created == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut child = SetupChild { process: info.hProcess, thread: info.hThread, pid: info.dwProcessId, created: 0, resumed: false };
+            // On an error the child drops here, which ends the suspended process.
+            child.created = creation_time(child.process)?;
+            Ok(Box::new(child))
         }
     }
 
     struct SetupChild {
-        child: std::process::Child,
+        process: HANDLE,
+        thread: HANDLE,
+        pid: u32,
         created: u64,
+        resumed: bool,
     }
+
+    // SAFETY: the handles are only used through `&mut self` or `&self` reads of plain values by the
+    // one thread that owns the box at a time (the install thread, then the watcher).
+    unsafe impl Send for SetupChild {}
 
     impl ChildProcess for SetupChild {
         fn try_wait(&mut self) -> io::Result<Option<i32>> {
-            Ok(self.child.try_wait()?.map(|status| status.code().unwrap_or(-1)))
+            // SAFETY: `process` is a live process handle owned by this value.
+            unsafe {
+                match WaitForSingleObject(self.process, 0) {
+                    WAIT_OBJECT_0 => {
+                        let mut code: u32 = 0;
+                        if GetExitCodeProcess(self.process, &mut code) == 0 {
+                            return Err(io::Error::last_os_error());
+                        }
+                        Ok(Some(code as i32))
+                    }
+                    WAIT_TIMEOUT => Ok(None),
+                    _ => Err(io::Error::last_os_error()),
+                }
+            }
         }
 
         fn kill(&mut self) -> io::Result<()> {
-            self.child.kill()
+            // SAFETY: as above; exit code 1.
+            if unsafe { TerminateProcess(self.process, 1) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
         }
 
         fn id(&self) -> u32 {
-            self.child.id()
+            self.pid
         }
     }
 
     impl SetupProcess for SetupChild {
         fn created(&self) -> u64 {
             self.created
+        }
+
+        fn resume(&mut self) -> io::Result<()> {
+            // SAFETY: `thread` is the suspended primary thread handle from CreateProcessW.
+            if unsafe { ResumeThread(self.thread) } == u32::MAX {
+                return Err(io::Error::last_os_error());
+            }
+            self.resumed = true;
+            Ok(())
+        }
+    }
+
+    impl Drop for SetupChild {
+        fn drop(&mut self) {
+            // SAFETY: both handles are owned here and closed once. A process that never ran is ended.
+            unsafe {
+                if !self.resumed {
+                    TerminateProcess(self.process, 1);
+                }
+                CloseHandle(self.thread);
+                CloseHandle(self.process);
+            }
         }
     }
 
@@ -1021,7 +1277,9 @@ pub mod win {
 
     impl UserCommands for ConsoleUserCommands {
         fn start(&mut self, command_line: &str, dir: &Path) -> io::Result<Box<dyn ChildProcess>> {
-            crate::daemon::launch_as_console_user(command_line, Some(dir))
+            // The user steps must run with the user's own environment ($env:APPDATA is theirs, not SYSTEM's):
+            // no environment block, no process.
+            crate::daemon::launch_as_console_user(command_line, Some(dir), true)
         }
     }
 

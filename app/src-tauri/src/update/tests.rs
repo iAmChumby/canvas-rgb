@@ -424,6 +424,7 @@ fn state_file_round_trips() {
         pending: Some(info("0.1.2")),
         pending_since_ms: Some(1_790_000_000_000),
         updated_to: Some(info("0.1.0")),
+        last_settled: Some("0.1.0".into()),
     };
     state::save(&path, &stored).unwrap();
     assert_eq!(state::load(&path), stored);
@@ -872,6 +873,75 @@ fn a_service_that_refuses_ends_the_update_with_no_launch() {
     assert_eq!(asked.lock().unwrap().len(), 1);
     assert!(h.seen.calls.lock().unwrap().is_empty(), "no fallback after a refusal");
     assert_eq!(h.stored().pending, None, "nothing started, so nothing pending");
+}
+
+#[test]
+fn an_unknown_outcome_keeps_pending_and_never_launches() {
+    let (asker, asked) = fake_service(ServiceAnswer::Unknown("reset".into()));
+    let h = harness_with_service("0.1.0", "test.key.pub", Launch::Starts, Some(asker));
+    good_release(&h);
+    h.check(true);
+    let s = h.install();
+    match s.phase {
+        UpdatePhase::InstallFailed { message } => {
+            assert_eq!(message, "canvas-rgb may be installing the update; it restarts on its own.")
+        }
+        other => panic!("expected InstallFailed, got {other:?}"),
+    }
+    assert_eq!(asked.lock().unwrap().len(), 1);
+    assert!(h.seen.calls.lock().unwrap().is_empty(), "no second setup beside the service's");
+    assert_eq!(h.stored().pending.map(|p| p.version).as_deref(), Some("0.1.1"), "pending stays for the next start");
+}
+
+fn after_update_controller(h: &Harness, current: &str) -> Controller {
+    Controller::new(
+        Settings { ..Settings::production() }.with_dir(h.dir.path()),
+        v(current),
+        Arc::new(|_: &Path| Ok(None)),
+        Box::new(|_| {}),
+    )
+}
+
+#[test]
+fn an_update_started_elsewhere_is_recorded_when_the_installer_starts_the_tray() {
+    let h = harness("0.1.1", "test.key.pub", Launch::Starts);
+    let result_path = h.dir.path().join("update-result.json");
+    std::fs::write(&result_path, r#"{"version":"0.1.1","ok":true}"#).unwrap();
+    let ctl = after_update_controller(&h, "0.1.1");
+    ctl.settle_unrecorded_update();
+    let s = ctl.state();
+    assert_eq!(s.updated_to.as_ref().map(|u| u.version.as_str()), Some("0.1.1"));
+    assert_eq!(state::load(&h.dir.path().join("update.json")).last_settled.as_deref(), Some("0.1.1"));
+    // Dismissed, then a stale report on a later --after-update start: not news again.
+    ctl.dismiss_updated();
+    let again = after_update_controller(&h, "0.1.1");
+    again.settle_unrecorded_update();
+    assert_eq!(again.state().updated_to, None, "a version already recorded is not recorded twice");
+}
+
+#[test]
+fn an_unrecorded_report_that_does_not_match_is_ignored() {
+    let h = harness("0.1.1", "test.key.pub", Launch::Starts);
+    let result_path = h.dir.path().join("update-result.json");
+    for report in [
+        r#"{"version":"0.1.0","ok":true}"#,                 // another version
+        r#"{"version":"0.1.1","ok":false,"message":"no"}"#, // failed
+    ] {
+        std::fs::write(&result_path, report).unwrap();
+        let ctl = after_update_controller(&h, "0.1.1");
+        ctl.settle_unrecorded_update();
+        assert_eq!(ctl.state().updated_to, None, "{report}");
+    }
+    // A running version that differs from the report's (the old tray is still up).
+    std::fs::write(&result_path, r#"{"version":"0.1.1","ok":true}"#).unwrap();
+    let ctl = after_update_controller(&h, "0.1.0");
+    ctl.settle_unrecorded_update();
+    assert_eq!(ctl.state().updated_to, None);
+    // No report at all.
+    std::fs::remove_file(&result_path).unwrap();
+    let ctl = after_update_controller(&h, "0.1.1");
+    ctl.settle_unrecorded_update();
+    assert_eq!(ctl.state().updated_to, None);
 }
 
 #[test]

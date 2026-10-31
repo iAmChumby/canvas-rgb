@@ -32,7 +32,14 @@ pub fn validate(request: &InstallUpdateRequest) -> Result<(), String> {
 /// `POST /api/v1/update/install`.
 ///
 /// 202 once the service runs setup; 422 for a refused file, signature or version; 409 while an
-/// install runs; 503 when the service is down.
+/// install runs. The statuses tell the tray whether the request reached the service:
+///
+/// - 503 only when the pipe could not be opened, so nothing was sent; the tray then falls back to
+///   the permission prompt.
+/// - 502 when the exchange broke after the pipe opened, or the service answered with something
+///   that is not an answer to this request: setup may be running, so the tray never falls back.
+/// - Every other refusal by the service (`unauthorized` 403, `internal` and any other code 500)
+///   is a refusal, never a reason to fall back.
 pub async fn install(
     State(app): State<Arc<App>>,
     Json(request): Json<InstallUpdateRequest>,
@@ -47,7 +54,7 @@ pub async fn install(
         },
     )
     .await
-    .map_err(|e| ApiFailure::service_unavailable(format!("the service is not reachable: {e}")))?;
+    .map_err(pipe_failure)?;
 
     match answer {
         PipeResponse::UpdateStarted { version } => {
@@ -59,11 +66,26 @@ pub async fn install(
             Err(match code.as_str() {
                 error_codes::VALIDATION => ApiFailure::validation(message),
                 error_codes::CONFLICT => ApiFailure::conflict(message),
-                error_codes::SERVICE_UNAVAILABLE => ApiFailure::service_unavailable(message),
+                error_codes::UNAUTHORIZED => ApiFailure::new(StatusCode::FORBIDDEN, error_codes::UNAUTHORIZED, message),
+                // `internal`, a staging folder that fails closed, and any code not named here.
                 _ => ApiFailure::internal(message),
             })
         }
-        _ => Err(ApiFailure::internal("the service gave an unexpected answer")),
+        _ => Err(bad_gateway("the service gave an unexpected answer")),
+    }
+}
+
+fn bad_gateway(message: impl Into<String>) -> ApiFailure {
+    ApiFailure::new(StatusCode::BAD_GATEWAY, error_codes::INTERNAL, message)
+}
+
+/// 503 only for an absent pipe (nothing was sent); a break after that is 502.
+fn pipe_failure(e: crate::pipe_client::PipeError) -> ApiFailure {
+    match &e {
+        crate::pipe_client::PipeError::Io(io) if io.kind() == std::io::ErrorKind::NotFound => {
+            ApiFailure::service_unavailable(format!("the service is not reachable: {e}"))
+        }
+        _ => bad_gateway(format!("the service exchange broke: {e}")),
     }
 }
 

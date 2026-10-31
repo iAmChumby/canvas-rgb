@@ -565,6 +565,8 @@ enum FakeReply {
     Started(&'static str),
     Error(&'static str),
     Down,
+    /// The pipe opened and then broke: the request may have been acted on.
+    Broke,
 }
 
 #[async_trait::async_trait]
@@ -584,6 +586,9 @@ impl canvas_daemon::pipe_client::PipeLink for FakePipe {
             }),
             FakeReply::Down => Err(canvas_daemon::pipe_client::PipeError::Io(
                 std::io::Error::new(std::io::ErrorKind::NotFound, "the pipe is not up"),
+            )),
+            FakeReply::Broke => Err(canvas_daemon::pipe_client::PipeError::Io(
+                std::io::Error::new(std::io::ErrorKind::BrokenPipe, "the pipe broke"),
             )),
         }
     }
@@ -697,6 +702,38 @@ async fn an_update_with_the_service_down_is_a_503() {
         .expect("the router answers");
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(json(response).await.get("error").and_then(|v| v.as_str()), Some("service_unavailable"));
+}
+
+/// The tray falls back to the permission prompt only on 503. Every other answer below must be a
+/// status it does not fall back on.
+#[tokio::test]
+async fn only_an_absent_pipe_is_a_503_for_an_update() {
+    let cases: [(FakeReply, StatusCode); 6] = [
+        (FakeReply::Down, StatusCode::SERVICE_UNAVAILABLE),
+        (FakeReply::Broke, StatusCode::BAD_GATEWAY),
+        (FakeReply::Error("unauthorized"), StatusCode::FORBIDDEN),
+        (FakeReply::Error("internal"), StatusCode::INTERNAL_SERVER_ERROR),
+        (FakeReply::Error("service_unavailable"), StatusCode::INTERNAL_SERVER_ERROR),
+        (FakeReply::Error("something_new"), StatusCode::INTERNAL_SERVER_ERROR),
+    ];
+    for (reply, want) in cases {
+        let (router, _app, _home) = build_with_pipe(reply);
+        let response = router
+            .oneshot(request_with_body("POST", routes::UPDATE_INSTALL, &install_body(r"C:\x\setup.exe", "c2ln")))
+            .await
+            .expect("the router answers");
+        assert_eq!(response.status(), want);
+    }
+}
+
+#[tokio::test]
+async fn an_answer_that_is_not_for_an_update_is_a_502() {
+    let (router, _app, _home) = build_with_pipe(FakeReply::Ok);
+    let response = router
+        .oneshot(request_with_body("POST", routes::UPDATE_INSTALL, &install_body(r"C:\x\setup.exe", "c2ln")))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
 }
 
 #[tokio::test]

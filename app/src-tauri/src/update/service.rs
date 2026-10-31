@@ -19,12 +19,17 @@ const INSTALL_TIMEOUT: Duration = Duration::from_secs(120);
 pub enum ServiceAnswer {
     /// Setup is running for this version (`202`). The tray's part is over.
     Started,
-    /// No service to ask (`503`, no daemon, an untrusted listener, an unexpected status): start the
-    /// installer the old way and let setup raise its own permission prompt.
+    /// The request certainly never reached the service (a refused or failed connection before
+    /// anything was sent, a `503`, an untrusted listener, no token): start the installer the old
+    /// way and let setup raise its own permission prompt.
     Unavailable,
-    /// The service looked at the file and said no (`422`, `409`), or did not answer in time. No
-    /// fallback: a second install would race the first.
+    /// The service looked at the file and said no (`422`, `409`, or any other refusal). No
+    /// fallback.
     Refused(String),
+    /// The request went out and the outcome is unknown (a timeout, a reset, a reply lost because
+    /// setup stopped the daemon). Setup may be running, so the tray starts nothing and keeps
+    /// `pending`.
+    Unknown(String),
 }
 
 /// Asks the service, through the daemon, to install `installer` signed by `signature`.
@@ -40,17 +45,20 @@ pub fn ask_daemon(installer: &Path, signature: &str) -> ServiceAnswer {
     answer_of(answer)
 }
 
-/// Maps the daemon's answer to what the updater does next.
+/// Maps the daemon's answer to what the updater does next. The fallback is only for a request
+/// that certainly never reached the service: a second setup beside a running one is worse than a
+/// failed update.
 pub fn answer_of(answer: Result<serde_json::Value, ApiError>) -> ServiceAnswer {
     match answer {
         Ok(_) => ServiceAnswer::Started,
-        Err(ApiError::Http { status: 422 | 409, message }) => ServiceAnswer::Refused(message),
-        // The request went out and nothing came back: the service may be mid-install, so another
-        // install must not start.
-        Err(ApiError::TimedOut) => ServiceAnswer::Refused(
-            "the service did not answer in time. If the update is running, canvas-rgb restarts on its own".into(),
-        ),
-        Err(_) => ServiceAnswer::Unavailable,
+        // The daemon could not open the service pipe.
+        Err(ApiError::Http { status: 503, .. }) => ServiceAnswer::Unavailable,
+        // The daemon's pipe exchange broke after the pipe opened: the service may have started setup.
+        Err(ApiError::Http { status: 502, message }) => ServiceAnswer::Unknown(message),
+        Err(ApiError::Http { message, .. }) => ServiceAnswer::Refused(message),
+        Err(ApiError::Lost(why)) => ServiceAnswer::Unknown(why),
+        Err(ApiError::Decode(why)) => ServiceAnswer::Unknown(why),
+        Err(ApiError::Unreachable | ApiError::NotTrusted(_) | ApiError::Token(_)) => ServiceAnswer::Unavailable,
     }
 }
 
@@ -65,13 +73,19 @@ mod tests {
     #[test]
     fn the_daemons_answers_map_to_the_updaters_next_step() {
         assert_eq!(answer_of(Ok(serde_json::json!({"version": "0.2.1"}))), ServiceAnswer::Started);
+        // Certainly never reached the service: fall back.
         assert_eq!(answer_of(http(503)), ServiceAnswer::Unavailable);
-        assert_eq!(answer_of(http(500)), ServiceAnswer::Unavailable);
         assert_eq!(answer_of(Err(ApiError::Unreachable)), ServiceAnswer::Unavailable);
         assert_eq!(answer_of(Err(ApiError::NotTrusted("x".into()))), ServiceAnswer::Unavailable);
         assert_eq!(answer_of(Err(ApiError::Token("x".into()))), ServiceAnswer::Unavailable);
+        // The service answered no: end the update, never fall back.
         assert_eq!(answer_of(http(422)), ServiceAnswer::Refused("m422".into()));
         assert_eq!(answer_of(http(409)), ServiceAnswer::Refused("m409".into()));
-        assert!(matches!(answer_of(Err(ApiError::TimedOut)), ServiceAnswer::Refused(_)));
+        assert_eq!(answer_of(http(500)), ServiceAnswer::Refused("m500".into()));
+        assert_eq!(answer_of(http(403)), ServiceAnswer::Refused("m403".into()));
+        // The request went out and the outcome is unknown: never fall back.
+        assert_eq!(answer_of(http(502)), ServiceAnswer::Unknown("m502".into()));
+        assert_eq!(answer_of(Err(ApiError::Lost("reset".into()))), ServiceAnswer::Unknown("reset".into()));
+        assert!(matches!(answer_of(Err(ApiError::Decode("x".into()))), ServiceAnswer::Unknown(_)));
     }
 }

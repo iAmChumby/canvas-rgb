@@ -477,7 +477,7 @@ mod windows_launcher {
         }
 
         fn launch(&mut self, exe: &Path) -> io::Result<Box<dyn ChildProcess>> {
-            launch_as_console_user(&format!("\"{}\"", exe.display()), exe.parent())
+            launch_as_console_user(&format!("\"{}\"", exe.display()), exe.parent(), false)
         }
     }
 
@@ -485,8 +485,10 @@ mod windows_launcher {
     /// the logged-on user's own token: `WTSQueryUserToken` then `CreateProcessAsUserW`, non-elevated,
     /// never the service's. The daemon launch uses it, and so do the update steps that must run as
     /// the user (#43). `dir` is the working directory. An error of kind [`io::ErrorKind::NotConnected`]
-    /// means no user is logged on in the console session.
-    pub fn launch_as_console_user(command_line: &str, dir: Option<&Path>) -> io::Result<Box<dyn ChildProcess>> {
+    /// means no user is logged on in the console session. With `require_env`, a failed
+    /// `CreateEnvironmentBlock` is an error and nothing starts (the child would otherwise inherit the
+    /// service's own environment, SYSTEM's profile paths); the daemon launch passes `false`.
+    pub fn launch_as_console_user(command_line: &str, dir: Option<&Path>, require_env: bool) -> io::Result<Box<dyn ChildProcess>> {
         // SAFETY: each Win32 call gets pointers into buffers that live until the call returns,
         // and every handle is closed on every path.
         unsafe {
@@ -505,6 +507,11 @@ mod windows_launcher {
             }
             let mut env: *mut c_void = std::ptr::null_mut();
             let have_env = CreateEnvironmentBlock(&mut env, token, FALSE) != 0;
+            if !have_env && require_env {
+                let error = io::Error::last_os_error();
+                CloseHandle(token);
+                return Err(io::Error::new(error.kind(), format!("cannot build the user's environment block: {error}")));
+            }
             let mut command: Vec<u16> = command_line.encode_utf16().chain(Some(0)).collect();
             let mut desktop: Vec<u16> = "winsta0\\default".encode_utf16().chain(Some(0)).collect();
             let dir: Vec<u16> = dir

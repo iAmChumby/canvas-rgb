@@ -525,7 +525,15 @@ fn acl_grants_nonadmin_write(dacl: *mut windows_sys::Win32::Security::ACL) -> io
         let header = ace as *const ACE_HEADER;
         // SAFETY: GetAce returned a valid ACE, so its header is readable.
         let (ace_type, ace_flags) = unsafe { ((*header).AceType, (*header).AceFlags) };
-        if ace_type != ACCESS_ALLOWED_ACE_TYPE || ace_flags & INHERIT_ONLY_ACE_FLAG != 0 {
+        if ace_flags & INHERIT_ONLY_ACE_FLAG != 0 {
+            continue;
+        }
+        if ace_type != ACCESS_ALLOWED_ACE_TYPE {
+            // Fail closed: an allow-type ACE this check does not parse (compound, object, callback,
+            // callback-object) or a type it does not know is treated as granting write.
+            if !ace_type_grants_nothing(ace_type) {
+                return Ok(true);
+            }
             continue;
         }
         let allowed = ace as *const ACCESS_ALLOWED_ACE;
@@ -541,6 +549,12 @@ fn acl_grants_nonadmin_write(dacl: *mut windows_sys::Win32::Security::ACL) -> io
         }
     }
     Ok(false)
+}
+
+/// ACE types that cannot grant access: the deny, audit, alarm and label families. Every other type
+/// other than plain ACCESS_ALLOWED (0) is an allow-type this check does not parse, or unknown.
+pub(crate) fn ace_type_grants_nothing(ace_type: u8) -> bool {
+    matches!(ace_type, 1 | 2 | 3 | 6 | 7 | 8 | 10 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19)
 }
 
 /// The DACL check for `p`. A NULL DACL grants everyone everything, so it counts as true.
@@ -667,6 +681,25 @@ mod win_tests {
     fn an_allowed_add_file_ace_for_users_is_nonadmin_write() {
         // FILE_ADD_FILE (0x2) for BUILTIN\Users (S-1-5-32-545).
         assert!(check("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x2;;;BU)").unwrap());
+    }
+
+    #[test]
+    fn a_callback_allow_ace_for_users_fails_closed_on_a_real_dacl() {
+        // A conditional (callback) allow ACE is not plain ACCESS_ALLOWED; the walk must not skip it.
+        assert!(check("D:P(A;;FA;;;SY)(A;;FA;;;BA)(XA;;FA;;;BU;(1==1))").unwrap());
+        // A callback ACE for a trusted SID is still an allow-type the check does not parse: closed too.
+        assert!(check("D:P(A;;FA;;;SY)(XA;;FA;;;BA;(1==1))").unwrap());
+    }
+
+    #[test]
+    fn allow_type_aces_other_than_plain_allowed_fail_closed() {
+        for t in [4u8, 5, 9, 11] {
+            assert!(!ace_type_grants_nothing(t), "type {t} is an allow type and must count as write");
+        }
+        assert!(!ace_type_grants_nothing(0x20), "an unknown type must count as write");
+        for t in [1u8, 2, 3, 6, 7, 8, 10, 12, 13, 14, 15, 16, 17, 18, 19] {
+            assert!(ace_type_grants_nothing(t), "type {t} grants nothing");
+        }
     }
 
     #[test]
