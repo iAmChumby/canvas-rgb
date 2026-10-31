@@ -112,6 +112,9 @@ pub struct PeripheralHub {
     /// `adapters` lock is held, so concurrent reads of one device queue behind the first and
     /// find its answer here (single-flight).
     reads: std::sync::Mutex<BTreeMap<DeviceId, (Instant, Props)>>,
+    /// How long a read is shared. [`READ_CACHE`] in the daemon; the tests set it to zero to
+    /// count the reads the hub made before it shared any.
+    read_cache: Duration,
 }
 
 /// One enumeration and the moment it was taken.
@@ -124,7 +127,14 @@ impl PeripheralHub {
     /// The hub with these adapters. The daemon builds it with the real adapters; the tests
     /// build it with fakes.
     pub fn new(adapters: Vec<Box<dyn Peripheral>>) -> Self {
+        Self::with_read_cache(adapters, READ_CACHE)
+    }
+
+    /// The hub with its own read-sharing window. Zero shares nothing: every read goes to the
+    /// device, as it did before the window existed.
+    pub fn with_read_cache(adapters: Vec<Box<dyn Peripheral>>, read_cache: Duration) -> Self {
         Self {
+            read_cache,
             adapters: tokio::sync::Mutex::new(adapters),
             discovery: tokio::sync::Mutex::new(None),
             reads: std::sync::Mutex::new(BTreeMap::new()),
@@ -188,12 +198,18 @@ impl PeripheralHub {
     /// access change drops the shared answer, and a failed read is never shared. A read that
     /// fails because the device is gone closes it, so the next read opens it again.
     pub async fn read(&self, device: &DeviceId) -> Result<Props, AdapterError> {
+        // One lock for all adapters. A blocking open inside an adapter holds it, so a slow open
+        // of one device queues the reads of the others behind it (the adapters' own HID caches
+        // are per adapter and do not share this).
         let mut adapters = self.adapters.lock().await;
-        if let Some(props) = self.shared_read(device) {
-            return Ok(props);
-        }
         let (index, _) = owner_of(&mut adapters, device).await?;
         let adapter = adapters[index].as_mut();
+        // A shared read of a device that has since been closed or unplugged is not an answer.
+        if adapter.is_connected() {
+            if let Some(props) = self.shared_read(device) {
+                return Ok(props);
+            }
+        }
         if !adapter.is_connected() {
             adapter.connect().await?;
         }
@@ -218,7 +234,7 @@ impl PeripheralHub {
         let reads = self.reads.lock().unwrap_or_else(|e| e.into_inner());
         reads
             .get(device)
-            .filter(|(at, _)| at.elapsed() < READ_CACHE)
+            .filter(|(at, _)| at.elapsed() < self.read_cache)
             .map(|(_, props)| props.clone())
     }
 

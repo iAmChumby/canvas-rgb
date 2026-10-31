@@ -4,7 +4,8 @@
 //! called. The adapters called it on every `present()` and every open, so one pass over the
 //! Peripherals view scanned the whole machine several times in a row (issue #7). This cache
 //! keeps one `HidApi` and rescans it with `refresh_devices()` only when its list is older than
-//! [`SCAN_TTL`] or a caller says the list was wrong.
+//! [`SCAN_TTL`], or once per ttl when a lookup or open on an old list fails (a replug). The X6,
+//! 8BitDo and CHIONE adapters all open through `with_retry`.
 //!
 //! What hidapi 2.6.7 says (docs.rs/hidapi/2.6.7/hidapi/struct.HidApi.html, and `src/lib.rs`):
 //! - "The `hidapi` C library is lazily initialized when creating the first instance, and never
@@ -48,10 +49,20 @@ impl Scan for hidapi::HidApi {
 
 struct Slot<S> {
     scan: Option<S>,
+    /// When the list was last scanned.
     at: Option<Instant>,
+    /// When a retry last forced a rescan.
+    forced_at: Option<Instant>,
 }
 
 /// A shared, age-limited HID context.
+///
+/// Scans are bounded: one when the list is older than the ttl, plus at most one forced by a
+/// failed lookup or open per ttl. A receiver that is absent therefore costs two scans per ttl
+/// however many times it is asked for, and "not there" is an answer that stands for the ttl.
+///
+/// The lock is held while a closure runs, including a blocking `open_path`. It is per cache,
+/// and every adapter owns its own cache, so one adapter's open never blocks another's.
 pub(crate) struct HidCache<S: Scan = hidapi::HidApi> {
     slot: Mutex<Slot<S>>,
     ttl: Duration,
@@ -64,37 +75,68 @@ impl<S: Scan> Default for HidCache<S> {
 }
 
 impl<S: Scan> HidCache<S> {
-    /// A cache whose list is reused for `ttl`.
+    /// A cache whose list is reused for `ttl`. Zero rescans on every call: the behaviour before
+    /// the cache existed, which the tests use to count the old scans.
     pub(crate) fn with_ttl(ttl: Duration) -> Self {
-        Self { slot: Mutex::new(Slot { scan: None, at: None }), ttl }
+        Self { slot: Mutex::new(Slot { scan: None, at: None, forced_at: None }), ttl }
+    }
+
+    /// Scans when the list is older than the ttl. True when it scanned.
+    fn refresh(&self, slot: &mut Slot<S>) -> Result<bool, String> {
+        if slot.at.is_some_and(|at| at.elapsed() < self.ttl) {
+            return Ok(false);
+        }
+        self.scan_now(slot)?;
+        Ok(true)
+    }
+
+    fn scan_now(&self, slot: &mut Slot<S>) -> Result<(), String> {
+        match slot.scan.as_mut() {
+            Some(scan) => scan.rescan()?,
+            None => slot.scan = Some(S::first()?),
+        }
+        slot.at = Some(Instant::now());
+        Ok(())
     }
 
     /// Runs `f` on the context, rescanning first when the list is older than the ttl.
     ///
     /// The lock is held while `f` runs, so callers on several threads share one scan.
     pub(crate) fn with<R>(&self, f: impl FnOnce(&S) -> R) -> Result<R, String> {
-        self.run(false, f)
-    }
-
-    /// Like [`HidCache::with`], but always rescans first: the caller's last answer from the
-    /// list was wrong (a path that no longer opens).
-    pub(crate) fn with_fresh<R>(&self, f: impl FnOnce(&S) -> R) -> Result<R, String> {
-        self.run(true, f)
-    }
-
-    fn run<R>(&self, force: bool, f: impl FnOnce(&S) -> R) -> Result<R, String> {
         let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
-        let stale = force || slot.at.is_none_or(|at| at.elapsed() >= self.ttl);
-        if stale {
-            match slot.scan.as_mut() {
-                Some(scan) => scan.rescan()?,
-                None => slot.scan = Some(S::first()?),
-            }
-            slot.at = Some(Instant::now());
-        }
+        self.refresh(&mut slot)?;
         match slot.scan.as_ref() {
             Some(scan) => Ok(f(scan)),
             None => Err("the HID context is not there".into()),
+        }
+    }
+
+    /// Finds and opens something from the list. When that finds nothing or fails and the list
+    /// was not scanned by this very call, the list may be stale (a replug moved the path, or
+    /// the device just arrived): rescan once and try again. At most one such rescan per ttl;
+    /// inside it the first answer stands.
+    pub(crate) fn with_retry<R>(
+        &self,
+        f: impl Fn(&S) -> Result<Option<R>, String>,
+    ) -> Result<Option<R>, String> {
+        let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        let scanned_now = self.refresh(&mut slot)?;
+        let first = match slot.scan.as_ref() {
+            Some(scan) => f(scan),
+            None => return Err("the HID context is not there".into()),
+        };
+        if matches!(first, Ok(Some(_))) {
+            return first;
+        }
+        let may_force = !scanned_now && slot.forced_at.is_none_or(|t| t.elapsed() >= self.ttl);
+        if !may_force {
+            return first;
+        }
+        slot.forced_at = Some(Instant::now());
+        self.scan_now(&mut slot)?;
+        match slot.scan.as_ref() {
+            Some(scan) => f(scan),
+            None => first,
         }
     }
 }
@@ -153,11 +195,39 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_call_rescans_inside_the_ttl() {
+    fn a_failed_lookup_on_an_old_list_rescans_once_per_ttl() {
         let n = counted(|| {
             let cache = HidCache::<Counting>::with_ttl(Duration::from_secs(60));
             cache.with(|_| ()).unwrap();
-            cache.with_fresh(|_| ()).unwrap();
+            for _ in 0..5 {
+                assert!(cache.with_retry(|_| Ok::<Option<()>, String>(None)).unwrap().is_none());
+            }
+        });
+        assert_eq!(n, 2, "the first scan and one forced rescan, not one per failed lookup");
+    }
+
+    #[test]
+    fn a_failed_lookup_on_a_list_this_call_scanned_does_not_rescan() {
+        let n = counted(|| {
+            let cache = HidCache::<Counting>::with_ttl(Duration::from_secs(60));
+            assert!(cache.with_retry(|_| Ok::<Option<()>, String>(None)).unwrap().is_none());
+        });
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn a_retry_that_finds_it_on_the_new_list_returns_it() {
+        let n = counted(|| {
+            let cache = HidCache::<Counting>::with_ttl(Duration::from_secs(60));
+            cache.with(|_| ()).unwrap();
+            let tries = std::cell::Cell::new(0);
+            let found = cache
+                .with_retry(|_| {
+                    tries.set(tries.get() + 1);
+                    Ok(if tries.get() == 1 { None } else { Some(7) })
+                })
+                .unwrap();
+            assert_eq!(found, Some(7));
         });
         assert_eq!(n, 2);
     }

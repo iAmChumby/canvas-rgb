@@ -239,13 +239,11 @@ impl Opener for HidOpener {
     }
 
     fn open(&self) -> Result<Option<Box<dyn Transport>>, String> {
-        self.cache.with(|api| match Self::find_path(api) {
+        let dev = self.cache.with_retry(|api| match Self::find_path(api) {
             None => Ok(None),
-            Some(path) => {
-                let dev = api.open_path(&path).map_err(|e| e.to_string())?;
-                Ok(Some(Box::new(HidTransport(std::sync::Mutex::new(dev))) as Box<dyn Transport>))
-            }
-        })?
+            Some(path) => api.open_path(&path).map(Some).map_err(|e| e.to_string()),
+        })?;
+        Ok(dev.map(|dev| Box::new(HidTransport(std::sync::Mutex::new(dev))) as Box<dyn Transport>))
     }
 }
 

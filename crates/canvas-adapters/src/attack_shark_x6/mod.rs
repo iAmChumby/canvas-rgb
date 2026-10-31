@@ -588,25 +588,27 @@ struct HidOpener<S: HidSource = hidapi::HidApi> {
 
 impl<S: HidSource> HidOpener<S> {
     fn new(product_id: u16) -> Self {
-        Self { product_id, cache: hid_cache::HidCache::default() }
+        Self::with_scan_ttl(product_id, hid_cache::SCAN_TTL)
+    }
+
+    /// The opener with its own scan ttl. Zero scans on every call, as the code did before the
+    /// cache; the tests use it to count those scans.
+    fn with_scan_ttl(product_id: u16, ttl: Duration) -> Self {
+        Self { product_id, cache: hid_cache::HidCache::with_ttl(ttl) }
     }
 
     /// Finds the collection and opens it. A list that is a little old can name a path that is
-    /// gone, or miss one that just arrived: both rescan once and try again.
+    /// gone, or miss one that just arrived: `with_retry` rescans once per ttl and tries again.
     fn open_collection<T>(
         &self,
         usage_page: u16,
         usage: u16,
         open: impl Fn(&S, &std::ffi::CStr) -> Result<T, String>,
     ) -> Result<Option<T>, String> {
-        let attempt = |api: &S| match api.find_path(self.product_id, usage_page, usage) {
+        self.cache.with_retry(|api| match api.find_path(self.product_id, usage_page, usage) {
             None => Ok(None),
             Some(path) => open(api, &path).map(Some),
-        };
-        if let Ok(Ok(Some(found))) = self.cache.with(attempt) {
-            return Ok(Some(found));
-        }
-        self.cache.with_fresh(attempt)?
+        })
     }
 }
 
@@ -1741,7 +1743,23 @@ mod tests {
         let opener = HidOpener::<CountingApi>::new(PRODUCT_ID + 1);
         assert!(!opener.present());
         assert!(opener.open_config().unwrap().is_none());
-        assert_eq!(scans(), 2, "present() scans; the open double-checks with one rescan");
+        assert!(opener.open_config().unwrap().is_none());
+        assert!(opener.open_events().unwrap().is_none());
+        assert_eq!(scans(), 2, "present() scans; the opens force one rescan between them, not one each");
+    }
+
+    /// The old behaviour, as a test: with no list reuse every call scans, which is what building
+    /// a `HidApi` in each call did.
+    #[test]
+    fn without_the_cache_the_same_twelve_calls_scan_twelve_times() {
+        SCANS.with(|s| s.set(0));
+        let opener = HidOpener::<CountingApi>::with_scan_ttl(PRODUCT_ID, Duration::ZERO);
+        for _ in 0..4 {
+            assert!(opener.present());
+            assert!(opener.open_config().unwrap().is_some());
+            assert!(opener.open_events().unwrap().is_some());
+        }
+        assert_eq!(scans(), 12);
     }
 
     /// The sends of one view-open as the daemon makes them: the list route's discover, the

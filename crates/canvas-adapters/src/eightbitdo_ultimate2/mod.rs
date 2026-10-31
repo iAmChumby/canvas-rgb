@@ -269,20 +269,15 @@ impl HidOpener {
         self.cache.with(|api| api.device_list().cloned().collect()).unwrap_or_default()
     }
 
-    /// Opens the collection at this path from the shared context.
-    fn open_path(&self, path: &std::ffi::CStr) -> Result<hidapi::HidDevice, String> {
-        self.cache.with(|api| api.open_path(path).map_err(|e| e.to_string()))?
-    }
-
     /// The path of the first collection that matches.
-    fn find(
-        devices: &[hidapi::DeviceInfo],
+    fn find<'a>(
+        devices: impl IntoIterator<Item = &'a hidapi::DeviceInfo>,
         product_id: u16,
         usage_page: u16,
         usage: u16,
     ) -> Option<std::ffi::CString> {
         devices
-            .iter()
+            .into_iter()
             .find(|d| {
                 d.vendor_id() == VENDOR_ID
                     && d.product_id() == product_id
@@ -328,22 +323,26 @@ impl Opener for HidOpener {
         &self,
         personality: Personality,
     ) -> Result<Option<Box<dyn VendorTransport>>, String> {
-        let devices = self.devices();
         // The DInput personality has no vendor collection of its own; the wired pad in DInput
         // mode may still have one on the vendor page.
         let pages: &[u16] = match personality.vendor_usage_page() {
             Some(page) => &[page, VENDOR_USAGE_PAGE_XINPUT][..],
             None => &[VENDOR_USAGE_PAGE_XINPUT][..],
         };
-        for page in pages {
-            let Some(path) = Self::find(&devices, personality.product_id(), *page, VENDOR_USAGE)
-            else {
-                continue;
-            };
-            let dev = self.open_path(&path)?;
-            return Ok(Some(Box::new(HidVendor(std::sync::Mutex::new(dev)))));
-        }
-        Ok(None)
+        // `with_retry` rescans once (at most once per ttl) when the list is old and the
+        // collection is missing or will not open, so a replugged pad is found again.
+        let dev = self.cache.with_retry(|api| {
+            for page in pages {
+                let Some(path) =
+                    Self::find(api.device_list(), personality.product_id(), *page, VENDOR_USAGE)
+                else {
+                    continue;
+                };
+                return api.open_path(&path).map(Some).map_err(|e| e.to_string());
+            }
+            Ok(None)
+        })?;
+        Ok(dev.map(|dev| Box::new(HidVendor(std::sync::Mutex::new(dev))) as Box<dyn VendorTransport>))
     }
 
     fn open_gamepad(
@@ -357,17 +356,18 @@ impl Opener for HidOpener {
         if personality != Personality::DInput {
             return Ok(None);
         }
-        let devices = self.devices();
-        let Some(path) = Self::find(
-            &devices,
-            personality.product_id(),
-            GAMEPAD_USAGE_PAGE,
-            GAMEPAD_USAGE,
-        ) else {
-            return Ok(None);
-        };
-        let dev = self.open_path(&path)?;
-        Ok(Some(Box::new(HidCollection(std::sync::Mutex::new(dev)))))
+        let dev = self.cache.with_retry(|api| {
+            let Some(path) = Self::find(
+                api.device_list(),
+                personality.product_id(),
+                GAMEPAD_USAGE_PAGE,
+                GAMEPAD_USAGE,
+            ) else {
+                return Ok(None);
+            };
+            api.open_path(&path).map(Some).map_err(|e| e.to_string())
+        })?;
+        Ok(dev.map(|dev| Box::new(HidCollection(std::sync::Mutex::new(dev))) as Box<dyn InputTransport>))
     }
 
     fn open_collections(&self) -> Result<OpenedCollections, String> {
