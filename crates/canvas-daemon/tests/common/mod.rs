@@ -415,6 +415,8 @@ pub struct PeripheralLog {
     pub gate: Option<StageGate>,
     /// The gate also holds `connect`, so the "opening" stage can be looked at.
     pub gate_connect: bool,
+    /// Makes this many reads fail (after they reported their stages), as a pulled cable does.
+    pub fail_read: u32,
 }
 
 /// The sink the daemon gave the fake. `ReadSink` has no `Debug`, so the log holds it in here.
@@ -514,6 +516,7 @@ impl Default for FakePeripheral {
             sink: SinkSlot(None),
             gate: None,
             gate_connect: false,
+            fail_read: 0,
         })))
     }
 }
@@ -641,7 +644,12 @@ impl canvas_proto::traits::PeripheralAdapter for FakePeripheral {
                 gate.go.acquire().await.expect("the gate stays open").forget();
             }
         }
-        Ok(self.0.lock().unwrap().values.clone())
+        let mut log = self.0.lock().unwrap();
+        if log.fail_read > 0 {
+            log.fail_read -= 1;
+            return Err(AdapterError::Io(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "read failed")));
+        }
+        Ok(log.values.clone())
     }
 
     async fn write_settings(&mut self, device: &DeviceId, props: &Props) -> Result<(), AdapterError> {
