@@ -58,6 +58,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 impl ProcessSpawner for StdSpawner {
     fn spawn(&mut self, exe: &Path, args: &[String]) -> io::Result<Box<dyn ChildProcess>> {
+        // token: the service's own (LocalSystem). Only OpenRGB is started this way, never the daemon.
         let mut command = std::process::Command::new(exe);
         command
             .args(args)

@@ -38,6 +38,12 @@ pub const PERIPHERALS_SCHEMA: u32 = 1;
 /// enumerate on every request.
 pub const DISCOVERY_CACHE: Duration = Duration::from_secs(5);
 
+/// A settings read is shared this long. Opening the Peripherals view can ask for the same device
+/// more than once (a reload, a second window, a page that refetches); each ask would be another
+/// run of feature-report round trips over the receiver's radio link (issue #7), so the asks
+/// inside this window share one read. A write or an access change drops it at once.
+pub const READ_CACHE: Duration = Duration::from_secs(2);
+
 /// The message the detail carries when the values are missing because reads are off.
 pub const READS_OFF: &str = "reads are off for this device";
 
@@ -102,6 +108,13 @@ pub struct PeripheralHub {
     adapters: tokio::sync::Mutex<Vec<Box<dyn Peripheral>>>,
     /// The last enumeration, and when it was taken.
     discovery: tokio::sync::Mutex<Option<Discovery>>,
+    /// The last good read of each device, and when it was taken. Only touched while the
+    /// `adapters` lock is held, so concurrent reads of one device queue behind the first and
+    /// find its answer here (single-flight).
+    reads: std::sync::Mutex<BTreeMap<DeviceId, (Instant, Props)>>,
+    /// How long a read is shared. [`READ_CACHE`] in the daemon; the tests set it to zero to
+    /// count the reads the hub made before it shared any.
+    read_cache: Duration,
 }
 
 /// One enumeration and the moment it was taken.
@@ -114,9 +127,17 @@ impl PeripheralHub {
     /// The hub with these adapters. The daemon builds it with the real adapters; the tests
     /// build it with fakes.
     pub fn new(adapters: Vec<Box<dyn Peripheral>>) -> Self {
+        Self::with_read_cache(adapters, READ_CACHE)
+    }
+
+    /// The hub with its own read-sharing window. Zero shares nothing: every read goes to the
+    /// device, as it did before the window existed.
+    pub fn with_read_cache(adapters: Vec<Box<dyn Peripheral>>, read_cache: Duration) -> Self {
         Self {
+            read_cache,
             adapters: tokio::sync::Mutex::new(adapters),
             discovery: tokio::sync::Mutex::new(None),
+            reads: std::sync::Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -170,24 +191,58 @@ impl PeripheralHub {
         Ok(schema)
     }
 
-    /// A fresh read of the device's settings. The device is opened first if it is not open.
+    /// The device's settings. The device is opened first if it is not open.
     ///
-    /// A read that fails because the device is gone closes it, so the next read opens it
-    /// again.
+    /// Asks inside [`READ_CACHE`] of the last good read share its answer: one view-open is one
+    /// run of feature reports to the device, however many requests it makes. A write or an
+    /// access change drops the shared answer, and a failed read is never shared. A read that
+    /// fails because the device is gone closes it, so the next read opens it again.
     pub async fn read(&self, device: &DeviceId) -> Result<Props, AdapterError> {
+        // One lock for all adapters. A blocking open inside an adapter holds it, so a slow open
+        // of one device queues the reads of the others behind it (the adapters' own HID caches
+        // are per adapter and do not share this).
         let mut adapters = self.adapters.lock().await;
         let (index, _) = owner_of(&mut adapters, device).await?;
         let adapter = adapters[index].as_mut();
+        // A shared read of a device that has since been closed is not an answer. `is_connected`
+        // only says the adapter still holds its handle: an unplug shows on the next I/O, so for
+        // up to `read_cache` after an unplug the shared values are served as they were read.
+        if adapter.is_connected() {
+            if let Some(props) = self.shared_read(device) {
+                return Ok(props);
+            }
+        }
         if !adapter.is_connected() {
             adapter.connect().await?;
         }
         let result = adapter.read_settings(device).await;
-        if let Err(error) = &result {
-            if device_failure(error) {
+        match &result {
+            Ok(props) => {
+                self.reads
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(device.clone(), (Instant::now(), props.clone()));
+            }
+            Err(error) if device_failure(error) => {
                 let _ = adapter.disconnect().await;
             }
+            Err(_) => {}
         }
         result
+    }
+
+    /// The last good read of this device, when it is younger than [`READ_CACHE`].
+    fn shared_read(&self, device: &DeviceId) -> Option<Props> {
+        let reads = self.reads.lock().unwrap_or_else(|e| e.into_inner());
+        reads
+            .get(device)
+            .filter(|(at, _)| at.elapsed() < self.read_cache)
+            .map(|(_, props)| props.clone())
+    }
+
+    /// Forgets the shared read of this device: the device changed, or is about to.
+    fn forget_read(&self, device: &DeviceId) {
+        self.reads.lock().unwrap_or_else(|e| e.into_inner()).remove(device);
     }
 
     /// Writes the given settings to the device. Only the keys present are written.
@@ -198,6 +253,7 @@ impl PeripheralHub {
         let mut adapters = self.adapters.lock().await;
         let (index, _) = owner_of(&mut adapters, device).await?;
         let adapter = adapters[index].as_mut();
+        self.forget_read(device);
         if !adapter.is_connected() {
             adapter.connect().await?;
         }
@@ -219,6 +275,7 @@ impl PeripheralHub {
         let mut adapters = self.adapters.lock().await;
         let (index, _) = owner_of(&mut adapters, device).await?;
         let adapter = adapters[index].as_mut();
+        self.forget_read(device);
         // The gate follows the access, whatever the access is. Writes need reads, so an
         // access that says otherwise keeps the writes off.
         adapter.set_config_writes(access.writes && access.reads);

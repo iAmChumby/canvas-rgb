@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  The per-user half of a canvas-rgb install: API token, HKCU Run entries, SignalRGB autostart removal
+  The per-user half of a canvas-rgb install: API token, HKCU Run entry (tray only), SignalRGB autostart removal
   (when Y), user PATH. Run it as the LOGGED-IN user, never elevated for another account.
 .DESCRIPTION
   setup.ps1 runs this after its elevated child. The Inno Setup installer (which itself runs elevated)
@@ -26,9 +26,14 @@ $token = Join-Path $appData $c.TokenFile
 if (Initialize-ApiToken -Path $token) { Write-Host "token: created $token" } else { Write-Host "token: $token exists, left as is" }
 
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-Set-ItemProperty -LiteralPath $runKey -Name $c.RunKeyDaemon -Value ('"{0}"' -f (Join-Path $InstallDir $c.DaemonExe))
+# Only the fan service starts the daemon (in the user's session, with no window). Older installs wrote a
+# Run value that started it from Explorer with a console (#6): delete it on every install and update.
+if (Get-ItemProperty -LiteralPath $runKey -Name $c.RunKeyDaemon -ErrorAction SilentlyContinue) {
+    Remove-ItemProperty -LiteralPath $runKey -Name $c.RunKeyDaemon
+    Write-Host "HKCU Run: removed the stale $($c.RunKeyDaemon) value (the service starts the daemon)"
+}
 Set-ItemProperty -LiteralPath $runKey -Name $c.RunKeyTray -Value ('"{0}"' -f (Join-Path $InstallDir $c.TrayExe))
-Write-Host "HKCU Run: set $($c.RunKeyDaemon) and $($c.RunKeyTray)"
+Write-Host "HKCU Run: set $($c.RunKeyTray)"
 
 if ($SignalRgb -eq 'Y') {
     $restore = Join-Path $appData $c.RestoreFile

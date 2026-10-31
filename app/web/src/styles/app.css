@@ -2176,10 +2176,19 @@ button.chip:hover {
   border-color: var(--line);
 }
 
+/* A narrow slot with no cell border; the readout's gap sits on both sides of it. */
+.digit-dot-slot {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  width: 5px;
+  height: 48px;
+  /* The dot sits on the digits' baseline, like a printed point: measured 14.3 px above the
+     cell's bottom for --t28 in --fm (.build/digit-baseline.mjs). */
+  padding-bottom: 14px;
+}
+
 .digit-dot {
-  position: absolute;
-  right: 3px;
-  bottom: 5px;
   width: 5px;
   height: 5px;
   border-radius: 50%;

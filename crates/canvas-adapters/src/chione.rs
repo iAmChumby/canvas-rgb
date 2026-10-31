@@ -30,9 +30,10 @@
 //!
 //! # Enumeration (`discover`)
 //!
-//! `discover` enumerates every HID device on the machine with hidapi (`HidApi::new`, which reads
-//! metadata for each device; it opens none and does no I/O). The app calls it only once a display
-//! has a saved config, so a machine without a configured display never enumerates.
+//! `discover` enumerates every HID device on the machine with hidapi (one shared `HidApi`,
+//! rescanned at most every 2 s; a scan reads metadata for each device, opens none and does no
+//! I/O). The app calls it only once a display has a saved config, so a machine without a
+//! configured display never enumerates.
 
 use async_trait::async_trait;
 use canvas_proto::device::DeviceId;
@@ -217,30 +218,54 @@ impl Transport for HidTransport {
     }
 }
 
-struct HidOpener;
+/// What the opener needs from a HID context: `hidapi::HidApi` in the product, a counting fake in
+/// the tests.
+trait HidSource: crate::attack_shark_x6::hid_cache::Scan {
+    /// The path of the display, when the list has it.
+    fn find_path(&self) -> Option<std::ffi::CString>;
+    /// Opens the display at this path.
+    fn open_at(&self, path: &std::ffi::CStr) -> Result<Box<dyn Transport>, String>;
+}
 
-impl HidOpener {
-    fn find_path(api: &hidapi::HidApi) -> Option<std::ffi::CString> {
-        api.device_list()
+impl HidSource for hidapi::HidApi {
+    fn find_path(&self) -> Option<std::ffi::CString> {
+        self.device_list()
             .find(|d| d.vendor_id() == VENDOR_ID && d.product_id() == PRODUCT_ID)
             .map(|d| d.path().to_owned())
     }
+
+    fn open_at(&self, path: &std::ffi::CStr) -> Result<Box<dyn Transport>, String> {
+        let dev = self.open_path(path).map_err(|e| e.to_string())?;
+        Ok(Box::new(HidTransport(std::sync::Mutex::new(dev))))
+    }
 }
 
-impl Opener for HidOpener {
+/// One HID context serves every call (`crate::attack_shark_x6::hid_cache`): `present()` and
+/// `open()` used to build a `HidApi` each, which scans every HID device on the machine (issue #7).
+/// Both look up through `with_retry`: a miss or a failed open on an old list rescans once per ttl.
+struct HidOpener<S: HidSource = hidapi::HidApi> {
+    cache: crate::attack_shark_x6::hid_cache::HidCache<S>,
+}
+
+impl<S: HidSource> Default for HidOpener<S> {
+    fn default() -> Self {
+        Self { cache: Default::default() }
+    }
+}
+
+impl<S: HidSource> Opener for HidOpener<S> {
     fn present(&self) -> bool {
-        hidapi::HidApi::new().map(|api| Self::find_path(&api).is_some()).unwrap_or(false)
+        self.cache
+            .with_retry(|api| Ok(api.find_path().map(|_| ())))
+            .map(|found| found.is_some())
+            .unwrap_or(false)
     }
 
     fn open(&self) -> Result<Option<Box<dyn Transport>>, String> {
-        let api = hidapi::HidApi::new().map_err(|e| e.to_string())?;
-        match Self::find_path(&api) {
+        self.cache.with_retry(|api| match api.find_path() {
             None => Ok(None),
-            Some(path) => {
-                let dev = api.open_path(&path).map_err(|e| e.to_string())?;
-                Ok(Some(Box::new(HidTransport(std::sync::Mutex::new(dev)))))
-            }
-        }
+            Some(path) => api.open_at(&path).map(Some),
+        })
     }
 }
 
@@ -411,7 +436,7 @@ impl Default for ChioneDisplay {
 
 impl ChioneDisplay {
     pub fn new() -> Self {
-        Self::with_opener(Arc::new(HidOpener), QUERY_WAIT)
+        Self::with_opener(Arc::new(HidOpener::<hidapi::HidApi>::default()), QUERY_WAIT)
     }
 
     fn with_opener(opener: Arc<dyn Opener>, query_wait: Duration) -> Self {
@@ -1211,5 +1236,99 @@ mod tests {
         let n = ticks.load(std::sync::atomic::Ordering::SeqCst);
         // 5 blocking calls of 60 ms (>= 300 ms); a blocked runtime thread would tick about 0 times (Windows timers tick at about 15 ms, so 300 ms gives about 20)
         assert!(n >= 10, "the ticker ran {n} times while the device was busy");
+    }
+
+    // ------------------------------------------------------ the HID context (issue #7)
+
+    use crate::attack_shark_x6::hid_cache::{HidCache, Scan};
+    use std::cell::Cell;
+
+    thread_local! {
+        static SCANS: Cell<u32> = const { Cell::new(0) };
+        static STALE_OPENS: Cell<u32> = const { Cell::new(0) };
+        static PLUGGED: Cell<bool> = const { Cell::new(true) };
+    }
+
+    struct CountingApi {
+        plugged: bool,
+    }
+
+    impl Scan for CountingApi {
+        fn first() -> Result<Self, String> {
+            SCANS.with(|s| s.set(s.get() + 1));
+            Ok(CountingApi { plugged: PLUGGED.with(Cell::get) })
+        }
+
+        fn rescan(&mut self) -> Result<(), String> {
+            SCANS.with(|s| s.set(s.get() + 1));
+            self.plugged = PLUGGED.with(Cell::get);
+            Ok(())
+        }
+    }
+
+    struct NullTransport;
+
+    impl Transport for NullTransport {
+        fn write(&mut self, data: &[u8]) -> Result<usize, String> {
+            Ok(data.len())
+        }
+
+        fn read(&mut self, _buf: &mut [u8], _timeout_ms: i32) -> Result<usize, String> {
+            Ok(0)
+        }
+    }
+
+    impl HidSource for CountingApi {
+        fn find_path(&self) -> Option<std::ffi::CString> {
+            self.plugged.then(|| std::ffi::CString::new("fake/chione").unwrap())
+        }
+
+        fn open_at(&self, _path: &std::ffi::CStr) -> Result<Box<dyn Transport>, String> {
+            if STALE_OPENS.with(|s| s.replace(s.get().saturating_sub(1)) > 0) {
+                return Err("the path is gone".into());
+            }
+            Ok(Box::new(NullTransport))
+        }
+    }
+
+    fn opener() -> HidOpener<CountingApi> {
+        SCANS.with(|s| s.set(0));
+        STALE_OPENS.with(|s| s.set(0));
+        PLUGGED.with(|s| s.set(true));
+        HidOpener { cache: HidCache::with_ttl(Duration::from_secs(3600)) }
+    }
+
+    fn scans() -> u32 {
+        SCANS.with(Cell::get)
+    }
+
+    #[test]
+    fn a_stale_path_is_rescanned_once_and_opens_on_the_retry() {
+        let o = opener();
+        assert!(o.present());
+        STALE_OPENS.with(|s| s.set(1));
+        assert!(o.open().unwrap().is_some(), "the retry opens it");
+        assert_eq!(scans(), 2, "the first scan and one forced rescan");
+    }
+
+    #[test]
+    fn a_missing_display_is_rescanned_at_most_once_per_ttl() {
+        let o = opener();
+        PLUGGED.with(|s| s.set(false));
+        for _ in 0..5 {
+            assert!(!o.present());
+            assert!(o.open().unwrap().is_none());
+        }
+        assert_eq!(scans(), 2, "the first scan and one forced rescan, not one per call");
+    }
+
+    #[test]
+    fn a_display_plugged_in_after_the_last_scan_is_found_inside_the_ttl() {
+        let o = opener();
+        PLUGGED.with(|s| s.set(false));
+        assert!(!o.present());
+        PLUGGED.with(|s| s.set(true));
+        assert!(o.present());
+        assert_eq!(scans(), 2);
     }
 }

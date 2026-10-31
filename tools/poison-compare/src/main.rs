@@ -210,6 +210,7 @@ fn render_original(
 ) -> Result<Vec<FrameStats>, String> {
     let out = work.join("original.rgb");
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("js").join("render.mjs");
+    // token: the developer's own, non-elevated.
     let mut cmd = Command::new("node");
     cmd.arg(&script)
         .arg("--out")

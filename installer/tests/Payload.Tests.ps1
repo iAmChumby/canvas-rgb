@@ -107,6 +107,12 @@ try {
             Assert-True ($iss.Contains($needle)) "missing $needle"
         }
     }
+    Test-Case 'setup-user.ps1: no daemon Run key is written, a stale one is deleted (#6)' {
+        $su = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\setup-user.ps1'))
+        Assert-True ($su -notmatch 'Set-ItemProperty[^\r\n]*RunKeyDaemon') 'setup-user.ps1 must not write the daemon Run value'
+        Assert-True ($su -match 'Remove-ItemProperty[^\r\n]*RunKeyDaemon') 'setup-user.ps1 must delete a stale daemon Run value'
+        Assert-True ($su -match 'Set-ItemProperty[^\r\n]*RunKeyTray') 'the tray Run value is still written'
+    }
     Test-Case 'iss: the per-user step runs as the original user, the machine step does not' {
         Assert-True ($iss -match "setup-user\.ps1'\), Args, True") 'setup-user.ps1 must run with AsOriginalUser=True'
         Assert-True ($iss -match "setup-elevated\.ps1'\), Args, False") 'setup-elevated.ps1 must run elevated'

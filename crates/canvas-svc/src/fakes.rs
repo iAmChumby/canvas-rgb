@@ -48,6 +48,13 @@ struct Sim {
     manual: [bool; CHANNELS],
     drop_duty_writes: bool,
     drop_commands: bool,
+    /// Firmware owns the fan controller (the resume transition): mode and duty writes are
+    /// ignored and the duty reads back as the BIOS value, until [`FakeChip::release_to_service`].
+    firmware_owned: bool,
+    /// The chip's own clock, moved by tests ([`FakeChip::set_clock`]); firmware ownership set with
+    /// [`FakeChip::simulate_resume_for`] ends when this reaches `owned_until`.
+    clock: Duration,
+    owned_until: Option<Duration>,
     /// The EC's fan configuration window (engine status PHASE set, LOCK clear).
     cfg_open: bool,
     /// The EC checked the last configuration (engine status CHECK_DONE).
@@ -107,6 +114,9 @@ impl FakeChip {
             manual: [false; CHANNELS],
             drop_duty_writes: false,
             drop_commands: false,
+            firmware_owned: false,
+            clock: Duration::ZERO,
+            owned_until: None,
             cfg_open: false,
             cfg_checked: false,
             writes: 0,
@@ -123,6 +133,43 @@ impl FakeChip {
     /// Simulates a chip that never acknowledges the command handshake.
     pub fn set_drop_commands(&self, drop: bool) {
         lock(&self.sim).drop_commands = drop;
+    }
+
+    /// Simulates a resume (issue #29): every header drops out of manual mode, every duty is back at
+    /// the BIOS value, and firmware owns the fan controller (writes ignored, readbacks stuck at the
+    /// BIOS duty) until [`FakeChip::release_to_service`]. Tests call that release at the point the
+    /// real firmware would be done, because the controller's grace runs on test-supplied `Instant`s
+    /// and the chip cannot share that clock.
+    pub fn simulate_resume(&self) {
+        let mut sim = lock(&self.sim);
+        sim.manual = [false; CHANNELS];
+        sim.duty_raw = [BIOS_RAW_DUTY; CHANNELS];
+        let mode_regs: Vec<u16> = sim.map.channels.iter().map(|c| c.mode_reg).collect();
+        for reg in mode_regs {
+            sim.regs.insert(reg, 0);
+        }
+        sim.firmware_owned = true;
+    }
+
+    /// Like [`FakeChip::simulate_resume`], but firmware lets go by itself `owned_for` after the chip's
+    /// clock (see [`FakeChip::set_clock`]), so a test can check that the controller's own grace is
+    /// what decides when writes land.
+    pub fn simulate_resume_for(&self, owned_for: Duration) {
+        self.simulate_resume();
+        let mut sim = lock(&self.sim);
+        sim.owned_until = Some(sim.clock + owned_for);
+    }
+
+    /// Moves the chip's clock. Tests keep it in step with the `Instant`s they give the controller.
+    pub fn set_clock(&self, clock: Duration) {
+        lock(&self.sim).clock = clock;
+    }
+
+    /// Firmware lets go of the fan controller: writes land again.
+    pub fn release_to_service(&self) {
+        let mut sim = lock(&self.sim);
+        sim.firmware_owned = false;
+        sim.owned_until = None;
     }
 
     /// Sets a board sensor in degrees C (half-degree bit from the fraction).
@@ -208,6 +255,20 @@ impl Sim {
         })
     }
 
+    /// The duty register as the EC answers it: the BIOS value while firmware owns the controller.
+    fn duty_value(&self, ch: usize) -> u8 {
+        if self.owned() {
+            BIOS_RAW_DUTY
+        } else {
+            self.duty_raw[ch]
+        }
+    }
+
+    /// Whether firmware owns the fan controller at the chip's current clock.
+    fn owned(&self) -> bool {
+        self.firmware_owned && self.owned_until.is_none_or(|until| self.clock < until)
+    }
+
     fn ec_read(&self, reg: u16) -> u8 {
         if reg == ENGINE_STS_REG {
             return if self.cfg_open {
@@ -219,10 +280,10 @@ impl Sim {
             };
         }
         if let Some(ch) = self.channel_of_pwm_write(reg) {
-            return self.duty_raw[ch];
+            return self.duty_value(ch);
         }
         if let Some(ch) = self.channel_of_pwm_read(reg) {
-            return self.duty_raw[ch];
+            return self.duty_value(ch);
         }
         if let Some((ch, high)) = self.channel_of_rpm(reg) {
             let value = self.rpm[ch].round().clamp(0.0, 65535.0) as u16;
@@ -250,6 +311,9 @@ impl Sim {
         // A fan-mode register (0xA00, or 0x80F for MSI AM5 system fans): each header follows
         // its own bit in its own register.
         if self.map.channels.iter().any(|c| c.mode_reg == reg) {
+            if self.owned() {
+                return;
+            }
             for (ch, c) in self.map.channels.iter().enumerate() {
                 if let (true, Some(bit)) = (c.mode_reg == reg, c.mode_bit) {
                     self.manual[ch] = value & (1 << bit) != 0;
@@ -259,7 +323,7 @@ impl Sim {
             return;
         }
         if let Some(ch) = self.channel_of_pwm_write(reg) {
-            if self.cfg_open && !self.drop_duty_writes {
+            if self.cfg_open && !self.drop_duty_writes && !self.owned() {
                 self.duty_raw[ch] = value;
             }
             return;
@@ -492,6 +556,14 @@ pub struct FakeProcesses {
     running: Arc<Mutex<Vec<RunningRecord>>>,
     /// The console session; `u32::MAX` means none.
     console: Arc<AtomicU32>,
+    /// While set, every spawn fails the way a launch does before anyone has logged on.
+    no_session: Arc<AtomicBool>,
+    /// Sessions whose user has logged off (the console id does not change).
+    dead_sessions: Arc<Mutex<Vec<u32>>>,
+    /// A killed process needs this many `try_wait` polls before it is gone.
+    slow_kill_polls: Arc<AtomicU32>,
+    /// Launches that happened while an earlier daemon had not exited yet.
+    overlaps: Arc<AtomicU32>,
 }
 
 type RunningRecord = (u32, PathBuf, u32, Arc<AtomicBool>);
@@ -548,7 +620,39 @@ impl FakeProcesses {
         self.fail_spawns.store(n, Ordering::SeqCst);
     }
 
+    /// Marks the user of `session` as logged off while the console id stays what it was.
+    pub fn log_off(&self, session: u32) {
+        self.dead_sessions.lock().unwrap_or_else(|p| p.into_inner()).push(session);
+    }
+
+    /// The user of `session` is logged on again.
+    pub fn log_on(&self, session: u32) {
+        self.dead_sessions.lock().unwrap_or_else(|p| p.into_inner()).retain(|s| *s != session);
+    }
+
+    /// A killed process takes `polls` `try_wait` calls to be gone.
+    pub fn set_slow_kill(&self, polls: u32) {
+        self.slow_kill_polls.store(polls, Ordering::SeqCst);
+    }
+
+    /// How many launches started while an earlier daemon was still running.
+    pub fn overlaps(&self) -> u32 {
+        self.overlaps.load(Ordering::SeqCst)
+    }
+
+    /// While `true`, spawns fail as "no user session yet" (`ErrorKind::NotConnected`).
+    pub fn set_no_session(&self, none: bool) {
+        self.no_session.store(none, Ordering::SeqCst);
+    }
+
     fn start(&self, exe: &Path, args: &[String]) -> io::Result<Box<dyn ChildProcess>> {
+        let console = self.console.load(Ordering::SeqCst);
+        if self.dead_sessions.lock().unwrap_or_else(|p| p.into_inner()).contains(&console) {
+            return Err(io::Error::new(io::ErrorKind::NotConnected, "nobody is logged on in the console session (fake)"));
+        }
+        if self.no_session.load(Ordering::SeqCst) {
+            return Err(io::Error::new(io::ErrorKind::NotConnected, "no user session yet (fake)"));
+        }
         let pending = self.fail_spawns.load(Ordering::SeqCst);
         if pending > 0 {
             self.fail_spawns.store(pending - 1, Ordering::SeqCst);
@@ -557,26 +661,50 @@ impl FakeProcesses {
         let exited = Arc::new(AtomicBool::new(false));
         let pid = {
             let mut spawns = self.spawns.lock().unwrap_or_else(|p| p.into_inner());
+            if spawns.iter().any(|s| !s.2.load(Ordering::SeqCst)) {
+                self.overlaps.fetch_add(1, Ordering::SeqCst);
+            }
             let pid = 4000 + spawns.len() as u32;
             spawns.push((exe.to_path_buf(), args.to_vec(), Arc::clone(&exited)));
             pid
         };
-        Ok(Box::new(FakeChild { exited, pid }))
+        Ok(Box::new(FakeChild {
+            exited,
+            pid,
+            slow_kill: self.slow_kill_polls.load(Ordering::SeqCst),
+            dying: None,
+        }))
     }
 }
 
 struct FakeChild {
     exited: Arc<AtomicBool>,
     pid: u32,
+    /// Polls a killed process needs before it has exited (0 = at once).
+    slow_kill: u32,
+    /// Polls left before a killed process exits.
+    dying: Option<u32>,
 }
 
 impl ChildProcess for FakeChild {
     fn try_wait(&mut self) -> io::Result<Option<i32>> {
+        if let Some(left) = self.dying {
+            if left == 0 {
+                self.exited.store(true, Ordering::SeqCst);
+                self.dying = None;
+            } else {
+                self.dying = Some(left - 1);
+            }
+        }
         Ok(self.exited.load(Ordering::SeqCst).then_some(1))
     }
 
     fn kill(&mut self) -> io::Result<()> {
-        self.exited.store(true, Ordering::SeqCst);
+        if self.slow_kill > 0 {
+            self.dying = Some(self.slow_kill);
+        } else {
+            self.exited.store(true, Ordering::SeqCst);
+        }
         Ok(())
     }
 
@@ -611,7 +739,7 @@ impl crate::daemon::SessionLauncher for FakeLauncher {
             .map(|(pid, image, session, flag)| crate::daemon::RunningDaemon {
                 image: image.clone(),
                 session: *session,
-                process: Box::new(FakeChild { exited: Arc::clone(flag), pid: *pid }),
+                process: Box::new(FakeChild { exited: Arc::clone(flag), pid: *pid, slow_kill: 0, dying: None }),
             })
             .collect()
     }
@@ -621,6 +749,10 @@ impl crate::daemon::SessionLauncher for FakeLauncher {
             u32::MAX => None,
             session => Some(session),
         }
+    }
+
+    fn session_alive(&mut self, session: u32) -> bool {
+        !self.0.dead_sessions.lock().unwrap_or_else(|p| p.into_inner()).contains(&session)
     }
 }
 

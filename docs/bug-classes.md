@@ -47,29 +47,89 @@ APIs, so the tests pass.
   used the wrong driver type with an adapter (`crates/canvas-daemon/src/capture/screen.rs`). Both are
   fixed in 0.1.0; the issue stays open until they are confirmed on real lights.
 - [#5](https://github.com/iAmChumby/canvas-rgb/issues/5): after a wake, the RAM shows its own rainbow.
-  The daemon's message window never receives `WM_POWERBROADCAST` (no suspend or resume in the log
-  across two sleeps), and the registration results are discarded (`let _ =` in
-  `crates/canvas-daemon/src/power.rs`).
+  The daemon's message-only window never received `WM_POWERBROADCAST` (no suspend or resume in the log
+  across two sleeps), and the registration results were discarded (`let _ =` in
+  `crates/canvas-daemon/src/power.rs`). Fixed: sleep, wake and display state register with
+  `DEVICE_NOTIFY_CALLBACK` (no window), every `Register*Notification` result is logged and the first
+  notification is logged. Microsoft documents that a message-only window "does not receive broadcast
+  messages" (Window Features, Message-Only Windows); that is the likely cause but is UNKNOWN until one
+  real sleep logs `reason="suspend"` and `reason="resume"` (the first-notification line alone also fires for display-state changes, so it settles nothing). The display-state notifications were never
+  handled before; they are registered and logged now, and acting on them is a follow-up. See also `cause:sleep-state`.
 - **Class fix:** due (second bug). Each capture path logs a WARN when it fails to start
   (`crates/canvas-daemon/src/capture/mod.rs`), but a capture that starts and then gets no data stays
   silent, and a failed power registration leaves no trace. Candidate: no Windows API result is
   discarded with `let _ =`; every one is logged, and every subscription logs its first event.
 
-### `cause:process-launch`: a process started outside the service's launch rules
+### `cause:sleep-state`: a state a sleep resets and the code never restores
+
+Hardware or a chip falls back to its own state when the PC sleeps, and the program set that state
+once per connection or once per start and trusts it forever.
+
+- [#5](https://github.com/iAmChumby/canvas-rgb/issues/5): the ENE DRAM sticks drop out of direct mode
+  over a sleep, and the daemon sent `SET_CUSTOM_MODE` once per OpenRGB connection
+  (`crates/canvas-adapters/src/openrgb.rs`). Fix built, pending a real wake: the mode is sent again after every resume and every
+  10 s while frames stream (`CUSTOM_MODE_KEEPALIVE`, a starting value to measure); the ROYUAN keyboard's
+  direct-mode report is sent again after a resume (`crates/canvas-adapters/src/royuan.rs`). One call,
+  `canvas_adapters::note_resume()`, reaches both. The keepalive covers the RAM even if the resume never reaches the daemon; the keyboard has no keepalive, so it depends on the resume arriving.
+- [#29](https://github.com/iAmChumby/canvas-rgb/issues/29): the service's 1 Hz fan loop kept writing
+  through the resume transition. A duty write landed while firmware still owned the fan controller,
+  its readback failed for the full `READBACK_SETTLE`, and the safety handback (correct in itself) stayed
+  until the user re-applied a profile (`crates/canvas-svc/src/fans.rs`). The service accepted no power
+  notifications (`crates/canvas-svc/src/winsvc.rs`). Fix built, pending a real wake: `SERVICE_CONTROL_POWEREVENT` pauses writes
+  on suspend and, after `RESUME_GRACE`, re-applies every header that was under control; a wall-clock
+  gap between ticks (`SystemTime`, because `Instant` may not count a sleep) is the fallback signal; an
+  apply inside the window is held until it ends; a suspend with no resume ends its hold after
+  `SUSPEND_HOLD_CAP_TICKS`; a failed readback logs every reading and the mode bit.
+  Regression tests: `fans_tests.rs`, on a `FakeChip` that models firmware owning the controller.
+  UNKNOWN until one real wake: whether the chip resets or firmware only holds it, and for how long.
+- **Sibling search (#29, canvas-svc):** the GPU fans (NVML) re-assert manual mode on every speed write,
+  so the same re-apply covers them. The daemon supervisor's 5 s heartbeat check compares `Instant`s; if
+  `Instant` counts the sleep, a wake looks like a missed heartbeat, so a resume now refreshes the
+  heartbeat clock (`Core::on_power`, `Core::tick`). Sensor-loss timeouts get a fresh clock when the
+  grace ends. Left, UNKNOWN: the OpenRGB supervisor's timers (`openrgb.rs:327`) also take an
+  `Instant` tick; not checked for a sleep.
+- **Class fix:** due (second bug). Candidate: every adapter or service that sets a mode once registers
+  for the resume event (one shared hook) and has a test that a resume makes it set the mode again.
+- **Sibling search (#5, canvas-adapters and canvas-daemon):** OpenRGB (every controller, GPU and
+  motherboard included): fixed. ROYUAN keyboard: fixed. CHIONE pump display: no mode state (every
+  250 ms packet carries its mode bytes; the 0xFF query is firmware info). Attack Shark X6 mouse and
+  8BitDo pad: settings are read and written on request, with no mode set at connect. Not covered:
+  the service's fan chip (#29, another fix).
+
+### `cause:process-launch`: a process started outside the service's launch rules, or with the wrong token
 
 The service owns starting the daemon in the user's session, with no window. Any other path that
-starts `canvas-rgbd.exe` skips those rules.
+starts `canvas-rgbd.exe` skips those rules. Any process started with a token other than the one the
+next step needs breaks what that step does.
 
 - 46c30c1: the service launched the daemon without `CREATE_NO_WINDOW`, so a console window showed;
   the installer also started the daemon itself and raced the service for the API port
   (`installer/inno/canvas-rgb.iss`, the comment above the tray launch).
 - [#6](https://github.com/iAmChumby/canvas-rgb/issues/6): the daemon runs in a visible console
-  after logon. `installer/setup-user.ps1` still writes an HKCU Run key that starts the daemon from
-  Explorer, and the service counts "no user logged on yet" as a crash and stops retrying before
+  after logon. `installer/setup-user.ps1` still wrote an HKCU Run key that started the daemon from
+  Explorer, and the service counted "no user logged on yet" as a crash and stopped retrying before
   logon.
-- **Class fix:** due (second bug). One launcher (the service), a daemon that cannot show a console
-  whoever starts it, and a check that fails when anything outside `canvas-svc` starts
-  `canvas-rgbd.exe`.
+- [#28](https://github.com/iAmChumby/canvas-rgb/issues/28): an update from the tray left no tray. The
+  tray started Setup with the `runas` verb, so Setup was elevated from its first instruction; its
+  `ExecAsOriginalUser` relaunch then started the tray elevated, and the tray refuses to run elevated.
+- **Class fix:** done (#6, #28). The service is the one launcher; the daemon is a windows-subsystem
+  program in release builds, so no path can show a console; and `crates/canvas-svc/tests/process_launch.rs`
+  (part of `cargo test --workspace`, so CI) scans `crates/`, `app/src-tauri/`, `installer/` and `tools/`
+  and fails with `file:line` when (1) anything outside `canvas-svc` starts or registers
+  `canvas-rgbd.exe` through the calls it knows (PowerShell `&` and `start`, and a `.cmd` `start`, are not scanned: every `& tool` line would need a token note) (a process start, a Run-key write, an Inno `[Run]` entry), (2) any code starts a
+  process with an elevating verb (`runas`, `-Verb RunAs`; the allow-list holds the two script-install
+  scripts that elevate only their own machine-wide child), (3) a process start has no `token:`
+  comment (a real comment, not code) within 8 lines above saying which token it runs with, or (4) a file that names the daemon starts any process (the daemon launched through a variable path). Allow-list entries are per line, and the scan fails on an entry that matches no line. A new launch site needs the comment;
+  that is the point.
+- **Sibling search** (every area): the tray starts one process, the installer (`update/launch.rs`;
+  fixed, #28). The Inno script's `Exec` calls are `RunPs` (machine script as Setup's admin token, user
+  script as the original user), the PawnIO page and the tray relaunches, all as the original user
+  except `RunPs` for the machine step; each now carries its `token:` line. The daemon starts OpenRGB
+  with its own token and `CREATE_NO_WINDOW` (a windows-subsystem parent would otherwise give a console
+  child its own window). The service starts OpenRGB as itself and the daemon through
+  `WTSQueryUserToken`. `tools/*.ps1` start only the build tools (ISCC and similar, with the developer's own token); none starts the daemon or the tray. `installer/setup.ps1` and `uninstall.ps1` elevate a
+  PowerShell child on purpose (allow-listed); nothing in them relaunches the tray.
+- **How to check a new launch:** add the `token:` line, then run `cargo test -p canvas-svc --test process_launch`.
 
 ### `cause:unchecked-state`: the system states something it never checked
 
