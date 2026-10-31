@@ -30,9 +30,10 @@
 //!
 //! # Enumeration (`discover`)
 //!
-//! `discover` enumerates every HID device on the machine with hidapi (`HidApi::new`, which reads
-//! metadata for each device; it opens none and does no I/O). The app calls it only once a display
-//! has a saved config, so a machine without a configured display never enumerates.
+//! `discover` enumerates every HID device on the machine with hidapi (one shared `HidApi`,
+//! rescanned at most every 2 s; a scan reads metadata for each device, opens none and does no
+//! I/O). The app calls it only once a display has a saved config, so a machine without a
+//! configured display never enumerates.
 
 use async_trait::async_trait;
 use canvas_proto::device::DeviceId;
@@ -217,7 +218,12 @@ impl Transport for HidTransport {
     }
 }
 
-struct HidOpener;
+/// One HID context serves every call (`crate::attack_shark_x6::hid_cache`): `present()` and
+/// `open()` used to build a `HidApi` each, which scans every HID device on the machine (issue #7).
+#[derive(Default)]
+struct HidOpener {
+    cache: crate::attack_shark_x6::hid_cache::HidCache,
+}
 
 impl HidOpener {
     fn find_path(api: &hidapi::HidApi) -> Option<std::ffi::CString> {
@@ -229,18 +235,17 @@ impl HidOpener {
 
 impl Opener for HidOpener {
     fn present(&self) -> bool {
-        hidapi::HidApi::new().map(|api| Self::find_path(&api).is_some()).unwrap_or(false)
+        self.cache.with(|api| Self::find_path(api).is_some()).unwrap_or(false)
     }
 
     fn open(&self) -> Result<Option<Box<dyn Transport>>, String> {
-        let api = hidapi::HidApi::new().map_err(|e| e.to_string())?;
-        match Self::find_path(&api) {
+        self.cache.with(|api| match Self::find_path(api) {
             None => Ok(None),
             Some(path) => {
                 let dev = api.open_path(&path).map_err(|e| e.to_string())?;
-                Ok(Some(Box::new(HidTransport(std::sync::Mutex::new(dev)))))
+                Ok(Some(Box::new(HidTransport(std::sync::Mutex::new(dev))) as Box<dyn Transport>))
             }
-        }
+        })?
     }
 }
 
@@ -411,7 +416,7 @@ impl Default for ChioneDisplay {
 
 impl ChioneDisplay {
     pub fn new() -> Self {
-        Self::with_opener(Arc::new(HidOpener), QUERY_WAIT)
+        Self::with_opener(Arc::new(HidOpener::default()), QUERY_WAIT)
     }
 
     fn with_opener(opener: Arc<dyn Opener>, query_wait: Duration) -> Self {

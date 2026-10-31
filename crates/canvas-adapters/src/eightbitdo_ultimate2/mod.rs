@@ -254,12 +254,24 @@ impl VendorTransport for HidVendor {
 }
 
 /// Finds the pad's collections with hidapi.
-struct HidOpener;
+///
+/// One HID context serves every call (`crate::attack_shark_x6::hid_cache`): each step of a
+/// connect used to build its own `HidApi`, which scans every HID device on the machine
+/// (issue #7).
+#[derive(Default)]
+struct HidOpener {
+    cache: crate::attack_shark_x6::hid_cache::HidCache,
+}
 
 impl HidOpener {
     /// Every HID device the pad shows, with the metadata the adapter matches on.
-    fn devices() -> Vec<hidapi::DeviceInfo> {
-        hidapi::HidApi::new().map(|api| api.device_list().cloned().collect()).unwrap_or_default()
+    fn devices(&self) -> Vec<hidapi::DeviceInfo> {
+        self.cache.with(|api| api.device_list().cloned().collect()).unwrap_or_default()
+    }
+
+    /// Opens the collection at this path from the shared context.
+    fn open_path(&self, path: &std::ffi::CStr) -> Result<hidapi::HidDevice, String> {
+        self.cache.with(|api| api.open_path(path).map_err(|e| e.to_string()))?
     }
 
     /// The path of the first collection that matches.
@@ -294,7 +306,7 @@ impl HidOpener {
 
 impl Opener for HidOpener {
     fn personalities(&self) -> Vec<Personality> {
-        let devices = Self::devices();
+        let devices = self.devices();
         let mut out = Vec::new();
         // The XInput personality: the vendor collection on the vendor page.
         if Self::find(&devices, PRODUCT_ID_XINPUT, VENDOR_USAGE_PAGE_XINPUT, VENDOR_USAGE).is_some()
@@ -316,7 +328,7 @@ impl Opener for HidOpener {
         &self,
         personality: Personality,
     ) -> Result<Option<Box<dyn VendorTransport>>, String> {
-        let devices = Self::devices();
+        let devices = self.devices();
         // The DInput personality has no vendor collection of its own; the wired pad in DInput
         // mode may still have one on the vendor page.
         let pages: &[u16] = match personality.vendor_usage_page() {
@@ -328,8 +340,7 @@ impl Opener for HidOpener {
             else {
                 continue;
             };
-            let api = hidapi::HidApi::new().map_err(|e| e.to_string())?;
-            let dev = api.open_path(&path).map_err(|e| e.to_string())?;
+            let dev = self.open_path(&path)?;
             return Ok(Some(Box::new(HidVendor(std::sync::Mutex::new(dev)))));
         }
         Ok(None)
@@ -346,7 +357,7 @@ impl Opener for HidOpener {
         if personality != Personality::DInput {
             return Ok(None);
         }
-        let devices = Self::devices();
+        let devices = self.devices();
         let Some(path) = Self::find(
             &devices,
             personality.product_id(),
@@ -355,24 +366,27 @@ impl Opener for HidOpener {
         ) else {
             return Ok(None);
         };
-        let api = hidapi::HidApi::new().map_err(|e| e.to_string())?;
-        let dev = api.open_path(&path).map_err(|e| e.to_string())?;
+        let dev = self.open_path(&path)?;
         Ok(Some(Box::new(HidCollection(std::sync::Mutex::new(dev)))))
     }
 
     fn open_collections(&self) -> Result<OpenedCollections, String> {
-        let api = hidapi::HidApi::new().map_err(|e| e.to_string())?;
-        let mut out: OpenedCollections = Vec::new();
-        for d in api.device_list().filter(|d| d.vendor_id() == VENDOR_ID) {
-            let label = Self::label(d);
-            match api.open_path(d.path()) {
-                Ok(dev) => out.push((label, Box::new(HidCollection(std::sync::Mutex::new(dev))))),
-                // Windows holds the keyboard and mouse collections exclusively: the research saw
-                // the same (2.2d: "Keyboard/mouse collections unreadable (Windows exclusive)").
-                Err(e) => tracing::warn!("the collection {label} cannot be opened: {e}"),
+        self.cache.with(|api| {
+            let mut out: OpenedCollections = Vec::new();
+            for d in api.device_list().filter(|d| d.vendor_id() == VENDOR_ID) {
+                let label = Self::label(d);
+                match api.open_path(d.path()) {
+                    Ok(dev) => {
+                        out.push((label, Box::new(HidCollection(std::sync::Mutex::new(dev)))))
+                    }
+                    // Windows holds the keyboard and mouse collections exclusively: the research
+                    // saw the same (2.2d: "Keyboard/mouse collections unreadable (Windows
+                    // exclusive)").
+                    Err(e) => tracing::warn!("the collection {label} cannot be opened: {e}"),
+                }
             }
-        }
-        Ok(out)
+            out
+        })
     }
 }
 
@@ -984,7 +998,7 @@ impl EightBitDoUltimate2 {
     /// The adapter for the 8BitDo Ultimate 2 Wireless.
     pub fn new() -> Self {
         Self {
-            opener: Arc::new(HidOpener),
+            opener: Arc::new(HidOpener::default()),
             xinput: Arc::new(SystemXInput),
             personality: None,
             bound: None,

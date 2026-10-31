@@ -350,6 +350,60 @@ async fn a_patch_with_writes_on_reaches_the_device_with_exactly_the_given_keys()
     assert_eq!(writes[0].get("dpi-stage-1"), Some(&PropValue::Number(1600.0)));
 }
 
+/// Issue #7: opening the Peripherals view must not run the device's feature reports more than
+/// once. The view-open here is the Rail's list, the view's list, and the detail asked for twice
+/// at once (a reload or a second window) and again right after.
+#[tokio::test]
+async fn one_view_open_reads_the_device_once() {
+    let fake = FakePeripheral::default();
+    let (router, _app, _home) = build(fake.clone());
+    let id = fake.id().0.clone();
+    let access = call_with_body(
+        &router,
+        "PUT",
+        &access_path_of(&id),
+        r#"{"reads":true,"writes":true}"#,
+    )
+    .await;
+    assert_eq!(access.status(), StatusCode::OK);
+
+    call(&router, "GET", routes::PERIPHERALS).await;
+    call(&router, "GET", routes::PERIPHERALS).await;
+    let path = path_of(&id);
+    let (a, b) = tokio::join!(call(&router, "GET", &path), call(&router, "GET", &path));
+    assert_eq!(a.status(), StatusCode::OK);
+    assert_eq!(b.status(), StatusCode::OK);
+    let again = call(&router, "GET", &path).await;
+    let values = json(again).await;
+    assert_eq!(
+        values.get("values").and_then(|v| v.as_object()).map(|v| v.len()),
+        Some(3),
+        "the shared read still carries the values"
+    );
+    assert_eq!(fake.log().reads, 1, "three detail requests, one read of the device");
+}
+
+/// A write changes the device, so the read after it is a new one.
+#[tokio::test]
+async fn a_write_drops_the_shared_read() {
+    let fake = FakePeripheral::default();
+    let (router, _app, _home) = build(fake.clone());
+    let id = fake.id().0.clone();
+    call_with_body(&router, "PUT", &access_path_of(&id), r#"{"reads":true,"writes":true}"#).await;
+    call(&router, "GET", &path_of(&id)).await;
+    assert_eq!(fake.log().reads, 1);
+    let patched = call_with_body(
+        &router,
+        "PATCH",
+        &path_of(&id),
+        r#"{"dpi-stage-1":{"type":"number","value":1600}}"#,
+    )
+    .await;
+    assert_eq!(patched.status(), StatusCode::OK);
+    call(&router, "GET", &path_of(&id)).await;
+    assert_eq!(fake.log().reads, 2, "the read after a write reads the device again");
+}
+
 #[tokio::test]
 async fn the_adapter_refuses_an_unknown_key_and_nothing_is_sent() {
     let fake = FakePeripheral::default();
