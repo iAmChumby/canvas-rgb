@@ -84,6 +84,8 @@ uninstaller hands the fans back to BIOS before it removes a single file. For a s
 canvas-rgb-setup-0.1.0.exe /SILENT /SIGNALRGB=Y /PAWNIO="C:\path\PawnIO_setup.exe"
 ```
 
+Start it from a normal (not administrator) shell. Setup asks for permission itself.
+
 ### Developer build
 
 Run the plan first. It prints every step and changes nothing.

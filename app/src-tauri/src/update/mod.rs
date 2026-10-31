@@ -15,7 +15,7 @@ mod tests;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use canvas_proto::tauri::{
     CheckFailReason, UpdateInfo, UpdatePhase, UpdateState, AFTER_UPDATE_ARG, EVT_UPDATE_STATE,
@@ -98,6 +98,21 @@ fn read_result(path: &Path) -> Option<InstallResult> {
     let text = String::from_utf8_lossy(&bytes);
     let bom = char::from_u32(0xFEFF).unwrap_or(' ');
     serde_json::from_str(text.trim_start_matches(bom)).ok()
+}
+
+/// The result file, only when it belongs to the run that started at `since`: written at or after
+/// that moment. Inno deletes an old file only in PrepareToInstall, which never runs when Setup's own
+/// permission prompt is declined, so a file from the previous update can still be there (#28).
+fn read_fresh_result(path: &Path, since: SystemTime) -> Option<InstallResult> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    if modified < since {
+        return None;
+    }
+    read_result(path)
+}
+
+fn since_of(ms: Option<u64>) -> Option<SystemTime> {
+    ms.map(|ms| UNIX_EPOCH + Duration::from_millis(ms))
 }
 
 /// How a start with a `pending` version ends. Only the running version and the installer's own
@@ -252,9 +267,16 @@ impl Controller {
     /// sweeps the downloaded installer away. Runs at start, and after an installer the tray
     /// outlived.
     pub fn reconcile_pending(&self) {
-        let result = read_result(&self.settings.result_path);
+        // The moment the installer was started is stored with `pending`, so a result file left by an
+        // earlier run is ignored here too, also after the tray restarted.
+        let since = since_of(self.lock().stored.pending_since_ms);
+        let result = match since {
+            None => read_result(&self.settings.result_path),
+            Some(t) => read_fresh_result(&self.settings.result_path, t),
+        };
         self.change(|i| {
             let Some(pending) = i.stored.pending.take() else { return };
+            i.stored.pending_since_ms = None;
             match settle(&pending.version, &self.current.to_string(), result.as_ref()) {
                 Settled::Updated => {
                     i.stored.updated_to = Some(pending);
@@ -276,6 +298,35 @@ impl Controller {
                 Err(why) => log::append(&format!("update: not clearing the updates folder: {why}")),
             }
         }
+    }
+
+    /// The installer process ended while this tray still runs. Setup raises its own permission
+    /// prompt (#28), so a Setup that exits with "cancelled before install" and wrote no result file
+    /// was declined at that prompt: nothing started, no pending version, the Declined phase. Any
+    /// other end is settled from the result file as before.
+    /// Only a result written after the tray started Setup counts (`pending_since_ms`), and only for
+    /// the pending version: a stale `ok` from the previous update must not turn a decline into a
+    /// failure.
+    pub fn settle_after_installer(&self, exit_code: Option<u32>) {
+        let (pending, since) = {
+            let inner = self.lock();
+            (inner.stored.pending.as_ref().map(|p| p.version.clone()), since_of(inner.stored.pending_since_ms))
+        };
+        let fresh = match since {
+            Some(t) => read_fresh_result(&self.settings.result_path, t),
+            None => read_result(&self.settings.result_path),
+        }
+        .filter(|r| pending.as_deref() == Some(r.version.as_str()));
+        if exit_code == Some(launch::SETUP_CANCELLED_CODE) && fresh.is_none() {
+            log::append("update: setup ended with code 2 and no result: the permission prompt was declined");
+            self.change(|i| {
+                i.stored.pending = None;
+                i.stored.pending_since_ms = None;
+                i.phase = UpdatePhase::Declined;
+            });
+            return;
+        }
+        self.reconcile_pending();
     }
 
     // ---- the person's choices ----
@@ -424,8 +475,11 @@ impl Controller {
         if let Some(handle) = started {
             // Normally the installer stops this tray. If it ends first, its result file says why.
             // The wait is unbounded, so it takes a blocking thread, not an async worker.
-            let _ = tauri::async_runtime::spawn_blocking(move || launch::wait_and_close(handle)).await;
-            self.reconcile_pending();
+            let code = tauri::async_runtime::spawn_blocking(move || launch::wait_and_close(handle))
+                .await
+                .ok()
+                .flatten();
+            self.settle_after_installer(code);
             return self.state();
         }
         state
@@ -564,6 +618,8 @@ impl Controller {
                 // Before the start: the tray dies during the install, and the next start reads this.
                 self.change(|i| {
                     i.stored.pending = Some(pending.clone());
+                    // Stamped before the start: the installer writes its result after this.
+                    i.stored.pending_since_ms = SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_millis() as u64);
                     i.phase = UpdatePhase::WaitingForUac;
                 });
                 (self.launcher)(p)
@@ -587,6 +643,7 @@ impl Controller {
                 // Nothing started: no pending version.
                 let state = self.change(|i| {
                     i.stored.pending = None;
+                    i.stored.pending_since_ms = None;
                     if matches!(phase, UpdatePhase::InstallFailed { .. }) {
                         i.install_failed_for = Some(pending.version.clone());
                     }
@@ -727,7 +784,7 @@ pub fn init<R: Runtime>(app: &AppHandle<R>, args: &[String]) {
             });
         }
     });
-    let launcher: Launcher = Arc::new(|path| launch::shell_execute_runas(path, launch::INSTALLER_ARGS));
+    let launcher: Launcher = Arc::new(|path| launch::start_non_elevated(path, launch::INSTALLER_ARGS));
     let controller = Arc::new(Controller::new(Settings::production(), current, launcher, on_change));
     app.manage(controller.clone());
     if has_after_update_arg(args) {

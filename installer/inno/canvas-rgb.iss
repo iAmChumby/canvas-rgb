@@ -162,6 +162,8 @@ var
   Params: String;
 begin
   Params := '-NoProfile -ExecutionPolicy Bypass -File "' + ScriptPath + '" ' + Args;
+  // token: ExecAsOriginalUser runs as the person who started Setup (non-elevated); Exec runs as Setup's own
+  // administrator token.
   if AsOriginalUser then
     Result := ExecAsOriginalUser(PsExe, Params, ExpandConstant('{sys}'), SW_HIDE, ewWaitUntilTerminated, Code)
   else
@@ -260,6 +262,7 @@ var
   Code: Integer;
 begin
   // Opened as the logged-in user (not with Setup's administrator rights).
+  // token: the original user's, non-elevated.
   ExecAsOriginalUser(ExpandConstant('{win}\explorer.exe'), '{#PawnIoUrl}', '', SW_SHOWNORMAL, ewNoWait, Code);
 end;
 
@@ -464,6 +467,8 @@ begin
     the wizard does it through the ticked "Launch canvas-rgb" ([Run], --onboard), /SILENT does it here
     ([Run] has skipifsilent). The tray is also single-instance, so a stray second launch only focuses it. }
   { /UPDATE (the tray updating itself) relaunches it with --after-update: it starts quietly, with no window. }
+  // token: ExecAsOriginalUser starts the tray as the person who started Setup. That is the non-elevated user only
+  // because the tray starts Setup unelevated and Setup raises itself (#28): never start Setup with an elevating verb.
   if WizardSilent and (not IsVerySilent) then
   begin
     if IsUpdateRun then
@@ -540,6 +545,7 @@ begin
     Lines[0] := Json;
     SaveStringsToUTF8FileWithoutBOM(ExpandConstant('{app}\update-result.json'), Lines, False);
     Exe := ExpandConstant('{app}\canvas-rgb.exe');
+    // token: the original user's, non-elevated (see CurStepChanged).
     if (not Ok) and FileExists(Exe) then
       ExecAsOriginalUser(Exe, '--after-update', ExpandConstant('{app}'), SW_SHOWNORMAL, ewNoWait, Code);
   except

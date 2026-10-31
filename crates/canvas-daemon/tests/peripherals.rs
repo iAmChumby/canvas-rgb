@@ -350,6 +350,109 @@ async fn a_patch_with_writes_on_reaches_the_device_with_exactly_the_given_keys()
     assert_eq!(writes[0].get("dpi-stage-1"), Some(&PropValue::Number(1600.0)));
 }
 
+/// Issue #7: opening the Peripherals view must not run the device's feature reports more than
+/// once. The view-open here is the Rail's list, the view's list, and the detail asked for twice
+/// at once (a reload or a second window) and again right after.
+#[tokio::test]
+async fn one_view_open_reads_the_device_once() {
+    let fake = FakePeripheral::default();
+    let (router, _app, _home) = build(fake.clone());
+    let id = fake.id().0.clone();
+    let access = call_with_body(
+        &router,
+        "PUT",
+        &access_path_of(&id),
+        r#"{"reads":true,"writes":true}"#,
+    )
+    .await;
+    assert_eq!(access.status(), StatusCode::OK);
+
+    call(&router, "GET", routes::PERIPHERALS).await;
+    call(&router, "GET", routes::PERIPHERALS).await;
+    let path = path_of(&id);
+    let (a, b) = tokio::join!(call(&router, "GET", &path), call(&router, "GET", &path));
+    assert_eq!(a.status(), StatusCode::OK);
+    assert_eq!(b.status(), StatusCode::OK);
+    let again = call(&router, "GET", &path).await;
+    let values = json(again).await;
+    assert_eq!(
+        values.get("values").and_then(|v| v.as_object()).map(|v| v.len()),
+        Some(3),
+        "the shared read still carries the values"
+    );
+    assert_eq!(fake.log().reads, 1, "three detail requests, one read of the device");
+}
+
+/// The view-open of issue #7 at the hub, with the sharing window as a parameter. Returns how
+/// many times the device was read: the Rail's list, the view's list, the describe, then three
+/// detail reads (two at once, one after).
+async fn reads_for_one_view_open(window: std::time::Duration) -> u32 {
+    use canvas_daemon::peripherals::{Peripheral, PeripheralHub};
+    let fake = FakePeripheral::default();
+    let hub = PeripheralHub::with_read_cache(
+        vec![Box::new(fake.clone()) as Box<dyn Peripheral>],
+        window,
+    );
+    let id = fake.id();
+    hub.apply(&id, PeripheralAccess { reads: true, writes: false }).await.unwrap();
+    hub.discover().await;
+    hub.discover().await;
+    hub.describe(&id).await.unwrap();
+    let (a, b) = tokio::join!(hub.read(&id), hub.read(&id));
+    a.unwrap();
+    b.unwrap();
+    hub.read(&id).await.unwrap();
+    fake.log().reads
+}
+
+#[tokio::test]
+async fn the_hub_shares_one_read_between_three_asks() {
+    assert_eq!(reads_for_one_view_open(canvas_daemon::peripherals::READ_CACHE).await, 1);
+}
+
+/// The old behaviour, as a test: with no sharing window every ask reads the device.
+#[tokio::test]
+async fn without_the_window_the_same_three_asks_read_three_times() {
+    assert_eq!(reads_for_one_view_open(std::time::Duration::ZERO).await, 3);
+}
+
+/// A shared read of a device that is no longer open is not an answer.
+#[tokio::test]
+async fn a_shared_read_is_not_served_for_a_device_that_is_no_longer_open() {
+    let fake = FakePeripheral::default();
+    let (router, _app, _home) = build(fake.clone());
+    let id = fake.id().0.clone();
+    call_with_body(&router, "PUT", &access_path_of(&id), r#"{"reads":true,"writes":false}"#).await;
+    call(&router, "GET", &path_of(&id)).await;
+    assert_eq!(fake.log().reads, 1);
+    fake.0.lock().unwrap().connected = false;
+    call(&router, "GET", &path_of(&id)).await;
+    let log = fake.log();
+    assert_eq!(log.reads, 2, "the unplugged device is opened again and read, not answered from memory");
+    assert_eq!(log.connects, 2);
+}
+
+/// A write changes the device, so the read after it is a new one.
+#[tokio::test]
+async fn a_write_drops_the_shared_read() {
+    let fake = FakePeripheral::default();
+    let (router, _app, _home) = build(fake.clone());
+    let id = fake.id().0.clone();
+    call_with_body(&router, "PUT", &access_path_of(&id), r#"{"reads":true,"writes":true}"#).await;
+    call(&router, "GET", &path_of(&id)).await;
+    assert_eq!(fake.log().reads, 1);
+    let patched = call_with_body(
+        &router,
+        "PATCH",
+        &path_of(&id),
+        r#"{"dpi-stage-1":{"type":"number","value":1600}}"#,
+    )
+    .await;
+    assert_eq!(patched.status(), StatusCode::OK);
+    call(&router, "GET", &path_of(&id)).await;
+    assert_eq!(fake.log().reads, 2, "the read after a write reads the device again");
+}
+
 #[tokio::test]
 async fn the_adapter_refuses_an_unknown_key_and_nothing_is_sent() {
     let fake = FakePeripheral::default();
