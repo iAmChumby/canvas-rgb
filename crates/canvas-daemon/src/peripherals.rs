@@ -183,6 +183,35 @@ mod sink_hook {
         GATE.get_or_init(|| (Mutex::new(Gate::default()), Condvar::new()))
     }
 
+    /// Opens the gate when it goes out of scope while it is armed.
+    ///
+    /// A wait that gives up (a panic) must not leave a worker blocked in `pause()`: the
+    /// runtime cannot end while a blocking task is still waiting, so the binary would hang
+    /// after the failure instead of ending with it. The guard opens the gate on the way out,
+    /// so the sink is released and the binary can end.
+    struct GateGuard {
+        armed: bool,
+    }
+
+    impl GateGuard {
+        fn armed() -> Self {
+            Self { armed: true }
+        }
+
+        /// The wait ended the way it should: the gate stays as the test left it.
+        fn disarm(&mut self) {
+            self.armed = false;
+        }
+    }
+
+    impl Drop for GateGuard {
+        fn drop(&mut self) {
+            if self.armed {
+                open();
+            }
+        }
+    }
+
     /// Waits at the gate, with the progress lock held. The test opens the gate.
     pub(crate) fn pause() {
         let (lock, cv) = gate();
@@ -213,6 +242,20 @@ mod sink_hook {
         cv.notify_all();
     }
 
+    /// True when the sink has written its stage. The test uses it to see that the sink was
+    /// still held at the gate: a gate that let the sink straight through would make the race
+    /// impossible, and the test would pass without it.
+    pub(crate) fn written_yet() -> bool {
+        let (lock, _cv) = gate();
+        let g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        g.written
+    }
+
+    /// True when the proof run asks for a gate that never opens.
+    pub(crate) fn never_opens() -> bool {
+        std::env::var("CANVAS_RGB_GATE_NEVER_OPENS").is_ok()
+    }
+
     /// Waits until a sink is at the gate.
     pub(crate) fn wait_until_reached() {
         wait_for("the sink to reach the gate", |g| g.reached);
@@ -229,6 +272,9 @@ mod sink_hook {
     /// Waits for one step of the test, with a deadline. A regression fails the test with the
     /// step it stopped at, instead of hanging the binary.
     fn wait_for(step: &str, done: fn(&Gate) -> bool) {
+        // The gate is opened if this wait gives up: the worker that is blocked at it is
+        // released, so the binary ends with the failure instead of hanging on it.
+        let mut guard = GateGuard::armed();
         let (lock, cv) = gate();
         let mut g = lock.lock().unwrap_or_else(|e| e.into_inner());
         let deadline = Instant::now() + GATE_TIMEOUT;
@@ -243,6 +289,7 @@ mod sink_hook {
                 panic!("the test waited {GATE_TIMEOUT:?} for {step} and gave up");
             }
         }
+        guard.disarm();
     }
 
     /// Puts the gate back, for the next test.
@@ -637,6 +684,14 @@ mod tests {
 
         // The sink is at the gate: it has checked the flag and has not written the stage yet.
         sink_hook::wait_until_reached();
+        // And it is still there: the gate holds it. A gate that let the sink straight through
+        // would make this test pass without the race ever happening, so the sink is given a
+        // moment to write its stage, and it must not have written it.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !sink_hook::written_yet(),
+            "the sink was not held at the gate: the race was not tested"
+        );
 
         // The reader goes away while the sink waits: the stage is cleared.
         reader.abort();
@@ -659,6 +714,39 @@ mod tests {
             "a report that arrived after the read ended brought the stage back"
         );
         sink_hook::reset();
+    }
+
+    /// The proof that a gate that never opens fails the test and does not hang the binary.
+    ///
+    /// It runs only when CANVAS_RGB_GATE_NEVER_OPENS is set: the other test opens the gate
+    /// itself, so the "never opens" case has to be asked for. The wait gives up after
+    /// GATE_TIMEOUT, the test fails, and the guard opens the gate on the way out: the worker
+    /// that is blocked at the gate is released, so the binary ends with the failure instead of
+    /// hanging on it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_gate_that_never_opens_fails_the_test_and_does_not_hang_the_binary() {
+        if !sink_hook::never_opens() {
+            eprintln!(
+                "skipped: set CANVAS_RGB_GATE_NEVER_OPENS=1 to run the never-opening gate proof"
+            );
+            return;
+        }
+        sink_hook::reset();
+        let id = DeviceId("held:never".into());
+        let hub = Arc::new(PeripheralHub::with_read_cache(
+            vec![Box::new(HeldPeripheral::new(id.clone()))],
+            Duration::ZERO,
+        ));
+        let _reader = {
+            let hub = hub.clone();
+            let id = id.clone();
+            tokio::spawn(async move { hub.read(&id).await })
+        };
+        // The sink is at the gate and nothing opens it: the wait gives up and the test fails.
+        sink_hook::wait_until_reached();
+        sink_hook::wait_until_written();
+        // The wait above gives up and panics: this line is only reached if it does not.
+        panic!("the wait for the sink to write its stage should have given up");
     }
 
     #[test]
