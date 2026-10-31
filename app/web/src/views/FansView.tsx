@@ -13,7 +13,7 @@ import { Slider } from "@/components/Slider";
 import { Sparkline, Figure } from "@/components/Readout";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { useMediaQuery } from "@/components/MediaQuery";
-import { LoadFrame } from "@/components/Loading";
+import { Details, LoadFrame } from "@/components/Loading";
 import { FansShape } from "@/components/LoadShapes";
 import { useToast } from "@/components/Toast";
 import { FanCurveEditor } from "@/views/FanCurveEditor";
@@ -168,10 +168,8 @@ export function FansView() {
               </Button>
             }
           >
-            The daemon has not heard from it for {downFor}. Fan control is unavailable until the
-            service is back. The lights are unaffected, and the fans stay under BIOS control in the
-            meantime.
-            <span className="state-detail">the daemon said: {fansError}</span>
+            No answer for {downFor}. The fans stay under BIOS control; the lights are unaffected.
+            <Details>{fansError}</Details>
           </EmptyState>
         </Panel>
         {known.length > 0 && (

@@ -233,7 +233,16 @@ export function LayoutShape() {
   return (
     <div className="layout-grid">
       <div className="layout-stage-col stack">
-        <Skeleton className="skel-stage" />
+        {/* The canvas box holds the drawing and, under it, the view switch and the notes, as the real
+            one does: the drawing is as tall as the loaded drawing, not as the whole box. */}
+        <div className="skel-canvas">
+          <Skeleton className="skel-stage" />
+          <div className="skel-canvas-tools">
+            <Skeleton width="58%" height={40} radius={8} />
+            <Skeleton width="86%" height={14} />
+            <Skeleton width="44%" height={14} />
+          </div>
+        </div>
         <SkelRows rows={2} size={[169.3, 292.3]} />
       </div>
       <div className="stack">
@@ -278,8 +287,13 @@ export function EffectDetailShape() {
           <Skeleton width="86%" height={14} />
         </div>
       </SkelPanel>
-      <SkelPanel size={[126.3, 126.3]}>
-        <Skeleton width={120} height={26} radius={8} />
+      <SkelPanel size={[200.3, 164.3]}>
+        <div className="skel-chips skel-chips-bare">
+          {Array.from({ length: 4 }, (_, i) => (
+            <Skeleton key={i} width={[120, 72, 104, 112][i]} height={32} radius={8} />
+          ))}
+        </div>
+        <Skeleton width="70%" height={14} />
       </SkelPanel>
       <SkelRows rows={6} size={[374.3, 454.5]} />
     </div>
@@ -334,26 +348,62 @@ export function SettingsShape() {
   );
 }
 
-/** The devices list: a card per device with its zone strips. */
+/**
+ * The devices list: a card per device, with its head and a zone row (the name, the LED strip, the
+ * count). The cards differ in height as the real ones do: most devices have one zone and one has
+ * four (measured on the 12 demo devices: a card is 69 px of head and 57.6 px a zone at 1440, 97.4 px
+ * and 108.1 px a zone on a phone). `ZONE_RHYTHM` is how many zone rows each card gets, in turn.
+ */
+const ZONE_RHYTHM = [1, 1, 1, 4, 1, 1, 1, 1, 1, 1, 1, 1] as const;
+
 export function DeviceListShape({ cards = 3 }: { cards?: number }) {
+  // A plain block, not the frame's flex column: the cards sit 12 px apart by `.device + .device`, as the real ones do.
   return (
-    <>
-      {Array.from({ length: cards }, (_, i) => (
-        <section className="device device-skeleton" key={i}>
+    <div>
+      {Array.from({ length: cards }, (_, i) => {
+        const zones = ZONE_RHYTHM[i % ZONE_RHYTHM.length] ?? 1;
+        const vars = {
+          "--dev-w": `${69 + zones * 57.6}px`,
+          "--dev-n": `${97.4 + zones * 108.1}px`,
+        } as CSSProperties;
+        return (
+        <section className="device device-skeleton" style={vars} key={i}>
           <div className="device-head">
             <Skeleton className="skeleton-icon" />
-            <span className="stack" style={{ gap: 4, minWidth: 0 }}>
+            <span className="stack" style={{ gap: 4, minWidth: 0, flex: "1 1 160px" }}>
               <Skeleton height={16} width="52%" />
-              <Skeleton height={12} width="34%" />
+              <Skeleton height={12} width="64%" />
             </span>
           </div>
-          <div className="zone-strip">
-            <Skeleton height={14} width="28%" />
-            <Skeleton height={14} width="42%" />
-            <Skeleton height={14} width="14%" />
-          </div>
+          {Array.from({ length: zones }, (_, z) => (
+            <div className="zone-strip skel-zone" key={z}>
+              <span className="zone-strip-name">
+                <Skeleton height={14} width="70%" />
+              </span>
+              <Skeleton className="zone-strip-svg skel-led-strip" height={22} radius={11} />
+              <span className="zone-strip-count">
+                <Skeleton height={14} width={64} />
+              </span>
+            </div>
+          ))}
         </section>
-      ))}
-    </>
+        );
+      })}
+    </div>
+  );
+}
+
+/** The updates page while the tray has not answered: the panel the state goes in. */
+export function UpdatesShape() {
+  return (
+    <div className="settings-grid">
+      <div className="stack">
+        <SkelPanel>
+          <Skeleton width="62%" height={16} />
+          <Skeleton width="100%" height={14} style={{ marginTop: 12 }} />
+          <Skeleton width="84%" height={14} style={{ marginTop: 8 }} />
+        </SkelPanel>
+      </div>
+    </div>
   );
 }

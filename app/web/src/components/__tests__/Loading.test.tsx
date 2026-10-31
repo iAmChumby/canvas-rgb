@@ -1,6 +1,6 @@
 import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ErrorPanel, LOAD_DELAY_MS, LoadFrame, stageLine, type LoadState } from "@/components/Loading";
+import { Details, ErrorPanel, LOAD_DELAY_MS, LoadFrame, stageLine, type LoadState } from "@/components/Loading";
 import { Skeleton } from "@/components/Skeleton";
 import { readStage } from "@/lib/peripherals";
 
@@ -200,5 +200,59 @@ describe("one frame in every state", () => {
     expect(root(container).getAttribute("aria-busy")).toBe("true");
     rerender(frame("ready"));
     expect(root(container).getAttribute("aria-busy")).toBeNull();
+  });
+});
+
+describe("a load that starts soon after another one ended", () => {
+  it("counts its own 150 ms, not what is left of the last load's", () => {
+    // Load A runs 100 ms and ends; load B starts at once. A's timer would have fired at 150 ms,
+    // 50 ms into B. B shows nothing until 150 ms after its own start.
+    const { container, rerender } = render(frame("loading"));
+    advance(100);
+    rerender(frame("ready"));
+    rerender(frame("loading"));
+    expect(root(container).dataset.shown).toBe("false");
+    advance(50); // t = 150 ms: A's timer, had it survived, fires here
+    expect(root(container).dataset.shown).toBe("false");
+    advance(99); // 149 ms into B
+    expect(root(container).dataset.shown).toBe("false");
+    advance(1);
+    expect(root(container).dataset.shown).toBe("true");
+  });
+});
+
+describe("the words a screen reader hears", () => {
+  it("says Loading only after the delay, and never for a load that ends inside it", () => {
+    const { container, rerender } = render(frame("loading", { label: "Loading the effects" }));
+    const status = () => container.querySelector(".sr-only[role=status]") as HTMLElement | null;
+    expect(status()).not.toBeNull();
+    expect(status()?.textContent).toBe("");
+    advance(LOAD_DELAY_MS - 1);
+    expect(status()?.textContent).toBe("");
+    advance(1);
+    expect(status()?.textContent).toBe("Loading the effects");
+    rerender(frame("ready"));
+    expect(container.querySelector(".sr-only[role=status]")).toBeNull();
+  });
+});
+
+describe("the error panel", () => {
+  it("offers Try again when it has a way to, and runs it", () => {
+    const calls: number[] = [];
+    const { getByRole } = render(
+      <ErrorPanel title="Could not read" message="no" onRetry={() => void calls.push(1)} />,
+    );
+    getByRole("button", { name: "Try again" }).click();
+    expect(calls).toEqual([1]);
+  });
+
+  it("folds the raw text of an error into a disclosure", () => {
+    const { container } = render(
+      <LoadFrame state="error" shape={shape} error={<Details>the service said: 500</Details>} />,
+    );
+    const d = container.querySelector("details.load-detail") as HTMLDetailsElement;
+    expect(d).not.toBeNull();
+    expect(d.open).toBe(false);
+    expect(d.textContent).toContain("the service said: 500");
   });
 });
