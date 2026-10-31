@@ -278,6 +278,22 @@ impl Controller {
         }
     }
 
+    /// The installer process ended while this tray still runs. Setup raises its own permission
+    /// prompt (#28), so a Setup that exits with "cancelled before install" and wrote no result file
+    /// was declined at that prompt: nothing started, no pending version, the Declined phase. Any
+    /// other end is settled from the result file as before.
+    pub fn settle_after_installer(&self, exit_code: Option<u32>) {
+        if exit_code == Some(launch::SETUP_CANCELLED_CODE) && read_result(&self.settings.result_path).is_none() {
+            log::append("update: setup ended with code 2 and no result: the permission prompt was declined");
+            self.change(|i| {
+                i.stored.pending = None;
+                i.phase = UpdatePhase::Declined;
+            });
+            return;
+        }
+        self.reconcile_pending();
+    }
+
     // ---- the person's choices ----
 
     pub fn later(&self) -> UpdateState {
@@ -424,8 +440,11 @@ impl Controller {
         if let Some(handle) = started {
             // Normally the installer stops this tray. If it ends first, its result file says why.
             // The wait is unbounded, so it takes a blocking thread, not an async worker.
-            let _ = tauri::async_runtime::spawn_blocking(move || launch::wait_and_close(handle)).await;
-            self.reconcile_pending();
+            let code = tauri::async_runtime::spawn_blocking(move || launch::wait_and_close(handle))
+                .await
+                .ok()
+                .flatten();
+            self.settle_after_installer(code);
             return self.state();
         }
         state
@@ -727,7 +746,7 @@ pub fn init<R: Runtime>(app: &AppHandle<R>, args: &[String]) {
             });
         }
     });
-    let launcher: Launcher = Arc::new(|path| launch::shell_execute_runas(path, launch::INSTALLER_ARGS));
+    let launcher: Launcher = Arc::new(|path| launch::start_non_elevated(path, launch::INSTALLER_ARGS));
     let controller = Arc::new(Controller::new(Settings::production(), current, launcher, on_change));
     app.manage(controller.clone());
     if has_after_update_arg(args) {

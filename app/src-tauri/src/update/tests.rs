@@ -1423,3 +1423,39 @@ fn the_result_file_is_read_with_a_bom_and_with_non_ascii_or_bad_bytes() {
     let r = read_result(&path).expect("a stray byte does not hide the report");
     assert!(r.message.starts_with("Caf") && !r.ok);
 }
+
+// ---- which token starts the installer (#28) ----
+
+/// Setup must be started with the tray's own non-elevated token and raise its own permission
+/// prompt; started elevated, its `ExecAsOriginalUser` relaunch gave an elevated tray that refuses
+/// to run. Fails on the old code: `shell_execute_runas` passed the elevating verb.
+#[test]
+fn the_installer_is_started_without_an_elevating_verb() {
+    let request = launch::installer_request(launch::INSTALLER_ARGS);
+    assert_eq!(request.verb, None);
+    assert_eq!(request.args, launch::INSTALLER_ARGS);
+    let source = include_str!("launch.rs").to_lowercase();
+    assert!(!source.contains("runas"), "launch.rs must not name an elevating verb");
+}
+
+#[test]
+fn a_setup_that_ends_cancelled_with_no_result_is_declined_not_failed() {
+    let h = harness("0.1.0", "test.key.pub", Launch::Starts);
+    good_release(&h);
+    h.check(true);
+    assert_eq!(h.install().phase, UpdatePhase::Installing);
+    assert!(h.stored().pending.is_some());
+    h.ctl.settle_after_installer(Some(launch::SETUP_CANCELLED_CODE));
+    assert_eq!(h.ctl.state().phase, UpdatePhase::Declined);
+    assert_eq!(h.stored().pending, None);
+}
+
+#[test]
+fn a_setup_that_ends_any_other_way_is_settled_from_its_result() {
+    let h = harness("0.1.0", "test.key.pub", Launch::Starts);
+    good_release(&h);
+    h.check(true);
+    h.install();
+    h.ctl.settle_after_installer(Some(4));
+    assert!(matches!(h.ctl.state().phase, UpdatePhase::InstallFailed { .. }), "{:?}", h.ctl.state().phase);
+}
