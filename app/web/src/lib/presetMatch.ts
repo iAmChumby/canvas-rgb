@@ -116,12 +116,16 @@ export function diffProps(defs: PropertyDef[], preset: Props, live: Props): Chan
   return changes;
 }
 
-/** True when the name is taken by one of the lists, ignoring case. `except` may keep its own. */
+/** Folds the letters A to Z and nothing else: the daemon compares names with `eq_ignore_ascii_case`. */
+export function asciiFold(name: string): string {
+  return name.replace(/[A-Z]/g, (c) => c.toLowerCase());
+}
+
+/** True when the name is taken by one of the lists, ignoring ASCII case. `except` may keep its own. */
 export function nameTaken(name: string, lists: Preset[][], except?: string): boolean {
-  const n = name.trim().toLowerCase();
-  return lists.some((list) =>
-    list.some((p) => p.name.toLowerCase() === n && p.name.toLowerCase() !== except?.toLowerCase()),
-  );
+  const n = asciiFold(name.trim());
+  const own = except === undefined ? null : asciiFold(except);
+  return lists.some((list) => list.some((p) => asciiFold(p.name) === n && asciiFold(p.name) !== own));
 }
 
 /** The next free copy name: "Storm 2", then "Storm 3". */

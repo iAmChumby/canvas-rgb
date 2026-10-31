@@ -125,6 +125,8 @@ function seededPresets(): Record<string, Preset[]> {
       { name: "Slow dusk", props: { ...aurora.defaults, color1: c("#8fb4e8"), color2: c("#b49cf0"), color3: c("#5fd0c0"), speed: n(8), scale: n(3) } },
       { name: "Late shift", props: { ...aurora.defaults, color1: c("#ffb703"), color2: c("#e5484d"), color3: c("#3a0ca3"), speed: n(35) } },
     ],
+    // The user effect of `?state=html`, so its delete asks what to do with the presets.
+    "html:fixture-sample": [{ name: "Calm", props: { speed: n(12) } }],
   };
 }
 
@@ -640,7 +642,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
   // The daemon does not answer at all.
   if (daemonDown()) fail(503, "service_unavailable", "the daemon is not answering");
   // Every write is refused.
-  if (method !== "GET" && saveError()) fail(500, "internal", "the daemon refused the change");
+  if (method !== "GET" && saveError()) fail(500, "internal", "could not save the effects: access is denied (os error 5)");
 
   const url = new URL(path, "http://demo.invalid");
   const pathname = decodeURIComponent(url.pathname);
@@ -838,7 +840,8 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       if (!e) fail(404, "not_found", `no user effect with the id ${id}`);
       delete s.effects[id];
       delete s.saved[id];
-      delete s.userPresets[id];
+      // The presets go with the effect unless the query keeps them.
+      if (url.searchParams.get("keep_presets") !== "true") delete s.userPresets[id];
       s.favorites.delete(id);
       if (s.activeEffect === id) s.activeEffect = null;
       return { ok: true };

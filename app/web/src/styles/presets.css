@@ -59,13 +59,13 @@ button.chip.chip-add:hover {
 .chip.chip-add[aria-pressed="true"] {
   border-style: solid;
   color: var(--ink);
-  background-color: color-mix(in oklab, var(--raised) 92%, black);
+  background-color: var(--raised-press);
 }
 
 /* The values on the lights differ from the key: its LED turns amber. */
 .chip.chip-marked[aria-pressed="true"]::before {
-  background: var(--warn);
-  box-shadow: 0 0 0 2px color-mix(in oklab, var(--warn) 24%, transparent);
+  background: var(--modified);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--modified) 24%, transparent);
 }
 
 /* A save on its way: the key is held down with its LED out. */
@@ -127,16 +127,11 @@ button.chip.chip-add:hover {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--warn);
+  background: var(--modified);
 }
 
-.preset-diff-text {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--ink);
-  font-size: var(--t14);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.preset-changed {
+  color: var(--dim);
 }
 
 .preset-actions {
@@ -146,14 +141,26 @@ button.chip.chip-add:hover {
   gap: var(--s1);
 }
 
-/* The refusal prints in space that is always there. */
-.preset-error {
+/* The note under the line: the change in numbers, or why something was refused. Always 22 px. */
+.preset-note {
   height: 22px;
   margin-top: var(--s1);
   overflow: hidden;
+  color: var(--mute);
+  font-family: var(--fm);
+  font-size: var(--t14);
   line-height: 22px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.preset-note[data-tone="error"] {
+  color: var(--down);
+  font-family: inherit;
+}
+
+.preset-working {
+  margin-left: var(--s1);
 }
 
 /* The menu of a user preset's key. */
@@ -201,7 +208,7 @@ button.chip.chip-add:hover {
   height: 6px;
   margin-left: 6px;
   border-radius: 50%;
-  background: var(--warn);
+  background: var(--modified);
   vertical-align: middle;
 }
 

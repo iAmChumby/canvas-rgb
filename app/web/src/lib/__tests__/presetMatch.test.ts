@@ -94,6 +94,14 @@ describe("names", () => {
     expect(nameTaken("Ember", [builtIn, user], "Storm")).toBe(true);
   });
 
+  it("folds only ASCII letters, as the daemon does", () => {
+    const accented: Preset[] = [{ name: "\u00c9t\u00e9", props: {} }];
+    expect(nameTaken("\u00e9t\u00e9", [accented])).toBe(false);
+    expect(nameTaken("\u00c9T\u00e9", [accented])).toBe(true);
+    expect(nameTaken("\u00c9t\u00e9", [accented])).toBe(true);
+    expect(nameTaken("STORM", [[{ name: "storm", props: {} }]])).toBe(true);
+  });
+
   it("numbers a copy with the next free number", () => {
     expect(nextFreeName("Storm", [builtIn, user])).toBe("Storm 3");
     expect(nextFreeName("Storm 2", [builtIn, user])).toBe("Storm 3");

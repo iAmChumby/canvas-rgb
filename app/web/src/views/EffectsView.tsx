@@ -188,6 +188,14 @@ export function EffectsView() {
     }
   };
 
+  // The preset deleted last, while it can still be put back (8 s).
+  const [undo, setUndoState] = useState<{ name: string; run: () => Promise<void> } | null>(null);
+  const undoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const setUndo = (next: { name: string; run: () => Promise<void> } | null) => {
+    if (undoTimer.current) clearTimeout(undoTimer.current);
+    setUndoState(next);
+    if (next) undoTimer.current = setTimeout(() => setUndoState(null), 8000);
+  };
   const detailRef = useRef<EffectDetail | null>(null);
   useEffect(() => {
     detailRef.current = loaded && loaded.id === selectedId ? loaded.detail : null;
@@ -295,17 +303,28 @@ export function EffectsView() {
     }
     // The live values stay as they are; they just no longer belong to a preset.
     if (wasApplied) setApplied(id, null);
-    // At once, with the props the preset had: nothing waits on a timer.
+    // One way back, shared by the toast and the strip: it works once, then both go.
+    let used = false;
     const putBack = async () => {
-      const r = await api.createPreset(id, { name, props: preset.props });
-      setUserPresets(id, r.user_presets);
-      if (wasApplied) setApplied(id, name);
+      if (used) return;
+      used = true;
+      setUndo(null);
+      try {
+        const r = await api.createPreset(id, { name, props: preset.props });
+        setUserPresets(id, r.user_presets);
+        if (wasApplied) setApplied(id, name);
+        // The store appends, so the preset comes back at the end of the list.
+        toast(`Put back ${name} at the end of the list`);
+      } catch (e) {
+        used = false;
+        throw e;
+      }
     };
+    setUndo({ name, run: putBack });
     toast(`Deleted ${name}`, "info", {
       label: "Undo",
       onClick: () => void putBack().catch((e: unknown) => toast(messageOf(e), "down")),
     });
-    return putBack;
   };
 
   const toggleFavorite = async (id: string, favorite: boolean, name: string) => {
@@ -346,10 +365,10 @@ export function EffectsView() {
   };
 
   /** Removes a user effect. The one that is playing asks first. */
-  const deleteEffect = async (id: string, name: string) => {
+  const deleteEffect = async (id: string, name: string, keepPresets = false) => {
     setDeleting(null);
     try {
-      await api.deleteEffect(id);
+      await api.deleteEffect(id, keepPresets);
       await refreshAll();
       toast(`${name} is removed`);
     } catch (e) {
@@ -552,7 +571,10 @@ export function EffectsView() {
                   {deleting === selectedId ? (
                     <>
                       <span>
-                        {running ? `${detail.schema.name} is playing. ` : ""}Delete it anyway?
+                        {running ? `${detail.schema.name} is playing. ` : ""}
+                        {detail.user_presets.length > 0
+                          ? `Delete it? It has ${detail.user_presets.length} preset${detail.user_presets.length === 1 ? "" : "s"} of yours.`
+                          : "Delete it anyway?"}
                       </span>
                       <div className="row-wrap">
                         <Button
@@ -560,8 +582,16 @@ export function EffectsView() {
                           size="sm"
                           onClick={() => void deleteEffect(selectedId, detail.schema.name)}
                         >
-                          Delete
+                          {detail.user_presets.length > 0 ? "Delete with presets" : "Delete"}
                         </Button>
+                        {detail.user_presets.length > 0 && (
+                          <Button
+                            size="sm"
+                            onClick={() => void deleteEffect(selectedId, detail.schema.name, true)}
+                          >
+                            Keep presets
+                          </Button>
+                        )}
                         <Button variant="ghost" size="sm" onClick={() => setDeleting(null)}>
                           Cancel
                         </Button>
@@ -596,6 +626,10 @@ export function EffectsView() {
             onRename={renamePreset}
             onDuplicate={duplicatePreset}
             onDelete={deletePreset}
+            undo={undo && detail.schema.id === selectedId ? { name: undo.name } : null}
+            onUndo={async () => {
+              if (undo) await undo.run();
+            }}
           />
 
           <Panel title="Properties">

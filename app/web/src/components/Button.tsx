@@ -95,19 +95,21 @@ export function IconButton({
   size = "md",
   disabled,
   className,
+  tip = true,
   onClick,
 }: {
   label: string;
   icon: ReactNode;
   pressed?: boolean;
+  /** False when the control sits where a bubble would only be in the way (an open name field). */
+  tip?: boolean;
   size?: "sm" | "md";
   disabled?: boolean;
   className?: string;
   onClick: () => void;
 }) {
   const cls = ["ibtn", size === "sm" && "ibtn-sm", className].filter(Boolean).join(" ");
-  return (
-    <Tooltip label={label}>
+  const button = (
       <button
         type="button"
         className={cls}
@@ -118,8 +120,8 @@ export function IconButton({
       >
         {icon}
       </button>
-    </Tooltip>
   );
+  return tip ? <Tooltip label={label}>{button}</Tooltip> : button;
 }
 
 /** A button that opens a file picker and hands the chosen file to `onFile`. */

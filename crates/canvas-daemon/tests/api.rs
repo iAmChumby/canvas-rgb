@@ -2218,7 +2218,8 @@ async fn user_presets_are_saved_to_disk_and_survive_a_restart() {
     assert_eq!(names, ["Storm"]);
 }
 
-/// The rule in `docs/preset-equality.json`: missing keys take the default, a number rounds to
+/// The rule in `docs/preset-equality.json`. The editor's rule is the only production one; this
+/// copy pins the fixture, with JavaScript's rounding. Missing keys take the default, a number rounds to
 /// its step, a hue to a whole degree modulo 360, colours compare without case, keys the schema
 /// does not name are ignored. The editor reads the same file in `presetMatch.test.ts`.
 #[test]
@@ -2238,10 +2239,13 @@ fn the_preset_equality_fixture_holds() {
                 let text = match (&d.kind, value) {
                     (PropKind::Number { step, .. }, PropValue::Number(v)) => {
                         let step = if *step > 0.0 { *step } else { 1.0 };
-                        format!("{}", ((v / step).round() * step * 1e4).round() / 1e4)
+                        // JavaScript's Math.round: a half goes toward +infinity (f64::round goes
+                        // away from zero, which differs for a negative half).
+                        let rounded = (v / step + 0.5).floor() * step;
+                        format!("{}", (rounded * 1e4 + 0.5).floor() / 1e4)
                     }
                     (PropKind::Hue { .. }, PropValue::Hue(v)) => {
-                        format!("{}", v.round().rem_euclid(360.0))
+                        format!("{}", (v + 0.5).floor().rem_euclid(360.0))
                     }
                     (_, PropValue::Color(c)) => {
                         serde_json::to_value(c).unwrap().as_str().unwrap().to_lowercase()
@@ -2254,7 +2258,7 @@ fn the_preset_equality_fixture_holds() {
     }
 
     let cases = fixture["cases"].as_array().expect("the cases");
-    assert!(cases.len() >= 10, "the fixture has its cases");
+    assert!(cases.len() >= 20, "the fixture has its cases");
     for case in cases {
         let name = case["name"].as_str().unwrap();
         let preset: Props = serde_json::from_value(case["preset"].clone()).expect(name);
@@ -2262,4 +2266,346 @@ fn the_preset_equality_fixture_holds() {
         let equal = normal(&defs, &preset) == normal(&defs, &live);
         assert_eq!(equal, case["equal"].as_bool().unwrap(), "{name}");
     }
+}
+
+// ---- user presets: the fix pass ----
+
+/// An app whose user effect `html:fancy` has one number property `speed` (0 to `max` in the file:
+/// the file's text is `max=NN`), so a test can narrow the range by writing the file again.
+fn build_with_speed_effect() -> (axum::Router, Arc<App>, TempHome, std::path::PathBuf) {
+    use canvas_proto::props::{PropKind, PropertyDef};
+    let home = TempHome::new();
+    let store = canvas_daemon::storage::Store::at(&home.path);
+    let engine = Arc::new(FakeEngine::default());
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(
+        store,
+        engine,
+        Box::new(FakeAdapter::default()),
+        TOKEN.to_string(),
+        "0.1.0-test".to_string(),
+        tx,
+    );
+    let fake: canvas_daemon::user_effects::Builder = Arc::new(|id: &str, source: &str| {
+        let max = source
+            .strip_prefix("max=")
+            .and_then(|n| n.trim().parse::<f64>().ok())
+            .unwrap_or(100.0);
+        let mut effect = common::FakeEffect::new(id);
+        effect.schema.properties = vec![PropertyDef {
+            key: "speed".to_string(),
+            label: "Speed".to_string(),
+            kind: PropKind::Number { min: 0.0, max, step: 1.0, default: 20.0 },
+        }];
+        Ok(Box::new(effect) as Box<dyn canvas_proto::traits::Effect>)
+    });
+    app.user_effects = Arc::new(canvas_daemon::user_effects::UserEffects::new(fake));
+    let folder = home.path.join("effects");
+    std::fs::create_dir_all(&folder).expect("the effects folder is created");
+    std::fs::write(folder.join("fancy.html"), "max=100").expect("the effect file is written");
+    app.user_effects.rescan(&folder);
+    app.effects_dir = folder.clone();
+    let app = Arc::new(app);
+    (api::router(app.clone()), app, home, folder)
+}
+
+#[tokio::test]
+async fn a_failed_save_leaves_no_ghost_preset() {
+    // The save fails because effects.json is a folder. Before the fix the preset was already in
+    // memory, so the next GET listed a preset that was not on disk.
+    let (router, _app, home) = build();
+    std::fs::create_dir_all(home.path.join("effects.json")).expect("the blocker is made");
+    let (status, _) = send(
+        &router,
+        "POST",
+        "/api/v1/effects/aurora/presets",
+        serde_json::json!({ "name": "Ghost", "props": { "speed": num(61.0) } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "the save failed");
+    let (_, detail) = send(&router, "GET", "/api/v1/effects/aurora", serde_json::json!({})).await;
+    assert!(
+        detail["user_presets"].as_array().unwrap().is_empty(),
+        "no ghost preset in memory: {detail}"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_save_rolls_back_a_replace_and_a_delete() {
+    let (router, _app, home) = build();
+    send(
+        &router,
+        "POST",
+        "/api/v1/effects/aurora/presets",
+        serde_json::json!({ "name": "Storm", "props": { "speed": num(61.0) } }),
+    )
+    .await;
+    // The disk fails from here on.
+    let file = home.path.join("effects.json");
+    std::fs::remove_file(&file).expect("the file is removed");
+    std::fs::create_dir_all(&file).expect("the blocker is made");
+
+    let (status, _) = send(
+        &router,
+        "PUT",
+        "/api/v1/effects/aurora/presets/Storm",
+        serde_json::json!({
+            "rename_to": "Gale",
+            "props": { "speed": num(70.0) },
+            "expected": { "speed": num(61.0) },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let (status, _) =
+        send(&router, "DELETE", "/api/v1/effects/aurora/presets/Storm", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let (_, detail) = send(&router, "GET", "/api/v1/effects/aurora", serde_json::json!({})).await;
+    assert_eq!(detail["user_presets"][0]["name"], "Storm", "the rename did not stick");
+    assert_eq!(detail["user_presets"][0]["props"]["speed"]["value"], 61.0, "the overwrite did not stick");
+}
+
+#[tokio::test]
+async fn preset_props_are_fitted_to_the_schema_and_capped() {
+    let (router, _app, _home) = build();
+    // An unknown key is dropped and a number is clamped to the schema's range (Aurora speed 0-100).
+    let (status, body) = send(
+        &router,
+        "POST",
+        "/api/v1/effects/aurora/presets",
+        serde_json::json!({
+            "name": "Wild",
+            "props": { "speed": num(9999.0), "ghost": num(1.0), "bands": { "type": "bool", "value": true } },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let props = &body["user_presets"][0]["props"];
+    assert_eq!(props["speed"]["value"], 100.0, "clamped to the schema's max");
+    assert!(props.get("ghost").is_none(), "an unknown key is dropped");
+    assert!(props.get("bands").is_none(), "a value of the wrong type is dropped");
+
+    // Over the caps: too many keys, too many bytes, too many presets.
+    let many: serde_json::Map<String, serde_json::Value> =
+        (0..65).map(|i| (format!("k{i}"), num(1.0))).collect();
+    let (status, _) = send(
+        &router,
+        "POST",
+        "/api/v1/effects/aurora/presets",
+        serde_json::json!({ "name": "Many", "props": many }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "65 keys is over the cap");
+    let long = "x".repeat(9000);
+    let (status, _) = send(
+        &router,
+        "POST",
+        "/api/v1/effects/aurora/presets",
+        serde_json::json!({ "name": "Big", "props": { "mode": { "type": "choice", "value": long } } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "9 KB of values is over the cap");
+    for i in 0..99 {
+        let (status, _) = send(
+            &router,
+            "POST",
+            "/api/v1/effects/aurora/presets",
+            serde_json::json!({ "name": format!("P{i}"), "props": {} }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "preset {i}");
+    }
+    let (status, _) = send(
+        &router,
+        "POST",
+        "/api/v1/effects/aurora/presets",
+        serde_json::json!({ "name": "One too many", "props": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "the 101st preset is refused");
+}
+
+#[tokio::test]
+async fn a_preset_saved_before_the_effect_narrowed_applies_clamped() {
+    let (router, app, _home, folder) = build_with_speed_effect();
+    let (status, _) = send(
+        &router,
+        "POST",
+        "/api/v1/effects/html:fancy/presets",
+        serde_json::json!({ "name": "Fast", "props": { "speed": num(90.0) } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // The file is imported again with a narrower range, and a stored key it no longer has.
+    std::fs::write(folder.join("fancy.html"), "max=50").expect("the file is written");
+    app.user_effects.rescan(&folder);
+    let (status, body) = send(
+        &router,
+        "POST",
+        "/api/v1/effects/html:fancy/activate",
+        serde_json::json!({ "preset": "Fast" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["props"]["speed"]["value"], 50.0, "applied clamped to the new range");
+}
+
+#[tokio::test]
+async fn a_preset_name_with_invisible_or_bidirectional_characters_is_refused() {
+    let (router, _app, _home) = build();
+    for bad in ["Evil\u{202E}txt", "Zero\u{200B}width", "Bom\u{FEFF}", "Tab\tname", "Line\nbreak"] {
+        let (status, _) = send(
+            &router,
+            "POST",
+            "/api/v1/effects/aurora/presets",
+            serde_json::json!({ "name": bad, "props": {} }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{bad:?}");
+    }
+    let (status, _) = send(
+        &router,
+        "POST",
+        "/api/v1/effects/aurora/presets",
+        serde_json::json!({ "name": "x".repeat(41), "props": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "41 characters is too long");
+    // A plain accented name is fine.
+    let (status, _) = send(
+        &router,
+        "POST",
+        "/api/v1/effects/aurora/presets",
+        serde_json::json!({ "name": "Soir\u{e9}e", "props": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn the_clash_rule_is_ascii_only_not_unicode() {
+    let (router, _app, _home) = build();
+    send(
+        &router,
+        "POST",
+        "/api/v1/effects/aurora/presets",
+        serde_json::json!({ "name": "\u{c9}t\u{e9}", "props": {} }),
+    )
+    .await;
+    // E-acute in lower case is another name for the ASCII rule: both are kept.
+    let (status, _) = send(
+        &router,
+        "POST",
+        "/api/v1/effects/aurora/presets",
+        serde_json::json!({ "name": "\u{e9}t\u{e9}", "props": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "only ASCII letters fold, as the web rule does");
+}
+
+/// Save, apply by name, rename and delete a preset of an effect, whatever kind it is.
+async fn preset_round_trip(router: &axum::Router, id: &str, key: &str) {
+    let base = format!("/api/v1/effects/{id}");
+    let (status, _) = send(
+        router,
+        "POST",
+        &format!("{base}/presets"),
+        serde_json::json!({ "name": "Mine", "props": { key: num(33.0) } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{id}: saved");
+    let (status, body) =
+        send(router, "POST", &format!("{base}/activate"), serde_json::json!({ "preset": "mine" })).await;
+    assert_eq!(status, StatusCode::OK, "{id}: applied by name");
+    assert_eq!(body["props"][key]["value"], 33.0, "{id}: the preset's value is running");
+    let (status, body) = send(
+        router,
+        "PUT",
+        &format!("{base}/presets/Mine"),
+        serde_json::json!({
+            "rename_to": "Yours",
+            "props": { key: num(44.0) },
+            "expected": { key: num(33.0) },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{id}: renamed");
+    assert_eq!(preset_names(&body), ["Yours"]);
+    let (status, body) = send(router, "DELETE", &format!("{base}/presets/Yours"), serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{id}: deleted");
+    assert!(preset_names(&body).is_empty());
+}
+
+#[tokio::test]
+async fn presets_work_for_a_built_in_a_stock_html_and_a_user_html_effect() {
+    // A Rust built-in.
+    let (router, _app, _home) = build();
+    preset_round_trip(&router, "aurora", "speed").await;
+    // A stock HTML effect: the first number property it has.
+    let (_, detail) = send(&router, "GET", "/api/v1/effects/html:ink-drop", serde_json::json!({})).await;
+    let key = detail["schema"]["properties"]
+        .as_array()
+        .and_then(|ps| ps.iter().find(|p| p["kind"]["type"] == "number"))
+        .and_then(|p| p["key"].as_str())
+        .expect("the stock effect has a number property")
+        .to_string();
+    let min = detail["schema"]["properties"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["key"] == key.as_str())
+        .unwrap()["kind"]["min"]
+        .as_f64()
+        .unwrap();
+    assert!(min <= 33.0, "the test value sits inside the stock range");
+    preset_round_trip(&router, "html:ink-drop", &key).await;
+    // A user HTML effect.
+    let (router, _app, _home, _folder) = build_with_speed_effect();
+    preset_round_trip(&router, "html:fancy", "speed").await;
+}
+
+#[tokio::test]
+async fn deleting_a_user_effect_removes_its_presets_unless_they_are_kept() {
+    // Default: the presets go with the effect, so importing the file again starts clean.
+    let (router, app, home, folder) = build_with_speed_effect();
+    send(
+        &router,
+        "POST",
+        "/api/v1/effects/html:fancy/presets",
+        serde_json::json!({ "name": "Fast", "props": { "speed": num(90.0) } }),
+    )
+    .await;
+    let (status, body) =
+        send(&router, "DELETE", "/api/v1/effects/html:fancy", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["presets_removed"], 1);
+    assert!(!app.store.read().await.effects.presets.contains_key("html:fancy"), "no orphan in memory");
+    let on_disk = canvas_daemon::storage::Store::load_from(&home.path);
+    assert!(!on_disk.effects.presets.contains_key("html:fancy"), "no orphan on disk");
+    std::fs::write(folder.join("fancy.html"), "max=100").expect("the file is imported again");
+    app.user_effects.rescan(&folder);
+    let (_, detail) = send(&router, "GET", "/api/v1/effects/html:fancy", serde_json::json!({})).await;
+    assert!(detail["user_presets"].as_array().unwrap().is_empty(), "the presets did not come back");
+
+    // keep_presets=true: they stay, and come back with the file.
+    send(
+        &router,
+        "POST",
+        "/api/v1/effects/html:fancy/presets",
+        serde_json::json!({ "name": "Fast", "props": { "speed": num(90.0) } }),
+    )
+    .await;
+    let (status, body) = send(
+        &router,
+        "DELETE",
+        "/api/v1/effects/html:fancy?keep_presets=true",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["presets_removed"], 0);
+    std::fs::write(folder.join("fancy.html"), "max=100").expect("the file is imported again");
+    app.user_effects.rescan(&folder);
+    let (_, detail) = send(&router, "GET", "/api/v1/effects/html:fancy", serde_json::json!({})).await;
+    assert_eq!(preset_names(&detail), ["Fast"], "the kept preset is back");
 }

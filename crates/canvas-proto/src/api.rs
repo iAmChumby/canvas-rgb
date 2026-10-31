@@ -35,16 +35,20 @@ pub mod routes {
     /// `POST` with [`super::ImportEffect`], answers [`super::ImportEffectResponse`]. The daemon
     /// parses the file before it writes it; a file that does not parse is refused with the
     /// parser's message and nothing is written. `DELETE` on [`EFFECT`] removes a user effect's
-    /// file (built-ins refuse).
+    /// file (built-ins refuse). Its presets go with it unless the query says
+    /// `?keep_presets=true` ([`super::DeleteEffectQuery`]).
     pub const EFFECTS_IMPORT: &str = "/api/v1/effects/import";
     /// `POST` with [`super::PresetCreate`]: saves a user preset for the effect. Answers
     /// [`super::PresetsResponse`]. 409 when the name equals, ignoring ASCII case, a built-in or
-    /// user preset of that effect; 404 for an unknown effect.
+    /// user preset of that effect; 404 for an unknown effect; 422 for an empty name, one over 40
+    /// characters, one with a control, bidirectional or other invisible format character, or
+    /// props over the caps (64 keys, 8 KiB). Keys the effect does not have are dropped and numbers
+    /// are clamped to the schema's range.
     pub const EFFECT_PRESETS: &str = "/api/v1/effects/{id}/presets";
     /// `PUT` with [`super::PresetReplace`] overwrites and/or renames one user preset; `DELETE`
     /// removes it. Both answer [`super::PresetsResponse`]. 404 for a missing preset or effect;
     /// 409 when `expected` is not what is stored (changed in another window) or `rename_to`
-    /// clashes.
+    /// clashes; 422 for a bad name or props over the caps, as for [`EFFECT_PRESETS`].
     pub const EFFECT_PRESET: &str = "/api/v1/effects/{id}/presets/{name}";
     pub const LAYOUTS: &str = "/api/v1/layouts";
     pub const LAYOUT: &str = "/api/v1/layouts/{id}";
@@ -334,6 +338,16 @@ pub struct PresetReplace {
     /// The props the client last saw for this preset. A mismatch is a conflict, so an edit made
     /// in another window is never overwritten silently.
     pub expected: Props,
+}
+
+/// Query of `DELETE /api/v1/effects/{id}`: what happens to the user presets of the effect that
+/// is removed. Left out, they are deleted with it; with `keep_presets=true` they stay in
+/// `effects.json`, so importing the same file again brings them back.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DeleteEffectQuery {
+    #[serde(default)]
+    pub keep_presets: bool,
 }
 
 /// The effect's user presets after a change, in their stored order.

@@ -78,7 +78,8 @@ export const api = {
   /** Adds a user effect from an HTML file the reader chose. */
   importEffect: (body: ImportEffect) => request<ImportEffectResponse>("POST", routes.effectsImport, body),
   /** Removes a user effect. Only the `html:` ids can go. */
-  deleteEffect: (id: string) => request<unknown>("DELETE", routes.effect(id)),
+  deleteEffect: (id: string, keepPresets = false) =>
+    request<unknown>("DELETE", `${routes.effect(id)}${keepPresets ? "?keep_presets=true" : ""}`),
 
   /** Every peripheral the adapters see. The list opens nothing. */
   peripherals: () => request<{ peripherals: PeripheralRow[] }>("GET", routes.peripherals),

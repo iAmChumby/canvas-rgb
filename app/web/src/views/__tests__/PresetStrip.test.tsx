@@ -45,7 +45,7 @@ function handlers() {
     onReset: vi.fn<(name: string) => Promise<void>>(async () => {}),
     onRename: vi.fn<(name: string, to: string) => Promise<void>>(async () => {}),
     onDuplicate: vi.fn<(name: string) => Promise<void>>(async () => {}),
-    onDelete: vi.fn<(name: string) => Promise<(() => Promise<void>) | void>>(async () => {}),
+    onDelete: vi.fn<(name: string) => Promise<void>>(async () => {}),
   };
 }
 type Handlers = ReturnType<typeof handlers>;
@@ -77,12 +77,13 @@ describe("PresetStrip", () => {
     expect(screen.queryByRole("button", { name: /^Apply preset/ })).toBeNull();
   });
 
-  it("lists the built-in keys, then the owner's, then Save current", () => {
+  it("lists the built-in keys, then the owner's, then Save current, in exactly that order", () => {
     mount();
-    const names = screen.getAllByRole("button").map((b) => b.getAttribute("aria-label") ?? b.textContent);
-    const at = (s: string) => names.findIndex((n) => n?.includes(s));
-    expect(at("Apply preset Ember")).toBeLessThan(at("Apply preset Storm"));
-    expect(at("Apply preset Storm")).toBeLessThan(at("Save current"));
+    const order = screen
+      .getAllByRole("button")
+      .map((b) => b.getAttribute("aria-label") ?? "")
+      .filter((n) => n.startsWith("Apply preset") || n.startsWith("Save current"));
+    expect(order).toEqual(["Apply preset Ember", "Apply preset Storm", "Save current values as a preset"]);
   });
 
   it("lights the running preset's key and says the values match it", () => {
@@ -101,6 +102,7 @@ describe("PresetStrip", () => {
     const key = screen.getByRole("button", { name: "Apply preset Storm (modified)" });
     expect(key.className).toContain("chip-marked");
     expect(screen.getByText("Speed 60 to 75")).toBeTruthy();
+    expect(screen.getByText(/Changed from/).textContent).toBe("Changed from Storm");
     // A user preset may be updated.
     expect(screen.getByRole("button", { name: /Update/ })).toBeTruthy();
     expect(screen.getByRole("button", { name: /Save as new/ })).toBeTruthy();
@@ -175,6 +177,7 @@ describe("PresetStrip", () => {
     expect(pending.disabled).toBe(true);
     expect(pending.getAttribute("aria-busy")).toBe("true");
     expect(field.disabled).toBe(true);
+    expect(screen.getByText("Saving\u2026")).toBeTruthy();
     await act(async () => finish());
     await waitFor(() => expect(screen.queryByRole("button", { name: "Saving Gale" })).toBeNull());
   });
@@ -191,6 +194,23 @@ describe("PresetStrip", () => {
     fireEvent.keyDown(field, { key: "Enter" });
     await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Gale is already"));
     expect(screen.getByLabelText("Preset name")).toBeTruthy();
+  });
+
+  it("names the reason when the daemon could not save, not just that it refused", async () => {
+    const h = handlers();
+    h.onSave = vi.fn<(name: string) => Promise<void>>(async () => {
+      throw new ApiFailure(500, "internal", "could not save the effects: the disk is full");
+    });
+    mount({}, h);
+    fireEvent.click(screen.getByRole("button", { name: "Save current values as a preset" }));
+    const field = screen.getByLabelText("Preset name");
+    fireEvent.change(field, { target: { value: "Gale" } });
+    fireEvent.keyDown(field, { key: "Enter" });
+    await waitFor(() =>
+      expect(screen.getByRole("alert").textContent).toBe(
+        "Not saved: The disk is full",
+      ),
+    );
   });
 
   it("opens the menu of a user key: Rename, Duplicate, Delete; and not of a built-in key", () => {
@@ -241,16 +261,34 @@ describe("PresetStrip", () => {
     await waitFor(() => expect(h.onRename).toHaveBeenCalledWith("Storm", "STORM"));
   });
 
-  it("offers Undo beside the keys after a delete, and Undo calls the way back", async () => {
-    const back = vi.fn(async () => {});
+  it("offers the page's Undo beside the keys and calls it", async () => {
     const h = handlers();
-    h.onDelete = vi.fn<(name: string) => Promise<(() => Promise<void>) | void>>(async () => back);
-    mount({}, h);
-    fireEvent.click(screen.getByRole("button", { name: "Actions for Storm" }));
-    fireEvent.click(screen.getByRole("button", { name: /^Delete/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
-    await waitFor(() => expect(screen.getByText(/Deleted/)).toBeTruthy());
+    const onUndo = vi.fn<() => Promise<void>>(async () => {});
+    render(
+      <PresetStrip
+        builtIn={builtIn}
+        user={[]}
+        defs={defs}
+        live={{} as never}
+        running={null}
+        undo={{ name: "Storm" }}
+        onUndo={onUndo}
+        {...h}
+      />,
+    );
+    expect(screen.getByText(/Deleted/).textContent).toBe("Deleted Storm");
     fireEvent.click(screen.getByRole("button", { name: /Undo/ }));
-    await waitFor(() => expect(back).toHaveBeenCalled());
+    await waitFor(() => expect(onUndo).toHaveBeenCalledTimes(1));
+  });
+
+  it("keeps the running key lit when another preset is deleted", () => {
+    const two: Preset[] = [...user, { name: "Calm", props: { speed: { type: "number", value: 5 } } }];
+    const h = handlers();
+    const props = { builtIn, defs, live: {} as never, running: { name: "Storm", modified: false }, ...h };
+    const { rerender } = render(<PresetStrip {...props} user={two} />);
+    expect(screen.getByRole("button", { name: "Apply preset Storm" }).getAttribute("aria-pressed")).toBe("true");
+    rerender(<PresetStrip {...props} user={user} />);
+    expect(screen.queryByRole("button", { name: "Apply preset Calm" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Apply preset Storm" }).getAttribute("aria-pressed")).toBe("true");
   });
 });

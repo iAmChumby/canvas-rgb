@@ -1,10 +1,10 @@
 //! The effect routes: list, detail, activate, props and favourites.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::response::IntoResponse;
 use axum::Json;
 use canvas_proto::api::{
-    ActivateEffect, EffectDetail, EffectSummary, EffectsResponse, FailedEffect, ImportEffect,
+    ActivateEffect, DeleteEffectQuery, EffectDetail, EffectSummary, EffectsResponse, FailedEffect, ImportEffect,
     ImportEffectResponse, PresetCreate, PresetReplace, PresetsResponse, SetFavorite,
 };
 use canvas_proto::props::{Preset, Props, PropertySchema};
@@ -139,7 +139,7 @@ pub async fn activate(
             .ok_or_else(|| ApiFailure::not_found(format!("no preset named {preset_name}")))?;
         // A preset sits on the defaults and never on the saved values, so a key it does not
         // mention is the default, not whatever the last session left behind.
-        props.extend(preset.props.clone());
+        props.extend(fit_props_to_schema(&schema, preset.props.clone(), &preset.name));
     } else {
         // The saved values win over the defaults.
         let saved = app
@@ -300,8 +300,32 @@ pub async fn put_effect(
 
 /// The longest preset name, in characters.
 const PRESET_NAME_MAX: usize = 40;
+/// The most properties one preset may hold, and the most bytes its props may take as JSON.
+/// Far above any effect's schema; they stop a client from filling `effects.json`.
+const PRESET_MAX_KEYS: usize = 64;
+const PRESET_MAX_BYTES: usize = 8 * 1024;
+/// The most user presets one effect may have.
+const PRESETS_PER_EFFECT_MAX: usize = 100;
 
-/// A preset name as it is stored: trimmed, not empty, short, no control characters.
+/// Invisible format characters (bidirectional controls, zero-width marks, the soft hyphen,
+/// the byte order mark). `char::is_control` does not see them; in a name they can make two
+/// presets look the same or reorder the text around them.
+fn is_format_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{061C}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+    )
+}
+
+/// A preset name as it is stored: trimmed, not empty, short, no control or format characters.
 fn clean_preset_name(name: &str) -> Result<String, ApiFailure> {
     let name = name.trim();
     if name.is_empty() {
@@ -312,20 +336,102 @@ fn clean_preset_name(name: &str) -> Result<String, ApiFailure> {
             "a preset name is at most {PRESET_NAME_MAX} characters"
         )));
     }
-    if name.chars().any(char::is_control) {
-        return Err(ApiFailure::validation("a preset name has no control characters"));
+    if name.chars().any(|c| c.is_control() || is_format_char(c)) {
+        return Err(ApiFailure::validation(
+            "a preset name has no control, bidirectional or invisible characters",
+        ));
     }
     Ok(name.to_string())
 }
 
-/// Whether a name is taken by a built-in or user preset, ignoring case. `except` is the user
-/// preset being renamed, which may keep its own name in another case.
+/// The props of a request, within the caps.
+fn check_preset_caps(props: &Props) -> Result<(), ApiFailure> {
+    if props.len() > PRESET_MAX_KEYS {
+        return Err(ApiFailure::validation(format!(
+            "a preset holds at most {PRESET_MAX_KEYS} properties"
+        )));
+    }
+    let bytes = serde_json::to_vec(props).map(|v| v.len()).unwrap_or(usize::MAX);
+    if bytes > PRESET_MAX_BYTES {
+        return Err(ApiFailure::validation(format!(
+            "a preset's values take at most {PRESET_MAX_BYTES} bytes"
+        )));
+    }
+    Ok(())
+}
+
+/// Fits saved props to the effect's schema as it is now: a key the effect no longer has, a value
+/// of the wrong type and a choice that is not an option are dropped, and a number is clamped to
+/// the schema's range. A preset outlives the file it was made for (an effect can be imported
+/// again with other properties), so this runs on every use and every save.
+pub fn fit_props_to_schema(schema: &PropertySchema, props: Props, what: &str) -> Props {
+    use canvas_proto::props::{PropKind, PropValue};
+    let mut fitted = Props::new();
+    for (key, value) in props {
+        let Some(def) = schema.properties.iter().find(|d| d.key == key) else {
+            tracing::warn!(effect = %schema.id, preset = %what, key = %key, "dropped a preset value the effect no longer has");
+            continue;
+        };
+        let kept = match (&def.kind, value) {
+            (PropKind::Number { min, max, .. }, PropValue::Number(v)) if v.is_finite() => {
+                let clamped = v.clamp(*min, *max);
+                if clamped != v {
+                    tracing::warn!(effect = %schema.id, preset = %what, key = %key, from = v, to = clamped, "clamped a preset value to the effect's range");
+                }
+                Some(PropValue::Number(clamped))
+            }
+            (PropKind::Hue { .. }, v @ PropValue::Hue(h)) if h.is_finite() => Some(v),
+            (PropKind::Color { .. }, v @ PropValue::Color(_)) => Some(v),
+            (PropKind::Bool { .. }, v @ PropValue::Bool(_)) => Some(v),
+            (PropKind::Choice { options, .. }, v @ PropValue::Choice(_)) => match &v {
+                PropValue::Choice(c) if options.iter().any(|o| o == c) => Some(v),
+                _ => None,
+            },
+            _ => None,
+        };
+        match kept {
+            Some(v) => {
+                fitted.insert(key, v);
+            }
+            None => {
+                tracing::warn!(effect = %schema.id, preset = %what, key = %key, "dropped a preset value that does not fit the effect");
+            }
+        }
+    }
+    fitted
+}
+
+/// Whether a name is taken by a built-in or user preset, ignoring ASCII case. `except` is the
+/// user preset being renamed, which may keep its own name in another case.
 fn clash(schema: &PropertySchema, user: &[Preset], name: &str, except: Option<&str>) -> bool {
     schema.presets.iter().any(|p| p.name.eq_ignore_ascii_case(name))
         || user.iter().any(|p| {
             p.name.eq_ignore_ascii_case(name)
                 && !except.is_some_and(|e| p.name.eq_ignore_ascii_case(e))
         })
+}
+
+/// Stores the new list for an effect and writes `effects.json`. When the write fails the list goes
+/// back to what it was, so the answer to the client and the memory agree: nothing half-saved.
+fn commit_presets(
+    store: &mut crate::storage::Store,
+    id: &str,
+    next: Vec<Preset>,
+) -> Result<(), ApiFailure> {
+    let before = store.effects.presets.get(id).cloned();
+    store.effects.presets.insert(id.to_string(), next);
+    if let Err(e) = store.save_effects() {
+        match before {
+            Some(list) => {
+                store.effects.presets.insert(id.to_string(), list);
+            }
+            None => {
+                store.effects.presets.remove(id);
+            }
+        }
+        return Err(ApiFailure::internal(format!("could not save the effects: {e}")));
+    }
+    Ok(())
 }
 
 /// `POST /api/v1/effects/{id}/presets`.
@@ -340,17 +446,21 @@ pub async fn create_preset(
     let schema = find_schema(&app.user_effects, &id)
         .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id or name {id}")))?;
     let name = clean_preset_name(&request.name)?;
+    check_preset_caps(&request.props)?;
+    let props = fit_props_to_schema(&schema, request.props, &name);
     let mut store = app.store.write().await;
-    let list = store.effects.presets.entry(schema.id.clone()).or_default();
-    if clash(&schema, list, &name, None) {
+    let mut list = store.effects.presets.get(&schema.id).cloned().unwrap_or_default();
+    if clash(&schema, &list, &name, None) {
         return Err(ApiFailure::conflict(format!("{name} is already a preset of this effect")));
     }
-    list.push(Preset { name, props: request.props });
-    let user_presets = list.clone();
-    store
-        .save_effects()
-        .map_err(|e| ApiFailure::internal(format!("could not save the effects: {e}")))?;
-    Ok(Json(PresetsResponse { user_presets }))
+    if list.len() >= PRESETS_PER_EFFECT_MAX {
+        return Err(ApiFailure::validation(format!(
+            "an effect has at most {PRESETS_PER_EFFECT_MAX} presets"
+        )));
+    }
+    list.push(Preset { name, props });
+    commit_presets(&mut store, &schema.id, list.clone())?;
+    Ok(Json(PresetsResponse { user_presets: list }))
 }
 
 /// `PUT /api/v1/effects/{id}/presets/{name}`.
@@ -365,8 +475,10 @@ pub async fn replace_preset(
     let schema = find_schema(&app.user_effects, &id)
         .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id or name {id}")))?;
     let rename_to = request.rename_to.as_deref().map(clean_preset_name).transpose()?;
+    check_preset_caps(&request.props)?;
+    let props = fit_props_to_schema(&schema, request.props, &name);
     let mut store = app.store.write().await;
-    let list = store.effects.presets.entry(schema.id.clone()).or_default();
+    let mut list = store.effects.presets.get(&schema.id).cloned().unwrap_or_default();
     let index = list
         .iter()
         .position(|p| p.name == name)
@@ -375,21 +487,18 @@ pub async fn replace_preset(
         return Err(ApiFailure::conflict(format!("{name} was changed in another window")));
     }
     if let Some(new_name) = &rename_to {
-        if clash(&schema, list, new_name, Some(&name)) {
+        if clash(&schema, &list, new_name, Some(&name)) {
             return Err(ApiFailure::conflict(format!(
                 "{new_name} is already a preset of this effect"
             )));
         }
     }
-    list[index].props = request.props;
+    list[index].props = props;
     if let Some(new_name) = rename_to {
         list[index].name = new_name;
     }
-    let user_presets = list.clone();
-    store
-        .save_effects()
-        .map_err(|e| ApiFailure::internal(format!("could not save the effects: {e}")))?;
-    Ok(Json(PresetsResponse { user_presets }))
+    commit_presets(&mut store, &schema.id, list.clone())?;
+    Ok(Json(PresetsResponse { user_presets: list }))
 }
 
 /// `DELETE /api/v1/effects/{id}/presets/{name}`.
@@ -400,17 +509,14 @@ pub async fn delete_preset(
     let schema = find_schema(&app.user_effects, &id)
         .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id or name {id}")))?;
     let mut store = app.store.write().await;
-    let list = store.effects.presets.entry(schema.id.clone()).or_default();
+    let mut list = store.effects.presets.get(&schema.id).cloned().unwrap_or_default();
     let index = list
         .iter()
         .position(|p| p.name == name)
         .ok_or_else(|| ApiFailure::not_found(format!("no preset named {name}")))?;
     list.remove(index);
-    let user_presets = list.clone();
-    store
-        .save_effects()
-        .map_err(|e| ApiFailure::internal(format!("could not save the effects: {e}")))?;
-    Ok(Json(PresetsResponse { user_presets }))
+    commit_presets(&mut store, &schema.id, list.clone())?;
+    Ok(Json(PresetsResponse { user_presets: list }))
 }
 
 /// `GET /api/v1/effects/{id}/thumbnail`.
@@ -593,6 +699,7 @@ pub async fn import_effect(
 pub async fn delete_effect(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
+    Query(query): Query<DeleteEffectQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let stem = id
         .strip_prefix(crate::user_effects::USER_EFFECT_PREFIX)
@@ -626,6 +733,22 @@ pub async fn delete_effect(
     }
     tracing::info!(effect = %id, "a user effect was deleted");
 
+    // The effect's presets go with it unless the owner chose to keep them: left behind they
+    // would come back, unseen, the day the same file is imported again.
+    let mut presets_removed = 0usize;
+    if !query.keep_presets {
+        let mut store = app.store.write().await;
+        if let Some(list) = store.effects.presets.remove(&id) {
+            presets_removed = list.len();
+            if let Err(e) = store.save_effects() {
+                store.effects.presets.insert(id.clone(), list);
+                return Err(ApiFailure::internal(format!(
+                    "the effect file is gone but its presets could not be removed: {e}"
+                )));
+            }
+        }
+    }
+
     // The effect was the active one: the daemon falls back the same way it does when
     // the file is missing. The active layout still names it, so the restore path
     // cannot build it any more and says so, exactly as it does at start.
@@ -643,7 +766,7 @@ pub async fn delete_effect(
         }
     }
 
-    Ok(Json(serde_json::json!({ "ok": true, "id": id })))
+    Ok(Json(serde_json::json!({ "ok": true, "id": id, "presets_removed": presets_removed })))
 }
 
 /// The largest request body the import route accepts, in bytes.
