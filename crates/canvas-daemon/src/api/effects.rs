@@ -5,9 +5,9 @@ use axum::response::IntoResponse;
 use axum::Json;
 use canvas_proto::api::{
     ActivateEffect, EffectDetail, EffectSummary, EffectsResponse, FailedEffect, ImportEffect,
-    ImportEffectResponse, SetFavorite,
+    ImportEffectResponse, PresetCreate, PresetReplace, PresetsResponse, SetFavorite,
 };
-use canvas_proto::props::{Props, PropertySchema};
+use canvas_proto::props::{Preset, Props, PropertySchema};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -108,8 +108,8 @@ fn current_props(store: &crate::storage::Store, schema: &PropertySchema) -> Prop
 
 /// `POST /api/v1/effects/{id}/activate`.
 ///
-/// Activates the effect on the active layout. The props in the body override the saved
-/// values.
+/// Activates the effect on the active layout. Without a preset the saved values sit on the
+/// defaults; with one the preset does. The props in the body override either.
 pub async fn activate(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
@@ -120,29 +120,41 @@ pub async fn activate(
 
     let mut props = schema.defaults();
     if let Some(preset_name) = &request.preset {
+        // A built-in preset first, then the user's own; the save routes keep the two
+        // namespaces apart, so a name never matches both.
+        let user_presets = app
+            .store
+            .read()
+            .await
+            .effects
+            .presets
+            .get(&schema.id)
+            .cloned()
+            .unwrap_or_default();
         let preset = schema
             .presets
             .iter()
+            .chain(user_presets.iter())
             .find(|p| p.name.eq_ignore_ascii_case(preset_name))
             .ok_or_else(|| ApiFailure::not_found(format!("no preset named {preset_name}")))?;
-        props = preset.props.clone();
+        // A preset sits on the defaults and never on the saved values, so a key it does not
+        // mention is the default, not whatever the last session left behind.
+        props.extend(preset.props.clone());
+    } else {
+        // The saved values win over the defaults.
+        let saved = app
+            .store
+            .read()
+            .await
+            .effects
+            .saved
+            .get(&schema.id)
+            .cloned()
+            .unwrap_or_default();
+        props.extend(saved);
     }
-    // The saved values win over the defaults, the request wins over both.
-    let saved = app
-        .store
-        .read()
-        .await
-        .effects
-        .saved
-        .get(&schema.id)
-        .cloned()
-        .unwrap_or_default();
-    for (k, v) in saved {
-        props.insert(k, v);
-    }
-    for (k, v) in request.props {
-        props.insert(k, v);
-    }
+    // The request wins over everything.
+    props.extend(request.props);
 
     // The onboarding effects are transient: nothing about them is saved, the layout keeps its
     // own effect, and a timer puts that effect back (see `crate::transient`).
@@ -284,6 +296,121 @@ pub async fn put_effect(
             .map_err(|e| ApiFailure::internal(format!("could not save the effects: {e}")))?;
     }
     Ok(Json(serde_json::json!({ "ok": true, "id": schema.id })))
+}
+
+/// The longest preset name, in characters.
+const PRESET_NAME_MAX: usize = 40;
+
+/// A preset name as it is stored: trimmed, not empty, short, no control characters.
+fn clean_preset_name(name: &str) -> Result<String, ApiFailure> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(ApiFailure::validation("a preset needs a name"));
+    }
+    if name.chars().count() > PRESET_NAME_MAX {
+        return Err(ApiFailure::validation(format!(
+            "a preset name is at most {PRESET_NAME_MAX} characters"
+        )));
+    }
+    if name.chars().any(char::is_control) {
+        return Err(ApiFailure::validation("a preset name has no control characters"));
+    }
+    Ok(name.to_string())
+}
+
+/// Whether a name is taken by a built-in or user preset, ignoring case. `except` is the user
+/// preset being renamed, which may keep its own name in another case.
+fn clash(schema: &PropertySchema, user: &[Preset], name: &str, except: Option<&str>) -> bool {
+    schema.presets.iter().any(|p| p.name.eq_ignore_ascii_case(name))
+        || user.iter().any(|p| {
+            p.name.eq_ignore_ascii_case(name)
+                && !except.is_some_and(|e| p.name.eq_ignore_ascii_case(e))
+        })
+}
+
+/// `POST /api/v1/effects/{id}/presets`.
+///
+/// Saves the props under a name. A name equal, ignoring case, to a built-in or user preset
+/// of the effect is a conflict.
+pub async fn create_preset(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Json(request): Json<PresetCreate>,
+) -> ApiResult<Json<PresetsResponse>> {
+    let schema = find_schema(&app.user_effects, &id)
+        .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id or name {id}")))?;
+    let name = clean_preset_name(&request.name)?;
+    let mut store = app.store.write().await;
+    let list = store.effects.presets.entry(schema.id.clone()).or_default();
+    if clash(&schema, list, &name, None) {
+        return Err(ApiFailure::conflict(format!("{name} is already a preset of this effect")));
+    }
+    list.push(Preset { name, props: request.props });
+    let user_presets = list.clone();
+    store
+        .save_effects()
+        .map_err(|e| ApiFailure::internal(format!("could not save the effects: {e}")))?;
+    Ok(Json(PresetsResponse { user_presets }))
+}
+
+/// `PUT /api/v1/effects/{id}/presets/{name}`.
+///
+/// Overwrites and/or renames one user preset. `expected` is what the client last saw: when the
+/// stored props differ, another window changed the preset and the answer is a conflict.
+pub async fn replace_preset(
+    State(app): State<Arc<App>>,
+    Path((id, name)): Path<(String, String)>,
+    Json(request): Json<PresetReplace>,
+) -> ApiResult<Json<PresetsResponse>> {
+    let schema = find_schema(&app.user_effects, &id)
+        .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id or name {id}")))?;
+    let rename_to = request.rename_to.as_deref().map(clean_preset_name).transpose()?;
+    let mut store = app.store.write().await;
+    let list = store.effects.presets.entry(schema.id.clone()).or_default();
+    let index = list
+        .iter()
+        .position(|p| p.name == name)
+        .ok_or_else(|| ApiFailure::not_found(format!("no preset named {name}")))?;
+    if list[index].props != request.expected {
+        return Err(ApiFailure::conflict(format!("{name} was changed in another window")));
+    }
+    if let Some(new_name) = &rename_to {
+        if clash(&schema, list, new_name, Some(&name)) {
+            return Err(ApiFailure::conflict(format!(
+                "{new_name} is already a preset of this effect"
+            )));
+        }
+    }
+    list[index].props = request.props;
+    if let Some(new_name) = rename_to {
+        list[index].name = new_name;
+    }
+    let user_presets = list.clone();
+    store
+        .save_effects()
+        .map_err(|e| ApiFailure::internal(format!("could not save the effects: {e}")))?;
+    Ok(Json(PresetsResponse { user_presets }))
+}
+
+/// `DELETE /api/v1/effects/{id}/presets/{name}`.
+pub async fn delete_preset(
+    State(app): State<Arc<App>>,
+    Path((id, name)): Path<(String, String)>,
+) -> ApiResult<Json<PresetsResponse>> {
+    let schema = find_schema(&app.user_effects, &id)
+        .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id or name {id}")))?;
+    let mut store = app.store.write().await;
+    let list = store.effects.presets.entry(schema.id.clone()).or_default();
+    let index = list
+        .iter()
+        .position(|p| p.name == name)
+        .ok_or_else(|| ApiFailure::not_found(format!("no preset named {name}")))?;
+    list.remove(index);
+    let user_presets = list.clone();
+    store
+        .save_effects()
+        .map_err(|e| ApiFailure::internal(format!("could not save the effects: {e}")))?;
+    Ok(Json(PresetsResponse { user_presets }))
 }
 
 /// `GET /api/v1/effects/{id}/thumbnail`.

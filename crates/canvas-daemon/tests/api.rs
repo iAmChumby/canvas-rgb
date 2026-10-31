@@ -1942,3 +1942,324 @@ async fn identify_is_an_override_that_stop_ends_even_with_output_paused() {
     sink.submit(vec![canvas_proto::Rgb8::WHITE; 12]);
     assert!(rx.try_recv().is_ok(), "engine frames flow again");
 }
+
+// ---- user presets (#9) ----
+
+/// A number property value as the API writes it.
+fn num(v: f64) -> serde_json::Value {
+    serde_json::json!({ "type": "number", "value": v })
+}
+
+/// Sends one request and returns the status and the JSON body.
+async fn send(
+    router: &axum::Router,
+    method: &str,
+    path: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let response = router
+        .clone()
+        .oneshot(request_with_body(method, path, &body.to_string()))
+        .await
+        .expect("the router answers");
+    let status = response.status();
+    (status, json(response).await)
+}
+
+fn preset_names(body: &serde_json::Value) -> Vec<String> {
+    body.get("user_presets")
+        .and_then(|v| v.as_array())
+        .expect("the user presets")
+        .iter()
+        .filter_map(|p| p.get("name").and_then(|n| n.as_str()).map(str::to_string))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_preset_is_applied_on_the_defaults_not_on_the_saved_values() {
+    // D9.1. Before the fix the saved values (here speed 77, set by a patch) were laid over the
+    // preset, so applying a one-key preset kept the speed of the last session.
+    let (router, _app, engine, _home) = build_with_engine();
+    let (status, _) = send(&router, "POST", "/api/v1/effects/aurora/activate", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(
+        &router,
+        "PATCH",
+        "/api/v1/effects/active/props",
+        serde_json::json!({ "speed": num(77.0), "bands": num(5.0) }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // A user preset with a single key.
+    let (status, _) = send(
+        &router,
+        "POST",
+        "/api/v1/effects/aurora/presets",
+        serde_json::json!({ "name": "Only scale", "props": { "scale": num(2.0) } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send(
+        &router,
+        "POST",
+        "/api/v1/effects/aurora/activate",
+        serde_json::json!({ "preset": "Only scale" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let props = body.get("props").expect("the props come back");
+    // The schema defaults (speed 20, bands 3) plus the preset's key, nothing from the patch.
+    assert_eq!(props["speed"]["value"], 20.0);
+    assert_eq!(props["bands"]["value"], 3.0);
+    assert_eq!(props["scale"]["value"], 2.0);
+    // The engine got the same, and a full map: every key of the schema.
+    let running = engine.props.lock().unwrap().clone();
+    assert_eq!(running.len(), 6, "the effect is started with every property");
+    assert_eq!(running.get("speed"), Some(&canvas_proto::props::PropValue::Number(20.0)));
+
+    // The request's own props still come last.
+    let (_, body) = send(
+        &router,
+        "POST",
+        "/api/v1/effects/aurora/activate",
+        serde_json::json!({ "preset": "Only scale", "props": { "speed": num(9.0) } }),
+    )
+    .await;
+    assert_eq!(body["props"]["speed"]["value"], 9.0);
+    assert_eq!(body["props"]["scale"]["value"], 2.0);
+}
+
+#[tokio::test]
+async fn a_user_preset_is_found_by_name_when_the_effect_is_activated() {
+    let (router, _app, _home) = build();
+    send(
+        &router,
+        "POST",
+        "/api/v1/effects/aurora/presets",
+        serde_json::json!({ "name": "Storm", "props": { "speed": num(61.0) } }),
+    )
+    .await;
+    // Case does not matter to activation, as for the built-in presets.
+    let (status, body) = send(
+        &router,
+        "POST",
+        "/api/v1/effects/aurora/activate",
+        serde_json::json!({ "preset": "STORM" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["props"]["speed"]["value"], 61.0);
+
+    let (status, _) = send(
+        &router,
+        "POST",
+        "/api/v1/effects/aurora/activate",
+        serde_json::json!({ "preset": "Nope" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "a missing preset is a 404");
+}
+
+#[tokio::test]
+async fn a_preset_name_that_clashes_is_a_409_ignoring_case() {
+    let (router, _app, _home) = build();
+    let create = |name: &str| serde_json::json!({ "name": name, "props": { "speed": num(1.0) } });
+    // A built-in preset of Aurora, in other case.
+    let (status, body) = send(&router, "POST", "/api/v1/effects/aurora/presets", create("EMBER")).await;
+    assert_eq!(status, StatusCode::CONFLICT, "the built-in preset Ember is taken");
+    assert_eq!(body["error"], "conflict");
+
+    let (status, _) = send(&router, "POST", "/api/v1/effects/aurora/presets", create("Storm")).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(&router, "POST", "/api/v1/effects/aurora/presets", create("sTORM")).await;
+    assert_eq!(status, StatusCode::CONFLICT, "the user preset Storm is taken");
+
+    // A name only has to be free for its own effect.
+    let (status, _) = send(&router, "POST", "/api/v1/effects/rain/presets", create("Storm")).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // An empty name and an unknown effect.
+    let (status, _) = send(&router, "POST", "/api/v1/effects/aurora/presets", create("   ")).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, _) = send(&router, "POST", "/api/v1/effects/nothing/presets", create("X")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_user_preset_is_replaced_renamed_and_the_stale_edit_is_refused() {
+    let (router, _app, _home) = build();
+    send(
+        &router,
+        "POST",
+        "/api/v1/effects/aurora/presets",
+        serde_json::json!({ "name": "Storm", "props": { "speed": num(61.0) } }),
+    )
+    .await;
+    send(
+        &router,
+        "POST",
+        "/api/v1/effects/aurora/presets",
+        serde_json::json!({ "name": "Calm", "props": { "speed": num(3.0) } }),
+    )
+    .await;
+
+    // Overwrite with the right `expected`.
+    let (status, body) = send(
+        &router,
+        "PUT",
+        "/api/v1/effects/aurora/presets/Storm",
+        serde_json::json!({
+            "props": { "speed": num(70.0) },
+            "expected": { "speed": num(61.0) },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["user_presets"][0]["props"]["speed"]["value"], 70.0);
+
+    // The same request again is stale: the stored props are no longer what the window saw.
+    let (status, body) = send(
+        &router,
+        "PUT",
+        "/api/v1/effects/aurora/presets/Storm",
+        serde_json::json!({
+            "props": { "speed": num(80.0) },
+            "expected": { "speed": num(61.0) },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "a stale expected is a 409");
+    assert_eq!(body["error"], "conflict");
+    let (_, detail) = send(&router, "GET", "/api/v1/effects/aurora", serde_json::json!({})).await;
+    assert_eq!(
+        detail["user_presets"][0]["props"]["speed"]["value"], 70.0,
+        "the stale edit changed nothing"
+    );
+
+    // Rename keeps the place in the list; a case-only change of its own name is allowed.
+    let same = serde_json::json!({ "props": { "speed": num(70.0) }, "expected": { "speed": num(70.0) } });
+    let mut rename = same.clone();
+    rename["rename_to"] = "Gale".into();
+    let (status, body) = send(&router, "PUT", "/api/v1/effects/aurora/presets/Storm", rename).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(preset_names(&body), ["Gale", "Calm"]);
+
+    let mut case_only = same.clone();
+    case_only["rename_to"] = "GALE".into();
+    let (status, body) = send(&router, "PUT", "/api/v1/effects/aurora/presets/Gale", case_only).await;
+    assert_eq!(status, StatusCode::OK, "a preset may change the case of its own name");
+    assert_eq!(preset_names(&body), ["GALE", "Calm"]);
+
+    // Renaming onto another preset, or a built-in one, is a 409.
+    let mut onto = same.clone();
+    onto["rename_to"] = "calm".into();
+    let (status, _) = send(&router, "PUT", "/api/v1/effects/aurora/presets/GALE", onto).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let mut onto_built_in = same.clone();
+    onto_built_in["rename_to"] = "ember".into();
+    let (status, _) = send(&router, "PUT", "/api/v1/effects/aurora/presets/GALE", onto_built_in).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    // A missing preset is a 404.
+    let (status, _) = send(&router, "PUT", "/api/v1/effects/aurora/presets/Nope", same).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn deleting_a_user_preset_removes_it_and_a_missing_one_is_a_404() {
+    let (router, _app, _home) = build();
+    send(
+        &router,
+        "POST",
+        "/api/v1/effects/aurora/presets",
+        serde_json::json!({ "name": "Storm", "props": { "speed": num(61.0) } }),
+    )
+    .await;
+    let (status, body) =
+        send(&router, "DELETE", "/api/v1/effects/aurora/presets/Storm", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(preset_names(&body).is_empty());
+
+    let (status, _) =
+        send(&router, "DELETE", "/api/v1/effects/aurora/presets/Storm", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "the preset is gone");
+    let (status, _) =
+        send(&router, "DELETE", "/api/v1/effects/nothing/presets/Storm", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "no such effect");
+    // A built-in preset is not the owner's to delete.
+    let (status, _) =
+        send(&router, "DELETE", "/api/v1/effects/aurora/presets/Ember", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn user_presets_are_saved_to_disk_and_survive_a_restart() {
+    let (router, app, home) = build();
+    send(
+        &router,
+        "POST",
+        "/api/v1/effects/aurora/presets",
+        serde_json::json!({ "name": "Storm", "props": { "speed": num(61.0) } }),
+    )
+    .await;
+    drop(app);
+    // A second store over the same folder is the daemon after a restart.
+    let reopened = canvas_daemon::storage::Store::load_from(&home.path);
+    let names: Vec<&str> = reopened
+        .effects
+        .presets
+        .get("aurora")
+        .expect("the presets are on disk")
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    assert_eq!(names, ["Storm"]);
+}
+
+/// The rule in `docs/preset-equality.json`: missing keys take the default, a number rounds to
+/// its step, a hue to a whole degree modulo 360, colours compare without case, keys the schema
+/// does not name are ignored. The editor reads the same file in `presetMatch.test.ts`.
+#[test]
+fn the_preset_equality_fixture_holds() {
+    use canvas_proto::props::{PropKind, PropValue, PropertyDef, Props};
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/preset-equality.json");
+    let text = std::fs::read_to_string(&path).expect("the fixture is in docs/");
+    let fixture: serde_json::Value = serde_json::from_str(&text).expect("the fixture is JSON");
+    let defs: Vec<PropertyDef> =
+        serde_json::from_value(fixture["properties"].clone()).expect("the properties are proto PropertyDefs");
+
+    fn normal(defs: &[PropertyDef], props: &Props) -> Vec<(String, String)> {
+        defs.iter()
+            .map(|d| {
+                let value = props.get(&d.key).cloned().unwrap_or_else(|| d.kind.default_value());
+                let text = match (&d.kind, value) {
+                    (PropKind::Number { step, .. }, PropValue::Number(v)) => {
+                        let step = if *step > 0.0 { *step } else { 1.0 };
+                        format!("{}", ((v / step).round() * step * 1e4).round() / 1e4)
+                    }
+                    (PropKind::Hue { .. }, PropValue::Hue(v)) => {
+                        format!("{}", v.round().rem_euclid(360.0))
+                    }
+                    (_, PropValue::Color(c)) => {
+                        serde_json::to_value(c).unwrap().as_str().unwrap().to_lowercase()
+                    }
+                    (_, other) => serde_json::to_string(&other).unwrap(),
+                };
+                (d.key.clone(), text)
+            })
+            .collect()
+    }
+
+    let cases = fixture["cases"].as_array().expect("the cases");
+    assert!(cases.len() >= 10, "the fixture has its cases");
+    for case in cases {
+        let name = case["name"].as_str().unwrap();
+        let preset: Props = serde_json::from_value(case["preset"].clone()).expect(name);
+        let live: Props = serde_json::from_value(case["live"].clone()).expect(name);
+        let equal = normal(&defs, &preset) == normal(&defs, &live);
+        assert_eq!(equal, case["equal"].as_bool().unwrap(), "{name}");
+    }
+}

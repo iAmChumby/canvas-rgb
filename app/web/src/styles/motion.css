@@ -433,6 +433,14 @@
   white-space: nowrap;
 }
 
+/* The answer a toast offers: a small key at the end of the line. */
+.toast-action {
+  flex: none;
+  margin: -4px -6px -4px var(--s1);
+  color: var(--tone);
+  font-weight: 600;
+}
+
 @media (max-width: 720px) {
   /* On a phone the toast floats in the bottom dock's own band, directly above the rail. The rail
      grows by the toast's height while the toast is up, so the toast is over the app's own chrome

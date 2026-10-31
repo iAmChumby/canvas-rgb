@@ -47,6 +47,11 @@ pub fn router(app: Arc<App>) -> Router {
             post(effects::import_effect)
                 .layer(axum::extract::DefaultBodyLimit::max(effects::IMPORT_BODY_LIMIT)),
         )
+        .route(routes::EFFECT_PRESETS, post(effects::create_preset))
+        .route(
+            routes::EFFECT_PRESET,
+            put(effects::replace_preset).delete(effects::delete_preset),
+        )
         .route(routes::EFFECT_ACTIVATE, post(effects::activate))
         .route(routes::EFFECT_THUMBNAIL, get(effects::thumbnail))
         .route(routes::EFFECT_ACTIVE_PROPS, patch(effects::patch_active_props))
