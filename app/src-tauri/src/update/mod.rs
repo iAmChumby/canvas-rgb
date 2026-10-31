@@ -15,7 +15,7 @@ mod tests;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use canvas_proto::tauri::{
     CheckFailReason, UpdateInfo, UpdatePhase, UpdateState, AFTER_UPDATE_ARG, EVT_UPDATE_STATE,
@@ -98,6 +98,17 @@ fn read_result(path: &Path) -> Option<InstallResult> {
     let text = String::from_utf8_lossy(&bytes);
     let bom = char::from_u32(0xFEFF).unwrap_or(' ');
     serde_json::from_str(text.trim_start_matches(bom)).ok()
+}
+
+/// The result file, only when it belongs to the run that started at `since`: written at or after
+/// that moment. Inno deletes an old file only in PrepareToInstall, which never runs when Setup's own
+/// permission prompt is declined, so a file from the previous update can still be there (#28).
+fn read_fresh_result(path: &Path, since: SystemTime) -> Option<InstallResult> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    if modified < since {
+        return None;
+    }
+    read_result(path)
 }
 
 /// How a start with a `pending` version ends. Only the running version and the installer's own
@@ -252,7 +263,16 @@ impl Controller {
     /// sweeps the downloaded installer away. Runs at start, and after an installer the tray
     /// outlived.
     pub fn reconcile_pending(&self) {
-        let result = read_result(&self.settings.result_path);
+        self.reconcile_since(None);
+    }
+
+    /// [`reconcile_pending`] for an installer this tray started at `since`: a result file older
+    /// than that belongs to an earlier run and is ignored.
+    fn reconcile_since(&self, since: Option<SystemTime>) {
+        let result = match since {
+            None => read_result(&self.settings.result_path),
+            Some(t) => read_fresh_result(&self.settings.result_path, t),
+        };
         self.change(|i| {
             let Some(pending) = i.stored.pending.take() else { return };
             match settle(&pending.version, &self.current.to_string(), result.as_ref()) {
@@ -282,8 +302,14 @@ impl Controller {
     /// prompt (#28), so a Setup that exits with "cancelled before install" and wrote no result file
     /// was declined at that prompt: nothing started, no pending version, the Declined phase. Any
     /// other end is settled from the result file as before.
-    pub fn settle_after_installer(&self, exit_code: Option<u32>) {
-        if exit_code == Some(launch::SETUP_CANCELLED_CODE) && read_result(&self.settings.result_path).is_none() {
+    /// `since` is when this tray started Setup: only a result written after it counts, and only for
+    /// the pending version (a stale `ok` from the previous update must not turn a decline into a
+    /// failure).
+    pub fn settle_after_installer(&self, exit_code: Option<u32>, since: SystemTime) {
+        let pending = self.lock().stored.pending.as_ref().map(|p| p.version.clone());
+        let fresh = read_fresh_result(&self.settings.result_path, since)
+            .filter(|r| pending.as_deref() == Some(r.version.as_str()));
+        if exit_code == Some(launch::SETUP_CANCELLED_CODE) && fresh.is_none() {
             log::append("update: setup ended with code 2 and no result: the permission prompt was declined");
             self.change(|i| {
                 i.stored.pending = None;
@@ -291,7 +317,7 @@ impl Controller {
             });
             return;
         }
-        self.reconcile_pending();
+        self.reconcile_since(Some(since));
     }
 
     // ---- the person's choices ----
@@ -436,6 +462,7 @@ impl Controller {
     /// Downloads, checks and starts the installer for an update from [`begin_install`]. Ends when
     /// the installer has been started (and, if this tray outlives it, when it has ended).
     pub async fn run_install(self: &Arc<Self>, update: &Update) -> UpdateState {
+        let since = SystemTime::now();
         let (state, started) = self.start_install(update).await;
         if let Some(handle) = started {
             // Normally the installer stops this tray. If it ends first, its result file says why.
@@ -444,7 +471,7 @@ impl Controller {
                 .await
                 .ok()
                 .flatten();
-            self.settle_after_installer(code);
+            self.settle_after_installer(code, since);
             return self.state();
         }
         state

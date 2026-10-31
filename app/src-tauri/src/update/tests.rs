@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::thread::JoinHandle;
+use std::time::SystemTime;
 
 use canvas_proto::tauri::{CheckFailReason, UpdateInfo, UpdatePhase, UpdateState};
 use semver::Version;
@@ -1156,7 +1157,12 @@ fn the_tray_waits_for_a_real_process_and_then_reads_the_installers_report() {
         good_release(&h);
         h.check(true);
         if let Some(report) = report {
-            std::fs::write(h.dir.path().join("update-result.json"), report).unwrap();
+            let path = h.dir.path().join("update-result.json");
+            std::fs::write(&path, report).unwrap();
+            // The installer writes its report while it runs, after the tray started it: a minute
+            // ahead stands in for that (an older file is a previous run's and is ignored).
+            let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            file.set_modified(SystemTime::now() + Duration::from_secs(60)).unwrap();
         }
         let update = h.ctl.begin_install().unwrap();
         let s = tauri::async_runtime::block_on(h.ctl.run_install(&update));
@@ -1445,7 +1451,7 @@ fn a_setup_that_ends_cancelled_with_no_result_is_declined_not_failed() {
     h.check(true);
     assert_eq!(h.install().phase, UpdatePhase::Installing);
     assert!(h.stored().pending.is_some());
-    h.ctl.settle_after_installer(Some(launch::SETUP_CANCELLED_CODE));
+    h.ctl.settle_after_installer(Some(launch::SETUP_CANCELLED_CODE), SystemTime::now());
     assert_eq!(h.ctl.state().phase, UpdatePhase::Declined);
     assert_eq!(h.stored().pending, None);
 }
@@ -1456,6 +1462,52 @@ fn a_setup_that_ends_any_other_way_is_settled_from_its_result() {
     good_release(&h);
     h.check(true);
     h.install();
-    h.ctl.settle_after_installer(Some(4));
+    h.ctl.settle_after_installer(Some(4), SystemTime::now());
     assert!(matches!(h.ctl.state().phase, UpdatePhase::InstallFailed { .. }), "{:?}", h.ctl.state().phase);
+}
+
+// ---- a stale result file never decides this run (#28) ----
+
+fn plant_result(h: &Harness, version: &str, ok: bool, age: Duration) {
+    let path = h.dir.path().join("update-result.json");
+    std::fs::write(&path, format!(r#"{{"version":"{version}","ok":{ok},"code":0,"message":""}}"#)).unwrap();
+    let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    file.set_modified(std::time::SystemTime::now() - age).unwrap();
+}
+
+/// Inno deletes update-result.json only in PrepareToInstall, which never runs when Setup's own
+/// permission prompt is declined. Fails on the code that trusted any file present: an ok:true
+/// result from the last update read as "The installer ended without finishing".
+#[test]
+fn a_decline_is_declined_even_with_a_stale_ok_result_from_the_last_update() {
+    // (version in the file, whether it is the pending version, how old the file is)
+    for (older_version, age) in [(true, Duration::ZERO), (false, Duration::from_secs(3600))] {
+        let h = harness("0.1.0", "test.key.pub", Launch::Starts);
+        good_release(&h);
+        h.check(true);
+        h.install();
+        let pending = h.stored().pending.unwrap().version;
+        let since = std::time::SystemTime::now() - Duration::from_secs(60);
+        let version = if older_version { "0.0.9".to_string() } else { pending };
+        plant_result(&h, &version, true, age);
+        h.ctl.settle_after_installer(Some(launch::SETUP_CANCELLED_CODE), since);
+        assert_eq!(h.ctl.state().phase, UpdatePhase::Declined, "stale {version} age {age:?}");
+        assert_eq!(h.stored().pending, None);
+    }
+}
+
+#[test]
+fn a_fresh_result_for_this_version_is_read_not_called_a_decline() {
+    let h = harness("0.1.0", "test.key.pub", Launch::Starts);
+    good_release(&h);
+    h.check(true);
+    h.install();
+    let pending = h.stored().pending.unwrap().version;
+    let since = std::time::SystemTime::now() - Duration::from_secs(60);
+    plant_result(&h, &pending, true, Duration::ZERO);
+    h.ctl.settle_after_installer(Some(launch::SETUP_CANCELLED_CODE), since);
+    match h.ctl.state().phase {
+        UpdatePhase::InstallFailed { message } => assert!(message.contains("still running"), "{message}"),
+        other => panic!("the fresh result was not used: {other:?}"),
+    }
 }
