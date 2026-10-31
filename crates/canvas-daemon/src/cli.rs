@@ -561,11 +561,16 @@ pub fn check_tile(path: &str, preview_dir: Option<&str>) -> Result<TileCheck, St
         &canvas_proto::props::Props::new(),
         crate::thumbnail::TILE_SEED,
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())?
+    // A tile frame is never dropped for being slow, so the check scores the same picture on
+    // any machine.
+    .tile_mode();
     let schema = effect.schema();
     let body = crate::thumbnail::render(&mut effect, &schema.defaults())?;
     let score = crate::thumbnail::score(&body).ok_or("the tile render was malformed")?;
     let mut problems: Vec<String> = effect.warnings().to_vec();
+    // A frame that failed is a failure of the tile, not a quietly different picture.
+    problems.extend(effect.errors().iter().map(|e| format!("the script failed while the tile was drawn: {e}")));
     problems.extend(crate::thumbnail::problems(&score, schema.thumbnail.as_ref()));
 
     let (mut gif, mut sheet) = (None, None);

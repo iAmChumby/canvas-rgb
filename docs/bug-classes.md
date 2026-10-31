@@ -175,6 +175,11 @@ runs without it.
   (`crates/canvas-html/tests/effects.rs`: `a_bad_property_meta_is_ignored_with_a_warning_and_the_effect_still_runs`
   and `a_bad_thumbnail_meta_is_ignored_with_a_warning_and_the_effect_still_runs`), and the
   daemon lists the warnings as problems in `canvas-rgb effects check`.
+- Sibling (#16, found in review): a number property with a minimum above its maximum, or a
+  `NaN` or infinite minimum, maximum or default, loaded with no warning and then panicked in
+  `f64::clamp` when the property was set. It is the same class (a part of the file that cannot
+  be used, not reported): `property_kind` now returns an error for it, so it takes the
+  ignored-with-a-warning path above. The same test lists the three cases.
 - **How to check a new part of a file:** read it into a value, and on a bad one push a
   warning and carry on. Never `?` out of the loader.
 

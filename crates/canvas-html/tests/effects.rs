@@ -1114,6 +1114,28 @@ fn a_bad_property_meta_is_ignored_with_a_warning_and_the_effect_still_runs() {
             "extra3",
             "no values",
         ),
+        // A range `f64::clamp` panics on: the minimum above the maximum, and a NaN or an
+        // infinite bound or default.
+        (
+            r#"<meta property="extra4" label="Extra 4" type="number" min="10" max="2" default="5" />"#,
+            "extra4",
+            "is above the maximum",
+        ),
+        (
+            r#"<meta property="extra5" label="Extra 5" type="number" min="NaN" max="10" default="5" />"#,
+            "extra5",
+            "must be finite",
+        ),
+        (
+            r#"<meta property="extra6" label="Extra 6" type="number" min="0" max="inf" default="5" />"#,
+            "extra6",
+            "must be finite",
+        ),
+        (
+            r#"<meta property="extra7" label="Extra 7" type="number" min="0" max="10" default="NaN" />"#,
+            "extra7",
+            "must be finite",
+        ),
     ] {
         let effect = HtmlEffect::from_source("html:t", &with_recipe(tag), &Props::new())
             .unwrap_or_else(|e| panic!("{tag} must not stop the effect loading: {e}"));
@@ -1161,4 +1183,51 @@ fn a_number_prop_that_is_not_finite_or_out_of_range_never_reaches_the_script() {
     props.insert("speed".into(), PropValue::Number(1e9));
     effect.init(&props);
     assert_eq!(effect.values().get("speed"), Some(&PropValue::Number(100.0)));
+}
+
+/// An effect whose second frame takes longer than the live frame budget, and paints green when it
+/// finishes. The first frame paints red.
+const SLOW_SECOND_FRAME: &str = r##"<head><title>Slow</title></head>
+<body><canvas id="c" width="8" height="8"></canvas></body>
+<script>
+var ctx = document.getElementById("c").getContext("2d");
+var frames = 0;
+function draw() {
+  frames++;
+  if (frames === 2) {
+    // Date.now() is the effect's clock, not the wall clock, so the slow frame is a long
+    // loop: far longer than the 100 ms live budget on any machine.
+    var sum = 0;
+    for (var i = 0; i < 20000000; i++) { sum += i % 7; }
+  }
+  ctx.fillStyle = frames >= 2 ? "#00ff00" : "#ff0000";
+  ctx.fillRect(0, 0, 8, 8);
+  window.requestAnimationFrame(draw);
+}
+window.requestAnimationFrame(draw);
+</script>"##;
+
+#[test]
+fn a_tile_frame_is_never_dropped_for_being_slow_and_a_live_frame_is() {
+    let run = |tile: bool| {
+        let mut effect = HtmlEffect::from_source_seeded("html:slow", SLOW_SECOND_FRAME, &Props::new(), 1)
+            .expect("loads");
+        if tile {
+            effect = effect.tile_mode();
+        }
+        let mut canvas = Canvas::new(8, 8);
+        effect.update(DT, &mut canvas, &Inputs::default());
+        effect.update(DT, &mut canvas, &Inputs::default());
+        (canvas.get(0, 0), effect.errors().to_vec())
+    };
+
+    // On the lights the slow frame overruns its budget and is dropped: the red frame stays.
+    let (live_pixel, live_errors) = run(false);
+    assert_eq!(live_errors.len(), 1, "the live frame is reported as dropped: {live_errors:?}");
+    assert!(live_pixel[0] > 0.9 && live_pixel[1] < 0.1, "the live frame stays red: {live_pixel:?}");
+
+    // For a library tile the same frame runs to its end, however slow the machine is: green.
+    let (tile_pixel, tile_errors) = run(true);
+    assert!(tile_errors.is_empty(), "a slow tile frame is not an error: {tile_errors:?}");
+    assert!(tile_pixel[1] > 0.9 && tile_pixel[0] < 0.1, "the slow tile frame completed: {tile_pixel:?}");
 }

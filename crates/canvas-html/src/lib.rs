@@ -69,6 +69,16 @@ pub const LOAD_BUDGET_MS: u64 = 2_000;
 /// A release build is several times faster still.
 pub const FRAME_BUDGET_MS: u64 = 100;
 
+/// The time one frame's script may take when the effect renders a library tile, in
+/// milliseconds.
+///
+/// A tile has to be the same picture on every machine and under any load, so a tile frame is
+/// never dropped for being slow: the live-lights deadline ([`FRAME_BUDGET_MS`]) drops a frame
+/// that overruns, and which frames overrun depends on how busy the machine is. A tile frame
+/// is held to the whole render budget instead (the daemon's `RENDER_BUDGET`, 20 s), so only a
+/// script that never returns is stopped, and that is an error the tile render reports.
+pub const TILE_FRAME_BUDGET_MS: u64 = 20_000;
+
 /// One HTML effect instance: its own JS context and 2D canvas.
 pub struct HtmlEffect {
     /// The effect's schema: id, name, description and the property definitions.
@@ -94,6 +104,9 @@ pub struct HtmlEffect {
     values: Props,
     /// Whether the script has run.
     loaded: bool,
+    /// The time one frame's script may take, in milliseconds: [`FRAME_BUDGET_MS`] on the
+    /// lights, [`TILE_FRAME_BUDGET_MS`] for a library tile.
+    frame_budget_ms: u64,
     /// The source sizes and destination sizes the blit maps were built for.
     blit_key: (usize, usize, usize, usize),
     /// The source column for each destination column, built once per size pair.
@@ -228,6 +241,7 @@ impl HtmlEffect {
             warnings,
             values: Props::new(),
             loaded: false,
+            frame_budget_ms: FRAME_BUDGET_MS,
             blit_key: (0, 0, 0, 0),
             blit_cols: Vec::new(),
             blit_rows: Vec::new(),
@@ -244,6 +258,18 @@ impl HtmlEffect {
         effect.loaded = true;
 
         Ok(effect)
+    }
+
+    /// Puts the instance in tile mode: no frame is dropped for being slow.
+    ///
+    /// On the lights a frame that overruns [`FRAME_BUDGET_MS`] is dropped and the last good
+    /// one stays, so the render loop keeps its rate. A library tile has no rate to keep and
+    /// has to be the same picture on every machine, so a tile frame runs to its end and is
+    /// held to [`TILE_FRAME_BUDGET_MS`] only. A frame that fails for any reason is still
+    /// reported by [`HtmlEffect::errors`], and the tile render turns that into a failure.
+    pub fn tile_mode(mut self) -> Self {
+        self.frame_budget_ms = TILE_FRAME_BUDGET_MS;
+        self
     }
 
     /// The canvas' logical size.
@@ -364,7 +390,7 @@ impl HtmlEffect {
         let timestamp = self.time * 1000.0;
         // The frame's script runs with a deadline, so a runaway callback is stopped
         // instead of freezing the render loop.
-        self.runtime.deadline.start(FRAME_BUDGET_MS);
+        self.runtime.deadline.start(self.frame_budget_ms);
         let result = self.runtime.context.with(|ctx| -> rquickjs::Result<()> {
             let globals = ctx.globals();
 
@@ -418,7 +444,8 @@ impl HtmlEffect {
         if let Err(e) = result {
             if timed_out {
                 return Err(HtmlError::Timeout(format!(
-                    "the effect's script ran longer than {FRAME_BUDGET_MS} ms"
+                    "the effect's script ran longer than {} ms",
+                    self.frame_budget_ms
                 )));
             }
             // The exception is already on the context; turn it into a message.
@@ -576,6 +603,20 @@ fn property_kind(
             let max = number(meta.attr("max").unwrap_or("100")).unwrap_or(100.0);
             let step = number(meta.attr("step").unwrap_or("1")).unwrap_or(1.0);
             let default = number(&default).unwrap_or(min);
+            // The range is held to what `f64::clamp` accepts: it panics on a minimum above the
+            // maximum and on a NaN bound. "inf" and "NaN" parse as numbers, so the file can say
+            // either. A property that cannot be clamped is ignored with a warning, like any
+            // other part of the file the runtime cannot read.
+            if !min.is_finite() || !max.is_finite() || !default.is_finite() {
+                return Err(HtmlError::Parse(format!(
+                    "{label}: the minimum ({min}), the maximum ({max}) and the default ({default}) must be finite numbers"
+                )));
+            }
+            if min > max {
+                return Err(HtmlError::Parse(format!(
+                    "{label}: the minimum ({min}) is above the maximum ({max})"
+                )));
+            }
             Ok(PropKind::Number { min, max, step, default })
         }
         "boolean" => {

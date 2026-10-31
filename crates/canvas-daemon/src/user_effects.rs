@@ -43,12 +43,14 @@ pub fn html_builder() -> Builder {
     })
 }
 
-/// The builder that runs the same HTML effects with a fixed seed, so a library tile is
-/// the same picture every time it is rendered.
+/// The builder that runs the same HTML effects for a library tile: a fixed seed, and no frame
+/// dropped for being slow.
 ///
-/// The lights get [`html_builder`], whose seed comes from the clock: every run of an
-/// effect is a little different. A tile is rendered again and again, so it needs a seed
-/// that does not move.
+/// The lights get [`html_builder`], whose seed comes from the clock (every run of an effect
+/// is a little different) and whose frames are dropped when they overrun the live deadline.
+/// A tile is rendered again and again, on any machine and under any load, so it needs a seed
+/// that does not move and frames that always finish. A frame that fails for any reason fails
+/// the tile render ([`TileHtml`]), so a tile is never a quietly different picture.
 pub fn html_builder_seeded(seed: u32) -> Builder {
     Arc::new(move |id: &str, source: &str| {
         canvas_html::HtmlEffect::from_source_seeded(id, source, &Props::new(), seed)
@@ -56,10 +58,43 @@ pub fn html_builder_seeded(seed: u32) -> Builder {
                 for warning in effect.warnings() {
                     tracing::warn!(id, %warning, "a user effect loaded with a part of its file ignored");
                 }
-                Box::new(effect) as Box<dyn Effect>
+                Box::new(TileHtml(effect.tile_mode())) as Box<dyn Effect>
             })
             .map_err(|e| e.to_string())
     })
+}
+
+/// An HTML effect rendering a library tile. It runs as the lights would, except that a failed
+/// frame ends the render: the tile path reads [`canvas_html::HtmlEffect::errors`] after every
+/// step and stops with a [`crate::thumbnail::TileFailure`] when one appears.
+struct TileHtml(canvas_html::HtmlEffect);
+
+impl TileHtml {
+    fn fail_on_error(&self) {
+        if let Some(error) = self.0.errors().first() {
+            // `resume_unwind` does not run the panic hook, so a bad effect is not logged as a
+            // daemon panic; the render catches the payload and reports it.
+            std::panic::resume_unwind(Box::new(crate::thumbnail::TileFailure(format!(
+                "the script failed while the tile was drawn: {error}"
+            ))));
+        }
+    }
+}
+
+impl Effect for TileHtml {
+    fn schema(&self) -> PropertySchema {
+        self.0.schema()
+    }
+
+    fn init(&mut self, props: &Props) {
+        self.0.init(props);
+        self.fail_on_error();
+    }
+
+    fn update(&mut self, dt: f32, canvas: &mut canvas_proto::traits::Canvas, inputs: &canvas_proto::traits::Inputs) {
+        self.0.update(dt, canvas, inputs);
+        self.fail_on_error();
+    }
 }
 
 /// The HTML effects that ship inside the daemon, as (file stem, source). Each one has the id
@@ -775,6 +810,70 @@ mod tests {
             .collect();
         assert!(leftovers.is_empty(), "the temp files are gone: {leftovers:?}");
     }
+    /// An effect whose third frame throws.
+    const THROWS_IN_FRAME_THREE: &str = r##"<head><title>Throws</title></head>
+<body><canvas id="c" width="8" height="8"></canvas></body>
+<script>
+var n = 0;
+function draw() {
+  n++;
+  if (n === 3) { throw new Error("boom in frame three"); }
+  window.requestAnimationFrame(draw);
+}
+window.requestAnimationFrame(draw);
+</script>"##;
+
+    #[test]
+    fn a_tile_frame_that_throws_fails_the_tile_and_the_lights_carry_on() {
+        // The tile path: the render fails, and says why.
+        let mut tile = html_builder_seeded(1)("html:throws", THROWS_IN_FRAME_THREE).expect("the effect loads");
+        let error = crate::thumbnail::render(tile.as_mut(), &Props::new())
+            .expect_err("a tile whose frame throws is not rendered");
+        assert!(!error.depends_on_load(), "{error}");
+        assert!(error.to_string().contains("boom in frame three"), "{error}");
+
+        // The lights: the same frame is reported in the log and the effect carries on.
+        let mut lights = html_builder()("html:throws", THROWS_IN_FRAME_THREE).expect("the effect loads");
+        let mut canvas = canvas_proto::traits::Canvas::new(8, 8);
+        for _ in 0..10 {
+            lights.update(1.0 / 60.0, &mut canvas, &canvas_proto::traits::Inputs::default());
+        }
+    }
+
+    /// An effect whose second frame is slow: a long loop, far over the 100 ms live budget on any
+    /// machine. It paints red, then green when the slow frame finishes.
+    const SLOW_SECOND_FRAME: &str = r##"<head><title>Slow</title></head>
+<body><canvas id="c" width="8" height="8"></canvas></body>
+<script>
+var ctx = document.getElementById("c").getContext("2d");
+var frames = 0;
+function draw() {
+  frames++;
+  if (frames === 2) { var sum = 0; for (var i = 0; i < 20000000; i++) { sum += i % 7; } }
+  ctx.fillStyle = frames >= 2 ? "#00ff00" : "#ff0000";
+  ctx.fillRect(0, 0, 8, 8);
+  window.requestAnimationFrame(draw);
+}
+window.requestAnimationFrame(draw);
+</script>"##;
+
+    #[test]
+    fn a_library_tile_does_not_drop_a_slow_frame_and_the_lights_do() {
+        let paint_after_two_frames = |mut effect: Box<dyn Effect>| {
+            let mut canvas = Canvas::new(8, 8);
+            for _ in 0..2 {
+                effect.update(1.0 / 60.0, &mut canvas, &Inputs::default());
+            }
+            canvas.get(0, 0)
+        };
+        // The lights drop the slow frame (the live deadline) and keep the red one.
+        let lights = paint_after_two_frames(html_builder()("html:slow", SLOW_SECOND_FRAME).expect("loads"));
+        assert!(lights[0] > 0.9 && lights[1] < 0.1, "the lights kept the last good frame: {lights:?}");
+        // A tile finishes every frame, whatever the machine's load: the slow frame is green.
+        let tile = paint_after_two_frames(html_builder_seeded(1)("html:slow", SLOW_SECOND_FRAME).expect("loads"));
+        assert!(tile[1] > 0.9 && tile[0] < 0.1, "the tile dropped a slow frame: {tile:?}");
+    }
+
     #[test]
     fn a_library_tile_is_built_with_the_tile_builder() {
         // The lights get the builder that seeds from the clock; a tile gets the seeded one,

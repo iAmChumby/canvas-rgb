@@ -538,46 +538,87 @@ pub async fn thumbnail(
     // A render that was given up is remembered: the library is told the tile was given up
     // instead of asking for it again on every open.
     if let Some(why) = app.thumbnails.failure(generation, &schema.id) {
-        return Err(ApiFailure::service_unavailable(why));
+        return Err(ApiFailure::service_unavailable(given_up(&id, &why)));
     }
 
     let user = app.user_effects.clone();
     let effect_id = schema.id.clone();
     let props = schema.defaults();
     let rendering = Arc::clone(&app);
+    let budget = app.thumbnails.render_budget();
     // The permit is taken before the render and handed to the render task, so it is held
     // for as long as the render runs: a request whose client goes away does not let a
     // third render in while this one is still going.
     let slot = app.thumbnails.acquire_slot().await;
-    let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+    let joined = tokio::task::spawn_blocking(move || -> TileOutcome {
         let _slot = slot;
         // Another render may have finished while this one waited for the slot.
         if let Some(bytes) = rendering.thumbnails.get(generation, &effect_id) {
-            return Ok((*bytes).clone());
+            return TileOutcome::Tile((*bytes).clone());
         }
         if let Some(why) = rendering.thumbnails.failure(generation, &effect_id) {
-            return Err(why);
+            return TileOutcome::AlreadyGivenUp(why);
         }
-        let mut effect = crate::create_effect_for_tile(&user, &effect_id)?;
-        crate::thumbnail::render(effect.as_mut(), &props)
+        let result = crate::create_effect_for_tile(&user, &effect_id)
+            .map_err(crate::thumbnail::RenderError::Failed)
+            .and_then(|mut effect| crate::thumbnail::render_within(effect.as_mut(), &props, budget));
+        match result {
+            Ok(bytes) => TileOutcome::Tile(bytes),
+            Err(error) => TileOutcome::Failed(error),
+        }
     })
-    .await
-    .map_err(|e| ApiFailure::internal(format!("the thumbnail render stopped: {e}")))?;
+    .await;
+    // A render that panics ends its task: that is a failed render like any other, not a 500,
+    // so it is remembered and the library does not run it again on every open.
+    let outcome = joined.unwrap_or_else(|error| TileOutcome::Failed(crate::thumbnail::RenderError::Failed(render_task_failure(error))));
 
-    match bytes {
-        Ok(bytes) => {
+    match outcome {
+        TileOutcome::Tile(bytes) => {
             let bytes = Arc::new(bytes);
             app.thumbnails.put(generation, &schema.id, bytes.clone());
             Ok(binary_response(&bytes))
         }
-        Err(why) => {
-            // The render was given up. It is remembered, so the next open of the library
-            // does not render it again for the whole budget, and the answer says what
-            // happened instead of being a bare 500.
-            let why = format!("the tile for {id} was given up: {why}");
-            app.thumbnails.put_failure(generation, &schema.id, why.clone());
-            Err(ApiFailure::service_unavailable(why))
+        TileOutcome::AlreadyGivenUp(why) => Err(ApiFailure::service_unavailable(given_up(&id, &why))),
+        TileOutcome::Failed(error) => {
+            // The render was given up. It is remembered (a failure of the effect until the
+            // effect changes, a timeout for a while), so the next open of the library does
+            // not render it again for the whole budget, and the answer says what happened
+            // instead of being a bare 500.
+            app.thumbnails.put_failure(generation, &schema.id, &error);
+            Err(ApiFailure::service_unavailable(given_up(&id, error.reason())))
         }
+    }
+}
+
+/// How a tile render ended, inside the blocking task.
+enum TileOutcome {
+    /// The tile, rendered (or found in the cache after the wait for the slot).
+    Tile(Vec<u8>),
+    /// The render was given up just now.
+    Failed(crate::thumbnail::RenderError),
+    /// Another request gave this tile up while this one waited for the slot; the cache
+    /// already holds the reason.
+    AlreadyGivenUp(String),
+}
+
+/// The answer for a tile that was given up. `why` is the bare reason, so the sentence is
+/// built in one place and never carries its own prefix twice.
+fn given_up(id: &str, why: &str) -> String {
+    format!("the tile for {id} was given up: {why}")
+}
+
+/// Why the render task itself ended without an answer: it panicked, or the runtime dropped it.
+fn render_task_failure(error: tokio::task::JoinError) -> String {
+    match error.try_into_panic() {
+        Ok(payload) => {
+            let message = payload
+                .downcast_ref::<&str>()
+                .map(|m| (*m).to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "a panic with a payload that is not text".to_string());
+            format!("the thumbnail render panicked: {message}")
+        }
+        Err(error) => format!("the thumbnail render stopped: {error}"),
     }
 }
 

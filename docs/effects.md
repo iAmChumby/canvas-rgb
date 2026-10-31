@@ -56,7 +56,9 @@ the editor) and a `type`.
 runtime does not know is read as a text field.
 
 A colour default may be `#rgb` or `#rrggbb`. A number default that is not a number falls
-back to `min`.
+back to `min`. A number property whose `min` is above its `max`, or whose `min`, `max` or
+default is not finite (`NaN`, `inf`), is ignored with a warning like any other property the
+file describes badly: the effect loads and runs, and the editor shows one property less.
 
 ## The library tile
 
@@ -88,7 +90,11 @@ values) is ignored the same way: the effect loads and runs, the editor shows one
 less, and the warning says which one.
 
 A render is stopped after 20 seconds (`RENDER_BUDGET`) and the library shows no tile for that
-effect; at most two tiles render at once. The library plays every tile at 12 frames a second,
+effect; at most two tiles render at once. A tile frame is never dropped for being slow: the
+lights drop a frame that runs past 100 ms and keep the last good one, but that depends on how
+busy the machine is, and a tile has to be the same picture on every machine. A tile frame runs
+to its end (only a script that never returns is stopped, at the render budget), and a frame
+that fails for any reason fails the tile render, so a tile is never a quietly different picture. The library plays every tile at 12 frames a second,
 24 frames in 2 seconds, so `loop` is simulated time: a 16 s loop plays 8 times faster than the
 effect runs.
 
@@ -96,9 +102,11 @@ A tile is rendered with a fixed seed, so the same effect always draws the same t
 effect that draws from the clock (Fire, Rain) would draw a different picture every time the
 library opened.
 
-A render that runs out of its budget is remembered, and the answer says the tile was given
-up (the library shows no tile for that effect). The library does not ask for it again on
-every open.
+A render that fails (the effect does not build, its script throws, it panics) is remembered
+until the effect file changes, and the answer says the tile was given up (the library shows no
+tile for that effect). A render that only ran out of its budget says how busy the PC was, not
+what the effect is, so it is remembered for 10 minutes (`TIMEOUT_RETRY_AFTER`) and then tried
+again. The library does not ask for either on every open.
 
 The quality bar a tile has to pass, measured on the 24 frames (a pixel is lit when its
 lightness, the CIE L\* of its colour, is at least 12 of 100: a near-black or dim grey is

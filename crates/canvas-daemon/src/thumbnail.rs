@@ -74,11 +74,67 @@ pub const RENDER_BUDGET: std::time::Duration = std::time::Duration::from_secs(20
 /// gives every effect this seed instead of the clock's. See [`canvas_effects::TILE_SEED`].
 pub const TILE_SEED: u32 = canvas_effects::TILE_SEED;
 
+/// Why a thumbnail render was given up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenderError {
+    /// The render ran past its time budget. Whether it does depends on how busy the machine is
+    /// (a game running, a build), not on the effect, so the library tries the tile again later.
+    OverBudget(String),
+    /// The effect could not be built, or it failed while it was drawn (a script error, a
+    /// panic). It fails the same way every time, so the library does not ask again until the
+    /// effect changes.
+    Failed(String),
+}
+
+impl RenderError {
+    /// What went wrong, as a sentence.
+    pub fn reason(&self) -> &str {
+        match self {
+            RenderError::OverBudget(why) | RenderError::Failed(why) => why,
+        }
+    }
+
+    /// True when the failure came from the machine's load and not from the effect.
+    pub fn depends_on_load(&self) -> bool {
+        matches!(self, RenderError::OverBudget(_))
+    }
+}
+
+impl std::fmt::Display for RenderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.reason())
+    }
+}
+
+impl std::error::Error for RenderError {}
+
+impl From<String> for RenderError {
+    fn from(why: String) -> Self {
+        RenderError::Failed(why)
+    }
+}
+
+impl From<RenderError> for String {
+    fn from(error: RenderError) -> Self {
+        error.reason().to_string()
+    }
+}
+
+/// What an effect unwinds with when its tile cannot be drawn.
+///
+/// The [`Effect`] trait has no way to say "this frame failed", and a tile that is silently
+/// different from the one the effect draws is worse than no tile. A tile effect (see
+/// `user_effects::html_builder_seeded`) unwinds with this payload through
+/// `std::panic::resume_unwind`, which skips the panic hook, so the failure is not logged as a
+/// daemon panic; [`render_within`] catches it and returns [`RenderError::Failed`].
+#[derive(Debug)]
+pub struct TileFailure(pub String);
+
 /// Renders the thumbnail of `effect` at `props`, within [`RENDER_BUDGET`]. Returns the whole
 /// binary body, or why the render was given up.
 ///
 /// The effect's own recipe applies: its showcase props are laid over `props`.
-pub fn render(effect: &mut dyn Effect, props: &Props) -> Result<Vec<u8>, String> {
+pub fn render(effect: &mut dyn Effect, props: &Props) -> Result<Vec<u8>, RenderError> {
     render_within(effect, props, RENDER_BUDGET)
 }
 
@@ -87,11 +143,32 @@ pub fn render_within(
     effect: &mut dyn Effect,
     props: &Props,
     budget: std::time::Duration,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, RenderError> {
+    // A tile effect that cannot draw its tile unwinds with a [`TileFailure`]; anything else
+    // that unwinds is a real panic and goes on.
+    let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| render_frames(effect, props, budget)));
+    match attempt {
+        Ok(result) => result,
+        Err(payload) => match payload.downcast::<TileFailure>() {
+            Ok(failure) => Err(RenderError::Failed(failure.0)),
+            Err(other) => std::panic::resume_unwind(other),
+        },
+    }
+}
+
+fn render_frames(
+    effect: &mut dyn Effect,
+    props: &Props,
+    budget: std::time::Duration,
+) -> Result<Vec<u8>, RenderError> {
     let started = std::time::Instant::now();
     let over_budget = || {
-        (started.elapsed() > budget)
-            .then(|| format!("the thumbnail render ran past its {} s budget and was stopped", budget.as_secs()))
+        (started.elapsed() > budget).then(|| {
+            RenderError::OverBudget(format!(
+                "the thumbnail render ran past its {} s budget and was stopped",
+                budget.as_secs()
+            ))
+        })
     };
     let schema = effect.schema();
     let needs = schema.needs;
@@ -150,6 +227,30 @@ pub fn render_within(
         out.extend_from_slice(&tile);
     }
     Ok(out)
+}
+
+/// The thumbnail body (the binary format above) of a frame strip PNG: the strip the editor's demo
+/// serves, 64 px wide, the frames stacked top to bottom. This is how a shipped strip is measured
+/// with [`score`] and [`problems`], the same as a tile the daemon serves.
+pub fn body_from_strip_png(png_bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let decoder = png::Decoder::new(std::io::Cursor::new(png_bytes));
+    let mut reader = decoder.read_info().map_err(|e| format!("not a PNG: {e}"))?;
+    let mut pixels = vec![0u8; reader.output_buffer_size().ok_or("the PNG is too large")?];
+    let info = reader.next_frame(&mut pixels).map_err(|e| format!("the PNG cannot be read: {e}"))?;
+    if info.color_type != png::ColorType::Rgb || info.bit_depth != png::BitDepth::Eight {
+        return Err(format!("the strip is {:?} {:?}; it must be 8-bit RGB", info.color_type, info.bit_depth));
+    }
+    let (w, h) = (info.width as usize, info.height as usize);
+    if w != WIDTH as usize || h == 0 || h % HEIGHT as usize != 0 {
+        return Err(format!("the strip is {w}x{h}; it must be {WIDTH} wide and a whole number of {HEIGHT}-row frames"));
+    }
+    let frames = (h / HEIGHT as usize) as u16;
+    let mut body = Vec::with_capacity(6 + w * h * 3);
+    body.extend_from_slice(&WIDTH.to_le_bytes());
+    body.extend_from_slice(&HEIGHT.to_le_bytes());
+    body.extend_from_slice(&frames.to_le_bytes());
+    body.extend_from_slice(&pixels[..w * h * 3]);
+    Ok(body)
 }
 
 /// How many updates cover `seconds` with no step longer than [`MAX_STEP_S`].
@@ -483,17 +584,28 @@ pub struct ThumbnailCache {
     /// How many renders may run at once. The library asks for every tile together, and each
     /// render can take seconds of a core.
     gate: Arc<tokio::sync::Semaphore>,
+    /// The time one render may take before it is given up.
+    render_budget: std::time::Duration,
+    /// How long a render that ran past its budget is remembered before the tile is tried
+    /// again.
+    timeout_retry_after: std::time::Duration,
 }
 
 /// Thumbnails rendered at the same time, at most.
 pub const CONCURRENT_RENDERS: usize = 2;
 
+/// How long a render that ran past [`RENDER_BUDGET`] is remembered, in wall-clock time, before
+/// the library may ask for the tile again.
+///
+/// A timeout says how busy the machine was (a game running, a build), not what the effect is.
+/// Remembering it for the whole session would blank the tile until the effect file changed
+/// or the daemon restarted. Ten minutes keeps a hopeless render from costing a core on every
+/// library open, and gives a tile that lost to a busy machine another chance.
+pub const TIMEOUT_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
 impl Default for ThumbnailCache {
     fn default() -> Self {
-        Self {
-            inner: Mutex::default(),
-            gate: Arc::new(tokio::sync::Semaphore::new(CONCURRENT_RENDERS)),
-        }
+        Self::with_limits(RENDER_BUDGET, TIMEOUT_RETRY_AFTER)
     }
 }
 
@@ -502,8 +614,9 @@ impl Default for ThumbnailCache {
 enum CacheEntry {
     /// The tile, rendered.
     Rendered(Arc<Vec<u8>>),
-    /// The render was given up: this is why.
-    GivenUp(String),
+    /// The render was given up: this is why. `retry_at` is when the tile may be tried again;
+    /// `None` means never, until the effect changes.
+    GivenUp { why: String, retry_at: Option<std::time::Instant> },
 }
 
 #[derive(Default)]
@@ -513,11 +626,28 @@ struct CacheState {
 }
 
 impl ThumbnailCache {
+    /// A cache with its own render budget and its own retry interval for a render that ran
+    /// past the budget. [`ThumbnailCache::default`] uses [`RENDER_BUDGET`] and
+    /// [`TIMEOUT_RETRY_AFTER`]; the tests shorten both.
+    pub fn with_limits(render_budget: std::time::Duration, timeout_retry_after: std::time::Duration) -> Self {
+        Self {
+            inner: Mutex::default(),
+            gate: Arc::new(tokio::sync::Semaphore::new(CONCURRENT_RENDERS)),
+            render_budget,
+            timeout_retry_after,
+        }
+    }
+
+    /// The time one render may take.
+    pub fn render_budget(&self) -> std::time::Duration {
+        self.render_budget
+    }
+
     /// Waits for one of the [`CONCURRENT_RENDERS`] render slots and hands back a permit the
     /// caller owns.
     ///
-    /// The permit is owned, not borrowed: the caller hands it to the render task, so it is
-    /// held for as long as the render runs. A client that goes away does not hand a slot
+    /// The permit is owned, not borrowed: the caller hands it to the render task, so it is held
+    /// for as long as the render runs. A client that goes away does not hand a slot
     /// back while the render is still going.
     pub async fn acquire_slot(&self) -> tokio::sync::OwnedSemaphorePermit {
         // The semaphore is never closed.
@@ -541,7 +671,12 @@ impl ThumbnailCache {
         }
     }
 
-    /// Why the render of `id` was given up, if it was. The cache belongs to `generation`.
+    /// Why the render of `id` was given up, if it was and the tile is not due another try.
+    /// The cache belongs to `generation`.
+    ///
+    /// A render that ran past its budget is due another try once
+    /// [`ThumbnailCache::with_limits`]' retry interval has passed: its entry is dropped here
+    /// and the answer is `None`.
     pub fn failure(&self, generation: u64, id: &str) -> Option<String> {
         let mut state = lock(&self.inner);
         if state.generation != generation {
@@ -549,7 +684,13 @@ impl ThumbnailCache {
             state.generation = generation;
         }
         match state.entries.get(id) {
-            Some(CacheEntry::GivenUp(why)) => Some(why.clone()),
+            Some(CacheEntry::GivenUp { why, retry_at }) => {
+                if retry_at.is_some_and(|at| std::time::Instant::now() >= at) {
+                    state.entries.remove(id);
+                    return None;
+                }
+                Some(why.clone())
+            }
             _ => None,
         }
     }
@@ -568,11 +709,20 @@ impl ThumbnailCache {
     ///
     /// The failure is remembered so the library does not ask for the tile again on every
     /// open: without it, every open would render the tile again, for up to
-    /// [`RENDER_BUDGET`], and hold a render slot while it did.
-    pub fn put_failure(&self, generation: u64, id: &str, why: String) {
+    /// [`RENDER_BUDGET`], and hold a render slot while it did. An effect that fails (it does
+    /// not build, its script errors, it panics) fails the same way every time, so that is
+    /// remembered until the effect changes. A render that only ran past its budget depends on
+    /// how busy the machine was, so that is remembered for the retry interval only.
+    pub fn put_failure(&self, generation: u64, id: &str, error: &RenderError) {
         let mut state = lock(&self.inner);
         if state.generation == generation {
-            state.entries.insert(id.to_string(), CacheEntry::GivenUp(why));
+            let retry_at = error
+                .depends_on_load()
+                .then(|| std::time::Instant::now() + self.timeout_retry_after);
+            state.entries.insert(
+                id.to_string(),
+                CacheEntry::GivenUp { why: error.reason().to_string(), retry_at },
+            );
         }
     }
 
@@ -919,7 +1069,8 @@ mod tests {
         let mut effect = Counter { updates: updates.clone(), recipe: None };
         let error = render_within(&mut effect, &Props::new(), std::time::Duration::ZERO)
             .expect_err("a zero budget stops the render");
-        assert!(error.contains("budget"), "{error}");
+        assert!(error.depends_on_load(), "{error}");
+        assert!(error.to_string().contains("budget"), "{error}");
         // It stopped at the first update, not after the whole recipe.
         assert_eq!(updates.load(Ordering::SeqCst), 1);
     }
@@ -977,5 +1128,65 @@ mod tests {
         assert_eq!(spectrum.centers_hz.len(), SPECTRUM_BANDS);
         assert!(spectrum.centers_hz.windows(2).all(|w| w[0] < w[1]));
         assert!(spectrum.magnitudes.windows(2).all(|w| w[0] > w[1]));
+    }
+
+    /// An effect that cannot draw its tile: the second update unwinds with a [`TileFailure`], or
+    /// panics for real.
+    struct Failing {
+        updates: u32,
+        really_panic: bool,
+    }
+
+    impl Effect for Failing {
+        fn schema(&self) -> PropertySchema {
+            PropertySchema {
+                id: "failing".into(),
+                name: "Failing".into(),
+                description: String::new(),
+                needs: Default::default(),
+                properties: Vec::new(),
+                presets: Vec::new(),
+                thumbnail: None,
+            }
+        }
+        fn init(&mut self, _props: &Props) {}
+        fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &Inputs) {
+            self.updates += 1;
+            canvas.pixels.fill([0.5, 0.5, 0.5]);
+            if self.updates == 2 {
+                if self.really_panic {
+                    panic!("a real panic");
+                }
+                std::panic::resume_unwind(Box::new(TileFailure("the script threw".into())));
+            }
+        }
+    }
+
+    #[test]
+    fn a_tile_effect_that_fails_makes_the_render_fail_loudly_and_a_real_panic_goes_on() {
+        let mut effect = Failing { updates: 0, really_panic: false };
+        let error = render(&mut effect, &Props::new()).expect_err("a failed tile frame fails the render");
+        assert_eq!(error, RenderError::Failed("the script threw".into()));
+        assert!(!error.depends_on_load());
+
+        // A panic that is not a tile failure is not swallowed.
+        let mut effect = Failing { updates: 0, really_panic: true };
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| render(&mut effect, &Props::new())));
+        assert!(outcome.is_err(), "a real panic must reach the caller");
+    }
+
+    #[test]
+    fn a_failure_is_remembered_for_good_and_a_timeout_only_for_the_retry_interval() {
+        let retry = std::time::Duration::from_millis(60);
+        let cache = ThumbnailCache::with_limits(RENDER_BUDGET, retry);
+        cache.put_failure(0, "broken", &RenderError::Failed("it panicked".into()));
+        cache.put_failure(0, "slow", &RenderError::OverBudget("past its budget".into()));
+        assert_eq!(cache.failure(0, "broken").as_deref(), Some("it panicked"));
+        assert_eq!(cache.failure(0, "slow").as_deref(), Some("past its budget"));
+
+        std::thread::sleep(retry * 3);
+        // The deterministic failure is still remembered; the timeout is due another try.
+        assert_eq!(cache.failure(0, "broken").as_deref(), Some("it panicked"));
+        assert_eq!(cache.failure(0, "slow"), None, "a timeout was remembered past the retry interval");
     }
 }
