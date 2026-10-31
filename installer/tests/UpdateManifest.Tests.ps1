@@ -1,15 +1,19 @@
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_assert.ps1')
 
+# CANVAS_RGB_RELEASE_WORKFLOW points the workflow tests at another copy of release.yml, so a mutated
+# copy can be run through the same tests without touching the real file.
+$workflowPath = if ($env:CANVAS_RGB_RELEASE_WORKFLOW) { $env:CANVAS_RGB_RELEASE_WORKFLOW } else { Join-Path $PSScriptRoot '..\..\.github\workflows\release.yml' }
+
 # The release workflow's jobs, with the comment lines dropped (comments say where the key is; only
 # code counts). Returns the whole text and the text of each job.
 function Get-WorkflowJobs {
     param([string]$Path)
     $text = Get-Content -LiteralPath $Path -Raw
     $text = (($text -split '\r?\n') | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
-    # Split into jobs at the two-space-indented keys under jobs:.
+    # Split into jobs at the two-space-indented keys under jobs: a job runs from its key to the next such key, or to the end.
     $jobs = @{}
-    $names = [regex]::Matches($text, '(?m)^  ([a-z]+):\s*$')
+    $names = [regex]::Matches($text, '(?m)^  ([A-Za-z0-9_-]+):\s*$')
     for ($i = 0; $i -lt $names.Count; $i++) {
         $end = if ($i + 1 -lt $names.Count) { $names[$i + 1].Index } else { $text.Length }
         $jobs[$names[$i].Groups[1].Value] = $text.Substring($names[$i].Index, $end - $names[$i].Index)
@@ -17,8 +21,8 @@ function Get-WorkflowJobs {
     return @{ Text = $text; Jobs = $jobs }
 }
 
-# One step of a job: from its own "- " line (so keys written above name:/uses:, like "- if:", are part of
-# it) up to the line before the next step. The marker finds a line inside the step.
+# One step of a job: from its own "- " line (so a run: or with: written above name:/uses: is part of it)
+# up to the line before the next step. The marker finds a line inside the step.
 function Get-WorkflowStep {
     param([string]$Job, [string]$Marker)
     $lines = $Job -split "`n"
@@ -34,6 +38,27 @@ function Get-WorkflowStep {
         $step += $lines[$i]
     }
     return ($step -join "`n")
+}
+
+# The script of a step's run: | block, with the block's own indent taken off.
+function Get-StepRun {
+    param([string]$Step)
+    $run = @()
+    $inRun = $false
+    $keyCol = 0
+    $strip = -1
+    foreach ($line in ($Step -split "`n")) {
+        if (-not $inRun) {
+            if ($line -match '^\s*(?:-\s+)?run:\s*\|') { $inRun = $true; $keyCol = $line.IndexOf('run:') }
+            continue
+        }
+        if ($line.Trim() -eq '') { $run += ''; continue }
+        $indent = $line.Length - $line.TrimStart().Length
+        if ($indent -le $keyCol) { break }
+        if ($strip -lt 0) { $strip = $indent }
+        $run += $line.Substring([Math]::Min($strip, $indent))
+    }
+    return ($run -join "`n")
 }
 
 # The keys of a step's with: block, by indentation: a key of the block has the with: line's indent plus
@@ -83,6 +108,10 @@ $script = if ($env:CANVAS_RGB_MANIFEST_SCRIPT) { $env:CANVAS_RGB_MANIFEST_SCRIPT
 # is there, and say which one ran.
 $ps = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell.exe' }
 Write-Host "script runs under: $ps"
+Test-Case 'when pwsh is on PATH the suite runs the script under pwsh' {
+    $onPath = [bool](Get-Command pwsh -ErrorAction SilentlyContinue)
+    Assert-True (-not $onPath -or $ps -eq 'pwsh') "pwsh is on PATH but the suite chose [$ps]"
+}
 Test-Case 'the script is run by the PowerShell this suite says it is' {
     # The child prints its own major version; pwsh must be 7 or later, Windows PowerShell is 5.
     $major = [int]((& $ps -NoProfile -Command '$PSVersionTable.PSVersion.Major' | Out-String).Trim())
@@ -202,7 +231,7 @@ try {
         Assert-True $m.notes.Contains('Fourteen built-in effects') 'real notes'
     }
     Test-Case 'release workflow: the key lives only in the sign job, which installs a lockfile-pinned CLI' {
-        $info = Get-WorkflowJobs (Join-Path $PSScriptRoot '..\..\.github\workflows\release.yml')
+        $info = Get-WorkflowJobs $workflowPath
         $wf = $info.Text
         $jobs = $info.Jobs
         Assert-True ($jobs.ContainsKey('build') -and $jobs.ContainsKey('sign') -and $jobs.ContainsKey('publish')) 'build, sign and publish jobs'
@@ -519,7 +548,7 @@ try {
         Assert-Equal $m.notes '- From the default file.' 'the notes come from the CHANGELOG.md next to tools'
     }
     Test-Case 'release workflow: the release body is the notes file, with the generated list after it' {
-        $info = Get-WorkflowJobs (Join-Path $PSScriptRoot '..\..\.github\workflows\release.yml')
+        $info = Get-WorkflowJobs $workflowPath
         $sign = $info.Jobs['sign']
         $publish = $info.Jobs['publish']
         # The sign job writes the notes from the same extractor, and the artifact carries them.
@@ -528,7 +557,6 @@ try {
         # The release step itself carries the body, not another step of the job.
         Assert-Equal ([regex]::Matches($publish, 'uses:\s*softprops/action-gh-release').Count) 1 'exactly one softprops/action-gh-release step in the publish job'
         $release = Get-WorkflowStep -Job $publish -Marker 'softprops/action-gh-release'
-        Assert-True ($release -notmatch '(?m)^(?: {6}- | {8})(?:if|continue-on-error):') 'the release step has no if: and no continue-on-error, so it always runs'
         $with = Get-StepWith $release
         Assert-Equal $with['body_path'] 'dist/release-notes.md' 'body_path is a key of the release step with: block'
         Assert-Equal $with['generate_release_notes'] 'true' 'generate_release_notes is a key of the release step with: block'
@@ -536,24 +564,11 @@ try {
         Assert-True ($publish.IndexOf('name: The release notes are there') -lt $publish.IndexOf('softprops/action-gh-release')) 'the check runs before the release'
     }
     Test-Case 'release workflow: the release stops when the notes file is missing or empty' {
-        $info = Get-WorkflowJobs (Join-Path $PSScriptRoot '..\..\.github\workflows\release.yml')
+        $info = Get-WorkflowJobs $workflowPath
         $publish = $info.Jobs['publish']
         $step = Get-WorkflowStep -Job $publish -Marker 'name: The release notes are there'
-        Assert-True ($step -notmatch '(?m)^(?: {6}- | {8})(?:if|continue-on-error):') 'the check step has no if: and no continue-on-error, so it always runs'
         # The step's own run: block, run with bash the way the runner runs it.
-        $run = @()
-        $inRun = $false
-        $indent = 0
-        foreach ($line in ($step -split "`n")) {
-            if (-not $inRun) {
-                if ($line -match '^(\s*)run:\s*\|') { $inRun = $true; $indent = $Matches[1].Length }
-                continue
-            }
-            if ($line.Trim() -eq '') { $run += ''; continue }
-            if (($line.Length - $line.TrimStart().Length) -le $indent) { break }
-            $run += $line.Trim()
-        }
-        $run = ($run -join "`n")
+        $run = Get-StepRun $step
         Assert-True ($run.Trim() -ne '') 'the step has a run: block'
         $work = Join-Path $dir 'bash-step'
         New-Item -ItemType Directory -Path (Join-Path $work 'dist') -Force | Out-Null
@@ -571,9 +586,82 @@ try {
         Assert-True ($empty.Exit -ne 0) 'an empty notes file stops the release'
         Assert-Equal $real.Exit 0 "a real notes file lets the release through: $($real.Err)"
         $bytes = (New-Object System.Text.UTF8Encoding($false)).GetByteCount($noteText)
-        Assert-True ($real.Out -match "(?m)\b3 lines, $bytes bytes") "the step prints the line and byte count: $($real.Out)"
-        Assert-True (-not $real.Out.Contains('::')) "the step prints no :: at all: $($real.Out)"
-        Assert-True (-not $real.Out.Contains('injected') -and -not $real.Out.Contains('Added')) "the step prints no notes text: $($real.Out)"
+        # Both streams carry only the count line: stdout is that line and stderr is empty, so no notes text reaches the log.
+        Assert-Equal "$($real.Out)".Trim() "dist/release-notes.md: 3 lines, $bytes bytes" 'stdout is only the count line'
+        Assert-Equal "$($real.Err)".Trim() '' 'stderr is empty'
+    }
+    Test-Case 'release workflow: no line of the publish job is an if: or a continue-on-error:, at any indent' {
+        $info = Get-WorkflowJobs $workflowPath
+        $publish = $info.Jobs['publish']
+        # The slice is the whole job: from its "  publish:" key to the next job key or the end. It must hold the job's steps.
+        Assert-True ($publish.StartsWith('  publish:')) 'the publish job text starts at its key'
+        Assert-True ($publish.Contains('name: Checksum still matches') -and $publish.Contains('softprops/action-gh-release')) 'the publish job text holds its first and last steps'
+        # One rule for the whole job: a line whose key is if or continue-on-error, with or without "- ", quoted, with spaces before the colon, or inside {...}.
+        $key = '["'']?(?:if|continue-on-error)["'']?[ \t]*:'
+        $hits = @($publish -split "`n" | Where-Object { $_ -match "^[ \t]*(?:-[ \t]+)?$key" -or $_ -match "[{,][ \t]*$key" })
+        Assert-Equal $hits.Count 0 "a guard in the publish job could stop the check, the checksum or the release from running: [$($hits -join ' | ')]"
+    }
+    Test-Case 'release workflow: the build job''s changelog check accepts the same version headings as the script' {
+        $info = Get-WorkflowJobs $workflowPath
+        $step = Get-WorkflowStep -Job $info.Jobs['build'] -Marker 'name: The changelog has this version'
+        $run = Get-StepRun $step
+        Assert-True ($run.Trim() -ne '') 'the step has a run: block'
+        $stepFile = Join-Path $dir 'build-step.ps1'
+        [System.IO.File]::WriteAllText($stepFile, $run + "`n", (New-Object System.Text.UTF8Encoding($false)))
+        $cases = @(
+            @{ H = '## [0.2.0] - 2026-11-02'; Ok = $true },
+            @{ H = ' ## [0.2.0] - 2026-11-02'; Ok = $true },
+            @{ H = '  ## [0.2.0] - 2026-11-02'; Ok = $true },
+            @{ H = '   ## [0.2.0] - 2026-11-02'; Ok = $true },
+            @{ H = '## [0.2.0] - 2026-11-02   '; Ok = $true },
+            @{ H = '    ## [0.2.0] - 2026-11-02'; Ok = $false },
+            @{ H = "`t## [0.2.0] - 2026-11-02"; Ok = $false },
+            @{ H = '## [0.2.0] - 2026-11-02 (yanked)'; Ok = $false },
+            @{ H = '## [0.2.0] - 2026-11-02x'; Ok = $false },
+            @{ H = '## [0.2.0]  - 2026-11-02'; Ok = $false },
+            @{ H = '## [0.2.0] - 2026-1-2'; Ok = $false },
+            @{ H = '## [0.2.0] 2026-11-02'; Ok = $false },
+            @{ H = '## [0.2.00] - 2026-11-02'; Ok = $false },
+            @{ H = '## [10.2.0] - 2026-11-02'; Ok = $false }
+        )
+        $oldRef = $env:GITHUB_REF_NAME
+        $env:GITHUB_REF_NAME = 'v0.2.0'
+        try {
+            foreach ($c in $cases) {
+                $r = Invoke-Changelog -Name 'agree' -Version '0.2.0' -Lines @('# Changelog', '', $c.H, '', '- Notes.', '', '[0.2.0]: https://example.invalid/tag')
+                $work = Join-Path $dir 'agree-build'
+                New-Item -ItemType Directory -Path $work -Force | Out-Null
+                Copy-Item -LiteralPath (Join-Path $dir 'agree-CHANGELOG.md') -Destination (Join-Path $work 'CHANGELOG.md') -Force
+                $p = Start-Process -FilePath $ps -ArgumentList @('-NoProfile', '-File', "`"$stepFile`"") -WorkingDirectory $work -NoNewWindow -Wait -PassThru -RedirectStandardOutput (Join-Path $dir 'agree.out') -RedirectStandardError (Join-Path $dir 'agree.err')
+                $scriptOk = ($r.Exit -eq 0)
+                $buildOk = ($p.ExitCode -eq 0)
+                Assert-Equal $scriptOk $c.Ok "the script on [$($c.H)]: $($r.Err)"
+                Assert-Equal $buildOk $scriptOk "the build job's check and the script disagree on the heading [$($c.H)]"
+            }
+        } finally { $env:GITHUB_REF_NAME = $oldRef }
+    }
+    Test-Case 'notes: a bare # or ## line inside the section is a stray heading, a bare ### is not' {
+        foreach ($h in '#', '##', ' #', '  ##', '   #', '## ') {
+            $r = Invoke-Changelog -Name 'bare' -Lines @('# Changelog', '', '## [0.1.1] - 2026-11-02', '', '### Added', '', '- Something.', '', $h, '', 'More text.', '', '## [0.1.0] - 2026-10-29', '', '- Old.', '', '[0.1.0]: https://example.invalid/tag')
+            Assert-True ($r.Exit -ne 0) "[$h] gives a non-zero exit"
+            Assert-True ($r.Err -match 'line 9') "[$h]: the message names line 9: $($r.Err)"
+            Assert-True ($r.Err -match 'not a version heading') "[$h]: the message says what is wrong: $($r.Err)"
+            Assert-True ($null -eq $r.NotesText) "[$h]: no notes file"
+        }
+        $r = Invoke-Changelog -Name 'bare3' -Lines @('# Changelog', '', '## [0.1.1] - 2026-11-02', '', '###', '', '- Something.', '', '## [0.1.0] - 2026-10-29', '', '- Old.', '', '[0.1.0]: https://example.invalid/tag')
+        Assert-Equal $r.Exit 0 "a bare ### is not a level-1 or level-2 heading: $($r.Err)"
+    }
+    Test-Case 'notes: a compare-link label that names no version fails whichever version is released' {
+        $tailLines = @('', '[Unreleased]: https://example.invalid/compare', '[ref]: https://example.invalid/ref', '[0.1.0]: https://example.invalid/tag')
+        foreach ($v in '0.1.1', '0.1.0') {
+            $r = Invoke-Changelog -Name 'anyver' -Version $v -Lines (@('# Changelog', '', '## [0.1.1] - 2026-11-02', '', '- A.', '', '## [0.1.0] - 2026-10-29', '', '- Old.') + $tailLines)
+            Assert-True ($r.Exit -ne 0) "[$v] non-zero exit"
+            Assert-True ($r.Err -match 'line 12') "[$v] the message names line 12: $($r.Err)"
+            Assert-True ($r.Err -match 'not a version link') "[$v] the message says what is wrong: $($r.Err)"
+            Assert-True ($null -eq $r.NotesText) "[$v] no notes file"
+        }
+        $r = Invoke-Changelog -Name 'anyver-ok' -Version '0.1.1' -Lines (@('# Changelog', '', '## [0.1.1] - 2026-11-02', '', '- A.', '', '## [0.1.0] - 2026-10-29', '', '- Old.', '', '[Unreleased]: https://example.invalid/compare', '[0.1.1]: https://example.invalid/a', '[0.1.0]: https://example.invalid/tag'))
+        Assert-Equal $r.Exit 0 "valid labels at the end: $($r.Err)"
     }
 }
 finally { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }

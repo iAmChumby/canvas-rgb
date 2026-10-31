@@ -6,15 +6,14 @@
   notes is that version's section of CHANGELOG.md: the text under "## [X.Y.Z] - date", up to the next
   version heading ("## [Unreleased]", "## [X.Y.Z]" or "## [X.Y.Z-pre.1]"), or up to the compare links at
   the bottom of the file (link definitions whose labels name versions, then only blank lines to the end).
-  The changelog is read as UTF-8, so em dashes and accents survive. Headings and link definitions may be
-  indented by 1-3 spaces, as in Markdown. Inside the section only "###" subheadings are allowed. The script
-  throws, naming the line, on: a level-1 or level-2 heading that is not a version heading, a second heading
-  for the same version, a link definition inside the section, and a link label that names no version in the
-  compare links at the end of the file. Unsupported, and not detected: headings or "## [x]" lines inside
-  fenced code blocks (read as real headings), "## [Unreleased]" or a pre-release heading in the middle of a
-  released section (ends it there), a duplicate version heading that is not the next version heading (the
-  section ends at the next one, the duplicate goes unseen), and any other Markdown layout (setext headings,
-  tab indents, 4-space indents, which are content).
+  The changelog is read as UTF-8. Headings and link definitions may be indented by 1-3 spaces, as in
+  Markdown. The script throws, naming the line, on: a level-1 or level-2 heading (including a bare "#" or
+  "##") that is not a version heading, a second heading for the same version, a link definition inside the
+  section, and, wherever the released version sits, a link label in the compare links at the end of the
+  file that names no version. Not detected: headings or "## [x]" lines inside fenced code blocks,
+  "## [Unreleased]" or a pre-release heading in the middle of a released section (ends it there), a
+  duplicate version heading that is not the next version heading, and other layouts (setext headings,
+  tab or 4-space indents).
   signature is the contents of the installer's .sig file, as `tauri signer sign` wrote it.
   url is the release asset's address; the tray refuses anything that is not https on github.com or
   GitHub's asset hosts, so a wrong address here makes the update unusable, not unsafe.
@@ -63,6 +62,21 @@ if ($start -lt 0) { throw "CHANGELOG.md has no '## [$Version] - YYYY-MM-DD' sect
 # not a version heading, a second heading for this same version, a link definition inside the section.
 # Version labels are case-sensitive: Unreleased, X.Y.Z, or X.Y.Z-pre.release.
 $labelPattern = '(Unreleased|\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?)'
+$linkDef = '^ {0,3}\[([^\]]+)\]:'
+
+# The compare links are the last thing in the file: the trailing run of link definitions and blank lines.
+# Every label in it must name a version, whichever version is being released.
+$tail = $lines.Count
+while ($tail -gt 0 -and (-not $lines[$tail - 1].Trim() -or $lines[$tail - 1] -match $linkDef)) { $tail-- }
+for ($j = $tail; $j -lt $lines.Count; $j++) {
+    if ($lines[$j] -match $linkDef) {
+        $label = $Matches[1]
+        if ($label -cnotmatch "^$labelPattern$") {
+            throw "CHANGELOG.md line $($j + 1): '[$label]' is not a version link. The compare links at the bottom of the file name versions."
+        }
+    }
+}
+
 $end = -1
 for ($i = $start + 1; $i -lt $lines.Count; $i++) {
     $line = $lines[$i]
@@ -72,27 +86,12 @@ for ($i = $start + 1; $i -lt $lines.Count; $i++) {
         }
         $end = $i; break
     }
-    if ($line -match '^ {0,3}#{1,2}\s' -or $line -match '^ {0,3}## \[') {
+    if ($line -match '^ {0,3}#{1,2}(\s|$)' -or $line -match '^ {0,3}## \[') {
         throw "CHANGELOG.md line $($i + 1): '$line' is not a version heading. The section for $Version ends at a '## [X.Y.Z]' heading, and holds only '###' subheadings."
     }
-    if ($line -match '^ {0,3}\[([^\]]+)\]:') {
-        $label = $Matches[1]
-        if ($label -cnotmatch "^$labelPattern$") {
-            throw "CHANGELOG.md line $($i + 1): '[$label]' is not a version link. The compare links at the bottom of the file name versions."
-        }
-        # The compare links are the last thing in the file: only link definitions and blank lines follow.
-        $compareBlock = $true
-        for ($j = $i + 1; $j -lt $lines.Count; $j++) {
-            $next = $lines[$j]
-            if (-not $next.Trim()) { continue }
-            if ($next -notmatch '^ {0,3}\[([^\]]+)\]:') { $compareBlock = $false; break }
-            $nextLabel = $Matches[1]
-            if ($nextLabel -cnotmatch "^$labelPattern$") {
-                throw "CHANGELOG.md line $($j + 1): '[$nextLabel]' is not a version link. The compare links at the bottom of the file name versions."
-            }
-        }
-        if ($compareBlock) { $end = $i; break }
-        throw "CHANGELOG.md line $($i + 1): '[$label]' is a link definition inside the section for $Version. The compare links belong at the end of the file."
+    if ($line -match $linkDef) {
+        if ($i -ge $tail) { $end = $i; break }
+        throw "CHANGELOG.md line $($i + 1): '$line' is a link definition inside the section for $Version. The compare links belong at the end of the file."
     }
 }
 if ($end -lt 0) { $end = $lines.Count }
