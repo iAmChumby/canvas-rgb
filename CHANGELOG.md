@@ -8,6 +8,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
+- Updating no longer fails when OpenRGB is running, and a failed update no longer leaves OpenRGB broken. (#60)
 - On a phone-width window (360 to 430 px) the bottom bar no longer runs off the right edge and cuts "Settings" to "Se": every page has its icon in the bar and the page you are on shows its name, in full, under it. (#42)
 
 ## [0.3.0] - 2026-10-31

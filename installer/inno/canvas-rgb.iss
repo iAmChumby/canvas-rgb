@@ -85,6 +85,9 @@ Name: "{autoprograms}\canvas-rgb"; Filename: "{app}\canvas-rgb.exe"; Comment: "L
 [UninstallDelete]
 ; Made by setup-elevated.ps1 (not by [Files]), so Inno does not know them.
 Type: filesandordirs; Name: "{app}\openrgb"
+; The two folders an update swap uses (setup-elevated.ps1). A failed update can leave them behind.
+Type: filesandordirs; Name: "{app}\openrgb.new"
+Type: filesandordirs; Name: "{app}\openrgb.old"
 Type: filesandordirs; Name: "{app}\bin"
 Type: filesandordirs; Name: "{app}\uninstall"
 ; Written by a /UPDATE run (see DeinitializeSetup).
@@ -198,7 +201,12 @@ begin
   Result := '';
   if LoadStringFromFile(LogPath, Text) then
   begin
-    Result := String(Text);
+    { The log is UTF-8 (the PowerShell scripts write it as UTF-8 without a BOM). Decoded as UTF-8,
+      so the message the person reads is the text that was written: read as the system code page
+      a BOM showed up as three odd characters, and every accent was wrong (#60). }
+    Result := Utf8Decode(Text);
+    if (Length(Result) > 0) and (Result[1] = #65279) then
+      Result := Copy(Result, 2, MaxInt);
     if Length(Result) > 1200 then Result := '...' + Copy(Result, Length(Result) - 1199, 1200);
   end;
 end;
@@ -445,7 +453,7 @@ begin
   end;
 
   WizardForm.PreparingLabel.Caption := 'Closing canvas-rgb if it is running...';
-  if not RunPs(ExpandConstant('{tmp}\stop-canvas.ps1'), '-LogFile "' + Log + '"', False, Code) or (Code <> 0) then
+  if not RunPs(ExpandConstant('{tmp}\stop-canvas.ps1'), '-LogFile "' + Log + '" -InstallDir "' + ExpandConstant('{app}') + '"', False, Code) or (Code <> 0) then
     Result := PrepFail('canvas-rgb is still running in the background and would not stop (code ' + IntToStr(Code) + '). Nothing was changed. ' + LogTail(Log));
 end;
 

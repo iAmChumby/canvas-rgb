@@ -38,8 +38,10 @@ try {
     if ($actual -ne $lock.Sha256.ToLowerInvariant()) { throw "OpenRGB SHA-256 mismatch in the elevated step: expected $($lock.Sha256) got $actual" }
     Say "  OpenRGB zip hash verified: $actual"
 
-    # 3. Stop what holds the binaries (upgrade case).
-    Stop-CanvasRgbRunning | ForEach-Object { Say $_ }
+    # 3. Stop what holds the binaries (upgrade case), including the bundled OpenRGB: a running
+    #    OpenRGB keeps its DLLs open, and a folder that cannot be deleted must not be deleted
+    #    half way (#60).
+    Stop-CanvasRgbRunning -InstallDir $InstallDir | ForEach-Object { Say $_ }
 
     # 4. Install dir: binaries, shim, OpenRGB.
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
@@ -58,17 +60,11 @@ try {
     [System.IO.File]::WriteAllText((Join-Path $binDir 'canvas-rgb.cmd'), (Get-ShimContent), (New-Object System.Text.ASCIIEncoding))
     Say '  wrote bin\canvas-rgb.cmd'
 
-    $orgb = Join-Path $InstallDir 'openrgb'
-    if (Test-Path -LiteralPath $orgb) { Remove-Item -LiteralPath $orgb -Recurse -Force }
-    Expand-Archive -LiteralPath $OpenRgbZip -DestinationPath $orgb -Force
-    $kids = @(Get-ChildItem -LiteralPath $orgb)
-    if ($kids.Count -eq 1 -and $kids[0].PSIsContainer) {
-        # The zip has one top-level folder: lift its contents so openrgb\OpenRGB.exe exists.
-        $inner = $kids[0].FullName
-        Get-ChildItem -LiteralPath $inner | Move-Item -Destination $orgb -Force
-        Remove-Item -LiteralPath $inner -Force
-    }
-    Say "  extracted OpenRGB to $orgb"
+    # OpenRGB: the verified zip is unpacked beside the live folder and swapped in. The live folder
+    # is never deleted in place, so a failure leaves it whole instead of half (#60).
+    $orgbTree = Install-OpenRgbTree -Zip $OpenRgbZip -InstallDir $InstallDir
+    $orgbTree.Notes | ForEach-Object { Say $_ }
+    Say "  extracted OpenRGB to $($orgbTree.Path)"
 
     # 5. ProgramData: created already protected.
     Initialize-MachineHome -Path $programData -LogFile $LogFile
