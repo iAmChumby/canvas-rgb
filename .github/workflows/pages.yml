@@ -24,7 +24,15 @@ permissions:
 
 concurrency:
   group: pages
-  cancel-in-progress: true
+  # A run that is already going is not cancelled. The Release workflow's build of the site is
+  # the one that has to go out, and a push that lands while it runs must not cancel it: with
+  # cancel-in-progress: true the push cancels the release's build and the page with the new
+  # hash never appears. GitHub's own Pages workflows queue instead of cancelling
+  # (actions/starter-workflows, pages/static.yml).
+  # What it costs: the site's builds are one at a time, so a push waits for the running build
+  # instead of replacing it, and only the newest queued run is kept - which is what a site
+  # wants, since the newest main is what should be live.
+  cancel-in-progress: false
 
 jobs:
   build:
