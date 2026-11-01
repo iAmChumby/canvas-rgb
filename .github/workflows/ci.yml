@@ -43,9 +43,11 @@ jobs:
       # own Chrome stands in for a downloaded Chromium.
       - name: Install Playwright for the nav check
         working-directory: tools/poison-compare/js
+        timeout-minutes: 5
         run: npm ci
 
       - name: Check the phone nav
+        timeout-minutes: 5
         run: node tools/nav-check.mjs
 
       - name: Test the editor

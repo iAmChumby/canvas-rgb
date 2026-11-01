@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import type { Icon } from "@phosphor-icons/react";
-import { Cpu, Fan, GameController, Gear, SquaresFour, Sparkle, ThermometerSimple } from "@phosphor-icons/react";
+import { Fan, GameController, Gear, Monitor, Plugs, SquaresFour, Sparkle } from "@phosphor-icons/react";
 import { useToasts } from "@/components/Toast";
 import { BrandMark, Wordmark } from "@/components/BrandMark";
 import { useSnap } from "@/lib/store";
@@ -20,8 +20,12 @@ export interface NavItem {
 const PAGES: NavItem[] = [
   { href: "/", label: "Layout", icon: SquaresFour },
   { href: "/effects/", label: "Effects", icon: Sparkle },
-  { href: "/devices/", label: "Devices", icon: Cpu },
-  { href: "/displays/", label: "Displays", icon: ThermometerSimple },
+  // What the daemon found on this machine: the board, the sticks, the card, the keyboard. Plugs
+  // says "the things plugged in", where a chip only said "the processor".
+  { href: "/devices/", label: "Devices", icon: Plugs },
+  // The panels that show numbers: a pump head, an AIO screen. A monitor says "a display", where
+  // a thermometer said "a temperature".
+  { href: "/displays/", label: "Displays", icon: Monitor },
   { href: "/peripherals/", label: "Peripherals", icon: GameController },
   { href: "/fans/", label: "Fans", icon: Fan },
 ];
@@ -72,12 +76,16 @@ export function Rail({ pathname }: { pathname: string }) {
       }
       const nr = nav.getBoundingClientRect();
       const ar = active.getBoundingClientRect();
+      // On a phone the mark sits just above the active item's icon: the tinted tile hugs the
+      // icon and the name under it, so the mark has to follow the icon, not the whole link.
+      const icon = active.querySelector<HTMLElement>(".rail-icon");
+      const ir = icon ? icon.getBoundingClientRect() : ar;
       const next: MarkerBox = {
         mx: ar.left - 6 - nr.left - nav.clientLeft,
         my: ar.top + 8 - nr.top - nav.clientTop,
         mh: Math.max(10, ar.height - 16),
         mxn: ar.left - nr.left - nav.clientLeft,
-        myn: ar.top - 5 - nr.top - nav.clientTop,
+        myn: ir.top - 5 - nr.top - nav.clientTop,
         mw: ar.width,
       };
       setMarker((prev) => {
