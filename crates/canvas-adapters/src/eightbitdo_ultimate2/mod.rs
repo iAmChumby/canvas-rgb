@@ -1568,6 +1568,14 @@ impl PeripheralAdapter for EightBitDoUltimate2 {
     }
 }
 
+impl crate::resume::ResumeBehavior for EightBitDoUltimate2 {
+    fn on_resume(&self) -> crate::resume::OnResume {
+        // No mode state: the pad's settings are read and written on request, and no mode is
+        // set when it connects, so a sleep leaves nothing to restore.
+        crate::resume::OnResume::NothingToRestore
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

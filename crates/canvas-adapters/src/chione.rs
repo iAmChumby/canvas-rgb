@@ -569,6 +569,15 @@ impl NumericDisplayAdapter for ChioneDisplay {
     }
 }
 
+impl crate::resume::ResumeBehavior for ChioneDisplay {
+    fn on_resume(&self) -> crate::resume::OnResume {
+        // No mode state: every 250 ms packet carries the digits, the unit and the mode bytes,
+        // so a sleep cannot leave the display in a state of its own. The 0xFF query is
+        // firmware information, not a mode, and it is sent once per connection.
+        crate::resume::OnResume::NothingToRestore
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

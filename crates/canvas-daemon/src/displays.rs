@@ -304,6 +304,13 @@ impl NumericDisplayAdapter for NoDisplays {
     }
 }
 
+impl canvas_adapters::resume::ResumeBehavior for NoDisplays {
+    fn on_resume(&self) -> canvas_adapters::resume::OnResume {
+        // No display, so no state a sleep could reset.
+        canvas_adapters::resume::OnResume::NothingToRestore
+    }
+}
+
 /// What a display's source can read from: the fan service's status (sensors and headers) and the
 /// last API value for that display.
 pub struct Inputs<'a> {

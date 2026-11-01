@@ -7,6 +7,7 @@ pub mod eightbitdo_ultimate2;
 pub mod fake;
 pub mod openrgb;
 mod protocol;
+pub mod resume;
 pub mod royuan;
 pub mod zones;
 

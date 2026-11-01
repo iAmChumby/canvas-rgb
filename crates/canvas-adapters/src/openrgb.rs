@@ -465,6 +465,16 @@ impl DeviceAdapter for OpenRgbAdapter {
     }
 }
 
+impl crate::resume::ResumeBehavior for OpenRgbAdapter {
+    fn on_resume(&self) -> crate::resume::OnResume {
+        // A controller that lost power over a sleep falls back to its built-in mode, so the
+        // next frame to it sends SET_CUSTOM_MODE again. The resume clears the map of the
+        // controllers in custom mode (`reset_custom_mode`), and the keepalive covers the case
+        // where the resume never reaches the daemon (#5).
+        crate::resume::OnResume::SetsModeAgain
+    }
+}
+
 async fn read_loop(mut read: OwnedReadHalf, link: Arc<Link>, epoch: u64) {
     while let Ok((device, packet_id, payload)) = read_packet(&mut read).await {
         // DEVICE_LIST_UPDATED needs no action here: every discover() and set_zone_size()
