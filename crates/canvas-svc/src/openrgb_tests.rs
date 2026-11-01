@@ -174,32 +174,9 @@ async fn the_boot_color_is_not_written_while_a_daemon_is_connected() {
 
 // ---- #18: the boot color waits for OpenRGB to finish detecting ----
 
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// A log sink the tests read back.
-#[derive(Clone, Default)]
-struct LogBuf(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for LogBuf {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl LogBuf {
-    fn text(&self) -> String {
-        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
-    }
-    fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync {
-        let buf = self.clone();
-        tracing_subscriber::fmt().with_ansi(false).with_writer(move || buf.clone()).finish()
-    }
-}
+use crate::test_logs::LogBuf;
 
 #[tokio::test]
 async fn the_boot_color_waits_until_openrgb_has_found_its_devices() {

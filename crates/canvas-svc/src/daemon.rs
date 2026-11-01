@@ -59,6 +59,22 @@ const STALE_EXIT_WAIT: Duration = Duration::from_secs(5);
 /// time is their bound, one move per `SESSION_SETTLE` at most.
 pub const SESSION_SETTLE: Duration = Duration::from_secs(3);
 
+/// Ends a daemon process, and says why first. Every kill of a daemon goes through here, so a
+/// line naming the pid and the reason is logged before the process is ended, on every path
+/// (class `cause:timing-test`, #45 and #55: a test asserts the line on each path).
+///
+/// `reason` completes "terminating the daemon (pid N): ...". A failed kill is logged too, and
+/// returned for a caller that has to stop on it.
+fn terminate_daemon(process: &mut dyn ChildProcess, reason: &str) -> io::Result<()> {
+    let pid = process.id();
+    tracing::warn!(pid, reason, "terminating the daemon (pid {pid}): {reason}");
+    let ended = process.kill();
+    if let Err(e) = &ended {
+        tracing::warn!(pid, reason, error = %e, "could not end the daemon");
+    }
+    ended
+}
+
 /// Ends `child` (already told to die) and waits up to `STALE_EXIT_WAIT` for it to go, so the next
 /// launch does not start while the old daemon still holds the API port (it would lose the bind and
 /// count as a crash).
@@ -163,9 +179,7 @@ impl DaemonSupervisor {
                 );
                 continue;
             }
-            tracing::warn!(pid, image = %stale.image.display(), "terminating the daemon (pid {pid}): a stale daemon from a previous service instance");
-            if let Err(e) = stale.process.kill() {
-                tracing::warn!(pid, error = %e, "could not end the stale daemon");
+            if terminate_daemon(stale.process.as_mut(), "a stale daemon from a previous service instance").is_err() {
                 continue;
             }
             let deadline = Instant::now() + STALE_EXIT_WAIT;
@@ -263,10 +277,7 @@ impl DaemonSupervisor {
     pub fn stop(&mut self) {
         self.stopped = true;
         if let Some(mut child) = self.child.take() {
-            tracing::info!(pid = child.id(), "terminating the daemon (pid {}): the service is stopping", child.id());
-            if let Err(e) = child.kill() {
-                tracing::warn!(error = %e, "could not end the daemon");
-            }
+            let _ = terminate_daemon(child.as_mut(), "the service is stopping");
         }
     }
 
@@ -319,10 +330,7 @@ impl DaemonSupervisor {
             if self.session_changed(now) {
                 self.pending_move = None;
                 if let Some(mut child) = self.child.take() {
-                    tracing::info!(pid = child.id(), "terminating the daemon (pid {}): the active console session changed", child.id());
-                    if let Err(e) = child.kill() {
-                        tracing::warn!(error = %e, "could not end the daemon of the old session");
-                    }
+                    let _ = terminate_daemon(child.as_mut(), "the active console session changed");
                     let pid = child.id();
                     wait_for_exit(child.as_mut(), pid);
                 }
@@ -334,10 +342,7 @@ impl DaemonSupervisor {
                 .is_some_and(|hb| now.saturating_duration_since(hb) >= HEARTBEAT_TIMEOUT);
             if stale {
                 if let Some(mut child) = self.child.take() {
-                    tracing::warn!(pid = child.id(), "terminating the daemon (pid {}): it missed heartbeats for 5 s", child.id());
-                    if let Err(e) = child.kill() {
-                        tracing::warn!(error = %e, "could not terminate the daemon that missed heartbeats");
-                    }
+                    let _ = terminate_daemon(child.as_mut(), "it missed heartbeats for 5 s");
                     let pid = child.id();
                     wait_for_exit(child.as_mut(), pid);
                 }
@@ -913,53 +918,66 @@ mod tests {
         assert!(!processes.running_ended(9001));
     }
 
-    /// Runs `run` under a subscriber that collects its lines.
+    /// Runs `run` under a subscriber that collects its lines (the shared test helper).
     fn logged(run: impl FnOnce()) -> String {
-        #[derive(Clone, Default)]
-        struct Buf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-        impl std::io::Write for Buf {
-            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(bytes);
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
-        let buf = Buf::default();
-        let sink = buf.clone();
-        let subscriber = tracing_subscriber::fmt().with_ansi(false).with_writer(move || sink.clone()).finish();
-        tracing::subscriber::with_default(subscriber, run);
-        let text = String::from_utf8_lossy(&buf.0.lock().unwrap()).into_owned();
-        text
+        crate::test_logs::captured(run).1
+    }
+
+    /// Whether `text` has a line that announces the end of daemon `pid` for `reason`.
+    fn announces_kill(text: &str, pid: u32, reason: &str) -> bool {
+        let announcement = format!("terminating the daemon (pid {pid}): {reason}");
+        text.lines().any(|line| line.contains(&announcement))
     }
 
     /// Every place the service ends the daemon says why, with the pid, in the line before the kill.
+    ///
+    /// Each path asserts the log line itself: a fake's kill record alone would pass with the line
+    /// removed. The reason is matched as the full announcement for that pid, so the crash line
+    /// that follows a missed heartbeat ("daemon crashed", reason "missed heartbeats for 5 s")
+    /// cannot satisfy it by accident (class `cause:timing-test`, #45 and #55).
     #[test]
     fn every_daemon_kill_is_preceded_by_a_line_naming_the_reason() {
         // 1. Missed heartbeats.
         let (mut sup, processes) = supervisor();
         let t0 = Instant::now();
         sup.start(t0);
+        let pid = sup.daemon_pid().expect("a daemon is running");
         let text = logged(|| {
             sup.tick(t0 + Duration::from_secs(6));
         });
-        assert!(text.contains("terminating the daemon (pid") && text.contains("missed heartbeats"), "{text}");
+        assert!(announces_kill(&text, pid, "it missed heartbeats for 5 s"), "{text}");
+        let announced = text.find("terminating the daemon").expect("announced");
+        let crashed = text.find("daemon crashed").expect("the crash is logged after the kill");
+        assert!(announced < crashed, "the reason comes before the crash line: {text}");
         assert_eq!(processes.spawns().len(), 2);
 
         // 2. The service stops.
         let (mut sup, _processes) = supervisor();
         sup.start(Instant::now());
+        let pid = sup.daemon_pid().expect("a daemon is running");
         let text = logged(|| sup.stop());
-        assert!(text.contains("terminating the daemon (pid") && text.contains("the service is stopping"), "{text}");
+        assert!(announces_kill(&text, pid, "the service is stopping"), "{text}");
 
         // 3. A stale daemon from a previous service instance.
         let (mut sup, processes) = supervisor();
         processes.set_console(1);
         processes.add_running(9001, r"C:\svc\canvas-rgbd.exe", 1);
         let text = logged(|| sup.start(Instant::now()));
-        assert!(text.contains("terminating the daemon (pid 9001)") && text.contains("stale daemon"), "{text}");
+        assert!(announces_kill(&text, 9001, "a stale daemon from a previous service instance"), "{text}");
         assert!(processes.running_ended(9001));
+
+        // 4. The active console session changed.
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        sup.start(t0);
+        let pid = sup.daemon_pid().expect("a daemon is running");
+        processes.set_console(2);
+        let text = logged(|| {
+            let _ = run_ticks(&mut sup, t0, 6);
+        });
+        assert!(announces_kill(&text, pid, "the active console session changed"), "{text}");
+        assert_eq!(processes.spawns().len(), 2);
     }
 
     #[test]

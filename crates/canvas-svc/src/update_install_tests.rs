@@ -1474,25 +1474,9 @@ fn walk(root: &Path) -> Vec<(PathBuf, u64)> {
 
 // ---- setup-user.ps1's outcome is logged, and the tray starts regardless ----
 
-/// Captures what the install code logs on this thread.
+/// Captures what the install code logs on this thread (the shared test helper).
 fn capture_logs<T>(f: impl FnOnce() -> T) -> (T, String) {
-    #[derive(Clone)]
-    struct Sink(Arc<Mutex<Vec<u8>>>);
-    impl io::Write for Sink {
-        fn write(&mut self, b: &[u8]) -> io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(b);
-            Ok(b.len())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-    let sink = Sink(Arc::new(Mutex::new(Vec::new())));
-    let writer = sink.clone();
-    let subscriber = tracing_subscriber::fmt().with_writer(move || writer.clone()).with_ansi(false).with_max_level(tracing::Level::TRACE).finish();
-    let out = tracing::subscriber::with_default(subscriber, f);
-    let text = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
-    (out, text)
+    crate::test_logs::captured(f)
 }
 
 #[test]
