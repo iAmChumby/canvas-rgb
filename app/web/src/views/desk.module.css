@@ -601,6 +601,21 @@
   margin-top: var(--s2);
 }
 
+/* The segments in the middle of the row: what the canvas shows, and whatever the page put
+   beside it. They keep their own line and never wrap under one another. */
+.segs {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+/* The canvas mode's own note is its tooltip, so the segment keeps the width it needs. */
+.modeTip {
+  flex: none;
+}
+
 .controls {
   display: flex;
   align-items: center;

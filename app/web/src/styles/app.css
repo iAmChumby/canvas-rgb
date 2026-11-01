@@ -1782,11 +1782,292 @@ button.chip:hover {
 
 /* ---------- layout page ---------- */
 
-.layout-grid {
+/* The desk and the inspector sit side by side from `regular` up (R6). The desk takes the
+   room that is left and the inspector takes its own column. */
+.rd-layout .rd-lay-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 340px;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  grid-template-rows: minmax(0, 1fr);
   gap: var(--s4);
-  align-items: stretch;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.rd-layout .rd-lay-stage {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* The frame: the desk fills it and the desk's own toolbar sits along its bottom edge, inside
+   the frame. */
+.rd-layout .rd-lay-stage-frame {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-lg);
+  background: var(--sunk);
+}
+
+/* The desk takes the whole frame: no fixed shape, and the picture zooms to fit it. */
+.rd-layout .rd-lay-stage-frame .stage {
+  aspect-ratio: auto;
+  height: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+}
+
+/* The bar along the frame's bottom edge. */
+.rd-layout .rd-lay-stage-frame .stage-toolbar {
+  flex: 0 0 auto;
+  margin-top: 0;
+  gap: var(--s2);
+  padding: var(--s2);
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+}
+
+/* The desk's own settings keep their own row in the bar: they never wrap over one another. */
+.rd-layout .rd-lay-seg-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex: none;
+}
+
+/* The segments keep their own width in the bar: they never wrap over one another, and the
+   bar wraps instead. */
+.rd-layout .rd-lay-stage-frame .stage-toolbar .seg {
+  flex-wrap: nowrap;
+  flex: none;
+}
+
+.rd-layout .rd-lay-stage-frame .stage-toolbar .seg-item {
+  white-space: nowrap;
+}
+
+/* The inspector: the unfinished work first, then the parts. */
+.rd-layout .rd-lay-inspector {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Each pane is a column of the inspector: the parts one takes the room that is left. */
+.rd-layout .rd-lay-place-pane {
+  flex: 0 0 auto;
+  min-height: 0;
+}
+
+.rd-layout .rd-lay-parts-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* "To place" is as tall as its rows: it never grows. */
+.rd-layout .rd-lay-place {
+  flex: 0 0 auto;
+}
+
+/* The parts pane: its head is pinned and its list scrolls inside it (R1). */
+.rd-layout .rd-lay-parts {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.rd-layout .rd-lay-parts .panel-head {
+  flex: 0 0 auto;
+}
+
+.rd-layout .rd-lay-parts-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* The notes of the desk's own settings are their tooltips (R8), so the bubble takes a width of
+   its own instead of one long line. It hangs from the right edge of its key, so it never
+   reaches past the frame. */
+.rd-layout .rd-lay-seg-tip .tip-bubble,
+.rd-layout .stage-mode-tip .tip-bubble {
+  white-space: normal;
+  width: 260px;
+  text-align: left;
+  left: auto;
+  right: 0;
+  transform: none;
+}
+
+/* The undo and redo keys are in the strip on a desktop; on a phone they move to the desk. */
+.rd-layout .rd-lay-stage-history {
+  display: none;
+  align-items: center;
+  gap: var(--s1);
+}
+
+/* The switcher between the panes below the desk: on a desktop they are all on screen at
+   once, so there is nothing to switch. */
+.rd-layout .rd-lay-tabs {
+  display: none;
+}
+
+/* The Render pane is the phone's home for the desk's own settings. */
+.rd-layout .rd-lay-render-pane {
+  display: none;
+}
+
+.rd-layout .rd-lay-seg-pane {
+  display: none;
+}
+
+/* wide: the inspector gets more room. */
+@container page (min-width: 1500px) {
+  .rd-layout .rd-lay-grid {
+    grid-template-columns: minmax(0, 1fr) 360px;
+  }
+}
+
+/* compact: a narrower inspector, and the desk's toolbar takes two rows rather than none of
+   its keys fit. */
+@container page (max-width: 999px) {
+  .rd-layout .rd-lay-grid {
+    grid-template-columns: minmax(0, 1fr) 280px;
+  }
+
+  /* The canvas mode on the first row, the desk's own settings on the second. */
+  .rd-layout .rd-lay-stage-frame .stage-segs {
+    flex-wrap: wrap;
+  }
+}
+
+/* phone: the desk on top, one pane below it. */
+@container page (max-width: 639px) {
+  .rd-layout .rd-lay-grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    overflow: visible;
+  }
+
+  .rd-layout .rd-lay-stage {
+    height: 46vh;
+    flex: 0 0 auto;
+  }
+
+  /* The switcher below the desk says which pane is on screen. */
+  .rd-layout .rd-lay-tabs {
+    display: block;
+    flex: 0 0 auto;
+  }
+
+  /* One pane at a time: the switcher below the desk says which. */
+  .rd-layout[data-pane="place"] .rd-lay-parts-pane,
+  .rd-layout[data-pane="parts"] .rd-lay-place-pane,
+  .rd-layout[data-pane="render"] .rd-lay-place-pane,
+  .rd-layout[data-pane="render"] .rd-lay-parts-pane {
+    display: none;
+  }
+
+  .rd-layout[data-pane="place"] .rd-lay-place-pane,
+  .rd-layout[data-pane="parts"] .rd-lay-parts-pane,
+  .rd-layout[data-pane="render"] .rd-lay-render-pane {
+    display: flex;
+  }
+
+  .rd-layout[data-pane="render"] .rd-lay-render-pane {
+    display: block;
+  }
+
+  /* The desk's own settings are in the Render pane here, not in the desk's toolbar. */
+  .rd-layout .rd-lay-seg-bar {
+    display: none;
+  }
+
+  .rd-layout .rd-lay-seg-pane {
+    display: flex;
+    align-items: center;
+    gap: var(--s2);
+    flex-wrap: wrap;
+  }
+
+  /* The bar wraps onto two rows: the canvas mode and the undo keys, then the zoom keys.
+     Nothing overlaps, nothing is cut. */
+  .rd-layout .rd-lay-stage-frame .stage-toolbar {
+    flex-wrap: wrap;
+    row-gap: var(--s2);
+  }
+
+  /* The undo and redo keys move here from the strip: they undo work done on the desk. */
+  .rd-layout .rd-lay-stage-history {
+    display: inline-flex;
+  }
+
+  /* The parts list is not a pane on a phone: the page scrolls. */
+  .rd-layout .rd-lay-parts {
+    flex: 0 0 auto;
+    overflow: visible;
+  }
+
+  .rd-layout .rd-lay-parts-body {
+    overflow: visible;
+  }
+
+  /* The rows are the app's compact rows, so the long list stays readable. */
+  .rd-layout .rd-lay-parts-body .row-button {
+    min-height: 32px;
+    padding: var(--s1) var(--s2);
+  }
+
+  .rd-layout .rd-lay-parts-body .row-sub {
+    display: none;
+  }
+
+  /* The zones to place are compact too: they are four rows, not a panel. */
+  .rd-layout .rd-lay-place .unplaced-item {
+    padding: var(--s1) 0;
+  }
+}
+
+/* The strip is outside the content box, so the rules that reach it are media queries on the
+   window, as they are in the shell. */
+@media (max-width: 1439px) {
+  /* The page's own actions need the room: the quiet key keeps its icon. */
+  .rd-lay-remap .rd-lay-text {
+    display: none;
+  }
+}
+
+@media (max-width: 1099px) {
+  .rd-lay-zones {
+    display: none;
+  }
+}
+
+@media (max-width: 719px) {
+  /* On a phone the strip carries the save state and its keys only: the undo and redo keys
+     move to the desk, where the work they undo happens. */
+  .rd-lay-history,
+  .rd-lay-remap {
+    display: none;
+  }
+
+  .rd-lay-revert .rd-lay-text,
+  .rd-lay-save .rd-lay-text {
+    display: none;
+  }
 }
 
 /* The canvas column: it takes the height the panels beside it need, so the desk is as big as
@@ -1797,47 +2078,16 @@ button.chip:hover {
   min-width: 0;
 }
 
-/* The canvas and the line under it: the way back to the canvas on a phone. It fills its column
-   at every width; in the phone stack nothing else would stretch it. */
-.layout-canvas {
-  align-self: stretch;
-  width: 100%;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  /* The desk takes the height the panels beside it need, so the PC is as big as the page
-     allows and there is no empty space under it. */
-  flex: 1 1 auto;
-  min-height: 0;
-  /* The desk is never taller than this: the page keeps a little air under it. */
-  max-height: 920px;
+/* The loading shape of the page: the desk on the left, the panels on the right. */
+.layout-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: var(--s4);
+  align-items: stretch;
 }
 
-/* The right column: what is playing, the zones and the way to save. */
-.layout-side {
-  min-width: 0;
-}
-
-.layout-now,
-.layout-render,
-.layout-zones,
-.layout-unplaced,
 .layout-save {
   min-width: 0;
-}
-
-.stage-meta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--s2) var(--s3);
-  margin-top: var(--s3);
-}
-
-.dropzone-hint {
-  color: var(--mute);
-  font-size: var(--t14);
 }
 
 .unplaced {

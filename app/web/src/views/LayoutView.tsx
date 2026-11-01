@@ -3,12 +3,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
 import {
   ArrowCounterClockwise,
-  ArrowsClockwise,
   ArrowUUpLeft,
   ArrowUUpRight,
   ArrowUp,
-  CaretDown,
-  CaretUp,
   CompassTool,
   CircleDashed,
   DotOutline,
@@ -30,24 +27,22 @@ import { LayoutShape } from "@/components/LoadShapes";
 import { Segmented } from "@/components/Segmented";
 import { NumberField, TextField } from "@/components/NumberField";
 import { Select } from "@/components/Select";
-import { Slider } from "@/components/Slider";
 import { Toggle } from "@/components/Toggle";
 import { Chip, RowButton } from "@/components/Chip";
-import { EffectPreview } from "@/components/EffectPreview";
 import { Popover } from "@/components/Popover";
-import { Thumb } from "@/components/Thumb";
+import { Tooltip } from "@/components/Tooltip";
 import { useMediaQuery } from "@/components/MediaQuery";
 import { KindIcon } from "@/components/KindIcon";
 import { PreviewStage, type CaseGuide, type StageMode } from "@/views/PreviewStage";
 import { Onboarding } from "@/views/editor/Onboarding";
 import { putOffUntilNextLaunch, shouldOpen, type Scope } from "@/views/editor/flow";
 import { useNewLights } from "@/views/editor/newLights";
-import { PropertyControls, type Values } from "@/views/PropertyControls";
+import { type Values } from "@/views/PropertyControls";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
 import { usePreviewStatus } from "@/lib/preview";
 import { usePrefersReducedMotion } from "@/lib/motion";
-import { getSnap, patchSnap, refreshAll, refreshLayouts, refreshSettings, retryLayouts, useSnap } from "@/lib/store";
+import { refreshLayouts, retryLayouts, useSnap } from "@/lib/store";
 import {
   defaultRect,
   defaultShape,
@@ -80,12 +75,8 @@ import type { Facing } from "@/proto/Facing";
 import type { Landmark } from "@/proto/Landmark";
 import type { Layout } from "@/proto/Layout";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
-import type { EffectDetail } from "@/proto/EffectDetail";
-import type { EffectSummary } from "@/proto/EffectSummary";
 import type { PartKind } from "@/proto/PartKind";
 import type { PlacedZone } from "@/proto/PlacedZone";
-import type { PropValue } from "@/proto/PropValue";
-import type { PropertySchema } from "@/proto/PropertySchema";
 import type { ZoneInfo } from "@/proto/ZoneInfo";
 import type { ZoneShape } from "@/proto/ZoneShape";
 import desk from "./desk.module.css";
@@ -97,8 +88,6 @@ import { PageTitle, PageActions } from "@/shell/PageHeader";
 const DROP_TYPE = "application/x-canvas-zone";
 const CANVAS_W = 320;
 const CANVAS_H = 200;
-/** A value of the running effect reaches the daemon this long after the last change (ms). */
-const PROPS_DEBOUNCE_MS = 60;
 /** Where the unit and the mode are remembered. */
 const MODE_KEY = "canvas-rgb.mode";
 
@@ -131,9 +120,14 @@ const RENDER_SCALE_NOTE: Record<string, { text: string; value: string }> = {
   },
 };
 
+/** The render area as the segmented says it: the number the daemon stores, as a string. */
+type RenderScaleKey = `${RenderScale}`;
+
+/** The panes below the desk on a phone: one of them at a time. */
+type PhonePane = "parts" | "place" | "render";
+
 /** What each way of reading the picture does, in words, and its name. */
-const SAMPLING_NOTE: Record<string, { text: string; value: string }> = {
-  nearest: {
+const SAMPLING_NOTE: Record<string, { text: string; value: string }> = {  nearest: {
     text: "Each LED takes the colour of the one pixel it sits on: the sharpest, and the lightest.",
     value: "Nearest",
   },
@@ -187,171 +181,10 @@ function shortDeviceId(id: string): string {
  * one and it is not among them. An effect's colours and its speed are what a reader changes
  * while they watch the desk; the rest is for the Effects page.
  */
-function topProperties(schema: PropertySchema): PropertySchema {
-  const picked = schema.properties.slice(0, 3);
-  const speed = schema.properties.find((p) => p.kind.type === "number" && !picked.includes(p));
-  if (speed) picked.push(speed);
-  return { ...schema, properties: picked };
-}
-
-/**
- * The running effect, beside the canvas: its name, a live picture of it, a quick switch to
- * another one, its top properties and the brightness every device shares.
- *
- * The picture and the name are always there - the panel says what is playing. The controls
- * fold away behind the chevron, so the panel takes a corner of the screen and not all of it.
- */
-function NowPlaying({
-  runningId,
-  name,
-  description,
-  values,
-  schema,
-  effects,
-  brightness,
-  error,
-  onPick,
-  onPropChange,
-  onBrightness,
-  onBrightnessCommit,
-}: {
-  runningId: string | null;
-  name: string | null;
-  description: string | null;
-  values: Values;
-  schema: PropertySchema | null;
-  effects: EffectSummary[] | null;
-  brightness: number;
-  error: string | null;
-  onPick: (id: string) => void;
-  onPropChange: (key: string, value: PropValue) => void;
-  onBrightness: (v: number) => void;
-  onBrightnessCommit: (v: number) => void;
-}) {
-  // The effect's own controls: the colours, the speed and the brightness. They fold away, so
-  // the panel is a corner of the screen and not a wall of it.
-  const [controls, setControls] = useState(false);
-  const [picker, setPicker] = useState(false);
-  const changeRef = useRef<HTMLSpanElement>(null);
-  const props = schema ? topProperties(schema) : null;
-  // An effect that reads the screen or the audio cannot be drawn by the editor: the picture
-  // is the daemon's.
-  const needsInput = schema ? schema.needs.screen || schema.needs.audio : false;
-
-  /**
-   * The list of effects hangs under the button. It opens upwards when there is no room under
-   * it, so the whole list is there to read wherever the panel is.
-   */
-  const openPicker = () => {
-    setPicker(true);
-  };
-
-  return (
-    <Panel
-      title="Now playing"
-      actions={
-        <span className="row-wrap" style={{ alignItems: "center", gap: "var(--s2)" }}>
-          <span ref={changeRef} className={desk.nowChange}>
-            <Button
-              size="sm"
-              variant="ghost"
-              icon={<ArrowsClockwise size={14} />}
-              disabled={!effects || effects.length === 0}
-              onClick={openPicker}
-            >
-              Change
-            </Button>
-          </span>
-          <IconButton
-            label={controls ? "Hide the effect's controls" : "Show the effect's controls"}
-            icon={controls ? <CaretUp size={14} /> : <CaretDown size={14} />}
-            size="sm"
-            onClick={() => setControls((o) => !o)}
-          />
-        </span>
-      }
-    >
-      <div className={desk.nowBody} data-now-playing="true">
-        <div className={desk.nowWho}>
-          <span className={desk.nowSwatch}>
-            {runningId ? (
-              needsInput ? (
-                <Thumb id={runningId} size="sm" label={name ?? "Effect"} />
-              ) : (
-                <EffectPreview id={runningId} />
-              )
-            ) : null}
-          </span>
-          <div className={desk.nowWhoText}>
-            <p className={desk.nowName}>{name ?? "No effect"}</p>
-            <p className={desk.nowDesc}>
-              {description ?? "Nothing running"}
-            </p>
-          </div>
-        </div>
-        {controls && (
-          <>
-            {props && (
-              <div className={desk.nowProps}>
-                <PropertyControls schema={props} values={values} onChange={onPropChange} />
-              </div>
-            )}
-            <Field label="Brightness">
-              <span className="row-wrap field-slider">
-                <Slider
-                  label="Brightness"
-                  min={0}
-                  max={100}
-                  value={brightness}
-                  onChange={onBrightness}
-                  onCommit={onBrightnessCommit}
-                />
-                <NumberField
-                  label="Brightness value"
-                  min={0}
-                  max={100}
-                  value={brightness}
-                  unit="%"
-                  onCommit={onBrightnessCommit}
-                />
-              </span>
-            </Field>
-          </>
-        )}
-        {error && <p className="error-line">{error}</p>}
-      </div>
-      <Popover
-        anchor={changeRef}
-        open={picker}
-        onClose={() => setPicker(false)}
-        label="Choose the effect that runs on this desk"
-      >
-        <div className={desk.nowPicker}>
-          {(effects ?? []).map((e) => (
-            <Chip
-              key={e.id}
-              pressed={e.id === runningId}
-              label={`Run ${e.name} on this desk`}
-              onClick={() => {
-                setPicker(false);
-                onPick(e.id);
-              }}
-            >
-              <Thumb id={e.id} size="sm" label={e.name} live={e.id === runningId} />
-              <span className={desk.nowPickerName}>{e.name}</span>
-            </Chip>
-          ))}
-        </div>
-      </Popover>
-    </Panel>
-  );
-}
-
 export function LayoutView() {
   const server = useSnap((s) => s.layouts?.find((l) => l.id === s.activeLayout) ?? null);
   const devices = useSnap((s) => s.devices);
   const effects = useSnap((s) => s.effects);
-  const settings = useSnap((s) => s.settings);
   const layoutsError = useSnap((s) => s.layoutsError);
   const layoutsLoaded = useSnap((s) => s.layouts !== null);
   // A load that is in flight after a Try again: the frame shows its placeholder until it ends.
@@ -361,6 +194,8 @@ export function LayoutView() {
   const [selection, setSelection] = useState<Sel[]>([]);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  /** The pane below the desk on a phone: one of them at a time. */
+  const [phonePane, setPhonePane] = useState<PhonePane>("parts");
   /**
    * The layout as it is on the page, and the history of how it got there. Every edit is a step:
    * the layout as it was goes on the history, and undo takes it back. The two stacks live with
@@ -433,12 +268,6 @@ export function LayoutView() {
     // layout they were made on.
     setEdit({ draft: server, past: [], future: [] });
   }
-
-  const effectName = useMemo(() => {
-    const id = server?.effect?.id;
-    if (!id) return "no effect";
-    return effects?.find((e) => e.id === id)?.name ?? id;
-  }, [server, effects]);
 
   /**
    * Zones that still have the shape of a layout saved before shapes existed (auto) where the
@@ -559,22 +388,14 @@ export function LayoutView() {
   const runningEffect = server?.effect ?? null;
   const runningId = runningEffect?.id ?? null;
   /**
-   * The "Now playing" panel: the running effect's own values, and the values as the reader
-   * changes them. The canvas follows the second ones at once, so a colour moves before the
-   * daemon has answered.
+   * The running effect's own values: the desk draws the effect with them, so a change in the
+   * daemon's values shows on the desk at once.
    */
-  const [nowDetail, setNowDetail] = useState<EffectDetail | null>(null);
   const [liveProps, setLiveProps] = useState<Values>({});
-  const [nowError, setNowError] = useState<string | null>(null);
-  const [brightnessDraft, setBrightnessDraft] = useState<number | null>(null);
-  /** The values waiting for the daemon: a drag sends one value, not forty. */
-  const pendingProps = useRef<Values>({});
-  const propsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // A different effect running means different values: the old ones go.
   const [propsFor, setPropsFor] = useState<string | null>(null);
   if (runningId !== propsFor) {
     setPropsFor(runningId);
-    setNowDetail(null);
     setLiveProps(runningEffect?.props ?? {});
   }
   useEffect(() => {
@@ -583,83 +404,15 @@ export function LayoutView() {
     api
       .effect(runningId)
       .then((d) => {
-        if (stop) return;
-        setNowDetail(d);
-        setLiveProps(d.props);
+        if (!stop) setLiveProps(d.props);
       })
-      .catch((e: unknown) => {
-        if (!stop) setNowError(messageOf(e));
+      .catch(() => {
+        // The desk draws the effect itself when it can; the daemon's values are a bonus.
       });
     return () => {
       stop = true;
     };
   }, [runningId]);
-  useEffect(
-    () => () => {
-      if (propsTimer.current) clearTimeout(propsTimer.current);
-    },
-    [],
-  );
-  /** Sends the waiting values to the effect they were edited on, and to no other. */
-  const flushProps = async (id: string | null) => {
-    if (propsTimer.current) clearTimeout(propsTimer.current);
-    propsTimer.current = null;
-    const batch = pendingProps.current;
-    pendingProps.current = {};
-    if (!id || Object.keys(batch).length === 0) return;
-    // The edit belongs to the effect that was running when it was made. If another one runs now
-    // (picked elsewhere, or by the CLI), the values are dropped, not merged into it.
-    if (getSnap().status?.active_effect !== id) return;
-    try {
-      await api.patchActiveProps(batch);
-    } catch (e: unknown) {
-      setNowError(messageOf(e));
-    }
-  };
-  // A different effect running: edits that never left belong to the old one.
-  useEffect(() => {
-    return () => {
-      if (propsTimer.current) clearTimeout(propsTimer.current);
-      propsTimer.current = null;
-      pendingProps.current = {};
-    };
-  }, [runningId]);
-  /** A value of the running effect: the canvas has it at once, the daemon gets it after. */
-  const onPropChange = (key: string, value: PropValue) => {
-    setNowError(null);
-    setLiveProps((prev) => ({ ...prev, [key]: value }));
-    pendingProps.current = { ...pendingProps.current, [key]: value };
-    if (propsTimer.current) clearTimeout(propsTimer.current);
-    const id = runningId;
-    propsTimer.current = setTimeout(() => void flushProps(id), PROPS_DEBOUNCE_MS);
-  };
-  /** Another effect on this desk. */
-  const pickEffect = async (id: string) => {
-    if (id === runningId) return;
-    setNowError(null);
-    try {
-      // What was edited on the effect that is leaving goes to it first, then the switch.
-      await flushProps(runningId);
-      await api.activateEffect(id, { props: {}, preset: null });
-      await refreshAll();
-    } catch (e) {
-      setNowError(messageOf(e));
-    }
-  };
-  /** The brightness every device shares. */
-  const commitBrightness = async (v: number) => {
-    setNowError(null);
-    try {
-      const out = await api.patchOutput({ power: null, brightness: v });
-      const cur = getSnap().settings;
-      if (cur) patchSnap({ settings: { ...cur, brightness: out.brightness } });
-      setBrightnessDraft(null);
-      await refreshSettings();
-    } catch (e) {
-      setBrightnessDraft(null);
-      setNowError(messageOf(e));
-    }
-  };
   const effectNeedsInput = useMemo(() => {
     if (!runningEffect) return false;
     const summary = effects?.find((e) => e.id === runningEffect.id);
@@ -710,6 +463,40 @@ export function LayoutView() {
       return { draft: fn(e.draft), past: [...e.past, e.draft], future: [] };
     });
   }, []);
+
+  /**
+   * The desk's own settings: how much of the desk the effect is drawn at, and how each LED
+   * reads the picture. They sit in the desk's toolbar on a desktop and in the Render pane on a
+   * phone, and their notes are their tooltips (R8).
+   */
+  const renderControls = draft ? (
+    <>
+      <Tooltip label={renderNote.text} className="rd-lay-seg-tip rd-lay-seg-render">
+        <Segmented<RenderScaleKey>
+          label="How much of the desk the effect is drawn at"
+          value={`${draft.render_scale}` as RenderScaleKey}
+          options={[
+            { value: "25", label: "¼" },
+            { value: "50", label: "½" },
+            { value: "100", label: "All" },
+          ]}
+          onChange={(v) => commit((l) => ({ ...l, render_scale: Number(v) as RenderScale }))}
+        />
+      </Tooltip>
+      <Tooltip label={samplingNote.text} className="rd-lay-seg-tip rd-lay-seg-sampling">
+        <Segmented<SamplingMode>
+          label="How each LED reads the picture"
+          value={draft.sampling}
+          options={[
+            { value: "nearest", label: "1" },
+            { value: "bilinear", label: "4" },
+            { value: "area_average", label: "All px" },
+          ]}
+          onChange={(v) => commit((l) => ({ ...l, sampling: v }))}
+        />
+      </Tooltip>
+    </>
+  ) : null;
 
   const undo = useCallback(() => {
     setEdit((e) => {
@@ -1103,6 +890,32 @@ export function LayoutView() {
       onHoverPart={extra.onHoverPart}
       guides={extra.guides}
       unlockBadge={extra.unlockBadge}
+      showLegend={false}
+      toolbarExtra={
+        <>
+          {/* The undo and redo keys undo work done on the stage: on a phone they move here,
+              where the work happens (the strip has no room for them). */}
+          <span className="rd-lay-stage-history">
+            <IconButton
+              label="Undo the last change"
+              icon={<ArrowUUpLeft size={15} />}
+              size="sm"
+              disabled={past.length === 0}
+              onClick={undo}
+            />
+            <IconButton
+              label="Redo the change that was undone"
+              icon={<ArrowUUpRight size={15} />}
+              size="sm"
+              disabled={future.length === 0}
+              onClick={redo}
+            />
+          </span>
+          {/* The render area and the sampling are the desk's own settings: they sit in the
+              desk's toolbar, and their notes are their tooltips (R8). */}
+          <span className="rd-lay-seg-bar">{renderControls}</span>
+        </>
+      }
     />
   );
 
@@ -1134,13 +947,61 @@ export function LayoutView() {
   }
 
   return (
-    <div className="rd-page rd-layout">
+    <div className="rd-page rd-layout" data-pane={phonePane}>
       {/* The page keeps one name in every state: the layout's own name stands beside it once
           it is known. */}
       <PageTitle title="Layout" context={draft.name} />
       <PageActions>
-        <Button variant="ghost" icon={<CompassTool size={16} />} onClick={remapAll}>
-          Map my PC again
+        {/* The undo and redo keys undo work done on the stage, so they sit in the strip beside
+            the page's name (R4). On a phone they move to the stage's own toolbar. */}
+        <span className="rd-lay-history">
+          <IconButton
+            label="Undo the last change"
+            icon={<ArrowUUpLeft size={15} />}
+            size="sm"
+            disabled={past.length === 0}
+            onClick={undo}
+          />
+          <IconButton
+            label="Redo the change that was undone"
+            icon={<ArrowUUpRight size={15} />}
+            size="sm"
+            disabled={future.length === 0}
+            onClick={redo}
+          />
+        </span>
+        <span className="mute fig rd-lay-zones">
+          <AnimatedNumber value={zones.filter((z) => z.visible).length} />/
+          <AnimatedNumber value={zones.length} /> zones
+        </span>
+        {/* The save state sits beside the save (R4). */}
+        <span className="rd-lay-save">
+          <span className={dirty ? "warn-text fig" : "mute"}>{dirty ? "Unsaved" : "Saved"}</span>
+          <Button
+            variant="ghost"
+            size="sm"
+            icon={<ArrowCounterClockwise size={16} />}
+            disabled={!dirty || saving}
+            onClick={revert}
+            aria-label="Revert the layout changes"
+          >
+            <span className="rd-lay-text">Revert</span>
+          </Button>
+          <Button
+            variant="primary"
+            size="sm"
+            icon={<FloppyDisk size={16} weight="bold" />}
+            disabled={!dirty || saving}
+            onClick={save}
+            aria-label={saving ? "Saving the layout" : "Save layout"}
+          >
+            <span className="rd-lay-text">
+              <Swap labels={["Save layout", "Saving"]} at={saving ? 1 : 0} />
+            </span>
+          </Button>
+        </span>
+        <Button variant="ghost" size="sm" className="rd-lay-remap" icon={<CompassTool size={16} />} onClick={remapAll}>
+          <span className="rd-lay-text">Map my PC again</span>
         </Button>
       </PageActions>
 
@@ -1184,149 +1045,128 @@ export function LayoutView() {
         </div>
       )}
 
-      <div className="layout-grid">
-        <div className="layout-stage-col stack">
-          <div className="layout-canvas" ref={stageRef}>
-            {renderStage()}
-            <div className="stage-meta">
-              <span className="dropzone-hint" />
-              <span className="row-wrap" style={{ alignItems: "center", gap: "var(--s3)" }}>
-                <span className="row-wrap" style={{ alignItems: "center", gap: "var(--s1)" }}>
-                  <IconButton
-                    label="Undo the last change"
-                    icon={<ArrowUUpLeft size={15} />}
-                    size="sm"
-                    disabled={past.length === 0}
-                    onClick={undo}
-                  />
-                  <IconButton
-                    label="Redo the change that was undone"
-                    icon={<ArrowUUpRight size={15} />}
-                    size="sm"
-                    disabled={future.length === 0}
-                    onClick={redo}
-                  />
-                </span>
-                {previewLine && (
-                  <span className={previewLine.down ? desk.noteDown : desk.drawn}>{previewLine.text}</span>
-                )}
-                <span className="mute fig">
-                  <AnimatedNumber value={zones.filter((z) => z.visible).length} /> of <AnimatedNumber value={zones.length} /> zones showing
-                </span>
-              </span>
-            </div>
-          </div>
+      {/* What the preview on the desk is: the note under it, now a line of its own. */}
+      {previewLine && (
+        <p className={previewLine.down ? "rule rule-warn" : "rule"} role="status">
+          {previewLine.text}
+        </p>
+      )}
 
-          <div className="layout-render">
-            <Panel title="Render">
-              <div className="render-grid">
-                <div className={desk.renderCell}>
-                  <Field label="Render area">
-                    <Segmented<`${RenderScale}`>
-                      label="How much of the desk the effect is drawn at"
-                      value={`${draft.render_scale}` as `${RenderScale}`}
-                      options={[
-                        { value: "25", label: "A quarter" },
-                        { value: "50", label: "Half" },
-                        { value: "100", label: "All of it" },
-                      ]}
-                      onChange={(v) => commit((l) => ({ ...l, render_scale: Number(v) as RenderScale }))}
-                    />
-                  </Field>
-                  <p className={desk.plainNote}>
-                    <span className="fig">{renderNote.value}</span>
-                  </p>
-                </div>
-                <div className={desk.renderCell}>
-                  <Field label="Sampling">
-                    <Segmented<SamplingMode>
-                      label="How each LED reads the picture"
-                      value={draft.sampling}
-                      options={[
-                        { value: "nearest", label: "One pixel" },
-                        { value: "bilinear", label: "Four pixels" },
-                        { value: "area_average", label: "Every pixel" },
-                      ]}
-                      onChange={(v) => commit((l) => ({ ...l, sampling: v }))}
-                    />
-                  </Field>
-                  <p className={desk.plainNote}>
-                    <span className="fig">{samplingNote.value}</span>
-                  </p>
-                </div>
-              </div>
-            </Panel>
+      {saveError && (
+        <p className="rule rule-warn" role="status">
+          The layout was not saved: {saveError}
+        </p>
+      )}
+
+      <div className="rd-lay-grid">
+        <div className="rd-lay-stage">
+          <div className="rd-lay-stage-frame" ref={stageRef}>
+            {renderStage()}
+          </div>
+          {/* The switcher between the panes below the desk. On a desktop they are all on
+              screen at once, so there is nothing to switch. */}
+          <div className="rd-lay-tabs">
+            <Segmented<PhonePane>
+              label="The pane below the desk"
+              value={phonePane}
+              options={[
+                { value: "parts", label: "Parts" },
+                { value: "place", label: "To place" },
+                { value: "render", label: "Render" },
+              ]}
+              onChange={setPhonePane}
+            />
           </div>
         </div>
 
-        <div className="layout-side stack">
-          {/* What is playing sits beside the canvas, not under it: the panel is the one thing
-              a reader wants to see while they watch the desk. */}
-          <div className="layout-now">
-            <NowPlaying
-              runningId={runningId}
-              name={nowDetail?.schema.name ?? effectName}
-              description={nowDetail?.schema.description ?? null}
-              values={liveProps}
-              schema={nowDetail?.schema ?? null}
-              effects={effects}
-              brightness={brightnessDraft ?? settings?.brightness ?? 100}
-              error={nowError}
-              onPick={(id) => void pickEffect(id)}
-              onPropChange={onPropChange}
-              onBrightness={(v) => setBrightnessDraft(v)}
-              onBrightnessCommit={(v) => void commitBrightness(v)}
-            />
+        <div className="rd-lay-inspector">
+          <div className="rd-lay-place-pane">
+            <Panel
+              title="To place"
+              className="rd-lay-place"
+              actions={<span className="mute fig"><AnimatedNumber value={unplaced.length} /></span>}
+            >
+              {unplaced.length === 0 && <p className="mute">Every zone is placed.</p>}
+              <div className="unplaced">
+                {unplaced.map((u) => (
+                  <div
+                    key={`${u.deviceId}#${u.zoneIndex}`}
+                    className="unplaced-item"
+                    draggable
+                    onDragStart={(e) => dragStart(u.deviceId, u.zoneIndex, e)}
+                  >
+                    <span style={{ minWidth: 0 }}>
+                      <span className="row-title" style={{ display: "block" }}>
+                        {u.zoneName} <span className="fig mute"><AnimatedNumber value={u.ledCount} /></span>
+                      </span>
+                      <span className="row-sub one-line" style={{ display: "block" }}>
+                        {u.deviceName}
+                        {!u.connected && " · disconnected"}
+                      </span>
+                    </span>
+                    <IconButton
+                      label={`Place ${u.zoneName}`}
+                      icon={<Plus size={16} weight="bold" />}
+                      size="sm"
+                      onClick={() => place(u.deviceId, u.zoneIndex)}
+                    />
+                  </div>
+                ))}
+              </div>
+            </Panel>
           </div>
 
-          <div className="layout-zones">
-            <Panel
-              title={selectedZone ? "Zone" : selectedLandmark ? "Part" : "Parts"}
-              actions={
-                <span className="row-wrap" style={{ alignItems: "center", gap: "var(--s2)" }}>
-                  <Segmented<LengthUnit>
-                    label="The unit every size is read in"
-                    value={unit}
-                    options={[
-                      { value: "cm", label: "cm" },
-                      { value: "in", label: "in" },
-                    ]}
-                    onChange={setUnit}
-                  />
-                  <span ref={addRef} className="row-wrap" style={{ alignItems: "center" }}>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      icon={<Plus size={14} />}
-                      onClick={() => setAdding(true)}
-                    >
-                      Add part
-                    </Button>
-                  </span>
-                  <Popover
-                    anchor={addRef}
-                    open={adding}
-                    onClose={() => setAdding(false)}
-                    label="Add a part to the desk"
+          <div className="rd-lay-parts-pane">
+
+          <Panel
+            title={selectedZone ? "Zone" : selectedLandmark ? "Part" : "Parts"}
+            className="rd-lay-parts"
+            actions={
+              <span className="row-wrap" style={{ alignItems: "center", gap: "var(--s2)" }}>
+                <Segmented<LengthUnit>
+                  label="The unit every size is read in"
+                  value={unit}
+                  options={[
+                    { value: "cm", label: "cm" },
+                    { value: "in", label: "in" },
+                  ]}
+                  onChange={setUnit}
+                />
+                <span ref={addRef} className="row-wrap" style={{ alignItems: "center" }}>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    icon={<Plus size={14} />}
+                    onClick={() => setAdding(true)}
                   >
-                    <div className={desk.nowPicker}>
-                      {LANDMARK_KINDS.map((kind) => (
-                        <Chip
-                          key={kind}
-                          label={`Add a ${PART_LABEL[kind]}`}
-                          onClick={() => {
-                            setAdding(false);
-                            addLandmark(kind);
-                          }}
-                        >
-                          <span className={desk.nowPickerName}>{PART_LABEL[kind]}</span>
-                        </Chip>
-                      ))}
-                    </div>
-                  </Popover>
+                    Add part
+                  </Button>
                 </span>
-              }
-            >
+                <Popover
+                  anchor={addRef}
+                  open={adding}
+                  onClose={() => setAdding(false)}
+                  label="Add a part to the desk"
+                >
+                  <div className={desk.nowPicker}>
+                    {LANDMARK_KINDS.map((kind) => (
+                      <Chip
+                        key={kind}
+                        label={`Add a ${PART_LABEL[kind]}`}
+                        onClick={() => {
+                          setAdding(false);
+                          addLandmark(kind);
+                        }}
+                      >
+                        <span className={desk.nowPickerName}>{PART_LABEL[kind]}</span>
+                      </Chip>
+                    ))}
+                  </div>
+                </Popover>
+              </span>
+            }
+          >
+            <div className="rd-lay-parts-body">
               {shownZone && primary?.kind === "zone" ? (
                 <div ref={inspectorRef}>
                   <ZoneInspector
@@ -1426,54 +1266,16 @@ export function LayoutView() {
                   </RowButton>
                 ))}
               </div>
-            </Panel>
-          </div>
-
-          <div className="layout-unplaced">
-            <Panel title="Unplaced zones" actions={<span className="mute fig"><AnimatedNumber value={unplaced.length} /></span>}>
-              {unplaced.length === 0 && <p className="mute">Every zone is placed.</p>}
-              <div className="unplaced">
-                {unplaced.map((u) => (
-                  <div
-                    key={`${u.deviceId}#${u.zoneIndex}`}
-                    className="unplaced-item"
-                    draggable
-                    onDragStart={(e) => dragStart(u.deviceId, u.zoneIndex, e)}
-                  >
-                    <span style={{ minWidth: 0 }}>
-                      <span className="row-title" style={{ display: "block" }}>
-                        {u.zoneName} <span className="fig mute"><AnimatedNumber value={u.ledCount} /></span>
-                      </span>
-                      <span className="row-sub one-line" style={{ display: "block" }}>
-                        {u.deviceName}
-                        {!u.connected && " · disconnected"}
-                      </span>
-                    </span>
-                    <IconButton
-                      label={`Place ${u.zoneName}`}
-                      icon={<Plus size={16} weight="bold" />}
-                      size="sm"
-                      onClick={() => place(u.deviceId, u.zoneIndex)}
-                    />
-                  </div>
-                ))}
-              </div>
-            </Panel>
-          </div>
-
-          <div className="layout-save">
-            <div className="savebar" data-dirty={dirty ? "true" : "false"}>
-              <span className={dirty ? "warn-text fig" : "mute"}>{dirty ? "Unsaved layout changes" : "Saved"}</span>
-              <div className="row-wrap">
-                <Button variant="ghost" icon={<ArrowCounterClockwise size={16} />} disabled={!dirty || saving} onClick={revert}>
-                  Revert
-                </Button>
-                <Button variant="primary" icon={<FloppyDisk size={16} weight="bold" />} disabled={!dirty || saving} onClick={save}>
-                  <Swap labels={["Save layout", "Saving"]} at={saving ? 1 : 0} />
-                </Button>
-              </div>
-              {saveError && <span className="error-line">{saveError}</span>}
             </div>
+          </Panel>
+          </div>
+
+          {/* The Render pane: on a phone the desk's own settings live here, because the
+              desk's toolbar has no room for them. */}
+          <div className="rd-lay-render-pane">
+            <Panel title="Render">
+              <span className="rd-lay-seg-pane">{renderControls}</span>
+            </Panel>
           </div>
         </div>
       </div>
