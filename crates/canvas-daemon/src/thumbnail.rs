@@ -24,6 +24,11 @@ use std::sync::{Arc, Mutex, MutexGuard};
 pub const WIDTH: u16 = 64;
 pub const HEIGHT: u16 = 40;
 pub const FRAMES: u16 = 24;
+/// The check's warning for a picture that never changes. `effects check` and the editor's
+/// preview say it with the same words.
+pub const NO_MOVEMENT: &str = "every frame is the same: the effect does not move";
+/// The check's warning for a picture that is one flat colour.
+pub const FLAT_COLOUR: &str = "the picture is one flat colour";
 /// The longest step the effect is updated by: 1/15 s is four of the 60 Hz frames an HTML effect
 /// runs per update, the most its runtime will catch up in one call. A longer step would lose time.
 const MAX_STEP_S: f64 = 1.0 / 15.0;
@@ -327,6 +332,48 @@ pub fn body_from_strip_png(png_bytes: &[u8]) -> Result<Vec<u8>, String> {
 /// How many updates cover `seconds` with no step longer than [`MAX_STEP_S`].
 fn steps_for(seconds: f64) -> u32 {
     ((seconds / MAX_STEP_S) - 1e-9).ceil().max(0.0) as u32
+}
+
+/// A thumbnail body's frame size and count, if the body is well formed.
+fn body_frames(body: &[u8]) -> Option<(usize, usize)> {
+    if body.len() < 6 {
+        return None;
+    }
+    let w = u16::from_le_bytes([body[0], body[1]]) as usize;
+    let h = u16::from_le_bytes([body[2], body[3]]) as usize;
+    let n = u16::from_le_bytes([body[4], body[5]]) as usize;
+    if w == 0 || h == 0 || n == 0 {
+        return None;
+    }
+    let frame_len = w.checked_mul(h)?.checked_mul(3)?;
+    (body.len() == 6 + n.checked_mul(frame_len)?).then_some((frame_len, n))
+}
+
+/// True when any frame of a rendered loop differs from its first: the picture moves.
+///
+/// The preview route asks this of the loop it just rendered, so a draft that draws the same
+/// picture every frame is reported the way `effects check` reports it ([`NO_MOVEMENT`]). A
+/// body that is not well formed counts as not moving: it cannot show movement.
+pub fn body_moves(body: &[u8]) -> bool {
+    let Some((frame_len, frames)) = body_frames(body) else {
+        return false;
+    };
+    let pixels = &body[6..];
+    (1..frames).any(|i| pixels[i * frame_len..(i + 1) * frame_len] != pixels[0..frame_len])
+}
+
+/// True when the last frame of a rendered loop is one flat colour ([`FLAT_COLOUR`]).
+///
+/// A body that is not well formed counts as flat: there is nothing in it to look at.
+pub fn body_is_flat(body: &[u8]) -> bool {
+    let Some((frame_len, frames)) = body_frames(body) else {
+        return true;
+    };
+    let last = &body[6 + (frames - 1) * frame_len..6 + frames * frame_len];
+    match last.get(..3) {
+        Some(first) => last.chunks_exact(3).all(|pixel| pixel == first),
+        None => true,
+    }
 }
 
 /// Keeps a recipe's numbers inside what the renderer can run: finite, and no longer than
@@ -967,6 +1014,43 @@ mod tests {
         assert_eq!((s.rows_lit, s.cols_lit), (1, 2));
         assert!((s.seam - 50.0 / (6.0 * 255.0)).abs() < 1e-9);
         assert!(score(&body[..body.len() - 1]).is_none());
+    }
+
+    /// A loop body of one row of pixels per frame.
+    fn body_of(frames: &[&[[u8; 3]]]) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&(frames[0].len() as u16).to_le_bytes());
+        body.extend_from_slice(&1u16.to_le_bytes());
+        body.extend_from_slice(&(frames.len() as u16).to_le_bytes());
+        for frame in frames {
+            for pixel in *frame {
+                body.extend_from_slice(pixel);
+            }
+        }
+        body
+    }
+
+    #[test]
+    fn a_loop_that_changes_moves_and_a_still_one_does_not() {
+        let still = body_of(&[&[[10, 0, 0], [20, 0, 0]]]);
+        assert!(!body_moves(&still), "one frame cannot move");
+        assert!(!body_is_flat(&still), "two colours are not one flat colour");
+
+        let moving = body_of(&[&[[10, 0, 0], [20, 0, 0]], &[[30, 0, 0], [20, 0, 0]]]);
+        assert!(body_moves(&moving));
+        assert!(!body_is_flat(&moving));
+
+        let one_colour = body_of(&[&[[5, 5, 5], [5, 5, 5]]]);
+        assert!(body_is_flat(&one_colour));
+
+        // Each frame is one colour, but the colour changes: it moves and is still flat.
+        let flat_but_moving = body_of(&[&[[5, 5, 5], [5, 5, 5]], &[[6, 6, 6], [6, 6, 6]]]);
+        assert!(body_moves(&flat_but_moving));
+        assert!(body_is_flat(&flat_but_moving));
+
+        // A malformed body shows nothing: it is not said to move, and it is flat.
+        assert!(!body_moves(&[0, 1, 2]));
+        assert!(body_is_flat(&[0, 1, 2]));
     }
 
     #[test]

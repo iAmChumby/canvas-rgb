@@ -42,6 +42,22 @@ pub fn source_hash(source: &str) -> String {
     format!("{hash:016x}")
 }
 
+/// The sentence a draft that failed to build gets in an API answer.
+///
+/// A load that ran out of time says how busy the machine was, not what the draft is, so it is
+/// said in words a person can read instead of the runtime's `timeout: ` prefix. Any other
+/// error is the runtime's own text, which names the script and, where it has one, the line.
+pub fn load_error_sentence(error: &str) -> String {
+    if crate::thumbnail::build_error_depends_on_load(error) {
+        format!(
+            "the draft took too long to load and was stopped: {}",
+            error.trim_start_matches("timeout: ")
+        )
+    } else {
+        error.to_string()
+    }
+}
+
 /// How often the effects folder is rescanned.
 pub const RESCAN_INTERVAL: Duration = Duration::from_secs(5);
 

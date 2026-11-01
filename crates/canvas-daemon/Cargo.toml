@@ -73,6 +73,7 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Gdi",
 ] }
 gif = "0.13"
+base64 = "0.22"
 
 [target.'cfg(windows)'.dependencies]
 windows-core = "0.62"

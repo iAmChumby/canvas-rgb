@@ -674,16 +674,7 @@ pub async fn import_effect(
 ) -> ApiResult<Json<ImportEffectResponse>> {
     // The body is read as bytes, so an oversized body is answered with the API's own
     // error shape and not with axum's plain text.
-    let bytes = body.map_err(|rejection| match rejection {
-        axum::extract::rejection::BytesRejection::FailedToBufferBody(
-            axum::extract::rejection::FailedToBufferBody::LengthLimitError(_),
-        ) => ApiFailure::new(
-            axum::http::StatusCode::PAYLOAD_TOO_LARGE,
-            canvas_proto::api::error_codes::VALIDATION,
-            format!("the request body is over the limit of {IMPORT_BODY_LIMIT} bytes"),
-        ),
-        other => ApiFailure::validation(format!("the request body could not be read: {other}")),
-    })?;
+    let bytes = crate::api::limited_body(body, IMPORT_BODY_LIMIT)?;
     let request: ImportEffect = serde_json::from_slice(&bytes)
         .map_err(|e| ApiFailure::validation(format!("the body is not an import request: {e}")))?;
 

@@ -31,6 +31,10 @@ pub const DRAFT_HEARTBEAT: Duration = Duration::from_secs(5);
 /// and the previous effect comes back, so a closed, crashed or throttled editor can leave
 /// the lights on a draft for at most this long.
 pub const DRAFT_LEASE: Duration = Duration::from_secs(15);
+/// The id prefix of a draft effect (`draft:` + its source hash). A draft is never a saved
+/// effect: no route that saves an effect or a layout stores one, and `find_schema` has no id
+/// that starts with this.
+pub const DRAFT_ID_PREFIX: &str = "draft:";
 /// Screen Ambience capture rate cap.
 pub const SCREEN_CAPTURE_MAX_FPS: u32 = 30;
 

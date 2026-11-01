@@ -59,6 +59,11 @@ pub fn router(app: Arc<App>) -> Router {
         .route(routes::EFFECT_ACTIVE_PROPS, patch(effects::patch_active_props))
         .route(routes::EFFECT_FAVORITE, put(effects::put_favorite))
         .route(routes::EFFECT_SOURCE, get(editor::effect_source))
+        .route(
+            routes::EFFECT_PREVIEW,
+            post(editor::preview_effect)
+                .layer(axum::extract::DefaultBodyLimit::max(effects::IMPORT_BODY_LIMIT)),
+        )
         .route(routes::LAYOUTS, get(layouts::list_layouts))
         .route(routes::LAYOUT, get(layouts::get_layout).put(layouts::put_layout))
         .route(routes::LAYOUT_ACTIVE, put(layouts::put_active_layout))
@@ -164,3 +169,24 @@ impl axum::response::IntoResponse for ApiFailure {
 
 /// The result type every handler returns.
 pub type ApiResult<T> = Result<T, ApiFailure>;
+
+/// A request body, within `limit` bytes, or the API's own error shape.
+///
+/// The body is read as bytes so an oversized one is answered with [`ApiFailure`] and not with
+/// axum's plain-text rejection. The import, the preview and the draft all use this, so the
+/// three carry the same cap and say the same thing when a body is over it.
+pub fn limited_body(
+    body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
+    limit: usize,
+) -> ApiResult<axum::body::Bytes> {
+    body.map_err(|rejection| match rejection {
+        axum::extract::rejection::BytesRejection::FailedToBufferBody(
+            axum::extract::rejection::FailedToBufferBody::LengthLimitError(_),
+        ) => ApiFailure::new(
+            axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+            canvas_proto::api::error_codes::VALIDATION,
+            format!("the request body is over the limit of {limit} bytes"),
+        ),
+        other => ApiFailure::validation(format!("the request body could not be read: {other}")),
+    })
+}
