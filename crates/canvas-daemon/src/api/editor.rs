@@ -27,6 +27,25 @@ pub async fn effect_source(
     if let Some((source, file_name)) = app.user_effects.source_and_file_name(&id) {
         return Ok(Json(EffectSource { source: source.to_string(), file_name }));
     }
+    // A file that does not parse is in the folder but not in the library. Its source is
+    // exactly what the editor needs to fix it, so a valid html: id falls back to the file.
+    if let Some(stem) = id.strip_prefix(crate::user_effects::USER_EFFECT_PREFIX) {
+        let file_name = format!("{stem}.html");
+        // The stem comes out of the URL: it is checked like any other file name, so no
+        // folder and no `..` reaches the read.
+        if crate::user_effects::check_file_name(&file_name).is_ok() {
+            if let Some(path) = crate::user_effects::existing_file(&app.effects_dir, &file_name) {
+                let source = std::fs::read_to_string(&path).map_err(|e| {
+                    ApiFailure::internal(format!("could not read the effect file: {e}"))
+                })?;
+                let file_name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or(file_name);
+                return Ok(Json(EffectSource { source, file_name }));
+            }
+        }
+    }
     // An id that is not an html: effect is a Rust built-in (or one the daemon does not know).
     match crate::api::effects::find_schema(&app.user_effects, &id) {
         Some(schema) if !schema.id.starts_with(crate::user_effects::USER_EFFECT_PREFIX) => {
@@ -75,8 +94,8 @@ async fn preview(html: &str, props: &Props) -> Result<EffectPreviewResponse, Api
     tokio::task::spawn_blocking(move || -> Result<EffectPreviewResponse, ApiFailure> {
         // The same build the lights use, so the preview is judged by the runtime that will
         // run it.
-        let mut effect = canvas_html::HtmlEffect::from_source(&id, &html, &Props::new())
-            .map_err(|e| ApiFailure::validation(crate::user_effects::load_error_sentence(&e.to_string())))?;
+        let mut effect = crate::user_effects::html_effect(&id, &html)
+            .map_err(|e| ApiFailure::validation(crate::user_effects::load_error_sentence(&e)))?;
         let schema = effect.schema();
         let thumbnail = crate::thumbnail::render(&mut effect, &props).map_err(|e| {
             ApiFailure::service_unavailable(format!("the preview was given up: {}", e.reason()))

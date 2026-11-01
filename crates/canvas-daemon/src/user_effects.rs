@@ -95,17 +95,22 @@ fn monotonic_clock() -> Clock {
 /// The daemon uses [`html_builder`]; the tests inject fakes.
 pub type Builder = Arc<dyn Fn(&str, &str) -> Result<Box<dyn Effect>, String> + Send + Sync>;
 
+/// Builds a user effect's HTML with the runtime the daemon runs, without boxing it: the
+/// editor's preview reads the concrete instance's schema, errors and warnings after the render.
+///
+/// [`html_builder`] is this, boxed; the two never build a file differently.
+pub fn html_effect(id: &str, source: &str) -> Result<canvas_html::HtmlEffect, String> {
+    canvas_html::HtmlEffect::from_source(id, source, &Props::new()).map_err(|e| e.to_string())
+}
+
 /// The builder that runs real SignalRGB-format HTML effects through `canvas-html`.
 pub fn html_builder() -> Builder {
     Arc::new(|id: &str, source: &str| {
-        canvas_html::HtmlEffect::from_source(id, source, &Props::new())
-            .map(|effect| {
-                for warning in effect.warnings() {
-                    tracing::warn!(id, %warning, "a user effect loaded with a part of its file ignored");
-                }
-                Box::new(effect) as Box<dyn Effect>
-            })
-            .map_err(|e| e.to_string())
+        let effect = html_effect(id, source)?;
+        for warning in effect.warnings() {
+            tracing::warn!(id, %warning, "a user effect loaded with a part of its file ignored");
+        }
+        Ok(Box::new(effect) as Box<dyn Effect>)
     })
 }
 

@@ -222,6 +222,34 @@ async fn an_unknown_effect_has_no_source() {
 }
 
 #[tokio::test]
+async fn a_file_that_does_not_parse_still_serves_its_source() {
+    let (router, app, _home, folder) = build();
+    std::fs::write(folder.join("broken.html"), NO_SCRIPT).expect("the broken effect is written");
+    app.user_effects.rescan(&folder);
+    // The file is not in the library, but it is exactly what needs editing.
+    assert!(app.user_effects.schemas().iter().all(|s| s.id != "html:broken"));
+
+    let response = router
+        .oneshot(request("GET", "/api/v1/effects/html:broken/source"))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let source: EffectSource = serde_json::from_value(json(response).await).expect("an EffectSource");
+    assert_eq!(source.source, NO_SCRIPT);
+    assert_eq!(source.file_name, "broken.html");
+}
+
+#[tokio::test]
+async fn a_source_id_cannot_reach_out_of_the_effects_folder() {
+    let (router, _app, _home, _folder) = build();
+    let response = router
+        .oneshot(request("GET", "/api/v1/effects/html:..%2Fsecret/source"))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn the_source_route_needs_the_token() {
     let (router, _app, _home, _folder) = build();
     let response = router
