@@ -15,12 +15,6 @@ const TAU_FOLLOW = 0.075;
 /** And back onto the wordmark, once the pointer has left the hero: slower, so it settles. */
 const TAU_SETTLE = 0.45;
 /**
- * After a stall (a long task, a hidden tab, a laptop waking up) the light eases back into
- * place at this rate instead of jumping: the elapsed time is dropped, so the pool moves by a
- * fraction of the gap instead of most of it.
- */
-const TAU_CATCH = 0.25;
-/**
  * The light's radius, as a share of the hero's smaller side, so it is round at every size.
  */
 const RADIUS = 0.42;
@@ -30,19 +24,47 @@ const RADIUS = 0.42;
  */
 const SCALE = 0.45;
 /**
- * How far the field reaches past the hero, above and below, in CSS pixels. The frame's fade
- * is drawn over exactly this band, so the light is taken to nothing outside the hero and its
- * centre, which is the pointer, is never dimmed by the fade. The site's own stylesheet sets
- * the same number on the field (`--reach`), and the script reads it back from there.
+ * How far the field reaches past the hero, above and below, in CSS pixels. It is the band
+ * the light's own edge is drawn over: below the hero the light fades out before the
+ * field's edge, and at the top it fades out before the sticky header's edge, so neither
+ * ever cuts it. The site's own stylesheet sets the same number on the field (`--reach`),
+ * and the script reads it back from there.
  */
 const REACH = 24;
 /** How long the spectrum in the easel's canvas takes to sweep across, once, on load. */
 const SWEEP = 0.62;
 /**
- * A gap between two frames longer than this is a stall (a long task, a hidden tab), not a
- * slow frame. The elapsed time is dropped, so the light eases back instead of snapping.
+ * The most elapsed time one frame is allowed to ease over. A frame that is late (a long
+ * task, a hidden tab, a laptop waking up) does not get to close the whole gap in one go:
+ * the elapsed time is capped, so the light eases back into place over the next frames
+ * instead of snapping there. There is no cliff at any gap: every frame moves the light by
+ * at most the same distance.
  */
-const STALL = 0.1;
+const DT_MAX = 0.05;
+/**
+ * The furthest the light may travel in one frame, as a share of its own radius. It is the
+ * same for every frame, whatever the gap, so a late frame slides the light into place
+ * instead of jumping it.
+ */
+const MOVE_SHARE = 1 / 16;
+
+/**
+ * What the site's QA harness sees: one frame's timing, and the light's place in the
+ * field's own pixels. It is how the ease's own numbers are read from inside the frame.
+ */
+type GlowFrame = {
+  /** The frame's time, in seconds since the first paint. */
+  t: number;
+  /** The elapsed time this frame eased over, in seconds. It is capped. */
+  dt: number;
+  /** The real gap since the last frame, in seconds. */
+  gap: number;
+  /** The light's centre, in the field's own pixels. */
+  x: number;
+  y: number;
+  /** The light's strength: 0 to 1. */
+  alpha: number;
+};
 
 /**
  * The hero.
@@ -53,8 +75,14 @@ const STALL = 0.1;
  * The light is the cursor spotlight: its centre IS the pointer, inside the hero, and it
  * trails it by a short, time-based ease. It never leans and never stops short. When the
  * pointer leaves, the pool settles back onto the wordmark. The field of light reaches a
- * little past the hero, so the frame's fade is drawn outside the hero and the pool is
- * never cut by it: the pool is brightest where the pointer is, right to the edge.
+ * little past the hero, and the light is faded out before the field's own edge, so the
+ * field never cuts it.
+ *
+ * The sticky header is opaque and lies over the top of the hero, so the light has to be
+ * gone by the time it reaches the header's bottom edge: otherwise the header's border
+ * would cut it and leave a straight line across the hero. The light is therefore taken
+ * to nothing at that edge, and the pool dims as the pointer goes up to it. Its centre
+ * stays on the pointer.
  *
  * Nothing reads layout per frame. The hero's and the mark's boxes are measured on resize (and
  * once the entrance has finished), in page coordinates; a pointer move and a scroll are only
@@ -63,9 +91,10 @@ const STALL = 0.1;
  * The little rectangle inside the easel is the canvas, and it shows the editor's spectrum,
  * sliding under the pointer. It is small and crisp: no blur, no glow.
  *
- * Under `prefers-reduced-motion`, on a screen with no hover (touch), and after a finger has
- * touched the hero, the hero draws one still frame behind the wordmark and asks for no
- * other.
+ * The rule is about the input, not about the kind of device: a mouse or a pen drives the
+ * light, on any device, including one with no hover; a finger puts the hero back to one
+ * still frame behind the wordmark; under `prefers-reduced-motion` the hero draws one
+ * still frame and asks for no other.
  */
 export function HeroWordmark() {
   const wrapRef = useRef<HTMLSpanElement>(null);
@@ -87,8 +116,17 @@ export function HeroWordmark() {
 
     const reduced = window.matchMedia("(prefers-reduced-motion: reduce)");
     const noHover = window.matchMedia("(hover: none)");
-    /** With the motion off the hero is one still frame: no pool that follows, no sweep. */
-    const still = () => reduced.matches || noHover.matches;
+    /** A mouse or a pen has driven the light: it follows, even on a screen with no hover. */
+    let driven = false;
+    /**
+     * With the motion off the hero is one still frame: no pool that follows, no sweep.
+     *
+     * The motion is off when the viewer asked for it (reduced motion), or when the device
+     * has no hover and nothing has driven the light yet (a phone: a finger is not a
+     * pointer to follow). A mouse or a pen on a phone is a pointer to follow, and the
+     * light follows it: the rule is about the input, not about the kind of device.
+     */
+    const still = () => reduced.matches || (noHover.matches && !driven);
     const root = getComputedStyle(document.documentElement);
     const colours = SPECTRUM.map((n) => root.getPropertyValue(n).trim() || "#ff3b5c");
 
@@ -118,6 +156,13 @@ export function HeroWordmark() {
     let rad = 1;
     /** How far the field reaches past the hero: the frame's fade is drawn over that band. */
     let reach = REACH;
+    /**
+     * The sticky header's height. It is at the top of the page and sticks to the top of
+     * the window, so its bottom edge is always the same height in the window: that edge
+     * is where the light has to be gone, or the header's border would cut it and leave a
+     * straight line across the hero.
+     */
+    let headerH = 0;
 
     // The pointer in the frame's pixels, the light, and the last client position.
     const target = { x: 0, y: 0 };
@@ -179,6 +224,11 @@ export function HeroWordmark() {
       // at the frame is drawn over exactly the band the field covers.
       const said = parseFloat(getComputedStyle(field).getPropertyValue("--reach"));
       if (Number.isFinite(said) && said > 0) reach = said;
+      // The sticky header's height, measured once (the header does not change with the
+      // hero's size). Its bottom edge is the line the light must not cross.
+      const head = document.querySelector(".site-header");
+      const headBox = head?.getBoundingClientRect();
+      headerH = headBox ? headBox.height : 0;
     };
 
     // The easel's canvas, measured from the mark itself, so the pane sits exactly on it.
@@ -230,6 +280,12 @@ export function HeroWordmark() {
         }
         return;
       }
+      // A mouse or a pen. It drives the light, on any device: a screen with no hover can
+      // still have a mouse on it, and the light follows it.
+      if (!driven) {
+        driven = true;
+        if (!reduced.matches && visible) start();
+      }
       if (touched) {
         // A mouse (or a pen) has taken over again.
         touched = false;
@@ -257,11 +313,53 @@ export function HeroWordmark() {
     window.addEventListener("scroll", onScroll, { passive: true });
 
     /**
+     * The light's own fade, drawn into the field with `destination-out`: the erase's value
+     * at a height is the profile's, and it takes the light away in proportion, so the
+     * light's edge is soft and never a line. The profile is sampled at its own breaks, so
+     * the gradient is exactly it.
+     *
+     * `breaks` are [height, value] pairs in order, and the value between two of them is
+     * linear. The value above the first break is the first one's, and below the last it
+     * is the last one's.
+     */
+    const fade = (breaks: Array<[number, number]>) => {
+      const first = breaks[0];
+      const last = breaks[breaks.length - 1];
+      if (!first || !last) return;
+      const value = (y: number) => {
+        if (y <= first[0]) return first[1];
+        for (let i = 1; i < breaks.length; i++) {
+          const b0 = breaks[i - 1];
+          const b1 = breaks[i];
+          if (!b0 || !b1) continue;
+          const [y0, v0] = b0;
+          const [y1, v1] = b1;
+          if (y <= y1) return v0 + ((v1 - v0) * (y - y0)) / (y1 - y0 || 1);
+        }
+        return last[1];
+      };
+      const g = ctx.createLinearGradient(0, 0, 0, fh);
+      const seen = new Set<string>();
+      for (const y of [0, ...breaks.map((b) => b[0]), fh]) {
+        if (y < 0 || y > fh) continue;
+        const o = y / fh;
+        const key = o.toFixed(6);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        g.addColorStop(o, `rgba(0, 0, 0, ${Math.min(1, Math.max(0, value(y)))})`);
+      }
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, fw, fh);
+    };
+
+    /**
      * The pool of light: one colour, soft, fading out completely, always round.
      *
      * `k` is the share of the gap to the pointer that this frame closes (0 leaves it alone,
      * 1 puts it straight on the pointer). `cap`, when it is not 0, is the furthest the pool
      * may travel in this frame.
+     *
+     * It returns the light's strength: how much of it is drawn, 0 to 1.
      */
     const drawField = (t: number, k: number, cap = 0) => {
       const following = inside && seen && !touched;
@@ -287,33 +385,64 @@ export function HeroWordmark() {
       ctx.clearRect(0, 0, fw, fh);
       const cx = pos.x * sx;
       const cy = pos.y * sy;
-      const r = rad * sx;
-      const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
-      g.addColorStop(0, `hsla(${hue}, 78%, ${light ? 58 : 56}%, ${a})`);
-      g.addColorStop(0.35, `hsla(${hue}, 78%, ${light ? 60 : 58}%, ${a * 0.45})`);
-      g.addColorStop(0.75, `hsla(${hue}, 78%, ${light ? 62 : 60}%, 0)`);
-      g.addColorStop(1, "hsla(0, 0%, 0%, 0)");
-      ctx.fillStyle = g;
-      ctx.fillRect(0, 0, fw, fh);
-      // The frame's fade, drawn into the field itself: the light is taken to nothing over the
-      // last pixels before the field's edge, so the field never cuts it. The band is the
-      // field's own reach past the hero, so the fade happens outside the hero and the light's
-      // centre, which is the pointer, is never dimmed by it: the light is brightest where
-      // the pointer is, right to the edge. Drawn in the canvas rather than with a CSS mask,
-      // so every browser gets the same soft edge. The field is as wide as the hero, so the
-      // light runs off the left and right of the screen, where there is nothing to see.
+      // Where the sticky header's bottom edge is, in the field's own pixels. The header is
+      // opaque and lies over the top of the hero, so the light has to be gone by the time
+      // it gets there: otherwise the header's border would cut it and leave a straight
+      // line across the hero. The header is at the top of the page and sticks to the top
+      // of the window, so its bottom edge is always the same height in the window, and
+      // the light's own edge moves with the page.
+      const cut = headerH > 0 ? (scrollY + headerH - framePageY) * sy : -1e6;
+      // How far below that edge the light's centre is, and how deep the light's own band
+      // is: the band is the field's reach, the same band the light fades out over.
+      const depth = cy - cut;
       const band = Math.max(1, reach * sy);
-      if (band < fh / 2) {
-        ctx.globalCompositeOperation = "destination-out";
-        const gy = ctx.createLinearGradient(0, 0, 0, fh);
-        gy.addColorStop(0, "rgba(0, 0, 0, 1)");
-        gy.addColorStop(band / fh, "rgba(0, 0, 0, 0)");
-        gy.addColorStop(1 - band / fh, "rgba(0, 0, 0, 0)");
-        gy.addColorStop(1, "rgba(0, 0, 0, 1)");
-        ctx.fillStyle = gy;
+      // The light's strength near the header: it is taken to nothing by the header's edge,
+      // so the pool dims as the pointer goes up to it, rather than being cut by it. The
+      // pool's centre stays on the pointer: the fade below reaches the centre exactly.
+      const strength = depth <= 0 ? 0 : Math.min(1, depth / band);
+      if (strength > 0) {
+        const r = rad * sx;
+        ctx.globalAlpha = strength;
+        const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+        g.addColorStop(0, `hsla(${hue}, 78%, ${light ? 58 : 56}%, ${a})`);
+        g.addColorStop(0.35, `hsla(${hue}, 78%, ${light ? 60 : 58}%, ${a * 0.45})`);
+        g.addColorStop(0.75, `hsla(${hue}, 78%, ${light ? 62 : 60}%, 0)`);
+        g.addColorStop(1, "hsla(0, 0%, 0%, 0)");
+        ctx.fillStyle = g;
         ctx.fillRect(0, 0, fw, fh);
-        ctx.globalCompositeOperation = "source-over";
+        ctx.globalAlpha = 1;
       }
+      // The frame's fade, drawn into the field itself: the light is taken to nothing over
+      // the last pixels before the field's edge, so the field never cuts it. The band is
+      // the field's own reach past the hero, so the fade happens outside the hero and the
+      // light's centre, which is the pointer, is never dimmed by it: the light is
+      // brightest where the pointer is, right to the edge. Drawn in the canvas rather than
+      // with a CSS mask, so every browser gets the same soft edge. The field is as wide as
+      // the hero, so the light runs off the left and right of the screen, where there is
+      // nothing to see.
+      ctx.globalCompositeOperation = "destination-out";
+      if (headerH > 0) {
+        // The header's edge: the light is erased over the band that reaches it, so that it
+        // is gone by the time it gets there. The erase runs from the header's edge down to
+        // the light's own centre, so the pool's peak stays on the pointer, and the pool's
+        // strength is scaled to match, so the edge is soft at every distance. Above the
+        // header's edge the light is left alone: that part of the field is behind the
+        // opaque header and nobody sees it.
+        const ramp = Math.min(Math.max(depth, 1), band);
+        fade([
+          [0, 0],
+          [cut, 1],
+          [cut + ramp, 0],
+        ]);
+      }
+      // The field's own bottom edge: the same fade, over the field's own reach, so the
+      // light is taken to nothing before the field's edge and the field never cuts it.
+      fade([
+        [fh - band, 0],
+        [fh, 1],
+      ]);
+      ctx.globalCompositeOperation = "source-over";
+      return strength;
     };
 
     /** The spectrum inside the easel's canvas: a small crisp band under the pointer. */
@@ -366,34 +495,30 @@ export function HeroWordmark() {
       .find((e) => e.name === "first-contentful-paint");
     const t0 = paint ? paint.startTime : 0;
     let last = 0;
-    /** True while the light is catching up after a stall: it eases back instead of jumping. */
-    let catching = false;
+    /**
+     * The site's own QA hook: it is called once per frame with the frame's timing and the
+     * light's place, so that a frame can be measured from the inside. Nothing in the site
+     * listens to it; the harness does.
+     */
+    const hook = (globalThis as { __heroGlow?: (f: GlowFrame) => void }).__heroGlow;
     const frame = (now: number) => {
       const t = (now - t0) / 1000;
-      // Time, not frames: the same gap closes in the same seconds at any refresh rate. A gap
-      // longer than STALL is a stall, not a slow frame: the elapsed time is dropped, so the
-      // light does not jump most of the way in one frame.
+      // Time, not frames: the same gap closes in the same seconds at any refresh rate. The
+      // elapsed time is capped, so a frame that is late (a long task, a hidden tab, a laptop
+      // waking up) eases the light back into place over the next frames instead of snapping
+      // it there. There is no cliff at any gap: the light's own move is capped too, so every
+      // frame moves it by at most the same distance.
       const gap = last ? (now - last) / 1000 : 0;
-      const stall = gap > STALL;
-      const dt = last ? (stall ? 1 / 60 : gap) : 1 / 60;
+      const dt = Math.min(gap || 1 / 60, DT_MAX);
       last = now;
       const following = inside && seen && !touched;
-      const wantX = following ? target.x : markX;
-      const wantY = following ? target.y : markY;
-      const away = Math.hypot(wantX - pos.x, wantY - pos.y);
-      let k = 0;
-      if (stall) {
-        // A stall: the light holds this frame and eases back into place over the next ones.
-        catching = true;
-      } else {
-        const tau = catching ? TAU_CATCH : following ? TAU_FOLLOW : TAU_SETTLE;
-        k = 1 - Math.exp(-dt / tau);
-        if (catching && away < 2) catching = false;
-      }
-      // While it catches up, the light never crosses more than an eighth of its own radius
-      // in one frame: it slides back into place instead of jumping.
-      drawField(t, k, catching ? rad * 0.125 : 0);
+      const tau = following ? TAU_FOLLOW : TAU_SETTLE;
+      const k = 1 - Math.exp(-dt / tau);
+      // The light never crosses more than a sixteenth of its own radius in one frame: it
+      // slides back into place instead of jumping.
+      const strength = drawField(t, k, rad * MOVE_SHARE);
       drawPane(t, true);
+      hook?.({ t, dt, gap, x: pos.x, y: pos.y, alpha: strength });
       raf = requestAnimationFrame(frame);
     };
     /** One still frame: the light rests on the wordmark, and the easel's canvas does not move. */
