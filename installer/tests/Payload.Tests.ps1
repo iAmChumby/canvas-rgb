@@ -200,7 +200,7 @@ try {
         foreach ($m in 'FPrepError := Text;') { Assert-True ($iss.Contains($m)) "PrepareToInstall failures are remembered ($m)" }
         $p = $iss.IndexOf('function PrepareToInstall'); $q = $iss.IndexOf('procedure CurStepChanged')
         $prep = $iss.Substring($p, $q - $p)
-        Assert-True ((([regex]::Matches($prep, 'Result := PrepFail\(')).Count) -eq 4) 'all four PrepareToInstall failures go through PrepFail'
+        Assert-True ((([regex]::Matches($prep, 'Result := PrepFail\(')).Count) -eq 5) 'all five PrepareToInstall failures go through PrepFail (the install-folder check is the fifth, #46)'
         Assert-True (-not ($prep -match "Result := '[^']")) 'no failure bypasses PrepFail'
     }
     Test-Case 'iss and tray agree on the installer switches (no /SUPPRESSMSGBOXES: the failure page must show)' {

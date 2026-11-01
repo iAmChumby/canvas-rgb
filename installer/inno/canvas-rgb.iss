@@ -76,6 +76,7 @@ Source: "{#PayloadDir}\installer\preflight.ps1";      DestDir: "{tmp}"; Flags: d
 Source: "{#PayloadDir}\installer\detect.ps1";         DestDir: "{tmp}"; Flags: dontcopy
 Source: "{#PayloadDir}\installer\stop-canvas.ps1";    DestDir: "{tmp}"; Flags: dontcopy
 Source: "{#PayloadDir}\installer\fetch-openrgb.ps1";  DestDir: "{tmp}"; Flags: dontcopy
+Source: "{#PayloadDir}\installer\check-install-dir.ps1"; DestDir: "{tmp}"; Flags: dontcopy
 Source: "{#PayloadDir}\installer\openrgb.lock.json";  DestDir: "{tmp}"; Flags: dontcopy
 
 [Icons]
@@ -119,6 +120,7 @@ var
   FPrepError: String;       // why PrepareToInstall stopped Setup, for the /UPDATE result file
   FPurge: String;           // ' -PurgeConfig' or empty
   FStoppedRunningService: Boolean;  // the first step stopped a running service (#60)
+  FInstallDirOk: Boolean;           // the uninstall check passed: the folder only administrators can change (#46)
 
 function ScriptsOk: Boolean;
 begin
@@ -435,11 +437,12 @@ end;
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   Code: Integer;
-  Dl, Log, Args: String;
+  Dl, Log, DirLog, Args: String;
 begin
   Result := '';
   Log := ExpandConstant('{tmp}\canvas-rgb-prepare.log');
   ExtractTemporaryFile('lib.ps1');
+  ExtractTemporaryFile('check-install-dir.ps1');
   ExtractTemporaryFile('preflight.ps1');
   ExtractTemporaryFile('stop-canvas.ps1');
   ExtractTemporaryFile('fetch-openrgb.ps1');
@@ -453,6 +456,18 @@ begin
   if not RunPs(ExpandConstant('{tmp}\preflight.ps1'), Args, False, Code) or (Code <> 0) then
   begin
     Result := PrepFail('Setup found a problem before copying anything. Nothing was changed.' + #13#10 + #13#10 + LogTail(Log));
+    Exit;
+  end;
+
+  // The install folder runs code as SYSTEM (the service, OpenRGB, these scripts), so it must be a folder only
+  // administrators can change. This locks it first, then refuses on anything a user could write, before
+  // any file is copied and before anything is downloaded or stopped (#46). A refusal never deletes or
+  // takes over a thing; it names the folder and what is wrong.
+  WizardForm.PreparingLabel.Caption := 'Checking the install folder...';
+  DirLog := ExpandConstant('{tmp}\canvas-rgb-dircheck.log');
+  if not RunPs(ExpandConstant('{tmp}\check-install-dir.ps1'), '-InstallDir "' + ExpandConstant('{app}') + '" -Mode Install -LogFile "' + DirLog + '"', False, Code) or (Code <> 0) then
+  begin
+    Result := PrepFail('Setup cannot use this install folder, and nothing was copied.' + #13#10 + #13#10 + LogTail(DirLog));
     Exit;
   end;
 
@@ -644,11 +659,35 @@ end;
 function InitializeUninstall: Boolean;
 var
   Code: Integer;
-  Log, Args: String;
+  Log, Args, CheckLog, CheckScript: String;
   Ran: Boolean;
 begin
   Result := True;
   FPurge := '';
+  FInstallDirOk := False;
+  // First of all, before anything in the install folder is run (the elevated script below runs
+  // canvas-rgb-svc.exe as an administrator): the folder must be one only administrators can change.
+  // The check runs from a protected copy in the machine home, never from {app}, which is the folder
+  // being checked. An install made before this check was added has no copy, and is refused the same way:
+  // the message says how to fix it (#46).
+  CheckLog := ExpandConstant('{tmp}\canvas-rgb-uninstall-dircheck.log');
+  CheckScript := ExpandConstant('{commonappdata}\canvas-rgb\check\check-install-dir.ps1');
+  if not FileExists(CheckScript) then
+  begin
+    SaveStringToFile(CheckLog, 'canvas-rgb cannot check that its folder is safe to run from, because the safety check that setup keeps in the protected canvas-rgb data folder is missing. Nothing was removed or run. Install canvas-rgb again into the default folder under Program Files, then remove this old folder by hand.', False);
+    Ran := False;
+    Code := 1;
+  end
+  else
+    Ran := RunPs(CheckScript, '-InstallDir "' + ExpandConstant('{app}') + '" -Mode Verify -LogFile "' + CheckLog + '"', False, Code);
+  if not (Ran and (Code = 0)) then
+  begin
+    if not UninstallSilent then
+      MsgBox('canvas-rgb cannot be removed from this folder.' + #13#10 + #13#10 + LogTail(CheckLog), mbError, MB_OK);
+    Result := False;
+    Exit;
+  end;
+  FInstallDirOk := True;
   if UninstallSilent then
   begin
     if Uppercase(GetParam('PURGE', 'N')) = 'Y' then FPurge := ' -PurgeConfig';
@@ -702,6 +741,8 @@ var
   Code: Integer;
 begin
   if CurUninstallStep <> usUninstall then Exit;
+  // Nothing from the install folder runs unless the check in InitializeUninstall passed (#46).
+  if not FInstallDirOk then Exit;
   if not RunPs(ExpandConstant('{app}\installer\uninstall-user.ps1'),
       '-InstallDir "' + ExpandConstant('{app}') + '"' + FPurge, False, Code) or (Code <> 0) then
     SuppressibleMsgBox('Cleaning up your account settings did not finish (code ' + IntToStr(Code) + '). The program files are still removed.',
