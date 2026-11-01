@@ -93,6 +93,24 @@ export function installerSentence(message: string): string {
   return /[.!?]$/.test(cap) ? cap : `${cap}.`;
 }
 
+/**
+ * The sentence after an install that did not finish. The version is named only when it is not the
+ * version the failed update was for: "canvas-rgb is still on 0.3.0" after an update *to* 0.3.0
+ * reads as if the update never reached this PC (#60).
+ */
+export function installFailedSentence(message: string, current: string, failedFor?: string | null): string {
+  const first = installerSentence(message);
+  if (!current) return first;
+  if (failedFor && sameVersion(failedFor, current)) return first;
+  return `${first} canvas-rgb is still on ${current}.`;
+}
+
+/** "0.3.0" and "v0.3.0" are the same version. */
+function sameVersion(a: string, b: string): boolean {
+  const norm = (v: string) => v.trim().replace(/^v/i, "");
+  return norm(a) === norm(b);
+}
+
 /** The state line of the updates page: what is happening, in the settled words. */
 export function stateLine(u: UpdateState): string {
   const v = u.available?.version ?? "";
@@ -121,7 +139,7 @@ export function stateLine(u: UpdateState): string {
           ? "Could not check for updates: GitHub rate limit."
           : "Could not check for updates.";
     case "install_failed":
-      return `${installerSentence(p.message)} canvas-rgb is still on ${u.current_version}.`;
+      return installFailedSentence(p.message, u.current_version, u.available?.version);
     case "up_to_date":
     case "idle":
     case "available":
