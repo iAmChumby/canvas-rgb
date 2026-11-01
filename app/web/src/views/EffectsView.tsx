@@ -353,7 +353,16 @@ export function EffectsView() {
       setPicked(r.effect.id);
       setReplaceWith(null);
       setImportError(null);
-      toast(r.replaced ? `${r.effect.name} is replaced` : `${r.effect.name} is added`);
+      // The effect is not in the library when the machine was too busy to load it: the
+      // file is saved, and the daemon says when it will load.
+      const inLibrary = (getSnap().effects ?? []).some((e) => e.id === r.effect.id);
+      toast(
+        inLibrary
+          ? r.replaced
+            ? `${r.effect.name} is replaced`
+            : `${r.effect.name} is added`
+          : r.effect.description,
+      );
     } catch (e) {
       if (e instanceof ApiFailure && e.status === 409) {
         setReplaceWith({ fileName: file.name, html: await file.text() });

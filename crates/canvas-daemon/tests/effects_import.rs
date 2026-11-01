@@ -143,6 +143,27 @@ async fn effect_ids(router: &axum::Router) -> Vec<String> {
         .collect()
 }
 
+/// The files that did not load, with the reason.
+async fn failed_effects(router: &axum::Router) -> Vec<(String, String)> {
+    let response = router
+        .clone()
+        .oneshot(request("GET", routes::EFFECTS))
+        .await
+        .expect("the router answers");
+    let body = json(response).await;
+    body.get("failed")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|e| {
+            let file = e.get("file")?.as_str()?.to_string();
+            let error = e.get("error")?.as_str()?.to_string();
+            Some((file, error))
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn an_imported_effect_lands_in_the_folder_and_in_the_library() {
     let (router, _app, _home, folder) = build();
@@ -437,36 +458,54 @@ async fn a_reserved_name_is_refused_whatever_comes_after_the_first_dot() {
     assert_eq!(std::fs::read_dir(&folder).expect("the folder").count(), 0);
 }
 
+/// A file whose script never ends: the runtime stops it at its budget. The machine was
+/// too busy to load the file, which is not the file's fault.
+const RUNAWAY: &str =
+    "<html><head><title>Loop</title></head><body></body><script>while (true) {}</script></html>";
+
+/// A file the machine was too busy to load is saved anyway: a save during a busy moment
+/// is not lost. The answer says it will load when the machine is less busy.
 #[tokio::test]
-async fn a_runaway_effect_is_refused_and_nothing_is_written() {
+async fn a_file_the_machine_was_too_busy_to_load_is_saved_and_will_load_later() {
     let (router, _app, _home, folder) = build();
-    // The script never ends. The runtime stops it at its budget and the import is
-    // refused, so the folder stays as it was.
-    let runaway = "<html><head><title>Loop</title></head><body></body><script>while (true) {}</script></html>";
     let started = std::time::Instant::now();
     let response = router
         .clone()
         .oneshot(request_with_body(
             "POST",
             routes::EFFECTS_IMPORT,
-            &import_body("loop.html", runaway, false),
+            &import_body("loop.html", RUNAWAY, false),
         ))
         .await
         .expect("the router answers");
     let elapsed = started.elapsed();
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(response.status(), StatusCode::OK);
     let body = json(response).await;
-    let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("");
+    let description = body
+        .get("effect")
+        .and_then(|e| e.get("description"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
     assert!(
-        message.contains("ran longer than"),
-        "the message says the script ran too long: {message}"
+        description.contains("will load when the machine is less busy"),
+        "the answer says it will load later: {description}"
     );
-    // It was stopped at the budget, not later.
+    // The file is in the folder: the save was not lost.
+    assert_eq!(std::fs::read_dir(&folder).expect("the folder").count(), 1);
+    // It is not in the library yet, and the list says why.
+    let ids = effect_ids(&router).await;
+    assert!(!ids.contains(&"html:loop".to_string()), "the effect is in the library: {ids:?}");
+    let failed = failed_effects(&router).await;
+    assert_eq!(failed.len(), 1);
+    assert!(failed[0].0.ends_with("loop.html"), "{failed:?}");
+    assert!(failed[0].1.contains("too busy"), "the reason is the machine: {failed:?}");
+    // The parse was stopped at the budget, not later: the import's own parse and the
+    // rescan's, each of them at the 2 s budget.
     assert!(
-        elapsed.as_millis() < 6_000,
-        "the import took {elapsed:?}, the budget is 2000 ms"
+        elapsed.as_millis() < 8_000,
+        "the import took {elapsed:?}, two budgets are 4000 ms"
     );
-    assert_eq!(std::fs::read_dir(&folder).expect("the folder").count(), 0);
 }
 
 #[tokio::test]

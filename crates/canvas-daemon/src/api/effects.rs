@@ -663,9 +663,11 @@ pub fn saved_presets(store: &crate::storage::Store) -> BTreeMap<String, Vec<canv
 /// Adds a SignalRGB-format HTML effect to the effects folder.
 ///
 /// The file name is checked first, then the file is parsed with the builder the loader
-/// uses: a file that does not parse is a validation error and nothing is written. The
-/// file lands in the folder atomically (a temp file in the same folder, then a rename),
-/// the folder is rescanned and the effect's summary comes back.
+/// uses: a file that does not parse is a validation error and nothing is written. A file
+/// whose load ran out of time is not the file's fault — the machine was busy — so it is
+/// written anyway and the answer says it will load when the machine is less busy. The file
+/// lands in the folder atomically (a temp file in the same folder, then a rename), the
+/// folder is rescanned and the effect's summary comes back.
 pub async fn import_effect(
     State(app): State<Arc<App>>,
     body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
@@ -725,25 +727,24 @@ pub async fn import_effect(
     // The file is parsed before anything is written: a broken file is refused and the
     // effects folder stays as it was. The parse runs the effect's script, so it goes
     // on a blocking thread and not on a tokio worker.
+    //
+    // A load that ran out of time is not the file's fault: the machine was busy. The file
+    // is written anyway, so a save during a game load is not lost, and the rescan below
+    // (or the retry that follows it) loads it when the machine is free.
     let parse_id = id.clone();
     let parse_html = request.html.clone();
-    let effect = tokio::task::spawn_blocking(move || {
+    let parsed = tokio::task::spawn_blocking(move || {
         (crate::user_effects::html_builder())(&parse_id, &parse_html)
     })
     .await
-    .map_err(|e| ApiFailure::internal(format!("the parse task stopped: {e}")))?
-    .map_err(|e| {
-        if crate::thumbnail::build_error_depends_on_load(&e) {
-            // The machine was too busy to load the effect, not the effect's fault. Nothing
-            // is written, so the import can be tried again.
-            ApiFailure::validation(format!(
-                "the machine was too busy to load the effect, so it was not imported; try again: {e}"
-            ))
-        } else {
-            ApiFailure::validation(format!("the effect does not parse: {e}"))
+    .map_err(|e| ApiFailure::internal(format!("the parse task stopped: {e}")))?;
+    let effect = match parsed {
+        Ok(effect) => Some(effect),
+        Err(e) if crate::thumbnail::build_error_depends_on_load(&e) => None,
+        Err(e) => {
+            return Err(ApiFailure::validation(format!("the effect does not parse: {e}")));
         }
-    })?;
-    let schema = effect.schema();
+    };
 
     // The write. A new file is created with a link, so a file that appears between the
     // check and the write is never overwritten.
@@ -779,12 +780,37 @@ pub async fn import_effect(
     };
     tracing::info!(effect = %id, replaced = existing.is_some(), "a user effect was imported");
 
+    // What the answer says: the effect that is in the library, or, when the machine was
+    // too busy to load it, that the file is saved and will load when the machine is less
+    // busy. The file is in the folder either way.
+    let loaded = app.user_effects.schemas().into_iter().find(|s| s.id == id);
+    let (name, description, needs) = match loaded {
+        Some(schema) => (schema.name, schema.description, schema.needs),
+        None => {
+            // The effect is not in the library: the machine was too busy to load it. The
+            // name is the file's, because the effect's own name is not known yet.
+            let name = effect
+                .as_ref()
+                .map(|e| e.schema().name)
+                .unwrap_or_else(|| {
+                    path.file_stem()
+                        .map(|stem| stem.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| request.file_name.clone())
+                });
+            (
+                name,
+                "it was saved and will load when the machine is less busy".to_string(),
+                Default::default(),
+            )
+        }
+    };
+
     Ok(Json(ImportEffectResponse {
         effect: EffectSummary {
             id,
-            name: schema.name,
-            description: schema.description,
-            needs: schema.needs,
+            name,
+            description,
+            needs,
             favorite,
         },
         replaced: existing.is_some(),
