@@ -945,14 +945,28 @@ function Start-Service { param($Name) Write-Host 'CALL Start-Service' }
         # The same guard must hold the outcome, so the message cannot claim more than happened.
         Assert-True ($guarded -match 'RestartCode') "the outcome is read inside the guard: [$guarded]"
     }
-    Test-Case 'an install that finished starts nothing' {
+    Test-Case 'an install that finished starts nothing: the elevated step ran, the flag says finished, and the restart is behind that flag' {
+        # What "finished" means in the Pascal: FScriptsOk is set True once both scripts succeeded,
+        # DeinitializeSetup reads it into Ok, and the restart sits inside the guard (not Ok).
+        $step = Get-IssFunction 'procedure CurStepChanged'
+        Assert-Equal (@([regex]::Matches($step, 'FScriptsOk := True')).Count) 1 'finished is set in one place'
+        $iElevated = $step.IndexOf('RunPs(ExpandConstant(''{app}\installer\setup-elevated.ps1'')')
+        $iUser = $step.IndexOf('setup-user.ps1')
+        $iOk = $step.IndexOf('FScriptsOk := True')
+        Assert-True ($iElevated -gt 0 -and $iOk -gt $iElevated -and $iOk -gt $iUser) 'finished is set only after the elevated and the per-user steps'
         $body = Get-IssFunction 'procedure DeinitializeSetup'
-        # The restart is called once, and only inside the guard that says the install did not
-        # finish: an install that finished must not start anything.
+        Assert-True ($body -match 'Ok := FScriptsOk') 'the routine reads the flag'
         Assert-Equal (@([regex]::Matches($body, 'RestartCanvasRgb')).Count) 1 'the restart is called once'
-        $guard = '(not Ok) and (not IsServiceUpdateRun)'
-        $guarded = Get-GuardedStatement $body $guard
-        Assert-True ($guarded -match 'RestartCanvasRgb') "the restart is inside the guard: [$guarded]"
+        Assert-True (Test-RestartGuarded $body) 'the restart is inside the guard that needs the install not to have finished'
+        # And through the decision: a finished install ran the elevated step, and with that step
+        # run the decision is never "restart", whatever else is true.
+        foreach ($stopped in $true, $false) { foreach ($copy in $true, $false) {
+            $d = Get-InstallRestartDecision -StoppedRunningService $stopped -ElevatedStepRan $true -CopyStarted $copy
+            Assert-True ($d -ne 'restart') "stopped=$stopped copy=$copy gave [$d]"
+        } }
+        # The script, told the elevated step ran, starts nothing.
+        $r = Invoke-RestartCanvasSandbox 'restart-finished' -StoppedRunningService -ElevatedStepRan -CopyStarted
+        Assert-Equal (@([regex]::Matches($r.Out, 'CALL Start-Service')).Count) 0 "the service is not started: $($r.Out)"
     }
     Test-Case 'a run that stopped nothing gets no note: the not-stopped exit comes before the script is looked for' {
         # A wizard Cancel ends Setup before PrepareToInstall extracts restart-canvas.ps1, so the
@@ -977,20 +991,32 @@ function Start-Service { param($Name) Write-Host 'CALL Start-Service' }
         $r = Invoke-RestartCanvasSandbox 'restart-cancel'
         Assert-Equal $r.Code 3 "no note is written for a run that stopped nothing: $($r.Out)"
     }
-    Test-Case 'an update that is cancelled before the stop starts nothing' {
-        # The first step never stopped a running service, so the note is not written and the flag
-        # stays false: the script is told nothing was stopped and starts nothing.
+    Test-Case 'an update cancelled before the stop starts nothing and says nothing: the flag is false, the helper leaves early, no note' {
+        # A cancel before the stop: Setup reaches DeinitializeSetup with Ok = False, but the
+        # first step never ran, so FStoppedRunningService was never set.
+        # 1. the flag is set in one place only, from the note the first step wrote, in
+        #    PrepareToInstall and only after the first step ran.
+        $prep = Get-IssFunction 'function PrepareToInstall'
+        Assert-Equal (@([regex]::Matches($prep, 'FStoppedRunningService :=')).Count) 1 'the flag is set in one place only'
+        Assert-True ($prep -match 'FStoppedRunningService := StoppedRunningService\(\)') 'the flag comes from the note'
+        Assert-True ($prep.IndexOf('stop-canvas.ps1'', ') -lt $prep.IndexOf('FStoppedRunningService :=')) 'the flag is read after the first step ran'
+        $all = Remove-IssComments $issText
+        Assert-Equal (@([regex]::Matches($all, 'FStoppedRunningService :=')).Count) 1 'nothing else sets the flag, so it is false before the stop'
+        # 2. the note is written only when a running service was stopped.
+        $stop = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\stop-canvas.ps1'))
+        Assert-True ($stop -match 'if \(\$stopState\.ServiceWasRunning\)') 'the note is written only when a running service was stopped'
+        # 3. with the flag false the helper leaves before it looks for the script (no start, no
+        #    note), and DeinitializeSetup writes a note for the codes 1 and 2 only.
+        $restart = Get-IssFunction 'function RestartCanvasRgb'
+        Assert-True ($restart.IndexOf('if not FStoppedRunningService then Exit') -gt 0) 'the helper leaves early'
+        $deinit = Get-IssFunction 'procedure DeinitializeSetup'
+        Assert-True ($deinit -notmatch 'RestartCode <> 0' -and $deinit -notmatch 'RestartCode = 3') 'no note for code 3'
+        # 4. the decision and the script, for the facts of that cancel (nothing stopped).
+        Assert-Equal (Get-InstallRestartDecision) 'not-stopped'
         $r = Invoke-RestartCanvasSandbox 'restart-g'
         Assert-Equal $r.Code 3 "there was nothing to start: $($r.Out)"
         Assert-Equal (@([regex]::Matches($r.Out, 'CALL Start-Service')).Count) 0 "the service is not started: $($r.Out)"
         Assert-True ($r.Log -match 'did not stop canvas-rgb') "it says why: $($r.Log)"
-        # And the flag comes from the note the first step wrote, and from nowhere else.
-        $prep = Get-IssFunction 'function PrepareToInstall'
-        Assert-True ($prep -match 'FStoppedRunningService := StoppedRunningService\(\)') 'the flag comes from the note'
-        Assert-Equal (@([regex]::Matches($prep, 'FStoppedRunningService :=')).Count) 1 'the flag is set in one place only'
-        # The note is written only when a running service was stopped.
-        $stop = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\stop-canvas.ps1'))
-        Assert-True ($stop -match 'if \(\$stopState\.ServiceWasRunning\)') 'the note is written only when a running service was stopped'
     }
     Test-Case 'the installer knows when the copy of the files started' {
         $body = Get-IssFunction 'procedure CurStepChanged'
