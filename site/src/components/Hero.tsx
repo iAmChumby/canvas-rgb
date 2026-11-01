@@ -7,6 +7,9 @@ const RELEASES = "https://github.com/iAmChumby/canvas-rgb/releases/latest";
 export function Hero() {
   return (
     <section className="site-hero" id="top">
+      {/* The field of light behind the mark. It covers the whole hero, so the light can
+          follow the pointer anywhere in it, and the hero's own words sit over it. */}
+      <canvas className="site-hero-field" aria-hidden="true" />
       <div className="site-hero-inner">
         <HeroWordmark />
         <h1 className="site-h1">RGB software shouldn&apos;t take a gigabyte of RAM.</h1>
