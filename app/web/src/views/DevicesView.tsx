@@ -302,6 +302,19 @@ export function DevicesView() {
                     <span className="state-dot" aria-hidden="true" />
                     {d.connected ? "connected" : "disconnected"}
                   </span>
+                  {/* A device with one zone has no row of zones under it, so the key that sizes
+                      the zone sits in the device's own row, in the same column as the zone rows'. */}
+                  <span className="zone-strip-size">
+                    {one?.resizable && (
+                      <Button
+                        size="sm"
+                        variant={walk?.deviceId === d.id && walk.zoneIndex === one.index ? "primary" : "default"}
+                        onClick={() => setWalk({ deviceId: d.id, zoneIndex: one.index })}
+                      >
+                        Size
+                      </Button>
+                    )}
+                  </span>
                 </div>
 
                 {d.zones.length > 1 &&

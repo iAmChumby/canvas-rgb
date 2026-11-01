@@ -2442,6 +2442,13 @@ button.chip:hover {
   flex: none;
 }
 
+/* The Size key of a device with one zone: the same column as the Size keys of the zone rows. */
+.rd-devices .rd-dev-row .zone-strip-size {
+  flex: none;
+  min-width: 104px;
+  text-align: right;
+}
+
 /* The word of a not-connected device is in the `down` tone. */
 .rd-devices .rd-dev-row .state.down-text {
   color: var(--down);
@@ -2617,6 +2624,13 @@ button.chip:hover {
     flex: 0 0 59px;
     order: 5;
     margin-left: 0;
+  }
+
+  .rd-devices .rd-dev-row .zone-strip-size {
+    flex: 0 0 auto;
+    order: 6;
+    min-width: 0;
+    margin-left: auto;
   }
 
   .rd-devices .rd-zone {

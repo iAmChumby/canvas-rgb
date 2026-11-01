@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { ToastProvider } from "@/components/Toast";
 import { getSnap, patchSnap, refreshDevices, refreshDisplays, refreshEffects } from "@/lib/store";
@@ -288,6 +288,27 @@ describe("the devices list", () => {
     });
     render(<DevicesView />);
     expect(document.querySelectorAll(".rd-dev-list .skeleton").length).toBeGreaterThan(0);
+  });
+
+  it("gives a device with one resizable zone its own Size key, and the key opens the walker under its row", async () => {
+    // A device with one zone has no row of zones under it: its Size key sits in the device's row.
+    setUrl("/devices/");
+    await act(async () => {
+      await refreshDevices();
+    });
+    render(<DevicesView />);
+    const row = (await screen.findAllByTestId("device-card")).find((c) => c.getAttribute("aria-label") === "NZXT Hue 2 Strip");
+    expect(row).toBeTruthy();
+    expect(row?.querySelectorAll(".rd-zone")).toHaveLength(0);
+    const size = within(row as HTMLElement).getByRole("button", { name: "Size" });
+    expect(document.querySelector(".rd-walk")).toBeNull();
+    fireEvent.click(size);
+    // The walker opens inside that device's section, under its row.
+    await waitFor(() => expect(row?.querySelector(".rd-walk")).toBeTruthy());
+    expect(document.querySelectorAll(".rd-walk")).toHaveLength(1);
+    // The list that came is not left in the store for the tests after this one.
+    cleanup();
+    patchSnap({ devices: null, devicesTotal: null, devicesError: null });
   });
 
   it("shows no grey placeholder beside the error", async () => {
