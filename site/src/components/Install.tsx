@@ -55,7 +55,8 @@ export function Install() {
           <p className="site-note">
             The installer isn&apos;t signed yet, so Windows flags an unknown publisher the first
             time. This hash is how you know the file is ours: run the command, and all 64
-            characters have to match.
+            characters have to match, whatever the case: Get-FileHash prints the hash in
+            capitals.
           </p>
         </div>
       </div>
