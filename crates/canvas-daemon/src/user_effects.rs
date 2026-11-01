@@ -408,6 +408,12 @@ impl UserEffects {
             .or_else(|| state.stock.get(id).map(|e| e.source.clone()))
     }
 
+    /// Runs the library's builder on a file that is about to be imported, so the import
+    /// judges it the way the loader will. Tests that inject a builder inject it here too.
+    pub fn check(&self, id: &str, html: &str) -> Result<(), String> {
+        (self.builder)(id, html).map(|_| ())
+    }
+
     /// The files that failed to parse at their last scan, with the error.
     ///
     /// A file that is waiting to be parsed again (its load ran out of time) is in this list

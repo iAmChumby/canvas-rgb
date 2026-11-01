@@ -70,6 +70,14 @@ impl Drop for TempHome {
 
 /// The router, the state, the home and the effects folder.
 fn build() -> (axum::Router, Arc<App>, TempHome, PathBuf) {
+    build_with(None)
+}
+
+/// Like [`build`], with the library's builder replaced: the seam that lets a test say which
+/// of the builder's calls run out of time.
+fn build_with(
+    builder: Option<canvas_daemon::user_effects::Builder>,
+) -> (axum::Router, Arc<App>, TempHome, PathBuf) {
     let home = TempHome::new();
     let folder = home.path.join("effects");
     std::fs::create_dir_all(&folder).expect("the effects folder is created");
@@ -86,6 +94,9 @@ fn build() -> (axum::Router, Arc<App>, TempHome, PathBuf) {
     );
     // The import writes into this folder, never into the owner's.
     app.effects_dir = folder.clone();
+    if let Some(builder) = builder {
+        app.user_effects = Arc::new(canvas_daemon::user_effects::UserEffects::with_stock(builder, &[]));
+    }
     let app = Arc::new(app);
     (api::router(app.clone()), app, home, folder)
 }
@@ -680,4 +691,60 @@ async fn deleting_the_active_effect_falls_back_like_a_missing_file() {
     // answer the daemon gives when the file went missing by hand.
     let made = canvas_daemon::create_effect(&app.user_effects, "html:spark");
     assert!(made.is_err(), "the deleted effect cannot be built any more");
+}
+
+/// A builder whose calls, counted from zero, run out of time when their number is in
+/// `times_out`; the others build the real effect. The import's own parse is one call and
+/// the rescan's parse of the same file is the next.
+fn timing_out_on(times_out: &'static [usize]) -> canvas_daemon::user_effects::Builder {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let real = canvas_daemon::user_effects::html_builder();
+    Arc::new(move |id: &str, html: &str| {
+        let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if times_out.contains(&call) {
+            return Err("timeout: the effect's script ran longer than 2000 ms".to_string());
+        }
+        real(id, html)
+    })
+}
+
+async fn import(router: &axum::Router, file: &str, html: &str, replace: bool) -> serde_json::Value {
+    let response = router
+        .clone()
+        .oneshot(request_with_body("POST", routes::EFFECTS_IMPORT, &import_body(file, html, replace)))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    json(response).await
+}
+
+/// The import's parse loads but the rescan's runs out of time (a replace): the reply is
+/// the "saved, took too long, tried again" one under the new file's name, not the old
+/// version's name and description; the old version keeps running.
+#[tokio::test]
+async fn a_replace_whose_rescan_times_out_says_it_is_waiting() {
+    // Calls: 0 import parse, 1 rescan (v1 loads); 2 import parse, 3 rescan (times out).
+    let (router, _app, _home, _folder) = build_with(Some(timing_out_on(&[3])));
+    import(&router, "spark.html", VALID, false).await;
+    let v2 = VALID.replace("<title>Spark</title>", "<title>Spark Two</title>");
+    let body = import(&router, "spark.html", &v2, true).await;
+    let description = body["effect"]["description"].as_str().unwrap_or_default().to_string();
+    assert!(
+        description.contains("took too long to load") && description.contains("tried again"),
+        "{description}"
+    );
+    assert_eq!(body["effect"]["name"], "spark", "the new file's name, not the old version's");
+    assert_ne!(body["effect"]["description"], "A test effect.");
+    assert!(effect_ids(&router).await.contains(&"html:spark".to_string()), "v1 keeps running");
+}
+
+/// The import's parse runs out of time but the rescan's loads the file: the effect is in
+/// the library, so the reply is the normal one, not "will be tried again".
+#[tokio::test]
+async fn an_import_whose_parse_timed_out_but_whose_rescan_loaded_is_a_normal_reply() {
+    let (router, _app, _home, _folder) = build_with(Some(timing_out_on(&[0])));
+    let body = import(&router, "spark.html", VALID, false).await;
+    assert_eq!(body["effect"]["name"], "Spark");
+    assert_eq!(body["effect"]["description"], "A test effect.");
+    assert!(effect_ids(&router).await.contains(&"html:spark".to_string()));
 }
