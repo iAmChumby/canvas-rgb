@@ -251,8 +251,9 @@ line. Three mechanisms, and one bug the timing only exposed.
     stuck queue and an injected writer (`exit_log::the_panic_hook_leaves_its_line_in_the_file_while_the_queue_is_stuck`);
     the production writer it is installed with at startup has no test that fails on the old hook (open).
   - #45/#55: every daemon kill goes through `terminate_daemon(process, reason)`, which logs the pid and
-    reason first; the service tests share one capture helper (`crates/canvas-svc/src/test_logs.rs`, one
-    capture at a time); the kill test asserts the full announcement for the pid on all four kill paths.
+    reason first; the service tests share one log buffer (`crates/canvas-svc/src/test_logs.rs`; its
+    `captured()` runs one capture at a time, though some OpenRGB tests still install the subscriber
+    themselves); the kill test asserts the full announcement for the pid on all four kill paths.
 - **The guard:** `crates/canvas-svc/tests/timing_class.rs` (part of `cargo test --workspace`, so CI) scans
   the test code under `crates/` (files in `tests/`, `tests.rs`, `*_tests.rs`, files that a `lib.rs` or
   `main.rs` declares as a `#[cfg(test)]` module such as `canvas-core/src/cpu.rs`, and a source file from
@@ -277,8 +278,8 @@ line. Three mechanisms, and one bug the timing only exposed.
   `close_flushes_the_last_line_to_the_file`, `exit_log.rs` tests `capture`), not on the shared
   helper, which lives in canvas-svc. Delete an entry when its test is fixed.
 - **What stays UNKNOWN:** the mechanism behind the vanished log line in #45/#55. The shared capture
-  helper and the stricter assertion are mitigations, not a diagnosis; the 50-run loop of the canvas-svc
-  library tests is in `.build/reports/job31-timing-class.md`. Settler: a longer loop under CPU load that
+  helper and the stricter assertion are mitigations, not a diagnosis; a 50-run loop of the canvas-svc
+  library tests passed every run (PR #69). Settler: a longer loop under CPU load that
   fails once, then bisected.
 - **How to check a new test:** if it compares `elapsed`, `took` or `waited` with `<`, or sleeps and
   then asserts, expect the scan to flag it; use `wait_until`, a count, a driven clock, or (for log

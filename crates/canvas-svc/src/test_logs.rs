@@ -1,12 +1,13 @@
-//! The one way the service's tests read what the code logs.
+//! The shared buffer and subscriber the service's tests use to read what the code logs.
 //!
 //! Several tests assert that a line was logged (every kill of the daemon names its reason, a
 //! failed setup is a warning, a write to no device is a warning). Each of them used to carry its
-//! own copy of a buffer and a subscriber; they now share this one, so a fix to how logs are
-//! captured is made once (class `cause:timing-test`, #45 and #55).
+//! own copy of a buffer and a subscriber; they now share [`LogBuf`] (class `cause:timing-test`,
+//! #45 and #55).
 //!
-//! [`captured`] holds a lock while it runs: one capture at a time, so two tests that install a
-//! scoped subscriber never build their dispatchers at the same moment.
+//! [`captured`] holds a lock while it runs: one capture at a time among the tests that go through
+//! it. Some tests (in `openrgb_tests.rs`) still install `LogBuf::subscriber()` themselves with
+//! `set_default` / `with_default`, outside that lock.
 
 use std::io;
 use std::sync::{Arc, Mutex, MutexGuard};
