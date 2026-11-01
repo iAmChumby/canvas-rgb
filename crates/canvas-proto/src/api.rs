@@ -50,6 +50,25 @@ pub mod routes {
     /// 409 when `expected` is not what is stored (changed in another window) or `rename_to`
     /// clashes; 422 for a bad name or props over the caps, as for [`EFFECT_PRESETS`].
     pub const EFFECT_PRESET: &str = "/api/v1/effects/{id}/presets/{name}";
+    /// `GET`: the HTML source of an `html:` effect, user or stock, and the file name Save
+    /// would use ([`super::EffectSource`]). A Rust built-in has no source and answers 404.
+    pub const EFFECT_SOURCE: &str = "/api/v1/effects/{id}/source";
+    /// `POST` with [`super::EffectPreviewRequest`]: the draft HTML and the editor's props. The
+    /// daemon parses and renders the draft headless (no devices touched) and answers
+    /// [`super::EffectPreviewResponse`]: the schema, the runtime's errors, the check warnings,
+    /// a `source_hash`, and the 64x40, 24-frame loop rendered with those props. The same body
+    /// cap as [`EFFECTS_IMPORT`]. A draft whose top-level script never ends is stopped by the
+    /// runtime's deadline and answers 422; the API keeps answering while it runs.
+    pub const EFFECT_PREVIEW: &str = "/api/v1/effects/preview";
+    /// `GET` the draft on the lights ([`super::DraftStatus`]); `PUT` with
+    /// [`super::DraftRequest`] starts it or renews its lease (and updates the props); `DELETE`
+    /// stops it. The editor PUTs every [`crate::consts::DRAFT_HEARTBEAT`] while the draft runs;
+    /// the slot ends after [`crate::consts::DRAFT_LEASE`] with no PUT. Nothing about a draft is
+    /// saved: the previous effect comes back on Stop, on expiry, or when the daemon restarts.
+    /// An `activate` or a layout switch ends the draft without restoring anything, because the
+    /// owner chose something else. A bad PUT (one that does not parse) leaves a running draft
+    /// alone. Same body cap as [`EFFECTS_IMPORT`].
+    pub const EFFECT_DRAFT: &str = "/api/v1/effects/draft";
     pub const LAYOUTS: &str = "/api/v1/layouts";
     pub const LAYOUT: &str = "/api/v1/layouts/{id}";
     /// `PUT` with [`super::SetActiveLayout`].
@@ -387,6 +406,87 @@ pub struct DeleteEffectQuery {
 #[ts(export)]
 pub struct PresetsResponse {
     pub user_presets: Vec<Preset>,
+}
+
+/// `GET /effects/{id}/source`: the HTML the editor opens, and the file name Save writes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct EffectSource {
+    pub source: String,
+    /// The name `POST /effects/import` would use with `replace: true`: the file that is
+    /// there for a user effect (its own case), or `<stem>.html` for a stock effect.
+    pub file_name: String,
+}
+
+/// `POST /effects/preview`: the draft's HTML and the props the editor has set.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct EffectPreviewRequest {
+    /// The draft, at most [`crate::consts::EFFECT_IMPORT_MAX_BYTES`].
+    pub html: String,
+    /// The props the preview is rendered with, laid under the effect's tile recipe.
+    pub props: Props,
+}
+
+/// The preview of a draft: its schema, what the runtime reported, and its loop.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct EffectPreviewResponse {
+    /// The draft's schema. `id` is `draft:` + [`EffectPreviewResponse::source_hash`]: a draft is
+    /// never a saved effect.
+    pub schema: PropertySchema,
+    /// The hash of the exact HTML this preview was rendered from. The editor keeps the last good
+    /// loop when a later preview fails and labels it with this, so a stale loop is never
+    /// mistaken for the current draft.
+    pub source_hash: String,
+    /// What the runtime reported while the draft was parsed and drawn. A preview with errors still
+    /// carries the loop: the last good frame stays drawn, so the editor can show it while it
+    /// says what failed.
+    pub errors: Vec<String>,
+    /// The check's warnings: a picture that does not move, one that is one flat colour, and
+    /// anything the file declared that the loader ignored.
+    pub warnings: Vec<String>,
+    /// The 64x40, 24-frame loop rendered with the editor's props, base64. Decoded it is the
+    /// thumbnail format: `u16 LE width, u16 LE height, u16 LE frames`, then
+    /// frames x width x height x 3 RGB bytes (see [`crate::api::routes::EFFECT_THUMBNAIL`]).
+    pub thumbnail: String,
+}
+
+/// `PUT /effects/draft`: the draft to put on the lights.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DraftRequest {
+    /// The draft, at most [`crate::consts::EFFECT_IMPORT_MAX_BYTES`]. Sent on every beat.
+    pub html: String,
+    /// The props the draft runs with.
+    pub props: Props,
+}
+
+/// The draft on the lights, as `GET`/`PUT`/`DELETE /effects/draft` answer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DraftStatus {
+    /// True while a draft is on the lights.
+    pub active: bool,
+    /// The draft effect's id: `draft:` + `source_hash`. It is never a saved effect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub source_hash: Option<String>,
+    /// The props the draft is running with. Empty when no draft runs.
+    #[serde(default)]
+    pub props: Props,
+    /// Milliseconds left in the lease; 0 when no draft runs. A PUT renews it.
+    #[ts(type = "number")]
+    pub lease_remaining_ms: u64,
+    /// How often to PUT to keep the draft alive; [`crate::consts::DRAFT_HEARTBEAT`].
+    #[ts(type = "number")]
+    pub heartbeat_ms: u64,
+    /// How long the draft survives without a PUT; [`crate::consts::DRAFT_LEASE`].
+    #[ts(type = "number")]
+    pub lease_ms: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
