@@ -7,6 +7,9 @@
 :root {
   /* The height of the header. The hero fills what is left of the window. */
   --header-h: 59px;
+  /* How far the hero's field of light reaches past the hero, above and below. The light's
+     fade at the frame is drawn over exactly this band, outside the hero. */
+  --reach: 24px;
 }
 
 /* ---------- the page frame ---------- */
@@ -257,16 +260,26 @@
   border-bottom: 1px solid var(--line);
 }
 
-/* The field of light behind the mark. The light is drawn well inside the frame and fades to
-   nothing before it reaches an edge, so there is no box to see. It sits under the words and
-   over the page's own background pattern. */
+/* The field of light behind the mark. It covers the whole hero, so the light can follow the
+   pointer anywhere in it, and it fades to nothing before it reaches the frame, so there is no
+   box to see. It sits under the words and over the page's own background pattern. */
 .site-hero-field {
   position: absolute;
-  inset: 0;
-  z-index: -1;
+  /* The field reaches a little past the hero, up under the header and down into the empty
+     band above the next section, so the light is never cut by the hero's own frame. It is as
+     wide as the hero, so the light runs off the left and right of the screen, where the
+     screen is the edge and there is nothing to see. A canvas is a replaced element, so it
+     needs its size said outright. */
+  left: 0;
+  top: calc(-1 * var(--reach));
   width: 100%;
-  height: 100%;
+  height: calc(100% + 2 * var(--reach));
+  /* Over the page's background pattern and under the hero's own content, which is z-index 1. */
+  z-index: 0;
   pointer-events: none;
+  /* The pool of light follows the pointer all the way to the frame, so the canvas would cut
+     it. The fade at the frame is drawn into the canvas itself (the script erases the light
+     towards the frame), so there is no CSS mask to fall back on and no box to see. */
 }
 
 .site-hero-inner {
