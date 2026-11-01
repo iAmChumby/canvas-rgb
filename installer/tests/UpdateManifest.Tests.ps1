@@ -177,13 +177,15 @@ function Get-WorkflowEntries {
 # The exact keys release.yml uses today, written out. A key outside these sets, in any spelling, is a
 # violation: the test reads what a line IS (its text before the first colon, quotes off), so it needs no
 # list of forbidden spellings. `if`, `continue-on-error`, `"\x69f"` and a working-directory on a step that has none today all fail.
+# Perm is the keys a job's permissions may hold, and it is per job: only the publish job may hold
+# `actions`, because the publish job starts the site's build and a dispatch needs that permission. The
+# publish job's steps may hold `env` for the same step, which carries the token it dispatches with.
 $workflowTopKeys = @('name', 'on', 'permissions', 'jobs')
 $workflowAllowed = @{
-    build   = @{ Job = @('runs-on', 'permissions', 'steps'); Step = @('name', 'uses', 'with', 'run', 'shell', 'working-directory') }
-    sign    = @{ Job = @('needs', 'runs-on', 'timeout-minutes', 'permissions', 'steps'); Step = @('name', 'uses', 'with', 'run', 'shell', 'env', 'timeout-minutes') }
-    publish = @{ Job = @('needs', 'runs-on', 'permissions', 'steps'); Step = @('name', 'uses', 'with', 'run', 'shell') }
+    build   = @{ Job = @('runs-on', 'permissions', 'steps'); Step = @('name', 'uses', 'with', 'run', 'shell', 'working-directory'); Perm = @('contents') }
+    sign    = @{ Job = @('needs', 'runs-on', 'timeout-minutes', 'permissions', 'steps'); Step = @('name', 'uses', 'with', 'run', 'shell', 'env', 'timeout-minutes'); Perm = @('contents') }
+    publish = @{ Job = @('needs', 'runs-on', 'permissions', 'steps'); Step = @('name', 'uses', 'with', 'run', 'shell', 'env'); Perm = @('contents', 'actions') }
 }
-$workflowPermKeys = @('contents')
 
 # The violations in a workflow's text: each names the job, the step and the line.
 function Get-WorkflowViolations {
@@ -208,7 +210,7 @@ function Get-WorkflowViolations {
             $where = "job [$name], step [$label], line [$($e.Line)]"
             if ($e.Level -eq 'indent') { $found += "${where}: unexpected indent $($e.Key)" }
             elseif ($e.Level -eq 'job' -and $workflowAllowed[$name].Job -cnotcontains $e.Key) { $found += "${where}: job key [$($e.Key)] is not in the allowlist [$($workflowAllowed[$name].Job -join ', ')]" }
-            elseif ($e.Level -eq 'perm' -and $workflowPermKeys -cnotcontains $e.Key) { $found += "${where}: permissions key [$($e.Key)] is not in the allowlist [$($workflowPermKeys -join ', ')]" }
+            elseif ($e.Level -eq 'perm' -and $workflowAllowed[$name].Perm -cnotcontains $e.Key) { $found += "${where}: permissions key [$($e.Key)] is not in the allowlist [$($workflowAllowed[$name].Perm -join ', ')]" }
             elseif ($e.Level -eq 'step' -and $workflowAllowed[$name].Step -cnotcontains $e.Key) { $found += "${where}: step key [$($e.Key)] is not in the allowlist [$($workflowAllowed[$name].Step -join ', ')]" }
         }
     }
@@ -758,6 +760,7 @@ try {
             'continue-on-error on the check' = { param($t) $t.Replace($checkName, "$checkName`n        continue-on-error: true") }
             'flow-map step with if'          = { param($t) $t.Replace($checkName, "      - {name: Extra, if: false, run: echo hi}`n$checkName") }
             'working-directory on the check' = { param($t) $t.Replace($checkName, "$checkName`n        working-directory: app") }
+            'actions on the build job'        = { param($t) $t.Replace("  build:`n    runs-on: windows-latest`n    permissions:`n      contents: read`n", "  build:`n    runs-on: windows-latest`n    permissions:`n      contents: read`n      actions: write`n") }
             'a new top-level key'            = { param($t) "if: false`n$t" }
         }
         foreach ($k in $variants.Keys) {
