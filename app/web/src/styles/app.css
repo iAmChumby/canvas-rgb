@@ -2482,6 +2482,7 @@ button.chip:hover {
     height: var(--rail-h);
     flex-direction: row;
     justify-content: space-around;
+    gap: 0;
     padding: var(--s1) var(--s2);
     border-top: 1px solid var(--line);
     background: var(--panel);
@@ -2498,14 +2499,71 @@ button.chip:hover {
     display: none;
   }
 
+  /* Seven pages do not fit in 360 px with their words: Settings alone is 54 px wide at 14 px.
+     The quiet links share the width as icons, and the active page keeps its name, so the word
+     that is drawn is always drawn whole. min-width: 0 lets a quiet link be narrower than its
+     label was: a flex item stops at its content's width unless told otherwise, which is what
+     pushed the last links off the right edge. */
   .rail-link {
-    flex-direction: column;
-    justify-content: center;
-    gap: 2px;
+    /* Two rows: the icon, and the name under it. The rows are the same height for every link,
+       so a quiet link's icon and the active link's icon sit on one line, and the active link's
+       name takes the row below instead of lifting its icon. The rows sit at the bottom of the
+       link, which is where the dock's icons already were. */
+    --nav-row-icon: 18px;
+    --nav-row-name: 16px;
+    --nav-row-gap: 2px;
+    display: grid;
+    grid-template-rows: var(--nav-row-icon) var(--nav-row-name);
+    gap: 0;
+    row-gap: var(--nav-row-gap);
+    justify-items: center;
+    align-content: end;
     height: 56px;
     flex: 1 1 0;
-    padding: var(--s1);
+    min-width: 0;
+    padding: var(--s1) var(--s1) 0;
     font-size: var(--t14);
+  }
+
+  .rail-link[aria-current="page"] {
+    flex: 0 0 auto;
+    padding: var(--s1) var(--s2) 0;
+    /* The tint is drawn by the tile below, so it can hug the icon and the name. */
+    background: none;
+  }
+
+  /* The active link's tile: the icon and the name under it, and nothing else. The link's own
+     box is as tall as the quiet ones so the icons stay on one line. */
+  .rail-link[aria-current="page"]::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: calc(56px - var(--nav-row-icon) - var(--nav-row-gap) - var(--nav-row-name));
+    bottom: 0;
+    background: var(--live-soft);
+    border-radius: var(--r-md);
+    z-index: -1;
+  }
+
+  .rail-icon {
+    grid-row: 1;
+  }
+
+  /* The name stays in the page for screen readers; only the active link draws it. */
+  .rail-link:not([aria-current="page"]) .rail-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+
+  .rail-link .rail-label {
+    grid-row: 2;
+    line-height: 16px;
+    white-space: nowrap;
   }
 
   .rail-marker {
