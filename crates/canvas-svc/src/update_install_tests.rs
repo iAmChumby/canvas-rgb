@@ -81,7 +81,7 @@ impl FsAcl for TreeFs {
     fn owner_trusted_parent(&self, p: &Path) -> io::Result<bool> {
         self.owner_trusted(p)
     }
-    fn has_nonadmin_control(&self, p: &Path) -> io::Result<bool> {
+    fn has_nonadmin_control(&self, p: &Path, _is_drive_root: bool) -> io::Result<bool> {
         Ok(self.controlled.lock().unwrap().iter().any(|c| c == p))
     }
 }
@@ -1529,7 +1529,7 @@ fn a_setup_user_that_hits_the_step_limit_is_logged_as_a_warning_and_the_tray_sti
 fn the_real_installed_folder_passes_the_install_folder_check() {
     let app = PathBuf::from(r"C:\Program Files\canvas-rgb");
     if !app.join("canvas-rgb.exe").exists() {
-        eprintln!("UNKNOWN: no install at {}; the check was not run", app.display());
+        eprintln!("SKIPPED (UNKNOWN, not a pass): no install at {}; the real-folder check was not run", app.display());
         return;
     }
     let installer = UpdateInstaller::production(std::env::temp_dir(), app);

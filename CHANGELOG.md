@@ -8,7 +8,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
-- Setup and updates now make sure the folder canvas-rgb is installed in can only be changed by administrators, and refuse a folder that is not safe, so existing installs are protected at their next install or update. (#46)
+- Setup and updates now refuse to install canvas-rgb into a folder that other people on the PC could change, and the default folder keeps working. (#46)
 
 ## [0.4.0] - 2026-11-01
 

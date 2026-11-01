@@ -1383,8 +1383,11 @@ function Copy-PawnIoToStaging {
 # Same set as ENTRY_WRITE_MASK in crates/canvas-svc/src/secure.rs.
 $script:InstallDirEntryWriteMask = 0x2 -bor 0x4 -bor 0x10 -bor 0x40 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x40000000 -bor 0x10000000
 # Control over a PARENT folder: FILE_DELETE_CHILD (0x40), WRITE_DAC (0x40000), WRITE_OWNER (0x80000), GENERIC_ALL.
-# A plain Modify ACE (0x1301bf) has none of them, so the bits are read, not the ACE name.
+# A plain Modify ACE has none of these, so the bits are read, not the ACE name. DELETE (0x10000) is added for
+# every parent except the drive root: with DELETE on a parent (Modify includes it) a user can rename that
+# parent away and rebuild the install path with their own files in it. A drive root cannot be renamed.
 $script:InstallDirParentControlMask = 0x40 -bor 0x40000 -bor 0x80000 -bor 0x10000000
+$script:InstallDirParentDeleteBit = 0x10000
 $script:TrustedInstallerSid = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
 
 # Who may hold write access or own a PARENT folder. Windows owns C:\ and C:\Program Files as TrustedInstaller.
@@ -1406,6 +1409,9 @@ function Find-UntrustedAceSid {
 }
 
 # What is on disk. Nothing here follows a junction: the caller checks IsReparse first.
+# Aces reads the raw descriptor, so a NULL DACL (everyone, everything) and an ACE type this check cannot
+# parse (object, compound, callback) are both seen, and both count as granting (fail closed, like the
+# Rust check in crates/canvas-svc/src/secure.rs).
 function New-InstallDirReader {
     return @{
         Exists    = { param($p) try { [System.IO.File]::GetAttributes($p) | Out-Null; $true } catch { $false } }
@@ -1416,16 +1422,22 @@ function New-InstallDirReader {
         Aces      = {
             param($p)
             $acl = Get-Acl -LiteralPath $p
-            # A NULL DACL (no D: section) gives everyone everything.
-            if ($acl.GetSecurityDescriptorSddlForm('Access') -notmatch 'D:') {
+            $raw = New-Object System.Security.AccessControl.RawSecurityDescriptor($acl.GetSecurityDescriptorBinaryForm(), 0)
+            $dacl = $raw.DiscretionaryAcl
+            if ($null -eq $dacl) {
                 return @([pscustomobject]@{ Sid = 'S-1-1-0'; Mask = 0x1f01ff; Allow = $true; InheritOnly = $false })
             }
-            foreach ($r in $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
-                [pscustomobject]@{
-                    Sid         = $r.IdentityReference.Value
-                    Mask        = [int]$r.FileSystemRights
-                    Allow       = ($r.AccessControlType -eq 'Allow')
-                    InheritOnly = [bool]($r.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly)
+            # Deny, audit, alarm and label families grant nothing (same list as ace_type_grants_nothing in Rust).
+            $grantsNothing = 1, 2, 3, 6, 7, 8, 10, 12, 13, 14, 15, 16, 17, 18, 19
+            foreach ($ace in $dacl) {
+                $type = [int]$ace.AceType
+                $inheritOnly = [bool](([int]$ace.AceFlags) -band 0x08)
+                if ($type -eq 0) {
+                    [pscustomobject]@{ Sid = $ace.SecurityIdentifier.Value; Mask = [int]$ace.AccessMask; Allow = $true; InheritOnly = $inheritOnly }
+                } elseif ($grantsNothing -contains $type) {
+                    [pscustomobject]@{ Sid = ''; Mask = 0; Allow = $false; InheritOnly = $inheritOnly }
+                } else {
+                    [pscustomobject]@{ Sid = "unparsed-ace-type-$type"; Mask = 0x1f01ff; Allow = $true; InheritOnly = $inheritOnly }
                 }
             }
         }
@@ -1452,7 +1464,8 @@ function New-InstallDirApplier {
     }
 }
 
-# Every folder above $Path up to the drive root. Returns $null when all pass, else the reason.
+# Every folder above $Path up to the drive root. Folders that do not exist yet are skipped. Returns $null
+# when all pass, else the reason.
 function Find-InstallDirParentProblem {
     param([string]$Path, [hashtable]$Reader)
     $parent = [System.IO.Path]::GetDirectoryName($Path)
@@ -1466,9 +1479,11 @@ function Find-InstallDirParentProblem {
             if (-not (Test-InstallDirParentSidTrusted -Sid $owner)) {
                 return "'$parent', a folder above it, is owned by $owner, not SYSTEM, Administrators or TrustedInstaller"
             }
-            $who = Find-UntrustedAceSid -Aces (& $Reader.Aces $parent) -Mask $script:InstallDirParentControlMask
+            $mask = $script:InstallDirParentControlMask
+            if (-not $isRoot) { $mask = $mask -bor $script:InstallDirParentDeleteBit }
+            $who = Find-UntrustedAceSid -Aces (& $Reader.Aces $parent) -Mask $mask
             if ($who) {
-                return "'$parent', a folder above it, lets $who change its permissions or delete what is in it"
+                return "'$parent', a folder above it, lets $who change its permissions, rename it or delete what is in it"
             }
         }
         $parent = [System.IO.Path]::GetDirectoryName($parent)
@@ -1497,10 +1512,13 @@ function Find-InstallDirTreeProblem {
 }
 
 # The one install-folder guard, for setup and uninstall.
-#   -Mode Install  create or take the folder, lock it FIRST (protected ACL), then check it, then its
-#                  parents, then every entry in it. Throws a plain "STOP:" message at the first problem.
-#   -Mode Verify   (uninstall) the same checks, no create and no lock: a folder that is not there passes.
-# Never deletes or adopts anything.
+#   -Mode Install  1. read-only checks FIRST: every parent (junction, owner, rights), then the folder and
+#                     every entry in it. A refusal here has changed nothing.
+#                  2. a folder that does not exist yet is created already protected (its parents were
+#                     walked before this).
+#                  3. lock the folder (protected ACL), then check the folder, its entries and its parents again.
+#   -Mode Verify   (uninstall) the read-only checks only: no create and no lock; a missing folder passes.
+# Throws a plain "STOP:" message at the first problem. Never deletes or adopts anything.
 function Assert-InstallDirProtected {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -1509,44 +1527,49 @@ function Assert-InstallDirProtected {
         [hashtable]$Applier = (New-InstallDirApplier),
         [string]$LogFile
     )
+    $locked = $false
+    $created = $false
     $verb = if ($Mode -eq 'Install') { 'install into' } else { 'run from' }
-    $tail = if ($Mode -eq 'Install') {
-        'Nothing was copied. Setup never deletes or takes over your files. Choose a folder under Program Files (the default), or make this folder administrator-only yourself, then run setup again.'
-    } else {
-        'Nothing was removed or run. Install canvas-rgb again into the default folder under Program Files, then remove this old folder by hand.'
-    }
     $stop = {
         param($why)
+        $tail = if ($Mode -eq 'Install') {
+            $state = if ($locked) { 'Setup had already locked this folder to administrators only when it found this.' }
+                     elseif ($created) { 'Setup created this folder, empty, and changed nothing else.' }
+                     else { 'The folder''s permissions were not changed.' }
+            "Nothing was copied. $state Setup never deletes or takes over your files. Choose a folder under Program Files (the default) or directly under a drive (such as D:\canvas-rgb), then run setup again."
+        } else {
+            'Nothing was removed or run. Install canvas-rgb again into the default folder under Program Files, then remove this old folder by hand.'
+        }
         "STOP: canvas-rgb will not $verb '$Path': $why. canvas-rgb runs programs from its folder as the system, so only administrators may be able to change it. $tail"
     }
     if ($Path -notmatch '^[A-Za-z]:\\') { throw (& $stop 'it is not a full drive path') }
     $full = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
     if ($full -match '^[A-Za-z]:$') { throw (& $stop 'it is a whole drive') }
 
-    if (-not (& $Reader.Exists $full)) {
-        if ($Mode -eq 'Verify') { return }
-        # Born protected. A junction cannot be here: the folder did not exist.
-        try { & $Applier.Create $full } catch { throw (& $stop "the folder could not be created ($($_.Exception.Message))") }
-    } elseif ($Mode -eq 'Install') {
-        # Locking follows a junction to its target and would re-permission THAT folder, so a junction (or
-        # a junction above) is refused before the lock, with no change made.
-        $probe = $full
-        while ($probe -and -not ($probe -match '^[A-Za-z]:\\?$')) {
-            if (& $Reader.IsReparse $probe) { throw (& $stop "'$probe' is a junction or symbolic link") }
-            $probe = [System.IO.Path]::GetDirectoryName($probe)
-        }
+    $exists = [bool](& $Reader.Exists $full)
+    if (-not $exists -and $Mode -eq 'Verify') { return }
+
+    # 1. Read-only, before anything is changed. The parents come first: with them safe, a user can neither
+    #    rename nor delete the folder or a parent, so the folder cannot be swapped for a junction
+    #    between these checks and the lock.
+    $problem = Find-InstallDirParentProblem -Path $full -Reader $Reader
+    if ($problem) { throw (& $stop $problem) }
+    if ($exists) {
         if (-not (& $Reader.IsDir $full)) { throw (& $stop 'it is a file, not a folder') }
+        $problem = Find-InstallDirTreeProblem -Root $full -Reader $Reader
+        if ($problem) { throw (& $stop $problem) }
     }
+    if ($Mode -eq 'Verify') { return }
 
-    if ($Mode -eq 'Install') {
-        # Lock first, then look: nothing can be added to the folder between the look and the copy.
-        try { & $Applier.Lock $full } catch { throw (& $stop "its permissions could not be locked ($($_.Exception.Message))") }
+    # 2 and 3. Born protected if new, then locked, then looked at again.
+    if (-not $exists) {
+        try { & $Applier.Create $full } catch { throw (& $stop "the folder could not be created ($($_.Exception.Message))") }
+        $created = $true
     }
-
-    # The folder itself and then everything in it: junction, owner, then write access.
+    try { & $Applier.Lock $full } catch { throw (& $stop "its permissions could not be locked ($($_.Exception.Message))") }
+    $locked = $true
     $problem = Find-InstallDirTreeProblem -Root $full -Reader $Reader
     if ($problem) { throw (& $stop $problem) }
-
     $problem = Find-InstallDirParentProblem -Path $full -Reader $Reader
     if ($problem) { throw (& $stop $problem) }
 }

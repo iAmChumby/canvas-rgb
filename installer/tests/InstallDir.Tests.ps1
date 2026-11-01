@@ -41,6 +41,7 @@ function New-DefaultDisk {
 # $script:Log collects every call, in order, so a test can check "lock before scan".
 $script:Disk = @{}
 $script:Log = $null
+$script:AfterLock = $null
 function New-FakeReader {
     @{
         Exists    = { param($p) $script:Log.Add("Exists $p"); $script:Disk.ContainsKey($p) }
@@ -56,7 +57,7 @@ function New-FakeReader {
 function New-FakeApplier {
     @{
         Create = { param($p) $script:Log.Add("Create $p"); $script:Disk[$p] = New-Node $true $BA (Get-ProtectedAces) }
-        Lock   = { param($p) $script:Log.Add("Lock $p"); $script:Disk[$p].Aces = @(Get-ProtectedAces) }
+        Lock   = { param($p) $script:Log.Add("Lock $p"); $script:Disk[$p].Aces = @(Get-ProtectedAces); if ($script:AfterLock) { & $script:AfterLock $script:Disk } }
     }
 }
 $APP = 'C:\Program Files\canvas-rgb'
@@ -65,7 +66,12 @@ function Invoke-Guard($Disk, [string]$Mode = 'Install', [string]$Path = $APP) {
     $script:Log = New-Object System.Collections.Generic.List[string]
     $r = New-FakeReader; $a = New-FakeApplier
     try { Assert-InstallDirProtected -Path $Path -Mode $Mode -Reader $r -Applier $a; return @{ Ok = $true; Log = $script:Log; Message = '' } }
-    catch { return @{ Ok = $false; Log = $script:Log; Message = $_.Exception.Message } }
+    catch {
+        $m = $_.Exception.Message
+        # Only a deliberate refusal counts as "refused": any other exception is a bug and fails the test.
+        if ($m -notmatch '^STOP: canvas-rgb will not (install into|run from) ') { throw "unexpected error, not a refusal: $m" }
+        return @{ Ok = $false; Log = $script:Log; Message = $m }
+    }
 }
 
 # ---------------------------------------------------------------- the default folder keeps passing
@@ -73,10 +79,34 @@ Test-Case 'the default Program Files folder passes: TrustedInstaller parents, ad
     $r = Invoke-Guard (New-DefaultDisk)
     Assert-True $r.Ok $r.Message
 }
-Test-Case 'a plain Modify ACE on a parent (no delete-child, no WRITE_DAC) passes: the bits are read, not the name' {
+Test-Case 'a plain Modify ACE (it includes DELETE) on a parent that is not a drive root is refused: the parent could be renamed away' {
     $d = New-DefaultDisk; $d['C:\Program Files'].Aces += (New-Ace $AU $MODIFY)
     $r = Invoke-Guard $d
+    Assert-True (-not $r.Ok) 'must refuse'
+    Assert-True ($r.Message -match "'C:\\Program Files', a folder above it, lets S-1-5-11 change its permissions, rename it or delete") $r.Message
+    Assert-True ($r.Message -match 'directly under a drive') 'tells the person which folders work'
+    Assert-True ($r.Message -match 'permissions were not changed') 'TRUE: the refusal came before any lock'
+    Assert-True (-not ($r.Log | Where-Object { $_ -match '^(Create|Lock) ' })) 'nothing was created or locked'
+}
+Test-Case 'a folder directly under a drive passes even when the drive root grants Authenticated Users Modify' {
+    $d = New-DefaultDisk
+    $d['D:\'] = New-Node $true $BA @((New-Ace $SY $FULL_CTL), (New-Ace $BA $FULL_CTL), (New-Ace $AU $MODIFY))
+    $d['D:\canvas-rgb'] = New-Node $true $BA (Get-ProtectedAces)
+    $r = Invoke-Guard $d 'Install' 'D:\canvas-rgb'
     Assert-True $r.Ok $r.Message
+    $r = Invoke-Guard $d 'Install' 'D:\fresh'
+    Assert-True $r.Ok $r.Message
+}
+Test-Case 'the same Modify grant one level up (D:\Apps) is refused, for an existing and for a new folder' {
+    $d = New-DefaultDisk
+    $d['D:\'] = New-Node $true $BA @((New-Ace $SY $FULL_CTL), (New-Ace $BA $FULL_CTL), (New-Ace $AU $MODIFY))
+    $d['D:\Apps'] = New-Node $true $BA @((New-Ace $SY $FULL_CTL), (New-Ace $BA $FULL_CTL), (New-Ace $AU $MODIFY))
+    $d['D:\Apps\canvas-rgb'] = New-Node $true $BA (Get-ProtectedAces)
+    $r = Invoke-Guard $d 'Install' 'D:\Apps\canvas-rgb'
+    Assert-True ((-not $r.Ok) -and $r.Message -match "'D:\\Apps', a folder above it") $r.Message
+    $r = Invoke-Guard $d 'Install' 'D:\Apps\new-folder'
+    Assert-True ((-not $r.Ok) -and $r.Message -match "'D:\\Apps', a folder above it") $r.Message
+    Assert-True (-not ($r.Log | Where-Object { $_ -match '^(Create|Lock) ' })) 'a new folder under a bad parent is not even created'
 }
 Test-Case 'a folder that does not exist yet is created, locked, then passes' {
     $d = New-DefaultDisk
@@ -105,11 +135,32 @@ Test-Case 'refuses an entry owned by a non-admin' {
     $r = Invoke-Guard $d
     Assert-True ((-not $r.Ok) -and $r.Message -match 'lib\.ps1.* is owned by S-1-5-21-1-2-3-1001') $r.Message
 }
-Test-Case 'refuses a folder owned by a non-admin even after the lock' {
-    $d = New-DefaultDisk; $d[$APP].Owner = $LUKE
-    $r = Invoke-Guard $d
+Test-Case 'refuses a folder owned by a non-admin, and leaves its permissions exactly as they were (D:\Games-style)' {
+    $d = New-DefaultDisk
+    $d['D:\'] = New-Node $true $BA @((New-Ace $SY $FULL_CTL), (New-Ace $BA $FULL_CTL))
+    $mine = @((New-Ace $LUKE $FULL_CTL), (New-Ace $SY $FULL_CTL))
+    $d['D:\Games'] = New-Node $true $LUKE $mine
+    $r = Invoke-Guard $d 'Install' 'D:\Games'
     Assert-True ((-not $r.Ok) -and $r.Message -match 'is owned by S-1-5-21-1-2-3-1001') $r.Message
-    Assert-True ($r.Log -contains "Lock $APP") 'the lock ran first, then the owner was refused'
+    Assert-True ($r.Message -match 'permissions were not changed') 'the text says so'
+    Assert-True (-not ($r.Log | Where-Object { $_ -match '^(Create|Lock) ' })) 'TRUE: no Lock and no Create ran'
+    Assert-True (@($d['D:\Games'].Aces).Count -eq 2 -and $d['D:\Games'].Aces[0].Sid -eq $LUKE) 'the ACEs are the ones it had'
+}
+Test-Case 'a folder with a user-writable ACE of its own is refused before the lock, permissions unchanged' {
+    $d = New-DefaultDisk; $d[$APP].Aces += (New-Ace $AU $MODIFY)
+    $before = @($d[$APP].Aces).Count
+    $r = Invoke-Guard $d
+    Assert-True ((-not $r.Ok) -and $r.Message -match 'can be changed by S-1-5-11') $r.Message
+    Assert-True (-not ($r.Log | Where-Object { $_ -match '^Lock ' })) 'no Lock ran'
+    Assert-Equal @($d[$APP].Aces).Count $before 'ACEs unchanged'
+}
+Test-Case 'a new folder under a junctioned parent is refused BEFORE it is created (/DIR=D:\Apps\canvas-rgb with D:\Apps a junction)' {
+    $d = New-DefaultDisk
+    $d['D:\'] = New-Node $true $BA @((New-Ace $SY $FULL_CTL), (New-Ace $BA $FULL_CTL))
+    $d['D:\Apps'] = New-Node $true $BA (Get-ProtectedAces) $true
+    $r = Invoke-Guard $d 'Install' 'D:\Apps\canvas-rgb'
+    Assert-True ((-not $r.Ok) -and $r.Message -match "'D:\\Apps', a folder above it, is a junction") $r.Message
+    Assert-True (-not ($r.Log | Where-Object { $_ -match '^(Create|Lock) ' })) 'nothing was created inside the junction target'
 }
 Test-Case 'refuses a parent owned by a non-admin' {
     $d = New-DefaultDisk; $d['C:\Program Files'].Owner = $LUKE
@@ -119,7 +170,7 @@ Test-Case 'refuses a parent owned by a non-admin' {
 Test-Case 'refuses a parent that grants a non-admin FILE_DELETE_CHILD' {
     $d = New-DefaultDisk; $d['C:\Program Files'].Aces += (New-Ace $USERS (0x1200a9 -bor 0x40))
     $r = Invoke-Guard $d
-    Assert-True ((-not $r.Ok) -and $r.Message -match "'C:\\Program Files', a folder above it, lets S-1-5-32-545 change its permissions or delete") $r.Message
+    Assert-True ((-not $r.Ok) -and $r.Message -match "'C:\\Program Files', a folder above it, lets S-1-5-32-545 change its permissions, rename it or delete") $r.Message
 }
 Test-Case 'refuses a parent that grants a non-admin WRITE_DAC, or WRITE_OWNER, or GENERIC_ALL' {
     foreach ($bits in 0x40000, 0x80000, 0x10000000) {
@@ -150,7 +201,7 @@ Test-Case 'refuses an install folder that is itself a junction, BEFORE the lock 
 Test-Case 'refuses a junction above the install folder, BEFORE the lock' {
     $d = New-DefaultDisk; $d['C:\Program Files'].Reparse = $true
     $r = Invoke-Guard $d
-    Assert-True ((-not $r.Ok) -and $r.Message -match "'C:\\Program Files' is a junction") $r.Message
+    Assert-True ((-not $r.Ok) -and $r.Message -match "'C:\\Program Files', a folder above it, is a junction") $r.Message
     Assert-True (-not ($r.Log | Where-Object { $_ -like 'Lock *' })) 'nothing was locked'
 }
 Test-Case 'refuses a relative path, a whole drive, and a file' {
@@ -159,30 +210,33 @@ Test-Case 'refuses a relative path, a whole drive, and a file' {
     $d = New-DefaultDisk; $d[$APP] = New-Node $false $BA (Get-ProtectedAces)
     $r = Invoke-Guard $d;                                      Assert-True ((-not $r.Ok) -and $r.Message -match 'a file, not a folder') $r.Message
 }
-Test-Case 'a NULL-DACL-style Everyone:Full entry is refused' {
+Test-Case 'an Everyone:Full ACE on an entry is refused (the real NULL-DACL case is the real-ACL test below)' {
     $d = New-DefaultDisk; $d["$APP\canvas-rgb.exe"].Aces = @((New-Ace 'S-1-1-0' 0x1f01ff))
     $r = Invoke-Guard $d
     Assert-True ((-not $r.Ok) -and $r.Message -match 'canvas-rgb\.exe. can be changed by S-1-1-0') $r.Message
 }
 
 # ---------------------------------------------------------------- order: lock first, then look
-Test-Case 'lock-before-scan: the lock happens before any child is listed or any ACL or owner is read' {
+Test-Case 'order: every read-only check (parents, folder, entries) runs BEFORE the lock, then the folder is checked again after it' {
     $d = New-DefaultDisk
     $r = Invoke-Guard $d
     Assert-True $r.Ok $r.Message
     $lock = $r.Log.IndexOf("Lock $APP")
     Assert-True ($lock -ge 0) 'the lock ran'
-    $firstRead = -1
-    for ($i = 0; $i -lt $r.Log.Count; $i++) { if ($r.Log[$i] -match '^(List|Aces|OwnerSid) ') { $firstRead = $i; break } }
-    Assert-True ($firstRead -gt $lock) "first read at $firstRead is not after the lock at $lock"
+    $reads = @(0..($r.Log.Count - 1) | Where-Object { $r.Log[$_] -match '^(List|Aces|OwnerSid) ' })
+    $before = @($reads | Where-Object { $_ -lt $lock }); $after = @($reads | Where-Object { $_ -gt $lock })
+    Assert-True ($before.Count -gt 0 -and $after.Count -gt 0) "reads before ($($before.Count)) and after ($($after.Count)) the lock"
+    Assert-True ($r.Log.IndexOf("OwnerSid C:\Program Files") -lt $lock) 'the parents were walked before the lock'
+    Assert-True ($r.Log.IndexOf("List $APP") -lt $lock) 'the existing children were listed before the lock'
 }
-Test-Case 'lock-before-scan: a child that is writable AFTER the lock is still caught (the lock does not reach explicit ACEs)' {
-    $d = New-DefaultDisk; $d["$APP\canvas-rgb-svc.exe"].Aces += (New-Ace $USERS $MODIFY)
-    $r = Invoke-Guard $d
-    Assert-True (-not $r.Ok) 'refused'
-    Assert-True ($d[$APP].Aces.Count -eq 3) 'the folder was locked to the protected DACL'
+Test-Case 'a problem that only shows up after the lock is still caught, and the text says the folder was locked' {
+    $d = New-DefaultDisk
+    $script:AfterLock = { param($disk) $disk["$APP\canvas-rgb-svc.exe"].Aces += (New-Ace $USERS $MODIFY) }
+    try { $r = Invoke-Guard $d } finally { $script:AfterLock = $null }
+    Assert-True ((-not $r.Ok) -and $r.Message -match 'canvas-rgb-svc\.exe. can be changed by S-1-5-32-545') $r.Message
+    Assert-True ($r.Message -match 'already locked this folder') 'TRUE after a lock'
+    Assert-True (-not ($r.Message -match 'permissions were not changed')) 'must not claim they were not changed'
 }
-
 # ---------------------------------------------------------------- uninstall (Verify mode)
 Test-Case 'uninstall check: a good install passes and changes nothing (no create, no lock)' {
     $r = Invoke-Guard (New-DefaultDisk) 'Verify'
@@ -202,6 +256,11 @@ Test-Case 'uninstall check: refuses a user-owned parent' {
     $r = Invoke-Guard $d 'Verify'
     Assert-True ((-not $r.Ok) -and $r.Message -match 'a folder above it, is owned by') $r.Message
 }
+Test-Case 'uninstall check: a path that is a file is refused, as in Install mode' {
+    $d = New-DefaultDisk; $d[$APP] = New-Node $false $BA (Get-ProtectedAces)
+    $r = Invoke-Guard $d 'Verify'
+    Assert-True ((-not $r.Ok) -and $r.Message -match 'a file, not a folder') $r.Message
+}
 Test-Case 'uninstall check: a folder that is not there passes (nothing to run)' {
     $r = Invoke-Guard (New-DefaultDisk) 'Verify' 'C:\Program Files\gone'
     Assert-True $r.Ok $r.Message
@@ -209,13 +268,27 @@ Test-Case 'uninstall check: a folder that is not there passes (nothing to run)' 
 
 # ---------------------------------------------------------------- wiring: the scripts call the guard in the right order
 $iss = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\inno\canvas-rgb.iss') -Raw
+# Source of one Pascal routine: from its header to the next top-level routine, with // comments removed so a
+# comment cannot satisfy a check.
+function Get-IssFunction([string]$Header) {
+    $a = $iss.IndexOf($Header)
+    if ($a -lt 0) { throw "no $Header in the .iss" }
+    $m = [regex]::Match($iss.Substring($a + $Header.Length), '(?m)^(function|procedure) ')
+    $body = if ($m.Success) { $iss.Substring($a, $Header.Length + $m.Index) } else { $iss.Substring($a) }
+    return ([regex]::Replace($body, '(?m)^\s*//.*$', ''))
+}
 $ue = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\uninstall-elevated.ps1') -Raw
 $se = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\setup-elevated.ps1') -Raw
-Test-Case 'installer: PrepareToInstall checks the install folder before it downloads, stops anything or copies a file' {
-    $prep = $iss.Substring($iss.IndexOf('function PrepareToInstall'))
-    $prep = $prep.Substring(0, $prep.IndexOf('procedure CurStepChanged'))
-    $iCheck = $prep.IndexOf('-Mode Install')
-    Assert-True ($iCheck -ge 0) 'PrepareToInstall must run check-install-dir.ps1 in Install mode'
+Test-Case 'installer: PrepareToInstall runs the check on {app}, gates on its exit code, and does so before the download and the stop step' {
+    $prep = Get-IssFunction 'function PrepareToInstall'
+    $iCheck = $prep.IndexOf("check-install-dir.ps1'), '-InstallDir")
+    Assert-True ($iCheck -ge 0) 'PrepareToInstall must run {tmp}\check-install-dir.ps1 on -InstallDir'
+    Assert-True ($prep -match "-Mode Install") 'in Install mode'
+    $gate = $prep.Substring($iCheck)
+    $iGate = $gate.IndexOf('(Code <> 0)')
+    Assert-True ($iGate -gt 0 -and $iGate -lt 400) 'the exit code is tested right after the call'
+    $iFail = $gate.IndexOf('Result := PrepFail(')
+    Assert-True ($iFail -gt $iGate -and $iFail -lt 600) 'a non-zero exit stops Setup through PrepFail'
     $iDl = $prep.IndexOf('-OutDir'); $iStopRun = $prep.IndexOf("stop-canvas.ps1'), '-LogFile")
     Assert-True ($iDl -gt 0 -and $iStopRun -gt 0) 'the download and stop steps are still in PrepareToInstall'
     Assert-True ($iCheck -lt $iDl) 'before the OpenRGB download'
@@ -225,22 +298,28 @@ Test-Case 'installer: the check is extracted to {tmp} with lib.ps1 and is a dont
     Assert-True ($iss -match 'check-install-dir\.ps1";\s+DestDir: "\{tmp\}"; Flags: dontcopy') 'listed as dontcopy'
     Assert-True ($iss -match "ExtractTemporaryFile\('check-install-dir\.ps1'\)") 'extracted in PrepareToInstall'
 }
-Test-Case 'uninstall: InitializeUninstall runs the PROTECTED copy of the check before it runs anything from {app}' {
-    $un = $iss.Substring($iss.IndexOf('function InitializeUninstall'))
-    $un = $un.Substring(0, $un.IndexOf('procedure CurUninstallStepChanged'))
+Test-Case 'uninstall: InitializeUninstall runs the PROTECTED copy of the check before anything from {app}, and a failure aborts' {
+    $un = Get-IssFunction 'function InitializeUninstall'
     $iCheck = $un.IndexOf('-Mode Verify'); $iRun = $un.IndexOf('uninstall-elevated.ps1')
     Assert-True ($iCheck -ge 0 -and $iCheck -lt $iRun) 'the Verify check must come before uninstall-elevated.ps1'
     Assert-True ($un -match 'commonappdata\}\\canvas-rgb\\check') 'the check runs from the protected machine home, not from {app}'
-    Assert-True ($un -match 'Result := False') 'a failed check aborts the uninstall'
+    $iGate = $un.IndexOf('if not (Ran and (Code = 0)) then')
+    Assert-True ($iGate -gt $iCheck -and $iGate -lt $iRun) 'the check result is tested before uninstall-elevated.ps1 runs'
+    $abort = $un.Substring($iGate, 400)
+    Assert-True ($abort -match 'Result := False;\s+Exit;') 'a failed check sets Result False and exits before anything runs'
 }
-Test-Case 'uninstall: CurUninstallStepChanged does not run uninstall-user.ps1 from {app} without the same check' {
-    $cu = $iss.Substring($iss.IndexOf('procedure CurUninstallStepChanged'))
-    Assert-True ($cu -match 'FInstallDirOk') 'guarded by the result of the check'
+Test-Case 'uninstall: CurUninstallStepChanged does not run uninstall-user.ps1 from {app} unless the check passed' {
+    $cu = Get-IssFunction 'procedure CurUninstallStepChanged'
+    $iGuard = $cu.IndexOf('if not FInstallDirOk then Exit;'); $iRun = $cu.IndexOf('uninstall-user.ps1')
+    Assert-True ($iGuard -ge 0 -and $iGuard -lt $iRun) 'the guard comes before the script runs'
+    $init = Get-IssFunction 'function InitializeUninstall'
+    Assert-True ($init.IndexOf('FInstallDirOk := True;') -gt $init.IndexOf('-Mode Verify')) 'set only after the check'
 }
 Test-Case 'uninstall-elevated.ps1 runs the guard (Verify) before it stops the service or runs the service exe' {
-    $iGuard = $ue.IndexOf('Assert-InstallDirProtected'); $iStop = $ue.IndexOf('Stop-Service'); $iExe = $ue.IndexOf('& $svcExe --restore-bios')
+    $code = [regex]::Replace($ue, '(?m)^\s*#.*$', '')
+    $iGuard = $code.IndexOf('Assert-InstallDirProtected'); $iStop = $code.IndexOf('Stop-Service'); $iExe = $code.IndexOf('& $svcExe --restore-bios')
     Assert-True ($iGuard -ge 0 -and $iGuard -lt $iStop -and $iGuard -lt $iExe) 'guard must come first'
-    Assert-True ($ue -match "Assert-InstallDirProtected -Path \`$InstallDir -Mode Verify") 'in Verify mode'
+    Assert-True ($code -match "Assert-InstallDirProtected -Path \`$InstallDir -Mode Verify") 'in Verify mode'
 }
 Test-Case 'setup-elevated.ps1 puts the check and lib.ps1 in the protected machine home for the uninstaller' {
     Assert-True ($se -match 'Copy-InstallDirCheck') 'copies the check after the machine home is created'
@@ -301,16 +380,90 @@ Test-Case 'real ACLs: Lock writes the protected DACL (SYSTEM, Administrators, Us
         Assert-Equal $by[$SY] $FULL_CTL; Assert-Equal $by[$BA] $FULL_CTL; Assert-Equal $by[$USERS] $READ_EXEC
     } finally { Remove-Throwaway $t }
 }
-Test-Case 'real ACLs: a folder this user owns is refused with the real owner reader, and the folder is neither deleted nor adopted' {
+Test-Case 'real ACLs: the real owner reader refuses a folder whose owner is not an administrator; the folder is neither deleted nor adopted' {
     $t = New-Throwaway
     try {
         'keep me' | Set-Content -LiteralPath (Join-Path $t 'mine.txt')
         $ownerBefore = Get-PathOwnerSid -Path $t
-        Assert-True (-not (Test-OwnerSidAllowed $ownerBefore)) "this user ($ownerBefore) must not count as an admin owner for the test to mean anything"
-        Assert-Throws { Assert-InstallDirProtected -Path $t -Mode Verify } "is owned by $([regex]::Escape($ownerBefore))"
+        # Isolate the owner rule: everything else is faked as fine, the owner comes from the real reader
+        # when this user is not an administrator, and is a plain user SID otherwise (an elevated token, such as
+        # the CI runner's, makes new folders Administrators-owned).
+        $rd = New-InstallDirReader; $rd.Aces = { param($p) @() }
+        $elevated = Test-OwnerSidAllowed $ownerBefore
+        if ($elevated) { $rd.OwnerSid = { param($p) 'S-1-5-21-1-2-3-1001' } }
+        $why = Find-InstallDirTreeProblem -Root $t -Reader $rd
+        $want = if ($elevated) { 'S-1-5-21-1-2-3-1001' } else { $ownerBefore }
+        Assert-True ($why -eq "'$t' is owned by $want, not SYSTEM or Administrators") "got: $why"
         Assert-Equal ([IO.File]::ReadAllText((Join-Path $t 'mine.txt')).Trim()) 'keep me'
         Assert-Equal (Get-PathOwnerSid -Path $t) $ownerBefore
+        if (-not $elevated) {
+            Assert-Throws { Assert-InstallDirProtected -Path $t -Mode Install } "is owned by $([regex]::Escape($ownerBefore)).*permissions were not changed"
+            Assert-Equal (Get-PathOwnerSid -Path $t) $ownerBefore 'the owner is still the same after the refused install'
+            Assert-True (-not (Get-Acl -LiteralPath $t).AreAccessRulesProtected) 'TRUE: the refused install left the folder unlocked'
+        }
     } finally { Remove-Throwaway $t }
+}
+Test-Case 'real ACLs: a folder with a real NULL DACL is refused as writable by Everyone' {
+    $t = New-Throwaway
+    try {
+        $acl = Get-Acl -LiteralPath $t
+        $raw = New-Object System.Security.AccessControl.RawSecurityDescriptor($acl.GetSecurityDescriptorBinaryForm(), 0)
+        $raw.DiscretionaryAcl = $null
+        $bytes = New-Object byte[] $raw.BinaryLength; $raw.GetBinaryForm($bytes, 0)
+        $ds = New-Object System.Security.AccessControl.DirectorySecurity
+        $ds.SetSecurityDescriptorBinaryForm($bytes, [System.Security.AccessControl.AccessControlSections]::Access)
+        Set-Acl -LiteralPath $t -AclObject $ds
+        $check = New-Object System.Security.AccessControl.RawSecurityDescriptor((Get-Acl -LiteralPath $t).GetSecurityDescriptorBinaryForm(), 0)
+        Assert-True ($null -eq $check.DiscretionaryAcl) 'the throwaway folder really has a NULL DACL'
+        $rd = New-InstallDirReader
+        Assert-Equal (Find-UntrustedAceSid -Aces (& $rd.Aces $t) -Mask $script:InstallDirEntryWriteMask) 'S-1-1-0'
+        $rd.OwnerSid = { param($p) 'S-1-5-32-544' }
+        $why = Find-InstallDirTreeProblem -Root $t -Reader $rd
+        Assert-True ($why -eq "'$t' can be changed by S-1-1-0") "got: $why"
+    } finally { Remove-Throwaway $t }
+}
+Test-Case 'Copy-InstallDirCheck: a normal copy works, a junction in the way is refused, a non-admin-owned file is refused' {
+    $src = New-Throwaway; $home1 = New-Throwaway; $home2 = New-Throwaway; $victim = New-Throwaway; $home3 = New-Throwaway
+    try {
+        'check' | Set-Content -LiteralPath (Join-Path $src 'check-install-dir.ps1'); 'lib' | Set-Content -LiteralPath (Join-Path $src 'lib.ps1')
+        Copy-InstallDirCheck -SourceDir $src -MachineHome $home1
+        Assert-Equal ((Get-Content -LiteralPath (Join-Path $home1 'check\lib.ps1')).Trim()) 'lib'
+        Assert-True (Test-Path -LiteralPath (Join-Path $home1 'check\check-install-dir.ps1')) 'script copied'
+        # a junction named check
+        & cmd.exe /c mklink /J "$home2\check" "$victim" | Out-Null
+        Assert-Throws { Copy-InstallDirCheck -SourceDir $src -MachineHome $home2 } 'junction or symbolic link'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $victim 'lib.ps1'))) 'nothing was written through the junction'
+        [System.IO.Directory]::Delete("$home2\check")
+        # an existing check folder owned by a non-admin (this user, when not elevated)
+        New-Item -ItemType Directory -Path "$home3\check" | Out-Null
+        if (Test-OwnerSidAllowed (Get-PathOwnerSid -Path "$home3\check")) {
+            Skip-Case 'Copy-InstallDirCheck, non-admin-owned half' 'elevated token: new folders are Administrators-owned'
+        } else {
+            Assert-Throws { Copy-InstallDirCheck -SourceDir $src -MachineHome $home3 } 'is owned by S-1-5-21'
+        }
+    } finally {
+        foreach ($d in $home1, $home2, $home3, $src, $victim) { Remove-Throwaway $d }
+    }
+}
+Test-Case 'the uninstall PowerShell that decides "is {app} under Program Files" (the .iss text itself) answers both branches' {
+    $line = ($iss -split "`r?`n" | Where-Object { $_ -match '^\s*UnderProgramFilesScript = ' }) | Select-Object -First 1
+    Assert-True ($null -ne $line) 'the constant is in the .iss'
+    $text = [regex]::Match($line, "= '(.*)';\s*$").Groups[1].Value.Replace("''", "'")
+    $run = {
+        param($app, $pf)
+        $cmd = $text.Replace('%APP%', $app.Replace("'", "''")).Replace('%PF%', $pf.Replace("'", "''"))
+        & powershell.exe -NoProfile -Command $cmd | Out-Null
+        return $LASTEXITCODE
+    }
+    Assert-Equal (& $run 'C:\Program Files\canvas-rgb' 'C:\Program Files') 0 'default folder is under Program Files'
+    Assert-Equal (& $run 'c:\program files\Canvas-RGB' 'C:\Program Files') 0 'case-insensitive'
+    Assert-Equal (& $run 'D:\Apps\canvas-rgb' 'C:\Program Files') 1 'a custom folder is not'
+    Assert-Equal (& $run 'C:\Program Files Evil\canvas-rgb' 'C:\Program Files') 1 'a sibling with the same prefix is not'
+    Assert-Equal (& $run 'C:\Program Files\..\Users\x\canvas-rgb' 'C:\Program Files') 1 'a .. path is normalised first'
+    Assert-Equal (& $run "C:\Program Files\it's\canvas-rgb" 'C:\Program Files') 0 'an apostrophe in the path does not break it'
+    $un = Get-IssFunction 'function InitializeUninstall'
+    Assert-True ($un -match 'if AppIsUnderProgramFiles then') 'InitializeUninstall branches on it when the copy is missing'
+    Assert-True ($un -match "is in a folder outside Program Files") 'the other branch refuses with its own message'
 }
 Test-Case 'real ACLs: a junction inside is found by the real reader and its target is not entered' {
     $t = New-Throwaway; $victim = New-Throwaway
@@ -328,10 +481,13 @@ Test-Case 'real ACLs: a junction inside is found by the real reader and its targ
         Assert-True ($why -match 'junction') "got: $why"
     } finally { Remove-Throwaway $t; Remove-Throwaway $victim }
 }
-Test-Case 'real ACLs: the default Program Files folder passes the guard in Verify mode (read-only), where it is installed' {
-    $app = Join-Path $env:ProgramFiles 'canvas-rgb'
-    if (-not (Test-Path -LiteralPath (Join-Path $app 'canvas-rgb-svc.exe'))) { Write-Host '      (no install here: UNKNOWN, not run)'; return }
-    Assert-InstallDirProtected -Path $app -Mode Verify
+$realApp = Join-Path $env:ProgramFiles 'canvas-rgb'
+if (Test-Path -LiteralPath (Join-Path $realApp 'canvas-rgb-svc.exe')) {
+    Test-Case 'real ACLs: the default Program Files folder passes the guard in Verify mode (read-only)' {
+        Assert-InstallDirProtected -Path $realApp -Mode Verify
+    }
+} else {
+    Skip-Case 'real ACLs: the default Program Files folder passes the guard in Verify mode' 'no canvas-rgb install on this machine'
 }
 Test-Case 'real ACLs: the folders above Program Files pass the parent walk (TrustedInstaller owns them)' {
     $why = Find-InstallDirParentProblem -Path (Join-Path $env:ProgramFiles 'canvas-rgb') -Reader (New-InstallDirReader)

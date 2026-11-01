@@ -107,6 +107,9 @@ Filename: "{app}\canvas-rgb.exe"; Parameters: "--onboard"; Description: "Launch 
 [Code]
 const
   UninstallSubkey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\canvas-rgb';
+  // PowerShell that exits 0 when %APP% is under %PF% (case-insensitive, whole path segments), else 1. Single
+  // quotes are doubled for Pascal; the install-folder tests run this very text for both branches.
+  UnderProgramFilesScript = '$a = ([IO.DirectoryInfo]''%APP%'').FullName.TrimEnd(''\'') + ''\''; $b = ([IO.DirectoryInfo]''%PF%'').FullName.TrimEnd(''\'') + ''\''; if ($a.StartsWith($b, [StringComparison]::OrdinalIgnoreCase)) { exit(0) } else { exit(1) }';
 
 var
   SignalRgbPage: TInputOptionWizardPage;
@@ -181,6 +184,24 @@ end;
 function PsExe: String;
 begin
   Result := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
+end;
+
+// True when {app} is inside Program Files ({commonpf}). Used only when the protected check copy is missing.
+function AppIsUnderProgramFiles: Boolean;
+var
+  Code: Integer;
+  App, Pf, Script: String;
+begin
+  App := ExpandConstant('{app}');
+  Pf := ExpandConstant('{commonpf}');
+  StringChangeEx(App, '''', '''''', True);
+  StringChangeEx(Pf, '''', '''''', True);
+  Script := UnderProgramFilesScript;
+  StringChangeEx(Script, '%APP%', App, True);
+  StringChangeEx(Script, '%PF%', Pf, True);
+  // token: Exec runs as Setup's own administrator token; the script only compares two paths.
+  Result := Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), '-NoProfile -Command "' + Script + '"',
+    ExpandConstant('{sys}'), SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0);
 end;
 
 function RunPs(const ScriptPath, Args: String; AsOriginalUser: Boolean; var Code: Integer): Boolean;
@@ -674,9 +695,20 @@ begin
   CheckScript := ExpandConstant('{commonappdata}\canvas-rgb\check\check-install-dir.ps1');
   if not FileExists(CheckScript) then
   begin
-    SaveStringToFile(CheckLog, 'canvas-rgb cannot check that its folder is safe to run from, because the safety check that setup keeps in the protected canvas-rgb data folder is missing. Nothing was removed or run. Install canvas-rgb again into the default folder under Program Files, then remove this old folder by hand.', False);
-    Ran := False;
-    Code := 1;
+    if AppIsUnderProgramFiles then
+    begin
+      // The protected copy is gone, but the folder is under Program Files, which only administrators can
+      // change. uninstall-elevated.ps1 runs the same check itself (Verify) before it stops or runs
+      // anything, and a refusal there aborts the uninstall.
+      Ran := True;
+      Code := 0;
+    end
+    else
+    begin
+      SaveStringToFile(CheckLog, 'This copy of canvas-rgb is in a folder outside Program Files, and the safety check that setup keeps in the protected canvas-rgb data folder is missing, so the uninstaller cannot confirm that only administrators can change this folder. Nothing was removed or run. Install canvas-rgb again into the default folder under Program Files (the new install takes over from this one), then remove this old folder by hand.', False);
+      Ran := False;
+      Code := 1;
+    end;
   end
   else
     Ran := RunPs(CheckScript, '-InstallDir "' + ExpandConstant('{app}') + '" -Mode Verify -LogFile "' + CheckLog + '"', False, Code);
