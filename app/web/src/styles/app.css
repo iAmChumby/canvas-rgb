@@ -2041,8 +2041,13 @@ button.chip:hover {
   }
 }
 
-/* The strip is outside the content box, so the rules that reach it are media queries on the
-   window, as they are in the shell. */
+/* The strip is outside the content box, so it follows the window, like the shell's own strip
+   rules do: on a phone the save key keeps its icon and drops its label. */
+@media (max-width: 640px) {
+  .rd-btn-text {
+    display: none;
+  }
+}
 @media (max-width: 1439px) {
   /* The page's own actions need the room: the quiet key keeps its icon. */
   .rd-lay-remap .rd-lay-text {
@@ -2607,6 +2612,238 @@ button.chip:hover {
 }
 
 /* ---------- fans page ---------- */
+
+/* The two kinds of thing sit side by side: the readings on the left, the editor of the picked
+   header on the right (R6). */
+.rd-fans .rd-fans-grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+  gap: var(--s4);
+}
+
+.rd-fans .rd-fans-left,
+.rd-fans .rd-fans-right {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+  min-height: 0;
+}
+
+/* The temperatures: the app's own cells, three across, each a label, its reading and its
+   meter. */
+.rd-fans .rd-temp-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--s4);
+}
+
+.rd-fans .rd-temp-row .temp-cell {
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "label value"
+    "meter meter";
+  align-items: center;
+  gap: var(--s1);
+  padding: 0;
+  border-bottom: 0;
+}
+
+.rd-fans .rd-temp-row .temp-cell > .one-line {
+  grid-area: label;
+}
+
+.rd-fans .rd-temp-row .temp-cell > .fig {
+  grid-area: value;
+}
+
+.rd-fans .rd-temp-row .temp-cell > .meter {
+  grid-area: meter;
+  height: 6px;
+}
+
+/* The headers: the app's table, its rows 40 px, its names on one line. */
+.rd-fans .rd-headers {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.rd-fans .rd-headers .panel-head {
+  flex: 0 0 auto;
+}
+
+.rd-fans .rd-headers .table-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.rd-fans .fan-table tbody tr {
+  height: 40px;
+}
+
+.rd-fans .fan-table th,
+.rd-fans .fan-table td {
+  padding: var(--s1) var(--s3);
+}
+
+/* The name and its chip share one line: the cell never breaks between them. */
+.rd-fans .fan-table th:first-child,
+.rd-fans .fan-table td:first-child {
+  white-space: nowrap;
+}
+
+.rd-fans .rd-hdr-chip {
+  margin-left: var(--s1);
+  padding: 0 var(--s1);
+  vertical-align: middle;
+}
+
+/* The editor: the app's panel, with the curve taking the height the column has left. */
+.rd-fans .rd-fans-right > .panel {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.rd-fans .rd-fans-right > .panel > .panel-head {
+  flex: 0 0 auto;
+}
+
+/* The points of the curve: two to a row, so the curve's own box keeps its height. */
+.rd-fans .curve-rows {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s2) var(--s3);
+}
+
+.rd-fans .curve-rows > .row-wrap {
+  grid-column: 1 / -1;
+}
+
+/* regular and wide: the history column fits beside the rest, narrow enough (64 px) to leave
+   the other columns their room. */
+@container page (min-width: 1000px) {
+  .rd-fans .fan-table .sparkline {
+    width: 64px;
+    height: 16px;
+  }
+
+  .rd-fans .fan-table th,
+  .rd-fans .fan-table td {
+    padding: var(--s1) var(--s2);
+  }
+}
+
+/* regular and below: the history column is the one that goes, the row still reads. */
+@container page (max-width: 999px) {
+  .rd-fans .fan-table th,
+  .rd-fans .fan-table td {
+    padding: var(--s1) var(--s2);
+  }
+}
+
+/* where a row has no room for the mode's word, the dot carries the mode and the tooltip says
+   which one it is. */
+@container page (max-width: 1499px) {
+  .rd-fans .fan-table .mode-state {
+    font-size: 0;
+    gap: 0;
+  }
+
+  .rd-fans .fan-table .mode-state .mode-dot {
+    font-size: var(--t14);
+  }
+}
+
+/* phone: the headers are compact rows and the editor is a sheet: the list is the page. */
+@container page (max-width: 640px) {
+  .rd-fans .rd-fans-grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto;
+  }
+
+  .rd-fans .rd-temp-row {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: var(--s2);
+  }
+
+  .rd-fans .rd-temp-row .temp-cell {
+    grid-template-areas:
+      "label label"
+      "value value"
+      "meter meter";
+  }
+
+  .rd-fans .rd-headers {
+    flex: 0 0 auto;
+  }
+
+  .rd-fans .rd-headers .table-scroll {
+    overflow: visible;
+  }
+
+  /* The headers are compact rows: the name, its speed and its mode. */
+  .rd-fans .fan-cards {
+    gap: 0;
+  }
+
+  .rd-fans .fan-card {
+    flex-direction: row;
+    align-items: center;
+    gap: var(--s3);
+    padding: var(--s2) var(--s3);
+    border-width: 0 0 1px;
+    border-radius: 0;
+    background: transparent;
+  }
+
+  .rd-fans .fan-card-head {
+    flex: 1 1 auto;
+  }
+
+  .rd-fans .fan-card-readouts {
+    flex: none;
+  }
+
+  .rd-fans .fan-card-readouts .meter,
+  .rd-fans .fan-card-readouts .fig,
+  .rd-fans .fan-card-spark {
+    display: none;
+  }
+
+  /* The mode's word does not fit beside the name: the dot carries it. */
+  .rd-fans .fan-card .mode-state {
+    font-size: 0;
+    gap: 0;
+  }
+
+  .rd-fans .fan-card .mode-state .mode-dot {
+    font-size: var(--t14);
+  }
+
+  /* The panels are tighter on a phone: every row counts. */
+  .rd-fans .panel {
+    padding: var(--s3);
+  }
+
+  /* The editor is a sheet a tap on a row pushes over the list. */
+  .rd-fans .rd-fans-right {
+    position: fixed;
+    left: 0;
+    right: 0;
+    top: var(--strip-h, 48px);
+    bottom: var(--dock-h, 65px);
+    z-index: 25;
+    padding: var(--s3);
+    overflow: auto;
+    background: var(--g1);
+  }
+}
 
 .fans-grid {
   display: grid;
