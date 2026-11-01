@@ -90,14 +90,14 @@ Start it from a normal (not administrator) shell. Setup asks for permission itse
 
 Run the plan first. It prints every step and changes nothing.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File installer\setup.ps1 -WhatIf
-powershell -ExecutionPolicy Bypass -File installer\setup.ps1
+```
+installer\setup.cmd -WhatIf
+installer\setup.cmd
 ```
 
 One admin prompt. The script builds canvas-rgb, downloads OpenRGB and checks its SHA-256 before
 anything runs. Fan control needs PawnIO, which isn't bundled: pass the installer you downloaded
-with `-PawnIoInstaller`. `installer\uninstall.ps1` hands every fan back to BIOS, then removes the
+with `-PawnIoInstaller`. `installer\uninstall.cmd` hands every fan back to BIOS, then removes the
 service, the install folder and the startup entries.
 
 To build the setup wizard yourself, run `tools\build-installer.ps1` with Inno Setup 6 installed.
