@@ -3869,8 +3869,14 @@ button.chip:hover {
   }
 
   /* The profile picker and the like are tighter in the strip on a phone. */
-  .rd-actions {
+  .rd-actions,
+  .strip-controls,
+  .strip-inner:has(.rd-actions) {
     gap: var(--s1);
+  }
+
+  .rd-title {
+    margin-right: 0;
   }
 
   .rd-actions .seg-item {
