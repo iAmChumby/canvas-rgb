@@ -842,32 +842,97 @@ fn set_timeout_honours_its_delay() {
     assert_eq!(pixels_near(&canvas, [255, 0, 0], 2), 0, "step() ran about once per frame");
 }
 
+/// A page whose scripts each burn `iterations` loop iterations.
+fn page(iterations: u64, scripts: usize) -> String {
+    let one = format!("<script>for (var i = 0; i < {iterations}; i++) {{}}</script>");
+    format!(
+        "<head><title>T</title></head><body><canvas id=\"c\" width=\"4\" height=\"4\"></canvas></body>{}",
+        one.repeat(scripts)
+    )
+}
+
+/// How long the page takes to load, in seconds. `None` when the load ran out of time, which
+/// means the scripts did not fit in the load budget.
+fn load_seconds(iterations: u64, scripts: usize) -> Option<f64> {
+    let start = std::time::Instant::now();
+    let result = HtmlEffect::from_source("t", &page(iterations, scripts), &Props::new());
+    let took = start.elapsed().as_secs_f64();
+    match result {
+        Ok(_) => Some(took),
+        Err(_) => None,
+    }
+}
+
 #[test]
 fn the_load_budget_covers_all_scripts_together() {
-    // Time how long a counting loop takes here, then give the page four scripts that each
-    // take about 0.9 s: 3.6 s together, over the 2 s load budget.
-    fn page(iterations: u64, scripts: usize) -> String {
-        let one = format!("<script>for (var i = 0; i < {iterations}; i++) {{}}</script>");
-        format!("<head><title>T</title></head><body><canvas id=\"c\" width=\"4\" height=\"4\"></canvas></body>{}", one.repeat(scripts))
-    }
-    // Calibrate with a loop that grows until it takes about 50 ms, so a slow machine (a debug
-    // build on a CI runner) never spends the 2 s budget on the calibration itself.
-    let mut probe = 10_000u64;
+    // The load budget is one for the whole load, not one per script: a page with several
+    // scripts, each of them inside the budget on its own, must still fail to load.
+    //
+    // The scripts cost what the calibration says they cost on this machine, so the test does
+    // not depend on how fast the machine is: the calibration is a warm-up, the fixed cost of
+    // a load is taken off, and the budget itself is the yardstick (class `cause:timing-test`,
+    // #51).
+    let budget_seconds = canvas_html::LOAD_BUDGET_MS as f64 / 1000.0;
+    // What a page costs before any script runs: the context, the parse, the first run.
+    let overhead = load_seconds(0, 1).expect("a page with an empty script loads");
+    // A warm-up: the first load on a machine pays for the caches.
+    let _ = load_seconds(1, 1);
+
+    // The cost of one iteration, measured over a probe long enough that the fixed cost of a
+    // load is a small share of it.
+    let mut probe = 100u64;
     let per_iter = loop {
-        let start = std::time::Instant::now();
-        HtmlEffect::from_source("probe", &page(probe, 1), &Props::new()).expect("probe loads");
-        let took = start.elapsed().as_secs_f64();
-        if took >= 0.05 {
-            break took / probe as f64;
+        match load_seconds(probe, 1) {
+            Some(took) => {
+                let script = (took - overhead).max(0.0);
+                if script >= 0.3 {
+                    break script / probe as f64;
+                }
+                probe *= 2;
+            }
+            None => {
+                // The probe did not fit in the load budget: this machine is slow, so one
+                // iteration costs at least (the budget / the iterations that did not fit).
+                break budget_seconds / probe as f64;
+            }
         }
-        probe *= 2;
     };
-    let iterations = (0.9 / per_iter) as u64;
-    let result = HtmlEffect::from_source("t", &page(iterations, 4), &Props::new());
+
+    // Two fifths of the budget for one script: it is well inside the budget on its own, and
+    // several of them together are not.
+    let mut iterations = ((budget_seconds * 0.4 / per_iter).round() as u64).max(1);
+    // One script of this size must fit inside the budget: that is what makes the failure
+    // below proof that the budget is shared and not one budget per script.
+    let mut one_script = load_seconds(iterations, 1);
+    while one_script.is_none() && iterations > 1 {
+        iterations /= 2;
+        one_script = load_seconds(iterations, 1);
+    }
+    let one_script = one_script.expect("a script of this size fits in the budget") - overhead;
+
+    // Enough scripts to be over the budget together, whatever the machine's speed: each of
+    // them fits inside the budget on its own, as measured above.
+    let scripts = ((budget_seconds / one_script).ceil() as usize + 2).min(64);
+    let result = HtmlEffect::from_source("t", &page(iterations, scripts), &Props::new());
     assert!(
         matches!(result, Err(canvas_html::HtmlError::Timeout(_))),
-        "four 0.9 s scripts should exceed one shared 2 s budget"
+        "{scripts} scripts of {iterations} iterations ({one_script:.2} s each) should not fit in one {} ms budget",
+        canvas_html::LOAD_BUDGET_MS
     );
+}
+
+#[test]
+fn the_budget_left_for_a_script_is_the_whole_budget_less_the_scripts_before_it() {
+    // Four scripts of 900 ms each: the third has 200 ms left and the fourth has none. The
+    // budget is one for the whole load.
+    assert_eq!(canvas_html::remaining_budget(2_000, 0), Some(2_000));
+    assert_eq!(canvas_html::remaining_budget(2_000, 900), Some(1_100));
+    assert_eq!(canvas_html::remaining_budget(2_000, 1_800), Some(200));
+    assert_eq!(canvas_html::remaining_budget(2_000, 2_000), None);
+    assert_eq!(canvas_html::remaining_budget(2_000, 2_001), None);
+    // A limit shorter than a second is a limit, not nothing.
+    assert_eq!(canvas_html::remaining_budget(40, 39), Some(1));
+    assert_eq!(canvas_html::remaining_budget(40, 40), None);
 }
 
 #[test]

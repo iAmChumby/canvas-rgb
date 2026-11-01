@@ -918,12 +918,20 @@ window.requestAnimationFrame(draw);
     #[test]
     fn a_tile_render_does_not_hold_its_slot_much_past_its_budget() {
         // Calibrate: how long does one frame of a fixed loop take on this machine, right now?
+        // A warm-up first (the first frame pays for the context and the caches) and the best
+        // of three samples (a preempted sample only makes the frames slower): one noisy
+        // sample must not decide how long the frames are (class `cause:timing-test`, #51).
         let probe = 200_000u64;
         let mut effect = html_builder_seeded(1)("html:burn", &burning_frames(probe)).expect("loads");
         let mut canvas = Canvas::new(8, 8);
-        let started = std::time::Instant::now();
         effect.update(1.0 / 60.0, &mut canvas, &Inputs::default());
-        let per_probe = started.elapsed().as_secs_f64().max(1e-4);
+        let mut best = f64::MAX;
+        for _ in 0..3 {
+            let started = std::time::Instant::now();
+            effect.update(1.0 / 60.0, &mut canvas, &Inputs::default());
+            best = best.min(started.elapsed().as_secs_f64());
+        }
+        let per_probe = best.max(1e-4);
         // Frames of about half a second each. A step of 1/15 s runs four of them, two seconds.
         let frame_s = 0.5;
         let iterations = (probe as f64 * frame_s / per_probe) as u64;
@@ -935,11 +943,13 @@ window.requestAnimationFrame(draw);
             .expect_err("frames of half a second cannot finish a render in 700 ms");
         let took = started.elapsed();
         assert!(error.depends_on_load(), "{error:?}");
-        // Without a bound per frame, the first step runs its four frames (two seconds) before the
-        // budget is looked at.
+        // Without a bound per frame, the render runs on to the end of the step it was in: four
+        // frames, two seconds in all. With it, the frame in progress is stopped at the budget, so
+        // the slot is held for the budget plus less than one frame. The frames were sized to this
+        // machine above, so the bound follows the machine and not a fixed number of milliseconds.
         assert!(
-            took < budget + std::time::Duration::from_millis(400),
-            "the render held its slot for {took:?} on a {budget:?} budget"
+            took < budget + std::time::Duration::from_secs_f64(frame_s),
+            "the render held its slot for {took:?} on a {budget:?} budget (a frame is about {frame_s} s)"
         );
     }
 
