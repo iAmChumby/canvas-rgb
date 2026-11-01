@@ -7,7 +7,7 @@
 ; one Installed apps entry (canvas-rgb_is1).
 
 #ifndef AppVersion
-  #define AppVersion "0.4.1"
+  #define AppVersion "0.4.2"
 #endif
 ; VersionInfoVersion must be numeric x.x.x.x: a test build such as 0.2.1-dev.12 keeps its full string in
 ; AppVersion and uses only the part before the "-" here.
