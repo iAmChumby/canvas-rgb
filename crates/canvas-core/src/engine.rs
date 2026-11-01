@@ -36,7 +36,7 @@ const PREVIEW_MAX_FPS: u32 = canvas_proto::consts::PREVIEW_MAX_FPS;
 /// How long the parked thread waits before re-checking its state. It is woken
 /// immediately by any state change, so this is only a safety net against a missed
 /// notification.
-const PARK_POLL: Duration = Duration::from_millis(100);
+pub(crate) const PARK_POLL: Duration = Duration::from_millis(100);
 
 /// One device's sink, plus the LED count its frames must have.
 struct SinkEntry {
@@ -171,6 +171,9 @@ pub struct CoreEngine {
     wake: Condvar,
     /// The render thread's join handle.
     thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// How many times the parked loop woke up. A test counts them: a parked engine that
+    /// spins shows thousands of wake-ups a second (#39, #47).
+    park_wakeups: std::sync::atomic::AtomicU64,
 }
 
 impl CoreEngine {
@@ -196,6 +199,15 @@ impl CoreEngine {
     pub(crate) fn render_thread_id(&self) -> Option<u32> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.render_thread_id
+    }
+
+    /// How many times the parked loop has woken up.
+    ///
+    /// The parked loop waits [`PARK_POLL`] between wake-ups, so this counts the wake-ups of a
+    /// parked engine: a spinning loop shows thousands of them (#39, #47).
+    #[cfg(test)]
+    pub(crate) fn park_wakeups(&self) -> u64 {
+        self.park_wakeups.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -372,6 +384,7 @@ pub fn spawn_core(settings: EngineSettings) -> Arc<CoreEngine> {
         state: Mutex::new(State::new(&settings)),
         wake: Condvar::new(),
         thread: Mutex::new(None),
+        park_wakeups: std::sync::atomic::AtomicU64::new(0),
     });
 
     let thread_engine = Arc::clone(&engine);
@@ -490,6 +503,10 @@ fn render_loop(engine: Arc<CoreEngine>) {
                     .wait_timeout(state, PARK_POLL)
                     .unwrap_or_else(|e| e.into_inner());
                 state = guard;
+                // The count of wake-ups is what a parked engine is measured by (#39, #47).
+                engine
+                    .park_wakeups
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             drop(state);
             continue;
