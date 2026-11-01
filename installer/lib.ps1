@@ -1534,7 +1534,7 @@ function Assert-InstallDirProtected {
     $stop = {
         param($why)
         $tail = if ($Mode -eq 'Install') {
-            $state = if ($locked) { 'Setup had already locked this folder to administrators only when it found this.' }
+            $state = if ($locked) { 'Setup locked this folder to administrators only before it found this.' }
                      elseif ($created) { 'Setup asked for this folder to be created already protected, and changed nothing else.' }
                      else { 'The folder''s permissions were not changed.' }
             "Nothing was copied. $state Setup never deletes or takes over your files. Choose a folder under Program Files (the default) or directly under a drive (such as D:\canvas-rgb), then run setup again."
