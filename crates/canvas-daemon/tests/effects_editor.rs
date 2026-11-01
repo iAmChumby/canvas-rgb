@@ -913,3 +913,13 @@ async fn the_draft_route_needs_the_token() {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{method}");
     }
 }
+
+#[tokio::test]
+async fn a_draft_with_a_syntax_error_is_refused() {
+    let broken = "<head><title>Syntax</title></head><body><canvas id=\"c\"></canvas></body><script>\nvar c = document.getElementById('c');\nvar ctx = c.getContext('2d');\nvar = ;\n</script>";
+    let (router, _app, _home, _folder) = build();
+    let response = post_preview(router, preview_body(broken, serde_json::json!({}))).await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let message = json(response).await["message"].as_str().unwrap_or_default().to_string();
+    assert!(message.contains("eval_script:4"), "the runtime's line is kept: {message}");
+}
