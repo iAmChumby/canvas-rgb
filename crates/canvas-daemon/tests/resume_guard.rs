@@ -240,8 +240,9 @@ fn test_lines(lines: &[&str]) -> Vec<bool> {
                 while j < lines.len() && lines[j] != "}" {
                     j += 1;
                 }
-                for k in i..=j.min(lines.len() - 1) {
-                    skip[k] = true;
+                let end = j.min(lines.len() - 1);
+                for line in skip.iter_mut().take(end + 1).skip(i) {
+                    *line = true;
                 }
                 i = j + 1;
                 continue;
@@ -260,7 +261,7 @@ fn adapter_impl(line: &str) -> Option<String> {
     if !ADAPTER_TRAITS.contains(&trait_name) {
         return None;
     }
-    Some(type_name(type_path)?)
+    type_name(type_path)
 }
 
 /// The type of an `impl ... for ... {` line.

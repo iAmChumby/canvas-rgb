@@ -60,8 +60,8 @@ impl Clocks {
     /// The clocks of the machine.
     pub fn system() -> Self {
         Self {
-            monotonic: Arc::new(|| Instant::now()),
-            wall: Arc::new(|| SystemTime::now()),
+            monotonic: Arc::new(Instant::now),
+            wall: Arc::new(SystemTime::now),
         }
     }
 
