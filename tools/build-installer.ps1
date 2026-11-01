@@ -62,7 +62,7 @@ foreach ($exe in $c.DaemonExe, $c.TrayExe, $c.ServiceExe, $c.CliExe) {
     Copy-Item -LiteralPath $src -Destination $payload
 }
 foreach ($f in 'LICENSE', 'NOTICE') { Copy-Item -LiteralPath (Join-Path $repo $f) -Destination $payload }
-foreach ($f in 'lib.ps1', 'setup-elevated.ps1', 'setup-user.ps1', 'uninstall-elevated.ps1', 'uninstall-user.ps1', 'stop-canvas.ps1', 'fetch-openrgb.ps1', 'preflight.ps1', 'detect.ps1', 'openrgb.lock.json') {
+foreach ($f in 'lib.ps1', 'setup-elevated.ps1', 'setup-user.ps1', 'uninstall-elevated.ps1', 'uninstall-user.ps1', 'stop-canvas.ps1', 'fetch-openrgb.ps1', 'preflight.ps1', 'detect.ps1', 'check-install-dir.ps1', 'openrgb.lock.json') {
     Copy-Item -LiteralPath (Join-Path $repo "installer\$f") -Destination (Join-Path $payload 'installer')
 }
 $lock = Test-OpenRgbLock -Path (Join-Path $payload 'installer\openrgb.lock.json')
