@@ -735,7 +735,7 @@ try {
     Test-Case 'the uninstall reads the OpenRGB list before it deletes anything, and says the true state when it cannot' {
         $un = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\uninstall-elevated.ps1'))
         $iRead = $un.IndexOf('Get-OpenRgbProcessList')
-        $iDel = $un.IndexOf('& $sc delete')
+        $iDel = $un.IndexOf('Remove-CanvasRgbService')
         Assert-True ($iRead -gt 0 -and $iDel -gt 0 -and $iRead -lt $iDel) 'the list is read before the service is deleted'
         $r = Invoke-UninstallSandbox 'uninst2' -CimFails
         Assert-True ($r.Out -match 'could not list') "it names the cause: $($r.Out)"

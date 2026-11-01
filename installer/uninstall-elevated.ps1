@@ -20,7 +20,7 @@ function Say([string]$t) { Write-Step $t $LogFile }
 # way: the service can be gone and the program files still there. The person must be told what is
 # true, not "nothing was removed", so every step that removes something says so here. The fans are
 # their own stage: a stopped service does not hand them back, --restore-bios does.
-$uninstallState = @{ Service = 'none'; Fans = 'unknown'; Entries = $false; Files = $false; OpenRgb = $false; Config = $false }
+$uninstallState = @{ Service = 'none'; Fans = 'unknown'; Entry = $false; Shortcut = $false; Files = ''; OpenRgb = ''; Config = $false }
 
 try {
     if (-not (Test-IsAdmin)) { throw 'uninstall-elevated.ps1 must run elevated (uninstall.ps1 starts it).' }
@@ -126,9 +126,9 @@ try {
 
     # 2b. Delete the service (already stopped).
     if ($svc) {
-        $sc = Join-Path $env:SystemRoot 'System32\sc.exe'   # absolute: a bare name resolves through PATH, which a user may control
-        & $sc delete $c.ServiceName | ForEach-Object { Say "  sc delete: $_" }
-        if ($LASTEXITCODE -ne 0) { throw "sc.exe delete failed (exit $LASTEXITCODE)" }
+        $del = Remove-CanvasRgbService -ServiceName $c.ServiceName
+        $del.Lines | ForEach-Object { Say "  sc delete: $_" }
+        if ($del.ExitCode -ne 0) { throw "sc.exe delete failed (exit $($del.ExitCode))" }
         Say "  service $($c.ServiceName) deleted"
         $uninstallState.Service = 'removed'
     }
@@ -137,10 +137,10 @@ try {
     #    install dir first: the Uninstall button runs this from a copy inside it.
     Set-Location -LiteralPath $env:SystemRoot
     $rm = Get-UninstallRemovalDecision -InnoMode ([bool]$InnoMode)
-    if ($rm.RemoveScriptEntry -and (Test-Path -LiteralPath $c.UninstallKey)) { Remove-Item -LiteralPath $c.UninstallKey -Recurse -Force; Say '  removed the Installed apps entry'; $uninstallState.Entries = $true }
-    if ($rm.RemoveInnoEntry -and (Test-Path -LiteralPath $c.InnoUninstallKey)) { Remove-Item -LiteralPath $c.InnoUninstallKey -Recurse -Force; Say '  removed the Inno Installed apps entry'; $uninstallState.Entries = $true }
+    if ($rm.RemoveScriptEntry -and (Test-Path -LiteralPath $c.UninstallKey)) { Remove-Item -LiteralPath $c.UninstallKey -Recurse -Force; Say '  removed the Installed apps entry'; $uninstallState.Entry = $true }
+    if ($rm.RemoveInnoEntry -and (Test-Path -LiteralPath $c.InnoUninstallKey)) { Remove-Item -LiteralPath $c.InnoUninstallKey -Recurse -Force; Say '  removed the Inno Installed apps entry'; $uninstallState.Entry = $true }
     $lnk = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) $c.StartMenuShortcut
-    if ($rm.RemoveShortcut -and (Test-Path -LiteralPath $lnk)) { Remove-Item -LiteralPath $lnk -Force; Say '  removed the Start menu shortcut'; $uninstallState.Entries = $true }
+    if ($rm.RemoveShortcut -and (Test-Path -LiteralPath $lnk)) { Remove-Item -LiteralPath $lnk -Force; Say '  removed the Start menu shortcut'; $uninstallState.Shortcut = $true }
     $appStopped = @()
     foreach ($n in 'canvas-rgbd', 'canvas-rgb', 'canvas-rgb-cli') {
         Get-Process -Name $n -ErrorAction SilentlyContinue | ForEach-Object { $_ | Stop-Process -Force; $appStopped += $n; Say "  stopped running $n" }
@@ -178,19 +178,25 @@ try {
                     Remove-Item -LiteralPath $child.FullName -Recurse -Force
                 }
                 Say "  removed everything in $InstallDir except the OpenRGB folder"
+                $uninstallState.Files = 'some'
             } else {
                 Remove-Item -LiteralPath $InstallDir -Recurse -Force
                 Say "  removed $InstallDir"
+                $uninstallState.Files = 'all'
             }
-            $uninstallState.Files = $true
         }
     } else {
         # Inno removes the files it installed; the folders this script made (bin, uninstall) are
         # listed in [UninstallDelete]. The OpenRGB tree is ours to delete: it is the biggest tree
         # and Inno does not know it. It goes only when no OpenRGB in it is still running.
+        $treesGone = 0
         foreach ($t in $trees) {
             if ($keep -contains $t) { continue }
-            if (Test-Path -LiteralPath $t) { Remove-Item -LiteralPath $t -Recurse -Force; Say "  removed $t"; $uninstallState.OpenRgb = $true }
+            if (Test-Path -LiteralPath $t) { Remove-Item -LiteralPath $t -Recurse -Force; Say "  removed $t"; $treesGone++ }
+        }
+        if ($treesGone -gt 0) {
+            # Only some of the trees went when one of them was kept whole for a running OpenRGB.
+            $uninstallState.OpenRgb = if ($keep.Count -gt 0) { 'some' } else { 'all' }
         }
         Say '  install dir, Installed apps entry and Start menu shortcut are left to the Inno uninstaller'
     }

@@ -197,7 +197,7 @@ function Set-UserPathEntry { Write-Host 'STUB Set-UserPathEntry'; return $false 
     }
 
     # uninstall-elevated.ps1 runs as a temp COPY; lib.ps1 gets stubs so no service, HKLM key, process or admin check is real.
-    function Invoke-ElevatedUninstallSandbox([string]$Name, [string]$RecordText, [switch]$Purge, [string]$SignalService = '', [switch]$JunctionHome, [switch]$ListFails, [switch]$PurgeFails, [switch]$ServiceRunning, [switch]$StopRefused, [switch]$RestoreFails, [switch]$ManualBios) {
+    function Invoke-ElevatedUninstallSandbox([string]$Name, [string]$RecordText, [switch]$Purge, [string]$SignalService = '', [switch]$JunctionHome, [switch]$ListFails, [switch]$PurgeFails, [switch]$ServiceRunning, [switch]$StopRefused, [switch]$RestoreFails, [switch]$ManualBios, [switch]$DeleteFails) {
         $root = Join-Path $dir $Name
         $scripts = Join-Path $root 'scripts'; $pd = Join-Path $root 'PD\canvas-rgb'; $inst = Join-Path $root 'install'
         New-Item -ItemType Directory -Path $scripts, $inst -Force | Out-Null
@@ -221,6 +221,7 @@ function Set-UserPathEntry { Write-Host 'STUB Set-UserPathEntry'; return $false 
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\lib.ps1') -Destination $scripts
         $stubs = @'
 
+function Get-CanvasConst { $c = $script:CanvasConst; $c.ServiceName = '__SVCNAME__'; return $c }
 function Test-IsAdmin { return $true }
 function Assert-MachineHomeSafe { param($Path) Write-Host 'STUB Assert-MachineHomeSafe' }
 function Assert-InstallDirProtected { param($Path, $Mode) Write-Host 'STUB Assert-InstallDirProtected' }
@@ -241,6 +242,7 @@ function Stop-Service { param($Name, [switch]$Force) $global:SvcStatus = 'Stoppe
 function Get-Process { }
 function Get-CimInstance { }
 function Invoke-RestoreBios { param($Exe) Write-Host 'STUB Invoke-RestoreBios'; return __RESTORE__ }
+function Remove-CanvasRgbService { param($ServiceName) Write-Host 'STUB Remove-CanvasRgbService'; return [pscustomobject]@{ Lines = @('stub delete'); ExitCode = __DELETE__ } }
 function Remove-Item {
     param([string]$LiteralPath, [switch]$Recurse, [switch]$Force)
     if ($LiteralPath -like 'HK*') { Write-Host "STUB refused registry delete $LiteralPath"; return }
@@ -262,9 +264,11 @@ function Remove-Item {
             $stubs = $stubs.Replace('    Microsoft.PowerShell.Management\Remove-Item', "    if (`$LiteralPath -eq '$pd') { throw 'the machine data folder is in use' }`r`n    Microsoft.PowerShell.Management\Remove-Item")
         }
         $stubs = $stubs.Replace('__SIGNAL__', $(if ($SignalService) { $SignalService } else { 'no-such-service' }))
-        $stubs = $stubs.Replace('__SVC__', $(if ($ServiceRunning) { 'canvas-rgb-svc' } else { 'no-such-service' }))
+        $stubs = $stubs.Replace('__SVC__', $(if ($ServiceRunning) { 'canvas-rgb-svc-sandbox' } else { 'no-such-service' }))
+        $stubs = $stubs.Replace('__SVCNAME__', 'canvas-rgb-svc-sandbox')
         $stubs = $stubs.Replace('__STATUS__', $(if ($ServiceRunning) { 'Running' } else { 'Stopped' }))
         $stubs = $stubs.Replace('__RESTORE__', $(if ($RestoreFails) { '1' } else { '0' }))
+        $stubs = $stubs.Replace('__DELETE__', $(if ($DeleteFails) { '1' } else { '0' }))
         Add-Content -LiteralPath (Join-Path $scripts 'lib.ps1') -Value $stubs
         $rec = Join-Path $pd 'signalrgb-restore.json'
         if ($null -ne $RecordText) { [System.IO.File]::WriteAllText($rec, $RecordText) }
@@ -414,15 +418,16 @@ function Start-Process { Write-Host 'STUB Start-Process'; [pscustomobject]@{ Exi
         Assert-True ($gone.Words -match 'the background service was removed') $gone.Words
         Assert-True $gone.Removed 'the service is gone'
         # Every part that was removed is named, and each one makes it a removal.
-        $all = Get-UninstallStateReport -State @{ Service = 'removed'; Entries = $true; Files = $true; OpenRgb = $true; Config = $true }
+        $all = Get-UninstallStateReport -State @{ Service = 'removed'; Entry = $true; Shortcut = $true; Files = 'all'; OpenRgb = 'all'; Config = $true }
         Assert-True ($all.Words -match 'the background service was removed') $all.Words
-        Assert-True ($all.Words -match 'the Installed apps entry and the Start menu shortcut were removed') $all.Words
+        Assert-True ($all.Words -match 'the Installed apps entry was removed') $all.Words
+        Assert-True ($all.Words -match 'the Start menu shortcut was removed') $all.Words
         Assert-True ($all.Words -match 'the program files were removed') $all.Words
         Assert-True ($all.Words -match 'the OpenRGB folder was removed') $all.Words
         Assert-True ($all.Words -match 'your canvas-rgb settings were removed') $all.Words
         Assert-True $all.Removed 'things were removed'
         # Each state has its own words: the service alone and the files alone are not the same text.
-        $files = Get-UninstallStateReport -State @{ Service = 'none'; Files = $true }
+        $files = Get-UninstallStateReport -State @{ Service = 'none'; Files = 'all' }
         Assert-True ($files.Words -ne $gone.Words) 'each state has its own words'
         Assert-True ($files.Words -match 'the program files were removed') $files.Words
         Assert-True ($files.Words -notmatch 'the background service') 'it says nothing about the service'
@@ -449,6 +454,48 @@ function Start-Process { Write-Host 'STUB Start-Process'; [pscustomobject]@{ Exi
         Assert-True ($words -match 'your fans may still be under canvas-rgb control') "it says the true thing: $words"
         Assert-True ($words -match 'the background service was stopped') "it says what happened to the service: $words"
         Assert-True ($words -match 'Restart the PC') "it says what to do: $words"
+    }
+    Test-Case 'a service that will not stop is said, and the fans are not said to be back' {
+        # The real script, against fakes: the service refuses to stop, so nothing was removed and
+        # the service still drives every fan.
+        $r = Invoke-ElevatedUninstallSandbox 'u64s' $null -ServiceRunning -StopRefused
+        Assert-Equal $r.Code 1 "the uninstall refuses: $($r.Out)"
+        Assert-True ($r.Out -match 'did not stop') "it names the cause: $($r.Out)"
+        $words = [System.IO.File]::ReadAllText($r.State)
+        Assert-True ($words -match 'the background service is still running') "it says the service is still running: $words"
+        Assert-True ($words -notmatch 'your fans are back') "it must not say the fans are back: $words"
+        Assert-True ($words -match 'your fans may still be under canvas-rgb control') "it says the fans are still under canvas-rgb: $words"
+    }
+    Test-Case 'a service that could not be deleted is said, and what did go is named' {
+        # The real script, against fakes: the service stops and the fans go back, but the delete
+        # fails, so the service is still there and nothing was removed.
+        $r = Invoke-ElevatedUninstallSandbox 'u64d' $null -ServiceRunning -DeleteFails
+        Assert-Equal $r.Code 1 "the uninstall fails: $($r.Out)"
+        Assert-True ($r.Out -match 'sc\.exe delete failed') "it names the cause: $($r.Out)"
+        $words = [System.IO.File]::ReadAllText($r.State)
+        Assert-True ($words -match 'the background service was stopped') "it says the service was stopped: $words"
+        Assert-True ($words -notmatch 'the background service was removed') "it must not say the service was removed: $words"
+        Assert-True ($words -match 'your fans are back on your motherboard') "the fans did go back: $words"
+        Assert-True ($words -match 'canvas-rgb was not removed:') "nothing was removed: $words"
+    }
+    Test-Case 'each item that went is named on its own, and a partial delete says so' {
+        $entry = Get-UninstallStateReport -State @{ Service = 'none'; Entry = $true }
+        Assert-True ($entry.Words -match 'the Installed apps entry was removed') $entry.Words
+        Assert-True ($entry.Words -notmatch 'Start menu shortcut') 'the shortcut is its own item'
+        Assert-True $entry.Removed 'the entry is a removal'
+        $shortcut = Get-UninstallStateReport -State @{ Service = 'none'; Shortcut = $true }
+        Assert-True ($shortcut.Words -match 'the Start menu shortcut was removed') $shortcut.Words
+        Assert-True ($shortcut.Words -notmatch 'Installed apps entry') 'the entry is its own item'
+        # A delete that only went half way says so.
+        $some = Get-UninstallStateReport -State @{ Service = 'none'; Files = 'some' }
+        Assert-True ($some.Words -match 'some of the program files were removed') $some.Words
+        Assert-True $some.Removed 'some files went'
+        $all = Get-UninstallStateReport -State @{ Service = 'none'; Files = 'all' }
+        Assert-True ($all.Words -match 'the program files were removed') $all.Words
+        Assert-True ($all.Words -notmatch 'some of') 'a whole delete is not a partial one'
+        $tree = Get-UninstallStateReport -State @{ Service = 'none'; OpenRgb = 'some' }
+        Assert-True ($tree.Words -match 'some of the OpenRGB folder was removed') $tree.Words
+        Assert-True $tree.Removed 'the OpenRGB folder went'
     }
     Test-Case 'an uninstall that fails after it removed the program files says so, and the exit code says it too' {
         $r = Invoke-ElevatedUninstallSandbox 'u64b' $null -Purge -PurgeFails

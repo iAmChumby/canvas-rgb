@@ -997,6 +997,16 @@ function Invoke-RestoreBios {
     return $LASTEXITCODE
 }
 
+# Deletes the service (it is stopped already). Split out so a test can stand in for it: it runs
+# sc.exe, which a test must never do. Returns what sc.exe said and its exit code.
+function Remove-CanvasRgbService {
+    param([string]$ServiceName)
+    $sc = Join-Path $env:SystemRoot 'System32\sc.exe'   # absolute: a bare name resolves through PATH, which a user may control
+    $out = @()
+    & $sc delete $ServiceName | ForEach-Object { $out += "$_" }
+    return [pscustomobject]@{ Lines = $out; ExitCode = $LASTEXITCODE }
+}
+
 # ---- the hand-off between the two Inno steps (#60) ----
 # The Inno installer stops canvas-rgb before it copies anything (stop-canvas.ps1, PrepareToInstall)
 # and runs the elevated step after it copied the files (setup-elevated.ps1). The second step finds
@@ -1092,8 +1102,9 @@ function Clear-UninstallState {
 #   Service  'none' (there was none), 'running' (it would not stop), 'stopped' or 'removed'
 #   Fans     'unknown' (not known), 'back' (they are on the motherboard's own settings) or
 #            'manual' (they may still be under canvas-rgb control)
-#   Entry / Shortcut / Files / OpenRgb / Config: what this uninstall removed. Files and OpenRgb
-#            are 'all' or 'some' when only part of it went.
+#   Entry / Shortcut / Files / OpenRgb / Config: what this uninstall removed. Entry and Shortcut
+#            are true when that one item went; Files and OpenRgb are 'all' or 'some' when only
+#            part of it went.
 # Pure: it says nothing about the disk.
 # Returns the words, and whether anything was really removed: a service that was only stopped is
 # not a removal, so the caller can still say that nothing was taken away.
@@ -1117,23 +1128,33 @@ function Get-UninstallStateReport {
     } elseif ($fans -eq 'manual') {
         $gone += 'your fans may still be under canvas-rgb control'
     }
-    if ($State['Entries']) { $gone += 'the Installed apps entry and the Start menu shortcut were removed' }
-    if ($State['Files']) { $gone += 'the program files were removed' }
-    if ($State['OpenRgb']) { $gone += 'the OpenRGB folder was removed' }
+    # Each item is named on its own, and a partial delete says so (#64).
+    $files = [string]$State['Files']
+    $openrgb = [string]$State['OpenRgb']
+    if ($State['Entry']) { $gone += 'the Installed apps entry was removed' }
+    if ($State['Shortcut']) { $gone += 'the Start menu shortcut was removed' }
+    if ($files -eq 'all') { $gone += 'the program files were removed' }
+    elseif ($files -eq 'some') { $gone += 'some of the program files were removed' }
+    if ($openrgb -eq 'all') { $gone += 'the OpenRGB folder was removed' }
+    elseif ($openrgb -eq 'some') { $gone += 'some of the OpenRGB folder was removed' }
     if ($State['Config']) { $gone += 'your canvas-rgb settings were removed' }
-    $removed = ($service -eq 'removed') -or [bool]$State['Entries'] -or [bool]$State['Files'] `
-        -or [bool]$State['OpenRgb'] -or [bool]$State['Config']
+    $removed = ($service -eq 'removed') -or [bool]$State['Entry'] -or [bool]$State['Shortcut'] `
+        -or ($files -eq 'all') -or ($files -eq 'some') -or ($openrgb -eq 'all') -or ($openrgb -eq 'some') `
+        -or [bool]$State['Config']
     # What the person is told to do depends on the fans: they cannot be handed back while they may
     # still be under canvas-rgb control.
     $tail = if ($fans -eq 'manual') {
         'Restart the PC, or fix the fan driver, then run the uninstall again.'
-    } else {
+    } elseif ($removed) {
         'Run the uninstall again to finish.'
-    }
-    $words = if ($gone.Count -eq 0) {
-        'canvas-rgb was not removed: the uninstall stopped before anything was taken away.'
     } else {
-        'canvas-rgb was not removed cleanly: ' + ($gone -join ', ') + '. ' + $tail
+        'Run the uninstall again.'
+    }
+    if ($gone.Count -eq 0) {
+        $words = 'canvas-rgb was not removed: the uninstall stopped before anything was taken away.'
+    } else {
+        $head = if ($removed) { 'canvas-rgb was not removed cleanly: ' } else { 'canvas-rgb was not removed: ' }
+        $words = $head + ($gone -join ', ') + '. ' + $tail
     }
     return [pscustomobject]@{ Words = $words; Removed = $removed }
 }
