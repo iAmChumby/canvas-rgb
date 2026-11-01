@@ -26,8 +26,9 @@
 //! - web tests (`findBy*` timeouts, #59): `app/web/vitest.setup.ts` and its test own that;
 //! - a missing log line (#45/#55): the mechanism is unknown.
 //!
-//! Test code is: any file in a `tests/` folder, `tests.rs`, `*_tests.rs`, and the part of a
-//! source file from its `#[cfg(test)]` line on. Comment lines never count.
+//! Test code is: any file in a `tests/` folder, `tests.rs`, `*_tests.rs`, a file that a `lib.rs`
+//! or `main.rs` declares as `#[cfg(test)] mod name;` (e.g. `canvas-core/src/cpu.rs`), and the
+//! part of a source file from its last `#[cfg(test)] mod` on. Comment lines never count.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -46,6 +47,10 @@ const CLOCK_WORDS: &[&str] = &[
     "as_micros()",
 ];
 
+/// The ratio shape of #39 (`percent < 0.05`) is NOT in the list: a CPU percentage has no
+/// distinctive word to match, and a bare `percent` or `ratio` would flag product maths. It is a
+/// limit of the scan, listed in docs/bug-classes.md.
+
 /// Accessors that may sit between the clock word and the comparison.
 const ACCESSORS: &[&str] = &[".as_millis()", ".as_secs_f64()", ".as_secs_f32()", ".as_secs()", ".as_micros()"];
 
@@ -55,14 +60,13 @@ const ACCESSORS: &[&str] = &[".as_millis()", ".as_secs_f64()", ".as_secs_f32()",
 /// "the property" (the bound is what the test is about), and "open" (a real sibling of the class,
 /// listed in docs/bug-classes.md and not yet fixed; deleting its entry is the fix's last step).
 const BOUND_ALLOWED: &[(&str, &str, &str)] = &[
-    ("canvas-core/src/timer.rs", "elapsed < Duration::from_millis(120)", "open: 120 ms ceiling on a 33 ms sleep; a stalled runner overshoots it"),
+    ("canvas-core/src/timer.rs", "elapsed < Duration::from_millis(120)", "open: 120 ms ceiling on three frames at 100 fps (30 ms of scheduled sleeps); a stalled runner overshoots it"),
     ("canvas-core/src/timer.rs", "start.elapsed() < Duration::from_millis(100)", "open: 100 ms ceiling on a catch-up that should cost nothing"),
     ("canvas-core/src/timer.rs", "start.elapsed() < Duration::from_millis(60)", "open: 60 ms ceiling after a reset; one 16.7 ms frame of slack"),
     ("canvas-daemon/src/cli.rs", "elapsed.as_millis() < 5_000", "hang guard: 5 s against a check that must stop at its first frame"),
-    ("canvas-daemon/src/logging.rs", "waited < std::time::Duration::from_secs(5)", "hang guard: every step of that test is bounded by 250 ms; 5 s means a bound was ignored"),
-    ("canvas-daemon/src/logging.rs", "took < std::time::Duration::from_millis(1000)", "the property: run_bounded gives up on a 5 s step after its 250 ms limit; 750 ms of slack"),
+    ("canvas-daemon/src/logging.rs", "took < std::time::Duration::from_millis(1000)", "open: a 1 s ceiling on run_bounded giving up after its 250 ms limit; a runner stalled for 750 ms past the limit fails it"),
     ("canvas-daemon/src/user_effects.rs", "took < std::time::Duration::from_secs(5)", "hang guard: a 400 ms render budget against a 30 s frame budget; 5 s means the frame was not held to the budget"),
-    ("canvas-daemon/src/user_effects.rs", "took < budget + std::time::Duration::from_secs_f64(frame_s)", "the property: the render is held to its budget plus one calibrated frame (the best of three samples, about 0.5 s); a constant slack, not machine-scaled (#51)"),
+    ("canvas-daemon/src/user_effects.rs", "took < budget + std::time::Duration::from_secs_f64(frame_est)", "open, calibrated: the render is held to its budget plus one frame, where the frame is the best of three samples scaled to the effect (about 0.5 s). The slack is a constant once measured: a stall longer than it fails the test (#51)"),
     ("canvas-daemon/tests/effects_import.rs", "elapsed.as_millis() < 6_000", "open: 6 s ceiling on a 2 s import budget"),
     ("canvas-daemon/tests/quit.rs", "started.elapsed() < Duration::from_secs(15)", "open: a child process must serve its API within 15 s on a loaded runner"),
     ("canvas-daemon/tests/quit.rs", "took <= EXIT_DEADLINE", "the property: the daemon's own exit deadline"),
@@ -70,7 +74,7 @@ const BOUND_ALLOWED: &[(&str, &str, &str)] = &[
     ("canvas-html/tests/effects.rs", "elapsed.as_millis() < 30 * canvas_html::FRAME_BUDGET_MS as u128", "hang guard: 30 frames against 30 frame budgets of the engine"),
 ];
 
-/// Allow-list for rule 2 (sleep-then-assert): (path suffix, text the sleep line must contain, why).
+/// Allow-list for rule 2 (sleep-then-assert): (path suffix, text the sleep line or the three lines after it must contain, why).
 ///
 /// "safe" reasons: the sleep is a minimum (a slow runner only waits longer), or the assert is about
 /// something that did NOT happen (slowness hides a failure, it cannot make one), or the sleep is
@@ -79,10 +83,13 @@ const BOUND_ALLOWED: &[(&str, &str, &str)] = &[
 const SLEEP_ASSERT_ALLOWED: &[(&str, &str, &str)] = &[
     ("attack_shark_x6/hid_cache.rs", "sleep(Duration::from_millis(350))", "safe: sleeps past a 300 ms TTL; a slower runner only ages the cache more"),
     ("canvas-adapters/tests/adapters_tests.rs", "sleep(Duration::from_millis(1700))", "safe: sleeps past the repeat interval; slowness only passes it further"),
-    ("canvas-core/src/tests.rs", "sleep(Duration::from_millis(300))", "open: waits 300 ms for the engine to park, then asserts it parked (same family as #39)"),
-    ("canvas-core/src/tests.rs", "sleep(Duration::from_secs(2))", "safe: asserts no frame was rendered or a count stayed at or under a ceiling; slowness lowers the count"),
+    ("canvas-core/src/cpu.rs", "sleep(Duration::from_millis(10))", "safe: the poll loop that waits for the engine to park, with a 10 s deadline"),
+    ("canvas-core/src/tests.rs", "stats.parked", "open: waits 300 ms for the engine to park, then asserts it parked (same family as #39)"),
+    ("canvas-core/src/tests.rs", "engine.stats().parked", "open: waits 300 ms for the engine to park, then asserts it parked (same family as #39)"),
+    ("canvas-core/src/tests.rs", "before, after", "safe: asserts the frame counter did not move over a 2 s sleep; slowness cannot add a frame to a parked engine"),
+    ("canvas-core/src/tests.rs", "let count = preview.count();", "open: a ceiling of 35 on the preview frames counted after a 2 s sleep; an overshooting sleep RAISES the count"),
     ("canvas-core/src/tests.rs", "sleep(Duration::from_secs(1))", "safe: asserts the frame counter did not move while paused"),
-    ("canvas-core/src/tests.rs", "sleep(Duration::from_millis(150))", "safe: an upper ceiling on frames rendered; slowness lowers the count"),
+    ("canvas-core/src/tests.rs", "burst", "open: a ceiling of 15 frames after a 150 ms sleep; an overshooting sleep RAISES the count"),
     ("canvas-core/src/tests.rs", "sleep(Duration::from_millis(500))", "safe: asserts no more preview frames arrive"),
     ("canvas-daemon/src/logging.rs", "|| std::thread::sleep(std::time::Duration::from_secs(5))", "the property: the sleep is the stuck step run_bounded must give up on"),
     ("canvas-daemon/src/peripherals.rs", "sleep(Duration::from_millis(200))", "safe: asserts the gated sink has NOT written yet"),
@@ -97,7 +104,7 @@ const SLEEP_ASSERT_ALLOWED: &[(&str, &str, &str)] = &[
     ("canvas-daemon/tests/exit_lines.rs", "sleep(Duration::from_millis(100))", "safe: the poll loop of a child exit, with a 20 s deadline that panics"),
     ("canvas-daemon/tests/wave1.rs", "sleep(std::time::Duration::from_secs(2))", "open: 2 s for an engine to park, then asserts it parked; a state reached in about 100 ms"),
     ("canvas-svc/src/openrgb_tests.rs", "sleep(Duration::from_millis(200))", "safe: the poll loop breaks when the boot color is written"),
-    ("canvas-svc/src/openrgb_tests.rs", "sleep(between)", "safe: sleeps past the watch window; slowness only passes it further"),
+    ("canvas-svc/src/openrgb_tests.rs", "sleep(between)", "open: a real sleep between two steps that run on synthetic clocks, to let the fake OpenRGB server see the first write; whether a stalled runner needs longer is not traced (UNKNOWN)"),
     ("canvas-svc/src/update_install_tests.rs", "sleep(Duration::from_millis(10))", "safe: the poll loop of a killed child, with a 10 s deadline that fails"),
     ("canvas-svc/src/update_install_tests.rs", "sleep(Duration::from_millis(300))", "safe: asserts a suspended setup has NOT run"),
 ];
@@ -177,16 +184,44 @@ fn allowed(list: &[(&str, &str, &str)], id: u8, rel: &str, line: &str, used: &mu
     hit
 }
 
-/// Whether the file is test code from its first line.
-fn is_test_file(rel: &str) -> bool {
+/// Whether the file is test code from its first line. `test_only` holds the files a `lib.rs` or
+/// `main.rs` declares as `#[cfg(test)] mod name;` (their file need not be named like a test, e.g.
+/// `canvas-core/src/cpu.rs`).
+fn is_test_file(rel: &str, test_only: &[String]) -> bool {
     let name = rel.rsplit('/').next().unwrap_or(rel);
-    rel.contains("/tests/") || name == "tests.rs" || name.ends_with("_tests.rs")
+    rel.contains("/tests/") || name == "tests.rs" || name.ends_with("_tests.rs") || test_only.iter().any(|t| t == rel)
+}
+
+/// The files that `rel` (a `lib.rs` or `main.rs`) declares as `#[cfg(test)] mod name;`, as
+/// repo-relative paths.
+fn test_only_modules(rel: &str, text: &str) -> Vec<String> {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    if name != "lib.rs" && name != "main.rs" {
+        return Vec::new();
+    }
+    let dir = rel.rsplit_once('/').map_or("", |(d, _)| d);
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        let attr = line.trim_start();
+        // `#[cfg(test)]` or `#[cfg(all(test, windows))]`.
+        if !(attr.starts_with("#[cfg(") && attr.contains("test")) {
+            continue;
+        }
+        let Some(next) = lines.get(i + 1) else { continue };
+        let next = next.trim();
+        let decl = next.strip_prefix("pub(crate) ").or_else(|| next.strip_prefix("pub ")).unwrap_or(next);
+        if let Some(module) = decl.strip_prefix("mod ").and_then(|m| m.strip_suffix(';')) {
+            out.push(format!("{dir}/{}.rs", module.trim()));
+        }
+    }
+    out
 }
 
 /// Scans one file's text. `rel` is the repo-relative path with `/` separators.
-fn scan_text_used(rel: &str, text: &str, used: &mut Used) -> Vec<Finding> {
+fn scan_text_used(rel: &str, text: &str, test_only: &[String], used: &mut Used) -> Vec<Finding> {
     let lines: Vec<&str> = text.lines().collect();
-    let first_test_line = if is_test_file(rel) {
+    let first_test_line = if is_test_file(rel, test_only) {
         0
     } else {
         // The test module: the last `#[cfg(test)]` line whose next line opens a `mod`. A `#[cfg(test)]`
@@ -214,13 +249,15 @@ fn scan_text_used(rel: &str, text: &str, used: &mut Used) -> Vec<Finding> {
             found.push(Finding { file: rel.to_string(), line: i + 1, rule: 1, text: raw.trim().to_string() });
         }
         if code.contains("sleep(") && !code.contains("fn ") {
-            let asserts_soon = lines
-                .iter()
-                .skip(i + 1)
-                .filter(|l| !l.trim().is_empty() && !is_comment(l))
-                .take(3)
-                .any(|l| l.trim_start().starts_with("assert"));
-            if asserts_soon && !allowed(SLEEP_ASSERT_ALLOWED, 2, rel, raw, used) {
+            let following: Vec<&str> =
+                lines.iter().skip(i + 1).copied().filter(|l| !l.trim().is_empty() && !is_comment(l)).take(3).collect();
+            let asserts_soon = following.iter().any(|l| l.trim_start().starts_with("assert"));
+            // An allow-list entry for a sleep matches the sleep line or the three lines after
+            // it, so two identical sleeps in one file can have different entries.
+            let window = format!("{raw}
+{}", following.join("
+"));
+            if asserts_soon && !allowed(SLEEP_ASSERT_ALLOWED, 2, rel, &window, used) {
                 found.push(Finding { file: rel.to_string(), line: i + 1, rule: 2, text: raw.trim().to_string() });
             }
         }
@@ -229,7 +266,7 @@ fn scan_text_used(rel: &str, text: &str, used: &mut Used) -> Vec<Finding> {
 }
 
 fn scan_text(rel: &str, text: &str) -> Vec<Finding> {
-    scan_text_used(rel, text, &mut Vec::new())
+    scan_text_used(rel, text, &[], &mut Vec::new())
 }
 
 fn repo_root() -> PathBuf {
@@ -261,8 +298,7 @@ fn scan_repo() -> (usize, Vec<Finding>, Used) {
     let root = repo_root();
     let mut files = Vec::new();
     collect(&root.join("crates"), &mut files);
-    let mut found = Vec::new();
-    let mut used = Used::new();
+    let mut read = Vec::new();
     for path in &files {
         let rel = path
             .strip_prefix(&root)
@@ -272,13 +308,19 @@ fn scan_repo() -> (usize, Vec<Finding>, Used) {
             .collect::<Vec<_>>()
             .join("/");
         let rel = rel.trim_start_matches("../").to_string();
+        // Lossy: a non-UTF-8 byte must not hide a file from the scan.
+        let text = String::from_utf8_lossy(&fs::read(path).expect("read a source file")).into_owned();
+        read.push((rel, text));
+    }
+    let test_only: Vec<String> = read.iter().flat_map(|(rel, text)| test_only_modules(rel, text)).collect();
+    let mut found = Vec::new();
+    let mut used = Used::new();
+    for (rel, text) in &read {
         // This file names every pattern it scans for; it is not a test of a clock.
         if rel.ends_with("canvas-svc/tests/timing_class.rs") {
             continue;
         }
-        // Lossy: a non-UTF-8 byte must not hide a file from the scan.
-        let text = String::from_utf8_lossy(&fs::read(path).expect("read a source file")).into_owned();
-        found.extend(scan_text_used(&rel, &text, &mut used));
+        found.extend(scan_text_used(rel, text, &test_only, &mut used));
     }
     (files.len(), found, used)
 }
@@ -377,4 +419,29 @@ fn an_allow_list_entry_applies_to_its_file_and_line_only() {
     assert!(used.is_empty());
     assert!(allowed(&[("crates/x/tests/a.rs", "x.elapsed()", "why")], 1, "crates/x/tests/a.rs", line, &mut used));
     assert_eq!(used, vec![(1, 0)]);
+}
+
+#[test]
+fn a_file_declared_as_a_cfg_test_module_is_test_code_from_its_first_line() {
+    let lib = "pub mod a;
+#[cfg(all(test, windows))]
+mod cpu;
+#[cfg(test)]
+pub(crate) mod b_tests;
+#[cfg(test)]
+mod inline {
+}
+";
+    assert_eq!(
+        test_only_modules("crates/x/src/lib.rs", lib),
+        vec!["crates/x/src/cpu.rs".to_string(), "crates/x/src/b_tests.rs".to_string()]
+    );
+    assert!(test_only_modules("crates/x/src/other.rs", lib).is_empty());
+    let body = "fn t() {
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+";
+    let test_only = vec!["crates/x/src/cpu.rs".to_string()];
+    assert_eq!(scan_text_used("crates/x/src/cpu.rs", body, &test_only, &mut Used::new()).len(), 1);
+    assert!(scan_text_used("crates/x/src/other.rs", body, &test_only, &mut Used::new()).is_empty());
 }

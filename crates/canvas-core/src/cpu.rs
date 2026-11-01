@@ -6,8 +6,11 @@
 //! Two tests read that budget, in two ways:
 //!
 //! - `a_parked_engine_wakes_on_its_period_and_renders_nothing` counts the wake-ups of the
-//!   parked loop. That is a property of the loop, and no clock is involved: a slow machine
-//!   can only delay a wake-up, never add one.
+//!   parked loop over a 3 s window. The verdict is a count, not a duration: a slow machine
+//!   can only delay a wake-up, never add one. (It does use a clock to bound the window: it
+//!   waits until the engine is parked, then sleeps 3 s and counts.) It checks that the loop
+//!   does not spin; it does NOT check what each wake-up costs, which only the ignored CPU
+//!   measurement below does.
 //! - `a_parked_engine_costs_almost_no_cpu` measures the CPU time of the render thread. That
 //!   is a measurement, not a gate: `GetThreadTimes` counts in 15.625 ms ticks, so the 0.05 %
 //!   budget (1.5 ms) is below the clock's own resolution and one tick fails it. It is
@@ -107,8 +110,12 @@ fn a_parked_engine_wakes_on_its_period_and_renders_nothing() {
         power: Power::Running,
         brightness: 100,
     });
-    // Let it settle into the parked state.
-    std::thread::sleep(Duration::from_millis(300));
+    // Wait for the engine to settle into the parked state (up to 10 s: a loaded runner can take
+    // longer than a fixed sleep), then count.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !engine.stats().parked && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
     assert!(engine.stats().parked, "the engine is parked: nothing consumes its frames");
 
     let before = engine.park_wakeups();
