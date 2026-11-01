@@ -1514,9 +1514,10 @@ function Find-InstallDirTreeProblem {
 # The one install-folder guard, for setup and uninstall.
 #   -Mode Install  1. read-only checks FIRST: every parent (junction, owner, rights), then the folder and
 #                     every entry in it. A refusal here has changed nothing.
-#                  2. a folder that does not exist yet is created already protected (its parents were
-#                     walked before this).
-#                  3. lock the folder (protected ACL), then check the folder, its entries and its parents again.
+#                  2. a folder that does not exist yet is created WITH the protected descriptor in one call (its
+#                     parents were walked before this); a junction or foreign owner found there is refused.
+#                  3. an existing folder is locked (protected ACL); a new one was born protected and is not
+#                     locked again. Then the folder, its entries and its parents are checked again.
 #   -Mode Verify   (uninstall) the read-only checks only: no create and no lock; a missing folder passes.
 # Throws a plain "STOP:" message at the first problem. Never deletes or adopts anything.
 function Assert-InstallDirProtected {
@@ -1534,7 +1535,7 @@ function Assert-InstallDirProtected {
         param($why)
         $tail = if ($Mode -eq 'Install') {
             $state = if ($locked) { 'Setup had already locked this folder to administrators only when it found this.' }
-                     elseif ($created) { 'Setup created this folder, empty, and changed nothing else.' }
+                     elseif ($created) { 'Setup asked for this folder to be created already protected, and changed nothing else.' }
                      else { 'The folder''s permissions were not changed.' }
             "Nothing was copied. $state Setup never deletes or takes over your files. Choose a folder under Program Files (the default) or directly under a drive (such as D:\canvas-rgb), then run setup again."
         } else {
@@ -1561,13 +1562,21 @@ function Assert-InstallDirProtected {
     }
     if ($Mode -eq 'Verify') { return }
 
-    # 2 and 3. Born protected if new, then locked, then looked at again.
+    # 2. A new folder is created WITH the protected descriptor in the one call and is never locked
+    #    separately: if something (a junction) was put at the path after the read above, Create does
+    #    nothing, and a separate lock would follow that junction and re-permission its target. So the
+    #    created path is looked at first, and a junction or a foreign owner is refused with nothing locked.
     if (-not $exists) {
         try { & $Applier.Create $full } catch { throw (& $stop "the folder could not be created ($($_.Exception.Message))") }
         $created = $true
+        if (& $Reader.IsReparse $full) { throw (& $stop "'$full' is a junction or symbolic link that appeared before the folder could be created") }
+        $owner = & $Reader.OwnerSid $full
+        if (-not (Test-OwnerSidAllowed -Sid $owner)) { throw (& $stop "'$full' is owned by $owner, not SYSTEM or Administrators") }
+    } else {
+        # 3. An existing folder that the checks above found admin-owned and junction-free is locked.
+        try { & $Applier.Lock $full } catch { throw (& $stop "its permissions could not be locked ($($_.Exception.Message))") }
+        $locked = $true
     }
-    try { & $Applier.Lock $full } catch { throw (& $stop "its permissions could not be locked ($($_.Exception.Message))") }
-    $locked = $true
     $problem = Find-InstallDirTreeProblem -Root $full -Reader $Reader
     if ($problem) { throw (& $stop $problem) }
     $problem = Find-InstallDirParentProblem -Path $full -Reader $Reader

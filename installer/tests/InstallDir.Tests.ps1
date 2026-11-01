@@ -42,6 +42,7 @@ function New-DefaultDisk {
 $script:Disk = @{}
 $script:Log = $null
 $script:AfterLock = $null
+$script:AtCreate = $null
 function New-FakeReader {
     @{
         Exists    = { param($p) $script:Log.Add("Exists $p"); $script:Disk.ContainsKey($p) }
@@ -56,8 +57,8 @@ function New-FakeReader {
 # a child keeps whatever ACEs it has.
 function New-FakeApplier {
     @{
-        Create = { param($p) $script:Log.Add("Create $p"); $script:Disk[$p] = New-Node $true $BA (Get-ProtectedAces) }
-        Lock   = { param($p) $script:Log.Add("Lock $p"); $script:Disk[$p].Aces = @(Get-ProtectedAces); if ($script:AfterLock) { & $script:AfterLock $script:Disk } }
+        Create = { param($p) $script:Log.Add("Create $p"); if ($script:AtCreate) { & $script:AtCreate $script:Disk }; if (-not $script:Disk.ContainsKey($p)) { $script:Disk[$p] = New-Node $true $BA (Get-ProtectedAces) } }
+        Lock   = { param($p) $script:Log.Add("Lock $p"); $t = $script:Disk[$p]; if ($t.Target) { $t = $script:Disk[$t.Target] }; $t.Aces = @(Get-ProtectedAces); if ($script:AfterLock) { & $script:AfterLock $script:Disk } }
     }
 }
 $APP = 'C:\Program Files\canvas-rgb'
@@ -108,12 +109,34 @@ Test-Case 'the same Modify grant one level up (D:\Apps) is refused, for an exist
     Assert-True ((-not $r.Ok) -and $r.Message -match "'D:\\Apps', a folder above it") $r.Message
     Assert-True (-not ($r.Log | Where-Object { $_ -match '^(Create|Lock) ' })) 'a new folder under a bad parent is not even created'
 }
-Test-Case 'a folder that does not exist yet is created, locked, then passes' {
+Test-Case 'a folder that does not exist yet is created already protected and is NOT locked separately, then passes' {
     $d = New-DefaultDisk
     $r = Invoke-Guard $d 'Install' 'C:\Program Files\canvas-rgb-new'
     Assert-True $r.Ok $r.Message
     Assert-True ($r.Log -contains 'Create C:\Program Files\canvas-rgb-new') 'created'
-    Assert-True ($r.Log -contains 'Lock C:\Program Files\canvas-rgb-new') 'locked'
+    Assert-True (-not ($r.Log | Where-Object { $_ -like 'Lock *' })) 'no separate lock on a folder setup created'
+}
+Test-Case 'a junction planted at the path AFTER the "does not exist" read is refused, nothing is locked, the target keeps its ACL' {
+    $d = New-DefaultDisk
+    $d['D:\'] = New-Node $true $BA @((New-Ace $SY $FULL_CTL), (New-Ace $BA $FULL_CTL))
+    $d['D:\target'] = New-Node $true $LUKE @((New-Ace $LUKE $FULL_CTL), (New-Ace $USERS $MODIFY))
+    $before = (@($d['D:\target'].Aces) | ForEach-Object { "$($_.Sid):$($_.Mask)" }) -join ','
+    $script:AtCreate = { param($disk) $disk['D:\canvas-rgb'] = @{ Dir = $true; Owner = $BA; Aces = @(); Reparse = $true; Target = 'D:\target' } }
+    try { $r = Invoke-Guard $d 'Install' 'D:\canvas-rgb' } finally { $script:AtCreate = $null }
+    Assert-True ((-not $r.Ok) -and $r.Message -match 'is a junction or symbolic link that appeared before the folder could be created') $r.Message
+    Assert-True (-not ($r.Log | Where-Object { $_ -like 'Lock *' })) 'TRUE: no Lock ran, so nothing was followed'
+    $after = (@($d['D:\target'].Aces) | ForEach-Object { "$($_.Sid):$($_.Mask)" }) -join ','
+    Assert-Equal $after $before 'the target folder keeps its ACL'
+    Assert-True ($r.Message -match 'asked for this folder to be created') 'text is true in this branch'
+    Assert-True (-not ($r.Message -match 'created this folder, empty')) 'does not claim it created one'
+}
+Test-Case 'a plain folder planted at the path by someone else is refused as foreign-owned, and nothing is locked' {
+    $d = New-DefaultDisk
+    $d['D:\'] = New-Node $true $BA @((New-Ace $SY $FULL_CTL), (New-Ace $BA $FULL_CTL))
+    $script:AtCreate = { param($disk) $disk['D:\canvas-rgb'] = @{ Dir = $true; Owner = $LUKE; Aces = @((New-Ace $LUKE $FULL_CTL)); Reparse = $false } }
+    try { $r = Invoke-Guard $d 'Install' 'D:\canvas-rgb' } finally { $script:AtCreate = $null }
+    Assert-True ((-not $r.Ok) -and $r.Message -match 'is owned by S-1-5-21-1-2-3-1001') $r.Message
+    Assert-True (-not ($r.Log | Where-Object { $_ -like 'Lock *' })) 'no Lock'
 }
 
 # ---------------------------------------------------------------- each refusal
@@ -400,6 +423,8 @@ Test-Case 'real ACLs: the real owner reader refuses a folder whose owner is not 
             Assert-Throws { Assert-InstallDirProtected -Path $t -Mode Install } "is owned by $([regex]::Escape($ownerBefore)).*permissions were not changed"
             Assert-Equal (Get-PathOwnerSid -Path $t) $ownerBefore 'the owner is still the same after the refused install'
             Assert-True (-not (Get-Acl -LiteralPath $t).AreAccessRulesProtected) 'TRUE: the refused install left the folder unlocked'
+        } else {
+            Skip-Case 'real ACLs: the real guard refuses a folder this user owns, and leaves it unlocked' 'elevated token: new folders are Administrators-owned, so there is no real non-admin owner to refuse'
         }
     } finally { Remove-Throwaway $t }
 }
@@ -463,6 +488,7 @@ Test-Case 'the uninstall PowerShell that decides "is {app} under Program Files" 
     Assert-Equal (& $run "C:\Program Files\it's\canvas-rgb" 'C:\Program Files') 0 'an apostrophe in the path does not break it'
     $un = Get-IssFunction 'function InitializeUninstall'
     Assert-True ($un -match 'if AppIsUnderProgramFiles then') 'InitializeUninstall branches on it when the copy is missing'
+    Assert-True ($un -notmatch '(?s)if AppIsUnderProgramFiles then\s+begin[^;]*?Ran := True') 'being under Program Files never sets the run flag by itself'
     Assert-True ($un -match "is in a folder outside Program Files") 'the other branch refuses with its own message'
 }
 Test-Case 'real ACLs: a junction inside is found by the real reader and its target is not entered' {
@@ -481,6 +507,90 @@ Test-Case 'real ACLs: a junction inside is found by the real reader and its targ
         Assert-True ($why -match 'junction') "got: $why"
     } finally { Remove-Throwaway $t; Remove-Throwaway $victim }
 }
+Test-Case 'real disk: a junction planted at the path after the "does not exist" read is refused, and its target ACL is untouched' {
+    $parent = New-Throwaway; $victim = New-Throwaway
+    try {
+        $target = Join-Path $parent 'canvas-rgb'
+        & cmd.exe /c mklink /J "$target" "$victim" | Out-Null
+        $sddlBefore = (Get-Acl -LiteralPath $victim).GetSecurityDescriptorSddlForm('Access')
+        $rd = New-InstallDirReader
+        # Parents and owners are faked as fine (they live under this user's profile); the junction check is real.
+        $rd.OwnerSid = { param($p) 'S-1-5-32-544' }; $rd.Aces = { param($p) @() }
+        $real = $rd.Exists; $state = @{ First = $true; Target = $target }
+        $rd.Exists = { param($p) if ($p -eq $state.Target -and $state.First) { $state.First = $false; return $false }; & $real $p }.GetNewClosure()
+        $msg = ''
+        try { Assert-InstallDirProtected -Path $target -Mode Install -Reader $rd } catch { $msg = $_.Exception.Message }
+        Assert-True ($msg -match 'junction or symbolic link that appeared before the folder could be created') "got: $msg"
+        Assert-Equal (Get-Acl -LiteralPath $victim).GetSecurityDescriptorSddlForm('Access') $sddlBefore 'the junction target ACL is unchanged'
+    } finally { if (Test-Path -LiteralPath "$parent\canvas-rgb") { [System.IO.Directory]::Delete("$parent\canvas-rgb") }; Remove-Throwaway $parent; Remove-Throwaway $victim }
+}
+
+# The uninstaller's own check of {app}, used when the protected copy is missing: the .iss text itself, run on
+# throwaway folders. "Trusted owners" is widened to this user (and a folder DACL granting this user Full) so an
+# admin-only-looking folder can be built without being an administrator; the refusals use the real list.
+$appCheckLine = ($iss -split "`r?`n" | Where-Object { $_ -match '^\s*AppCheckScript = ' }) | Select-Object -First 1
+$appCheckText = [regex]::Match($appCheckLine, "= '(.*)';\s*$").Groups[1].Value.Replace("''", "'")
+function Invoke-AppCheck([string]$App, [string[]]$ExtraTrusted = @()) {
+    $text = $appCheckText.Replace('%APP%', $App.Replace("'", "''"))
+    if ($ExtraTrusted.Count) {
+        $list = ($ExtraTrusted | ForEach-Object { "'$_'" }) -join ','
+        $text = $text.Replace("`$k = 'S-1-5-18','S-1-5-32-544';", "`$k = 'S-1-5-18','S-1-5-32-544',$list;")
+    }
+    & powershell.exe -NoProfile -Command $text | Out-Null
+    return $LASTEXITCODE
+}
+function New-FakeApp {
+    $a = New-Throwaway
+    New-Item -ItemType Directory -Path "$a\installer" | Out-Null
+    foreach ($f in 'installer\uninstall-elevated.ps1', 'installer\lib.ps1', 'installer\uninstall-user.ps1', 'canvas-rgb-svc.exe') { 'x' | Set-Content -LiteralPath "$a\$f" }
+    $sec = New-Object Security.AccessControl.DirectorySecurity
+    $sec.SetSecurityDescriptorSddlForm($script:CanvasConst.MachineHomeSddl + "(A;OICI;FA;;;$($me.Value))", [Security.AccessControl.AccessControlSections]::Access)
+    Set-Acl -LiteralPath $a -AclObject $sec
+    return $a
+}
+Test-Case 'embedded {app} check: an admin-only folder passes, and each of a user write ACE, a junction and a foreign owner is refused' {
+    Assert-True ($appCheckText.Length -gt 100) 'found the script in the .iss'
+    $a = New-FakeApp
+    try {
+        $mine = Get-PathOwnerSid -Path $a
+        Assert-Equal (Invoke-AppCheck $a @($mine)) 0 'admin-only (plus this user as owner) passes'
+        Assert-Equal (Invoke-AppCheck $a @()) $(if (Test-OwnerSidAllowed $mine) { 0 } else { 1 }) 'with the real owner list a user-owned folder is refused (an elevated owner is Administrators and passes)'
+        # a user write ACE on a script that uninstall-elevated.ps1 dot-sources
+        $lib = "$a\installer\lib.ps1"; $acl = Get-Acl -LiteralPath $lib
+        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($usersSid, 'Modify', 'Allow'))); Set-Acl -LiteralPath $lib -AclObject $acl
+        Assert-Equal (Invoke-AppCheck $a @($mine)) 1 'a user write ACE on lib.ps1 is refused'
+    } finally { Remove-Throwaway $a }
+    $b = New-FakeApp; $victim = New-Throwaway
+    try {
+        $mine = Get-PathOwnerSid -Path $b
+        Remove-Item -LiteralPath "$b\installer" -Recurse -Force
+        & cmd.exe /c mklink /J "$b\installer" "$victim" | Out-Null
+        Assert-Equal (Invoke-AppCheck $b @($mine)) 1 'installer\ as a junction is refused'
+        [System.IO.Directory]::Delete("$b\installer")
+    } finally { Remove-Throwaway $b; Remove-Throwaway $victim }
+}
+Test-Case 'embedded {app} check: a NULL DACL on the folder is refused' {
+    $a = New-Throwaway   # no children: a NULL DACL cannot be propagated to them without a privilege a standard user lacks
+    try {
+        $mine = Get-PathOwnerSid -Path $a
+        $raw = New-Object System.Security.AccessControl.RawSecurityDescriptor((Get-Acl -LiteralPath $a).GetSecurityDescriptorBinaryForm(), 0)
+        $raw.DiscretionaryAcl = $null
+        $bytes = New-Object byte[] $raw.BinaryLength; $raw.GetBinaryForm($bytes, 0)
+        $ds = New-Object System.Security.AccessControl.DirectorySecurity
+        $ds.SetSecurityDescriptorBinaryForm($bytes, [System.Security.AccessControl.AccessControlSections]::Access)
+        Set-Acl -LiteralPath $a -AclObject $ds
+        Assert-Equal (Invoke-AppCheck $a @($mine)) 1
+    } finally { Remove-Throwaway $a }
+}
+Test-Case 'uninstall: with the check copy missing, InitializeUninstall runs AppCheckScript on {app} BEFORE anything from {app}, and a failure aborts with a message that is true for it' {
+    $un = Get-IssFunction 'function InitializeUninstall'
+    $iMissing = $un.IndexOf('if not FileExists(CheckScript) then'); $iApp = $un.IndexOf('AppFolderPassesCheck(Code)'); $iRun = $un.IndexOf("uninstall-elevated.ps1'), ")
+    if ($iRun -lt 0) { $iRun = $un.IndexOf('uninstall-elevated.ps1') }
+    Assert-True ($iMissing -ge 0 -and $iApp -gt $iMissing -and $iApp -lt $iRun) 'the {app} check sits in the missing-copy branch, before uninstall-elevated.ps1'
+    Assert-True ($un -match 'if not Ran then\s+SaveStringToFile\(CheckLog, ''canvas-rgb cannot confirm that only administrators can change the folder') 'a failed check writes its own message'
+    Assert-True ($iss -match "(?s)function AppFolderPassesCheck.*?token:") 'the Exec says which token it runs with'
+}
+
 $realApp = Join-Path $env:ProgramFiles 'canvas-rgb'
 if (Test-Path -LiteralPath (Join-Path $realApp 'canvas-rgb-svc.exe')) {
     Test-Case 'real ACLs: the default Program Files folder passes the guard in Verify mode (read-only)' {

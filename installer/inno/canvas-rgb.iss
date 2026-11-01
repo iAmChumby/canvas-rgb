@@ -110,6 +110,11 @@ const
   // PowerShell that exits 0 when %APP% is under %PF% (case-insensitive, whole path segments), else 1. Single
   // quotes are doubled for Pascal; the install-folder tests run this very text for both branches.
   UnderProgramFilesScript = '$a = ([IO.DirectoryInfo]''%APP%'').FullName.TrimEnd(''\'') + ''\''; $b = ([IO.DirectoryInfo]''%PF%'').FullName.TrimEnd(''\'') + ''\''; if ($a.StartsWith($b, [StringComparison]::OrdinalIgnoreCase)) { exit(0) } else { exit(1) }';
+  // PowerShell run BEFORE anything in {app} when the protected check copy is missing: it checks {app}, its
+  // installer folder, the two scripts the uninstaller runs and the program, with code that does not come from
+  // {app}. Exits 1 on a junction, an owner other than SYSTEM or Administrators, a NULL permission list, or a
+  // write right given to anyone else. The install-folder tests run this very text on throwaway folders.
+  AppCheckScript = '$k = ''S-1-5-18'',''S-1-5-32-544''; $t = ''S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464''; $w = 0x4 -bor 0x2 -bor 0x10 -bor 0x40 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x40000000 -bor 0x10000000; $r = ([IO.DirectoryInfo]''%APP%'').FullName.TrimEnd(''\''); $bad = 0; foreach ($f in $r, ($r + ''\installer''), ($r + ''\installer\uninstall-elev'' + ''ated.ps1''), ($r + ''\installer\lib.ps1''), ($r + ''\installer\uninstall-user.ps1''), ($r + ''\canvas-rgb-svc.exe'')) { if (-not ([IO.File]::Exists($f) -or [IO.Directory]::Exists($f))) { continue }; if ([IO.File]::GetAttributes($f) -band 0x400) { $bad = 1 }; $a = Get-Acl -LiteralPath $f; if ($a.GetSecurityDescriptorSddlForm(''Access'') -eq '''') { $bad = 1 }; if ($k -notcontains $a.GetOwner([Security.Principal.SecurityIdentifier]).Value) { $bad = 1 }; foreach ($x in $a.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) { if ($x.AccessControlType -eq ''Allow'' -and -not ($x.PropagationFlags -band 2) -and (([int]$x.FileSystemRights -band $w) -ne 0) -and ($k + $t) -notcontains $x.IdentityReference.Value) { $bad = 1 } } }; exit($bad)';
 
 var
   SignalRgbPage: TInputOptionWizardPage;
@@ -200,6 +205,20 @@ begin
   StringChangeEx(Script, '%APP%', App, True);
   StringChangeEx(Script, '%PF%', Pf, True);
   // token: Exec runs as Setup's own administrator token; the script only compares two paths.
+  Result := Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), '-NoProfile -Command "' + Script + '"',
+    ExpandConstant('{sys}'), SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0);
+end;
+
+// Runs AppCheckScript on {app}: True when it found nothing wrong. Code is its exit code.
+function AppFolderPassesCheck(var Code: Integer): Boolean;
+var
+  App, Script: String;
+begin
+  App := ExpandConstant('{app}');
+  StringChangeEx(App, '''', '''''', True);
+  Script := AppCheckScript;
+  StringChangeEx(Script, '%APP%', App, True);
+  // token: Exec runs as Setup's own administrator token; the script only reads owners and permissions.
   Result := Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), '-NoProfile -Command "' + Script + '"',
     ExpandConstant('{sys}'), SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0);
 end;
@@ -697,11 +716,11 @@ begin
   begin
     if AppIsUnderProgramFiles then
     begin
-      // The protected copy is gone, but the folder is under Program Files, which only administrators can
-      // change. uninstall-elevated.ps1 runs the same check itself (Verify) before it stops or runs
-      // anything, and a refusal there aborts the uninstall.
-      Ran := True;
-      Code := 0;
+      // The protected copy is gone. Before uninstall-elevated.ps1 (which lives in {app}) runs, {app} is
+      // checked with code that is not from {app}: AppCheckScript.
+      Ran := AppFolderPassesCheck(Code);
+      if not Ran then
+        SaveStringToFile(CheckLog, 'canvas-rgb cannot confirm that only administrators can change the folder it is installed in, or the check could not run. Nothing was removed or run. Fix the permissions on that folder yourself, or install canvas-rgb again into the default folder under Program Files and remove the old folder by hand.', False);
     end
     else
     begin

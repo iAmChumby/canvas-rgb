@@ -1524,14 +1524,15 @@ fn a_setup_user_that_hits_the_step_limit_is_logged_as_a_warning_and_the_tray_sti
 }
 
 /// Real Win32, no fake: the folder Inno installed on this PC must pass the install-folder check, or
-/// every update through the service is refused. Skips (and says so) where nothing is installed.
+/// every update through the service is refused. It needs an install, so it is `#[ignore]`d and shows as
+/// "ignored" in the cargo summary instead of passing silently where nothing is installed. Run it on a PC
+/// with canvas-rgb installed: `cargo test -p canvas-svc -- --ignored the_real_installed_folder`. Run
+/// without an install it FAILS, never passes.
 #[test]
+#[ignore = "needs canvas-rgb installed in the default Program Files folder; run with: cargo test -p canvas-svc -- --ignored the_real_installed_folder"]
 fn the_real_installed_folder_passes_the_install_folder_check() {
     let app = PathBuf::from(r"C:\Program Files\canvas-rgb");
-    if !app.join("canvas-rgb.exe").exists() {
-        eprintln!("SKIPPED (UNKNOWN, not a pass): no install at {}; the real-folder check was not run", app.display());
-        return;
-    }
+    assert!(app.join("canvas-rgb.exe").exists(), "no install at {}: this test needs one", app.display());
     let installer = UpdateInstaller::production(std::env::temp_dir(), app);
     installer.check_app_dir().expect("the real install folder must pass check_app_dir");
 }
