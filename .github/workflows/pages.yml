@@ -42,7 +42,13 @@ jobs:
         id: sha
         working-directory: site
         env:
-          CANVAS_SETUP_SHA256_SKIP_IF_MISSING: "1"
+          # Only a push may skip. A push to main lands before the release for that version is
+          # out, so there is no .sha256 asset to read yet and the deploy waits for the release.
+          # A dispatch (the one the Release workflow starts, or a manual one) has to find the
+          # asset: it retries, and then fails the run with a clear message when the asset is
+          # missing or malformed. A run that goes green without deploying is worse than a red
+          # one.
+          CANVAS_SETUP_SHA256_SKIP_IF_MISSING: ${{ github.event_name == 'push' && '1' || '0' }}
         run: node scripts/setup-sha.mjs
 
       - uses: actions/setup-node@v4
