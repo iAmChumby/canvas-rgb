@@ -923,6 +923,30 @@ function Start-Service { param($Name) Write-Host 'CALL Start-Service' }
         # The same guard must hold the outcome, so the message cannot claim more than happened.
         Assert-True ($guarded -match 'RestartCode') "the outcome is read inside the guard: [$guarded]"
     }
+    Test-Case 'an install that finished starts nothing' {
+        $body = Get-IssFunction 'procedure DeinitializeSetup'
+        # The restart is called once, and only inside the guard that says the install did not
+        # finish: an install that finished must not start anything.
+        Assert-Equal (@([regex]::Matches($body, 'RestartCanvasRgb')).Count) 1 'the restart is called once'
+        $guard = '(not Ok) and (not IsServiceUpdateRun)'
+        $guarded = Get-GuardedStatement $body $guard
+        Assert-True ($guarded -match 'RestartCanvasRgb') "the restart is inside the guard: [$guarded]"
+    }
+    Test-Case 'an update that is cancelled before the stop starts nothing' {
+        # The first step never stopped a running service, so the note is not written and the flag
+        # stays false: the script is told nothing was stopped and starts nothing.
+        $r = Invoke-RestartCanvasSandbox 'restart-g'
+        Assert-Equal $r.Code 3 "there was nothing to start: $($r.Out)"
+        Assert-Equal (@([regex]::Matches($r.Out, 'CALL Start-Service')).Count) 0 "the service is not started: $($r.Out)"
+        Assert-True ($r.Log -match 'did not stop canvas-rgb') "it says why: $($r.Log)"
+        # And the flag comes from the note the first step wrote, and from nowhere else.
+        $prep = Get-IssFunction 'function PrepareToInstall'
+        Assert-True ($prep -match 'FStoppedRunningService := StoppedRunningService\(\)') 'the flag comes from the note'
+        Assert-Equal (@([regex]::Matches($prep, 'FStoppedRunningService :=')).Count) 1 'the flag is set in one place only'
+        # The note is written only when a running service was stopped.
+        $stop = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\stop-canvas.ps1'))
+        Assert-True ($stop -match 'if \(\$stopState\.ServiceWasRunning\)') 'the note is written only when a running service was stopped'
+    }
     Test-Case 'the installer knows when the copy of the files started' {
         $body = Get-IssFunction 'procedure CurStepChanged'
         Assert-True ($body -match 'if CurStep = ssInstall then') 'the copy step is noticed'
