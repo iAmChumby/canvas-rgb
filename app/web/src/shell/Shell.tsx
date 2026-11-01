@@ -16,6 +16,7 @@ import { CommandPalette, type Command } from "@/components/CommandPalette";
 import { DaemonDown } from "@/components/DaemonDown";
 import { links, playingLine } from "@/lib/status";
 import { useTakeover } from "@/views/editor/takeover";
+import { StripSlotsProvider } from "@/shell/PageHeader";
 
 const PAGE_PATHS: Record<string, string> = {
   layout: "/",
@@ -34,7 +35,9 @@ const PAGE_PATHS: Record<string, string> = {
 export function Shell({ children }: { children: ReactNode }) {
   return (
     <ToastProvider>
-      <Frame>{children}</Frame>
+      <StripSlotsProvider>
+        <Frame>{children}</Frame>
+      </StripSlotsProvider>
     </ToastProvider>
   );
 }

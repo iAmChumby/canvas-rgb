@@ -9,6 +9,7 @@ import { EffectsView } from "@/views/EffectsView";
 import { FansView } from "@/views/FansView";
 import { LayoutView } from "@/views/LayoutView";
 import { SettingsView } from "@/views/SettingsView";
+import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
 
 // The loads that do not end: a retry whose request never answers, and a refresh that fails
 // after the content is on screen.
@@ -166,7 +167,13 @@ describe("a refresh that fails after the content is on screen", () => {
       effects: [],
       settings: INITIAL_SETTINGS,
     });
-    render(<LayoutView />);
+    render(
+      <StripSlotsProvider>
+        {/* The page's name lives in the status strip, so a page on its own needs a strip. */}
+        <StripSlot kind="title" />
+        <LayoutView />
+      </StripSlotsProvider>,
+    );
     expect(screen.getByText("The layout may be out of date.")).toBeTruthy();
     // The desk is still there, under the one name the page has in every state.
     expect(screen.getByRole("heading", { level: 1, name: "Layout" })).toBeTruthy();

@@ -123,14 +123,16 @@ html[data-motion="reduced"] *::after {
 :root {
   /* The height of the phone's bottom dock, and the band a toast takes in it. The dock grows by
      the band while a toast is up. */
-  --rail-h: 65px;
+  --dock-h: 65px;
   --toast-band-h: 46px;
 }
 
 .app {
   display: grid;
   grid-template-columns: var(--rail-w) minmax(0, 1fr);
-  min-height: 100vh;
+  /* R1: the window is the page. The shell fills the viewport, so the document never scrolls. */
+  height: 100vh;
+  min-height: 0;
 }
 
 /* The signature: a 2 px spectrum line across the top of the window. The only place, with the
@@ -155,12 +157,20 @@ html[data-motion="reduced"] *::after {
   align-self: stretch;
   border-right: 1px solid var(--line);
   background: var(--panel);
+  /* R1: a rail taller than a short window scrolls inside itself instead of pushing the
+     document (today the icon rail is 810 px tall and overflows a 768 px window). */
+  min-height: 0;
+  height: 100vh;
+  overflow: hidden;
 }
 
 .rail {
   position: sticky;
   top: 0;
   height: 100vh;
+  max-height: 100vh;
+  overflow-y: auto;
+  scrollbar-width: none;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -302,6 +312,9 @@ html[data-motion="reduced"] *::after {
 
 .main {
   min-width: 0;
+  /* R1: the shell is the window. */
+  height: 100vh;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   overflow-x: clip;
@@ -450,6 +463,38 @@ html[data-motion="reduced"] *::after {
   margin-left: auto;
 }
 
+/* R3: now playing appears once. With the rail deck on screen (1280 px and up) the strip names
+   the page instead; below that the deck is hidden and the strip carries it. */
+@media (min-width: 1280px) {
+  .strip-now {
+    display: none;
+  }
+}
+
+/* Below 1280 the strip also carries now playing and the page's own actions: the state mark
+   keeps its icon (its tooltip and accessible name say the state) and drops its words, so
+   nothing truncates. */
+@media (max-width: 1279px) {
+  .strip-mark-text {
+    display: none;
+  }
+}
+
+/* A page with its own strip actions (Apply, Save layout, the fan profiles) needs the room
+   below 1280: now playing shrinks to its colour swatch (the effect's name stays its tooltip
+   and the rail's value), and below 1100 the page's context line goes too. */
+@media (max-width: 1279px) {
+  .strip-inner:has(.rd-actions) .strip-now-text {
+    display: none;
+  }
+}
+
+@media (max-width: 1099px) {
+  .strip-inner:has(.rd-actions) .rd-context {
+    display: none;
+  }
+}
+
 .strip-offline {
   color: var(--mute);
 }
@@ -557,30 +602,107 @@ html[data-motion="reduced"] *::after {
 }
 
 .content {
-  /* The toast floats over the page head's subtitle row, so the content is the anchor it hangs
-     from. */
+  /* The toast floats over the page, so the content is the anchor it hangs from. */
   position: relative;
-  padding: var(--s6) var(--s6) var(--s8);
+  /* R1: the content box is the page. It is the size container every screen lays out against
+     (R5), and it holds the page's own height: the document never scrolls, a long list scrolls
+     inside its own pane. */
+  flex: 1 1 auto;
+  min-height: 0;
+  container: page / size;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: var(--s4) var(--s6) var(--s6);
   min-width: 0;
 }
 
-/* The page head: the title, and the line under it that says what the page is for. The subtitle
-   sits under the title and is aligned to it, so the head reads as one block instead of a title
-   on the left and a sentence marooned at the far right. */
-.page-head {
+/* The page body: the route that is on screen, and the page inside it. Both fill the content
+   box, so a screen that lays out against the box has the height to do it in. */
+.page-enter {
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--s2) var(--s4);
-  min-height: var(--control-h);
-  margin-bottom: var(--s4);
+  flex-direction: column;
 }
 
-.page-head p {
+/* The page itself: a column that fills the content box, with its own gap. */
+.rd-page {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+}
+
+/* A pane: a panel that fills its cell and scrolls its own body, with its title pinned (R1). */
+.rd-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.rd-pane > .panel-head {
+  flex: 0 0 auto;
+}
+
+.rd-pane-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  margin: 0 calc(var(--s4) * -1);
+  padding: 0 var(--s4);
+}
+
+/* R2: the page title lives in the strip, with the page's one-line context in mono. */
+.rd-title {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s3);
+  min-width: 0;
+  flex: 0 1 auto;
+  /* The title never touches the state mark beside it. */
+  margin-right: var(--s2);
+}
+
+.rd-title h1 {
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 600 var(--t20) / 1 var(--fu);
+  color: var(--ink);
+  letter-spacing: -0.01em;
+}
+
+.rd-context {
+  font: var(--t14) / 1 var(--fm);
   color: var(--mute);
-  font-size: var(--t14);
-  max-width: 120ch;
-  text-wrap: pretty;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rd-context b {
+  color: var(--dim);
+  font-weight: 500;
+}
+
+/* The page's own actions, on the strip's right, before Pause and Search. */
+.rd-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding-right: var(--s3);
+  margin-right: var(--s1);
+  border-right: 1px solid var(--line);
+}
+
+/* The strip's slots: an empty slot takes no room at all. */
+.strip-slot {
+  display: contents;
 }
 
 .stack {
@@ -1664,11 +1786,348 @@ button.chip:hover {
 
 /* ---------- layout page ---------- */
 
-.layout-grid {
+/* The desk and the inspector sit side by side from `regular` up (R6). The desk takes the
+   room that is left and the inspector takes its own column. */
+.rd-layout .rd-lay-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 340px;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  grid-template-rows: minmax(0, 1fr);
   gap: var(--s4);
-  align-items: stretch;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.rd-layout .rd-lay-stage {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* The frame: the desk fills it and the desk's own toolbar sits along its bottom edge, inside
+   the frame. */
+.rd-layout .rd-lay-stage-frame {
+  /* The frame is the container the desk's toolbar answers to: what fits on it depends on the
+     frame's own width, not on the window's. */
+  container: lay-stage / inline-size;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-lg);
+  background: var(--sunk);
+}
+
+/* The desk takes the whole frame: no fixed shape, and the picture zooms to fit it. */
+.rd-layout .rd-lay-stage-frame .stage {
+  aspect-ratio: auto;
+  height: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+}
+
+/* The bar along the frame's bottom edge. */
+.rd-layout .rd-lay-stage-frame .stage-toolbar {
+  flex: 0 0 auto;
+  margin-top: 0;
+  gap: var(--s2);
+  padding: var(--s2);
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  /* Nothing overlaps: a bar that is too narrow for its keys wraps them. */
+  flex-wrap: wrap;
+  row-gap: var(--s2);
+}
+
+/* The desk's own settings keep their own row in the bar: they never wrap over one another. */
+.rd-layout .rd-lay-seg-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex: none;
+}
+
+/* The segments keep their own width in the bar: they never wrap over one another, and the
+   bar wraps instead. */
+.rd-layout .rd-lay-stage-frame .stage-toolbar .seg {
+  flex-wrap: nowrap;
+  flex: none;
+}
+
+.rd-layout .rd-lay-stage-frame .stage-toolbar .seg-item {
+  white-space: nowrap;
+}
+
+/* The Render key: the two settings folded into one, for a desk too narrow to hold both
+   segments beside the other keys. */
+.rd-layout .rd-lay-render-key {
+  display: none;
+  flex: none;
+}
+
+@container lay-stage (max-width: 779px) {
+  .rd-layout .rd-lay-seg-bar {
+    display: none;
+  }
+
+  .rd-layout .rd-lay-render-key {
+    display: inline-flex;
+  }
+}
+
+/* What the Render key opens: each setting, with its note. The popover is drawn at the end of the
+   document, so these rules do not hang under the page. */
+.rd-lay-render-pop {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  width: 280px;
+  max-width: 100%;
+}
+
+.rd-lay-render-pop-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+}
+
+.rd-lay-render-pop-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+}
+
+.rd-lay-render-pop-note {
+  margin: 0;
+}
+
+/* The note is on its own line here, so the segment's tooltip has nothing to add. */
+.rd-lay-render-pop .tip-bubble {
+  display: none;
+}
+
+/* The inspector: the unfinished work first, then the parts. */
+.rd-layout .rd-lay-inspector {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Each pane is a column of the inspector: the parts one takes the room that is left. */
+.rd-layout .rd-lay-place-pane {
+  flex: 0 0 auto;
+  min-height: 0;
+}
+
+.rd-layout .rd-lay-parts-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* "To place" is as tall as its rows: it never grows. */
+.rd-layout .rd-lay-place {
+  flex: 0 0 auto;
+}
+
+/* The parts pane: its head is pinned and its list scrolls inside it (R1). */
+.rd-layout .rd-lay-parts {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.rd-layout .rd-lay-parts .panel-head {
+  flex: 0 0 auto;
+}
+
+.rd-layout .rd-lay-parts-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* The notes of the desk's own settings are their tooltips (R8), so the bubble takes a width of
+   its own instead of one long line. It hangs from the right edge of its key, so it never
+   reaches past the frame. */
+.rd-layout .rd-lay-seg-tip .tip-bubble,
+.rd-layout .stage-mode-tip .tip-bubble {
+  white-space: normal;
+  width: 260px;
+  text-align: left;
+  left: auto;
+  right: 0;
+  transform: none;
+}
+
+/* The undo and redo keys are in the strip on a desktop; on a phone they move to the desk. */
+.rd-layout .rd-lay-stage-history {
+  display: none;
+  align-items: center;
+  gap: var(--s1);
+}
+
+/* The switcher between the panes below the desk: on a desktop they are all on screen at
+   once, so there is nothing to switch. */
+.rd-layout .rd-lay-tabs {
+  display: none;
+}
+
+/* The Render pane is the phone's home for the desk's own settings. */
+.rd-layout .rd-lay-render-pane {
+  display: none;
+}
+
+.rd-layout .rd-lay-seg-pane {
+  display: none;
+}
+
+/* wide: the inspector gets more room. */
+@container page (min-width: 1500px) {
+  .rd-layout .rd-lay-grid {
+    grid-template-columns: minmax(0, 1fr) 360px;
+  }
+}
+
+/* compact: a narrower inspector. The desk's toolbar folds its two settings into the Render key
+   by the width of the desk's own frame (above), not by the window's. */
+@container page (max-width: 999px) {
+  .rd-layout .rd-lay-grid {
+    grid-template-columns: minmax(0, 1fr) 280px;
+  }
+}
+
+/* phone: the desk on top, one pane below it. */
+@container page (max-width: 639px) {
+  .rd-layout .rd-lay-grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    overflow: visible;
+  }
+
+  .rd-layout .rd-lay-stage {
+    height: 46vh;
+    flex: 0 0 auto;
+  }
+
+  /* The switcher below the desk says which pane is on screen. */
+  .rd-layout .rd-lay-tabs {
+    display: block;
+    flex: 0 0 auto;
+  }
+
+  /* One pane at a time: the switcher below the desk says which. */
+  .rd-layout[data-pane="place"] .rd-lay-parts-pane,
+  .rd-layout[data-pane="parts"] .rd-lay-place-pane,
+  .rd-layout[data-pane="render"] .rd-lay-place-pane,
+  .rd-layout[data-pane="render"] .rd-lay-parts-pane {
+    display: none;
+  }
+
+  .rd-layout[data-pane="place"] .rd-lay-place-pane,
+  .rd-layout[data-pane="parts"] .rd-lay-parts-pane,
+  .rd-layout[data-pane="render"] .rd-lay-render-pane {
+    display: flex;
+  }
+
+  .rd-layout[data-pane="render"] .rd-lay-render-pane {
+    display: block;
+  }
+
+  /* The desk's own settings are in the Render pane here, not in the desk's toolbar. */
+  .rd-layout .rd-lay-seg-bar,
+  .rd-layout .rd-lay-render-key {
+    display: none;
+  }
+
+  .rd-layout .rd-lay-seg-pane {
+    display: flex;
+    align-items: center;
+    gap: var(--s2);
+    flex-wrap: wrap;
+  }
+
+  /* The bar wraps onto two rows: the canvas mode and the undo keys, then the zoom keys.
+     Nothing overlaps, nothing is cut. */
+  .rd-layout .rd-lay-stage-frame .stage-toolbar {
+    flex-wrap: wrap;
+    row-gap: var(--s2);
+  }
+
+  /* The undo and redo keys move here from the strip: they undo work done on the desk. */
+  .rd-layout .rd-lay-stage-history {
+    display: inline-flex;
+  }
+
+  /* The parts list is not a pane on a phone: the page scrolls. */
+  .rd-layout .rd-lay-parts {
+    flex: 0 0 auto;
+    overflow: visible;
+  }
+
+  .rd-layout .rd-lay-parts-body {
+    overflow: visible;
+  }
+
+  /* The rows are the app's compact rows, so the long list stays readable. */
+  .rd-layout .rd-lay-parts-body .row-button {
+    min-height: 32px;
+    padding: var(--s1) var(--s2);
+  }
+
+  .rd-layout .rd-lay-parts-body .row-sub {
+    display: none;
+  }
+
+  /* The zones to place are compact too: they are four rows, not a panel. */
+  .rd-layout .rd-lay-place .unplaced-item {
+    padding: var(--s1) 0;
+  }
+}
+
+/* The strip is outside the content box, so it follows the window, like the shell's own strip
+   rules do: on a phone the save key keeps its icon and drops its label. */
+@media (max-width: 640px) {
+  .rd-btn-text {
+    display: none;
+  }
+}
+@media (max-width: 1439px) {
+  /* The page's own actions need the room: the quiet key keeps its icon. */
+  .rd-lay-remap .rd-lay-text {
+    display: none;
+  }
+}
+
+@media (max-width: 1099px) {
+  .rd-lay-zones {
+    display: none;
+  }
+}
+
+@media (max-width: 719px) {
+  /* On a phone the strip carries the save state and its keys only: the undo and redo keys
+     move to the desk, where the work they undo happens. */
+  .rd-lay-history,
+  .rd-lay-remap {
+    display: none;
+  }
+
+  .rd-lay-revert .rd-lay-text,
+  .rd-lay-save .rd-lay-text {
+    display: none;
+  }
 }
 
 /* The canvas column: it takes the height the panels beside it need, so the desk is as big as
@@ -1679,47 +2138,16 @@ button.chip:hover {
   min-width: 0;
 }
 
-/* The canvas and the line under it: the way back to the canvas on a phone. It fills its column
-   at every width; in the phone stack nothing else would stretch it. */
-.layout-canvas {
-  align-self: stretch;
-  width: 100%;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  /* The desk takes the height the panels beside it need, so the PC is as big as the page
-     allows and there is no empty space under it. */
-  flex: 1 1 auto;
-  min-height: 0;
-  /* The desk is never taller than this: the page keeps a little air under it. */
-  max-height: 920px;
+/* The loading shape of the page: the desk on the left, the panels on the right. */
+.layout-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: var(--s4);
+  align-items: stretch;
 }
 
-/* The right column: what is playing, the zones and the way to save. */
-.layout-side {
-  min-width: 0;
-}
-
-.layout-now,
-.layout-render,
-.layout-zones,
-.layout-unplaced,
 .layout-save {
   min-width: 0;
-}
-
-.stage-meta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--s2) var(--s3);
-  margin-top: var(--s3);
-}
-
-.dropzone-hint {
-  color: var(--mute);
-  font-size: var(--t14);
 }
 
 .unplaced {
@@ -1754,6 +2182,190 @@ button.chip:hover {
 }
 
 /* ---------- effects page ---------- */
+
+/* The body: the library on the left, the inspector of the running effect on the right (R6). */
+.rd-effects .rd-eff-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  gap: var(--s4);
+}
+
+/* The gallery: the library's own pane, so a longer library scrolls here and not the page. */
+.rd-effects .rd-eff-gallery {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* The tiles: as many to a row as fit at 168 px. */
+.rd-effects .effect-gallery {
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: var(--s2);
+  align-content: start;
+}
+
+/* The inspector: the head, then Presets, then Properties. */
+.rd-effects .rd-eff-inspector {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+
+/* The head row: the live preview beside the effect's name, its key and its favourite. */
+.rd-effects .rd-eff-head-row {
+  display: grid;
+  grid-template-columns: 128px minmax(0, 1fr) auto;
+  grid-template-areas:
+    "preview name fav"
+    "preview key fav";
+  align-items: center;
+  column-gap: var(--s3);
+  row-gap: var(--s2);
+}
+
+.rd-effects .rd-eff-head-row .effect-live {
+  grid-area: preview;
+  width: 128px;
+}
+
+.rd-effects .rd-eff-head-text {
+  grid-area: name;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s2);
+}
+
+/* The effect's name and what it needs, on one line. */
+.rd-effects .rd-eff-name-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.rd-effects .rd-eff-head-row .rd-eff-fav {
+  grid-area: fav;
+  align-self: start;
+}
+
+/* The description is one line: the whole sentence is in its tooltip (R8). */
+.rd-effects .rd-eff-desc {
+  margin: var(--s2) 0 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The description and the note that says what the picture is share a row. */
+.rd-effects .rd-eff-foot {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s3);
+  min-width: 0;
+}
+
+.rd-effects .rd-eff-foot .rd-eff-desc {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* The inspector's panels are tighter than the page's: the column has to hold the head, the
+   presets and the properties at once. */
+.rd-effects .rd-eff-inspector .panel {
+  padding: var(--s3);
+}
+
+.rd-effects .rd-eff-inspector .prop-item {
+  min-height: 40px;
+  padding: var(--s1) 0;
+}
+
+/* The search keeps room for its whole placeholder: when the failed key does not fit beside it,
+   the toolbar wraps and the key takes the next row. */
+.rd-effects .effect-toolbar .effect-search {
+  flex: 1 1 160px;
+  min-width: 160px;
+}
+
+/* A tile's name has the tile's whole width but for a small inset, so a long name ("Screen
+   Ambience") shows whole at the compact tile size. */
+.rd-effects .effect-card-meta {
+  padding: var(--s2);
+}
+
+/* The failed-parse key: the app's own warn tone. */
+.rd-effects .rd-failed-chip {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+  background: color-mix(in srgb, var(--warn) 8%, var(--panel));
+  gap: var(--s1);
+}
+
+/* The chip sits at the right end of the toolbar, so its bubble hangs from the right edge rather
+   than from its middle. */
+.rd-effects .effect-toolbar .tip-bubble {
+  left: auto;
+  right: 0;
+  transform: none;
+}
+
+/* wide: the inspector takes the room the gallery can spare. */
+@container page (min-width: 1500px) {
+  .rd-effects .rd-eff-body {
+    grid-template-columns: minmax(0, 1fr) 400px;
+  }
+}
+
+/* compact: the gallery column is narrower here, so the tiles are smaller and the whole library
+   still stands in the window. */
+@container page (max-width: 999px) {
+  .rd-effects .effect-gallery {
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  }
+}
+
+/* A short window (the content box under 700 px): the inspector's rows tighten, so the head,
+   the presets and the properties all stand in the window (R5). */
+@container page (max-height: 700px) {
+  .rd-effects .rd-eff-inspector {
+    gap: var(--s2);
+  }
+
+  .rd-effects .rd-eff-inspector .panel {
+    padding: var(--s2);
+  }
+
+  .rd-effects .rd-eff-inspector .prop-item {
+    min-height: 36px;
+  }
+}
+
+/* phone: the gallery is the page and the inspector is the sheet that a tap pushes over it. */
+@container page (max-width: 640px) {
+  .rd-effects .rd-eff-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rd-effects .rd-eff-gallery {
+    overflow: visible;
+  }
+
+  .rd-effects .effect-toolbar .effect-search {
+    flex: 1 1 180px;
+  }
+
+  .rd-effects .effect-toolbar .effect-categories {
+    flex: 1 1 100%;
+    justify-content: flex-start;
+  }
+}
 
 /* ---------- effects page: the grid and its parts live in motion.css ---------- */
 
@@ -1833,6 +2445,369 @@ button.chip:hover {
 }
 
 /* ---------- devices page ---------- */
+
+/* The list is the whole page: one row per device, and the list scrolls inside its own pane
+   when it is longer than the window (R1). */
+.rd-devices .load-frame[data-state="ready"] {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.rd-devices .rd-dev-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  /* One column: the list scrolls down in its pane. (`columns: 1` made a short window start a
+     second column to the right, where its rows were out of sight.) The wide rule below sets
+     the two columns. */
+  column-gap: var(--s4);
+}
+
+/* One device, one row. */
+.rd-devices .rd-dev {
+  break-inside: avoid;
+  border-bottom: 1px solid var(--line);
+}
+
+.rd-devices .rd-dev-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  height: 44px;
+  padding: 0 var(--s4);
+}
+
+.rd-devices .rd-dev-name {
+  flex: 0 0 220px;
+  min-width: 0;
+  font-weight: 600;
+}
+
+/* The sub-line is the kind, the vendor, the adapter and the address: it gives way to the drawing
+   on a narrow row, and the whole line is its tooltip. */
+.rd-devices .rd-dev-sub {
+  flex: 0 1 300px;
+  min-width: 96px;
+}
+
+/* The drawing takes the room the row has left; the count and the state stay put. */
+.rd-devices .rd-dev-row .zone-strip-svg {
+  flex: 1 1 200px;
+  min-width: 64px;
+}
+
+.rd-devices .rd-dev-row .zone-strip-count {
+  flex: none;
+  min-width: 56px;
+  margin-left: auto;
+}
+
+.rd-devices .rd-dev-row .state {
+  flex: none;
+}
+
+/* The Size key of a device with one zone: the same column as the Size keys of the zone rows. */
+.rd-devices .rd-dev-row .zone-strip-size {
+  flex: none;
+  min-width: 104px;
+  text-align: right;
+}
+
+/* The word of a not-connected device is in the `down` tone. */
+.rd-devices .rd-dev-row .state.down-text {
+  color: var(--down);
+}
+
+/* A device with several zones: a header row, then one indented row per zone. */
+.rd-devices .rd-zone {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  height: 44px;
+  padding: 0 var(--s4) 0 calc(var(--s4) + var(--s8) + var(--s3));
+  border-top: 1px solid var(--line);
+}
+
+.rd-devices .rd-zone .zone-strip-name {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  flex: 0 0 116px;
+  min-width: 0;
+  line-height: 1.25;
+}
+
+/* The shape of the zone (linear, single, matrix) under its name, as the list showed it before. */
+.rd-devices .rd-zone .rd-zone-shape {
+  font-size: var(--t14);
+}
+
+/* A device that reports no zones: its message and Try again under the row. */
+.rd-devices .rd-zone-empty {
+  border-top: 1px solid var(--line);
+}
+
+.rd-devices .rd-zone .zone-strip-svg {
+  flex: 1 1 200px;
+  min-width: 64px;
+}
+
+.rd-devices .rd-zone .zone-strip-count {
+  flex: none;
+  min-width: 56px;
+  margin-left: auto;
+}
+
+.rd-devices .rd-zone .zone-strip-size {
+  flex: none;
+  min-width: 104px;
+  text-align: right;
+}
+
+/* The identify walker: an accordion under the row whose Size was pressed, not a column of its
+   own (R7). The walker's own parts stand along one row, so the list still fits the window. */
+.rd-devices .rd-walk {
+  border-top: 1px solid var(--line);
+  background: var(--raised);
+}
+
+.rd-devices .rd-walk .panel {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: var(--s3);
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: var(--s2) var(--s3);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+/* The head's own parts stand in the row: the title first, the close key last. */
+.rd-devices .rd-walk .panel-head {
+  display: contents;
+}
+
+.rd-devices .rd-walk .panel-title {
+  flex: none;
+  font-size: var(--t14);
+}
+
+.rd-devices .rd-walk .panel-head .tip {
+  order: 10;
+  margin-left: auto;
+}
+
+.rd-devices .rd-walk .stack {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--s3);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* The device's name is on the row above: the walker's own title says which zone it walks. */
+.rd-devices .rd-walk .dim {
+  display: none;
+}
+
+.rd-devices .rd-walk .walker-led {
+  flex: none;
+}
+
+.rd-devices .rd-walk .walker-big {
+  font-size: var(--t28);
+}
+
+.rd-devices .rd-walk .walker-keys {
+  flex: none;
+}
+
+.rd-devices .rd-walk .num {
+  width: 64px;
+}
+
+.rd-devices .rd-walk .btn {
+  flex: none;
+}
+
+/* wide: two columns of the list, and a device never splits across them. */
+@container page (min-width: 1500px) {
+  .rd-devices .rd-dev-list {
+    columns: 2 560px;
+  }
+}
+
+/* R5: a short window (content height under 700) tightens the rows. */
+@container page (max-height: 700px) {
+  .rd-devices .rd-dev-row,
+  .rd-devices .rd-zone {
+    height: 36px;
+  }
+}
+
+/* phone: the row wraps to two lines, the name and its state on the first, the id, the drawing
+   and the count on the second. */
+@container page (max-width: 640px) {
+  .rd-devices .rd-dev-list {
+    overflow: visible;
+    flex: 0 0 auto;
+  }
+
+  .rd-devices .load-frame[data-state="ready"] {
+    flex: 0 0 auto;
+  }
+
+  .rd-devices .rd-dev-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    height: auto;
+    row-gap: var(--s1);
+    column-gap: var(--s1);
+    padding: var(--s1) var(--s4);
+  }
+
+  .rd-devices .rd-dev-row .device-kind {
+    flex: 0 0 24px;
+    order: 0;
+    width: 24px;
+    height: 24px;
+  }
+
+  .rd-devices .rd-dev-row .rd-dev-name {
+    flex: 0 1 auto;
+    order: 1;
+  }
+
+  .rd-devices .rd-dev-row .state {
+    flex: 0 0 100px;
+    order: 2;
+  }
+
+  .rd-devices .rd-dev-row .rd-dev-sub {
+    flex: 0 1 150px;
+    order: 3;
+  }
+
+  .rd-devices .rd-dev-row .zone-strip-svg {
+    flex: 0 0 64px;
+    order: 4;
+    width: 64px;
+    height: auto;
+  }
+
+  .rd-devices .rd-dev-row .zone-strip-count {
+    flex: 0 0 59px;
+    order: 5;
+    margin-left: 0;
+  }
+
+  .rd-devices .rd-dev-row .zone-strip-size {
+    flex: 0 0 auto;
+    order: 6;
+    min-width: 0;
+    margin-left: auto;
+  }
+
+  .rd-devices .rd-zone {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-areas:
+      "name count size"
+      "drawing drawing drawing";
+    align-items: center;
+    height: auto;
+    row-gap: var(--s1);
+    column-gap: var(--s2);
+    padding: var(--s1) var(--s4) var(--s1) var(--s6);
+  }
+
+  /* The zone's name and its shape stand on one line here: the row is two lines, not three. */
+  .rd-devices .rd-zone .zone-strip-name {
+    grid-area: name;
+    flex: none;
+    flex-direction: row;
+    align-items: baseline;
+    gap: var(--s2);
+  }
+
+  /* The zone's name keeps its whole width; the shape word has no room beside the count and the
+     Size key on a phone, so it goes there (the drawing under the row shows the shape). */
+  .rd-devices .rd-zone .zone-strip-name > .one-line:first-child {
+    flex: none;
+  }
+
+  .rd-devices .rd-zone .rd-zone-shape {
+    display: none;
+  }
+
+  .rd-devices .rd-zone .zone-strip-svg {
+    grid-area: drawing;
+    flex: none;
+    width: 100%;
+    height: 16px;
+  }
+
+  .rd-devices .rd-zone .zone-strip-count {
+    grid-area: count;
+    justify-self: end;
+    margin-left: 0;
+  }
+
+  .rd-devices .rd-zone .zone-strip-size {
+    grid-area: size;
+    justify-self: end;
+  }
+
+  /* The walker stacks into three rows on a phone. */
+  .rd-devices .rd-walk .panel {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "title close"
+      "read keys"
+      "set button";
+    height: auto;
+    row-gap: var(--s2);
+    padding: var(--s2) var(--s3);
+  }
+
+  .rd-devices .rd-walk .panel-title {
+    grid-area: title;
+  }
+
+  .rd-devices .rd-walk .panel-head .tip {
+    grid-area: close;
+    margin-left: 0;
+    order: 0;
+  }
+
+  .rd-devices .rd-walk .stack {
+    display: contents;
+  }
+
+  .rd-devices .rd-walk .walker-led {
+    grid-area: read;
+  }
+
+  .rd-devices .rd-walk .walker-keys {
+    grid-area: keys;
+    justify-self: end;
+  }
+
+  .rd-devices .rd-walk .stack > .mute {
+    grid-area: set;
+  }
+
+  .rd-devices .rd-walk .stack > .btn {
+    grid-area: button;
+    justify-self: start;
+  }
+}
 
 .devices-grid {
   display: grid;
@@ -1924,6 +2899,315 @@ button.chip:hover {
 }
 
 /* ---------- fans page ---------- */
+
+/* The frame is the page's height, so the two columns reach the bottom of the window and the
+   headers scroll inside their own pane (R1). */
+.rd-fans .load-frame[data-state="ready"] {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* The two kinds of thing sit side by side: the readings on the left, the editor of the picked
+   header on the right (R6). */
+.rd-fans .rd-fans-grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+  gap: var(--s4);
+}
+
+.rd-fans .rd-fans-left,
+.rd-fans .rd-fans-right {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+  min-height: 0;
+}
+
+/* The editor column is the container its points answer to: how many points stand in a row
+   depends on the column's own width, not the window's. */
+.rd-fans .rd-fans-right {
+  container: fans-editor / inline-size;
+}
+
+/* The temperatures: the app's own cells, three across, each a label, its reading and its
+   meter. */
+.rd-fans .rd-temp-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--s4);
+}
+
+.rd-fans .rd-temp-row .temp-cell {
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "label value"
+    "meter meter";
+  align-items: center;
+  gap: var(--s1);
+  padding: 0;
+  border-bottom: 0;
+}
+
+.rd-fans .rd-temp-row .temp-cell > .one-line {
+  grid-area: label;
+}
+
+.rd-fans .rd-temp-row .temp-cell > .fig {
+  grid-area: value;
+}
+
+.rd-fans .rd-temp-row .temp-cell > .meter {
+  grid-area: meter;
+  height: 6px;
+}
+
+/* The headers: the app's table, its rows 40 px, its names on one line. */
+.rd-fans .rd-headers {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.rd-fans .rd-headers .panel-head {
+  flex: 0 0 auto;
+}
+
+.rd-fans .rd-headers .table-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.rd-fans .fan-table tbody tr {
+  height: 40px;
+}
+
+.rd-fans .fan-table th,
+.rd-fans .fan-table td {
+  padding: var(--s1) var(--s3);
+}
+
+/* The name and its chip share one line: the cell never breaks between them. */
+.rd-fans .fan-table th:first-child,
+.rd-fans .fan-table td:first-child {
+  white-space: nowrap;
+}
+
+.rd-fans .rd-hdr-chip {
+  margin-left: var(--s1);
+  padding: 0 var(--s1);
+  vertical-align: middle;
+}
+
+/* The editor: the app's panel, with the curve taking the height the column has left. */
+.rd-fans .rd-fans-right > .panel {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.rd-fans .rd-fans-right > .panel > .panel-head {
+  flex: 0 0 auto;
+}
+
+/* The points of the curve: two to a row, so the curve's own box keeps its height. */
+.rd-fans .curve-rows {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s2) var(--s3);
+}
+
+.rd-fans .curve-rows > .row-wrap {
+  grid-column: 1 / -1;
+}
+
+/* A point in a row of two: the number and its unit keep their line. */
+.rd-fans .curve-rows .curve-row {
+  grid-template-columns: 20px minmax(84px, 1fr) minmax(84px, 1fr) auto;
+}
+
+/* A point's temperature and percent show their whole value: the field never gets narrower than
+   the three digits of "100" and its padding. */
+.rd-fans .curve-rows .num {
+  width: 100%;
+  max-width: 92px;
+  min-width: 52px;
+}
+
+/* A column too narrow for two points side by side holds one point to a row. */
+@container fans-editor (max-width: 559px) {
+  .rd-fans .curve-rows {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.rd-fans .curve-rows .curve-row .row-wrap {
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+
+/* regular and wide: the history column fits beside the rest, narrow enough (64 px) to leave
+   the other columns their room. */
+@container page (min-width: 1000px) {
+  .rd-fans .fan-table .sparkline {
+    width: 56px;
+    height: 16px;
+  }
+
+  /* The pane is about 500 px at 1280: the duty's bar gives a little so every column is whole. */
+  .rd-fans .fan-table .duty-cell .meter {
+    width: 52px;
+  }
+
+  .rd-fans .fan-table th,
+  .rd-fans .fan-table td {
+    padding: var(--s1) var(--s2);
+  }
+}
+
+/* compact and below: the history column is the one that goes, the row still reads (the mockup's
+   960 shot has Header, RPM, Duty and Mode). */
+@container page (max-width: 999px) {
+  .rd-fans .fan-table th,
+  .rd-fans .fan-table td {
+    padding: var(--s1) var(--s2);
+  }
+
+  .rd-fans .fan-table .rd-history {
+    display: none;
+  }
+
+  /* The pane is about 400 px at 960: the duty's bar is shorter, and a long name wraps rather than
+     push the Mode column out of the pane. */
+  .rd-fans .fan-table .duty-cell .meter {
+    width: 44px;
+  }
+
+  .rd-fans .fan-table th:first-child,
+  .rd-fans .fan-table td:first-child {
+    white-space: normal;
+  }
+}
+
+/* A reading's label stands over its value and its bar, so a long name ("Board SYSTIN") keeps its
+   whole width where three readings stand side by side. */
+@container page (max-width: 1499px) {
+  .rd-fans .rd-temp-row .temp-cell {
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-areas:
+      "label label"
+      "value meter";
+    column-gap: var(--s2);
+  }
+}
+
+/* where a row has no room for the mode's word, the dot carries the mode and the tooltip says
+   which one it is. */
+@container page (max-width: 1499px) {
+  .rd-fans .fan-table .mode-state {
+    font-size: 0;
+    gap: 0;
+  }
+
+  .rd-fans .fan-table .mode-state .mode-dot {
+    font-size: var(--t14);
+  }
+}
+
+/* phone: the headers are compact rows and the editor is a sheet: the list is the page. */
+@container page (max-width: 640px) {
+  .rd-fans .rd-fans-grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto;
+  }
+
+  .rd-fans .rd-temp-row {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: var(--s2);
+  }
+
+  .rd-fans .rd-temp-row .temp-cell {
+    grid-template-areas:
+      "label label"
+      "value value"
+      "meter meter";
+  }
+
+  .rd-fans .load-frame[data-state="ready"] {
+    flex: 0 0 auto;
+  }
+
+  .rd-fans .rd-headers {
+    flex: 0 0 auto;
+  }
+
+  .rd-fans .rd-headers .table-scroll {
+    overflow: visible;
+  }
+
+  /* The headers are compact rows: the name, its speed and its mode. */
+  .rd-fans .fan-cards {
+    gap: 0;
+  }
+
+  .rd-fans .fan-card {
+    flex-direction: row;
+    align-items: center;
+    gap: var(--s3);
+    padding: var(--s2) var(--s3);
+    border-width: 0 0 1px;
+    border-radius: 0;
+    background: transparent;
+  }
+
+  .rd-fans .fan-card-head {
+    flex: 1 1 auto;
+  }
+
+  .rd-fans .fan-card-readouts {
+    flex: none;
+  }
+
+  .rd-fans .fan-card-readouts .meter,
+  .rd-fans .fan-card-readouts .fig,
+  .rd-fans .fan-card-spark {
+    display: none;
+  }
+
+  /* The mode's word does not fit beside the name: the dot carries it. */
+  .rd-fans .fan-card .mode-state {
+    font-size: 0;
+    gap: 0;
+  }
+
+  .rd-fans .fan-card .mode-state .mode-dot {
+    font-size: var(--t14);
+  }
+
+  /* The panels are tighter on a phone: every row counts. */
+  .rd-fans .panel {
+    padding: var(--s3);
+  }
+
+  /* The editor is a sheet a tap on a row pushes over the list. */
+  .rd-fans .rd-fans-right {
+    position: fixed;
+    left: 0;
+    right: 0;
+    top: var(--strip-h, 48px);
+    bottom: var(--dock-h, 65px);
+    z-index: 25;
+    padding: var(--s3);
+    overflow: auto;
+    background: var(--g1);
+  }
+}
 
 .fans-grid {
   display: grid;
@@ -2110,6 +3394,103 @@ button.chip:hover {
 
 /* ---------- displays: one number on a pump head ---------- */
 
+/* R6: one panel per display, 560 px or wider, so a second display sits beside the first. */
+.rd-displays .rd-displays-grid[data-state="ready"] {
+  display: grid;
+  gap: var(--s4);
+  grid-template-columns: repeat(auto-fit, minmax(min(560px, 100%), 1fr));
+  align-content: start;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* The empty title band goes: the notice slot is not reserved here, and the head row is the
+   display's name, its state and the keys that change them. */
+.rd-displays .display-notice-slot {
+  min-height: 0;
+  margin-bottom: 0;
+}
+
+.rd-displays .display-panel .panel-head {
+  margin-bottom: var(--s2);
+}
+
+/* The state and the keys that change it stand together in the head. */
+.rd-displays .rd-display-head {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s3);
+}
+
+.rd-displays .rd-display-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+/* R6: at regular width the controls sit in two columns - Source | Unit, Decimals | Blink - and
+   the readout keeps the left of the card. */
+@container page (min-width: 1000px) {
+  .rd-displays .display-controls {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: var(--s6);
+  }
+
+  .rd-displays .display-controls .field {
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: flex-start;
+    gap: var(--s1);
+    border-bottom: 0;
+  }
+
+  .rd-displays .display-controls .field-label {
+    flex: none;
+  }
+
+  .rd-displays .display-controls .field-control {
+    justify-content: flex-start;
+  }
+}
+
+/* Phone: the head row wraps - the name on its own line, the state with its keys - and a field
+   takes its label above the control, so nothing is cut. */
+@container page (max-width: 639px) {
+  .rd-displays .display-panel .panel-head .state {
+    flex-basis: auto;
+  }
+
+  .rd-displays .display-panel .panel-head .panel-title {
+    flex: 1 1 100%;
+  }
+
+  .rd-displays .rd-display-actions {
+    margin-left: 0;
+    padding-left: 0;
+  }
+
+  .rd-displays .display-controls .field {
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: flex-start;
+    gap: var(--s1);
+  }
+
+  .rd-displays .display-controls .field-label {
+    flex: none;
+  }
+
+  .rd-displays .display-controls .field-control {
+    justify-content: flex-start;
+    width: 100%;
+  }
+
+  .rd-displays .display-controls .select-trigger {
+    width: 100%;
+  }
+}
+
 /* The slot holds the vendor-app notice's height while idle, so the card below never moves (#14).
    Idle it is an empty block; the min-heights below are the measured heights of the notice. */
 .display-notice-slot {
@@ -2259,6 +3640,67 @@ button.chip:hover {
 }
 
 /* ---------- settings ---------- */
+
+/* The settings stand in columns of about 340 px, so no column is a tall stack and no row
+   leaves a gap: the panels flow down the columns and a panel never breaks across two. */
+.rd-settings .rd-settings-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.rd-settings .rd-settings-grid {
+  columns: 340px auto;
+  column-gap: var(--s4);
+}
+
+.rd-settings .rd-settings-grid > .panel {
+  break-inside: avoid;
+  margin: 0 0 var(--s4);
+}
+
+/* The version figure sits in the panel's title row. */
+.rd-settings .rd-version {
+  margin-left: auto;
+  color: var(--ink);
+}
+
+.rd-settings .rd-settings-grid .panel-head {
+  display: flex;
+  align-items: baseline;
+}
+
+/* R1 on a desktop window: what is taller than the window scrolls inside its own pane, so
+   nothing stands cut off and the page itself never scrolls. The panes below are the ones a
+   short window (700 px and under) reaches; a taller window never scrolls them. */
+@container page (min-width: 641px) {
+  .rd-settings .rd-settings-scroll,
+  .rd-peripherals .peripheral-detail,
+  .rd-effects .rd-eff-inspector {
+    overflow-y: auto;
+    /* The focus ring and the panels' edges stay whole at the pane's sides. */
+    margin: 0 calc(var(--s1) * -1);
+    padding: 0 var(--s1);
+  }
+
+  .rd-peripherals .peripheral-detail {
+    flex: 1 1 auto;
+    min-height: 0;
+    /* The Read and Change tooltips hang past the pane's edge while hidden; they do not make the
+       pane scroll sideways. */
+    overflow-x: hidden;
+  }
+
+  .rd-fans .rd-fans-right > .panel {
+    overflow-y: auto;
+  }
+}
+
+/* Phone: the panels are tighter: every row counts when the page scrolls. */
+@container page (max-width: 639px) {
+  .rd-settings .rd-settings-grid > .panel {
+    padding: var(--s3);
+  }
+}
 
 .settings-grid {
   display: grid;
@@ -2416,6 +3858,83 @@ button.chip:hover {
 @media (max-width: 720px) {
   .app {
     grid-template-columns: minmax(0, 1fr);
+    /* R1 is a desktop rule: a phone page scrolls, clear of the dock. The document is the
+       scroller there, so the shell is as tall as the page needs it to be. */
+    height: auto;
+    min-height: 100vh;
+  }
+
+  .main {
+    height: auto;
+    min-height: 100vh;
+  }
+
+  .content {
+    /* The content box is the page on a desktop; on a phone the document scrolls, so the box
+       only carries the width the page lays out against. */
+    container-type: inline-size;
+    overflow: visible;
+    flex: 0 0 auto;
+    height: auto;
+    padding: var(--s3) var(--s3) calc(60px + var(--s4));
+  }
+
+  .page-enter,
+  .rd-page {
+    flex: 0 0 auto;
+  }
+
+  /* The phone strip: one row. The brand, the page's title, what is playing, how it is going,
+     the page's own actions and the control. Now playing is the one that gives way: its name
+     shrinks to its colour when the row is full (R3: the strip carries it below 1280). */
+  .rd-context,
+  .strip-mark-text {
+    display: none;
+  }
+
+  .strip-now {
+    display: inline-flex;
+    overflow: hidden;
+  }
+
+  /* The name shows on every page here, whatever the page's own actions leave room for. */
+  .strip-inner:has(.rd-actions) .strip-now-text {
+    display: inline-flex;
+  }
+
+  /* The page's title and its actions keep their words; the brand mark makes room when the page
+     brings actions of its own. */
+  .strip-inner:has(.rd-actions) .strip-brand {
+    display: none;
+  }
+
+  .rd-title,
+  .rd-actions,
+  .strip-controls,
+  .strip-mark {
+    flex: none;
+  }
+
+  /* The profile picker and the like are tighter in the strip on a phone. */
+  .rd-actions,
+  .strip-controls,
+  .strip-inner:has(.rd-actions) {
+    gap: var(--s1);
+  }
+
+  .rd-title {
+    margin-right: 0;
+  }
+
+  .rd-actions .seg-item {
+    padding-left: var(--s2);
+    padding-right: var(--s2);
+  }
+
+  .rd-actions {
+    border-right: 0;
+    padding-right: 0;
+    margin-right: 0;
   }
 
   /* The strip publishes its height for the floating notice. Before it does, the phone value is the
@@ -2464,8 +3983,11 @@ button.chip:hover {
     display: none;
   }
 
+  /* The state's icon never gives up width: it is the one status the phone row keeps. */
   .strip-mark {
-    flex: 0 1 auto;
+    flex: none;
+    padding-left: var(--s1);
+    padding-right: var(--s1);
   }
 
   .rail-col {
@@ -2479,7 +4001,7 @@ button.chip:hover {
     left: 0;
     right: 0;
     z-index: 20;
-    height: var(--rail-h);
+    height: var(--dock-h);
     flex-direction: row;
     justify-content: space-around;
     gap: 0;
@@ -2491,7 +4013,7 @@ button.chip:hover {
   /* A toast takes a band of the dock's own surface, so it hides nothing the reader could reach:
      the dock grows by exactly the toast's height. */
   .rail[data-toast="on"] {
-    height: calc(var(--rail-h) + var(--toast-band-h));
+    height: calc(var(--dock-h) + var(--toast-band-h));
     padding-top: var(--toast-band-h);
   }
 
@@ -2521,13 +4043,16 @@ button.chip:hover {
     height: 56px;
     flex: 1 1 0;
     min-width: 0;
-    padding: var(--s1) var(--s1) 0;
+    /* #57: the label of the active link clears the bottom edge of its tile. Every link takes
+       the same inset, so the icons stay on one line. */
+    padding: var(--s1) var(--s1) var(--s1);
     font-size: var(--t14);
   }
 
   .rail-link[aria-current="page"] {
     flex: 0 0 auto;
-    padding: var(--s1) var(--s2) 0;
+    /* #57: the active tile's label clears the tile's bottom edge. */
+    padding: var(--s1) var(--s2) var(--s1);
     /* The tint is drawn by the tile below, so it can hug the icon and the name. */
     background: none;
   }
@@ -2757,7 +4282,7 @@ button.chip:hover {
     position: fixed;
     left: var(--s4);
     right: var(--s4);
-    bottom: calc(var(--rail-h) + var(--s2));
+    bottom: calc(var(--dock-h) + var(--s2));
     z-index: 6;
     animation: canvas-enter var(--dur) var(--ease) both;
   }
@@ -2838,6 +4363,218 @@ button.chip:hover {
 }
 
 /* ---------- peripherals page ---------- */
+
+/* The device column becomes a row of keys under the strip. The keys scroll sideways when they
+   do not fit (a phone), and the row never shrinks. */
+.rd-peri-keys {
+  display: flex;
+  gap: var(--s2);
+  flex: 0 0 auto;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: var(--s1);
+  margin: calc(var(--s1) * -1);
+}
+
+.rd-peri-keys::-webkit-scrollbar {
+  display: none;
+}
+
+/* The keys are a row, not a column. */
+.rd-peri-keys .load-frame.load-col[data-state="ready"] {
+  flex-direction: row;
+  gap: var(--s2);
+}
+
+/* The key: its icon, its name, its battery and its state. */
+.rd-peri-keys .rd-devkey {
+  flex: 0 0 auto;
+  width: auto;
+  gap: var(--s2);
+  padding: var(--s2) var(--s3);
+  border-radius: var(--r-md);
+}
+
+.rd-devkey .peripheral-icon {
+  width: 28px;
+  height: 28px;
+}
+
+.rd-devkey .peripheral-text {
+  flex: 0 1 auto;
+}
+
+.rd-devkey .peripheral-name {
+  white-space: nowrap;
+}
+
+/* The device head: Access is merged into it as two inline switches, and the notes under them
+   are the switches' own tooltips (R8). */
+.peripheral-head {
+  align-items: center;
+}
+
+.rd-peri-access {
+  display: flex;
+  align-items: center;
+  gap: var(--s4);
+  margin-left: auto;
+  padding-left: var(--s4);
+  border-left: 1px solid var(--line);
+}
+
+.rd-peri-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.rd-peri-toggle-label {
+  font-weight: 600;
+}
+
+/* The bubble hangs from the right edge of its switch, so it never reaches past the page. */
+.rd-peri-toggle .tip-bubble {
+  white-space: normal;
+  width: 240px;
+  text-align: left;
+  left: auto;
+  right: 0;
+  transform: none;
+}
+
+/* The sections are columns of about 280 px, so a panel never breaks across two of them. */
+.rd-peri-sections {
+  columns: 280px auto;
+  column-gap: var(--s4);
+}
+
+.rd-peri-sections > .panel {
+  break-inside: avoid;
+  margin: 0 0 var(--s4);
+}
+
+/* A field keeps its label on the left and its control on the right, in one row: the columns are
+   narrow, so the label column is narrow too and the slider takes what is left of it. The number
+   rows name the page as well, so they outrank `.peripheral-detail .prop-item[data-kind="number"]`
+   (a 190 px label column that left the slider 21 px). */
+.rd-peri-sections .prop-item {
+  grid-template-columns: minmax(0, 116px) minmax(0, 1fr);
+}
+
+.rd-peripherals .rd-peri-sections .prop-item[data-kind="number"] {
+  grid-template-columns: minmax(0, 116px) minmax(0, 1fr) 48px;
+}
+
+.rd-peripherals .rd-peri-sections .prop-item[data-kind="number"] .num {
+  width: 48px;
+}
+
+/* A segmented control is never allowed to break over two lines: it sizes to its content, so
+   its thumb stays on the selected stage. It drops under its label when the column cannot
+   give it the width it needs. */
+.rd-peri-sections .seg {
+  width: max-content;
+  max-width: 100%;
+  white-space: nowrap;
+}
+
+.rd-peri-sections .prop-item:has(.seg) .prop-control {
+  grid-column: 1 / -1;
+}
+
+/* The button mappings are a list of key/value pairs: two columns of pairs, three rows tall
+   instead of six. */
+.rd-peri-sections .rd-peri-buttons .prop-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(3, auto);
+  grid-auto-flow: column;
+  column-gap: var(--s4);
+}
+
+.rd-peri-sections .rd-peri-buttons .prop-item {
+  grid-template-columns: minmax(0, 1fr);
+  border-bottom: 0;
+  min-height: 44px;
+}
+
+/* A short window tightens the rows, as the shell does for the panel padding. */
+@container page (max-height: 700px) {
+  .rd-peri-sections .prop-item {
+    min-height: 44px;
+  }
+}
+
+/* Phone: the keys scroll sideways and the sections stack in one column. The page scrolls;
+   there is no second scroll area inside it. */
+@container page (max-width: 639px) {
+  .rd-peri-sections {
+    columns: auto;
+    column-gap: 0;
+  }
+
+  .rd-peri-sections > .panel {
+    margin: 0 0 var(--s4);
+  }
+
+  .rd-peripherals .rd-peri-sections .prop-item[data-kind="number"] {
+    grid-template-columns: minmax(0, 1fr) 48px;
+  }
+
+  .rd-peripherals .rd-peri-sections .prop-item[data-kind="number"] .field-label {
+    grid-column: 1 / -1;
+  }
+
+  .rd-peri-sections .prop-item:has(.seg) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rd-peri-sections .prop-item:has(.seg) .field-label {
+    grid-column: 1 / -1;
+  }
+
+  /* The rows are tighter on a phone: the page scrolls anyway, and every row counts. */
+  .rd-peri-sections .prop-item {
+    min-height: 44px;
+  }
+
+  /* The panels are tighter too. */
+  .rd-peripherals .panel {
+    padding: var(--s3);
+  }
+
+  /* The head wraps: the device's name on its own line, the switches under it. */
+  .peripheral-head {
+    flex-wrap: wrap;
+  }
+
+  .rd-peripherals .peripheral-head-text {
+    flex: 1 1 0;
+  }
+
+  .rd-peri-access {
+    margin-left: 0;
+    padding-left: 0;
+    border-left: 0;
+    flex: 1 1 100%;
+    justify-content: flex-end;
+  }
+}
+
+/* The strip is outside the content box, so it follows the window, like the shell's own strip
+   rules do: the pending count and the Revert label give way to the title and Apply, which
+   have to fit at 390 px. */
+@media (max-width: 720px) {
+  .rd-peri-pending {
+    display: none;
+  }
+
+  .rd-peri-revert-label {
+    display: none;
+  }
+}
 
 .peripheral-grid {
   display: grid;
@@ -3932,12 +5669,24 @@ button.chip:hover {
 }
 
 /* The onboarding's takeover: the rail, the strip and the banners are not drawn (the shell skips
-   them), so the one column is the whole window and the onboarding owns its own padding. */
+   them), so the one column is the whole window and the onboarding owns its own padding. It
+   also owns the window's height: the takeover scrolls like a page of its own. */
 .app[data-takeover="on"] {
   grid-template-columns: minmax(0, 1fr);
+  height: auto;
+  min-height: 100vh;
+}
+
+.app[data-takeover="on"] .main {
+  height: auto;
+  min-height: 100vh;
 }
 
 .app[data-takeover="on"] .content {
+  container-type: inline-size;
+  overflow: visible;
+  flex: 0 0 auto;
+  height: auto;
   padding: 0;
 }
 
@@ -3975,4 +5724,28 @@ button.chip:hover {
 .new-light-text strong {
   flex: none;
   white-space: nowrap;
+}
+
+/* A very narrow phone (360 px): the profile picker and the strip's edges give a little more, and
+   now playing (which has no room left) leaves the row. */
+@media (max-width: 430px) {
+  .rd-actions .seg-item {
+    padding-left: 6px;
+    padding-right: 6px;
+  }
+}
+
+@media (max-width: 380px) {
+  .strip-inner:has(.rd-actions) {
+    padding: 0 var(--s1);
+  }
+
+  .strip-inner:has(.rd-actions) .strip-now {
+    display: none;
+  }
+
+  .rd-actions .seg-item {
+    padding-left: 6px;
+    padding-right: 6px;
+  }
 }

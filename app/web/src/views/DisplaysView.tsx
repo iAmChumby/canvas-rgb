@@ -22,6 +22,7 @@ import type { DisplayUnit } from "@/proto/DisplayUnit";
 import type { FansStatus } from "@/proto/FansStatus";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { useTweenNumber } from "@/components/Motion";
+import { PageTitle } from "@/shell/PageHeader";
 
 /** The source of a display, as one string: the picker works on keys, not on the spine's shape. */
 function sourceKey(source: DisplaySource): string {
@@ -242,11 +243,24 @@ function DisplayCard({ row, fans }: { row: DisplayStatus; fans: FansStatus | nul
       className="display-panel"
       title={row.info.name}
       actions={
-        // The daemon measures whether the vendor app holds the display (#14); the editor only
-        // repeats it. `blocked_by` wins over the plain connected flag.
-        <StateDot tone={blockedBy ? "warn" : row.info.connected ? "ok" : "down"}>
-          {blockedBy ? `waiting for ${blockedBy}` : row.info.connected ? "connected" : "not connected"}
-        </StateDot>
+        // The state and the keys that change it stand together in the head, beside the display
+        // they belong to.
+        <span className="rd-display-head">
+          {/* The daemon measures whether the vendor app holds the display (#14); the editor only
+              repeats it. `blocked_by` wins over the plain connected flag. */}
+          <StateDot tone={blockedBy ? "warn" : row.info.connected ? "ok" : "down"}>
+            {blockedBy ? `waiting for ${blockedBy}` : row.info.connected ? "connected" : "not connected"}
+          </StateDot>
+          <span className="rd-display-actions">
+            <Button variant="primary" icon={<FloppyDisk size={16} weight="bold" />} disabled={!dirty || busy} onClick={() => void save()}>
+              Save
+            </Button>
+            <Button variant="ghost" disabled={busy} onClick={() => void stop()}>
+              Stop
+            </Button>
+            {dirty && <span className="mute">Unsaved</span>}
+          </span>
+        </span>
       }
     >
       {/* The slot keeps the notice's height in every state (min-height in CSS), so the card does
@@ -365,15 +379,6 @@ function DisplayCard({ row, fans }: { row: DisplayStatus; fans: FansStatus | nul
             </span>
           </Field>
 
-          <div className="row-wrap display-actions">
-            <Button variant="primary" icon={<FloppyDisk size={16} weight="bold" />} disabled={!dirty || busy} onClick={() => void save()}>
-              Save
-            </Button>
-            <Button variant="ghost" disabled={busy} onClick={() => void stop()}>
-              Stop
-            </Button>
-            {dirty && <span className="mute">Unsaved</span>}
-          </div>
           {error && <p className="error-line">{error}</p>}
         </div>
       </div>
@@ -403,11 +408,12 @@ export function DisplaysView() {
         ? "empty"
         : "ready";
 
+  // How many displays are there, and how many of them are there: the strip says it in one line.
+  const connectedCount = displays?.filter((d) => d.info.connected).length ?? 0;
+
   return (
-    <div className="stack">
-      <div className="page-head">
-        <h1>Displays</h1>
-      </div>
+    <div className="rd-page rd-displays">
+      <PageTitle title="Displays" context={<>{connectedCount} connected</>} />
 
       {stale && (
         <div className="rule rule-warn" role="status">
@@ -417,7 +423,7 @@ export function DisplaysView() {
       )}
 
       <LoadFrame
-        className="stack"
+        className="rd-displays-grid"
         state={state}
         shape={<DisplayShape />}
         label="Reading the displays"

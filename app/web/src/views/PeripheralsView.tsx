@@ -1,16 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
   ArrowCounterClockwise,
   BatteryCharging,
   BatteryFull,
-  CaretLeft,
   GameController,
   Keyboard,
   Mouse,
 } from "@phosphor-icons/react";
-import { Button, IconButton } from "@/components/Button";
+import { Button } from "@/components/Button";
 import { Panel, StateDot } from "@/components/Panel";
 import { ErrorPanel, LoadFrame, type LoadState } from "@/components/Loading";
 import { PeripheralDetailShape, PeripheralListShape } from "@/components/LoadShapes";
@@ -18,7 +17,6 @@ import { Toggle } from "@/components/Toggle";
 import { Select } from "@/components/Select";
 import { ControllerOutline, type PadButton } from "@/components/ControllerOutline";
 import { PropertyControls, type Values } from "@/views/PropertyControls";
-import { useMediaQuery } from "@/components/MediaQuery";
 import { useToast } from "@/components/Toast";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
@@ -29,6 +27,8 @@ import type { PropertyDef } from "@/proto/PropertyDef";
 import type { PropertySchema } from "@/proto/PropertySchema";
 import type { PropValue } from "@/proto/PropValue";
 import type { Props } from "@/proto/props";
+import { PageActions, PageTitle } from "@/shell/PageHeader";
+import { Tooltip } from "@/components/Tooltip";
 
 /** The icon each kind of peripheral wears. */
 const KIND_GLYPH = {
@@ -128,11 +128,10 @@ export function PeripheralsView() {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [pickedStage, setPickedStage] = useState<number | null>(null);
   const [pickedButton, setPickedButton] = useState<string | null>(null);
-  const narrow = useMediaQuery("(max-width: 720px)");
   const toast = useToast();
 
-  // On a wide page the first device is open already; on a phone the list comes first.
-  const selectedId = pickedId ?? (narrow ? null : (list?.[0]?.id ?? null));
+  // The first device is open already: the keys are the way to the others.
+  const selectedId = pickedId ?? (list?.[0]?.id ?? null);
 
   // What this device held when it was read: from this page, or from an earlier visit. While the
   // device is read again these stay on screen, marked as refreshing.
@@ -258,6 +257,9 @@ export function PeripheralsView() {
     return out;
   }, [staged, detail]);
 
+  // The edits that are not on the device yet: they are the ones the strip counts.
+  const changedCount = Object.keys(changed).length;
+
   const onChange = (key: string, value: PropValue) => {
     setStaged((prev) => ({ ...prev, [key]: value }));
     setSaveError(null);
@@ -344,16 +346,11 @@ export function PeripheralsView() {
         <PeripheralDetail
           detail={detail}
           values={values}
-          changedCount={Object.keys(changed).length}
-          saving={saving}
-          saveError={saveError}
           pickedStage={pickedStage}
           pickedButton={pickedButton}
           onPickStage={setPickedStage}
           onPickButton={setPickedButton}
           onChange={onChange}
-          onApply={() => void apply()}
-          onRevert={revert}
           onAccess={(next) => void setAccess(next)}
         />
       )}
@@ -364,90 +361,103 @@ export function PeripheralsView() {
     listError && !listBusy ? "error" : list === null ? "loading" : rows.length === 0 ? "empty" : "ready";
 
   return (
-    <div className="stack">
-      <div className="page-head">
-        <h1>Peripherals</h1>
+    <div className="rd-page rd-peripherals">
+      <PageTitle title="Peripherals" context={<>{rows.length} found</>} />
+      {/* The pending changes and the way to send them sit in the strip, beside the save (R4). */}
+      <PageActions>
+        {changedCount > 0 && (
+          <>
+            <span className="warn-text fig rd-peri-pending">
+              {changedCount} change{changedCount === 1 ? "" : "s"} not sent
+            </span>
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<ArrowCounterClockwise size={16} />}
+              disabled={saving}
+              aria-label="Revert"
+              onClick={revert}
+            >
+              <span className="rd-peri-revert-label">Revert</span>
+            </Button>
+            <Button variant="primary" size="sm" disabled={saving} onClick={() => void apply()}>
+              {saving ? "Sending" : "Apply"}
+            </Button>
+          </>
+        )}
+      </PageActions>
+
+      {/* The device column becomes a row of keys: one click, as now. */}
+      <div className="rd-peri-keys">        <LoadFrame
+          className="load-col"
+          state={listState}
+          shape={<PeripheralListShape />}
+          label="Looking for devices"
+          error={
+            <ErrorPanel
+              title="The peripherals could not be listed"
+              summary="canvas-rgb could not look for the peripherals. Nothing was changed."
+              message={listError}
+              onRetry={retryList}
+            />
+          }
+          empty={
+            <Panel title="No device found">
+              <p className="mute">None that canvas-rgb can configure is plugged in.</p>
+            </Panel>
+          }
+        >
+          {rows.map((p) => {
+            const Glyph = KIND_GLYPH[p.kind];
+            const battery = p.battery ?? null;
+            return (
+              <button
+                key={p.id}
+                type="button"
+                className="peripheral-row rd-devkey"
+                data-on={p.id === selectedId ? "true" : "false"}
+                aria-current={p.id === selectedId ? "true" : undefined}
+                onClick={() => {
+                  setDetailError(null);
+                  setChangeSaved(false);
+                  // A new device: the stage and the button that were picked belong to the
+                  // one that was on screen.
+                  setPickedStage(null);
+                  setPickedButton(null);
+                  setSelectedId(p.id);
+                }}
+              >
+                <span className="peripheral-icon" aria-hidden="true">
+                  <Glyph size={18} />
+                </span>
+                <span className="peripheral-text">
+                  <span className="peripheral-name">{p.name}</span>
+                </span>
+                {battery !== null && (
+                  <span className="peripheral-battery fig">
+                    {p.charging ? <BatteryCharging size={14} /> : <BatteryFull size={14} />}
+                    {battery}%
+                  </span>
+                )}
+                <span
+                  className="state-dot"
+                  style={{ "--tone": p.connected ? "var(--ok)" : "var(--mute)" } as CSSProperties}
+                  aria-hidden="true"
+                />
+              </button>
+            );
+          })}
+        </LoadFrame>
       </div>
 
-      <div className="peripheral-grid" data-step={narrow && selectedId ? "detail" : "list"}>
-        <div className="peripheral-list" hidden={narrow && !!selectedId}>
-          <LoadFrame
-            className="load-col"
-            state={listState}
-            shape={<PeripheralListShape />}
-            label="Looking for devices"
-            error={
-              <ErrorPanel
-                title="The peripherals could not be listed"
-                summary="canvas-rgb could not look for the peripherals. Nothing was changed."
-                message={listError}
-                onRetry={retryList}
-              />
-            }
-            empty={
-              <Panel title="No device found">
-                <p className="mute">None that canvas-rgb can configure is plugged in.</p>
-              </Panel>
-            }
-          >
-            {rows.map((p) => {
-              const Glyph = KIND_GLYPH[p.kind];
-              const battery = p.battery ?? null;
-              return (
-                <button
-                  key={p.id}
-                  type="button"
-                  className="peripheral-row"
-                  data-on={p.id === selectedId ? "true" : "false"}
-                  aria-current={p.id === selectedId ? "true" : undefined}
-                  onClick={() => {
-                    setDetailError(null);
-                    setChangeSaved(false);
-                    // A new device: the stage and the button that were picked belong to the
-                    // one that was on screen.
-                    setPickedStage(null);
-                    setPickedButton(null);
-                    setSelectedId(p.id);
-                  }}
-                >
-                  <span className="peripheral-icon" aria-hidden="true">
-                    <Glyph size={18} />
-                  </span>
-                  <span className="peripheral-text">
-                    <span className="peripheral-name">{p.name}</span>
-                    <span className="peripheral-sub">
-                      {kindWord(p.kind)} · {p.vendor} ·{" "}
-                      <StateDot tone={p.connected ? "ok" : "mute"}>
-                        {p.connected ? "Connected" : "Not connected"}
-                      </StateDot>
-                    </span>
-                  </span>
-                  {battery !== null && (
-                    <span className="peripheral-battery fig">
-                      {p.charging ? <BatteryCharging size={14} /> : <BatteryFull size={14} />}
-                      {battery}%
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-          </LoadFrame>
-        </div>
+      {saveError && (
+        <p className="rule rule-warn" role="status">
+          <span>{saveError}</span>
+        </p>
+      )}
 
-        <div className="peripheral-detail" hidden={narrow && !selectedId}>
-          {narrow && selectedId && (
-            <div className="peripheral-back">
-              <IconButton label="Back to the peripherals" icon={<CaretLeft size={18} />} onClick={() => {
-                  // The next pick reads the device again: what it held stays on screen as known.
-                  setLoaded(null);
-                  setSelectedId(null);
-                }}
-              />
-              <span>Peripherals</span>
-            </div>
-          )}
-          {detailPane}
-        </div>
+      <div className="peripheral-detail">
+        {detailPane}
       </div>
     </div>
   );
@@ -457,30 +467,20 @@ export function PeripheralsView() {
 function PeripheralDetail({
   detail,
   values,
-  changedCount,
-  saving,
-  saveError,
   pickedStage,
   pickedButton,
   onPickStage,
   onPickButton,
   onChange,
-  onApply,
-  onRevert,
   onAccess,
 }: {
   detail: PeripheralDetail;
   values: Values;
-  changedCount: number;
-  saving: boolean;
-  saveError: string | null;
   pickedStage: number | null;
   pickedButton: string | null;
   onPickStage: (n: number | null) => void;
   onPickButton: (key: string | null) => void;
   onChange: (key: string, value: PropValue) => void;
-  onApply: () => void;
-  onRevert: () => void;
   onAccess: (next: { reads?: boolean; writes?: boolean }) => void;
 }) {
   const info = detail.info;
@@ -491,8 +491,75 @@ function PeripheralDetail({
   const isController = detail.schema.kind === "game_controller";
   const isMouse = detail.schema.kind === "mouse";
 
+  // The panels that stand in columns, and the one that spans them all.
+  const columnPanels: ReactNode[] = [];
+  const widePanels: ReactNode[] = [];
+
+  for (const section of detail.schema.sections) {
+    if (isMouse && section.id === "dpi") {
+      columnPanels.push(
+        <DpiPanel
+          key={section.id}
+          section={section}
+          values={values}
+          readOnly={readOnly}
+          disabled={!writes}
+          picked={pickedStage}
+          onPick={onPickStage}
+          onChange={onChange}
+        />,
+      );
+      continue;
+    }
+    if (isController && section.id === "buttons") {
+      // The outline of the pad and the mapping of its buttons belong together, and they are
+      // wider than a column: they span them all.
+      widePanels.push(
+        <ControllerPanel
+          key={section.id}
+          detail={detail}
+          values={values}
+          readOnly={readOnly}
+          disabled={!writes}
+          picked={pickedButton}
+          onPick={onPickButton}
+          onChange={onChange}
+        />,
+      );
+      continue;
+    }
+    // One profile shows at a time: the active one.
+    if (isController && section.id.startsWith("profile-")) {
+      const active = String(plain(values["active-profile"]) ?? "1");
+      if (section.id !== `profile-${active}`) continue;
+    }
+    // The paddles are in the mapping list of the plan; the profile panels hold the rest.
+    const properties =
+      isController && section.id.startsWith("profile-")
+        ? section.properties.filter((p) => !p.key.includes("-paddle-"))
+        : section.properties;
+    columnPanels.push(
+      <Panel
+        key={section.id}
+        title={section.title}
+        className={section.id === "buttons" ? "rd-peri-buttons" : undefined}
+      >
+        <PropertyControls
+          schema={schemaOf(`peripheral-${section.id}`, section.title, properties)}
+          values={values}
+          readOnly={readOnly}
+          disabled={!writes}
+          optionLabel={choiceWord}
+          onChange={onChange}
+        />
+      </Panel>,
+    );
+  }
+
   return (
     <div className="stack">
+      {/* The device head, with Access merged into it: what may be done with it is a switch
+          beside the device it belongs to (R4). */}
       <Panel>
         <div className="peripheral-head">
           <span className="peripheral-head-icon" aria-hidden="true">
@@ -504,30 +571,31 @@ function PeripheralDetail({
               {kindWord(info.kind)} · {info.vendor} · <span className="fig">{info.location}</span>
             </p>
           </div>
-          <StateDot tone={info.connected ? "ok" : "mute"}>{info.connected ? "Connected" : "Not connected"}</StateDot>
-        </div>
-      </Panel>
-
-      <Panel title="Access">
-        <div className="access-list">
-          <div className="access-row">
-            <span className="access-label">Read settings from this device</span>
-            <Toggle
-              label="Read settings from this device"
-              checked={reads}
-              onChange={(v) => onAccess({ reads: v, writes: v ? undefined : false })}
-            />
-            <p className="access-note">canvas-rgb opens the device and asks for its settings; it changes nothing</p>
-          </div>
-          <div className="access-row">
-            <span className="access-label">Change settings on the device</span>
-            <Toggle
-              label="Change settings on the device"
-              checked={writes}
-              disabled={!reads}
-              onChange={(v) => onAccess({ writes: v })}
-            />
-            <p className="access-note">lets canvas-rgb change settings on the device</p>
+          <StateDot tone={info.connected ? "ok" : "mute"}>
+            {info.connected ? "Connected" : "Not connected"}
+          </StateDot>
+          <div className="rd-peri-access">
+            <Tooltip label="canvas-rgb opens the device and asks for its settings; it changes nothing">
+              <span className="rd-peri-toggle">
+                <span className="rd-peri-toggle-label">Read</span>
+                <Toggle
+                  label="Read settings from this device"
+                  checked={reads}
+                  onChange={(v) => onAccess({ reads: v, writes: v ? undefined : false })}
+                />
+              </span>
+            </Tooltip>
+            <Tooltip label="lets canvas-rgb change settings on the device">
+              <span className="rd-peri-toggle">
+                <span className="rd-peri-toggle-label">Change</span>
+                <Toggle
+                  label="Change settings on the device"
+                  checked={writes}
+                  disabled={!reads}
+                  onChange={(v) => onAccess({ writes: v })}
+                />
+              </span>
+            </Tooltip>
           </div>
         </div>
         {detail.problem && (
@@ -537,92 +605,16 @@ function PeripheralDetail({
         )}
       </Panel>
 
-      {detail.schema.sections.map((section) => {
-        if (isMouse && section.id === "dpi") {
-          return (
-            <DpiPanel
-              key={section.id}
-              section={section}
-              values={values}
-              readOnly={readOnly}
-              disabled={!writes}
-              picked={pickedStage}
-              onPick={onPickStage}
-              onChange={onChange}
-            />
-          );
-        }
-        if (isController && section.id === "buttons") {
-          return (
-            <ControllerPanel
-              key={section.id}
-              detail={detail}
-              values={values}
-              readOnly={readOnly}
-              disabled={!writes}
-              picked={pickedButton}
-              onPick={onPickButton}
-              onChange={onChange}
-            />
-          );
-        }
-        // One profile shows at a time: the active one.
-        if (isController && section.id.startsWith("profile-")) {
-          const active = String(plain(values["active-profile"]) ?? "1");
-          if (section.id !== `profile-${active}`) return null;
-        }
-        // The paddles are in the mapping list of the plan; the profile panels hold the rest.
-        const properties =
-          isController && section.id.startsWith("profile-")
-            ? section.properties.filter((p) => !p.key.includes("-paddle-"))
-            : section.properties;
-        return (
-          <Panel key={section.id} title={section.title}>
-            <PropertyControls
-              schema={schemaOf(`peripheral-${section.id}`, section.title, properties)}
-              values={values}
-              readOnly={readOnly}
-              disabled={!writes}
-              optionLabel={choiceWord}
-              onChange={onChange}
-            />
-          </Panel>
-        );
-      })}
+      {/* The sections in columns: a panel never breaks across two of them. */}
+      <div className="rd-peri-sections">{columnPanels}</div>
+
+      {widePanels}
 
       {isController && (
         <Panel title="RGB rings">
           <p className="mute">The rings on the pad are not read yet: this build cannot name them.</p>
         </Panel>
       )}
-
-      <div className="layout-save">
-        <div className="savebar" data-dirty={changedCount > 0 ? "true" : "false"}>
-          {!writes ? (
-            <span className="mute">Turn on writes to change settings on the device</span>
-          ) : (
-            <>
-              <span className={changedCount > 0 ? "warn-text fig" : "mute"}>
-                {changedCount > 0 ? `${changedCount} change${changedCount === 1 ? "" : "s"} not sent` : "On the device"}
-              </span>
-              <div className="row-wrap">
-                <Button
-                  variant="ghost"
-                  icon={<ArrowCounterClockwise size={16} />}
-                  disabled={changedCount === 0 || saving}
-                  onClick={onRevert}
-                >
-                  Revert
-                </Button>
-                <Button variant="primary" disabled={changedCount === 0 || saving} onClick={onApply}>
-                  {saving ? "Sending" : "Apply"}
-                </Button>
-              </div>
-            </>
-          )}
-          {saveError && <span className="error-line">{saveError}</span>}
-        </div>
-      </div>
     </div>
   );
 }

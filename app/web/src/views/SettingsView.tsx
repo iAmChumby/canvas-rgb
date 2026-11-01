@@ -16,7 +16,7 @@ import { exportConfig, importConfigFile } from "@/lib/config-transfer";
 import { BLACK_HEX } from "@/lib/color";
 import { openLogsFolder, tauriHost } from "@/lib/host";
 import { getSnap, patchSnap, refreshAll, refreshRender, refreshSettings, retrySettings, useSnap } from "@/lib/store";
-import { fmt1, fmtInt } from "@/lib/format";
+import { fmt1 } from "@/lib/format";
 import { useToast } from "@/components/Toast";
 import { ErrorPanel, Details, LoadFrame } from "@/components/Loading";
 import { SettingsShape } from "@/components/LoadShapes";
@@ -30,6 +30,7 @@ import {
 } from "@/shell/prefs";
 import type { Settings } from "@/proto/Settings";
 import { UpdatesPanel } from "./UpdatesPanel";
+import { PageTitle } from "@/shell/PageHeader";
 
 export function SettingsView() {
   const settings = useSnap((s) => s.settings);
@@ -37,7 +38,6 @@ export function SettingsView() {
   // A load that is in flight after a Try again: the frame shows its placeholder until it ends.
   const retrying = useSnap((s) => s.pending.includes("settings"));
   const status = useSnap((s) => s.status);
-  const layouts = useSnap((s) => s.layouts);
   const render = useSnap((s) => s.render);
   const [fps, setFps] = useState<number | null>(null);
   const [brightness, setBrightness] = useState<number | null>(null);
@@ -53,10 +53,8 @@ export function SettingsView() {
 
   if (!settings) {
     return (
-      <div className="stack">
-        <div className="page-head">
-          <h1>Settings</h1>
-        </div>
+      <div className="rd-page rd-settings">
+        <PageTitle title="Settings" />
         <LoadFrame
           state={retrying ? "loading" : settingsError ? "error" : "loading"}
           shape={<SettingsShape />}
@@ -76,11 +74,6 @@ export function SettingsView() {
 
   const shownFps = fps ?? render?.fps ?? settings.fps;
   const shownBrightness = brightness ?? settings.brightness;
-
-  // The layout is named the same everywhere: the Layout page titles the layout by its name, so
-  // this says the name too, not the id the daemon stores it under.
-  const activeLayout = layouts?.find((l) => l.id === status?.active_layout) ?? null;
-  const layoutName = activeLayout?.name ?? status?.active_layout ?? "—";
 
   const save = async (patch: Partial<Settings>) => {
     setErr(null);
@@ -155,10 +148,8 @@ export function SettingsView() {
   };
 
   return (
-    <div className="stack">
-      <div className="page-head">
-        <h1>Settings</h1>
-      </div>
+    <div className="rd-page rd-settings">
+      <PageTitle title="Settings" />
 
       {settingsError && (
         // A refresh that failed after the settings were read does not take the page away: the
@@ -170,8 +161,9 @@ export function SettingsView() {
         </div>
       )}
 
-      <div className="settings-grid">
-        <div className="stack">
+      {/* The pane the panels scroll in when the window is too short for them (R1). */}
+      <div className="rd-settings-scroll">
+      <div className="rd-settings-grid">
           <Panel title="Rendering">
             <Field
               label="Frame rate"
@@ -203,6 +195,40 @@ export function SettingsView() {
               </span>
             </Field>
             {renderErr && <p className="error-line" style={{ marginTop: 8 }}>{renderErr}</p>}
+          </Panel>
+
+          <Panel title="Appearance">
+            <Field label="Theme">
+              <Segmented<Theme>
+                label="Theme"
+                value={theme}
+                options={[
+                  { value: "dark", label: "Dark" },
+                  { value: "light", label: "Light" },
+                  { value: "system", label: "System" },
+                ]}
+                onChange={(t) => {
+                  setTheme(t);
+                  applyTheme(t);
+                  toast(`Theme: ${t}`);
+                }}
+              />
+            </Field>
+            <Field label="Motion">
+              <Segmented<MotionPref>
+                label="Interface motion"
+                value={motion}
+                options={[
+                  { value: "full", label: "Full" },
+                  { value: "reduced", label: "Reduced" },
+                ]}
+                onChange={(m) => {
+                  setMotion(m);
+                  applyMotion(m);
+                  toast(m === "reduced" ? "Motion reduced" : "Motion on");
+                }}
+              />
+            </Field>
           </Panel>
 
           <Panel title="Lock and quit">
@@ -241,10 +267,8 @@ export function SettingsView() {
               </span>
             </Field>
           </Panel>
-        </div>
 
-        <div className="stack">
-          <Panel title="Lights">
+          <Panel title="Setup">
             <Field label="Map my PC" hint="Walk through every light again">
               <Button
                 icon={<CompassTool size={16} />}
@@ -260,9 +284,6 @@ export function SettingsView() {
                 Map my PC again
               </Button>
             </Field>
-          </Panel>
-
-          <Panel title="Config">
             <Field label="Export">
               <Button icon={<DownloadSimple size={16} />} onClick={() => void doExport()}>
                 Export
@@ -277,49 +298,8 @@ export function SettingsView() {
             {err && <p className="error-line" style={{ marginTop: 8 }}>{err}</p>}
           </Panel>
 
-          <Panel title="Appearance">
-            <Field label="Theme">
-              <Segmented<Theme>
-                label="Theme"
-                value={theme}
-                options={[
-                  { value: "dark", label: "Dark" },
-                  { value: "light", label: "Light" },
-                  { value: "system", label: "System" },
-                ]}
-                onChange={(t) => {
-                  setTheme(t);
-                  applyTheme(t);
-                  toast(`Theme: ${t}`);
-                }}
-              />
-            </Field>
-            <Field label="Motion">
-              <Segmented<MotionPref>
-                label="Interface motion"
-                value={motion}
-                options={[
-                  { value: "full", label: "Full" },
-                  { value: "reduced", label: "Reduced" },
-                ]}
-                onChange={(m) => {
-                  setMotion(m);
-                  applyMotion(m);
-                  toast(m === "reduced" ? "Motion reduced" : "Motion on");
-                }}
-              />
-            </Field>
-          </Panel>
-
-          <Panel title="About">
-            <dl className="kv">
-              <dt>Version</dt>
-              <dd>{status?.version ?? "—"}</dd>
-              <dt>Active layout</dt>
-              <dd>{layoutName}</dd>
-              <dt>Devices connected</dt>
-              <dd>{fmtInt(status?.devices_connected ?? null)}</dd>
-            </dl>
+          <Panel title="Version" actions={<span className="fig rd-version">{status?.version ?? "—"}</span>}>
+            <UpdatesPanel />
             <div className="row-wrap" style={{ marginTop: 12 }}>
               <Button
                 icon={<FolderOpen size={16} />}
@@ -334,9 +314,7 @@ export function SettingsView() {
               {!inTray && <span className="mute" style={{ fontSize: 14 }}>Tray app only</span>}
             </div>
           </Panel>
-
-          <UpdatesPanel />
-        </div>
+      </div>
       </div>
     </div>
   );

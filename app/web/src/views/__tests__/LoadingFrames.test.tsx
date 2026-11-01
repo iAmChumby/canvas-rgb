@@ -1,10 +1,11 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { ToastProvider } from "@/components/Toast";
 import { getSnap, patchSnap, refreshDevices, refreshDisplays, refreshEffects } from "@/lib/store";
 import { DevicesView } from "@/views/DevicesView";
 import { DisplaysView } from "@/views/DisplaysView";
 import { EffectsView } from "@/views/EffectsView";
+import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
 import { PeripheralsView } from "@/views/PeripheralsView";
 import { UpdatesView, TRAY_TIMEOUT_MS } from "@/views/UpdatesView";
 import type { Status } from "@/proto/Status";
@@ -113,7 +114,11 @@ describe("the error frame", () => {
     });
     render(
       <ToastProvider>
-        <EffectsView />
+        {/* The page's name lives in the status strip, so a page on its own needs a strip. */}
+        <StripSlotsProvider>
+          <StripSlot kind="title" />
+          <EffectsView />
+        </StripSlotsProvider>
       </ToastProvider>,
     );
     await screen.findByText("The effects could not be read");
@@ -149,7 +154,11 @@ describe("the retry", () => {
     });
     render(
       <ToastProvider>
-        <EffectsView />
+        {/* The page's name lives in the status strip, so a page on its own needs a strip. */}
+        <StripSlotsProvider>
+          <StripSlot kind="title" />
+          <EffectsView />
+        </StripSlotsProvider>
       </ToastProvider>,
     );
     await screen.findByText("The effects could not be read");
@@ -171,7 +180,11 @@ describe("the retry", () => {
     });
     render(
       <ToastProvider>
-        <EffectsView />
+        {/* The page's name lives in the status strip, so a page on its own needs a strip. */}
+        <StripSlotsProvider>
+          <StripSlot kind="title" />
+          <EffectsView />
+        </StripSlotsProvider>
       </ToastProvider>,
     );
     await screen.findAllByText(/Aurora/);
@@ -195,20 +208,25 @@ describe("the gallery's cards", () => {
     });
     render(
       <ToastProvider>
-        <EffectsView />
+        {/* The page's name lives in the status strip, so a page on its own needs a strip. */}
+        <StripSlotsProvider>
+          <StripSlot kind="title" />
+          <EffectsView />
+        </StripSlotsProvider>
       </ToastProvider>,
     );
     await screen.findAllByText(/Aurora/);
-    const strip = document.querySelector(".failed-strip");
+    const key = document.querySelector(".rd-failed-chip");
     const gallery = document.querySelector(".effect-gallery");
-    expect(strip).not.toBeNull();
+    expect(key).not.toBeNull();
     expect(gallery).not.toBeNull();
-    // The strip says a file did not load: that is true for a broken file and for one whose
+    // The key says a file did not load: that is true for a broken file and for one whose
     // load ran out of time.
-    expect(strip?.textContent).toContain("did not load");
-    // The strip stands after the cards: it comes with the list and must not push them down.
+    expect(key?.textContent).toContain("did not load");
+    // The key stands in the toolbar, above the cards: it comes with the list and must not push
+    // them down.
     expect(
-      (gallery as Node).compareDocumentPosition(strip as Node) & Node.DOCUMENT_POSITION_FOLLOWING,
+      (key as Node).compareDocumentPosition(gallery as Node) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
   });
 
@@ -217,7 +235,11 @@ describe("the gallery's cards", () => {
     patchSnap({ effects: [], effectsError: null });
     render(
       <ToastProvider>
-        <EffectsView />
+        {/* The page's name lives in the status strip, so a page on its own needs a strip. */}
+        <StripSlotsProvider>
+          <StripSlot kind="title" />
+          <EffectsView />
+        </StripSlotsProvider>
       </ToastProvider>,
     );
     expect(screen.getByText("No effects yet")).toBeTruthy();
@@ -253,11 +275,11 @@ describe("the devices list", () => {
     render(<DevicesView />);
     await waitFor(() => expect(frame()?.dataset.state).toBe("loading"));
     expect(screen.queryAllByTestId("device-card")).toHaveLength(0);
-    // The walker has no device to point at either: the right column draws no placeholder.
-    expect(document.querySelectorAll(".devices-grid > .stack .skeleton")).toHaveLength(0);
+    // There is nothing to draw: the list is empty and the walker has no row to open under.
+    expect(document.querySelectorAll(".rd-dev-list .skeleton")).toHaveLength(0);
   });
 
-  it("draws the walker's placeholder while the number of devices is not known", async () => {
+  it("draws the list's placeholder while the number of devices is not known", async () => {
     patchSnap({
       status: { ...status, devices_connected: 0, devices_total: undefined as unknown as number },
       devices: null,
@@ -265,7 +287,56 @@ describe("the devices list", () => {
       devicesError: null,
     });
     render(<DevicesView />);
-    expect(document.querySelectorAll(".devices-grid > .stack .skeleton").length).toBeGreaterThan(0);
+    expect(document.querySelectorAll(".rd-dev-list .skeleton").length).toBeGreaterThan(0);
+  });
+
+  it("gives a device with one resizable zone its own Size key, and the key opens the walker under its row", async () => {
+    // A device with one zone has no row of zones under it: its Size key sits in the device's row.
+    setUrl("/devices/");
+    await act(async () => {
+      await refreshDevices();
+    });
+    render(<DevicesView />);
+    const row = (await screen.findAllByTestId("device-card")).find((c) => c.getAttribute("aria-label") === "NZXT Hue 2 Strip");
+    expect(row).toBeTruthy();
+    expect(row?.querySelectorAll(".rd-zone")).toHaveLength(0);
+    const size = within(row as HTMLElement).getByRole("button", { name: "Size" });
+    expect(document.querySelector(".rd-walk")).toBeNull();
+    fireEvent.click(size);
+    // The walker opens inside that device's section, under its row.
+    await waitFor(() => expect(row?.querySelector(".rd-walk")).toBeTruthy());
+    expect(document.querySelectorAll(".rd-walk")).toHaveLength(1);
+    // The list that came is not left in the store for the tests after this one.
+    cleanup();
+    patchSnap({ devices: null, devicesTotal: null, devicesError: null });
+  });
+
+  it("says a device reports no zones, and offers Try again in its row", async () => {
+    patchSnap({
+      status: { ...status, devices_connected: 1, devices_total: 1 },
+      devices: [
+        {
+          id: "openrgb:empty-1",
+          name: "Mystery Hub",
+          vendor: "Acme",
+          kind: "other",
+          adapter: "openrgb",
+          adapter_index: 0,
+          serial: "",
+          location: "HID: 0x42",
+          connected: true,
+          zones: [],
+        },
+      ],
+      devicesTotal: 1,
+      devicesError: null,
+    });
+    render(<DevicesView />);
+    const row = await screen.findByTestId("device-card");
+    expect(within(row).getByText("Mystery Hub reports no zones")).toBeTruthy();
+    expect(within(row).getByRole("button", { name: "Try again" })).toBeTruthy();
+    cleanup();
+    patchSnap({ devices: null, devicesTotal: null, devicesError: null });
   });
 
   it("shows no grey placeholder beside the error", async () => {

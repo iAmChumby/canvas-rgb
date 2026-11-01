@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useRef, useState, type CSSProperties } from "react";
-import { ArrowClockwise, CopySimple, Fan, FloppyDisk, Plus, Trash, X } from "@phosphor-icons/react";
+import { ArrowClockwise, CopySimple, DotsThreeOutline, Fan, FloppyDisk, Plus, Trash, X } from "@phosphor-icons/react";
 import { Button, IconButton } from "@/components/Button";
 import { Chip } from "@/components/Chip";
+import { Popover } from "@/components/Popover";
 import { EmptyState } from "@/components/EmptyState";
 import { NumberField, TextField } from "@/components/NumberField";
 import { Panel, Field } from "@/components/Panel";
@@ -12,7 +13,8 @@ import { Select } from "@/components/Select";
 import { Slider } from "@/components/Slider";
 import { Sparkline, Figure } from "@/components/Readout";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
-import { useMediaQuery } from "@/components/MediaQuery";
+import { usePageNarrow } from "@/components/MediaQuery";
+import { PageActions } from "@/shell/PageHeader";
 import { Details, LoadFrame } from "@/components/Loading";
 import { FansShape } from "@/components/LoadShapes";
 import { useToast } from "@/components/Toast";
@@ -28,6 +30,7 @@ import type { FanMode } from "@/proto/FanMode";
 import type { FansStatus } from "@/proto/FansStatus";
 import type { TempSource } from "@/proto/TempSource";
 import type { TempReading } from "@/proto/TempReading";
+import { PageTitle } from "@/shell/PageHeader";
 
 const MAX_POINTS = 8;
 const MIN_POINTS = 2;
@@ -132,10 +135,12 @@ export function FansView() {
   const rpm = useSnap((s) => s.rpm);
   // A load that is in flight after a Try again: the frame shows its placeholder until it ends.
   const retrying = useSnap((s) => s.pending.includes("fans"));
-  const narrow = useMediaQuery("(max-width: 720px)");
+  // The page's box, not the window: the editor sheet in the CSS switches on at 640 px of it.
+  const narrow = usePageNarrow(640);
   const [picked, setSelectedId] = useState<string | null>(null);
-  // The first header is the default selection until one is clicked.
-  const selectedId = picked ?? fans?.headers[0]?.id ?? null;
+  // The first header is the default selection until one is clicked. On a phone the list is the
+  // page and the editor is a sheet a tap pushes over it, so nothing is selected until then.
+  const selectedId = picked ?? (narrow ? null : fans?.headers[0]?.id ?? null);
 
   // The headers last read: from this session if there was one, else from the viewer's memory.
   const [saved] = useState<KnownHeader[]>(() => readKnownHeaders());
@@ -189,22 +194,25 @@ export function FansView() {
       </div>
   ) : null;
 
-  const selected = fans ? (fans.headers.find((h) => h.id === selectedId) ?? fans.headers[0] ?? null) : null;
+  const selected = fans ? (fans.headers.find((h) => h.id === selectedId) ?? (narrow ? null : fans.headers[0] ?? null)) : null;
   const headers = fans?.headers ?? [];
   // A refresh that failed after the readings were read does not take the page away: the numbers
   // stay and the page says they may be old.
   const stale = fans !== null && fansError !== null;
 
   return (
-    <div className="stack">
-      <div className="page-head">
-        <h1>Fans</h1>
-        {fans && !fansError && (
-          <span className="mute fig">
-            {fans.chip ?? "No chip"} · floor <AnimatedNumber value={fans.floor_percent} />%
-          </span>
-        )}
-      </div>
+    <div className="rd-page rd-fans">
+      <PageTitle
+        title="Fans"
+        context={
+          fans && !fansError ? (
+            <>
+              {fans.chip ?? "No chip"} · floor <AnimatedNumber value={fans.floor_percent} />%
+            </>
+          ) : undefined
+        }
+      />
+      {fans && !fansError && <FanProfileActions fans={fans} />}
 
       {stale && (
         <div className="rule rule-warn" role="status">
@@ -221,12 +229,36 @@ export function FansView() {
         error={errorNode}
       >
       {fans && (
-      <>
-      <ProfilesPanel fans={fans} />
-
-      <div className="fans-grid">
-        <div className="stack">
-        <Panel title="Headers">
+      <div className="rd-fans-grid">
+        <div className="rd-fans-left">
+          <Panel title="Temperatures">
+            {fans.temps.length === 0 && <p className="mute">No temperature sources reported.</p>}
+            <div className="rd-temp-row">
+              {fans.temps.map((t) => {
+                const c = t.celsius ?? 0;
+                return (
+                  <div className="temp-cell" key={sourceKey(t.source)}>
+                    <span className="one-line">{t.label}</span>
+                    <span className="meter" aria-hidden="true">
+                      <span
+                        className="meter-fill"
+                        style={
+                          {
+                            "--p": clamp((c - 20) / 80, 0, 1),
+                            "--tone": tempTone(c),
+                          } as CSSProperties
+                        }
+                      />
+                    </span>
+                    <span className="fig">
+                      <AnimatedNumber value={c} decimals={1} /> °C
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </Panel>
+          <Panel title="Headers" className="rd-headers">
           {narrow ? (
             <div className="fan-cards">
               {headers.map((h) => (
@@ -248,7 +280,7 @@ export function FansView() {
                     <th scope="col" className="num-col">RPM</th>
                     <th scope="col">Duty</th>
                     <th scope="col">Mode</th>
-                    <th scope="col">Last 60 s</th>
+                    <th scope="col" className="rd-history">Last 60 s</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -265,45 +297,19 @@ export function FansView() {
               </table>
             </div>
           )}
-        </Panel>
-          <Panel title="Temperatures">
-            {fans.temps.length === 0 && <p className="mute">No temperature sources reported.</p>}
-            {fans.temps.map((t) => {
-              const c = t.celsius ?? 0;
-              return (
-                <div className="temp-cell" key={sourceKey(t.source)}>
-                  <span className="one-line">{t.label}</span>
-                  <span className="meter" aria-hidden="true">
-                    <span
-                      className="meter-fill"
-                      style={
-                        {
-                          "--p": clamp((c - 20) / 80, 0, 1),
-                          "--tone": tempTone(c),
-                        } as CSSProperties
-                      }
-                    />
-                  </span>
-                  <span className="fig">
-                    <AnimatedNumber value={c} decimals={1} /> °C
-                  </span>
-                </div>
-              );
-            })}
           </Panel>
         </div>
 
-        <div className="stack fans-editor-col">
-          {selected && (
+        {selected && (
+          <div className="rd-fans-right">
             <HeaderEditor
               key={`${selected.id}|${selected.mode.mode}|${fans.active_profile}`}
               header={selected}
               fans={fans}
             />
-          )}
-        </div>
+          </div>
+        )}
       </div>
-      </>
       )}
       </LoadFrame>
     </div>
@@ -337,6 +343,7 @@ function FanRow({
     >
       <td>
         <span className="fig" style={{ fontWeight: 600 }}>{header.label}</span>
+        {header.pwm_percent === null && <Chip className="rd-hdr-chip">tach only</Chip>}
         <Handoff header={header} />
       </td>
       <td className="num-col">
@@ -358,7 +365,7 @@ function FanRow({
       <td>
         <ModeState mode={header.mode} />
       </td>
-      <td>
+      <td className="rd-history">
         <div className="row-wrap" style={{ flexWrap: "nowrap" }}>
           <Sparkline values={history} max={peak} label={`${header.label} RPM over the last 60 seconds`} />
         </div>
@@ -425,10 +432,17 @@ function FanCard({
   );
 }
 
-function ProfilesPanel({ fans }: { fans: FansStatus }) {
+/**
+ * The fan profiles, in the strip: the profile that is on, the key that saves it and the menu
+ * that holds the rest (duplicate, rename, delete). They sit beside the page's name, so the
+ * profile that is on is never more than a glance away (R4).
+ */
+function FanProfileActions({ fans }: { fans: FansStatus }) {
   const [err, setErr] = useState<string | null>(null);
   // The profile whose delete is waiting for an inline confirm.
   const [confirming, setConfirming] = useState<string | null>(null);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreRef = useRef<HTMLSpanElement>(null);
   const toast = useToast();
 
   const current = (): Record<string, FanMode> =>
@@ -454,85 +468,119 @@ function ProfilesPanel({ fans }: { fans: FansStatus }) {
   };
 
   return (
-    <Panel
-      title="Profiles"
-      actions={
-        <div className="row-wrap">
-          <Button size="sm" icon={<CopySimple size={14} />} onClick={() => void run(() => api.putFanProfile(nextName(fans.active_profile), { name: nextName(fans.active_profile), headers: current() }), "Profile duplicated")}>
+    <PageActions>
+      <Segmented
+        label="The fan profile"
+        value={fans.active_profile}
+        options={fans.profiles.map((p) => ({ value: p, label: p }))}
+        onChange={(p) => void run(() => api.switchFanProfile(p), `${p} is the active profile`)}
+      />
+      <Button
+        variant="primary"
+        size="sm"
+        icon={<FloppyDisk size={14} />}
+        aria-label={`Save ${fans.active_profile}`}
+        onClick={() =>
+          void run(
+            () => api.putFanProfile(fans.active_profile, { name: fans.active_profile, headers: current() }),
+            `${fans.active_profile} saved`,
+          )
+        }
+      >
+        <span className="rd-btn-text">Save {fans.active_profile}</span>
+      </Button>
+      <span ref={moreRef} className="row-wrap">
+        <IconButton
+          label="The fan profiles"
+          size="sm"
+          icon={<DotsThreeOutline size={16} />}
+          onClick={() => setMoreOpen((o) => !o)}
+        />
+      </span>
+      <Popover
+        anchor={moreRef}
+        open={moreOpen}
+        onClose={() => setMoreOpen(false)}
+        label="The fan profiles"
+      >
+        <div className="stack" style={{ gap: 12 }}>
+          <Button
+            size="sm"
+            icon={<CopySimple size={14} />}
+            onClick={() =>
+              void run(
+                () =>
+                  api.putFanProfile(nextName(fans.active_profile), {
+                    name: nextName(fans.active_profile),
+                    headers: current(),
+                  }),
+                "Profile duplicated",
+              )
+            }
+          >
             Duplicate
           </Button>
-          <Button variant="primary" size="sm" icon={<FloppyDisk size={14} />} onClick={() => void run(() => api.putFanProfile(fans.active_profile, { name: fans.active_profile, headers: current() }), `${fans.active_profile} saved`)}>
-            Save {fans.active_profile}
-          </Button>
-        </div>
-      }
-    >
-      <div className="stack" style={{ gap: 12 }}>
-        <div className="profile-row">
-          {fans.profiles.map((p) => (
-            <span key={p} className="row-wrap" style={{ gap: 2 }}>
-              <Chip
-                pressed={p === fans.active_profile}
-                onClick={() => void run(() => api.switchFanProfile(p), `${p} is the active profile`)}
-                label={`Switch to profile ${p}`}
-              >
-                {p}
-              </Chip>
-              {/* The active profile is not deletable: you switch to another one first. One way to
-                  delete, not two. */}
-              {p !== fans.active_profile && (
-                <IconButton
-                  label={`Delete profile ${p}`}
+          <Field label="Rename">
+            <TextField
+              label="New profile name"
+              placeholder="New name"
+              value=""
+              onCommit={(name) =>
+                void run(async () => {
+                  const old = fans.active_profile;
+                  await api.putFanProfile(name, { name, headers: current() });
+                  await api.switchFanProfile(name);
+                  if (old !== name) await api.deleteFanProfile(old);
+                }, `Profile renamed to ${name}`)
+              }
+            />
+          </Field>
+          {confirming ? (
+            <div className="confirm slide-in" role="alert">
+              <span>
+                Delete <span className="fig" style={{ color: "var(--ink)" }}>{confirming}</span>? Its saved
+                headers are removed.
+              </span>
+              <div className="row-wrap" style={{ marginLeft: "auto" }}>
+                <Button
                   size="sm"
-                  icon={<Trash size={14} />}
-                  onClick={() => setConfirming(p)}
-                />
-              )}
-            </span>
-          ))}
-        </div>
-        {confirming && (
-          <div className="confirm slide-in" role="alert">
-            <span>
-              Delete <span className="fig" style={{ color: "var(--ink)" }}>{confirming}</span>? Its saved headers are removed.
-            </span>
-            <div className="row-wrap" style={{ marginLeft: "auto" }}>
-              <Button
-                size="sm"
-                variant="danger"
-                onClick={() =>
-                  void run(async () => {
-                    await api.deleteFanProfile(confirming);
-                    setConfirming(null);
-                  }, `${confirming} deleted`)
-                }
-              >
-                Delete
-              </Button>
-              <Button size="sm" variant="ghost" onClick={() => setConfirming(null)}>
-                Cancel
-              </Button>
+                  variant="danger"
+                  onClick={() =>
+                    void run(async () => {
+                      await api.deleteFanProfile(confirming);
+                      setConfirming(null);
+                    }, `${confirming} deleted`)
+                  }
+                >
+                  Delete
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => setConfirming(null)}>
+                  Cancel
+                </Button>
+              </div>
             </div>
-          </div>
-        )}
-        <Field label="Rename">
-          <TextField
-            label="New profile name"
-            placeholder="New name"
-            value=""
-            onCommit={(name) =>
-              void run(async () => {
-                const old = fans.active_profile;
-                await api.putFanProfile(name, { name, headers: current() });
-                await api.switchFanProfile(name);
-                if (old !== name) await api.deleteFanProfile(old);
-              }, `Profile renamed to ${name}`)
-            }
-          />
-        </Field>
-        {err && <p className="error-line">{err}</p>}
-      </div>
-    </Panel>
+          ) : (
+            fans.profiles
+              .filter((p) => p !== fans.active_profile)
+              .map((p) => (
+                <div key={p} className="row-wrap" style={{ justifyContent: "space-between" }}>
+                  <span>{p}</span>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    icon={<Trash size={14} />}
+                    aria-label={`Delete profile ${p}`}
+                    onClick={() => setConfirming(p)}
+                  >
+                    Delete
+                  </Button>
+                </div>
+              ))
+          )}
+          {err && <p className="error-line">{err}</p>}
+        </div>
+      </Popover>
+    </PageActions>
   );
 }
 

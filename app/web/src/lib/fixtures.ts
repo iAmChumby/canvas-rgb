@@ -417,6 +417,20 @@ export const DEVICES: DeviceInfo[] = [
     connected: true,
     zones: [zone(0, "Strip", { type: "linear" }, 60, 60, 60, false)],
   },
+  {
+    // A strip on a header with one zone that can be resized: the Devices list shows its Size key
+    // in the device's own row, since it has no row of zones under it.
+    id: "openrgb:strip-2",
+    name: "NZXT Hue 2 Strip",
+    vendor: "NZXT",
+    kind: "led_strip",
+    adapter: "openrgb",
+    adapter_index: 10,
+    serial: "strip-2",
+    location: "HID: \\\\?\\HID#VID_1E71&PID_2002#strip-2",
+    connected: true,
+    zones: [zone(0, "Channel 1", { type: "linear" }, 30, 0, 120, true)],
+  },
 ];
 
 /**

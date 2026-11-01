@@ -10,6 +10,7 @@ import {
   type CSSProperties,
   type DragEvent,
   type PointerEvent,
+  type ReactNode,
 } from "react";
 import {
   AlignBottom,
@@ -25,6 +26,7 @@ import {
 } from "@phosphor-icons/react";
 import { NumberField } from "@/components/NumberField";
 import { Segmented } from "@/components/Segmented";
+import { Tooltip } from "@/components/Tooltip";
 import { IconButton } from "@/components/Button";
 import { EffectPreview, type PreviewValues } from "@/components/EffectPreview";
 import { useMediaQuery } from "@/components/MediaQuery";
@@ -654,6 +656,16 @@ export interface StageProps {
    * so the reader still sees their case; the daemon migrates it.
    */
   caseForm?: CaseForm;
+  /**
+   * The controls that sit in the stage's own toolbar, beside the canvas mode: the page puts
+   * there what it wants next to the desk. Nothing is drawn over the desk itself.
+   */
+  toolbarExtra?: ReactNode;
+  /**
+   * Whether the line under the desk says what the cells are. A page that has no room for it
+   * turns it off: the words are then the canvas mode's own tooltip.
+   */
+  showLegend?: boolean;
 }
 
 /** The hit-test's name for the kind of pointer an event came from. */
@@ -745,7 +757,7 @@ function partOf(z: PlacedZone, devices: DeviceInfo[] | null, info: ZoneInfo | nu
  *
  * Two ways of seeing the desk: the effect under the parts (the cells the engine samples, in
  * their own colours) and the lights themselves (each LED a dot with a halo that stays inside
- * its own part). The second is labelled approximate, because it is.
+ * its own part). The second is approximate, and the canvas mode's tooltip says so.
  */
 export function PreviewStage({
   zones,
@@ -775,6 +787,8 @@ export function PreviewStage({
   onHoverPart,
   guides = [],
   unlockBadge = false,
+  toolbarExtra = null,
+  showLegend = true,
 }: StageProps) {
   const stageRef = useRef<HTMLDivElement>(null);
   const previewRef = useRef<HTMLCanvasElement>(null);
@@ -2152,6 +2166,21 @@ export function PreviewStage({
   const base = (stageBox.w || CANVAS_W) / CANVAS_W;
   const k = base * view.scale;
 
+  /**
+   * What the canvas mode's two keys show, for the tooltip on them (R8). It says outright that the
+   * lights view is approximate: the key itself reads only "Lights".
+   */
+  const modeNote =
+    "Effect: each cell is one LED, in the colour it reads from the effect. " +
+    "Lights is approximate: each LED is a dot in its own colour and its halo stays inside its part, so the picture is close, not exact." +
+    (phone ? " Tap anything for its name." : "");
+
+  /** What the cells on the desk are: the line under the desk when there is room for one. */
+  const legend =
+    (mode === "lights"
+      ? "Each LED is a dot in its own colour. The halo stays inside its part, so the picture is close, not exact."
+      : "Each cell is one LED, in the colour it reads from the effect.") + (phone ? " Tap anything for its name." : "");
+
   /** The part that is picked, and the one that is only hovered. */
   const primary = selection[0] ?? null;
   const hovered = pressed ?? hover;
@@ -2713,7 +2742,7 @@ export function PreviewStage({
           />
         )}
       </div>
-      <div className={desk.toolbar}>
+      <div className={`${desk.toolbar} stage-toolbar`}>
         {scaleBar ? (
           <div className={desk.scaleBar} role="img" aria-label={`Scale: ${scaleBar.text}`}>
             <span className={desk.scaleLine} style={{ width: `${scaleBar.px}px` }} />
@@ -2724,16 +2753,23 @@ export function PreviewStage({
         ) : (
           <span />
         )}
-        <div className={desk.controls}>
-          <Segmented<StageMode>
-            label="What the canvas shows"
-            value={mode}
-            options={[
-              { value: "effect", label: "Effect" },
-              { value: "lights", label: "Lights (approximate)" },
-            ]}
-            onChange={onMode}
-          />
+        <div className={`${desk.segs} stage-segs`}>
+          {/* What the canvas shows, and what the cells mean: the note is the segment's own
+              tooltip, not a line under the desk (R8). */}
+          <Tooltip label={modeNote} className={`${desk.modeTip} stage-mode-tip`}>
+            <Segmented<StageMode>
+              label="What the canvas shows"
+              value={mode}
+              options={[
+                { value: "effect", label: "Effect" },
+                { value: "lights", label: "Lights" },
+              ]}
+              onChange={onMode}
+            />
+          </Tooltip>
+          {toolbarExtra}
+        </div>
+        <div className={`${desk.controls} stage-zoom`}>
           <IconButton label="Zoom out" icon={<Minus size={13} />} size="sm" onClick={() => zoomBy(1 / 1.3)} />
           <span className={desk.zoomValue}>{Math.round(view.scale * 100)}%</span>
           <IconButton label="Zoom in" icon={<Plus size={13} />} size="sm" onClick={() => zoomBy(1.3)} />
@@ -2753,12 +2789,11 @@ export function PreviewStage({
           <IconButton label="Spread the parts out down" icon={<AlignCenterVertical size={13} />} size="sm" onClick={() => arrange("spreadV")} />
         </div>
       )}
-      <p className={desk.legend}>
-        {mode === "lights"
-          ? "Each LED is a dot in its own colour. The halo stays inside its part, so the picture is close, not exact."
-          : "Each cell is one LED, in the colour it reads from the effect."}
-        {phone && " Tap anything for its name."}
-      </p>
+      {showLegend ? (
+        <p className={desk.legend}>
+          {legend}
+        </p>
+      ) : null}
     </>
   );
 }

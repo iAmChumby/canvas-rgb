@@ -14,6 +14,7 @@ import { links, playing, problems, type Tone } from "@/lib/status";
 import { patchSnap, refreshStatus, useSnap } from "@/lib/store";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { RunningPresetName, useTrackRunningPreset } from "@/shell/RunningPresetName";
+import { StripSlot } from "@/shell/PageHeader";
 
 /** What the strip says when nothing is wrong. */
 const ALL_GOOD = "All connected";
@@ -117,6 +118,9 @@ export function StatusStrip({
           <Wordmark />
         </span>
 
+        {/* The page's own title and context, filled in by the page (R2). */}
+        <StripSlot kind="title" />
+
         {/* What the lights are doing, with a chip of the running light's own colour. */}
         <span className="strip-now">
           <span className="strip-swatch" data-paused={paused ? "true" : "false"} aria-hidden="true" />
@@ -153,6 +157,8 @@ export function StatusStrip({
         </button>
 
         <span className="strip-controls">
+          {/* The page's own actions, before Pause and Search (R2, R4). */}
+          <StripSlot kind="actions" />
           {known ? (
             <Button
               size="sm"
