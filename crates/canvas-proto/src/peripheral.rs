@@ -139,6 +139,56 @@ pub struct PeripheralDetail {
     pub problem: Option<String>,
 }
 
+/// Where a long device read is. The read of a peripheral can take seconds (a mouse on its 2.4 GHz
+/// receiver may be asleep and the adapter waits for it to wake), so the editor asks for this while
+/// `GET /peripherals/{id}` is still open and says what the daemon is doing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadStage {
+    /// No read is running.
+    #[default]
+    Idle,
+    /// The daemon is opening the device.
+    Opening,
+    /// The device is asleep and the adapter is waiting for it to wake.
+    Waking,
+    /// The settings are being read, one report at a time: see `done` and `total`.
+    Reading,
+}
+
+/// `GET /peripherals/{id}/read`: the stage of the read that is running now.
+///
+/// Answers at once, also while a read of the same device is still open: it never waits on the
+/// device. Nothing is opened or sent to the device by asking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ReadProgress {
+    /// The stage of the read.
+    pub stage: ReadStage,
+    /// The reports read so far while `stage` is `reading`; 0 in the other stages.
+    #[serde(default)]
+    pub done: u32,
+    /// The reports the read will make; 0 when the adapter does not know a count.
+    #[serde(default)]
+    pub total: u32,
+}
+
+impl ReadProgress {
+    /// No read is running.
+    pub const IDLE: Self = Self { stage: ReadStage::Idle, done: 0, total: 0 };
+
+    /// A stage with no count.
+    pub const fn at(stage: ReadStage) -> Self {
+        Self { stage, done: 0, total: 0 }
+    }
+
+    /// The settings are being read: `done` of `total` reports are in.
+    pub const fn reading(done: u32, total: u32) -> Self {
+        Self { stage: ReadStage::Reading, done, total }
+    }
+}
+
 /// What the daemon may do with one peripheral. Both are off until the owner turns them on, so
 /// the daemon never opens or writes a device it was not told to (the vendor app may own it).
 /// Saved per device id in `%APPDATA%\canvas-rgb\peripherals.json`.

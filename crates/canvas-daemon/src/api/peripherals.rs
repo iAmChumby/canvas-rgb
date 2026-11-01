@@ -1,5 +1,5 @@
 //! The peripheral routes: `GET /peripherals`, `GET /peripherals/{id}`, `PATCH /peripherals/{id}`
-//! and `PUT /peripherals/{id}/access`.
+//! `PUT /peripherals/{id}/access` and `GET /peripherals/{id}/read` (the stage of a read that is open).
 //!
 //! The rule that shapes every route: the daemon never opens a peripheral it was not told to.
 //! The enumeration opens nothing, a read happens only while reads are on for that device id,
@@ -10,7 +10,7 @@ use axum::extract::{Path, State};
 use axum::Json;
 use canvas_proto::device::DeviceId;
 use canvas_proto::peripheral::{
-    PeripheralAccess, PeripheralDetail, PeripheralInfo, PeripheralsResponse,
+    PeripheralAccess, PeripheralDetail, PeripheralInfo, PeripheralsResponse, ReadProgress,
 };
 use canvas_proto::props::Props;
 use canvas_proto::traits::AdapterError;
@@ -134,6 +134,18 @@ pub async fn put_peripheral_access(
     }
     tracing::info!(device = %id, reads = access.reads, writes = access.writes, "the peripheral access was saved");
     Ok(Json(access))
+}
+
+/// `GET /api/v1/peripherals/{id}/read`: the stage of the read of this device that is open now.
+///
+/// It answers at once and never waits on the device or on the adapters' lock, so it can be asked
+/// while `GET /peripherals/{id}` is still waiting for a sleeping mouse. An id that is not reading
+/// (or not a device) is `idle`.
+pub async fn get_peripheral_read(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+) -> Json<ReadProgress> {
+    Json(app.peripherals.read_progress(&DeviceId(id)))
 }
 
 /// The peripheral with this id, as the last enumeration found it.

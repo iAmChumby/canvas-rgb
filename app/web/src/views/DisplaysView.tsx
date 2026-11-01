@@ -4,6 +4,8 @@ import { Fragment, useMemo, useState } from "react";
 import { ArrowClockwise, FloppyDisk, ThermometerSimple, WarningOctagon } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
 import { EmptyState } from "@/components/EmptyState";
+import { ErrorPanel, Details, LoadFrame, type LoadState } from "@/components/Loading";
+import { DisplayShape } from "@/components/LoadShapes";
 import { NumberField } from "@/components/NumberField";
 import { Field, Panel, StateDot } from "@/components/Panel";
 import { Segmented } from "@/components/Segmented";
@@ -12,7 +14,7 @@ import { Toggle } from "@/components/Toggle";
 import { useToast } from "@/components/Toast";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
-import { refreshDisplays, useSnap } from "@/lib/store";
+import { refreshDisplays, retryDisplays, useSnap } from "@/lib/store";
 import type { DisplayConfig } from "@/proto/DisplayConfig";
 import type { DisplaySource } from "@/proto/DisplaySource";
 import type { DisplayStatus } from "@/proto/DisplayStatus";
@@ -384,6 +386,22 @@ export function DisplaysView() {
   const displaysError = useSnap((s) => s.displaysError);
   const displaysUnsupported = useSnap((s) => s.displaysUnsupported);
   const fans = useSnap((s) => s.fans);
+  // A load that is in flight after a Try again: the frame shows its placeholder until it ends.
+  const retrying = useSnap((s) => s.pending.includes("displays"));
+
+  // One frame in every state, so the page keeps its shape: the card that is coming, the error
+  // and the empty states all stand where the card stands. A refresh that failed after the cards
+  // were read keeps them: the page says they may be old instead of taking them away.
+  const stale = displays !== null && displaysError !== null && !displaysUnsupported;
+  const state: LoadState = displaysUnsupported
+    ? "empty"
+    : displays === null
+      ? displaysError && !retrying
+        ? "error"
+        : "loading"
+      : displays.length === 0
+        ? "empty"
+        : "ready";
 
   return (
     <div className="stack">
@@ -391,41 +409,51 @@ export function DisplaysView() {
         <h1>Displays</h1>
       </div>
 
-      {displaysUnsupported ? (
-        // The daemon answered 404: it is older than the display support. That is a version to fix,
-        // not a failure, so it does not read like one.
-        <Panel>
-          <EmptyState
-            icon={<ArrowClockwise size={22} />}
-            title="This daemon is older than the editor"
-            action={
-              <Button size="sm" onClick={() => void refreshDisplays()}>
-                Check again
-              </Button>
-            }
-          >
-            The daemon does not have the display routes yet: it was built before displays existed.
-            Update the daemon and the tray app to set a display up. Nothing else on this page is
-            affected, and no display is touched until one has a source.
-          </EmptyState>
-        </Panel>
-      ) : displaysError ? (
-        <Panel title="The displays could not be read">
-          <p className="error-line">{displaysError}</p>
-        </Panel>
-      ) : displays === null ? (
-        <Panel title="Reading the displays">
-          <p className="mute">The daemon has not answered yet.</p>
-        </Panel>
-      ) : displays.length === 0 ? (
-        <Panel>
-          <EmptyState icon={<ThermometerSimple size={22} />} title="No display has a source yet">
-            The daemon drives a display only while it has a saved source, so a display that has
-            never been set up is left alone. Nothing is sent to it.
-          </EmptyState>
-        </Panel>
-      ) : (
-        displays.map((row) => (
+      {stale && (
+        <div className="rule rule-warn" role="status">
+          The displays may be out of date.
+          <Details>{displaysError}</Details>
+        </div>
+      )}
+
+      <LoadFrame
+        className="stack"
+        state={state}
+        shape={<DisplayShape />}
+        label="Reading the displays"
+        error={
+          <ErrorPanel
+            title="The displays could not be read"
+            summary="canvas-rgb could not read the displays. The lights are unaffected."
+            message={displaysError}
+            onRetry={() => void retryDisplays()}
+          />
+        }
+        empty={
+          <Panel>
+            {displaysUnsupported ? (
+              // The daemon answered 404: it is older than the display support. That is a version
+              // to fix, not a failure, so it does not read like one.
+              <EmptyState
+                icon={<ArrowClockwise size={22} />}
+                title="canvas-rgb needs an update for displays"
+                action={
+                  <Button size="sm" onClick={() => void refreshDisplays()}>
+                    Check again
+                  </Button>
+                }
+              >
+                The service running is older than this page; update canvas-rgb to set a display up.
+              </EmptyState>
+            ) : (
+              <EmptyState icon={<ThermometerSimple size={22} />} title="No display has a source yet">
+                Nothing is sent to a display until it has one.
+              </EmptyState>
+            )}
+          </Panel>
+        }
+      >
+        {(displays ?? []).map((row) => (
           // The key carries the saved config, so the card's draft starts from the daemon's config
           // and follows it when it is saved, from here or from the CLI.
           <DisplayCard
@@ -433,8 +461,8 @@ export function DisplaysView() {
             row={row}
             fans={fans}
           />
-        ))
-      )}
+        ))}
+      </LoadFrame>
     </div>
   );
 }

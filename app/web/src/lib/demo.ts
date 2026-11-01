@@ -17,6 +17,10 @@ import {
   applyStatusScenarios,
   conflictClearsMs,
   daemonDown,
+  emptyArea,
+  failsArea,
+  holdMs,
+  slowRead,
   foundOnRescan,
   onboardingDone,
   openRgbConnecting,
@@ -61,6 +65,7 @@ import type { DisplayUnit } from "@/proto/DisplayUnit";
 import type { DisplayValue } from "@/proto/DisplayValue";
 import type { PeripheralAccess } from "@/proto/PeripheralAccess";
 import type { PeripheralDetail } from "@/proto/PeripheralDetail";
+import type { ReadProgress } from "@/proto/ReadProgress";
 import type { ImportEffect } from "@/proto/ImportEffect";
 import type { ImportEffectResponse } from "@/proto/ImportEffectResponse";
 import type { FailedEffect } from "@/proto/FailedEffect";
@@ -191,9 +196,13 @@ function initialState(): DemoState {
     displayApiValue: null,
     // The daemon never opens a device it was not told to: both start with reads off.
     peripherals: PERIPHERALS.map((p) => ({ ...p, values: { ...p.values } })),
-    peripheralAccess: {},
+    // `?state=reads-on` starts with reads allowed for every device, as a configured PC has.
+    peripheralAccess: s.has("reads-on")
+      ? Object.fromEntries(PERIPHERALS.map((p) => [p.info.id, { reads: true, writes: false }]))
+      : {},
     // A user effect file that did not parse: the author sees why.
-    failedEffects: [
+    // `?state=no-failed` has none, as most PCs do.
+    failedEffects: s.has("no-failed") ? [] : [
       {
         file: "neon-grid.html",
         error: "the effect does not parse: effect html:neon-grid has no script",
@@ -216,6 +225,28 @@ function activeLayout(): Layout {
   const found = st().layouts.find((l) => l.id === st().activeLayout);
   if (!found) fail(404, "not_found", "no active layout");
   return found;
+}
+
+// ---- a slow device read (`?state=slow-read`) ----
+
+/** When each open read started. */
+const readStartedAt = new Map<string, number>();
+/** Opening, waking, then five reports a little under a second apart. */
+const OPEN_MS = 700;
+const WAKE_MS = 1500;
+const REPORT_MS = 900;
+const REPORTS = 5;
+const SLOW_READ_TOTAL_MS = OPEN_MS + WAKE_MS + REPORT_MS * REPORTS;
+
+/** What the daemon's read route would say for this device now. */
+function readProgressNow(id: string): ReadProgress {
+  const started = readStartedAt.get(id);
+  if (started === undefined) return { stage: "idle", done: 0, total: 0 };
+  const t = Date.now() - started;
+  if (t < OPEN_MS) return { stage: "opening", done: 0, total: 0 };
+  if (t < OPEN_MS + WAKE_MS) return { stage: "waking", done: 0, total: 0 };
+  const done = Math.min(REPORTS, Math.floor((t - OPEN_MS - WAKE_MS) / REPORT_MS));
+  return { stage: "reading", done, total: REPORTS };
 }
 
 // ---- simulated sensors and fans ----
@@ -330,6 +361,9 @@ function statusNow(): Status {
   const elapsedMs = Date.now() - s.startedAt;
   const waking = openRgbConnecting() || elapsedMs < wakingMs();
   const connected = waking ? 0 : s.devices.filter((d) => d.connected).length;
+  // Every device the daemon knows about, connected or not: the editor draws one card per device
+  // while the list is on its way.
+  const total = waking ? 0 : s.devices.length;
   const down = !s.serviceUp;
   const fps = s.settings.fps;
   const jitter = Math.sin(Date.now() / 1700) * 0.12;
@@ -344,6 +378,7 @@ function statusNow(): Status {
     frames_rendered: Math.round((elapsed / 1000) * fps),
     parked: false,
     devices_connected: connected,
+    devices_total: total,
     preview_subscribers: 1,
     active_layout: s.activeLayout,
     active_effect: s.activeEffect,
@@ -640,7 +675,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
   // scenario makes every answer take long enough for the editor's skeletons to show.
   await new Promise((resolve) => setTimeout(resolve, answerDelayMs()));
   // The daemon does not answer at all.
-  if (daemonDown()) fail(503, "service_unavailable", "the daemon is not answering");
+  if (daemonDown()) fail(503, "service_unavailable", "canvas-rgb is not answering");
   // Every write is refused.
   if (method !== "GET" && saveError()) fail(500, "internal", "could not save the effects: access is denied (os error 5)");
 
@@ -652,6 +687,25 @@ export async function demoRequest(method: string, path: string, body: unknown): 
   const bad = (): never => fail(404, "not_found", `no route ${method} ${pathname}`);
 
   const head = seg[0];
+  // The loading states: an area's GETs can be held, made to fail or made to come back empty,
+  // so the editor's placeholder, error and empty states can be seen (see demoScenarios).
+  if (method === "GET" && head && head !== "status") {
+    const area =
+      head === "effects" && seg.length === 2 && seg[1] !== "active"
+        ? "effect"
+        : head === "peripherals" && seg.length === 2
+          ? "peripheral"
+          : head;
+    const wait = holdMs(area);
+    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+    // The daemon's own words: the route that failed and why, the way the service says it.
+    if (failsArea(area)) fail(500, "internal", `could not read the ${area}: the request came back with an error`);
+    if (emptyArea(area)) {
+      if (area === "peripherals") return { peripherals: [] };
+      if (area === "displays") return [];
+      if (area === "effects") return { effects: [], active: null, failed: [] };
+    }
+  }
   if (head === "status") return method === "GET" ? statusNow() : bad();
 
   if (head === "output") {
@@ -857,6 +911,8 @@ export async function demoRequest(method: string, path: string, body: unknown): 
     const device = s.peripherals.find((p) => p.info.id === id);
     if (!device) fail(404, "not_found", `no peripheral with the id ${id}`);
     const access = s.peripheralAccess[id] ?? { reads: false, writes: false };
+    // The stage of the read that is open: answers at once, like the daemon's route.
+    if (seg.length === 3 && seg[2] === "read" && method === "GET") return readProgressNow(id);
     if (seg.length === 2 && method === "GET") {
       const detail: PeripheralDetail = {
         info: { ...device.info },
@@ -865,6 +921,12 @@ export async function demoRequest(method: string, path: string, body: unknown): 
         access,
         problem: READS_OFF,
       };
+      // `?state=slow-read`: the read goes through its stages, as a mouse that has to wake does.
+      if (access.reads && slowRead()) {
+        readStartedAt.set(id, Date.now());
+        await new Promise((resolve) => setTimeout(resolve, SLOW_READ_TOTAL_MS));
+        readStartedAt.delete(id);
+      }
       if (access.reads) {
         // A mouse that is asleep answers nothing: the adapter says so.
         if (scenario().has("asleep") && device.info.kind === "mouse") {

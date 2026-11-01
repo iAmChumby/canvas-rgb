@@ -13,12 +13,13 @@ import { Slider } from "@/components/Slider";
 import { Sparkline, Figure } from "@/components/Readout";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { useMediaQuery } from "@/components/MediaQuery";
-import { SkeletonLines } from "@/components/Skeleton";
+import { Details, LoadFrame } from "@/components/Loading";
+import { FansShape } from "@/components/LoadShapes";
 import { useToast } from "@/components/Toast";
 import { FanCurveEditor } from "@/views/FanCurveEditor";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
-import { refreshFans, useSnap } from "@/lib/store";
+import { refreshFans, retryFans as retryFansNow, useSnap } from "@/lib/store";
 import { baseFloor, hotRuleText } from "@/lib/fan-rules";
 import { clamp, fmtSeconds } from "@/lib/format";
 import type { CurvePoint } from "@/proto/CurvePoint";
@@ -129,6 +130,8 @@ export function FansView() {
   const fansError = useSnap((s) => s.fansError);
   const serviceDownMs = useSnap((s) => s.status?.service_down_ms ?? null);
   const rpm = useSnap((s) => s.rpm);
+  // A load that is in flight after a Try again: the frame shows its placeholder until it ends.
+  const retrying = useSnap((s) => s.pending.includes("fans"));
   const narrow = useMediaQuery("(max-width: 720px)");
   const [picked, setSelectedId] = useState<string | null>(null);
   // The first header is the default selection until one is clicked.
@@ -148,15 +151,11 @@ export function FansView() {
 
   // The "Try again" on the service-down state.
   const retryFans = async () => {
-    await refreshFans();
+    await retryFansNow();
   };
-
-  if (fansError) {
-    return (
+  // The error sits in the frame the page loads into, so the page keeps its shape.
+  const errorNode = fansError ? (
       <div className="stack">
-        <div className="page-head">
-          <h1>Fans</h1>
-        </div>
         {/* One card says it: the title, how long, what keeps working, and the way to try again.
             The status strip says it in its own words; this page does not repeat the strip. */}
         <Panel>
@@ -170,10 +169,8 @@ export function FansView() {
               </Button>
             }
           >
-            The daemon has not heard from it for {downFor}. Fan control is unavailable until the
-            service is back. The lights are unaffected, and the fans stay under BIOS control in the
-            meantime.
-            <span className="state-detail">the daemon said: {fansError}</span>
+            No answer for {downFor}. The fans stay under BIOS control; the lights are unaffected.
+            <Details>{fansError}</Details>
           </EmptyState>
         </Panel>
         {known.length > 0 && (
@@ -190,34 +187,41 @@ export function FansView() {
           </Panel>
         )}
       </div>
-    );
-  }
+  ) : null;
 
-  if (!fans) {
-    return (
-      <div className="stack">
-        <div className="page-head">
-          <h1>Fans</h1>
-        </div>
-        <Panel title="Reading the fans">
-          <SkeletonLines rows={5} />
-        </Panel>
-      </div>
-    );
-  }
-
-  const selected = fans.headers.find((h) => h.id === selectedId) ?? fans.headers[0] ?? null;
-  const headers = fans.headers;
+  const selected = fans ? (fans.headers.find((h) => h.id === selectedId) ?? fans.headers[0] ?? null) : null;
+  const headers = fans?.headers ?? [];
+  // A refresh that failed after the readings were read does not take the page away: the numbers
+  // stay and the page says they may be old.
+  const stale = fans !== null && fansError !== null;
 
   return (
     <div className="stack">
       <div className="page-head">
         <h1>Fans</h1>
-        <span className="mute fig">
-          {fans.chip ?? "No chip"} · floor <AnimatedNumber value={fans.floor_percent} />%
-        </span>
+        {fans && !fansError && (
+          <span className="mute fig">
+            {fans.chip ?? "No chip"} · floor <AnimatedNumber value={fans.floor_percent} />%
+          </span>
+        )}
       </div>
 
+      {stale && (
+        <div className="rule rule-warn" role="status">
+          The fan readings may be out of date.
+          <Details>{fansError}</Details>
+        </div>
+      )}
+
+      <LoadFrame
+        className="stack"
+        state={retrying ? "loading" : fansError && fans === null ? "error" : fans ? "ready" : "loading"}
+        shape={<FansShape />}
+        label="Reading the fans"
+        error={errorNode}
+      >
+      {fans && (
+      <>
       <ProfilesPanel fans={fans} />
 
       <div className="fans-grid">
@@ -299,6 +303,9 @@ export function FansView() {
           )}
         </div>
       </div>
+      </>
+      )}
+      </LoadFrame>
     </div>
   );
 }
@@ -667,8 +674,8 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
         {header.override_reason && (
           <p className={handedBack ? "rule rule-warn" : "rule"}>
             {handedBack
-              ? "The daemon handed this header back to BIOS"
-              : "The daemon overrode this"}
+              ? "canvas-rgb handed this header back to BIOS"
+              : "canvas-rgb overrode this"}
             : {header.override_reason}
           </p>
         )}
