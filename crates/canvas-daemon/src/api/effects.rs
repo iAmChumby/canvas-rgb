@@ -732,7 +732,17 @@ pub async fn import_effect(
     })
     .await
     .map_err(|e| ApiFailure::internal(format!("the parse task stopped: {e}")))?
-    .map_err(|e| ApiFailure::validation(format!("the effect does not parse: {e}")))?;
+    .map_err(|e| {
+        if crate::thumbnail::build_error_depends_on_load(&e) {
+            // The machine was too busy to load the effect, not the effect's fault. Nothing
+            // is written, so the import can be tried again.
+            ApiFailure::validation(format!(
+                "the machine was too busy to load the effect, so it was not imported; try again: {e}"
+            ))
+        } else {
+            ApiFailure::validation(format!("the effect does not parse: {e}"))
+        }
+    })?;
     let schema = effect.schema();
 
     // The write. A new file is created with a link, so a file that appears between the
