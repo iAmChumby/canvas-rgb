@@ -574,6 +574,13 @@
   justify-content: flex-end;
 }
 
+/* The name of what the block under it holds: the command, then the hash it should print. */
+.site-code-label {
+  margin: 0;
+  color: var(--mute);
+  font-size: var(--t14);
+}
+
 .site-install-notes {
   display: flex;
   flex-direction: column;
