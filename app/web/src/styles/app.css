@@ -4345,16 +4345,18 @@ button.chip:hover {
 }
 
 /* A field keeps its label on the left and its control on the right, in one row: the columns are
-   narrow, so the label column is narrow too and the slider takes what is left of it. */
+   narrow, so the label column is narrow too and the slider takes what is left of it. The number
+   rows name the page as well, so they outrank `.peripheral-detail .prop-item[data-kind="number"]`
+   (a 190 px label column that left the slider 21 px). */
 .rd-peri-sections .prop-item {
   grid-template-columns: minmax(0, 116px) minmax(0, 1fr);
 }
 
-.rd-peri-sections .prop-item[data-kind="number"] {
+.rd-peripherals .rd-peri-sections .prop-item[data-kind="number"] {
   grid-template-columns: minmax(0, 116px) minmax(0, 1fr) 48px;
 }
 
-.rd-peri-sections .prop-item[data-kind="number"] .num {
+.rd-peripherals .rd-peri-sections .prop-item[data-kind="number"] .num {
   width: 48px;
 }
 
@@ -4406,11 +4408,11 @@ button.chip:hover {
     margin: 0 0 var(--s4);
   }
 
-  .rd-peri-sections .prop-item[data-kind="number"] {
+  .rd-peripherals .rd-peri-sections .prop-item[data-kind="number"] {
     grid-template-columns: minmax(0, 1fr) 48px;
   }
 
-  .rd-peri-sections .prop-item[data-kind="number"] .field-label {
+  .rd-peripherals .rd-peri-sections .prop-item[data-kind="number"] .field-label {
     grid-column: 1 / -1;
   }
 
