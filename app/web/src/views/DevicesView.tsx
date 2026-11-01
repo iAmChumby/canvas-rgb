@@ -17,8 +17,10 @@ import type { Icon } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
 import { EmptyState } from "@/components/EmptyState";
 import { Panel, StateDot } from "@/components/Panel";
+import { ErrorPanel, Details, LoadFrame } from "@/components/Loading";
+import { DeviceListShape } from "@/components/LoadShapes";
 import { Skeleton } from "@/components/Skeleton";
-import { refreshDevices, useSnap } from "@/lib/store";
+import { refreshDevices, retryDevices, useSnap } from "@/lib/store";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { DeviceKind } from "@/proto/DeviceKind";
 import type { ZoneInfo } from "@/proto/ZoneInfo";
@@ -135,6 +137,16 @@ interface WalkTarget {
 export function DevicesView() {
   const devices = useSnap((s) => s.devices);
   const devicesError = useSnap((s) => s.devicesError);
+  // How many lights the daemon has already counted: the placeholder draws as many cards.
+  const counted = useSnap((s) => s.status?.devices_connected ?? 0);
+  // How many devices the daemon has, connected or not. The status route knows the total, so the
+  // placeholder draws as many cards as the list will show, from the very first load. A daemon
+  // that does not report a total (an older one) leaves it out, and the number is null then.
+  const total = useSnap((s) => s.status?.devices_total ?? null);
+  // The length of the last list that came: the total for a daemon that does not report one.
+  const listed = useSnap((s) => s.devicesTotal);
+  // A load that is in flight after a Try again: the frame shows its placeholder until it ends.
+  const retrying = useSnap((s) => s.pending.includes("devices"));
   const openrgb = useSnap((s) => s.status?.openrgb ?? "connected");
   // The first-run banner links here with ?walk=<device id>. That device's first resizable zone opens
   // in the walker until the user closes it or picks another zone.
@@ -166,7 +178,14 @@ export function DevicesView() {
         <h1>Devices</h1>
       </div>
 
-      {devicesError && <Panel><p className="error-line">{devicesError}</p></Panel>}
+      {devicesError && devices !== null && (
+        // The list is on screen but the last read failed: the cards stay and the page says they
+        // may be old. The raw words are behind the disclosure.
+        <div className="rule rule-warn" role="status">
+          The device list may be out of date.
+          <Details>{devicesError}</Details>
+        </div>
+      )}
       {openrgb !== "connected" && (
         <p className="rule rule-warn">
           OpenRGB is not connected.
@@ -174,27 +193,48 @@ export function DevicesView() {
       )}
 
       <div className="devices-grid">
-        <div>
-          {devices === null && !devicesError ? (
-            // The shape of the list that is coming, so nothing jumps when it lands.
-            [0, 1, 2].map((i) => (
-              <section className="device device-skeleton" key={`skeleton-${i}`} aria-hidden="true">
-                <div className="device-head">
-                  <Skeleton className="skeleton-icon" />
-                  <span className="stack" style={{ gap: 4, minWidth: 0 }}>
-                    <Skeleton height={16} width="52%" />
-                    <Skeleton height={12} width="34%" />
-                  </span>
-                </div>
-                <div className="zone-strip">
-                  <Skeleton height={14} width="28%" />
-                  <Skeleton height={14} width="42%" />
-                  <Skeleton height={14} width="14%" />
-                </div>
-              </section>
-            ))
-          ) : (
-          (devices ?? []).map((d, di) => {
+        <LoadFrame
+          state={
+            devices === null
+              ? devicesError && !retrying
+                ? "error"
+                : "loading"
+              : devices.length === 0
+                ? "empty"
+                : "ready"
+          }
+          shape={
+            // A known zero is a known zero: a machine with no devices has none, so the
+            // placeholder draws no card. Only a number that is not known at all falls through
+            // to the next one.
+            <DeviceListShape cards={total ?? listed ?? (counted > 0 ? counted : 3)} />
+          }
+          label="Looking for devices"
+          error={
+            <ErrorPanel
+              title="The devices could not be read"
+              summary="canvas-rgb could not read the devices. The lights are unaffected."
+              message={devicesError}
+              onRetry={() => void retryDevices()}
+            />
+          }
+          empty={
+            <Panel>
+              <EmptyState
+                icon={<Memory size={22} />}
+                title="No device found"
+                action={
+                  <Button size="sm" icon={<ArrowClockwise size={16} />} onClick={() => void refreshDevices()}>
+                    Try again
+                  </Button>
+                }
+              >
+                OpenRGB reports no lights. Plug one in or start OpenRGB, then try again.
+              </EmptyState>
+            </Panel>
+          }
+        >
+          {(devices ?? []).map((d, di) => {
             const Glyph = KIND_ICON[d.kind];
             const accent = ACCENTS[di % ACCENTS.length];
             const tag = deviceTag(d);
@@ -205,6 +245,7 @@ export function DevicesView() {
                 className="device"
                 style={{ "--tone": `var(${accent})` } as CSSProperties}
                 aria-label={d.name}
+                data-testid="device-card"
               >
                 <div className="device-head">
                   <div className="row-title" style={{ minWidth: 0 }}>
@@ -231,12 +272,11 @@ export function DevicesView() {
                       title={`${d.name} reports no zones`}
                       action={
                         <Button size="sm" icon={<ArrowClockwise size={16} />} onClick={() => void refreshDevices()}>
-                          Ask the daemon again
+                          Try again
                         </Button>
                       }
                     >
-                      The daemon sees this device, but it has not reported any zones for it yet. Ask
-                      it again once the device is lit and connected over OpenRGB.
+                      OpenRGB lists this device but no zones for it yet. Try again once it is lit.
                     </EmptyState>
                   </div>
                 ) : (
@@ -267,12 +307,25 @@ export function DevicesView() {
                 )}
               </section>
             );
-          })
-          )}
-        </div>
+          })}
+        </LoadFrame>
 
         <div className="stack" style={{ position: "sticky", top: 16 }}>
-          {walkDevice && walkZone ? (
+          {devices === null ? (
+            devicesError || total === 0 ? null : (
+              // The walker points at a device that is still coming: it shows a placeholder, not
+              // its own words. When the list could not be read there is no device to point at, so
+              // the column says nothing: a grey skeleton next to an error reads as a page that
+              // is still loading. The same holds for a machine the daemon says has no devices (a
+              // known zero): there is nothing to point at, so the column draws nothing.
+              <Panel>
+                <div className="stack" style={{ gap: 8 }}>
+                  <Skeleton width="54%" height={16} />
+                  <Skeleton width="78%" height={14} />
+                </div>
+              </Panel>
+            )
+          ) : walkDevice && walkZone ? (
             <IdentifyWalker
               key={`${walkDevice.id}#${walkZone.index}`}
               device={walkDevice}

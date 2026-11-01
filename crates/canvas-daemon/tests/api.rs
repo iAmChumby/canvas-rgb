@@ -972,7 +972,7 @@ async fn a_tile_whose_load_ran_out_of_time_is_tried_again_after_the_retry_interv
             Ok(Box::new(common::FakeEffect::new("busy")) as Box<dyn canvas_proto::traits::Effect>)
         })
     };
-    let retry = std::time::Duration::from_millis(300);
+    let retry = std::time::Duration::from_secs(3);
     let cache = canvas_daemon::thumbnail::ThumbnailCache::with_limits(std::time::Duration::from_secs(30), retry);
     let (router, _app, _home) = build_with_user_effects_and_cache(&["busy"], builder, cache);
     let ask = || {

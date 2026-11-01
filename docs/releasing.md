@@ -71,7 +71,14 @@ push and the release workflow runs it before it builds.
    that the tag matches `Cargo.toml`, builds `canvas-rgb-setup-0.1.1.exe`, signs it in a separate job, writes
    `latest.json` and attaches the installer, its `.sha256`, its `.sig` and `latest.json` to the
    GitHub release.
-6. Paste the version's changelog section into the GitHub release notes.
+6. The workflow writes the release notes: the version's changelog section, then GitHub's list of merged
+   pull requests. Check them with `gh release view vX.Y.Z --json body`; the body must start with the
+   section's first line. The script fails the release (exit 1), naming the line, on: a `#` or `##`
+   heading that is not a version heading (a bare one too), a heading of any level with a bracketed version
+   (`### [0.1.0]`), a second heading for the same version, a link definition inside the section, and a compare-link label at the end of the
+   file that names no version. Fences are not tracked: a `#` or `##` line in a code block is refused too.
+   Not detected: setext headings, tab or 4-space indents, a mid-section `## [Unreleased]` (it ends the
+   section). Indents of 1-3 spaces are allowed.
 
 ## Updates: the signing key and `latest.json`
 
@@ -97,8 +104,9 @@ then runs `npm ci --ignore-scripts --prefix tools/signer`. `tools/signer/package
 `@tauri-apps/cli` to exactly 2.12.4 and `package-lock.json` carries the integrity hashes, so the CLI
 is the audited package, with no install scripts and no `npx` download. The step calls
 `tools/signer/node_modules/.bin/tauri.cmd signer sign` directly, then `make-update-manifest.ps1`, and uploads
-the `.sig` and `latest.json` as the `signature` artifact. The `publish` job (the only one with
-`contents: write`) downloads both artifacts and attaches the exe, `.sha256`, `.sig` and `latest.json`.
+the `.sig`, `latest.json` and `release-notes.md` as the `signature` artifact. The `publish` job (the only one with
+`contents: write`) downloads both artifacts, attaches the exe, `.sha256`, `.sig` and `latest.json`, and makes
+`release-notes.md` the release body, with GitHub's generated list of merged pull requests after it.
 
 The signing step reads the key from `TAURI_SIGNING_PRIVATE_KEY` and the password from
 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (empty), with no `-f` or `-p` on the command line, and runs under

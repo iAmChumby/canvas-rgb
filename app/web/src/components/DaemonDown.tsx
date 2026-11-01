@@ -52,10 +52,10 @@ export function DaemonDown({
         <span className="state-page-icon" aria-hidden="true">
           <CloudSlash size={26} />
         </span>
-        <h1 className="state-page-title">The daemon is not answering</h1>
+        <h1 className="state-page-title">canvas-rgb is not answering</h1>
         <p className="state-page-lead">
-          canvas-rgb draws the lights through the daemon on 127.0.0.1:9430. It may still be
-          starting, or it may have stopped.
+          canvas-rgb draws the lights on 127.0.0.1:9430. It may still be starting, or it may
+          have stopped.
         </p>
         <ul className="state-page-keeps">
           <li>

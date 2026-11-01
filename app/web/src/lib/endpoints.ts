@@ -24,6 +24,7 @@ import type { SetFavorite } from "@/proto/SetFavorite";
 import type { Props } from "@/proto/props";
 import type { PeripheralDetail } from "@/proto/PeripheralDetail";
 import type { PeripheralAccess } from "@/proto/PeripheralAccess";
+import type { ReadProgress } from "@/proto/ReadProgress";
 import type { PeripheralRow } from "@/lib/peripherals";
 import type { LayoutsResponse } from "@/proto/LayoutsResponse";
 import type { Layout } from "@/proto/Layout";
@@ -90,6 +91,8 @@ export const api = {
   /** What the daemon may do with one peripheral. */
   putPeripheralAccess: (id: string, body: PeripheralAccess) =>
     request<PeripheralAccess>("PUT", routes.peripheralAccess(id), body),
+  /** The stage of the read of one peripheral that is open now. Answers at once, even mid-read. */
+  peripheralRead: (id: string) => request<ReadProgress>("GET", routes.peripheralRead(id)),
 
   layouts: () => request<LayoutsResponse>("GET", routes.layouts),
   putLayout: (id: string, body: Layout) => request<Layout>("PUT", routes.layout(id), body),
