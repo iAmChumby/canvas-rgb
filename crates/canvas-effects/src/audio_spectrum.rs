@@ -52,6 +52,9 @@ impl AudioSpectrum {
             "Punchy",
             vec![("sensitivity", number_kind(250.0)), ("decay", number_kind(15.0))],
         )
+        // The tile feeds the effect a spectrum that moves once per loop. At the defaults the bars
+        // clip; a higher sensitivity and a faster decay show them rise and fall.
+        .thumbnail(crate::schema::recipe(2.0, 2.0, 6, vec![("sensitivity", crate::schema::num(250.0)), ("decay", crate::schema::num(30.0))]))
         .build()
     }
 
@@ -119,7 +122,7 @@ impl Effect for AudioSpectrum {
         for i in 0..bands {
             let raw = (spectrum.magnitudes[i] * self.sensitivity).clamp(0.0, 1.0);
             let level = &mut self.levels[i];
-            if raw > *level {
+            if raw >= *level {
                 *level = raw;
             } else {
                 *level *= fall.max(0.0);
@@ -132,7 +135,9 @@ impl Effect for AudioSpectrum {
             }
         }
 
-        // One vertical bar per band.
+        // One vertical bar per band, on a cleared canvas: the engine hands the canvas back as
+        // the last frame left it, so a bar that fell would otherwise stay painted.
+        canvas.pixels.fill([0.0, 0.0, 0.0]);
         let n = canvas.width as usize;
         let bar_w = (n / bands).max(1);
         for b in 0..bands {
@@ -247,7 +252,7 @@ mod tests {
                 best_x = x;
             }
         }
-        assert!(best_h > 50, "no bar was drawn: best_h={best_h}");
+        assert!(best_h > 50, "no bar was drawn: best_h={best_h} at x={best_x} of {}x{}", canvas.width, canvas.height);
         // The tallest bar must be the 1 kHz band.
         let band = best_x / (canvas.width / 32).max(1);
         assert_eq!(

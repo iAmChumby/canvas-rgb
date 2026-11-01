@@ -69,6 +69,16 @@ pub const LOAD_BUDGET_MS: u64 = 2_000;
 /// A release build is several times faster still.
 pub const FRAME_BUDGET_MS: u64 = 100;
 
+/// The time one frame's script may take when the effect renders a library tile, in
+/// milliseconds.
+///
+/// A tile has to be the same picture on every machine and under any load, so a tile frame is
+/// never dropped for being slow: the live-lights deadline ([`FRAME_BUDGET_MS`]) drops a frame
+/// that overruns, and which frames overrun depends on how busy the machine is. A tile frame
+/// is held to the whole render budget instead (the daemon's `RENDER_BUDGET`, 30 s), so only a
+/// script that never returns is stopped, and that is an error the tile render reports.
+pub const TILE_FRAME_BUDGET_MS: u64 = 30_000;
+
 /// One HTML effect instance: its own JS context and 2D canvas.
 pub struct HtmlEffect {
     /// The effect's schema: id, name, description and the property definitions.
@@ -82,6 +92,8 @@ pub struct HtmlEffect {
     canvas_id: String,
     /// The embedded JS engine.
     runtime: JsRuntime,
+    /// Things in the file that were ignored and the effect still loaded (a bad thumbnail tag).
+    warnings: Vec<String>,
     /// The fractional frame accumulator.
     accumulator: f32,
     /// The effect clock in seconds, driven by the sum of `dt`.
@@ -92,6 +104,16 @@ pub struct HtmlEffect {
     values: Props,
     /// Whether the script has run.
     loaded: bool,
+    /// The time one frame's script may take, in milliseconds: [`FRAME_BUDGET_MS`] on the
+    /// lights, [`TILE_FRAME_BUDGET_MS`] for a library tile.
+    frame_budget_ms: u64,
+    /// When a tile render must be over (the daemon's render budget, from its start). A frame
+    /// is held to the time left until then as well as to `frame_budget_ms`, so one update of
+    /// several frames cannot run on past the render's budget. `None` on the lights.
+    give_up_at: Option<std::time::Instant>,
+    /// Whether a frame was stopped for running past its deadline (a timing outcome, unlike a
+    /// script error, which fails the same way on every machine).
+    timed_out: bool,
     /// The source sizes and destination sizes the blit maps were built for.
     blit_key: (usize, usize, usize, usize),
     /// The source column for each destination column, built once per size pair.
@@ -148,7 +170,10 @@ impl HtmlEffect {
             .unwrap_or("canvas")
             .to_string();
 
-        // Build the property definitions.
+        // Build the property definitions. A property the file does not describe properly is
+        // ignored with a warning: the effect loads and runs, and the editor shows one
+        // property less. A bad property never takes the effect away.
+        let mut warnings: Vec<String> = Vec::new();
         let mut properties = Vec::new();
         for meta in &parsed.metas {
             let Some(key) = meta.attr("property") else { continue };
@@ -156,7 +181,13 @@ impl HtmlEffect {
                 continue;
             }
             let label = meta.attr("label").unwrap_or(key).to_string();
-            let kind = property_kind(meta, &label)?;
+            let kind = match property_kind(meta, &label) {
+                Ok(kind) => kind,
+                Err(error) => {
+                    warnings.push(ignored_part(&format!("<meta property={key:?}> tag"), &error));
+                    continue;
+                }
+            };
             properties.push(PropertyDef { key: key.to_string(), label, kind });
         }
 
@@ -172,6 +203,18 @@ impl HtmlEffect {
             needs: InputNeeds::default(),
             properties: properties.clone(),
             presets: Vec::new(),
+            // A tile recipe that does not parse is ignored with a warning: the tile only
+            // decides how the library draws the effect, and must never take the effect away.
+            thumbnail: match &parsed.thumbnail {
+                Some(meta) => match thumbnail_recipe(meta, &properties) {
+                    Ok(recipe) => Some(recipe),
+                    Err(error) => {
+                        warnings.push(ignored_part("<meta thumbnail> tag", &error));
+                        None
+                    }
+                },
+                None => None,
+            },
         };
         apply_overrides(&mut schema, default_overrides);
 
@@ -202,8 +245,12 @@ impl HtmlEffect {
             accumulator: 0.0,
             time: 0.0,
             reported: Vec::new(),
+            warnings,
             values: Props::new(),
             loaded: false,
+            frame_budget_ms: FRAME_BUDGET_MS,
+            give_up_at: None,
+            timed_out: false,
             blit_key: (0, 0, 0, 0),
             blit_cols: Vec::new(),
             blit_rows: Vec::new(),
@@ -220,6 +267,31 @@ impl HtmlEffect {
         effect.loaded = true;
 
         Ok(effect)
+    }
+
+    /// Puts the instance in tile mode: no frame is dropped for being slow.
+    ///
+    /// On the lights a frame that overruns [`FRAME_BUDGET_MS`] is dropped and the last good
+    /// one stays, so the render loop keeps its rate. A library tile has no rate to keep and
+    /// has to be the same picture on every machine, so a tile frame runs to its end and is
+    /// held to [`TILE_FRAME_BUDGET_MS`] only. A frame that fails for any reason is still
+    /// reported by [`HtmlEffect::errors`], and the tile render turns that into a failure.
+    pub fn tile_mode(mut self) -> Self {
+        self.frame_budget_ms = TILE_FRAME_BUDGET_MS;
+        self
+    }
+
+    /// Holds every later frame to the time left until `at`, as well as to its own budget.
+    /// A tile render passes the end of its render budget here, so a render never holds its
+    /// slot much past that budget however many frames one update asks for.
+    pub fn set_give_up_at(&mut self, at: Option<std::time::Instant>) {
+        self.give_up_at = at;
+    }
+
+    /// Whether a frame was stopped for running past its deadline. That says how busy the
+    /// machine was, not what the script does.
+    pub fn timed_out(&self) -> bool {
+        self.timed_out
     }
 
     /// The canvas' logical size.
@@ -340,7 +412,17 @@ impl HtmlEffect {
         let timestamp = self.time * 1000.0;
         // The frame's script runs with a deadline, so a runaway callback is stopped
         // instead of freezing the render loop.
-        self.runtime.deadline.start(FRAME_BUDGET_MS);
+        let mut budget_ms = self.frame_budget_ms;
+        if let Some(at) = self.give_up_at {
+            let left = at.saturating_duration_since(std::time::Instant::now());
+            budget_ms = budget_ms.min(left.as_millis() as u64);
+            if budget_ms == 0 {
+                return Err(HtmlError::Timeout(
+                    "the render's time ran out before this frame (the frame budget was not the limit)".to_string(),
+                ));
+            }
+        }
+        self.runtime.deadline.start(budget_ms);
         let result = self.runtime.context.with(|ctx| -> rquickjs::Result<()> {
             let globals = ctx.globals();
 
@@ -393,9 +475,7 @@ impl HtmlEffect {
 
         if let Err(e) = result {
             if timed_out {
-                return Err(HtmlError::Timeout(format!(
-                    "the effect's script ran longer than {FRAME_BUDGET_MS} ms"
-                )));
+                return Err(HtmlError::Timeout(format!("the effect's script ran longer than {budget_ms} ms")));
             }
             // The exception is already on the context; turn it into a message.
             let message = self
@@ -410,6 +490,9 @@ impl HtmlEffect {
     /// Reports an error once per distinct message. At most `MAX_REPORTED` distinct messages
     /// are kept, so a script that fails with a changing message cannot grow the list forever.
     fn report(&mut self, error: &HtmlError) {
+        if matches!(error, HtmlError::Timeout(_)) {
+            self.timed_out = true;
+        }
         let message = error.to_string();
         if self.reported.contains(&message) {
             return;
@@ -424,6 +507,17 @@ impl HtmlEffect {
     /// has occurred since the instance was created.
     pub fn errors(&self) -> &[String] {
         &self.reported
+    }
+
+    /// The property values the effect is running with, after they were held to their ranges.
+    pub fn values(&self) -> &Props {
+        &self.values
+    }
+
+    /// What the loader ignored while the effect still loaded: a `<meta thumbnail>` tag that
+    /// did not parse. The effect runs as if the tag were not there.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
     }
 
     /// Copies the rendered pixels into the engine's canvas, resampling if the render
@@ -481,6 +575,16 @@ impl HtmlEffect {
     }
 }
 
+/// The warning for a part of the file that was ignored.
+///
+/// A file may hold a part the runtime cannot read: a property whose type or default does
+/// not make sense, a tile tag that does not parse. The part is ignored and the effect
+/// loads and runs without it. This is the one place that says so, so every kind of part
+/// is reported the same way (bug class `cause:bad-file-part`).
+fn ignored_part(part: &str, error: &HtmlError) -> String {
+    format!("the {part} was ignored: {error}")
+}
+
 /// A seed for one instance's `Math.random`. The clock's nanoseconds are mixed with a
 /// process-wide counter, so two instances created back to back never share a seed. The
 /// mix is splitmix64.
@@ -531,6 +635,20 @@ fn property_kind(
             let max = number(meta.attr("max").unwrap_or("100")).unwrap_or(100.0);
             let step = number(meta.attr("step").unwrap_or("1")).unwrap_or(1.0);
             let default = number(&default).unwrap_or(min);
+            // The range is held to what `f64::clamp` accepts: it panics on a minimum above the
+            // maximum and on a NaN bound. "inf" and "NaN" parse as numbers, so the file can say
+            // either. A property that cannot be clamped is ignored with a warning, like any
+            // other part of the file the runtime cannot read.
+            if !min.is_finite() || !max.is_finite() || !default.is_finite() {
+                return Err(HtmlError::Parse(format!(
+                    "{label}: the minimum ({min}), the maximum ({max}) and the default ({default}) must be finite numbers"
+                )));
+            }
+            if min > max {
+                return Err(HtmlError::Parse(format!(
+                    "{label}: the minimum ({min}) is above the maximum ({max})"
+                )));
+            }
             Ok(PropKind::Number { min, max, step, default })
         }
         "boolean" => {
@@ -571,6 +689,82 @@ fn property_kind(
     }
 }
 
+/// Builds the library tile's recipe from a `<meta thumbnail ...>` tag:
+///
+/// ```html
+/// <meta thumbnail warm_up="1" loop="4.5" crossfade="0" props="speed=100;ink1=#ff0000" dark_on_purpose="a spark on black" />
+/// ```
+///
+/// Every attribute is optional and the renderer's defaults fill what is missing: `warm_up`
+/// and `loop` are seconds, `crossfade` is a frame count, `props` is `key=value` pairs
+/// separated by `;` (each key must be one of the file's properties, each value valid for
+/// that property's type) and `dark_on_purpose` is the reason a mostly dark tile is right.
+fn thumbnail_recipe(
+    meta: &parse::MetaTag,
+    properties: &[PropertyDef],
+) -> Result<canvas_proto::props::ThumbnailRecipe, HtmlError> {
+    let mut recipe = canvas_proto::props::ThumbnailRecipe::default();
+    let seconds = |name: &str| -> Result<Option<f64>, HtmlError> {
+        match meta.attr(name).map(str::trim).filter(|v| !v.is_empty()) {
+            None => Ok(None),
+            Some(v) => match v.parse::<f64>() {
+                Ok(n) if n.is_finite() && n >= 0.0 => Ok(Some(n)),
+                _ => Err(HtmlError::Parse(format!("thumbnail {name}: {v:?} is not a number of seconds"))),
+            },
+        }
+    };
+    if let Some(n) = seconds("warm_up")? {
+        recipe.warm_up_s = n;
+    }
+    if let Some(n) = seconds("loop")? {
+        recipe.loop_s = n;
+    }
+    if let Some(n) = seconds("crossfade")? {
+        recipe.crossfade_frames = n as u32;
+    }
+    if let Some(reason) = meta.attr("dark_on_purpose").map(str::trim).filter(|v| !v.is_empty()) {
+        recipe.dark_on_purpose = Some(reason.to_string());
+    }
+    if let Some(reason) = meta.attr("loop_jump_on_purpose").map(str::trim).filter(|v| !v.is_empty()) {
+        recipe.loop_jump_on_purpose = Some(reason.to_string());
+    }
+    for pair in meta.attr("props").unwrap_or("").split(';').map(str::trim).filter(|p| !p.is_empty()) {
+        let Some((key, text)) = pair.split_once('=') else {
+            return Err(HtmlError::Parse(format!("thumbnail props: {pair:?} is not key=value")));
+        };
+        let (key, text) = (key.trim(), text.trim());
+        let Some(def) = properties.iter().find(|d| d.key == key) else {
+            return Err(HtmlError::Parse(format!("thumbnail props: the file has no property {key:?}")));
+        };
+        let bad = || HtmlError::Parse(format!("thumbnail props: {text:?} is not a valid {key}"));
+        let value = match &def.kind {
+            PropKind::Color { .. } => PropValue::Color(text.parse().map_err(|_| bad())?),
+            PropKind::Number { min, max, .. } => {
+                let n = text.parse::<f64>().ok().filter(|n| n.is_finite()).ok_or_else(bad)?;
+                PropValue::Number(n.clamp(*min, *max))
+            }
+            PropKind::Hue { .. } => {
+                let h = text.parse::<f64>().ok().filter(|h| h.is_finite()).ok_or_else(bad)?;
+                PropValue::Hue(h.clamp(0.0, 360.0))
+            }
+            PropKind::Bool { .. } => match text.to_ascii_lowercase().as_str() {
+                "true" | "1" => PropValue::Bool(true),
+                "false" | "0" => PropValue::Bool(false),
+                _ => return Err(bad()),
+            },
+            PropKind::Choice { options, .. } => {
+                // A choice the file does not offer is not a valid value for it.
+                if !options.iter().any(|o| o == text) {
+                    return Err(bad());
+                }
+                PropValue::Choice(text.to_string())
+            }
+        };
+        recipe.props.insert(key.to_string(), value);
+    }
+    Ok(recipe)
+}
+
 /// Replaces the schema's declared defaults with the overrides.
 fn apply_overrides(schema: &mut PropertySchema, overrides: &Props) {
     for def in &mut schema.properties {
@@ -606,6 +800,21 @@ impl Effect for HtmlEffect {
         let mut merged = self.schema.defaults();
         for (key, value) in props {
             merged.insert(key.clone(), value.clone());
+        }
+        // A number outside its declared range, or not a number at all, is held to the range
+        // (or the default): a value from a preset, a recipe or the API never reaches the
+        // script as NaN or infinity.
+        for def in &self.schema.properties {
+            let Some(value) = merged.get_mut(&def.key) else { continue };
+            match (&def.kind, value) {
+                (PropKind::Number { min, max, default, .. }, PropValue::Number(n)) => {
+                    *n = if n.is_finite() { n.clamp(*min, *max) } else { *default };
+                }
+                (PropKind::Hue { default }, PropValue::Hue(h)) => {
+                    *h = if h.is_finite() { h.clamp(0.0, 360.0) } else { *default };
+                }
+                _ => {}
+            }
         }
         self.values = merged.clone();
         // A props change on a live instance only sets the globals; the script is not

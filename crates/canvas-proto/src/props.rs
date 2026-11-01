@@ -68,6 +68,62 @@ pub struct Preset {
     pub props: Props,
 }
 
+/// How an effect's library tile is rendered (`GET /api/v1/effects/{id}/thumbnail`). An effect
+/// that carries none is rendered with the renderer's own defaults.
+///
+/// The recipe is for the tile only: it never changes how the effect runs on the lights.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ThumbnailRecipe {
+    /// Seconds the effect runs before the first recorded frame, so trails and build-ups
+    /// have content. The renderer default is 1.
+    #[serde(default = "default_warm_up_s")]
+    pub warm_up_s: f64,
+    /// Seconds the tile's loop lasts, matched to the effect's period where it has one.
+    /// The renderer default is 2.
+    #[serde(default = "default_loop_s")]
+    pub loop_s: f64,
+    /// Frames at the end of the loop that are crossfaded into the first frames, for an
+    /// effect with no period (random rain). 0 is no crossfade.
+    #[serde(default)]
+    pub crossfade_frames: u32,
+    /// The showcase props for the tile, laid over the schema defaults.
+    #[serde(default)]
+    pub props: Props,
+    /// Set when the effect is dark on purpose: the reason, which exempts the tile from the
+    /// lit-share bar (never from the rows, columns or seam bars).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub dark_on_purpose: Option<String>,
+    /// Set when the loop is meant to jump where it restarts (a flicker, a strobe): the reason,
+    /// which exempts the tile from the seam bar and from nothing else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub loop_jump_on_purpose: Option<String>,
+}
+
+fn default_warm_up_s() -> f64 {
+    1.0
+}
+
+fn default_loop_s() -> f64 {
+    2.0
+}
+
+impl Default for ThumbnailRecipe {
+    /// The renderer's defaults: one second of warm-up and a two second loop.
+    fn default() -> Self {
+        Self {
+            warm_up_s: default_warm_up_s(),
+            loop_s: default_loop_s(),
+            crossfade_frames: 0,
+            props: Props::new(),
+            dark_on_purpose: None,
+            loop_jump_on_purpose: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct PropertySchema {
@@ -78,6 +134,10 @@ pub struct PropertySchema {
     pub needs: InputNeeds,
     pub properties: Vec<PropertyDef>,
     pub presets: Vec<Preset>,
+    /// How the library tile is rendered. `None` is the renderer default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub thumbnail: Option<ThumbnailRecipe>,
 }
 
 impl PropertySchema {
@@ -86,5 +146,44 @@ impl PropertySchema {
             .iter()
             .map(|p| (p.key.clone(), p.kind.default_value()))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A schema as an older client or file wrote it, with no `thumbnail` field.
+    const OLD: &str = r#"{"id":"solid","name":"Solid","description":"","needs":{"screen":false,"audio":false},"properties":[],"presets":[]}"#;
+
+    #[test]
+    fn a_schema_without_a_thumbnail_recipe_still_reads_and_writes_without_one() {
+        let schema: PropertySchema = serde_json::from_str(OLD).expect("an old schema reads");
+        assert_eq!(schema.thumbnail, None);
+        let again = serde_json::to_string(&schema).expect("writes");
+        assert!(!again.contains("thumbnail"), "a schema with no recipe writes none: {again}");
+    }
+
+    #[test]
+    fn a_recipe_fills_what_it_leaves_out_with_the_renderer_defaults() {
+        let json = OLD.replace("\"presets\":[]", "\"presets\":[],\"thumbnail\":{\"loop_s\":4.0}");
+        let schema: PropertySchema = serde_json::from_str(&json).expect("a partial recipe reads");
+        let recipe = schema.thumbnail.expect("a recipe");
+        assert_eq!(recipe, ThumbnailRecipe { loop_s: 4.0, ..ThumbnailRecipe::default() });
+        assert_eq!((recipe.warm_up_s, recipe.crossfade_frames), (1.0, 0));
+    }
+
+    #[test]
+    fn a_recipe_round_trips() {
+        let recipe = ThumbnailRecipe {
+            warm_up_s: 3.0,
+            loop_s: 4.0,
+            crossfade_frames: 6,
+            props: [("speed".to_string(), PropValue::Number(90.0))].into_iter().collect(),
+            dark_on_purpose: Some("a spark on black".into()),
+            loop_jump_on_purpose: Some("a strobe".into()),
+        };
+        let json = serde_json::to_string(&recipe).expect("writes");
+        assert_eq!(serde_json::from_str::<ThumbnailRecipe>(&json).expect("reads"), recipe);
     }
 }

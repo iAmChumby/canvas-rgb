@@ -323,16 +323,26 @@ fn effects_import(cli: &Cli, args: &canvas_daemon::cli::ImportArgs) -> Result<()
 fn effects_check(cli: &Cli, args: &canvas_daemon::cli::CheckArgs) -> Result<(), CliError> {
     let report = canvas_daemon::cli::check_effect(&args.file, args.png.as_deref())
         .map_err(CliError::Other)?;
+    // The library tile, scored against the quality bar. A script that already failed has no
+    // tile worth scoring.
+    let tile = if report.errors.is_empty() {
+        Some(canvas_daemon::cli::check_tile(&args.file, args.preview.as_deref()).map_err(CliError::Other)?)
+    } else {
+        None
+    };
 
-    let mut problems: Vec<&str> = Vec::new();
+    let mut problems: Vec<String> = Vec::new();
     if !report.moves {
-        problems.push("every frame is the same: the effect does not move");
+        problems.push("every frame is the same: the effect does not move".to_string());
     }
     if report.flat {
-        problems.push("the picture is one flat colour");
+        problems.push("the picture is one flat colour".to_string());
     }
     if !report.errors.is_empty() {
-        problems.push("the script reported an error while the frames were rendered");
+        problems.push("the script reported an error while the frames were rendered".to_string());
+    }
+    if let Some(tile) = &tile {
+        problems.extend(tile.problems.iter().map(|p| format!("tile: {p}")));
     }
 
     if cli.json {
@@ -352,6 +362,26 @@ fn effects_check(cli: &Cli, args: &canvas_daemon::cli::CheckArgs) -> Result<(), 
                 "moves": report.moves,
                 "flat": report.flat,
                 "png": report.png,
+                "tile": tile.as_ref().map(|t| serde_json::json!({
+                    "lit_first": t.score.lit_first,
+                    "lit_last": t.score.lit_last,
+                    "lit_avg": t.score.lit_avg,
+                    "rows_lit": t.score.rows_lit,
+                    "cols_lit": t.score.cols_lit,
+                    "seam": t.score.seam,
+                    "step": t.score.step,
+                    "max_step": t.score.max_step,
+                    "bar": {
+                        "lit_avg": canvas_daemon::thumbnail::BAR_LIT_AVG,
+                        "lit_lightness": canvas_daemon::thumbnail::LIT_LIGHTNESS,
+                        "seam": canvas_daemon::thumbnail::BAR_SEAM,
+                        "line_share": canvas_daemon::thumbnail::BAR_LINE_SHARE,
+                    },
+                    "dark_on_purpose": t.recipe.as_ref().and_then(|r| r.dark_on_purpose.clone()),
+                    "problems": t.problems,
+                    "gif": t.gif,
+                    "sheet": t.sheet,
+                })),
                 "errors": report.errors,
                 "problems": problems,
             }),
@@ -391,6 +421,47 @@ fn effects_check(cli: &Cli, args: &canvas_daemon::cli::CheckArgs) -> Result<(), 
         );
         if let Some(png) = &report.png {
             println!("png         {png}");
+        }
+        if let Some(tile) = &tile {
+            let s = &tile.score;
+            println!(
+                "tile        {:.0} % lit on average ({:.0} % first frame, {:.0} % last), {} of {} rows and {} of {} columns lit at some point over the loop",
+                s.lit_avg * 100.0,
+                s.lit_first * 100.0,
+                s.lit_last * 100.0,
+                s.rows_lit,
+                canvas_daemon::thumbnail::HEIGHT,
+                s.cols_lit,
+                canvas_daemon::thumbnail::WIDTH
+            );
+            println!(
+                "tile seam   {:.1} % where the loop restarts, {:.1} % for a normal step, {:.1} % for the biggest step, {} rows of black at the top or the bottom of a frame",
+                s.seam * 100.0,
+                s.step * 100.0,
+                s.max_step * 100.0,
+                s.band_rows
+            );
+            println!(
+                "tile bar    {:.0} % lit on average (a pixel is lit when its lightness is at least {:.0} of 100), every row and column {:.0} % lit at some point over the loop, seam under {:.0} %, no step over {:.0} %, at most {} rows of black at the top or the bottom of a frame",
+                canvas_daemon::thumbnail::BAR_LIT_AVG * 100.0,
+                canvas_daemon::thumbnail::LIT_LIGHTNESS,
+                canvas_daemon::thumbnail::BAR_LINE_SHARE * 100.0,
+                canvas_daemon::thumbnail::BAR_SEAM * 100.0,
+                canvas_daemon::thumbnail::BAR_MAX_STEP * 100.0,
+                canvas_daemon::thumbnail::BAR_BAND_ROWS
+            );
+            if let Some(reason) = tile.recipe.as_ref().and_then(|r| r.loop_jump_on_purpose.as_deref()) {
+                println!("tile jump   on purpose: {reason}");
+            }
+            if let Some(reason) = tile.recipe.as_ref().and_then(|r| r.dark_on_purpose.as_deref()) {
+                println!("tile dark   on purpose: {reason}");
+            }
+            if let Some(gif) = &tile.gif {
+                println!("tile gif    {gif}");
+            }
+            if let Some(sheet) = &tile.sheet {
+                println!("tile sheet  {sheet}");
+            }
         }
         for error in &report.errors {
             println!("script      {error}");

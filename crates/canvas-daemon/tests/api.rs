@@ -10,6 +10,7 @@ use axum::http::{Request, StatusCode};
 use canvas_daemon::api;
 use canvas_daemon::state::App;
 use canvas_proto::api::{routes, ApiError};
+use canvas_proto::traits::Effect;
 use common::{FakeAdapter, FakeEngine};
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -552,6 +553,451 @@ async fn the_thumbnail_of_an_unknown_effect_is_a_404() {
         .await
         .expect("the router answers");
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+/// The app with a user-effects folder holding the named HTML effects, built by the fake
+/// builder the test gives.
+fn build_with_user_effects(
+    names: &[&str],
+    builder: canvas_daemon::user_effects::Builder,
+) -> (axum::Router, Arc<App>, TempHome) {
+    build_with_user_effects_and_cache(names, builder, canvas_daemon::thumbnail::ThumbnailCache::default())
+}
+
+/// The same, with the thumbnail cache the test gives (its render budget and its retry interval).
+fn build_with_user_effects_and_cache(
+    names: &[&str],
+    builder: canvas_daemon::user_effects::Builder,
+    cache: canvas_daemon::thumbnail::ThumbnailCache,
+) -> (axum::Router, Arc<App>, TempHome) {
+    let home = TempHome::new();
+    let store = canvas_daemon::storage::Store::at(&home.path);
+    let engine = Arc::new(FakeEngine::default());
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(
+        store,
+        engine,
+        Box::new(FakeAdapter::default()),
+        TOKEN.to_string(),
+        "0.1.0-test".to_string(),
+        tx,
+    );
+    app.user_effects = Arc::new(canvas_daemon::user_effects::UserEffects::new(builder));
+    app.thumbnails = cache;
+    let folder = home.path.join("effects");
+    std::fs::create_dir_all(&folder).expect("the effects folder is created");
+    for name in names {
+        std::fs::write(folder.join(format!("{name}.html")), format!("{name}\n<canvas></canvas>"))
+            .expect("the effect file is written");
+    }
+    app.user_effects.rescan(&folder);
+    let app = Arc::new(app);
+    (api::router(app.clone()), app, home)
+}
+
+/// A slow effect that counts the renders running at the same time.
+struct SlowEffect {
+    running: Arc<std::sync::atomic::AtomicUsize>,
+    peak: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Effect for SlowEffect {
+    fn schema(&self) -> canvas_proto::props::PropertySchema {
+        canvas_proto::props::PropertySchema {
+            id: "slow".into(),
+            name: "Slow".into(),
+            description: String::new(),
+            needs: Default::default(),
+            properties: Vec::new(),
+            presets: Vec::new(),
+            thumbnail: None,
+        }
+    }
+    fn init(&mut self, _props: &canvas_proto::props::Props) {}
+    fn update(
+        &mut self,
+        _dt: f32,
+        _canvas: &mut canvas_proto::traits::Canvas,
+        _inputs: &canvas_proto::traits::Inputs,
+    ) {
+        // Every update is slow, so a render takes a while.
+        std::thread::sleep(std::time::Duration::from_millis(8));
+    }
+}
+
+impl Drop for SlowEffect {
+    fn drop(&mut self) {
+        // The effect lives as long as its render, so the count is the number of renders
+        // running at the same time.
+        let now = self.running.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        self.peak.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// The render cap holds even when a client goes away.
+///
+/// The permit belongs to the render, not to the request: a client that disconnects while
+/// its tile is rendering must not hand a slot back, or more renders run at once than the
+/// cap allows.
+#[tokio::test]
+async fn at_most_two_tiles_render_at_once_even_when_a_client_goes_away() {
+    let running = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let builder: canvas_daemon::user_effects::Builder = {
+        let running = running.clone();
+        let peak = peak.clone();
+        Arc::new(move |_id: &str, _source: &str| {
+            let now = running.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            peak.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
+            Ok(Box::new(SlowEffect { running: running.clone(), peak: peak.clone() })
+                as Box<dyn canvas_proto::traits::Effect>)
+        })
+    };
+    let names = ["slow-0", "slow-1", "slow-2", "slow-3"];
+    let (router, _app, _home) = build_with_user_effects(&names, builder);
+    let renders_running = || running.load(std::sync::atomic::Ordering::SeqCst);
+
+    // The first client asks for its tile and waits until the render is in flight.
+    let abandoned = {
+        let router = router.clone();
+        tokio::spawn(async move {
+            let _ = router.oneshot(request("GET", "/api/v1/effects/html:slow-0/thumbnail")).await;
+        })
+    };
+    assert!(
+        wait_until(|| renders_running() >= 1).await,
+        "the first tile never started rendering, so the test has nothing to measure"
+    );
+    // Then the client goes away. Its render goes on: the slot belongs to the render.
+    abandoned.abort();
+    let _ = abandoned.await;
+    assert!(
+        renders_running() >= 1,
+        "the render of the client that went away was no longer in flight"
+    );
+
+    // Three more ask for a tile at the same time.
+    let mut waiting = Vec::new();
+    for name in &names[1..] {
+        let router = router.clone();
+        let path = format!("/api/v1/effects/html:{name}/thumbnail");
+        waiting.push(tokio::spawn(async move {
+            let _ = router.oneshot(request("GET", &path)).await;
+        }));
+    }
+    // Two renders run at once (the abandoned one and one more): the cap is reached, so the
+    // test cannot pass without exercising it.
+    assert!(
+        wait_until(|| peak.load(std::sync::atomic::Ordering::SeqCst) >= 2).await,
+        "two renders never ran at once"
+    );
+    for task in waiting {
+        tokio::time::timeout(std::time::Duration::from_secs(60), task)
+            .await
+            .expect("the tiles finish")
+            .expect("the request task ends");
+    }
+
+    let peak = peak.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        peak,
+        canvas_daemon::thumbnail::CONCURRENT_RENDERS,
+        "{peak} tiles rendered at once; the cap is {} and it is reached",
+        canvas_daemon::thumbnail::CONCURRENT_RENDERS
+    );
+}
+
+/// Polls `condition` for up to 10 seconds. True when it held.
+async fn wait_until(condition: impl Fn() -> bool) -> bool {
+    for _ in 0..1000 {
+        if condition() {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    condition()
+}
+
+/// A tile that cannot be rendered is remembered, so the library does not ask for it again
+/// on every open, and the answer says the tile was given up.
+#[tokio::test]
+async fn a_tile_that_cannot_be_rendered_says_so_and_is_not_rendered_again() {
+    let builds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let builder: canvas_daemon::user_effects::Builder = {
+        let builds = builds.clone();
+        Arc::new(move |_id: &str, _source: &str| {
+            let count = builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if count > 1 {
+                // The effect built when the folder was scanned, but it cannot be built
+                // again, so the tile render fails.
+                return Err("the effect could not be built".to_string());
+            }
+            Ok(Box::new(common::FakeEffect::new("broken")) as Box<dyn canvas_proto::traits::Effect>)
+        })
+    };
+    let (router, _app, _home) = build_with_user_effects(&["broken"], builder);
+
+    let response = router
+        .clone()
+        .oneshot(request("GET", "/api/v1/effects/html:broken/thumbnail"))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = json(response).await;
+    let message = body.get("message").and_then(|m| m.as_str()).unwrap_or_default();
+    assert!(message.contains("given up"), "the answer does not say the tile was given up: {message}");
+
+    // The second request is answered from the remembered failure: the effect is not built
+    // again, so the library does not pay for the render on every open.
+    let after_the_first = builds.load(std::sync::atomic::Ordering::SeqCst);
+    let response = router
+        .oneshot(request("GET", "/api/v1/effects/html:broken/thumbnail"))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        builds.load(std::sync::atomic::Ordering::SeqCst),
+        after_the_first,
+        "the effect was built again for the second request"
+    );
+}
+
+/// A render that panics is a tile that was given up, like any other failure: the answer is a
+/// 503 that says so, and the panic is remembered, so the library does not run the render again
+/// on every open.
+#[tokio::test]
+async fn a_tile_whose_render_panics_is_given_up_and_is_not_rendered_again() {
+    let builds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let builder: canvas_daemon::user_effects::Builder = {
+        let builds = builds.clone();
+        Arc::new(move |_id: &str, _source: &str| {
+            let count = builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if count > 1 {
+                // The effect built when the folder was scanned; the tile render panics.
+                panic!("the effect blew up while it was built for its tile");
+            }
+            Ok(Box::new(common::FakeEffect::new("panics")) as Box<dyn canvas_proto::traits::Effect>)
+        })
+    };
+    let (router, _app, _home) = build_with_user_effects(&["panics"], builder);
+
+    let response = router
+        .clone()
+        .oneshot(request("GET", "/api/v1/effects/html:panics/thumbnail"))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "a panic is a given-up tile, not a 500");
+    let body = json(response).await;
+    let message = body.get("message").and_then(|m| m.as_str()).unwrap_or_default();
+    assert!(message.contains("given up"), "the answer does not say the tile was given up: {message}");
+    assert!(message.contains("blew up"), "the answer does not say what happened: {message}");
+    assert_eq!(message.matches("given up").count(), 1, "the prefix is doubled: {message}");
+
+    let after_the_first = builds.load(std::sync::atomic::Ordering::SeqCst);
+    let response = router
+        .oneshot(request("GET", "/api/v1/effects/html:panics/thumbnail"))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        builds.load(std::sync::atomic::Ordering::SeqCst),
+        after_the_first,
+        "the render that panicked was run again for the second request"
+    );
+}
+
+/// A render that panics caches its failure before its slot is released, so a request that
+/// waited for the slot is answered from the cache and does not render the tile again.
+#[tokio::test]
+async fn a_request_waiting_for_a_slot_is_not_given_the_render_that_panicked_to_run_again() {
+    let builds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let builder: canvas_daemon::user_effects::Builder = {
+        let builds = builds.clone();
+        Arc::new(move |_id: &str, _source: &str| {
+            let count = builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if count > 1 {
+                // Both slots are busy for a while, then the render panics.
+                std::thread::sleep(std::time::Duration::from_millis(1000));
+                panic!("the effect blew up while it was built for its tile");
+            }
+            Ok(Box::new(common::FakeEffect::new("panics")) as Box<dyn canvas_proto::traits::Effect>)
+        })
+    };
+    let (router, _app, _home) = build_with_user_effects(&["panics"], builder);
+    let ask = |router: axum::Router| {
+        tokio::spawn(async move {
+            router
+                .oneshot(request("GET", "/api/v1/effects/html:panics/thumbnail"))
+                .await
+                .expect("the router answers")
+                .status()
+        })
+    };
+    // Two requests take both slots; two more ask once both are rendering, so they wait.
+    let first = ask(router.clone());
+    let second = ask(router.clone());
+    assert!(
+        wait_until(|| builds.load(std::sync::atomic::Ordering::SeqCst) >= 3).await,
+        "the two renders never started"
+    );
+    let third = ask(router.clone());
+    let fourth = ask(router.clone());
+    let statuses = [first.await.unwrap(), second.await.unwrap(), third.await.unwrap(), fourth.await.unwrap()];
+    assert!(statuses.iter().all(|s| *s == StatusCode::SERVICE_UNAVAILABLE), "{statuses:?}");
+    // The scan built it once; the two renders in the slots built it twice. The two requests that
+    // waited were answered from the remembered failure.
+    assert_eq!(
+        builds.load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "a request that waited for the slot ran the render that panicked again"
+    );
+}
+
+/// A request that waited for a render slot while another request gave the same tile up is
+/// answered from the remembered failure, and the sentence says "given up" once.
+#[tokio::test]
+async fn a_tile_given_up_while_a_request_waited_for_a_slot_is_worded_once() {
+    let builds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let builder: canvas_daemon::user_effects::Builder = {
+        let builds = builds.clone();
+        Arc::new(move |_id: &str, _source: &str| {
+            let count = builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if count > 1 {
+                // Both slots are busy for a while, then the tile is given up.
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+                return Err("the effect could not be built".to_string());
+            }
+            Ok(Box::new(common::FakeEffect::new("race")) as Box<dyn canvas_proto::traits::Effect>)
+        })
+    };
+    let (router, _app, _home) = build_with_user_effects(&["race"], builder);
+    let ask = |router: axum::Router| {
+        tokio::spawn(async move {
+            let response = router
+                .oneshot(request("GET", "/api/v1/effects/html:race/thumbnail"))
+                .await
+                .expect("the router answers");
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let body = json(response).await;
+            body.get("message").and_then(|m| m.as_str()).unwrap_or_default().to_string()
+        })
+    };
+    // Two requests take both slots; the third asks once they are both rendering, so it waits.
+    let first = ask(router.clone());
+    let second = ask(router.clone());
+    assert!(
+        wait_until(|| builds.load(std::sync::atomic::Ordering::SeqCst) >= 3).await,
+        "the two renders never started"
+    );
+    let third = ask(router.clone());
+    for message in [first.await.unwrap(), second.await.unwrap(), third.await.unwrap()] {
+        assert_eq!(message.matches("given up").count(), 1, "the prefix is doubled: {message}");
+    }
+    // The third did not build the effect: it was answered from the remembered failure.
+    assert_eq!(
+        builds.load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "the request that waited built the effect again"
+    );
+}
+
+/// A render that runs past its budget says how busy the PC was, not what the effect is: the
+/// tile is given up for a while, then tried again. A failure of the effect is remembered for good
+/// (the test above).
+#[tokio::test]
+async fn a_tile_that_ran_past_its_budget_is_tried_again_after_the_retry_interval() {
+    let builds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let builder: canvas_daemon::user_effects::Builder = {
+        let builds = builds.clone();
+        Arc::new(move |id: &str, _source: &str| {
+            builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Box::new(common::FakeEffect::new(id.trim_start_matches("html:"))) as Box<dyn canvas_proto::traits::Effect>)
+        })
+    };
+    // A budget of nothing: every render runs past it.
+    let retry = std::time::Duration::from_millis(300);
+    let cache = canvas_daemon::thumbnail::ThumbnailCache::with_limits(std::time::Duration::ZERO, retry);
+    let (router, _app, _home) = build_with_user_effects_and_cache(&["slow"], builder, cache);
+    let ask = || {
+        let router = router.clone();
+        async move {
+            router
+                .oneshot(request("GET", "/api/v1/effects/html:slow/thumbnail"))
+                .await
+                .expect("the router answers")
+        }
+    };
+
+    let response = ask().await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = json(response).await;
+    let message = body.get("message").and_then(|m| m.as_str()).unwrap_or_default().to_string();
+    assert!(message.contains("budget"), "the answer does not name the budget: {message}");
+
+    // Inside the interval the timeout is remembered: the effect is not rendered again.
+    let after_the_first = builds.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(ask().await.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        builds.load(std::sync::atomic::Ordering::SeqCst),
+        after_the_first,
+        "a timeout inside the retry interval was rendered again"
+    );
+
+    // After the interval the tile is tried again.
+    tokio::time::sleep(retry * 2).await;
+    assert_eq!(ask().await.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        builds.load(std::sync::atomic::Ordering::SeqCst) > after_the_first,
+        "a timeout was remembered for good: the tile was never tried again"
+    );
+}
+
+/// An effect whose top-level script runs past the load budget on a busy PC is not an effect
+/// that fails for good: the tile is tried again after the retry interval, like a render that
+/// ran past its budget.
+#[tokio::test]
+async fn a_tile_whose_load_ran_out_of_time_is_tried_again_after_the_retry_interval() {
+    const BUSY_AT_LOAD: &str = r##"<head><title>Busy</title></head>
+<body><canvas id="c" width="8" height="8"></canvas></body>
+<script>while (true) {}</script>"##;
+    let builds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let builder: canvas_daemon::user_effects::Builder = {
+        let builds = builds.clone();
+        Arc::new(move |id: &str, _source: &str| {
+            let count = builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if count > 1 {
+                // The tile build: the real HTML loader, whose top-level script never returns.
+                return canvas_daemon::user_effects::html_builder_seeded(1)(id, BUSY_AT_LOAD);
+            }
+            Ok(Box::new(common::FakeEffect::new("busy")) as Box<dyn canvas_proto::traits::Effect>)
+        })
+    };
+    let retry = std::time::Duration::from_secs(3);
+    let cache = canvas_daemon::thumbnail::ThumbnailCache::with_limits(std::time::Duration::from_secs(30), retry);
+    let (router, _app, _home) = build_with_user_effects_and_cache(&["busy"], builder, cache);
+    let ask = || {
+        let router = router.clone();
+        async move {
+            router
+                .oneshot(request("GET", "/api/v1/effects/html:busy/thumbnail"))
+                .await
+                .expect("the router answers")
+        }
+    };
+    assert_eq!(ask().await.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let after_the_first = builds.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(ask().await.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        builds.load(std::sync::atomic::Ordering::SeqCst),
+        after_the_first,
+        "a load timeout inside the retry interval was built again"
+    );
+    tokio::time::sleep(retry * 2).await;
+    assert_eq!(ask().await.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        builds.load(std::sync::atomic::Ordering::SeqCst) > after_the_first,
+        "a load timeout was remembered for good: the tile was never tried again"
+    );
 }
 
 /// A fake service. It answers every request the same way.

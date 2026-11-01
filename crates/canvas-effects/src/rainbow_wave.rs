@@ -32,8 +32,9 @@ impl RainbowWave {
         .number("speed", "Speed", 0.0, 100.0, 1.0, 30.0)
         // Width is in logical units, as it always was: a saved 60 stays a 60-unit band. The
         // default (190, about 60 % of the 320-unit canvas) is what keeps a new effect from
-        // being a thin sliver on black.
-        .number("width", "Width", 5.0, 200.0, 1.0, 190.0)
+        // being a thin sliver on black. The range reaches the whole travel period (480),
+        // so a band can be as wide as the canvas is tall and never leave a black gap.
+        .number("width", "Width", 5.0, 480.0, 1.0, 190.0)
         .number("direction", "Direction", 0.0, 360.0, 1.0, 0.0)
         .number("cycles", "Cycles", 1.0, 8.0, 1.0, 1.0)
         .preset(
@@ -48,6 +49,11 @@ impl RainbowWave {
             "Wide arc",
             vec![("width", number_kind(150.0)), ("cycles", number_kind(2.0))],
         )
+        // The tile shows the whole spectrum across the tile: the band is 400 units wide, so
+        // it covers the canvas from end to end and no part of the tile is ever black, and
+        // the loop drifts slowly enough that the crossfade at its restart does not double
+        // the picture.
+        .thumbnail(crate::schema::recipe(18.0, 3.75, 8, vec![("speed", crate::schema::num(0.4)), ("direction", crate::schema::num(90.0)), ("cycles", crate::schema::num(2.0)), ("width", crate::schema::num(400.0))]))
         .build()
     }
 

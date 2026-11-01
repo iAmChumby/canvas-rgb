@@ -12,6 +12,8 @@ use canvas_proto::{Canvas, Effect, PropertySchema, Props};
 
 /// Entries in the palette lookup. Fine enough that the ramp looks continuous.
 const LUT_SIZE: usize = 1024;
+/// The stretches the source row is cut into: each is one tongue of flame that rises and dies.
+const TONGUES: usize = 14;
 
 /// The Fire effect.
 pub struct Fire {
@@ -34,6 +36,8 @@ pub struct Fire {
     map_key: Option<(u32, u32, u32)>,
     /// For each canvas column, the heat column it shows.
     col_map: Vec<usize>,
+    /// How strongly each stretch of the source row burns, drifting with time (see `step`).
+    tongues: Vec<f32>,
     /// For each canvas row, the heat row it shows, already multiplied by the width.
     row_map: Vec<usize>,
 }
@@ -59,6 +63,10 @@ impl Fire {
                 ("intensity", number_kind(90.0)),
             ],
         )
+        // At the defaults the flames cool within the bottom fifth of the canvas. Full intensity and
+        // low cooling carry the heat to the top, four seconds of warm-up let it climb there, and the
+        // end crossfades into the start because the tongues of flame never repeat.
+        .thumbnail(crate::schema::recipe(4.0, 2.0, 8, vec![("intensity", crate::schema::num(100.0)), ("cooling", crate::schema::num(6.0))]))
         .build()
     }
 
@@ -83,6 +91,7 @@ impl Fire {
             cooling: 30.0,
             map_key: None,
             col_map: Vec::new(),
+            tongues: vec![0.5; TONGUES],
             row_map: Vec::new(),
         };
         e.init(&e.schema.defaults());
@@ -146,6 +155,12 @@ impl Effect for Fire {
         self.intensity = p::number(&self.schema, props, "intensity") as f32;
         self.palette = p::choice(&self.schema, props, "palette");
         self.cooling = p::number(&self.schema, props, "cooling") as f32;
+        // The library tile is rendered with a fixed seed, so the tile is the same fire
+        // every time. On the lights the seed comes from the clock, so every run of the
+        // effect is a different fire.
+        if let Some(seed) = p::tile_seed(props) {
+            self.rng = Rng::new(seed);
+        }
         self.ramp = Self::build_ramp(&self.palette);
         self.lut = Self::build_lut(&self.ramp);
     }
@@ -209,7 +224,22 @@ impl Fire {
         let (w, h) = (self.w, self.h);
         // The bottom row is the source, heated by the intensity.
         let source = (self.intensity / 100.0).clamp(0.0, 1.0);
-        self.next[(h - 1) * w..h * w].fill(source);
+        // The source is not one flat line: it burns in tongues, each a stretch of the row that
+        // drifts between a third and all of the intensity, so flames rise and die instead of
+        // the picture being one gradient.
+        for tongue in self.tongues.iter_mut() {
+            *tongue = *tongue * 0.9 + 0.1 * self.rng.next_f32();
+        }
+        let last = (TONGUES - 1) as f32;
+        for (x, cell) in self.next[(h - 1) * w..h * w].iter_mut().enumerate() {
+            let at = x as f32 / (w - 1) as f32 * last;
+            let i = (at as usize).min(TONGUES - 2);
+            let f = at - i as f32;
+            let burn = self.tongues[i] * (1.0 - f) + self.tongues[i + 1] * f;
+            // Noise has a mean of 0.5 and spread of about 0.15, so scale it back to 0..1.
+            let level = ((burn - 0.5) * 3.0 + 0.5).clamp(0.0, 1.0);
+            *cell = source * (0.3 + 0.7 * level);
+        }
         let cool = (self.cooling / 100.0).clamp(0.0, 1.0) * 0.08;
         for y in 0..h - 1 {
             let below = &self.heat[(y + 1) * w..(y + 2) * w];

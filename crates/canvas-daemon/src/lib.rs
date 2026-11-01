@@ -46,6 +46,22 @@ pub fn create_effect(
     }
 }
 
+/// A fresh instance of the effect with this id, for a library tile.
+///
+/// The same effect the lights would run, but with a fixed seed: a tile is rendered again
+/// and again, so it has to be the same picture every time. An HTML effect is built with
+/// the seeded builder; a built-in one reads the seed from the properties the tile path
+/// hands it (see [`crate::thumbnail::render`]).
+pub fn create_effect_for_tile(
+    user: &user_effects::UserEffects,
+    id: &str,
+) -> Result<Box<dyn canvas_proto::traits::Effect>, String> {
+    match user.create_for_tile(id) {
+        Some(made) => made,
+        None => canvas_effects::create(id).ok_or_else(|| format!("no effect with the id {id}")),
+    }
+}
+
 /// Creates the effect and hands it to the engine, starting and stopping the captures to
 /// match what the effect needs.
 ///
