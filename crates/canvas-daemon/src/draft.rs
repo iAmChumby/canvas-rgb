@@ -81,6 +81,13 @@ impl Draft {
         self.builder.clone()
     }
 
+    /// The gate every draft transition takes. A caller that must look at the draft and then
+    /// apply its own effect without ending a draft (the onboarding restore) holds this across
+    /// both, so no PUT lands between them.
+    pub fn gate(&self) -> &tokio::sync::Mutex<()> {
+        &self.gate
+    }
+
     fn lock(&self) -> MutexGuard<'_, Option<Slot>> {
         self.slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }

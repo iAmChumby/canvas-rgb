@@ -118,8 +118,11 @@ fn spawn_timer(app: Arc<App>, generation: u64, base: Duration) {
 ///
 /// A draft on the lights outranks the onboarding restore: the editor is holding them on purpose,
 /// and ending that draft puts the same saved effect back (or black when there is none), so this
-/// does nothing while a draft runs.
+/// does nothing while a draft runs. The draft gate is held across the check and the apply, so a
+/// PUT that is already building is seen before the check and one that arrives during the apply
+/// waits for it.
 pub async fn restore(app: &Arc<App>) {
+    let _gate = app.draft.gate().lock().await;
     if app.draft.is_active() {
         tracing::info!("the onboarding restore is skipped: a draft holds the lights");
         return;

@@ -207,7 +207,10 @@ pub async fn patch_active_props(
 ) -> ApiResult<Json<serde_json::Value>> {
     // A draft holds the lights; the layout's effect is not what is running. The props of a
     // draft are changed with PUT /effects/draft, so this is a clear 404 and not a silent
-    // overwrite of the draft with the saved effect.
+    // overwrite of the draft with the saved effect. The draft gate is held across the check
+    // and the apply, so a PUT that is already building is seen here and one that arrives
+    // during the apply waits until the saved effect is on (its PUT then starts a new draft).
+    let _draft_gate = app.draft.gate().lock().await;
     if app.draft.is_active() {
         return Err(ApiFailure::not_found(
             "a draft is on the lights; change its props with PUT /api/v1/effects/draft",
