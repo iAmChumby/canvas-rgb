@@ -370,8 +370,8 @@ pub fn body_is_flat(body: &[u8]) -> bool {
         return true;
     };
     let last = &body[6 + (frames - 1) * frame_len..6 + frames * frame_len];
-    match last.get(..3) {
-        Some(first) => last.chunks_exact(3).all(|pixel| pixel == first),
+    match last.as_chunks::<3>().0.split_first() {
+        Some((first, rest)) => rest.iter().all(|pixel| pixel == first),
         None => true,
     }
 }

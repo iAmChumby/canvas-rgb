@@ -8,6 +8,7 @@ pub mod cli;
 pub mod composite;
 pub mod conflict;
 pub mod displays;
+pub mod draft;
 pub mod elevated;
 pub mod exit_log;
 pub mod first_run;
@@ -87,6 +88,20 @@ pub async fn apply_effect(app: &Arc<App>, id: &str, props: &Props) -> Result<(),
         .map_err(|e| format!("the effect load task failed: {e}"))??
     };
 
+    apply_built(app, effect, props).await
+}
+
+/// Hands an effect that is already built to the engine, starting and stopping the captures to
+/// match what it needs.
+///
+/// [`apply_effect`] builds an effect from its id and comes here; the editor's draft
+/// ([`crate::draft`]) builds its own HTML and comes here too. Nothing is saved: the caller
+/// owns what, if anything, the effect means to the store.
+pub async fn apply_built(
+    app: &Arc<App>,
+    effect: Box<dyn canvas_proto::traits::Effect>,
+    props: &Props,
+) -> Result<(), String> {
     // The captures follow the effect's `needs`.
     let needs = effect.schema().needs;
     app.inputs.lock().map_err(|_| "the capture state is poisoned")?.apply_needs(needs);

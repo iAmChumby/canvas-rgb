@@ -6,7 +6,9 @@
 
 use axum::extract::{Path, State};
 use axum::Json;
-use canvas_proto::api::{EffectPreviewRequest, EffectPreviewResponse, EffectSource};
+use canvas_proto::api::{
+    DraftRequest, DraftStatus, EffectPreviewRequest, EffectPreviewResponse, EffectSource,
+};
 use canvas_proto::props::Props;
 use canvas_proto::traits::Effect as _;
 use std::sync::Arc;
@@ -106,4 +108,54 @@ async fn preview(html: &str, props: &Props) -> Result<EffectPreviewResponse, Api
 fn preview_base64(bytes: &[u8]) -> String {
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// `GET /api/v1/effects/draft`.
+///
+/// The draft on the lights, for the editor's banner after a reload. A lease that ran out is
+/// ended here first, so the answer never reports a draft that is already over.
+pub async fn get_draft(State(app): State<Arc<App>>) -> Json<DraftStatus> {
+    crate::draft::expire_if_due(&app).await;
+    Json(crate::draft::status(&app))
+}
+
+/// `PUT /api/v1/effects/draft`.
+///
+/// Starts the draft, or renews its lease (and updates its props). A draft that does not parse
+/// is refused and a running draft is left alone, so a bad keystroke mid-edit never takes the
+/// lights off the last good draft.
+pub async fn put_draft(
+    State(app): State<Arc<App>>,
+    body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
+) -> ApiResult<Json<DraftStatus>> {
+    let bytes = crate::api::limited_body(body, crate::api::effects::IMPORT_BODY_LIMIT)?;
+    let request: DraftRequest = serde_json::from_slice(&bytes)
+        .map_err(|e| ApiFailure::validation(format!("the body is not a draft request: {e}")))?;
+    if request.html.len() > canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES {
+        return Err(ApiFailure::validation(format!(
+            "the draft is {} bytes; the limit is {}",
+            request.html.len(),
+            canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES
+        )));
+    }
+    if let Err(error) = crate::draft::put(&app, &request.html, &request.props).await {
+        return Err(match error {
+            crate::draft::PutError::Build(message) => {
+                ApiFailure::validation(crate::user_effects::load_error_sentence(&message))
+            }
+            crate::draft::PutError::Internal(message) => ApiFailure::internal(message),
+        });
+    }
+    Ok(Json(crate::draft::status(&app)))
+}
+
+/// `DELETE /api/v1/effects/draft`.
+///
+/// Stops the draft and puts the prior effect back. Without a draft it is a no-op, so a banner's
+/// Stop after a lease already ran out is not an error.
+pub async fn delete_draft(State(app): State<Arc<App>>) -> ApiResult<Json<DraftStatus>> {
+    crate::draft::stop(&app)
+        .await
+        .map_err(|e| ApiFailure::internal(format!("could not restore the prior effect: {e}")))?;
+    Ok(Json(crate::draft::status(&app)))
 }

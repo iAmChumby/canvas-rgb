@@ -45,6 +45,37 @@ impl Drop for TempHome {
 
 /// The router, the state, the home and the effects folder.
 fn build() -> (axum::Router, Arc<App>, TempHome, PathBuf) {
+    let (router, app, _engine, home, folder, _clock) = build_with_clock();
+    (router, app, home, folder)
+}
+
+/// A clock the test moves by hand: a draft lease is tested without waiting.
+#[derive(Clone)]
+struct TestClock {
+    now: Arc<std::sync::Mutex<std::time::Duration>>,
+}
+
+impl TestClock {
+    fn new() -> Self {
+        Self { now: Arc::new(std::sync::Mutex::new(std::time::Duration::ZERO)) }
+    }
+
+    /// The clock the draft reads.
+    fn clock(&self) -> canvas_daemon::draft::Clock {
+        let now = self.now.clone();
+        Arc::new(move || *now.lock().unwrap_or_else(|poisoned| poisoned.into_inner()))
+    }
+
+    /// Moves the clock on.
+    fn advance(&self, by: std::time::Duration) {
+        let mut now = self.now.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *now += by;
+    }
+}
+
+/// Like [`build`], with the fake engine and the draft's clock handed back too.
+fn build_with_clock(
+) -> (axum::Router, Arc<App>, Arc<FakeEngine>, TempHome, PathBuf, TestClock) {
     let home = TempHome::new();
     let folder = home.path.join("effects");
     std::fs::create_dir_all(&folder).expect("the effects folder is created");
@@ -53,7 +84,7 @@ fn build() -> (axum::Router, Arc<App>, TempHome, PathBuf) {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = App::new(
         store,
-        engine,
+        engine.clone(),
         Box::new(FakeAdapter::default()),
         TOKEN.to_string(),
         "0.1.0-test".to_string(),
@@ -61,8 +92,11 @@ fn build() -> (axum::Router, Arc<App>, TempHome, PathBuf) {
     );
     // The routes work on this folder, never on the owner's.
     app.effects_dir = folder.clone();
+    // A lease is driven by the test's clock, never by the wall clock.
+    let clock = TestClock::new();
+    app.draft = canvas_daemon::draft::Draft::with_clock(clock.clock());
     let app = Arc::new(app);
-    (api::router(app.clone()), app, home, folder)
+    (api::router(app.clone()), app, engine, home, folder, clock)
 }
 
 /// A request with the token and a body.
@@ -404,4 +438,450 @@ async fn the_preview_route_needs_the_token() {
         .await
         .expect("the router answers");
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+// ---------------------------------------------------------------- draft on the lights
+
+/// A `color` prop, as the editor sends it.
+fn color(hex: &str) -> canvas_proto::props::Props {
+    let mut props = canvas_proto::props::Props::new();
+    props.insert(
+        "color".to_string(),
+        canvas_proto::PropValue::Color(hex.parse().expect("a #rrggbb colour")),
+    );
+    props
+}
+
+/// Makes `id` the active layout's effect, and runs it: this is what a draft takes over from.
+async fn prior_effect(app: &Arc<App>, id: &str, props: canvas_proto::props::Props) {
+    {
+        let mut store = app.store.write().await;
+        store.layouts.layouts[0].effect =
+            Some(canvas_proto::layout::ActiveEffect { id: id.to_string(), props: props.clone() });
+    }
+    canvas_daemon::apply_effect(app, id, &props).await.expect("the prior effect runs");
+}
+
+/// What the fake engine is running, and with which props.
+fn running(engine: &FakeEngine) -> (Option<String>, canvas_proto::props::Props) {
+    (
+        engine.effect_id.lock().unwrap().clone(),
+        engine.props.lock().unwrap().clone(),
+    )
+}
+
+/// A PUT to the draft route.
+async fn put_draft(
+    router: axum::Router,
+    html: &str,
+    props: serde_json::Value,
+) -> axum::response::Response {
+    let body = serde_json::json!({ "html": html, "props": props }).to_string();
+    router
+        .oneshot(request_with_body("PUT", routes::EFFECT_DRAFT, &body))
+        .await
+        .expect("the router answers")
+}
+
+/// The draft state the daemon reports.
+async fn draft_state(router: axum::Router) -> canvas_proto::api::DraftStatus {
+    let response = router
+        .oneshot(request("GET", routes::EFFECT_DRAFT))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    serde_json::from_value(json(response).await).expect("a DraftStatus")
+}
+
+#[tokio::test]
+async fn a_draft_runs_on_the_lights_and_stop_puts_the_prior_effect_back() {
+    let (router, app, engine, _home, _folder, _clock) = build_with_clock();
+    let prior = color("#112233");
+    prior_effect(&app, "solid", prior.clone()).await;
+    assert_eq!(running(&engine).0.as_deref(), Some("solid"));
+
+    let props = serde_json::json!({ "tint": { "type": "color", "value": "#ff0000" } });
+    let response = put_draft(router.clone(), MOVING, props.clone()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let status: canvas_proto::api::DraftStatus =
+        serde_json::from_value(json(response).await).expect("a DraftStatus");
+    let hash = canvas_daemon::user_effects::source_hash(MOVING);
+    assert!(status.active, "the draft is on");
+    assert_eq!(status.id.as_deref(), Some(format!("draft:{hash}").as_str()));
+    assert_eq!(status.source_hash.as_deref(), Some(hash.as_str()));
+    assert_eq!(status.props.len(), 1, "the props are reported: {:?}", status.props);
+    assert_eq!(status.heartbeat_ms, 5_000);
+    assert_eq!(status.lease_ms, 15_000);
+    assert!(status.lease_remaining_ms > 0, "the lease is running");
+
+    let (id, engine_props) = running(&engine);
+    assert_eq!(id.as_deref(), Some(format!("draft:{hash}").as_str()));
+    assert_eq!(engine_props.len(), 1, "the draft was handed to the engine with its props");
+
+    // The same draft is reported for a reload.
+    let state = draft_state(router.clone()).await;
+    assert!(state.active);
+    assert_eq!(state.id, status.id);
+
+    let response = router
+        .clone()
+        .oneshot(request("DELETE", routes::EFFECT_DRAFT))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let stopped: canvas_proto::api::DraftStatus =
+        serde_json::from_value(json(response).await).expect("a DraftStatus");
+    assert!(!stopped.active, "the draft is over");
+
+    let (id, engine_props) = running(&engine);
+    assert_eq!(id.as_deref(), Some("solid"), "the prior effect is back");
+    assert_eq!(engine_props, prior, "with the props it had");
+    assert!(!draft_state(router).await.active);
+}
+
+#[tokio::test]
+async fn a_beat_renews_the_lease_and_a_beat_after_the_lease_still_runs() {
+    let (router, app, engine, _home, _folder, clock) = build_with_clock();
+    prior_effect(&app, "solid", color("#112233")).await;
+
+    assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
+    clock.advance(std::time::Duration::from_secs(10));
+    // A second draft replaces the code but keeps the visit: the prior is still solid.
+    let changed = MOVING.replace("#ffcc00", "#00ff00");
+    assert_eq!(put_draft(router.clone(), &changed, serde_json::json!({})).await.status(), StatusCode::OK);
+    clock.advance(std::time::Duration::from_secs(10));
+
+    let state = draft_state(router.clone()).await;
+    assert!(state.active, "the second beat renewed the lease");
+    assert_eq!(
+        state.source_hash.as_deref(),
+        Some(canvas_daemon::user_effects::source_hash(&changed).as_str())
+    );
+    assert_eq!(running(&engine).0.as_deref(), Some(format!("draft:{}", canvas_daemon::user_effects::source_hash(&changed)).as_str()));
+
+    // Sixteen seconds after the last beat the lease is over: the prior effect is back.
+    clock.advance(std::time::Duration::from_secs(16));
+    assert!(!draft_state(router).await.active);
+    assert_eq!(running(&engine).0.as_deref(), Some("solid"));
+}
+
+#[tokio::test]
+async fn a_draft_whose_lease_runs_out_restores_the_prior_effect() {
+    let (router, app, engine, _home, _folder, clock) = build_with_clock();
+    let prior = color("#224466");
+    prior_effect(&app, "solid", prior.clone()).await;
+    assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
+    assert_eq!(
+        running(&engine).0,
+        Some(format!("draft:{}", canvas_daemon::user_effects::source_hash(MOVING)))
+    );
+
+    clock.advance(canvas_proto::consts::DRAFT_LEASE);
+    assert!(!draft_state(router).await.active, "the lease ran out");
+    let (id, props) = running(&engine);
+    assert_eq!(id.as_deref(), Some("solid"), "the prior effect is back");
+    assert_eq!(props, prior, "with the props it had");
+}
+
+#[tokio::test]
+async fn a_saved_activation_ends_the_draft_without_restoring_it() {
+    let (router, app, engine, _home, _folder, clock) = build_with_clock();
+    prior_effect(&app, "solid", color("#112233")).await;
+    assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
+
+    let response = router
+        .clone()
+        .oneshot(request_with_body(
+            "POST",
+            &routes::EFFECT_ACTIVATE.replace("{id}", "gradient"),
+            r#"{"props": {}, "preset": null}"#,
+        ))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(running(&engine).0.as_deref(), Some("gradient"));
+
+    // The draft is gone, and time passing does not bring the old effect back.
+    assert!(!draft_state(router.clone()).await.active);
+    clock.advance(canvas_proto::consts::DRAFT_LEASE * 2);
+    assert!(!draft_state(router).await.active);
+    assert_eq!(
+        running(&engine).0.as_deref(),
+        Some("gradient"),
+        "the owner chose gradient; nothing restored solid over it"
+    );
+}
+
+#[tokio::test]
+async fn a_layout_switch_ends_the_draft_without_restoring_it() {
+    let (router, app, engine, _home, _folder, clock) = build_with_clock();
+    prior_effect(&app, "solid", color("#112233")).await;
+    // A second layout, with an effect of its own.
+    {
+        let mut store = app.store.write().await;
+        let mut other = store.layouts.layouts[0].clone();
+        other.id = "other".to_string();
+        other.name = "Other".to_string();
+        other.effect = Some(canvas_proto::layout::ActiveEffect {
+            id: "gradient".to_string(),
+            props: canvas_proto::props::Props::new(),
+        });
+        store.layouts.layouts.push(other);
+    }
+    assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
+
+    let response = router
+        .clone()
+        .oneshot(request_with_body(
+            "PUT",
+            routes::LAYOUT_ACTIVE,
+            r#"{"id": "other"}"#,
+        ))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(running(&engine).0.as_deref(), Some("gradient"));
+
+    assert!(!draft_state(router).await.active, "the switch ended the draft");
+    clock.advance(canvas_proto::consts::DRAFT_LEASE * 2);
+    assert_eq!(
+        running(&engine).0.as_deref(),
+        Some("gradient"),
+        "nothing restored the draft's prior effect over the chosen layout"
+    );
+}
+
+#[tokio::test]
+async fn the_active_props_route_is_refused_while_a_draft_runs() {
+    let (router, app, engine, _home, _folder, _clock) = build_with_clock();
+    prior_effect(&app, "solid", color("#112233")).await;
+    assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
+
+    let response = router
+        .clone()
+        .oneshot(request_with_body(
+            "PATCH",
+            routes::EFFECT_ACTIVE_PROPS,
+            r##"{"color": {"type": "color", "value": "#00ff00"}}"##,
+        ))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let message = json(response).await["message"].as_str().unwrap_or_default().to_string();
+    assert!(message.contains("draft"), "the message names the draft route: {message}");
+    assert_eq!(
+        running(&engine).0,
+        Some(format!("draft:{}", canvas_daemon::user_effects::source_hash(MOVING))),
+        "the draft is still what runs"
+    );
+
+    // After Stop, the route works again.
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(request("DELETE", routes::EFFECT_DRAFT))
+            .await
+            .expect("the router answers")
+            .status(),
+        StatusCode::OK
+    );
+    let response = router
+        .oneshot(request_with_body(
+            "PATCH",
+            routes::EFFECT_ACTIVE_PROPS,
+            r##"{"color": {"type": "color", "value": "#00ff00"}}"##,
+        ))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_bad_draft_leaves_the_running_draft_alone() {
+    let (router, app, engine, _home, _folder, _clock) = build_with_clock();
+    prior_effect(&app, "solid", color("#112233")).await;
+    assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
+    let hash = canvas_daemon::user_effects::source_hash(MOVING);
+
+    let response = put_draft(router.clone(), NO_SCRIPT, serde_json::json!({})).await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let message = json(response).await["message"].as_str().unwrap_or_default().to_string();
+    assert!(message.contains("parse"), "the parser's message is kept: {message}");
+
+    let state = draft_state(router).await;
+    assert!(state.active, "the good draft still runs");
+    assert_eq!(state.source_hash.as_deref(), Some(hash.as_str()));
+    assert_eq!(running(&engine).0, Some(format!("draft:{hash}")));
+}
+
+#[tokio::test]
+async fn a_beat_with_new_props_updates_the_lights_without_a_reload() {
+    let (router, app, engine, _home, _folder, _clock) = build_with_clock();
+    prior_effect(&app, "solid", color("#112233")).await;
+    assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
+    assert!(running(&engine).1.is_empty(), "no props on the first beat");
+
+    let response = put_draft(
+        router.clone(),
+        MOVING,
+        serde_json::json!({ "tint": { "type": "color", "value": "#ff0000" } }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let state: canvas_proto::api::DraftStatus =
+        serde_json::from_value(json(response).await).expect("a DraftStatus");
+    assert_eq!(state.id.as_deref(), Some(format!("draft:{}", canvas_daemon::user_effects::source_hash(MOVING)).as_str()));
+    let (id, props) = running(&engine);
+    assert_eq!(id, state.id, "the same draft still runs");
+    assert_eq!(props.len(), 1, "the new props reached the engine: {props:?}");
+}
+
+#[tokio::test]
+async fn a_draft_with_no_saved_effect_goes_black_on_stop() {
+    let (router, _app, engine, _home, _folder, _clock) = build_with_clock();
+    assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(request("DELETE", routes::EFFECT_DRAFT))
+            .await
+            .expect("the router answers")
+            .status(),
+        StatusCode::OK
+    );
+    let (id, props) = running(&engine);
+    assert_eq!(id.as_deref(), Some("solid"), "the layout had no effect: black");
+    assert_eq!(
+        props,
+        canvas_daemon::draft::black(),
+        "black is the same fallback the onboarding restore uses"
+    );
+}
+
+#[tokio::test]
+async fn a_frame_that_never_returns_is_stopped_and_the_api_still_answers() {
+    let runaway = r##"<head><title>Runaway frame</title></head>
+<body><canvas id="c" width="320" height="200"></canvas></body>
+<script>
+  var c = document.getElementById("c");
+  var ctx = c.getContext("2d");
+  ctx.fillStyle = "#00ff00";
+  ctx.fillRect(0, 0, 320, 200);
+  function draw() { while (true) {} }
+  window.requestAnimationFrame(draw);
+</script>"##;
+    let (router, _app, _home, _folder) = build();
+    let pending = tokio::spawn(post_preview(router.clone(), preview_body(runaway, serde_json::json!({}))));
+    // The API answers while the preview's frame is stopped at its deadline on a blocking
+    // thread: the render loop's thread is not the API's.
+    let status = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(routes::STATUS)
+                .header("host", "127.0.0.1:9430")
+                .body(Body::empty())
+                .expect("the request builds"),
+        )
+        .await
+        .expect("the router answers");
+    assert_eq!(status.status(), StatusCode::OK);
+
+    // A frame is given one whole frame at the slowest rate (100 ms), so the render is bounded.
+    let response = tokio::time::timeout(std::time::Duration::from_secs(60), pending)
+        .await
+        .expect("the preview answers; the runaway frame does not hold it")
+        .expect("the task ends");
+    assert_eq!(response.status(), StatusCode::OK, "the last good loop is still served");
+    let answer = json(response).await;
+    let errors: Vec<String> = answer["errors"]
+        .as_array()
+        .expect("errors")
+        .iter()
+        .filter_map(|e| e.as_str().map(str::to_string))
+        .collect();
+    assert!(
+        errors.iter().any(|e| e.contains("ran longer than")),
+        "the frame deadline is reported: {errors:?}"
+    );
+    assert_eq!(thumbnail(&answer).len(), 6 + 24 * 64 * 40 * 3);
+}
+
+#[tokio::test]
+async fn a_draft_writes_nothing_to_the_saved_files_or_the_effects_folder() {
+    let (router, app, engine, home, folder, _clock) = build_with_clock();
+    prior_effect(&app, "solid", color("#112233")).await;
+    {
+        let store = app.store.read().await;
+        store.save_effects().expect("effects.json is written");
+        store.save_layouts().expect("layouts.json is written");
+    }
+    let snapshot = || {
+        let effects = std::fs::read(home.path.join("effects.json")).expect("effects.json");
+        let layouts = std::fs::read(home.path.join("layouts.json")).expect("layouts.json");
+        let files: Vec<String> = std::fs::read_dir(&folder)
+            .expect("the effects folder")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        (effects, layouts, files)
+    };
+    let before = snapshot();
+
+    assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
+    assert!(draft_state(router.clone()).await.active);
+    // A beat with new code rebuilds the draft; it still saves nothing.
+    assert_eq!(
+        put_draft(router.clone(), &MOVING.replace("#ffcc00", "#00ff00"), serde_json::json!({}))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(request("DELETE", routes::EFFECT_DRAFT))
+            .await
+            .expect("the router answers")
+            .status(),
+        StatusCode::OK
+    );
+
+    assert_eq!(snapshot(), before, "a draft never writes the effects or layouts file");
+    assert!(running(&engine).0.as_deref() == Some("solid"));
+    let active = app.active_layout().await.and_then(|layout| layout.effect);
+    assert_eq!(
+        active.map(|effect| effect.id),
+        Some("solid".to_string()),
+        "the draft never became the layout's effect"
+    );
+}
+
+#[tokio::test]
+async fn a_draft_body_over_the_limit_is_refused() {
+    let (router, _app, _engine, _home, _folder, _clock) = build_with_clock();
+    let html = "a".repeat(canvas_daemon::api::effects::IMPORT_BODY_LIMIT);
+    let response = put_draft(router, &html, serde_json::json!({})).await;
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn the_draft_route_needs_the_token() {
+    let (router, _app, _engine, _home, _folder, _clock) = build_with_clock();
+    for method in ["GET", "PUT", "DELETE"] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(routes::EFFECT_DRAFT)
+                    .header("host", "127.0.0.1:9430")
+                    .body(Body::empty())
+                    .expect("the request builds"),
+            )
+            .await
+            .expect("the router answers");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{method}");
+    }
 }

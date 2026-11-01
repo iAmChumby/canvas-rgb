@@ -210,11 +210,19 @@ pub async fn put_layout(
     // The active layout goes to the engine straight away.
     let active = app.store.read().await.layouts.active.clone();
     if active == id {
+        // The layout's effect is what runs now: a draft on the lights ends without restore.
+        let draft_ended = crate::draft::drop_slot(&app).await;
         app.engine.set_layout(layout.clone(), devices);
         if let Some(effect) = &layout.effect {
             crate::logging::warn_if_err(
                 &format!("the saved layout was updated but its effect {} did not start", effect.id),
                 crate::apply_effect(&app, &effect.id, &effect.props).await,
+            );
+        } else if draft_ended {
+            // Nothing was restored and the layout names no effect: black, not the draft.
+            crate::logging::warn_if_err(
+                "the layout has no effect and the draft's could not be cleared",
+                crate::apply_effect(&app, "solid", &crate::draft::black()).await,
             );
         }
     }
@@ -249,11 +257,19 @@ pub async fn put_active_layout(
     };
 
     let devices = app.devices.read().await.clone();
+    // The layout's effect is what runs now: a draft on the lights ends without restore.
+    let draft_ended = crate::draft::drop_slot(&app).await;
     app.engine.set_layout(layout.clone(), devices);
     if let Some(effect) = &layout.effect {
         crate::logging::warn_if_err(
             &format!("the layout became active but its effect {} did not start", effect.id),
             crate::apply_effect(&app, &effect.id, &effect.props).await,
+        );
+    } else if draft_ended {
+        // Nothing was restored and the layout names no effect: black, not the draft.
+        crate::logging::warn_if_err(
+            "the layout has no effect and the draft's could not be cleared",
+            crate::apply_effect(&app, "solid", &crate::draft::black()).await,
         );
     }
     tracing::info!(layout = %layout.id, "the active layout changed");

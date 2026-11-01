@@ -64,6 +64,13 @@ pub fn router(app: Arc<App>) -> Router {
             post(editor::preview_effect)
                 .layer(axum::extract::DefaultBodyLimit::max(effects::IMPORT_BODY_LIMIT)),
         )
+        .route(
+            routes::EFFECT_DRAFT,
+            get(editor::get_draft)
+                .put(editor::put_draft)
+                .delete(editor::delete_draft)
+                .layer(axum::extract::DefaultBodyLimit::max(effects::IMPORT_BODY_LIMIT)),
+        )
         .route(routes::LAYOUTS, get(layouts::list_layouts))
         .route(routes::LAYOUT, get(layouts::get_layout).put(layouts::put_layout))
         .route(routes::LAYOUT_ACTIVE, put(layouts::put_active_layout))

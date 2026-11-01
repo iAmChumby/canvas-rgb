@@ -184,6 +184,8 @@ pub async fn activate(
 
     // Any activation ends an earlier timer; an onboarding effect arms a new one below.
     app.transient.cancel();
+    // The owner chose a saved effect: a draft on the lights is dropped, not restored.
+    crate::draft::drop_slot(&app).await;
     crate::apply_effect(&app, &schema.id, &props)
         .await
         .map_err(|e| ApiFailure::internal(format!("could not activate the effect: {e}")))?;
@@ -202,6 +204,14 @@ pub async fn patch_active_props(
     State(app): State<Arc<App>>,
     Json(props): Json<Props>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    // A draft holds the lights; the layout's effect is not what is running. The props of a
+    // draft are changed with PUT /effects/draft, so this is a clear 404 and not a silent
+    // overwrite of the draft with the saved effect.
+    if app.draft.is_active() {
+        return Err(ApiFailure::not_found(
+            "a draft is on the lights; change its props with PUT /api/v1/effects/draft",
+        ));
+    }
     let (schema, merged) = {
         let store = app.store.read().await;
         let active = store

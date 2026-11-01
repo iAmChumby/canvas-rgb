@@ -101,6 +101,8 @@ pub struct App {
     pub last_frame: Arc<crate::last_frame::LastFrame>,
     /// The onboarding effects are transient: the timer that restores the saved effect.
     pub transient: crate::transient::Transient,
+    /// The draft on the lights: an editor's unsaved effect, with its lease (see [`crate::draft`]).
+    pub draft: crate::draft::Draft,
 }
 
 /// The fan config the daemon keeps a copy of.
@@ -160,6 +162,7 @@ impl App {
             identify: Arc::default(),
             last_frame: Arc::default(),
             transient: Default::default(),
+            draft: Default::default(),
             store: tokio::sync::RwLock::new(store),
             engine,
             adapter: Arc::new(tokio::sync::Mutex::new(adapter as Box<dyn DeviceAdapter>)),
