@@ -1,18 +1,20 @@
 //! The `cause:sleep-state` class guard (#5, #29).
 //!
-//! Every adapter the daemon can build says what it does when the machine resumes from sleep,
-//! and this test checks that it does it:
+//! Every adapter the daemon can build says what it does when the machine resumes from sleep.
+//! Three things hold that together:
 //!
-//! - an adapter that holds a mode sets it again after a simulated resume (the OpenRGB
-//!   controllers and the ROYUAN keyboard);
-//! - an adapter that holds no mode says so, and does not take part in the resume;
-//! - and the scan over the repo's own source says that every adapter there has made that
-//!   choice and is on the list below, so an adapter that is added later cannot forget it.
-//!
-//! The scan is the half that catches the next adapter: it reads the source of every crate and
-//! fails with `file:line` when an adapter does not say what it does on a resume, or when it is
-//! not on the list this test drives.
+//! - The compiler. The daemon takes its adapters through bounds that include `ResumeBehavior`
+//!   (`App::new`, `App::with_displays`, `DisplayHub::new` and the `Peripheral` trait), so an
+//!   adapter without it cannot be handed to the daemon.
+//! - This test, which drives a simulated resume: an adapter that holds a mode sets it again
+//!   (the OpenRGB controllers and the ROYUAN keyboard), and the others declare
+//!   `NothingToRestore`. What the `NothingToRestore` adapters send after a resume is checked on
+//!   their fake transports, in the adapters' own tests (`a_resume_makes_the_..._send_nothing_extra`).
+//! - A scan over the repo's production source, which fails with `file:line` when an adapter
+//!   exists that this test does not drive. It reads real `#[cfg(test)]` items and `tests/`
+//!   directories as test code and everything else as production code.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -33,8 +35,8 @@ const RED: Rgb8 = Rgb8 { r: 255, g: 0, b: 0 };
 
 /// The adapters the daemon can build, by the name their `impl` block carries.
 ///
-/// The scan below says that every adapter in the repo is on this list, so an adapter that is
-/// added has to come here and be driven by this test.
+/// The scan below says that every adapter in the production source is on this list, so an
+/// adapter that is added has to come here and be driven by this test.
 const GUARDED: &[&str] = &[
     "OpenRgbAdapter",
     "RoyuanAdapter",
@@ -120,11 +122,11 @@ fn keyboard_id() -> DeviceId {
 #[tokio::test]
 async fn every_adapter_the_daemon_can_build_says_what_it_does_on_a_resume() {
     // The scan first: an adapter that is not under this guard fails here, with its file and
-    // its line.
+    // its line. (An adapter without `ResumeBehavior` never gets this far: it does not compile.)
     let findings = scan_adapters();
     assert!(
         findings.is_empty(),
-        "the resume guard found adapters that do not say what they do on a resume:\n{}",
+        "the resume guard found adapters it does not drive:\n{}",
         findings.join("\n")
     );
 
@@ -178,14 +180,9 @@ fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
 }
 
-/// A directory the scan does not read.
+/// A directory the scan does not read: build output, and the `tests/` directories (test code).
 fn skipped_dir(name: &str) -> bool {
-    matches!(name, "target" | "node_modules" | "examples" | "tests" | ".git" | "out" | ".next")
-}
-
-/// A file the scan does not read.
-fn skipped_file(name: &str) -> bool {
-    name == "tests.rs" || name.ends_with("_tests.rs")
+    matches!(name, "target" | "node_modules" | "tests" | ".git" | "out" | ".next")
 }
 
 /// Every Rust file of every crate, with the path it has in the repository.
@@ -201,7 +198,7 @@ fn source_files(root: &Path) -> Vec<(String, PathBuf)> {
                 if !skipped_dir(&name) {
                     dirs.push(path);
                 }
-            } else if !skipped_file(&name) && path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
                 let rel = path
                     .strip_prefix(root)
                     .unwrap_or(&path)
@@ -217,40 +214,81 @@ fn source_files(root: &Path) -> Vec<(String, PathBuf)> {
     files
 }
 
-/// Which lines of a file are test code: the `#[cfg(test)]` modules.
+/// Whether a line is an attribute that makes the next item test-only: `#[cfg(test)]` or
+/// `#[cfg(all(test, ...))]`. `#[cfg(not(test))]` and `#[cfg(any(test, ...))]` keep the item in a
+/// release build, so they are production code.
+fn is_test_cfg(line: &str) -> bool {
+    let line = line.trim();
+    line == "#[cfg(test)]" || (line.starts_with("#[cfg(all(test") && line.ends_with(")]"))
+}
+
+/// The leading whitespace of a line.
+fn indent(line: &str) -> &str {
+    &line[..line.len() - line.trim_start().len()]
+}
+
+/// The first line of the item an attribute at line `at` applies to (after further attributes).
+fn item_after(lines: &[&str], at: usize) -> usize {
+    let mut item = at + 1;
+    while item < lines.len() && lines[item].trim().starts_with("#[") {
+        item += 1;
+    }
+    item
+}
+
+/// Which lines of a file are test code: the items under a test-only `#[cfg]`.
 ///
 /// The fakes in them are not shipped, so they are not under the guard.
 fn test_lines(lines: &[&str]) -> Vec<bool> {
     let mut skip = vec![false; lines.len()];
     let mut i = 0;
     while i < lines.len() {
-        let trimmed = lines[i].trim();
-        if trimmed.starts_with("#[cfg(") && trimmed.contains("test") {
-            skip[i] = true;
-            let next = lines.get(i + 1).map(|l| l.trim()).unwrap_or("");
-            if next.starts_with("mod ") {
-                if next.ends_with(';') {
-                    // A module of its own: only the declaration is test code.
-                    skip[i + 1] = true;
-                    i += 2;
-                    continue;
-                }
-                // A module with a body: skip to the line that closes it at the left margin.
-                let mut j = i + 1;
-                while j < lines.len() && lines[j] != "}" {
-                    j += 1;
-                }
-                let end = j.min(lines.len() - 1);
-                for line in skip.iter_mut().take(end + 1).skip(i) {
-                    *line = true;
-                }
-                i = j + 1;
-                continue;
-            }
+        if !is_test_cfg(lines[i]) {
+            i += 1;
+            continue;
         }
-        i += 1;
+        let item = item_after(lines, i);
+        let Some(first) = lines.get(item) else {
+            skip[i] = true;
+            break;
+        };
+        let end = if first.trim_end().ends_with(';') || first.trim_end().ends_with('}') {
+            // A declaration, or an item that closes on its own line.
+            item
+        } else {
+            // An item with a body: it ends at the line that closes it at the item's indent.
+            let margin = indent(first);
+            (item + 1..lines.len())
+                .find(|&k| lines[k].trim() == "}" && indent(lines[k]) == margin)
+                .unwrap_or(lines.len() - 1)
+        };
+        for line in skip.iter_mut().take(end + 1).skip(i) {
+            *line = true;
+        }
+        i = end + 1;
     }
     skip
+}
+
+/// The files that a test-only `mod name;` of this file pulls in: `name.rs` and the `name/`
+/// directory, next to a `lib.rs`, `main.rs` or `mod.rs`, or under the file's own name otherwise.
+fn test_module_paths(file: &Path, lines: &[&str]) -> Vec<PathBuf> {
+    let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    let parent = file.parent().unwrap_or(Path::new(""));
+    let dir = if matches!(stem, "lib" | "main" | "mod") { parent.to_path_buf() } else { parent.join(stem) };
+    let mut paths = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if !is_test_cfg(line) {
+            continue;
+        }
+        let Some(decl) = lines.get(item_after(lines, i)).map(|l| l.trim()) else { continue };
+        let decl = decl.strip_prefix("pub(crate) ").or_else(|| decl.strip_prefix("pub ")).unwrap_or(decl);
+        if let Some(name) = decl.strip_prefix("mod ").and_then(|rest| rest.strip_suffix(';')) {
+            paths.push(dir.join(format!("{}.rs", name.trim())));
+            paths.push(dir.join(name.trim()));
+        }
+    }
+    paths
 }
 
 /// The type of an `impl ... for ... {` line, when it implements an adapter trait.
@@ -271,54 +309,26 @@ fn type_name(type_path: &str) -> Option<String> {
     Some(name.rsplit("::").next()?.to_string())
 }
 
-/// Whether a line is the `impl ResumeBehavior for <type>` of the given type.
-fn resume_impl(line: &str, wanted: &str) -> bool {
-    let Some(rest) = line.trim().strip_prefix("impl ") else { return false };
-    let Some((trait_path, type_path)) = rest.split_once(" for ") else { return false };
-    if trait_path.trim().rsplit("::").next() != Some("ResumeBehavior") {
-        return false;
-    }
-    type_name(type_path).is_some_and(|name| name == wanted)
-}
-
-/// What an adapter says it does on a resume, read from the source.
-fn declaration(files: &[(String, PathBuf)], wanted: &str) -> Option<OnResume> {
-    for (_, path) in files {
-        let text = fs::read_to_string(path).expect("a source file reads");
-        let lines: Vec<&str> = text.lines().collect();
-        for (i, line) in lines.iter().enumerate() {
-            if !resume_impl(line, wanted) {
-                continue;
-            }
-            // The body of the impl, up to the line that closes the method.
-            let body: String = lines[i + 1..]
-                .iter()
-                .take_while(|line| line.trim() != "}")
-                .copied()
-                .collect::<Vec<&str>>()
-                .join("\n");
-            if body.contains("NothingToRestore") {
-                return Some(OnResume::NothingToRestore);
-            }
-            if body.contains("SetsModeAgain") {
-                return Some(OnResume::SetsModeAgain);
-            }
-            return None;
-        }
-    }
-    None
-}
-
-/// Everything the scan found, as lines a human can act on.
+/// Everything the scan found, as lines a human can act on: the adapters in production code
+/// that this test does not drive.
 fn scan_adapters() -> Vec<String> {
     let root = repo_root();
     let files = source_files(&root);
-    let mut findings = Vec::new();
+    let texts: Vec<String> =
+        files.iter().map(|(_, path)| fs::read_to_string(path).expect("a source file reads")).collect();
 
-    // Every adapter in the source, with the file and the line it was found on.
+    // The files that are test code as a whole: the targets of a test-only `mod name;`.
+    let mut test_modules: BTreeSet<PathBuf> = BTreeSet::new();
+    for ((_, path), text) in files.iter().zip(&texts) {
+        let lines: Vec<&str> = text.lines().collect();
+        test_modules.extend(test_module_paths(path, &lines));
+    }
+
     let mut found: Vec<(String, usize, String)> = Vec::new();
-    for (rel, path) in &files {
-        let text = fs::read_to_string(path).expect("a source file reads");
+    for ((rel, path), text) in files.iter().zip(&texts) {
+        if test_modules.iter().any(|module| path.starts_with(module)) {
+            continue;
+        }
         let lines: Vec<&str> = text.lines().collect();
         let skip = test_lines(&lines);
         for (i, line) in lines.iter().enumerate() {
@@ -332,35 +342,45 @@ fn scan_adapters() -> Vec<String> {
     }
     assert!(!found.is_empty(), "the scan found no adapter at all: the roots moved?");
 
-    for (rel, line, type_name) in &found {
-        // 1. Every adapter says what it does on a resume.
-        let Some(declared) = declaration(&files, type_name) else {
-            findings.push(format!(
-                "{rel}:{line}: {type_name} does not say what it does on a resume \
-                 (implement `ResumeBehavior` for it)"
-            ));
-            continue;
-        };
-        // 2. Every adapter is on the list this test drives.
-        if !GUARDED.contains(&type_name.as_str()) {
-            findings.push(format!(
-                "{rel}:{line}: {type_name} is not under the resume guard: add it to GUARDED \
-                 and drive it in this test"
-            ));
-        }
-        // 3. An adapter with nothing to restore does not take part in the resume.
-        if declared == OnResume::NothingToRestore {
-            let path = files.iter().find(|(r, _)| r == rel).map(|(_, p)| p);
-            if let Some(path) = path {
-                let text = fs::read_to_string(path).expect("a source file reads");
-                if text.contains("note_resume") || text.contains("resume_epoch") {
-                    findings.push(format!(
-                        "{rel}:{line}: {type_name} says it has nothing to restore, but it takes \
-                         part in the resume"
-                    ));
-                }
-            }
-        }
+    found
+        .iter()
+        .filter(|(_, _, type_name)| !GUARDED.contains(&type_name.as_str()))
+        .map(|(rel, line, type_name)| {
+            format!(
+                "{rel}:{line}: {type_name} is not under the resume guard: add it to GUARDED and \
+                 drive it in this test"
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn the_scan_reads_production_code_wherever_it_sits() {
+    // Real test items are skipped, in every spelling that is test-only.
+    for attr in ["#[cfg(test)]", "#[cfg(all(test, windows))]"] {
+        let text = format!(
+            "{attr}\nmod fakes {{\n    impl DeviceAdapter for Fake {{\n    }}\n}}\nimpl DeviceAdapter for Real {{"
+        );
+        let lines: Vec<&str> = text.lines().collect();
+        let skip = test_lines(&lines);
+        assert!(skip[2], "{attr}: the fake inside a test module is test code");
+        assert!(!skip[lines.len() - 1], "{attr}: the impl after the module is production code");
     }
-    findings
+    // `cfg(not(test))` and `cfg(any(test, ..))` code ships, so it is read.
+    for attr in ["#[cfg(not(test))]", "#[cfg(any(test, windows))]"] {
+        let text = format!("{attr}\nimpl DeviceAdapter for Late {{\n}}");
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(test_lines(&lines).iter().all(|skipped| !skipped), "{attr}: this is production code");
+    }
+    // A test-only `mod x;` makes `x.rs` test code. A file that is merely named `*_tests.rs` is
+    // not test code unless a test-only `mod` pulls it in.
+    let lib = Path::new("crates/c/src/lib.rs");
+    let text = "#[cfg(test)]\nmod app_tests;\nmod shipped_tests;";
+    let lines: Vec<&str> = text.lines().collect();
+    let modules = test_module_paths(lib, &lines);
+    assert!(modules.contains(&Path::new("crates/c/src").join("app_tests.rs")));
+    assert!(!modules.contains(&Path::new("crates/c/src").join("shipped_tests.rs")));
+    // An adapter impl is found by its trait's last path segment.
+    assert_eq!(adapter_impl("impl canvas_proto::traits::DeviceAdapter for Late {").as_deref(), Some("Late"));
+    assert_eq!(adapter_impl("impl Peripheral for Late {"), None);
 }
