@@ -161,6 +161,8 @@ export function SettingsView() {
         </div>
       )}
 
+      {/* The pane the panels scroll in when the window is too short for them (R1). */}
+      <div className="rd-settings-scroll">
       <div className="rd-settings-grid">
           <Panel title="Rendering">
             <Field
@@ -312,6 +314,7 @@ export function SettingsView() {
               {!inTray && <span className="mute" style={{ fontSize: 14 }}>Tray app only</span>}
             </div>
           </Panel>
+      </div>
       </div>
     </div>
   );

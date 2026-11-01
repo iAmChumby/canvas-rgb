@@ -3641,9 +3641,12 @@ button.chip:hover {
 
 /* The settings stand in columns of about 340 px, so no column is a tall stack and no row
    leaves a gap: the panels flow down the columns and a panel never breaks across two. */
-.rd-settings .rd-settings-grid {
+.rd-settings .rd-settings-scroll {
   flex: 1 1 auto;
   min-height: 0;
+}
+
+.rd-settings .rd-settings-grid {
   columns: 340px auto;
   column-gap: var(--s4);
 }
@@ -3662,6 +3665,29 @@ button.chip:hover {
 .rd-settings .rd-settings-grid .panel-head {
   display: flex;
   align-items: baseline;
+}
+
+/* R1 on a desktop window: what is taller than the window scrolls inside its own pane, so
+   nothing stands cut off and the page itself never scrolls. The panes below are the ones a
+   short window (700 px and under) reaches; a taller window never scrolls them. */
+@container page (min-width: 641px) {
+  .rd-settings .rd-settings-scroll,
+  .rd-peripherals .peripheral-detail,
+  .rd-effects .rd-eff-inspector {
+    overflow-y: auto;
+    /* The focus ring and the panels' edges stay whole at the pane's sides. */
+    margin: 0 calc(var(--s1) * -1);
+    padding: 0 var(--s1);
+  }
+
+  .rd-peripherals .peripheral-detail {
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+
+  .rd-fans .rd-fans-right > .panel {
+    overflow-y: auto;
+  }
 }
 
 /* Phone: the panels are tighter: every row counts when the page scrolls. */
