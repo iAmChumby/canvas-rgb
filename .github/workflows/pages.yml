@@ -1,7 +1,9 @@
 name: Pages
 
 # The site is a static export of site/, built from the editor's own components. It goes live
-# when the site's files or the editor's source change.
+# when the site's files or the editor's source change, and again when a release is published:
+# the install section prints the installer's SHA-256, read from the release's own .sha256 asset
+# when the site is built, so the site can only be built once the release exists (#83).
 on:
   push:
     branches:
@@ -9,6 +11,8 @@ on:
     paths:
       - "site/**"
       - "app/web/src/**"
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -23,8 +27,23 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      # "true" when the release for the version the page shows is not out yet: the deploy is
+      # skipped, and the "release: published" event builds the site once the hash is there.
+      skipped: ${{ steps.sha.outputs.skipped }}
     steps:
       - uses: actions/checkout@v4
+
+      # The hash the install section prints, read from the release's own .sha256 asset, so the
+      # page and the release cannot disagree (#83). A push to main lands before the release for
+      # that version exists, so a missing asset is not a failure here: the build and the deploy
+      # are skipped with a clear line, and the release event builds the site with the hash.
+      - name: Read the installer's SHA-256
+        id: sha
+        working-directory: site
+        env:
+          CANVAS_SETUP_SHA256_SKIP_IF_MISSING: "1"
+        run: node scripts/setup-sha.mjs
 
       - uses: actions/setup-node@v4
         with:
@@ -45,14 +64,23 @@ jobs:
         working-directory: site
 
       - name: Build the site
+        if: steps.sha.outputs.skipped != 'true'
         run: npm --prefix site run build
 
+      # The built page shows the hash the release carries, and no PowerShell command line
+      # anywhere on it (#79).
+      - name: Check the install section
+        if: steps.sha.outputs.skipped != 'true'
+        run: npm --prefix site run check-install
+
       - uses: actions/upload-pages-artifact@v3
+        if: steps.sha.outputs.skipped != 'true'
         with:
           path: site/out
 
   deploy:
     needs: build
+    if: needs.build.outputs.skipped != 'true'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
