@@ -298,15 +298,8 @@ Test-Case 'uninstall check: a folder that is not there passes (nothing to run)' 
 
 # ---------------------------------------------------------------- wiring: the scripts call the guard in the right order
 $iss = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\inno\canvas-rgb.iss') -Raw
-# Source of one Pascal routine: from its header to the next top-level routine, with // comments removed so a
-# comment cannot satisfy a check.
-function Get-IssFunction([string]$Header) {
-    $a = $iss.IndexOf($Header)
-    if ($a -lt 0) { throw "no $Header in the .iss" }
-    $m = [regex]::Match($iss.Substring($a + $Header.Length), '(?m)^(function|procedure) ')
-    $body = if ($m.Success) { $iss.Substring($a, $Header.Length + $m.Index) } else { $iss.Substring($a) }
-    return ([regex]::Replace($body, '(?m)^\s*//.*$', ''))
-}
+# Get-IssFunction (the source of one Pascal routine, with the comments removed) lives in
+# _assert.ps1, so every suite reads the .iss the same way.
 $ue = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\uninstall-elevated.ps1') -Raw
 $se = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\setup-elevated.ps1') -Raw
 Test-Case 'installer: PrepareToInstall runs the check on {app}, gates on its exit code, and does so before the download and the stop step' {
@@ -347,7 +340,7 @@ Test-Case 'uninstall: CurUninstallStepChanged does not run uninstall-user.ps1 fr
 }
 Test-Case 'uninstall-elevated.ps1 runs the guard (Verify) before it stops the service or runs the service exe' {
     $code = [regex]::Replace($ue, '(?m)^\s*#.*$', '')
-    $iGuard = $code.IndexOf('Assert-InstallDirProtected'); $iStop = $code.IndexOf('Stop-Service'); $iExe = $code.IndexOf('& $svcExe --restore-bios')
+    $iGuard = $code.IndexOf('Assert-InstallDirProtected'); $iStop = $code.IndexOf('Stop-Service'); $iExe = $code.IndexOf('Invoke-RestoreBios -Exe $svcExe')
     Assert-True ($iGuard -ge 0 -and $iGuard -lt $iStop -and $iGuard -lt $iExe) 'guard must come first'
     Assert-True ($code -match "Assert-InstallDirProtected -Path \`$InstallDir -Mode Verify") 'in Verify mode'
 }

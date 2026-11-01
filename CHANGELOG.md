@@ -10,6 +10,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Security
 
+- An update that fails before it copies any new files now starts canvas-rgb again when it was running, so your fans do not stay on your motherboard's own settings. (#65)
+- Removing canvas-rgb now says what it really removed, instead of always saying nothing was removed. (#64)
 - Setup and updates now refuse to install canvas-rgb into a folder that other people on the PC could change, and the default folder keeps working. (#46)
 
 ### Fixed
