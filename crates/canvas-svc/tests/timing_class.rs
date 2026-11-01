@@ -47,9 +47,9 @@ const CLOCK_WORDS: &[&str] = &[
     "as_micros()",
 ];
 
-/// The ratio shape of #39 (`percent < 0.05`) is NOT in the list: a CPU percentage has no
-/// distinctive word to match, and a bare `percent` or `ratio` would flag product maths. It is a
-/// limit of the scan, listed in docs/bug-classes.md.
+// The ratio shape of #39 (`percent < 0.05`) is NOT in the list: a CPU percentage has no
+// distinctive word to match, and a bare `percent` or `ratio` would flag product maths. It is a
+// limit of the scan, listed in docs/bug-classes.md.
 
 /// Accessors that may sit between the clock word and the comparison.
 const ACCESSORS: &[&str] = &[".as_millis()", ".as_secs_f64()", ".as_secs_f32()", ".as_secs()", ".as_micros()"];
