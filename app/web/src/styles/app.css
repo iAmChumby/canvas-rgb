@@ -3064,6 +3064,17 @@ button.chip:hover {
   .rd-fans .fan-table .rd-history {
     display: none;
   }
+
+  /* The pane is about 400 px at 960: the duty's bar is shorter, and a long name wraps rather than
+     push the Mode column out of the pane. */
+  .rd-fans .fan-table .duty-cell .meter {
+    width: 44px;
+  }
+
+  .rd-fans .fan-table th:first-child,
+  .rd-fans .fan-table td:first-child {
+    white-space: normal;
+  }
 }
 
 /* A reading's label stands over its value and its bar, so a long name ("Board SYSTIN") keeps its
