@@ -870,10 +870,13 @@ begin
       Msg := UninstallStateWords();
       if Msg = '' then
       begin
-        if Code = 4 then
-          Msg := 'canvas-rgb was not removed cleanly. The log below says what was done.'
+        // Only exit 1 means that nothing was removed. Every other code means the state is
+        // unknown (the machine home would not take the state file), so the wrapper must not
+        // claim that nothing was removed (#64).
+        if Code = 1 then
+          Msg := 'canvas-rgb could not stop running or give the fans back to your motherboard (code ' + IntToStr(Code) + '). Nothing was removed.'
         else
-          Msg := 'canvas-rgb could not stop running or give the fans back to your motherboard (code ' + IntToStr(Code) + '). Nothing was removed.';
+          Msg := 'canvas-rgb was not removed cleanly. The log below says what was done.';
       end;
       MsgBox(Msg + #13#10 + #13#10 + LogTail(Log), mbError, MB_OK);
     end;

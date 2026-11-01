@@ -244,7 +244,12 @@ try {
     # script reads back and shows.
     $report = Get-UninstallStateReport -State $uninstallState
     Say "[elevated] state: $($report.Words)"
-    Set-UninstallState -Text $report.Words | Out-Null
+    if (-not (Set-UninstallState -Text $report.Words)) {
+        # The state could not be written, so the uninstaller cannot say what is true. It must not
+        # fall back to "nothing was removed": this exit code says that the state is unknown.
+        Say '[elevated] the state could not be written, so the uninstaller cannot say what was removed'
+        exit 5
+    }
     # Exit 4: it failed and something was already removed. Exit 1: it failed before anything was
     # taken away, so "nothing was removed" is true.
     if ($report.Removed) { exit 4 }

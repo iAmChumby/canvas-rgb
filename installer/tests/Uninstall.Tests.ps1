@@ -197,7 +197,7 @@ function Set-UserPathEntry { Write-Host 'STUB Set-UserPathEntry'; return $false 
     }
 
     # uninstall-elevated.ps1 runs as a temp COPY; lib.ps1 gets stubs so no service, HKLM key, process or admin check is real.
-    function Invoke-ElevatedUninstallSandbox([string]$Name, [string]$RecordText, [switch]$Purge, [string]$SignalService = '', [switch]$JunctionHome, [switch]$ListFails, [switch]$PurgeFails, [switch]$ServiceRunning, [switch]$StopRefused, [switch]$RestoreFails, [switch]$ManualBios, [switch]$DeleteFails) {
+    function Invoke-ElevatedUninstallSandbox([string]$Name, [string]$RecordText, [switch]$Purge, [string]$SignalService = '', [switch]$JunctionHome, [switch]$ListFails, [switch]$PurgeFails, [switch]$ServiceRunning, [switch]$StopRefused, [switch]$RestoreFails, [switch]$ManualBios, [switch]$DeleteFails, [switch]$NoMachineHome) {
         $root = Join-Path $dir $Name
         $scripts = Join-Path $root 'scripts'; $pd = Join-Path $root 'PD\canvas-rgb'; $inst = Join-Path $root 'install'
         New-Item -ItemType Directory -Path $scripts, $inst -Force | Out-Null
@@ -206,7 +206,7 @@ function Set-UserPathEntry { Write-Host 'STUB Set-UserPathEntry'; return $false 
             $real = Join-Path $root 'real-home'
             New-Item -ItemType Directory -Path $real, (Split-Path $pd) -Force | Out-Null
             & cmd.exe /c mklink /J "$pd" "$real" | Out-Null
-        } else { New-Item -ItemType Directory -Path $pd -Force | Out-Null }
+        } elseif (-not $NoMachineHome) { New-Item -ItemType Directory -Path $pd -Force | Out-Null }
         [System.IO.File]::WriteAllText((Join-Path $inst 'canvas-rgbd.exe'), 'x')
         if ($ServiceRunning) {
             # The service exe: the real script hands the fans back with it. The stubbed helper
@@ -271,8 +271,8 @@ function Remove-Item {
         $stubs = $stubs.Replace('__DELETE__', $(if ($DeleteFails) { '1' } else { '0' }))
         Add-Content -LiteralPath (Join-Path $scripts 'lib.ps1') -Value $stubs
         $rec = Join-Path $pd 'signalrgb-restore.json'
-        if ($null -ne $RecordText) { [System.IO.File]::WriteAllText($rec, $RecordText) }
-        if ($ManualBios) {
+        if ($null -ne $RecordText -and (Test-Path -LiteralPath $pd)) { [System.IO.File]::WriteAllText($rec, $RecordText) }
+        if ($ManualBios -and (Test-Path -LiteralPath $pd)) {
             # A fan header that canvas-rgb took over: the fans are not back on the motherboard.
             [System.IO.File]::WriteAllText((Join-Path $pd 'bios-state.json'), '{"headers":{"cpu_fan":{"manual":true,"duty_percent":40}}}')
         }
@@ -536,11 +536,21 @@ function Start-Process { Write-Host 'STUB Start-Process'; [pscustomobject]@{ Exi
         $iWords = $un.IndexOf('UninstallStateWords()')
         $iBox = $un.IndexOf('MsgBox(Msg')
         Assert-True ($iWords -ge 0 -and $iBox -gt $iWords) 'the message is the one the script left'
-        # "Nothing was removed" is only said for the exit code that means it (1).
+        # "Nothing was removed" is only said for the exit code that means it (1). Every other code
+        # (something was removed, or the state could not be written) must not say it.
         $iNothing = $un.IndexOf('Nothing was removed.')
         Assert-True ($iNothing -gt 0) 'the old message is still there, for the case where it is true'
         $before = $un.Substring(0, $iNothing)
-        Assert-True ($before -match 'if Code = 4 then') 'it is only used when the code says something was removed'
+        Assert-True ($before -match 'if Code = 1 then') 'it is only used for the code that means nothing was removed'
+        Assert-True ($un -match 'was not removed cleanly') 'every other code says the state is unknown'
+    }
+    Test-Case 'an uninstall that fails and cannot record its state does not let the wrapper say nothing was removed' {
+        # The machine home is gone, so the state file cannot be written. The exit code then says
+        # the state is unknown, and the wrapper must not claim that nothing was removed (#64).
+        $r = Invoke-ElevatedUninstallSandbox 'u64n' $null -ListFails -NoMachineHome
+        Assert-Equal $r.Code 5 "the uninstall fails and says it cannot record the state: $($r.Out)"
+        Assert-True (-not (Test-Path -LiteralPath $r.State)) 'there is no state file'
+        Assert-True ($r.Out -match 'the state could not be written') "it says so: $($r.Out)"
     }
 
     # ---- item 12: Uninstall in Installed apps knows a non-default folder
