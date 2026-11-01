@@ -339,8 +339,7 @@ mod tests {
 
     /// `note_resume` bumps a process-wide counter, so the tests that count reports run one at a time.
     fn serial() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: Mutex<()> = Mutex::new(());
-        LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        crate::resume_serial()
     }
 
     fn rig(present: bool) -> (RoyuanAdapter, Arc<Mutex<Shared>>) {

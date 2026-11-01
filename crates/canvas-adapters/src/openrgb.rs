@@ -51,14 +51,14 @@ const ZONE_TYPE_MATRIX: i32 = 2;
 /// wall clock follows the RTC, so a sleep shows up there whether or not the monotonic clock
 /// counted it (#5).
 #[derive(Clone)]
-pub struct Clocks {
+struct Clocks {
     monotonic: Arc<dyn Fn() -> Instant + Send + Sync>,
     wall: Arc<dyn Fn() -> SystemTime + Send + Sync>,
 }
 
 impl Clocks {
     /// The clocks of the machine.
-    pub fn system() -> Self {
+    fn system() -> Self {
         Self {
             monotonic: Arc::new(Instant::now),
             wall: Arc::new(SystemTime::now),
@@ -66,7 +66,8 @@ impl Clocks {
     }
 
     /// The clocks of the caller: the tests move them.
-    pub fn moved(
+    #[cfg(test)]
+    fn moved(
         monotonic: Arc<dyn Fn() -> Instant + Send + Sync>,
         wall: Arc<dyn Fn() -> SystemTime + Send + Sync>,
     ) -> Self {
@@ -243,7 +244,8 @@ impl OpenRgbAdapter {
     ///
     /// The tests move the clocks: a sleep that the monotonic clock did not count is a jump
     /// of the wall clock alone (#5).
-    pub fn with_clocks(host: &str, port: u16, keepalive: Duration, clocks: Clocks) -> Self {
+    #[cfg(test)]
+    fn with_clocks(host: &str, port: u16, keepalive: Duration, clocks: Clocks) -> Self {
         let mut adapter = Self::new(host, port);
         guard(&adapter.link.session).keepalive = keepalive;
         adapter.clocks = clocks;
@@ -806,7 +808,9 @@ mod keepalive_tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the lock keeps `note_resume` tests one at a time
     async fn a_sleep_the_monotonic_clock_did_not_count_still_makes_the_mode_be_set_again() {
+        let _serial = crate::resume_serial();
         let state = Moved::new();
         let (server, mut adapter) = adapter(&state).await;
         frame(&mut adapter).await;
@@ -825,7 +829,9 @@ mod keepalive_tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the lock keeps `note_resume` tests one at a time
     async fn the_keepalive_fires_when_the_monotonic_clock_passed_it() {
+        let _serial = crate::resume_serial();
         let state = Moved::new();
         let (server, mut adapter) = adapter(&state).await;
         frame(&mut adapter).await;
@@ -838,7 +844,9 @@ mod keepalive_tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the lock keeps `note_resume` tests one at a time
     async fn a_wall_clock_set_backwards_is_not_a_sleep() {
+        let _serial = crate::resume_serial();
         let state = Moved::new();
         let (server, mut adapter) = adapter(&state).await;
         frame(&mut adapter).await;

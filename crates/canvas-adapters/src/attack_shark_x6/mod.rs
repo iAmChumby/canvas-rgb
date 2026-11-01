@@ -1540,8 +1540,11 @@ impl PeripheralAdapter for AttackSharkX6 {
 
 impl crate::resume::ResumeBehavior for AttackSharkX6 {
     fn on_resume(&self) -> crate::resume::OnResume {
-        // No mode state: the mouse's settings are read and written on request, and no mode is
-        // set when it connects, so a sleep leaves nothing to restore.
+        // Nothing to restore: no mode is set when the mouse connects, and the app writes a
+        // setting only on request (the LED mode and colour, the DPI stages and the rest of the
+        // properties), which the mouse stores. Whether the firmware keeps a written LED mode
+        // over a sleep is UNKNOWN: nothing was observed across a real sleep, and no re-send is
+        // invented here. One real wake with a written LED mode would settle it.
         crate::resume::OnResume::NothingToRestore
     }
 }
@@ -1876,6 +1879,30 @@ mod tests {
         assert!(!found[0].connected);
         assert_eq!(s.lock().unwrap().opens, 0, "the enumeration opens nothing");
         assert_eq!(a.name(), "attack-shark-x6");
+    }
+
+    /// The class `cause:sleep-state` (#5, #29): the mouse declares `NothingToRestore`, and a
+    /// resume through the production path makes it send nothing it would not have sent anyway.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the lock keeps `note_resume` tests one at a time
+    async fn a_resume_makes_the_mouse_send_nothing_extra() {
+        let _serial = crate::resume_serial();
+        let (mut a, s) = rig();
+        let id = a.device_id();
+        a.connect().await.unwrap();
+        a.read_settings(&id).await.unwrap();
+        let before = s.lock().unwrap().sent.len();
+        a.read_settings(&id).await.unwrap();
+        let ordinary = s.lock().unwrap().sent[before..].to_vec();
+        assert_eq!(ordinary.len(), codec::READ_ORDER.len(), "an ordinary read is one request per report");
+
+        crate::note_resume();
+
+        let before = s.lock().unwrap().sent.len();
+        a.read_settings(&id).await.unwrap();
+        let g = s.lock().unwrap();
+        assert_eq!(g.sent[before..], ordinary[..], "the read after the resume sent more than the read does");
+        assert_eq!(g.opens, 1, "the resume reopened the mouse");
     }
 
     #[tokio::test]

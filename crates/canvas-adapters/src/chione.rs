@@ -1008,6 +1008,29 @@ mod tests {
         assert_eq!(s.lock().unwrap().opens, 1);
     }
 
+    /// The class `cause:sleep-state` (#5, #29): the CHIONE declares `NothingToRestore`, and a
+    /// resume through the production path makes it send nothing it would not have sent anyway.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the lock keeps `note_resume` tests one at a time
+    async fn a_resume_makes_the_display_send_nothing_extra() {
+        let _serial = crate::resume_serial();
+        let (mut a, s) = rig(true, vec![reply(0x01, 0x07, 1, 1, 0)]);
+        a.connect().await.unwrap();
+        a.write_value(&id(), &temp_c(42.5)).await.unwrap();
+        let before = s.lock().unwrap().writes.len();
+        a.write_value(&id(), &temp_c(42.5)).await.unwrap();
+        let ordinary = s.lock().unwrap().writes[before..].to_vec();
+        assert_eq!(ordinary.len(), 1, "an ordinary write is one report");
+
+        crate::note_resume();
+
+        let before = s.lock().unwrap().writes.len();
+        a.write_value(&id(), &temp_c(42.5)).await.unwrap();
+        let g = s.lock().unwrap();
+        assert_eq!(g.writes[before..], ordinary[..], "the write after the resume sent more than the value");
+        assert_eq!(g.opens, 1, "the resume reopened the device");
+    }
+
     #[tokio::test]
     async fn disconnect_drops_the_device() {
         let (mut a, _) = rig(true, vec![reply(0x01, 0x07, 1, 1, 0)]);
