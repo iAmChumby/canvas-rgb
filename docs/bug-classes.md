@@ -86,8 +86,9 @@ once per connection or once per start and trusts it forever.
   so the same re-apply covers them. The daemon supervisor's 5 s heartbeat check compares `Instant`s; if
   `Instant` counts the sleep, a wake looks like a missed heartbeat, so a resume now refreshes the
   heartbeat clock (`Core::on_power`, `Core::tick`). Sensor-loss timeouts get a fresh clock when the
-  grace ends. The OpenRGB supervisor's timers (`openrgb.rs:327`) took an `Instant` tick too: settled
-  below.
+  grace ends. The OpenRGB supervisor's timers (the `PaintJob` clocks at
+  `crates/canvas-svc/src/openrgb.rs:90-96`, stepped by `tick` at `:340`) took an `Instant` tick too:
+  settled below.
 - **The OpenRGB timers across a sleep:** `Instant` is a monotonic clock, and the standard library
   says it is "not specified whether system suspends count as elapsed time or not" (on Windows it
   reads `QueryPerformanceCounter`), so no timer may lean on it alone. Two did:
@@ -100,15 +101,35 @@ once per connection or once per start and trusts it forever.
     the first write. When the monotonic clock counted the sleep, the window ended at the wake, and a
     controller OpenRGB announced after it never got the color. A resume starts the window again.
   A wall clock set backwards is not a sleep: nothing is set again for no reason.
-- **Class fix:** done (#5, #29). Every adapter says what it does on a resume
+- **Class fix:** the guard is done; the fixes it protects (#5, #29) are pending a real wake and
+  both issues stay open. Every adapter says what it does on a resume
   (`canvas_adapters::resume::ResumeBehavior`; the method has no default, so an adapter has to
   choose). The OpenRGB controllers and the ROYUAN keyboard say `SetsModeAgain`; the CHIONE pump
   display, the Attack Shark X6 mouse and the 8BitDo pad say `NothingToRestore` and are not given a
-  fake mode to restore. One test walks every adapter the daemon can build
-  (`crates/canvas-daemon/tests/resume_guard.rs`): a simulated resume makes each mode-setting
-  adapter set its mode again, the others say so, and a scan over the repo's own source fails with
-  `file:line` when an adapter does not say what it does on a resume, is not on the list the test
-  drives, or takes part in the resume while saying it has nothing to restore.
+  fake mode to restore. Three parts hold it together:
+  - the compiler: the daemon takes its adapters through bounds that include `ResumeBehavior`
+    (`App::new`, `App::with_displays`, `DisplayHub::new`, and the daemon's `Peripheral` trait in
+    `crates/canvas-daemon/src/`), so an adapter handed to the daemon without it does not compile.
+    The bound is in the daemon and not on the spine traits (`DeviceAdapter` and the others in
+    `canvas-proto`), because the spine is the shared contract of every area and cannot depend on
+    the adapters crate. An adapter that is never handed to the daemon is
+    not checked by the compiler. Nothing at run time calls `on_resume()`: the resume itself goes
+    through `note_resume()`.
+  - one test over the adapters the daemon can build
+    (`crates/canvas-daemon/tests/resume_guard.rs`): a simulated resume makes each mode-setting
+    adapter set its mode again, and a scan over the production source fails with `file:line` when an
+    adapter exists that the test does not drive. The scan reads real `#[cfg(test)]` items and
+    `tests/` directories as test code and everything else as production code.
+  - for each `NothingToRestore` adapter, a test on its fake transport that calls the production
+    `note_resume()` and shows that the next operation sends what it would have sent anyway
+    (`a_resume_makes_the_display_send_nothing_extra` in `chione.rs`, and the same for the mouse and
+    the pad in `attack_shark_x6/mod.rs` and `eightbitdo_ultimate2/mod.rs`).
+  UNKNOWN until one real wake: (a) whether the firmware of the X6 keeps an LED mode or colour that
+  the app wrote, over a sleep (the app writes it on request and the mouse stores it; no re-send is
+  built); (b) whether the 8BitDo pad keeps the stick and trigger ranges and the paddle map the app
+  wrote (the app writes no LED state to this pad); (c) whether the resume reaches the daemon at all:
+  the RAM has the keepalive as a second path, but the keyboard has none, so its reset depends on the
+  resume arriving (`crates/canvas-daemon/src/power.rs:135`).
 - **Sibling search (#5, canvas-adapters and canvas-daemon):** OpenRGB (every controller, GPU and
   motherboard included): fixed. ROYUAN keyboard: fixed. CHIONE pump display: no mode state (every
   250 ms packet carries its mode bytes; the 0xFF query is firmware info). Attack Shark X6 mouse and
