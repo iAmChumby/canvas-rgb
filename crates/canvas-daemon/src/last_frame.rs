@@ -2,9 +2,15 @@
 //!
 //! A RAM stick that goes dark after an update raises one question the logs could not answer: were
 //! frames still streaming to it when the service ended OpenRGB? The service logs the moment it
-//! ends the daemon and OpenRGB; the daemon logs, with this, the moment its own last frame went out.
-//! The two logs then line up. Nothing is logged per frame: the writer tasks only store a time here,
-//! and the quit path reads it once.
+//! ends the daemon and OpenRGB; the daemon logs, with this, the moment its own last frame went
+//! out.
+//!
+//! The daemon writes that line only when it ends itself (Ctrl+C, a logoff, an API quit). When the
+//! service kills it, the daemon runs no code at all, so that line is missing on the update path
+//! and the service's own line is the record there.
+//!
+//! Nothing is logged per frame: the writer tasks only store a time here, and the quit path reads
+//! it once.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -32,6 +38,9 @@ impl LastFrame {
     /// Logs the time of the last frame, with `when` saying what asked (the daemon was told to
     /// stop, or it finished quitting). Written as UTC like the log's own timestamps, and as the
     /// gap to this line, so the service log and this one can be read side by side.
+    ///
+    /// The daemon writes it only when it ends itself; a daemon the service kills never gets
+    /// here, and the service's line is the record then.
     pub fn log(&self, when: &str) {
         self.log_at(when, now_unix_ms());
     }
