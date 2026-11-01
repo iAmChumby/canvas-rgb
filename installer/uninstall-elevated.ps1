@@ -20,7 +20,7 @@ function Say([string]$t) { Write-Step $t $LogFile }
 # way: the service can be gone and the program files still there. The person must be told what is
 # true, not "nothing was removed", so every step that removes something says so here. The fans are
 # their own stage: a stopped service does not hand them back, --restore-bios does.
-$uninstallState = @{ Service = 'none'; Fans = 'unknown'; Entry = $false; Shortcut = $false; Files = ''; OpenRgb = ''; Config = $false }
+$uninstallState = @{ Service = 'none'; Fans = 'unknown'; Entry = $false; Shortcut = $false; Files = ''; OpenRgb = ''; Config = $false; SignalRgb = $false }
 
 try {
     if (-not (Test-IsAdmin)) { throw 'uninstall-elevated.ps1 must run elevated (uninstall.ps1 starts it).' }
@@ -222,8 +222,10 @@ try {
         if (Get-Service -Name $rec.service.name -ErrorAction SilentlyContinue) {
             Set-Service -Name $rec.service.name -StartupType $t
             Say "  $($rec.service.name) StartType restored to $t"
+            $uninstallState.SignalRgb = $true
         }
         Remove-Item -LiteralPath $rf -Force
+        $uninstallState.SignalRgb = $true
     } else {
         Say "  no machine SignalRGB record: the SignalRGB service is left as is"
     }

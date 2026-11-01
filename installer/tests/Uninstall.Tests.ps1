@@ -416,6 +416,14 @@ function Start-Process { Write-Host 'STUB Start-Process'; [pscustomobject]@{ Exi
     }
 
     # ---- #64: the uninstall says what it really removed ----
+    Test-Case 'a SignalRGB setting put back is named, so a later failure does not say nothing was taken away' {
+        $r = Get-UninstallStateReport -State @{ Service = 'none'; SignalRgb = $true }
+        Assert-True ($r.Words -notmatch 'before anything was taken away') $r.Words
+        Assert-True ($r.Words -match 'SignalRGB') $r.Words
+        Assert-True $r.Removed 'putting the SignalRGB setting back is a change'
+        $script = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\uninstall-elevated.ps1'))
+        Assert-True ($script -match '\$uninstallState\.SignalRgb = \$true') 'the uninstall records it when it puts the setting back'
+    }
     Test-Case 'the state of an unfinished uninstall is said in plain words, and each part is its own' {
         $none = Get-UninstallStateReport -State @{ Service = 'none' }
         Assert-True ($none.Words -match 'was not removed') $none.Words

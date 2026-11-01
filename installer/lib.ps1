@@ -1194,12 +1194,13 @@ function Get-UninstallStateReport {
     elseif ($files -eq 'some') { $gone += 'some of the program files were removed' }
     if ($openrgb -eq 'all') { $gone += 'the OpenRGB folder was removed' }
     elseif ($openrgb -eq 'some') { $gone += 'some of the OpenRGB folder was removed' }
+    if ($State['SignalRgb']) { $gone += 'SignalRGB''s startup setting was put back' }
     $config = $State['Config']
     if ($config -eq 'some') { $gone += 'some of your canvas-rgb settings were removed' }
     elseif ($config) { $gone += 'your canvas-rgb settings were removed' }
     $removed = ($service -eq 'removed') -or [bool]$State['Entry'] -or [bool]$State['Shortcut'] `
         -or ($files -eq 'all') -or ($files -eq 'some') -or ($openrgb -eq 'all') -or ($openrgb -eq 'some') `
-        -or [bool]$config
+        -or [bool]$config -or [bool]$State['SignalRgb']
     # What the person is told to do depends on the fans: they cannot be handed back while they may
     # still be under canvas-rgb control.
     $tail = if ($fans -eq 'manual') {

@@ -743,12 +743,12 @@ begin
     begin
       RestartCode := RestartCanvasRgb;
       if RestartCode = 2 then
-        Note := 'canvas-rgb is stopped: the install folder holds a mix of the old and the new files, so it was not started again. Your fans are on your motherboard''s own settings. Run setup again.'
+        Note := 'canvas-rgb is stopped: the install folder may hold a mix of the old and the new files, so it was not started again. Your fans are on your motherboard''s own settings. Run setup again.'
       else if RestartCode = 1 then
         Note := 'canvas-rgb is stopped and could not be started again: your fans are on your motherboard''s own settings. Run setup again.';
     end;
     // Not an update: nothing else would tell the person that canvas-rgb is stopped.
-    if (not IsUpdateRun) and (Note <> '') then MsgBox(Note, mbError, MB_OK);
+    if (not IsUpdateRun) and (Note <> '') then SuppressibleMsgBox(Note, mbError, MB_OK, IDOK);
     if not IsUpdateRun then Exit;
     Msg := '';
     if not Ok then

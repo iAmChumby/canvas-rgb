@@ -37,7 +37,7 @@ try {
             exit 3
         }
         'leave-stopped' {
-            Say '  canvas-rgb is not started again: the install folder holds a mix of the old and the new files, so it could run the wrong program. Your fans stay on your motherboard''s own settings. Run setup again.'
+            Say '  canvas-rgb is not started again: the install folder may hold a mix of the old and the new files, so it could run the wrong program. Your fans stay on your motherboard''s own settings. Run setup again.'
             exit 2
         }
     }
