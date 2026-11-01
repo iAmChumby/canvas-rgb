@@ -898,6 +898,15 @@ pub async fn delete_effect(
     if let Some(active) = active {
         if active.id == id {
             tracing::warn!(effect = %id, "the active user effect was deleted");
+            // A draft took this effect over from, and its prior now names a file that is
+            // gone. End the draft first, chosen over refusing the delete with a 409: the
+            // draft is in memory only, and deleting what the lights show is what the owner
+            // asked for. The restore cannot build the file any more, so the lights go black
+            // and the note says so.
+            let ended = crate::draft::stop(&app).await;
+            if let Some(note) = ended.note {
+                tracing::warn!(%note, "the draft ended when its prior effect was deleted");
+            }
             if let Err(e) = crate::apply_effect(&app, &active.id, &active.props).await {
                 tracing::warn!(
                     effect = %active.id,

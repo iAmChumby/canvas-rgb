@@ -107,6 +107,14 @@ impl std::fmt::Display for PutError {
     }
 }
 
+/// What ending a draft did to the lights.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Ended {
+    /// A sentence for the answer when the prior effect could not be put back and black was
+    /// used instead. `None` when the prior (or the no-prior black) went on normally.
+    pub note: Option<String>,
+}
+
 /// Puts `html` on the lights as the draft, renews a running draft's lease and updates its props.
 ///
 /// The prior effect is the active layout's effect when the draft starts, and stays the same
@@ -116,14 +124,32 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<Slot, PutE
     let _gate = app.draft.gate.lock().await;
     let source_hash = crate::user_effects::source_hash(html);
     let id = format!("{}{source_hash}", canvas_proto::consts::DRAFT_ID_PREFIX);
-    let existing = app.draft.snapshot();
+    let mut existing = app.draft.snapshot();
+
+    // An expired slot is over, whatever its source: end it before this PUT is handled, so the
+    // new draft takes the effect that is on the lights now as its prior instead of renewing a
+    // draft whose lights should already be back.
+    let now = app.draft.now();
+    if existing.as_ref().is_some_and(|slot| now >= slot.lease_until) {
+        let ended = app.draft.lock().take();
+        if let Some(slot) = ended {
+            let outcome = restore(app, &slot).await;
+            tracing::info!(
+                draft = %slot.id,
+                note = outcome.note.as_deref().unwrap_or(""),
+                "the expired draft ended before a new PUT was handled"
+            );
+        }
+        existing = None;
+    }
+
     // The layout is read only when the draft starts: a refresh keeps the prior it took over
     // from, even if something changed the layout meanwhile.
     let prior = match &existing {
         Some(slot) => slot.prior.clone(),
         None => app.active_layout().await.and_then(|layout| layout.effect),
     };
-    let lease_until = app.draft.now() + canvas_proto::consts::DRAFT_LEASE;
+    let lease_until = now + canvas_proto::consts::DRAFT_LEASE;
 
     if let Some(slot) = &existing {
         if slot.source_hash == source_hash {
@@ -176,34 +202,29 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<Slot, PutE
 
 /// Stops the draft and puts the prior effect back (the editor's Stop).
 ///
-/// A restore that fails keeps the slot, so the banner's Retry (another DELETE) or the sweeper
-/// tries again instead of leaving the draft on the lights with nothing to end it.
-pub async fn stop(app: &Arc<App>) -> Result<(), String> {
+/// The slot always goes: a Stop, an expiry or a GET after the lease is over never leaves a
+/// draft behind. When the prior effect cannot be built (its file was deleted mid-draft, say),
+/// black goes on the lights and [`Ended::note`] says so; the answer is still a success.
+pub async fn stop(app: &Arc<App>) -> Ended {
     let _gate = app.draft.gate.lock().await;
     let Some(slot) = app.draft.lock().take() else {
-        return Ok(());
+        return Ended::default();
     };
-    match restore(app, &slot).await {
-        Ok(()) => {
-            tracing::info!(draft = %slot.id, "the draft stopped; the prior effect is back");
-            Ok(())
-        }
-        Err(error) => {
-            let mut guard = app.draft.lock();
-            if guard.is_none() {
-                *guard = Some(slot);
-            }
-            Err(error)
-        }
-    }
+    let ended = restore(app, &slot).await;
+    tracing::info!(
+        draft = %slot.id,
+        note = ended.note.as_deref().unwrap_or(""),
+        "the draft stopped"
+    );
+    ended
 }
 
-/// Ends a draft whose lease ran out: Stop, without the editor asking. Returns true when a draft
-/// ended here.
+/// Ends a draft whose lease ran out: Stop, without the editor asking. Returns what happened
+/// when a draft ended here, `None` when none was due.
 ///
 /// The daemon calls this once a second (see [`spawn_sweeper`]), and `GET /effects/draft` calls it
 /// before it answers, so the answer never reports a lease that is over.
-pub async fn expire_if_due(app: &Arc<App>) -> bool {
+pub async fn expire_if_due(app: &Arc<App>) -> Option<Ended> {
     let _gate = app.draft.gate.lock().await;
     let now = app.draft.now();
     let due = {
@@ -213,28 +234,14 @@ pub async fn expire_if_due(app: &Arc<App>) -> bool {
             _ => None,
         }
     };
-    let Some(slot) = due else {
-        return false;
-    };
-    match restore(app, &slot).await {
-        Ok(()) => {
-            tracing::info!(draft = %slot.id, "the draft lease ran out; the prior effect is back");
-            true
-        }
-        Err(error) => {
-            tracing::warn!(
-                draft = %slot.id,
-                error = %error,
-                "the draft lease ran out but the prior effect could not be restored"
-            );
-            // Keep it, so the next sweep tries again.
-            let mut guard = app.draft.lock();
-            if guard.is_none() {
-                *guard = Some(slot);
-            }
-            false
-        }
-    }
+    let slot = due?;
+    let ended = restore(app, &slot).await;
+    tracing::info!(
+        draft = %slot.id,
+        note = ended.note.as_deref().unwrap_or(""),
+        "the draft lease ran out"
+    );
+    Some(ended)
 }
 
 /// Ends the draft without restoring: an activate or a layout switch chose something else, and
@@ -248,7 +255,30 @@ pub async fn drop_slot(app: &Arc<App>) -> bool {
     true
 }
 
-/// The answer `GET`/`PUT`/`DELETE /effects/draft` give.
+/// Holds the draft gate while a saved effect is put on the lights, after ending a draft.
+///
+/// A caller that replaces the effect (activate, a layout switch, the first run) keeps this
+/// guard across its apply: `put` waits on the gate, so a beat cannot start a draft in the gap
+/// between "the draft is gone" and "the saved effect is on", which the apply would then
+/// overwrite while the slot said the draft was running. Dropping a draft here restores nothing.
+pub struct ReplaceGuard<'a> {
+    _gate: tokio::sync::MutexGuard<'a, ()>,
+    /// True when a draft was on the lights and was dropped here.
+    pub dropped: bool,
+}
+
+/// Ends any draft (without restoring it) and holds the gate until the guard is dropped.
+pub async fn hold_for_replace(app: &Arc<App>) -> ReplaceGuard<'_> {
+    let gate = app.draft.gate.lock().await;
+    let dropped = app.draft.lock().take();
+    if let Some(slot) = &dropped {
+        tracing::info!(draft = %slot.id, "the draft ended: a saved effect is being put on");
+    }
+    ReplaceGuard { _gate: gate, dropped: dropped.is_some() }
+}
+
+/// The answer `GET`/`PUT`/`DELETE /effects/draft` give. A `note` is only set by an ending that
+/// could not put the prior effect back.
 pub fn status(app: &App) -> canvas_proto::api::DraftStatus {
     let now = app.draft.now();
     let heartbeat_ms = canvas_proto::consts::DRAFT_HEARTBEAT.as_millis() as u64;
@@ -262,6 +292,7 @@ pub fn status(app: &App) -> canvas_proto::api::DraftStatus {
             lease_remaining_ms: slot.lease_until.saturating_sub(now).as_millis() as u64,
             heartbeat_ms,
             lease_ms,
+            note: None,
         },
         None => canvas_proto::api::DraftStatus {
             active: false,
@@ -271,15 +302,52 @@ pub fn status(app: &App) -> canvas_proto::api::DraftStatus {
             lease_remaining_ms: 0,
             heartbeat_ms,
             lease_ms,
+            note: None,
         },
     }
 }
 
-/// Puts the effect the draft took over from back on the lights.
-async fn restore(app: &Arc<App>, slot: &Slot) -> Result<(), String> {
-    match &slot.prior {
-        Some(effect) => crate::apply_effect(app, &effect.id, &effect.props).await,
-        None => crate::apply_effect(app, "solid", &black()).await,
+/// Puts the effect the draft took over from back on the lights. Never fails: when the prior
+/// effect cannot be built (its file was deleted mid-draft), black goes on the lights and the
+/// returned note says why, so the draft can still end.
+async fn restore(app: &Arc<App>, slot: &Slot) -> Ended {
+    if let Some(effect) = &slot.prior {
+        match crate::apply_effect(app, &effect.id, &effect.props).await {
+            Ok(()) => return Ended::default(),
+            Err(error) => {
+                tracing::warn!(
+                    draft = %slot.id,
+                    effect = %effect.id,
+                    error = %error,
+                    "the prior effect could not be restored; the lights are black"
+                );
+                let note = format!(
+                    "the prior effect {} could not be restored, so the lights are black: {error}",
+                    effect.id
+                );
+                let black_note = set_black(app).await;
+                return Ended {
+                    note: Some(match black_note {
+                        Some(black_error) => format!("{note}; and {black_error}"),
+                        None => note,
+                    }),
+                };
+            }
+        }
+    }
+    // No prior effect: black is the normal end, as after onboarding.
+    Ended { note: set_black(app).await }
+}
+
+/// Puts black on the lights. `Some` is why it failed, which is a failure of the daemon and not
+/// of the draft.
+async fn set_black(app: &Arc<App>) -> Option<String> {
+    match crate::apply_effect(app, "solid", &black()).await {
+        Ok(()) => None,
+        Err(error) => {
+            tracing::warn!(error = %error, "the lights could not be set to black");
+            Some(format!("the lights could not be set to black: {error}"))
+        }
     }
 }
 

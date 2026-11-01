@@ -28,4 +28,10 @@ heartbeat_ms: number,
 /**
  * How long the draft survives without a PUT; [`crate::consts::DRAFT_LEASE`].
  */
-lease_ms: number, };
+lease_ms: number, 
+/**
+ * A sentence about the ending, when it needs saying: the prior effect could not be
+ * restored (its file was deleted mid-draft), so the lights are black. Absent when the
+ * prior, or black for a layout with no effect, went on normally.
+ */
+note?: string, };

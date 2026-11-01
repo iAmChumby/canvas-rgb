@@ -923,3 +923,102 @@ async fn a_draft_with_a_syntax_error_is_refused() {
     let message = json(response).await["message"].as_str().unwrap_or_default().to_string();
     assert!(message.contains("eval_script:4"), "the runtime's line is kept: {message}");
 }
+// ---------------------------------------------------------------- round-1 fixes
+
+/// Writes a user effect into the folder and rescans, so the library has it.
+fn add_user_effect(app: &Arc<App>, folder: &std::path::Path, file: &str, html: &str) {
+    std::fs::write(folder.join(file), html).expect("the effect is written");
+    app.user_effects.rescan(folder);
+}
+
+#[tokio::test]
+async fn deleting_a_drafts_prior_ends_the_draft_at_once() {
+    let (router, app, engine, _home, folder, _clock) = build_with_clock();
+    add_user_effect(&app, &folder, "foo.html", MOVING);
+    prior_effect(&app, "html:foo", canvas_proto::props::Props::new()).await;
+    assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
+
+    // The prior's file goes through the route while the draft holds the lights. The draft is
+    // in memory only, and deleting what the lights show is what the owner asked for, so the
+    // draft ends here (black) instead of the route refusing with a 409.
+    let deleted = router
+        .clone()
+        .oneshot(request("DELETE", "/api/v1/effects/html:foo"))
+        .await
+        .expect("the router answers");
+    assert_eq!(deleted.status(), StatusCode::OK);
+
+    let state = draft_state(router.clone()).await;
+    assert!(!state.active, "the delete ended the draft");
+    assert_eq!(running(&engine).0.as_deref(), Some("solid"), "the lights are black");
+    let stopped = router
+        .oneshot(request("DELETE", routes::EFFECT_DRAFT))
+        .await
+        .expect("the router answers");
+    assert_eq!(stopped.status(), StatusCode::OK, "a Stop after the delete is a no-op");
+}
+
+#[tokio::test]
+async fn a_prior_that_vanishes_ends_the_draft_on_expiry() {
+    let (router, app, engine, _home, folder, clock) = build_with_clock();
+    add_user_effect(&app, &folder, "foo.html", MOVING);
+    prior_effect(&app, "html:foo", canvas_proto::props::Props::new()).await;
+    assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
+
+    // The file goes behind the daemon's back (Explorer, a sync client): the rescan drops it
+    // from the library while the draft still holds the lights.
+    std::fs::remove_file(folder.join("foo.html")).expect("the effect file is removed");
+    app.user_effects.rescan(&folder);
+
+    clock.advance(canvas_proto::consts::DRAFT_LEASE);
+    let state = draft_state(router).await;
+    assert!(!state.active, "the lease ended the draft instead of stranding it");
+    let note = state.note.as_deref().unwrap_or_default();
+    assert!(note.contains("html:foo"), "the expiry answer says what happened: {note}");
+    assert_eq!(
+        running(&engine).0.as_deref(),
+        Some("solid"),
+        "the prior could not be built, so the lights are black"
+    );
+}
+
+#[tokio::test]
+async fn a_prior_that_vanishes_stop_answers_200_with_a_note() {
+    let (router, app, engine, _home, folder, _clock) = build_with_clock();
+    add_user_effect(&app, &folder, "foo.html", MOVING);
+    prior_effect(&app, "html:foo", canvas_proto::props::Props::new()).await;
+    assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
+    std::fs::remove_file(folder.join("foo.html")).expect("the effect file is removed");
+    app.user_effects.rescan(&folder);
+
+    let response = router
+        .oneshot(request("DELETE", routes::EFFECT_DRAFT))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK, "Stop answers 200, not 500");
+    let body = json(response).await;
+    assert_eq!(body["active"], serde_json::json!(false));
+    let note = body["note"].as_str().unwrap_or_default();
+    assert!(note.contains("html:foo"), "the note names the prior: {note}");
+    assert_eq!(running(&engine).0.as_deref(), Some("solid"), "black is on the lights");
+}
+
+#[tokio::test]
+async fn a_prior_that_vanishes_stop_after_an_expiry_still_answers_200() {
+    let (router, app, engine, _home, folder, clock) = build_with_clock();
+    add_user_effect(&app, &folder, "foo.html", MOVING);
+    prior_effect(&app, "html:foo", canvas_proto::props::Props::new()).await;
+    assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
+    std::fs::remove_file(folder.join("foo.html")).expect("the effect file is removed");
+    app.user_effects.rescan(&folder);
+
+    clock.advance(canvas_proto::consts::DRAFT_LEASE);
+    let _ = canvas_daemon::draft::expire_if_due(&app).await;
+    let response = router
+        .oneshot(request("DELETE", routes::EFFECT_DRAFT))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK, "Stop after an expiry answers 200");
+    assert_eq!(running(&engine).0.as_deref(), Some("solid"));
+}
+

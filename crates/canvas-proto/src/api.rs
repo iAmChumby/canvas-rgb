@@ -487,6 +487,12 @@ pub struct DraftStatus {
     /// How long the draft survives without a PUT; [`crate::consts::DRAFT_LEASE`].
     #[ts(type = "number")]
     pub lease_ms: u64,
+    /// A sentence about the ending, when it needs saying: the prior effect could not be
+    /// restored (its file was deleted mid-draft), so the lights are black. Absent when the
+    /// prior, or black for a layout with no effect, went on normally.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
