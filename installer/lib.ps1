@@ -989,6 +989,14 @@ function Start-CanvasRgbService {
     return $out
 }
 
+# Runs the service exe to hand every fan header back to BIOS. Split out so a test can stand in for
+# it: it runs a program as SYSTEM, which a test must never do. Returns the exit code.
+function Invoke-RestoreBios {
+    param([string]$Exe)
+    & $Exe --restore-bios | Out-Host
+    return $LASTEXITCODE
+}
+
 # ---- the hand-off between the two Inno steps (#60) ----
 # The Inno installer stops canvas-rgb before it copies anything (stop-canvas.ps1, PrepareToInstall)
 # and runs the elevated step after it copied the files (setup-elevated.ps1). The second step finds
@@ -1080,18 +1088,34 @@ function Clear-UninstallState {
 }
 
 # The true state of an uninstall that did not finish, in plain words. $State says what is already
-# gone: Service ('none', 'stopped' or 'removed'), and Entries, Files, OpenRgb and Config (true
-# when this uninstall removed them). Pure: it says nothing about the disk.
+# gone and what the fans are doing:
+#   Service  'none' (there was none), 'running' (it would not stop), 'stopped' or 'removed'
+#   Fans     'unknown' (not known), 'back' (they are on the motherboard's own settings) or
+#            'manual' (they may still be under canvas-rgb control)
+#   Entry / Shortcut / Files / OpenRgb / Config: what this uninstall removed. Files and OpenRgb
+#            are 'all' or 'some' when only part of it went.
+# Pure: it says nothing about the disk.
 # Returns the words, and whether anything was really removed: a service that was only stopped is
 # not a removal, so the caller can still say that nothing was taken away.
 function Get-UninstallStateReport {
     param([hashtable]$State = @{})
     $service = [string]$State['Service']
+    $fans = [string]$State['Fans']
     $gone = @()
-    if ($service -eq 'stopped') {
-        $gone += 'the background service is stopped, so your fans are back on your motherboard''s own settings'
+    if ($service -eq 'running') {
+        $gone += 'the background service is still running'
+    } elseif ($service -eq 'stopped') {
+        $gone += 'the background service was stopped'
     } elseif ($service -eq 'removed') {
         $gone += 'the background service was removed'
+    }
+    # The fans are a stage of their own: stopping the service does not hand them back. Only
+    # --restore-bios (or the knowledge that no fan was ever under canvas-rgb control) does, so
+    # the words say the fans are back only then (#64).
+    if ($fans -eq 'back') {
+        $gone += 'your fans are back on your motherboard''s own settings'
+    } elseif ($fans -eq 'manual') {
+        $gone += 'your fans may still be under canvas-rgb control'
     }
     if ($State['Entries']) { $gone += 'the Installed apps entry and the Start menu shortcut were removed' }
     if ($State['Files']) { $gone += 'the program files were removed' }
@@ -1099,10 +1123,17 @@ function Get-UninstallStateReport {
     if ($State['Config']) { $gone += 'your canvas-rgb settings were removed' }
     $removed = ($service -eq 'removed') -or [bool]$State['Entries'] -or [bool]$State['Files'] `
         -or [bool]$State['OpenRgb'] -or [bool]$State['Config']
+    # What the person is told to do depends on the fans: they cannot be handed back while they may
+    # still be under canvas-rgb control.
+    $tail = if ($fans -eq 'manual') {
+        'Restart the PC, or fix the fan driver, then run the uninstall again.'
+    } else {
+        'Run the uninstall again to finish.'
+    }
     $words = if ($gone.Count -eq 0) {
         'canvas-rgb was not removed: the uninstall stopped before anything was taken away.'
     } else {
-        'canvas-rgb was not removed cleanly: ' + ($gone -join ', ') + '. Run the uninstall again to finish.'
+        'canvas-rgb was not removed cleanly: ' + ($gone -join ', ') + '. ' + $tail
     }
     return [pscustomobject]@{ Words = $words; Removed = $removed }
 }

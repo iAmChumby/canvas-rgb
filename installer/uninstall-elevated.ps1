@@ -16,10 +16,11 @@ $ErrorActionPreference = 'Stop'
 $c = Get-CanvasConst
 function Say([string]$t) { Write-Step $t $LogFile }
 
-# What this uninstall has already taken away (#64). It can fail half way: the service can be gone
-# and the program files still there. The person must be told what is true, not "nothing was
-# removed", so every step that removes something says so here.
-$uninstallState = @{ Service = 'none'; Entries = $false; Files = $false; OpenRgb = $false; Config = $false }
+# What this uninstall has already taken away, and what the fans are doing (#64). It can fail half
+# way: the service can be gone and the program files still there. The person must be told what is
+# true, not "nothing was removed", so every step that removes something says so here. The fans are
+# their own stage: a stopped service does not hand them back, --restore-bios does.
+$uninstallState = @{ Service = 'none'; Fans = 'unknown'; Entries = $false; Files = $false; OpenRgb = $false; Config = $false }
 
 try {
     if (-not (Test-IsAdmin)) { throw 'uninstall-elevated.ps1 must run elevated (uninstall.ps1 starts it).' }
@@ -74,11 +75,19 @@ try {
                 Stop-Service -Name $c.ServiceName -Force
                 $svc.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
             } catch {
+                # The service is still running, so it still drives every fan: they are under
+                # canvas-rgb control (#64).
+                $uninstallState.Service = 'running'
+                $uninstallState.Fans = 'manual'
                 throw "the service $($c.ServiceName) did not stop ($($_.Exception.Message)). Nothing was removed. It may still own fan headers: stop it from services.msc and run the uninstall again."
             }
         }
         $svc.Refresh()
-        if ($svc.Status -ne 'Stopped') { throw "the service $($c.ServiceName) is $($svc.Status), not Stopped. Nothing was removed." }
+        if ($svc.Status -ne 'Stopped') {
+            $uninstallState.Service = 'running'
+            $uninstallState.Fans = 'manual'
+            throw "the service $($c.ServiceName) is $($svc.Status), not Stopped. Nothing was removed."
+        }
         Say "  service $($c.ServiceName) stopped (its shutdown hands the fan headers back to BIOS)"
         $uninstallState.Service = 'stopped'
     }
@@ -88,18 +97,28 @@ try {
     #    any fan chip (no PawnIO driver, no NVIDIA GPU); then nothing could be under canvas-rgb
     #    control, which bios-state.json settles: it is written before any header is taken over.
     if (Test-Path -LiteralPath $svcExe) {
-        & $svcExe --restore-bios
-        $code = $LASTEXITCODE
+        $code = Invoke-RestoreBios -Exe $svcExe
         Say "  $($c.ServiceExe) --restore-bios exit code: $code"
         $state = Get-BiosStateVerdict -MachineHome $programData
         switch (Get-RestoreBiosDecision -ExitCode $code -ManualState $state.State) {
             'refuse' {
+                # The fans may still be under canvas-rgb control: that is NOT the same as "back on
+                # the motherboard", and the words must not say it is (#64).
+                $uninstallState.Fans = 'manual'
                 $why = if ($state.State -eq 'Manual') { "bios-state.json records $(@($state.Headers) -join ', ') as taken over" } else { 'bios-state.json could not be read' }
                 throw "--restore-bios failed (exit $code) and $why. Nothing was removed (the service is stopped). Fans may still be under canvas-rgb control: restart the PC, or fix the fan driver and run the uninstall again."
             }
-            'skip' { Say '  --restore-bios could not open a fan chip, and bios-state.json lists no header: no fan was ever under canvas-rgb control. Carrying on.' }
+            'skip' {
+                # No fan was ever under canvas-rgb control, so the fans are on the motherboard's own
+                # settings: they never left it.
+                $uninstallState.Fans = 'back'
+                Say '  --restore-bios could not open a fan chip, and bios-state.json lists no header: no fan was ever under canvas-rgb control. Carrying on.'
+            }
+            'ok' { $uninstallState.Fans = 'back' }
         }
     } elseif ($svc) {
+        # The service is stopped, but the fans could not be handed back: they may still be manual.
+        $uninstallState.Fans = 'manual'
         throw "$svcExe is missing but the service exists: cannot hand fans back to BIOS. Nothing was removed."
     } else {
         Say "  $svcExe not found and no service: nothing installed, --restore-bios skipped"

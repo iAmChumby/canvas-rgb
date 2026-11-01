@@ -85,8 +85,8 @@ try {
         Assert-True ($src -match 'Get-UninstallRemovalDecision') 'uses the decision'
         Assert-True ($src -match 'if \(\$rm\.RemoveInstallDir\)') 'the install dir removal is gated'
         # Stop and restore-bios still precede any removal in Inno mode too.
-        Assert-True ($src.IndexOf('Stop-Service -Name') -lt $src.IndexOf('& $svcExe --restore-bios')) 'service stops before --restore-bios'
-        Assert-True ($src.IndexOf('& $svcExe --restore-bios') -lt $src.IndexOf('Get-UninstallRemovalDecision')) '--restore-bios before any removal'
+        Assert-True ($src.IndexOf('Stop-Service -Name') -lt $src.IndexOf('Invoke-RestoreBios -Exe $svcExe')) 'service stops before --restore-bios'
+        Assert-True ($src.IndexOf('Invoke-RestoreBios -Exe $svcExe') -lt $src.IndexOf('Get-UninstallRemovalDecision')) '--restore-bios before any removal'
     }
     Test-Case 'setup.ps1 (repo path) still passes -RepoRoot and never -PayloadDir or -InnoMode' {
         $src = Get-Content -LiteralPath (Join-Path $instDir 'setup.ps1') -Raw

@@ -347,7 +347,7 @@ Test-Case 'uninstall: CurUninstallStepChanged does not run uninstall-user.ps1 fr
 }
 Test-Case 'uninstall-elevated.ps1 runs the guard (Verify) before it stops the service or runs the service exe' {
     $code = [regex]::Replace($ue, '(?m)^\s*#.*$', '')
-    $iGuard = $code.IndexOf('Assert-InstallDirProtected'); $iStop = $code.IndexOf('Stop-Service'); $iExe = $code.IndexOf('& $svcExe --restore-bios')
+    $iGuard = $code.IndexOf('Assert-InstallDirProtected'); $iStop = $code.IndexOf('Stop-Service'); $iExe = $code.IndexOf('Invoke-RestoreBios -Exe $svcExe')
     Assert-True ($iGuard -ge 0 -and $iGuard -lt $iStop -and $iGuard -lt $iExe) 'guard must come first'
     Assert-True ($code -match "Assert-InstallDirProtected -Path \`$InstallDir -Mode Verify") 'in Verify mode'
 }

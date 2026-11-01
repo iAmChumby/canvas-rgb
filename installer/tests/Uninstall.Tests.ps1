@@ -49,7 +49,7 @@ try {
     Test-Case 'uninstall-elevated.ps1 stops the service before --restore-bios, and both before anything is deleted' {
         $src = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\uninstall-elevated.ps1') -Raw
         $iStop = $src.IndexOf('Stop-Service')
-        $iRestore = $src.IndexOf('& $svcExe --restore-bios')
+        $iRestore = $src.IndexOf('Invoke-RestoreBios -Exe $svcExe')
         $iDelete = $src.IndexOf('sc.exe delete')
         $iRemove = $src.IndexOf('Remove-Item -LiteralPath $InstallDir')
         Assert-True ($iStop -ge 0 -and $iRestore -gt $iStop) 'the service must be stopped first: it re-drives manual headers every second'
@@ -197,7 +197,7 @@ function Set-UserPathEntry { Write-Host 'STUB Set-UserPathEntry'; return $false 
     }
 
     # uninstall-elevated.ps1 runs as a temp COPY; lib.ps1 gets stubs so no service, HKLM key, process or admin check is real.
-    function Invoke-ElevatedUninstallSandbox([string]$Name, [string]$RecordText, [switch]$Purge, [string]$SignalService = '', [switch]$JunctionHome, [switch]$ListFails, [switch]$PurgeFails) {
+    function Invoke-ElevatedUninstallSandbox([string]$Name, [string]$RecordText, [switch]$Purge, [string]$SignalService = '', [switch]$JunctionHome, [switch]$ListFails, [switch]$PurgeFails, [switch]$ServiceRunning, [switch]$StopRefused, [switch]$RestoreFails, [switch]$ManualBios) {
         $root = Join-Path $dir $Name
         $scripts = Join-Path $root 'scripts'; $pd = Join-Path $root 'PD\canvas-rgb'; $inst = Join-Path $root 'install'
         New-Item -ItemType Directory -Path $scripts, $inst -Force | Out-Null
@@ -208,6 +208,11 @@ function Set-UserPathEntry { Write-Host 'STUB Set-UserPathEntry'; return $false 
             & cmd.exe /c mklink /J "$pd" "$real" | Out-Null
         } else { New-Item -ItemType Directory -Path $pd -Force | Out-Null }
         [System.IO.File]::WriteAllText((Join-Path $inst 'canvas-rgbd.exe'), 'x')
+        if ($ServiceRunning) {
+            # The service exe: the real script hands the fans back with it. The stubbed helper
+            # below stands in for that call, so this file is never run.
+            [System.IO.File]::WriteAllText((Join-Path $inst 'canvas-rgb-svc.exe'), 'x')
+        }
         # GetFolderPath('CommonPrograms') returns '' once %ProgramData% points at a fake folder: point the copy at a temp folder.
         $src = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\uninstall-elevated.ps1') -Raw
         $src = $src.Replace("[Environment]::GetFolderPath('CommonPrograms')", "'$(Join-Path $root 'StartMenu')'")
@@ -219,10 +224,23 @@ function Set-UserPathEntry { Write-Host 'STUB Set-UserPathEntry'; return $false 
 function Test-IsAdmin { return $true }
 function Assert-MachineHomeSafe { param($Path) Write-Host 'STUB Assert-MachineHomeSafe' }
 function Assert-InstallDirProtected { param($Path, $Mode) Write-Host 'STUB Assert-InstallDirProtected' }
-function Get-Service { param($Name) Write-Host 'STUB Get-Service'; if ($Name -eq '__SIGNAL__') { [pscustomobject]@{ Name = $Name; Status = 'Stopped' } } }
+$global:SvcStatus = '__STATUS__'
+function Get-Service {
+    param($Name)
+    if ($Name -eq '__SVC__') {
+        $s = [pscustomobject]@{ Name = $Name; Status = $global:SvcStatus }
+        $s | Add-Member -MemberType ScriptMethod -Name WaitForStatus -Value { param($S, $T) }
+        $s | Add-Member -MemberType ScriptMethod -Name Refresh -Value { $this.Status = $global:SvcStatus }
+        return $s
+    }
+    Write-Host 'STUB Get-Service'
+    if ($Name -eq '__SIGNAL__') { [pscustomobject]@{ Name = $Name; Status = 'Stopped' } }
+}
 function Set-Service { Write-Host 'STUB Set-Service' }
+function Stop-Service { param($Name, [switch]$Force) $global:SvcStatus = 'Stopped'; Write-Host 'STUB Stop-Service' }
 function Get-Process { }
 function Get-CimInstance { }
+function Invoke-RestoreBios { param($Exe) Write-Host 'STUB Invoke-RestoreBios'; return __RESTORE__ }
 function Remove-Item {
     param([string]$LiteralPath, [switch]$Recurse, [switch]$Force)
     if ($LiteralPath -like 'HK*') { Write-Host "STUB refused registry delete $LiteralPath"; return }
@@ -234,15 +252,26 @@ function Remove-Item {
             # stops or removes anything.
             $stubs += "`r`nfunction Get-CimInstance { [CmdletBinding()] param(`$ClassName, `$Filter) Write-Error 'WMI is down' }`r`n"
         }
+        if ($StopRefused) {
+            # The service will not stop: the uninstall refuses before it removes anything.
+            $stubs += "`r`nfunction Stop-Service { param(`$Name, [switch]`$Force) throw 'the service is busy' }`r`n"
+        }
         if ($PurgeFails) {
             # The machine data folder cannot be deleted (a file in it is in use): the uninstall fails
             # after the program files are gone.
             $stubs = $stubs.Replace('    Microsoft.PowerShell.Management\Remove-Item', "    if (`$LiteralPath -eq '$pd') { throw 'the machine data folder is in use' }`r`n    Microsoft.PowerShell.Management\Remove-Item")
         }
         $stubs = $stubs.Replace('__SIGNAL__', $(if ($SignalService) { $SignalService } else { 'no-such-service' }))
+        $stubs = $stubs.Replace('__SVC__', $(if ($ServiceRunning) { 'canvas-rgb-svc' } else { 'no-such-service' }))
+        $stubs = $stubs.Replace('__STATUS__', $(if ($ServiceRunning) { 'Running' } else { 'Stopped' }))
+        $stubs = $stubs.Replace('__RESTORE__', $(if ($RestoreFails) { '1' } else { '0' }))
         Add-Content -LiteralPath (Join-Path $scripts 'lib.ps1') -Value $stubs
         $rec = Join-Path $pd 'signalrgb-restore.json'
         if ($null -ne $RecordText) { [System.IO.File]::WriteAllText($rec, $RecordText) }
+        if ($ManualBios) {
+            # A fan header that canvas-rgb took over: the fans are not back on the motherboard.
+            [System.IO.File]::WriteAllText((Join-Path $pd 'bios-state.json'), '{"headers":{"cpu_fan":{"manual":true,"duty_percent":40}}}')
+        }
         $log = Join-Path $root 'elevated.log'
         $extra = if ($Purge) { ' -PurgeConfig' } else { '' }
         $cmd = '$env:ProgramData=''{0}''; & ''{1}'' -InstallDir ''{2}'' -LogFile ''{3}''{4}; exit $LASTEXITCODE' -f (Join-Path $root 'PD'), (Join-Path $scripts 'uninstall-elevated.ps1'), $inst, $log, $extra
@@ -366,12 +395,20 @@ function Start-Process { Write-Host 'STUB Start-Process'; [pscustomobject]@{ Exi
         Assert-True ($none.Words -match 'was not removed') $none.Words
         Assert-True ($none.Words -match 'before anything was taken away') $none.Words
         Assert-True (-not $none.Removed) 'nothing was removed'
-        # A service that was only stopped is not a removal, but the person must know the fans are
-        # back on the motherboard's own settings.
+        # A service that was only stopped is not a removal, and the fans are a stage of their own:
+        # stopping the service does not hand them back.
         $stopped = Get-UninstallStateReport -State @{ Service = 'stopped' }
-        Assert-True ($stopped.Words -match 'the background service is stopped') $stopped.Words
-        Assert-True ($stopped.Words -match 'motherboard') $stopped.Words
+        Assert-True ($stopped.Words -match 'the background service was stopped') $stopped.Words
+        Assert-True ($stopped.Words -notmatch 'your fans are back') "it must not say the fans are back: $($stopped.Words)"
         Assert-True (-not $stopped.Removed) 'a stopped service is not a removal'
+        # The fans are back only when the hand-back succeeded.
+        $back = Get-UninstallStateReport -State @{ Service = 'stopped'; Fans = 'back' }
+        Assert-True ($back.Words -match 'your fans are back on your motherboard') $back.Words
+        # The fans may still be under canvas-rgb control: that is said, and the advice follows it.
+        $manual = Get-UninstallStateReport -State @{ Service = 'stopped'; Fans = 'manual' }
+        Assert-True ($manual.Words -match 'your fans may still be under canvas-rgb control') $manual.Words
+        Assert-True ($manual.Words -notmatch 'your fans are back') "it must not say the fans are back: $($manual.Words)"
+        Assert-True ($manual.Words -match 'Restart the PC') "it says what to do: $($manual.Words)"
         # The service is gone: that IS a removal.
         $gone = Get-UninstallStateReport -State @{ Service = 'removed' }
         Assert-True ($gone.Words -match 'the background service was removed') $gone.Words
@@ -398,6 +435,20 @@ function Start-Process { Write-Host 'STUB Start-Process'; [pscustomobject]@{ Exi
         $words = [System.IO.File]::ReadAllText($r.State)
         Assert-True ($words -match 'before anything was taken away') "the words say that nothing was taken away: $words"
         Assert-True ($words -notmatch 'was removed:') "it must not claim that something was removed: $words"
+    }
+    Test-Case 'the fans are their own stage: a refusal at the fan hand-back does not say they are back on the motherboard' {
+        # The real script, against fakes: the service is there and stops, --restore-bios fails, and
+        # bios-state.json says a header was taken over. The fans may still be under canvas-rgb
+        # control, so the words must not say they are back on the motherboard (#64).
+        $r = Invoke-ElevatedUninstallSandbox 'u64f' $null -ServiceRunning -RestoreFails -ManualBios
+        Assert-Equal $r.Code 1 "the uninstall refuses: $($r.Out)"
+        Assert-True ($r.Out -match 'restore-bios failed') "it names the cause: $($r.Out)"
+        Assert-True (Test-Path -LiteralPath $r.State) 'the state is recorded'
+        $words = [System.IO.File]::ReadAllText($r.State)
+        Assert-True ($words -notmatch 'your fans are back on your motherboard') "it must not say the fans are back: $words"
+        Assert-True ($words -match 'your fans may still be under canvas-rgb control') "it says the true thing: $words"
+        Assert-True ($words -match 'the background service was stopped') "it says what happened to the service: $words"
+        Assert-True ($words -match 'Restart the PC') "it says what to do: $words"
     }
     Test-Case 'an uninstall that fails after it removed the program files says so, and the exit code says it too' {
         $r = Invoke-ElevatedUninstallSandbox 'u64b' $null -Purge -PurgeFails
