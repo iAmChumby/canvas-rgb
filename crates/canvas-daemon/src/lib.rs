@@ -27,6 +27,7 @@ pub mod thumbnail;
 pub mod transient;
 pub mod token;
 pub mod user_effects;
+pub mod writer;
 
 #[cfg(test)]
 pub(crate) mod test_logs;
