@@ -126,6 +126,9 @@ pub fn panic_message(info: &PanicHookInfo<'_>) -> String {
     }
 }
 
+/// The longest the panic line waits to be written straight into the log file.
+const PANIC_WRITE_LIMIT: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Makes every panic leave a line (message, `file:line:col`, thread) before the default hook
 /// runs.
 ///
@@ -143,14 +146,24 @@ pub fn install_panic_hook() {
             .location()
             .map_or_else(|| "an unknown location".to_string(), |at| format!("{}:{}:{}", at.file(), at.line(), at.column()));
         let thread = std::thread::current();
-        tracing::error!(
-            message = %panic_message(info),
-            location = %location,
-            thread = thread.name().unwrap_or("<unnamed>"),
-            "the daemon panicked"
-        );
+        let message = panic_message(info);
+        let thread_name = thread.name().unwrap_or("<unnamed>");
         if thread.id() == main_thread {
+            // This panic ends the process. Its line is written to the day's log file here, on
+            // this thread, in one bounded write: queued behind a backlog it could be lost to the
+            // 250 ms flush below (#36). Written once: the tracing copy is only the fallback for
+            // when the file could not be written (the logger was never started, or the disk
+            // failed), so the file never holds the line twice.
+            let line = format!(
+                "{} ERROR canvas_daemon::exit_log: the daemon panicked message=\"{message}\" location={location} thread={thread_name}",
+                crate::storage::export_timestamp()
+            );
+            if !crate::logging::write_line_direct_within(PANIC_WRITE_LIMIT, line) {
+                tracing::error!(message = %message, location = %location, thread = thread_name, "the daemon panicked");
+            }
             crate::logging::close_within_limit();
+        } else {
+            tracing::error!(message = %message, location = %location, thread = thread_name, "the daemon panicked");
         }
         previous(info);
     }));

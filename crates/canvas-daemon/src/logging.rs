@@ -54,6 +54,53 @@ pub fn close_within_limit() -> bool {
     run_bounded(FLUSH_LIMIT, close)
 }
 
+/// Where the daily log file is, set by [`init`]: the folder and the file stem. A panic on the main
+/// thread writes its line there directly ([`write_line_direct_within`]).
+static DIRECT_TARGET: std::sync::Mutex<Option<(std::path::PathBuf, String)>> = std::sync::Mutex::new(None);
+
+/// The file the daily appender is writing now: the newest `{name}.{date}.log` in `dir`.
+fn current_log_file(dir: &std::path::Path, name: &str) -> std::io::Result<std::path::PathBuf> {
+    let mut newest: Option<std::path::PathBuf> = None;
+    for entry in std::fs::read_dir(dir)?.flatten() {
+        let file = entry.file_name().to_string_lossy().into_owned();
+        if file.starts_with(name) && file.ends_with(".log") && newest.as_ref().is_none_or(|n| entry.path() > *n) {
+            newest = Some(entry.path());
+        }
+    }
+    newest.ok_or_else(|| std::io::Error::other("no log file yet"))
+}
+
+/// Appends one line to the day's log file from the calling thread, in one write, without going
+/// through the queue the appender drains. The line the daemon writes on its way out of a panic
+/// must not wait behind a backlog (class `cause:timing-test`, #36).
+pub fn write_line_direct(dir: &std::path::Path, name: &str, line: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let path = current_log_file(dir, name)?;
+    let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
+    file.write_all(format!("{line}
+").as_bytes())?;
+    file.flush()
+}
+
+/// [`write_line_direct`] to the log file [`init`] set up, but it gives up after `limit`. Returns
+/// whether the line is in the file: `false` when the logger was never started, when the write
+/// failed, and when it did not finish in time.
+pub fn write_line_direct_within(limit: std::time::Duration, line: String) -> bool {
+    let target = DIRECT_TARGET.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+    let Some((dir, name)) = target else { return false };
+    write_line_direct_bounded(dir, name, limit, line)
+}
+
+/// [`write_line_direct`] on a helper thread, waiting at most `limit`.
+fn write_line_direct_bounded(dir: std::path::PathBuf, name: String, limit: std::time::Duration, line: String) -> bool {
+    let written = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&written);
+    let finished = run_bounded(limit, move || {
+        flag.store(write_line_direct(&dir, &name, &line).is_ok(), std::sync::atomic::Ordering::SeqCst);
+    });
+    finished && written.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// The non-blocking file writer for `name` in `dir`, and the guard that flushes it.
 fn file_writer(
     dir: &std::path::Path,
@@ -79,6 +126,7 @@ pub fn init(name: &str) -> std::io::Result<()> {
     std::fs::create_dir_all(&dir)?;
     prune_old_logs(&dir);
     let (writer, guard) = file_writer(&dir, name)?;
+    *DIRECT_TARGET.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((dir.clone(), name.to_string()));
 
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("canvas_daemon=info,canvas_rgbd=info,warn"));
@@ -212,6 +260,72 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert!(text.contains("the very last line"), "the last line reached the file: {} bytes", text.len());
         close(); // a second close does nothing
+    }
+
+    /// A writer that blocks every write until `release` is set: a backlog that cannot drain.
+    struct StuckWriter(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl std::io::Write for StuckWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            while !self.0.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// #36: a line queued behind a backlog that does not drain is not in the file when the process
+    /// ends; the panic line is written straight into the file and is.
+    #[test]
+    fn a_direct_line_reaches_the_file_while_a_backlog_is_stuck() {
+        let dir = std::env::temp_dir().join(format!("canvas-rgb-direct-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // The day's file, as the appender has made it.
+        let (writer, guard) = file_writer(&dir, "canvas-rgbd").unwrap();
+        drop((writer, guard));
+
+        // A queue whose writer is stuck: the lines pile up behind it.
+        let release = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (stuck, stuck_guard) = tracing_appender::non_blocking(StuckWriter(release.clone()));
+        let subscriber = tracing_subscriber::fmt().with_ansi(false).with_writer(stuck).finish();
+        tracing::subscriber::with_default(subscriber, || {
+            for i in 0..100 {
+                tracing::error!("queued behind the backlog {i}");
+            }
+        });
+        let started = std::time::Instant::now();
+        let drained = run_bounded(std::time::Duration::from_millis(250), move || drop(stuck_guard));
+        assert!(!drained, "the backlog does not drain inside the limit");
+
+        let line = "2026-11-01T00:00:00Z ERROR the daemon panicked message=\"direct\"".to_string();
+        let written = write_line_direct_bounded(dir.clone(), "canvas-rgbd".to_string(), std::time::Duration::from_millis(250), line);
+        let waited = started.elapsed();
+        release.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let text: String = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| std::fs::read_to_string(e.path()).unwrap_or_default())
+            .collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(written, "the direct write finished inside its limit");
+        assert_eq!(text.matches("the daemon panicked").count(), 1, "{text}");
+        assert!(!text.contains("queued behind the backlog"), "the stuck backlog never reached the file: {text}");
+        assert!(waited < std::time::Duration::from_secs(5), "{waited:?}");
+    }
+
+    #[test]
+    fn a_direct_write_with_no_log_file_reports_that_it_wrote_nothing() {
+        let dir = std::env::temp_dir().join(format!("canvas-rgb-direct-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let written = write_line_direct_bounded(dir.clone(), "canvas-rgbd".to_string(), std::time::Duration::from_millis(250), "x".to_string());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!written, "no file, no line: the caller falls back to tracing");
     }
 
     #[test]
