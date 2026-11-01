@@ -353,9 +353,12 @@ export function EffectsView() {
       setPicked(r.effect.id);
       setReplaceWith(null);
       setImportError(null);
-      // The effect is not in the library when the machine was too busy to load it: the
-      // file is saved, and the daemon says when it will load.
-      const inLibrary = (getSnap().effects ?? []).some((e) => e.id === r.effect.id);
+      // When the load took too long the reply carries its own sentence (saved, will be
+      // tried again) in place of the effect's description, so the library entry, if any, does
+      // not match it. Say that sentence; it names the effect.
+      const inLibrary = (getSnap().effects ?? []).some(
+        (e) => e.id === r.effect.id && e.description === r.effect.description,
+      );
       toast(
         inLibrary
           ? r.replaced

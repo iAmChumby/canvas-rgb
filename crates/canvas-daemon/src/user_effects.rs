@@ -205,7 +205,7 @@ impl StockFailure {
     }
 }
 
-/// A file that did not parse, and whether the machine was too busy for it.
+/// A file that did not parse, and whether the load ran out of time.
 struct ParseFailure {
     /// The error, as the person using the app reads it.
     error: String,
@@ -232,7 +232,7 @@ impl ParseFailure {
             let detail = error.trim_start_matches("timeout: ");
             Self {
                 error: format!(
-                    "the machine was too busy to load it ({detail}); it will be tried again"
+                    "it took too long to load just now ({detail}); it will be tried again"
                 ),
                 depends_on_load: true,
             }
@@ -500,8 +500,13 @@ impl UserEffects {
                 }
                 Err(failure) => {
                     tracing::warn!(path = %path.display(), error = %failure.error, "a user effect failed to parse and was skipped");
-                    // The file was in the library before, so the set changed.
-                    changed |= state.loaded.remove(&path).is_some();
+                    // A load that only ran out of time says nothing about the new version, so
+                    // the last version that loaded keeps being served until a retry succeeds or
+                    // a real error replaces it. A real parse error drops the file as before.
+                    if !failure.depends_on_load {
+                        // The file was in the library before, so the set changed.
+                        changed |= state.loaded.remove(&path).is_some();
+                    }
                     // A failure that came from the machine's load is tried again after the
                     // back-off; one that fails the same way every time is not. The same file,
                     // failing the same way, waits twice as long each time. A file that changed
@@ -996,7 +1001,7 @@ mod tests {
         assert_eq!(failures.len(), 1);
         assert!(failures[0].0.ends_with("slow.html"), "{failures:?}");
         assert!(failures[0].1.contains("ran longer than"), "the reason is kept: {failures:?}");
-        assert!(failures[0].1.contains("too busy"), "the machine is named as the reason: {failures:?}");
+        assert!(failures[0].1.contains("took too long to load"), "it says what happened: {failures:?}");
         assert!(failures[0].1.contains("tried again"), "it says it is tried again: {failures:?}");
         assert!(!failures[0].1.starts_with("timeout: "), "the runtime's prefix is not shown: {failures:?}");
 
@@ -1101,8 +1106,54 @@ mod tests {
         // It is still reported as failed: it did fail, and why.
         let failures = effects.failures();
         assert_eq!(failures.len(), 1);
-        assert!(failures[0].1.contains("too busy"), "{failures:?}");
+        assert!(failures[0].1.contains("took too long to load"), "{failures:?}");
         assert!(effects.schemas().is_empty());
+    }
+
+    /// A new version of an effect that is in the library, saved while its load runs out of
+    /// time, does not take the working version away: it is served until the retry loads.
+    #[test]
+    fn a_busy_replace_keeps_the_loaded_version_until_the_retry_succeeds() {
+        let dir = TempDir::new("busy-replace");
+        dir.write("fx.html", "Version one
+<canvas></canvas>");
+        let parses = Arc::new(AtomicUsize::new(0));
+        let clock = TestClock::new();
+        // The first parse loads, the second runs out of time, the rest load.
+        let builder: Builder = {
+            let parses = parses.clone();
+            Arc::new(move |id: &str, source: &str| {
+                if parses.fetch_add(1, Ordering::SeqCst) == 1 {
+                    return Err(LOAD_TIMEOUT.to_string());
+                }
+                Ok(Box::new(FakeHtml { schema: fake_schema(id, source) }) as Box<dyn Effect>)
+            })
+        };
+        let effects = UserEffects::with_limits(builder, &[], crate::thumbnail::TIMEOUT_RETRY_AFTER, clock.clock());
+        effects.rescan(&dir.0);
+        assert_eq!(names(&effects), vec![("html:fx".to_string(), "Version one".to_string())]);
+
+        // Version two is saved; its load runs out of time.
+        dir.write("fx.html", "Version two
+<canvas></canvas>");
+        effects.rescan(&dir.0);
+        assert_eq!(parses.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            names(&effects),
+            vec![("html:fx".to_string(), "Version one".to_string())],
+            "the working version is still in the library"
+        );
+        assert!(effects.create("html:fx").is_some(), "and it still runs");
+        assert_eq!(effects.failures().len(), 1, "the report says the new file is waiting");
+
+        // Inside the wait nothing changes; after it the retry loads version two.
+        clock.advance_to(FIRST_RETRY_AFTER - Duration::from_secs(1));
+        effects.rescan(&dir.0);
+        assert_eq!(names(&effects), vec![("html:fx".to_string(), "Version one".to_string())]);
+        clock.advance_to(FIRST_RETRY_AFTER);
+        effects.rescan(&dir.0);
+        assert_eq!(names(&effects), vec![("html:fx".to_string(), "Version two".to_string())]);
+        assert!(effects.failures().is_empty());
     }
 
     /// A file that is edited while it waits is parsed at once: the file changed, so the

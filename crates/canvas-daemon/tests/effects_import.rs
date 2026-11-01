@@ -463,8 +463,8 @@ async fn a_reserved_name_is_refused_whatever_comes_after_the_first_dot() {
 const RUNAWAY: &str =
     "<html><head><title>Loop</title></head><body></body><script>while (true) {}</script></html>";
 
-/// A file the machine was too busy to load is saved anyway: a save during a busy moment
-/// is not lost. The answer says it will load when the machine is less busy.
+/// A file whose load ran out of time is saved anyway: a save during a busy moment is not
+/// lost. The answer says only what is known: it was saved, it took too long, it is tried again.
 #[tokio::test]
 async fn a_file_the_machine_was_too_busy_to_load_is_saved_and_will_load_later() {
     let (router, _app, _home, folder) = build();
@@ -488,8 +488,11 @@ async fn a_file_the_machine_was_too_busy_to_load_is_saved_and_will_load_later() 
         .unwrap_or_default()
         .to_string();
     assert!(
-        description.contains("will load when the machine is less busy"),
-        "the answer says it will load later: {description}"
+        description.contains("saved")
+            && description.contains("took too long to load")
+            && description.contains("tried again")
+            && description.starts_with("loop"),
+        "the answer names the file and says what is known: {description}"
     );
     // The file is in the folder: the save was not lost.
     assert_eq!(std::fs::read_dir(&folder).expect("the folder").count(), 1);
@@ -499,7 +502,7 @@ async fn a_file_the_machine_was_too_busy_to_load_is_saved_and_will_load_later() 
     let failed = failed_effects(&router).await;
     assert_eq!(failed.len(), 1);
     assert!(failed[0].0.ends_with("loop.html"), "{failed:?}");
-    assert!(failed[0].1.contains("too busy"), "the reason is the machine: {failed:?}");
+    assert!(failed[0].1.contains("took too long to load"), "the reason is what happened: {failed:?}");
     // The parse was stopped at the budget, not later: the import's own parse and the
     // rescan's, each of them at the 2 s budget.
     assert!(

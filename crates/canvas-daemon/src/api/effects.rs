@@ -665,7 +665,7 @@ pub fn saved_presets(store: &crate::storage::Store) -> BTreeMap<String, Vec<canv
 /// The file name is checked first, then the file is parsed with the builder the loader
 /// uses: a file that does not parse is a validation error and nothing is written. A file
 /// whose load ran out of time is not the file's fault — the machine was busy — so it is
-/// written anyway and the answer says it will load when the machine is less busy. The file
+/// written anyway and the answer says it was saved, took too long to load just now, and will be tried again. The file
 /// lands in the folder atomically (a temp file in the same folder, then a rename), the
 /// folder is rescanned and the effect's summary comes back.
 pub async fn import_effect(
@@ -784,23 +784,23 @@ pub async fn import_effect(
     // too busy to load it, that the file is saved and will load when the machine is less
     // busy. The file is in the folder either way.
     let loaded = app.user_effects.schemas().into_iter().find(|s| s.id == id);
-    let (name, description, needs) = match loaded {
-        Some(schema) => (schema.name, schema.description, schema.needs),
-        None => {
-            // The effect is not in the library: the machine was too busy to load it. The
-            // name is the file's, because the effect's own name is not known yet.
-            let name = effect
-                .as_ref()
-                .map(|e| e.schema().name)
-                .unwrap_or_else(|| {
-                    path.file_stem()
-                        .map(|stem| stem.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| request.file_name.clone())
-                });
+    let (name, description, needs) = match (effect.as_ref(), loaded) {
+        // The file loaded: the effect that is in the library.
+        (Some(_), Some(schema)) => (schema.name, schema.description, schema.needs),
+        // The load ran out of time. This says only what is known: the file is saved, the
+        // load took too long just now, and it is tried again. (A script that never ends
+        // also runs out of time, so it does not say the machine was busy.) A replaced
+        // effect keeps its name, and the version that was loaded keeps running.
+        (_, loaded) => {
+            let name = loaded.as_ref().map(|s| s.name.clone()).unwrap_or_else(|| {
+                path.file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| request.file_name.clone())
+            });
             (
-                name,
-                "it was saved and will load when the machine is less busy".to_string(),
-                Default::default(),
+                name.clone(),
+                format!("{name} was saved, but it took too long to load just now; it will be tried again"),
+                loaded.map(|s| s.needs).unwrap_or_default(),
             )
         }
     };

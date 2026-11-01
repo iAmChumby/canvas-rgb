@@ -203,8 +203,8 @@ describe("the gallery's cards", () => {
     const gallery = document.querySelector(".effect-gallery");
     expect(strip).not.toBeNull();
     expect(gallery).not.toBeNull();
-    // The strip says a file did not load: that is true for a broken file and for one the
-    // machine was too busy to load.
+    // The strip says a file did not load: that is true for a broken file and for one whose
+    // load ran out of time.
     expect(strip?.textContent).toContain("did not load");
     // The strip stands after the cards: it comes with the list and must not push them down.
     expect(
