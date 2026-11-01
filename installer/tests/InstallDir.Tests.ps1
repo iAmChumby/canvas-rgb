@@ -109,6 +109,13 @@ Test-Case 'the same Modify grant one level up (D:\Apps) is refused, for an exist
     Assert-True ((-not $r.Ok) -and $r.Message -match "'D:\\Apps', a folder above it") $r.Message
     Assert-True (-not ($r.Log | Where-Object { $_ -match '^(Create|Lock) ' })) 'a new folder under a bad parent is not even created'
 }
+Test-Case 'a new folder whose parent does not exist either is refused before anything is created (C:\Apps\canvas-rgb, no C:\Apps)' {
+    $d = New-DefaultDisk
+    $r = Invoke-Guard $d 'Install' 'C:\Apps\canvas-rgb'
+    Assert-True ((-not $r.Ok) -and $r.Message.Contains("the folder above it, 'C:\Apps', does not exist")) $r.Message
+    Assert-True ($r.Message -match 'permissions were not changed') $r.Message
+    Assert-True (-not ($r.Log | Where-Object { $_ -match '^(Create|Lock) ' })) 'nothing was created or locked'
+}
 Test-Case 'a folder that does not exist yet is created already protected and is NOT locked separately, then passes' {
     $d = New-DefaultDisk
     $r = Invoke-Guard $d 'Install' 'C:\Program Files\canvas-rgb-new'

@@ -1549,6 +1549,13 @@ function Assert-InstallDirProtected {
 
     $exists = [bool](& $Reader.Exists $full)
     if (-not $exists -and $Mode -eq 'Verify') { return }
+    # Setup creates only the last folder. A missing folder above it would be created with the
+    # permissions it inherits (often ones that let any user rename it), refused afterwards and left
+    # behind, so it is refused before anything is made.
+    $above = [System.IO.Path]::GetDirectoryName($full)
+    if (-not $exists -and $above -and -not (& $Reader.Exists $above)) {
+        throw (& $stop "the folder above it, '$above', does not exist")
+    }
 
     # 1. Read-only, before anything is changed. The parents come first: with them safe, a user can neither
     #    rename nor delete the folder or a parent, so the folder cannot be swapped for a junction

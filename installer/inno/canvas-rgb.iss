@@ -708,8 +708,9 @@ begin
   // First of all, before anything in the install folder is run (the elevated script below runs
   // canvas-rgb-svc.exe as an administrator): the folder must be one only administrators can change.
   // The check runs from a protected copy in the machine home, never from {app}, which is the folder
-  // being checked. An install made before this check was added has no copy, and is refused the same way:
-  // the message says how to fix it (#46).
+  // being checked. An install made before this check was added has no copy: its folder is then checked by
+  // the script embedded below (AppCheckScript), never by code from {app}, and refused when it is not
+  // admin-only, with a message that says how to fix it (#46).
   CheckLog := ExpandConstant('{tmp}\canvas-rgb-uninstall-dircheck.log');
   CheckScript := ExpandConstant('{commonappdata}\canvas-rgb\check\check-install-dir.ps1');
   if not FileExists(CheckScript) then
