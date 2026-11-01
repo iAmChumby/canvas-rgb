@@ -971,22 +971,49 @@ function Stop-CanvasRgbUserProcesses {
 # folder holds a whole set of files, so this is safe; a service that will not start is said so.
 # -WasRunning is what Stop-CanvasRgbService reported: only a service this run stopped is started
 # again. A service the user had stopped on purpose stays stopped.
+# -Result says what happened: Started is true when the service runs now, Failed when it could
+# not be started. The caller needs that to tell the truth about the state of the PC (#65).
 function Start-CanvasRgbService {
-    param([bool]$WasRunning = $false)
+    param([bool]$WasRunning = $false, [hashtable]$Result = @{})
     $c = $script:CanvasConst
     $out = @()
+    $Result.Started = $false
+    $Result.Failed = $false
     if (-not $WasRunning) { return $out }
     $svc = Get-Service -Name $c.ServiceName -ErrorAction SilentlyContinue
     if (-not $svc) { return $out }
-    if ($svc.Status -eq 'Running') { return $out }
+    if ($svc.Status -eq 'Running') { $Result.Started = $true; return $out }
     try {
         Start-Service -Name $c.ServiceName
         (Get-Service -Name $c.ServiceName).WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
+        $Result.Started = $true
         $out += "  started the service $($c.ServiceName) again"
     } catch {
+        $Result.Failed = $true
         $out += "  the service $($c.ServiceName) could not be started again ($($_.Exception.Message))"
     }
     return $out
+}
+
+# Whether the service may be started again after an install that did not finish (#65).
+#   StoppedRunningService: this run stopped a running service (the first step did).
+#   ElevatedStepRan: the machine-wide step ran; it starts the service itself when it fails, so
+#     starting it again here would be a second start.
+#   CopyStarted: Inno's copy of the files started, so the install folder holds a mix of the old and
+#     the new files: the service must not be started from that.
+# Returns:
+#   'restart'         - start the service again
+#   'not-stopped'     - this run stopped no running service: there is nothing to start
+#   'already-handled' - the machine-wide step starts the service itself
+#   'leave-stopped'   - the copy started: the service stays stopped (the fans are then on the
+#                        motherboard's own curve, which is safe)
+# Pure: it looks at nothing but these three facts.
+function Get-InstallRestartDecision {
+    param([bool]$StoppedRunningService = $false, [bool]$ElevatedStepRan = $false, [bool]$CopyStarted = $false)
+    if (-not $StoppedRunningService) { return 'not-stopped' }
+    if ($ElevatedStepRan) { return 'already-handled' }
+    if ($CopyStarted) { return 'leave-stopped' }
+    return 'restart'
 }
 
 # Runs the service exe to hand every fan header back to BIOS. Split out so a test can stand in for

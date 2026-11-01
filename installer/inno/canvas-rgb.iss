@@ -77,6 +77,7 @@ Source: "{#PayloadDir}\installer\detect.ps1";         DestDir: "{tmp}"; Flags: d
 Source: "{#PayloadDir}\installer\stop-canvas.ps1";    DestDir: "{tmp}"; Flags: dontcopy
 Source: "{#PayloadDir}\installer\fetch-openrgb.ps1";  DestDir: "{tmp}"; Flags: dontcopy
 Source: "{#PayloadDir}\installer\check-install-dir.ps1"; DestDir: "{tmp}"; Flags: dontcopy
+Source: "{#PayloadDir}\installer\restart-canvas.ps1"; DestDir: "{tmp}"; Flags: dontcopy
 Source: "{#PayloadDir}\installer\openrgb.lock.json";  DestDir: "{tmp}"; Flags: dontcopy
 
 [Icons]
@@ -115,12 +116,7 @@ const
   // {app}. Exits 1 on a junction, an owner other than SYSTEM or Administrators, a NULL permission list, or a
   // write right given to anyone else. The install-folder tests run this very text on throwaway folders.
   AppCheckScript = '$k = ''S-1-5-18'',''S-1-5-32-544''; $t = ''S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464''; $w = 0x4 -bor 0x2 -bor 0x10 -bor 0x40 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x40000000 -bor 0x10000000; $r = ([IO.DirectoryInfo]''%APP%'').FullName.TrimEnd(''\''); $bad = 0; foreach ($f in $r, ($r + ''\installer''), ($r + ''\installer\uninstall-elev'' + ''ated.ps1''), ($r + ''\installer\lib.ps1''), ($r + ''\installer\uninstall-user.ps1''), ($r + ''\canvas-rgb-svc.exe'')) { if (-not ([IO.File]::Exists($f) -or [IO.Directory]::Exists($f))) { continue }; if ([IO.File]::GetAttributes($f) -band 0x400) { $bad = 1 }; $a = Get-Acl -LiteralPath $f; if ($a.GetSecurityDescriptorSddlForm(''Access'') -eq '''') { $bad = 1 }; if ($k -notcontains $a.GetOwner([Security.Principal.SecurityIdentifier]).Value) { $bad = 1 }; foreach ($x in $a.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) { if ($x.AccessControlType -eq ''Allow'' -and -not ($x.PropagationFlags -band 2) -and (([int]$x.FileSystemRights -band $w) -ne 0) -and ($k + $t) -notcontains $x.IdentityReference.Value) { $bad = 1 } } }; exit($bad)';
-  // PowerShell that starts canvas-rgb again after an update that failed before the elevated step
-  // ran (#65). It calls the same code the scripts use (lib.ps1), so a service that will not start
-  // is handled the same way. %LIB% is the lib.ps1 that was extracted to {tmp}.
-  RestartServiceScript = '. ''%LIB%''; Start-CanvasRgbService -WasRunning $true';
-
-var
+  var
   SignalRgbPage: TInputOptionWizardPage;
   PawnChoicePage: TInputOptionWizardPage;
   PawnFilePage: TInputFileWizardPage;
@@ -133,6 +129,7 @@ var
   FPurge: String;           // ' -PurgeConfig' or empty
   FStoppedRunningService: Boolean;  // the first step stopped a running service (#60)
   FElevatedStepRan: Boolean;       // the elevated step ran: it starts the service itself when it fails (#65)
+  FCopyStarted: Boolean;           // Inno's copy of the files started: the folder holds a mix of old and new (#65)
   FInstallDirOk: Boolean;           // the uninstall check passed: the folder only administrators can change (#46)
 
 function ScriptsOk: Boolean;
@@ -241,31 +238,30 @@ begin
     Result := Exec(PsExe, Params, ExpandConstant('{sys}'), SW_HIDE, ewWaitUntilTerminated, Code);
 end;
 
-// Starts canvas-rgb again after an update that failed before the elevated step ran (#65): the
+// Starts canvas-rgb again when an install did not finish and this run stopped it (#65): the
 // first step stopped the service before it copied anything, and nothing has started it again, so
-// the fans would stay on the motherboard's own settings. It uses the same code as the scripts
-// (lib.ps1), so a service that will not start is handled the same way.
-function RestartCanvasRgb: Boolean;
+// the fans would stay on the motherboard's own settings.
+// The script decides (it knows what this run did), it writes what it did to a log, and its exit
+// code says what happened: 0 the service runs again, 1 it could not be started, 2 it was left
+// stopped on purpose (the copy had started), 3 there was nothing to start.
+function RestartCanvasRgb: Integer;
 var
   Code: Integer;
-  Script, Lib: String;
+  Script, Args: String;
 begin
-  Result := False;
-  Lib := ExpandConstant('{tmp}\lib.ps1');
-  if FileExists(Lib) then
-  begin
-    StringChangeEx(Lib, '''', '''''', True);
-    Script := RestartServiceScript;
-    StringChangeEx(Script, '%LIB%', Lib, True);
-    // token: Exec runs as Setup's own administrator token; the script only starts the service.
-    Result := Exec(PsExe, '-NoProfile -ExecutionPolicy Bypass -Command "' + Script + '"',
-      ExpandConstant('{sys}'), SW_HIDE, ewWaitUntilTerminated, Code);
-    Exit;
-  end;
-  // Setup's own temp folder is already gone: the system tool starts the service instead. It is a
-  // system program, never code from the install folder.
-  // token: Setup's own administrator token; sc.exe only starts the service.
-  Result := Exec(ExpandConstant('{sys}\sc.exe'), 'start canvas-rgb-svc', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  // No script, no start: the caller says canvas-rgb is stopped, which is then true.
+  Result := 1;
+  Script := ExpandConstant('{tmp}\restart-canvas.ps1');
+  if not FileExists(Script) then Exit;
+  Args := '';
+  if FStoppedRunningService then Args := Args + ' -StoppedRunningService';
+  if FElevatedStepRan then Args := Args + ' -ElevatedStepRan';
+  if FCopyStarted then Args := Args + ' -CopyStarted';
+  Args := Args + ' -LogFile "' + ExpandConstant('{tmp}\canvas-rgb-restart.log') + '"';
+  // token: Exec runs as Setup's own administrator token; the script only starts the service.
+  if Exec(PsExe, '-NoProfile -ExecutionPolicy Bypass -File "' + Script + '"' + Args,
+      ExpandConstant('{sys}'), SW_HIDE, ewWaitUntilTerminated, Code) then
+    Result := Code;
 end;
 
 function LogTail(const LogPath: String): String;
@@ -537,6 +533,7 @@ begin
   Log := ExpandConstant('{tmp}\canvas-rgb-prepare.log');
   ExtractTemporaryFile('lib.ps1');
   ExtractTemporaryFile('check-install-dir.ps1');
+  ExtractTemporaryFile('restart-canvas.ps1');
   ExtractTemporaryFile('preflight.ps1');
   ExtractTemporaryFile('stop-canvas.ps1');
   ExtractTemporaryFile('fetch-openrgb.ps1');
@@ -607,6 +604,14 @@ var
   Code: Integer;
   Log, Args, Pawn: String;
 begin
+  if CurStep = ssInstall then
+  begin
+    // Inno's copy of the files starts here: from now on the install folder holds a mix of the old
+    // and the new files. The service must not be started from that: it could run the wrong
+    // program. The fans then stay on the motherboard's own curve, which is safe (#65).
+    FCopyStarted := True;
+    Exit;
+  end;
   if CurStep <> ssPostInstall then Exit;
   // The elevated step runs from here on. When it fails it starts the service again itself (it is
   // told what the first step stopped), so the restart in DeinitializeSetup must not start it a
@@ -711,19 +716,27 @@ procedure DeinitializeSetup;
 var
   Code: Integer;
   Ok: Boolean;
-  Msg, Json, Exe: String;
+  Msg, Json, Exe, Note: String;
   Lines: TArrayOfString;
+  RestartCode: Integer;
 begin
   try
     Ok := FScriptsOk;
-    { The install did not finish, and this run stopped a running service before it copied anything
-      (the first step did, so every fan is back on the motherboard's own settings). Nothing has
-      started it again: the elevated step never ran, so it could not. Start it now, so an update
-      that failed or was cancelled does not leave the fans on BIOS (#65).
-      A service the user had stopped on purpose is not started: the first step writes the marker
-      only when it stopped a running one. }
-    if (not Ok) and FStoppedRunningService and (not FElevatedStepRan) and (not IsServiceUpdateRun) then
-      RestartCanvasRgb;
+    Note := '';
+    { The install did not finish. If this run stopped a running service, the fans are on the
+      motherboard's own settings until the service runs again, so it is started again now (#65).
+      What came of that is said to the person: a service that could not be started, or one that
+      was left stopped on purpose, is named as stopped, so the message is true. }
+    if (not Ok) and (not IsServiceUpdateRun) then
+    begin
+      RestartCode := RestartCanvasRgb;
+      if RestartCode = 2 then
+        Note := 'canvas-rgb is stopped: the install folder holds a mix of the old and the new files, so it was not started again. Your fans are on your motherboard''s own settings. Run setup again.'
+      else if RestartCode = 1 then
+        Note := 'canvas-rgb is stopped and could not be started again: your fans are on your motherboard''s own settings. Run setup again.';
+    end;
+    // Not an update: nothing else would tell the person that canvas-rgb is stopped.
+    if (not IsUpdateRun) and (Note <> '') then MsgBox(Note, mbError, MB_OK);
     if not IsUpdateRun then Exit;
     Msg := '';
     if not Ok then
@@ -731,6 +744,7 @@ begin
       if FFailText <> '' then Msg := FFailText
       else if FPrepError <> '' then Msg := FPrepError
       else Msg := 'Setup did not finish.';
+      if Note <> '' then Msg := Msg + ' ' + Note;
     end;
     Json := '{"version":"{#AppVersion}","ok":';
     if Ok then Json := Json + 'true' else Json := Json + 'false';

@@ -25,21 +25,28 @@ try {
             # The note must be readable: the next step reads it to learn that this run stopped the
             # service, and a note that cannot be read leaves canvas-rgb stopped for good (#65).
             if (-not (Test-StoppedServiceMarker)) {
-                throw 'Setup could not read back the note that lets it start canvas-rgb again if the update fails, so it stopped before copying anything. canvas-rgb was started again. Run setup again.'
+                throw 'Setup could not read back the note that lets it start canvas-rgb again if the update fails, so it stopped before copying anything. Run setup again.'
             }
             Write-Step '  this run stopped a running service: the marker says so for the next step' $LogFile
         } else {
             # Without the marker the next step could not start the service again after a failure, so
             # the update stops here, before anything is copied, and the catch starts the service again.
-            throw 'Setup could not write the note that lets it start canvas-rgb again if the update fails, so it stopped before copying anything. canvas-rgb was started again. Run setup again.'
+            throw 'Setup could not write the note that lets it start canvas-rgb again if the update fails, so it stopped before copying anything. Run setup again.'
         }
     }
     exit 0
 } catch {
     Write-Step "FAILED: $($_.Exception.Message)" $LogFile
-    # When this run stopped the service, canvas-rgb would be left down with the fans on BIOS. The
-    # install folder still holds a whole set of files, so the service is started again. A service
-    # that was already stopped (on purpose) stays stopped.
-    Start-CanvasRgbService -WasRunning $stopState.ServiceWasRunning | ForEach-Object { Write-Step $_ $LogFile }
+    # When this run stopped the service, canvas-rgb would be left down with the fans on the
+    # motherboard's own settings. The install folder still holds a whole set of files, so the
+    # service is started again. A service that was already stopped (on purpose) stays stopped.
+    # What came of it is said as it is: "started again" only when it really runs now.
+    $restart = @{}
+    Start-CanvasRgbService -WasRunning $stopState.ServiceWasRunning -Result $restart | ForEach-Object { Write-Step $_ $LogFile }
+    if ($restart.Started) {
+        Write-Step '  canvas-rgb was started again' $LogFile
+    } elseif ($restart.Failed) {
+        Write-Step '  canvas-rgb could not be started again: your fans stay on your motherboard''s own settings until you run setup again' $LogFile
+    }
     exit 1
 }
