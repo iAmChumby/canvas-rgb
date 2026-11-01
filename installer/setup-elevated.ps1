@@ -10,6 +10,7 @@ param(
     [string]$RepoRoot = '',
     [string]$PayloadDir = '',
     [switch]$InnoMode,
+    [switch]$StoppedRunningService,
     [Parameter(Mandatory)][string]$InstallDir,
     [Parameter(Mandatory)][string]$OpenRgbZip,
     [ValidateSet('Y', 'N')][string]$DisableSignalRgb = 'N',
@@ -44,8 +45,11 @@ try {
     #    half way (#60).
     #    The Inno installer has already copied the new program files into the install folder, so a
     #    refusal from here must not claim that nothing was changed.
+    #    -StoppedRunningService is what the Inno installer's first step reported: it stopped a
+    #    running service before it copied the files, so this step finds the service stopped and
+    #    cannot see that for itself.
     $copiedNote = if ($InnoMode) { 'The new program files are already in place' } else { '' }
-    Stop-CanvasRgbRunning -InstallDir $InstallDir -CopiedNote $copiedNote -Result $stopState | ForEach-Object { Say $_ }
+    Stop-CanvasRgbRunning -InstallDir $InstallDir -CopiedNote $copiedNote -StoppedRunningService:$StoppedRunningService -Result $stopState | ForEach-Object { Say $_ }
 
     # 4. Install dir: binaries, shim, OpenRGB.
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
@@ -192,6 +196,10 @@ try {
     # When this run stopped the service, canvas-rgb would be left down with the fans on BIOS. The
     # install folder holds a whole set of files, so the service is started again. A service that
     # was already stopped (on purpose) stays stopped.
-    Start-CanvasRgbService -WasRunning $stopState.ServiceWasRunning | ForEach-Object { Say $_ }
+    # -StoppedRunningService is what the Inno installer's first step reported: it stopped a running
+    # service before it copied the files, so this step finds the service stopped and would leave it
+    # stopped after a failure (#60).
+    $wasRunning = ($stopState.ServiceWasRunning -or [bool]$StoppedRunningService)
+    Start-CanvasRgbService -WasRunning $wasRunning | ForEach-Object { Say $_ }
     exit 1
 }

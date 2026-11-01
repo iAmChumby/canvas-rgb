@@ -989,6 +989,49 @@ function Start-CanvasRgbService {
     return $out
 }
 
+# ---- the hand-off between the two Inno steps (#60) ----
+# The Inno installer stops canvas-rgb before it copies anything (stop-canvas.ps1, PrepareToInstall)
+# and runs the elevated step after it copied the files (setup-elevated.ps1). The second step finds
+# the service already stopped, so it cannot know that this run stopped it: without this marker a
+# failure there leaves canvas-rgb down and every fan back on the motherboard's own settings.
+# The marker is one file in the protected machine home, so only an administrator can write it, and
+# it says one thing: this run stopped a running service.
+function Get-StoppedServiceMarkerPath {
+    $c = Get-CanvasConst
+    return (Join-Path (Join-Path $env:ProgramData $c.AppName) 'stopped-service.marker')
+}
+
+# Records that this run stopped a running service. Nothing is written when the service was already
+# stopped (the user may have stopped it on purpose): that one must not be started again.
+# The machine home is never created here: without one there was no installation, so nothing was
+# stopped and there is nothing to record.
+function Set-StoppedServiceMarker {
+    param([string]$Path = '')
+    if (-not $Path) { $Path = Get-StoppedServiceMarkerPath }
+    $dir = Split-Path -Parent $Path
+    if (-not (Test-Path -LiteralPath $dir -PathType Container)) { return $false }
+    try {
+        [System.IO.File]::WriteAllText($Path, "stoppedByThisRun=yes`r`nservice=$($script:CanvasConst.ServiceName)`r`n")
+        return $true
+    } catch { return $false }
+}
+
+# True when the marker says this run stopped a running service.
+function Test-StoppedServiceMarker {
+    param([string]$Path = '')
+    if (-not $Path) { $Path = Get-StoppedServiceMarkerPath }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    try { $text = [System.IO.File]::ReadAllText($Path) } catch { return $false }
+    return ($text -match 'stoppedByThisRun=yes')
+}
+
+# Removes the marker: it is about one run only.
+function Clear-StoppedServiceMarker {
+    param([string]$Path = '')
+    if (-not $Path) { $Path = Get-StoppedServiceMarkerPath }
+    try { if (Test-Path -LiteralPath $Path -PathType Leaf) { Remove-Item -LiteralPath $Path -Force } } catch { }
+}
+
 # Stops the service (its shutdown hands the fans to BIOS) and the user processes that hold the binaries.
 # Returns the log lines. A service that will not stop throws: nothing may be replaced under a live service.
 # With -InstallDir it also stops every OpenRGB that runs from <InstallDir>\openrgb (#60).
@@ -999,15 +1042,26 @@ function Start-CanvasRgbService {
 # claiming that nothing was changed.
 # -CopiedNote says what is already in place (the Inno installer copies the new files before this
 # runs), so a refusal that comes later does not claim that nothing was changed.
+# -StoppedRunningService says that an EARLIER step of this same run stopped a running service (the
+# Inno installer's PrepareToInstall does, before it copies the files). This step finds the service
+# already stopped, so it cannot see that for itself: the refusal then says that canvas-rgb was
+# stopped for the update, and the caller starts the service again if this run fails (#60).
 # -Result is a hashtable the caller keeps: ServiceWasRunning is set once the service was stopped,
 # so a failure can start it again only when this run stopped it.
 function Stop-CanvasRgbRunning {
-    param([string]$InstallDir = '', [string]$CopiedNote = '', [hashtable]$Result = @{})
+    param([string]$InstallDir = '', [string]$CopiedNote = '', [switch]$StoppedRunningService, [hashtable]$Result = @{})
     $out = @()
     $Result.ServiceWasRunning = $false
     # What is true when the refusal comes BEFORE anything is stopped: in Inno mode the new program
-    # files are already in place, and the OpenRGB folder was left as it was.
-    $early = if ($CopiedNote) { "$CopiedNote; the OpenRGB folder was left as it was." } else { '' }
+    # files are already in place, the OpenRGB folder was left as it was, and canvas-rgb is not
+    # running (the Inno installer stopped it before it copied the files).
+    $early = ''
+    if ($CopiedNote) {
+        $early = "$CopiedNote; the OpenRGB folder was left as it was"
+        if ($StoppedRunningService) { $early += '; canvas-rgb was stopped for the update' }
+        else { $early += '; canvas-rgb was not running' }
+        $early += '.'
+    }
     # What is true once canvas-rgb was stopped.
     $lateState = (@($CopiedNote | Where-Object { $_ }) + 'canvas-rgb was stopped for the update') -join '; '
     $lateState += '.'

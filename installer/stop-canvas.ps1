@@ -12,8 +12,21 @@ $stopState = @{ ServiceWasRunning = $false }
 . (Join-Path $PSScriptRoot 'lib.ps1')
 try {
     if (-not (Test-IsAdmin)) { throw 'stop-canvas.ps1 must run elevated.' }
+    # A marker from an earlier run says nothing about this one.
+    Clear-StoppedServiceMarker
     Stop-CanvasRgbRunning -InstallDir $InstallDir -Result $stopState | ForEach-Object { Write-Step $_ $LogFile }
     Write-Step '  nothing left running' $LogFile
+    # The Inno installer runs the elevated setup step after it copied the files, and that step finds
+    # the service already stopped: it cannot know that this run stopped it. The marker in the
+    # machine home carries that one fact across, so a failure there starts the service again and
+    # the fans do not stay on the motherboard's own settings (#60).
+    if ($stopState.ServiceWasRunning) {
+        if (Set-StoppedServiceMarker) {
+            Write-Step '  this run stopped a running service: the marker says so for the next step' $LogFile
+        } else {
+            Write-Step '  could not write the marker: the next step may not start the service again' $LogFile
+        }
+    }
     exit 0
 } catch {
     Write-Step "FAILED: $($_.Exception.Message)" $LogFile

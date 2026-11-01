@@ -110,13 +110,22 @@ try {
     if ($rm.RemoveInnoEntry -and (Test-Path -LiteralPath $c.InnoUninstallKey)) { Remove-Item -LiteralPath $c.InnoUninstallKey -Recurse -Force; Say '  removed the Inno Installed apps entry' }
     $lnk = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) $c.StartMenuShortcut
     if ($rm.RemoveShortcut -and (Test-Path -LiteralPath $lnk)) { Remove-Item -LiteralPath $lnk -Force; Say '  removed the Start menu shortcut' }
+    $appStopped = @()
     foreach ($n in 'canvas-rgbd', 'canvas-rgb', 'canvas-rgb-cli') {
-        Get-Process -Name $n -ErrorAction SilentlyContinue | ForEach-Object { $_ | Stop-Process -Force; Say "  stopped running $n" }
+        Get-Process -Name $n -ErrorAction SilentlyContinue | ForEach-Object { $_ | Stop-Process -Force; $appStopped += $n; Say "  stopped running $n" }
     }
     # The bundled OpenRGB server, which the service launched as SYSTEM, outlives the service and
     # holds its DLLs open. Stop only the copy that runs from the install dir: an OpenRGB the owner
     # runs from anywhere else is left alone.
-    $stop = Stop-BundledOpenRgb -InstallDir $InstallDir -State 'The service was stopped and removed.' -Retry 'run the uninstall again'
+    # What is already true when this stop refuses: the service was stopped and removed, and the
+    # canvas-rgb programs that were running were stopped. The refusal says so, so the person knows
+    # what state the PC is in (#60).
+    $stopState = if ($svc) { 'The service was stopped and removed' } else { 'There was no service, so none was stopped or removed' }
+    if ($appStopped.Count -gt 0) { $stopState += ", and the canvas-rgb programs were stopped ($(@($appStopped | Select-Object -Unique) -join ', '))" }
+    $stopState += '. '
+    if ($rm.RemoveShortcut) { $stopState += 'The Installed apps entry and the Start menu shortcut were removed.' }
+    else { $stopState += 'The Installed apps entry and the Start menu shortcut are still there.' }
+    $stop = Stop-BundledOpenRgb -InstallDir $InstallDir -State $stopState -Retry 'run the uninstall again'
     $stop.Lines | ForEach-Object { Say $_ }
     Start-Sleep -Milliseconds 500
     # The OpenRGB tree and the leftovers beside it. An OpenRGB that could not be stopped holds files
