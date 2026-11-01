@@ -2713,25 +2713,31 @@ button.chip:hover {
 
   .rd-devices .rd-zone {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) auto auto;
     grid-template-areas:
-      "name count"
-      "drawing size";
+      "name count size"
+      "drawing drawing drawing";
+    align-items: center;
     height: auto;
     row-gap: var(--s1);
+    column-gap: var(--s2);
     padding: var(--s1) var(--s4) var(--s1) var(--s6);
   }
 
+  /* The zone's name and its shape stand on one line here: the row is two lines, not three. */
   .rd-devices .rd-zone .zone-strip-name {
     grid-area: name;
     flex: none;
+    flex-direction: row;
+    align-items: baseline;
+    gap: var(--s2);
   }
 
   .rd-devices .rd-zone .zone-strip-svg {
     grid-area: drawing;
     flex: none;
     width: 100%;
-    height: auto;
+    height: 16px;
   }
 
   .rd-devices .rd-zone .zone-strip-count {
