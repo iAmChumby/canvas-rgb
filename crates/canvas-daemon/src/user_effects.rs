@@ -533,7 +533,7 @@ impl UserEffects {
         if changed {
             self.generation.fetch_add(1, Ordering::SeqCst);
         }
-changed
+        changed
     }
 
     /// Builds the stock effects whose load ran out of time and may be built again.

@@ -8,7 +8,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
-- An effect that was too slow to load the first time is tried again later, instead of staying out of the library. (#56)
+- An effect that did not show up because the PC was busy (a game loading, for example) is no longer treated as broken: canvas-rgb tries it again, and an effect saved at a busy moment is kept. (#56)
 
 ## [0.4.0] - 2026-11-01
 
