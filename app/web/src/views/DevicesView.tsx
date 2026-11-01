@@ -4,7 +4,6 @@ import { useState, type CSSProperties, type ReactElement } from "react";
 import {
   ArrowClockwise,
   Cpu,
-  Crosshair,
   GraphicsCard,
   Keyboard,
   Lightbulb,
@@ -16,10 +15,9 @@ import {
 import type { Icon } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
 import { EmptyState } from "@/components/EmptyState";
-import { Panel, StateDot } from "@/components/Panel";
+import { Panel } from "@/components/Panel";
 import { ErrorPanel, Details, LoadFrame } from "@/components/Loading";
 import { DeviceListShape } from "@/components/LoadShapes";
-import { Skeleton } from "@/components/Skeleton";
 import { refreshDevices, retryDevices, useSnap } from "@/lib/store";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { DeviceKind } from "@/proto/DeviceKind";
@@ -54,11 +52,22 @@ const KIND_LABEL: Record<DeviceKind, string> = {
 
 const ACCENTS = ["--a1", "--a2", "--a3", "--a4", "--a5"] as const;
 
-function zoneShape(z: ZoneInfo): string {
-  if (z.kind.type === "matrix") return `matrix ${z.kind.width} × ${z.kind.height}`;
-  if (z.kind.type === "linear") return "linear";
-  return "single";
-}
+/**
+ * The order the list is in: the devices that are not there first, then by kind - the board
+ * first, then the memory, the card, the fans, the strips and the peripherals. Inside a group
+ * the daemon's own order stands.
+ */
+const KIND_RANK: Record<DeviceKind, number> = {
+  motherboard: 0,
+  dram: 1,
+  gpu: 2,
+  other: 3,
+  led_strip: 4,
+  keyboard: 5,
+  mouse: 5,
+  microphone: 5,
+  headset: 5,
+};
 
 /**
  * The one detail that tells two devices apart when the daemon gives them the same name: the
@@ -173,9 +182,31 @@ export function DevicesView() {
   const walkDevice = devices?.find((d) => d.id === walk?.deviceId) ?? null;
   const walkZone = walkDevice?.zones.find((z) => z.index === walk?.zoneIndex) ?? null;
 
+  // The list in the order it is read: what is not there first, then by kind.
+  const sorted = [...(devices ?? [])].sort((a, b) => {
+    if (a.connected !== b.connected) return a.connected ? 1 : -1;
+    return KIND_RANK[a.kind] - KIND_RANK[b.kind];
+  });
+
+  // How many devices are there, and how many of them are lit: the strip says it in one line.
+  const connectedCount = devices?.filter((d) => d.connected).length ?? 0;
+  const litCount = (devices ?? [])
+    .filter((d) => d.connected)
+    .reduce((sum, d) => sum + d.zones.reduce((s, z) => s + z.led_count, 0), 0);
+
   return (
     <div className="rd-page rd-devices">
-      <PageTitle title="Devices" />
+      <PageTitle
+        title="Devices"
+        context={
+          <>
+            <b>
+              {connectedCount}/{devices?.length ?? 0}
+            </b>{" "}
+            connected · {litCount} LEDs
+          </>
+        }
+      />
 
       {devicesError && devices !== null && (
         // The list is on screen but the last read failed: the cards stay and the page says they
@@ -191,153 +222,128 @@ export function DevicesView() {
         </p>
       )}
 
-      <div className="devices-grid">
-        <LoadFrame
-          state={
-            devices === null
-              ? devicesError && !retrying
-                ? "error"
-                : "loading"
-              : devices.length === 0
-                ? "empty"
-                : "ready"
-          }
-          shape={
-            // A known zero is a known zero: a machine with no devices has none, so the
-            // placeholder draws no card. Only a number that is not known at all falls through
-            // to the next one.
-            <DeviceListShape cards={total ?? listed ?? (counted > 0 ? counted : 3)} />
-          }
-          label="Looking for devices"
-          error={
-            <ErrorPanel
-              title="The devices could not be read"
-              summary="canvas-rgb could not read the devices. The lights are unaffected."
-              message={devicesError}
-              onRetry={() => void retryDevices()}
-            />
-          }
-          empty={
-            <Panel>
-              <EmptyState
-                icon={<Memory size={22} />}
-                title="No device found"
-                action={
-                  <Button size="sm" icon={<ArrowClockwise size={16} />} onClick={() => void refreshDevices()}>
-                    Try again
-                  </Button>
-                }
-              >
-                OpenRGB reports no lights. Plug one in or start OpenRGB, then try again.
-              </EmptyState>
-            </Panel>
-          }
-        >
-          {(devices ?? []).map((d, di) => {
+      <LoadFrame
+        className="load-list"
+        state={
+          devices === null
+            ? devicesError && !retrying
+              ? "error"
+              : "loading"
+            : devices.length === 0
+              ? "empty"
+              : "ready"
+        }
+        shape={
+          // A known zero is a known zero: a machine with no devices has none, so the
+          // placeholder draws no card. Only a number that is not known at all falls through
+          // to the next one.
+          <DeviceListShape cards={total ?? listed ?? (counted > 0 ? counted : 3)} />
+        }
+        label="Looking for devices"
+        error={
+          <ErrorPanel
+            title="The devices could not be read"
+            summary="canvas-rgb could not read the devices. The lights are unaffected."
+            message={devicesError}
+            onRetry={() => void retryDevices()}
+          />
+        }
+        empty={
+          <Panel>
+            <EmptyState
+              icon={<Memory size={22} />}
+              title="No device found"
+              action={
+                <Button size="sm" icon={<ArrowClockwise size={16} />} onClick={() => void refreshDevices()}>
+                  Try again
+                </Button>
+              }
+            >
+              OpenRGB reports no lights. Plug one in or start OpenRGB, then try again.
+            </EmptyState>
+          </Panel>
+        }
+      >
+        <div className="rd-dev-list">
+          {sorted.map((d) => {
             const Glyph = KIND_ICON[d.kind];
-            const accent = ACCENTS[di % ACCENTS.length];
+            const accent = ACCENTS[sorted.indexOf(d) % ACCENTS.length];
             const tag = deviceTag(d);
             const sameName = (devices ?? []).filter((x) => x.name === d.name).length > 1;
+            // The zones of a device that has one are the device's own row; a device with
+            // several gets a row of its own and a row for each of its zones.
+            const one = d.zones.length === 1 ? d.zones[0] : null;
             return (
               <section
                 key={d.id}
-                className="device"
+                className="rd-dev"
                 style={{ "--tone": `var(${accent})` } as CSSProperties}
                 aria-label={d.name}
                 data-testid="device-card"
               >
-                <div className="device-head">
-                  <div className="row-title" style={{ minWidth: 0 }}>
-                    <span className="device-kind" aria-hidden="true">
-                      <Glyph size={18} />
-                    </span>
-                    <span className="stack" style={{ gap: 0, minWidth: 0 }}>
-                      <span className="one-line">
-                        {d.name}
-                        {sameName && tag ? ` ${tag}` : ""}
-                      </span>
-                      <span className="row-sub fig one-line">
-                        {KIND_LABEL[d.kind]} · {d.vendor} · {d.adapter} #{d.adapter_index}
-                        {tag ? ` · ${tag}` : ""}
-                      </span>
-                    </span>
-                  </div>
-                  <StateDot tone={d.connected ? "ok" : "down"}>{d.connected ? "connected" : "disconnected"}</StateDot>
-                </div>
-                {d.zones.length === 0 ? (
-                  <div className="zone-empty">
-                    <EmptyState
-                      icon={<Memory size={20} />}
-                      title={`${d.name} reports no zones`}
-                      action={
-                        <Button size="sm" icon={<ArrowClockwise size={16} />} onClick={() => void refreshDevices()}>
-                          Try again
-                        </Button>
-                      }
-                    >
-                      OpenRGB lists this device but no zones for it yet. Try again once it is lit.
-                    </EmptyState>
-                  </div>
-                ) : (
-                d.zones.map((z) => (
-                  <div className="zone-strip" key={z.index}>
-                    <span className="zone-strip-name">
-                      <span className="one-line" style={{ display: "block" }}>{z.name}</span>
-                      <span className="mute" style={{ fontSize: 14 }}>{zoneShape(z)}</span>
-                    </span>
-                    <ZoneStrip zone={z} />
+                <div className="rd-dev-row">
+                  <span className="device-kind" aria-hidden="true">
+                    <Glyph size={18} />
+                  </span>
+                  <span className="one-line rd-dev-name">
+                    {d.name}
+                    {sameName && tag ? ` ${tag}` : ""}
+                  </span>
+                  <span className="row-sub fig one-line rd-dev-sub">
+                    {KIND_LABEL[d.kind]} · {d.vendor} · #{d.adapter_index}
+                  </span>
+                  {one && <ZoneStrip zone={one} />}
+                  {one && (
                     <span className="zone-strip-count">
-                      <AnimatedNumber value={z.led_count} /> {z.led_count === 1 ? "LED" : "LEDs"}
-                      {z.resizable && <span className="mute"> · {z.min_leds}–{z.max_leds}</span>}
+                      <AnimatedNumber value={one.led_count} /> {one.led_count === 1 ? "LED" : "LEDs"}
                     </span>
-                    <span className="zone-strip-size">
-                      {z.resizable && (
-                        <Button
-                          size="sm"
-                          variant={walk?.deviceId === d.id && walk.zoneIndex === z.index ? "primary" : "default"}
-                          onClick={() => setWalk({ deviceId: d.id, zoneIndex: z.index })}
-                        >
-                          Size
-                        </Button>
-                      )}
-                    </span>
+                  )}
+                  <span className={`state ${d.connected ? "" : "down-text"}`} style={{ "--tone": d.connected ? "var(--ok)" : "var(--down)" } as CSSProperties}>
+                    <span className="state-dot" aria-hidden="true" />
+                    {d.connected ? "connected" : "disconnected"}
+                  </span>
+                </div>
+
+                {d.zones.length > 1 &&
+                  d.zones.map((z) => (
+                    <div className="rd-zone" key={z.index}>
+                      <span className="zone-strip-name one-line">{z.name}</span>
+                      <ZoneStrip zone={z} />
+                      <span className="zone-strip-count">
+                        <AnimatedNumber value={z.led_count} /> {z.led_count === 1 ? "LED" : "LEDs"}
+                        {z.resizable && <span className="mute"> · {z.min_leds}–{z.max_leds}</span>}
+                      </span>
+                      <span className="zone-strip-size">
+                        {z.resizable && (
+                          <Button
+                            size="sm"
+                            variant={walk?.deviceId === d.id && walk.zoneIndex === z.index ? "primary" : "default"}
+                            onClick={() => setWalk({ deviceId: d.id, zoneIndex: z.index })}
+                          >
+                            Size
+                          </Button>
+                        )}
+                      </span>
+                    </div>
+                  ))}
+
+                {/* The walker opens under the row whose Size was pressed, not in a column of
+                    its own (R7). */}
+                {walkDevice?.id === d.id && walkZone && (
+                  <div className="rd-walk">
+                    <IdentifyWalker
+                      key={`${walkDevice.id}#${walkZone.index}`}
+                      device={walkDevice}
+                      zone={walkZone}
+                      onClose={() => setWalk(null)}
+                    />
                   </div>
-                ))
                 )}
               </section>
             );
           })}
-        </LoadFrame>
-
-        <div className="stack" style={{ position: "sticky", top: 16 }}>
-          {devices === null ? (
-            devicesError || total === 0 ? null : (
-              // The walker points at a device that is still coming: it shows a placeholder, not
-              // its own words. When the list could not be read there is no device to point at, so
-              // the column says nothing: a grey skeleton next to an error reads as a page that
-              // is still loading. The same holds for a machine the daemon says has no devices (a
-              // known zero): there is nothing to point at, so the column draws nothing.
-              <Panel>
-                <div className="stack" style={{ gap: 8 }}>
-                  <Skeleton width="54%" height={16} />
-                  <Skeleton width="78%" height={14} />
-                </div>
-              </Panel>
-            )
-          ) : walkDevice && walkZone ? (
-            <IdentifyWalker
-              key={`${walkDevice.id}#${walkZone.index}`}
-              device={walkDevice}
-              zone={walkZone}
-              onClose={() => setWalk(null)}
-            />
-          ) : (
-            <EmptyState icon={<Crosshair size={22} />} title="Identify walker">
-              Pick a header&apos;s Size to find its last LED.
-            </EmptyState>
-          )}
         </div>
-      </div>
+      </LoadFrame>
     </div>
   );
 }

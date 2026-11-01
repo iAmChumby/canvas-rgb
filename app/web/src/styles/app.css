@@ -2202,6 +2202,321 @@ button.chip:hover {
 
 /* ---------- devices page ---------- */
 
+/* The list is the whole page: one row per device, and the list scrolls inside its own pane
+   when it is longer than the window (R1). */
+.rd-devices .load-frame[data-state="ready"] {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.rd-devices .rd-dev-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  columns: 1;
+  column-gap: var(--s4);
+}
+
+/* One device, one row. */
+.rd-devices .rd-dev {
+  break-inside: avoid;
+  border-bottom: 1px solid var(--line);
+}
+
+.rd-devices .rd-dev-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  height: 44px;
+  padding: 0 var(--s4);
+}
+
+.rd-devices .rd-dev-name {
+  flex: 0 0 220px;
+  min-width: 0;
+  font-weight: 600;
+}
+
+.rd-devices .rd-dev-sub {
+  flex: 0 0 212px;
+  min-width: 0;
+}
+
+/* The drawing takes the room the row has left; the count and the state stay put. */
+.rd-devices .rd-dev-row .zone-strip-svg {
+  flex: 1 1 200px;
+  min-width: 64px;
+}
+
+.rd-devices .rd-dev-row .zone-strip-count {
+  flex: none;
+  min-width: 56px;
+  margin-left: auto;
+}
+
+.rd-devices .rd-dev-row .state {
+  flex: none;
+}
+
+/* The word of a not-connected device is in the `down` tone. */
+.rd-devices .rd-dev-row .state.down-text {
+  color: var(--down);
+}
+
+/* A device with several zones: a header row, then one indented row per zone. */
+.rd-devices .rd-zone {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  height: 44px;
+  padding: 0 var(--s4) 0 calc(var(--s4) + var(--s8) + var(--s3));
+  border-top: 1px solid var(--line);
+}
+
+.rd-devices .rd-zone .zone-strip-name {
+  flex: 0 0 116px;
+  min-width: 0;
+}
+
+.rd-devices .rd-zone .zone-strip-svg {
+  flex: 1 1 200px;
+  min-width: 64px;
+}
+
+.rd-devices .rd-zone .zone-strip-count {
+  flex: none;
+  min-width: 56px;
+  margin-left: auto;
+}
+
+.rd-devices .rd-zone .zone-strip-size {
+  flex: none;
+  min-width: 104px;
+  text-align: right;
+}
+
+/* The identify walker: an accordion under the row whose Size was pressed, not a column of its
+   own (R7). The walker's own parts stand along one row, so the list still fits the window. */
+.rd-devices .rd-walk {
+  border-top: 1px solid var(--line);
+  background: var(--raised);
+}
+
+.rd-devices .rd-walk .panel {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: var(--s3);
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: var(--s2) var(--s3);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+/* The head's own parts stand in the row: the title first, the close key last. */
+.rd-devices .rd-walk .panel-head {
+  display: contents;
+}
+
+.rd-devices .rd-walk .panel-title {
+  flex: none;
+  font-size: var(--t14);
+}
+
+.rd-devices .rd-walk .panel-head .tip {
+  order: 10;
+  margin-left: auto;
+}
+
+.rd-devices .rd-walk .stack {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--s3);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* The device's name is on the row above: the walker's own title says which zone it walks. */
+.rd-devices .rd-walk .dim {
+  display: none;
+}
+
+.rd-devices .rd-walk .walker-led {
+  flex: none;
+}
+
+.rd-devices .rd-walk .walker-big {
+  font-size: var(--t28);
+}
+
+.rd-devices .rd-walk .walker-keys {
+  flex: none;
+}
+
+.rd-devices .rd-walk .num {
+  width: 64px;
+}
+
+.rd-devices .rd-walk .btn {
+  flex: none;
+}
+
+/* wide: two columns of the list, and a device never splits across them. */
+@container page (min-width: 1500px) {
+  .rd-devices .rd-dev-list {
+    columns: 2 560px;
+  }
+}
+
+/* R5: a short window (content height under 700) tightens the rows. */
+@container page (max-height: 700px) {
+  .rd-devices .rd-dev-row,
+  .rd-devices .rd-zone {
+    height: 36px;
+  }
+}
+
+/* phone: the row wraps to two lines, the name and its state on the first, the id, the drawing
+   and the count on the second. */
+@container page (max-width: 640px) {
+  .rd-devices .rd-dev-list {
+    overflow: visible;
+    flex: 0 0 auto;
+  }
+
+  .rd-devices .load-frame[data-state="ready"] {
+    flex: 0 0 auto;
+  }
+
+  .rd-devices .rd-dev-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    height: auto;
+    row-gap: var(--s1);
+    column-gap: var(--s1);
+    padding: var(--s1) var(--s4);
+  }
+
+  .rd-devices .rd-dev-row .device-kind {
+    flex: 0 0 24px;
+    order: 0;
+    width: 24px;
+    height: 24px;
+  }
+
+  .rd-devices .rd-dev-row .rd-dev-name {
+    flex: 0 1 auto;
+    order: 1;
+  }
+
+  .rd-devices .rd-dev-row .state {
+    flex: 0 0 100px;
+    order: 2;
+  }
+
+  .rd-devices .rd-dev-row .rd-dev-sub {
+    flex: 0 1 150px;
+    order: 3;
+  }
+
+  .rd-devices .rd-dev-row .zone-strip-svg {
+    flex: 0 0 64px;
+    order: 4;
+    width: 64px;
+    height: auto;
+  }
+
+  .rd-devices .rd-dev-row .zone-strip-count {
+    flex: 0 0 59px;
+    order: 5;
+    margin-left: 0;
+  }
+
+  .rd-devices .rd-zone {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "name count"
+      "drawing size";
+    height: auto;
+    row-gap: var(--s1);
+    padding: var(--s1) var(--s4) var(--s1) var(--s6);
+  }
+
+  .rd-devices .rd-zone .zone-strip-name {
+    grid-area: name;
+    flex: none;
+  }
+
+  .rd-devices .rd-zone .zone-strip-svg {
+    grid-area: drawing;
+    flex: none;
+    width: 100%;
+    height: auto;
+  }
+
+  .rd-devices .rd-zone .zone-strip-count {
+    grid-area: count;
+    justify-self: end;
+    margin-left: 0;
+  }
+
+  .rd-devices .rd-zone .zone-strip-size {
+    grid-area: size;
+    justify-self: end;
+  }
+
+  /* The walker stacks into three rows on a phone. */
+  .rd-devices .rd-walk .panel {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "title close"
+      "read keys"
+      "set button";
+    height: auto;
+    row-gap: var(--s2);
+    padding: var(--s2) var(--s3);
+  }
+
+  .rd-devices .rd-walk .panel-title {
+    grid-area: title;
+  }
+
+  .rd-devices .rd-walk .panel-head .tip {
+    grid-area: close;
+    margin-left: 0;
+    order: 0;
+  }
+
+  .rd-devices .rd-walk .stack {
+    display: contents;
+  }
+
+  .rd-devices .rd-walk .walker-led {
+    grid-area: read;
+  }
+
+  .rd-devices .rd-walk .walker-keys {
+    grid-area: keys;
+    justify-self: end;
+  }
+
+  .rd-devices .rd-walk .stack > .mute {
+    grid-area: set;
+  }
+
+  .rd-devices .rd-walk .stack > .btn {
+    grid-area: button;
+    justify-self: start;
+  }
+}
+
 .devices-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 360px;

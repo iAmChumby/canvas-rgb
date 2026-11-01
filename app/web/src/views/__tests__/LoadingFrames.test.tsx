@@ -253,11 +253,11 @@ describe("the devices list", () => {
     render(<DevicesView />);
     await waitFor(() => expect(frame()?.dataset.state).toBe("loading"));
     expect(screen.queryAllByTestId("device-card")).toHaveLength(0);
-    // The walker has no device to point at either: the right column draws no placeholder.
-    expect(document.querySelectorAll(".devices-grid > .stack .skeleton")).toHaveLength(0);
+    // There is nothing to draw: the list is empty and the walker has no row to open under.
+    expect(document.querySelectorAll(".rd-dev-list .skeleton")).toHaveLength(0);
   });
 
-  it("draws the walker's placeholder while the number of devices is not known", async () => {
+  it("draws the list's placeholder while the number of devices is not known", async () => {
     patchSnap({
       status: { ...status, devices_connected: 0, devices_total: undefined as unknown as number },
       devices: null,
@@ -265,7 +265,7 @@ describe("the devices list", () => {
       devicesError: null,
     });
     render(<DevicesView />);
-    expect(document.querySelectorAll(".devices-grid > .stack .skeleton").length).toBeGreaterThan(0);
+    expect(document.querySelectorAll(".rd-dev-list .skeleton").length).toBeGreaterThan(0);
   });
 
   it("shows no grey placeholder beside the error", async () => {

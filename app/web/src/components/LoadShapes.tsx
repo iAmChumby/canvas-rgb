@@ -393,35 +393,32 @@ function SkelLedStrip() {
 }
 
 export function DeviceListShape({ cards = 3 }: { cards?: number }) {
-  // A plain block, not the frame's flex column: the cards sit 12 px apart by `.device + .device`, as the real ones do.
+  // The shape of the list that is coming: a row per device, and a row for each zone of a device
+  // that has more than one.
   return (
-    <div>
+    <div className="rd-dev-list">
       {Array.from({ length: cards }, (_, i) => {
         const zones = ZONE_RHYTHM[i % ZONE_RHYTHM.length] ?? 1;
-        const vars = {
-          "--dev-w": `${69 + zones * 57.6}px`,
-          "--dev-n": `${97.4 + zones * 108.1}px`,
-        } as CSSProperties;
         return (
-        <section className="device device-skeleton" style={vars} key={i} data-testid="device-card">
-          <div className="device-head">
+        <section className="rd-dev device-skeleton" key={i} data-testid="device-card">
+          <div className="rd-dev-row">
             <Skeleton className="skeleton-icon" />
-            <span className="stack" style={{ gap: 4, minWidth: 0, flex: "1 1 160px" }}>
-              <Skeleton height={16} width="52%" />
-              <Skeleton height={12} width="64%" />
+            <Skeleton height={14} width="200px" />
+            <Skeleton height={12} width="180px" />
+            <span className="zone-strip-count">
+              <Skeleton height={14} width={64} />
             </span>
           </div>
-          {Array.from({ length: zones }, (_, z) => (
-            <div className="zone-strip skel-dev-zone" key={z}>
-              <span className="zone-strip-name">
-                <Skeleton height={14} width="70%" />
-              </span>
-              <SkelLedStrip />
-              <span className="zone-strip-count">
-                <Skeleton height={14} width={64} />
-              </span>
-            </div>
-          ))}
+          {zones > 1 &&
+            Array.from({ length: zones }, (_, z) => (
+              <div className="rd-zone" key={z}>
+                <Skeleton height={14} width="100px" />
+                <SkelLedStrip />
+                <span className="zone-strip-count">
+                  <Skeleton height={14} width={64} />
+                </span>
+              </div>
+            ))}
         </section>
         );
       })}
