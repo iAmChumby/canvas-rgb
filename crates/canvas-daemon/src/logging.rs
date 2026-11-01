@@ -438,6 +438,7 @@ mod tests {
         let dir = temp_dir("reparse");
         let elsewhere = temp_dir("reparse-target");
         let link = todays_log_file(&dir, "canvas-rgbd");
+        // token: the current user's, not elevated (a test making a junction with mklink).
         let made = std::process::Command::new("cmd")
             .args(["/C", "mklink", "/J"])
             .arg(&link)
