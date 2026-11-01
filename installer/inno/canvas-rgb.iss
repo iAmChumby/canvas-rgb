@@ -76,6 +76,7 @@ Source: "{#PayloadDir}\installer\preflight.ps1";      DestDir: "{tmp}"; Flags: d
 Source: "{#PayloadDir}\installer\detect.ps1";         DestDir: "{tmp}"; Flags: dontcopy
 Source: "{#PayloadDir}\installer\stop-canvas.ps1";    DestDir: "{tmp}"; Flags: dontcopy
 Source: "{#PayloadDir}\installer\fetch-openrgb.ps1";  DestDir: "{tmp}"; Flags: dontcopy
+Source: "{#PayloadDir}\installer\check-install-dir.ps1"; DestDir: "{tmp}"; Flags: dontcopy
 Source: "{#PayloadDir}\installer\openrgb.lock.json";  DestDir: "{tmp}"; Flags: dontcopy
 
 [Icons]
@@ -106,6 +107,14 @@ Filename: "{app}\canvas-rgb.exe"; Parameters: "--onboard"; Description: "Launch 
 [Code]
 const
   UninstallSubkey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\canvas-rgb';
+  // PowerShell that exits 0 when %APP% is under %PF% (case-insensitive, whole path segments), else 1. Single
+  // quotes are doubled for Pascal; the install-folder tests run this very text for both branches.
+  UnderProgramFilesScript = '$a = ([IO.DirectoryInfo]''%APP%'').FullName.TrimEnd(''\'') + ''\''; $b = ([IO.DirectoryInfo]''%PF%'').FullName.TrimEnd(''\'') + ''\''; if ($a.StartsWith($b, [StringComparison]::OrdinalIgnoreCase)) { exit(0) } else { exit(1) }';
+  // PowerShell run BEFORE anything in {app} when the protected check copy is missing: it checks {app}, its
+  // installer folder, the two scripts the uninstaller runs and the program, with code that does not come from
+  // {app}. Exits 1 on a junction, an owner other than SYSTEM or Administrators, a NULL permission list, or a
+  // write right given to anyone else. The install-folder tests run this very text on throwaway folders.
+  AppCheckScript = '$k = ''S-1-5-18'',''S-1-5-32-544''; $t = ''S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464''; $w = 0x4 -bor 0x2 -bor 0x10 -bor 0x40 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x40000000 -bor 0x10000000; $r = ([IO.DirectoryInfo]''%APP%'').FullName.TrimEnd(''\''); $bad = 0; foreach ($f in $r, ($r + ''\installer''), ($r + ''\installer\uninstall-elev'' + ''ated.ps1''), ($r + ''\installer\lib.ps1''), ($r + ''\installer\uninstall-user.ps1''), ($r + ''\canvas-rgb-svc.exe'')) { if (-not ([IO.File]::Exists($f) -or [IO.Directory]::Exists($f))) { continue }; if ([IO.File]::GetAttributes($f) -band 0x400) { $bad = 1 }; $a = Get-Acl -LiteralPath $f; if ($a.GetSecurityDescriptorSddlForm(''Access'') -eq '''') { $bad = 1 }; if ($k -notcontains $a.GetOwner([Security.Principal.SecurityIdentifier]).Value) { $bad = 1 }; foreach ($x in $a.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) { if ($x.AccessControlType -eq ''Allow'' -and -not ($x.PropagationFlags -band 2) -and (([int]$x.FileSystemRights -band $w) -ne 0) -and ($k + $t) -notcontains $x.IdentityReference.Value) { $bad = 1 } } }; exit($bad)';
 
 var
   SignalRgbPage: TInputOptionWizardPage;
@@ -119,6 +128,7 @@ var
   FPrepError: String;       // why PrepareToInstall stopped Setup, for the /UPDATE result file
   FPurge: String;           // ' -PurgeConfig' or empty
   FStoppedRunningService: Boolean;  // the first step stopped a running service (#60)
+  FInstallDirOk: Boolean;           // the uninstall check passed: the folder only administrators can change (#46)
 
 function ScriptsOk: Boolean;
 begin
@@ -179,6 +189,38 @@ end;
 function PsExe: String;
 begin
   Result := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
+end;
+
+// True when {app} is inside Program Files ({commonpf}). Used only when the protected check copy is missing.
+function AppIsUnderProgramFiles: Boolean;
+var
+  Code: Integer;
+  App, Pf, Script: String;
+begin
+  App := ExpandConstant('{app}');
+  Pf := ExpandConstant('{commonpf}');
+  StringChangeEx(App, '''', '''''', True);
+  StringChangeEx(Pf, '''', '''''', True);
+  Script := UnderProgramFilesScript;
+  StringChangeEx(Script, '%APP%', App, True);
+  StringChangeEx(Script, '%PF%', Pf, True);
+  // token: Exec runs as Setup's own administrator token; the script only compares two paths.
+  Result := Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), '-NoProfile -Command "' + Script + '"',
+    ExpandConstant('{sys}'), SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0);
+end;
+
+// Runs AppCheckScript on {app}: True when it found nothing wrong. Code is its exit code.
+function AppFolderPassesCheck(var Code: Integer): Boolean;
+var
+  App, Script: String;
+begin
+  App := ExpandConstant('{app}');
+  StringChangeEx(App, '''', '''''', True);
+  Script := AppCheckScript;
+  StringChangeEx(Script, '%APP%', App, True);
+  // token: Exec runs as Setup's own administrator token; the script only reads owners and permissions.
+  Result := Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), '-NoProfile -Command "' + Script + '"',
+    ExpandConstant('{sys}'), SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0);
 end;
 
 function RunPs(const ScriptPath, Args: String; AsOriginalUser: Boolean; var Code: Integer): Boolean;
@@ -435,11 +477,12 @@ end;
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   Code: Integer;
-  Dl, Log, Args: String;
+  Dl, Log, DirLog, Args: String;
 begin
   Result := '';
   Log := ExpandConstant('{tmp}\canvas-rgb-prepare.log');
   ExtractTemporaryFile('lib.ps1');
+  ExtractTemporaryFile('check-install-dir.ps1');
   ExtractTemporaryFile('preflight.ps1');
   ExtractTemporaryFile('stop-canvas.ps1');
   ExtractTemporaryFile('fetch-openrgb.ps1');
@@ -453,6 +496,18 @@ begin
   if not RunPs(ExpandConstant('{tmp}\preflight.ps1'), Args, False, Code) or (Code <> 0) then
   begin
     Result := PrepFail('Setup found a problem before copying anything. Nothing was changed.' + #13#10 + #13#10 + LogTail(Log));
+    Exit;
+  end;
+
+  // The install folder runs code as SYSTEM (the service, OpenRGB, these scripts), so it must be a folder only
+  // administrators can change. This locks it first, then refuses on anything a user could write, before
+  // any file is copied and before anything is downloaded or stopped (#46). A refusal never deletes or
+  // takes over a thing; it names the folder and what is wrong.
+  WizardForm.PreparingLabel.Caption := 'Checking the install folder...';
+  DirLog := ExpandConstant('{tmp}\canvas-rgb-dircheck.log');
+  if not RunPs(ExpandConstant('{tmp}\check-install-dir.ps1'), '-InstallDir "' + ExpandConstant('{app}') + '" -Mode Install -LogFile "' + DirLog + '"', False, Code) or (Code <> 0) then
+  begin
+    Result := PrepFail('Setup cannot use this install folder, and nothing was copied.' + #13#10 + #13#10 + LogTail(DirLog));
     Exit;
   end;
 
@@ -644,11 +699,47 @@ end;
 function InitializeUninstall: Boolean;
 var
   Code: Integer;
-  Log, Args: String;
+  Log, Args, CheckLog, CheckScript: String;
   Ran: Boolean;
 begin
   Result := True;
   FPurge := '';
+  FInstallDirOk := False;
+  // First of all, before anything in the install folder is run (the elevated script below runs
+  // canvas-rgb-svc.exe as an administrator): the folder must be one only administrators can change.
+  // The check runs from a protected copy in the machine home, never from {app}, which is the folder
+  // being checked. An install made before this check was added has no copy: its folder is then checked by
+  // the script embedded below (AppCheckScript), never by code from {app}, and refused when it is not
+  // admin-only, with a message that says how to fix it (#46).
+  CheckLog := ExpandConstant('{tmp}\canvas-rgb-uninstall-dircheck.log');
+  CheckScript := ExpandConstant('{commonappdata}\canvas-rgb\check\check-install-dir.ps1');
+  if not FileExists(CheckScript) then
+  begin
+    if AppIsUnderProgramFiles then
+    begin
+      // The protected copy is gone. Before uninstall-elevated.ps1 (which lives in {app}) runs, {app} is
+      // checked with code that is not from {app}: AppCheckScript.
+      Ran := AppFolderPassesCheck(Code);
+      if not Ran then
+        SaveStringToFile(CheckLog, 'canvas-rgb cannot confirm that only administrators can change the folder it is installed in, or the check could not run. Nothing was removed or run. Fix the permissions on that folder yourself, or install canvas-rgb again into the default folder under Program Files and remove the old folder by hand.', False);
+    end
+    else
+    begin
+      SaveStringToFile(CheckLog, 'This copy of canvas-rgb is in a folder outside Program Files, and the safety check that setup keeps in the protected canvas-rgb data folder is missing, so the uninstaller cannot confirm that only administrators can change this folder. Nothing was removed or run. Install canvas-rgb again into the default folder under Program Files (the new install takes over from this one), then remove this old folder by hand.', False);
+      Ran := False;
+      Code := 1;
+    end;
+  end
+  else
+    Ran := RunPs(CheckScript, '-InstallDir "' + ExpandConstant('{app}') + '" -Mode Verify -LogFile "' + CheckLog + '"', False, Code);
+  if not (Ran and (Code = 0)) then
+  begin
+    if not UninstallSilent then
+      MsgBox('canvas-rgb cannot be removed from this folder.' + #13#10 + #13#10 + LogTail(CheckLog), mbError, MB_OK);
+    Result := False;
+    Exit;
+  end;
+  FInstallDirOk := True;
   if UninstallSilent then
   begin
     if Uppercase(GetParam('PURGE', 'N')) = 'Y' then FPurge := ' -PurgeConfig';
@@ -702,6 +793,8 @@ var
   Code: Integer;
 begin
   if CurUninstallStep <> usUninstall then Exit;
+  // Nothing from the install folder runs unless the check in InitializeUninstall passed (#46).
+  if not FInstallDirOk then Exit;
   if not RunPs(ExpandConstant('{app}\installer\uninstall-user.ps1'),
       '-InstallDir "' + ExpandConstant('{app}') + '"' + FPurge, False, Code) or (Code <> 0) then
     SuppressibleMsgBox('Cleaning up your account settings did not finish (code ' + IntToStr(Code) + '). The program files are still removed.',

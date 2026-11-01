@@ -75,6 +75,7 @@ function Invoke-UninstallSandbox([string]$Name, [switch]$OpenRgbStub, [switch]$C
     $stubs = @'
 function Test-IsAdmin { return $true }
 function Assert-MachineHomeSafe { param($Path) }
+function Assert-InstallDirProtected { param($Path, $Mode) }
 function Get-Service { param($Name) }
 function Set-Service { param($Name, [string]$StartupType) }
 function Get-Process { [CmdletBinding()] param([string]$Name, [int]$Id) }
@@ -191,6 +192,7 @@ function Invoke-InnoUpdateSandbox([string]$Name, [string]$ServiceStatus) {
 function Test-IsAdmin { return `$true }
 function Assert-MachineHomeSafe { param(`$Path) }
 function Initialize-MachineHome { param(`$Path, `$LogFile) New-Item -ItemType Directory -Path `$Path -Force | Out-Null }
+function Copy-InstallDirCheck { param(`$SourceDir, `$MachineHome) }
 function Get-Service { param(`$Name) `$s = [pscustomobject]@{ Name = 'canvas-rgb-svc'; Status = `$global:SvcStatus }; `$s | Add-Member -MemberType ScriptMethod -Name WaitForStatus -Value { param(`$S, `$T) }; `$s }
 function Stop-Service { param(`$Name, [switch]`$Force) `$global:SvcStatus = 'Stopped'; Write-Host 'CALL Stop-Service' }
 function Start-Service { param(`$Name) `$global:SvcStatus = 'Running'; Write-Host 'CALL Start-Service' }

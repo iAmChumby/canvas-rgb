@@ -218,6 +218,7 @@ function Set-UserPathEntry { Write-Host 'STUB Set-UserPathEntry'; return $false 
 
 function Test-IsAdmin { return $true }
 function Assert-MachineHomeSafe { param($Path) Write-Host 'STUB Assert-MachineHomeSafe' }
+function Assert-InstallDirProtected { param($Path, $Mode) Write-Host 'STUB Assert-InstallDirProtected' }
 function Get-Service { param($Name) Write-Host 'STUB Get-Service'; if ($Name -eq '__SIGNAL__') { [pscustomobject]@{ Name = $Name; Status = 'Stopped' } } }
 function Set-Service { Write-Host 'STUB Set-Service' }
 function Get-Process { }

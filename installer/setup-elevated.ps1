@@ -80,6 +80,10 @@ try {
     # 5. ProgramData: created already protected.
     Initialize-MachineHome -Path $programData -LogFile $LogFile
     Say "  $programData ready"
+    # The uninstaller checks the install folder from this protected copy of the check, never from the
+    # install folder itself (#46).
+    Copy-InstallDirCheck -SourceDir $PSScriptRoot -MachineHome $programData
+    Say "  install folder check kept in $programData\check for the uninstaller"
 
     # 6. PawnIO from the official installer the user already downloaded.
     if ($PawnIoInstaller) {

@@ -24,6 +24,9 @@ try {
     # 0. Check before anything changes: the folders this script is about to delete are the ones
     #    canvas-rgb owns. The machine home is also where bios-state.json is read from below.
     Assert-InstallDirSafe -Path $InstallDir
+    # The service exe in this folder is about to run as an administrator (--restore-bios): it must be a
+    # folder only administrators can change (#46). Looks only; changes nothing.
+    Assert-InstallDirProtected -Path $InstallDir -Mode Verify
     Assert-MachineHomeSafe -Path $programData
 
     # 0b. Read the SignalRGB machine record NOW, before anything is deleted. An unreadable record is reported and

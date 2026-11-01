@@ -1,6 +1,7 @@
 # Minimal assertion helpers (Pester on this PC is 3.4.0, too old). Dot-source from a *.Tests.ps1.
 $script:Pass = 0
 $script:Fail = 0
+$script:Skipped = 0
 
 function Test-Case {
     param([string]$Name, [scriptblock]$Body)
@@ -13,6 +14,13 @@ function Test-Case {
         Write-Host "FAIL  $Name"
         Write-Host "      $($_.Exception.Message)"
     }
+}
+
+# A check that could not run here. Shown as SKIP (UNKNOWN), counted separately, never as PASS.
+function Skip-Case {
+    param([string]$Name, [string]$Reason)
+    $script:Skipped++
+    Write-Host "SKIP  $Name  (UNKNOWN, not run: $Reason)"
 }
 
 function Assert-True { param($Cond, [string]$Msg = 'expected true') if (-not $Cond) { throw $Msg } }
@@ -37,7 +45,7 @@ function New-TestDir {
 
 function Complete-Tests {
     param([string]$Suite)
-    Write-Host "$Suite : $($script:Pass) passed, $($script:Fail) failed"
+    Write-Host "$Suite : $($script:Pass) passed, $($script:Fail) failed, $($script:Skipped) skipped"
     if ($script:Fail -gt 0) { exit 1 }
     exit 0
 }

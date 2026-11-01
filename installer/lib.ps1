@@ -1370,3 +1370,245 @@ function Copy-PawnIoToStaging {
     } finally { $in.Dispose() }
     return $dest
 }
+
+# ---------------------------------------------------------------- install folder guard (#46)
+# SYSTEM runs code from the install folder (the service, OpenRGB, the installer scripts), so the folder
+# must be one only administrators can change. These functions take a "reader" (what is on disk) and an
+# "applier" (what changes it) as hashtables of scriptblocks, so the tests run them on fakes. The real
+# ones are New-InstallDirReader and New-InstallDirApplier. Nothing here deletes, renames or adopts a file.
+
+# Write-class rights on an entry: FILE_WRITE_DATA/ADD_FILE (0x2), FILE_APPEND_DATA/ADD_SUBDIRECTORY (0x4),
+# FILE_WRITE_EA (0x10), FILE_DELETE_CHILD (0x40), FILE_WRITE_ATTRIBUTES (0x100), DELETE (0x10000),
+# WRITE_DAC (0x40000), WRITE_OWNER (0x80000), GENERIC_WRITE (0x40000000), GENERIC_ALL (0x10000000).
+# Same set as ENTRY_WRITE_MASK in crates/canvas-svc/src/secure.rs.
+$script:InstallDirEntryWriteMask = 0x2 -bor 0x4 -bor 0x10 -bor 0x40 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x40000000 -bor 0x10000000
+# Control over a PARENT folder: FILE_DELETE_CHILD (0x40), WRITE_DAC (0x40000), WRITE_OWNER (0x80000), GENERIC_ALL.
+# A plain Modify ACE has none of these, so the bits are read, not the ACE name. DELETE (0x10000) is added for
+# every parent except the drive root: with DELETE on a parent (Modify includes it) a user can rename that
+# parent away and rebuild the install path with their own files in it. A drive root cannot be renamed.
+$script:InstallDirParentControlMask = 0x40 -bor 0x40000 -bor 0x80000 -bor 0x10000000
+$script:InstallDirParentDeleteBit = 0x10000
+$script:TrustedInstallerSid = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+
+# Who may hold write access or own a PARENT folder. Windows owns C:\ and C:\Program Files as TrustedInstaller.
+function Test-InstallDirParentSidTrusted {
+    param([string]$Sid)
+    return ((Test-OwnerSidAllowed -Sid $Sid) -or $Sid -eq $script:TrustedInstallerSid)
+}
+
+# The first ACE (allow, not inherit-only) that gives a principal other than SYSTEM, Administrators or
+# TrustedInstaller a right in $Mask. Returns the SID, or $null.
+function Find-UntrustedAceSid {
+    param($Aces, [int]$Mask)
+    foreach ($a in @($Aces)) {
+        if (-not $a.Allow -or $a.InheritOnly) { continue }
+        if (([int]$a.Mask -band $Mask) -eq 0) { continue }
+        if (-not (Test-InstallDirParentSidTrusted -Sid $a.Sid)) { return $a.Sid }
+    }
+    return $null
+}
+
+# What is on disk. Nothing here follows a junction: the caller checks IsReparse first.
+# Aces reads the raw descriptor, so a NULL DACL (everyone, everything) and an ACE type this check cannot
+# parse (object, compound, callback) are both seen, and both count as granting (fail closed, like the
+# Rust check in crates/canvas-svc/src/secure.rs).
+function New-InstallDirReader {
+    return @{
+        Exists    = { param($p) try { [System.IO.File]::GetAttributes($p) | Out-Null; $true } catch { $false } }
+        IsDir     = { param($p) [bool]([System.IO.File]::GetAttributes($p) -band [System.IO.FileAttributes]::Directory) }
+        IsReparse = { param($p) [bool]([System.IO.File]::GetAttributes($p) -band [System.IO.FileAttributes]::ReparsePoint) }
+        List      = { param($p) [System.IO.Directory]::GetFileSystemEntries($p) }
+        OwnerSid  = { param($p) Get-PathOwnerSid -Path $p }
+        Aces      = {
+            param($p)
+            $acl = Get-Acl -LiteralPath $p
+            $raw = New-Object System.Security.AccessControl.RawSecurityDescriptor($acl.GetSecurityDescriptorBinaryForm(), 0)
+            $dacl = $raw.DiscretionaryAcl
+            if ($null -eq $dacl) {
+                return @([pscustomobject]@{ Sid = 'S-1-1-0'; Mask = 0x1f01ff; Allow = $true; InheritOnly = $false })
+            }
+            # Deny, audit, alarm and label families grant nothing (same list as ace_type_grants_nothing in Rust).
+            $grantsNothing = 1, 2, 3, 6, 7, 8, 10, 12, 13, 14, 15, 16, 17, 18, 19
+            foreach ($ace in $dacl) {
+                $type = [int]$ace.AceType
+                $inheritOnly = [bool](([int]$ace.AceFlags) -band 0x08)
+                if ($type -eq 0) {
+                    [pscustomobject]@{ Sid = $ace.SecurityIdentifier.Value; Mask = [int]$ace.AccessMask; Allow = $true; InheritOnly = $inheritOnly }
+                } elseif ($grantsNothing -contains $type) {
+                    [pscustomobject]@{ Sid = ''; Mask = 0; Allow = $false; InheritOnly = $inheritOnly }
+                } else {
+                    [pscustomobject]@{ Sid = "unparsed-ace-type-$type"; Mask = 0x1f01ff; Allow = $true; InheritOnly = $inheritOnly }
+                }
+            }
+        }
+    }
+}
+
+# What changes disk. Create makes the folder already protected (no window with the inherited ACL).
+# Lock replaces ONLY the DACL, protected: the owner is never changed, so a folder somebody else owns
+# is still seen as theirs afterwards and refused, never adopted.
+function New-InstallDirApplier {
+    return @{
+        Create = {
+            param($p)
+            $sec = New-Object System.Security.AccessControl.DirectorySecurity
+            $sec.SetSecurityDescriptorSddlForm($script:CanvasConst.MachineHomeSddl, [System.Security.AccessControl.AccessControlSections]::Access)
+            [System.IO.Directory]::CreateDirectory($p, $sec) | Out-Null
+        }
+        Lock = {
+            param($p)
+            $sec = New-Object System.Security.AccessControl.DirectorySecurity
+            $sec.SetSecurityDescriptorSddlForm($script:CanvasConst.MachineHomeSddl, [System.Security.AccessControl.AccessControlSections]::Access)
+            Set-Acl -LiteralPath $p -AclObject $sec -ErrorAction Stop
+        }
+    }
+}
+
+# Every folder above $Path up to the drive root. Folders that do not exist yet are skipped. Returns $null
+# when all pass, else the reason.
+function Find-InstallDirParentProblem {
+    param([string]$Path, [hashtable]$Reader)
+    $parent = [System.IO.Path]::GetDirectoryName($Path)
+    while ($parent) {
+        if (& $Reader.Exists $parent) {
+            $isRoot = -not [System.IO.Path]::GetDirectoryName($parent)
+            if ((-not $isRoot) -and (& $Reader.IsReparse $parent)) {
+                return "'$parent', a folder above it, is a junction or symbolic link"
+            }
+            $owner = & $Reader.OwnerSid $parent
+            if (-not (Test-InstallDirParentSidTrusted -Sid $owner)) {
+                return "'$parent', a folder above it, is owned by $owner, not SYSTEM, Administrators or TrustedInstaller"
+            }
+            $mask = $script:InstallDirParentControlMask
+            if (-not $isRoot) { $mask = $mask -bor $script:InstallDirParentDeleteBit }
+            $who = Find-UntrustedAceSid -Aces (& $Reader.Aces $parent) -Mask $mask
+            if ($who) {
+                return "'$parent', a folder above it, lets $who change its permissions, rename it or delete what is in it"
+            }
+        }
+        $parent = [System.IO.Path]::GetDirectoryName($parent)
+    }
+    return $null
+}
+
+# Every entry under $Root, root included (a junction is never entered): no junction or symlink, owned by
+# SYSTEM or Administrators, and no one else can write it. Returns $null when all pass, else the reason.
+function Find-InstallDirTreeProblem {
+    param([string]$Root, [hashtable]$Reader)
+    $stack = New-Object System.Collections.Generic.Stack[string]
+    $stack.Push($Root)
+    while ($stack.Count -gt 0) {
+        $p = $stack.Pop()
+        if (& $Reader.IsReparse $p) { return "'$p' is a junction or symbolic link" }
+        $owner = & $Reader.OwnerSid $p
+        if (-not (Test-OwnerSidAllowed -Sid $owner)) { return "'$p' is owned by $owner, not SYSTEM or Administrators" }
+        $who = Find-UntrustedAceSid -Aces (& $Reader.Aces $p) -Mask $script:InstallDirEntryWriteMask
+        if ($who) { return "'$p' can be changed by $who" }
+        if (& $Reader.IsDir $p) {
+            foreach ($child in @(& $Reader.List $p)) { $stack.Push($child) }
+        }
+    }
+    return $null
+}
+
+# The one install-folder guard, for setup and uninstall.
+#   -Mode Install  1. read-only checks FIRST: every parent (junction, owner, rights), then the folder and
+#                     every entry in it. A refusal here has changed nothing.
+#                  2. a folder that does not exist yet is created WITH the protected descriptor in one call (its
+#                     parents were walked before this); a junction or foreign owner found there is refused.
+#                  3. an existing folder is locked (protected ACL); a new one was born protected and is not
+#                     locked again. Then the folder, its entries and its parents are checked again.
+#   -Mode Verify   (uninstall) the read-only checks only: no create and no lock; a missing folder passes.
+# Throws a plain "STOP:" message at the first problem. Never deletes or adopts anything.
+function Assert-InstallDirProtected {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [ValidateSet('Install', 'Verify')][string]$Mode = 'Install',
+        [hashtable]$Reader = (New-InstallDirReader),
+        [hashtable]$Applier = (New-InstallDirApplier),
+        [string]$LogFile
+    )
+    $locked = $false
+    $created = $false
+    $verb = if ($Mode -eq 'Install') { 'install into' } else { 'run from' }
+    $stop = {
+        param($why)
+        $tail = if ($Mode -eq 'Install') {
+            $state = if ($locked) { 'Setup locked this folder to administrators only before it found this.' }
+                     elseif ($created) { 'Setup asked for this folder to be created already protected, and changed nothing else.' }
+                     else { 'The folder''s permissions were not changed.' }
+            "Nothing was copied. $state Setup never deletes or takes over your files. Choose a folder under Program Files (the default) or directly under a drive (such as D:\canvas-rgb), then run setup again."
+        } else {
+            'Nothing was removed or run. Install canvas-rgb again into the default folder under Program Files, then remove this old folder by hand.'
+        }
+        "STOP: canvas-rgb will not $verb '$Path': $why. canvas-rgb runs programs from its folder as the system, so only administrators may be able to change it. $tail"
+    }
+    if ($Path -notmatch '^[A-Za-z]:\\') { throw (& $stop 'it is not a full drive path') }
+    $full = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+    if ($full -match '^[A-Za-z]:$') { throw (& $stop 'it is a whole drive') }
+
+    $exists = [bool](& $Reader.Exists $full)
+    if (-not $exists -and $Mode -eq 'Verify') { return }
+    # Setup creates only the last folder. A missing folder above it would be created with the
+    # permissions it inherits (often ones that let any user rename it), refused afterwards and left
+    # behind, so it is refused before anything is made.
+    $above = [System.IO.Path]::GetDirectoryName($full)
+    if (-not $exists -and $above -and -not (& $Reader.Exists $above)) {
+        throw (& $stop "the folder above it, '$above', does not exist")
+    }
+
+    # 1. Read-only, before anything is changed. The parents come first: with them safe, a user can neither
+    #    rename nor delete the folder or a parent, so the folder cannot be swapped for a junction
+    #    between these checks and the lock.
+    $problem = Find-InstallDirParentProblem -Path $full -Reader $Reader
+    if ($problem) { throw (& $stop $problem) }
+    if ($exists) {
+        if (-not (& $Reader.IsDir $full)) { throw (& $stop 'it is a file, not a folder') }
+        $problem = Find-InstallDirTreeProblem -Root $full -Reader $Reader
+        if ($problem) { throw (& $stop $problem) }
+    }
+    if ($Mode -eq 'Verify') { return }
+
+    # 2. A new folder is created WITH the protected descriptor in the one call and is never locked
+    #    separately: if something (a junction) was put at the path after the read above, Create does
+    #    nothing, and a separate lock would follow that junction and re-permission its target. So the
+    #    created path is looked at first, and a junction or a foreign owner is refused with nothing locked.
+    if (-not $exists) {
+        try { & $Applier.Create $full } catch { throw (& $stop "the folder could not be created ($($_.Exception.Message))") }
+        $created = $true
+        if (& $Reader.IsReparse $full) { throw (& $stop "'$full' is a junction or symbolic link that appeared before the folder could be created") }
+        $owner = & $Reader.OwnerSid $full
+        if (-not (Test-OwnerSidAllowed -Sid $owner)) { throw (& $stop "'$full' is owned by $owner, not SYSTEM or Administrators") }
+    } else {
+        # 3. An existing folder that the checks above found admin-owned and junction-free is locked.
+        try { & $Applier.Lock $full } catch { throw (& $stop "its permissions could not be locked ($($_.Exception.Message))") }
+        $locked = $true
+    }
+    $problem = Find-InstallDirTreeProblem -Root $full -Reader $Reader
+    if ($problem) { throw (& $stop $problem) }
+    $problem = Find-InstallDirParentProblem -Path $full -Reader $Reader
+    if ($problem) { throw (& $stop $problem) }
+}
+
+# Keeps the install-folder check where the uninstaller can trust it: a "check" folder in the protected
+# machine home (SYSTEM and Administrators write, everyone else reads). The check is two files, the script
+# and lib.ps1 it dot-sources. An existing folder or file that is a junction or owned by a non-admin is
+# refused, never replaced.
+function Copy-InstallDirCheck {
+    param([Parameter(Mandatory)][string]$SourceDir, [Parameter(Mandatory)][string]$MachineHome)
+    $dest = Join-Path $MachineHome 'check'
+    foreach ($p in @($dest) + @('check-install-dir.ps1', 'lib.ps1' | ForEach-Object { Join-Path $dest $_ })) {
+        if (-not (Test-Path -LiteralPath $p)) { continue }
+        if ((Get-Item -LiteralPath $p -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+            throw "STOP: '$p' is a junction or symbolic link. Setup never follows or deletes it. Check it yourself and remove it, then run setup again."
+        }
+        $sid = Get-PathOwnerSid -Path $p
+        if (-not (Test-OwnerSidAllowed -Sid $sid)) {
+            throw "STOP: '$p' is owned by $sid, not SYSTEM or Administrators. Setup never deletes or takes over an existing file. Check it yourself and remove it, then run setup again."
+        }
+    }
+    New-Item -ItemType Directory -Path $dest -Force | Out-Null
+    foreach ($f in 'check-install-dir.ps1', 'lib.ps1') {
+        Copy-Item -LiteralPath (Join-Path $SourceDir $f) -Destination (Join-Path $dest $f) -Force
+    }
+}
