@@ -159,6 +159,10 @@ pub struct UpdateConfig {
     pub user_session_wait: Duration,
     /// How often a finish that found nobody logged on is tried again (until the marker is stale).
     pub resume_retry: Duration,
+    /// The clock the age of the update marker is measured with, in milliseconds since the Unix
+    /// epoch. A test replaces it, so the age of a marker is the test's to decide and not the
+    /// wall clock's (class `cause:timing-test`, #66).
+    pub now_unix_ms: Arc<dyn Fn() -> u64 + Send + Sync>,
 }
 
 impl UpdateConfig {
@@ -176,6 +180,7 @@ impl UpdateConfig {
             user_step_limit: Duration::from_secs(5 * 60),
             user_session_wait: Duration::from_secs(2 * 60),
             resume_retry: Duration::from_secs(10),
+            now_unix_ms: Arc::new(now_unix_ms),
         }
     }
 }
@@ -197,6 +202,11 @@ pub struct PendingUpdate {
     pub requester_session: u32,
     /// Seconds since the Unix epoch.
     pub started_unix: u64,
+    /// Milliseconds since the Unix epoch: the same moment, to the millisecond. The age of the
+    /// marker is measured with it, so a wait limit shorter than a second is not rounded down to
+    /// nothing. Zero in a marker written before this field existed; then `started_unix` is used.
+    #[serde(default)]
+    pub started_unix_ms: u64,
     /// The private `TMP`/`TEMP` folder setup ran with (a folder this service made inside the staging
     /// folder). Empty in a marker from before it existed.
     #[serde(default)]
@@ -205,6 +215,14 @@ pub struct PendingUpdate {
 
 fn now_unix() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// The wall clock, in milliseconds since the Unix epoch. The default clock of the marker age.
+pub(crate) fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 // ---- verification ----
@@ -613,6 +631,7 @@ impl UpdateInstaller {
                 requester_pid: who.pid,
                 requester_session: who.session,
                 started_unix: now_unix(),
+                started_unix_ms: (self.cfg.now_unix_ms)(),
                 tmp_dir: tmp.path.to_string_lossy().into_owned(),
             }
         };
@@ -701,8 +720,23 @@ impl UpdateInstaller {
 
     /// The marker is older than the longest wait for setup: that setup is hung, or was stranded suspended
     /// by a service crash between the marker write and the resume.
+    ///
+    /// The age is measured in milliseconds against the limit in milliseconds, so a limit shorter
+    /// than a second is a limit and not nothing (class `cause:timing-test`, #66).
     fn marker_is_overdue(&self, pending: &PendingUpdate) -> bool {
-        now_unix().saturating_sub(pending.started_unix) > self.cfg.setup_wait_limit.as_secs()
+        self.marker_age_ms(pending) > self.cfg.setup_wait_limit.as_millis()
+    }
+
+    /// How long ago the marker was written, in milliseconds. The clock is the config's, so a test
+    /// decides the age of a marker.
+    fn marker_age_ms(&self, pending: &PendingUpdate) -> u128 {
+        // A marker from before the millisecond field existed falls back to its seconds.
+        let started = if pending.started_unix_ms != 0 {
+            pending.started_unix_ms
+        } else {
+            pending.started_unix.saturating_mul(1000)
+        };
+        u128::from((self.cfg.now_unix_ms)().saturating_sub(started))
     }
 
     /// Ends an overdue setup (PID and creation time verified by the probe). No job object ties setup to
@@ -940,7 +974,7 @@ impl UpdateInstaller {
                 return None;
             }
         };
-        if now_unix().saturating_sub(pending.started_unix) > MARKER_MAX_AGE.as_secs() {
+        if self.marker_age_ms(&pending) > MARKER_MAX_AGE.as_millis() {
             tracing::warn!(version = %pending.version, "dropping a stale update marker");
             self.discard(&updates, &pending);
             return None;
