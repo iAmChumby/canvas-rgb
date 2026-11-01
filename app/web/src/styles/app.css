@@ -3936,8 +3936,11 @@ button.chip:hover {
     display: none;
   }
 
+  /* The state's icon never gives up width: it is the one status the phone row keeps. */
   .strip-mark {
-    flex: 0 1 auto;
+    flex: none;
+    padding-left: var(--s1);
+    padding-right: var(--s1);
   }
 
   .rail-col {
@@ -5674,4 +5677,21 @@ button.chip:hover {
 .new-light-text strong {
   flex: none;
   white-space: nowrap;
+}
+
+/* A very narrow phone (360 px): the profile picker and the strip's edges give a little more, and
+   now playing (which has no room left) leaves the row. */
+@media (max-width: 380px) {
+  .strip-inner:has(.rd-actions) {
+    padding: 0 var(--s1);
+  }
+
+  .strip-inner:has(.rd-actions) .strip-now {
+    display: none;
+  }
+
+  .rd-actions .seg-item {
+    padding-left: 6px;
+    padding-right: 6px;
+  }
 }
