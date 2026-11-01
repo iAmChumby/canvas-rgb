@@ -51,7 +51,7 @@ try {
         $iStop = $src.IndexOf('Stop-Service')
         $iRestore = $src.IndexOf('Invoke-RestoreBios -Exe $svcExe')
         $iDelete = $src.IndexOf('sc.exe delete')
-        $iRemove = $src.IndexOf('Remove-Item -LiteralPath $InstallDir')
+        $iRemove = $src.IndexOf('Remove-TreeCounting -Path $InstallDir')
         Assert-True ($iStop -ge 0 -and $iRestore -gt $iStop) 'the service must be stopped first: it re-drives manual headers every second'
         Assert-True ($iDelete -gt $iRestore -and $iRemove -gt $iRestore) 'fans go back to BIOS before the service or any file is deleted'
     }
@@ -197,7 +197,7 @@ function Set-UserPathEntry { Write-Host 'STUB Set-UserPathEntry'; return $false 
     }
 
     # uninstall-elevated.ps1 runs as a temp COPY; lib.ps1 gets stubs so no service, HKLM key, process or admin check is real.
-    function Invoke-ElevatedUninstallSandbox([string]$Name, [string]$RecordText, [switch]$Purge, [string]$SignalService = '', [switch]$JunctionHome, [switch]$ListFails, [switch]$PurgeFails, [switch]$ServiceRunning, [switch]$StopRefused, [switch]$RestoreFails, [switch]$ManualBios, [switch]$DeleteFails, [switch]$NoMachineHome) {
+    function Invoke-ElevatedUninstallSandbox([string]$Name, [string]$RecordText, [switch]$Purge, [string]$SignalService = '', [switch]$JunctionHome, [switch]$ListFails, [switch]$PurgeFails, [switch]$ServiceRunning, [switch]$StopRefused, [switch]$RestoreFails, [switch]$ManualBios, [switch]$DeleteFails, [switch]$NoMachineHome, [switch]$LockedFile, [switch]$LockedData) {
         $root = Join-Path $dir $Name
         $scripts = Join-Path $root 'scripts'; $pd = Join-Path $root 'PD\canvas-rgb'; $inst = Join-Path $root 'install'
         New-Item -ItemType Directory -Path $scripts, $inst -Force | Out-Null
@@ -276,10 +276,20 @@ function Remove-Item {
             # A fan header that canvas-rgb took over: the fans are not back on the motherboard.
             [System.IO.File]::WriteAllText((Join-Path $pd 'bios-state.json'), '{"headers":{"cpu_fan":{"manual":true,"duty_percent":40}}}')
         }
+        # A file that is in use: this process holds it open with no sharing, so a recursive delete
+        # of its folder removes the files before it and then throws on this one. The file named
+        # a-first sorts before it and goes first.
+        $held = $null
+        if ($LockedFile -or $LockedData) {
+            $lockDir = if ($LockedData) { $pd } else { $inst }
+            [System.IO.File]::WriteAllText((Join-Path $lockDir 'a-first.txt'), 'x')
+            [System.IO.File]::WriteAllText((Join-Path $lockDir 'z-locked.txt'), 'x')
+            $held = [System.IO.File]::Open((Join-Path $lockDir 'z-locked.txt'), 'Open', 'ReadWrite', 'None')
+        }
         $log = Join-Path $root 'elevated.log'
         $extra = if ($Purge) { ' -PurgeConfig' } else { '' }
         $cmd = '$env:ProgramData=''{0}''; & ''{1}'' -InstallDir ''{2}'' -LogFile ''{3}''{4}; exit $LASTEXITCODE' -f (Join-Path $root 'PD'), (Join-Path $scripts 'uninstall-elevated.ps1'), $inst, $log, $extra
-        $out = & powershell.exe -NoProfile -Command $cmd 2>&1 | Out-String
+        try { $out = & powershell.exe -NoProfile -Command $cmd 2>&1 | Out-String } finally { if ($held) { $held.Dispose() } }
         return @{ Out = $out; Code = $LASTEXITCODE; Record = $rec; Install = $inst; Pd = $pd; State = (Join-Path $pd 'uninstall-state.marker') }
     }
 
@@ -508,6 +518,27 @@ function Start-Process { Write-Host 'STUB Start-Process'; [pscustomobject]@{ Exi
         $tree = Get-UninstallStateReport -State @{ Service = 'none'; OpenRgb = 'some' }
         Assert-True ($tree.Words -match 'some of the OpenRGB folder was removed') $tree.Words
         Assert-True $tree.Removed 'the OpenRGB folder went'
+    }
+    Test-Case 'a delete that stops half way says that some files were removed, not that nothing was' {
+        # The real script, with a file in the install folder held open: the files before it go, the
+        # delete throws on it, and the words must say that some of the files were removed. Before,
+        # the flag flipped only after a whole delete, so these words said "nothing was taken away".
+        $r = Invoke-ElevatedUninstallSandbox 'u64p' $null -LockedFile
+        Assert-True ($r.Code -ne 0) "the uninstall fails: $($r.Out)"
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $r.Install 'a-first.txt'))) 'the first file went'
+        Assert-True (Test-Path -LiteralPath (Join-Path $r.Install 'z-locked.txt')) 'the locked file is still there'
+        $words = [System.IO.File]::ReadAllText($r.State)
+        Assert-True ($words -match 'some of the program files were removed') "the words say some files went: $words"
+        Assert-True ($words -notmatch 'before anything was taken away') "it must not say that nothing was taken away: $words"
+        Assert-Equal $r.Code 4 "the exit code says something was removed: $($r.Out)"
+    }
+    Test-Case 'a machine data folder that is deleted half way says some of the settings were removed' {
+        $r = Invoke-ElevatedUninstallSandbox 'u64q' $null -Purge -LockedData
+        Assert-True ($r.Code -ne 0) "the uninstall fails: $($r.Out)"
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $r.Pd 'a-first.txt'))) 'the first file went'
+        $words = [System.IO.File]::ReadAllText($r.State)
+        Assert-True ($words -match 'some of your canvas-rgb settings were removed') "the words say some settings went: $words"
+        Assert-True ($words -notmatch '(?<!of )your canvas-rgb settings were removed') "it must not say that all went: $words"
     }
     Test-Case 'an uninstall that fails after it removed the program files says so, and the exit code says it too' {
         $r = Invoke-ElevatedUninstallSandbox 'u64b' $null -Purge -PurgeFails

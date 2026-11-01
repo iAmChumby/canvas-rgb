@@ -1034,6 +1034,30 @@ function Remove-CanvasRgbService {
     return [pscustomobject]@{ Lines = $out; ExitCode = $LASTEXITCODE }
 }
 
+# Deletes a folder and everything in it, and says when the delete stopped half way. A recursive
+# delete that throws (a file is in use) has already removed what came before it, so "it threw"
+# does not mean "nothing went". The items under the path are counted before and after: when the
+# delete throws and the count fell, $Result.Partial is true. The error is thrown again (#64).
+function Remove-TreeCounting {
+    param([string]$Path, [hashtable]$Result)
+    $ErrorActionPreference = 'Stop'
+    $Result.Partial = $false
+    $before = Measure-TreeItems -Path $Path
+    try {
+        Remove-Item -LiteralPath $Path -Recurse -Force
+    } catch {
+        $Result.Partial = ((Measure-TreeItems -Path $Path) -lt $before)
+        throw
+    }
+}
+
+# The number of items in a folder, the folder itself included; 0 when it is gone.
+function Measure-TreeItems {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return 0 }
+    return 1 + @(Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue).Count
+}
+
 # ---- the hand-off between the two Inno steps (#60) ----
 # The Inno installer stops canvas-rgb before it copies anything (stop-canvas.ps1, PrepareToInstall)
 # and runs the elevated step after it copied the files (setup-elevated.ps1). The second step finds
@@ -1130,8 +1154,8 @@ function Clear-UninstallState {
 #   Fans     'unknown' (not known), 'back' (they are on the motherboard's own settings) or
 #            'manual' (they may still be under canvas-rgb control)
 #   Entry / Shortcut / Files / OpenRgb / Config: what this uninstall removed. Entry and Shortcut
-#            are true when that one item went; Files and OpenRgb are 'all' or 'some' when only
-#            part of it went.
+#            are true when that one item went; Files, OpenRgb and Config are 'all' ($true for
+#            Config) or 'some' when only part of it went.
 # Pure: it says nothing about the disk.
 # Returns the words, and whether anything was really removed: a service that was only stopped is
 # not a removal, so the caller can still say that nothing was taken away.
@@ -1164,10 +1188,12 @@ function Get-UninstallStateReport {
     elseif ($files -eq 'some') { $gone += 'some of the program files were removed' }
     if ($openrgb -eq 'all') { $gone += 'the OpenRGB folder was removed' }
     elseif ($openrgb -eq 'some') { $gone += 'some of the OpenRGB folder was removed' }
-    if ($State['Config']) { $gone += 'your canvas-rgb settings were removed' }
+    $config = $State['Config']
+    if ($config -eq 'some') { $gone += 'some of your canvas-rgb settings were removed' }
+    elseif ($config) { $gone += 'your canvas-rgb settings were removed' }
     $removed = ($service -eq 'removed') -or [bool]$State['Entry'] -or [bool]$State['Shortcut'] `
         -or ($files -eq 'all') -or ($files -eq 'some') -or ($openrgb -eq 'all') -or ($openrgb -eq 'some') `
-        -or [bool]$State['Config']
+        -or [bool]$config
     # What the person is told to do depends on the fans: they cannot be handed back while they may
     # still be under canvas-rgb control.
     $tail = if ($fans -eq 'manual') {

@@ -173,14 +173,20 @@ try {
         if (Test-Path -LiteralPath $InstallDir) {
             if ($keep.Count -gt 0) {
                 # Everything else goes; the folder a running OpenRGB holds stays whole.
+                # A delete that throws half way has already removed what came before it: the
+                # state says 'some' as soon as anything went, not only after a whole delete (#64).
                 foreach ($child in @(Get-ChildItem -LiteralPath $InstallDir -Force)) {
                     if ($keep -contains $child.FullName) { continue }
-                    Remove-Item -LiteralPath $child.FullName -Recurse -Force
+                    $res = @{}
+                    try { Remove-TreeCounting -Path $child.FullName -Result $res }
+                    catch { if ($res.Partial) { $uninstallState.Files = 'some' }; throw }
+                    $uninstallState.Files = 'some'
                 }
                 Say "  removed everything in $InstallDir except the OpenRGB folder"
-                $uninstallState.Files = 'some'
             } else {
-                Remove-Item -LiteralPath $InstallDir -Recurse -Force
+                $res = @{}
+                try { Remove-TreeCounting -Path $InstallDir -Result $res }
+                catch { if ($res.Partial) { $uninstallState.Files = 'some' }; throw }
                 Say "  removed $InstallDir"
                 $uninstallState.Files = 'all'
             }
@@ -192,7 +198,13 @@ try {
         $treesGone = 0
         foreach ($t in $trees) {
             if ($keep -contains $t) { continue }
-            if (Test-Path -LiteralPath $t) { Remove-Item -LiteralPath $t -Recurse -Force; Say "  removed $t"; $treesGone++ }
+            if (Test-Path -LiteralPath $t) {
+                $res = @{}
+                try { Remove-TreeCounting -Path $t -Result $res }
+                catch { if ($res.Partial) { $uninstallState.OpenRgb = 'some' }; throw }
+                Say "  removed $t"; $treesGone++
+                $uninstallState.OpenRgb = 'some'
+            }
         }
         if ($treesGone -gt 0) {
             # Only some of the trees went when one of them was kept whole for a running OpenRGB.
@@ -220,7 +232,9 @@ try {
     if ($PurgeConfig -and $recError) {
         Say "  kept $programData (-PurgeConfig skipped: it holds the unreadable restore record)"
     } elseif ($PurgeConfig -and (Test-Path -LiteralPath $programData)) {
-        Remove-Item -LiteralPath $programData -Recurse -Force
+        $res = @{}
+        try { Remove-TreeCounting -Path $programData -Result $res }
+        catch { if ($res.Partial) { $uninstallState.Config = 'some' }; throw }
         Say "  deleted $programData (-PurgeConfig)"
         $uninstallState.Config = $true
     } else {
