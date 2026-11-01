@@ -559,9 +559,21 @@ pub async fn thumbnail(
         if let Some(why) = rendering.thumbnails.failure(generation, &effect_id) {
             return TileOutcome::AlreadyGivenUp(why);
         }
-        let result = crate::create_effect_for_tile(&user, &effect_id)
-            .map_err(crate::thumbnail::RenderError::Failed)
-            .and_then(|mut effect| crate::thumbnail::render_within(effect.as_mut(), &props, budget));
+        // A render that panics is caught here, inside the task, so its failure is cached below
+        // like any other answer and before the slot is handed back. Caught after the task
+        // instead (from the join), the permit has already dropped during the unwind and a
+        // request that waited for the slot would find nothing cached and render the tile again.
+        let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::create_effect_for_tile(&user, &effect_id)
+                .map_err(crate::thumbnail::RenderError::Failed)
+                .and_then(|mut effect| crate::thumbnail::render_within(effect.as_mut(), &props, budget))
+        }));
+        let result = attempt.unwrap_or_else(|payload| {
+            Err(crate::thumbnail::RenderError::Failed(format!(
+                "the thumbnail render panicked: {}",
+                panic_message(payload)
+            )))
+        });
         // The answer is cached before the slot is handed back (the permit drops when this
         // closure returns). A request that waits for the slot then finds the tile, or the
         // reason it was given up, and does not render the same tile again.
@@ -587,8 +599,9 @@ pub async fn thumbnail(
         // not render it again for the whole budget; the answer says what happened instead of
         // being a bare 500.
         Ok(TileOutcome::Failed(error)) => Err(ApiFailure::service_unavailable(given_up(&id, error.reason()))),
-        // A render that panics ends its task: that is a failed render like any other, not a 500,
-        // so it is remembered and the library does not run it again on every open.
+        // The task panics only if something outside the render does (the cache write, say), or
+        // the runtime dropped it. A render's own panic is caught inside the task and cached
+        // there; this is the fallback, and it also remembers the failure.
         Err(error) => {
             let error = crate::thumbnail::RenderError::Failed(render_task_failure(error));
             app.thumbnails.put_failure(generation, &schema.id, &error);
@@ -617,16 +630,18 @@ fn given_up(id: &str, why: &str) -> String {
 /// Why the render task itself ended without an answer: it panicked, or the runtime dropped it.
 fn render_task_failure(error: tokio::task::JoinError) -> String {
     match error.try_into_panic() {
-        Ok(payload) => {
-            let message = payload
-                .downcast_ref::<&str>()
-                .map(|m| (*m).to_string())
-                .or_else(|| payload.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "a panic with a payload that is not text".to_string());
-            format!("the thumbnail render panicked: {message}")
-        }
+        Ok(payload) => format!("the thumbnail render panicked: {}", panic_message(payload)),
         Err(error) => format!("the thumbnail render stopped: {error}"),
     }
+}
+
+/// The text of a panic payload.
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|m| (*m).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a panic with a payload that is not text".to_string())
 }
 
 fn binary_response(bytes: &[u8]) -> axum::response::Response {

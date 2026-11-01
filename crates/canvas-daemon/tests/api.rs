@@ -806,6 +806,53 @@ async fn a_tile_whose_render_panics_is_given_up_and_is_not_rendered_again() {
     );
 }
 
+/// A render that panics caches its failure before its slot is released, so a request that
+/// waited for the slot is answered from the cache and does not render the tile again.
+#[tokio::test]
+async fn a_request_waiting_for_a_slot_is_not_given_the_render_that_panicked_to_run_again() {
+    let builds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let builder: canvas_daemon::user_effects::Builder = {
+        let builds = builds.clone();
+        Arc::new(move |_id: &str, _source: &str| {
+            let count = builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if count > 1 {
+                // Both slots are busy for a while, then the render panics.
+                std::thread::sleep(std::time::Duration::from_millis(1000));
+                panic!("the effect blew up while it was built for its tile");
+            }
+            Ok(Box::new(common::FakeEffect::new("panics")) as Box<dyn canvas_proto::traits::Effect>)
+        })
+    };
+    let (router, _app, _home) = build_with_user_effects(&["panics"], builder);
+    let ask = |router: axum::Router| {
+        tokio::spawn(async move {
+            router
+                .oneshot(request("GET", "/api/v1/effects/html:panics/thumbnail"))
+                .await
+                .expect("the router answers")
+                .status()
+        })
+    };
+    // Two requests take both slots; two more ask once both are rendering, so they wait.
+    let first = ask(router.clone());
+    let second = ask(router.clone());
+    assert!(
+        wait_until(|| builds.load(std::sync::atomic::Ordering::SeqCst) >= 3).await,
+        "the two renders never started"
+    );
+    let third = ask(router.clone());
+    let fourth = ask(router.clone());
+    let statuses = [first.await.unwrap(), second.await.unwrap(), third.await.unwrap(), fourth.await.unwrap()];
+    assert!(statuses.iter().all(|s| *s == StatusCode::SERVICE_UNAVAILABLE), "{statuses:?}");
+    // The scan built it once; the two renders in the slots built it twice. The two requests that
+    // waited were answered from the remembered failure.
+    assert_eq!(
+        builds.load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "a request that waited for the slot ran the render that panicked again"
+    );
+}
+
 /// A request that waited for a render slot while another request gave the same tile up is
 /// answered from the remembered failure, and the sentence says "given up" once.
 #[tokio::test]
