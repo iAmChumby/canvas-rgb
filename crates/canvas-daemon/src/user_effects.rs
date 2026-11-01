@@ -7,10 +7,10 @@
 //! parse is logged with its error and left out of the list until it changes.
 //!
 //! A file whose *load* ran out of time is another case: it says how busy the machine was,
-//! not what the file is, so it is parsed again after a back-off
-//! ([`crate::thumbnail::TIMEOUT_RETRY_AFTER`]) instead of being left out for good. The
-//! failure stays in the report while the file waits, so the editor still says what went
-//! wrong.
+//! not what the file is, so it is parsed again after a wait (30 s, then twice as long each
+//! time, up to [`crate::thumbnail::TIMEOUT_RETRY_AFTER`]) instead of being left out for
+//! good. The failure stays in the report while the file waits, so the editor still says
+//! what went wrong.
 //!
 //! This module also holds the rules an imported file name must follow
 //! ([`check_file_name`]) and the atomic write that puts a file in the folder
@@ -29,6 +29,23 @@ pub const USER_EFFECT_PREFIX: &str = "html:";
 
 /// How often the effects folder is rescanned.
 pub const RESCAN_INTERVAL: Duration = Duration::from_secs(5);
+
+/// The first wait after a load ran out of time: 30 s.
+///
+/// A load that ran out of time says the machine was busy, not that the effect is broken, so
+/// the file is tried again soon. Each consecutive timeout waits twice as long, up to
+/// [`crate::thumbnail::TIMEOUT_RETRY_AFTER`], so a script that is always too slow does not
+/// cost a core on every rescan.
+pub const FIRST_RETRY_AFTER: Duration = Duration::from_secs(30);
+
+/// The wait after the `attempts`-th load timeout in a row: 30 s, 60 s, 120 s, and so on,
+/// capped at `cap`.
+fn back_off(attempts: u32, cap: Duration) -> Duration {
+    // The shift is capped so a long run of timeouts cannot overflow the multiplication.
+    let steps = attempts.saturating_sub(1).min(20);
+    let seconds = FIRST_RETRY_AFTER.as_secs().saturating_mul(1u64 << steps);
+    Duration::from_secs(seconds.min(cap.as_secs()))
+}
 
 /// The clock the retry back-off is measured against: a monotonic time since the effects
 /// were loaded. The tests inject a clock they move by hand, so a back-off is tested
@@ -150,8 +167,11 @@ struct StockEffect {
 struct Failure {
     /// The stamp the file failed at: a file that changes is parsed again at once.
     stamp: Stamp,
-    /// The error, as the builder gave it.
+    /// The error, as the person using the app reads it.
     error: String,
+    /// How many times in a row the load of this file ran out of time. Zero for a failure
+    /// that does not depend on the load: those are not tried again.
+    attempts: u32,
     /// When the file may be parsed again: `Some` when the failure came from the machine's
     /// load (the effect's script ran past its load budget), which says how busy the
     /// machine was and not what the effect is. `None` when the file fails the same way
@@ -172,6 +192,8 @@ impl Failure {
 struct StockFailure {
     /// The source it is built from, so it can be tried again.
     source: Arc<str>,
+    /// How many times in a row its load ran out of time; see [`Failure::attempts`].
+    attempts: u32,
     /// When it may be built again; see [`Failure::retry_at`].
     retry_at: Option<Duration>,
 }
@@ -185,7 +207,7 @@ impl StockFailure {
 
 /// A file that did not parse, and whether the machine was too busy for it.
 struct ParseFailure {
-    /// The error, as the builder gave it.
+    /// The error, as the person using the app reads it.
     error: String,
     /// True when the failure came from the machine's load: the effect's script ran past
     /// its load budget, so it says how busy the machine was and not what the effect is.
@@ -226,8 +248,8 @@ pub struct UserEffects {
     /// so a tile is the same picture every time it is rendered.
     tile_builder: Builder,
     state: RwLock<State>,
-    /// How long a file whose load ran out of time is left before it is parsed again.
-    retry_after: Duration,
+    /// The longest a file whose load ran out of time waits before it is parsed again.
+    max_retry_after: Duration,
     /// The clock that back-off is measured against.
     clock: Clock,
     /// Bumped whenever a rescan changes the set of user effects, so caches keyed on it
@@ -256,19 +278,18 @@ impl UserEffects {
         Self::build(builder, tile_builder, stock)
     }
 
-    /// Like [`UserEffects::with_stock`], with the back-off a file whose load ran out of
-    /// time waits before it is parsed again, and the clock that back-off is measured
-    /// against.
+    /// Like [`UserEffects::with_stock`], with the longest wait a file whose load ran out of
+    /// time waits before it is parsed again, and the clock that wait is measured against.
     ///
     /// The daemon uses [`crate::thumbnail::TIMEOUT_RETRY_AFTER`] and a monotonic clock; the
-    /// tests shorten the back-off and move the clock, so the wait is tested without waiting.
+    /// tests shorten the wait and move the clock, so the waiting is tested without waiting.
     pub fn with_limits(
         builder: Builder,
         stock: &[(&str, &str)],
-        retry_after: Duration,
+        max_retry_after: Duration,
         clock: Clock,
     ) -> Self {
-        Self::build_with_limits(builder.clone(), builder, stock, retry_after, clock)
+        Self::build_with_limits(builder.clone(), builder, stock, max_retry_after, clock)
     }
 
     fn build(builder: Builder, tile_builder: Builder, stock: &[(&str, &str)]) -> Self {
@@ -285,7 +306,7 @@ impl UserEffects {
         builder: Builder,
         tile_builder: Builder,
         stock: &[(&str, &str)],
-        retry_after: Duration,
+        max_retry_after: Duration,
         clock: Clock,
     ) -> Self {
         let now = clock();
@@ -305,7 +326,9 @@ impl UserEffects {
                         id,
                         StockFailure {
                             source: Arc::from(*source),
-                            retry_at: depends_on_load.then(|| now + retry_after),
+                            attempts: u32::from(depends_on_load),
+                            retry_at: depends_on_load
+                                .then(|| now + back_off(1, max_retry_after)),
                         },
                     );
                 }
@@ -315,7 +338,7 @@ impl UserEffects {
             builder,
             tile_builder,
             state: RwLock::new(state),
-            retry_after,
+            max_retry_after,
             clock,
             generation: AtomicU64::new(0),
         }
@@ -435,6 +458,8 @@ impl UserEffects {
             .collect();
 
         let mut state = write_lock(&self.state);
+        let loaded_before = state.loaded.len();
+        let failed_before = state.failed.len();
 
         for (path, stamp, result) in parsed {
             match result {
@@ -450,10 +475,11 @@ impl UserEffects {
                         changed |= state.loaded.remove(&path).is_some();
                         state.failed.insert(
                             path,
-                            Failure { stamp, error, retry_at: None },
+                            Failure { stamp, error, attempts: 0, retry_at: None },
                         );
                     } else {
                         tracing::info!(path = %path.display(), id = %effect.schema.id, "a user effect was loaded");
+                        // The file loads now, so the count of timeouts it had starts again.
                         state.failed.remove(&path);
                         state.loaded.insert(path, effect);
                         changed = true;
@@ -464,26 +490,37 @@ impl UserEffects {
                     // The file was in the library before, so the set changed.
                     changed |= state.loaded.remove(&path).is_some();
                     // A failure that came from the machine's load is tried again after the
-                    // back-off; one that fails the same way every time is not.
-                    let retry_at = failure.depends_on_load.then(|| now + self.retry_after);
+                    // back-off; one that fails the same way every time is not. The same file,
+                    // failing the same way, waits twice as long each time. A file that changed
+                    // or that loads starts the count again.
+                    let attempts = state
+                        .failed
+                        .get(&path)
+                        .filter(|f| f.stamp == stamp && f.attempts > 0)
+                        .map(|f| f.attempts + 1)
+                        .unwrap_or(1);
+                    let attempts = if failure.depends_on_load { attempts } else { 0 };
+                    let retry_at = failure
+                        .depends_on_load
+                        .then(|| now + back_off(attempts, self.max_retry_after));
                     state.failed.insert(
                         path,
-                        Failure { stamp, error: failure.error, retry_at },
+                        Failure { stamp, error: failure.error, attempts, retry_at },
                     );
                 }
             }
         }
 
-        let loaded_before = state.loaded.len();
         state.loaded.retain(|path, _| listing.contains_key(path));
         state.failed.retain(|path, _| listing.contains_key(path));
-        if state.loaded.len() != loaded_before {
+        // A file that came or went changes the set the editor sees, whether it loaded or not.
+        if state.loaded.len() != loaded_before || state.failed.len() != failed_before {
             changed = true;
         }
         if changed {
             self.generation.fetch_add(1, Ordering::SeqCst);
         }
-        changed
+changed
     }
 
     /// Builds the stock effects whose load ran out of time and may be built again.
@@ -492,13 +529,13 @@ impl UserEffects {
     /// starts again; one that only ran out of time says how busy the machine was, so it is
     /// built again after the back-off.
     fn retry_stock(&self, now: Duration) -> bool {
-        let due: Vec<(String, Arc<str>)> = {
+        let due: Vec<(String, Arc<str>, u32)> = {
             let state = read_lock(&self.state);
             state
                 .stock_failed
                 .iter()
                 .filter(|(_, failure)| failure.may_retry(now))
-                .map(|(id, failure)| (id.clone(), failure.source.clone()))
+                .map(|(id, failure)| (id.clone(), failure.source.clone(), failure.attempts))
                 .collect()
         };
         if due.is_empty() {
@@ -506,21 +543,21 @@ impl UserEffects {
         }
 
         // The builds run outside the lock, so the API keeps answering while they do.
-        let built: Vec<(String, Arc<str>, Result<StockEffect, String>)> = due
+        let built: Vec<(String, Arc<str>, u32, Result<StockEffect, String>)> = due
             .into_iter()
-            .map(|(id, source)| {
+            .map(|(id, source, attempts)| {
                 let result = (self.builder)(&id, &source).map(|effect| {
                     let mut schema = effect.schema();
                     schema.id = id.clone();
                     StockEffect { schema, source: source.clone() }
                 });
-                (id, source, result)
+                (id, source, attempts, result)
             })
             .collect();
 
         let mut changed = false;
         let mut state = write_lock(&self.state);
-        for (id, source, result) in built {
+        for (id, source, attempts, result) in built {
             match result {
                 Ok(stock) => {
                     tracing::info!(%id, "a stock effect was loaded");
@@ -531,11 +568,15 @@ impl UserEffects {
                 Err(error) => {
                     tracing::error!(%id, %error, "a stock effect failed to build and was left out");
                     let depends_on_load = crate::thumbnail::build_error_depends_on_load(&error);
+                    // The same effect, failing the same way, waits twice as long each time.
+                    let attempts = if depends_on_load { attempts + 1 } else { 0 };
                     state.stock_failed.insert(
                         id,
                         StockFailure {
                             source,
-                            retry_at: depends_on_load.then(|| now + self.retry_after),
+                            attempts,
+                            retry_at: depends_on_load
+                                .then(|| now + back_off(attempts, self.max_retry_after)),
                         },
                     );
                 }
@@ -819,6 +860,12 @@ mod tests {
             let mut now = self.now.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             *now += by;
         }
+
+        /// Moves the clock to an absolute time. The tests only move it forward.
+        fn advance_to(&self, at: Duration) {
+            let mut now = self.now.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            *now = at;
+        }
     }
 
     /// A fresh folder for one test, removed when the test ends.
@@ -899,9 +946,18 @@ mod tests {
         assert!(effects.schemas().is_empty());
     }
 
-    /// The back-off the tests use: long enough that a scan inside it does not parse the
-    /// file again, and the test moves the clock past it.
-    const TEST_RETRY: Duration = Duration::from_secs(60);
+    /// The waits after each load timeout in a row: 30 s, then twice as long each time, up
+    /// to the cap of ten minutes. The sixth wait is the cap (the uncapped one would be
+    /// 960 s) and the seventh is the cap again.
+    const WAITS: [Duration; 7] = [
+        Duration::from_secs(30),
+        Duration::from_secs(60),
+        Duration::from_secs(120),
+        Duration::from_secs(240),
+        Duration::from_secs(480),
+        Duration::from_secs(600),
+        Duration::from_secs(600),
+    ];
 
     /// A file whose load ran out of time is not left out of the library for good: a later
     /// scan parses it again, and it is in the library when it loads.
@@ -914,7 +970,7 @@ mod tests {
         let effects = UserEffects::with_limits(
             timing_out_builder(parses.clone(), 1),
             &[],
-            TEST_RETRY,
+            crate::thumbnail::TIMEOUT_RETRY_AFTER,
             clock.clock(),
         );
 
@@ -922,27 +978,28 @@ mod tests {
         effects.rescan(&dir.0);
         assert_eq!(parses.load(Ordering::SeqCst), 1);
         assert!(effects.schemas().is_empty(), "the effect is not in the library yet");
-        // The failure is reported, and it says why.
+        // The failure is reported, and it says why in words a person can read.
         let failures = effects.failures();
         assert_eq!(failures.len(), 1);
         assert!(failures[0].0.ends_with("slow.html"), "{failures:?}");
         assert!(failures[0].1.contains("ran longer than"), "the reason is kept: {failures:?}");
 
-        // Inside the back-off the file is left alone.
+        // Inside the wait the file is left alone.
+        clock.advance_to(FIRST_RETRY_AFTER - Duration::from_secs(1));
         effects.rescan(&dir.0);
         assert_eq!(
             parses.load(Ordering::SeqCst),
             1,
-            "the file was parsed again inside the back-off"
+            "the file was parsed again before the wait was over"
         );
 
-        // After the back-off it is parsed again, and now it loads.
-        clock.advance(TEST_RETRY);
+        // After the wait it is parsed again, and now it loads.
+        clock.advance_to(FIRST_RETRY_AFTER);
         effects.rescan(&dir.0);
         assert_eq!(
             parses.load(Ordering::SeqCst),
             2,
-            "the file was not parsed again after the back-off"
+            "the file was not parsed again after the wait"
         );
         assert_eq!(names(&effects), vec![("html:slow".to_string(), "Slow".to_string())]);
         assert!(effects.failures().is_empty(), "the failure is gone: the file loads now");
@@ -959,7 +1016,7 @@ mod tests {
         let effects = UserEffects::with_limits(
             fake_builder(parses.clone()),
             &[],
-            TEST_RETRY,
+            crate::thumbnail::TIMEOUT_RETRY_AFTER,
             clock.clock(),
         );
 
@@ -968,7 +1025,7 @@ mod tests {
         assert_eq!(effects.failures().len(), 1);
 
         // A later scan does not parse it again, however far the clock has moved.
-        clock.advance(TEST_RETRY * 10);
+        clock.advance(crate::thumbnail::TIMEOUT_RETRY_AFTER * 10);
         effects.rescan(&dir.0);
         assert_eq!(
             parses.load(Ordering::SeqCst),
@@ -984,10 +1041,11 @@ mod tests {
         assert_eq!(names(&effects), vec![("html:bad".to_string(), "Fixed".to_string())]);
     }
 
-    /// A script that is always too slow is not parsed on every scan: it waits for the
-    /// back-off, and it stays in the report while it waits.
+    /// A script that is always too slow is not parsed on every scan: it waits 30 s after the
+    /// first timeout, then twice as long each time, up to the cap. It stays in the report
+    /// while it waits.
     #[test]
-    fn a_file_that_always_times_out_is_not_parsed_again_before_the_back_off() {
+    fn a_file_that_always_times_out_waits_longer_each_time_and_stops_at_the_cap() {
         let dir = TempDir::new("always-slow");
         dir.write("slow.html", "Slow\n<canvas></canvas>");
         let parses = Arc::new(AtomicUsize::new(0));
@@ -995,32 +1053,35 @@ mod tests {
         let effects = UserEffects::with_limits(
             timing_out_builder(parses.clone(), usize::MAX),
             &[],
-            TEST_RETRY,
+            crate::thumbnail::TIMEOUT_RETRY_AFTER,
             clock.clock(),
         );
 
+        // The first scan: the load runs out of time.
         effects.rescan(&dir.0);
         assert_eq!(parses.load(Ordering::SeqCst), 1);
 
-        // Every scan inside the back-off leaves the file alone.
-        for _ in 0..3 {
-            clock.advance(Duration::from_secs(10));
+        let mut due = Duration::ZERO;
+        for (round, wait) in WAITS.iter().enumerate() {
+            // A scan a moment before the wait is over leaves the file alone.
+            clock.advance_to(due + *wait - Duration::from_secs(1));
             effects.rescan(&dir.0);
+            assert_eq!(
+                parses.load(Ordering::SeqCst),
+                round + 1,
+                "the file was parsed again before the wait of {wait:?} was over"
+            );
+            // The wait is over: the file is parsed again, and the load times out again.
+            clock.advance_to(due + *wait);
+            effects.rescan(&dir.0);
+            assert_eq!(
+                parses.load(Ordering::SeqCst),
+                round + 2,
+                "the file was not parsed again after the wait of {wait:?}"
+            );
+            due += *wait;
         }
-        assert_eq!(
-            parses.load(Ordering::SeqCst),
-            1,
-            "the file was parsed again inside the back-off"
-        );
 
-        // Past the back-off it is tried again: the machine may be free now.
-        clock.advance(TEST_RETRY);
-        effects.rescan(&dir.0);
-        assert_eq!(
-            parses.load(Ordering::SeqCst),
-            2,
-            "the file was not parsed again after the back-off"
-        );
         // It is still reported as failed: it did fail, and why.
         let failures = effects.failures();
         assert_eq!(failures.len(), 1);
@@ -1028,17 +1089,74 @@ mod tests {
         assert!(effects.schemas().is_empty());
     }
 
-    /// A stock effect is built when the daemon starts; if its load runs out of time then,
-    /// it is built again after the back-off instead of being left out for good.
+    /// A file that is edited while it waits is parsed at once: the file changed, so the
+    /// wait does not apply to it.
     #[test]
-    fn a_stock_effect_whose_load_timed_out_is_built_after_the_back_off() {
+    fn a_file_edited_while_it_waits_is_parsed_at_once() {
+        let dir = TempDir::new("edited-while-waiting");
+        dir.write("slow.html", "Slow\n<canvas></canvas>");
+        let parses = Arc::new(AtomicUsize::new(0));
+        let clock = TestClock::new();
+        let effects = UserEffects::with_limits(
+            timing_out_builder(parses.clone(), 1),
+            &[],
+            crate::thumbnail::TIMEOUT_RETRY_AFTER,
+            clock.clock(),
+        );
+
+        effects.rescan(&dir.0);
+        assert_eq!(parses.load(Ordering::SeqCst), 1);
+
+        // The file is edited while it waits: the next scan parses it at once.
+        dir.write("slow.html", "Slow and fixed\n<canvas></canvas>");
+        effects.rescan(&dir.0);
+        assert_eq!(
+            parses.load(Ordering::SeqCst),
+            2,
+            "an edited file was not parsed at once"
+        );
+        assert_eq!(names(&effects), vec![("html:slow".to_string(), "Slow and fixed".to_string())]);
+    }
+
+    /// A file that is deleted while it waits is gone from the report: there is nothing
+    /// left to wait for.
+    #[test]
+    fn a_file_deleted_while_it_waits_is_dropped_from_the_failed_list() {
+        let dir = TempDir::new("deleted-while-waiting");
+        dir.write("slow.html", "Slow\n<canvas></canvas>");
+        let parses = Arc::new(AtomicUsize::new(0));
+        let clock = TestClock::new();
+        let effects = UserEffects::with_limits(
+            timing_out_builder(parses.clone(), 1),
+            &[],
+            crate::thumbnail::TIMEOUT_RETRY_AFTER,
+            clock.clock(),
+        );
+
+        effects.rescan(&dir.0);
+        assert_eq!(effects.failures().len(), 1);
+
+        dir.remove("slow.html");
+        effects.rescan(&dir.0);
+        assert!(
+            effects.failures().is_empty(),
+            "the deleted file is still in the report: {:?}",
+            effects.failures()
+        );
+        assert_eq!(parses.load(Ordering::SeqCst), 1, "the deleted file was parsed again");
+    }
+
+    /// A stock effect is built when the daemon starts; if its load runs out of time then,
+    /// it is built again after the wait instead of being left out for good.
+    #[test]
+    fn a_stock_effect_whose_load_timed_out_is_built_after_the_wait() {
         let dir = TempDir::new("stock-timeout");
         let builds = Arc::new(AtomicUsize::new(0));
         let clock = TestClock::new();
         let effects = UserEffects::with_limits(
             timing_out_builder(builds.clone(), 1),
             &[("stock-one", "Stock One\n<canvas></canvas>")],
-            TEST_RETRY,
+            crate::thumbnail::TIMEOUT_RETRY_AFTER,
             clock.clock(),
         );
 
@@ -1046,27 +1164,111 @@ mod tests {
         assert_eq!(builds.load(Ordering::SeqCst), 1);
         assert!(effects.schemas().is_empty(), "the stock effect is not in the library yet");
 
-        // Inside the back-off it is not built again.
-        clock.advance(Duration::from_secs(10));
+        // Inside the wait it is not built again.
+        clock.advance_to(FIRST_RETRY_AFTER - Duration::from_secs(1));
         effects.rescan(&dir.0);
         assert_eq!(
             builds.load(Ordering::SeqCst),
             1,
-            "the stock effect was built again inside the back-off"
+            "the stock effect was built again before the wait was over"
         );
 
-        // After the back-off it is built, and it is in the library.
-        clock.advance(TEST_RETRY);
+        // After the wait it is built, and it is in the library.
+        clock.advance_to(FIRST_RETRY_AFTER);
         effects.rescan(&dir.0);
         assert_eq!(
             builds.load(Ordering::SeqCst),
             2,
-            "the stock effect was not built again after the back-off"
+            "the stock effect was not built again after the wait"
         );
         assert_eq!(
             names(&effects),
             vec![("html:stock-one".to_string(), "Stock One".to_string())]
         );
+    }
+
+    /// A stock effect whose load times out again waits twice as long, like a file does.
+    #[test]
+    fn a_stock_effect_that_times_out_again_waits_longer() {
+        let dir = TempDir::new("stock-timeout-again");
+        let builds = Arc::new(AtomicUsize::new(0));
+        let clock = TestClock::new();
+        let effects = UserEffects::with_limits(
+            timing_out_builder(builds.clone(), usize::MAX),
+            &[("stock-one", "Stock One\n<canvas></canvas>")],
+            crate::thumbnail::TIMEOUT_RETRY_AFTER,
+            clock.clock(),
+        );
+
+        // The first build ran out of time.
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+
+        // The first wait is over: it is built again, and it times out again.
+        clock.advance_to(FIRST_RETRY_AFTER);
+        effects.rescan(&dir.0);
+        assert_eq!(builds.load(Ordering::SeqCst), 2);
+
+        // The next wait is twice as long: a scan just before it is over leaves it alone.
+        clock.advance_to(FIRST_RETRY_AFTER + FIRST_RETRY_AFTER * 2 - Duration::from_secs(1));
+        effects.rescan(&dir.0);
+        assert_eq!(
+            builds.load(Ordering::SeqCst),
+            2,
+            "the stock effect was built again before the longer wait was over"
+        );
+
+        // Just after it, it is built again.
+        clock.advance_to(FIRST_RETRY_AFTER + FIRST_RETRY_AFTER * 2);
+        effects.rescan(&dir.0);
+        assert_eq!(
+            builds.load(Ordering::SeqCst),
+            3,
+            "the stock effect was not built again after the longer wait"
+        );
+    }
+
+    /// A stock effect that fails with a real error is left out for good: it fails the same
+    /// way every time, so only a new daemon would try it again.
+    #[test]
+    fn a_stock_effect_that_fails_with_a_real_error_is_not_tried_again() {
+        let dir = TempDir::new("stock-real-error");
+        let builds = Arc::new(AtomicUsize::new(0));
+        let clock = TestClock::new();
+        // The first build runs out of time, the second one fails for good.
+        let builder: Builder = {
+            let builds = builds.clone();
+            Arc::new(move |_id: &str, _source: &str| {
+                let count = builds.fetch_add(1, Ordering::SeqCst);
+                if count == 0 {
+                    return Err(LOAD_TIMEOUT.to_string());
+                }
+                Err("parse: no script".to_string())
+            })
+        };
+        let effects = UserEffects::with_limits(
+            builder,
+            &[("stock-one", "Stock One\n<canvas></canvas>")],
+            crate::thumbnail::TIMEOUT_RETRY_AFTER,
+            clock.clock(),
+        );
+
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+        assert!(effects.schemas().is_empty());
+
+        // The first wait is over: it is built again, and now it fails for good.
+        clock.advance_to(FIRST_RETRY_AFTER);
+        effects.rescan(&dir.0);
+        assert_eq!(builds.load(Ordering::SeqCst), 2);
+
+        // A real error is not tried again, however long the daemon runs.
+        clock.advance(crate::thumbnail::TIMEOUT_RETRY_AFTER * 10);
+        effects.rescan(&dir.0);
+        assert_eq!(
+            builds.load(Ordering::SeqCst),
+            2,
+            "a stock effect that fails for good was built again"
+        );
+        assert!(effects.schemas().is_empty());
     }
 
     #[test]
