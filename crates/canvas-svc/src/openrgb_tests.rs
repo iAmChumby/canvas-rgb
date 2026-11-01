@@ -90,7 +90,7 @@ async fn a_restart_request_stops_and_starts_the_server() {
     let (root, exe) = install();
     let mut sup = supervisor(&processes, &root, &exe, 6742, Some(1));
     sup.tick(Instant::now(), false, None).await;
-    sup.restart("test");
+    sup.restart("test", crate::daemon::DaemonBeforeStop::NotRunning);
     assert_eq!(sup.state(), OpenRgbServerState::Crashed);
     sup.tick(Instant::now(), false, None).await;
     assert_eq!(sup.starts(), 2);
@@ -450,4 +450,94 @@ async fn the_watch_window_ending_with_an_unpainted_device_warns_with_the_count()
     let line = text.lines().find(|l| l.contains("watch ended")).unwrap_or_else(|| panic!("no window-end line:
 {text}"));
     assert!(line.contains("WARN") && line.contains("1 devices are still unpainted") && line.contains("15 s"), "{line}");
+}
+
+// ---- #81: every stop of the OpenRGB server leaves a line, so the next dark stick is diagnosable ----
+
+/// A daemon started first (pid 4000), then an OpenRGB server (pid 4001), both on one set of fakes.
+async fn running_pair(root: &TempDir, exe: &Path) -> (crate::daemon::DaemonSupervisor, OpenRgbSupervisor, FakeProcesses) {
+    let processes = FakeProcesses::new();
+    let mut daemon = crate::daemon::DaemonSupervisor::new(
+        PathBuf::from(r"C:\svc\canvas-rgbd.exe"),
+        Box::new(crate::fakes::FakeLauncher(processes.clone())),
+    );
+    daemon.start(Instant::now());
+    // Port 1 has no server: only the process lifecycle matters here.
+    let mut sup = supervisor(&processes, root, exe, 6742, Some(1));
+    sup.tick(Instant::now(), true, None).await;
+    assert_eq!(sup.starts(), 1);
+    (daemon, sup, processes)
+}
+
+/// The line that announces the end of OpenRGB `pid`, if the text has one.
+fn openrgb_stop_line(text: &str, pid: u32) -> Option<&str> {
+    let announcement = format!("stopping the OpenRGB server (pid {pid})");
+    text.lines().find(|line| line.contains(&announcement))
+}
+
+/// A service stop ends the daemon, then OpenRGB: the OpenRGB line names its pid, the reason and
+/// how, says the daemon went first and how long before, and comes after the daemon's own line.
+#[tokio::test]
+async fn a_service_stop_logs_the_openrgb_kill_with_its_pid_reason_and_the_gap_after_the_daemon() {
+    let (root, exe) = install();
+    let (daemon, sup, _processes) = running_pair(&root, &exe).await;
+    let home = tempfile::tempdir().unwrap();
+    let mut core = crate::pipe_server::tests::test_core(home.path().to_path_buf());
+    core.daemon = daemon;
+    core.openrgb = sup;
+
+    let ((), text) = crate::test_logs::captured(|| core.shutdown("service stop"));
+
+    let line = openrgb_stop_line(&text, 4001).unwrap_or_else(|| panic!("no OpenRGB stop line:\n{text}"));
+    assert!(line.contains("service stop"), "the reason: {line}");
+    assert!(line.contains("how: kill"), "the how: {line}");
+    assert!(line.contains("the daemon (pid 4000) was terminated") && line.contains(" ms earlier"), "the gap: {line}");
+    let daemon_at = text.find("terminating the daemon (pid 4000)").expect("the daemon's own line");
+    let openrgb_at = text.find("stopping the OpenRGB server (pid 4001)").expect("the OpenRGB line");
+    assert!(daemon_at < openrgb_at, "the daemon stop comes first: {text}");
+    assert_eq!(core.openrgb.state(), OpenRgbServerState::NotStarted);
+}
+
+/// A restart on request kills OpenRGB under a daemon that keeps streaming: the line says so.
+#[tokio::test]
+async fn a_restart_logs_the_openrgb_kill_with_its_pid_and_that_the_daemon_still_runs() {
+    let (root, exe) = install();
+    let (daemon, mut sup, _processes) = running_pair(&root, &exe).await;
+
+    let ((), text) = crate::test_logs::captured(|| sup.restart("requested over the pipe", daemon.before_openrgb_stop()));
+
+    let line = openrgb_stop_line(&text, 4001).unwrap_or_else(|| panic!("no OpenRGB stop line:\n{text}"));
+    assert!(line.contains("restart: requested over the pipe"), "the reason: {line}");
+    assert!(line.contains("how: kill"), "the how: {line}");
+    assert!(line.contains("the daemon (pid 4000) is still running and was not told"), "the daemon: {line}");
+}
+
+/// A stop with nothing running says that, instead of leaving the log silent.
+#[tokio::test]
+async fn a_stop_with_no_server_process_says_so() {
+    let processes = FakeProcesses::new();
+    let (root, exe) = install();
+    let mut sup = supervisor(&processes, &root, &exe, 6742, Some(1));
+    let ((), text) = crate::test_logs::captured(|| sup.stop("service stop", crate::daemon::DaemonBeforeStop::NotRunning));
+    assert!(text.contains("no OpenRGB server process to stop") && text.contains("service stop"), "{text}");
+}
+
+/// An OpenRGB that exits by itself is logged with its pid and as an exit, not as a service stop.
+#[tokio::test]
+async fn an_openrgb_that_exits_on_its_own_is_logged_with_its_pid_as_an_exit() {
+    let (root, exe) = install();
+    let (_daemon, mut sup, processes) = running_pair(&root, &exe).await;
+    let logs = LogBuf::default();
+    let _default = tracing::subscriber::set_default(logs.subscriber());
+
+    processes.exit_last();
+    sup.tick(Instant::now(), true, None).await;
+
+    let text = logs.text();
+    let line = text
+        .lines()
+        .find(|line| line.contains("OpenRGB server (pid 4001) exited on its own"))
+        .unwrap_or_else(|| panic!("no exit line:\n{text}"));
+    assert!(line.contains("not stopped by the service"), "{line}");
+    assert!(openrgb_stop_line(&text, 4001).is_none(), "an exit is not a kill: {text}");
 }

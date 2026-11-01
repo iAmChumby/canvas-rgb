@@ -4,6 +4,7 @@
 //! It restarts when it exits. Once it accepts a connection and no daemon is connected, the
 //! service writes the boot color to every device (G5), and holds it until the daemon connects.
 
+use crate::daemon::DaemonBeforeStop;
 use crate::process::{ChildProcess, ProcessSpawner};
 use canvas_proto::pipe::OpenRgbServerState;
 use canvas_proto::traits::DeviceAdapter;
@@ -313,23 +314,28 @@ impl OpenRgbSupervisor {
     }
 
     /// Restarts the server on request (`RestartOpenRgb`). The next tick starts it again.
-    pub fn restart(&mut self, reason: &str) {
+    /// `daemon` is what the daemon is doing now: it is told nothing, so it keeps streaming (#81).
+    pub fn restart(&mut self, reason: &str, daemon: DaemonBeforeStop) {
         tracing::info!(reason, "OpenRGB restart requested");
         if let Some(mut child) = self.child.take() {
-            if let Err(e) = child.kill() {
+            if let Err(e) = kill_server(child.as_mut(), &format!("restart: {reason}"), daemon) {
                 tracing::warn!(error = %e, "could not kill the OpenRGB server");
             }
+        } else {
+            tracing::info!(reason, "OpenRGB restart requested with no server process running");
         }
         self.session = None;
         self.state = OpenRgbServerState::Crashed;
     }
 
-    /// Stops the server when the service stops.
-    pub fn stop(&mut self) {
+    /// Stops the server when the service stops. `daemon` is the daemon stop that came before it.
+    pub fn stop(&mut self, reason: &str, daemon: DaemonBeforeStop) {
         if let Some(mut child) = self.child.take() {
-            if let Err(e) = child.kill() {
+            if let Err(e) = kill_server(child.as_mut(), reason, daemon) {
                 tracing::warn!(error = %e, "could not kill the OpenRGB server on stop");
             }
+        } else {
+            tracing::info!(reason, "no OpenRGB server process to stop");
         }
         self.session = None;
         self.state = OpenRgbServerState::NotStarted;
@@ -344,10 +350,17 @@ impl OpenRgbSupervisor {
         if let Some(child) = self.child.as_mut() {
             match child.try_wait() {
                 Ok(Some(code)) => {
+                    let pid = child.id();
                     self.child = None;
                     self.session = None;
                     self.state = OpenRgbServerState::Crashed;
-                    tracing::info!(code = %crate::process::describe_exit_code(code), "OpenRGB server exited; restarting");
+                    tracing::info!(
+                        pid,
+                        reason = "exit",
+                        code = %crate::process::describe_exit_code(code),
+                        "OpenRGB server (pid {pid}) exited on its own with code {}, not stopped by the service; restarting",
+                        crate::process::describe_exit_code(code)
+                    );
                 }
                 Ok(None) => {}
                 Err(e) => tracing::warn!(error = %e, "could not query the OpenRGB server"),
@@ -456,6 +469,23 @@ impl OpenRgbSupervisor {
             self.boot_job = None;
         }
     }
+}
+
+/// Ends the OpenRGB server, and says first which process, why, how, and what the daemon had done
+/// before it (#81). Every kill of the server goes through here, so the next stick that goes dark
+/// after a stop leaves the order and the gap on record. The kill itself is unchanged:
+/// `TerminateProcess`, no drain, no wait.
+fn kill_server(child: &mut dyn ChildProcess, reason: &str, daemon: DaemonBeforeStop) -> std::io::Result<()> {
+    let pid = child.id();
+    let daemon_text = daemon.describe(Instant::now());
+    tracing::warn!(
+        pid,
+        reason,
+        how = "kill",
+        daemon = %daemon_text,
+        "stopping the OpenRGB server (pid {pid}): {reason}; how: kill, no graceful close, not waited on; {daemon_text}"
+    );
+    child.kill()
 }
 
 /// Logs how many devices a step touched: INFO for some, WARN for none. A step that reached no

@@ -85,7 +85,7 @@ impl Core {
     pub fn shutdown(&mut self, reason: &str) {
         self.fans.restore_all(reason);
         self.daemon.stop();
-        self.openrgb.stop();
+        self.openrgb.stop(reason, self.daemon.before_openrgb_stop());
     }
 
     /// Answers one request. Every fan value is validated before anything is written.
@@ -115,7 +115,7 @@ impl Core {
                 port: self.openrgb.port(),
             },
             PipeRequest::RestartOpenRgb => {
-                self.openrgb.restart("requested over the pipe");
+                self.openrgb.restart("requested over the pipe", self.daemon.before_openrgb_stop());
                 PipeResponse::Ok
             }
             PipeRequest::SetBootColor { color } => ok_or(self.fans.set_boot_color(color)),

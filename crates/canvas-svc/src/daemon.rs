@@ -96,6 +96,33 @@ fn wait_for_exit(child: &mut dyn ChildProcess, pid: u32) {
     }
 }
 
+/// What the service knew about the daemon at the moment it ended OpenRGB, for the log line of that
+/// stop (#81): a stick that went dark after an update needs the order and the gap between the two
+/// kills to be on record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonBeforeStop {
+    /// The service ended the daemon `at`; it did not wait for the daemon to exit.
+    Stopped { pid: u32, at: Instant },
+    /// The daemon runs and was not told: it keeps sending frames.
+    Running { pid: u32 },
+    /// No daemon process.
+    NotRunning,
+}
+
+impl DaemonBeforeStop {
+    /// The sentence part of the OpenRGB stop line: what became of the daemon, and how long before.
+    pub fn describe(&self, now: Instant) -> String {
+        match *self {
+            Self::Stopped { pid, at } => {
+                let gap_ms = now.saturating_duration_since(at).as_secs_f64() * 1000.0;
+                format!("the daemon (pid {pid}) was terminated {gap_ms:.3} ms earlier")
+            }
+            Self::Running { pid } => format!("the daemon (pid {pid}) is still running and was not told; it keeps sending frames"),
+            Self::NotRunning => "no daemon is running".to_string(),
+        }
+    }
+}
+
 /// Compares two Windows paths without regard to case or a verbatim (`\\?\`) prefix.
 fn same_image(a: &Path, b: &Path) -> bool {
     fn norm(p: &Path) -> String {
@@ -134,6 +161,8 @@ pub struct DaemonSupervisor {
     child_session: Option<u32>,
     /// A different console session seen while the daemon runs, and since when (see `SESSION_SETTLE`).
     pending_move: Option<(u32, Instant)>,
+    /// The daemon `stop()` ended, and when (#81): the OpenRGB stop line reports the gap.
+    stopped_daemon: Option<(u32, Instant)>,
 }
 
 impl DaemonSupervisor {
@@ -150,6 +179,7 @@ impl DaemonSupervisor {
             waiting_for_session: false,
             child_session: None,
             pending_move: None,
+            stopped_daemon: None,
         }
     }
 
@@ -277,7 +307,20 @@ impl DaemonSupervisor {
     pub fn stop(&mut self) {
         self.stopped = true;
         if let Some(mut child) = self.child.take() {
+            let pid = child.id();
             let _ = terminate_daemon(child.as_mut(), "the service is stopping");
+            self.stopped_daemon = Some((pid, Instant::now()));
+        }
+    }
+
+    /// What the daemon's state is right now, for the line that logs an OpenRGB stop (#81).
+    pub fn before_openrgb_stop(&self) -> DaemonBeforeStop {
+        if let Some(child) = self.child.as_ref() {
+            return DaemonBeforeStop::Running { pid: child.id() };
+        }
+        match self.stopped_daemon {
+            Some((pid, at)) => DaemonBeforeStop::Stopped { pid, at },
+            None => DaemonBeforeStop::NotRunning,
         }
     }
 
