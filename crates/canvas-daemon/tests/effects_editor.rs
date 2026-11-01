@@ -1050,3 +1050,112 @@ async fn a_draft_cancels_an_armed_onboarding_restore() {
     );
 }
 
+
+/// A user-effect builder whose next build waits for `go` once `block` is set, so a test can
+/// hold an activation's apply open and interleave a PUT with it.
+struct SlowBuild {
+    block: Arc<std::sync::atomic::AtomicBool>,
+    started: std::sync::mpsc::Receiver<()>,
+    go: std::sync::mpsc::Sender<()>,
+}
+
+/// Like [`build_with_clock`], with a gated user-effect builder for activations and a fast fake
+/// builder for drafts.
+fn build_slow_activation(
+) -> (axum::Router, Arc<App>, Arc<FakeEngine>, TempHome, PathBuf, TestClock, SlowBuild) {
+    let home = TempHome::new();
+    let folder = home.path.join("effects");
+    std::fs::create_dir_all(&folder).expect("the effects folder is created");
+    let store = canvas_daemon::storage::Store::at(&home.path);
+    let engine = Arc::new(FakeEngine::default());
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+    let block = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (started_tx, started) = std::sync::mpsc::channel::<()>();
+    let (go, go_rx) = std::sync::mpsc::channel::<()>();
+    let go_rx = Arc::new(std::sync::Mutex::new(go_rx));
+    let user_builder: canvas_daemon::user_effects::Builder = {
+        let block = block.clone();
+        let go_rx = go_rx.clone();
+        Arc::new(move |id: &str, _source: &str| {
+            if block.load(std::sync::atomic::Ordering::SeqCst) {
+                let _ = started_tx.send(());
+                let _ = go_rx.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).recv();
+            }
+            Ok(Box::new(common::FakeEffect::new(id)) as Box<dyn canvas_proto::traits::Effect>)
+        })
+    };
+    let draft_builder: canvas_daemon::user_effects::Builder = Arc::new(|id: &str, _source: &str| {
+        Ok(Box::new(common::FakeEffect::new(id)) as Box<dyn canvas_proto::traits::Effect>)
+    });
+
+    let mut app = App::new(
+        store,
+        engine.clone(),
+        Box::new(FakeAdapter::default()),
+        TOKEN.to_string(),
+        "0.1.0-test".to_string(),
+        tx,
+    );
+    app.effects_dir = folder.clone();
+    app.user_effects = Arc::new(canvas_daemon::user_effects::UserEffects::with_stock(user_builder, &[]));
+    let clock = TestClock::new();
+    app.draft = canvas_daemon::draft::Draft::with_builder(clock.clock(), draft_builder);
+    let app = Arc::new(app);
+    (api::router(app.clone()), app, engine, home, folder, clock, SlowBuild { block, started, go })
+}
+
+#[tokio::test]
+async fn a_put_waits_for_an_activation_that_ends_the_draft() {
+    let (router, app, engine, _home, folder, _clock, slow) = build_slow_activation();
+    add_user_effect(&app, &folder, "slow.html", MOVING);
+    assert!(
+        app.user_effects.schemas().iter().any(|s| s.id == "html:slow"),
+        "the slow effect is in the library"
+    );
+    prior_effect(&app, "solid", color("#112233")).await;
+    assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
+
+    let SlowBuild { block, started, go } = slow;
+    block.store(true, std::sync::atomic::Ordering::SeqCst);
+    let activate = tokio::spawn({
+        let router = router.clone();
+        async move {
+            router
+                .oneshot(request_with_body(
+                    "POST",
+                    &routes::EFFECT_ACTIVATE.replace("{id}", "html:slow"),
+                    r#"{"props": {}, "preset": null}"#,
+                ))
+                .await
+                .expect("the router answers")
+        }
+    });
+    // The activation is inside its build: the draft is already ended and the gate is held.
+    tokio::task::spawn_blocking(move || started.recv_timeout(std::time::Duration::from_secs(10)))
+        .await
+        .expect("the wait ends")
+        .expect("the activation's build started");
+
+    let changed = MOVING.replace("#ffcc00", "#00ff00");
+    let hash = canvas_daemon::user_effects::source_hash(&changed);
+    let put_router = router.clone();
+    let put = tokio::spawn(async move {
+        put_draft(put_router, &changed, serde_json::json!({})).await
+    });
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert!(!put.is_finished(), "the PUT waits while the activation holds the draft gate");
+
+    go.send(()).expect("the build is released");
+    assert_eq!(activate.await.expect("the task ends").status(), StatusCode::OK);
+    assert_eq!(put.await.expect("the task ends").status(), StatusCode::OK);
+
+    assert_eq!(
+        running(&engine).0,
+        Some(format!("draft:{hash}")),
+        "the PUT that waited is the last thing on the lights"
+    );
+    assert!(draft_state(router).await.active, "and its slot is the one reported");
+}

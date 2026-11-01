@@ -184,8 +184,9 @@ pub async fn activate(
 
     // Any activation ends an earlier timer; an onboarding effect arms a new one below.
     app.transient.cancel();
-    // The owner chose a saved effect: a draft on the lights is dropped, not restored.
-    crate::draft::drop_slot(&app).await;
+    // The owner chose a saved effect: a draft on the lights ends, and the guard keeps a beat
+    // from starting a new one until this effect is on the lights.
+    let _replace = crate::draft::hold_for_replace(&app).await;
     crate::apply_effect(&app, &schema.id, &props)
         .await
         .map_err(|e| ApiFailure::internal(format!("could not activate the effect: {e}")))?;

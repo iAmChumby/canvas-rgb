@@ -54,6 +54,9 @@ pub struct Draft {
     gate: tokio::sync::Mutex<()>,
     /// The daemon's clock; the tests replace it.
     clock: Clock,
+    /// How a draft is built. The daemon uses [`crate::user_effects::html_builder`]; a test
+    /// swaps in a fake, and one that can be held open to interleave a PUT with an activation.
+    builder: crate::user_effects::Builder,
 }
 
 impl Default for Draft {
@@ -65,7 +68,17 @@ impl Default for Draft {
 impl Draft {
     /// A draft slot measured against `clock`. The tests pass a clock they move by hand.
     pub fn with_clock(clock: Clock) -> Self {
-        Self { slot: Mutex::new(None), gate: tokio::sync::Mutex::new(()), clock }
+        Self::with_builder(clock, crate::user_effects::html_builder())
+    }
+
+    /// A draft slot with its own builder, for a test that holds a build open.
+    pub fn with_builder(clock: Clock, builder: crate::user_effects::Builder) -> Self {
+        Self { slot: Mutex::new(None), gate: tokio::sync::Mutex::new(()), clock, builder }
+    }
+
+    /// The builder a draft's HTML is built with.
+    pub fn builder(&self) -> crate::user_effects::Builder {
+        self.builder.clone()
     }
 
     fn lock(&self) -> MutexGuard<'_, Option<Slot>> {
@@ -176,10 +189,8 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<Slot, PutE
     // A new source. Building it runs the file's scripts, so it goes on a blocking thread.
     let build_id = id.clone();
     let build_source = html.to_string();
-    let effect = tokio::task::spawn_blocking(move || {
-        let build = crate::user_effects::html_builder();
-        build(&build_id, &build_source)
-    })
+    let build = app.draft.builder();
+    let effect = tokio::task::spawn_blocking(move || build(&build_id, &build_source))
     .await
     .map_err(|e| PutError::Internal(format!("the draft load task failed: {e}")))?
     .map_err(PutError::Build)?;
@@ -245,17 +256,6 @@ pub async fn expire_if_due(app: &Arc<App>) -> Option<Ended> {
         "the draft lease ran out"
     );
     Some(ended)
-}
-
-/// Ends the draft without restoring: an activate or a layout switch chose something else, and
-/// that something is already (or is about to be) on the lights. Returns true when a draft ended.
-pub async fn drop_slot(app: &Arc<App>) -> bool {
-    let _gate = app.draft.gate.lock().await;
-    let Some(slot) = app.draft.lock().take() else {
-        return false;
-    };
-    tracing::info!(draft = %slot.id, "the draft ended: something else was chosen");
-    true
 }
 
 /// Holds the draft gate while a saved effect is put on the lights, after ending a draft.
