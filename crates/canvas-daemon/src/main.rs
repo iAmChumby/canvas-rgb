@@ -15,7 +15,7 @@
 use canvas_daemon::exit_log::StopReason;
 use canvas_daemon::state::App;
 use canvas_proto::api::LinkState;
-use canvas_proto::traits::{DeviceAdapter, EngineSettings};
+use canvas_proto::traits::EngineSettings;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -136,8 +136,7 @@ async fn daemon_main() -> Exit {
 
     // The numeric display (the CHIONE pump head). It only enumerates until a display has a saved
     // config, so starting it opens nothing on a PC without one.
-    let display_adapter = Box::new(canvas_adapters::chione::ChioneDisplay::new())
-        as Box<dyn canvas_proto::traits::NumericDisplayAdapter>;
+    let display_adapter = Box::new(canvas_adapters::chione::ChioneDisplay::new());
 
     // The peripherals: the mouse and the controller. They are enumerated, never opened, until
     // the owner says so in `peripherals.json` (see `canvas_daemon::peripherals`).
@@ -152,7 +151,7 @@ async fn daemon_main() -> Exit {
         App::with_displays(
             store,
             engine.clone(),
-            Box::new(adapter) as Box<dyn DeviceAdapter>,
+            Box::new(adapter),
             token,
             canvas_daemon::version(),
             quit_tx,

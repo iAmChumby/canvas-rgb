@@ -147,9 +147,12 @@ pub struct Runtime {
 }
 
 impl DisplayHub {
-    pub fn new(adapter: Box<dyn NumericDisplayAdapter>) -> Self {
+    pub fn new<D>(adapter: Box<D>) -> Self
+    where
+        D: NumericDisplayAdapter + canvas_adapters::resume::ResumeBehavior + 'static,
+    {
         Self {
-            adapter: Arc::new(tokio::sync::Mutex::new(adapter)),
+            adapter: Arc::new(tokio::sync::Mutex::new(adapter as Box<dyn NumericDisplayAdapter>)),
             runtime: tokio::sync::RwLock::new(Runtime::default()),
             generation: AtomicU64::new(0),
             vendor_running: std::sync::Mutex::new(Arc::new(vendor_app_running)),
