@@ -217,19 +217,30 @@ function Get-WorkflowViolations {
     return $found
 }
 
-# The secret violations in a workflow's text: a job other than the sign job that names a
-# secret. Any form of the secrets context counts, under any key: env, with, run or a job key.
-# A comment cannot make a secret reach a job, so comments are not read.
+# The secret violations in a workflow's raw text: every line, comments and shell text inside a
+# run: block included, that names a secret anywhere outside the sign job. Any form counts
+# (secrets., secrets[, toJSON(secrets), any case): the match is the word "secrets". A comment
+# is not exempt: a "#" line inside a run: | block is shell text, and a comment outside the sign
+# job that names a secret is a line this guard cannot tell from a use. The sign job's range is
+# found on the raw lines: from its "  sign:" key to the line before the next line indented two
+# spaces or fewer (a key, a comment or a top-level line). It fails closed: when the sign job is
+# not found exactly once, that is a violation; the guard never passes by finding nothing.
 function Get-SecretViolations {
     param([string]$Text)
-    $info = Get-WorkflowJobsFromText $Text
+    $lines = @($Text -split '\r?\n')
     $found = @()
-    foreach ($name in $info.Jobs.Keys) {
-        if ($name -eq 'sign') { continue }
-        foreach ($line in ($info.Jobs[$name] -split "`n")) {
-            if ($line.TrimStart().StartsWith('#')) { continue }
-            if ($line -match '(?i)secrets') { $found += "job [$name] names a secret: [$($line.Trim())]" }
-        }
+    $starts = @(0..($lines.Count - 1) | Where-Object { $lines[$_] -match '^ {2}[''"]?sign[''"]?\s*:\s*(#.*)?$' })
+    if ($starts.Count -ne 1) {
+        return @("the sign job was found $($starts.Count) times in the raw text, not exactly once: the secrets guard cannot tell where the one allowed job is")
+    }
+    $first = $starts[0]
+    $last = $lines.Count - 1
+    for ($i = $first + 1; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '^\s{0,2}\S') { $last = $i - 1; break }
+    }
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($i -ge $first -and $i -le $last) { continue }
+        if ($lines[$i] -match '(?i)secrets') { $found += "line $($i + 1) is outside the sign job and names a secret: [$($lines[$i].Trim())]" }
     }
     return $found
 }
@@ -788,20 +799,39 @@ try {
         Assert-Equal @(Get-WorkflowViolations $base).Count 0 'the unmutated workflow has none'
     }
     Test-Case 'release workflow: only the sign job may name a secret' {
-        # The key is the one secret the release signs with. Any other secret, in any form and
-        # under any key, must not reach the build or the publish job: toJSON(secrets) hands over
-        # every secret there is, and a publish step that echoes one puts it in the log.
-        $violations = @(Get-SecretViolations (Get-Content -LiteralPath $workflowPath -Raw))
+        # The key is the one secret the release signs with. The raw file is scanned, every line
+        # (comments and shell text included): a secret named anywhere outside the sign job's lines,
+        # under any key or none, is a failure. toJSON(secrets) hands over every secret there is, and a
+        # "#" line inside a run: | block is shell text, not a YAML comment.
+        $raw = Get-Content -LiteralPath $workflowPath -Raw
+        $violations = @(Get-SecretViolations $raw)
         Assert-Equal $violations.Count 0 "a secret outside the sign job:`n$($violations -join "`n")"
         $info = Get-WorkflowJobs $workflowPath
         Assert-True ($info.Jobs['sign'] -match '(?i)secrets\.') 'the sign job still reads its secret'
     }
-    Test-Case 'release workflow: the secrets check catches a secret in any job and any key' {
-        $base = (Get-WorkflowJobsFromText (Get-Content -LiteralPath $workflowPath -Raw)).Text
+    Test-Case 'release workflow: the secrets check catches a secret anywhere outside the sign job' {
+        # Each mutant is built from the raw text (LF line ends), the text the guard reads, and must
+        # differ from it.
+        $base = (Get-Content -LiteralPath $workflowPath -Raw) -replace "`r`n", "`n"
+        $all = '${{ toJSON(secrets) }}'
+        $key = '${{ secrets.UPDATE_SIGNING_KEY }}'
+        $checkout = "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4`n        with:`n          persist-credentials: false`n"
         $variants = [ordered]@{
-            'toJSON(secrets) in a publish env'     = { param($t) $t.Replace("      - name: Build the site`n        env:`n", "      - name: Build the site`n        env:`n          ALL_SECRETS: `${{ toJSON(secrets) }}`n") }
-            'secrets.UPDATE_SIGNING_KEY in a with' = { param($t) $t.Replace("        with:`n          files: |`n", "        with:`n          key: `${{ secrets.UPDATE_SIGNING_KEY }}`n          files: |`n") }
-            'secrets.GITHUB_TOKEN in a build step' = { param($t) $t.Replace("      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4`n        with:`n          persist-credentials: false`n`n", "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4`n        with:`n          persist-credentials: false`n          token: `${{ secrets.GITHUB_TOKEN }}`n`n") }
+            'toJSON(secrets) in a publish step env'       = { param($t) $t.Replace("      - name: Build the site`n        env:`n", "      - name: Build the site`n        env:`n          ALL_SECRETS: $all`n") }
+            'secrets.UPDATE_SIGNING_KEY in a publish with' = { param($t) $t.Replace("        with:`n          files: |`n", "        with:`n          key: $key`n          files: |`n") }
+            'secrets.GITHUB_TOKEN in a build step'        = { param($t) $t.Replace($checkout, $checkout + "          token: `${{ secrets.GITHUB_TOKEN }}`n") }
+            'a # line inside publish run: |'              = { param($t) $t.Replace("          # Only the size is printed:", "          # $key`n          # Only the size is printed:") }
+            'top-level env with the key'                  = { param($t) $t.Replace("`njobs:`n", "`nenv:`n  K: $key`n`njobs:`n") }
+            'top-level toJSON(secrets)'                   = { param($t) $t.Replace("`njobs:`n", "`nenv:`n  ALL: $all`n`njobs:`n") }
+            'publish: # x with toJSON(secrets) in env'    = { param($t) $t.Replace("`n  publish:`n", "`n  publish: # x`n    env:`n      ALL: $all`n") }
+            'quoted publish key with toJSON(secrets)'     = { param($t) $t.Replace("`n  publish:`n", "`n  'publish':`n    env:`n      ALL: $all`n") }
+            'secrets[ in a publish run'                   = { param($t) $t.Replace("        run: cd dist && sha256sum -c *.sha256`n", "        run: cd dist && echo `${{ secrets['UPDATE_SIGNING_KEY'] }}`n") }
+            'upper-case SECRETS in a build step'          = { param($t) $t.Replace($checkout, $checkout + "          token: `${{ SECRETS.GITHUB_TOKEN }}`n") }
+            'a comment in the build job'                  = { param($t) $t.Replace("  build:`n    runs-on: windows-latest`n", "  build:`n    # `${{ secrets.UPDATE_SIGNING_KEY }}`n    runs-on: windows-latest`n") }
+            'a comment before the publish key'            = { param($t) $t.Replace("`n  publish:`n", "`n  # reads secrets`n  publish:`n") }
+            'a comment at the top of the file'            = { param($t) "# secrets`n$t" }
+            'the sign job renamed, so not found'          = { param($t) $t.Replace("`n  sign:`n", "`n  signer:`n") }
+            'a second sign key'                           = { param($t) $t.Replace("`n  publish:`n", "`n  sign:`n    runs-on: ubuntu-latest`n`n  publish:`n") }
         }
         foreach ($k in $variants.Keys) {
             $mutated = & $variants[$k] $base
