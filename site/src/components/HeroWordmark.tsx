@@ -348,11 +348,14 @@ export function HeroWordmark() {
       for (let i = 0; i < colours.length; i++) {
         g.addColorStop(i / (colours.length - 1), colours[i] ?? "#ff3b5c");
       }
-      // A little hue from the pointer, and no more.
-      paneCtx.filter = `hue-rotate(${hueShift.toFixed(1)}deg)`;
+      // A little hue from the pointer, and no more. Not every browser has the canvas filter
+      // (WebKit does not), and then the band is simply drawn without the shift: that is a
+      // colour and not an edge, so the soft edge of the light is the same everywhere.
+      const hasFilter = typeof (paneCtx as unknown as { filter?: unknown }).filter === "string";
+      if (hasFilter) paneCtx.filter = `hue-rotate(${hueShift.toFixed(1)}deg)`;
       paneCtx.fillStyle = g;
       paneCtx.fillRect(0, 0, w, h);
-      paneCtx.filter = "none";
+      if (hasFilter) paneCtx.filter = "none";
     };
 
     let raf = 0;
