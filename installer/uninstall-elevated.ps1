@@ -112,7 +112,7 @@ try {
     # holds its DLLs open. Stop only the copy that runs from the install dir: an OpenRGB the owner
     # runs from anywhere else is left alone.
     $bundled = Join-Path $InstallDir 'openrgb'
-    Stop-BundledOpenRgb -InstallDir $InstallDir | ForEach-Object { Say $_ }
+    Stop-BundledOpenRgb -InstallDir $InstallDir -KeepGoing | ForEach-Object { Say $_ }
     Start-Sleep -Milliseconds 500
     if ($rm.RemoveInstallDir) {
         if (Test-Path -LiteralPath $InstallDir) {

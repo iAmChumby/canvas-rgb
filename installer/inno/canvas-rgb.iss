@@ -454,7 +454,7 @@ begin
 
   WizardForm.PreparingLabel.Caption := 'Closing canvas-rgb if it is running...';
   if not RunPs(ExpandConstant('{tmp}\stop-canvas.ps1'), '-LogFile "' + Log + '" -InstallDir "' + ExpandConstant('{app}') + '"', False, Code) or (Code <> 0) then
-    Result := PrepFail('canvas-rgb is still running in the background and would not stop (code ' + IntToStr(Code) + '). Nothing was changed. ' + LogTail(Log));
+    Result := PrepFail('Setup could not close everything it has to replace (code ' + IntToStr(Code) + '). Nothing was changed.' + #13#10 + #13#10 + LogTail(Log));
 end;
 
 // After the files are in {app}: the elevated machine-wide script, then the per-user script as the logged-in
