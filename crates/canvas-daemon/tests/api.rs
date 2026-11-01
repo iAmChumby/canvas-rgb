@@ -2521,10 +2521,11 @@ async fn identify_is_an_override_that_stop_ends_even_with_output_paused() {
     assert!(rx.try_recv().is_ok(), "engine frames flow again");
 }
 
-/// #81: each identify request logs the OpenRGB controller it went to and what was sent, so a stick
-/// that stays dark can be told apart from an identify that never went out.
+/// #81: each identify request logs the OpenRGB controller it went to and whether the frame was
+/// queued for the writer, so a stick that stays dark can be told apart from an identify that
+/// never went out.
 #[tokio::test]
-async fn an_identify_request_logs_the_controller_and_what_was_sent() {
+async fn an_identify_request_logs_the_controller_and_whether_the_frame_was_queued() {
     use canvas_proto::device::DeviceKind;
     let logs = common::LogBuf::default();
     let _log = logs.install();
@@ -2535,8 +2536,15 @@ async fn an_identify_request_logs_the_controller_and_what_was_sent() {
     ram.location = "SMBus 0x73".into();
     *app.devices.write().await = vec![common::device("Board", DeviceKind::Motherboard, 12), ram];
 
+    // A writer for both devices, so their frames are queued.
+    let (board_tx, _board_rx) = tokio::sync::mpsc::channel(4);
+    let (ram_tx, _ram_rx) = tokio::sync::mpsc::channel(4);
+    app.identify.register(canvas_proto::DeviceId("fake:Board".into()), board_tx);
+    app.identify.register(canvas_proto::DeviceId("fake:Ram".into()), ram_tx);
+
     let path = routes::DEVICE_IDENTIFY.replace("{id}", "fake:Ram");
     let response = router
+        .clone()
         .oneshot(request_with_body("POST", &path, r#"{"zone":0,"led":2,"count":3}"#))
         .await
         .expect("the router answers");
@@ -2545,14 +2553,38 @@ async fn an_identify_request_logs_the_controller_and_what_was_sent() {
     let text = logs.text();
     let line = text
         .lines()
-        .find(|l| l.contains("identify sent to"))
-        .unwrap_or_else(|| panic!("no identify-sent line:
+        .find(|l| l.contains("identify queued for"))
+        .unwrap_or_else(|| panic!("no identify-queued line:
 {text}"));
     assert!(line.contains("INFO"), "{line}");
     assert!(line.contains("openrgb controller 3 (fake:Ram; Ram, SMBus 0x73)"), "{line}");
     assert!(line.contains("3 of 8 LEDs white from LED 2"), "{line}");
     assert!(line.contains("1 other devices get an all-black frame"), "{line}");
-    assert_eq!(text.lines().filter(|l| l.contains("identify sent to")).count(), 1, "one line per request: {text}");
+    assert_eq!(text.lines().filter(|l| l.contains("identify queued for")).count(), 1, "one line per request: {text}");
+
+    // A device with no writer: the frame goes nowhere, and the line says so.
+    let mut orphan = common::device("Orphan", DeviceKind::Dram, 4);
+    orphan.adapter = "openrgb".into();
+    orphan.adapter_index = 4;
+    orphan.location = "SMBus 0x74".into();
+    *app.devices.write().await = vec![common::device("Board", DeviceKind::Motherboard, 12), orphan];
+    let path = routes::DEVICE_IDENTIFY.replace("{id}", "fake:Orphan");
+    let response = router
+        .oneshot(request_with_body("POST", &path, r#"{"zone":0,"led":0,"count":1}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let text = logs.text();
+    let line = text
+        .lines()
+        .find(|l| l.contains("identify dropped for"))
+        .unwrap_or_else(|| panic!("no identify-dropped line:
+{text}"));
+    assert!(line.contains("INFO"), "{line}");
+    assert!(line.contains("openrgb controller 4 (fake:Orphan; Orphan, SMBus 0x74)"), "{line}");
+    assert!(line.contains("the device has no writer"), "{line}");
+    assert!(line.contains("nothing was sent"), "{line}");
 }
 
 // ---- user presets (#9) ----
