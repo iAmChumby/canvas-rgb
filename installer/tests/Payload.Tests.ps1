@@ -85,8 +85,8 @@ try {
         Assert-True ($src -match 'Get-UninstallRemovalDecision') 'uses the decision'
         Assert-True ($src -match 'if \(\$rm\.RemoveInstallDir\)') 'the install dir removal is gated'
         # Stop and restore-bios still precede any removal in Inno mode too.
-        Assert-True ($src.IndexOf('Stop-Service -Name') -lt $src.IndexOf('& $svcExe --restore-bios')) 'service stops before --restore-bios'
-        Assert-True ($src.IndexOf('& $svcExe --restore-bios') -lt $src.IndexOf('Get-UninstallRemovalDecision')) '--restore-bios before any removal'
+        Assert-True ($src.IndexOf('Stop-Service -Name') -lt $src.IndexOf('Invoke-RestoreBios -Exe $svcExe')) 'service stops before --restore-bios'
+        Assert-True ($src.IndexOf('Invoke-RestoreBios -Exe $svcExe') -lt $src.IndexOf('Get-UninstallRemovalDecision')) '--restore-bios before any removal'
     }
     Test-Case 'setup.ps1 (repo path) still passes -RepoRoot and never -PayloadDir or -InnoMode' {
         $src = Get-Content -LiteralPath (Join-Path $instDir 'setup.ps1') -Raw
@@ -170,11 +170,16 @@ try {
         Assert-True ($body -match 'if not IsUpdateRun then Exit;' -and $body.Contains('update-result.json')) 'update-result.json is still written (the guard is /UPDATE, not /SERVICEUPDATE)'
     }
     Test-Case 'scripts that run as SYSTEM call sc.exe by absolute path, never by a name PATH could resolve (#43)' {
-        foreach ($f in 'setup-elevated.ps1', 'uninstall-elevated.ps1') {
+        foreach ($f in 'setup-elevated.ps1', 'uninstall-elevated.ps1', 'lib.ps1') {
             $t = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot "..\$f"))
             Assert-True ($t -notmatch '(?m)^\s*&\s+sc\.exe ') "$f must not call a bare sc.exe"
-            Assert-True ($t.Contains('Join-Path $env:SystemRoot ' + [char]39 + 'System32\sc.exe' + [char]39)) "$f resolves sc.exe under SystemRoot"
         }
+        # The one place that calls sc.exe resolves it under SystemRoot.
+        $lib = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\lib.ps1'))
+        Assert-True ($lib.Contains('Join-Path $env:SystemRoot ' + [char]39 + 'System32\sc.exe' + [char]39)) 'lib.ps1 resolves sc.exe under SystemRoot'
+        # The uninstall script goes through that helper, so it never names sc.exe itself.
+        $un = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\uninstall-elevated.ps1'))
+        Assert-True ($un.Contains('Remove-CanvasRgbService')) 'the uninstall script deletes the service through the helper'
     }
     Test-Case 'iss: a failed /SERVICEUPDATE starts the service so something finishes the update (#43)' {
         $a = $iss.IndexOf('procedure DeinitializeSetup;')

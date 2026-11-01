@@ -16,6 +16,12 @@ $ErrorActionPreference = 'Stop'
 $c = Get-CanvasConst
 function Say([string]$t) { Write-Step $t $LogFile }
 
+# What this uninstall has already taken away, and what the fans are doing (#64). It can fail half
+# way: the service can be gone and the program files still there. The person must be told what is
+# true, not "nothing was removed", so every step that removes something says so here. The fans are
+# their own stage: a stopped service does not hand them back, --restore-bios does.
+$uninstallState = @{ Service = 'none'; Fans = 'unknown'; Entry = $false; Shortcut = $false; Files = ''; OpenRgb = ''; Config = $false; SignalRgb = $false }
+
 try {
     if (-not (Test-IsAdmin)) { throw 'uninstall-elevated.ps1 must run elevated (uninstall.ps1 starts it).' }
     $programData = Join-Path $env:ProgramData $c.AppName
@@ -28,6 +34,8 @@ try {
     # folder only administrators can change (#46). Looks only; changes nothing.
     Assert-InstallDirProtected -Path $InstallDir -Mode Verify
     Assert-MachineHomeSafe -Path $programData
+    # A state file from an earlier uninstall says nothing about this one.
+    Clear-UninstallState
 
     # 0b. Read the SignalRGB machine record NOW, before anything is deleted. An unreadable record is reported and
     #     kept; the uninstall carries on and ends with exit 2 (finished, except the record), never a plain success.
@@ -67,12 +75,21 @@ try {
                 Stop-Service -Name $c.ServiceName -Force
                 $svc.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
             } catch {
+                # The service is still running, so it still drives every fan: they are under
+                # canvas-rgb control (#64).
+                $uninstallState.Service = 'running'
+                $uninstallState.Fans = 'manual'
                 throw "the service $($c.ServiceName) did not stop ($($_.Exception.Message)). Nothing was removed. It may still own fan headers: stop it from services.msc and run the uninstall again."
             }
         }
         $svc.Refresh()
-        if ($svc.Status -ne 'Stopped') { throw "the service $($c.ServiceName) is $($svc.Status), not Stopped. Nothing was removed." }
+        if ($svc.Status -ne 'Stopped') {
+            $uninstallState.Service = 'running'
+            $uninstallState.Fans = 'manual'
+            throw "the service $($c.ServiceName) is $($svc.Status), not Stopped. Nothing was removed."
+        }
         Say "  service $($c.ServiceName) stopped (its shutdown hands the fan headers back to BIOS)"
+        $uninstallState.Service = 'stopped'
     }
 
     # 2. G4: hand every fan header back to BIOS BEFORE anything is deleted. With the service stopped
@@ -80,18 +97,28 @@ try {
     #    any fan chip (no PawnIO driver, no NVIDIA GPU); then nothing could be under canvas-rgb
     #    control, which bios-state.json settles: it is written before any header is taken over.
     if (Test-Path -LiteralPath $svcExe) {
-        & $svcExe --restore-bios
-        $code = $LASTEXITCODE
+        $code = Invoke-RestoreBios -Exe $svcExe
         Say "  $($c.ServiceExe) --restore-bios exit code: $code"
         $state = Get-BiosStateVerdict -MachineHome $programData
         switch (Get-RestoreBiosDecision -ExitCode $code -ManualState $state.State) {
             'refuse' {
+                # The fans may still be under canvas-rgb control: that is NOT the same as "back on
+                # the motherboard", and the words must not say it is (#64).
+                $uninstallState.Fans = 'manual'
                 $why = if ($state.State -eq 'Manual') { "bios-state.json records $(@($state.Headers) -join ', ') as taken over" } else { 'bios-state.json could not be read' }
                 throw "--restore-bios failed (exit $code) and $why. Nothing was removed (the service is stopped). Fans may still be under canvas-rgb control: restart the PC, or fix the fan driver and run the uninstall again."
             }
-            'skip' { Say '  --restore-bios could not open a fan chip, and bios-state.json lists no header: no fan was ever under canvas-rgb control. Carrying on.' }
+            'skip' {
+                # No fan was ever under canvas-rgb control, so the fans are on the motherboard's own
+                # settings: they never left it.
+                $uninstallState.Fans = 'back'
+                Say '  --restore-bios could not open a fan chip, and bios-state.json lists no header: no fan was ever under canvas-rgb control. Carrying on.'
+            }
+            'ok' { $uninstallState.Fans = 'back' }
         }
     } elseif ($svc) {
+        # The service is stopped, but the fans could not be handed back: they may still be manual.
+        $uninstallState.Fans = 'manual'
         throw "$svcExe is missing but the service exists: cannot hand fans back to BIOS. Nothing was removed."
     } else {
         Say "  $svcExe not found and no service: nothing installed, --restore-bios skipped"
@@ -99,20 +126,21 @@ try {
 
     # 2b. Delete the service (already stopped).
     if ($svc) {
-        $sc = Join-Path $env:SystemRoot 'System32\sc.exe'   # absolute: a bare name resolves through PATH, which a user may control
-        & $sc delete $c.ServiceName | ForEach-Object { Say "  sc delete: $_" }
-        if ($LASTEXITCODE -ne 0) { throw "sc.exe delete failed (exit $LASTEXITCODE)" }
+        $del = Remove-CanvasRgbService -ServiceName $c.ServiceName
+        $del.Lines | ForEach-Object { Say "  sc delete: $_" }
+        if ($del.ExitCode -ne 0) { throw "sc.exe delete failed (exit $($del.ExitCode))" }
         Say "  service $($c.ServiceName) deleted"
+        $uninstallState.Service = 'removed'
     }
 
     # 3. Remove the Installed apps entry, the Start menu shortcut, then the install dir. Leave the
     #    install dir first: the Uninstall button runs this from a copy inside it.
     Set-Location -LiteralPath $env:SystemRoot
     $rm = Get-UninstallRemovalDecision -InnoMode ([bool]$InnoMode)
-    if ($rm.RemoveScriptEntry -and (Test-Path -LiteralPath $c.UninstallKey)) { Remove-Item -LiteralPath $c.UninstallKey -Recurse -Force; Say '  removed the Installed apps entry' }
-    if ($rm.RemoveInnoEntry -and (Test-Path -LiteralPath $c.InnoUninstallKey)) { Remove-Item -LiteralPath $c.InnoUninstallKey -Recurse -Force; Say '  removed the Inno Installed apps entry' }
+    if ($rm.RemoveScriptEntry -and (Test-Path -LiteralPath $c.UninstallKey)) { Remove-Item -LiteralPath $c.UninstallKey -Recurse -Force; Say '  removed the Installed apps entry'; $uninstallState.Entry = $true }
+    if ($rm.RemoveInnoEntry -and (Test-Path -LiteralPath $c.InnoUninstallKey)) { Remove-Item -LiteralPath $c.InnoUninstallKey -Recurse -Force; Say '  removed the Inno Installed apps entry'; $uninstallState.Entry = $true }
     $lnk = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) $c.StartMenuShortcut
-    if ($rm.RemoveShortcut -and (Test-Path -LiteralPath $lnk)) { Remove-Item -LiteralPath $lnk -Force; Say '  removed the Start menu shortcut' }
+    if ($rm.RemoveShortcut -and (Test-Path -LiteralPath $lnk)) { Remove-Item -LiteralPath $lnk -Force; Say '  removed the Start menu shortcut'; $uninstallState.Shortcut = $true }
     $appStopped = @()
     foreach ($n in 'canvas-rgbd', 'canvas-rgb', 'canvas-rgb-cli') {
         Get-Process -Name $n -ErrorAction SilentlyContinue | ForEach-Object { $_ | Stop-Process -Force; $appStopped += $n; Say "  stopped running $n" }
@@ -145,23 +173,42 @@ try {
         if (Test-Path -LiteralPath $InstallDir) {
             if ($keep.Count -gt 0) {
                 # Everything else goes; the folder a running OpenRGB holds stays whole.
+                # A delete that throws half way has already removed what came before it: the
+                # state says 'some' as soon as anything went, not only after a whole delete (#64).
                 foreach ($child in @(Get-ChildItem -LiteralPath $InstallDir -Force)) {
                     if ($keep -contains $child.FullName) { continue }
-                    Remove-Item -LiteralPath $child.FullName -Recurse -Force
+                    $res = @{}
+                    try { Remove-TreeCounting -Path $child.FullName -Result $res }
+                    catch { if ($res.Partial) { $uninstallState.Files = 'some' }; throw }
+                    $uninstallState.Files = 'some'
                 }
                 Say "  removed everything in $InstallDir except the OpenRGB folder"
             } else {
-                Remove-Item -LiteralPath $InstallDir -Recurse -Force
+                $res = @{}
+                try { Remove-TreeCounting -Path $InstallDir -Result $res }
+                catch { if ($res.Partial) { $uninstallState.Files = 'some' }; throw }
                 Say "  removed $InstallDir"
+                $uninstallState.Files = 'all'
             }
         }
     } else {
         # Inno removes the files it installed; the folders this script made (bin, uninstall) are
         # listed in [UninstallDelete]. The OpenRGB tree is ours to delete: it is the biggest tree
         # and Inno does not know it. It goes only when no OpenRGB in it is still running.
+        $treesGone = 0
         foreach ($t in $trees) {
             if ($keep -contains $t) { continue }
-            if (Test-Path -LiteralPath $t) { Remove-Item -LiteralPath $t -Recurse -Force; Say "  removed $t" }
+            if (Test-Path -LiteralPath $t) {
+                $res = @{}
+                try { Remove-TreeCounting -Path $t -Result $res }
+                catch { if ($res.Partial) { $uninstallState.OpenRgb = 'some' }; throw }
+                Say "  removed $t"; $treesGone++
+                $uninstallState.OpenRgb = 'some'
+            }
+        }
+        if ($treesGone -gt 0) {
+            # Only some of the trees went when one of them was kept whole for a running OpenRGB.
+            $uninstallState.OpenRgb = if ($keep.Count -gt 0) { 'some' } else { 'all' }
         }
         Say '  install dir, Installed apps entry and Start menu shortcut are left to the Inno uninstaller'
     }
@@ -175,8 +222,10 @@ try {
         if (Get-Service -Name $rec.service.name -ErrorAction SilentlyContinue) {
             Set-Service -Name $rec.service.name -StartupType $t
             Say "  $($rec.service.name) StartType restored to $t"
+            $uninstallState.SignalRgb = $true
         }
         Remove-Item -LiteralPath $rf -Force
+        $uninstallState.SignalRgb = $true
     } else {
         Say "  no machine SignalRGB record: the SignalRGB service is left as is"
     }
@@ -185,8 +234,11 @@ try {
     if ($PurgeConfig -and $recError) {
         Say "  kept $programData (-PurgeConfig skipped: it holds the unreadable restore record)"
     } elseif ($PurgeConfig -and (Test-Path -LiteralPath $programData)) {
-        Remove-Item -LiteralPath $programData -Recurse -Force
+        $res = @{}
+        try { Remove-TreeCounting -Path $programData -Result $res }
+        catch { if ($res.Partial) { $uninstallState.Config = 'some' }; throw }
         Say "  deleted $programData (-PurgeConfig)"
+        $uninstallState.Config = $true
     } else {
         Say "  kept $programData"
     }
@@ -202,5 +254,23 @@ try {
     exit 0
 } catch {
     Say "[elevated] FAILED: $($_.Exception.Message)"
+    # What is true now: the uninstall can fail after the service or the files are gone, and the
+    # person must be told that, not "nothing was removed" (#64). The words go into the log and
+    # into one small file in the protected machine home, which the uninstaller that ran this
+    # script reads back and shows.
+    $report = Get-UninstallStateReport -State $uninstallState
+    Say "[elevated] state: $($report.Words)"
+    $noHomeNothingDone = (-not $report.Removed) -and ($uninstallState.Service -eq 'none') -and ((-not $programData) -or (-not (Test-Path -LiteralPath $programData)))
+    if ((-not (Set-UninstallState -Text $report.Words)) -and (-not $noHomeNothingDone)) {
+        # The state could not be written, so the uninstaller cannot say what is true. It must not
+        # fall back to "nothing was removed": this exit code says that the state is unknown.
+        # The exception: there is no machine home (no installation was ever made), nothing was
+        # removed and no service was touched, so "nothing was removed" IS true and exit 1 says it.
+        Say '[elevated] the state could not be written, so the uninstaller cannot say what was removed'
+        exit 5
+    }
+    # Exit 4: it failed and something was already removed. Exit 1: it failed before anything was
+    # taken away, so "nothing was removed" is true.
+    if ($report.Removed) { exit 4 }
     exit 1
 }

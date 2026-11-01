@@ -3,7 +3,7 @@ import { CopyButton } from "./CopyButton";
 
 const RELEASES = "https://github.com/iAmChumby/canvas-rgb/releases/latest";
 const PAWNIO = "https://github.com/namazso/PawnIO";
-const SETUP = "canvas-rgb-setup-0.4.1.exe";
+const SETUP = "canvas-rgb-setup-0.4.2.exe";
 
 const COMMANDS = `powershell -ExecutionPolicy Bypass -File installer\\setup.ps1 -WhatIf
 powershell -ExecutionPolicy Bypass -File installer\\setup.ps1`;

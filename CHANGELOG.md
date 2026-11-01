@@ -10,6 +10,13 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 - Every editor screen now fits the window: the page title sits in the status bar and the panels lie side by side instead of in one long column, so the things you act on are where you can see them. (#67)
 
+## [0.4.2] - 2026-11-01
+
+### Fixed
+
+- An update that fails before it copies any new files now starts canvas-rgb again when it was running, so your fans do not stay on your motherboard's own settings. (#65)
+- Removing canvas-rgb now says what it really removed, instead of always saying nothing was removed. (#64)
+
 ## [0.4.1] - 2026-11-01
 
 ### Security
@@ -110,7 +117,8 @@ The first release.
 - Settings for the Attack Shark X6 mouse and the 8BitDo Ultimate 2 controller.
 - The editor, the tray app, the `canvas-rgb` CLI and the Windows installer.
 
-[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/iAmChumby/canvas-rgb/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/iAmChumby/canvas-rgb/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.2.0...v0.3.0

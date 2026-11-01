@@ -971,22 +971,97 @@ function Stop-CanvasRgbUserProcesses {
 # folder holds a whole set of files, so this is safe; a service that will not start is said so.
 # -WasRunning is what Stop-CanvasRgbService reported: only a service this run stopped is started
 # again. A service the user had stopped on purpose stays stopped.
+# -Result says what happened: Started is true when the service runs now, Failed when it could
+# not be started, Missing when there is no such service at all (nothing to start). The caller
+# needs that to tell the truth about the state of the PC (#65).
 function Start-CanvasRgbService {
-    param([bool]$WasRunning = $false)
+    param([bool]$WasRunning = $false, [hashtable]$Result = @{})
     $c = $script:CanvasConst
     $out = @()
+    $Result.Started = $false
+    $Result.Failed = $false
+    $Result.Missing = $false
     if (-not $WasRunning) { return $out }
     $svc = Get-Service -Name $c.ServiceName -ErrorAction SilentlyContinue
-    if (-not $svc) { return $out }
-    if ($svc.Status -eq 'Running') { return $out }
+    if (-not $svc) {
+        $Result.Missing = $true
+        $out += "  the service $($c.ServiceName) is not installed, so it could not be started again"
+        return $out
+    }
+    if ($svc.Status -eq 'Running') { $Result.Started = $true; return $out }
     try {
         Start-Service -Name $c.ServiceName
         (Get-Service -Name $c.ServiceName).WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
+        $Result.Started = $true
         $out += "  started the service $($c.ServiceName) again"
     } catch {
+        $Result.Failed = $true
         $out += "  the service $($c.ServiceName) could not be started again ($($_.Exception.Message))"
     }
     return $out
+}
+
+# Whether the service may be started again after an install that did not finish (#65).
+#   StoppedRunningService: this run stopped a running service (the first step did).
+#   ElevatedStepRan: the machine-wide step ran; it starts the service itself when it fails, so
+#     starting it again here would be a second start.
+#   CopyStarted: Inno's copy of the files started, so the install folder holds a mix of the old and
+#     the new files: the service must not be started from that.
+# Returns:
+#   'restart'         - start the service again
+#   'not-stopped'     - this run stopped no running service: there is nothing to start
+#   'already-handled' - the machine-wide step starts the service itself
+#   'leave-stopped'   - the copy started: the service stays stopped (the fans are then on the
+#                        motherboard's own curve, which is safe)
+# Pure: it looks at nothing but these three facts.
+function Get-InstallRestartDecision {
+    param([bool]$StoppedRunningService = $false, [bool]$ElevatedStepRan = $false, [bool]$CopyStarted = $false)
+    if (-not $StoppedRunningService) { return 'not-stopped' }
+    if ($ElevatedStepRan) { return 'already-handled' }
+    if ($CopyStarted) { return 'leave-stopped' }
+    return 'restart'
+}
+
+# Runs the service exe to hand every fan header back to BIOS. Split out so a test can stand in for
+# it: it runs a program as SYSTEM, which a test must never do. Returns the exit code.
+function Invoke-RestoreBios {
+    param([string]$Exe)
+    & $Exe --restore-bios | Out-Host
+    return $LASTEXITCODE
+}
+
+# Deletes the service (it is stopped already). Split out so a test can stand in for it: it runs
+# sc.exe, which a test must never do. Returns what sc.exe said and its exit code.
+function Remove-CanvasRgbService {
+    param([string]$ServiceName)
+    $sc = Join-Path $env:SystemRoot 'System32\sc.exe'   # absolute: a bare name resolves through PATH, which a user may control
+    $out = @()
+    & $sc delete $ServiceName | ForEach-Object { $out += "$_" }
+    return [pscustomobject]@{ Lines = $out; ExitCode = $LASTEXITCODE }
+}
+
+# Deletes a folder and everything in it, and says when the delete stopped half way. A recursive
+# delete that throws (a file is in use) has already removed what came before it, so "it threw"
+# does not mean "nothing went". The items under the path are counted before and after: when the
+# delete throws and the count fell, $Result.Partial is true. The error is thrown again (#64).
+function Remove-TreeCounting {
+    param([string]$Path, [hashtable]$Result)
+    $ErrorActionPreference = 'Stop'
+    $Result.Partial = $false
+    $before = Measure-TreeItems -Path $Path
+    try {
+        Remove-Item -LiteralPath $Path -Recurse -Force
+    } catch {
+        $Result.Partial = ((Measure-TreeItems -Path $Path) -lt $before)
+        throw
+    }
+}
+
+# The number of items in a folder, the folder itself included; 0 when it is gone.
+function Measure-TreeItems {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return 0 }
+    return 1 + @(Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue).Count
 }
 
 # ---- the hand-off between the two Inno steps (#60) ----
@@ -1005,11 +1080,15 @@ function Get-StoppedServiceMarkerPath {
 # stopped (the user may have stopped it on purpose): that one must not be started again.
 # The machine home is never created here: without one there was no installation, so nothing was
 # stopped and there is nothing to record.
+# The machine home is written like every other machine-home write: the check comes first, and a
+# folder that is not safe is never written to (#65). The check stops with its own message (it
+# throws), so the reason ends up in the log instead of being swallowed.
 function Set-StoppedServiceMarker {
     param([string]$Path = '')
     if (-not $Path) { $Path = Get-StoppedServiceMarkerPath }
     $dir = Split-Path -Parent $Path
     if (-not (Test-Path -LiteralPath $dir -PathType Container)) { return $false }
+    Assert-MachineHomeSafe -Path $dir
     try {
         [System.IO.File]::WriteAllText($Path, "stoppedByThisRun=yes`r`nservice=$($script:CanvasConst.ServiceName)`r`n")
         return $true
@@ -1030,6 +1109,114 @@ function Clear-StoppedServiceMarker {
     param([string]$Path = '')
     if (-not $Path) { $Path = Get-StoppedServiceMarkerPath }
     try { if (Test-Path -LiteralPath $Path -PathType Leaf) { Remove-Item -LiteralPath $Path -Force } } catch { }
+}
+
+# ---- what an unfinished uninstall leaves behind (#64) ----
+# The uninstall can fail half way: the service can be gone and the program files still there. The
+# person must be told what is true, not "nothing was removed". The script records what it removed
+# in one small file in the protected machine home (the same pattern as the stopped-service marker)
+# and the uninstaller that ran it reads the words back and shows them.
+function Get-UninstallStatePath {
+    $c = Get-CanvasConst
+    return (Join-Path (Join-Path $env:ProgramData $c.AppName) 'uninstall-state.marker')
+}
+
+# Records the state in plain words. The machine home is never created here: without one there was
+# no installation to take away, so there is nothing to record.
+# The machine home is written like every other machine-home write: the check comes first, and a
+# folder that is not safe is never written to. The check does not throw here: this runs when the
+# uninstall has already failed, and the failure must not become a different one.
+function Set-UninstallState {
+    param([string]$Text = '', [string]$Path = '')
+    if (-not $Path) { $Path = Get-UninstallStatePath }
+    $dir = Split-Path -Parent $Path
+    if (-not (Test-Path -LiteralPath $dir -PathType Container)) { return $false }
+    try { Assert-MachineHomeSafe -Path $dir } catch { return $false }
+    try {
+        [System.IO.File]::WriteAllText($Path, $Text)
+        return $true
+    } catch { return $false }
+}
+
+# The words of the last state that was recorded, or '' when there is none (an uninstall that never
+# ran, or one that failed before the machine home existed).
+function Read-UninstallState {
+    param([string]$Path = '')
+    if (-not $Path) { $Path = Get-UninstallStatePath }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '' }
+    try { return ([System.IO.File]::ReadAllText($Path)).Trim() } catch { return '' }
+}
+
+# Removes the state of an earlier uninstall: it says nothing about this one.
+function Clear-UninstallState {
+    param([string]$Path = '')
+    if (-not $Path) { $Path = Get-UninstallStatePath }
+    try { if (Test-Path -LiteralPath $Path -PathType Leaf) { Remove-Item -LiteralPath $Path -Force } } catch { }
+}
+
+# The true state of an uninstall that did not finish, in plain words. $State says what is already
+# gone and what the fans are doing:
+#   Service  'none' (there was none), 'running' (it would not stop), 'stopped' or 'removed'
+#   Fans     'unknown' (not known), 'back' (they are on the motherboard's own settings) or
+#            'manual' (they may still be under canvas-rgb control)
+#   Entry / Shortcut / Files / OpenRgb / Config: what this uninstall removed. Entry and Shortcut
+#            are true when that one item went; Files, OpenRgb and Config are 'all' ($true for
+#            Config) or 'some' when only part of it went.
+# Pure: it says nothing about the disk.
+# Returns the words, and whether anything was really removed: a service that was only stopped is
+# not a removal, so the caller can still say that nothing was taken away.
+function Get-UninstallStateReport {
+    param([hashtable]$State = @{})
+    $service = [string]$State['Service']
+    $fans = [string]$State['Fans']
+    $gone = @()
+    if ($service -eq 'running') {
+        $gone += 'the background service is still running'
+    } elseif ($service -eq 'stopped') {
+        $gone += 'the background service was stopped'
+    } elseif ($service -eq 'removed') {
+        $gone += 'the background service was removed'
+    }
+    # The fans are a stage of their own: stopping the service does not hand them back. Only
+    # --restore-bios (or the knowledge that no fan was ever under canvas-rgb control) does, so
+    # the words say the fans are back only then (#64).
+    if ($fans -eq 'back') {
+        $gone += 'your fans are back on your motherboard''s own settings'
+    } elseif ($fans -eq 'manual') {
+        $gone += 'your fans may still be under canvas-rgb control'
+    }
+    # Each item is named on its own, and a partial delete says so (#64).
+    $files = [string]$State['Files']
+    $openrgb = [string]$State['OpenRgb']
+    if ($State['Entry']) { $gone += 'the Installed apps entry was removed' }
+    if ($State['Shortcut']) { $gone += 'the Start menu shortcut was removed' }
+    if ($files -eq 'all') { $gone += 'the program files were removed' }
+    elseif ($files -eq 'some') { $gone += 'some of the program files were removed' }
+    if ($openrgb -eq 'all') { $gone += 'the OpenRGB folder was removed' }
+    elseif ($openrgb -eq 'some') { $gone += 'some of the OpenRGB folder was removed' }
+    if ($State['SignalRgb']) { $gone += 'SignalRGB''s startup setting was put back' }
+    $config = $State['Config']
+    if ($config -eq 'some') { $gone += 'some of your canvas-rgb settings were removed' }
+    elseif ($config) { $gone += 'your canvas-rgb settings were removed' }
+    $removed = ($service -eq 'removed') -or [bool]$State['Entry'] -or [bool]$State['Shortcut'] `
+        -or ($files -eq 'all') -or ($files -eq 'some') -or ($openrgb -eq 'all') -or ($openrgb -eq 'some') `
+        -or [bool]$config -or [bool]$State['SignalRgb']
+    # What the person is told to do depends on the fans: they cannot be handed back while they may
+    # still be under canvas-rgb control.
+    $tail = if ($fans -eq 'manual') {
+        'Restart the PC, or fix the fan driver, then run the uninstall again.'
+    } elseif ($removed) {
+        'Run the uninstall again to finish.'
+    } else {
+        'Run the uninstall again.'
+    }
+    if ($gone.Count -eq 0) {
+        $words = 'canvas-rgb was not removed: the uninstall stopped before anything was taken away.'
+    } else {
+        $head = if ($removed) { 'canvas-rgb was not removed cleanly: ' } else { 'canvas-rgb was not removed: ' }
+        $words = $head + ($gone -join ', ') + '. ' + $tail
+    }
+    return [pscustomobject]@{ Words = $words; Removed = $removed }
 }
 
 # Stops the service (its shutdown hands the fans to BIOS) and the user processes that hold the binaries.
@@ -1058,8 +1245,12 @@ function Stop-CanvasRgbRunning {
     $early = ''
     if ($CopiedNote) {
         $early = "$CopiedNote; the OpenRGB folder was left as it was"
+        # What is known here is what THIS run did, never what the service is doing now: the
+        # switch says the first step of this run stopped a running service, and its absence says
+        # only that this run stopped nothing. It says nothing about a service that was already
+        # stopped on purpose (#65).
         if ($StoppedRunningService) { $early += '; canvas-rgb was stopped for the update' }
-        else { $early += '; canvas-rgb was not running' }
+        else { $early += '; this update did not stop canvas-rgb' }
         $early += '.'
     }
     # What is true once canvas-rgb was stopped.
