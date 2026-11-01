@@ -3,6 +3,7 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { ToastProvider } from "@/components/Toast";
 import { refreshEffects } from "@/lib/store";
 import { EffectsView } from "@/views/EffectsView";
+import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
 
 // The Effects gallery while it waits, and when it cannot be read. The demo backend holds or fails
 // the effects list (`?state=hold:effects`, `?state=fail:effects`).
@@ -39,7 +40,11 @@ const setState = (tokens: string) => window.history.replaceState({}, "", `/effec
 const mount = () =>
   render(
     <ToastProvider>
-      <EffectsView />
+      {/* The page's name lives in the status strip, so a page on its own needs a strip. */}
+      <StripSlotsProvider>
+        <StripSlot kind="title" />
+        <EffectsView />
+      </StripSlotsProvider>
     </ToastProvider>,
   );
 const count = () => screen.getByTestId("effect-count").textContent ?? "";

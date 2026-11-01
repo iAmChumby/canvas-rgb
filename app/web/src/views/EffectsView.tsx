@@ -11,6 +11,7 @@ import {
   Star,
   Trash,
   UploadSimple,
+  Warning,
   Waveform,
 } from "@phosphor-icons/react";
 import { Button, ButtonLink, FileButton, IconButton, Swap } from "@/components/Button";
@@ -33,7 +34,8 @@ import { api } from "@/lib/endpoints";
 import { ApiFailure, messageOf } from "@/lib/errors";
 import { EFFECT_CATEGORIES, categoryOf, type EffectCategory } from "@/lib/effectCategories";
 import { getSnap, refreshAll, retryEffects, useSnap } from "@/lib/store";
-import { PageTitle } from "@/shell/PageHeader";
+import { PageActions, PageTitle } from "@/shell/PageHeader";
+import { Popover } from "@/components/Popover";
 import { fillDefaults, nextFreeName } from "@/lib/presetMatch";
 import { appliedName, runningOf, setApplied, setShown } from "@/lib/runningPreset";
 import type { EffectDetail } from "@/proto/EffectDetail";
@@ -458,34 +460,8 @@ export function EffectsView() {
     }, 240);
   };
 
-  // The files that did not load. They stand inside the gallery's frame, because they come with
-  // the list: above the frame they would push the page down when the list lands.
-  const failedStrip =
-    failed.length > 0 ? (
-      <div className="failed-strip" data-open={showFailed ? "true" : "false"}>
-        <button
-          type="button"
-          className="failed-strip-head"
-          aria-expanded={showFailed}
-          onClick={() => setShowFailed((v) => !v)}
-        >
-          <FileHtml size={14} aria-hidden="true" />
-          <span>
-            {failed.length} file{failed.length === 1 ? "" : "s"} did not load
-          </span>
-        </button>
-        {showFailed && (
-          <div className="failed-strip-body">
-            {failed.map((f) => (
-              <p key={f.file} className="failed-line">
-                <span className="fig">{f.file}</span>
-                <span className="failed-error">{f.error}</span>
-              </p>
-            ))}
-          </div>
-        )}
-      </div>
-    ) : null;
+  // The files that did not load: the key in the toolbar says how many, and the list is behind it.
+  const failedRef = useRef<HTMLSpanElement>(null);
 
   // A refresh that failed after the list was read does not take the gallery away: the cards stay
   // and the page says they may be old. Only a list that was never read has an error frame.
@@ -526,7 +502,6 @@ export function EffectsView() {
               </EmptyState>
             )}
           </Panel>
-          {failedStrip}
         </div>
       }
     >
@@ -582,9 +557,6 @@ export function EffectsView() {
         );
       })}
     </div>
-    {/* The files that did not load stand under the gallery: they come with the list, and above
-        the cards they would push every card down. */}
-    {failedStrip}
     </LoadFrame>
   );
 
@@ -623,8 +595,8 @@ export function EffectsView() {
       >
       {detail && (
         <>
-          <Panel>
-            <div className="stack" style={{ gap: 12 }}>
+          <Panel className="rd-eff-head">
+            <div className="rd-eff-head-row">
               <div className="effect-live" data-stale={stale ? "true" : "false"}>
                 {needsInput ? (
                   <Thumb id={detail.schema.id} size="lg" label={detail.schema.name} live />
@@ -634,8 +606,16 @@ export function EffectsView() {
                   </div>
                 )}
               </div>
-              <div className="row-wrap" style={{ justifyContent: "space-between" }}>
-                <h2 className="effect-title">{detail.schema.name}</h2>
+              <div className="rd-eff-head-text">
+                <div className="rd-eff-name-row">
+                  <h2 className="effect-title">{detail.schema.name}</h2>
+                  <div className="row-wrap">
+                    {detail.schema.needs.screen && <Chip icon={<MonitorPlay size={14} />}>Screen capture</Chip>}
+                    {detail.schema.needs.audio && <Chip icon={<Waveform size={14} />}>Audio input</Chip>}
+                    {selectedId?.startsWith("html:") && <Chip html>HTML effect</Chip>}
+                    <StateDot tone={running ? "ok" : "mute"}>{running ? "Running" : "Idle"}</StateDot>
+                  </div>
+                </div>
                 <Button
                   variant={running ? "default" : "primary"}
                   disabled={running || stale}
@@ -645,17 +625,23 @@ export function EffectsView() {
                   <Swap labels={["Activate", "Running"]} at={running ? 1 : 0} />
                 </Button>
               </div>
-              <p className="dim">{detail.schema.description}</p>
-              <div className="row-wrap">
-                {detail.schema.needs.screen && <Chip icon={<MonitorPlay size={14} />}>Screen capture</Chip>}
-                {detail.schema.needs.audio && <Chip icon={<Waveform size={14} />}>Audio input</Chip>}
-                {selectedId?.startsWith("html:") && <Chip html>HTML effect</Chip>}
-                <StateDot tone={running ? "ok" : "mute"}>{running ? "Running" : "Idle"}</StateDot>
-              </div>
-              <p className="effect-live-note">
-                {needsInput ? "Live frame" : "Preview"}
+              <Chip
+                className="rd-eff-fav"
+                pressed={detail.favorite}
+                label={detail.favorite ? `Unfavorite ${detail.schema.name}` : `Favorite ${detail.schema.name}`}
+                onClick={() => void toggleFavorite(detail.schema.id, !detail.favorite, detail.schema.name)}
+              >
+                <Star size={16} weight={detail.favorite ? "fill" : "regular"} aria-hidden="true" />
+              </Chip>
+            </div>
+            {/* The description is one line: the whole sentence is in its tooltip. */}
+            <div className="rd-eff-foot">
+              <p className="dim rd-eff-desc" title={detail.schema.description ?? undefined}>
+                {detail.schema.description}
               </p>
-              {selectedId?.startsWith("html:") && (
+              <p className="effect-live-note">{needsInput ? "Live frame" : "Preview"}</p>
+            </div>
+            {selectedId?.startsWith("html:") && (
                 <div className="effect-delete">
                   {deleting === selectedId ? (
                     <>
@@ -698,7 +684,6 @@ export function EffectsView() {
                   )}
                 </div>
               )}
-            </div>
           </Panel>
 
           <PresetStrip
@@ -753,7 +738,24 @@ export function EffectsView() {
         if (file) void sendImport(file, false);
       }}
     >
-      <PageTitle title="Effects" />
+      <PageTitle
+        title="Effects"
+        context={
+          <span className="fig" data-testid="effect-count">
+            {effects === null || listStale ? "–" : <AnimatedNumber value={list.length} />} effects
+          </span>
+        }
+      />
+      <PageActions>
+        <FileButton
+          accept=".html,text/html"
+          icon={<UploadSimple size={16} />}
+          disabled={importing}
+          onFile={(file) => void sendImport(file, false)}
+        >
+          <span className="rd-btn-text">Import</span>
+        </FileButton>
+      </PageActions>
 
       {dragging && (
         <div className="drop-overlay" aria-hidden="true">
@@ -795,18 +797,35 @@ export function EffectsView() {
             aria-label="Search effects"
           />
         </span>
-        {/* A count is shown once the list is known: "0 effects" while loading or on an error would be a false answer. */}
-        <span className="mute fig" data-testid="effect-count">
-          {effects === null || listStale ? "–" : <AnimatedNumber value={list.length} />} effects
-        </span>
-        <FileButton
-          accept=".html,text/html"
-          icon={<UploadSimple size={16} />}
-          disabled={importing}
-          onFile={(file) => void sendImport(file, false)}
+        {/* The files that did not load: a key that says how many, and the list behind it. */}
+        {failed.length > 0 && (
+          <span ref={failedRef} className="rd-failed-anchor">
+            <button
+              type="button"
+              className="chip rd-failed-chip"
+              aria-expanded={showFailed}
+              onClick={() => setShowFailed((v) => !v)}
+            >
+              <Warning size={14} aria-hidden="true" />
+              {failed.length} failed
+            </button>
+          </span>
+        )}
+        <Popover
+          anchor={failedRef}
+          open={showFailed}
+          onClose={() => setShowFailed(false)}
+          label="The files that did not load"
         >
-          Import
-        </FileButton>
+          <div className="stack" style={{ gap: 8 }}>
+            {failed.map((f) => (
+              <p key={f.file} className="failed-line">
+                <span className="fig">{f.file}</span>
+                <span className="failed-error">{f.error}</span>
+              </p>
+            ))}
+          </div>
+        </Popover>
       </div>
 
       {(replaceWith || importError) && (
@@ -864,9 +883,9 @@ export function EffectsView() {
           )}
         </div>
       ) : (
-        <div className="effects-grid">
-          {gallery}
-          {detailPane}
+        <div className="rd-eff-body">
+          <div className="rd-eff-gallery">{gallery}</div>
+          <div className="rd-eff-inspector">{detailPane}</div>
         </div>
       )}
     </div>

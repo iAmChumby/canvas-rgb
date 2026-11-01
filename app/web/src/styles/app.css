@@ -2128,6 +2128,183 @@ button.chip:hover {
 
 /* ---------- effects page ---------- */
 
+/* The body: the library on the left, the inspector of the running effect on the right (R6). */
+.rd-effects .rd-eff-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  gap: var(--s4);
+}
+
+/* The gallery: the library's own pane, so a longer library scrolls here and not the page. */
+.rd-effects .rd-eff-gallery {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* The tiles: as many to a row as fit at 168 px. */
+.rd-effects .effect-gallery {
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: var(--s2);
+  align-content: start;
+}
+
+/* The inspector: the head, then Presets, then Properties. */
+.rd-effects .rd-eff-inspector {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+
+/* The head row: the live preview beside the effect's name, its key and its favourite. */
+.rd-effects .rd-eff-head-row {
+  display: grid;
+  grid-template-columns: 128px minmax(0, 1fr) auto;
+  grid-template-areas:
+    "preview name fav"
+    "preview key fav";
+  align-items: center;
+  column-gap: var(--s3);
+  row-gap: var(--s2);
+}
+
+.rd-effects .rd-eff-head-row .effect-live {
+  grid-area: preview;
+  width: 128px;
+}
+
+.rd-effects .rd-eff-head-text {
+  grid-area: name;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s2);
+}
+
+/* The effect's name and what it needs, on one line. */
+.rd-effects .rd-eff-name-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.rd-effects .rd-eff-head-row .rd-eff-fav {
+  grid-area: fav;
+  align-self: start;
+}
+
+/* The description is one line: the whole sentence is in its tooltip (R8). */
+.rd-effects .rd-eff-desc {
+  margin: var(--s2) 0 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The description and the note that says what the picture is share a row. */
+.rd-effects .rd-eff-foot {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s3);
+  min-width: 0;
+}
+
+.rd-effects .rd-eff-foot .rd-eff-desc {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* The inspector's panels are tighter than the page's: the column has to hold the head, the
+   presets and the properties at once. */
+.rd-effects .rd-eff-inspector .panel {
+  padding: var(--s3);
+}
+
+.rd-effects .rd-eff-inspector .prop-item {
+  min-height: 40px;
+  padding: var(--s1) 0;
+}
+
+/* The search gives the row its room back, so the failed key stays on it. */
+.rd-effects .effect-toolbar .effect-search {
+  flex: 1 1 120px;
+  min-width: 120px;
+}
+
+/* The failed-parse key: the app's own warn tone. */
+.rd-effects .rd-failed-chip {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+  background: color-mix(in srgb, var(--warn) 8%, var(--panel));
+  gap: var(--s1);
+}
+
+/* The chip sits at the right end of the toolbar, so its bubble hangs from the right edge rather
+   than from its middle. */
+.rd-effects .effect-toolbar .tip-bubble {
+  left: auto;
+  right: 0;
+  transform: none;
+}
+
+/* wide: the inspector takes the room the gallery can spare. */
+@container page (min-width: 1500px) {
+  .rd-effects .rd-eff-body {
+    grid-template-columns: minmax(0, 1fr) 400px;
+  }
+}
+
+/* compact: the gallery column is narrower here, so the tiles are smaller and the whole library
+   still stands in the window. */
+@container page (max-width: 999px) {
+  .rd-effects .effect-gallery {
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  }
+}
+
+/* A short window (the content box under 700 px): the inspector's rows tighten, so the head,
+   the presets and the properties all stand in the window (R5). */
+@container page (max-height: 700px) {
+  .rd-effects .rd-eff-inspector {
+    gap: var(--s2);
+  }
+
+  .rd-effects .rd-eff-inspector .panel {
+    padding: var(--s2);
+  }
+
+  .rd-effects .rd-eff-inspector .prop-item {
+    min-height: 36px;
+  }
+}
+
+/* phone: the gallery is the page and the inspector is the sheet that a tap pushes over it. */
+@container page (max-width: 640px) {
+  .rd-effects .rd-eff-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rd-effects .rd-eff-gallery {
+    overflow: visible;
+  }
+
+  .rd-effects .effect-toolbar .effect-search {
+    flex: 1 1 180px;
+  }
+
+  .rd-effects .effect-toolbar .effect-categories {
+    flex: 1 1 100%;
+    justify-content: flex-start;
+  }
+}
+
 /* ---------- effects page: the grid and its parts live in motion.css ---------- */
 
 .list-panel {

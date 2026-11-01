@@ -5,6 +5,7 @@ import { getSnap, patchSnap, refreshDevices, refreshDisplays, refreshEffects } f
 import { DevicesView } from "@/views/DevicesView";
 import { DisplaysView } from "@/views/DisplaysView";
 import { EffectsView } from "@/views/EffectsView";
+import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
 import { PeripheralsView } from "@/views/PeripheralsView";
 import { UpdatesView, TRAY_TIMEOUT_MS } from "@/views/UpdatesView";
 import type { Status } from "@/proto/Status";
@@ -113,7 +114,11 @@ describe("the error frame", () => {
     });
     render(
       <ToastProvider>
-        <EffectsView />
+        {/* The page's name lives in the status strip, so a page on its own needs a strip. */}
+        <StripSlotsProvider>
+          <StripSlot kind="title" />
+          <EffectsView />
+        </StripSlotsProvider>
       </ToastProvider>,
     );
     await screen.findByText("The effects could not be read");
@@ -149,7 +154,11 @@ describe("the retry", () => {
     });
     render(
       <ToastProvider>
-        <EffectsView />
+        {/* The page's name lives in the status strip, so a page on its own needs a strip. */}
+        <StripSlotsProvider>
+          <StripSlot kind="title" />
+          <EffectsView />
+        </StripSlotsProvider>
       </ToastProvider>,
     );
     await screen.findByText("The effects could not be read");
@@ -171,7 +180,11 @@ describe("the retry", () => {
     });
     render(
       <ToastProvider>
-        <EffectsView />
+        {/* The page's name lives in the status strip, so a page on its own needs a strip. */}
+        <StripSlotsProvider>
+          <StripSlot kind="title" />
+          <EffectsView />
+        </StripSlotsProvider>
       </ToastProvider>,
     );
     await screen.findAllByText(/Aurora/);
@@ -195,20 +208,25 @@ describe("the gallery's cards", () => {
     });
     render(
       <ToastProvider>
-        <EffectsView />
+        {/* The page's name lives in the status strip, so a page on its own needs a strip. */}
+        <StripSlotsProvider>
+          <StripSlot kind="title" />
+          <EffectsView />
+        </StripSlotsProvider>
       </ToastProvider>,
     );
     await screen.findAllByText(/Aurora/);
-    const strip = document.querySelector(".failed-strip");
+    const key = document.querySelector(".rd-failed-chip");
     const gallery = document.querySelector(".effect-gallery");
-    expect(strip).not.toBeNull();
+    expect(key).not.toBeNull();
     expect(gallery).not.toBeNull();
-    // The strip says a file did not load: that is true for a broken file and for one whose
+    // The key says a file did not load: that is true for a broken file and for one whose
     // load ran out of time.
-    expect(strip?.textContent).toContain("did not load");
-    // The strip stands after the cards: it comes with the list and must not push them down.
+    expect(key?.textContent).toContain("failed");
+    // The key stands in the toolbar, above the cards: it comes with the list and must not push
+    // them down.
     expect(
-      (gallery as Node).compareDocumentPosition(strip as Node) & Node.DOCUMENT_POSITION_FOLLOWING,
+      (key as Node).compareDocumentPosition(gallery as Node) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
   });
 
@@ -217,7 +235,11 @@ describe("the gallery's cards", () => {
     patchSnap({ effects: [], effectsError: null });
     render(
       <ToastProvider>
-        <EffectsView />
+        {/* The page's name lives in the status strip, so a page on its own needs a strip. */}
+        <StripSlotsProvider>
+          <StripSlot kind="title" />
+          <EffectsView />
+        </StripSlotsProvider>
       </ToastProvider>,
     );
     expect(screen.getByText("No effects yet")).toBeTruthy();
