@@ -3248,6 +3248,216 @@ button.chip:hover {
 
 /* ---------- peripherals page ---------- */
 
+/* The device column becomes a row of keys under the strip. The keys scroll sideways when they
+   do not fit (a phone), and the row never shrinks. */
+.rd-peri-keys {
+  display: flex;
+  gap: var(--s2);
+  flex: 0 0 auto;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: var(--s1);
+  margin: calc(var(--s1) * -1);
+}
+
+.rd-peri-keys::-webkit-scrollbar {
+  display: none;
+}
+
+/* The keys are a row, not a column. */
+.rd-peri-keys .load-frame.load-col[data-state="ready"] {
+  flex-direction: row;
+  gap: var(--s2);
+}
+
+/* The key: its icon, its name, its battery and its state. */
+.rd-peri-keys .rd-devkey {
+  flex: 0 0 auto;
+  width: auto;
+  gap: var(--s2);
+  padding: var(--s2) var(--s3);
+  border-radius: var(--r-md);
+}
+
+.rd-devkey .peripheral-icon {
+  width: 28px;
+  height: 28px;
+}
+
+.rd-devkey .peripheral-text {
+  flex: 0 1 auto;
+}
+
+.rd-devkey .peripheral-name {
+  white-space: nowrap;
+}
+
+/* The device head: Access is merged into it as two inline switches, and the notes under them
+   are the switches' own tooltips (R8). */
+.peripheral-head {
+  align-items: center;
+}
+
+.rd-peri-access {
+  display: flex;
+  align-items: center;
+  gap: var(--s4);
+  margin-left: auto;
+  padding-left: var(--s4);
+  border-left: 1px solid var(--line);
+}
+
+.rd-peri-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.rd-peri-toggle-label {
+  font-weight: 600;
+}
+
+/* The bubble hangs from the right edge of its switch, so it never reaches past the page. */
+.rd-peri-toggle .tip-bubble {
+  white-space: normal;
+  width: 240px;
+  text-align: left;
+  left: auto;
+  right: 0;
+  transform: none;
+}
+
+/* The sections are columns of about 280 px, so a panel never breaks across two of them. */
+.rd-peri-sections {
+  columns: 280px auto;
+  column-gap: var(--s4);
+}
+
+.rd-peri-sections > .panel {
+  break-inside: avoid;
+  margin: 0 0 var(--s4);
+}
+
+/* A field keeps its label on the left and its control on the right, in one row: the columns are
+   narrow, so the label column is narrow too and the slider takes what is left of it. */
+.rd-peri-sections .prop-item {
+  grid-template-columns: minmax(0, 116px) minmax(0, 1fr);
+}
+
+.rd-peri-sections .prop-item[data-kind="number"] {
+  grid-template-columns: minmax(0, 116px) minmax(0, 1fr) 48px;
+}
+
+.rd-peri-sections .prop-item[data-kind="number"] .num {
+  width: 48px;
+}
+
+/* A segmented control is never allowed to break over two lines: it sizes to its content, so
+   its thumb stays on the selected stage. It drops under its label when the column cannot
+   give it the width it needs. */
+.rd-peri-sections .seg {
+  width: max-content;
+  max-width: 100%;
+  white-space: nowrap;
+}
+
+.rd-peri-sections .prop-item:has(.seg) .prop-control {
+  grid-column: 1 / -1;
+}
+
+/* The button mappings are a list of key/value pairs: two columns of pairs, three rows tall
+   instead of six. */
+.rd-peri-sections .rd-peri-buttons .prop-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(3, auto);
+  grid-auto-flow: column;
+  column-gap: var(--s4);
+}
+
+.rd-peri-sections .rd-peri-buttons .prop-item {
+  grid-template-columns: minmax(0, 1fr);
+  border-bottom: 0;
+  min-height: 44px;
+}
+
+/* A short window tightens the rows, as the shell does for the panel padding. */
+@container page (max-height: 700px) {
+  .rd-peri-sections .prop-item {
+    min-height: 44px;
+  }
+}
+
+/* Phone: the keys scroll sideways and the sections stack in one column. The page scrolls;
+   there is no second scroll area inside it. */
+@container page (max-width: 639px) {
+  .rd-peri-sections {
+    columns: auto;
+    column-gap: 0;
+  }
+
+  .rd-peri-sections > .panel {
+    margin: 0 0 var(--s4);
+  }
+
+  .rd-peri-sections .prop-item[data-kind="number"] {
+    grid-template-columns: minmax(0, 1fr) 48px;
+  }
+
+  .rd-peri-sections .prop-item[data-kind="number"] .field-label {
+    grid-column: 1 / -1;
+  }
+
+  .rd-peri-sections .prop-item:has(.seg) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rd-peri-sections .prop-item:has(.seg) .field-label {
+    grid-column: 1 / -1;
+  }
+
+  /* The rows are tighter on a phone: the page scrolls anyway, and every row counts. */
+  .rd-peri-sections .prop-item {
+    min-height: 44px;
+  }
+
+  /* The panels are tighter too. */
+  .rd-peripherals .panel {
+    padding: var(--s3);
+  }
+
+  /* The head wraps: the device's name on its own line, the switches under it. */
+  .peripheral-head {
+    flex-wrap: wrap;
+  }
+
+  .rd-peripherals .peripheral-head-text {
+    flex: 1 1 0;
+  }
+
+  .rd-peri-access {
+    margin-left: 0;
+    padding-left: 0;
+    border-left: 0;
+    flex: 1 1 100%;
+    justify-content: flex-end;
+  }
+}
+
+/* The strip is outside the content box, so it follows the window, like the shell's own strip
+   rules do: the pending count and the Revert label give way to the title and Apply, which
+   have to fit at 390 px. */
+@media (max-width: 720px) {
+  .rd-peri-pending {
+    display: none;
+  }
+
+  .rd-peri-revert-label {
+    display: none;
+  }
+}
+
 .peripheral-grid {
   display: grid;
   grid-template-columns: 320px minmax(0, 1fr);
