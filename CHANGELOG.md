@@ -8,7 +8,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
-- If the app crashes, the crash is now always written to its log, even when the log is busy. (#36)
+- When the app crashes, its log now keeps the crash even if the log was busy at the time. (#36)
 
 ## [0.4.0] - 2026-11-01
 
