@@ -932,6 +932,29 @@ function Start-Service { param($Name) Write-Host 'CALL Start-Service' }
         $guarded = Get-GuardedStatement $body $guard
         Assert-True ($guarded -match 'RestartCanvasRgb') "the restart is inside the guard: [$guarded]"
     }
+    Test-Case 'a run that stopped nothing gets no note: the not-stopped exit comes before the script is looked for' {
+        # A wizard Cancel ends Setup before PrepareToInstall extracts restart-canvas.ps1, so the
+        # script is missing then. "Missing" must not be read as "could not start": when this run
+        # stopped no running service, RestartCanvasRgb leaves before it looks for the script (#65).
+        $restart = Get-IssFunction 'function RestartCanvasRgb'
+        $iNotStopped = $restart.IndexOf('if not FStoppedRunningService then Exit')
+        $iExists = $restart.IndexOf('FileExists')
+        Assert-True ($iNotStopped -gt 0) "the not-stopped exit is there: $restart"
+        Assert-True ($iExists -gt 0) 'the script is looked for'
+        Assert-True ($iNotStopped -lt $iExists) 'the not-stopped exit comes before the script is looked for'
+        # What that exit returns is the "nothing to start" result (3), and the caller writes a note
+        # for 1 and 2 only.
+        $beforeExit = $restart.Substring(0, $iNotStopped)
+        Assert-True ($beforeExit -match 'Result := 3;\s*$') "the result at the exit is 3: [$beforeExit]"
+        $deinit = Get-IssFunction 'procedure DeinitializeSetup'
+        Assert-True ($deinit -match 'RestartCode = 2' -and $deinit -match 'RestartCode = 1') 'a note for 1 and 2'
+        Assert-True ($deinit -notmatch 'RestartCode = 3' -and $deinit -notmatch 'RestartCode <> 0') 'no note for 3'
+        # The decision for "not stopped" is the same whatever else is true, and the script gives it
+        # the exit code that carries no note.
+        Assert-Equal (Get-InstallRestartDecision -StoppedRunningService $false -ElevatedStepRan $true -CopyStarted $true) 'not-stopped'
+        $r = Invoke-RestartCanvasSandbox 'restart-cancel'
+        Assert-Equal $r.Code 3 "no note is written for a run that stopped nothing: $($r.Out)"
+    }
     Test-Case 'an update that is cancelled before the stop starts nothing' {
         # The first step never stopped a running service, so the note is not written and the flag
         # stays false: the script is told nothing was stopped and starts nothing.

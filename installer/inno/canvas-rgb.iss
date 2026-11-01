@@ -244,13 +244,21 @@ end;
 // the fans would stay on the motherboard's own settings.
 // The script decides (it knows what this run did), it writes what it did to a log, and its exit
 // code says what happened: 0 the service runs again, 1 it could not be started, 2 it was left
-// stopped on purpose (the copy had started), 3 there was nothing to start.
+// stopped on purpose (the copy had started), 3 there was nothing to start (this run stopped no
+// running service, so the script is not even looked for).
 function RestartCanvasRgb: Integer;
 var
   Code: Integer;
   Script, Args: String;
 begin
-  // No script, no start: the caller says canvas-rgb is stopped, which is then true.
+  // This run stopped no running service (a wizard Cancel, or a service the user had stopped): there
+  // is nothing to start and nothing to say. This comes before the script is looked for, because
+  // the script is extracted only in PrepareToInstall and a Setup that ends earlier does not have
+  // it; a missing script must not be read as "could not start" when nothing was stopped (#65).
+  Result := 3;
+  if not FStoppedRunningService then Exit;
+  // A service was stopped but there is no script to start it: the caller says canvas-rgb is
+  // stopped, which is then true.
   Result := 1;
   Script := ExpandConstant('{tmp}\restart-canvas.ps1');
   if not FileExists(Script) then Exit;
