@@ -1160,6 +1160,10 @@ fn a_bad_property_meta_is_ignored_with_a_warning_and_the_effect_still_runs() {
         effect.init(&effect.schema().defaults());
         effect.update(DT, &mut canvas, &Inputs::default());
         assert!(effect.errors().is_empty(), "{tag}: {:?}", effect.errors());
+        assert!(
+            canvas.pixels.iter().any(|p| p.iter().any(|v| *v > 0.1)),
+            "{tag}: the effect ran but painted nothing"
+        );
     }
 }
 
