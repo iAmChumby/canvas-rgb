@@ -1013,7 +1013,10 @@ function Start-Service { param($Name) Write-Host 'CALL Start-Service' }
         $prep = Get-IssFunction 'function PrepareToInstall'
         Assert-Equal (@([regex]::Matches($prep, 'FStoppedRunningService :=')).Count) 1 'the flag is set in one place only'
         Assert-True ($prep -match 'FStoppedRunningService := StoppedRunningService\(\)') 'the flag comes from the note'
-        Assert-True ($prep.IndexOf('stop-canvas.ps1'', ') -lt $prep.IndexOf('FStoppedRunningService :=')) 'the flag is read after the first step ran'
+        $stopAt = $prep.IndexOf('\stop-canvas.ps1'')')
+        $flagAt = $prep.IndexOf('FStoppedRunningService :=')
+        Assert-True ($stopAt -gt 0) 'the first step is run in PrepareToInstall'
+        Assert-True ($stopAt -lt $flagAt) 'the flag is read after the first step ran'
         $all = Remove-IssComments $issText
         Assert-Equal (@([regex]::Matches($all, 'FStoppedRunningService :=')).Count) 1 'nothing else sets the flag, so it is false before the stop'
         # 2. the note is written only when a running service was stopped.
