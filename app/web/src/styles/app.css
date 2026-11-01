@@ -2459,7 +2459,9 @@ button.chip:hover {
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
-  columns: 1;
+  /* One column: the list scrolls down in its pane. (`columns: 1` made a short window start a
+     second column to the right, where its rows were out of sight.) The wide rule below sets
+     the two columns. */
   column-gap: var(--s4);
 }
 
@@ -3683,6 +3685,9 @@ button.chip:hover {
   .rd-peripherals .peripheral-detail {
     flex: 1 1 auto;
     min-height: 0;
+    /* The Read and Change tooltips hang past the pane's edge while hidden; they do not make the
+       pane scroll sideways. */
+    overflow-x: hidden;
   }
 
   .rd-fans .rd-fans-right > .panel {
