@@ -287,8 +287,9 @@ impl DeviceAdapter for RoyuanAdapter {
 
 impl crate::resume::ResumeBehavior for RoyuanAdapter {
     fn on_resume(&self) -> crate::resume::OnResume {
-        // The keyboard drops out of direct mode over a sleep, so the direct-mode report goes
-        // out again before the next colour (#5).
+        // The keyboard may drop out of direct mode over a sleep (seen for the RAM in #5; not
+        // yet seen for the keyboard), so the direct-mode report goes out again before the next
+        // colour.
         crate::resume::OnResume::SetsModeAgain
     }
 }

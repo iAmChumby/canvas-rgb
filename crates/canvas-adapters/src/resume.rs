@@ -14,7 +14,9 @@
 //! `canvas-proto`), because the spine is the shared contract of every area and cannot depend on
 //! this crate. An adapter that is never handed to the daemon is not checked by the compiler.
 //! The guard test (`crates/canvas-daemon/tests/resume_guard.rs`) covers the rest: it drives the
-//! adapters on the list, and a scan fails when an adapter is missing from it.
+//! mode-setting adapters (OpenRGB and ROYUAN, through the composite) through a resume, asserts
+//! what every other adapter on the list declares, and a scan fails when an adapter is missing
+//! from the list.
 //!
 //! The choice is checked too. The guard test shows that an adapter that sets its mode again
 //! really does after a resume. For the adapters with nothing to restore, each adapter's own
