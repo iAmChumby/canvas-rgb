@@ -8,7 +8,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Changed
 
-- In a desktop window every editor screen now fits without the page scrolling, so what you act on stays in view. (#67)
+- At the usual window sizes every editor screen now fits without the page scrolling, so what you act on stays in view. (#67)
 
 ## [0.4.2] - 2026-11-01
 
