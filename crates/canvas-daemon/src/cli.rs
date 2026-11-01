@@ -1221,7 +1221,8 @@ mod tests {
     #[test]
     fn a_moving_effect_passes_the_check() {
         let file = TempFile::new("moving", MOVING);
-        let report = check_effect(&file.path(), None).expect("the effect loads");        assert_eq!(report.name, "Moving");
+        let report = check_effect(&file.path(), None).expect("the effect loads");
+        assert_eq!(report.name, "Moving");
         assert_eq!(report.frames, 120);
         assert!(report.moves, "the picture moves");
         assert!(!report.flat, "the picture is not one flat colour");
