@@ -78,6 +78,10 @@ pub mod routes {
     /// `PUT` with [`crate::peripheral::PeripheralAccess`]: turn reads and config writes on or off
     /// for one device, saved. `writes: true` with `reads: false` is a validation error.
     pub const PERIPHERAL_ACCESS: &str = "/api/v1/peripherals/{id}/access";
+    /// `GET`: the [`crate::peripheral::ReadProgress`] of the read of this device that is running now
+    /// (`stage: "idle"` when none is). Answers at once, even while `GET` on [`PERIPHERAL`] waits for
+    /// the device; the editor polls it to say what a long read is doing.
+    pub const PERIPHERAL_READ: &str = "/api/v1/peripherals/{id}/read";
     /// `GET` / `PUT` a [`crate::config::Settings`].
     pub const SETTINGS: &str = "/api/v1/settings";
     /// `POST`, no body: dismisses G7's "size your ARGB headers" panel.
@@ -177,6 +181,11 @@ pub struct Status {
     /// True when the loop is parked (no device sinks, no preview subscriber).
     pub parked: bool,
     pub devices_connected: u32,
+    /// How many devices the daemon knows about, connected or not. The editor draws one card per
+    /// device while the list is on its way, so it needs the total and not only the connected
+    /// count. A daemon that does not send it (an older one) reports none.
+    #[serde(default)]
+    pub devices_total: u32,
     pub preview_subscribers: u32,
     pub active_layout: Option<String>,
     pub active_effect: Option<String>,

@@ -15,7 +15,13 @@ frames_rendered: number,
 /**
  * True when the loop is parked (no device sinks, no preview subscriber).
  */
-parked: boolean, devices_connected: number, preview_subscribers: number, active_layout: string | null, active_effect: string | null, openrgb: LinkState, service: LinkState, 
+parked: boolean, devices_connected: number, 
+/**
+ * How many devices the daemon knows about, connected or not. The editor draws one card per
+ * device while the list is on its way, so it needs the total and not only the connected
+ * count. A daemon that does not send it (an older one) reports none.
+ */
+devices_total: number, preview_subscribers: number, active_layout: string | null, active_effect: string | null, openrgb: LinkState, service: LinkState, 
 /**
  * Milliseconds the service pipe has been down, if it is (G4 banner after 10 s).
  */

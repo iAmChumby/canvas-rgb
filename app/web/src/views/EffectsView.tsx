@@ -24,14 +24,15 @@ import { EmptyState } from "@/components/EmptyState";
 import { Enter } from "@/components/Motion";
 import { Highlighted, matchEffect } from "@/components/Search";
 import { useMediaQuery } from "@/components/MediaQuery";
-import { Skeleton, SkeletonLines } from "@/components/Skeleton";
+import { ErrorPanel, Details, LoadFrame, type LoadState } from "@/components/Loading";
+import { EffectDetailShape, EffectGalleryShape } from "@/components/LoadShapes";
 import { useToast } from "@/components/Toast";
 import { PropertyControls, type Values } from "@/views/PropertyControls";
 import { PresetStrip } from "@/views/PresetStrip";
 import { api } from "@/lib/endpoints";
 import { ApiFailure, messageOf } from "@/lib/errors";
 import { EFFECT_CATEGORIES, categoryOf, type EffectCategory } from "@/lib/effectCategories";
-import { getSnap, refreshAll, useSnap } from "@/lib/store";
+import { getSnap, refreshAll, retryEffects, useSnap } from "@/lib/store";
 import { fillDefaults, nextFreeName } from "@/lib/presetMatch";
 import { appliedName, runningOf, setApplied, setShown } from "@/lib/runningPreset";
 import type { EffectDetail } from "@/proto/EffectDetail";
@@ -54,6 +55,8 @@ export function EffectsView() {
   const failed = useSnap((s) => s.effectsFailed);
   const status = useSnap((s) => s.status);
   const activeId = useSnap((s) => s.status?.active_effect ?? null);
+  // A load that is in flight after a Try again: the frame shows its placeholder until it ends.
+  const retrying = useSnap((s) => s.pending.includes("effects"));
   const [filter, setFilter] = useState<"all" | "favorites">("all");
   const [category, setCategory] = useState<EffectCategory | null>(null);
   const [query, setQuery] = useState("");
@@ -442,18 +445,80 @@ export function EffectsView() {
     }, 240);
   };
 
+  // The files that did not parse. They stand inside the gallery's frame, because they come with
+  // the list: above the frame they would push the page down when the list lands.
+  const failedStrip =
+    failed.length > 0 ? (
+      <div className="failed-strip" data-open={showFailed ? "true" : "false"}>
+        <button
+          type="button"
+          className="failed-strip-head"
+          aria-expanded={showFailed}
+          onClick={() => setShowFailed((v) => !v)}
+        >
+          <FileHtml size={14} aria-hidden="true" />
+          <span>
+            {failed.length} file{failed.length === 1 ? "" : "s"} did not parse
+          </span>
+        </button>
+        {showFailed && (
+          <div className="failed-strip-body">
+            {failed.map((f) => (
+              <p key={f.file} className="failed-line">
+                <span className="fig">{f.file}</span>
+                <span className="failed-error">{f.error}</span>
+              </p>
+            ))}
+          </div>
+        )}
+      </div>
+    ) : null;
+
+  // A refresh that failed after the list was read does not take the gallery away: the cards stay
+  // and the page says they may be old. Only a list that was never read has an error frame.
+  const listStale = effects !== null && effectsError !== null;
+  const galleryState: LoadState =
+    effects === null
+      ? effectsError && !retrying
+        ? "error"
+        : "loading"
+      : list.length === 0
+        ? "empty"
+        : "ready";
   const gallery = (
+    <LoadFrame
+      className="stack"
+      state={galleryState}
+      shape={<EffectGalleryShape />}
+      label="Loading the effects"
+      error={
+        <ErrorPanel
+          title="The effects could not be read"
+          summary="canvas-rgb could not read the effect list. Nothing was changed."
+          message={effectsError}
+          onRetry={() => void retryEffects()}
+        />
+      }
+      empty={
+        <div className="stack">
+          <Panel className="effect-empty">
+            {effects !== null && effects.length === 0 ? (
+              // There is no effect at all: the filter is not the reason.
+              <EmptyState icon={<Waveform size={22} />} title="No effects yet">
+                This machine has no effect to run. Import an HTML effect to add one.
+              </EmptyState>
+            ) : (
+              <EmptyState icon={<MagnifyingGlass size={22} />} title="No effect matches that">
+                Try fewer words, or clear the filter and the category.
+              </EmptyState>
+            )}
+          </Panel>
+          {failedStrip}
+        </div>
+      }
+    >
     <div className="effect-gallery">
-      {effects === null
-        ? Array.from({ length: 12 }, (_, i) => (
-            <div className="effect-card effect-card-skeleton" key={`skeleton-${i}`} aria-hidden="true">
-              <Skeleton className="skeleton-preview" />
-              <span className="effect-card-meta">
-                <Skeleton className="skeleton-line" height={20} width="55%" />
-              </span>
-            </div>
-          ))
-        : list.map((row, i) => {
+      {list.map((row, i) => {
         const e = row.effect;
         const html = e.id.startsWith("html:");
         const selected = e.id === selectedId;
@@ -503,12 +568,11 @@ export function EffectsView() {
           </Enter>
         );
       })}
-      {list.length === 0 && (
-        <Panel className="effect-empty">
-          <p className="mute">No effect matches that.</p>
-        </Panel>
-      )}
     </div>
+    {/* The files that did not parse stand under the gallery: they come with the list, and above
+        the cards they would push every card down. */}
+    {failedStrip}
+    </LoadFrame>
   );
 
   const detailPane = (
@@ -516,22 +580,34 @@ export function EffectsView() {
       {noLayout && (
         <EmptyState
           icon={<SquaresFour size={24} />}
-          title="There is no layout yet"
+          title="No layout to run on yet"
           action={
             <ButtonLink href="/" variant="primary" size="sm">
               Open the Layout
             </ButtonLink>
           }
         >
-          Nothing can run until the desk canvas has a zone in it. The effects are still here, ready
-          for one.
+          The effects are still here, ready for one.
         </EmptyState>
       )}
-      {!noLayout && !detail && (
-        <Panel title="Loading">
-          <SkeletonLines rows={4} />
-        </Panel>
-      )}
+      {!(noLayout && !detail) && (
+      <LoadFrame
+        className="stack"
+        state={detail ? "ready" : error ? "error" : "loading"}
+        shape={<EffectDetailShape />}
+        label="Loading the effect"
+        error={
+          <ErrorPanel
+            title="The effect could not be read"
+            summary="canvas-rgb could not read that effect. The others are still here."
+            message={error}
+            onRetry={() => {
+              setError(null);
+              setReloadTick((t) => t + 1);
+            }}
+          />
+        }
+      >
       {detail && (
         <>
           <Panel>
@@ -642,6 +718,8 @@ export function EffectsView() {
           </Panel>
         </>
       )}
+      </LoadFrame>
+      )}
     </div>
   );
 
@@ -706,7 +784,10 @@ export function EffectsView() {
             aria-label="Search effects"
           />
         </span>
-        <span className="mute fig"><AnimatedNumber value={list.length} /> effects</span>
+        {/* A count is shown once the list is known: "0 effects" while loading or on an error would be a false answer. */}
+        <span className="mute fig" data-testid="effect-count">
+          {effects === null || listStale ? "–" : <AnimatedNumber value={list.length} />} effects
+        </span>
         <FileButton
           accept=".html,text/html"
           icon={<UploadSimple size={16} />}
@@ -716,32 +797,6 @@ export function EffectsView() {
           Import
         </FileButton>
       </div>
-
-      {failed.length > 0 && (
-        <div className="failed-strip" data-open={showFailed ? "true" : "false"}>
-          <button
-            type="button"
-            className="failed-strip-head"
-            aria-expanded={showFailed}
-            onClick={() => setShowFailed((v) => !v)}
-          >
-            <FileHtml size={14} aria-hidden="true" />
-            <span>
-              {failed.length} file{failed.length === 1 ? "" : "s"} did not parse
-            </span>
-          </button>
-          {showFailed && (
-            <div className="failed-strip-body">
-              {failed.map((f) => (
-                <p key={f.file} className="failed-line">
-                  <span className="fig">{f.file}</span>
-                  <span className="failed-error">{f.error}</span>
-                </p>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
 
       {(replaceWith || importError) && (
         <div className="import-note" data-tone={replaceWith ? "ask" : "down"}>
@@ -768,7 +823,14 @@ export function EffectsView() {
         </div>
       )}
 
-      {effectsError && <p className="error-line">{effectsError}</p>}
+      {listStale && (
+        // The list is on screen but the last refresh failed: the cards may be old, and the count
+        // is a dash until the list is read again. The raw words are behind the disclosure.
+        <div className="rule rule-warn" role="status">
+          The effect list may be out of date.
+          <Details>{effectsError}</Details>
+        </div>
+      )}
 
       {narrow ? (
         <div

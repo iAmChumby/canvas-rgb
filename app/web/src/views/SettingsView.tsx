@@ -15,10 +15,11 @@ import { messageOf } from "@/lib/errors";
 import { exportConfig, importConfigFile } from "@/lib/config-transfer";
 import { BLACK_HEX } from "@/lib/color";
 import { openLogsFolder, tauriHost } from "@/lib/host";
-import { getSnap, patchSnap, refreshAll, refreshRender, refreshSettings, useSnap } from "@/lib/store";
+import { getSnap, patchSnap, refreshAll, refreshRender, refreshSettings, retrySettings, useSnap } from "@/lib/store";
 import { fmt1, fmtInt } from "@/lib/format";
 import { useToast } from "@/components/Toast";
-import { SkeletonLines } from "@/components/Skeleton";
+import { ErrorPanel, Details, LoadFrame } from "@/components/Loading";
+import { SettingsShape } from "@/components/LoadShapes";
 import {
   applyMotion,
   applyTheme,
@@ -33,6 +34,8 @@ import { UpdatesPanel } from "./UpdatesPanel";
 export function SettingsView() {
   const settings = useSnap((s) => s.settings);
   const settingsError = useSnap((s) => s.settingsError);
+  // A load that is in flight after a Try again: the frame shows its placeholder until it ends.
+  const retrying = useSnap((s) => s.pending.includes("settings"));
   const status = useSnap((s) => s.status);
   const layouts = useSnap((s) => s.layouts);
   const render = useSnap((s) => s.render);
@@ -54,13 +57,19 @@ export function SettingsView() {
         <div className="page-head">
           <h1>Settings</h1>
         </div>
-        <Panel title={settingsError ? "The settings could not be read" : "Reading the settings"}>
-          {settingsError ? (
-            <p className="error-line">{settingsError}</p>
-          ) : (
-            <SkeletonLines rows={5} />
-          )}
-        </Panel>
+        <LoadFrame
+          state={retrying ? "loading" : settingsError ? "error" : "loading"}
+          shape={<SettingsShape />}
+          label="Reading the settings"
+          error={
+            <ErrorPanel
+              title="The settings could not be read"
+              summary="canvas-rgb could not read the settings. Nothing was changed."
+              message={settingsError}
+              onRetry={() => void retrySettings()}
+            />
+          }
+        />
       </div>
     );
   }
@@ -150,6 +159,16 @@ export function SettingsView() {
       <div className="page-head">
         <h1>Settings</h1>
       </div>
+
+      {settingsError && (
+        // A refresh that failed after the settings were read does not take the page away: the
+        // settings stay and the page says they may be old. The raw words are behind the
+        // disclosure.
+        <div className="rule rule-warn" role="status">
+          The settings may be out of date.
+          <Details>{settingsError}</Details>
+        </div>
+      )}
 
       <div className="settings-grid">
         <div className="stack">

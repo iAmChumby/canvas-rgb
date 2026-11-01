@@ -23,6 +23,7 @@ const SERVICE_BANNER_MS = 10_000;
  * and nothing is pushed down after it has been painted.
  */
 export function StandingNotices() {
+  const pathname = usePathname();
   const status = useSnap((s) => s.status);
   const devices = useSnap((s) => s.devices);
   const [err, setErr] = useState<string | null>(null);
@@ -46,8 +47,10 @@ export function StandingNotices() {
   }, []);
 
   const conflict = status?.conflicts.find((c) => c.kind === "signal_rgb");
-  // Nothing can run until the desk canvas has a zone in it.
-  const noLayout = status !== null && !status.active_layout;
+  // Nothing can run until the desk canvas has a zone in it. The Layout page is where the layout is
+  // made: its own frame says it, so the banner would say it twice and push the page down.
+  const onLayout = pathname === "/";
+  const noLayout = status !== null && !status.active_layout && !onLayout;
 
   const firstResizable = devices?.find((d) => d.zones.some((z) => z.resizable));
   const walkHref = firstResizable
@@ -244,7 +247,7 @@ export function GlobalBanners() {
             icon={<WarningOctagon size={20} weight="fill" />}
             title="Fan control is unavailable"
           >
-            The daemon has not heard from the fan service for {fmtSeconds(status.service_down_ms ?? 0)}. The
+            canvas-rgb has not heard from the fan service for {fmtSeconds(status.service_down_ms ?? 0)}. The
             lights are unaffected.
           </Banner>
         )}

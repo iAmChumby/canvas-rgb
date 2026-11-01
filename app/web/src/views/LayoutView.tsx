@@ -15,6 +15,7 @@ import {
   DotsThree,
   FloppyDisk,
   GridFour,
+  SquaresFour,
   Lightbulb,
   MagicWand,
   Plus,
@@ -23,6 +24,9 @@ import {
 } from "@phosphor-icons/react";
 import { Button, IconButton, Swap } from "@/components/Button";
 import { Panel, Field } from "@/components/Panel";
+import { EmptyState } from "@/components/EmptyState";
+import { Details, ErrorPanel, LoadFrame } from "@/components/Loading";
+import { LayoutShape } from "@/components/LoadShapes";
 import { Segmented } from "@/components/Segmented";
 import { NumberField, TextField } from "@/components/NumberField";
 import { Select } from "@/components/Select";
@@ -43,7 +47,7 @@ import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
 import { usePreviewStatus } from "@/lib/preview";
 import { usePrefersReducedMotion } from "@/lib/motion";
-import { getSnap, patchSnap, refreshAll, refreshLayouts, refreshSettings, useSnap } from "@/lib/store";
+import { getSnap, patchSnap, refreshAll, refreshLayouts, refreshSettings, retryLayouts, useSnap } from "@/lib/store";
 import {
   defaultRect,
   defaultShape,
@@ -348,6 +352,9 @@ export function LayoutView() {
   const effects = useSnap((s) => s.effects);
   const settings = useSnap((s) => s.settings);
   const layoutsError = useSnap((s) => s.layoutsError);
+  const layoutsLoaded = useSnap((s) => s.layouts !== null);
+  // A load that is in flight after a Try again: the frame shows its placeholder until it ends.
+  const retrying = useSnap((s) => s.pending.includes("layouts"));
 
   const [base, setBase] = useState<Layout | null>(null);
   const [selection, setSelection] = useState<Sel[]>([]);
@@ -665,7 +672,7 @@ export function LayoutView() {
     if (preview.state === "live") return null;
     if (editorDraws) {
       return {
-        text: "Preview drawn by the editor · the daemon's live preview is not available yet",
+        text: "Preview drawn by the editor · the live preview is not available yet",
         down: false,
       };
     }
@@ -677,14 +684,14 @@ export function LayoutView() {
     }
     if (effectNeedsInput) {
       return {
-        text: "This effect reads the screen or the audio, so the preview is the daemon's frame.",
+        text: "This effect reads the screen or the audio, so the preview is the frame from canvas-rgb.",
         down: true,
       };
     }
     if (!runningEffect) {
       return { text: "No effect is running on this layout.", down: true };
     }
-    return { text: "The daemon's live preview is not available yet.", down: false };
+    return { text: "The live preview is not available yet.", down: false };
   }, [preview.state, preview.error, editorDraws, effectNeedsInput, runningEffect]);
 
   // The plain-language note under each setting: what it does in words, and the precise value.
@@ -1023,11 +1030,35 @@ export function LayoutView() {
         <div className="page-head">
           <h1>Layout</h1>
         </div>
-        <Panel>
-          <p className="mute">
-            {layoutsError ? `Layout unreadable: ${layoutsError}` : "Loading"}
-          </p>
-        </Panel>
+        <LoadFrame
+          state={
+            retrying
+              ? "loading"
+              : layoutsError
+                ? "error"
+                : layoutsLoaded && !server
+                  ? "empty"
+                  : "loading"
+          }
+          shape={<LayoutShape />}
+          label="Reading the layout"
+          error={
+            <ErrorPanel
+              title="The layout could not be read"
+              summary="canvas-rgb could not read the layout. Nothing was changed."
+              message={layoutsError}
+              onRetry={() => void retryLayouts()}
+            />
+          }
+          empty={
+            <Panel>
+              <EmptyState icon={<SquaresFour size={24} />} title="There is no layout yet">
+                Make one here: the desk canvas is this page, and nothing can run until it has a
+                zone in it.
+              </EmptyState>
+            </Panel>
+          }
+        />
       </div>
     );
   }
@@ -1106,7 +1137,10 @@ export function LayoutView() {
   return (
     <div className="stack">
       <div className="page-head">
-        <h1>{draft.name}</h1>
+        {/* The page keeps one name in every state: the layout's own name stands beside it once
+            it is known. */}
+        <h1>Layout</h1>
+        <span className="mute fig">{draft.name}</span>
         <Button
           variant="default"
           icon={<CompassTool size={16} />}
@@ -1116,6 +1150,15 @@ export function LayoutView() {
           Map my PC again
         </Button>
       </div>
+
+      {layoutsError && (
+        // A refresh that failed after the layout was read does not take the page away: the desk
+        // stays and the page says it may be old. The raw words are behind the disclosure.
+        <div className="rule rule-warn" role="status">
+          The layout may be out of date.
+          <Details>{layoutsError}</Details>
+        </div>
+      )}
 
       {newLights.fresh.length > 0 && (
         <div className="new-light" role="status">
