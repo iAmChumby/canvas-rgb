@@ -6,6 +6,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-01
+
 ### Fixed
 
 - Updating and uninstalling stop OpenRGB first, and when they cannot, they leave the OpenRGB folder as it was instead of leaving it broken. (#60)
@@ -92,7 +94,8 @@ The first release.
 - Settings for the Attack Shark X6 mouse and the 8BitDo Ultimate 2 controller.
 - The editor, the tray app, the `canvas-rgb` CLI and the Windows installer.
 
-[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/iAmChumby/canvas-rgb/compare/v0.1.2...v0.1.3
