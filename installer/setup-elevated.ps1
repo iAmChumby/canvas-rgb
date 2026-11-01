@@ -10,6 +10,7 @@ param(
     [string]$RepoRoot = '',
     [string]$PayloadDir = '',
     [switch]$InnoMode,
+    [switch]$StoppedRunningService,
     [Parameter(Mandatory)][string]$InstallDir,
     [Parameter(Mandatory)][string]$OpenRgbZip,
     [ValidateSet('Y', 'N')][string]$DisableSignalRgb = 'N',
@@ -23,6 +24,7 @@ $ErrorActionPreference = 'Stop'
 $c = Get-CanvasConst
 function Say([string]$t) { Write-Step $t $LogFile }
 
+$stopState = @{ ServiceWasRunning = $false }
 try {
     if (-not (Test-IsAdmin)) { throw 'setup-elevated.ps1 must run elevated (setup.ps1 starts it).' }
     $programData = Join-Path $env:ProgramData $c.AppName
@@ -38,8 +40,16 @@ try {
     if ($actual -ne $lock.Sha256.ToLowerInvariant()) { throw "OpenRGB SHA-256 mismatch in the elevated step: expected $($lock.Sha256) got $actual" }
     Say "  OpenRGB zip hash verified: $actual"
 
-    # 3. Stop what holds the binaries (upgrade case).
-    Stop-CanvasRgbRunning | ForEach-Object { Say $_ }
+    # 3. Stop what holds the binaries (upgrade case), including the bundled OpenRGB: a running
+    #    OpenRGB keeps its DLLs open, and a folder that cannot be deleted must not be deleted
+    #    half way (#60).
+    #    The Inno installer has already copied the new program files into the install folder, so a
+    #    refusal from here must not claim that nothing was changed.
+    #    -StoppedRunningService is what the Inno installer's first step reported: it stopped a
+    #    running service before it copied the files, so this step finds the service stopped and
+    #    cannot see that for itself.
+    $copiedNote = if ($InnoMode) { 'The new program files are already in place' } else { '' }
+    Stop-CanvasRgbRunning -InstallDir $InstallDir -CopiedNote $copiedNote -StoppedRunningService:$StoppedRunningService -Result $stopState | ForEach-Object { Say $_ }
 
     # 4. Install dir: binaries, shim, OpenRGB.
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
@@ -58,17 +68,14 @@ try {
     [System.IO.File]::WriteAllText((Join-Path $binDir 'canvas-rgb.cmd'), (Get-ShimContent), (New-Object System.Text.ASCIIEncoding))
     Say '  wrote bin\canvas-rgb.cmd'
 
-    $orgb = Join-Path $InstallDir 'openrgb'
-    if (Test-Path -LiteralPath $orgb) { Remove-Item -LiteralPath $orgb -Recurse -Force }
-    Expand-Archive -LiteralPath $OpenRgbZip -DestinationPath $orgb -Force
-    $kids = @(Get-ChildItem -LiteralPath $orgb)
-    if ($kids.Count -eq 1 -and $kids[0].PSIsContainer) {
-        # The zip has one top-level folder: lift its contents so openrgb\OpenRGB.exe exists.
-        $inner = $kids[0].FullName
-        Get-ChildItem -LiteralPath $inner | Move-Item -Destination $orgb -Force
-        Remove-Item -LiteralPath $inner -Force
-    }
-    Say "  extracted OpenRGB to $orgb"
+    # OpenRGB: the verified zip is unpacked beside the live folder and swapped in. The live folder
+    # is never deleted in place, so a failure leaves it whole instead of half (#60).
+    # The new program files are in place by now, so a refusal says so instead of claiming that
+    # nothing was changed.
+    $orgbTree = Install-OpenRgbTree -Zip $OpenRgbZip -InstallDir $InstallDir `
+        -State 'The OpenRGB folder was left as it was; the new program files are already in place'
+    $orgbTree.Notes | ForEach-Object { Say $_ }
+    Say "  extracted OpenRGB to $($orgbTree.Path)"
 
     # 5. ProgramData: created already protected.
     Initialize-MachineHome -Path $programData -LogFile $LogFile
@@ -186,5 +193,13 @@ try {
     exit 0
 } catch {
     Say "[elevated] FAILED: $($_.Exception.Message)"
+    # When this run stopped the service, canvas-rgb would be left down with the fans on BIOS. The
+    # install folder holds a whole set of files, so the service is started again. A service that
+    # was already stopped (on purpose) stays stopped.
+    # -StoppedRunningService is what the Inno installer's first step reported: it stopped a running
+    # service before it copied the files, so this step finds the service stopped and would leave it
+    # stopped after a failure (#60).
+    $wasRunning = ($stopState.ServiceWasRunning -or [bool]$StoppedRunningService)
+    Start-CanvasRgbService -WasRunning $wasRunning | ForEach-Object { Say $_ }
     exit 1
 }

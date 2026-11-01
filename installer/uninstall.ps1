@@ -69,9 +69,10 @@ if ($PurgeConfig) { $childArgs += ' -PurgeConfig' }
 Write-Host 'Requesting elevation (the one UAC prompt)...'
 # token: a new elevated administrator token (UAC). The machine-wide half only; the per-user half runs as the person.
 $p = Start-Process -FilePath 'powershell.exe' -ArgumentList $childArgs -Verb RunAs -Wait -PassThru
-if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log | ForEach-Object { Write-Host $_ } }
+if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Encoding UTF8 | ForEach-Object { Write-Host $_ } }
 # Exit 2 = the elevated work finished except the SignalRGB machine record (unreadable, kept): carry on with the per-user steps.
-$elevatedPartial = ($p.ExitCode -eq 2)
+# Exit 3 = the elevated work finished except the OpenRGB folder, which was kept whole because an OpenRGB still runs in it.
+$elevatedPartial = ($p.ExitCode -eq 2 -or $p.ExitCode -eq 3)
 if ($p.ExitCode -ne 0 -and -not $elevatedPartial) { Fail "Elevated step failed (exit $($p.ExitCode)). Per-user steps were not run." }
 Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
 
@@ -80,6 +81,7 @@ $userArgs = @{ InstallDir = $InstallDir }
 if ($PurgeConfig) { $userArgs.PurgeConfig = $true }
 & (Join-Path $PSScriptRoot 'uninstall-user.ps1') @userArgs
 if (-not $?) { Fail 'The per-user step failed.' }
+if ($p.ExitCode -eq 3) { Fail 'uninstall finished, except: an OpenRGB is still running, so the folder it holds was kept whole and not deleted. Close OpenRGB (or restart the PC) and remove that folder by hand. See the messages above.' }
 if ($elevatedPartial) { Fail 'uninstall finished, except: the SignalRGB service start type was not restored (unreadable machine record, kept). See the messages above.' }
 Write-Host ''
 Write-Host 'uninstall finished.'

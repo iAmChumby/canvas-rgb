@@ -84,7 +84,9 @@ Name: "{autoprograms}\canvas-rgb"; Filename: "{app}\canvas-rgb.exe"; Comment: "L
 
 [UninstallDelete]
 ; Made by setup-elevated.ps1 (not by [Files]), so Inno does not know them.
-Type: filesandordirs; Name: "{app}\openrgb"
+; The OpenRGB tree is NOT here: uninstall-elevated.ps1 deletes it, because it is the only place
+; that knows whether an OpenRGB in it is still running. A folder that holds a running OpenRGB is
+; kept whole, never deleted half way (#60).
 Type: filesandordirs; Name: "{app}\bin"
 Type: filesandordirs; Name: "{app}\uninstall"
 ; Written by a /UPDATE run (see DeinitializeSetup).
@@ -116,6 +118,7 @@ var
   FFailText: String;
   FPrepError: String;       // why PrepareToInstall stopped Setup, for the /UPDATE result file
   FPurge: String;           // ' -PurgeConfig' or empty
+  FStoppedRunningService: Boolean;  // the first step stopped a running service (#60)
 
 function ScriptsOk: Boolean;
 begin
@@ -198,7 +201,12 @@ begin
   Result := '';
   if LoadStringFromFile(LogPath, Text) then
   begin
-    Result := String(Text);
+    { The log is UTF-8 (the PowerShell scripts write it as UTF-8 without a BOM). Decoded as UTF-8,
+      so the message the person reads is the text that was written: read as the system code page
+      a BOM showed up as three odd characters, and every accent was wrong (#60). }
+    Result := Utf8Decode(Text);
+    if (Length(Result) > 0) and (Result[1] = #65279) then
+      Result := Copy(Result, 2, MaxInt);
     if Length(Result) > 1200 then Result := '...' + Copy(Result, Length(Result) - 1199, 1200);
   end;
 end;
@@ -404,6 +412,25 @@ begin
   Result := Text;
 end;
 
+// The marker the first step (stop-canvas.ps1) wrote when it stopped a running service. It lives
+// in the protected machine home, so only an administrator can write one.
+function StoppedServiceMarkerPath: String;
+begin
+  Result := ExpandConstant('{commonappdata}\canvas-rgb\stopped-service.marker');
+end;
+
+// True when the marker says this run stopped a running service. The elevated step runs after the
+// files were copied and finds the service already stopped, so it cannot know that for itself: the
+// switch below hands the fact over, and a failure there starts the service again (#60).
+function StoppedRunningService: Boolean;
+var
+  Text: AnsiString;
+begin
+  Result := False;
+  if LoadStringFromFile(StoppedServiceMarkerPath, Text) then
+    Result := Pos('stoppedByThisRun=yes', Utf8Decode(Text)) > 0;
+end;
+
 // Before any file is copied: fetch and verify OpenRGB (nothing is changed if this fails), then stop a running install.
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
@@ -411,8 +438,6 @@ var
   Dl, Log, Args: String;
 begin
   Result := '';
-  // A result file from an earlier run says nothing about this one.
-  DeleteFile(ExpandConstant('{app}\update-result.json'));
   Log := ExpandConstant('{tmp}\canvas-rgb-prepare.log');
   ExtractTemporaryFile('lib.ps1');
   ExtractTemporaryFile('preflight.ps1');
@@ -445,8 +470,25 @@ begin
   end;
 
   WizardForm.PreparingLabel.Caption := 'Closing canvas-rgb if it is running...';
-  if not RunPs(ExpandConstant('{tmp}\stop-canvas.ps1'), '-LogFile "' + Log + '"', False, Code) or (Code <> 0) then
-    Result := PrepFail('canvas-rgb is still running in the background and would not stop (code ' + IntToStr(Code) + '). Nothing was changed. ' + LogTail(Log));
+  // A marker from an earlier run says nothing about this one.
+  DeleteFile(StoppedServiceMarkerPath);
+  if not RunPs(ExpandConstant('{tmp}\stop-canvas.ps1'), '-LogFile "' + Log + '" -InstallDir "' + ExpandConstant('{app}') + '"', False, Code) or (Code <> 0) then
+  begin
+    // Nothing was copied: the checks above all ran before a single file was touched. What was
+    // stopped and what was not is in the log.
+    Result := PrepFail('Setup could not close everything it has to replace (code ' + IntToStr(Code) + '). Nothing was copied.' + #13#10 + #13#10 + LogTail(Log));
+    Exit;
+  end;
+
+  // Did that stop a running service? The marker in the machine home says so, and the switch below
+  // hands the fact to the elevated step: it runs after the files were copied, finds the service
+  // already stopped, and cannot see that for itself (#60).
+  FStoppedRunningService := StoppedRunningService();
+  DeleteFile(StoppedServiceMarkerPath);
+
+  // A result file from an earlier run says nothing about this one. It is deleted last, so a
+  // refusal above leaves the install folder exactly as it was.
+  DeleteFile(ExpandConstant('{app}\update-result.json'));
 end;
 
 // After the files are in {app}: the elevated machine-wide script, then the per-user script as the logged-in
@@ -462,6 +504,11 @@ begin
           ' -OpenRgbZip "' + Trim(String(FOpenRgbZip)) + '" -DisableSignalRgb ' + GetSignalRgb + ' -LogFile "' + Log + '"';
   Pawn := GetPawnIoPath;
   if Pawn <> '' then Args := Args + ' -PawnIoInstaller "' + Pawn + '"';
+  // The first step stopped a running service before the files were copied. This step finds the
+  // service stopped and cannot see that, so the switch hands it over: a failure here starts the
+  // service again instead of leaving canvas-rgb down with the fans on the motherboard's own
+  // settings (#60).
+  if FStoppedRunningService then Args := Args + ' -StoppedRunningService';
 
   WizardForm.StatusLabel.Caption := 'Setting up canvas-rgb to run in the background...';
   if not RunPs(ExpandConstant('{app}\installer\setup-elevated.ps1'), Args, False, Code) or (Code <> 0) then
@@ -623,7 +670,15 @@ begin
   Log := ExpandConstant('{tmp}\canvas-rgb-uninstall-elevated.log');
   Args := '-InstallDir "' + ExpandConstant('{app}') + '" -InnoMode -LogFile "' + Log + '"' + FPurge;
   Ran := RunPs(ExpandConstant('{app}\installer\uninstall-elevated.ps1'), Args, False, Code);
-  if Ran and (Code = 2) then
+  if Ran and (Code = 3) then
+  begin
+    // Exit 3: the elevated work finished, except that an OpenRGB was still running, so the
+    // folder it holds was kept whole instead of being deleted half way (#60).
+    if not UninstallSilent then
+      MsgBox('canvas-rgb is being removed, except one thing: an OpenRGB is still running, so its folder was kept whole and not deleted. Close OpenRGB (or restart the PC) and remove that folder by hand.' + #13#10 + #13#10 +
+        LogTail(Log), mbInformation, MB_OK);
+  end
+  else if Ran and (Code = 2) then
   begin
     // Exit 2: the elevated work finished, except the SignalRGB service start type (its restore record is unreadable and kept).
     // The service is already gone, so the uninstall carries on; say what was not restored.

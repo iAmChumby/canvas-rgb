@@ -8,7 +8,7 @@ import { Button, ButtonLink } from "@/components/Button";
 import { api } from "@/lib/endpoints";
 import { canUpdate, openLogsFolder, tauriHost, updateDismissUpdated, updateInstall, updateLater, updateSkip } from "@/lib/host";
 import { sendUpdate } from "@/lib/updateActions";
-import { installerSentence, isInstalling, isSkipped } from "@/lib/updateWords";
+import { installFailedSentence, isInstalling, isSkipped } from "@/lib/updateWords";
 import { messageOf } from "@/lib/errors";
 import { fmtSeconds } from "@/lib/format";
 import { patchSnap, useSnap } from "@/lib/store";
@@ -217,7 +217,7 @@ export function GlobalBanners() {
             onDismiss={() => setFailedHidden(failedKey)}
             dismissLabel="Dismiss"
           >
-            {installerSentence(failed)} canvas-rgb is still on {update.current_version}.
+            {installFailedSentence(failed, update.current_version, update.available.version)}
             <div className="upd-banner-acts">
               <Button
                 variant="primary"

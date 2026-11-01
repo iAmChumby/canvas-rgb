@@ -47,6 +47,11 @@ try {
         Say "  Fix or remove the record, then run the uninstall again."
     }
 
+    # 0c. Read the OpenRGB list NOW too, before the service is stopped or deleted: a list that cannot
+    #     be read is a refusal, and nothing has been changed yet. The list is read again after the
+    #     service is gone (the stop needs it fresh); this read only settles that it can be read.
+    Get-OpenRgbProcessList -Retry 'run the uninstall again' | Out-Null
+
     # 1. Stop the service FIRST. Its 1 Hz tick re-drives every manual header (each duty write sets the
     #    manual bit again), so a --restore-bios run beside a live service is undone within a second.
     #    Its shutdown hands every header back to BIOS. A service that will not stop is a hard stop:
@@ -105,26 +110,56 @@ try {
     if ($rm.RemoveInnoEntry -and (Test-Path -LiteralPath $c.InnoUninstallKey)) { Remove-Item -LiteralPath $c.InnoUninstallKey -Recurse -Force; Say '  removed the Inno Installed apps entry' }
     $lnk = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) $c.StartMenuShortcut
     if ($rm.RemoveShortcut -and (Test-Path -LiteralPath $lnk)) { Remove-Item -LiteralPath $lnk -Force; Say '  removed the Start menu shortcut' }
+    $appStopped = @()
     foreach ($n in 'canvas-rgbd', 'canvas-rgb', 'canvas-rgb-cli') {
-        Get-Process -Name $n -ErrorAction SilentlyContinue | ForEach-Object { $_ | Stop-Process -Force; Say "  stopped running $n" }
+        Get-Process -Name $n -ErrorAction SilentlyContinue | ForEach-Object { $_ | Stop-Process -Force; $appStopped += $n; Say "  stopped running $n" }
     }
     # The bundled OpenRGB server, which the service launched as SYSTEM, outlives the service and
     # holds its DLLs open. Stop only the copy that runs from the install dir: an OpenRGB the owner
     # runs from anywhere else is left alone.
-    $bundled = Join-Path $InstallDir 'openrgb'
-    Get-CimInstance Win32_Process -Filter "Name='OpenRGB.exe'" | Where-Object {
-        $_.ExecutablePath -and $_.ExecutablePath.StartsWith($bundled, [StringComparison]::OrdinalIgnoreCase)
-    } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force; Say "  stopped the bundled OpenRGB (pid $($_.ProcessId))" }
+    # What is already true when this stop refuses: the service was stopped and removed, and the
+    # canvas-rgb programs that were running were stopped. The refusal says so, so the person knows
+    # what state the PC is in (#60).
+    $stopState = if ($svc) { 'The service was stopped and removed' } else { 'There was no service, so none was stopped or removed' }
+    if ($appStopped.Count -gt 0) { $stopState += ", and the canvas-rgb programs were stopped ($(@($appStopped | Select-Object -Unique) -join ', '))" }
+    $stopState += '. '
+    if ($rm.RemoveShortcut) { $stopState += 'The Installed apps entry and the Start menu shortcut were removed.' }
+    else { $stopState += 'The Installed apps entry and the Start menu shortcut are still there.' }
+    $stop = Stop-BundledOpenRgb -InstallDir $InstallDir -State $stopState -Retry 'run the uninstall again'
+    $stop.Lines | ForEach-Object { Say $_ }
     Start-Sleep -Milliseconds 500
+    # The OpenRGB tree and the leftovers beside it. An OpenRGB that could not be stopped holds files
+    # in one of them, and deleting that folder half way is the bug this fixes (#60): the folder is
+    # kept whole, and the user is told what is left behind.
+    $trees = @(Get-OpenRgbTreeFolders -InstallDir $InstallDir)
+    $keep = @(Get-OpenRgbFoldersToKeep -InstallDir $InstallDir -Stop $stop)
+    if ($keep.Count -gt 0) {
+        $pids = (@($stop.Stuck | ForEach-Object { $_.Id }) + @($stop.Unreadable | ForEach-Object { $_.Id })) -join ', '
+        Say "  an OpenRGB (pid $pids) is still running, so the folder it holds was kept whole and not deleted: $($keep -join ', ')"
+        Say '  Close OpenRGB (or restart the PC) and remove that folder by hand.'
+    }
     if ($rm.RemoveInstallDir) {
         if (Test-Path -LiteralPath $InstallDir) {
-            Remove-Item -LiteralPath $InstallDir -Recurse -Force
-            Say "  removed $InstallDir"
+            if ($keep.Count -gt 0) {
+                # Everything else goes; the folder a running OpenRGB holds stays whole.
+                foreach ($child in @(Get-ChildItem -LiteralPath $InstallDir -Force)) {
+                    if ($keep -contains $child.FullName) { continue }
+                    Remove-Item -LiteralPath $child.FullName -Recurse -Force
+                }
+                Say "  removed everything in $InstallDir except the OpenRGB folder"
+            } else {
+                Remove-Item -LiteralPath $InstallDir -Recurse -Force
+                Say "  removed $InstallDir"
+            }
         }
     } else {
-        # Inno removes the files it installed; the folders this script made (openrgb, bin, uninstall) are
-        # listed in [UninstallDelete]. Clear the bundled OpenRGB here: it is the biggest tree and Inno does not know it.
-        if (Test-Path -LiteralPath $bundled) { Remove-Item -LiteralPath $bundled -Recurse -Force; Say "  removed $bundled" }
+        # Inno removes the files it installed; the folders this script made (bin, uninstall) are
+        # listed in [UninstallDelete]. The OpenRGB tree is ours to delete: it is the biggest tree
+        # and Inno does not know it. It goes only when no OpenRGB in it is still running.
+        foreach ($t in $trees) {
+            if ($keep -contains $t) { continue }
+            if (Test-Path -LiteralPath $t) { Remove-Item -LiteralPath $t -Recurse -Force; Say "  removed $t" }
+        }
         Say '  install dir, Installed apps entry and Start menu shortcut are left to the Inno uninstaller'
     }
 
@@ -155,6 +190,10 @@ try {
     if ($recError) {
         Say '[elevated] finished, except: the SignalRGB service was not restored (unreadable record kept)'
         exit 2
+    }
+    if ($keep.Count -gt 0) {
+        Say '[elevated] finished, except: the OpenRGB folder was kept (an OpenRGB is still running in it)'
+        exit 3
     }
     Say '[elevated] done'
     exit 0
