@@ -405,7 +405,8 @@ impl OpenRgbSupervisor {
     }
 
     /// Whether the boot color is still being painted or watched.
-    pub fn boot_pending(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn boot_pending(&self) -> bool {
         self.boot_job.is_some()
     }
 

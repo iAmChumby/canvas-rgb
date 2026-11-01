@@ -193,6 +193,15 @@ async fn a_resume_starts_the_boot_color_watch_window_again() {
     sup.on_resume(woke);
     sup.tick(woke, false, Some(boot)).await;
     assert!(sup.boot_pending(), "the watch window ended at the wake");
+
+    // A controller OpenRGB announces after the wake still gets the boot color.
+    fake.announce(device(1, 6));
+    sup.tick(woke + Duration::from_secs(1), false, Some(boot)).await;
+    assert_eq!(
+        wait_for_colors(&fake, 1, &[boot; 6]).await,
+        vec![boot; 6],
+        "the controller announced after the wake did not get the boot color"
+    );
 }
 
 // ---- #18: the boot color waits for OpenRGB to finish detecting ----
