@@ -351,8 +351,9 @@ function Remove-Item {
     }
 
     # uninstall.ps1 as a temp copy: Start-Process (the UAC child) is a stub returning a chosen exit code, and
-    # uninstall-user.ps1 is a fake that only says it ran.
-    function Invoke-UninstallDriverSandbox([string]$Name, [int]$ChildExit) {
+    # uninstall-user.ps1 is a fake that only says it ran. -StateText is what the elevated child left behind
+    # (the words that say what it removed): the stub writes it, so the driver can be seen to show it.
+    function Invoke-UninstallDriverSandbox([string]$Name, [int]$ChildExit, [string]$StateText = '') {
         $root = Join-Path $dir $Name
         $scripts = Join-Path $root 'scripts'; $inst = Join-Path $root 'install'
         New-Item -ItemType Directory -Path $scripts, $inst, (Join-Path $root 'PD'), (Join-Path $root 'AD'), (Join-Path $root 'TEMP') -Force | Out-Null
@@ -365,7 +366,10 @@ function Remove-Item {
 function Test-IsAdmin { return $false }
 function Start-Process { Write-Host 'STUB Start-Process'; [pscustomobject]@{ ExitCode = __EXIT__ } }
 '@
-        Add-Content -LiteralPath (Join-Path $scripts 'lib.ps1') -Value $stubs.Replace('__EXIT__', "$ChildExit")
+        if ($StateText) {
+            $stubs += "`r`nfunction Start-Process { Write-Host 'STUB Start-Process'; [pscustomobject]@{ ExitCode = __EXIT__ }; New-Item -ItemType Directory -Path (Split-Path -Parent '__STATE__') -Force | Out-Null; Set-Content -LiteralPath '__STATE__' -Value '__STATETEXT__' }`r`n"
+        }
+        Add-Content -LiteralPath (Join-Path $scripts 'lib.ps1') -Value $stubs.Replace('__EXIT__', "$ChildExit").Replace('__STATE__', (Join-Path $root 'PD\canvas-rgb\uninstall-state.marker')).Replace('__STATETEXT__', $StateText)
         $cmd = '$env:ProgramData=''{0}''; $env:APPDATA=''{1}''; $env:TEMP=''{2}''; & ''{3}'' -InstallDir ''{4}''; exit $LASTEXITCODE' -f (Join-Path $root 'PD'), (Join-Path $root 'AD'), (Join-Path $root 'TEMP'), (Join-Path $scripts 'uninstall.ps1'), $inst
         $out = & powershell.exe -NoProfile -Command $cmd 2>&1 | Out-String
         return @{ Out = $out; Code = $LASTEXITCODE }
@@ -391,6 +395,14 @@ function Start-Process { Write-Host 'STUB Start-Process'; [pscustomobject]@{ Exi
         $r = Invoke-UninstallDriverSandbox 'd24c' 0
         Assert-True ($r.Out -match 'uninstall finished\.') $r.Out
         Assert-Equal $r.Code 0 $r.Out
+    }
+    Test-Case 'uninstall.ps1: when the elevated child fails, the state it left behind is said to the person' {
+        # The child wrote down what it removed; the driver shows those words, so the person knows
+        # the true state and not only that something failed (#64).
+        $r = Invoke-UninstallDriverSandbox 'd64a' 1 'canvas-rgb was not removed cleanly: the background service was removed.'
+        Assert-True ($r.Out -match 'the background service was removed') "the words are shown: $($r.Out)"
+        Assert-True ($r.Out -match 'Elevated step failed \(exit 1\)') "the failure is named too: $($r.Out)"
+        Assert-Equal $r.Code 1 $r.Out
     }
 
     # ---- #64: the uninstall says what it really removed ----
