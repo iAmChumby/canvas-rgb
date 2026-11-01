@@ -3023,7 +3023,7 @@ button.chip:hover {
 }
 
 /* A column too narrow for two points side by side holds one point to a row. */
-@container fans-editor (max-width: 459px) {
+@container fans-editor (max-width: 559px) {
   .rd-fans .curve-rows {
     grid-template-columns: minmax(0, 1fr);
   }
