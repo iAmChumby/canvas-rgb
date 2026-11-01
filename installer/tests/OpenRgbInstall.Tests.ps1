@@ -183,7 +183,7 @@ function Invoke-InnoUpdateSandbox([string]$Name, [string]$ServiceStatus) {
     $pawn = Join-Path $root 'PawnIO_setup.exe'
     [System.IO.File]::WriteAllText($pawn, 'not a real installer')
     $stubs = @"
-`$global:SvcStatus = '$ServiceStatus'
+`$global:SvcStatus = '__STATUS__'
 function Test-IsAdmin { return `$true }
 function Assert-MachineHomeSafe { param(`$Path) }
 function Initialize-MachineHome { param(`$Path, `$LogFile) New-Item -ItemType Directory -Path `$Path -Force | Out-Null }
@@ -197,9 +197,13 @@ function Test-OpenRgbLock { param(`$Path) @{ Ok = `$true; Sha256 = 'deadbeef' } 
 function Get-FileSha256Hex { param(`$Path) 'deadbeef' }
 function Test-PawnIoInstallerFile { param(`$Path) [pscustomobject]@{ Ok = `$false; Reason = 'the publisher is not the official one' } }
 "@
-    Add-Content -LiteralPath (Join-Path $scripts 'lib.ps1') -Value $stubs
+    $libText = [System.IO.File]::ReadAllText((Join-Path $scripts 'lib.ps1'))
+    function Write-Lib([string]$Status) {
+        [System.IO.File]::WriteAllText((Join-Path $scripts 'lib.ps1'), $libText + "`r`n" + $stubs.Replace('__STATUS__', $Status))
+    }
 
-    # Step 1: what PrepareToInstall runs.
+    # Step 1: what PrepareToInstall runs. The service reports what it reports before the run.
+    Write-Lib $ServiceStatus
     $log1 = Join-Path $root 'prepare.log'
     $cmd1 = '$env:ProgramData=''{0}''; & ''{1}'' -InstallDir ''{2}'' -LogFile ''{3}''; exit $LASTEXITCODE' -f $pd, (Join-Path $scripts 'stop-canvas.ps1'), $inst, $log1
     $out1 = & powershell.exe -NoProfile -Command $cmd1 2>&1 | Out-String
@@ -212,7 +216,10 @@ function Test-PawnIoInstallerFile { param(`$Path) [pscustomobject]@{ Ok = `$fals
         try { $marked = ([System.IO.File]::ReadAllText($marker) -match 'stoppedByThisRun=yes') } catch { $marked = $false }
     }
 
-    # Step 2: the elevated step, with the switch the .iss passes when the marker says so.
+    # Step 2: the elevated step, with the switch the .iss passes when the marker says so. The
+    # service is stopped by now (the first step stopped it, or it was stopped already): that is
+    # the whole point, the elevated step cannot see that it was running before.
+    Write-Lib 'Stopped'
     $log2 = Join-Path $root 'elevated.log'
     $sw = if ($marked) { '-StoppedRunningService' } else { '' }
     $cmd2 = '$env:ProgramData=''{0}''; & ''{1}'' -PayloadDir ''{2}'' -InstallDir ''{2}'' -InnoMode {3} -OpenRgbZip ''{4}'' -PawnIoInstaller ''{5}'' -LogFile ''{6}''; exit $LASTEXITCODE' -f $pd, (Join-Path $scripts 'setup-elevated.ps1'), $inst, $sw, $zip, $pawn, $log2
@@ -726,11 +733,11 @@ try {
     Test-Case 'an Inno update that stops a running service starts it again when the elevated step fails' {
         $r = Invoke-InnoUpdateSandbox 'inno-a' 'Running'
         Assert-Equal $r.Code1 0 "the first step stopped canvas-rgb: $($r.Out1)"
-        Assert-True $r.Marked 'the first step wrote the marker: the .iss reads it'
         Assert-True ($r.Out2 -match 'extracted OpenRGB to') "the files were in place before the failure: $($r.Out2)"
         Assert-True ($r.Out2 -match 'PawnIO installer refused') "it failed late, after the copy: $($r.Out2)"
         Assert-Equal $r.Code2 1 "the elevated step fails: $($r.Out2)"
         Assert-Equal $r.Starts 1 "the service is started again once: $($r.Out2)"
+        Assert-True $r.Marked 'the first step wrote the marker: the .iss reads it'
     }
     Test-Case 'an Inno update that finds the service stopped does not start it again' {
         $r = Invoke-InnoUpdateSandbox 'inno-b' 'Stopped'
