@@ -86,10 +86,29 @@ once per connection or once per start and trusts it forever.
   so the same re-apply covers them. The daemon supervisor's 5 s heartbeat check compares `Instant`s; if
   `Instant` counts the sleep, a wake looks like a missed heartbeat, so a resume now refreshes the
   heartbeat clock (`Core::on_power`, `Core::tick`). Sensor-loss timeouts get a fresh clock when the
-  grace ends. Left, UNKNOWN: the OpenRGB supervisor's timers (`openrgb.rs:327`) also take an
-  `Instant` tick; not checked for a sleep.
-- **Class fix:** due (second bug). Candidate: every adapter or service that sets a mode once registers
-  for the resume event (one shared hook) and has a test that a resume makes it set the mode again.
+  grace ends. The OpenRGB supervisor's timers (`openrgb.rs:327`) took an `Instant` tick too: settled
+  below.
+- **The OpenRGB timers across a sleep:** `Instant` is a monotonic clock, and the standard library
+  says it is "not specified whether system suspends count as elapsed time or not" (on Windows it
+  reads `QueryPerformanceCounter`), so no timer may lean on it alone. Two did:
+  - the adapter's keepalive (`crates/canvas-adapters/src/openrgb.rs`): the mode was sent again every
+    10 s, but only once the monotonic clock had passed the interval. When that clock did not count
+    the sleep, the RAM's own rainbow lasted until 10 more seconds of wakefulness had passed. The
+    keepalive watches the wall clock as well now: it follows the RTC, so it counts the sleep
+    whatever the monotonic clock did, and the first frame after the wake sets the mode again.
+  - the service's boot-colour watch window (`crates/canvas-svc/src/openrgb.rs`): it ends 15 s after
+    the first write. When the monotonic clock counted the sleep, the window ended at the wake, and a
+    controller OpenRGB announced after it never got the color. A resume starts the window again.
+  A wall clock set backwards is not a sleep: nothing is set again for no reason.
+- **Class fix:** done (#5, #29). Every adapter says what it does on a resume
+  (`canvas_adapters::resume::ResumeBehavior`; the method has no default, so an adapter has to
+  choose). The OpenRGB controllers and the ROYUAN keyboard say `SetsModeAgain`; the CHIONE pump
+  display, the Attack Shark X6 mouse and the 8BitDo pad say `NothingToRestore` and are not given a
+  fake mode to restore. One test walks every adapter the daemon can build
+  (`crates/canvas-daemon/tests/resume_guard.rs`): a simulated resume makes each mode-setting
+  adapter set its mode again, the others say so, and a scan over the repo's own source fails with
+  `file:line` when an adapter does not say what it does on a resume, is not on the list the test
+  drives, or takes part in the resume while saying it has nothing to restore.
 - **Sibling search (#5, canvas-adapters and canvas-daemon):** OpenRGB (every controller, GPU and
   motherboard included): fixed. ROYUAN keyboard: fixed. CHIONE pump display: no mode state (every
   250 ms packet carries its mode bytes; the 0xFF query is firmware info). Attack Shark X6 mouse and
