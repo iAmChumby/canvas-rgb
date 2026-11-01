@@ -129,7 +129,7 @@ var
   FPrepError: String;       // why PrepareToInstall stopped Setup, for the /UPDATE result file
   FPurge: String;           // ' -PurgeConfig' or empty
   FStoppedRunningService: Boolean;  // the first step stopped a running service (#60)
-  FElevatedStepRan: Boolean;       // the elevated step ran: it starts the service itself when it fails (#65)
+  FElevatedStepRan: Boolean;       // the elevated step was launched: it starts the service itself when it fails (#65)
   FCopyStarted: Boolean;           // Inno's copy of the files started: the folder holds a mix of old and new (#65)
   FInstallDirOk: Boolean;           // the uninstall check passed: the folder only administrators can change (#46)
 
@@ -612,6 +612,7 @@ procedure CurStepChanged(CurStep: TSetupStep);
 var
   Code: Integer;
   Log, Args, Pawn: String;
+  Ran: Boolean;
 begin
   if CurStep = ssInstall then
   begin
@@ -622,10 +623,10 @@ begin
     Exit;
   end;
   if CurStep <> ssPostInstall then Exit;
-  // The elevated step runs from here on. When it fails it starts the service again itself (it is
-  // told what the first step stopped), so the restart in DeinitializeSetup must not start it a
-  // second time (#65).
-  FElevatedStepRan := True;
+  // The elevated step is flagged below, once it has actually started. When it runs and fails it
+  // starts the service again itself (it is told what the first step stopped), so the restart in
+  // DeinitializeSetup must not start it a second time. When it could not even be launched
+  // nothing started the service, so the flag stays false and the restart decides (#65).
   Log := ExpandConstant('{tmp}\canvas-rgb-setup-elevated.log');
   Args := '-PayloadDir "' + ExpandConstant('{app}') + '" -InstallDir "' + ExpandConstant('{app}') + '" -InnoMode' +
           ' -OpenRgbZip "' + Trim(String(FOpenRgbZip)) + '" -DisableSignalRgb ' + GetSignalRgb + ' -LogFile "' + Log + '"';
@@ -638,7 +639,9 @@ begin
   if FStoppedRunningService then Args := Args + ' -StoppedRunningService';
 
   WizardForm.StatusLabel.Caption := 'Setting up canvas-rgb to run in the background...';
-  if not RunPs(ExpandConstant('{app}\installer\setup-elevated.ps1'), Args, False, Code) or (Code <> 0) then
+  Ran := RunPs(ExpandConstant('{app}\installer\setup-elevated.ps1'), Args, False, Code);
+  if Ran then FElevatedStepRan := True;
+  if (not Ran) or (Code <> 0) then
   begin
     FFailCode := 10;
     FFailText := 'Setup could not finish installing the background part of canvas-rgb (code ' + IntToStr(Code) + '). It may not be running, and your account settings were not set up. Run this setup again.' + #13#10 + #13#10 + LogTail(Log);

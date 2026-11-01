@@ -1032,6 +1032,23 @@ function Start-Service { param($Name) Write-Host 'CALL Start-Service' }
         Assert-Equal (@([regex]::Matches($r.Out, 'CALL Start-Service')).Count) 0 "the service is not started: $($r.Out)"
         Assert-True ($r.Log -match 'did not stop canvas-rgb') "it says why: $($r.Log)"
     }
+    Test-Case 'an elevated step that could not be launched is not counted as run, so the restart still decides' {
+        # The flag says the step started. Set before the launch it would also say so when the
+        # launch failed, the decision would be "already-handled", and nothing would start the
+        # service while the message says canvas-rgb may not be running (#65).
+        $body = Get-IssFunction 'procedure CurStepChanged'
+        Assert-Equal (@([regex]::Matches($body, 'FElevatedStepRan := True')).Count) 1 'the flag is set in one place'
+        $iRun = $body.IndexOf('RunPs(ExpandConstant(''{app}\installer\setup-elevated.ps1'')')
+        $iFlag = $body.IndexOf('FElevatedStepRan := True')
+        Assert-True ($iRun -gt 0 -and $iFlag -gt $iRun) "the flag is set after the launch, not before it: run at $iRun, flag at $iFlag"
+        Assert-True ((Get-GuardedStatement $body 'if Ran') -match 'FElevatedStepRan := True') 'and only when the launch worked'
+        # Through the decision: a launch that failed leaves the flag false, so the restart is not
+        # skipped as already handled.
+        Assert-Equal (Get-InstallRestartDecision -StoppedRunningService $true -ElevatedStepRan $false) 'restart'
+        Assert-Equal (Get-InstallRestartDecision -StoppedRunningService $true -ElevatedStepRan $false -CopyStarted $true) 'leave-stopped'
+        # A launch that worked and then failed is handled by the step itself.
+        Assert-Equal (Get-InstallRestartDecision -StoppedRunningService $true -ElevatedStepRan $true -CopyStarted $true) 'already-handled'
+    }
     Test-Case 'the installer knows when the copy of the files started' {
         $body = Get-IssFunction 'procedure CurStepChanged'
         Assert-True ($body -match 'if CurStep = ssInstall then') 'the copy step is noticed'
@@ -1046,11 +1063,14 @@ function Start-Service { param($Name) Write-Host 'CALL Start-Service' }
         Assert-True ($restart -match '\s-ElevatedStepRan') 'the elevated flag is passed on'
     }
     Test-Case 'the elevated step says that it ran, so the service is not started a second time' {
+        # The flag is set once the step was launched (see the test about a launch that fails): after
+        # the launch, so a step that ran and failed starts the service itself and the restart in
+        # DeinitializeSetup does not start it a second time.
         $body = Get-IssFunction 'procedure CurStepChanged'
         Assert-True ($body -match 'FElevatedStepRan := True') 'the flag is set'
-        $iFlag = $body.IndexOf('FElevatedStepRan := True')
-        $iRun = $body.IndexOf('setup-elevated.ps1')
-        Assert-True ($iFlag -gt 0 -and $iRun -gt $iFlag) 'the flag is set before the elevated step runs'
+        Assert-True ($body.IndexOf('setup-elevated.ps1') -lt $body.IndexOf('FElevatedStepRan := True')) 'the flag is set once the elevated step was launched'
+        $restart = Get-IssFunction 'function RestartCanvasRgb'
+        Assert-True ($restart -match 'if FElevatedStepRan then Args := Args \+ '' -ElevatedStepRan''') 'the flag is handed to the restart'
     }
     Test-Case 'the installer starts canvas-rgb again only when this run stopped a running service' {
         $body = Get-IssFunction 'function PrepareToInstall'
