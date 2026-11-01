@@ -353,7 +353,19 @@ export function EffectsView() {
       setPicked(r.effect.id);
       setReplaceWith(null);
       setImportError(null);
-      toast(r.replaced ? `${r.effect.name} is replaced` : `${r.effect.name} is added`);
+      // When the load took too long the reply carries its own sentence (saved, will be
+      // tried again) in place of the effect's description, so the library entry, if any, does
+      // not match it. Say that sentence; it names the effect.
+      const inLibrary = (getSnap().effects ?? []).some(
+        (e) => e.id === r.effect.id && e.description === r.effect.description,
+      );
+      toast(
+        inLibrary
+          ? r.replaced
+            ? `${r.effect.name} is replaced`
+            : `${r.effect.name} is added`
+          : r.effect.description,
+      );
     } catch (e) {
       if (e instanceof ApiFailure && e.status === 409) {
         setReplaceWith({ fileName: file.name, html: await file.text() });
@@ -445,7 +457,7 @@ export function EffectsView() {
     }, 240);
   };
 
-  // The files that did not parse. They stand inside the gallery's frame, because they come with
+  // The files that did not load. They stand inside the gallery's frame, because they come with
   // the list: above the frame they would push the page down when the list lands.
   const failedStrip =
     failed.length > 0 ? (
@@ -458,7 +470,7 @@ export function EffectsView() {
         >
           <FileHtml size={14} aria-hidden="true" />
           <span>
-            {failed.length} file{failed.length === 1 ? "" : "s"} did not parse
+            {failed.length} file{failed.length === 1 ? "" : "s"} did not load
           </span>
         </button>
         {showFailed && (
@@ -569,7 +581,7 @@ export function EffectsView() {
         );
       })}
     </div>
-    {/* The files that did not parse stand under the gallery: they come with the list, and above
+    {/* The files that did not load stand under the gallery: they come with the list, and above
         the cards they would push every card down. */}
     {failedStrip}
     </LoadFrame>

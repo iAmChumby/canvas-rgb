@@ -11,7 +11,7 @@ import type { Status } from "@/proto/Status";
 
 // The frames of every view in its states: the error frame says it in one line and keeps the raw
 // words behind a disclosure, the retry goes back to the placeholder while it runs, and the
-// gallery's cards do not move when a file did not parse.
+// gallery's cards do not move when a file did not load.
 //
 // The demo backend holds or fails a route on request (`?state=hold:effects`, `?state=fail:devices`).
 
@@ -188,7 +188,7 @@ describe("the retry", () => {
 });
 
 describe("the gallery's cards", () => {
-  it("do not move when the files that did not parse are told about", async () => {
+  it("do not move when the files that did not load are told about", async () => {
     setUrl("/effects/?state=complete");
     await act(async () => {
       await refreshEffects();
@@ -203,6 +203,9 @@ describe("the gallery's cards", () => {
     const gallery = document.querySelector(".effect-gallery");
     expect(strip).not.toBeNull();
     expect(gallery).not.toBeNull();
+    // The strip says a file did not load: that is true for a broken file and for one whose
+    // load ran out of time.
+    expect(strip?.textContent).toContain("did not load");
     // The strip stands after the cards: it comes with the list and must not push them down.
     expect(
       (gallery as Node).compareDocumentPosition(strip as Node) & Node.DOCUMENT_POSITION_FOLLOWING,

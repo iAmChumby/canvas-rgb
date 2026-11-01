@@ -663,9 +663,11 @@ pub fn saved_presets(store: &crate::storage::Store) -> BTreeMap<String, Vec<canv
 /// Adds a SignalRGB-format HTML effect to the effects folder.
 ///
 /// The file name is checked first, then the file is parsed with the builder the loader
-/// uses: a file that does not parse is a validation error and nothing is written. The
-/// file lands in the folder atomically (a temp file in the same folder, then a rename),
-/// the folder is rescanned and the effect's summary comes back.
+/// uses: a file that does not parse is a validation error and nothing is written. A file
+/// whose load ran out of time is not the file's fault — the machine was busy — so it is
+/// written anyway and the answer says it was saved, took too long to load just now, and will be tried again. The file
+/// lands in the folder atomically (a temp file in the same folder, then a rename), the
+/// folder is rescanned and the effect's summary comes back.
 pub async fn import_effect(
     State(app): State<Arc<App>>,
     body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
@@ -725,15 +727,24 @@ pub async fn import_effect(
     // The file is parsed before anything is written: a broken file is refused and the
     // effects folder stays as it was. The parse runs the effect's script, so it goes
     // on a blocking thread and not on a tokio worker.
+    //
+    // A load that ran out of time is not the file's fault: the machine was busy. The file
+    // is written anyway, so a save during a game load is not lost, and the rescan below
+    // (or the retry that follows it) loads it when the machine is free.
     let parse_id = id.clone();
     let parse_html = request.html.clone();
-    let effect = tokio::task::spawn_blocking(move || {
-        (crate::user_effects::html_builder())(&parse_id, &parse_html)
-    })
-    .await
-    .map_err(|e| ApiFailure::internal(format!("the parse task stopped: {e}")))?
-    .map_err(|e| ApiFailure::validation(format!("the effect does not parse: {e}")))?;
-    let schema = effect.schema();
+    let parse_with = app.user_effects.clone();
+    let parsed = tokio::task::spawn_blocking(move || parse_with.check(&parse_id, &parse_html))
+        .await
+        .map_err(|e| ApiFailure::internal(format!("the parse task stopped: {e}")))?;
+    match parsed {
+        Ok(()) => {}
+        // A load that ran out of time is not the file's fault: it is written below.
+        Err(e) if crate::thumbnail::build_error_depends_on_load(&e) => {}
+        Err(e) => {
+            return Err(ApiFailure::validation(format!("the effect does not parse: {e}")));
+        }
+    }
 
     // The write. A new file is created with a link, so a file that appears between the
     // check and the write is never overwritten.
@@ -769,12 +780,50 @@ pub async fn import_effect(
     };
     tracing::info!(effect = %id, replaced = existing.is_some(), "a user effect was imported");
 
+    // What the answer says comes from the rescan's outcome for this file, not from the
+    // import's own parse (the two can disagree: a parse that loaded can be followed by a
+    // rescan that runs out of time, and the other way round). A file still in the failed
+    // list says it was saved, took too long to load just now, and is tried again, under the
+    // new file's name (a script that never ends also runs out of time, so it does not say
+    // the machine was busy). A file in the library gets the normal reply for what is there.
+    let waiting = app
+        .user_effects
+        .failures()
+        .into_iter()
+        .find(|(p, _)| p.file_name() == path.file_name())
+        .map(|(_, error)| error);
+    let file_name = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| request.file_name.clone());
+    let busy = |name: String| {
+        (
+            name.clone(),
+            format!("{name} was saved, but it took too long to load just now; it will be tried again"),
+            Default::default(),
+        )
+    };
+    let (name, description, needs) = match waiting {
+        Some(error) if error.ends_with("it will be tried again") => busy(file_name),
+        // The file is in the folder but the loader refused it for a reason of its own
+        // (a duplicate id, say): say so.
+        Some(error) => {
+            return Err(ApiFailure::validation(format!(
+                "the file was saved, but the effect does not load: {error}"
+            )));
+        }
+        None => match app.user_effects.schemas().into_iter().find(|s| s.id == id) {
+            Some(schema) => (schema.name, schema.description, schema.needs),
+            None => busy(file_name),
+        },
+    };
+
     Ok(Json(ImportEffectResponse {
         effect: EffectSummary {
             id,
-            name: schema.name,
-            description: schema.description,
-            needs: schema.needs,
+            name,
+            description,
+            needs,
             favorite,
         },
         replaced: existing.is_some(),
