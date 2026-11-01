@@ -27,6 +27,21 @@ use std::time::{Duration, SystemTime};
 /// The id prefix every user HTML effect carries.
 pub const USER_EFFECT_PREFIX: &str = "html:";
 
+/// A short, stable hash of an effect's source: the preview's `source_hash` and the id of a
+/// draft (`draft:` + the hash, see [`crate::draft`]) both come from it.
+///
+/// FNV-1a over the bytes: the same text hashes the same in this process and in the next, so a
+/// stale label the editor kept survives a daemon restart, and two drafts of the same file share
+/// one id.
+pub fn source_hash(source: &str) -> String {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in source.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
 /// How often the effects folder is rescanned.
 pub const RESCAN_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -406,6 +421,32 @@ impl UserEffects {
             .find(|e| e.schema.id == id)
             .map(|e| e.source.clone())
             .or_else(|| state.stock.get(id).map(|e| e.source.clone()))
+    }
+
+    /// The source of a loaded or stock user effect, and the file name Save would use: the
+    /// file's own name (its case as it is on disk) for a user effect, `<stem>.html` for a
+    /// stock one. `None` for an id that is not an `html:` effect: a Rust built-in has no
+    /// source.
+    pub fn source_and_file_name(&self, id: &str) -> Option<(Arc<str>, String)> {
+        let state = read_lock(&self.state);
+        // The library reports the canonical id, but a URL may carry another case; the
+        // lookup is the same one `find_schema` does for activation.
+        if let Some((path, effect)) = state
+            .loaded
+            .iter()
+            .find(|(_, e)| e.schema.id.eq_ignore_ascii_case(id))
+        {
+            let file_name = path.file_name()?.to_string_lossy().into_owned();
+            return Some((effect.source.clone(), file_name));
+        }
+        state
+            .stock
+            .iter()
+            .find(|(stock_id, _)| stock_id.eq_ignore_ascii_case(id))
+            .map(|(stock_id, effect)| {
+                let stem = stock_id.strip_prefix(USER_EFFECT_PREFIX).unwrap_or(stock_id);
+                (effect.source.clone(), format!("{stem}.html"))
+            })
     }
 
     /// Runs the library's builder on a file that is about to be imported, so the import
@@ -1357,9 +1398,71 @@ mod tests {
         assert!(effects.schemas().is_empty());
     }
 
+    /// A user effect's source comes with its file name, and the id matches without regard to
+    /// case. A Rust built-in has no source in the library.
     #[test]
-    fn only_changed_files_are_parsed_again() {
-        let dir = TempDir::new("changes");
+    fn the_source_of_a_user_effect_comes_with_the_file_name_save_would_use() {
+        let dir = TempDir::new("source-of");
+        let text = "My Effect\n<canvas></canvas>";
+        dir.write("My Effect.html", text);
+        let effects = UserEffects::new(fake_builder(Arc::new(AtomicUsize::new(0))));
+        effects.rescan(&dir.0);
+
+        let (source, file_name) =
+            effects.source_and_file_name("html:My Effect").expect("the effect has a source");
+        assert_eq!(&*source, text);
+        assert_eq!(file_name, "My Effect.html", "the file's own name and case");
+        // A URL may carry another case; the file name is still the file's.
+        let (_, lower) =
+            effects.source_and_file_name("HTML:my effect").expect("the id matches without case");
+        assert_eq!(lower, "My Effect.html");
+        // A Rust built-in has no source here.
+        assert!(effects.source_and_file_name("solid").is_none());
+        assert!(effects.source_and_file_name("html:not-there").is_none());
+    }
+
+    /// A stock effect ships inside the daemon: it has a source too, and the name Save would
+    /// use is `<stem>.html`.
+    #[test]
+    fn a_stock_effect_has_a_source_and_the_name_save_would_use() {
+        let text = "Stock One\n<canvas></canvas>";
+        let effects = UserEffects::with_stock(
+            fake_builder(Arc::new(AtomicUsize::new(0))),
+            &[("stock-one", text)],
+        );
+        let (source, file_name) =
+            effects.source_and_file_name("html:stock-one").expect("the stock effect has a source");
+        assert_eq!(&*source, text);
+        assert_eq!(file_name, "stock-one.html");
+    }
+
+    /// A user file with a stock effect's id replaces it, and its source is the file's.
+    #[test]
+    fn a_user_file_replaces_a_stock_source() {
+        let dir = TempDir::new("stock-shadowed-source");
+        dir.write("stock-one.html", "Mine\n<canvas></canvas>");
+        let effects = UserEffects::with_stock(
+            fake_builder(Arc::new(AtomicUsize::new(0))),
+            &[("stock-one", "Shipped\n<canvas></canvas>")],
+        );
+        effects.rescan(&dir.0);
+        let (source, file_name) =
+            effects.source_and_file_name("html:stock-one").expect("a source");
+        assert_eq!(&*source, "Mine\n<canvas></canvas>");
+        assert_eq!(file_name, "stock-one.html");
+    }
+
+    /// The source hash is stable, changes with the text, and has one shape.
+    #[test]
+    fn the_source_hash_is_stable_and_changes_with_the_source() {
+        assert_eq!(source_hash("abc"), source_hash("abc"));
+        assert_ne!(source_hash("abc"), source_hash("abd"));
+        assert_eq!(source_hash("").len(), 16);
+        assert!(source_hash("abc").chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn only_changed_files_are_parsed_again() {        let dir = TempDir::new("changes");
         dir.write("a.html", "A\n<canvas></canvas>");
         let parses = Arc::new(AtomicUsize::new(0));
         let effects = UserEffects::new(fake_builder(parses.clone()));

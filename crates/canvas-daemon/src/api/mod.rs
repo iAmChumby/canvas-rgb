@@ -6,6 +6,7 @@
 pub mod diag;
 pub mod devices;
 pub mod displays;
+pub mod editor;
 pub mod effects;
 pub mod fans;
 pub mod layouts;
@@ -57,6 +58,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route(routes::EFFECT_THUMBNAIL, get(effects::thumbnail))
         .route(routes::EFFECT_ACTIVE_PROPS, patch(effects::patch_active_props))
         .route(routes::EFFECT_FAVORITE, put(effects::put_favorite))
+        .route(routes::EFFECT_SOURCE, get(editor::effect_source))
         .route(routes::LAYOUTS, get(layouts::list_layouts))
         .route(routes::LAYOUT, get(layouts::get_layout).put(layouts::put_layout))
         .route(routes::LAYOUT_ACTIVE, put(layouts::put_active_layout))
