@@ -13,16 +13,26 @@ import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-/** Whether the window is a phone: the fans page asks `(max-width: 720px)`. */
-let phone = false;
+/**
+ * The width of the page's box (`.content`, without its padding). The fan page asks the box the
+ * stylesheet's `@container page (max-width: 640px)` rule asks, so the test sets that width and
+ * nothing about the window. jsdom has no layout: the box reports what is set here.
+ */
+let pageWidth = 1100;
 
 beforeAll(() => {
   window.matchMedia = ((query: string) => ({
-    matches: phone && query.includes("max-width: 720px"),
+    matches: false,
     media: query,
     addEventListener: () => {},
     removeEventListener: () => {},
   })) as unknown as typeof window.matchMedia;
+  Object.defineProperty(HTMLElement.prototype, "clientWidth", {
+    configurable: true,
+    get(this: HTMLElement) {
+      return this.classList.contains("content") ? pageWidth : 0;
+    },
+  });
   globalThis.ResizeObserver = class {
     observe() {}
     unobserve() {}
@@ -42,7 +52,7 @@ beforeAll(() => {
 
 afterEach(() => {
   cleanup();
-  phone = false;
+  pageWidth = 1100;
   patchSnap({ fans: null, fansError: null });
 });
 
@@ -59,7 +69,9 @@ async function page() {
           <StripSlot kind="title" />
           <StripSlot kind="actions" />
         </header>
-        <FansView />
+        <main className="content">
+          <FansView />
+        </main>
       </StripSlotsProvider>
     </ToastProvider>,
   );
@@ -94,8 +106,22 @@ describe("the fan profiles in the strip", () => {
 });
 
 describe("the fan editor on a phone", () => {
+  it("answers to the page's box at 640 px, the CSS's own condition", async () => {
+    // 640 px of the box is a sheet (the CSS `max-width: 640px` holds), 641 px is a column.
+    pageWidth = 640;
+    const { unmount } = await page();
+    await screen.findByRole("heading", { level: 2, name: "Headers" });
+    expect(document.querySelector(".rd-fans-right")).toBeNull();
+    unmount();
+
+    pageWidth = 641;
+    await page();
+    await screen.findByRole("heading", { level: 2, name: "Headers" });
+    expect(document.querySelector(".rd-fans-right")).not.toBeNull();
+  });
+
   it("is not open until a header is tapped", async () => {
-    phone = true;
+    pageWidth = 358;
     await page();
     // The headers are the list, and no header is picked, so no editor stands on the page.
     await screen.findByRole("heading", { level: 2, name: "Headers" });

@@ -13,7 +13,7 @@ import { Select } from "@/components/Select";
 import { Slider } from "@/components/Slider";
 import { Sparkline, Figure } from "@/components/Readout";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
-import { useMediaQuery } from "@/components/MediaQuery";
+import { usePageNarrow } from "@/components/MediaQuery";
 import { PageActions } from "@/shell/PageHeader";
 import { Details, LoadFrame } from "@/components/Loading";
 import { FansShape } from "@/components/LoadShapes";
@@ -135,7 +135,8 @@ export function FansView() {
   const rpm = useSnap((s) => s.rpm);
   // A load that is in flight after a Try again: the frame shows its placeholder until it ends.
   const retrying = useSnap((s) => s.pending.includes("fans"));
-  const narrow = useMediaQuery("(max-width: 720px)");
+  // The page's box, not the window: the editor sheet in the CSS switches on at 640 px of it.
+  const narrow = usePageNarrow(640);
   const [picked, setSelectedId] = useState<string | null>(null);
   // The first header is the default selection until one is clicked. On a phone the list is the
   // page and the editor is a sheet a tap pushes over it, so nothing is selected until then.
