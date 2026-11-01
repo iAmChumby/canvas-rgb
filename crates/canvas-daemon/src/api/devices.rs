@@ -133,7 +133,9 @@ pub async fn identify(
     // Send the first frames now; the ticker repeats them and runs the watchdog.
     let devices = app.devices.read().await.clone();
     if let crate::identify::Tick::Frames(frames) = app.identify.tick(std::time::Instant::now(), &devices) {
-        app.identify.push(frames);
+        // The push comes first: the line may only say the frame was sent if the writer took it.
+        let outcomes = app.identify.push(&frames);
+        crate::identify::log_sent(&device, &frames, &outcomes);
     }
     if start {
         crate::identify::spawn_ticker(app.clone());
@@ -156,7 +158,7 @@ pub async fn onboarding_session(
         }
         let devices = app.devices.read().await.clone();
         if let crate::identify::Tick::Frames(frames) = app.identify.tick(std::time::Instant::now(), &devices) {
-            app.identify.push(frames);
+            app.identify.push(&frames);
         }
         if start {
             crate::identify::spawn_ticker(app.clone());

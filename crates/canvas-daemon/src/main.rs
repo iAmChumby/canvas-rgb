@@ -268,6 +268,8 @@ fn port_holders(port: u16) -> String {
 /// The quit path (G3), in order. Each step has a bound, so no step holds the daemon up.
 async fn quit_sequence(app: &Arc<App>) {
     app.shutting_down.store(1, Ordering::SeqCst);
+    // The service log has the moment it ended OpenRGB; this is the moment frames last went out (#81).
+    app.last_frame.log("the daemon was told to stop");
 
     // 1. `on_quit`: black, or the last frame left in place.
     if tokio::time::timeout(ON_QUIT_LIMIT, write_on_quit(app)).await.is_err() {
@@ -287,6 +289,8 @@ async fn quit_sequence(app: &Arc<App>) {
     if tokio::time::timeout(ENGINE_STOP_LIMIT, stop).await.is_err() {
         tracing::warn!("the render loop did not stop in time");
     }
+    // The black frame of step 1 counts: this is the last frame the daemon sent before it ended (#81).
+    app.last_frame.log("the daemon finished its quit sequence");
 
     // 4. The OpenRGB server the daemon started.
     kill_openrgb_server(app);
@@ -432,25 +436,17 @@ async fn sync_device_sinks(
         if sinks.contains_key(&id) {
             continue;
         }
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<canvas_proto::Rgb8>>(1);
+        let (tx, rx) = tokio::sync::mpsc::channel::<Vec<canvas_proto::Rgb8>>(1);
         let adapter = app.adapter.clone();
         let writer_id = id.clone();
-        let writer = tokio::spawn(async move {
-            let mut failures = 0u32;
-            while let Some(frame) = rx.recv().await {
-                let result = adapter.lock().await.write_frame(&writer_id, &frame).await;
-                match result {
-                    Ok(()) => failures = 0,
-                    Err(e) => {
-                        failures += 1;
-                        // Log the first failure and then every 300th, not every frame.
-                        if failures == 1 || failures.is_multiple_of(300) {
-                            tracing::warn!(device = %writer_id, error = %e, failures, "frame write failed");
-                        }
-                    }
-                }
-            }
-        });
+        // The writer task records the time of every frame that went out (#81). It lives in the
+        // library, so a test can run it and prove that it records.
+        let writer = tokio::spawn(canvas_daemon::writer::writer_loop(
+            adapter,
+            writer_id,
+            rx,
+            Arc::clone(&app.last_frame),
+        ));
         app.engine.add_sink(id.clone(), Arc::new(canvas_daemon::state::DeviceSink::with_gate(id.clone(), tx, app.identify.clone())));
         tracing::info!(device = %id, "device frame sink added");
         sinks.insert(id, writer);

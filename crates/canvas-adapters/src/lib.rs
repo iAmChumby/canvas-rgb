@@ -11,6 +11,9 @@ pub mod resume;
 pub mod royuan;
 pub mod zones;
 
+#[cfg(test)]
+mod test_logs;
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 

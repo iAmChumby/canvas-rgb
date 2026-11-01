@@ -564,6 +564,8 @@ pub struct FakeProcesses {
     slow_kill_polls: Arc<AtomicU32>,
     /// Launches that happened while an earlier daemon had not exited yet.
     overlaps: Arc<AtomicU32>,
+    /// Kills that fail with an error.
+    fail_kills: Arc<AtomicUsize>,
 }
 
 type RunningRecord = (u32, PathBuf, u32, Arc<AtomicBool>);
@@ -635,6 +637,12 @@ impl FakeProcesses {
         self.slow_kill_polls.store(polls, Ordering::SeqCst);
     }
 
+    /// Makes the next `n` kills fail with an error, as a kill of a process that is already gone
+    /// does. The next kill after that works again.
+    pub fn fail_kills(&self, n: usize) {
+        self.fail_kills.store(n, Ordering::SeqCst);
+    }
+
     /// How many launches started while an earlier daemon was still running.
     pub fn overlaps(&self) -> u32 {
         self.overlaps.load(Ordering::SeqCst)
@@ -673,6 +681,7 @@ impl FakeProcesses {
             pid,
             slow_kill: self.slow_kill_polls.load(Ordering::SeqCst),
             dying: None,
+            fail_kills: Arc::clone(&self.fail_kills),
         }))
     }
 }
@@ -684,6 +693,8 @@ struct FakeChild {
     slow_kill: u32,
     /// Polls left before a killed process exits.
     dying: Option<u32>,
+    /// Kills that fail with an error.
+    fail_kills: Arc<AtomicUsize>,
 }
 
 impl ChildProcess for FakeChild {
@@ -700,6 +711,10 @@ impl ChildProcess for FakeChild {
     }
 
     fn kill(&mut self) -> io::Result<()> {
+        if self.fail_kills.load(Ordering::SeqCst) > 0 {
+            self.fail_kills.fetch_sub(1, Ordering::SeqCst);
+            return Err(io::Error::other("fake kill failure"));
+        }
         if self.slow_kill > 0 {
             self.dying = Some(self.slow_kill);
         } else {
@@ -739,7 +754,13 @@ impl crate::daemon::SessionLauncher for FakeLauncher {
             .map(|(pid, image, session, flag)| crate::daemon::RunningDaemon {
                 image: image.clone(),
                 session: *session,
-                process: Box::new(FakeChild { exited: Arc::clone(flag), pid: *pid, slow_kill: 0, dying: None }),
+                process: Box::new(FakeChild {
+                    exited: Arc::clone(flag),
+                    pid: *pid,
+                    slow_kill: 0,
+                    dying: None,
+                    fail_kills: Arc::clone(&self.0.fail_kills),
+                }),
             })
             .collect()
     }

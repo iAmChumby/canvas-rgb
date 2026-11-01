@@ -12,6 +12,7 @@ pub mod elevated;
 pub mod exit_log;
 pub mod first_run;
 pub mod identify;
+pub mod last_frame;
 pub mod logging;
 pub mod migration;
 pub mod openrgb_supervisor;
@@ -26,6 +27,10 @@ pub mod thumbnail;
 pub mod transient;
 pub mod token;
 pub mod user_effects;
+pub mod writer;
+
+#[cfg(test)]
+pub(crate) mod test_logs;
 
 use canvas_proto::props::Props;
 use std::sync::Arc;

@@ -97,6 +97,8 @@ pub struct App {
     pub peripherals: crate::peripherals::PeripheralHub,
     /// The identify override: while it is active the engine's frames reach no device.
     pub identify: Arc<crate::identify::IdentifyGate>,
+    /// When the last frame reached a device; the quit path logs it so the service log lines up (#81).
+    pub last_frame: Arc<crate::last_frame::LastFrame>,
     /// The onboarding effects are transient: the timer that restores the saved effect.
     pub transient: crate::transient::Transient,
 }
@@ -156,6 +158,7 @@ impl App {
             displays: crate::displays::DisplayHub::new(display_adapter),
             peripherals: crate::peripherals::PeripheralHub::new(Vec::new()),
             identify: Arc::default(),
+            last_frame: Arc::default(),
             transient: Default::default(),
             store: tokio::sync::RwLock::new(store),
             engine,
