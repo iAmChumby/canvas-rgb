@@ -247,8 +247,9 @@ line. Three mechanisms, and one bug the timing only exposed.
     (made if the appender has not made it yet; a reparse point is refused). The tracing copy is only the
     fallback when that write failed or had not begun at the limit; a write that has begun and lands late
     owns the line, so the line is in the file at most once. A stalled disk can still lose it, and a
-    panic on any thread but the main one still goes through the queue. The real hook is tested with a
-    stuck queue (`exit_log::the_panic_hook_leaves_its_line_in_the_file_while_the_queue_is_stuck`).
+    panic on any thread but the main one still goes through the queue. The hook's logic is tested with a
+    stuck queue and an injected writer (`exit_log::the_panic_hook_leaves_its_line_in_the_file_while_the_queue_is_stuck`);
+    the production writer it is installed with at startup has no test that fails on the old hook (open).
   - #45/#55: every daemon kill goes through `terminate_daemon(process, reason)`, which logs the pid and
     reason first; the service tests share one capture helper (`crates/canvas-svc/src/test_logs.rs`, one
     capture at a time); the kill test asserts the full announcement for the pid on all four kill paths.

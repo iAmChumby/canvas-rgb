@@ -946,11 +946,9 @@ window.requestAnimationFrame(draw);
         // Without a bound per frame, the render runs on to the end of the step it was in: four
         // frames, two seconds in all. With it, the frame in progress is stopped at the budget, so
         // the slot is held for the budget plus the interrupt latency. The ceiling is the budget
-        // plus ONE frame, where the frame is the calibrated estimate of this effect on this
-        // machine (the best of three samples scaled to the iterations the effect was given),
-        // not a fixed number of milliseconds. The estimate is about 0.5 s by construction, so
-        // the slack is about half a second; it moves only if the calibration reads a different
-        // frame time.
+        // plus ONE frame. The iterations are sized from the calibration so that a frame is
+        // `frame_s`, so `frame_est` works out to `frame_s` (0.5 s): the slack is a constant half
+        // second, not a measurement of this machine. A stall longer than that fails the test.
         let frame_est = per_probe * iterations as f64 / probe as f64;
         assert!(
             took < budget + std::time::Duration::from_secs_f64(frame_est),
