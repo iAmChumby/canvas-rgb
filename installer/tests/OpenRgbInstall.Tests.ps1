@@ -821,10 +821,12 @@ try {
     }
     # The PowerShell the installer runs to start canvas-rgb again, taken from the .iss itself: what this
     # test runs is the text the installer runs. It runs against a stubbed lib.ps1 (no real service).
-    $restartLine = ($issText -split "`r?`n" | Where-Object { $_ -match '^\s*RestartServiceScript = ' }) | Select-Object -First 1
-    Assert-True ($null -ne $restartLine) 'the .iss has the text that starts canvas-rgb again'
-    $restartText = [regex]::Match($restartLine, "= '(.*)';\s*$").Groups[1].Value.Replace("''", "'")
-    function Invoke-RestartSandbox([string]$Name, [string]$ServiceStatus) {
+    function Get-RestartText {
+        $line = ($issText -split "`r?`n" | Where-Object { $_ -match '^\s*RestartServiceScript = ' }) | Select-Object -First 1
+        if ($null -eq $line) { throw 'the .iss has the text that starts canvas-rgb again' }
+        return [regex]::Match($line, "= '(.*)';\s*$").Groups[1].Value.Replace("''", "'")
+    }
+    function Invoke-RestartSandbox([string]$Name, [string]$ServiceStatus, [string]$Text) {
         $root = Join-Path $dir $Name
         New-Item -ItemType Directory -Path $root -Force | Out-Null
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\lib.ps1') -Destination $root
@@ -834,17 +836,17 @@ function Get-Service { param(`$Name) `$s = [pscustomobject]@{ Name = 'canvas-rgb
 function Start-Service { param(`$Name) `$global:SvcStatus = 'Running'; Write-Host 'CALL Start-Service' }
 "@
         Add-Content -LiteralPath (Join-Path $root 'lib.ps1') -Value $stubs
-        $cmd = $restartText.Replace('%LIB%', (Join-Path $root 'lib.ps1').Replace("'", "''"))
+        $cmd = $Text.Replace('%LIB%', (Join-Path $root 'lib.ps1').Replace("'", "''"))
         $out = & powershell.exe -NoProfile -Command $cmd 2>&1 | Out-String
         return @{ Out = $out; Code = $LASTEXITCODE }
     }
     Test-Case 'the installer starts canvas-rgb again with the code the scripts use, and it starts it once' {
-        $r = Invoke-RestartSandbox 'restart1' 'Stopped'
+        $r = Invoke-RestartSandbox 'restart1' 'Stopped' (Get-RestartText)
         Assert-Equal (@([regex]::Matches($r.Out, 'CALL Start-Service')).Count) 1 "the service is started once: $($r.Out)"
         Assert-True ($r.Out -match 'started the service canvas-rgb-svc again') "it says so: $($r.Out)"
     }
     Test-Case 'a canvas-rgb that is already running is not started a second time' {
-        $r = Invoke-RestartSandbox 'restart2' 'Running'
+        $r = Invoke-RestartSandbox 'restart2' 'Running' (Get-RestartText)
         Assert-Equal (@([regex]::Matches($r.Out, 'CALL Start-Service')).Count) 0 "nothing is started: $($r.Out)"
     }
     Test-Case 'the installer starts canvas-rgb again when the update failed before the elevated step' {
