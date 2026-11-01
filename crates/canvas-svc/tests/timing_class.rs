@@ -67,7 +67,7 @@ const BOUND_ALLOWED: &[(&str, &str, &str)] = &[
     ("canvas-daemon/src/logging.rs", "took < std::time::Duration::from_millis(1000)", "open: a 1 s ceiling on run_bounded giving up after its 250 ms limit; a runner stalled for 750 ms past the limit fails it"),
     ("canvas-daemon/src/user_effects.rs", "took < std::time::Duration::from_secs(5)", "hang guard: a 400 ms render budget against a 30 s frame budget; 5 s means the frame was not held to the budget"),
     ("canvas-daemon/src/user_effects.rs", "took < budget + std::time::Duration::from_secs_f64(frame_est)", "open, calibrated: the render is held to its budget plus one frame, where the frame is the best of three samples scaled to the effect (about 0.5 s). The slack is a constant once measured: a stall longer than it fails the test (#51)"),
-    ("canvas-daemon/tests/effects_import.rs", "elapsed.as_millis() < 6_000", "open: 6 s ceiling on a 2 s import budget"),
+    ("canvas-daemon/tests/effects_import.rs", "elapsed.as_millis() < 8_000", "open: 8 s ceiling on two 2 s load budgets (the import's parse and the rescan's, #56)"),
     ("canvas-daemon/tests/quit.rs", "started.elapsed() < Duration::from_secs(15)", "open: a child process must serve its API within 15 s on a loaded runner"),
     ("canvas-daemon/tests/quit.rs", "took <= EXIT_DEADLINE", "the property: the daemon's own exit deadline"),
     ("canvas-html/tests/effects.rs", "started.elapsed().as_millis() <= 2_000", "hang guard: a frame after a runaway loop must not be stuck as well; 2 s"),
