@@ -2733,6 +2733,16 @@ button.chip:hover {
     gap: var(--s2);
   }
 
+  /* The zone's name keeps its whole width; the shape word has no room beside the count and the
+     Size key on a phone, so it goes there (the drawing under the row shows the shape). */
+  .rd-devices .rd-zone .zone-strip-name > .one-line:first-child {
+    flex: none;
+  }
+
+  .rd-devices .rd-zone .rd-zone-shape {
+    display: none;
+  }
+
   .rd-devices .rd-zone .zone-strip-svg {
     grid-area: drawing;
     flex: none;
@@ -5687,6 +5697,13 @@ button.chip:hover {
 
 /* A very narrow phone (360 px): the profile picker and the strip's edges give a little more, and
    now playing (which has no room left) leaves the row. */
+@media (max-width: 430px) {
+  .rd-actions .seg-item {
+    padding-left: 6px;
+    padding-right: 6px;
+  }
+}
+
 @media (max-width: 380px) {
   .strip-inner:has(.rd-actions) {
     padding: 0 var(--s1);
