@@ -217,21 +217,120 @@ function Get-WorkflowViolations {
     return $found
 }
 
+# The lines of a workflow that lie inside a block scalar ("key: |" or "key: >"): YAML reads them
+# as text, where a quote, an anchor or a backslash is not YAML syntax. One entry per line.
+function Get-WorkflowBlockScalarLines {
+    param([string[]]$Lines)
+    $inside = New-Object 'bool[]' $Lines.Count
+    $keyIndent = -1
+    for ($i = 0; $i -lt $Lines.Count; $i++) {
+        $line = $Lines[$i]
+        if ($keyIndent -ge 0) {
+            if ($line -match '^\s*$') { $inside[$i] = $true; continue }
+            $indent = $line.Length - $line.TrimStart().Length
+            if ($indent -gt $keyIndent) { $inside[$i] = $true; continue }
+            $keyIndent = -1
+        }
+        $m = [regex]::Match($line, '^(\s*)(?:-\s+)?[^\s:#][^:]*:\s*[|>][-+]?\s*(?:#.*)?$')
+        if ($m.Success) { $keyIndent = $m.Groups[1].Value.Length }
+    }
+    return ,$inside
+}
+
+# The escapes that hide text from a scan of the raw lines, inside a double-quoted scalar outside
+# the sign job: a \u or \x escape (YAML decodes both, so \u0073ecrets is secrets to the workflow)
+# and a line ending in a backslash (YAML joins the next line to it with the backslash removed, so
+# sec\ then rets is secrets). A single-quoted or plain scalar decodes no escapes, and a block
+# scalar holds text, so those are left alone. Quotes, ${{ }} expressions, comments and block
+# scalars are read the way YAML reads them, so a quote in a comment or a shell line starts no
+# scalar.
+function Get-YamlEscapeViolations {
+    param([string[]]$Lines, [bool[]]$InBlock, [int]$SignFirst, [int]$SignLast)
+    $found = @()
+    $quote = ''
+    for ($i = 0; $i -lt $Lines.Count; $i++) {
+        if ($InBlock[$i]) { continue }
+        $line = $Lines[$i]
+        $j = 0
+        while ($j -lt $line.Length) {
+            $c = $line[$j]
+            if ($quote -eq '"') {
+                if ($c -eq '"') { $quote = ''; $j++; continue }
+                if ($c -eq '\') {
+                    $rest = $line.Substring($j + 1)
+                    $outside = $i -lt $SignFirst -or $i -gt $SignLast
+                    if ($rest.Trim() -eq '') {
+                        if ($outside) { $found += "line $($i + 1) ends a double-quoted scalar line with a backslash: YAML joins the next line to it" }
+                    } elseif ($rest[0] -eq 'u' -or $rest[0] -eq 'x') {
+                        if ($outside) { $found += "line $($i + 1) has a \u or \x escape inside a double-quoted scalar: YAML decodes it before the workflow reads the text" }
+                    }
+                    $j += 2
+                    continue
+                }
+                $j++
+                continue
+            }
+            if ($quote -eq "'") {
+                if ($c -eq "'") {
+                    if ($j + 1 -lt $line.Length -and $line[$j + 1] -eq "'") { $j += 2; continue }
+                    $quote = ''
+                }
+                $j++
+                continue
+            }
+            if ($c -eq '#' -and ($j -eq 0 -or [char]::IsWhiteSpace($line[$j - 1]))) { break }
+            if (($c -eq '"' -or $c -eq "'") -and ($j -eq 0 -or $line[$j - 1] -match '[\s:,\[\{-]')) {
+                $quote = "$c"
+                $j++
+                continue
+            }
+            if ($c -eq '$' -and $j + 2 -lt $line.Length -and $line[$j + 1] -eq '{' -and $line[$j + 2] -eq '{') {
+                $close = $line.IndexOf('}}', $j + 3)
+                if ($close -ge 0) { $j = $close + 2; continue }
+            }
+            $j++
+        }
+    }
+    return $found
+}
+
 # The secret violations in a workflow's raw text: every line, comments and shell text inside a
-# run: block included, that names a secret anywhere outside the sign job. Any form counts
-# (secrets., secrets[, toJSON(secrets), any case): the match is the word "secrets". A comment
-# is not exempt: a "#" line inside a run: | block is shell text, and a comment outside the sign
-# job that names a secret is a line this guard cannot tell from a use. The sign job's range is
-# found on the raw lines: from its "  sign:" key to the line before the next line indented two
-# spaces or fewer (a key, a comment or a top-level line). It fails closed: when the sign job is
-# not found exactly once, that is a violation; the guard never passes by finding nothing.
+# run: block included, that writes the secrets context (secrets., secrets[, toJSON(secrets), any
+# case) outside the sign job, plus the YAML syntax that hides it from that scan: an anchor or
+# alias (&name / *name) outside ${{ }}, quoted strings and block scalars; and a \u or \x escape
+# or a line ending in a backslash inside a double-quoted scalar outside the sign job. A "#" line
+# inside a run: | block is shell text, so it is scanned like the rest of the block.
+#
+# The sign job is found on the raw lines: the jobs: block at column 0, then the sign: key at two
+# spaces inside that block (a "  sign:" anywhere else is some other key), to the line before the
+# next line indented two spaces or fewer. Finding jobs:, or the sign key, other than exactly once
+# is a violation: the guard fails closed instead of passing by finding nothing.
+#
+# This is a text guard, not a YAML-level guarantee. It catches the forms written here; the hard
+# boundary is an environment-scoped secret (issue #90).
 function Get-SecretViolations {
     param([string]$Text)
     $lines = @($Text -split '\r?\n')
     $found = @()
-    $starts = @(0..($lines.Count - 1) | Where-Object { $lines[$_] -match '^ {2}[''"]?sign[''"]?\s*:\s*(#.*)?$' })
+    $jobsAt = @()
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '^jobs:\s*(#.*)?$') { $jobsAt += $i }
+    }
+    if ($jobsAt.Count -ne 1) {
+        return @("the jobs: block was found $($jobsAt.Count) times at column 0, not exactly once: the guard does not know which lines hold the sign job")
+    }
+    $jobsFirst = $jobsAt[0]
+    $jobsLast = $lines.Count - 1
+    for ($i = $jobsFirst + 1; $i -lt $lines.Count; $i++) {
+        # A blank line or a column-0 comment is inside the block: only a top-level key ends it.
+        if ($lines[$i] -match '^[^\s#]') { $jobsLast = $i - 1; break }
+    }
+    $starts = @()
+    for ($i = $jobsFirst + 1; $i -le $jobsLast; $i++) {
+        if ($lines[$i] -match '^  [''"]?sign[''"]?\s*:\s*(#.*)?$') { $starts += $i }
+    }
     if ($starts.Count -ne 1) {
-        return @("the sign job was found $($starts.Count) times in the raw text, not exactly once: the secrets guard cannot tell where the one allowed job is")
+        return @("the sign job was found $($starts.Count) times at two spaces inside the jobs: block, not exactly once: the guard does not know where the one job allowed to hold the key is")
     }
     $first = $starts[0]
     $last = $lines.Count - 1
@@ -240,8 +339,22 @@ function Get-SecretViolations {
     }
     for ($i = 0; $i -lt $lines.Count; $i++) {
         if ($i -ge $first -and $i -le $last) { continue }
-        if ($lines[$i] -match '(?i)secrets') { $found += "line $($i + 1) is outside the sign job and names a secret: [$($lines[$i].Trim())]" }
+        if ($lines[$i] -match '(?i)secrets') { $found += "line $($i + 1) writes the secrets context outside the sign job: [$($lines[$i].Trim())]" }
     }
+    $inBlock = Get-WorkflowBlockScalarLines $lines
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($inBlock[$i]) { continue }
+        $scan = $lines[$i]
+        $scan = $scan -replace '\$\{\{.*?\}\}', ''
+        $scan = $scan -replace '"[^"]*"', ''
+        $scan = $scan -replace "'[^']*'", ''
+        $scan = $scan -replace '(?<=^|\s)#.*$', ''
+        $m = [regex]::Match($scan, '(?<=^|[\s:,\[\{])[&*][A-Za-z0-9_-]+')
+        if ($m.Success) {
+            $found += "line $($i + 1) has a YAML anchor or alias [$($m.Value)]: an alias can carry the sign job's key into another job"
+        }
+    }
+    $found += Get-YamlEscapeViolations -Lines $lines -InBlock $inBlock -SignFirst $first -SignLast $last
     return $found
 }
 
@@ -809,9 +922,13 @@ try {
         $info = Get-WorkflowJobs $workflowPath
         Assert-True ($info.Jobs['sign'] -match '(?i)secrets\.') 'the sign job still reads its secret'
     }
-    Test-Case 'release workflow: the secrets check catches a secret anywhere outside the sign job' {
+    Test-Case 'release workflow: the secrets check catches the secrets context outside the sign job, and an escape or an alias' {
         # Each mutant is built from the raw text (LF line ends), the text the guard reads, and must
-        # differ from it.
+        # differ from it. The guard reads text, not YAML: it catches the secrets context written
+        # plainly outside the sign job's lines, and the YAML forms that hide it from that scan (an
+        # anchor or alias, a \u or \x escape, a backslash line break in a double-quoted scalar).
+        # It is not a YAML-level guarantee; the hard boundary is an environment-scoped secret
+        # (issue #90).
         $base = (Get-Content -LiteralPath $workflowPath -Raw) -replace "`r`n", "`n"
         $all = '${{ toJSON(secrets) }}'
         $key = '${{ secrets.UPDATE_SIGNING_KEY }}'
@@ -832,6 +949,10 @@ try {
             'a comment at the top of the file'            = { param($t) "# secrets`n$t" }
             'the sign job renamed, so not found'          = { param($t) $t.Replace("`n  sign:`n", "`n  signer:`n") }
             'a second sign key'                           = { param($t) $t.Replace("`n  publish:`n", "`n  sign:`n    runs-on: ubuntu-latest`n`n  publish:`n") }
+            'a \u0073 escape in a publish run'            = { param($t) $t.Replace("        run: cd dist && sha256sum -c *.sha256`n", '        run: "echo ${{ \u0073ecrets.UPDATE_SIGNING_KEY }}"' + "`n") }
+            'a backslash line break splitting sec and rets' = { param($t) $t.Replace("        run: cd dist && sha256sum -c *.sha256`n", '        run: "echo sec\' + "`n" + '          rets.UPDATE_SIGNING_KEY"' + "`n") }
+            '&k on the signing step env, *k as publish env' = { param($t) $t.Replace("        env:`n          TAURI_SIGNING_PRIVATE_KEY: `${{ secrets.UPDATE_SIGNING_KEY }}`n", "        env: &k`n          TAURI_SIGNING_PRIVATE_KEY: `${{ secrets.UPDATE_SIGNING_KEY }}`n").Replace("`n  publish:`n", "`n  publish:`n    env: *k`n") }
+            'top-level env with a sign: key, the key moved there and the sign job renamed' = { param($t) $t.Replace("          TAURI_SIGNING_PRIVATE_KEY: `${{ secrets.UPDATE_SIGNING_KEY }}`n", '').Replace("`n  sign:`n", "`n  signer:`n").Replace("`njobs:`n", "`nenv:`n  sign:`n    UPDATE_SIGNING_KEY: `${{ secrets.UPDATE_SIGNING_KEY }}`n`njobs:`n") }
         }
         foreach ($k in $variants.Keys) {
             $mutated = & $variants[$k] $base
