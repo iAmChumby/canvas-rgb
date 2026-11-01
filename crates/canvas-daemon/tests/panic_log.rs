@@ -58,6 +58,14 @@ fn child_panics_like_the_daemon() {
                 }
                 panic!("the main thread lost its sink");
             }
+            "backlog-panic" => {
+                // A backlog far past what the writer drains in the time the panic hook waits:
+                // 300 000 lines of about 120 bytes each are queued ahead of the panic.
+                for i in 0..300_000 {
+                    tracing::warn!("filler line {i} ........................................................................");
+                }
+                panic!("the main thread lost its sink behind a backlog");
+            }
             "task-panic" => {
                 let task = std::thread::Builder::new().name("render-task".into()).spawn(|| {
                     panic!("a task lost its sink");
@@ -82,6 +90,21 @@ fn a_main_thread_panic_reaches_the_log_file() {
     assert!(text.contains("the daemon panicked"), "the panic line is in the file ({} bytes):\n{text}", text.len());
     assert!(text.contains("the main thread lost its sink"), "{text}");
     assert!(text.contains("panic_log.rs"), "the location names this file: {text}");
+    assert_eq!(text.matches("the daemon panicked").count(), 1, "the panic line is in the file once:
+{}", &text[text.len().saturating_sub(600)..]);
+}
+
+/// #36: the panic line is written straight into the file, so a backlog the writer cannot drain
+/// before the process ends does not take the line with it.
+#[test]
+fn a_main_thread_panic_behind_a_backlog_still_reaches_the_log_file() {
+    let (text, code) = run_child("child_panics_like_the_daemon", "backlog-panic");
+    assert_eq!(code, Some(101));
+    let tail = &text[text.len().saturating_sub(600)..];
+    assert!(text.contains("the main thread lost its sink behind a backlog"), "the panic line is in the file ({} bytes), tail:
+{tail}", text.len());
+    assert_eq!(text.matches("the daemon panicked").count(), 1, "the panic line is in the file once, tail:
+{tail}");
 }
 
 #[test]
