@@ -195,3 +195,77 @@ second on the status poll, so the effect tears down and starts again before it c
   callback dependency only re-binds a listener, is guarded by a ref, or is a `useMemo` (`CommandPalette.tsx:96`,
   `Popover.tsx:113`, `IdentifyWalker.tsx:144` re-bind listeners; `OnboardingGate.tsx:23`,
   `LayoutView.tsx:922`, `Onboarding.tsx:310` are ref-guarded one-time actions).
+
+### `cause:timing-test`: a test whose verdict depends on how long the machine takes
+
+A test passes on a quiet PC and fails once in a while on a shared CI runner, with no code change. It
+checks the right property but reads the verdict off a real clock that a busy runner can push past the
+line. Three mechanisms, and one bug the timing only exposed.
+
+- [#39](https://github.com/iAmChumby/canvas-rgb/issues/39), [#47](https://github.com/iAmChumby/canvas-rgb/issues/47):
+  `a_parked_engine_costs_almost_no_cpu` failed at 0.5208 % against a 0.05 % budget. 0.5208 % of 3 s is
+  15.625 ms, one scheduler tick of `GetThreadTimes`; the budget was below the clock's resolution
+  (`crates/canvas-core/src/cpu.rs`). Same test, same number: duplicates.
+- [#51](https://github.com/iAmChumby/canvas-rgb/issues/51): `the_load_budget_covers_all_scripts_together`
+  timed one loop once and scaled it to "0.9 s a script"; one noisy sample changed how many scripts fit
+  in the 2 s budget (`crates/canvas-html/tests/effects.rs`). The same single-sample calibration was in
+  `a_tile_render_does_not_hold_its_slot_much_past_its_budget` (`crates/canvas-daemon/src/user_effects.rs`).
+- [#59](https://github.com/iAmChumby/canvas-rgb/issues/59): a `findByText` on a promise chain used Testing
+  Library's 1 s default on a starved runner (`app/web/src/views/__tests__/PeripheralWrite.test.tsx`);
+  vitest's own 5 s test timeout also capped any longer wait.
+- [#66](https://github.com/iAmChumby/canvas-rgb/issues/66): `the_wait_for_setup_is_bounded` set a 40 ms
+  limit, and `marker_is_overdue` compared whole seconds to `limit.as_secs()`, which is 0; the marker was
+  "overdue" whenever the wall clock crossed a second during the test (`crates/canvas-svc/src/update_install.rs`).
+  Reproduced locally: 1 failure in 60 runs. A product bug as well: a sub-second limit rounded to nothing.
+- [#45](https://github.com/iAmChumby/canvas-rgb/issues/45), [#55](https://github.com/iAmChumby/canvas-rgb/issues/55)
+  (a third sighting on #39): `every_daemon_kill_is_preceded_by_a_line_naming_the_reason` lost one WARN
+  line while its neighbours in the same capture arrived. Same test, same symptom: duplicates by symptom
+  only. The clock-mix idea in #55 is FALSE (reaching that branch means the WARN ran).
+- [#36](https://github.com/iAmChumby/canvas-rgb/issues/36): not a test bug. The panic hook queued its line
+  behind a deep log backlog, gave up draining after 250 ms and ignored the result
+  (`crates/canvas-daemon/src/exit_log.rs`, `logging.rs`); the test was right to fail.
+- **Class fix:** done for the mechanisms below, with a guard. The rule: a test never decides on how long
+  something took. It waits for an event (`wait_until`, `findBy*`), counts (wake-ups, frames), injects the
+  clock, sizes its work by a warm-up and the best of several samples, or is an `#[ignore]`d measurement.
+  - #66: the marker carries its start in milliseconds and the installer reads time through
+    `UpdateConfig::now_unix_ms`, which a test drives; ages and limits compare as milliseconds.
+  - #39/#47: the gate counts the parked loop's wake-ups (`CoreEngine::park_wakeups`) and that nothing
+    rendered; the CPU-time measurement stays as an `#[ignore]` test with the command to run it.
+  - #51: the multi-script test sizes one script from a warm-up and a probe long enough to dwarf the
+    fixed cost of a load, then adds scripts until the total passes the budget, so it drives the real
+    shared-budget path (`remaining_budget` is also unit-checked); the tile test sizes its frames from the
+    best of three samples after a warm-up and bounds the hold to the budget plus one frame.
+  - #59: `app/web/vitest.setup.ts` raises `asyncUtilTimeout` to 10 s and `vitest.config.mts` raises
+    `testTimeout` to 20 s, from `vitest.limits.ts`; `src/test/setup.test.tsx` pins both and finds an
+    element that appears after 1.5 s. A `findBy*` returns when its element appears, so a pass costs nothing.
+  - #36: the main thread's panic line is written straight into the day's log file, in one write bounded
+    to 250 ms (`logging::write_line_direct_within`), and the tracing copy is only the fallback when that
+    write fails, so the line is in the file once.
+  - #45/#55: every daemon kill goes through `terminate_daemon(process, reason)`, which logs the pid and
+    reason first; the service tests share one capture helper (`crates/canvas-svc/src/test_logs.rs`, one
+    capture at a time); the kill test asserts the full announcement for the pid on all four kill paths.
+- **The guard:** `crates/canvas-svc/tests/timing_class.rs` (part of `cargo test --workspace`, so CI) scans
+  the test code under `crates/` (files in `tests/`, `tests.rs`, `*_tests.rs`, and a source file from its
+  last `#[cfg(test)] mod`) and fails with `file:line` on (1) a measured duration compared with `<` or `<=`
+  (`elapsed()`, `took`, `waited`, `.as_millis()` and similar), and (2) a `sleep(` followed within three
+  lines by an `assert`. Every hit needs an allow-list entry with a reason (hang guard, the property under
+  test, safe because the sleep is a minimum or the assert is about something that did not happen, or
+  "open", a real sibling not yet fixed). The scan fails on an entry that matches no line.
+- **What the guard cannot catch:** it reads text one line at a time. Product code with a clock in it
+  (#36, #66); a bound with no `<` on a named clock (#51 scaled one sample); a bound written the other
+  way round or through a helper; a sleep more than three lines from its assert; a poll loop or
+  `recv_timeout` that is too short (a `while t.elapsed() < limit {` line is not flagged); a second
+  identical line in a file whose text already has an entry; web tests (#59 is held by the setup file and
+  its test, not by the scan); a missing log line (#45/#55). `cpu.rs` is not scanned (its module is not a
+  `#[cfg(test)] mod`), so its own settle-then-assert sleeps are outside the guard.
+- **Sibling search:** the allow-list entries marked "open" are the siblings: `timer.rs` upper bounds
+  (3 tests), `effects_import.rs` and `quit.rs` ceilings, the `canvas-core/src/tests.rs` "sleep 300 ms
+  then expect parked" tests and `wave1.rs`, and the `api.rs` onboarding timers (60-350 ms sleeps against
+  100 ms timers on a compressed time scale, `transient.rs`), the riskiest. `cpu.rs`'s settle sleeps are
+  the same shape as the `tests.rs` ones. Delete an entry when its test is fixed.
+- **What stays UNKNOWN:** the mechanism behind the vanished log line in #45/#55. The shared capture
+  helper and the stricter assertion are mitigations, not a diagnosis; the 50-run loop of the canvas-svc
+  library tests is in `.build/reports/job31-timing-class.md`. Settler: a longer loop under CPU load that
+  fails once, then bisected.
+- **How to check a new test:** if it contains `elapsed`, `sleep` or a hand-made subscriber, expect the
+  scan to flag it; use `wait_until`, a count, a driven clock or `test_logs::captured`.
