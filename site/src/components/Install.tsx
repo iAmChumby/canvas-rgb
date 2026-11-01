@@ -4,7 +4,7 @@ import { CopyButton } from "./CopyButton";
 const RELEASES = "https://github.com/iAmChumby/canvas-rgb/releases/latest";
 const PAWNIO = "https://github.com/namazso/PawnIO";
 const REPO = "https://github.com/iAmChumby/canvas-rgb";
-const SETUP = "canvas-rgb-setup-0.4.2.exe";
+const SETUP = "canvas-rgb-setup-0.5.0.exe";
 
 // The installer's SHA-256, read from the release's own .sha256 asset when the site is built
 // (site/scripts/setup-sha.mjs). It is not written here, so the page cannot show a hash the

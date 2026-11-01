@@ -526,7 +526,7 @@ dependencies = [
 
 [[package]]
 name = "canvas-adapters"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "canvas-proto",
@@ -541,7 +541,7 @@ dependencies = [
 
 [[package]]
 name = "canvas-core"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "canvas-proto",
  "tracing",
@@ -550,7 +550,7 @@ dependencies = [
 
 [[package]]
 name = "canvas-daemon"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -584,7 +584,7 @@ dependencies = [
 
 [[package]]
 name = "canvas-effects"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "canvas-proto",
  "rand 0.8.8",
@@ -595,7 +595,7 @@ dependencies = [
 
 [[package]]
 name = "canvas-html"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "canvas-proto",
  "rquickjs",
@@ -606,7 +606,7 @@ dependencies = [
 
 [[package]]
 name = "canvas-proto"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -617,7 +617,7 @@ dependencies = [
 
 [[package]]
 name = "canvas-rgb-tray"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "canvas-proto",
  "reqwest",
@@ -637,7 +637,7 @@ dependencies = [
 
 [[package]]
 name = "canvas-svc"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3128,7 +3128,7 @@ dependencies = [
 
 [[package]]
 name = "poison-compare"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "canvas-html",
  "canvas-proto",
