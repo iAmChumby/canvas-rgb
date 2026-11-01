@@ -556,7 +556,7 @@ impl UserEffects {
         }
 
         // The builds run outside the lock, so the API keeps answering while they do.
-        let built: Vec<(String, Arc<str>, u32, Result<StockEffect, String>)> = due
+        let built: Vec<_> = due
             .into_iter()
             .map(|(id, source, attempts)| {
                 let result = (self.builder)(&id, &source).map(|effect| {
