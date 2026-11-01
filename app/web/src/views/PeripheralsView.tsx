@@ -375,6 +375,7 @@ export function PeripheralsView() {
               size="sm"
               icon={<ArrowCounterClockwise size={16} />}
               disabled={saving}
+              aria-label="Revert"
               onClick={revert}
             >
               <span className="rd-peri-revert-label">Revert</span>

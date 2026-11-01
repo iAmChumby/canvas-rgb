@@ -131,12 +131,15 @@ export function FileButton({
   children,
   onFile,
   disabled,
+  label,
 }: {
   accept: string;
   icon?: ReactNode;
   children: ReactNode;
   onFile: (file: File) => void;
   disabled?: boolean;
+  /** The button's accessible name, for a button whose words are hidden at some widths. */
+  label?: string;
 }) {
   const input = useRef<HTMLInputElement>(null);
   const change = (e: ChangeEvent<HTMLInputElement>) => {
@@ -146,7 +149,7 @@ export function FileButton({
   };
   return (
     <>
-      <Button icon={icon} disabled={disabled} onClick={() => input.current?.click()}>
+      <Button icon={icon} disabled={disabled} aria-label={label} onClick={() => input.current?.click()}>
         {children}
       </Button>
       <input ref={input} type="file" accept={accept} hidden onChange={change} />

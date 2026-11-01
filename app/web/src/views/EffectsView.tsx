@@ -751,6 +751,7 @@ export function EffectsView() {
           accept=".html,text/html"
           icon={<UploadSimple size={16} />}
           disabled={importing}
+          label="Import"
           onFile={(file) => void sendImport(file, false)}
         >
           <span className="rd-btn-text">Import</span>
