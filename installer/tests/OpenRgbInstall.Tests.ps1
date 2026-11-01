@@ -912,11 +912,33 @@ function Start-Service { param($Name) Write-Host 'CALL Start-Service' }
         Assert-True ($body -match 'mix of the old and the new files') 'the message says why it was left stopped'
         Assert-True ($body -match 'Run setup again') 'the message says what to do'
     }
+    # Whether the restart is inside the guard that says the install did not finish: the statement
+    # the guard controls, not the branch after an else.
+    $script:RestartGuard = '(not Ok) and (not IsServiceUpdateRun)'
+    function Test-RestartGuarded([string]$Body) {
+        return ((Get-GuardedStatement $Body $script:RestartGuard) -match 'RestartCanvasRgb')
+    }
+    Test-Case 'a restart in the else branch of the guard is not inside the guard' {
+        # Two mutants of the real DeinitializeSetup: the restart moved into the else branch, as a
+        # block and as a single statement. Both used to pass because the guarded statement ran on
+        # through the else.
+        $body = Get-IssFunction 'procedure DeinitializeSetup'
+        Assert-True (Test-RestartGuarded $body) 'the real routine has the restart inside the guard'
+        $m1 = [regex]::Replace($body, '(?s)(if \(not Ok\) and \(not IsServiceUpdateRun\) then)\s*begin', '$1 Note := '''' else begin')
+        Assert-True ($m1 -ne $body) 'mutant 1 was built'
+        Assert-True ($m1 -match 'then Note := '''' else begin') 'mutant 1 has the restart in an else block'
+        Assert-True (-not (Test-RestartGuarded $m1)) 'mutant 1 (the restart in an else block) must fail the wiring test'
+        $m2 = '  if (not Ok) and (not IsServiceUpdateRun) then Note := ''x'' else RestartCode := RestartCanvasRgb;'
+        Assert-True (-not (Test-RestartGuarded $m2)) 'mutant 2 (the restart as the else statement) must fail the wiring test'
+        # And a restart in the then branch, with an else after it, still passes.
+        $ok = '  if (not Ok) and (not IsServiceUpdateRun) then RestartCode := RestartCanvasRgb else Note := ''x'';'
+        Assert-True (Test-RestartGuarded $ok) 'a restart in the then branch is inside the guard'
+    }
     Test-Case 'the restart sits inside the guard that says the install did not finish' {
         # The call is bound to the guard, not merely somewhere after it: a restart that ran
         # whatever happened, or that ran after the /UPDATE-only exit, is caught here.
         $body = Get-IssFunction 'procedure DeinitializeSetup'
-        $guard = '(not Ok) and (not IsServiceUpdateRun)'
+        $guard = $script:RestartGuard
         Assert-True ($body -match [regex]::Escape($guard)) "the guard is there: $body"
         $guarded = Get-GuardedStatement $body $guard
         Assert-True ($guarded -match 'RestartCanvasRgb') "the restart is inside the guard: [$guarded]"

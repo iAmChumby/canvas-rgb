@@ -109,7 +109,8 @@ function Get-IssFunction([string]$Header, [string]$Text = '') {
 }
 
 # The statement a guard controls: the text between the guard's "then" and the end of that
-# statement. A single statement ends at its ";"; a begin/end block ends at its "end". The text
+# statement. A single statement ends at its ";"; a begin/end block ends at its "end"; either one
+# ends at an "else" of the guard itself, because the else branch is NOT inside the guard. The text
 # inside a string literal is blanked out first, so a ";" or an "end" in one cannot end the
 # statement early.
 function Get-GuardedStatement([string]$Body, [string]$Guard) {
@@ -121,10 +122,14 @@ function Get-GuardedStatement([string]$Body, [string]$Guard) {
     $rest = [regex]::Replace($rest, "'(?:[^']|'')*'", '""')
     $pos = 0; $depth = 0
     while ($true) {
-        $m = [regex]::Match($rest.Substring($pos), '(?i)\b(begin|end)\b|;')
+        $m = [regex]::Match($rest.Substring($pos), '(?i)\b(begin|end|else)\b|;')
         if (-not $m.Success) { return $rest }
         $at = $pos + $m.Index
         if ($m.Value -eq ';') {
+            if ($depth -eq 0) { return $rest.Substring(0, $at) }
+        } elseif ($m.Value -match '(?i)^else$') {
+            # An else at the guard's own level ends the guarded statement; one inside a begin/end
+            # block belongs to an if in that block.
             if ($depth -eq 0) { return $rest.Substring(0, $at) }
         } elseif ($m.Value -match '(?i)^begin$') {
             $depth++
