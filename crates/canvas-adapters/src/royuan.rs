@@ -44,12 +44,17 @@ fn device_id() -> DeviceId {
 // ---------------------------------------------------------------- transport
 
 /// An open handle that can send one feature report.
-trait Transport: Send + Sync {
+///
+/// This is the seam the tests fake (the guard test over the daemon's adapters needs to see the
+/// reports the keyboard sends), the way the service's `PortIo` and `FanChip` are.
+pub trait Transport: Send + Sync {
     fn send_feature(&mut self, data: &[u8]) -> Result<(), String>;
 }
 
 /// Finds and opens the vendor interface.
-trait Opener: Send + Sync {
+///
+/// The seam the tests fake; the product uses [`HidOpener`].
+pub trait Opener: Send + Sync {
     /// True when the vendor interface is present.
     fn present(&self) -> bool;
     /// Opens the vendor interface. `Ok(None)` when it is not there.
@@ -125,7 +130,11 @@ impl RoyuanAdapter {
         Self::with_opener(Box::new(HidOpener))
     }
 
-    fn with_opener(opener: Box<dyn Opener>) -> Self {
+    /// The adapter with an opener of the caller's.
+    ///
+    /// The product uses the HID opener; the tests use a fake one, so they can count the
+    /// reports the keyboard sends.
+    pub fn with_opener(opener: Box<dyn Opener>) -> Self {
         Self { opener, dev: None, last_sent: None, last_color: Rgb8::BLACK, seen_resume: crate::resume_epoch(), direct_pending: false }
     }
 
@@ -276,6 +285,15 @@ impl DeviceAdapter for RoyuanAdapter {
     }
 }
 
+impl crate::resume::ResumeBehavior for RoyuanAdapter {
+    fn on_resume(&self) -> crate::resume::OnResume {
+        // The keyboard may drop out of direct mode over a sleep (seen for the RAM in #5; not
+        // yet seen for the keyboard), so the direct-mode report goes out again before the next
+        // colour.
+        crate::resume::OnResume::SetsModeAgain
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // The serial guard is held across awaits on purpose: it keeps tests that count reports apart.
@@ -322,8 +340,7 @@ mod tests {
 
     /// `note_resume` bumps a process-wide counter, so the tests that count reports run one at a time.
     fn serial() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: Mutex<()> = Mutex::new(());
-        LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        crate::resume_serial()
     }
 
     fn rig(present: bool) -> (RoyuanAdapter, Arc<Mutex<Shared>>) {

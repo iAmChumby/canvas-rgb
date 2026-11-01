@@ -2170,6 +2170,13 @@ struct SlowDisplay {
     connected: bool,
 }
 
+impl canvas_adapters::resume::ResumeBehavior for SlowDisplay {
+    fn on_resume(&self) -> canvas_adapters::resume::OnResume {
+        // A test fake: it holds no mode.
+        canvas_adapters::resume::OnResume::NothingToRestore
+    }
+}
+
 #[async_trait::async_trait]
 impl canvas_proto::traits::NumericDisplayAdapter for SlowDisplay {
     fn name(&self) -> &'static str {

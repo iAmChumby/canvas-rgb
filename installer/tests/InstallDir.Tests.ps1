@@ -257,7 +257,7 @@ Test-Case 'a problem that only shows up after the lock is still caught, and the 
     $script:AfterLock = { param($disk) $disk["$APP\canvas-rgb-svc.exe"].Aces += (New-Ace $USERS $MODIFY) }
     try { $r = Invoke-Guard $d } finally { $script:AfterLock = $null }
     Assert-True ((-not $r.Ok) -and $r.Message -match 'canvas-rgb-svc\.exe. can be changed by S-1-5-32-545') $r.Message
-    Assert-True ($r.Message -match 'already locked this folder') 'TRUE after a lock'
+    Assert-True ($r.Message -match 'Setup locked this folder to administrators only before it found this') 'TRUE after a lock'
     Assert-True (-not ($r.Message -match 'permissions were not changed')) 'must not claim they were not changed'
 }
 # ---------------------------------------------------------------- uninstall (Verify mode)
@@ -530,21 +530,22 @@ Test-Case 'real disk: a junction planted at the path after the "does not exist" 
 # admin-only-looking folder can be built without being an administrator; the refusals use the real list.
 $appCheckLine = ($iss -split "`r?`n" | Where-Object { $_ -match '^\s*AppCheckScript = ' }) | Select-Object -First 1
 $appCheckText = [regex]::Match($appCheckLine, "= '(.*)';\s*$").Groups[1].Value.Replace("''", "'")
-function Invoke-AppCheck([string]$App, [string[]]$ExtraTrusted = @()) {
+function Invoke-AppCheck([string]$App, [string[]]$Trusted = @('S-1-5-18', 'S-1-5-32-544')) {
+    # $Trusted replaces the owner/writer list in the embedded text, so a test can build an "admin-only" folder
+    # without being an administrator (add this user) or isolate the owner rule (drop Administrators).
     $text = $appCheckText.Replace('%APP%', $App.Replace("'", "''"))
-    if ($ExtraTrusted.Count) {
-        $list = ($ExtraTrusted | ForEach-Object { "'$_'" }) -join ','
-        $text = $text.Replace("`$k = 'S-1-5-18','S-1-5-32-544';", "`$k = 'S-1-5-18','S-1-5-32-544',$list;")
-    }
-    & powershell.exe -NoProfile -Command $text | Out-Null
+    $list = ($Trusted | ForEach-Object { "'$_'" }) -join ','
+    $new = $text.Replace("`$k = 'S-1-5-18','S-1-5-32-544';", "`$k = $list;")
+    if ($new -eq $text -and ($Trusted -join ',') -ne 'S-1-5-18,S-1-5-32-544') { throw 'trusted list not replaced in the embedded text' }
+    & powershell.exe -NoProfile -Command $new | Out-Null
     return $LASTEXITCODE
 }
-function New-FakeApp {
+function New-FakeApp([switch]$NoMe) {
     $a = New-Throwaway
     New-Item -ItemType Directory -Path "$a\installer" | Out-Null
     foreach ($f in 'installer\uninstall-elevated.ps1', 'installer\lib.ps1', 'installer\uninstall-user.ps1', 'canvas-rgb-svc.exe') { 'x' | Set-Content -LiteralPath "$a\$f" }
     $sec = New-Object Security.AccessControl.DirectorySecurity
-    $sec.SetSecurityDescriptorSddlForm($script:CanvasConst.MachineHomeSddl + "(A;OICI;FA;;;$($me.Value))", [Security.AccessControl.AccessControlSections]::Access)
+    $sec.SetSecurityDescriptorSddlForm($script:CanvasConst.MachineHomeSddl + $(if ($NoMe) { '' } else { "(A;OICI;FA;;;$($me.Value))" }), [Security.AccessControl.AccessControlSections]::Access)
     Set-Acl -LiteralPath $a -AclObject $sec
     return $a
 }
@@ -552,20 +553,34 @@ Test-Case 'embedded {app} check: an admin-only folder passes, and each of a user
     Assert-True ($appCheckText.Length -gt 100) 'found the script in the .iss'
     $a = New-FakeApp
     try {
-        $mine = Get-PathOwnerSid -Path $a
-        Assert-Equal (Invoke-AppCheck $a @($mine)) 0 'admin-only (plus this user as owner) passes'
-        Assert-Equal (Invoke-AppCheck $a @()) $(if (Test-OwnerSidAllowed $mine) { 0 } else { 1 }) 'with the real owner list a user-owned folder is refused (an elevated owner is Administrators and passes)'
+        # The folder carries a Full ACE for this user (so the test can clean it up). Trusting SYSTEM, Administrators
+        # and this user models an admin-only folder under either token; the owner may be this user or Administrators.
+        $good = @('S-1-5-18', 'S-1-5-32-544', $me.Value)
+        Assert-Equal (Invoke-AppCheck $a $good) 0 'admin-only (plus this user) passes'
+        Assert-Equal (Invoke-AppCheck $a) 1 'with the real trusted list, this user''s Full ACE (and, when not elevated, ownership) is refused'
         # a user write ACE on a script that uninstall-elevated.ps1 dot-sources
         $lib = "$a\installer\lib.ps1"; $acl = Get-Acl -LiteralPath $lib
         $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($usersSid, 'Modify', 'Allow'))); Set-Acl -LiteralPath $lib -AclObject $acl
-        Assert-Equal (Invoke-AppCheck $a @($mine)) 1 'a user write ACE on lib.ps1 is refused'
+        Assert-Equal (Invoke-AppCheck $a $good) 1 'a user write ACE on lib.ps1 is refused'
     } finally { Remove-Throwaway $a }
+    # Owner rule alone: a folder with only SYSTEM/Administrators/Users-read ACEs, owned by this user. The real
+    # trusted list must refuse it for its owner. Under an elevated token the owner is Administrators, so there
+    # is no foreign owner to refuse.
+    $n = New-FakeApp -NoMe
+    try {
+        if (Test-OwnerSidAllowed (Get-PathOwnerSid -Path $n)) {
+            Skip-Case 'embedded {app} check: a folder owned by someone else is refused' 'elevated token: new folders are Administrators-owned, so there is no foreign owner'
+        } else {
+            Assert-Equal (Invoke-AppCheck $n) 1 'owned by this user, otherwise admin-only: refused for the owner alone'
+            Assert-Equal (Invoke-AppCheck $n @('S-1-5-18', 'S-1-5-32-544', (Get-PathOwnerSid -Path $n))) 0 'the same folder passes once its owner is trusted, so the owner was the only reason'
+        }
+    } finally { Remove-Throwaway $n }
     $b = New-FakeApp; $victim = New-Throwaway
     try {
         $mine = Get-PathOwnerSid -Path $b
         Remove-Item -LiteralPath "$b\installer" -Recurse -Force
         & cmd.exe /c mklink /J "$b\installer" "$victim" | Out-Null
-        Assert-Equal (Invoke-AppCheck $b @($mine)) 1 'installer\ as a junction is refused'
+        Assert-Equal (Invoke-AppCheck $b @('S-1-5-18', 'S-1-5-32-544', $me.Value)) 1 'installer\ as a junction is refused'
         [System.IO.Directory]::Delete("$b\installer")
     } finally { Remove-Throwaway $b; Remove-Throwaway $victim }
 }
@@ -579,7 +594,7 @@ Test-Case 'embedded {app} check: a NULL DACL on the folder is refused' {
         $ds = New-Object System.Security.AccessControl.DirectorySecurity
         $ds.SetSecurityDescriptorBinaryForm($bytes, [System.Security.AccessControl.AccessControlSections]::Access)
         Set-Acl -LiteralPath $a -AclObject $ds
-        Assert-Equal (Invoke-AppCheck $a @($mine)) 1
+        Assert-Equal (Invoke-AppCheck $a @('S-1-5-18', 'S-1-5-32-544', $me.Value)) 1 'a NULL DACL is refused'
     } finally { Remove-Throwaway $a }
 }
 Test-Case 'uninstall: with the check copy missing, InitializeUninstall runs AppCheckScript on {app} BEFORE anything from {app}, and a failure aborts with a message that is true for it' {

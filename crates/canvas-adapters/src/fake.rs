@@ -54,6 +54,14 @@ struct FakeDevice {
     custom_mode_writes: u32,
 }
 
+impl FakeDevice {
+    fn new(info: DeviceInfo) -> Self {
+        let colors = vec![Rgb8 { r: 0, g: 0, b: 0 }; info.led_count() as usize];
+        let initial_zone_leds = info.zones.iter().map(|zone| zone.led_count).collect();
+        Self { info, initial_zone_leds, colors, custom_mode_writes: 0 }
+    }
+}
+
 fn guard<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -81,11 +89,7 @@ impl FakeOpenRgbServer {
     async fn start_inner(devices: Vec<DeviceInfo>, detection: Option<Detection>) -> std::io::Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
         let port = listener.local_addr()?.port();
-        let devices = devices.into_iter().map(|info| {
-            let colors = vec![Rgb8 { r: 0, g: 0, b: 0 }; info.led_count() as usize];
-            let initial_zone_leds = info.zones.iter().map(|zone| zone.led_count).collect();
-            FakeDevice { info, initial_zone_leds, colors, custom_mode_writes: 0 }
-        }).collect();
+        let devices = devices.into_iter().map(FakeDevice::new).collect();
         let state = Arc::new(Mutex::new(FakeState { devices, detection }));
         let connections: Arc<Mutex<Vec<AbortHandle>>> = Arc::new(Mutex::new(Vec::new()));
         let acceptor = {
@@ -105,6 +109,12 @@ impl FakeOpenRgbServer {
 
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    /// OpenRGB announces one more controller now, after the others: the test decides when, so
+    /// no clock is involved. It gets the next index.
+    pub fn announce(&self, info: DeviceInfo) {
+        guard(&self.state).devices.push(FakeDevice::new(info));
     }
 
     /// Current LED colors of controller `index`, as last written.

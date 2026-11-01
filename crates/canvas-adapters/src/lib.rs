@@ -7,6 +7,7 @@ pub mod eightbitdo_ultimate2;
 pub mod fake;
 pub mod openrgb;
 mod protocol;
+pub mod resume;
 pub mod royuan;
 pub mod zones;
 
@@ -34,4 +35,13 @@ pub(crate) fn resume_epoch() -> u64 {
 pub fn note_resume() -> usize {
     RESUME_EPOCH.fetch_add(1, Ordering::SeqCst);
     openrgb::reset_custom_mode_all()
+}
+
+/// Tests that call `note_resume` change process-wide state (the resume counter and every live
+/// OpenRGB adapter), and tests that count what an adapter sends watch that state. Both take
+/// this lock, so they run one at a time.
+#[cfg(test)]
+pub(crate) fn resume_serial() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
