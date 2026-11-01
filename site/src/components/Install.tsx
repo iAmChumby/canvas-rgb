@@ -5,8 +5,10 @@ const RELEASES = "https://github.com/iAmChumby/canvas-rgb/releases/latest";
 const PAWNIO = "https://github.com/namazso/PawnIO";
 const SETUP = "canvas-rgb-setup-0.4.2.exe";
 
-const COMMANDS = `powershell -ExecutionPolicy Bypass -File installer\\setup.ps1 -WhatIf
-powershell -ExecutionPolicy Bypass -File installer\\setup.ps1`;
+// A .cmd wrapper, so no PowerShell command line is shown or copied: that is the shape of a
+// ClickFix attack, and ad blockers warn about it (#79).
+const COMMANDS = `installer\\setup.cmd -WhatIf
+installer\\setup.cmd`;
 
 export function Install() {
   return (

@@ -106,6 +106,18 @@ try {
         Assert-Equal @(Get-ChildItem -LiteralPath $fake -Recurse -Force).Count 2 'only the two empty folders may exist'
     }
 
+    # The page and the README show `installer\setup.cmd`, not a PowerShell command line (#79): the
+    # wrapper must run the same plan, pass its arguments through and return the script's exit code.
+    Test-Case 'setup.cmd -WhatIf runs setup.ps1 -WhatIf: exits 0, prints the plan, writes nothing' {
+        $cmdFile = Join-Path $PSScriptRoot '..\setup.cmd'
+        $line = 'set "ProgramData={0}" && set "APPDATA={1}" && "{2}" -WhatIf' -f $fakePd, $fakeAd, $cmdFile
+        $out = & cmd.exe /d /c $line 2>&1 | Out-String
+        Assert-Equal $LASTEXITCODE 0 $out
+        Assert-True $out.Contains('OpenRGB lock ok') "the wrapper ran setup.ps1: $out"
+        Assert-True $out.Contains('WhatIf: nothing was changed') $out
+        Assert-Equal @(Get-ChildItem -LiteralPath $fake -Recurse -Force).Count 2 'only the two empty folders may exist'
+    }
+
     Test-Case 'uninstall.ps1 -WhatIf exits 0 and writes nothing' {
         $r = & $runChild (Join-Path $PSScriptRoot '..\uninstall.ps1')
         Assert-Equal $r.Code 0
