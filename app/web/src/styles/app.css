@@ -3357,6 +3357,38 @@ button.chip:hover {
 
 /* ---------- settings ---------- */
 
+/* The settings stand in columns of about 340 px, so no column is a tall stack and no row
+   leaves a gap: the panels flow down the columns and a panel never breaks across two. */
+.rd-settings .rd-settings-grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  columns: 340px auto;
+  column-gap: var(--s4);
+}
+
+.rd-settings .rd-settings-grid > .panel {
+  break-inside: avoid;
+  margin: 0 0 var(--s4);
+}
+
+/* The version figure sits in the panel's title row. */
+.rd-settings .rd-version {
+  margin-left: auto;
+  color: var(--ink);
+}
+
+.rd-settings .rd-settings-grid .panel-head {
+  display: flex;
+  align-items: baseline;
+}
+
+/* Phone: the panels are tighter: every row counts when the page scrolls. */
+@container page (max-width: 639px) {
+  .rd-settings .rd-settings-grid > .panel {
+    padding: var(--s3);
+  }
+}
+
 .settings-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);

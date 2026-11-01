@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { Button, ButtonLink, Swap } from "@/components/Button";
-import { Field, Panel, StateDot } from "@/components/Panel";
+import { Field, StateDot } from "@/components/Panel";
 import { Toggle } from "@/components/Toggle";
 import { canUpdate, updateCheckNow, updateSetAuto, updateUnskip } from "@/lib/host";
 import { useSnap } from "@/lib/store";
@@ -28,7 +28,7 @@ export function UpdatesPanel() {
   const checking = u?.phase.kind === "checking";
 
   return (
-    <Panel title="Updates">
+    <>
       <Field label="Check automatically" hint="At start, then once a day">
         <Toggle
           label="Check for updates automatically"
@@ -71,6 +71,6 @@ export function UpdatesPanel() {
       </div>
       {!acts && <p className="mute upd-note">Tray app only</p>}
       {err && <p className="error-line">{err}</p>}
-    </Panel>
+    </>
   );
 }
