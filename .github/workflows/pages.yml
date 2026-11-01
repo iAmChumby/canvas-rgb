@@ -63,6 +63,7 @@ jobs:
         run: node scripts/setup-sha.mjs
 
       - uses: actions/setup-node@v4
+        if: steps.sha.outputs.skipped != 'true'
         with:
           node-version: 22
           cache: npm
@@ -73,10 +74,12 @@ jobs:
       # The site imports the editor's components from app/web/src, so the editor's packages
       # are installed too: the TypeScript in the editor's files resolves React from there.
       - name: Install the editor's packages
+        if: steps.sha.outputs.skipped != 'true'
         run: npm ci
         working-directory: app/web
 
       - name: Install the site's packages
+        if: steps.sha.outputs.skipped != 'true'
         run: npm ci
         working-directory: site
 
