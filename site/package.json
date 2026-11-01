@@ -5,6 +5,7 @@
   "description": "The canvas-rgb site: a Next.js static export built from the editor's own components.",
   "scripts": {
     "setup-sha": "node scripts/setup-sha.mjs",
+    "check-install": "node scripts/check-install.mjs",
     "typecheck": "tsc --noEmit",
     "build": "npm run setup-sha && npm run typecheck && next build --webpack"
   },
