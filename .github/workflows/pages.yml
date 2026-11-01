@@ -23,19 +23,14 @@ permissions:
   id-token: write
 
 jobs:
-  # The hash read is its own job and has NO concurrency group. GitHub keeps one pending run per
-  # group and a newly queued run replaces it (GitHub docs, workflow syntax, "concurrency": "By
-  # default, any existing pending job or workflow in the same concurrency group will be
-  # canceled and the new queued job or workflow will take its place."). A push that skips must therefore never
-  # enter the group: if it did, it would replace the Release workflow's pending dispatch, find
-  # no asset for the new version, skip, and the released page would never deploy. Only the jobs
-  # that run when the read did not skip (build, deploy) are in the group.
+  # The hash read is a job of its own and has NO concurrency group, so a push that skips never
+  # enters the group and cannot replace a run already waiting in it.
   read:
     runs-on: ubuntu-latest
     outputs:
-      # "true" when the release for the version the page shows is not out yet: the build and the
-      # deploy do not run, and the build the Release workflow starts builds the site once the
-      # hash is there.
+      # "true" when the release for the version the page shows is not out yet: the build job
+      # does not run, and the build the Release workflow starts builds the site once the hash
+      # is there.
       skipped: ${{ steps.sha.outputs.skipped }}
       sha256: ${{ steps.sha.outputs.sha256 }}
     steps:
@@ -43,8 +38,8 @@ jobs:
 
       # The hash the install section prints, read from the release's own .sha256 asset, so the
       # page and the release cannot disagree (#83). A push to main lands before the release for
-      # that version exists, so a missing asset is not a failure there: the build and the deploy
-      # do not run, and the build the Release workflow starts has the hash.
+      # that version exists, so a missing asset is not a failure there: the build job does not
+      # run, and the build the Release workflow starts has the hash.
       - name: Read the installer's SHA-256
         id: sha
         working-directory: site
@@ -58,19 +53,30 @@ jobs:
           CANVAS_SETUP_SHA256_SKIP_IF_MISSING: ${{ github.event_name == 'push' && '1' || '0' }}
         run: node scripts/setup-sha.mjs
 
+  # Build, check and deploy are ONE job, so a run joins the pages group once. GitHub keeps at
+  # most one pending entry per concurrency group and a newer queued entry replaces it (workflow
+  # syntax, "concurrency": "By default, any existing pending job or workflow in the same
+  # concurrency group will be canceled and the new queued job or workflow will take its
+  # place."). Two jobs in the group gave a push's deploy a second entry to queue with, and it
+  # could replace the Release workflow's pending build; with one entry a push has no second
+  # place to queue. What is still possible: a push that builds, queued after a dispatch is
+  # pending, replaces that pending entry. It runs at the push's commit, which is the release
+  # commit or a later one, finds its own version's .sha256, and builds the same version with the
+  # same hash, so it deploys the same page. Nothing cancels a run that is going
+  # (cancel-in-progress: false): the Release workflow's build of the site must go out, and a
+  # push that lands while it runs must not cancel it (GitHub's own Pages workflows queue the
+  # same way, actions/starter-workflows pages/static.yml). What it costs: the site's builds are
+  # one at a time, and only the newest queued run is kept, which is what a site wants since the
+  # newest main is what should be live.
   build:
     needs: read
-    if: needs.read.outputs.skipped != 'true'
+    # Explicit success, so a failed or cancelled read never runs the build, also when a later
+    # step or job is added under always().
+    if: needs.read.result == 'success' && needs.read.outputs.skipped != 'true'
     runs-on: ubuntu-latest
-    # Builds and deploys queue and never cancel a run that is going: the Release workflow's
-    # build of the site must go out, and a push that lands while it runs must not cancel it
-    # (GitHub's own Pages workflows queue the same way, actions/starter-workflows
-    # pages/static.yml). What it costs: the site's builds are one at a time, and only the newest
-    # queued run is kept, which is what a site wants since the newest main is what should be
-    # live. A queued push build can replace a queued dispatch only when it was triggered after
-    # the dispatch, so its commit is the release commit or a later one, and it skipped nothing:
-    # it found its own version's .sha256, so it builds the same version with the same hash, or a
-    # newer released one.
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     concurrency:
       group: pages
       cancel-in-progress: false
@@ -111,16 +117,5 @@ jobs:
         with:
           path: site/out
 
-  deploy:
-    needs: [read, build]
-    if: needs.read.outputs.skipped != 'true'
-    runs-on: ubuntu-latest
-    concurrency:
-      group: pages
-      cancel-in-progress: false
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
       - id: deployment
         uses: actions/deploy-pages@v4
