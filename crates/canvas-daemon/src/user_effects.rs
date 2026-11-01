@@ -898,8 +898,21 @@ mod tests {
             Self(path)
         }
 
+        /// Writes the file and gives it a modified time later than any write before it, so a
+        /// rescan always sees the change: two writes of the same length inside one tick of the
+        /// file system's clock would otherwise share a stamp (class `cause:timing-test`).
         fn write(&self, file: &str, contents: &str) {
-            std::fs::write(self.0.join(file), contents).expect("the file is written");
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(1);
+            let path = self.0.join(file);
+            std::fs::write(&path, contents).expect("the file is written");
+            let at = SystemTime::UNIX_EPOCH
+                + Duration::from_secs(1_700_000_000 + NEXT.fetch_add(1, Ordering::SeqCst));
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .and_then(|f| f.set_modified(at))
+                .expect("the modified time is set");
         }
 
         fn remove(&self, file: &str) {
