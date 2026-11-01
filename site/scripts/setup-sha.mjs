@@ -72,7 +72,9 @@ async function main() {
     }
   }
 
-  fs.writeFileSync(outFile, `${JSON.stringify({ version, file, sha256 }, null, 2)}\n`);
+  // The workflow's build job takes the same hash, so the page prints what the read job found.
+  writeOutput("sha256", sha256);
+  fs.writeFileSync(outFile,`${JSON.stringify({ version, file, sha256 }, null, 2)}\n`);
   console.log(`setup-sha: wrote ${path.relative(site, outFile)}`);
 }
 

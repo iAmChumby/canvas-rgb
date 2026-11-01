@@ -22,33 +22,29 @@ permissions:
   pages: write
   id-token: write
 
-concurrency:
-  group: pages
-  # A run that is already going is not cancelled. The Release workflow's build of the site is
-  # the one that has to go out, and a push that lands while it runs must not cancel it: with
-  # cancel-in-progress: true the push cancels the release's build and the page with the new
-  # hash never appears. GitHub's own Pages workflows queue instead of cancelling
-  # (actions/starter-workflows, pages/static.yml).
-  # What it costs: the site's builds are one at a time, so a push waits for the running build
-  # instead of replacing it, and only the newest queued run is kept - which is what a site
-  # wants, since the newest main is what should be live.
-  cancel-in-progress: false
-
 jobs:
-  build:
+  # The hash read is its own job and has NO concurrency group. GitHub keeps one pending run per
+  # group and a newly queued run replaces it (GitHub docs, workflow syntax, "concurrency": "By
+  # default, any existing pending job or workflow in the same concurrency group will be
+  # canceled and the new queued job or workflow will take its place."). A push that skips must therefore never
+  # enter the group: if it did, it would replace the Release workflow's pending dispatch, find
+  # no asset for the new version, skip, and the released page would never deploy. Only the jobs
+  # that run when the read did not skip (build, deploy) are in the group.
+  read:
     runs-on: ubuntu-latest
     outputs:
-      # "true" when the release for the version the page shows is not out yet: the deploy is
-      # skipped, and the build the Release workflow starts builds the site once the hash is
-      # there.
+      # "true" when the release for the version the page shows is not out yet: the build and the
+      # deploy do not run, and the build the Release workflow starts builds the site once the
+      # hash is there.
       skipped: ${{ steps.sha.outputs.skipped }}
+      sha256: ${{ steps.sha.outputs.sha256 }}
     steps:
       - uses: actions/checkout@v4
 
       # The hash the install section prints, read from the release's own .sha256 asset, so the
       # page and the release cannot disagree (#83). A push to main lands before the release for
       # that version exists, so a missing asset is not a failure there: the build and the deploy
-      # are skipped with a clear line, and the build the Release workflow starts has the hash.
+      # do not run, and the build the Release workflow starts has the hash.
       - name: Read the installer's SHA-256
         id: sha
         working-directory: site
@@ -62,8 +58,26 @@ jobs:
           CANVAS_SETUP_SHA256_SKIP_IF_MISSING: ${{ github.event_name == 'push' && '1' || '0' }}
         run: node scripts/setup-sha.mjs
 
+  build:
+    needs: read
+    if: needs.read.outputs.skipped != 'true'
+    runs-on: ubuntu-latest
+    # Builds and deploys queue and never cancel a run that is going: the Release workflow's
+    # build of the site must go out, and a push that lands while it runs must not cancel it
+    # (GitHub's own Pages workflows queue the same way, actions/starter-workflows
+    # pages/static.yml). What it costs: the site's builds are one at a time, and only the newest
+    # queued run is kept, which is what a site wants since the newest main is what should be
+    # live. A queued push build can replace a queued dispatch only when it was triggered after
+    # the dispatch, so its commit is the release commit or a later one, and it skipped nothing:
+    # it found its own version's .sha256, so it builds the same version with the same hash, or a
+    # newer released one.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
-        if: steps.sha.outputs.skipped != 'true'
         with:
           node-version: 22
           cache: npm
@@ -74,34 +88,36 @@ jobs:
       # The site imports the editor's components from app/web/src, so the editor's packages
       # are installed too: the TypeScript in the editor's files resolves React from there.
       - name: Install the editor's packages
-        if: steps.sha.outputs.skipped != 'true'
         run: npm ci
         working-directory: app/web
 
       - name: Install the site's packages
-        if: steps.sha.outputs.skipped != 'true'
         run: npm ci
         working-directory: site
 
+      # The hash the read job found, handed on so the page prints exactly that hash (the same
+      # commit, so the same version).
       - name: Build the site
-        if: steps.sha.outputs.skipped != 'true'
+        env:
+          CANVAS_SETUP_SHA256: ${{ needs.read.outputs.sha256 }}
         run: npm --prefix site run build
 
       # The built page shows the hash the release carries, and no PowerShell command line
       # anywhere on it (#79).
       - name: Check the install section
-        if: steps.sha.outputs.skipped != 'true'
         run: npm --prefix site run check-install
 
       - uses: actions/upload-pages-artifact@v3
-        if: steps.sha.outputs.skipped != 'true'
         with:
           path: site/out
 
   deploy:
-    needs: build
-    if: needs.build.outputs.skipped != 'true'
+    needs: [read, build]
+    if: needs.read.outputs.skipped != 'true'
     runs-on: ubuntu-latest
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
