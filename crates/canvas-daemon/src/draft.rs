@@ -196,6 +196,9 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<Slot, PutE
         lease_until,
     };
     *app.draft.lock() = Some(slot.clone());
+    // A draft started after an onboarding greeting outranks its restore: the owner is choosing
+    // a look, and ending the draft puts the layout's effect back anyway.
+    app.transient.cancel();
     tracing::info!(draft = %slot.id, "a draft is on the lights");
     Ok(slot)
 }

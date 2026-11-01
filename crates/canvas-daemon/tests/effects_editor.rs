@@ -1022,3 +1022,31 @@ async fn a_prior_that_vanishes_stop_after_an_expiry_still_answers_200() {
     assert_eq!(running(&engine).0.as_deref(), Some("solid"));
 }
 
+#[tokio::test]
+async fn the_onboarding_timer_does_not_touch_a_draft() {
+    let (router, app, engine, _home, _folder, _clock) = build_with_clock();
+    prior_effect(&app, "solid", color("#112233")).await;
+    assert_eq!(put_draft(router, MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
+
+    canvas_daemon::transient::restore(&app).await;
+    assert_eq!(
+        running(&engine).0,
+        Some(format!("draft:{}", canvas_daemon::user_effects::source_hash(MOVING))),
+        "the onboarding restore left the draft on the lights"
+    );
+}
+
+#[tokio::test]
+async fn a_draft_cancels_an_armed_onboarding_restore() {
+    let (router, app, _engine, _home, _folder, _clock) = build_with_clock();
+    prior_effect(&app, "solid", color("#112233")).await;
+    canvas_daemon::transient::arm(&app, canvas_effects::onboard::HELLO_ID);
+    assert!(app.transient.is_pending(), "the onboarding restore is armed");
+
+    assert_eq!(put_draft(router, MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
+    assert!(
+        !app.transient.is_pending(),
+        "a draft started after the transient, so the transient must not restore over it"
+    );
+}
+
