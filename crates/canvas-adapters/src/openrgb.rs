@@ -12,7 +12,7 @@ use canvas_proto::{
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
@@ -43,11 +43,69 @@ const ZONE_TYPE_SINGLE: i32 = 0;
 const ZONE_TYPE_LINEAR: i32 = 1;
 const ZONE_TYPE_MATRIX: i32 = 2;
 
+/// The clocks the adapter reads.
+///
+/// `Instant` is a monotonic clock, and the standard library says that it is "not specified
+/// whether system suspends count as elapsed time or not" (on Windows it reads
+/// `QueryPerformanceCounter`). The keepalive therefore watches the wall clock as well: the
+/// wall clock follows the RTC, so a sleep shows up there whether or not the monotonic clock
+/// counted it (#5).
+#[derive(Clone)]
+pub struct Clocks {
+    monotonic: Arc<dyn Fn() -> Instant + Send + Sync>,
+    wall: Arc<dyn Fn() -> SystemTime + Send + Sync>,
+}
+
+impl Clocks {
+    /// The clocks of the machine.
+    pub fn system() -> Self {
+        Self {
+            monotonic: Arc::new(|| Instant::now()),
+            wall: Arc::new(|| SystemTime::now()),
+        }
+    }
+
+    /// The clocks of the caller: the tests move them.
+    pub fn moved(
+        monotonic: Arc<dyn Fn() -> Instant + Send + Sync>,
+        wall: Arc<dyn Fn() -> SystemTime + Send + Sync>,
+    ) -> Self {
+        Self { monotonic, wall }
+    }
+
+    /// The monotonic clock.
+    fn monotonic(&self) -> Instant {
+        (self.monotonic)()
+    }
+
+    /// The wall clock.
+    fn wall(&self) -> SystemTime {
+        (self.wall)()
+    }
+}
+
+impl Default for Clocks {
+    fn default() -> Self {
+        Self::system()
+    }
+}
+
+/// When a controller was last switched to direct/custom mode.
+#[derive(Clone, Copy)]
+struct ModeStamp {
+    /// The monotonic clock.
+    at: Instant,
+    /// The wall clock.
+    wall: SystemTime,
+}
+
 #[derive(Clone)]
 pub struct OpenRgbAdapter {
     host: String,
     port: u16,
     link: Arc<Link>,
+    /// The clocks the keepalive reads.
+    clocks: Clocks,
 }
 
 struct Link {
@@ -67,7 +125,7 @@ struct Session {
     controllers: Vec<Controller>,
     /// When each controller was last switched to direct/custom mode on this connection.
     /// A missing entry means the next frame sends `SET_CUSTOM_MODE` first.
-    custom_mode: HashMap<u32, Instant>,
+    custom_mode: HashMap<u32, ModeStamp>,
     /// How long a controller stays trusted to be in custom mode before the next frame
     /// sends `SET_CUSTOM_MODE` again.
     keepalive: Duration,
@@ -171,13 +229,24 @@ impl OpenRgbAdapter {
             links.retain(|link| link.strong_count() > 0);
             links.push(Arc::downgrade(&link));
         }
-        Self { host: host.to_string(), port, link }
+        Self { host: host.to_string(), port, link, clocks: Clocks::system() }
     }
 
     /// Like [`new`](Self::new) with another keepalive interval (tests use a short one).
     pub fn with_keepalive(host: &str, port: u16, keepalive: Duration) -> Self {
         let adapter = Self::new(host, port);
         guard(&adapter.link.session).keepalive = keepalive;
+        adapter
+    }
+
+    /// Like [`new`](Self::new) with another keepalive interval and clocks of the caller's.
+    ///
+    /// The tests move the clocks: a sleep that the monotonic clock did not count is a jump
+    /// of the wall clock alone (#5).
+    pub fn with_clocks(host: &str, port: u16, keepalive: Duration, clocks: Clocks) -> Self {
+        let mut adapter = Self::new(host, port);
+        guard(&adapter.link.session).keepalive = keepalive;
+        adapter.clocks = clocks;
         adapter
     }
 
@@ -311,19 +380,38 @@ impl OpenRgbAdapter {
     async fn send_leds(&self, index: u32, colors: &[Rgb8]) -> Result<(), AdapterError> {
         let needs_mode = {
             let session = guard(&self.link.session);
-            session.custom_mode.get(&index).is_none_or(|at| at.elapsed() >= session.keepalive)
+            session
+                .custom_mode
+                .get(&index)
+                .is_none_or(|stamp| self.mode_is_stale(stamp, session.keepalive))
         };
         if needs_mode {
             // Stamped before the send. A resume that lands during the await bumps `resets`; the
             // controller is then not recorded, so the next frame sends the mode again.
-            let (sent_at, resets) = (Instant::now(), guard(&self.link.session).resets);
+            let sent_at = self.clocks.monotonic();
+            let sent_wall = self.clocks.wall();
+            let resets = guard(&self.link.session).resets;
             self.send(index, SET_CUSTOM_MODE, &[]).await?;
             let mut session = guard(&self.link.session);
             if session.resets == resets {
-                session.custom_mode.insert(index, sent_at);
+                session.custom_mode.insert(index, ModeStamp { at: sent_at, wall: sent_wall });
             }
         }
         self.send(index, UPDATE_LEDS, &update_leds_payload(colors)?).await
+    }
+
+    /// Whether a controller's mode has to be sent again.
+    ///
+    /// The keepalive covers a controller that lost power over a sleep: the ENE DRAM sticks fall
+    /// back to their built-in rainbow. The monotonic clock may not have counted the sleep (the
+    /// standard library does not say), so the wall clock is watched too: it follows the RTC, so
+    /// it counts a sleep whatever the monotonic clock did (#5).
+    fn mode_is_stale(&self, stamp: &ModeStamp, keepalive: Duration) -> bool {
+        if self.clocks.monotonic().saturating_duration_since(stamp.at) >= keepalive {
+            return true;
+        }
+        // A wall clock that went backwards (the clock was set) is not a sleep.
+        self.clocks.wall().duration_since(stamp.wall).is_ok_and(|gap| gap > keepalive)
     }
 }
 
@@ -638,5 +726,129 @@ mod hostile_tests {
         adapter.connect().await.unwrap();
         let result = tokio::time::timeout(Duration::from_secs(3), adapter.discover()).await;
         assert!(matches!(&result, Ok(Ok(devices)) if devices.len() == 1), "expected the one good controller, got {result:?}");
+    }
+}
+
+// ---- the keepalive over a sleep: the wall clock counts it, the monotonic clock may not
+
+#[cfg(test)]
+mod keepalive_tests {
+    use super::*;
+    use crate::fake::FakeOpenRgbServer;
+    use std::sync::Mutex;
+
+    const RED: Rgb8 = Rgb8 { r: 255, g: 0, b: 0 };
+
+    /// A DRAM stick, as the fake server reports it.
+    fn stick() -> DeviceInfo {
+        DeviceInfo {
+            id: DeviceId("openrgb:dram".into()),
+            name: "DDR5".into(),
+            vendor: "fake".into(),
+            kind: DeviceKind::Dram,
+            adapter: "openrgb".into(),
+            adapter_index: 0,
+            serial: "dram".into(),
+            location: "smbus".into(),
+            zones: vec![ZoneInfo {
+                index: 0,
+                name: "RGB".into(),
+                kind: ZoneKind::Linear,
+                led_count: 8,
+                min_leds: 8,
+                max_leds: 8,
+                resizable: false,
+            }],
+            connected: true,
+        }
+    }
+
+    /// The clocks of an awake machine, which the test moves.
+    struct Moved {
+        monotonic: Mutex<Instant>,
+        wall: Mutex<SystemTime>,
+    }
+
+    impl Moved {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                monotonic: Mutex::new(Instant::now()),
+                wall: Mutex::new(SystemTime::now()),
+            })
+        }
+
+        /// The clocks that read this state.
+        fn clocks(state: &Arc<Self>) -> Clocks {
+            let monotonic = Arc::clone(state);
+            let wall = Arc::clone(state);
+            Clocks::moved(
+                Arc::new(move || *monotonic.monotonic.lock().expect("the clock's lock")),
+                Arc::new(move || *wall.wall.lock().expect("the clock's lock")),
+            )
+        }
+    }
+
+    /// The adapter over the fake server, with the clocks the test moves.
+    async fn adapter(state: &Arc<Moved>) -> (FakeOpenRgbServer, OpenRgbAdapter) {
+        let server = FakeOpenRgbServer::start(vec![stick()]).await.expect("the fake server");
+        let mut adapter =
+            OpenRgbAdapter::with_clocks("127.0.0.1", server.port(), CUSTOM_MODE_KEEPALIVE, Moved::clocks(state));
+        adapter.connect().await.expect("connect");
+        (server, adapter)
+    }
+
+    /// Writes a frame and waits for the server to have handled it.
+    async fn frame(adapter: &mut OpenRgbAdapter) {
+        let id = DeviceId("openrgb:dram".into());
+        adapter.write_frame(&id, &[RED; 8]).await.expect("frame");
+        // The read-back is a request and a reply, so the frame before it has been handled.
+        adapter.read_back(&id).await.expect("readback orders the frame");
+    }
+
+    #[tokio::test]
+    async fn a_sleep_the_monotonic_clock_did_not_count_still_makes_the_mode_be_set_again() {
+        let state = Moved::new();
+        let (server, mut adapter) = adapter(&state).await;
+        frame(&mut adapter).await;
+        assert_eq!(server.custom_mode_writes(0), 1, "the first frame sets the mode");
+
+        // The machine sleeps for an hour. The monotonic clock stands still (the standard
+        // library does not say that a suspend counts), the wall clock follows the RTC.
+        *state.wall.lock().expect("the clock's lock") += Duration::from_secs(3600);
+
+        frame(&mut adapter).await;
+        assert_eq!(
+            server.custom_mode_writes(0),
+            2,
+            "the frame after the sleep did not set the mode again"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_keepalive_fires_when_the_monotonic_clock_passed_it() {
+        let state = Moved::new();
+        let (server, mut adapter) = adapter(&state).await;
+        frame(&mut adapter).await;
+        assert_eq!(server.custom_mode_writes(0), 1);
+
+        *state.monotonic.lock().expect("the clock's lock") += CUSTOM_MODE_KEEPALIVE;
+
+        frame(&mut adapter).await;
+        assert_eq!(server.custom_mode_writes(0), 2, "the keepalive set the mode again");
+    }
+
+    #[tokio::test]
+    async fn a_wall_clock_set_backwards_is_not_a_sleep() {
+        let state = Moved::new();
+        let (server, mut adapter) = adapter(&state).await;
+        frame(&mut adapter).await;
+        assert_eq!(server.custom_mode_writes(0), 1);
+
+        // The clock was set an hour back: the wall clock moved away from the stamp, so it is
+        // not a sleep and the mode stays where it is.
+        *state.wall.lock().expect("the clock's lock") -= Duration::from_secs(3600);
+
+        frame(&mut adapter).await;
+        assert_eq!(server.custom_mode_writes(0), 1, "the mode was set again for no reason");
     }
 }
