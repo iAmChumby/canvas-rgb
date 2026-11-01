@@ -475,10 +475,13 @@ impl OpenRgbSupervisor {
 /// before it (#81). Every kill of the server goes through here, so the next stick that goes dark
 /// after a stop leaves the order and the gap on record. The kill itself is unchanged:
 /// `TerminateProcess`, no drain, no wait.
+///
+/// The line is an INFO one: a stop that worked is routine. The warning is the caller's, for a
+/// kill that failed.
 fn kill_server(child: &mut dyn ChildProcess, reason: &str, daemon: DaemonBeforeStop) -> std::io::Result<()> {
     let pid = child.id();
     let daemon_text = daemon.describe(Instant::now());
-    tracing::warn!(
+    tracing::info!(
         pid,
         reason,
         how = "kill",

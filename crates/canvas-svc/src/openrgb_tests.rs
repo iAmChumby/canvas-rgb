@@ -563,3 +563,46 @@ async fn a_daemon_the_service_could_not_end_is_not_logged_as_terminated() {
     assert!(line.contains("the daemon (pid 4000) could not be ended"), "the line says what happened: {line}");
     assert!(text.contains("could not end the daemon"), "the failed kill is logged: {text}");
 }
+
+/// A stop that worked is routine: the daemon's line and the OpenRGB line are INFO ones, so a
+/// warning in the log means something is wrong (#81).
+#[tokio::test]
+async fn a_routine_stop_is_an_info_line() {
+    let (root, exe) = install();
+    let (mut daemon, mut sup, _processes) = running_pair(&root, &exe).await;
+
+    let ((), text) = crate::test_logs::captured(|| {
+        daemon.stop();
+        sup.stop("service stop", daemon.before_openrgb_stop());
+    });
+
+    for what in ["terminating the daemon (pid 4000)", "stopping the OpenRGB server (pid 4001)"] {
+        let line = text
+            .lines()
+            .find(|line| line.contains(what))
+            .unwrap_or_else(|| panic!("no line for {what}:\n{text}"));
+        assert!(line.contains("INFO"), "{what} is routine, not a warning: {line}");
+        assert!(!line.contains("WARN"), "{what} is routine, not a warning: {line}");
+    }
+    assert!(!text.contains("could not end the daemon"), "nothing failed: {text}");
+}
+
+/// The warning is the failure: a kill that did not work is the only WARN in a stop (#81).
+#[tokio::test]
+async fn a_failed_kill_is_the_warning() {
+    let (root, exe) = install();
+    let (mut daemon, mut sup, processes) = running_pair(&root, &exe).await;
+    // The next kill fails: the daemon's, not OpenRGB's.
+    processes.fail_kills(1);
+
+    let ((), text) = crate::test_logs::captured(|| {
+        daemon.stop();
+        sup.stop("service stop", daemon.before_openrgb_stop());
+    });
+
+    let line = text
+        .lines()
+        .find(|line| line.contains("could not end the daemon"))
+        .unwrap_or_else(|| panic!("no failure line:\n{text}"));
+    assert!(line.contains("WARN"), "{line}");
+}

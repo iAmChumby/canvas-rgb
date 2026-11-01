@@ -63,11 +63,12 @@ pub const SESSION_SETTLE: Duration = Duration::from_secs(3);
 /// line naming the pid and the reason is logged before the process is ended, on every path
 /// (class `cause:timing-test`, #45 and #55: a test asserts the line on each path).
 ///
-/// `reason` completes "terminating the daemon (pid N): ...". A failed kill is logged too, and
+/// `reason` completes "terminating the daemon (pid N): ...". A stop that worked is routine, so
+/// the line is an INFO one; only the failure is a warning. A failed kill is logged too, and
 /// returned for a caller that has to stop on it.
 fn terminate_daemon(process: &mut dyn ChildProcess, reason: &str) -> io::Result<()> {
     let pid = process.id();
-    tracing::warn!(pid, reason, "terminating the daemon (pid {pid}): {reason}");
+    tracing::info!(pid, reason, "terminating the daemon (pid {pid}): {reason}");
     let ended = process.kill();
     if let Err(e) = &ended {
         tracing::warn!(pid, reason, error = %e, "could not end the daemon");
