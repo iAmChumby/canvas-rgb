@@ -70,7 +70,7 @@ once per connection or once per start and trusts it forever.
   (`crates/canvas-adapters/src/openrgb.rs`). Fix built, pending a real wake: the mode is sent again after every resume and every
   10 s while frames stream (`CUSTOM_MODE_KEEPALIVE`, a starting value to measure); the ROYUAN keyboard's
   direct-mode report is sent again after a resume (`crates/canvas-adapters/src/royuan.rs`). One call,
-  `canvas_adapters::note_resume()`, reaches both. The keepalive covers the RAM even if the resume never reaches the daemon; the keyboard has no keepalive, so it depends on the resume arriving.
+  `canvas_adapters::note_resume()`, reaches both. The keepalive covers the RAM even if the resume never reaches the daemon; the keyboard re-sends its colours but nothing re-sends its direct mode on a timer, so it depends on the resume arriving.
 - [#29](https://github.com/iAmChumby/canvas-rgb/issues/29): the service's 1 Hz fan loop kept writing
   through the resume transition. A duty write landed while firmware still owned the fan controller,
   its readback failed for the full `READBACK_SETTLE`, and the safety handback (correct in itself) stayed
@@ -109,7 +109,9 @@ once per connection or once per start and trusts it forever.
   fake mode to restore. Three parts hold it together:
   - the compiler: the daemon takes its adapters through bounds that include `ResumeBehavior`
     (`App::new`, `App::with_displays`, `DisplayHub::new`, and the daemon's `Peripheral` trait in
-    `crates/canvas-daemon/src/`), so an adapter handed to the daemon without it does not compile.
+    `crates/canvas-daemon/src/`), so an adapter handed to the daemon through those without it does
+    not compile. The OpenRGB reconnect loop (`openrgb_supervisor::supervise`) takes an already boxed
+    adapter with no bound; in production it only gets the one `App::new` checked.
     The bound is in the daemon and not on the spine traits (`DeviceAdapter` and the others in
     `canvas-proto`), because the spine is the shared contract of every area and cannot depend on
     the adapters crate. An adapter that is never handed to the daemon is

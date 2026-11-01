@@ -4,14 +4,17 @@
 //! sleep must be put back into the host-driven one, and an adapter that has no such state must
 //! say so instead of growing a fake mode to restore.
 //!
-//! Every adapter implements [`ResumeBehavior`]. The method has no default, and the places where
-//! the daemon takes an adapter ask for the trait in a bound (`App::new`, `App::with_displays`,
+//! Every adapter implements [`ResumeBehavior`]. The method has no default, and the daemon's
+//! entry points for adapters ask for the trait in a bound (`App::new`, `App::with_displays`,
 //! `DisplayHub::new`, and the daemon's `Peripheral` trait in `crates/canvas-daemon/src/`). An
-//! adapter the daemon is given without it does not compile. The bound lives in the daemon and
-//! not on the spine traits (`DeviceAdapter` and the others in `canvas-proto`), because the spine
-//! is the shared contract of every area and cannot depend on this crate. An adapter that is
-//! never handed to the daemon is not checked by the compiler. The guard test (`crates/canvas-daemon/tests/resume_guard.rs`) covers the rest: it
-//! drives the adapters on the list, and a scan fails when an adapter is missing from it.
+//! adapter given to the daemon through those without it does not compile. The OpenRGB
+//! reconnect loop (`openrgb_supervisor::supervise`) takes an already boxed `dyn DeviceAdapter`
+//! with no bound; in production it only receives the adapter `App::new` checked. The bound
+//! lives in the daemon and not on the spine traits (`DeviceAdapter` and the others in
+//! `canvas-proto`), because the spine is the shared contract of every area and cannot depend on
+//! this crate. An adapter that is never handed to the daemon is not checked by the compiler.
+//! The guard test (`crates/canvas-daemon/tests/resume_guard.rs`) covers the rest: it drives the
+//! adapters on the list, and a scan fails when an adapter is missing from it.
 //!
 //! The choice is checked too. The guard test shows that an adapter that sets its mode again
 //! really does after a resume. For the adapters with nothing to restore, each adapter's own
