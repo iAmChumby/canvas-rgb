@@ -25,7 +25,7 @@
 
 use crate::pipe_server::Admitted;
 use crate::process::ChildProcess;
-use crate::secure::{check_tree, offending, refused, FsAcl};
+use crate::secure::{self, check_tree, offending, refused, FsAcl};
 use crate::paths;
 use base64::Engine;
 use canvas_proto::api::error_codes;
@@ -493,48 +493,15 @@ impl UpdateInstaller {
     }
 
     /// The install folder is trusted with the same rules as the staging folder, because the update
-    /// reads `update-result.json` there and starts `setup-user.ps1` and `canvas-rgb.exe` from it: no
-    /// reparse point on the path to it, the folder, `installer\` and the files the finish step runs owned
-    /// by SYSTEM or Administrators, and none of them writable by anyone else. Changes nothing; names the
-    /// first path that fails.
+    /// reads `update-result.json` there and starts `setup-user.ps1` and `canvas-rgb.exe` from it, and
+    /// the service itself is `canvas-rgb-svc.exe` there: no reparse point on the path to it, no
+    /// folder above it that a non-admin owns or can re-permission, the folder, `installer\`, the
+    /// service exe, the files the finish step runs and the whole `openrgb\` tree owned by SYSTEM or
+    /// Administrators, and none of them writable by anyone else. One shared check
+    /// ([`secure::check_install_folder`]); changes nothing; names the first path that fails.
     pub fn check_app_dir(&self) -> io::Result<()> {
         let fs = lock(&self.fs);
-        let app = self.cfg.app_dir.as_path();
-        for ancestor in app.ancestors() {
-            // The drive root has no attributes worth reading; a missing ancestor is the folder's own failure below.
-            if ancestor.parent().is_some() && fs.exists(ancestor)? && fs.is_reparse(ancestor)? {
-                return Err(offending(ancestor, "the install path goes through a junction or symlink"));
-            }
-        }
-        let installer = app.join("installer");
-        let folders = [app.to_path_buf(), installer.clone()];
-        // setup-user.ps1 dot-sources lib.ps1, so it is run as part of the script.
-        let files = [installer.join("setup-user.ps1"), installer.join("lib.ps1"), app.join("canvas-rgb.exe")];
-        let result = app.join("update-result.json");
-        let mut all: Vec<(PathBuf, bool)> = folders.into_iter().map(|p| (p, true)).collect();
-        all.extend(files.into_iter().map(|p| (p, false)));
-        // A result file left by an earlier run is read too, so it is checked when it is there.
-        if fs.exists(&result)? {
-            all.push((result, false));
-        }
-        for (path, is_folder) in all {
-            if !fs.exists(&path)? {
-                return Err(offending(&path, "an install path the update needs is missing"));
-            }
-            if fs.is_reparse(&path)? {
-                return Err(offending(&path, "an install path is a junction or symlink"));
-            }
-            if fs.is_dir(&path)? != is_folder {
-                return Err(refused(&path, if is_folder { "is not a folder" } else { "is not a file" }));
-            }
-            if !fs.owner_trusted(&path)? {
-                return Err(offending(&path, "an install path is owned by someone other than SYSTEM or Administrators"));
-            }
-            if fs.has_nonadmin_write(&path)? {
-                return Err(offending(&path, "an install path has write access granted to a non-admin principal"));
-            }
-        }
-        Ok(())
+        secure::check_install_folder(&**fs, self.cfg.app_dir.as_path())
     }
 
     // ---- install ----

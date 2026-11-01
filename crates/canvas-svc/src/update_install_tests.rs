@@ -43,6 +43,8 @@ pub(crate) struct TreeFs {
     pub untrusted: Arc<Mutex<Vec<PathBuf>>>,
     /// Paths a non-admin principal may write.
     pub writable: Arc<Mutex<Vec<PathBuf>>>,
+    /// Paths where a non-admin holds WRITE_DAC, WRITE_OWNER or FILE_DELETE_CHILD.
+    pub controlled: Arc<Mutex<Vec<PathBuf>>>,
 }
 
 impl FsAcl for TreeFs {
@@ -75,6 +77,12 @@ impl FsAcl for TreeFs {
     }
     fn has_nonadmin_write(&self, p: &Path) -> io::Result<bool> {
         Ok(self.writable.lock().unwrap().iter().any(|w| w == p))
+    }
+    fn owner_trusted_parent(&self, p: &Path) -> io::Result<bool> {
+        self.owner_trusted(p)
+    }
+    fn has_nonadmin_control(&self, p: &Path) -> io::Result<bool> {
+        Ok(self.controlled.lock().unwrap().iter().any(|c| c == p))
     }
 }
 
@@ -265,6 +273,7 @@ pub(crate) struct Rig {
     pub probe: Arc<ProbeState>,
     pub untrusted: Arc<Mutex<Vec<PathBuf>>>,
     pub writable: Arc<Mutex<Vec<PathBuf>>>,
+    pub controlled: Arc<Mutex<Vec<PathBuf>>>,
 }
 
 impl Drop for Rig {
@@ -293,6 +302,7 @@ pub(crate) fn rig_with(
     std::fs::write(app.join("installer").join("setup-user.ps1"), b"# fake").unwrap();
     std::fs::write(app.join("installer").join("lib.ps1"), b"# fake").unwrap();
     std::fs::write(app.join("canvas-rgb.exe"), b"MZ fake").unwrap();
+    std::fs::write(app.join("canvas-rgb-svc.exe"), b"MZ fake").unwrap();
     let mut cfg = UpdateConfig {
         home: home.clone(),
         app_dir: app.clone(),
@@ -308,17 +318,18 @@ pub(crate) fn rig_with(
     tweak(&mut cfg);
     let untrusted = Arc::new(Mutex::new(Vec::new()));
     let writable = Arc::new(Mutex::new(Vec::new()));
+    let controlled = Arc::new(Mutex::new(Vec::new()));
     let setup = Arc::new(SetupState::default());
     let user = Arc::new(UserState::default());
     let probe = Arc::new(ProbeState::default());
     let installer = UpdateInstaller::new(
         cfg,
-        Box::new(TreeFs { untrusted: Arc::clone(&untrusted), writable: Arc::clone(&writable) }),
+        Box::new(TreeFs { untrusted: Arc::clone(&untrusted), writable: Arc::clone(&writable), controlled: Arc::clone(&controlled) }),
         Box::new(FakeSetup(Arc::clone(&setup))),
         Box::new(FakeUser(Arc::clone(&user), FakeProcesses::new())),
         Box::new(FakeProbe(Arc::clone(&probe))),
     );
-    Rig { dir, home, app, installer: Arc::new(wrap(installer)), setup, user, probe, untrusted, writable }
+    Rig { dir, home, app, installer: Arc::new(wrap(installer)), setup, user, probe, untrusted, writable, controlled }
 }
 
 impl Rig {
@@ -1343,6 +1354,53 @@ fn app_breakers() -> Vec<(&'static str, Breaker)> {
             r.untrusted.lock().unwrap().push(r.app.clone());
             r.app.clone()
         }),
+        ("canvas-rgb-svc.exe (the service, run as SYSTEM) is writable by non-admins", |r| {
+            let p = r.app.join("canvas-rgb-svc.exe");
+            r.writable.lock().unwrap().push(p.clone());
+            p
+        }),
+        ("canvas-rgb-svc.exe is owned by someone else", |r| {
+            let p = r.app.join("canvas-rgb-svc.exe");
+            r.untrusted.lock().unwrap().push(p.clone());
+            p
+        }),
+        ("canvas-rgb-svc.exe is missing", |r| {
+            let p = r.app.join("canvas-rgb-svc.exe");
+            std::fs::remove_file(&p).unwrap();
+            p
+        }),
+        ("a file deep in openrgb\\ is writable by non-admins", |r| {
+            let deep = r.app.join("openrgb").join("plugins").join("evil.dll");
+            std::fs::create_dir_all(deep.parent().unwrap()).unwrap();
+            std::fs::write(&deep, b"MZ").unwrap();
+            r.writable.lock().unwrap().push(deep.clone());
+            deep
+        }),
+        ("a file in openrgb\\ is owned by someone else", |r| {
+            let f = r.app.join("openrgb").join("OpenRGB.exe");
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(&f, b"MZ").unwrap();
+            r.untrusted.lock().unwrap().push(f.clone());
+            f
+        }),
+        ("openrgb\\ holds a junction", |r| {
+            let elsewhere = r.dir.path().join("elsewhere-openrgb");
+            std::fs::create_dir_all(&elsewhere).unwrap();
+            let link = r.app.join("openrgb").join("plugins");
+            std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+            mklink_junction(&link, &elsewhere);
+            link
+        }),
+        ("a folder above the install folder lets a non-admin change its permissions or delete in it", |r| {
+            let parent = r.app.parent().unwrap().to_path_buf();
+            r.controlled.lock().unwrap().push(parent.clone());
+            parent
+        }),
+        ("a folder above the install folder is owned by someone else", |r| {
+            let parent = r.app.parent().unwrap().to_path_buf();
+            r.untrusted.lock().unwrap().push(parent.clone());
+            parent
+        }),
         ("canvas-rgb.exe is missing", |r| {
             let p = r.app.join("canvas-rgb.exe");
             std::fs::remove_file(&p).unwrap();
@@ -1476,4 +1534,13 @@ fn the_real_installed_folder_passes_the_install_folder_check() {
     }
     let installer = UpdateInstaller::production(std::env::temp_dir(), app);
     installer.check_app_dir().expect("the real install folder must pass check_app_dir");
+}
+
+/// The parent walk on the real machine: the folders above the default install path (`C:\`,
+/// `C:\Program Files`, owned by TrustedInstaller) must pass, or an update of the real install would start
+/// refusing. Read-only; needs no install.
+#[test]
+fn the_real_folders_above_program_files_pass_the_parent_walk() {
+    let app = PathBuf::from(r"C:\Program Files\canvas-rgb");
+    crate::secure::check_install_parents(&crate::secure::WinFs, &app).expect("C:\\ and C:\\Program Files must pass the parent walk");
 }
