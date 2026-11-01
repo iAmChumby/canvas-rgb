@@ -252,13 +252,21 @@ var
 begin
   Result := False;
   Lib := ExpandConstant('{tmp}\lib.ps1');
-  if not FileExists(Lib) then Exit;
-  StringChangeEx(Lib, '''', '''''', True);
-  Script := RestartServiceScript;
-  StringChangeEx(Script, '%LIB%', Lib, True);
-  // token: Exec runs as Setup's own administrator token; the script only starts the service.
-  Result := Exec(PsExe, '-NoProfile -ExecutionPolicy Bypass -Command "' + Script + '"',
-    ExpandConstant('{sys}'), SW_HIDE, ewWaitUntilTerminated, Code);
+  if FileExists(Lib) then
+  begin
+    // The same code the scripts use, so a service that will not start is handled the same way.
+    StringChangeEx(Lib, '''', '''''', True);
+    Script := RestartServiceScript;
+    StringChangeEx(Script, '%LIB%', Lib, True);
+    // token: Exec runs as Setup's own administrator token; the script only starts the service.
+    Result := Exec(PsExe, '-NoProfile -ExecutionPolicy Bypass -Command "' + Script + '"',
+      ExpandConstant('{sys}'), SW_HIDE, ewWaitUntilTerminated, Code);
+    Exit;
+  end;
+  // Setup's own temp folder is already gone: the system tool starts the service instead. It is a
+  // system program, never code from the install folder.
+  // token: Setup's own administrator token; sc.exe only starts the service.
+  Result := Exec(ExpandConstant('{sys}\sc.exe'), 'start canvas-rgb-svc', '', SW_HIDE, ewWaitUntilTerminated, Code);
 end;
 
 function LogTail(const LogPath: String): String;
