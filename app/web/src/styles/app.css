@@ -2871,6 +2871,15 @@ button.chip:hover {
 
 /* ---------- fans page ---------- */
 
+/* The frame is the page's height, so the two columns reach the bottom of the window and the
+   headers scroll inside their own pane (R1). */
+.rd-fans .load-frame[data-state="ready"] {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 /* The two kinds of thing sit side by side: the readings on the left, the editor of the picked
    header on the right (R6). */
 .rd-fans .rd-fans-grid {
@@ -2887,6 +2896,12 @@ button.chip:hover {
   flex-direction: column;
   gap: var(--s4);
   min-height: 0;
+}
+
+/* The editor column is the container its points answer to: how many points stand in a row
+   depends on the column's own width, not the window's. */
+.rd-fans .rd-fans-right {
+  container: fans-editor / inline-size;
 }
 
 /* The temperatures: the app's own cells, three across, each a label, its reading and its
@@ -2985,13 +3000,22 @@ button.chip:hover {
 
 /* A point in a row of two: the number and its unit keep their line. */
 .rd-fans .curve-rows .curve-row {
-  grid-template-columns: 20px minmax(0, 1fr) minmax(0, 1fr) auto;
+  grid-template-columns: 20px minmax(84px, 1fr) minmax(84px, 1fr) auto;
 }
 
+/* A point's temperature and percent show their whole value: the field never gets narrower than
+   the three digits of "100" and its padding. */
 .rd-fans .curve-rows .num {
   width: 100%;
   max-width: 92px;
-  min-width: 0;
+  min-width: 52px;
+}
+
+/* A column too narrow for two points side by side holds one point to a row. */
+@container fans-editor (max-width: 459px) {
+  .rd-fans .curve-rows {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .rd-fans .curve-rows .curve-row .row-wrap {
@@ -3003,8 +3027,13 @@ button.chip:hover {
    the other columns their room. */
 @container page (min-width: 1000px) {
   .rd-fans .fan-table .sparkline {
-    width: 64px;
+    width: 56px;
     height: 16px;
+  }
+
+  /* The pane is about 500 px at 1280: the duty's bar gives a little so every column is whole. */
+  .rd-fans .fan-table .duty-cell .meter {
+    width: 52px;
   }
 
   .rd-fans .fan-table th,
@@ -3013,11 +3042,28 @@ button.chip:hover {
   }
 }
 
-/* regular and below: the history column is the one that goes, the row still reads. */
+/* compact and below: the history column is the one that goes, the row still reads (the mockup's
+   960 shot has Header, RPM, Duty and Mode). */
 @container page (max-width: 999px) {
   .rd-fans .fan-table th,
   .rd-fans .fan-table td {
     padding: var(--s1) var(--s2);
+  }
+
+  .rd-fans .fan-table .rd-history {
+    display: none;
+  }
+}
+
+/* A reading's label stands over its value and its bar, so a long name ("Board SYSTIN") keeps its
+   whole width where three readings stand side by side. */
+@container page (max-width: 1499px) {
+  .rd-fans .rd-temp-row .temp-cell {
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-areas:
+      "label label"
+      "value meter";
+    column-gap: var(--s2);
   }
 }
 
@@ -3051,6 +3097,10 @@ button.chip:hover {
       "label label"
       "value value"
       "meter meter";
+  }
+
+  .rd-fans .load-frame[data-state="ready"] {
+    flex: 0 0 auto;
   }
 
   .rd-fans .rd-headers {

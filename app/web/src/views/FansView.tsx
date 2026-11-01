@@ -279,7 +279,7 @@ export function FansView() {
                     <th scope="col" className="num-col">RPM</th>
                     <th scope="col">Duty</th>
                     <th scope="col">Mode</th>
-                    <th scope="col">Last 60 s</th>
+                    <th scope="col" className="rd-history">Last 60 s</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -364,7 +364,7 @@ function FanRow({
       <td>
         <ModeState mode={header.mode} />
       </td>
-      <td>
+      <td className="rd-history">
         <div className="row-wrap" style={{ flexWrap: "nowrap" }}>
           <Sparkline values={history} max={peak} label={`${header.label} RPM over the last 60 seconds`} />
         </div>
@@ -564,7 +564,13 @@ function FanProfileActions({ fans }: { fans: FansStatus }) {
               .map((p) => (
                 <div key={p} className="row-wrap" style={{ justifyContent: "space-between" }}>
                   <span>{p}</span>
-                  <Button size="sm" variant="ghost" icon={<Trash size={14} />} onClick={() => setConfirming(p)}>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    icon={<Trash size={14} />}
+                    aria-label={`Delete profile ${p}`}
+                    onClick={() => setConfirming(p)}
+                  >
                     Delete
                   </Button>
                 </div>
