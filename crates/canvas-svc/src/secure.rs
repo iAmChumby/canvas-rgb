@@ -39,6 +39,9 @@ pub const SECURE_SDDL: &str = "O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OIC
 /// folders no ordinary user may even read, such as the update staging folder (#43).
 pub const PRIVATE_SDDL: &str = "O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
 
+/// The program the service runs as SYSTEM, in the install folder.
+pub const SERVICE_EXE: &str = "canvas-rgb-svc.exe";
+
 /// Subfolders the service creates inside the home, so they are secured and checked with it.
 pub const SUBDIRS: [&str; 2] = ["openrgb", "logs"];
 
@@ -84,6 +87,17 @@ pub trait FsAcl: Send {
     /// True if the entry's DACL has any ACCESS_ALLOWED ACE granting a write-class right to any SID other
     /// than SYSTEM (`S-1-5-18`) and Administrators (`S-1-5-32-544`). A NULL DACL counts as true.
     fn has_nonadmin_write(&self, p: &Path) -> io::Result<bool>;
+    /// True if the owner of a PARENT folder is SYSTEM, Administrators or TrustedInstaller. Windows
+    /// itself owns `C:\` and `C:\Program Files` as TrustedInstaller, so the strict owner rule of
+    /// [`FsAcl::owner_trusted`] would refuse the default install path (#46).
+    fn owner_trusted_parent(&self, p: &Path) -> io::Result<bool>;
+    /// True if the entry's DACL has an ACCESS_ALLOWED ACE (not inherit-only) that gives a principal
+    /// other than SYSTEM, Administrators or TrustedInstaller WRITE_DAC, WRITE_OWNER or FILE_DELETE_CHILD.
+    /// Those three rights on a parent folder let its holder swap the install folder out from under a
+    /// check. DELETE counts too, except on a drive root (which cannot be renamed): a Modify ACE includes
+    /// it, and with it a user can rename the parent away and rebuild the path with their own files in
+    /// it. The bits are read, not the ACE name (#46). A NULL DACL counts as true.
+    fn has_nonadmin_control(&self, p: &Path, is_drive_root: bool) -> io::Result<bool>;
 }
 
 /// Secures a directory and reports whether a path can be trusted.
@@ -130,6 +144,115 @@ pub(crate) fn check_tree(fs: &dyn FsAcl, dir: &Path) -> io::Result<()> {
         if fs.is_dir(&child)? {
             check_tree(fs, &child)?;
         }
+    }
+    Ok(())
+}
+
+/// Names the install-folder failure: logs it at ERROR with the path and returns it. Nothing is deleted,
+/// renamed or adopted; the person fixes the folder, or installs into the default one.
+pub(crate) fn install_offending(path: &Path, what: &str) -> io::Error {
+    tracing::error!(
+        path = %path.display(),
+        "install folder: {what}. canvas-rgb runs programs from its install folder as the system, so it will not \
+         start an update from here. Nothing was deleted or renamed. Install canvas-rgb into a folder only \
+         administrators can change (the default is under Program Files)."
+    );
+    refused(path, &format!("{what}; install canvas-rgb into a folder only administrators can change"))
+}
+
+/// Checks one path inside the install folder: it exists, is the kind it should be, is no junction or
+/// symlink, is owned by SYSTEM or Administrators, and no one else can write it.
+fn check_install_entry(fs: &dyn FsAcl, path: &Path, is_folder: bool) -> io::Result<()> {
+    if !fs.exists(path)? {
+        return Err(install_offending(path, "an install path canvas-rgb needs is missing"));
+    }
+    if fs.is_reparse(path)? {
+        return Err(install_offending(path, "an install path is a junction or symlink"));
+    }
+    if fs.is_dir(path)? != is_folder {
+        return Err(refused(path, if is_folder { "is not a folder" } else { "is not a file" }));
+    }
+    if !fs.owner_trusted(path)? {
+        return Err(install_offending(path, "an install path is owned by someone other than SYSTEM or Administrators"));
+    }
+    if fs.has_nonadmin_write(path)? {
+        return Err(install_offending(path, "an install path has write access granted to a non-admin principal"));
+    }
+    Ok(())
+}
+
+/// Walks every entry under `dir` (a junction is never followed): none may be a junction or symlink,
+/// owned by anyone but SYSTEM or Administrators, or writable by anyone else.
+fn check_install_tree(fs: &dyn FsAcl, dir: &Path) -> io::Result<()> {
+    for child in fs.list(dir)? {
+        let folder = fs.is_dir(&child)? && !fs.is_reparse(&child)?;
+        check_install_entry(fs, &child, fs.is_dir(&child)?)?;
+        if folder {
+            check_install_tree(fs, &child)?;
+        }
+    }
+    Ok(())
+}
+
+/// Every folder above `app`, up to and including the drive root: no junction or symlink, owned by
+/// SYSTEM, Administrators or TrustedInstaller, and no one else holds WRITE_DAC, WRITE_OWNER or
+/// FILE_DELETE_CHILD on it. Someone who holds one of those on a parent can rename the install folder
+/// away and put their own in its place, whatever the install folder's own ACL says.
+pub(crate) fn check_install_parents(fs: &dyn FsAcl, app: &Path) -> io::Result<()> {
+    for parent in app.ancestors().skip(1) {
+        if !fs.exists(parent)? {
+            continue;
+        }
+        // A drive root has no reparse attribute worth reading.
+        if parent.parent().is_some() && fs.is_reparse(parent)? {
+            return Err(install_offending(parent, "the install path goes through a junction or symlink"));
+        }
+        if !fs.owner_trusted_parent(parent)? {
+            return Err(install_offending(
+                parent,
+                "a folder above the install folder is owned by someone other than SYSTEM, Administrators or TrustedInstaller",
+            ));
+        }
+        if fs.has_nonadmin_control(parent, parent.parent().is_none())? {
+            return Err(install_offending(
+                parent,
+                "a folder above the install folder lets a non-admin change its permissions, rename it or delete what is in it; choose a folder under Program Files or directly under a drive",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The one install-folder check (#46). The update path and the service start use it. It changes
+/// nothing and names the first path that fails:
+/// - every folder above `app` ([`check_install_parents`]),
+/// - `app`, `installer\`, `canvas-rgb.exe`, `canvas-rgb-svc.exe` (the exe the service runs as SYSTEM),
+///   the scripts the finish step runs, and a left-over `update-result.json`,
+/// - the whole `openrgb\` tree when there is one (OpenRGB runs as SYSTEM too).
+pub fn check_install_folder(fs: &dyn FsAcl, app: &Path) -> io::Result<()> {
+    check_install_parents(fs, app)?;
+    let installer = app.join("installer");
+    // setup-user.ps1 dot-sources lib.ps1, so it is run as part of the script.
+    let mut all: Vec<(PathBuf, bool)> = vec![
+        (app.to_path_buf(), true),
+        (installer.clone(), true),
+        (installer.join("setup-user.ps1"), false),
+        (installer.join("lib.ps1"), false),
+        (app.join("canvas-rgb.exe"), false),
+        (app.join(SERVICE_EXE), false),
+    ];
+    // A result file left by an earlier run is read too, so it is checked when it is there.
+    let result = app.join("update-result.json");
+    if fs.exists(&result)? {
+        all.push((result, false));
+    }
+    for (path, is_folder) in all {
+        check_install_entry(fs, &path, is_folder)?;
+    }
+    let openrgb = app.join("openrgb");
+    if fs.exists(&openrgb)? {
+        check_install_entry(fs, &openrgb, true)?;
+        check_install_tree(fs, &openrgb)?;
     }
     Ok(())
 }
@@ -454,23 +577,26 @@ impl FsAcl for WinFs {
     }
 
     fn has_nonadmin_write(&self, p: &Path) -> io::Result<bool> {
-        dacl_grants_nonadmin_write(p)
+        dacl_grants_nonadmin(p, ENTRY_WRITE_MASK)
+    }
+
+    fn owner_trusted_parent(&self, p: &Path) -> io::Result<bool> {
+        Ok(writer_is_trusted_sid(&owner_sid_string(p)?))
+    }
+
+    fn has_nonadmin_control(&self, p: &Path, is_drive_root: bool) -> io::Result<bool> {
+        dacl_grants_nonadmin(p, if is_drive_root { PARENT_CONTROL_MASK } else { PARENT_NONROOT_MASK })
     }
 }
 
 /// `ACCESS_ALLOWED_ACE_TYPE`: the only ACE type that grants rights.
-#[cfg(windows)]
 const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
 /// `INHERIT_ONLY_ACE`: the ACE applies to children only, not to the object itself.
-#[cfg(windows)]
 const INHERIT_ONLY_ACE_FLAG: u8 = 0x08;
-#[cfg(windows)]
 const GENERIC_WRITE_BIT: u32 = 0x4000_0000;
-#[cfg(windows)]
 const GENERIC_ALL_BIT: u32 = 0x1000_0000;
 /// Write-class rights: FILE_WRITE_DATA (= FILE_ADD_FILE), FILE_APPEND_DATA (= FILE_ADD_SUBDIRECTORY),
 /// FILE_WRITE_EA, FILE_DELETE_CHILD, FILE_WRITE_ATTRIBUTES, DELETE, WRITE_DAC, WRITE_OWNER.
-#[cfg(windows)]
 const WRITE_CLASS_RIGHTS: u32 = 0x0000_0002
     | 0x0000_0004
     | 0x0000_0010
@@ -479,6 +605,17 @@ const WRITE_CLASS_RIGHTS: u32 = 0x0000_0002
     | 0x0001_0000
     | 0x0004_0000
     | 0x0008_0000;
+
+/// What counts as write access on an entry inside the install folder.
+pub(crate) const ENTRY_WRITE_MASK: u32 = WRITE_CLASS_RIGHTS | GENERIC_WRITE_BIT | GENERIC_ALL_BIT;
+
+/// What counts as control over a PARENT folder: FILE_DELETE_CHILD (0x40), WRITE_DAC (0x40000) and
+/// WRITE_OWNER (0x80000), or GENERIC_ALL. A plain Modify ACE (0x1301bf) has none of them.
+pub(crate) const PARENT_CONTROL_MASK: u32 = 0x0000_0040 | 0x0004_0000 | 0x0008_0000 | GENERIC_ALL_BIT;
+
+/// The same for a parent that is not a drive root: DELETE (0x10000) too, because a user holding it can
+/// rename that parent away and rebuild the install path (#46).
+pub(crate) const PARENT_NONROOT_MASK: u32 = PARENT_CONTROL_MASK | 0x0001_0000;
 
 /// The string form of a SID (`S-1-5-32-545`, ...).
 #[cfg(windows)]
@@ -507,10 +644,10 @@ fn sid_string(sid: *mut std::ffi::c_void) -> io::Result<String> {
     Ok(result)
 }
 
-/// True if the ACL has an ALLOWED ACE that is not inherit-only, grants a write-class right
-/// (or GENERIC_WRITE / GENERIC_ALL), and names a SID other than SYSTEM or Administrators.
+/// True if the ACL has an ALLOWED ACE that is not inherit-only, grants a right in `mask`, and names a
+/// SID other than SYSTEM, Administrators or TrustedInstaller.
 #[cfg(windows)]
-fn acl_grants_nonadmin_write(dacl: *mut windows_sys::Win32::Security::ACL) -> io::Result<bool> {
+fn acl_grants_nonadmin(dacl: *mut windows_sys::Win32::Security::ACL, mask: u32) -> io::Result<bool> {
     use std::ffi::c_void;
     use windows_sys::Win32::Security::{GetAce, ACCESS_ALLOWED_ACE, ACE_HEADER};
 
@@ -525,30 +662,42 @@ fn acl_grants_nonadmin_write(dacl: *mut windows_sys::Win32::Security::ACL) -> io
         let header = ace as *const ACE_HEADER;
         // SAFETY: GetAce returned a valid ACE, so its header is readable.
         let (ace_type, ace_flags) = unsafe { ((*header).AceType, (*header).AceFlags) };
-        if ace_flags & INHERIT_ONLY_ACE_FLAG != 0 {
-            continue;
-        }
-        if ace_type != ACCESS_ALLOWED_ACE_TYPE {
-            // Fail closed: an allow-type ACE this check does not parse (compound, object, callback,
-            // callback-object) or a type it does not know is treated as granting write.
-            if !ace_type_grants_nothing(ace_type) {
-                return Ok(true);
-            }
-            continue;
-        }
         let allowed = ace as *const ACCESS_ALLOWED_ACE;
-        // SAFETY: an ACCESS_ALLOWED ACE has this layout; the SID starts at `SidStart`.
-        let mask = unsafe { (*allowed).Mask };
-        if mask & (WRITE_CLASS_RIGHTS | GENERIC_WRITE_BIT | GENERIC_ALL_BIT) == 0 {
-            continue;
-        }
-        // SAFETY: `SidStart` is inside the ACE, which is inside the ACL.
-        let sid = unsafe { std::ptr::addr_of!((*allowed).SidStart) } as *mut c_void;
-        if !writer_is_trusted_sid(&sid_string(sid)?) {
+        // SAFETY: an ACCESS_ALLOWED ACE has this layout; the mask is read only when the type says so.
+        let ace_mask = if ace_type == ACCESS_ALLOWED_ACE_TYPE { unsafe { (*allowed).Mask } } else { 0 };
+        let grants = ace_grants_untrusted(ace_type, ace_flags, ace_mask, mask, || {
+            // SAFETY: `SidStart` is inside the ACE, which is inside the ACL.
+            let sid = unsafe { std::ptr::addr_of!((*allowed).SidStart) } as *mut c_void;
+            sid_string(sid)
+        })?;
+        if grants {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+/// The decision for one ACE, apart from reading it: true when it gives a principal other than SYSTEM,
+/// Administrators or TrustedInstaller a right in `mask`. `sid` is read only when the mask matches.
+/// Inherit-only ACEs do not apply to the object itself. An allow-type ACE this check cannot parse, or a
+/// type it does not know, counts as granting (fail closed).
+pub(crate) fn ace_grants_untrusted(
+    ace_type: u8,
+    ace_flags: u8,
+    ace_mask: u32,
+    mask: u32,
+    sid: impl FnOnce() -> io::Result<String>,
+) -> io::Result<bool> {
+    if ace_flags & INHERIT_ONLY_ACE_FLAG != 0 {
+        return Ok(false);
+    }
+    if ace_type != ACCESS_ALLOWED_ACE_TYPE {
+        return Ok(!ace_type_grants_nothing(ace_type));
+    }
+    if ace_mask & mask == 0 {
+        return Ok(false);
+    }
+    Ok(!writer_is_trusted_sid(&sid()?))
 }
 
 /// `NT SERVICE\TrustedInstaller`. Every folder under `C:\Program Files` carries a full-control ACE
@@ -569,7 +718,7 @@ pub(crate) fn ace_type_grants_nothing(ace_type: u8) -> bool {
 
 /// The DACL check for `p`. A NULL DACL grants everyone everything, so it counts as true.
 #[cfg(windows)]
-fn dacl_grants_nonadmin_write(p: &Path) -> io::Result<bool> {
+fn dacl_grants_nonadmin(p: &Path, mask: u32) -> io::Result<bool> {
     use std::ffi::c_void;
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
@@ -595,7 +744,7 @@ fn dacl_grants_nonadmin_write(p: &Path) -> io::Result<bool> {
     if status != 0 {
         return Err(io::Error::from_raw_os_error(status as i32));
     }
-    let result = if dacl.is_null() { Ok(true) } else { acl_grants_nonadmin_write(dacl) };
+    let result = if dacl.is_null() { Ok(true) } else { acl_grants_nonadmin(dacl, mask) };
     // SAFETY: `descriptor` came from GetNamedSecurityInfoW and is freed once; `dacl` is not used after this.
     unsafe {
         LocalFree(descriptor);
@@ -679,7 +828,7 @@ mod win_tests {
     }
 
     fn has_nonadmin_write_on(p: &Path) -> io::Result<bool> {
-        dacl_grants_nonadmin_write(p)
+        dacl_grants_nonadmin(p, ENTRY_WRITE_MASK)
     }
 
     #[test]
@@ -779,6 +928,12 @@ mod tests {
         swap_id_on: Option<PathBuf>,
         /// Tracks which paths have non-admin write permissions (for testing)
         nonadmin_write_on: Vec<PathBuf>,
+        /// Paths that give a non-admin WRITE_DAC, WRITE_OWNER or FILE_DELETE_CHILD.
+        nonadmin_control_on: Vec<PathBuf>,
+        /// Paths that give a non-admin DELETE only (a plain Modify ACE).
+        nonadmin_delete_on: Vec<PathBuf>,
+        /// Paths owned by TrustedInstaller: a parent may be, an entry in the install folder may not.
+        installer_owned: Vec<PathBuf>,
     }
 
     impl FakeFs {
@@ -869,6 +1024,19 @@ mod tests {
             } else {
                 Ok(false)
             }
+        }
+
+        fn owner_trusted_parent(&self, p: &Path) -> io::Result<bool> {
+            if self.installer_owned.iter().any(|i| i == p) {
+                return Ok(true);
+            }
+            self.owner_trusted(p)
+        }
+
+        fn has_nonadmin_control(&self, p: &Path, is_drive_root: bool) -> io::Result<bool> {
+            // A DELETE grant (a plain Modify) counts for every parent except a drive root.
+            let deletable = !is_drive_root && self.nonadmin_delete_on.iter().any(|c| c == p);
+            Ok(deletable || self.nonadmin_control_on.iter().any(|c| c == p))
         }
     }
 
@@ -1086,5 +1254,162 @@ mod tests {
         assert!(!has_write, "no non-admin write permissions");
         secure_home(&mut fs, Path::new(HOME)).unwrap();
         assert!(fs.touched(), "the tree was secured");
+    }
+
+    // ---- the shared install-folder check (#46) ----
+
+    const APP: &str = r"C:\Program Files\canvas-rgb";
+
+    fn app_path(rest: &str) -> String {
+        format!(r"{APP}\{rest}")
+    }
+
+    /// The default install as it is on a real PC: Windows' TrustedInstaller owns `C:\` and
+    /// `C:\Program Files`, Administrators own the install folder, all of it admin-only.
+    fn default_install() -> FakeFs {
+        let mut fs = FakeFs::default()
+            .with(r"C:\", dir(false))
+            .with(r"C:\Program Files", dir(false))
+            .with(APP, dir(true))
+            .with(&app_path("installer"), dir(true))
+            .with(&app_path(r"installer\setup-user.ps1"), file(true))
+            .with(&app_path(r"installer\lib.ps1"), file(true))
+            .with(&app_path("canvas-rgb.exe"), file(true))
+            .with(&app_path("canvas-rgb-svc.exe"), file(true))
+            .with(&app_path("openrgb"), dir(true))
+            .with(&app_path(r"openrgb\OpenRGB.exe"), file(true))
+            .with(&app_path(r"openrgb\plugins"), dir(true))
+            .with(&app_path(r"openrgb\plugins\a.dll"), file(true));
+        fs.installer_owned = vec![PathBuf::from(r"C:\"), PathBuf::from(r"C:\Program Files")];
+        fs
+    }
+
+    fn check_default(fs: &FakeFs) -> io::Result<()> {
+        check_install_folder(fs, Path::new(APP))
+    }
+
+    #[test]
+    fn the_default_install_folder_passes_even_though_trustedinstaller_owns_the_parents() {
+        check_default(&default_install()).unwrap();
+    }
+
+    #[test]
+    fn a_trustedinstaller_owner_is_fine_on_a_parent_but_not_on_an_entry_inside_the_install_folder() {
+        let mut fs = default_install();
+        // The entry rule stays SYSTEM and Administrators only.
+        fs.nodes.insert(PathBuf::from(app_path("canvas-rgb-svc.exe")), file(false));
+        let err = check_default(&fs).unwrap_err().to_string();
+        assert!(err.contains("canvas-rgb-svc.exe") && err.contains("owned by someone other"), "{err}");
+    }
+
+    /// Every way the install folder can be bad, each with the path the refusal must name.
+    #[test]
+    fn each_install_folder_failure_is_refused_and_names_its_path() {
+        type Bad = fn(&mut FakeFs) -> String;
+        let table: Vec<(&str, Bad, &str)> = vec![
+            ("the service exe is writable by a non-admin", |f| { let p = app_path("canvas-rgb-svc.exe"); f.nonadmin_write_on.push(p.clone().into()); p }, "write access"),
+            ("the service exe is owned by a user", |f| { let p = app_path("canvas-rgb-svc.exe"); f.nodes.insert(p.clone().into(), file(false)); p }, "owned by someone other"),
+            ("the service exe is missing", |f| { let p = app_path("canvas-rgb-svc.exe"); f.nodes.remove(Path::new(&p)); p }, "missing"),
+            ("a file deep in openrgb is writable", |f| { let p = app_path(r"openrgb\plugins\a.dll"); f.nonadmin_write_on.push(p.clone().into()); p }, "write access"),
+            ("a folder in openrgb is owned by a user", |f| { let p = app_path(r"openrgb\plugins"); f.nodes.insert(p.clone().into(), dir(false)); p }, "owned by someone other"),
+            ("openrgb holds a junction", |f| { let p = app_path(r"openrgb\plugins"); f.nodes.insert(p.clone().into(), link(true, true)); p }, "junction"),
+            ("the install folder is a junction", |f| { f.nodes.insert(APP.into(), link(true, true)); APP.to_string() }, "junction"),
+            ("a parent is a junction", |f| { let p = r"C:\Program Files".to_string(); f.nodes.insert(p.clone().into(), link(true, true)); p }, "junction"),
+            ("a parent is owned by a user", |f| { let p = r"C:\Program Files".to_string(); f.installer_owned.clear(); f.nodes.insert(p.clone().into(), dir(false)); p }, "owned by someone other"),
+            ("a parent lets a non-admin delete children or change its ACL", |f| { let p = r"C:\Program Files".to_string(); f.nonadmin_control_on.push(p.clone().into()); p }, "permissions, rename it or delete"),
+            ("the drive root lets a non-admin change its ACL", |f| { f.nonadmin_control_on.push(PathBuf::from(r"C:\")); r"C:\".to_string() }, "permissions, rename it or delete"),
+            ("a parent that is not a drive root gives a non-admin DELETE (a plain Modify ACE)", |f| { let p = r"C:\Program Files".to_string(); f.nonadmin_delete_on.push(p.clone().into()); p }, "choose a folder under Program Files or directly under a drive"),
+            ("installer\\ is writable", |f| { let p = app_path("installer"); f.nonadmin_write_on.push(p.clone().into()); p }, "write access"),
+            ("lib.ps1 is writable", |f| { let p = app_path(r"installer\lib.ps1"); f.nonadmin_write_on.push(p.clone().into()); p }, "write access"),
+            ("setup-user.ps1 is writable", |f| { let p = app_path(r"installer\setup-user.ps1"); f.nodes.insert(p.clone().into(), file(true)); f.nonadmin_write_on.push(p.clone().into()); p }, "write access"),
+            ("canvas-rgb.exe is writable", |f| { let p = app_path("canvas-rgb.exe"); f.nonadmin_write_on.push(p.clone().into()); p }, "write access"),
+            ("update-result.json is writable", |f| { let p = app_path("update-result.json"); f.nodes.insert(p.clone().into(), file(true)); f.nonadmin_write_on.push(p.clone().into()); p }, "write access"),
+            ("update-result.json is owned by a user", |f| { let p = app_path("update-result.json"); f.nodes.insert(p.clone().into(), file(false)); p }, "owned by someone other"),
+        ];
+        for (label, bad, expect) in table {
+            let mut fs = default_install();
+            let path = bad(&mut fs);
+            let err = check_default(&fs).expect_err(label).to_string();
+            assert!(err.contains(&path), "{label}: must name {path}: {err}");
+            assert!(err.contains(expect), "{label}: must say {expect:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_parent_that_is_missing_is_skipped_and_the_rest_still_checked() {
+        let mut fs = default_install();
+        fs.nodes.remove(Path::new(r"C:\Program Files"));
+        check_default(&fs).unwrap();
+    }
+
+    #[test]
+    fn the_install_check_changes_nothing() {
+        let fs = default_install();
+        let before = fs.snapshot();
+        check_default(&fs).unwrap();
+        assert!(!fs.touched() && fs.snapshot() == before);
+    }
+
+    /// The ACE table: (type, flags, ace mask, sid, mask asked, expected). The bits are read, not the ACE name.
+    #[test]
+    fn ace_table_decides_on_the_bits_and_the_sid() {
+        const USERS: &str = "S-1-5-32-545";
+        const AU: &str = "S-1-5-11";
+        const SYSTEM: &str = "S-1-5-18";
+        const BA: &str = "S-1-5-32-544";
+        const MODIFY: u32 = 0x1301bf; // a plain Modify ACE: has DELETE, no FILE_DELETE_CHILD
+        const READ_EXEC: u32 = 0x1200a9;
+        const INHERIT_ONLY: u8 = 0x08;
+        let rows: Vec<(u8, u8, u32, &str, u32, bool, &str)> = vec![
+            (0, 0, MODIFY, AU, PARENT_CONTROL_MASK, false, "Modify has no delete-child, WRITE_DAC or WRITE_OWNER (a drive root, which cannot be renamed)"),
+            (0, 0, MODIFY, AU, PARENT_NONROOT_MASK, true, "Modify has DELETE: a non-root parent could be renamed away"),
+            (0, 0, 0x10000, USERS, PARENT_NONROOT_MASK, true, "DELETE alone on a non-root parent"),
+            (0, 0, 0x10000, USERS, PARENT_CONTROL_MASK, false, "DELETE alone on a drive root"),
+            (0, 0, READ_EXEC, USERS, PARENT_NONROOT_MASK, false, "read and execute on a non-root parent"),
+            (0, 0, GENERIC_WRITE_BIT, AU, ENTRY_WRITE_MASK, true, "GENERIC_WRITE on an entry"),
+            (0, 0, 0x10000, AU, ENTRY_WRITE_MASK, true, "DELETE on an entry"),
+            (0, 0, MODIFY | 0x40, AU, PARENT_CONTROL_MASK, true, "Modify plus FILE_DELETE_CHILD"),
+            (0, 0, 0x40000, USERS, PARENT_CONTROL_MASK, true, "WRITE_DAC"),
+            (0, 0, 0x80000, USERS, PARENT_CONTROL_MASK, true, "WRITE_OWNER"),
+            (0, 0, GENERIC_ALL_BIT, AU, PARENT_CONTROL_MASK, true, "GENERIC_ALL"),
+            (0, 0, READ_EXEC, USERS, PARENT_CONTROL_MASK, false, "read and execute"),
+            (0, INHERIT_ONLY, 0x1f01ff, USERS, PARENT_CONTROL_MASK, false, "inherit-only never applies to the folder itself"),
+            (0, 0, 0x1f01ff, SYSTEM, PARENT_CONTROL_MASK, false, "SYSTEM"),
+            (0, 0, 0x1f01ff, BA, PARENT_CONTROL_MASK, false, "Administrators"),
+            (0, 0, 0x1f01ff, TRUSTED_INSTALLER_SID, PARENT_CONTROL_MASK, false, "TrustedInstaller"),
+            (0, 0, MODIFY, AU, ENTRY_WRITE_MASK, true, "Modify is write on an entry"),
+            (0, 0, READ_EXEC, USERS, ENTRY_WRITE_MASK, false, "read and execute is no write"),
+            (0, 0, 0x4, AU, ENTRY_WRITE_MASK, true, "FILE_ADD_SUBDIRECTORY is write on an entry"),
+            (1, 0, MODIFY, AU, ENTRY_WRITE_MASK, false, "a deny ACE grants nothing"),
+            (9, 0, 0, AU, ENTRY_WRITE_MASK, true, "an allow-type ACE this check cannot parse fails closed"),
+            (200, 0, 0, AU, ENTRY_WRITE_MASK, true, "an unknown ACE type fails closed"),
+        ];
+        for (ty, flags, ace_mask, sid, mask, want, why) in rows {
+            let got = ace_grants_untrusted(ty, flags, ace_mask, mask, || Ok(sid.to_string())).unwrap();
+            assert_eq!(got, want, "{why}");
+        }
+    }
+
+    #[test]
+    fn the_sid_is_read_only_when_the_mask_matches() {
+        let got = ace_grants_untrusted(0, 0, 0x1200a9, PARENT_CONTROL_MASK, || panic!("the SID must not be read"));
+        assert!(!got.unwrap());
+    }
+
+    #[test]
+    fn a_folder_directly_under_a_drive_passes_even_when_the_root_grants_modify() {
+        // D:\ grants Authenticated Users Modify (DELETE included); a drive root cannot be renamed.
+        let mut fs = FakeFs::default().with(r"D:\", dir(true)).with(r"D:\canvas-rgb", dir(true));
+        for (rel, is_dir) in [("installer", true), ("installer\\setup-user.ps1", false), ("installer\\lib.ps1", false), ("canvas-rgb.exe", false), ("canvas-rgb-svc.exe", false)] {
+            let path = format!(r"D:\canvas-rgb\{rel}");
+            fs.nodes.insert(PathBuf::from(path), if is_dir { dir(true) } else { file(true) });
+        }
+        fs.nonadmin_delete_on.push(PathBuf::from(r"D:\"));
+        check_install_folder(&fs, Path::new(r"D:\canvas-rgb")).unwrap();
+        // The same grant on a non-root parent is refused.
+        let mut under = FakeFs::default().with(r"D:\", dir(true)).with(r"D:\Apps", dir(true)).with(r"D:\Apps\canvas-rgb", dir(true));
+        under.nonadmin_delete_on.push(PathBuf::from(r"D:\Apps"));
+        let err = check_install_folder(&under, Path::new(r"D:\Apps\canvas-rgb")).unwrap_err().to_string();
+        assert!(err.contains(r"D:\Apps") && err.contains("rename it"), "{err}");
     }
 }
