@@ -33,9 +33,73 @@ pub type Builder = Arc<dyn Fn(&str, &str) -> Result<Box<dyn Effect>, String> + S
 pub fn html_builder() -> Builder {
     Arc::new(|id: &str, source: &str| {
         canvas_html::HtmlEffect::from_source(id, source, &Props::new())
-            .map(|effect| Box::new(effect) as Box<dyn Effect>)
+            .map(|effect| {
+                for warning in effect.warnings() {
+                    tracing::warn!(id, %warning, "a user effect loaded with a part of its file ignored");
+                }
+                Box::new(effect) as Box<dyn Effect>
+            })
             .map_err(|e| e.to_string())
     })
+}
+
+/// The builder that runs the same HTML effects for a library tile: a fixed seed, and no frame
+/// dropped for being slow.
+///
+/// The lights get [`html_builder`], whose seed comes from the clock (every run of an effect
+/// is a little different) and whose frames are dropped when they overrun the live deadline.
+/// A tile is rendered again and again, on any machine and under any load, so it needs a seed
+/// that does not move and frames that always finish. A frame that fails for any reason fails
+/// the tile render ([`TileHtml`]), so a tile is never a quietly different picture.
+pub fn html_builder_seeded(seed: u32) -> Builder {
+    Arc::new(move |id: &str, source: &str| {
+        canvas_html::HtmlEffect::from_source_seeded(id, source, &Props::new(), seed)
+            .map(|effect| {
+                for warning in effect.warnings() {
+                    tracing::warn!(id, %warning, "a user effect loaded with a part of its file ignored");
+                }
+                Box::new(TileHtml(effect.tile_mode())) as Box<dyn Effect>
+            })
+            .map_err(|e| e.to_string())
+    })
+}
+
+/// An HTML effect rendering a library tile. It runs as the lights would, except that a failed
+/// frame ends the render: the tile path reads [`canvas_html::HtmlEffect::errors`] after every
+/// step and stops with a [`crate::thumbnail::TileFailure`] when one appears.
+struct TileHtml(canvas_html::HtmlEffect);
+
+impl TileHtml {
+    fn fail_on_error(&self) {
+        if let Some(error) = self.0.errors().first() {
+            // `resume_unwind` does not run the panic hook, so a bad effect is not logged as a
+            // daemon panic; the render catches the payload and reports it.
+            // A frame stopped for running past its deadline is a timing outcome: the render is
+            // given up for now and tried again later, not for good.
+            std::panic::resume_unwind(Box::new(crate::thumbnail::TileFailure {
+                reason: format!("the script failed while the tile was drawn: {error}"),
+                load_dependent: self.0.timed_out(),
+            }));
+        }
+    }
+}
+
+impl Effect for TileHtml {
+    fn schema(&self) -> PropertySchema {
+        self.0.schema()
+    }
+
+    fn init(&mut self, props: &Props) {
+        self.0.init(props);
+        self.fail_on_error();
+    }
+
+    fn update(&mut self, dt: f32, canvas: &mut canvas_proto::traits::Canvas, inputs: &canvas_proto::traits::Inputs) {
+        // Every frame of this update is held to the time left in the render's budget.
+        self.0.set_give_up_at(crate::thumbnail::give_up_at());
+        self.0.update(dt, canvas, inputs);
+        self.fail_on_error();
+    }
 }
 
 /// The HTML effects that ship inside the daemon, as (file stem, source). Each one has the id
@@ -75,6 +139,9 @@ struct State {
 /// The user HTML effects found in the effects folder.
 pub struct UserEffects {
     builder: Builder,
+    /// The builder a library tile is rendered with: the same file, run with a fixed seed,
+    /// so a tile is the same picture every time it is rendered.
+    tile_builder: Builder,
     state: RwLock<State>,
     /// The effects shipped inside the daemon; see [`STOCK_EFFECTS`].
     stock: Vec<StockEffect>,
@@ -91,6 +158,20 @@ impl UserEffects {
     /// Like [`UserEffects::new`], with effects that ship inside the daemon. A stock effect
     /// that does not build is logged and left out.
     pub fn with_stock(builder: Builder, stock: &[(&str, &str)]) -> Self {
+        Self::build(builder.clone(), builder, stock)
+    }
+
+    /// Like [`UserEffects::with_stock`], with a builder of its own for library tiles: the
+    /// same file run with a fixed seed, so a tile is the same picture every time.
+    pub fn with_stock_and_tiles(
+        builder: Builder,
+        tile_builder: Builder,
+        stock: &[(&str, &str)],
+    ) -> Self {
+        Self::build(builder, tile_builder, stock)
+    }
+
+    fn build(builder: Builder, tile_builder: Builder, stock: &[(&str, &str)]) -> Self {
         let stock = stock
             .iter()
             .filter_map(|(stem, source)| {
@@ -110,6 +191,7 @@ impl UserEffects {
             .collect();
         Self {
             builder,
+            tile_builder,
             state: RwLock::new(State::default()),
             stock,
             generation: AtomicU64::new(0),
@@ -144,16 +226,27 @@ impl UserEffects {
     /// Builds a fresh instance of a loaded user effect. `None` when `id` is not a loaded
     /// user effect; the caller then tries the built-ins.
     pub fn create(&self, id: &str) -> Option<Result<Box<dyn Effect>, String>> {
-        let source = {
-            let state = read_lock(&self.state);
-            state
-                .loaded
-                .values()
-                .find(|e| e.schema.id == id)
-                .map(|e| e.source.clone())
-        }
-        .or_else(|| self.stock.iter().find(|e| e.schema.id == id).map(|e| e.source.clone()))?;
+        let source = self.source_of(id)?;
         Some((self.builder)(id, &source))
+    }
+
+    /// Builds a fresh instance of a user effect for a library tile: the same file, run
+    /// with the tile builder's fixed seed, so the tile is the same picture every time it
+    /// is rendered. `None` when `id` is not a loaded user effect.
+    pub fn create_for_tile(&self, id: &str) -> Option<Result<Box<dyn Effect>, String>> {
+        let source = self.source_of(id)?;
+        Some((self.tile_builder)(id, &source))
+    }
+
+    /// The source of a loaded or stock user effect.
+    fn source_of(&self, id: &str) -> Option<Arc<str>> {
+        let state = read_lock(&self.state);
+        state
+            .loaded
+            .values()
+            .find(|e| e.schema.id == id)
+            .map(|e| e.source.clone())
+            .or_else(|| self.stock.iter().find(|e| e.schema.id == id).map(|e| e.source.clone()))
     }
 
     /// The files that failed to parse at their last scan, with the error.
@@ -472,6 +565,7 @@ mod tests {
                     needs: Default::default(),
                     properties: Vec::new(),
                     presets: Vec::new(),
+                    thumbnail: None,
                 },
             }) as Box<dyn Effect>)
         })
@@ -721,6 +815,167 @@ mod tests {
             .collect();
         assert!(leftovers.is_empty(), "the temp files are gone: {leftovers:?}");
     }
+    /// An effect whose third frame throws.
+    const THROWS_IN_FRAME_THREE: &str = r##"<head><title>Throws</title></head>
+<body><canvas id="c" width="8" height="8"></canvas></body>
+<script>
+var n = 0;
+function draw() {
+  n++;
+  if (n === 3) { throw new Error("boom in frame three"); }
+  window.requestAnimationFrame(draw);
+}
+window.requestAnimationFrame(draw);
+</script>"##;
+
+    #[test]
+    fn a_tile_frame_that_throws_fails_the_tile_and_the_lights_carry_on() {
+        // The tile path: the render fails, and says why.
+        let mut tile = html_builder_seeded(1)("html:throws", THROWS_IN_FRAME_THREE).expect("the effect loads");
+        let error = crate::thumbnail::render(tile.as_mut(), &Props::new())
+            .expect_err("a tile whose frame throws is not rendered");
+        assert!(!error.depends_on_load(), "{error}");
+        assert!(error.to_string().contains("boom in frame three"), "{error}");
+
+        // The lights: the same frame is reported in the log and the effect carries on.
+        let mut lights = html_builder()("html:throws", THROWS_IN_FRAME_THREE).expect("the effect loads");
+        let mut canvas = canvas_proto::traits::Canvas::new(8, 8);
+        for _ in 0..10 {
+            lights.update(1.0 / 60.0, &mut canvas, &canvas_proto::traits::Inputs::default());
+        }
+    }
+
+    /// An effect whose second frame is slow: a long loop, far over the 100 ms live budget on any
+    /// machine. It paints red, then green when the slow frame finishes.
+    const SLOW_SECOND_FRAME: &str = r##"<head><title>Slow</title></head>
+<body><canvas id="c" width="8" height="8"></canvas></body>
+<script>
+var ctx = document.getElementById("c").getContext("2d");
+var frames = 0;
+function draw() {
+  frames++;
+  if (frames === 2) { var sum = 0; for (var i = 0; i < 20000000; i++) { sum += i % 7; } }
+  ctx.fillStyle = frames >= 2 ? "#00ff00" : "#ff0000";
+  ctx.fillRect(0, 0, 8, 8);
+  window.requestAnimationFrame(draw);
+}
+window.requestAnimationFrame(draw);
+</script>"##;
+
+    #[test]
+    fn a_library_tile_does_not_drop_a_slow_frame_and_the_lights_do() {
+        let paint_after_two_frames = |mut effect: Box<dyn Effect>| {
+            let mut canvas = Canvas::new(8, 8);
+            for _ in 0..2 {
+                effect.update(1.0 / 60.0, &mut canvas, &Inputs::default());
+            }
+            canvas.get(0, 0)
+        };
+        // The lights drop the slow frame (the live deadline) and keep the red one.
+        let lights = paint_after_two_frames(html_builder()("html:slow", SLOW_SECOND_FRAME).expect("loads"));
+        assert!(lights[0] > 0.9 && lights[1] < 0.1, "the lights kept the last good frame: {lights:?}");
+        // A tile finishes every frame, whatever the machine's load: the slow frame is green.
+        let tile = paint_after_two_frames(html_builder_seeded(1)("html:slow", SLOW_SECOND_FRAME).expect("loads"));
+        assert!(tile[1] > 0.9 && tile[0] < 0.1, "the tile dropped a slow frame: {tile:?}");
+    }
+
+    /// An effect whose frame never returns.
+    const NEVER_RETURNS: &str = r##"<head><title>Never</title></head>
+<body><canvas id="c" width="8" height="8"></canvas></body>
+<script>
+function draw() { while (true) {} }
+window.requestAnimationFrame(draw);
+</script>"##;
+
+    #[test]
+    fn a_tile_frame_that_ran_out_of_time_is_over_budget_and_retried_not_failed_for_good() {
+        let mut tile = html_builder_seeded(1)("html:never", NEVER_RETURNS).expect("the effect loads");
+        let started = std::time::Instant::now();
+        let error = crate::thumbnail::render_within(tile.as_mut(), &Props::new(), std::time::Duration::from_millis(400))
+            .expect_err("a frame that never returns ends the render");
+        let took = started.elapsed();
+        assert!(error.depends_on_load(), "a timeout is a timing outcome, retried later: {error:?}");
+        assert!(
+            matches!(error, crate::thumbnail::RenderError::OverBudget(_)),
+            "a timed-out tile frame is OverBudget, not Failed for good: {error:?}"
+        );
+        // The frame is held to the time the render has left, not to the 30 s frame budget.
+        assert!(took < std::time::Duration::from_secs(5), "the render ran for {took:?} on a 400 ms budget");
+    }
+
+    /// An effect whose every frame burns `BURN` loop iterations.
+    fn burning_frames(iterations: u64) -> String {
+        format!(
+            r##"<head><title>Burn</title></head>
+<body><canvas id="c" width="8" height="8"></canvas></body>
+<script>
+function draw() {{ var s = 0; for (var i = 0; i < {iterations}; i++) {{ s += i % 7; }} window.requestAnimationFrame(draw); }}
+window.requestAnimationFrame(draw);
+</script>"##
+        )
+    }
+
+    #[test]
+    fn a_tile_render_does_not_hold_its_slot_much_past_its_budget() {
+        // Calibrate: how long does one frame of a fixed loop take on this machine, right now?
+        let probe = 200_000u64;
+        let mut effect = html_builder_seeded(1)("html:burn", &burning_frames(probe)).expect("loads");
+        let mut canvas = Canvas::new(8, 8);
+        let started = std::time::Instant::now();
+        effect.update(1.0 / 60.0, &mut canvas, &Inputs::default());
+        let per_probe = started.elapsed().as_secs_f64().max(1e-4);
+        // Frames of about half a second each. A step of 1/15 s runs four of them, two seconds.
+        let frame_s = 0.5;
+        let iterations = (probe as f64 * frame_s / per_probe) as u64;
+
+        let budget = std::time::Duration::from_millis(700);
+        let mut tile = html_builder_seeded(1)("html:burn", &burning_frames(iterations)).expect("loads");
+        let started = std::time::Instant::now();
+        let error = crate::thumbnail::render_within(tile.as_mut(), &Props::new(), budget)
+            .expect_err("frames of half a second cannot finish a render in 700 ms");
+        let took = started.elapsed();
+        assert!(error.depends_on_load(), "{error:?}");
+        // Without a bound per frame, the first step runs its four frames (two seconds) before the
+        // budget is looked at.
+        assert!(
+            took < budget + std::time::Duration::from_millis(400),
+            "the render held its slot for {took:?} on a {budget:?} budget"
+        );
+    }
+
+    #[test]
+    fn a_library_tile_is_built_with_the_tile_builder() {
+        // The lights get the builder that seeds from the clock; a tile gets the seeded one,
+        // so a tile is the same picture every time it is rendered.
+        let calls: Arc<std::sync::Mutex<Vec<&'static str>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let make = |name: &'static str| {
+            let calls = calls.clone();
+            Arc::new(move |id: &str, _source: &str| {
+                calls.lock().unwrap().push(name);
+                Ok(Box::new(FakeHtml {
+                    schema: PropertySchema {
+                        id: id.to_string(),
+                        name: id.to_string(),
+                        description: String::new(),
+                        needs: Default::default(),
+                        properties: Vec::new(),
+                        presets: Vec::new(),
+                        thumbnail: None,
+                    },
+                }) as Box<dyn Effect>)
+            }) as Builder
+        };
+        let dir = TempDir::new("tile-builder");
+        dir.write("live.html", "Live\n<canvas></canvas>");
+        let effects = UserEffects::with_stock_and_tiles(make("lights"), make("tiles"), &[]);
+        effects.rescan(&dir.0);
+        effects.create("html:live").expect("a loaded effect").expect("the effect builds");
+        effects.create_for_tile("html:live").expect("a loaded effect").expect("the effect builds");
+        let calls = calls.lock().unwrap().clone();
+        assert!(calls.contains(&"lights"), "the effect on the lights was not built: {calls:?}");
+        assert!(calls.contains(&"tiles"), "the tile was not built with the tile builder: {calls:?}");
+    }
+
     #[test]
     fn the_stock_effects_are_listed_and_build_with_the_real_engine() {
         let effects = UserEffects::with_stock(html_builder(), STOCK_EFFECTS);

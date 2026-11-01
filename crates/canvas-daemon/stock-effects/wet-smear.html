@@ -1,6 +1,7 @@
 <head>
   <title>Wet Smear</title>
   <meta description="Wide loaded brushes drag thick pigment across the case, pick up the wet paint underneath and smear it into streaks that slowly blend." />
+  <meta thumbnail warm_up="10" loop="8" props="speed=100" />
   <meta property="ground" label="Ground" type="color" default="#0c1020" />
   <meta property="paint1" label="Paint 1" type="color" default="#2b3fe0" />
   <meta property="paint2" label="Paint 2" type="color" default="#e5337a" />
@@ -63,39 +64,71 @@ function noise1(x) {
   var a = N1[xi & 255], b = N1[(xi + 1) & 255];
   return a + (b - a) * u;
 }
-// Presents a coarse grid (gw x gh cells of r,g,b triples) as an 80x50 picture: bilinear upsample into
-// ImageData and one putImageData. The canvas is 80x50 and the engine scales it up to the lights' canvas.
-var PW = 80, PH = 50, IMG = null, PD = null, XI0 = [], XI1 = [], XWT = [], YI0 = [], YI1 = [], YWT = [];
+// Presents a coarse grid (gw x gh cells of r,g,b triples) as an 80x50 picture: a quadratic
+// B-spline upsample into ImageData and one putImageData. The canvas is 80x50 and the engine scales
+// it up to the lights' canvas.
+// A plain bilinear upsample leaves a half-pixel checkerboard on every soft edge: the weight
+// between two cells alternates from pixel to pixel, so a soft edge comes out as a row of
+// alternating pixels. A B-spline is smooth in its first derivative, so the edge comes out as a
+// soft line.
+var PW = 80, PH = 50, IMG = null, PD = null;
+var XC0 = [], XC1 = [], XC2 = [], XW0 = [], XW1 = [], XW2 = [];
+var YR0 = [], YR1 = [], YR2 = [], YW0 = [], YW1 = [], YW2 = [];
 function presentInit(gw, gh) {
-  var i, f, i0;
+  var i, f, i0, t;
   IMG = ctx.createImageData(PW, PH); PD = IMG.data;
   for (i = 0; i < PW * PH; i++) PD[i * 4 + 3] = 255;
+  // The three grid columns around each picture column, and their weights: the quadratic
+  // B-spline's weights for a sample at t between two cells are (1-t)^2/2, 1/2+t-t^2 and t^2/2.
   for (i = 0; i < PW; i++) {
-    f = (i + 0.5) * gw / PW - 0.5; if (f < 0) f = 0; i0 = f | 0;
-    XI0[i] = i0 * 3; XI1[i] = (i0 + 1 < gw ? i0 + 1 : gw - 1) * 3; XWT[i] = f - i0;
+    f = (i + 0.5) * gw / PW - 0.5; if (f < 0) f = 0; i0 = f | 0; t = f - i0;
+    XC0[i] = (i0 > 0 ? i0 - 1 : 0) * 3;
+    XC1[i] = i0 * 3;
+    XC2[i] = (i0 + 1 < gw ? i0 + 1 : gw - 1) * 3;
+    XW0[i] = 0.5 * (1 - t) * (1 - t);
+    XW1[i] = 0.5 + t - t * t;
+    XW2[i] = 0.5 * t * t;
   }
+  // The same, down the rows.
   for (i = 0; i < PH; i++) {
-    f = (i + 0.5) * gh / PH - 0.5; if (f < 0) f = 0; i0 = f | 0;
-    YI0[i] = i0 * gw * 3; YI1[i] = (i0 + 1 < gh ? i0 + 1 : gh - 1) * gw * 3; YWT[i] = f - i0;
+    f = (i + 0.5) * gh / PH - 0.5; if (f < 0) f = 0; i0 = f | 0; t = f - i0;
+    YR0[i] = (i0 > 0 ? i0 - 1 : 0) * gw * 3;
+    YR1[i] = i0 * gw * 3;
+    YR2[i] = (i0 + 1 < gh ? i0 + 1 : gh - 1) * gw * 3;
+    YW0[i] = 0.5 * (1 - t) * (1 - t);
+    YW1[i] = 0.5 + t - t * t;
+    YW2[i] = 0.5 * t * t;
   }
 }
 // Only the rows with Y % PARTS === part are worked out per call, so one frame pays a quarter of the
-// upsample; the sim moves slowly enough that a row a few frames old is not visible.
-var PARTS = 4, PART = 0;
-function present(ctx, buf, gw, gh) {
+// upsample. The four parts all read one snapshot of the grid, taken when part 0 runs: the picture is
+// up to three frames old, every row of it the same age. Reading the live grid made the rows of one
+// picture four different moments, and an edge that moves fast (the library tile runs the sim at twice
+// the default rate) came out as a comb, one tooth every few rows.
+var PARTS = 4, PART = 0, SNAP = null;
+function present(ctx, live, gw, gh) {
   if (!IMG) presentInit(gw, gh);
-  var X, Y, o, r0, r1, wy, wx, a0, a1, b0, b1, p, q;
+  if (!SNAP) SNAP = new Float32Array(live.length);
+  if (PART === 0) SNAP.set(live);
+  var buf = SNAP;
+  var X, Y, o, r0, r1, r2, wy0, wy1, wy2, p0, p1, p2, wx0, wx1, wx2, a0, a1, a2, b0, b1, b2, c0, c1, c2;
   for (Y = PART; Y < PH; Y += PARTS) {
     o = Y * PW * 4;
-    r0 = YI0[Y]; r1 = YI1[Y]; wy = YWT[Y];
+    r0 = YR0[Y]; r1 = YR1[Y]; r2 = YR2[Y]; wy0 = YW0[Y]; wy1 = YW1[Y]; wy2 = YW2[Y];
     for (X = 0; X < PW; X++) {
-      wx = XWT[X]; p = XI0[X]; q = XI1[X];
-      a0 = buf[r0 + p]; a1 = buf[r0 + q]; b0 = buf[r1 + p]; b1 = buf[r1 + q];
-      a0 += (a1 - a0) * wx; b0 += (b1 - b0) * wx; PD[o] = a0 + (b0 - a0) * wy;
-      a0 = buf[r0 + p + 1]; a1 = buf[r0 + q + 1]; b0 = buf[r1 + p + 1]; b1 = buf[r1 + q + 1];
-      a0 += (a1 - a0) * wx; b0 += (b1 - b0) * wx; PD[o + 1] = a0 + (b0 - a0) * wy;
-      a0 = buf[r0 + p + 2]; a1 = buf[r0 + q + 2]; b0 = buf[r1 + p + 2]; b1 = buf[r1 + q + 2];
-      a0 += (a1 - a0) * wx; b0 += (b1 - b0) * wx; PD[o + 2] = a0 + (b0 - a0) * wy;
+      p0 = XC0[X]; p1 = XC1[X]; p2 = XC2[X]; wx0 = XW0[X]; wx1 = XW1[X]; wx2 = XW2[X];
+      a0 = buf[r0 + p0] * wx0 + buf[r0 + p1] * wx1 + buf[r0 + p2] * wx2;
+      a1 = buf[r0 + p0 + 1] * wx0 + buf[r0 + p1 + 1] * wx1 + buf[r0 + p2 + 1] * wx2;
+      a2 = buf[r0 + p0 + 2] * wx0 + buf[r0 + p1 + 2] * wx1 + buf[r0 + p2 + 2] * wx2;
+      b0 = buf[r1 + p0] * wx0 + buf[r1 + p1] * wx1 + buf[r1 + p2] * wx2;
+      b1 = buf[r1 + p0 + 1] * wx0 + buf[r1 + p1 + 1] * wx1 + buf[r1 + p2 + 1] * wx2;
+      b2 = buf[r1 + p0 + 2] * wx0 + buf[r1 + p1 + 2] * wx1 + buf[r1 + p2 + 2] * wx2;
+      c0 = buf[r2 + p0] * wx0 + buf[r2 + p1] * wx1 + buf[r2 + p2] * wx2;
+      c1 = buf[r2 + p0 + 1] * wx0 + buf[r2 + p1 + 1] * wx1 + buf[r2 + p2 + 1] * wx2;
+      c2 = buf[r2 + p0 + 2] * wx0 + buf[r2 + p1 + 2] * wx1 + buf[r2 + p2 + 2] * wx2;
+      PD[o] = a0 * wy0 + b0 * wy1 + c0 * wy2;
+      PD[o + 1] = a1 * wy0 + b1 * wy1 + c1 * wy2;
+      PD[o + 2] = a2 * wy0 + b2 * wy1 + c2 * wy2;
       o += 4;
     }
   }
@@ -197,7 +230,9 @@ function step(S) {
         var aw = (w < 0 ? -w : w) / b.hw + (br - 0.5) * 0.3;
         if (aw > 1) continue;
         var a2 = aw * aw, u2 = au * au, rr = Math.sqrt(Math.sqrt(a2 * a2 + u2 * u2));
-        var wgt = smooth(1, 0.8, rr);
+        // The brush fades out over most of its width, so a stroke has a soft edge and not a
+        // hard rectangle: the paint thins out before the bristles leave the paper.
+        var wgt = smooth(1, 0.45, rr);
         var cov = clamp((load * 1.5 - br * 0.8) * 4, 0, 1) * wgt;
         if (cov <= 0) continue;
         k = clamp(((w / b.hw * 0.5 + 0.5) * K) | 0, 0, K - 1);

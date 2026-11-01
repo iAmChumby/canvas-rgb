@@ -76,6 +76,8 @@ impl Spiral {
             "Slow six",
             vec![("arms", number_kind(6.0)), ("speed", number_kind(10.0))],
         )
+        // Speed 10 turns once in exactly 2 s, the length of the tile, so the loop closes.
+        .thumbnail(crate::schema::recipe(1.0, 2.0, 0, vec![("speed", crate::schema::num(10.0))]))
         .build()
     }
 

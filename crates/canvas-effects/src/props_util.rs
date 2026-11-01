@@ -93,6 +93,18 @@ pub fn choice(schema: &PropertySchema, props: &Props, key: &str) -> String {
     }
 }
 
+/// The seed the library tile path asks for, if the props carry one.
+///
+/// The tile path renders every effect with a fixed seed (see [`crate::TILE_SEED`]), so a
+/// tile is the same picture every time it is rendered. An effect that draws from its own
+/// randomness starts its generator from this seed instead of the clock's.
+pub fn tile_seed(props: &Props) -> Option<u64> {
+    match props.get(crate::TILE_SEED_PROP) {
+        Some(PropValue::Number(n)) if n.is_finite() && *n >= 0.0 => Some(*n as u64),
+        _ => None,
+    }
+}
+
 /// Reads a hue property (degrees), falling back to the schema default.
 pub fn hue(schema: &PropertySchema, props: &Props, key: &str) -> f64 {
     let def = schema
@@ -167,6 +179,7 @@ mod tests {
                 },
             ],
             presets: vec![],
+            thumbnail: None,
         }
     }
 

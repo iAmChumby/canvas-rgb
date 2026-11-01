@@ -31,6 +31,21 @@ pub mod spiral;
 
 use canvas_proto::{Effect, EffectFactory};
 
+/// The seed a library tile is rendered with.
+///
+/// A tile has to be the same picture every time it is rendered: the library renders one
+/// when it opens, and the tile test renders every effect again and again. An effect that
+/// draws from the clock (Fire, Rain) would draw a different picture each time, so the
+/// tile path hands every effect this seed instead of the clock's.
+pub const TILE_SEED: u32 = 0x7A1E_5EED;
+
+/// The reserved property that carries [`TILE_SEED`] to an effect that draws from its own
+/// randomness.
+///
+/// It is not one of an effect's own properties, so it never shows in the editor and
+/// never reaches the lights: only the tile path sets it.
+pub const TILE_SEED_PROP: &str = "__tile_seed";
+
 /// The built-in effects, in `canvas_proto::EFFECT_IDS` order.
 ///
 /// These are the 11 effects that are ours. A user HTML effect is not one of them: it

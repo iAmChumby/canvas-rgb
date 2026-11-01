@@ -1,7 +1,7 @@
 //! A small builder for [`PropertySchema`], so each effect declares its properties once
 //! and reads clearly.
 
-use canvas_proto::props::Preset;
+use canvas_proto::props::{Preset, ThumbnailRecipe};
 use canvas_proto::{InputNeeds, PropKind, PropValue, PropertyDef, PropertySchema, Rgb8};
 use std::collections::BTreeMap;
 
@@ -13,6 +13,7 @@ pub struct SchemaBuilder {
     needs: InputNeeds,
     properties: Vec<PropertyDef>,
     presets: Vec<Preset>,
+    thumbnail: Option<ThumbnailRecipe>,
 }
 
 impl SchemaBuilder {
@@ -24,6 +25,7 @@ impl SchemaBuilder {
             needs: InputNeeds::default(),
             properties: Vec::new(),
             presets: Vec::new(),
+            thumbnail: None,
         }
     }
 
@@ -36,6 +38,12 @@ impl SchemaBuilder {
     /// Marks the effect as needing the audio spectrum.
     pub fn needs_audio(mut self) -> Self {
         self.needs.audio = true;
+        self
+    }
+
+    /// Sets how the effect's library tile is rendered.
+    pub fn thumbnail(mut self, recipe: ThumbnailRecipe) -> Self {
+        self.thumbnail = Some(recipe);
         self
     }
 
@@ -126,6 +134,36 @@ impl SchemaBuilder {
             needs: self.needs,
             properties: self.properties,
             presets: self.presets,
+            thumbnail: self.thumbnail,
         }
     }
+}
+
+/// A thumbnail recipe for an effect: seconds of warm-up, seconds the tile's loop covers,
+/// frames crossfaded from the loop's end into its start, and the showcase props laid over
+/// the schema defaults. See [`ThumbnailRecipe`].
+pub fn recipe(
+    warm_up_s: f64,
+    loop_s: f64,
+    crossfade_frames: u32,
+    props: Vec<(&str, PropValue)>,
+) -> ThumbnailRecipe {
+    ThumbnailRecipe {
+        warm_up_s,
+        loop_s,
+        crossfade_frames,
+        props: props.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        dark_on_purpose: None,
+        loop_jump_on_purpose: None,
+    }
+}
+
+/// A number value for a recipe's showcase props.
+pub fn num(value: f64) -> PropValue {
+    PropValue::Number(value)
+}
+
+/// A colour value (`#rrggbb`) for a recipe's showcase props.
+pub fn col(hex: &str) -> PropValue {
+    PropValue::Color(hex.parse().unwrap_or(Rgb8::BLACK))
 }

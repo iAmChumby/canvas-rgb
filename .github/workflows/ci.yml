@@ -78,6 +78,10 @@ jobs:
       - name: Paint effect tests (release)
         run: cargo test --release -p canvas-html --test effects
 
+      # The tile bar over the stock paint effects, for the same reason.
+      - name: Stock tile quality (release)
+        run: cargo test --release -p canvas-daemon --test tile_quality -- --include-ignored
+
       # Plain PowerShell scripts with their own asserts, not Pester (see installer/tests/_assert.ps1).
       - name: Installer tests
         shell: pwsh

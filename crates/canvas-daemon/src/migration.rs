@@ -346,6 +346,7 @@ mod tests {
                     needs: Default::default(),
                     properties: Vec::new(),
                     presets: Vec::new(),
+                    thumbnail: None,
                 },
             }) as Box<dyn canvas_proto::traits::Effect>)
         });

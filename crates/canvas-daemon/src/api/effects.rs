@@ -535,21 +535,113 @@ pub async fn thumbnail(
     if let Some(bytes) = app.thumbnails.get(generation, &schema.id) {
         return Ok(binary_response(&bytes));
     }
+    // A render that was given up is remembered: the library is told the tile was given up
+    // instead of asking for it again on every open.
+    if let Some(why) = app.thumbnails.failure(generation, &schema.id) {
+        return Err(ApiFailure::service_unavailable(given_up(&id, &why)));
+    }
 
     let user = app.user_effects.clone();
     let effect_id = schema.id.clone();
     let props = schema.defaults();
-    let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
-        let mut effect = crate::create_effect(&user, &effect_id)?;
-        Ok(crate::thumbnail::render(effect.as_mut(), &props))
+    let rendering = Arc::clone(&app);
+    let budget = app.thumbnails.render_budget();
+    // The permit is taken before the render and handed to the render task, so it is held
+    // for as long as the render runs: a request whose client goes away does not let a
+    // third render in while this one is still going.
+    let slot = app.thumbnails.acquire_slot().await;
+    let joined = tokio::task::spawn_blocking(move || -> TileOutcome {
+        let _slot = slot;
+        // Another render may have finished while this one waited for the slot.
+        if let Some(bytes) = rendering.thumbnails.get(generation, &effect_id) {
+            return TileOutcome::Tile(bytes);
+        }
+        if let Some(why) = rendering.thumbnails.failure(generation, &effect_id) {
+            return TileOutcome::AlreadyGivenUp(why);
+        }
+        // A render that panics is caught here, inside the task, so its failure is cached below
+        // like any other answer and before the slot is handed back. Caught after the task
+        // instead (from the join), the permit has already dropped during the unwind and a
+        // request that waited for the slot would find nothing cached and render the tile again.
+        let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::create_effect_for_tile(&user, &effect_id)
+                .map_err(crate::thumbnail::RenderError::from_build_error)
+                .and_then(|mut effect| crate::thumbnail::render_within(effect.as_mut(), &props, budget))
+        }));
+        let result = attempt.unwrap_or_else(|payload| {
+            Err(crate::thumbnail::RenderError::Failed(format!(
+                "the thumbnail render panicked: {}",
+                panic_message(payload)
+            )))
+        });
+        // The answer is cached before the slot is handed back (the permit drops when this
+        // closure returns). A request that waits for the slot then finds the tile, or the
+        // reason it was given up, and does not render the same tile again.
+        match result {
+            Ok(bytes) => {
+                let bytes = Arc::new(bytes);
+                rendering.thumbnails.put(generation, &effect_id, bytes.clone());
+                TileOutcome::Tile(bytes)
+            }
+            Err(error) => {
+                rendering.thumbnails.put_failure(generation, &effect_id, &error);
+                TileOutcome::Failed(error)
+            }
+        }
     })
-    .await
-    .map_err(|e| ApiFailure::internal(format!("the thumbnail render stopped: {e}")))?
-    .map_err(|e| ApiFailure::internal(format!("could not render the thumbnail: {e}")))?;
+    .await;
 
-    let bytes = Arc::new(bytes);
-    app.thumbnails.put(generation, &schema.id, bytes.clone());
-    Ok(binary_response(&bytes))
+    match joined {
+        Ok(TileOutcome::Tile(bytes)) => Ok(binary_response(&bytes)),
+        Ok(TileOutcome::AlreadyGivenUp(why)) => Err(ApiFailure::service_unavailable(given_up(&id, &why))),
+        // The render was given up, and the cache already remembers it (a failure of the effect
+        // until the effect changes, a timeout for a while), so the next open of the library does
+        // not render it again for the whole budget; the answer says what happened instead of
+        // being a bare 500.
+        Ok(TileOutcome::Failed(error)) => Err(ApiFailure::service_unavailable(given_up(&id, error.reason()))),
+        // The task panics only if something outside the render does (the cache write, say), or
+        // the runtime dropped it. A render's own panic is caught inside the task and cached
+        // there; this is the fallback, and it also remembers the failure.
+        Err(error) => {
+            let error = crate::thumbnail::RenderError::Failed(render_task_failure(error));
+            app.thumbnails.put_failure(generation, &schema.id, &error);
+            Err(ApiFailure::service_unavailable(given_up(&id, error.reason())))
+        }
+    }
+}
+
+/// How a tile render ended, inside the blocking task.
+enum TileOutcome {
+    /// The tile, rendered and cached (or found in the cache after the wait for the slot).
+    Tile(Arc<Vec<u8>>),
+    /// The render was given up just now, and the reason is cached.
+    Failed(crate::thumbnail::RenderError),
+    /// Another request gave this tile up while this one waited for the slot; the cache
+    /// already holds the reason.
+    AlreadyGivenUp(String),
+}
+
+/// The answer for a tile that was given up. `why` is the bare reason, so the sentence is
+/// built in one place and never carries its own prefix twice.
+fn given_up(id: &str, why: &str) -> String {
+    format!("the tile for {id} was given up: {why}")
+}
+
+/// Why the render task itself ended without an answer: it panicked, or the runtime dropped it.
+fn render_task_failure(error: tokio::task::JoinError) -> String {
+    match error.try_into_panic() {
+        Ok(payload) => format!("the thumbnail render panicked: {}", panic_message(payload)),
+        Err(error) => format!("the thumbnail render stopped: {error}"),
+    }
+}
+
+/// The text of a panic payload.
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|m| (*m).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a panic with a payload that is not text".to_string())
 }
 
 fn binary_response(bytes: &[u8]) -> axum::response::Response {
