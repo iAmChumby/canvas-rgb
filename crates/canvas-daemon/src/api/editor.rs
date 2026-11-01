@@ -115,8 +115,10 @@ async fn preview(
         let _slot = slot;
         // The same build the lights use, so the preview is judged by the runtime that will
         // run it.
-        let mut effect = crate::user_effects::html_effect(&id, &html)
-            .map_err(|e| ApiFailure::validation(crate::user_effects::load_error_sentence(&e)))?;
+        let mut effect = crate::user_effects::html_effect(&id, &html).map_err(|error| {
+            let (line, column) = crate::user_effects::error_position(&error);
+            ApiFailure::validation(crate::user_effects::load_error_sentence(&error)).at(line, column)
+        })?;
         let schema = effect.schema();
         let thumbnail = crate::thumbnail::render(&mut effect, &props).map_err(|e| {
             ApiFailure::service_unavailable(format!("the preview was given up: {}", e.reason()))
@@ -132,10 +134,22 @@ async fn preview(
         if crate::thumbnail::body_is_flat(&thumbnail) {
             warnings.push(crate::thumbnail::FLAT_COLOUR.to_string());
         }
+        let errors = effect
+            .errors()
+            .iter()
+            .map(|message| {
+                let (line, column) = crate::user_effects::error_position(message);
+                canvas_proto::api::EffectError {
+                    message: message.clone(),
+                    line,
+                    column,
+                }
+            })
+            .collect();
         Ok(EffectPreviewResponse {
             schema,
             source_hash,
-            errors: effect.errors().to_vec(),
+            errors,
             warnings,
             thumbnail: preview_base64(&thumbnail),
         })
@@ -184,7 +198,9 @@ pub async fn put_draft(
     if let Err(error) = crate::draft::put(&app, &request.html, &request.props).await {
         return Err(match error {
             crate::draft::PutError::Build(message) => {
+                let (line, column) = crate::user_effects::error_position(&message);
                 ApiFailure::validation(crate::user_effects::load_error_sentence(&message))
+                    .at(line, column)
             }
             crate::draft::PutError::Internal(message) => ApiFailure::internal(message),
         });

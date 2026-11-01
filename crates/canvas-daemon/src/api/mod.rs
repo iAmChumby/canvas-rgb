@@ -118,16 +118,27 @@ pub struct ApiFailure {
     pub message: String,
     /// A `Retry-After` header, in seconds, when the answer says to try again later.
     pub retry_after: Option<u64>,
+    /// The line in a draft's script, when the failure is the runtime refusing it.
+    pub line: Option<u32>,
+    /// The column, when the runtime gave one.
+    pub column: Option<u32>,
 }
 
 impl ApiFailure {
     pub fn new(status: axum::http::StatusCode, code: &'static str, message: impl Into<String>) -> Self {
-        Self { status, code, message: message.into(), retry_after: None }
+        Self { status, code, message: message.into(), retry_after: None, line: None, column: None }
     }
 
     /// Adds `Retry-After: <seconds>` to the answer.
     pub fn with_retry_after(mut self, seconds: u64) -> Self {
         self.retry_after = Some(seconds);
+        self
+    }
+
+    /// Adds the runtime's position to the answer, for the editor's error gutter.
+    pub fn at(mut self, line: Option<u32>, column: Option<u32>) -> Self {
+        self.line = line;
+        self.column = column;
         self
     }
 
@@ -177,7 +188,8 @@ impl axum::response::IntoResponse for ApiFailure {
         let body = canvas_proto::api::ApiError {
             error: self.code.to_string(),
             message: self.message,
-            ..Default::default()
+            line: self.line,
+            column: self.column,
         };
         let mut response = (self.status, axum::Json(body)).into_response();
         if let Some(seconds) = self.retry_after {

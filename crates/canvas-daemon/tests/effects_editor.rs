@@ -379,21 +379,15 @@ async fn a_script_that_throws_is_reported_with_its_loop() {
     let response = post_preview(router, preview_body(source, serde_json::json!({}))).await;
     assert_eq!(response.status(), StatusCode::OK, "the loop is still served");
     let answer = json(response).await;
-    let errors: Vec<String> = answer["errors"]
-        .as_array()
-        .expect("errors")
-        .iter()
-        .filter_map(|e| e.as_str().map(str::to_string))
-        .collect();
+    let errors = answer["errors"].as_array().expect("errors");
     assert!(!errors.is_empty(), "the thrown error is reported: {answer}");
     assert!(
-        errors.iter().any(|e| e.contains("notAFunction")),
+        errors.iter().any(|e| e["message"].as_str().unwrap_or_default().contains("notAFunction")),
         "the error names what threw: {errors:?}"
     );
-    assert!(
-        errors.iter().any(|e| e.contains("eval_script:") && e.contains(':')),
-        "the runtime's line is kept: {errors:?}"
-    );
+    let first = errors.first().expect("one error");
+    assert_eq!(first["line"], serde_json::json!(7), "the runtime's line is structured: {first}");
+    assert_eq!(first["column"], serde_json::json!(5), "and its column: {first}");
     let loop_bytes = thumbnail(&answer);
     assert_eq!(loop_bytes.len(), 6 + 24 * 64 * 40 * 3, "the last good frame is still a loop");
 }
@@ -823,14 +817,9 @@ async fn a_frame_that_never_returns_is_stopped_and_the_api_still_answers() {
         .expect("the task ends");
     assert_eq!(response.status(), StatusCode::OK, "the last good loop is still served");
     let answer = json(response).await;
-    let errors: Vec<String> = answer["errors"]
-        .as_array()
-        .expect("errors")
-        .iter()
-        .filter_map(|e| e.as_str().map(str::to_string))
-        .collect();
+    let errors = answer["errors"].as_array().expect("errors");
     assert!(
-        errors.iter().any(|e| e.contains("ran longer than")),
+        errors.iter().any(|e| e["message"].as_str().unwrap_or_default().contains("ran longer than")),
         "the frame deadline is reported: {errors:?}"
     );
     assert_eq!(thumbnail(&answer).len(), 6 + 24 * 64 * 40 * 3);
@@ -1240,4 +1229,15 @@ async fn a_put_after_the_lease_starts_a_new_draft_with_the_current_prior() {
         Some("gradient"),
         "the new draft's prior is the effect in force when it started"
     );
+}
+
+#[tokio::test]
+async fn a_draft_put_with_a_syntax_error_carries_its_line() {
+    let broken = "<head><title>Syntax</title></head><body><canvas id=\"c\"></canvas></body><script>\nvar c = document.getElementById('c');\nvar ctx = c.getContext('2d');\nvar = ;\n</script>";
+    let (router, _app, _engine, _home, _folder, _clock) = build_with_clock();
+    let response = put_draft(router, broken, serde_json::json!({})).await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = json(response).await;
+    assert_eq!(body["line"], serde_json::json!(4), "the 422 carries the line: {body}");
+    assert_eq!(body["column"], serde_json::json!(5), "and the column: {body}");
 }

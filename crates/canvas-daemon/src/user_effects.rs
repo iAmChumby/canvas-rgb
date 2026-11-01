@@ -42,6 +42,27 @@ pub fn source_hash(source: &str) -> String {
     format!("{hash:016x}")
 }
 
+/// The runtime's position in a draft, from its own message: the `eval_script:<line>:<col>` (or
+/// `eval_script:<line>`) a thrown script puts in its stack. `(None, None)` when it gave none.
+///
+/// QuickJS writes `at draw (eval_script:7:5)` for a callback and `at eval_script:4:5` for a
+/// syntax error; the editor's gutter reads the numbers, never the text.
+pub fn error_position(error: &str) -> (Option<u32>, Option<u32>) {
+    let Some(at) = error.find("eval_script:") else {
+        return (None, None);
+    };
+    let rest = &error[at + "eval_script:".len()..];
+    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    let Ok(line) = rest[..end].parse::<u32>() else {
+        return (None, None);
+    };
+    let column = rest[end..].strip_prefix(':').and_then(|after| {
+        let end = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+        after[..end].parse::<u32>().ok()
+    });
+    (Some(line), column)
+}
+
 /// The sentence a draft that failed to build gets in an API answer.
 ///
 /// A load that ran out of time says how busy the machine was, not what the draft is, so it is
@@ -1471,6 +1492,20 @@ mod tests {
             effects.source_and_file_name("html:stock-one").expect("a source");
         assert_eq!(&*source, "Mine\n<canvas></canvas>");
         assert_eq!(file_name, "stock-one.html");
+    }
+
+    /// The runtime's `eval_script:<line>:<col>` is read into numbers, and a message without
+    /// one gives none.
+    #[test]
+    fn the_runtime_position_is_read_from_its_message() {
+        assert_eq!(
+            error_position("script: Error: boom at draw (eval_script:7:5)"),
+            (Some(7), Some(5))
+        );
+        assert_eq!(error_position("script: SyntaxError at eval_script:4:5"), (Some(4), Some(5)));
+        assert_eq!(error_position("at eval_script:12"), (Some(12), None));
+        assert_eq!(error_position("parse: no script"), (None, None));
+        assert_eq!(error_position("eval_script:"), (None, None));
     }
 
     /// The source hash is stable, changes with the text, and has one shape.

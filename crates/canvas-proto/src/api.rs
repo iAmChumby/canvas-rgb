@@ -138,6 +138,15 @@ pub struct ApiError {
     /// One of [`error_codes`].
     pub error: String,
     pub message: String,
+    /// For an effect that failed to load (a preview or a draft): the line in its script, when
+    /// the runtime gave one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub line: Option<u32>,
+    /// The column, when the runtime gave one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub column: Option<u32>,
 }
 
 pub mod error_codes {
@@ -430,6 +439,25 @@ pub struct EffectPreviewRequest {
     pub props: Props,
 }
 
+/// One error the runtime reported while the draft was parsed or drawn.
+///
+/// `message` is the runtime's own text, unchanged; `line` and `column` are the position it gave
+/// (its `eval_script:<line>:<col>`), so the editor can mark the gutter without parsing the
+/// message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct EffectError {
+    pub message: String,
+    /// The line in the draft's script, when the runtime gave one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub line: Option<u32>,
+    /// The column, when the runtime gave one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub column: Option<u32>,
+}
+
 /// The preview of a draft: its schema, what the runtime reported, and its loop.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -444,7 +472,7 @@ pub struct EffectPreviewResponse {
     /// What the runtime reported while the draft was parsed and drawn. A preview with errors still
     /// carries the loop: the last good frame stays drawn, so the editor can show it while it
     /// says what failed.
-    pub errors: Vec<String>,
+    pub errors: Vec<EffectError>,
     /// The check's warnings: a picture that does not move, one that is one flat colour, and
     /// anything the file declared that the loader ignored.
     pub warnings: Vec<String>,

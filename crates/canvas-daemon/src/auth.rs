@@ -34,7 +34,7 @@ fn error_response(
     message: &str,
     origin: Option<&str>,
 ) -> Response {
-    let body = ApiError { error: code.to_string(), message: message.to_string() };
+    let body = ApiError { error: code.to_string(), message: message.to_string(), ..Default::default() };
     let mut response = (status, axum::Json(body)).into_response();
     // A 403 must never be cached by anything.
     response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
