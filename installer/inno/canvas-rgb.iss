@@ -116,7 +116,8 @@ const
   // {app}. Exits 1 on a junction, an owner other than SYSTEM or Administrators, a NULL permission list, or a
   // write right given to anyone else. The install-folder tests run this very text on throwaway folders.
   AppCheckScript = '$k = ''S-1-5-18'',''S-1-5-32-544''; $t = ''S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464''; $w = 0x4 -bor 0x2 -bor 0x10 -bor 0x40 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x40000000 -bor 0x10000000; $r = ([IO.DirectoryInfo]''%APP%'').FullName.TrimEnd(''\''); $bad = 0; foreach ($f in $r, ($r + ''\installer''), ($r + ''\installer\uninstall-elev'' + ''ated.ps1''), ($r + ''\installer\lib.ps1''), ($r + ''\installer\uninstall-user.ps1''), ($r + ''\canvas-rgb-svc.exe'')) { if (-not ([IO.File]::Exists($f) -or [IO.Directory]::Exists($f))) { continue }; if ([IO.File]::GetAttributes($f) -band 0x400) { $bad = 1 }; $a = Get-Acl -LiteralPath $f; if ($a.GetSecurityDescriptorSddlForm(''Access'') -eq '''') { $bad = 1 }; if ($k -notcontains $a.GetOwner([Security.Principal.SecurityIdentifier]).Value) { $bad = 1 }; foreach ($x in $a.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) { if ($x.AccessControlType -eq ''Allow'' -and -not ($x.PropagationFlags -band 2) -and (([int]$x.FileSystemRights -band $w) -ne 0) -and ($k + $t) -notcontains $x.IdentityReference.Value) { $bad = 1 } } }; exit($bad)';
-  var
+
+var
   SignalRgbPage: TInputOptionWizardPage;
   PawnChoicePage: TInputOptionWizardPage;
   PawnFilePage: TInputFileWizardPage;
