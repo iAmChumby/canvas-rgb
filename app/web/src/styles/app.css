@@ -2287,10 +2287,17 @@ button.chip:hover {
   padding: var(--s1) 0;
 }
 
-/* The search gives the row its room back, so the failed key stays on it. */
+/* The search keeps room for its whole placeholder: when the failed key does not fit beside it,
+   the toolbar wraps and the key takes the next row. */
 .rd-effects .effect-toolbar .effect-search {
-  flex: 1 1 120px;
-  min-width: 120px;
+  flex: 1 1 160px;
+  min-width: 160px;
+}
+
+/* A tile's name has the tile's whole width but for a small inset, so a long name ("Screen
+   Ambience") shows whole at the compact tile size. */
+.rd-effects .effect-card-meta {
+  padding: var(--s2);
 }
 
 /* The failed-parse key: the app's own warn tone. */
