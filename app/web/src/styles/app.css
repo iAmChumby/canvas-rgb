@@ -668,6 +668,10 @@ html[data-motion="reduced"] *::after {
 
 .rd-title h1 {
   margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font: 600 var(--t20) / 1 var(--fu);
   color: var(--ink);
   letter-spacing: -0.01em;
@@ -3815,12 +3819,45 @@ button.chip:hover {
     flex: 0 0 auto;
   }
 
-  /* The phone strip: one row. The brand, the page's title, how it is going, the page's own
-     actions and the control. */
-  .strip-now,
+  /* The phone strip: one row. The brand, the page's title, what is playing, how it is going,
+     the page's own actions and the control. Now playing is the one that gives way: its name
+     shrinks to its colour when the row is full (R3: the strip carries it below 1280). */
   .rd-context,
   .strip-mark-text {
     display: none;
+  }
+
+  .strip-now {
+    display: inline-flex;
+    overflow: hidden;
+  }
+
+  /* The name shows on every page here, whatever the page's own actions leave room for. */
+  .strip-inner:has(.rd-actions) .strip-now-text {
+    display: inline-flex;
+  }
+
+  /* The page's title and its actions keep their words; the brand mark makes room when the page
+     brings actions of its own. */
+  .strip-inner:has(.rd-actions) .strip-brand {
+    display: none;
+  }
+
+  .rd-title,
+  .rd-actions,
+  .strip-controls,
+  .strip-mark {
+    flex: none;
+  }
+
+  /* The profile picker and the like are tighter in the strip on a phone. */
+  .rd-actions {
+    gap: var(--s1);
+  }
+
+  .rd-actions .seg-item {
+    padding-left: var(--s2);
+    padding-right: var(--s2);
   }
 
   .rd-actions {
