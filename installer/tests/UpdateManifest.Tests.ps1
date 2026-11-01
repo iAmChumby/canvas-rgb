@@ -217,6 +217,23 @@ function Get-WorkflowViolations {
     return $found
 }
 
+# The secret violations in a workflow's text: a job other than the sign job that names a
+# secret. Any form of the secrets context counts, under any key: env, with, run or a job key.
+# A comment cannot make a secret reach a job, so comments are not read.
+function Get-SecretViolations {
+    param([string]$Text)
+    $info = Get-WorkflowJobsFromText $Text
+    $found = @()
+    foreach ($name in $info.Jobs.Keys) {
+        if ($name -eq 'sign') { continue }
+        foreach ($line in ($info.Jobs[$name] -split "`n")) {
+            if ($line.TrimStart().StartsWith('#')) { continue }
+            if ($line -match '(?i)secrets') { $found += "job [$name] names a secret: [$($line.Trim())]" }
+        }
+    }
+    return $found
+}
+
 # Runs a shell script with Git for Windows' bash, the way GitHub runs a bash step by default:
 # --noprofile --norc -eo pipefail. The publish job runs on ubuntu-latest, not Windows, so this is a
 # proxy for it (the same bash, the same flags, a different OS); the real run is the CI release. Bounded:
@@ -769,6 +786,29 @@ try {
             Assert-True (@(Get-WorkflowViolations $mutated).Count -gt 0) "variant [$k] is a violation"
         }
         Assert-Equal @(Get-WorkflowViolations $base).Count 0 'the unmutated workflow has none'
+    }
+    Test-Case 'release workflow: only the sign job may name a secret' {
+        # The key is the one secret the release signs with. Any other secret, in any form and
+        # under any key, must not reach the build or the publish job: toJSON(secrets) hands over
+        # every secret there is, and a publish step that echoes one puts it in the log.
+        $violations = @(Get-SecretViolations (Get-Content -LiteralPath $workflowPath -Raw))
+        Assert-Equal $violations.Count 0 "a secret outside the sign job:`n$($violations -join "`n")"
+        $info = Get-WorkflowJobs $workflowPath
+        Assert-True ($info.Jobs['sign'] -match '(?i)secrets\.') 'the sign job still reads its secret'
+    }
+    Test-Case 'release workflow: the secrets check catches a secret in any job and any key' {
+        $base = (Get-WorkflowJobsFromText (Get-Content -LiteralPath $workflowPath -Raw)).Text
+        $variants = [ordered]@{
+            'toJSON(secrets) in a publish env'     = { param($t) $t.Replace("      - name: Build the site`n        env:`n", "      - name: Build the site`n        env:`n          ALL_SECRETS: `${{ toJSON(secrets) }}`n") }
+            'secrets.UPDATE_SIGNING_KEY in a with' = { param($t) $t.Replace("        with:`n          files: |`n", "        with:`n          key: `${{ secrets.UPDATE_SIGNING_KEY }}`n          files: |`n") }
+            'secrets.GITHUB_TOKEN in a build step' = { param($t) $t.Replace("      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4`n        with:`n          persist-credentials: false`n`n", "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4`n        with:`n          persist-credentials: false`n          token: `${{ secrets.GITHUB_TOKEN }}`n`n") }
+        }
+        foreach ($k in $variants.Keys) {
+            $mutated = & $variants[$k] $base
+            Assert-True ($mutated -ne $base) "variant [$k] changed the workflow text"
+            Assert-True (@(Get-SecretViolations $mutated).Count -gt 0) "variant [$k] is a violation"
+        }
+        Assert-Equal @(Get-SecretViolations $base).Count 0 'the unmutated workflow has none'
     }
     Test-Case 'release workflow: the notes check step runs under bash, in the repository root' {
         $info = Get-WorkflowJobs $workflowPath
