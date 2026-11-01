@@ -1803,6 +1803,9 @@ button.chip:hover {
 /* The frame: the desk fills it and the desk's own toolbar sits along its bottom edge, inside
    the frame. */
 .rd-layout .rd-lay-stage-frame {
+  /* The frame is the container the desk's toolbar answers to: what fits on it depends on the
+     frame's own width, not on the window's. */
+  container: lay-stage / inline-size;
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -1832,6 +1835,9 @@ button.chip:hover {
   padding: var(--s2);
   border-top: 1px solid var(--line);
   background: var(--panel);
+  /* Nothing overlaps: a bar that is too narrow for its keys wraps them. */
+  flex-wrap: wrap;
+  row-gap: var(--s2);
 }
 
 /* The desk's own settings keep their own row in the bar: they never wrap over one another. */
@@ -1851,6 +1857,55 @@ button.chip:hover {
 
 .rd-layout .rd-lay-stage-frame .stage-toolbar .seg-item {
   white-space: nowrap;
+}
+
+/* The Render key: the two settings folded into one, for a desk too narrow to hold both
+   segments beside the other keys. */
+.rd-layout .rd-lay-render-key {
+  display: none;
+  flex: none;
+}
+
+@container lay-stage (max-width: 779px) {
+  .rd-layout .rd-lay-seg-bar {
+    display: none;
+  }
+
+  .rd-layout .rd-lay-render-key {
+    display: inline-flex;
+  }
+}
+
+/* What the Render key opens: each setting, with its note. The popover is drawn at the end of the
+   document, so these rules do not hang under the page. */
+.rd-lay-render-pop {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  width: 280px;
+  max-width: 100%;
+}
+
+.rd-lay-render-pop-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+}
+
+.rd-lay-render-pop-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+}
+
+.rd-lay-render-pop-note {
+  margin: 0;
+}
+
+/* The note is on its own line here, so the segment's tooltip has nothing to add. */
+.rd-lay-render-pop .tip-bubble {
+  display: none;
 }
 
 /* The inspector: the unfinished work first, then the parts. */
@@ -1941,16 +1996,11 @@ button.chip:hover {
   }
 }
 
-/* compact: a narrower inspector, and the desk's toolbar takes two rows rather than none of
-   its keys fit. */
+/* compact: a narrower inspector. The desk's toolbar folds its two settings into the Render key
+   by the width of the desk's own frame (above), not by the window's. */
 @container page (max-width: 999px) {
   .rd-layout .rd-lay-grid {
     grid-template-columns: minmax(0, 1fr) 280px;
-  }
-
-  /* The canvas mode on the first row, the desk's own settings on the second. */
-  .rd-layout .rd-lay-stage-frame .stage-segs {
-    flex-wrap: wrap;
   }
 }
 
@@ -1992,7 +2042,8 @@ button.chip:hover {
   }
 
   /* The desk's own settings are in the Render pane here, not in the desk's toolbar. */
-  .rd-layout .rd-lay-seg-bar {
+  .rd-layout .rd-lay-seg-bar,
+  .rd-layout .rd-lay-render-key {
     display: none;
   }
 

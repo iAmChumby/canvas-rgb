@@ -17,6 +17,7 @@ import {
   MagicWand,
   Plus,
   Rectangle,
+  SlidersHorizontal,
   X,
 } from "@phosphor-icons/react";
 import { Button, IconButton, Swap } from "@/components/Button";
@@ -464,37 +465,46 @@ export function LayoutView() {
     });
   }, []);
 
+  // On a narrow desk the two settings fold into one Render key that opens them.
+  const renderKeyRef = useRef<HTMLSpanElement>(null);
+  const [renderOpen, setRenderOpen] = useState(false);
   /**
    * The desk's own settings: how much of the desk the effect is drawn at, and how each LED
    * reads the picture. They sit in the desk's toolbar on a desktop and in the Render pane on a
    * phone, and their notes are their tooltips (R8).
    */
+  const renderScaleSeg = draft ? (
+    <Tooltip label={renderNote.text} className="rd-lay-seg-tip rd-lay-seg-render">
+      <Segmented<RenderScaleKey>
+        label="How much of the desk the effect is drawn at"
+        value={`${draft.render_scale}` as RenderScaleKey}
+        options={[
+          { value: "25", label: "¼" },
+          { value: "50", label: "½" },
+          { value: "100", label: "All" },
+        ]}
+        onChange={(v) => commit((l) => ({ ...l, render_scale: Number(v) as RenderScale }))}
+      />
+    </Tooltip>
+  ) : null;
+  const samplingSeg = draft ? (
+    <Tooltip label={samplingNote.text} className="rd-lay-seg-tip rd-lay-seg-sampling">
+      <Segmented<SamplingMode>
+        label="How each LED reads the picture"
+        value={draft.sampling}
+        options={[
+          { value: "nearest", label: "1" },
+          { value: "bilinear", label: "4" },
+          { value: "area_average", label: "All px" },
+        ]}
+        onChange={(v) => commit((l) => ({ ...l, sampling: v }))}
+      />
+    </Tooltip>
+  ) : null;
   const renderControls = draft ? (
     <>
-      <Tooltip label={renderNote.text} className="rd-lay-seg-tip rd-lay-seg-render">
-        <Segmented<RenderScaleKey>
-          label="How much of the desk the effect is drawn at"
-          value={`${draft.render_scale}` as RenderScaleKey}
-          options={[
-            { value: "25", label: "¼" },
-            { value: "50", label: "½" },
-            { value: "100", label: "All" },
-          ]}
-          onChange={(v) => commit((l) => ({ ...l, render_scale: Number(v) as RenderScale }))}
-        />
-      </Tooltip>
-      <Tooltip label={samplingNote.text} className="rd-lay-seg-tip rd-lay-seg-sampling">
-        <Segmented<SamplingMode>
-          label="How each LED reads the picture"
-          value={draft.sampling}
-          options={[
-            { value: "nearest", label: "1" },
-            { value: "bilinear", label: "4" },
-            { value: "area_average", label: "All px" },
-          ]}
-          onChange={(v) => commit((l) => ({ ...l, sampling: v }))}
-        />
-      </Tooltip>
+      {renderScaleSeg}
+      {samplingSeg}
     </>
   ) : null;
 
@@ -912,8 +922,43 @@ export function LayoutView() {
             />
           </span>
           {/* The render area and the sampling are the desk's own settings: they sit in the
-              desk's toolbar, and their notes are their tooltips (R8). */}
+              desk's toolbar, and their notes are their tooltips (R8). On a narrow desk they fold
+              into one Render key that opens both. */}
           <span className="rd-lay-seg-bar">{renderControls}</span>
+          <span ref={renderKeyRef} className="rd-lay-render-key">
+            <Button
+              size="sm"
+              icon={<SlidersHorizontal size={15} />}
+              aria-expanded={renderOpen}
+              aria-haspopup="dialog"
+              onClick={() => setRenderOpen((v) => !v)}
+            >
+              Render
+            </Button>
+          </span>
+          <Popover
+            anchor={renderKeyRef}
+            open={renderOpen}
+            onClose={() => setRenderOpen(false)}
+            label="How the desk is drawn and read"
+          >
+            <div className="rd-lay-render-pop">
+              <div className="rd-lay-render-pop-row">
+                <span className="rd-lay-render-pop-head">
+                  <span className="mute">Render</span>
+                  {renderScaleSeg}
+                </span>
+                <p className="mute rd-lay-render-pop-note">{renderNote.text}</p>
+              </div>
+              <div className="rd-lay-render-pop-row">
+                <span className="rd-lay-render-pop-head">
+                  <span className="mute">Sampling</span>
+                  {samplingSeg}
+                </span>
+                <p className="mute rd-lay-render-pop-note">{samplingNote.text}</p>
+              </div>
+            </div>
+          </Popover>
         </>
       }
     />
@@ -1000,7 +1045,14 @@ export function LayoutView() {
             </span>
           </Button>
         </span>
-        <Button variant="ghost" size="sm" className="rd-lay-remap" icon={<CompassTool size={16} />} onClick={remapAll}>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="rd-lay-remap"
+          icon={<CompassTool size={16} />}
+          onClick={remapAll}
+          aria-label="Map my PC again"
+        >
           <span className="rd-lay-text">Map my PC again</span>
         </Button>
       </PageActions>

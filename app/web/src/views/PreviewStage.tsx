@@ -757,7 +757,7 @@ function partOf(z: PlacedZone, devices: DeviceInfo[] | null, info: ZoneInfo | nu
  *
  * Two ways of seeing the desk: the effect under the parts (the cells the engine samples, in
  * their own colours) and the lights themselves (each LED a dot with a halo that stays inside
- * its own part). The second is labelled approximate, because it is.
+ * its own part). The second is approximate, and the canvas mode's tooltip says so.
  */
 export function PreviewStage({
   zones,
@@ -2167,9 +2167,15 @@ export function PreviewStage({
   const k = base * view.scale;
 
   /**
-   * What the cells on the desk are. It is the canvas mode's own tooltip, and the line under
-   * the desk when there is room for one (R8).
+   * What the canvas mode's two keys show, for the tooltip on them (R8). It says outright that the
+   * lights view is approximate: the key itself reads only "Lights".
    */
+  const modeNote =
+    "Effect: each cell is one LED, in the colour it reads from the effect. " +
+    "Lights is approximate: each LED is a dot in its own colour and its halo stays inside its part, so the picture is close, not exact." +
+    (phone ? " Tap anything for its name." : "");
+
+  /** What the cells on the desk are: the line under the desk when there is room for one. */
   const legend =
     (mode === "lights"
       ? "Each LED is a dot in its own colour. The halo stays inside its part, so the picture is close, not exact."
@@ -2750,7 +2756,7 @@ export function PreviewStage({
         <div className={`${desk.segs} stage-segs`}>
           {/* What the canvas shows, and what the cells mean: the note is the segment's own
               tooltip, not a line under the desk (R8). */}
-          <Tooltip label={legend} className={`${desk.modeTip} stage-mode-tip`}>
+          <Tooltip label={modeNote} className={`${desk.modeTip} stage-mode-tip`}>
             <Segmented<StageMode>
               label="What the canvas shows"
               value={mode}
