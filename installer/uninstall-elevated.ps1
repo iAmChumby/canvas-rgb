@@ -258,9 +258,12 @@ try {
     # script reads back and shows.
     $report = Get-UninstallStateReport -State $uninstallState
     Say "[elevated] state: $($report.Words)"
-    if (-not (Set-UninstallState -Text $report.Words)) {
+    $noHomeNothingDone = (-not $report.Removed) -and ($uninstallState.Service -eq 'none') -and ((-not $programData) -or (-not (Test-Path -LiteralPath $programData)))
+    if ((-not (Set-UninstallState -Text $report.Words)) -and (-not $noHomeNothingDone)) {
         # The state could not be written, so the uninstaller cannot say what is true. It must not
         # fall back to "nothing was removed": this exit code says that the state is unknown.
+        # The exception: there is no machine home (no installation was ever made), nothing was
+        # removed and no service was touched, so "nothing was removed" IS true and exit 1 says it.
         Say '[elevated] the state could not be written, so the uninstaller cannot say what was removed'
         exit 5
     }

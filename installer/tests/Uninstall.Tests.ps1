@@ -576,12 +576,22 @@ function Start-Process { Write-Host 'STUB Start-Process'; [pscustomobject]@{ Exi
         Assert-True ($un -match 'was not removed cleanly') 'every other code says the state is unknown'
     }
     Test-Case 'an uninstall that fails and cannot record its state does not let the wrapper say nothing was removed' {
-        # The machine home is gone, so the state file cannot be written. The exit code then says
-        # the state is unknown, and the wrapper must not claim that nothing was removed (#64).
-        $r = Invoke-ElevatedUninstallSandbox 'u64n' $null -ListFails -NoMachineHome
+        # The state file cannot be written, and the service was touched, so what happened is not
+        # known. The exit code then says the state is unknown, and the wrapper must not claim that
+        # nothing was removed (#64).
+        $r = Invoke-ElevatedUninstallSandbox 'u64n' $null -ServiceRunning -DeleteFails -NoMachineHome
         Assert-Equal $r.Code 5 "the uninstall fails and says it cannot record the state: $($r.Out)"
         Assert-True (-not (Test-Path -LiteralPath $r.State)) 'there is no state file'
         Assert-True ($r.Out -match 'the state could not be written') "it says so: $($r.Out)"
+    }
+    Test-Case 'an uninstall with no machine home that removed nothing keeps the true words: nothing was removed' {
+        # No machine home means no installation was made. The uninstall fails before it touches
+        # anything, so exit 1 (which the wrapper words as "Nothing was removed") is true; exit 5
+        # ("not removed cleanly") would say less than is known.
+        $r = Invoke-ElevatedUninstallSandbox 'u64m' $null -ListFails -NoMachineHome
+        Assert-Equal $r.Code 1 "nothing was removed, and the code says so: $($r.Out)"
+        Assert-True (-not (Test-Path -LiteralPath $r.State)) 'there is no state file'
+        Assert-True ($r.Out -match 'before anything was taken away') "the log says nothing was taken away: $($r.Out)"
     }
 
     # ---- item 12: Uninstall in Installed apps knows a non-default folder
