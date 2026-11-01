@@ -1,7 +1,10 @@
 name: Pages
 
 # The site is a static export of site/, built from the editor's own components. It goes live
-# when the site's files or the editor's source change.
+# when the site's files or the editor's source change, and when the Release workflow asks for a
+# build: the install section prints the installer's SHA-256, read from the release's own
+# .sha256 asset when the site is built, so the site can only be built once the release exists
+# (#83).
 on:
   push:
     branches:
@@ -9,6 +12,9 @@ on:
     paths:
       - "site/**"
       - "app/web/src/**"
+  # The Release workflow starts this build itself, after it has attached the .sha256 to the
+  # release: a "release: published" event cannot do it, because the release is published with
+  # GITHUB_TOKEN and GitHub does not start workflows from events that token creates.
   workflow_dispatch:
 
 permissions:
@@ -16,13 +22,64 @@ permissions:
   pages: write
   id-token: write
 
-concurrency:
-  group: pages
-  cancel-in-progress: true
-
 jobs:
-  build:
+  # The hash read is a job of its own and has NO concurrency group, so a push that skips never
+  # enters the group and cannot replace a run already waiting in it.
+  read:
     runs-on: ubuntu-latest
+    outputs:
+      # "true" when the release for the version the page shows is not out yet: the build job
+      # does not run, and the build the Release workflow starts builds the site once the hash
+      # is there.
+      skipped: ${{ steps.sha.outputs.skipped }}
+      sha256: ${{ steps.sha.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The hash the install section prints, read from the release's own .sha256 asset, so the
+      # page and the release cannot disagree (#83). A push to main lands before the release for
+      # that version exists, so a missing asset is not a failure there: the build job does not
+      # run, and the build the Release workflow starts has the hash.
+      - name: Read the installer's SHA-256
+        id: sha
+        working-directory: site
+        env:
+          # Only a push may skip. A push to main lands before the release for that version is
+          # out, so there is no .sha256 asset to read yet and the deploy waits for the release.
+          # A dispatch (the one the Release workflow starts, or a manual one) has to find the
+          # asset: it retries, and then fails the run with a clear message when the asset is
+          # missing or malformed. A run that goes green without deploying is worse than a red
+          # one.
+          CANVAS_SETUP_SHA256_SKIP_IF_MISSING: ${{ github.event_name == 'push' && '1' || '0' }}
+        run: node scripts/setup-sha.mjs
+
+  # Build, check and deploy are ONE job, so a run joins the pages group once. GitHub keeps at
+  # most one pending entry per concurrency group and a newer queued entry replaces it (workflow
+  # syntax, "concurrency": "By default, any existing pending job or workflow in the same
+  # concurrency group will be canceled and the new queued job or workflow will take its
+  # place."). Two jobs in the group gave a push's deploy a second entry to queue with, and it
+  # could replace the Release workflow's pending build; with one entry a push has no second
+  # place to queue. What is still possible: a push that builds, queued after a dispatch is
+  # pending, replaces that pending entry. It runs at the push's commit, which is the release
+  # commit or a later one, finds its own version's .sha256, and builds the same version with the
+  # same hash, so it deploys the same page. Nothing cancels a run that is going
+  # (cancel-in-progress: false): the Release workflow's build of the site must go out, and a
+  # push that lands while it runs must not cancel it (GitHub's own Pages workflows queue the
+  # same way, actions/starter-workflows pages/static.yml). What it costs: the site's builds are
+  # one at a time, and only the newest queued run is kept, which is what a site wants since the
+  # newest main is what should be live.
+  build:
+    needs: read
+    # Explicit success, so a failed or cancelled read never runs the build, also when a later
+    # step or job is added under always().
+    if: needs.read.result == 'success' && needs.read.outputs.skipped != 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
 
@@ -44,19 +101,21 @@ jobs:
         run: npm ci
         working-directory: site
 
+      # The hash the read job found, handed on so the page prints exactly that hash (the same
+      # commit, so the same version).
       - name: Build the site
+        env:
+          CANVAS_SETUP_SHA256: ${{ needs.read.outputs.sha256 }}
         run: npm --prefix site run build
+
+      # The built page shows the hash the release carries, and no PowerShell command line
+      # anywhere on it (#79).
+      - name: Check the install section
+        run: npm --prefix site run check-install
 
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site/out
 
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
       - id: deployment
         uses: actions/deploy-pages@v4

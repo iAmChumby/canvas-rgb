@@ -177,13 +177,15 @@ function Get-WorkflowEntries {
 # The exact keys release.yml uses today, written out. A key outside these sets, in any spelling, is a
 # violation: the test reads what a line IS (its text before the first colon, quotes off), so it needs no
 # list of forbidden spellings. `if`, `continue-on-error`, `"\x69f"` and a working-directory on a step that has none today all fail.
+# Perm is the keys a job's permissions may hold, and it is per job: only the publish job may hold
+# `actions`, because the publish job starts the site's build and a dispatch needs that permission. The
+# publish job's steps may hold `env` for the same step, which carries the token it dispatches with.
 $workflowTopKeys = @('name', 'on', 'permissions', 'jobs')
 $workflowAllowed = @{
-    build   = @{ Job = @('runs-on', 'permissions', 'steps'); Step = @('name', 'uses', 'with', 'run', 'shell', 'working-directory') }
-    sign    = @{ Job = @('needs', 'runs-on', 'timeout-minutes', 'permissions', 'steps'); Step = @('name', 'uses', 'with', 'run', 'shell', 'env', 'timeout-minutes') }
-    publish = @{ Job = @('needs', 'runs-on', 'permissions', 'steps'); Step = @('name', 'uses', 'with', 'run', 'shell') }
+    build   = @{ Job = @('runs-on', 'permissions', 'steps'); Step = @('name', 'uses', 'with', 'run', 'shell', 'working-directory'); Perm = @('contents') }
+    sign    = @{ Job = @('needs', 'runs-on', 'timeout-minutes', 'permissions', 'steps'); Step = @('name', 'uses', 'with', 'run', 'shell', 'env', 'timeout-minutes'); Perm = @('contents') }
+    publish = @{ Job = @('needs', 'runs-on', 'permissions', 'steps'); Step = @('name', 'uses', 'with', 'run', 'shell', 'env'); Perm = @('contents', 'actions') }
 }
-$workflowPermKeys = @('contents')
 
 # The violations in a workflow's text: each names the job, the step and the line.
 function Get-WorkflowViolations {
@@ -208,9 +210,64 @@ function Get-WorkflowViolations {
             $where = "job [$name], step [$label], line [$($e.Line)]"
             if ($e.Level -eq 'indent') { $found += "${where}: unexpected indent $($e.Key)" }
             elseif ($e.Level -eq 'job' -and $workflowAllowed[$name].Job -cnotcontains $e.Key) { $found += "${where}: job key [$($e.Key)] is not in the allowlist [$($workflowAllowed[$name].Job -join ', ')]" }
-            elseif ($e.Level -eq 'perm' -and $workflowPermKeys -cnotcontains $e.Key) { $found += "${where}: permissions key [$($e.Key)] is not in the allowlist [$($workflowPermKeys -join ', ')]" }
+            elseif ($e.Level -eq 'perm' -and $workflowAllowed[$name].Perm -cnotcontains $e.Key) { $found += "${where}: permissions key [$($e.Key)] is not in the allowlist [$($workflowAllowed[$name].Perm -join ', ')]" }
             elseif ($e.Level -eq 'step' -and $workflowAllowed[$name].Step -cnotcontains $e.Key) { $found += "${where}: step key [$($e.Key)] is not in the allowlist [$($workflowAllowed[$name].Step -join ', ')]" }
         }
+    }
+    return $found
+}
+
+# The secret violations in a workflow's raw text: every line, comments and shell text inside a
+# run: block included, that writes the word secrets (any case: secrets., secrets[, toJSON(secrets))
+# plainly outside the sign job. A "#" line inside a run: | block is shell text, so it is scanned
+# like the rest of the block.
+#
+# The sign job is found on the raw lines: the jobs: block at column 0, then the sign: key at two
+# spaces inside that block (a "  sign:" anywhere else is some other key), to the line before the
+# next line indented two spaces or fewer. Finding jobs:, or the sign key, other than exactly once
+# is a violation: the guard fails closed instead of passing by finding nothing.
+#
+# The sign job's range runs to the next YAML key at two spaces or less; a comment or blank line
+# never ends it.
+#
+# This guard reads lines and does not decode YAML: an escape, an alias, or a folded line can
+# hide the word from it. It catches the secrets context written plainly on a line outside
+# the sign job. The boundary that holds whatever the file says is an environment-scoped secret
+# (issue #90).
+function Get-SecretViolations {
+    param([string]$Text)
+    $lines = @($Text -split '\r?\n')
+    $found = @()
+    $jobsAt = @()
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '^jobs:\s*(#.*)?$') { $jobsAt += $i }
+    }
+    if ($jobsAt.Count -ne 1) {
+        return @("the jobs: block was found $($jobsAt.Count) times at column 0, not exactly once: the guard does not know which lines hold the sign job")
+    }
+    $jobsFirst = $jobsAt[0]
+    $jobsLast = $lines.Count - 1
+    for ($i = $jobsFirst + 1; $i -lt $lines.Count; $i++) {
+        # A blank line or a column-0 comment is inside the block: only a top-level key ends it.
+        if ($lines[$i] -match '^[^\s#]') { $jobsLast = $i - 1; break }
+    }
+    $starts = @()
+    for ($i = $jobsFirst + 1; $i -le $jobsLast; $i++) {
+        if ($lines[$i] -match '^  [''"]?sign[''"]?\s*:\s*(#.*)?$') { $starts += $i }
+    }
+    if ($starts.Count -ne 1) {
+        return @("the sign job was found $($starts.Count) times at two spaces inside the jobs: block, not exactly once: the guard does not know where the one job allowed to hold the key is")
+    }
+    $first = $starts[0]
+    $last = $lines.Count - 1
+    for ($i = $first + 1; $i -lt $lines.Count; $i++) {
+        # A blank line or a comment (at any column) is inside the job: only a YAML key at two
+        # spaces or less ends it.
+        if ($lines[$i] -match '^\s{0,2}[^\s#]') { $last = $i - 1; break }
+    }
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($i -ge $first -and $i -le $last) { continue }
+        if ($lines[$i] -match '(?i)secrets') { $found += "line $($i + 1) writes the secrets context outside the sign job: [$($lines[$i].Trim())]" }
     }
     return $found
 }
@@ -745,7 +802,7 @@ try {
         $violations = @(Get-WorkflowViolations $raw)
         Assert-Equal $violations.Count 0 "keys outside the allowlist, each with its job, step and line:`n$($violations -join "`n")"
     }
-    Test-Case 'release workflow: the allowlist catches a guard written in any form' {
+    Test-Case 'release workflow: the allowlist catches each of the guard forms listed here (job-level and step-level keys, quoted and escaped keys, a flow map, a new top-level key)' {
         $base = (Get-WorkflowJobsFromText (Get-Content -LiteralPath $workflowPath -Raw)).Text
         $checkName = '      - name: The release notes are there'
         $variants = [ordered]@{
@@ -758,6 +815,7 @@ try {
             'continue-on-error on the check' = { param($t) $t.Replace($checkName, "$checkName`n        continue-on-error: true") }
             'flow-map step with if'          = { param($t) $t.Replace($checkName, "      - {name: Extra, if: false, run: echo hi}`n$checkName") }
             'working-directory on the check' = { param($t) $t.Replace($checkName, "$checkName`n        working-directory: app") }
+            'actions on the build job'        = { param($t) $t.Replace("  build:`n    runs-on: windows-latest`n    permissions:`n      contents: read`n", "  build:`n    runs-on: windows-latest`n    permissions:`n      contents: read`n      actions: write`n") }
             'a new top-level key'            = { param($t) "if: false`n$t" }
         }
         foreach ($k in $variants.Keys) {
@@ -766,6 +824,68 @@ try {
             Assert-True (@(Get-WorkflowViolations $mutated).Count -gt 0) "variant [$k] is a violation"
         }
         Assert-Equal @(Get-WorkflowViolations $base).Count 0 'the unmutated workflow has none'
+    }
+    Test-Case 'release workflow: only the sign job may name a secret' {
+        # The key is the one secret the release signs with. The raw file is scanned, every line
+        # (comments and shell text included): a secret named anywhere outside the sign job's lines,
+        # under any key or none, is a failure. toJSON(secrets) hands over every secret there is, and a
+        # "#" line inside a run: | block is shell text, not a YAML comment.
+        $raw = Get-Content -LiteralPath $workflowPath -Raw
+        $violations = @(Get-SecretViolations $raw)
+        Assert-Equal $violations.Count 0 "a secret outside the sign job:`n$($violations -join "`n")"
+        $info = Get-WorkflowJobs $workflowPath
+        Assert-True ($info.Jobs['sign'] -match '(?i)secrets\.') 'the sign job still reads its secret'
+    }
+    Test-Case 'release workflow: the secrets check catches the secrets context written plainly on a line outside the sign job' {
+        # Each mutant is built from the raw text (LF line ends), the text the guard reads, and must
+        # differ from it. The guard scans lines: it catches the word secrets written plainly outside
+        # the sign job's lines. It does not decode YAML (escapes, aliases, folded lines), so the
+        # boundary that holds whatever the file says is an environment-scoped secret (issue #90).
+        $base = (Get-Content -LiteralPath $workflowPath -Raw) -replace "`r`n", "`n"
+        $all = '${{ toJSON(secrets) }}'
+        $key = '${{ secrets.UPDATE_SIGNING_KEY }}'
+        $checkout = "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4`n        with:`n          persist-credentials: false`n"
+        $variants = [ordered]@{
+            'toJSON(secrets) in a publish step env'       = { param($t) $t.Replace("      - name: Build the site`n        env:`n", "      - name: Build the site`n        env:`n          ALL_SECRETS: $all`n") }
+            'secrets.UPDATE_SIGNING_KEY in a publish with' = { param($t) $t.Replace("        with:`n          files: |`n", "        with:`n          key: $key`n          files: |`n") }
+            'secrets.GITHUB_TOKEN in a build step'        = { param($t) $t.Replace($checkout, $checkout + "          token: `${{ secrets.GITHUB_TOKEN }}`n") }
+            'a # line inside publish run: |'              = { param($t) $t.Replace("          # Only the size is printed:", "          # $key`n          # Only the size is printed:") }
+            'top-level env with the key'                  = { param($t) $t.Replace("`njobs:`n", "`nenv:`n  K: $key`n`njobs:`n") }
+            'top-level toJSON(secrets)'                   = { param($t) $t.Replace("`njobs:`n", "`nenv:`n  ALL: $all`n`njobs:`n") }
+            'publish: # x with toJSON(secrets) in env'    = { param($t) $t.Replace("`n  publish:`n", "`n  publish: # x`n    env:`n      ALL: $all`n") }
+            'quoted publish key with toJSON(secrets)'     = { param($t) $t.Replace("`n  publish:`n", "`n  'publish':`n    env:`n      ALL: $all`n") }
+            'secrets[ in a publish run'                   = { param($t) $t.Replace("        run: cd dist && sha256sum -c *.sha256`n", "        run: cd dist && echo `${{ secrets['UPDATE_SIGNING_KEY'] }}`n") }
+            'upper-case SECRETS in a build step'          = { param($t) $t.Replace($checkout, $checkout + "          token: `${{ SECRETS.GITHUB_TOKEN }}`n") }
+            'a comment in the build job'                  = { param($t) $t.Replace("  build:`n    runs-on: windows-latest`n", "  build:`n    # `${{ secrets.UPDATE_SIGNING_KEY }}`n    runs-on: windows-latest`n") }
+            'a comment inside the publish job'            = { param($t) $t.Replace("`n  publish:`n", "`n  publish:`n  # reads secrets`n") }
+            'a comment after sign, then a secret in publish' = { param($t) $t.Replace("`n  publish:`n", "`n# a note`n  publish:`n    env:`n      ALL: $all`n") }
+            'a comment at the top of the file'            = { param($t) "# secrets`n$t" }
+            'the sign job renamed, so not found'          = { param($t) $t.Replace("`n  sign:`n", "`n  signer:`n") }
+            'a second sign key'                           = { param($t) $t.Replace("`n  publish:`n", "`n  sign:`n    runs-on: ubuntu-latest`n`n  publish:`n") }
+            'top-level env with a sign: key, the key moved there and the sign job renamed' = { param($t) $t.Replace("          TAURI_SIGNING_PRIVATE_KEY: `${{ secrets.UPDATE_SIGNING_KEY }}`n", '').Replace("`n  sign:`n", "`n  signer:`n").Replace("`njobs:`n", "`nenv:`n  sign:`n    UPDATE_SIGNING_KEY: `${{ secrets.UPDATE_SIGNING_KEY }}`n`njobs:`n") }
+        }
+        foreach ($k in $variants.Keys) {
+            $mutated = & $variants[$k] $base
+            Assert-True ($mutated -ne $base) "variant [$k] changed the workflow text"
+            Assert-True (@(Get-SecretViolations $mutated).Count -gt 0) "variant [$k] is a violation"
+        }
+        Assert-Equal @(Get-SecretViolations $base).Count 0 'the unmutated workflow has none'
+        # These must PASS: a comment at column 0 or two spaces inside the sign job does not end its
+        # range (the secret line after it is still the sign job's), and plain text that only looks
+        # like YAML syntax (a glob, an emphasised step name) is not a violation.
+        $signEnv = "        env:`n          TAURI_SIGNING_PRIVATE_KEY: `${{ secrets.UPDATE_SIGNING_KEY }}`n"
+        $clean = [ordered]@{
+            'a column-0 comment inside the sign job'        = { param($t) $t.Replace($signEnv, "# a note`n" + $signEnv) }
+            'a two-space comment inside the sign job'       = { param($t) $t.Replace($signEnv, "  # a note`n" + $signEnv) }
+            'both comments, then the secret line'           = { param($t) $t.Replace($signEnv, "# a note`n  # another`n`n" + $signEnv) }
+            'ls *-setup.exe in a publish run'               = { param($t) $t.Replace("        run: cd dist && sha256sum -c *.sha256`n", "        run: cd dist && ls *-setup.exe`n") }
+            '*release* in a publish step name'              = { param($t) $t.Replace('      - name: The release notes are there', '      - name: The *release* notes are there') }
+        }
+        foreach ($k in $clean.Keys) {
+            $mutated = & $clean[$k] $base
+            Assert-True ($mutated -ne $base) "clean variant [$k] changed the workflow text"
+            Assert-Equal @(Get-SecretViolations $mutated).Count 0 "clean variant [$k] has no violation"
+        }
     }
     Test-Case 'release workflow: the notes check step runs under bash, in the repository root' {
         $info = Get-WorkflowJobs $workflowPath

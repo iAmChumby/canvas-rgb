@@ -6,7 +6,8 @@ name: Release
 # The installer is NOT code-signed, so Windows SmartScreen warns on first run ("Windows protected your PC":
 # More info, then Run anyway). Compare the SHA-256 below with the one in the job log before running it.
 # Every third-party action is pinned to a full commit SHA (tag in the comment). The build job is read-only;
-# only the publish job holds contents: write. The update signing key lives in the sign job alone.
+# only the publish job holds contents: write (and actions: write, to start the site's build once the release
+# is out). The update signing key lives in the sign job alone.
 on:
   push:
     tags:
@@ -176,6 +177,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # the only job that can write to the release
+      actions: write # it starts the site's build, so the site can show the new hash
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -209,3 +211,17 @@ jobs:
             dist/latest.json
           body_path: dist/release-notes.md
           generate_release_notes: true
+
+      # The site prints the installer's SHA-256, and it reads it from the release's own .sha256
+      # asset when the site is built (#83). The site's build is started here, after the assets
+      # are attached, because a "release: published" event cannot start it: this workflow
+      # publishes with GITHUB_TOKEN, and GitHub does not start workflows from events that token
+      # creates. The build runs on main, which holds the release commit, so the page shows the
+      # version that was just released and any site fix that landed with it.
+      - name: Build the site
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # The publish job has no checkout, so gh has no git remote to read the repository
+          # from and exits 1 with "not a git repository". GH_REPO names the repository instead.
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow run pages.yml --ref main
