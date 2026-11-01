@@ -5,6 +5,8 @@
 //   - the hash on the page is the hash the release carries, so the page and the release cannot
 //     disagree;
 //   - the page shows the command that checks the download;
+//   - no Copy button copies the hash as well: the copied text is pasted into a shell, and the
+//     hash is not a command;
 //   - nothing on the page downloads and runs (irm, iwr, iex), and no PowerShell command line is
 //     on it. #79: an ad blocker reads a PowerShell command on the clipboard as a ClickFix
 //     attack, and the page is where that command used to be.
@@ -29,6 +31,46 @@ const fail = [];
 
 function check(passed, message) {
   (passed ? ok : fail).push(message);
+}
+
+/**
+ * The text the Copy buttons copy, as it sits in the built page.
+ *
+ * The page carries the buttons' props in a JSON string inside a JS string, so a quote inside a
+ * value is escaped twice. The quote that ends a value is the one whose backslash run, once the
+ * page's own escapes are undone, leaves an even number of backslashes before it: a raw run of
+ * 1 or 4 backslashes ends the value, a run of 2 or 3 does not. The text is left as it is in
+ * the page: a SHA-256 is hex and needs no escaping, so it is found as it is.
+ */
+function copyTexts(html) {
+  const out = [];
+  const marker = '\\"text\\":\\"';
+  let at = 0;
+  for (;;) {
+    const start = html.indexOf(marker, at);
+    if (start < 0) break;
+    let i = start + marker.length;
+    let end = -1;
+    while (i < html.length) {
+      const q = html.indexOf('"', i);
+      if (q < 0) break;
+      let n = 0;
+      let k = q - 1;
+      while (k >= 0 && html[k] === "\\") {
+        n++;
+        k--;
+      }
+      if (n % 4 === 0 || n % 4 === 1) {
+        end = q;
+        break;
+      }
+      i = q + 1;
+    }
+    if (end < 0) break;
+    out.push(html.slice(start + marker.length, end));
+    at = end + 1;
+  }
+  return out;
 }
 
 if (!fs.existsSync(setupFile)) {
@@ -69,6 +111,22 @@ const forbidden = [
 ];
 for (const [name, re] of forbidden) {
   check(!re.test(html), `the page has no "${name}" on it`);
+}
+
+// The Copy buttons copy text that gets pasted into a shell. The check block's button copies
+// the Get-FileHash command alone: the hash is not a command, and pasting it after the command
+// is an error in PowerShell. The copied text is in the page as the buttons' "text" prop.
+const copies = copyTexts(html);
+check(copies.length > 0, `the page has ${copies.length} Copy buttons`);
+check(
+  copies.some((c) => c.includes("Get-FileHash")),
+  "a Copy button copies the Get-FileHash command",
+);
+const withHash = copies.filter((c) => c.includes(setup.sha256));
+if (withHash.length) {
+  fail.push(`a Copy button copies the hash as well: ${withHash.join(" | ")}`);
+} else {
+  ok.push("no Copy button copies the hash");
 }
 
 // The release carries the same hash.

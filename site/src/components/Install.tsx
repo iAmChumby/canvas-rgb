@@ -14,7 +14,9 @@ if (!SHA256) {
   throw new Error("the installer's SHA-256 is missing: the site was built without setup-sha.");
 }
 
-// The check a visitor runs on the file they downloaded.
+// The check a visitor runs on the file they downloaded. The Copy button copies this line and
+// nothing else: the hash is not a command, and pasting it after the command is an error in
+// PowerShell.
 const CHECK = `Get-FileHash .\\${SETUP}`;
 
 // Building from source. A .cmd wrapper, so no PowerShell command line is shown or copied: that
@@ -43,13 +45,13 @@ export function Install() {
           <pre>
             <code>{CHECK}</code>
           </pre>
+          <div className="site-code-actions">
+            <CopyButton text={CHECK} />
+          </div>
           <p className="site-code-label">Expected SHA-256</p>
           <pre>
             <code>{SHA256}</code>
           </pre>
-          <div className="site-code-actions">
-            <CopyButton text={`${CHECK}\n${SHA256}`} />
-          </div>
         </div>
         <div className="site-install-notes">
           <p className="site-note">
