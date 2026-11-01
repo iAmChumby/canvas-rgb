@@ -1568,6 +1568,18 @@ impl PeripheralAdapter for EightBitDoUltimate2 {
     }
 }
 
+impl crate::resume::ResumeBehavior for EightBitDoUltimate2 {
+    fn on_resume(&self) -> crate::resume::OnResume {
+        // Nothing to restore: no mode is set when the pad connects, and the app writes a setting
+        // only on request (the stick and trigger ranges and the paddle map of the active
+        // profile), which the pad stores in its profile. The app writes no LED state to this
+        // pad. Whether the firmware keeps a written profile over a sleep is UNKNOWN: nothing
+        // was observed across a real sleep, and no re-send is invented here. One real wake
+        // after a write would settle it.
+        crate::resume::OnResume::NothingToRestore
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1832,6 +1844,30 @@ mod tests {
         assert_eq!(s.lock().unwrap().opens, 1, "a second connect is a no-op");
         a.disconnect().await.unwrap();
         assert!(!a.is_connected());
+    }
+
+    /// The class `cause:sleep-state` (#5, #29): the pad declares `NothingToRestore`, and a
+    /// resume through the production path makes it send nothing it would not have sent anyway.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the lock keeps `note_resume` tests one at a time
+    async fn a_resume_makes_the_pad_send_nothing_extra() {
+        let _serial = crate::resume_serial();
+        let (mut a, s) = rig();
+        let id = a.device_id();
+        a.connect().await.unwrap();
+        a.read_settings(&id).await.unwrap();
+        let before = s.lock().unwrap().sent.len();
+        a.read_settings(&id).await.unwrap();
+        let ordinary = s.lock().unwrap().sent[before..].to_vec();
+        assert!(!ordinary.is_empty(), "an ordinary read sends its chunk requests");
+
+        crate::note_resume();
+
+        let before = s.lock().unwrap().sent.len();
+        a.read_settings(&id).await.unwrap();
+        let g = s.lock().unwrap();
+        assert_eq!(g.sent[before..], ordinary[..], "the read after the resume sent more than the read does");
+        assert_eq!(g.opens, 1, "the resume reopened the pad");
     }
 
     #[tokio::test]

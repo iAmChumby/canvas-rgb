@@ -68,13 +68,15 @@ impl Core {
     }
 
     /// A suspend or resume from the SCM. A resume also gives the daemon a fresh heartbeat clock:
-    /// `Instant` may have counted the sleep, and a heartbeat hours old is not a crash.
+    /// `Instant` may have counted the sleep, and a heartbeat hours old is not a crash. The
+    /// OpenRGB supervisor's watch window starts again too, so a sleep does not end it early.
     pub fn on_power(&mut self, event: PowerEvent, now: Instant) {
         match event {
             PowerEvent::Suspend => self.fans.on_suspend(),
             PowerEvent::Resume => {
                 self.fans.on_resume(now, "power event");
                 self.daemon.on_heartbeat(now);
+                self.openrgb.on_resume(now);
             }
         }
     }

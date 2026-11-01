@@ -30,9 +30,18 @@ pub struct CompositeAdapter {
 
 impl CompositeAdapter {
     pub fn new(openrgb: OpenRgbAdapter) -> Self {
+        Self::with_keyboard(openrgb, RoyuanAdapter::new())
+    }
+
+    /// Like [`new`](Self::new), with a keyboard adapter of the caller's.
+    ///
+    /// The daemon builds the real keyboard; the tests build one over a fake HID transport, so
+    /// the resume guard can see the reports the keyboard sends (`crates/canvas-daemon/tests/
+    /// resume_guard.rs`).
+    pub fn with_keyboard(openrgb: OpenRgbAdapter, keyboard: RoyuanAdapter) -> Self {
         Self {
             openrgb,
-            royuan: RoyuanAdapter::new(),
+            royuan: keyboard,
             royuan_attempt: None,
         }
     }
@@ -135,5 +144,13 @@ impl DeviceAdapter for CompositeAdapter {
             return self.royuan.read_back(device).await;
         }
         self.openrgb.read_back(device).await
+    }
+}
+
+impl canvas_adapters::resume::ResumeBehavior for CompositeAdapter {
+    fn on_resume(&self) -> canvas_adapters::resume::OnResume {
+        // The composite drives two adapters that hold a mode: the OpenRGB controllers and the
+        // ROYUAN keyboard. Both set their mode again after a resume (#5).
+        canvas_adapters::resume::OnResume::SetsModeAgain
     }
 }

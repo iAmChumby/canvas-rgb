@@ -147,9 +147,12 @@ pub struct Runtime {
 }
 
 impl DisplayHub {
-    pub fn new(adapter: Box<dyn NumericDisplayAdapter>) -> Self {
+    pub fn new<D>(adapter: Box<D>) -> Self
+    where
+        D: NumericDisplayAdapter + canvas_adapters::resume::ResumeBehavior + 'static,
+    {
         Self {
-            adapter: Arc::new(tokio::sync::Mutex::new(adapter)),
+            adapter: Arc::new(tokio::sync::Mutex::new(adapter as Box<dyn NumericDisplayAdapter>)),
             runtime: tokio::sync::RwLock::new(Runtime::default()),
             generation: AtomicU64::new(0),
             vendor_running: std::sync::Mutex::new(Arc::new(vendor_app_running)),
@@ -301,6 +304,13 @@ impl NumericDisplayAdapter for NoDisplays {
 
     fn write_interval_ms(&self) -> u32 {
         250
+    }
+}
+
+impl canvas_adapters::resume::ResumeBehavior for NoDisplays {
+    fn on_resume(&self) -> canvas_adapters::resume::OnResume {
+        // No display, so no state a sleep could reset.
+        canvas_adapters::resume::OnResume::NothingToRestore
     }
 }
 

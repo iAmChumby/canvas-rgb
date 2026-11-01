@@ -120,6 +120,13 @@ struct FlakyAdapter {
     failures: u32,
 }
 
+impl canvas_adapters::resume::ResumeBehavior for FlakyAdapter {
+    fn on_resume(&self) -> canvas_adapters::resume::OnResume {
+        // A test fake: it holds no mode.
+        canvas_adapters::resume::OnResume::NothingToRestore
+    }
+}
+
 #[async_trait::async_trait]
 impl canvas_proto::traits::DeviceAdapter for FlakyAdapter {
     fn name(&self) -> &'static str {
