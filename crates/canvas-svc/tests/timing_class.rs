@@ -62,7 +62,7 @@ const BOUND_ALLOWED: &[(&str, &str, &str)] = &[
     ("canvas-daemon/src/logging.rs", "waited < std::time::Duration::from_secs(5)", "hang guard: every step of that test is bounded by 250 ms; 5 s means a bound was ignored"),
     ("canvas-daemon/src/logging.rs", "took < std::time::Duration::from_millis(1000)", "the property: run_bounded gives up on a 5 s step after its 250 ms limit; 750 ms of slack"),
     ("canvas-daemon/src/user_effects.rs", "took < std::time::Duration::from_secs(5)", "hang guard: a 400 ms render budget against a 30 s frame budget; 5 s means the frame was not held to the budget"),
-    ("canvas-daemon/src/user_effects.rs", "took < budget + std::time::Duration::from_secs_f64(frame_s)", "the property, calibrated: frames are sized to this machine, and the bound is one frame (#51)"),
+    ("canvas-daemon/src/user_effects.rs", "took < budget + std::time::Duration::from_secs_f64(frame_s)", "the property: the render is held to its budget plus one calibrated frame (the best of three samples, about 0.5 s); a constant slack, not machine-scaled (#51)"),
     ("canvas-daemon/tests/effects_import.rs", "elapsed.as_millis() < 6_000", "open: 6 s ceiling on a 2 s import budget"),
     ("canvas-daemon/tests/quit.rs", "started.elapsed() < Duration::from_secs(15)", "open: a child process must serve its API within 15 s on a loaded runner"),
     ("canvas-daemon/tests/quit.rs", "took <= EXIT_DEADLINE", "the property: the daemon's own exit deadline"),

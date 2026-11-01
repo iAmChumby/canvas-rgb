@@ -945,11 +945,16 @@ window.requestAnimationFrame(draw);
         assert!(error.depends_on_load(), "{error:?}");
         // Without a bound per frame, the render runs on to the end of the step it was in: four
         // frames, two seconds in all. With it, the frame in progress is stopped at the budget, so
-        // the slot is held for the budget plus less than one frame. The frames were sized to this
-        // machine above, so the bound follows the machine and not a fixed number of milliseconds.
+        // the slot is held for the budget plus the interrupt latency. The ceiling is the budget
+        // plus ONE frame, where the frame is the calibrated estimate of this effect on this
+        // machine (the best of three samples scaled to the iterations the effect was given),
+        // not a fixed number of milliseconds. The estimate is about 0.5 s by construction, so
+        // the slack is about half a second; it moves only if the calibration reads a different
+        // frame time.
+        let frame_est = per_probe * iterations as f64 / probe as f64;
         assert!(
-            took < budget + std::time::Duration::from_secs_f64(frame_s),
-            "the render held its slot for {took:?} on a {budget:?} budget (a frame is about {frame_s} s)"
+            took < budget + std::time::Duration::from_secs_f64(frame_est),
+            "the render held its slot for {took:?} on a {budget:?} budget (a frame is about {frame_est:.2} s)"
         );
     }
 

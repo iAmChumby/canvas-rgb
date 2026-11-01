@@ -899,20 +899,27 @@ fn the_load_budget_covers_all_scripts_together() {
     };
 
     // Two fifths of the budget for one script: it is well inside the budget on its own, and
-    // several of them together are not.
-    let mut iterations = ((budget_seconds * 0.4 / per_iter).round() as u64).max(1);
-    // One script of this size must fit inside the budget: that is what makes the failure
-    // below proof that the budget is shared and not one budget per script.
-    let mut one_script = load_seconds(iterations, 1);
-    while one_script.is_none() && iterations > 1 {
+    // several of them together are not. The cost of an iteration is floored, so a probe that
+    // read as free cannot divide by zero or ask for more iterations than a script can hold.
+    let mut iterations = ((budget_seconds * 0.4 / per_iter.max(1e-12)).round() as u64).clamp(1, 2_000_000_000);
+    // The cost of one script: the best of three loads, so one preempted sample cannot make a
+    // script look dearer (the page would then get too few scripts to pass the budget). One
+    // script of this size must fit inside the budget: that is what makes the failure below
+    // proof that the budget is shared and not one budget per script.
+    let one_script = loop {
+        let samples: Vec<f64> = (0..3).filter_map(|_| load_seconds(iterations, 1)).collect();
+        if samples.len() == 3 {
+            let best = samples.iter().copied().fold(f64::MAX, f64::min);
+            break (best - overhead).max(1e-3);
+        }
+        assert!(iterations > 1, "even a one-iteration script does not fit in the budget");
         iterations /= 2;
-        one_script = load_seconds(iterations, 1);
-    }
-    let one_script = one_script.expect("a script of this size fits in the budget") - overhead;
+    };
 
     // Enough scripts to be over the budget together, whatever the machine's speed: each of
-    // them fits inside the budget on its own, as measured above.
-    let scripts = ((budget_seconds / one_script).ceil() as usize + 2).min(64);
+    // them fits inside the budget on its own, as measured above. The count is computed in
+    // floating point and capped before it becomes a `usize`.
+    let scripts = (budget_seconds / one_script).ceil().min(62.0) as usize + 2;
     let result = HtmlEffect::from_source("t", &page(iterations, scripts), &Props::new());
     assert!(
         matches!(result, Err(canvas_html::HtmlError::Timeout(_))),
