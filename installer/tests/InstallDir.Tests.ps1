@@ -298,15 +298,8 @@ Test-Case 'uninstall check: a folder that is not there passes (nothing to run)' 
 
 # ---------------------------------------------------------------- wiring: the scripts call the guard in the right order
 $iss = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\inno\canvas-rgb.iss') -Raw
-# Source of one Pascal routine: from its header to the next top-level routine, with // comments removed so a
-# comment cannot satisfy a check.
-function Get-IssFunction([string]$Header) {
-    $a = $iss.IndexOf($Header)
-    if ($a -lt 0) { throw "no $Header in the .iss" }
-    $m = [regex]::Match($iss.Substring($a + $Header.Length), '(?m)^(function|procedure) ')
-    $body = if ($m.Success) { $iss.Substring($a, $Header.Length + $m.Index) } else { $iss.Substring($a) }
-    return ([regex]::Replace($body, '(?m)^\s*//.*$', ''))
-}
+# Get-IssFunction (the source of one Pascal routine, with the comments removed) lives in
+# _assert.ps1, so every suite reads the .iss the same way.
 $ue = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\uninstall-elevated.ps1') -Raw
 $se = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\setup-elevated.ps1') -Raw
 Test-Case 'installer: PrepareToInstall runs the check on {app}, gates on its exit code, and does so before the download and the stop step' {

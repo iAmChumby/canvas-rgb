@@ -809,16 +809,9 @@ try {
     }
 
     # ---- #65: an update that fails before the elevated step leaves canvas-rgb stopped ----
+    # Get-IssFunction (the source of one Pascal routine, with every comment removed) is in
+    # _assert.ps1: a comment can never satisfy a check.
     $issText = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\inno\canvas-rgb.iss'))
-    # Source of one Pascal routine: from its header to the next top-level routine, with the // comments
-    # removed so a comment cannot satisfy a check.
-    function Get-IssRoutine([string]$Header) {
-        $a = $issText.IndexOf($Header)
-        if ($a -lt 0) { throw "no $Header in the .iss" }
-        $m = [regex]::Match($issText.Substring($a + $Header.Length), '(?m)^(function|procedure) ')
-        $body = if ($m.Success) { $issText.Substring($a, $Header.Length + $m.Index) } else { $issText.Substring($a) }
-        return ([regex]::Replace($body, '(?m)^\s*//.*$', ''))
-    }
     # The PowerShell the installer runs to start canvas-rgb again: the real script, against a
     # stubbed lib.ps1 (no real service, no real process). Every Start-Service it makes is printed
     # as a CALL line, and its exit code says what happened.
@@ -908,7 +901,7 @@ function Start-Service { param($Name) Write-Host 'CALL Start-Service' }
         Assert-True ($r.Log -match 'canvas-rgb was started again') "the script ran and said so: $($r.Log)"
     }
     Test-Case 'the installer starts canvas-rgb again when the update failed before the elevated step' {
-        $body = Get-IssRoutine 'procedure DeinitializeSetup'
+        $body = Get-IssFunction 'procedure DeinitializeSetup'
         # The restart runs when the install did not finish, and what came of it is said to the
         # person: a service that could not be started, or one left stopped on purpose, is named.
         Assert-True ($body -match 'RestartCanvasRgb') 'the restart runs'
@@ -919,28 +912,39 @@ function Start-Service { param($Name) Write-Host 'CALL Start-Service' }
         Assert-True ($body -match 'mix of the old and the new files') 'the message says why it was left stopped'
         Assert-True ($body -match 'Run setup again') 'the message says what to do'
     }
+    Test-Case 'the restart sits inside the guard that says the install did not finish' {
+        # The call is bound to the guard, not merely somewhere after it: a restart that ran
+        # whatever happened, or that ran after the /UPDATE-only exit, is caught here.
+        $body = Get-IssFunction 'procedure DeinitializeSetup'
+        $guard = '(not Ok) and (not IsServiceUpdateRun)'
+        Assert-True ($body -match [regex]::Escape($guard)) "the guard is there: $body"
+        $guarded = Get-GuardedStatement $body $guard
+        Assert-True ($guarded -match 'RestartCanvasRgb') "the restart is inside the guard: [$guarded]"
+        # The same guard must hold the outcome, so the message cannot claim more than happened.
+        Assert-True ($guarded -match 'RestartCode') "the outcome is read inside the guard: [$guarded]"
+    }
     Test-Case 'the installer knows when the copy of the files started' {
-        $body = Get-IssRoutine 'procedure CurStepChanged'
+        $body = Get-IssFunction 'procedure CurStepChanged'
         Assert-True ($body -match 'if CurStep = ssInstall then') 'the copy step is noticed'
         Assert-True ($body -match 'FCopyStarted := True') 'the flag is set there'
         $iCopy = $body.IndexOf('FCopyStarted := True')
         $iElevated = $body.IndexOf('FElevatedStepRan := True')
         Assert-True ($iCopy -gt 0 -and $iElevated -gt $iCopy) 'the copy starts before the machine-wide step'
         # And the flag is handed to the script that decides.
-        $restart = Get-IssRoutine 'function RestartCanvasRgb'
+        $restart = Get-IssFunction 'function RestartCanvasRgb'
         Assert-True ($restart -match '\s-CopyStarted') 'the copy flag is passed on'
         Assert-True ($restart -match '\s-StoppedRunningService') 'the stopped flag is passed on'
         Assert-True ($restart -match '\s-ElevatedStepRan') 'the elevated flag is passed on'
     }
     Test-Case 'the elevated step says that it ran, so the service is not started a second time' {
-        $body = Get-IssRoutine 'procedure CurStepChanged'
+        $body = Get-IssFunction 'procedure CurStepChanged'
         Assert-True ($body -match 'FElevatedStepRan := True') 'the flag is set'
         $iFlag = $body.IndexOf('FElevatedStepRan := True')
         $iRun = $body.IndexOf('setup-elevated.ps1')
         Assert-True ($iFlag -gt 0 -and $iRun -gt $iFlag) 'the flag is set before the elevated step runs'
     }
     Test-Case 'the installer starts canvas-rgb again only when this run stopped a running service' {
-        $body = Get-IssRoutine 'function PrepareToInstall'
+        $body = Get-IssFunction 'function PrepareToInstall'
         # The flag comes from the note the first step wrote, and from nowhere else.
         Assert-True ($body -match 'FStoppedRunningService := StoppedRunningService\(\)') 'the flag comes from the note'
         Assert-Equal (@([regex]::Matches($body, 'FStoppedRunningService :=')).Count) 1 'the flag is set in one place only'
