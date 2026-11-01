@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- After the PC wakes from sleep, canvas-rgb tells the RAM to take the running effect again right away. (#5)
+
 ## [0.4.0] - 2026-11-01
 
 ### Fixed

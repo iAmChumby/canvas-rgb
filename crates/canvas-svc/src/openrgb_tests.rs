@@ -172,6 +172,38 @@ async fn the_boot_color_is_not_written_while_a_daemon_is_connected() {
     assert_eq!(fake.colors(0), vec![Rgb8::BLACK; 3], "the daemon owns the devices");
 }
 
+/// A sleep inside the watch window must not end the window: `Instant` may have counted the
+/// sleep, and a controller OpenRGB announces after the wake still gets the color (#29, class
+/// `cause:sleep-state`).
+#[tokio::test]
+async fn a_resume_starts_the_boot_color_watch_window_again() {
+    let fake = FakeOpenRgbServer::start(vec![device(0, 4)]).await.unwrap();
+    let processes = FakeProcesses::new();
+    let (root, exe) = install();
+    let mut sup = supervisor(&processes, &root, &exe, fake.port(), None);
+    let boot = Rgb8::new(10, 20, 30);
+    let now = Instant::now();
+    sup.tick(now, false, Some(boot)).await;
+    sup.tick(now + Duration::from_secs(1), false, Some(boot)).await;
+    assert_eq!(wait_for_colors(&fake, 0, &[boot; 4]).await, vec![boot; 4]);
+    assert!(sup.boot_pending(), "the watch window runs after the first write");
+
+    // The machine sleeps for an hour. The clock may have counted it.
+    let woke = now + Duration::from_secs(3600);
+    sup.on_resume(woke);
+    sup.tick(woke, false, Some(boot)).await;
+    assert!(sup.boot_pending(), "the watch window ended at the wake");
+
+    // A controller OpenRGB announces after the wake still gets the boot color.
+    fake.announce(device(1, 6));
+    sup.tick(woke + Duration::from_secs(1), false, Some(boot)).await;
+    assert_eq!(
+        wait_for_colors(&fake, 1, &[boot; 6]).await,
+        vec![boot; 6],
+        "the controller announced after the wake did not get the boot color"
+    );
+}
+
 // ---- #18: the boot color waits for OpenRGB to finish detecting ----
 
 use std::sync::{Arc, Mutex};
