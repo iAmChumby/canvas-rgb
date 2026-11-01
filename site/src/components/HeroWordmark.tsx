@@ -426,11 +426,12 @@ export function HeroWordmark() {
         // is gone by the time it gets there. The erase runs from the header's edge down to
         // the light's own centre, so the pool's peak stays on the pointer, and the pool's
         // strength is scaled to match, so the edge is soft at every distance. Above the
-        // header's edge the light is left alone: that part of the field is behind the
-        // opaque header and nobody sees it.
+        // header's edge the light is erased outright: that part of the field is behind the
+        // opaque header, nobody sees it, and the field holds nothing but the light that is
+        // on show.
         const ramp = Math.min(Math.max(depth, 1), band);
         fade([
-          [0, 0],
+          [0, 1],
           [cut, 1],
           [cut + ramp, 0],
         ]);
