@@ -223,9 +223,22 @@ impl ParseFailure {
 
     /// A failure of the builder, told apart by what it says (see
     /// [`crate::thumbnail::build_error_depends_on_load`]).
+    ///
+    /// A load that ran out of time is written out in plain words: the runtime's own text
+    /// starts with `timeout: `, which is not what a person needs to read, and the file is
+    /// tried again, so the words say so.
     fn from_error(error: String) -> Self {
-        let depends_on_load = crate::thumbnail::build_error_depends_on_load(&error);
-        Self { error, depends_on_load }
+        if crate::thumbnail::build_error_depends_on_load(&error) {
+            let detail = error.trim_start_matches("timeout: ");
+            Self {
+                error: format!(
+                    "the machine was too busy to load it ({detail}); it will be tried again"
+                ),
+                depends_on_load: true,
+            }
+        } else {
+            Self { error, depends_on_load: false }
+        }
     }
 }
 
@@ -983,6 +996,9 @@ mod tests {
         assert_eq!(failures.len(), 1);
         assert!(failures[0].0.ends_with("slow.html"), "{failures:?}");
         assert!(failures[0].1.contains("ran longer than"), "the reason is kept: {failures:?}");
+        assert!(failures[0].1.contains("too busy"), "the machine is named as the reason: {failures:?}");
+        assert!(failures[0].1.contains("tried again"), "it says it is tried again: {failures:?}");
+        assert!(!failures[0].1.starts_with("timeout: "), "the runtime's prefix is not shown: {failures:?}");
 
         // Inside the wait the file is left alone.
         clock.advance_to(FIRST_RETRY_AFTER - Duration::from_secs(1));
@@ -1085,7 +1101,7 @@ mod tests {
         // It is still reported as failed: it did fail, and why.
         let failures = effects.failures();
         assert_eq!(failures.len(), 1);
-        assert!(failures[0].1.contains("ran longer than"), "{failures:?}");
+        assert!(failures[0].1.contains("too busy"), "{failures:?}");
         assert!(effects.schemas().is_empty());
     }
 

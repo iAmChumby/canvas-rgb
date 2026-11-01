@@ -200,7 +200,7 @@ function initialState(): DemoState {
     peripheralAccess: s.has("reads-on")
       ? Object.fromEntries(PERIPHERALS.map((p) => [p.info.id, { reads: true, writes: false }]))
       : {},
-    // A user effect file that did not parse: the author sees why.
+    // A user effect file that did not load: the author sees why.
     // `?state=no-failed` has none, as most PCs do.
     failedEffects: s.has("no-failed") ? [] : [
       {
