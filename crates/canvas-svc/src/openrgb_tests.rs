@@ -541,3 +541,25 @@ async fn an_openrgb_that_exits_on_its_own_is_logged_with_its_pid_as_an_exit() {
     assert!(line.contains("not stopped by the service"), "{line}");
     assert!(openrgb_stop_line(&text, 4001).is_none(), "an exit is not a kill: {text}");
 }
+
+/// A daemon the service could not end was not terminated, so the OpenRGB line must not say it
+/// was and must not report a gap (#81).
+#[tokio::test]
+async fn a_daemon_the_service_could_not_end_is_not_logged_as_terminated() {
+    let (root, exe) = install();
+    let (daemon, sup, processes) = running_pair(&root, &exe).await;
+    let home = tempfile::tempdir().unwrap();
+    let mut core = crate::pipe_server::tests::test_core(home.path().to_path_buf());
+    core.daemon = daemon;
+    core.openrgb = sup;
+
+    // The next kill fails: the daemon's, not OpenRGB's.
+    processes.fail_kills(1);
+    let ((), text) = crate::test_logs::captured(|| core.shutdown("service stop"));
+
+    let line = openrgb_stop_line(&text, 4001).unwrap_or_else(|| panic!("no OpenRGB stop line:\n{text}"));
+    assert!(!line.contains("was terminated"), "the daemon was not terminated: {line}");
+    assert!(!line.contains("ms earlier"), "there is no gap to report: {line}");
+    assert!(line.contains("the daemon (pid 4000) could not be ended"), "the line says what happened: {line}");
+    assert!(text.contains("could not end the daemon"), "the failed kill is logged: {text}");
+}

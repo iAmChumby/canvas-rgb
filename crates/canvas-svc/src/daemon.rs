@@ -105,6 +105,8 @@ pub enum DaemonBeforeStop {
     Stopped { pid: u32, at: Instant },
     /// The daemon runs and was not told: it keeps sending frames.
     Running { pid: u32 },
+    /// The service tried to end the daemon and the kill failed: it may still be running.
+    NotEnded { pid: u32 },
     /// No daemon process.
     NotRunning,
 }
@@ -118,6 +120,9 @@ impl DaemonBeforeStop {
                 format!("the daemon (pid {pid}) was terminated {gap_ms:.3} ms earlier")
             }
             Self::Running { pid } => format!("the daemon (pid {pid}) is still running and was not told; it keeps sending frames"),
+            Self::NotEnded { pid } => {
+                format!("the daemon (pid {pid}) could not be ended; it may still be running")
+            }
             Self::NotRunning => "no daemon is running".to_string(),
         }
     }
@@ -163,6 +168,9 @@ pub struct DaemonSupervisor {
     pending_move: Option<(u32, Instant)>,
     /// The daemon `stop()` ended, and when (#81): the OpenRGB stop line reports the gap.
     stopped_daemon: Option<(u32, Instant)>,
+    /// The daemon `stop()` could not end (#81): the OpenRGB stop line says that instead of
+    /// claiming the daemon was terminated.
+    unended_daemon: Option<u32>,
 }
 
 impl DaemonSupervisor {
@@ -180,6 +188,7 @@ impl DaemonSupervisor {
             child_session: None,
             pending_move: None,
             stopped_daemon: None,
+            unended_daemon: None,
         }
     }
 
@@ -308,8 +317,13 @@ impl DaemonSupervisor {
         self.stopped = true;
         if let Some(mut child) = self.child.take() {
             let pid = child.id();
-            let _ = terminate_daemon(child.as_mut(), "the service is stopping");
-            self.stopped_daemon = Some((pid, Instant::now()));
+            // The stop is recorded only when the daemon really ended. A kill that failed leaves
+            // the daemon running, and the OpenRGB line must not say it was terminated (#81).
+            if terminate_daemon(child.as_mut(), "the service is stopping").is_ok() {
+                self.stopped_daemon = Some((pid, Instant::now()));
+            } else {
+                self.unended_daemon = Some(pid);
+            }
         }
     }
 
@@ -317,6 +331,9 @@ impl DaemonSupervisor {
     pub fn before_openrgb_stop(&self) -> DaemonBeforeStop {
         if let Some(child) = self.child.as_ref() {
             return DaemonBeforeStop::Running { pid: child.id() };
+        }
+        if let Some(pid) = self.unended_daemon {
+            return DaemonBeforeStop::NotEnded { pid };
         }
         match self.stopped_daemon {
             Some((pid, at)) => DaemonBeforeStop::Stopped { pid, at },
@@ -1027,5 +1044,37 @@ mod tests {
     fn a_daemon_exit_reason_is_hex_with_the_status_name() {
         assert_eq!(exited_reason(-1_073_741_502), "exited with code 0xC0000142 STATUS_DLL_INIT_FAILED");
         assert_eq!(exited_reason(1), "exited with code 0x00000001");
+    }
+
+    /// A kill that failed did not stop the daemon, so the service must not record it as stopped:
+    /// the OpenRGB line would then say the daemon was terminated when it was not (#81).
+    #[test]
+    fn a_daemon_the_service_could_not_end_is_not_recorded_as_stopped() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        sup.start(t0);
+        let pid = sup.daemon_pid().expect("a daemon is running");
+        processes.fail_kills(1);
+
+        sup.stop();
+
+        assert_eq!(sup.before_openrgb_stop(), DaemonBeforeStop::NotEnded { pid });
+        let text = sup.before_openrgb_stop().describe(t0);
+        assert!(!text.contains("terminated"), "the daemon was not terminated: {text}");
+        assert!(!text.contains("ms earlier"), "there is no gap to report: {text}");
+    }
+
+    /// A kill that worked is recorded, and the OpenRGB line says how long before.
+    #[test]
+    fn a_daemon_the_service_ended_is_recorded_as_stopped() {
+        let (mut sup, _processes) = supervisor();
+        let t0 = Instant::now();
+        sup.start(t0);
+        let pid = sup.daemon_pid().expect("a daemon is running");
+
+        sup.stop();
+
+        assert!(matches!(sup.before_openrgb_stop(), DaemonBeforeStop::Stopped { pid: p, .. } if p == pid));
+        assert!(sup.before_openrgb_stop().describe(t0).contains("was terminated"));
     }
 }
