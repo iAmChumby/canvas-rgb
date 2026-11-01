@@ -75,9 +75,9 @@ pub const FRAME_BUDGET_MS: u64 = 100;
 /// A tile has to be the same picture on every machine and under any load, so a tile frame is
 /// never dropped for being slow: the live-lights deadline ([`FRAME_BUDGET_MS`]) drops a frame
 /// that overruns, and which frames overrun depends on how busy the machine is. A tile frame
-/// is held to the whole render budget instead (the daemon's `RENDER_BUDGET`, 20 s), so only a
+/// is held to the whole render budget instead (the daemon's `RENDER_BUDGET`, 30 s), so only a
 /// script that never returns is stopped, and that is an error the tile render reports.
-pub const TILE_FRAME_BUDGET_MS: u64 = 20_000;
+pub const TILE_FRAME_BUDGET_MS: u64 = 30_000;
 
 /// One HTML effect instance: its own JS context and 2D canvas.
 pub struct HtmlEffect {
@@ -107,6 +107,13 @@ pub struct HtmlEffect {
     /// The time one frame's script may take, in milliseconds: [`FRAME_BUDGET_MS`] on the
     /// lights, [`TILE_FRAME_BUDGET_MS`] for a library tile.
     frame_budget_ms: u64,
+    /// When a tile render must be over (the daemon's render budget, from its start). A frame
+    /// is held to the time left until then as well as to `frame_budget_ms`, so one update of
+    /// several frames cannot run on past the render's budget. `None` on the lights.
+    give_up_at: Option<std::time::Instant>,
+    /// Whether a frame was stopped for running past its deadline (a timing outcome, unlike a
+    /// script error, which fails the same way on every machine).
+    timed_out: bool,
     /// The source sizes and destination sizes the blit maps were built for.
     blit_key: (usize, usize, usize, usize),
     /// The source column for each destination column, built once per size pair.
@@ -242,6 +249,8 @@ impl HtmlEffect {
             values: Props::new(),
             loaded: false,
             frame_budget_ms: FRAME_BUDGET_MS,
+            give_up_at: None,
+            timed_out: false,
             blit_key: (0, 0, 0, 0),
             blit_cols: Vec::new(),
             blit_rows: Vec::new(),
@@ -270,6 +279,19 @@ impl HtmlEffect {
     pub fn tile_mode(mut self) -> Self {
         self.frame_budget_ms = TILE_FRAME_BUDGET_MS;
         self
+    }
+
+    /// Holds every later frame to the time left until `at`, as well as to its own budget.
+    /// A tile render passes the end of its render budget here, so a render never holds its
+    /// slot much past that budget however many frames one update asks for.
+    pub fn set_give_up_at(&mut self, at: Option<std::time::Instant>) {
+        self.give_up_at = at;
+    }
+
+    /// Whether a frame was stopped for running past its deadline. That says how busy the
+    /// machine was, not what the script does.
+    pub fn timed_out(&self) -> bool {
+        self.timed_out
     }
 
     /// The canvas' logical size.
@@ -390,7 +412,15 @@ impl HtmlEffect {
         let timestamp = self.time * 1000.0;
         // The frame's script runs with a deadline, so a runaway callback is stopped
         // instead of freezing the render loop.
-        self.runtime.deadline.start(self.frame_budget_ms);
+        let mut budget_ms = self.frame_budget_ms;
+        if let Some(at) = self.give_up_at {
+            let left = at.saturating_duration_since(std::time::Instant::now());
+            budget_ms = budget_ms.min(left.as_millis() as u64);
+            if budget_ms == 0 {
+                return Err(HtmlError::Timeout("the render's time ran out before this frame".to_string()));
+            }
+        }
+        self.runtime.deadline.start(budget_ms);
         let result = self.runtime.context.with(|ctx| -> rquickjs::Result<()> {
             let globals = ctx.globals();
 
@@ -443,10 +473,7 @@ impl HtmlEffect {
 
         if let Err(e) = result {
             if timed_out {
-                return Err(HtmlError::Timeout(format!(
-                    "the effect's script ran longer than {} ms",
-                    self.frame_budget_ms
-                )));
+                return Err(HtmlError::Timeout(format!("the effect's script ran longer than {budget_ms} ms")));
             }
             // The exception is already on the context; turn it into a message.
             let message = self
@@ -461,6 +488,9 @@ impl HtmlEffect {
     /// Reports an error once per distinct message. At most `MAX_REPORTED` distinct messages
     /// are kept, so a script that fails with a changing message cannot grow the list forever.
     fn report(&mut self, error: &HtmlError) {
+        if matches!(error, HtmlError::Timeout(_)) {
+            self.timed_out = true;
+        }
         let message = error.to_string();
         if self.reported.contains(&message) {
             return;

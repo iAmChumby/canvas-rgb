@@ -66,7 +66,13 @@ pub const BAR_BAND_ROWS: usize = 3;
 /// The longest a thumbnail render may run, in wall-clock time, before it is given up. A
 /// recipe at its limits (30 s of warm-up, a 30 s loop and a crossfade) asks an HTML effect for
 /// thousands of frames at up to 100 ms each; this stops that costing minutes of a core.
-pub const RENDER_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+///
+/// 30 s, measured: the slowest tile that ships, Wet Smear, renders in 3.8 s on an idle PC
+/// (release build) and in 11.4 s when it gets a third of one core (the render and two busy
+/// loops sharing a core, a game running at the same time), so the budget leaves it 2.6 times
+/// that. The picture is the same whatever the load; whether the render finishes in time
+/// depends on the load.
+pub const RENDER_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The seed every library tile is rendered with.
 ///
@@ -128,7 +134,43 @@ impl From<RenderError> for String {
 /// `std::panic::resume_unwind`, which skips the panic hook, so the failure is not logged as a
 /// daemon panic; [`render_within`] catches it and returns [`RenderError::Failed`].
 #[derive(Debug)]
-pub struct TileFailure(pub String);
+pub struct TileFailure {
+    /// What went wrong, as a sentence.
+    pub reason: String,
+    /// True when the tile failed for want of time (a frame ran past its deadline), which says
+    /// how busy the machine was and not what the effect is: the render is
+    /// [`RenderError::OverBudget`], retried later, and not [`RenderError::Failed`] for good.
+    pub load_dependent: bool,
+}
+
+thread_local! {
+    /// When the render running on this thread must be over. A tile effect reads it so its
+    /// frames are held to the time left (see [`give_up_at`]).
+    static GIVE_UP_AT: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// When the thumbnail render running on this thread must be over, if one is running. A tile
+/// effect holds every frame to the time left until then, so a render does not hold its slot
+/// much past [`RENDER_BUDGET`] however many frames one update runs.
+pub fn give_up_at() -> Option<std::time::Instant> {
+    GIVE_UP_AT.with(|at| at.get())
+}
+
+/// Sets [`give_up_at`] for the render in progress and clears it afterwards, also on unwind.
+struct GiveUpAtGuard;
+
+impl GiveUpAtGuard {
+    fn set(at: std::time::Instant) -> Self {
+        GIVE_UP_AT.with(|cell| cell.set(Some(at)));
+        GiveUpAtGuard
+    }
+}
+
+impl Drop for GiveUpAtGuard {
+    fn drop(&mut self) {
+        GIVE_UP_AT.with(|cell| cell.set(None));
+    }
+}
 
 /// Renders the thumbnail of `effect` at `props`, within [`RENDER_BUDGET`]. Returns the whole
 /// binary body, or why the render was given up.
@@ -150,7 +192,8 @@ pub fn render_within(
     match attempt {
         Ok(result) => result,
         Err(payload) => match payload.downcast::<TileFailure>() {
-            Ok(failure) => Err(RenderError::Failed(failure.0)),
+            Ok(failure) if failure.load_dependent => Err(RenderError::OverBudget(failure.reason)),
+            Ok(failure) => Err(RenderError::Failed(failure.reason)),
             Err(other) => std::panic::resume_unwind(other),
         },
     }
@@ -162,6 +205,7 @@ fn render_frames(
     budget: std::time::Duration,
 ) -> Result<Vec<u8>, RenderError> {
     let started = std::time::Instant::now();
+    let _give_up_at = GiveUpAtGuard::set(started + budget);
     let over_budget = || {
         (started.elapsed() > budget).then(|| {
             RenderError::OverBudget(format!(
@@ -1135,6 +1179,7 @@ mod tests {
     struct Failing {
         updates: u32,
         really_panic: bool,
+        load_dependent: bool,
     }
 
     impl Effect for Failing {
@@ -1157,22 +1202,30 @@ mod tests {
                 if self.really_panic {
                     panic!("a real panic");
                 }
-                std::panic::resume_unwind(Box::new(TileFailure("the script threw".into())));
+                std::panic::resume_unwind(Box::new(TileFailure { reason: "the script threw".into(), load_dependent: self.load_dependent }));
             }
         }
     }
 
     #[test]
     fn a_tile_effect_that_fails_makes_the_render_fail_loudly_and_a_real_panic_goes_on() {
-        let mut effect = Failing { updates: 0, really_panic: false };
+        let mut effect = Failing { updates: 0, really_panic: false, load_dependent: false };
         let error = render(&mut effect, &Props::new()).expect_err("a failed tile frame fails the render");
         assert_eq!(error, RenderError::Failed("the script threw".into()));
         assert!(!error.depends_on_load());
 
         // A panic that is not a tile failure is not swallowed.
-        let mut effect = Failing { updates: 0, really_panic: true };
+        let mut effect = Failing { updates: 0, really_panic: true, load_dependent: false };
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| render(&mut effect, &Props::new())));
         assert!(outcome.is_err(), "a real panic must reach the caller");
+    }
+
+    #[test]
+    fn a_tile_failure_from_a_timing_outcome_is_over_budget_and_not_failed_for_good() {
+        let mut effect = Failing { updates: 0, really_panic: false, load_dependent: true };
+        let error = render(&mut effect, &Props::new()).expect_err("the tile frame timed out");
+        assert_eq!(error, RenderError::OverBudget("the script threw".into()));
+        assert!(error.depends_on_load(), "a timing outcome is retried, not cached for good");
     }
 
     #[test]

@@ -89,12 +89,15 @@ A property tag the file describes badly (a colour with no default, a combobox wi
 values) is ignored the same way: the effect loads and runs, the editor shows one property
 less, and the warning says which one.
 
-A render is stopped after 20 seconds (`RENDER_BUDGET`) and the library shows no tile for that
-effect; at most two tiles render at once. A tile frame is never dropped for being slow: the
-lights drop a frame that runs past 100 ms and keep the last good one, but that depends on how
-busy the machine is, and a tile has to be the same picture on every machine. A tile frame runs
-to its end (only a script that never returns is stopped, at the render budget), and a frame
-that fails for any reason fails the tile render, so a tile is never a quietly different picture. The library plays every tile at 12 frames a second,
+A render is stopped after 30 seconds (`RENDER_BUDGET`) and the library shows no tile for that
+effect for a while (it is asked for again after 10 minutes, since running out of time says how
+busy the machine was and not what the effect is); at most two tiles render at once. A tile frame
+is never dropped for being slow: the lights drop a frame that runs past 100 ms and keep the last
+good one, but that depends on how busy the machine is, and a tile has to be the same picture on
+every machine. A tile frame runs to its end, held only to the time the render has left (a script
+that never returns is stopped there, and the tile is retried later). A frame that fails any other
+way fails the tile render for good, so a tile is never a quietly different picture. Whether a
+render finishes in time depends on the load; the picture does not. The library plays every tile at 12 frames a second,
 24 frames in 2 seconds, so `loop` is simulated time: a 16 s loop plays 8 times faster than the
 effect runs.
 

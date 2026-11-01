@@ -74,9 +74,12 @@ impl TileHtml {
         if let Some(error) = self.0.errors().first() {
             // `resume_unwind` does not run the panic hook, so a bad effect is not logged as a
             // daemon panic; the render catches the payload and reports it.
-            std::panic::resume_unwind(Box::new(crate::thumbnail::TileFailure(format!(
-                "the script failed while the tile was drawn: {error}"
-            ))));
+            // A frame stopped for running past its deadline is a timing outcome: the render is
+            // given up for now and tried again later, not for good.
+            std::panic::resume_unwind(Box::new(crate::thumbnail::TileFailure {
+                reason: format!("the script failed while the tile was drawn: {error}"),
+                load_dependent: self.0.timed_out(),
+            }));
         }
     }
 }
@@ -92,6 +95,8 @@ impl Effect for TileHtml {
     }
 
     fn update(&mut self, dt: f32, canvas: &mut canvas_proto::traits::Canvas, inputs: &canvas_proto::traits::Inputs) {
+        // Every frame of this update is held to the time left in the render's budget.
+        self.0.set_give_up_at(crate::thumbnail::give_up_at());
         self.0.update(dt, canvas, inputs);
         self.fail_on_error();
     }
@@ -872,6 +877,70 @@ window.requestAnimationFrame(draw);
         // A tile finishes every frame, whatever the machine's load: the slow frame is green.
         let tile = paint_after_two_frames(html_builder_seeded(1)("html:slow", SLOW_SECOND_FRAME).expect("loads"));
         assert!(tile[1] > 0.9 && tile[0] < 0.1, "the tile dropped a slow frame: {tile:?}");
+    }
+
+    /// An effect whose frame never returns.
+    const NEVER_RETURNS: &str = r##"<head><title>Never</title></head>
+<body><canvas id="c" width="8" height="8"></canvas></body>
+<script>
+function draw() { while (true) {} }
+window.requestAnimationFrame(draw);
+</script>"##;
+
+    #[test]
+    fn a_tile_frame_that_ran_out_of_time_is_over_budget_and_retried_not_failed_for_good() {
+        let mut tile = html_builder_seeded(1)("html:never", NEVER_RETURNS).expect("the effect loads");
+        let started = std::time::Instant::now();
+        let error = crate::thumbnail::render_within(tile.as_mut(), &Props::new(), std::time::Duration::from_millis(400))
+            .expect_err("a frame that never returns ends the render");
+        let took = started.elapsed();
+        assert!(error.depends_on_load(), "a timeout is a timing outcome, retried later: {error:?}");
+        assert!(
+            matches!(error, crate::thumbnail::RenderError::OverBudget(_)),
+            "a timed-out tile frame is OverBudget, not Failed for good: {error:?}"
+        );
+        // The frame is held to the time the render has left, not to the 30 s frame budget.
+        assert!(took < std::time::Duration::from_secs(5), "the render ran for {took:?} on a 400 ms budget");
+    }
+
+    /// An effect whose every frame burns `BURN` loop iterations.
+    fn burning_frames(iterations: u64) -> String {
+        format!(
+            r##"<head><title>Burn</title></head>
+<body><canvas id="c" width="8" height="8"></canvas></body>
+<script>
+function draw() {{ var s = 0; for (var i = 0; i < {iterations}; i++) {{ s += i % 7; }} window.requestAnimationFrame(draw); }}
+window.requestAnimationFrame(draw);
+</script>"##
+        )
+    }
+
+    #[test]
+    fn a_tile_render_does_not_hold_its_slot_much_past_its_budget() {
+        // Calibrate: how long does one frame of a fixed loop take on this machine, right now?
+        let probe = 200_000u64;
+        let mut effect = html_builder_seeded(1)("html:burn", &burning_frames(probe)).expect("loads");
+        let mut canvas = Canvas::new(8, 8);
+        let started = std::time::Instant::now();
+        effect.update(1.0 / 60.0, &mut canvas, &Inputs::default());
+        let per_probe = started.elapsed().as_secs_f64().max(1e-4);
+        // Frames of about half a second each. A step of 1/15 s runs four of them, two seconds.
+        let frame_s = 0.5;
+        let iterations = (probe as f64 * frame_s / per_probe) as u64;
+
+        let budget = std::time::Duration::from_millis(700);
+        let mut tile = html_builder_seeded(1)("html:burn", &burning_frames(iterations)).expect("loads");
+        let started = std::time::Instant::now();
+        let error = crate::thumbnail::render_within(tile.as_mut(), &Props::new(), budget)
+            .expect_err("frames of half a second cannot finish a render in 700 ms");
+        let took = started.elapsed();
+        assert!(error.depends_on_load(), "{error:?}");
+        // Without a bound per frame, the first step runs its four frames (two seconds) before the
+        // budget is looked at.
+        assert!(
+            took < budget + std::time::Duration::from_millis(400),
+            "the render held its slot for {took:?} on a {budget:?} budget"
+        );
     }
 
     #[test]
