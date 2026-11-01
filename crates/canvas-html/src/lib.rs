@@ -860,3 +860,22 @@ impl Effect for HtmlEffect {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::HtmlError;
+
+    /// The daemon gets a build error as text (the builders return `Result<_, String>`), and
+    /// tells a load that ran out of time from a real failure by this prefix
+    /// (`canvas-daemon`'s `thumbnail::build_error_depends_on_load`). If the wording here
+    /// changes, a busy machine would be treated as a broken effect again (#56), so the prefix
+    /// is pinned. The daemon pins the other side with the real variant's text.
+    #[test]
+    fn a_timeout_reads_with_the_prefix_the_daemon_matches() {
+        let text = HtmlError::Timeout("the effect's script ran longer than 2000 ms".into()).to_string();
+        assert!(text.starts_with("timeout: "), "{text}");
+        // The other kinds never carry it.
+        assert!(!HtmlError::Parse("x".into()).to_string().starts_with("timeout: "));
+        assert!(!HtmlError::Script("x".into()).to_string().starts_with("timeout: "));
+    }
+}

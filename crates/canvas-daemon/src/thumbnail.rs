@@ -146,8 +146,9 @@ impl From<RenderError> for String {
 /// machine was (a game running, a build), not what the effect is. Such a failure is worth
 /// another try later; any other build error fails the same way every time.
 ///
-/// This is the one place that knows the rule, so the tile path and the user-effects path
-/// ([`crate::user_effects`]) tell a timeout from a real failure the same way.
+/// The tile build path and the user-effects path ([`crate::user_effects`]) both ask this, so
+/// they tell a timeout from a real failure the same way. The tile *frame* path is a separate
+/// case: it carries its own flag (`TileFailure::load_dependent`) and does not ask this.
 pub fn build_error_depends_on_load(why: &str) -> bool {
     why.starts_with("timeout: ")
 }
@@ -1244,6 +1245,18 @@ mod tests {
         let mut effect = Failing { updates: 0, really_panic: true, load_dependent: false };
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| render(&mut effect, &Props::new())));
         assert!(outcome.is_err(), "a real panic must reach the caller");
+    }
+
+    /// The error reaches the daemon as text, so the rule matches the text of the real
+    /// variants: a `Timeout` depends on the load, the other kinds never do. (`canvas-html`
+    /// pins the prefix on its side.)
+    #[test]
+    fn the_text_of_the_html_error_kinds_is_told_apart_by_the_rule() {
+        use canvas_html::HtmlError;
+        let timeout = HtmlError::Timeout("the effect's script ran longer than 2000 ms".into()).to_string();
+        assert!(build_error_depends_on_load(&timeout), "{timeout}");
+        assert!(!build_error_depends_on_load(&HtmlError::Parse("x".into()).to_string()));
+        assert!(!build_error_depends_on_load(&HtmlError::Script("x".into()).to_string()));
     }
 
     #[test]
