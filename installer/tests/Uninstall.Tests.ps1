@@ -197,7 +197,7 @@ function Set-UserPathEntry { Write-Host 'STUB Set-UserPathEntry'; return $false 
     }
 
     # uninstall-elevated.ps1 runs as a temp COPY; lib.ps1 gets stubs so no service, HKLM key, process or admin check is real.
-    function Invoke-ElevatedUninstallSandbox([string]$Name, [string]$RecordText, [switch]$Purge, [string]$SignalService = '', [switch]$JunctionHome) {
+    function Invoke-ElevatedUninstallSandbox([string]$Name, [string]$RecordText, [switch]$Purge, [string]$SignalService = '', [switch]$JunctionHome, [switch]$ListFails, [switch]$PurgeFails) {
         $root = Join-Path $dir $Name
         $scripts = Join-Path $root 'scripts'; $pd = Join-Path $root 'PD\canvas-rgb'; $inst = Join-Path $root 'install'
         New-Item -ItemType Directory -Path $scripts, $inst -Force | Out-Null
@@ -229,14 +229,25 @@ function Remove-Item {
     Microsoft.PowerShell.Management\Remove-Item -LiteralPath $LiteralPath -Recurse:$Recurse -Force:$Force
 }
 '@
-        Add-Content -LiteralPath (Join-Path $scripts 'lib.ps1') -Value $stubs.Replace('__SIGNAL__', $(if ($SignalService) { $SignalService } else { 'no-such-service' }))
+        if ($ListFails) {
+            # The list of running OpenRGB processes cannot be read: the uninstall refuses before it
+            # stops or removes anything.
+            $stubs += "`r`nfunction Get-CimInstance { [CmdletBinding()] param(`$ClassName, `$Filter) Write-Error 'WMI is down' }`r`n"
+        }
+        if ($PurgeFails) {
+            # The machine data folder cannot be deleted (a file in it is in use): the uninstall fails
+            # after the program files are gone.
+            $stubs = $stubs.Replace('    Microsoft.PowerShell.Management\Remove-Item', "    if (`$LiteralPath -eq '$pd') { throw 'the machine data folder is in use' }`r`n    Microsoft.PowerShell.Management\Remove-Item")
+        }
+        $stubs = $stubs.Replace('__SIGNAL__', $(if ($SignalService) { $SignalService } else { 'no-such-service' }))
+        Add-Content -LiteralPath (Join-Path $scripts 'lib.ps1') -Value $stubs
         $rec = Join-Path $pd 'signalrgb-restore.json'
         if ($null -ne $RecordText) { [System.IO.File]::WriteAllText($rec, $RecordText) }
         $log = Join-Path $root 'elevated.log'
         $extra = if ($Purge) { ' -PurgeConfig' } else { '' }
         $cmd = '$env:ProgramData=''{0}''; & ''{1}'' -InstallDir ''{2}'' -LogFile ''{3}''{4}; exit $LASTEXITCODE' -f (Join-Path $root 'PD'), (Join-Path $scripts 'uninstall-elevated.ps1'), $inst, $log, $extra
         $out = & powershell.exe -NoProfile -Command $cmd 2>&1 | Out-String
-        return @{ Out = $out; Code = $LASTEXITCODE; Record = $rec; Install = $inst; Pd = $pd }
+        return @{ Out = $out; Code = $LASTEXITCODE; Record = $rec; Install = $inst; Pd = $pd; State = (Join-Path $pd 'uninstall-state.marker') }
     }
 
     Test-Case 'uninstall-elevated.ps1: a corrupt machine record is named before anything is deleted, kept, and the run ends non-zero after the other steps' {
@@ -347,6 +358,79 @@ function Start-Process { Write-Host 'STUB Start-Process'; [pscustomobject]@{ Exi
         $r = Invoke-UninstallDriverSandbox 'd24c' 0
         Assert-True ($r.Out -match 'uninstall finished\.') $r.Out
         Assert-Equal $r.Code 0 $r.Out
+    }
+
+    # ---- #64: the uninstall says what it really removed ----
+    Test-Case 'the state of an unfinished uninstall is said in plain words, and each part is its own' {
+        $none = Get-UninstallStateReport -State @{ Service = 'none' }
+        Assert-True ($none.Words -match 'was not removed') $none.Words
+        Assert-True ($none.Words -match 'before anything was taken away') $none.Words
+        Assert-True (-not $none.Removed) 'nothing was removed'
+        # A service that was only stopped is not a removal, but the person must know the fans are
+        # back on the motherboard's own settings.
+        $stopped = Get-UninstallStateReport -State @{ Service = 'stopped' }
+        Assert-True ($stopped.Words -match 'the background service is stopped') $stopped.Words
+        Assert-True ($stopped.Words -match 'motherboard') $stopped.Words
+        Assert-True (-not $stopped.Removed) 'a stopped service is not a removal'
+        # The service is gone: that IS a removal.
+        $gone = Get-UninstallStateReport -State @{ Service = 'removed' }
+        Assert-True ($gone.Words -match 'the background service was removed') $gone.Words
+        Assert-True $gone.Removed 'the service is gone'
+        # Every part that was removed is named, and each one makes it a removal.
+        $all = Get-UninstallStateReport -State @{ Service = 'removed'; Entries = $true; Files = $true; OpenRgb = $true; Config = $true }
+        Assert-True ($all.Words -match 'the background service was removed') $all.Words
+        Assert-True ($all.Words -match 'the Installed apps entry and the Start menu shortcut were removed') $all.Words
+        Assert-True ($all.Words -match 'the program files were removed') $all.Words
+        Assert-True ($all.Words -match 'the OpenRGB folder was removed') $all.Words
+        Assert-True ($all.Words -match 'your canvas-rgb settings were removed') $all.Words
+        Assert-True $all.Removed 'things were removed'
+        # Each state has its own words: the service alone and the files alone are not the same text.
+        $files = Get-UninstallStateReport -State @{ Service = 'none'; Files = $true }
+        Assert-True ($files.Words -ne $gone.Words) 'each state has its own words'
+        Assert-True ($files.Words -match 'the program files were removed') $files.Words
+        Assert-True ($files.Words -notmatch 'the background service') 'it says nothing about the service'
+    }
+    Test-Case 'an uninstall that fails before it removes anything says that nothing was removed' {
+        $r = Invoke-ElevatedUninstallSandbox 'u64a' $null -ListFails
+        Assert-Equal $r.Code 1 "the uninstall refuses: $($r.Out)"
+        Assert-True ($r.Out -match 'could not list') "it names the cause: $($r.Out)"
+        Assert-True (Test-Path -LiteralPath $r.State) 'the state is recorded'
+        $words = [System.IO.File]::ReadAllText($r.State)
+        Assert-True ($words -match 'before anything was taken away') "the words say that nothing was taken away: $words"
+        Assert-True ($words -notmatch 'was removed:') "it must not claim that something was removed: $words"
+    }
+    Test-Case 'an uninstall that fails after it removed the program files says so, and the exit code says it too' {
+        $r = Invoke-ElevatedUninstallSandbox 'u64b' $null -Purge -PurgeFails
+        Assert-Equal $r.Code 4 "the uninstall fails, and the code says something was removed: $($r.Out)"
+        Assert-True (Test-Path -LiteralPath $r.State) 'the state is recorded'
+        $words = [System.IO.File]::ReadAllText($r.State)
+        Assert-True ($words -match 'the program files were removed') "the words name what is gone: $words"
+        Assert-True ($words -notmatch 'before anything was taken away') "it must not claim that nothing was taken away: $words"
+        Assert-True ($r.Out -match 'the program files were removed') "the log says it too: $($r.Out)"
+    }
+    Test-Case 'the uninstaller shows what the uninstall really removed, and only says "nothing was removed" when that is true' {
+        $iss = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\inno\canvas-rgb.iss') -Raw
+        # The state file the script writes, read back by the uninstaller.
+        Assert-True ($iss -match [regex]::Escape("{commonappdata}\canvas-rgb\uninstall-state.marker")) 'the state file is in the machine home'
+        $lib = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\lib.ps1') -Raw
+        Assert-True ($lib -match "'uninstall-state\.marker'") 'the scripts and the .iss agree on the name'
+        # The uninstaller deletes a state file from an earlier uninstall before it runs the script.
+        $a = $iss.IndexOf('function InitializeUninstall')
+        $b = $iss.IndexOf('procedure CurUninstallStepChanged')
+        $un = $iss.Substring($a, $b - $a)
+        $iDel = $un.IndexOf('DeleteFile(UninstallStatePath)')
+        $iRun = $un.IndexOf("uninstall-elevated.ps1'), ")
+        Assert-True ($iDel -ge 0 -and $iRun -gt $iDel) 'the old state is deleted before the script runs'
+        # The message is what the script wrote, not a fixed "nothing was removed".
+        Assert-True ($un -match 'UninstallStateWords\(\)') 'the uninstaller reads the state back'
+        $iWords = $un.IndexOf('UninstallStateWords()')
+        $iBox = $un.IndexOf('MsgBox(Msg')
+        Assert-True ($iWords -ge 0 -and $iBox -gt $iWords) 'the message is the one the script left'
+        # "Nothing was removed" is only said for the exit code that means it (1).
+        $iNothing = $un.IndexOf('Nothing was removed.')
+        Assert-True ($iNothing -gt 0) 'the old message is still there, for the case where it is true'
+        $before = $un.Substring(0, $iNothing)
+        Assert-True ($before -match 'if Code = 4 then') 'it is only used when the code says something was removed'
     }
 
     # ---- item 12: Uninstall in Installed apps knows a non-default folder

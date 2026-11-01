@@ -126,15 +126,18 @@ function Get-Process { [CmdletBinding()] param([string]$Name, [int]$Id) if ($Nam
 # -ServiceStatus is what the stubbed service reports before the run; -Stuck puts an OpenRGB in the
 # install folder that will not stop (the update fails after it stopped the service); without it
 # the OpenRGB on the list has a path nobody can read (the update refuses at step 1).
-function Invoke-StopCanvasSandbox([string]$Name, [string]$ServiceStatus, [switch]$Stuck, [switch]$MarkerBlocked) {
+function Invoke-StopCanvasSandbox([string]$Name, [string]$ServiceStatus, [switch]$Stuck, [switch]$MarkerBlocked, [switch]$MachineHomeUnsafe, [switch]$MarkerUnreadable, [switch]$NoOpenRgb) {
     $root = Join-Path $dir $Name
     $scripts = Join-Path $root 'scripts'; $inst = Join-Path $root 'install'
-    New-Item -ItemType Directory -Path $scripts, $inst -Force | Out-Null
+    # The machine home is faked too: the note that carries "this run stopped a running service" to
+    # the next step goes in there, and the real one is not ours.
+    New-Item -ItemType Directory -Path $scripts, $inst, (Join-Path $root 'PD\canvas-rgb') -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\stop-canvas.ps1') -Destination $scripts
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\lib.ps1') -Destination $scripts
     $exe = if ($Stuck) { Join-Path $inst 'openrgb\OpenRGB.exe' } else { '' }
     $stubs = @"
 function Test-IsAdmin { return `$true }
+function Assert-MachineHomeSafe { param(`$Path) }
 `$global:SvcStatus = '$ServiceStatus'
 function Get-Service { param(`$Name) `$s = [pscustomobject]@{ Name = 'canvas-rgb-svc'; Status = `$global:SvcStatus }; `$s | Add-Member -MemberType ScriptMethod -Name WaitForStatus -Value { param(`$S, `$T) }; `$s }
 function Stop-Service { param(`$Name, [switch]`$Force) `$global:SvcStatus = 'Stopped'; Write-Host 'CALL Stop-Service' }
@@ -144,9 +147,24 @@ function Stop-Process { param([int]`$Id, [switch]`$Force, [switch]`$ErrorAction)
 function Start-Sleep { param([int]`$Milliseconds) }
 function Get-CimInstance { param(`$ClassName, `$Filter) [pscustomobject]@{ ProcessId = 4242; ExecutablePath = '$exe' } }
 "@
+    if ($NoOpenRgb -or $MarkerBlocked) {
+        # No OpenRGB runs at all: the stop has nothing to place, so it carries on and the service
+        # is stopped (and the note about it is written).
+        $stubs += "`r`nfunction Get-CimInstance { param(`$ClassName, `$Filter) }`r`n"
+    }
     if ($MarkerBlocked) {
-        # No OpenRGB runs, and the marker cannot be written (a machine home that refuses the write).
-        $stubs += "`r`nfunction Get-CimInstance { param(`$ClassName, `$Filter) }`r`nfunction Set-StoppedServiceMarker { return `$false }`r`n"
+        # The note cannot be written (a machine home that refuses the write).
+        $stubs += "`r`nfunction Set-StoppedServiceMarker { return `$false }`r`n"
+    }
+    if ($MachineHomeUnsafe) {
+        # The machine home is not safe: the note that carries "this run stopped a running service"
+        # to the next step must not be written there (#65).
+        $stubs += "`r`nfunction Assert-MachineHomeSafe { param(`$Path) throw 'STOP: the machine home is a junction or symbolic link.' }`r`n"
+    }
+    if ($MarkerUnreadable) {
+        # The note is written but cannot be read back: the next step would not know that this run
+        # stopped the service, so the update must stop (#65).
+        $stubs += "`r`nfunction Test-StoppedServiceMarker { return `$false }`r`n"
     }
     Add-Content -LiteralPath (Join-Path $scripts 'lib.ps1') -Value $stubs
     $log = Join-Path $root 'stop.log'
@@ -154,7 +172,7 @@ function Get-CimInstance { param(`$ClassName, `$Filter) [pscustomobject]@{ Proce
     # stopped a running service" to the next step goes in there, and the real one is not ours.
     $cmd = '$env:ProgramData=''{0}''; & ''{1}'' -InstallDir ''{2}'' -LogFile ''{3}''; exit $LASTEXITCODE' -f (Join-Path $root 'PD'), (Join-Path $scripts 'stop-canvas.ps1'), $inst, $log
     $out = & powershell.exe -NoProfile -Command $cmd 2>&1 | Out-String
-    return @{ Out = $out; Code = $LASTEXITCODE; Marker = (Join-Path $root 'PD\canvas-rgb\stopped-service.marker') }
+    return @{ Out = $out; Code = $LASTEXITCODE; Marker = (Join-Path $root 'PD\canvas-rgb\stopped-service.marker'); Log = $log }
 }
 
 # The two steps of an Inno update, one after the other, against fakes:
@@ -774,21 +792,6 @@ try {
         $setup = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\setup-elevated.ps1'))
         Assert-True ($setup -match '\[switch\]\$StoppedRunningService') 'the elevated step takes the switch'
     }
-    Test-Case 'in Inno mode a refusal at step 1 says whether canvas-rgb is running' {
-        $install = Join-Path $dir 'inno3'
-        function Get-OpenRgbProcessList { @([pscustomobject]@{ Id = 9401; Path = '' }) }
-        function Get-Service { param([string]$Name) $s = New-FakeService; $s.Status = 'Stopped'; $s }
-        # The Inno installer's first step stopped a running service before it copied the files.
-        $threw = $false
-        try { Stop-CanvasRgbRunning -InstallDir $install -CopiedNote 'The new program files are already in place' -StoppedRunningService | Out-Null } catch { $threw = $true; $why = $_.Exception.Message }
-        Assert-True $threw 'the update refuses'
-        Assert-True ($why -match 'canvas-rgb was stopped for the update') "it says canvas-rgb was stopped for the update: $why"
-        # Without the switch nothing was stopped, so canvas-rgb was not running.
-        $threw = $false
-        try { Stop-CanvasRgbRunning -InstallDir $install -CopiedNote 'The new program files are already in place' | Out-Null } catch { $threw = $true; $why2 = $_.Exception.Message }
-        Assert-True $threw 'the update refuses'
-        Assert-True ($why2 -match 'canvas-rgb was not running') "it says canvas-rgb was not running: $why2"
-    }
     Test-Case 'the uninstall refusal names what was already stopped and removed' {
         $r = Invoke-UninstallSandbox 'uninst4' -CimFailsLate -FakeApp
         Assert-True ($r.Out -match 'could not list') "it names the cause: $($r.Out)"
@@ -803,6 +806,120 @@ try {
         Assert-True ($line[0] -match 'Updating') "it covers updating: $($line[0])"
         Assert-True ($line[0] -match 'uninstalling') "it covers uninstalling: $($line[0])"
         Assert-True ($line[0] -match 'OpenRGB') "it says what is stopped: $($line[0])"
+    }
+
+    # ---- #65: an update that fails before the elevated step leaves canvas-rgb stopped ----
+    $issText = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\inno\canvas-rgb.iss'))
+    # Source of one Pascal routine: from its header to the next top-level routine, with the // comments
+    # removed so a comment cannot satisfy a check.
+    function Get-IssRoutine([string]$Header) {
+        $a = $issText.IndexOf($Header)
+        if ($a -lt 0) { throw "no $Header in the .iss" }
+        $m = [regex]::Match($issText.Substring($a + $Header.Length), '(?m)^(function|procedure) ')
+        $body = if ($m.Success) { $issText.Substring($a, $Header.Length + $m.Index) } else { $issText.Substring($a) }
+        return ([regex]::Replace($body, '(?m)^\s*//.*$', ''))
+    }
+    # The PowerShell the installer runs to start canvas-rgb again, taken from the .iss itself: what this
+    # test runs is the text the installer runs. It runs against a stubbed lib.ps1 (no real service).
+    $restartLine = ($issText -split "`r?`n" | Where-Object { $_ -match '^\s*RestartServiceScript = ' }) | Select-Object -First 1
+    Assert-True ($null -ne $restartLine) 'the .iss has the text that starts canvas-rgb again'
+    $restartText = [regex]::Match($restartLine, "= '(.*)';\s*$").Groups[1].Value.Replace("''", "'")
+    function Invoke-RestartSandbox([string]$Name, [string]$ServiceStatus) {
+        $root = Join-Path $dir $Name
+        New-Item -ItemType Directory -Path $root -Force | Out-Null
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\lib.ps1') -Destination $root
+        $stubs = @"
+`$global:SvcStatus = '$ServiceStatus'
+function Get-Service { param(`$Name) `$s = [pscustomobject]@{ Name = 'canvas-rgb-svc'; Status = `$global:SvcStatus }; `$s | Add-Member -MemberType ScriptMethod -Name WaitForStatus -Value { param(`$S, `$T) }; `$s }
+function Start-Service { param(`$Name) `$global:SvcStatus = 'Running'; Write-Host 'CALL Start-Service' }
+"@
+        Add-Content -LiteralPath (Join-Path $root 'lib.ps1') -Value $stubs
+        $cmd = $restartText.Replace('%LIB%', (Join-Path $root 'lib.ps1').Replace("'", "''"))
+        $out = & powershell.exe -NoProfile -Command $cmd 2>&1 | Out-String
+        return @{ Out = $out; Code = $LASTEXITCODE }
+    }
+    Test-Case 'the installer starts canvas-rgb again with the code the scripts use, and it starts it once' {
+        $r = Invoke-RestartSandbox 'restart1' 'Stopped'
+        Assert-Equal (@([regex]::Matches($r.Out, 'CALL Start-Service')).Count) 1 "the service is started once: $($r.Out)"
+        Assert-True ($r.Out -match 'started the service canvas-rgb-svc again') "it says so: $($r.Out)"
+    }
+    Test-Case 'a canvas-rgb that is already running is not started a second time' {
+        $r = Invoke-RestartSandbox 'restart2' 'Running'
+        Assert-Equal (@([regex]::Matches($r.Out, 'CALL Start-Service')).Count) 0 "nothing is started: $($r.Out)"
+    }
+    Test-Case 'the installer starts canvas-rgb again when the update failed before the elevated step' {
+        $body = Get-IssRoutine 'procedure DeinitializeSetup'
+        # The three facts: the install did not finish, this run stopped a running service, and the
+        # elevated step never ran (it starts the service itself when it fails).
+        Assert-True ($body -match '\(not Ok\) and FStoppedRunningService and \(not FElevatedStepRan\)') 'the restart is guarded by the three facts'
+        Assert-True ($body -match 'RestartCanvasRgb') 'the restart runs'
+        # It must not sit behind the /UPDATE-only exit: every install needs it, not only an update.
+        $iRestart = $body.IndexOf('RestartCanvasRgb')
+        $iExit = $body.IndexOf('if not IsUpdateRun then Exit')
+        Assert-True ($iRestart -gt 0 -and $iExit -gt $iRestart) 'the restart runs before the /UPDATE-only exit'
+        # The service update has its own way of starting the service: it must not start it twice.
+        Assert-True ($body -match '\(not IsServiceUpdateRun\) then\s+RestartCanvasRgb') 'the service-update path is left to its own branch'
+    }
+    Test-Case 'the elevated step says that it ran, so the service is not started a second time' {
+        $body = Get-IssRoutine 'procedure CurStepChanged'
+        Assert-True ($body -match 'FElevatedStepRan := True') 'the flag is set'
+        $iFlag = $body.IndexOf('FElevatedStepRan := True')
+        $iRun = $body.IndexOf('setup-elevated.ps1')
+        Assert-True ($iFlag -gt 0 -and $iRun -gt $iFlag) 'the flag is set before the elevated step runs'
+    }
+    Test-Case 'the installer starts canvas-rgb again only when this run stopped a running service' {
+        $body = Get-IssRoutine 'function PrepareToInstall'
+        # The flag comes from the note the first step wrote, and from nowhere else.
+        Assert-True ($body -match 'FStoppedRunningService := StoppedRunningService\(\)') 'the flag comes from the note'
+        Assert-Equal (@([regex]::Matches($body, 'FStoppedRunningService :=')).Count) 1 'the flag is set in one place only'
+        # The first step writes that note only when it stopped a running service.
+        $stop = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\stop-canvas.ps1'))
+        Assert-True ($stop -match 'if \(\$stopState\.ServiceWasRunning\)') 'the note is written only when a running service was stopped'
+        # A service that was stopped on purpose is not started again: the note says nothing.
+        $r = Invoke-StopCanvasSandbox 'svc4' -ServiceStatus 'Stopped'
+        Assert-Equal $r.Code 1 "the update refuses: $($r.Out)"
+        Assert-True ($r.Out -notmatch 'CALL Start-Service') "the service is not started again: $($r.Out)"
+    }
+    Test-Case 'the note that carries the stopped service across is checked and read back' {
+        $lib = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\lib.ps1'))
+        $m = [regex]::Match($lib, '(?s)function Set-StoppedServiceMarker.*?\r?\n\}')
+        Assert-True $m.Success 'the function is there'
+        $iCheck = $m.Value.IndexOf('Assert-MachineHomeSafe')
+        $iWrite = $m.Value.IndexOf('WriteAllText')
+        Assert-True ($iCheck -gt 0 -and $iWrite -gt $iCheck) 'the machine home is checked before the note is written'
+        # And the note is read back: a note that cannot be read is a note the next step cannot use.
+        $stop = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\stop-canvas.ps1'))
+        Assert-True ($stop -match 'Test-StoppedServiceMarker') 'the first step reads the note back'
+        $r = Invoke-StopCanvasSandbox 'svc5' -ServiceStatus 'Running' -NoOpenRgb -MarkerUnreadable
+        Assert-Equal $r.Code 1 "the update stops: $($r.Out)"
+        Assert-True ($r.Out -match 'CALL Start-Service') "the service is started again: $($r.Out)"
+        Assert-True (Test-Path -LiteralPath $r.Marker) 'the note is there, it just cannot be read'
+    }
+    Test-Case 'an unsafe machine home stops the update before anything is copied, and the service is started again' {
+        $r = Invoke-StopCanvasSandbox 'svc6' -ServiceStatus 'Running' -NoOpenRgb -MachineHomeUnsafe
+        Assert-Equal $r.Code 1 "the update stops: $($r.Out)"
+        Assert-True ($r.Out -match 'CALL Start-Service') "the service is started again: $($r.Out)"
+        Assert-True (-not (Test-Path -LiteralPath $r.Marker)) 'no note was written in a folder that is not safe'
+        $log = if (Test-Path -LiteralPath $r.Log) { Get-Content -LiteralPath $r.Log -Raw } else { '' }
+        Assert-True ($log -match 'junction or symbolic link') "the reason is in the log: $log"
+    }
+    Test-Case 'a refusal at step 1 says what it knows about canvas-rgb, and nothing more' {
+        $install = Join-Path $dir 'inno4'
+        function Get-OpenRgbProcessList { @([pscustomobject]@{ Id = 9501; Path = '' }) }
+        function Get-Service { param([string]$Name) $s = New-FakeService; $s.Status = 'Stopped'; $s }
+        # The Inno installer's first step stopped a running service before it copied the files: the
+        # refusal says so, because that is what the note says.
+        $threw = $false
+        try { Stop-CanvasRgbRunning -InstallDir $install -CopiedNote 'The new program files are already in place' -StoppedRunningService | Out-Null } catch { $threw = $true; $why = $_.Exception.Message }
+        Assert-True $threw 'the update refuses'
+        Assert-True ($why -match 'canvas-rgb was stopped for the update') "it says canvas-rgb was stopped for the update: $why"
+        # Without the note this run stopped nothing. It does not say that canvas-rgb is not running:
+        # only that this update did not stop it.
+        $threw = $false
+        try { Stop-CanvasRgbRunning -InstallDir $install -CopiedNote 'The new program files are already in place' | Out-Null } catch { $threw = $true; $why2 = $_.Exception.Message }
+        Assert-True $threw 'the update refuses'
+        Assert-True ($why2 -match 'this update did not stop canvas-rgb') "it says what it knows: $why2"
+        Assert-True ($why2 -notmatch 'canvas-rgb was not running') "it must not claim that canvas-rgb is not running: $why2"
     }
 
     # ---- the log the person reads ----

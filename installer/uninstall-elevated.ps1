@@ -118,11 +118,10 @@ try {
     #    install dir first: the Uninstall button runs this from a copy inside it.
     Set-Location -LiteralPath $env:SystemRoot
     $rm = Get-UninstallRemovalDecision -InnoMode ([bool]$InnoMode)
-    if ($rm.RemoveScriptEntry -and (Test-Path -LiteralPath $c.UninstallKey)) { Remove-Item -LiteralPath $c.UninstallKey -Recurse -Force; Say '  removed the Installed apps entry' }
-    if ($rm.RemoveInnoEntry -and (Test-Path -LiteralPath $c.InnoUninstallKey)) { Remove-Item -LiteralPath $c.InnoUninstallKey -Recurse -Force; Say '  removed the Inno Installed apps entry' }
+    if ($rm.RemoveScriptEntry -and (Test-Path -LiteralPath $c.UninstallKey)) { Remove-Item -LiteralPath $c.UninstallKey -Recurse -Force; Say '  removed the Installed apps entry'; $uninstallState.Entries = $true }
+    if ($rm.RemoveInnoEntry -and (Test-Path -LiteralPath $c.InnoUninstallKey)) { Remove-Item -LiteralPath $c.InnoUninstallKey -Recurse -Force; Say '  removed the Inno Installed apps entry'; $uninstallState.Entries = $true }
     $lnk = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) $c.StartMenuShortcut
-    if ($rm.RemoveShortcut -and (Test-Path -LiteralPath $lnk)) { Remove-Item -LiteralPath $lnk -Force; Say '  removed the Start menu shortcut' }
-    if ($rm.RemoveShortcut) { $uninstallState.Entries = $true }
+    if ($rm.RemoveShortcut -and (Test-Path -LiteralPath $lnk)) { Remove-Item -LiteralPath $lnk -Force; Say '  removed the Start menu shortcut'; $uninstallState.Entries = $true }
     $appStopped = @()
     foreach ($n in 'canvas-rgbd', 'canvas-rgb', 'canvas-rgb-cli') {
         Get-Process -Name $n -ErrorAction SilentlyContinue | ForEach-Object { $_ | Stop-Process -Force; $appStopped += $n; Say "  stopped running $n" }
