@@ -58,11 +58,17 @@ pub async fn effect_source(
     }
 }
 
+/// How many previews may render at once. Each one can hold a blocking thread for up to the
+/// render budget (30 s), so the rest answer 503 with `Retry-After` instead of queueing behind a
+/// slow draft until the editor gives up.
+pub const PREVIEW_CONCURRENT: usize = 2;
+
 /// `POST /api/v1/effects/preview`.
 ///
 /// The draft's HTML and the editor's props, rendered headless: the schema, the runtime's
 /// errors, the check warnings, a source hash, and the 64x40 24-frame loop. No device is
-/// touched and nothing is written.
+/// touched and nothing is written. At most [`PREVIEW_CONCURRENT`] previews render at once; a
+/// request that finds them all busy answers 503 with `Retry-After: 1`.
 ///
 /// The parse and the render run on a blocking thread, so a draft that runs a script past its
 /// deadline never holds the API: the runtime stops it at its load or frame budget and the
@@ -70,6 +76,7 @@ pub async fn effect_source(
 /// one whose frame callback runs over still answers with its loop and lists the error, so the
 /// editor can keep the last good picture.
 pub async fn preview_effect(
+    State(app): State<Arc<App>>,
     body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
 ) -> ApiResult<Json<EffectPreviewResponse>> {
     let bytes = crate::api::limited_body(body, crate::api::effects::IMPORT_BODY_LIMIT)?;
@@ -82,16 +89,30 @@ pub async fn preview_effect(
             canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES
         )));
     }
-    Ok(Json(preview(&request.html, &request.props).await?))
+    // The slot is held until the render is over. A busy answer is a 503 with a retry hint, not
+    // a queue: the editor sends a new preview 400 ms after the next keystroke anyway.
+    let Ok(slot) = app.preview_slots.clone().try_acquire_owned() else {
+        return Err(ApiFailure::service_unavailable(format!(
+            "the daemon is already rendering {PREVIEW_CONCURRENT} previews; try again shortly"
+        ))
+        .with_retry_after(1));
+    };
+    Ok(Json(preview(&request.html, &request.props, slot).await?))
 }
 
-/// Renders a draft for [`preview_effect`], off the async workers.
-async fn preview(html: &str, props: &Props) -> Result<EffectPreviewResponse, ApiFailure> {
+/// Renders a draft for [`preview_effect`], off the async workers. The slot stays with the
+/// render: a client that goes away does not free it while the render still runs.
+async fn preview(
+    html: &str,
+    props: &Props,
+    slot: tokio::sync::OwnedSemaphorePermit,
+) -> Result<EffectPreviewResponse, ApiFailure> {
     let source_hash = crate::user_effects::source_hash(html);
     let id = format!("{}{source_hash}", canvas_proto::consts::DRAFT_ID_PREFIX);
     let html = html.to_string();
     let props = props.clone();
     tokio::task::spawn_blocking(move || -> Result<EffectPreviewResponse, ApiFailure> {
+        let _slot = slot;
         // The same build the lights use, so the preview is judged by the runtime that will
         // run it.
         let mut effect = crate::user_effects::html_effect(&id, &html)

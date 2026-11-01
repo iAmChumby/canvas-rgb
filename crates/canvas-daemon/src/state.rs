@@ -103,6 +103,9 @@ pub struct App {
     pub transient: crate::transient::Transient,
     /// The draft on the lights: an editor's unsaved effect, with its lease (see [`crate::draft`]).
     pub draft: crate::draft::Draft,
+    /// The preview render slots. A preview renders up to 30 s of a blocking thread, so at most
+    /// [`crate::api::editor::PREVIEW_CONCURRENT`] run at once and the rest answer 503.
+    pub preview_slots: Arc<tokio::sync::Semaphore>,
 }
 
 /// The fan config the daemon keeps a copy of.
@@ -163,6 +166,7 @@ impl App {
             last_frame: Arc::default(),
             transient: Default::default(),
             draft: Default::default(),
+            preview_slots: Arc::new(tokio::sync::Semaphore::new(crate::api::editor::PREVIEW_CONCURRENT)),
             store: tokio::sync::RwLock::new(store),
             engine,
             adapter: Arc::new(tokio::sync::Mutex::new(adapter as Box<dyn DeviceAdapter>)),

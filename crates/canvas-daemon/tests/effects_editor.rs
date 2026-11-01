@@ -1159,3 +1159,45 @@ async fn a_put_waits_for_an_activation_that_ends_the_draft() {
     );
     assert!(draft_state(router).await.active, "and its slot is the one reported");
 }
+#[tokio::test]
+async fn at_most_two_previews_render_at_once() {
+    let runaway_frame = r##"<head><title>Slow</title></head>
+<body><canvas id="c" width="320" height="200"></canvas></body>
+<script>
+  var c = document.getElementById("c");
+  var ctx = c.getContext("2d");
+  ctx.fillStyle = "#00ff00";
+  ctx.fillRect(0, 0, 320, 200);
+  function draw() { while (true) {} }
+  window.requestAnimationFrame(draw);
+</script>"##;
+    let (router, _app, _home, _folder) = build();
+    let mut pending = Vec::new();
+    for _ in 0..3 {
+        pending.push(tokio::spawn(post_preview(
+            router.clone(),
+            preview_body(runaway_frame, serde_json::json!({})),
+        )));
+    }
+    let mut ok = 0;
+    let mut busy = 0;
+    let mut retry_after = None;
+    for task in pending {
+        let response = task.await.expect("the request task ends");
+        match response.status() {
+            StatusCode::OK => ok += 1,
+            StatusCode::SERVICE_UNAVAILABLE => {
+                busy += 1;
+                retry_after = response
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string);
+            }
+            other => panic!("unexpected status {other}"),
+        }
+    }
+    assert!(ok <= 2, "at most two previews render at once, got {ok}");
+    assert!(busy >= 1, "the third preview is refused while two run");
+    assert_eq!(retry_after.as_deref(), Some("1"), "the busy answer says when to retry");
+}

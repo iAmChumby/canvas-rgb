@@ -58,7 +58,9 @@ pub mod routes {
     /// [`super::EffectPreviewResponse`]: the schema, the runtime's errors, the check warnings,
     /// a `source_hash`, and the 64x40, 24-frame loop rendered with those props. The same body
     /// cap as [`EFFECTS_IMPORT`]. A draft whose top-level script never ends is stopped by the
-    /// runtime's deadline and answers 422; the API keeps answering while it runs.
+    /// runtime's deadline and answers 422; the API keeps answering while it runs. At most two
+    /// previews render at once; a request that finds both busy answers 503
+    /// `service_unavailable` with `Retry-After: 1`.
     pub const EFFECT_PREVIEW: &str = "/api/v1/effects/preview";
     /// `GET` the draft on the lights ([`super::DraftStatus`]); `PUT` with
     /// [`super::DraftRequest`] starts it or renews its lease (and updates the props); `DELETE`
@@ -130,7 +132,7 @@ pub mod routes {
     pub const PREVIEW: &str = "/api/v1/preview";
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ApiError {
     /// One of [`error_codes`].
