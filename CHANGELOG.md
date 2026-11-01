@@ -8,7 +8,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
-- Updating stops OpenRGB first, and if it cannot, it changes nothing and says why, instead of leaving OpenRGB broken. (#60)
+- Updating and uninstalling stop OpenRGB first, and if they cannot they say what state the PC is in and leave OpenRGB whole instead of leaving it broken. (#60)
 - Effects whose files have a small mistake in them still load and run, with a warning, instead of disappearing. (#16)
 - The effect library renders at most two previews at a time, even if you leave the page while they load. (#16)
 - An effect whose preview fails is not retried on every visit; one that only timed out because the PC was busy is tried again later. (#16)

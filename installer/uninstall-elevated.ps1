@@ -111,18 +111,41 @@ try {
     # The bundled OpenRGB server, which the service launched as SYSTEM, outlives the service and
     # holds its DLLs open. Stop only the copy that runs from the install dir: an OpenRGB the owner
     # runs from anywhere else is left alone.
-    $bundled = Join-Path $InstallDir 'openrgb'
-    Stop-BundledOpenRgb -InstallDir $InstallDir -KeepGoing | ForEach-Object { Say $_ }
+    $stop = Stop-BundledOpenRgb -InstallDir $InstallDir
+    $stop.Lines | ForEach-Object { Say $_ }
     Start-Sleep -Milliseconds 500
+    # The OpenRGB tree and the leftovers beside it. An OpenRGB that could not be stopped holds files
+    # in one of them, and deleting that folder half way is the bug this fixes (#60): the folder is
+    # kept whole, and the user is told what is left behind.
+    $trees = @(Get-OpenRgbTreeFolders -InstallDir $InstallDir)
+    $keep = @(Get-OpenRgbFoldersToKeep -InstallDir $InstallDir -Stop $stop)
+    if ($keep.Count -gt 0) {
+        $pids = (@($stop.Stuck | ForEach-Object { $_.Id }) + @($stop.Unreadable | ForEach-Object { $_.Id })) -join ', '
+        Say "  an OpenRGB (pid $pids) is still running, so the folder it holds was kept whole and not deleted: $($keep -join ', ')"
+        Say '  Close OpenRGB (or restart the PC) and remove that folder by hand.'
+    }
     if ($rm.RemoveInstallDir) {
         if (Test-Path -LiteralPath $InstallDir) {
-            Remove-Item -LiteralPath $InstallDir -Recurse -Force
-            Say "  removed $InstallDir"
+            if ($keep.Count -gt 0) {
+                # Everything else goes; the folder a running OpenRGB holds stays whole.
+                foreach ($child in @(Get-ChildItem -LiteralPath $InstallDir -Force)) {
+                    if ($keep -contains $child.FullName) { continue }
+                    Remove-Item -LiteralPath $child.FullName -Recurse -Force
+                }
+                Say "  removed everything in $InstallDir except the OpenRGB folder"
+            } else {
+                Remove-Item -LiteralPath $InstallDir -Recurse -Force
+                Say "  removed $InstallDir"
+            }
         }
     } else {
-        # Inno removes the files it installed; the folders this script made (openrgb, bin, uninstall) are
-        # listed in [UninstallDelete]. Clear the bundled OpenRGB here: it is the biggest tree and Inno does not know it.
-        if (Test-Path -LiteralPath $bundled) { Remove-Item -LiteralPath $bundled -Recurse -Force; Say "  removed $bundled" }
+        # Inno removes the files it installed; the folders this script made (bin, uninstall) are
+        # listed in [UninstallDelete]. The OpenRGB tree is ours to delete: it is the biggest tree
+        # and Inno does not know it. It goes only when no OpenRGB in it is still running.
+        foreach ($t in $trees) {
+            if ($keep -contains $t) { continue }
+            if (Test-Path -LiteralPath $t) { Remove-Item -LiteralPath $t -Recurse -Force; Say "  removed $t" }
+        }
         Say '  install dir, Installed apps entry and Start menu shortcut are left to the Inno uninstaller'
     }
 
@@ -153,6 +176,10 @@ try {
     if ($recError) {
         Say '[elevated] finished, except: the SignalRGB service was not restored (unreadable record kept)'
         exit 2
+    }
+    if ($keep.Count -gt 0) {
+        Say '[elevated] finished, except: the OpenRGB folder was kept (an OpenRGB is still running in it)'
+        exit 3
     }
     Say '[elevated] done'
     exit 0

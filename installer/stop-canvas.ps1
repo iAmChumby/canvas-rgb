@@ -16,5 +16,8 @@ try {
     exit 0
 } catch {
     Write-Step "FAILED: $($_.Exception.Message)" $LogFile
+    # The service was stopped for the update, so canvas-rgb would be left down with the fans on
+    # BIOS. The install folder still holds a whole set of files, so the service is started again.
+    Start-CanvasRgbService | ForEach-Object { Write-Step $_ $LogFile }
     exit 1
 }

@@ -6,6 +6,8 @@ $ErrorActionPreference = 'Stop'
 # no install folder, no service, no OpenRGB of the owner's own.
 $dir = New-TestDir
 $script:fakes = @()
+# What the last test stopped, so a test can see that the update stopped nothing.
+$script:stopped = @()
 
 function New-OpenRgbTree([string]$Root, [string]$Marker) {
     New-Item -ItemType Directory -Path (Join-Path $Root 'platforms') -Force | Out-Null
@@ -42,6 +44,55 @@ $script:realProcessList = ${function:Get-OpenRgbProcessList}
 function Get-OpenRgbProcessList {
     @(& $script:realProcessList | Where-Object { $script:fakes.Id -contains $_.Id })
 }
+
+# A service that looks running, with the two cmdlets the stop uses. Every stop is written down, so
+# a test can see WHAT the update stopped and in which order. The real service is never touched.
+function New-FakeService {
+    $s = [pscustomobject]@{ Name = 'canvas-rgb-svc'; Status = 'Running' }
+    $s | Add-Member -MemberType ScriptMethod -Name WaitForStatus -Value { param($Status, $Timeout) }
+    return $s
+}
+
+# The uninstall runs as a temp COPY of the script with a stubbed lib.ps1: no service, no real
+# install folder, no registry. -OpenRgbStub puts one OpenRGB on the list whose path cannot be
+# read, which is what a reader sees when it cannot place a running process.
+function Invoke-UninstallSandbox([string]$Name, [switch]$OpenRgbStub) {
+    $root = Join-Path $dir $Name
+    $scripts = Join-Path $root 'scripts'; $pd = Join-Path $root 'PD\canvas-rgb'; $inst = Join-Path $root 'install'
+    New-Item -ItemType Directory -Path $scripts, $pd, $inst -Force | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $inst 'canvas-rgbd.exe'), 'x')
+    New-OpenRgbTree -Root (Join-Path $inst 'openrgb') -Marker 'live'
+    New-OpenRgbTree -Root (Join-Path $inst 'openrgb.old') -Marker 'older'
+    $src = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\uninstall-elevated.ps1') -Raw
+    # GetFolderPath('CommonPrograms') returns '' once %ProgramData% points at a fake folder.
+    $src = $src.Replace("[Environment]::GetFolderPath('CommonPrograms')", "'$(Join-Path $root 'StartMenu')'")
+    [System.IO.File]::WriteAllText((Join-Path $scripts 'uninstall-elevated.ps1'), $src)
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\lib.ps1') -Destination $scripts
+    $stubs = @'
+function Test-IsAdmin { return $true }
+function Assert-MachineHomeSafe { param($Path) }
+function Get-Service { param($Name) }
+function Set-Service { param($Name, [string]$StartupType) }
+function Get-Process { [CmdletBinding()] param([string]$Name, [int]$Id) }
+function Stop-Process { param([int]$Id, [switch]$Force, [switch]$ErrorAction) }
+function Remove-Item {
+    param([string]$LiteralPath, [switch]$Recurse, [switch]$Force)
+    if ($LiteralPath -like 'HK*') { Write-Host "STUB refused registry delete $LiteralPath"; return }
+    Microsoft.PowerShell.Management\Remove-Item -LiteralPath $LiteralPath -Recurse:$Recurse -Force:$Force
+}
+'@
+    if ($OpenRgbStub) {
+        $stubs += @'
+function Get-CimInstance { param($ClassName, $Filter) [pscustomobject]@{ ProcessId = 4242; ExecutablePath = '' } }
+'@
+    }
+    Add-Content -LiteralPath (Join-Path $scripts 'lib.ps1') -Value $stubs
+    $log = Join-Path $root 'elevated.log'
+    $cmd = '$env:ProgramData=''{0}''; & ''{1}'' -InstallDir ''{2}'' -LogFile ''{3}''; exit $LASTEXITCODE' -f (Join-Path $root 'PD'), (Join-Path $scripts 'uninstall-elevated.ps1'), $inst, $log
+    $out = & powershell.exe -NoProfile -Command $cmd 2>&1 | Out-String
+    return @{ Out = $out; Code = $LASTEXITCODE; Install = $inst; Log = $log }
+}
+
 try {
     # ---- the stop plan: which OpenRGB may be stopped ----
     Test-Case 'the plan stops an OpenRGB that runs from the install folder' {
@@ -84,6 +135,18 @@ try {
         Assert-True (-not (Test-PathUnder -Path 'C:\app\openrgb-old\a.dll' -Dir 'C:\app\openrgb')) 'a neighbour is not under it'
         Assert-True (Test-PathUnder -Path 'C:\app\OpenRGB\a.dll' -Dir 'C:\app\openrgb') 'the folder is matched case-insensitively'
     }
+    Test-Case 'the OpenRGB folders of an install are the openrgb tree and its leftovers, and nothing else' {
+        $install = Join-Path $dir 'trees'
+        New-OpenRgbTree -Root (Join-Path $install 'openrgb') -Marker 'live'
+        New-OpenRgbTree -Root (Join-Path $install 'openrgb.old') -Marker 'older'
+        New-OpenRgbTree -Root (Join-Path $install 'openrgb.new') -Marker 'staged'
+        New-Item -ItemType Directory -Path (Join-Path $install 'bin') -Force | Out-Null
+        $trees = @(Get-OpenRgbTreeFolders -InstallDir $install)
+        Assert-Equal $trees.Count 3 'the tree and the two leftovers'
+        Assert-True ($trees -contains (Join-Path $install 'openrgb')) 'the live tree'
+        Assert-True ($trees -contains (Join-Path $install 'openrgb.old')) 'the leftover'
+        Assert-True (-not ($trees -contains (Join-Path $install 'bin'))) 'another folder is not one of them'
+    }
 
     # ---- the real stop: a fake OpenRGB under a temp install folder ----
     Test-Case 'the bundled OpenRGB is stopped before the install folder is touched' {
@@ -91,7 +154,7 @@ try {
         $fake = Start-FakeOpenRgb -OpenRgbDir (Join-Path $install 'openrgb')
         $script:fakes += $fake
         try {
-            $lines = @(Stop-BundledOpenRgb -InstallDir $install)
+            $lines = @((Stop-BundledOpenRgb -InstallDir $install).Lines)
             $stopped = @($lines | Where-Object { $_ -match "pid $($fake.Id)" -and $_ -match 'stopped the bundled OpenRGB' })
             Assert-Equal $stopped.Count 1 "one line for the stopped process: $($lines -join ' | ')"
             Assert-True (-not (Get-Process -Id $fake.Id -ErrorAction SilentlyContinue)) 'the fake OpenRGB is gone'
@@ -173,7 +236,7 @@ try {
         $install = Join-Path $dir 'stopsib'
         $fake = Start-FakeOpenRgb -OpenRgbDir (Join-Path $install 'openrgb.old')
         $script:fakes += $fake
-        $lines = @(Stop-BundledOpenRgb -InstallDir $install)
+        $lines = @((Stop-BundledOpenRgb -InstallDir $install).Lines)
         Assert-True (-not (Get-Process -Id $fake.Id -ErrorAction SilentlyContinue)) "the stray in openrgb.old is gone: $($lines -join ' | ')"
         Assert-Equal @($lines | Where-Object { $_ -match "pid $($fake.Id)" -and $_ -match 'stopped' }).Count 1 'one line names it'
     }
@@ -183,13 +246,20 @@ try {
         New-OpenRgbTree -Root $live -Marker 'old'
         $bystander = Start-FakeOpenRgb -OpenRgbDir (Join-Path $install 'openrgb.old')
         $script:fakes += $bystander
+        $script:stopped = @()
         # The plan's input is a list of id and path; here the path of a real running OpenRGB reads back empty.
         function Get-OpenRgbProcessList { @([pscustomobject]@{ Id = $bystander.Id; Path = '' }) }
+        function Get-Service { param([string]$Name) New-FakeService }
+        function Stop-Service { param([string]$Name, [switch]$Force) $script:stopped += "stopped service $Name" }
+        function Get-Process { [CmdletBinding()] param([string]$Name, [int]$Id) if ($Id -eq $bystander.Id) { return $bystander } }
+        function Stop-Process { param([int]$Id, [switch]$Force, [switch]$ErrorAction) }
+
         $threw = $false
-        try { Stop-BundledOpenRgb -InstallDir $install | Out-Null } catch { $threw = $true; $why = $_.Exception.Message }
+        try { Stop-CanvasRgbRunning -InstallDir $install | Out-Null } catch { $threw = $true; $why = $_.Exception.Message }
         Assert-True $threw 'a refusal, not a log line'
         Assert-True ($why -match "pid $($bystander.Id)") "names the pid: $why"
         Assert-True ($why -match 'Nothing was changed') "says nothing was changed: $why"
+        Assert-Equal ($script:stopped -join '|') '' 'nothing was stopped: the service and the app are still running'
         Assert-True ([bool](Get-Process -Id $bystander.Id -ErrorAction SilentlyContinue)) 'nothing was stopped'
         $src = Join-Path $dir 'blind-src'
         New-OpenRgbTree -Root $src -Marker 'new'
@@ -199,23 +269,21 @@ try {
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $install 'openrgb.new'))) 'nothing was unpacked'
         $bystander.Kill()
     }
-    Test-Case 'the uninstall keeps going past an OpenRGB whose path cannot be read' {
-        $install = Join-Path $dir 'blind2'
-        function Get-OpenRgbProcessList { @([pscustomobject]@{ Id = 4242; Path = '' }) }
-        $lines = @(Stop-BundledOpenRgb -InstallDir $install -KeepGoing)
-        Assert-True (($lines -join '|') -match 'pid 4242') "named in the log: $($lines -join '|')"
-    }
     Test-Case 'an OpenRGB that would not stop is a refusal, not a log line' {
         $install = Join-Path $dir 'stuck'
         $fake = Start-FakeOpenRgb -OpenRgbDir (Join-Path $install 'openrgb')
         $script:fakes += $fake
+        $script:stopped = @()
         # Stop-Process that changes nothing: the process stays.
-        function Stop-Process { }
+        function Stop-Process { param([int]$Id, [switch]$Force, [switch]$ErrorAction) }
+        function Get-Process { [CmdletBinding()] param([string]$Name, [int]$Id) if ($Id -eq $fake.Id) { return $fake } }
+        function Get-Service { param([string]$Name) New-FakeService }
+        function Stop-Service { param([string]$Name, [switch]$Force) $script:stopped += "stopped service $Name" }
         $threw = $false
-        try { Stop-BundledOpenRgb -InstallDir $install | Out-Null } catch { $threw = $true; $why = $_.Exception.Message }
+        try { Stop-CanvasRgbRunning -InstallDir $install | Out-Null } catch { $threw = $true; $why = $_.Exception.Message }
         Assert-True $threw 'the update stops'
         Assert-True ($why -match "pid $($fake.Id)") "names the pid: $why"
-        Assert-True ($why -match 'Nothing was changed') "says nothing was changed: $why"
+        Assert-True ($why -notmatch 'Nothing was changed') "it must not claim that nothing was changed: $why"
         $fake.Kill()
     }
     Test-Case 'a process list that cannot be read is a refusal, not an empty list' {
@@ -359,6 +427,100 @@ try {
         Assert-True ($src -match 'Stop-CanvasRgbRunning -InstallDir \$InstallDir') 'the bundled OpenRGB is stopped first'
         $un = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\uninstall-elevated.ps1'))
         Assert-True ($un -match 'Stop-BundledOpenRgb -InstallDir \$InstallDir') 'the uninstall stops it too'
+    }
+
+    # ---- round 3: "Nothing was changed" has to be true ----
+    Test-Case 'an OpenRGB that cannot be placed stops the update before the service is stopped, so nothing was changed' {
+        $install = Join-Path $dir 'order1'
+        $script:stopped = @()
+        # An OpenRGB whose path cannot be read: Setup cannot tell whether it holds files it must replace.
+        function Get-OpenRgbProcessList { @([pscustomobject]@{ Id = 9101; Path = '' }) }
+        function Get-Service { param([string]$Name) New-FakeService }
+        function Stop-Service { param([string]$Name, [switch]$Force) $script:stopped += "stopped service $Name" }
+        function Start-Service { param([string]$Name) $script:stopped += "started service $Name" }
+        function Get-Process { [CmdletBinding()] param([string]$Name, [int]$Id) }
+        function Stop-Process { param([int]$Id, [switch]$Force, [switch]$ErrorAction) $script:stopped += "stopped pid $Id" }
+
+        $threw = $false
+        try { Stop-CanvasRgbRunning -InstallDir $install | Out-Null } catch { $threw = $true; $why = $_.Exception.Message }
+        Assert-True $threw 'the update refuses'
+        Assert-True ($why -match 'pid 9101') "it names the pid: $why"
+        Assert-True ($why -match 'Nothing was changed') "it says nothing was changed: $why"
+        Assert-Equal ($script:stopped -join '|') '' 'the service and the app were not stopped, so nothing was changed'
+    }
+    Test-Case 'a stop that did not complete says canvas-rgb was stopped, and not that nothing was changed' {
+        $install = Join-Path $dir 'order2'
+        $fake = Start-FakeOpenRgb -OpenRgbDir (Join-Path $install 'openrgb')
+        $script:fakes += $fake
+        $script:stopped = @()
+        # Stop-Process that changes nothing: the OpenRGB stays.
+        function Stop-Process { param([int]$Id, [switch]$Force, [switch]$ErrorAction) }
+        function Get-Process { [CmdletBinding()] param([string]$Name, [int]$Id) if ($Id -eq $fake.Id) { return $fake } }
+        function Get-Service { param([string]$Name) New-FakeService }
+        function Stop-Service { param([string]$Name, [switch]$Force) $script:stopped += "stopped service $Name" }
+
+        $threw = $false
+        try { Stop-CanvasRgbRunning -InstallDir $install | Out-Null } catch { $threw = $true; $why = $_.Exception.Message }
+        Assert-True $threw 'the update stops'
+        Assert-True ($why -match "pid $($fake.Id)") "it names the pid: $why"
+        Assert-True ($why -match 'canvas-rgb was stopped') "it says what state the PC is in: $why"
+        Assert-True ($why -notmatch 'Nothing was changed') "it must not claim that nothing was changed: $why"
+        Assert-True ($why -match 'Close OpenRGB') "it says what to do: $why"
+        Assert-True (($script:stopped -join '|') -match 'stopped service') 'the service was stopped for the update'
+        $fake.Kill()
+    }
+    Test-Case 'the real process list reads an OpenRGB whose path cannot be read, and the update stops for it' {
+        $install = Join-Path $dir 'order3'
+        $script:stopped = @()
+        # The CIM and Get-Process layer is stubbed, not the function: the real
+        # Get-OpenRgbProcessList runs and finds the path unreadable.
+        function Get-CimInstance { param($ClassName, $Filter) [pscustomobject]@{ ProcessId = 4242; ExecutablePath = '' } }
+        function Get-Process { [CmdletBinding()] param([string]$Name, [int]$Id) if ($Id -eq 4242) { return [pscustomobject]@{ Path = '' } } }
+        function Get-Service { param([string]$Name) New-FakeService }
+        function Stop-Service { param([string]$Name, [switch]$Force) $script:stopped += "stopped service $Name" }
+        function Stop-Process { param([int]$Id, [switch]$Force, [switch]$ErrorAction) }
+        # The real function, with the stubbed layer under it. The suite's own filter (which hides
+        # the owner's OpenRGB) is not used here: the stubbed layer can only ever return this fake.
+        function Get-OpenRgbProcessList { @(& $script:realProcessList) }
+
+        $list = @(& $script:realProcessList)
+        Assert-Equal $list.Count 1 'one OpenRGB is running'
+        Assert-Equal $list[0].Id 4242 'with its pid'
+        Assert-Equal $list[0].Path '' 'and its path could not be read'
+        $plan = @(Get-OpenRgbStopPlan -OpenRgbDir (Join-Path $install 'openrgb') -Processes $list)
+        Assert-True $plan[0].Unreadable 'the plan flags it, so the update stops instead of carrying on'
+        $threw = $false
+        try { Stop-CanvasRgbRunning -InstallDir $install | Out-Null } catch { $threw = $true; $why = $_.Exception.Message }
+        Assert-True $threw 'the update refuses'
+        Assert-True ($why -match 'Nothing was changed') "it says nothing was changed: $why"
+        Assert-Equal ($script:stopped -join '|') '' 'nothing was stopped'
+    }
+    Test-Case 'the uninstall keeps the OpenRGB folder whole when an OpenRGB in it could not be stopped' {
+        $r = Invoke-UninstallSandbox 'uninst1' -OpenRgbStub
+        Assert-True ($r.Out -match 'was kept whole and not deleted') "it says the folder was kept: $($r.Out)"
+        Assert-True (Test-Path -LiteralPath (Join-Path $r.Install 'openrgb\OpenRGB.exe')) 'the OpenRGB folder is still there, whole'
+        Assert-True (Test-Path -LiteralPath (Join-Path $r.Install 'openrgb.old\OpenRGB.exe')) 'the leftover is still there, whole'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $r.Install 'canvas-rgbd.exe'))) 'everything else was removed'
+        Assert-Equal $r.Code 3 'the run ends "finished, except"'
+    }
+    Test-Case 'the Inno uninstaller does not delete the OpenRGB tree behind the script back' {
+        $iss = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\inno\canvas-rgb.iss'))
+        $m = [regex]::Match($iss, '(?s)\[UninstallDelete\].*?(?=\r?\n\[)')
+        Assert-True $m.Success 'the [UninstallDelete] section is found'
+        $entries = @([regex]::Matches($m.Value, '(?m)^\s*Type:.*$') | ForEach-Object { $_.Value })
+        Assert-True ($entries.Count -gt 0) 'the section has entries'
+        Assert-True (-not (($entries -join ' ') -match 'openrgb')) 'no entry names the OpenRGB tree: the script decides'
+    }
+    Test-Case 'the Inno installer deletes the result file last, so a refusal leaves the install folder as it was' {
+        $iss = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\inno\canvas-rgb.iss'))
+        $p = $iss.IndexOf('function PrepareToInstall')
+        $q = $iss.IndexOf('procedure CurStepChanged')
+        $prep = $iss.Substring($p, $q - $p)
+        $iDel = $prep.IndexOf('DeleteFile')
+        $iStop = $prep.IndexOf('stop-canvas.ps1')
+        Assert-True ($iDel -gt 0 -and $iStop -gt 0) 'the delete and the last check are both in PrepareToInstall'
+        Assert-True ($iDel -gt $iStop) 'the result file is deleted after the last check, not before it'
+        Assert-True ($prep -match 'Nothing was copied') 'the refusal says that nothing was copied'
     }
 
     # ---- the log the person reads ----

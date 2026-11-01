@@ -41,7 +41,10 @@ try {
     # 3. Stop what holds the binaries (upgrade case), including the bundled OpenRGB: a running
     #    OpenRGB keeps its DLLs open, and a folder that cannot be deleted must not be deleted
     #    half way (#60).
-    Stop-CanvasRgbRunning -InstallDir $InstallDir | ForEach-Object { Say $_ }
+    #    The Inno installer has already copied the new program files into the install folder, so a
+    #    refusal from here must not claim that nothing was changed.
+    $copiedNote = if ($InnoMode) { 'The new program files are already in place' } else { '' }
+    Stop-CanvasRgbRunning -InstallDir $InstallDir -CopiedNote $copiedNote | ForEach-Object { Say $_ }
 
     # 4. Install dir: binaries, shim, OpenRGB.
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
@@ -62,7 +65,10 @@ try {
 
     # OpenRGB: the verified zip is unpacked beside the live folder and swapped in. The live folder
     # is never deleted in place, so a failure leaves it whole instead of half (#60).
-    $orgbTree = Install-OpenRgbTree -Zip $OpenRgbZip -InstallDir $InstallDir
+    # The new program files are in place by now, so a refusal says so instead of claiming that
+    # nothing was changed.
+    $orgbTree = Install-OpenRgbTree -Zip $OpenRgbZip -InstallDir $InstallDir `
+        -State 'The OpenRGB folder was left as it was; the new program files are already in place'
     $orgbTree.Notes | ForEach-Object { Say $_ }
     Say "  extracted OpenRGB to $($orgbTree.Path)"
 
@@ -182,5 +188,8 @@ try {
     exit 0
 } catch {
     Say "[elevated] FAILED: $($_.Exception.Message)"
+    # The update stopped the service before it failed, so canvas-rgb would be left down with the
+    # fans on BIOS. The install folder holds a whole set of files, so the service is started again.
+    Start-CanvasRgbService | ForEach-Object { Say $_ }
     exit 1
 }

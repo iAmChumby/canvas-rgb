@@ -84,10 +84,9 @@ Name: "{autoprograms}\canvas-rgb"; Filename: "{app}\canvas-rgb.exe"; Comment: "L
 
 [UninstallDelete]
 ; Made by setup-elevated.ps1 (not by [Files]), so Inno does not know them.
-Type: filesandordirs; Name: "{app}\openrgb"
-; The two folders an update swap uses (setup-elevated.ps1). A failed update can leave them behind.
-Type: filesandordirs; Name: "{app}\openrgb.new"
-Type: filesandordirs; Name: "{app}\openrgb.old"
+; The OpenRGB tree is NOT here: uninstall-elevated.ps1 deletes it, because it is the only place
+; that knows whether an OpenRGB in it is still running. A folder that holds a running OpenRGB is
+; kept whole, never deleted half way (#60).
 Type: filesandordirs; Name: "{app}\bin"
 Type: filesandordirs; Name: "{app}\uninstall"
 ; Written by a /UPDATE run (see DeinitializeSetup).
@@ -419,8 +418,6 @@ var
   Dl, Log, Args: String;
 begin
   Result := '';
-  // A result file from an earlier run says nothing about this one.
-  DeleteFile(ExpandConstant('{app}\update-result.json'));
   Log := ExpandConstant('{tmp}\canvas-rgb-prepare.log');
   ExtractTemporaryFile('lib.ps1');
   ExtractTemporaryFile('preflight.ps1');
@@ -454,7 +451,16 @@ begin
 
   WizardForm.PreparingLabel.Caption := 'Closing canvas-rgb if it is running...';
   if not RunPs(ExpandConstant('{tmp}\stop-canvas.ps1'), '-LogFile "' + Log + '" -InstallDir "' + ExpandConstant('{app}') + '"', False, Code) or (Code <> 0) then
-    Result := PrepFail('Setup could not close everything it has to replace (code ' + IntToStr(Code) + '). Nothing was changed.' + #13#10 + #13#10 + LogTail(Log));
+  begin
+    // Nothing was copied: the checks above all ran before a single file was touched. What was
+    // stopped and what was not is in the log.
+    Result := PrepFail('Setup could not close everything it has to replace (code ' + IntToStr(Code) + '). Nothing was copied.' + #13#10 + #13#10 + LogTail(Log));
+    Exit;
+  end;
+
+  // A result file from an earlier run says nothing about this one. It is deleted last, so a
+  // refusal above leaves the install folder exactly as it was.
+  DeleteFile(ExpandConstant('{app}\update-result.json'));
 end;
 
 // After the files are in {app}: the elevated machine-wide script, then the per-user script as the logged-in
@@ -631,7 +637,15 @@ begin
   Log := ExpandConstant('{tmp}\canvas-rgb-uninstall-elevated.log');
   Args := '-InstallDir "' + ExpandConstant('{app}') + '" -InnoMode -LogFile "' + Log + '"' + FPurge;
   Ran := RunPs(ExpandConstant('{app}\installer\uninstall-elevated.ps1'), Args, False, Code);
-  if Ran and (Code = 2) then
+  if Ran and (Code = 3) then
+  begin
+    // Exit 3: the elevated work finished, except that an OpenRGB was still running, so the
+    // folder it holds was kept whole instead of being deleted half way (#60).
+    if not UninstallSilent then
+      MsgBox('canvas-rgb is being removed, except one thing: an OpenRGB is still running, so its folder was kept whole and not deleted. Close OpenRGB (or restart the PC) and remove that folder by hand.' + #13#10 + #13#10 +
+        LogTail(Log), mbInformation, MB_OK);
+  end
+  else if Ran and (Code = 2) then
   begin
     // Exit 2: the elevated work finished, except the SignalRGB service start type (its restore record is unreadable and kept).
     // The service is already gone, so the uninstall carries on; say what was not restored.
