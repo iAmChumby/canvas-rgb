@@ -218,54 +218,67 @@ line. Three mechanisms, and one bug the timing only exposed.
   "overdue" whenever the wall clock crossed a second during the test (`crates/canvas-svc/src/update_install.rs`).
   Reproduced locally: 1 failure in 60 runs. A product bug as well: a sub-second limit rounded to nothing.
 - [#45](https://github.com/iAmChumby/canvas-rgb/issues/45), [#55](https://github.com/iAmChumby/canvas-rgb/issues/55)
-  (a third sighting on #39): `every_daemon_kill_is_preceded_by_a_line_naming_the_reason` lost one WARN
-  line while its neighbours in the same capture arrived. Same test, same symptom: duplicates by symptom
-  only. The clock-mix idea in #55 is FALSE (reaching that branch means the WARN ran).
+  (a third sighting on #39): `every_daemon_kill_is_preceded_by_a_line_naming_the_reason` was missing a
+  "terminating the daemon" WARN line in the capture. Same test, same symptom: duplicates by symptom only.
+  In #55 the neighbouring lines of the same capture arrived. The clock-mix idea in #55 is FALSE (reaching
+  that branch means the WARN ran).
 - [#36](https://github.com/iAmChumby/canvas-rgb/issues/36): not a test bug. The panic hook queued its line
   behind a deep log backlog, gave up draining after 250 ms and ignored the result
   (`crates/canvas-daemon/src/exit_log.rs`, `logging.rs`); the test was right to fail.
-- **Class fix:** done for the mechanisms below, with a guard. The rule: a test never decides on how long
+- **Class fix:** partial. Each test named below is fixed, and a guard stops new instances of two shapes; siblings remain open (listed below). The rule: a test never decides on how long
   something took. It waits for an event (`wait_until`, `findBy*`), counts (wake-ups, frames), injects the
   clock, sizes its work by a warm-up and the best of several samples, or is an `#[ignore]`d measurement.
   - #66: the marker carries its start in milliseconds and the installer reads time through
     `UpdateConfig::now_unix_ms`, which a test drives; ages and limits compare as milliseconds.
   - #39/#47: the gate counts the parked loop's wake-ups (`CoreEngine::park_wakeups`) and that nothing
-    rendered; the CPU-time measurement stays as an `#[ignore]` test with the command to run it.
+    rendered; the CPU-time measurement stays as an `#[ignore]` test with the command to run it. The gap:
+    the CPU cost of each wake-up is no longer checked in CI (only the ignored measurement checks it, run
+    by hand); the count catches a spinning loop, not a loop that wakes on time and then does too much.
   - #51: the multi-script test sizes one script from a warm-up and a probe long enough to dwarf the
     fixed cost of a load, then adds scripts until the total passes the budget, so it drives the real
-    shared-budget path (`remaining_budget` is also unit-checked); the tile test sizes its frames from the
-    best of three samples after a warm-up and bounds the hold to the budget plus one frame.
+    shared-budget path (`remaining_budget` is also unit-checked); the cost of one script is the best of
+    three loads. The tile test sizes its frames from the best of three samples after a warm-up and bounds
+    the hold to the budget plus one calibrated frame (about 0.5 s, a constant once measured).
   - #59: `app/web/vitest.setup.ts` raises `asyncUtilTimeout` to 10 s and `vitest.config.mts` raises
     `testTimeout` to 20 s, from `vitest.limits.ts`; `src/test/setup.test.tsx` pins both and finds an
     element that appears after 1.5 s. A `findBy*` returns when its element appears, so a pass costs nothing.
   - #36: the main thread's panic line is written straight into the day's log file, in one write bounded
-    to 250 ms (`logging::write_line_direct_within`), and the tracing copy is only the fallback when that
-    write fails, so the line is in the file once.
+    to 250 ms (`logging::write_line_direct_within`), to the file the appender names for today's UTC date
+    (made if the appender has not made it yet; a reparse point is refused). The tracing copy is only the
+    fallback when that write failed or had not begun at the limit; a write that has begun and lands late
+    owns the line, so the line is in the file at most once. A stalled disk can still lose it, and a
+    panic on any thread but the main one still goes through the queue. The real hook is tested with a
+    stuck queue (`exit_log::the_panic_hook_leaves_its_line_in_the_file_while_the_queue_is_stuck`).
   - #45/#55: every daemon kill goes through `terminate_daemon(process, reason)`, which logs the pid and
     reason first; the service tests share one capture helper (`crates/canvas-svc/src/test_logs.rs`, one
     capture at a time); the kill test asserts the full announcement for the pid on all four kill paths.
 - **The guard:** `crates/canvas-svc/tests/timing_class.rs` (part of `cargo test --workspace`, so CI) scans
-  the test code under `crates/` (files in `tests/`, `tests.rs`, `*_tests.rs`, and a source file from its
-  last `#[cfg(test)] mod`) and fails with `file:line` on (1) a measured duration compared with `<` or `<=`
+  the test code under `crates/` (files in `tests/`, `tests.rs`, `*_tests.rs`, files that a `lib.rs` or
+  `main.rs` declares as a `#[cfg(test)]` module such as `canvas-core/src/cpu.rs`, and a source file from
+  its last `#[cfg(test)] mod`) and fails with `file:line` on (1) a measured duration compared with `<` or `<=`
   (`elapsed()`, `took`, `waited`, `.as_millis()` and similar), and (2) a `sleep(` followed within three
-  lines by an `assert`. Every hit needs an allow-list entry with a reason (hang guard, the property under
+  lines by an `assert`. Every hit needs an allow-list entry (matched on the line, or for a sleep on the
+  sleep line plus the three after it) with a reason (hang guard, the property under
   test, safe because the sleep is a minimum or the assert is about something that did not happen, or
   "open", a real sibling not yet fixed). The scan fails on an entry that matches no line.
 - **What the guard cannot catch:** it reads text one line at a time. Product code with a clock in it
   (#36, #66); a bound with no `<` on a named clock (#51 scaled one sample); a bound written the other
   way round or through a helper; a sleep more than three lines from its assert; a poll loop or
   `recv_timeout` that is too short (a `while t.elapsed() < limit {` line is not flagged); a second
-  identical line in a file whose text already has an entry; web tests (#59 is held by the setup file and
-  its test, not by the scan); a missing log line (#45/#55). `cpu.rs` is not scanned (its module is not a
-  `#[cfg(test)] mod`), so its own settle-then-assert sleeps are outside the guard.
+  identical line in a file whose text already has an entry; a ratio or percentage bound (`percent <
+  0.05`, the original #39 shape: no distinctive word to match); web tests (#59 is held by the setup file
+  and its test, not by the scan); hand-made log subscribers (no rule); a missing log line (#45/#55).
 - **Sibling search:** the allow-list entries marked "open" are the siblings: `timer.rs` upper bounds
   (3 tests), `effects_import.rs` and `quit.rs` ceilings, the `canvas-core/src/tests.rs` "sleep 300 ms
   then expect parked" tests and `wave1.rs`, and the `api.rs` onboarding timers (60-350 ms sleeps against
-  100 ms timers on a compressed time scale, `transient.rs`), the riskiest. `cpu.rs`'s settle sleeps are
-  the same shape as the `tests.rs` ones. Delete an entry when its test is fixed.
+  100 ms timers on a compressed time scale, `transient.rs`), the riskiest. Also open: canvas-daemon's
+  own hand-rolled `with_default` log captures (`logging.rs` tests `captured` and
+  `close_flushes_the_last_line_to_the_file`, `exit_log.rs` tests `capture`), not on the shared
+  helper, which lives in canvas-svc. Delete an entry when its test is fixed.
 - **What stays UNKNOWN:** the mechanism behind the vanished log line in #45/#55. The shared capture
   helper and the stricter assertion are mitigations, not a diagnosis; the 50-run loop of the canvas-svc
   library tests is in `.build/reports/job31-timing-class.md`. Settler: a longer loop under CPU load that
   fails once, then bisected.
-- **How to check a new test:** if it contains `elapsed`, `sleep` or a hand-made subscriber, expect the
-  scan to flag it; use `wait_until`, a count, a driven clock or `test_logs::captured`.
+- **How to check a new test:** if it compares `elapsed`, `took` or `waited` with `<`, or sleeps and
+  then asserts, expect the scan to flag it; use `wait_until`, a count, a driven clock, or (for log
+  lines in canvas-svc) `test_logs::captured`. Run `cargo test -p canvas-svc --test timing_class`.
