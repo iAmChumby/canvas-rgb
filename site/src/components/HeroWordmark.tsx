@@ -97,6 +97,11 @@ export function HeroWordmark() {
     let frameH = 1;
     let fw = 1;
     let fh = 1;
+    // The field's own scale: the backing store's pixels for each CSS pixel. It is not exactly
+    // SCALE (the store's size is rounded), and using the real one keeps the light where the
+    // pointer is, to the pixel.
+    let sx = SCALE;
+    let sy = SCALE;
     // The frame's top-left in page pixels, and the page's scroll, so a client position
     // becomes a position in the frame by arithmetic alone.
     let framePageX = 0;
@@ -158,6 +163,8 @@ export function HeroWordmark() {
       fh = Math.max(1, Math.round((fw * frameH) / frameW));
       field.width = fw;
       field.height = fh;
+      sx = fw / frameW;
+      sy = fh / frameH;
       const mark = wrap.getBoundingClientRect();
       markL = mark.left - box.left;
       markT = mark.top - box.top;
@@ -278,9 +285,9 @@ export function HeroWordmark() {
       const a = light ? 0.17 : 0.21;
 
       ctx.clearRect(0, 0, fw, fh);
-      const cx = pos.x * SCALE;
-      const cy = pos.y * SCALE;
-      const r = rad * SCALE;
+      const cx = pos.x * sx;
+      const cy = pos.y * sy;
+      const r = rad * sx;
       const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
       g.addColorStop(0, `hsla(${hue}, 78%, ${light ? 58 : 56}%, ${a})`);
       g.addColorStop(0.35, `hsla(${hue}, 78%, ${light ? 60 : 58}%, ${a * 0.45})`);
@@ -295,7 +302,7 @@ export function HeroWordmark() {
       // the pointer is, right to the edge. Drawn in the canvas rather than with a CSS mask,
       // so every browser gets the same soft edge. The field is as wide as the hero, so the
       // light runs off the left and right of the screen, where there is nothing to see.
-      const band = Math.max(1, reach * SCALE);
+      const band = Math.max(1, reach * sy);
       if (band < fh / 2) {
         ctx.globalCompositeOperation = "destination-out";
         const gy = ctx.createLinearGradient(0, 0, 0, fh);
