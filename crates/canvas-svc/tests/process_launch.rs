@@ -127,6 +127,11 @@ const DAEMON_FILE_STARTS_ALLOWED: &[(&str, &str, &str)] = &[(
     "installer/setup.ps1",
     "Start-Process -FilePath 'powershell.exe' -ArgumentList $childArgs -Verb RunAs",
     "elevates the machine-wide child script, not the daemon",
+),
+(
+    "crates/canvas-daemon/src/logging.rs",
+    "let made = std::process::Command::new(\"cmd\")",
+    "a unit test makes a junction with `cmd /C mklink /J` to check the log writer refuses a reparse point; not the daemon",
 )];
 
 /// Rule 3 lines that look like a launch but are text, not a call: the installer's printed plan

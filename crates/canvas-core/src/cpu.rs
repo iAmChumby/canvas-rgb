@@ -1,8 +1,24 @@
 //! Checks that the parked and paused loops cost (almost) no CPU.
 //!
 //! The spec budgets "Paused: daemon CPU mean ≤ 0.05%". The engine is one thread of
-//! the daemon, so it has to be cheaper than that. The test times the render thread
-//! on its own, so it is not disturbed by the other tests running in parallel.
+//! the daemon, so it has to be cheaper than that.
+//!
+//! Two tests read that budget, in two ways:
+//!
+//! - `a_parked_engine_wakes_on_its_period_and_renders_nothing` counts the wake-ups of the
+//!   parked loop over a 3 s window. The verdict is a count, not a duration: a slow machine
+//!   can only delay a wake-up, never add one. (It does use a clock to bound the window: it
+//!   waits until the engine is parked, then sleeps 3 s and counts.) It checks that the loop
+//!   does not spin; it does NOT check what each wake-up costs, which only the ignored CPU
+//!   measurement below does.
+//! - `a_parked_engine_costs_almost_no_cpu` measures the CPU time of the render thread. That
+//!   is a measurement, not a gate: `GetThreadTimes` counts in 15.625 ms ticks, so the 0.05 %
+//!   budget (1.5 ms) is below the clock's own resolution and one tick fails it. It is
+//!   `#[ignore]`d and run by hand on a quiet machine.
+//!
+//! The tests run on this machine only; the timer resolution the running engine asks for
+//! (`timeBeginPeriod`, `timer.rs`) is a system-wide setting, so the sibling test below can
+//! change how finely the parked loop's wait is timed while both run.
 
 #![cfg(windows)]
 
@@ -81,7 +97,57 @@ fn render_thread_id(engine: &Arc<crate::engine::CoreEngine>) -> u32 {
     panic!("the render thread never reported its id");
 }
 
+/// A parked engine waits on a fixed period and renders nothing: it must not spin.
+///
+/// The property is measured by counting the wake-ups of the parked loop, not by reading a
+/// clock: the loop wakes every `PARK_POLL` (100 ms) by design, so the count over a window says
+/// how often the loop looked at its state, and a slow machine can only make that count smaller
+/// (class `cause:timing-test`, #39 and #47).
 #[test]
+fn a_parked_engine_wakes_on_its_period_and_renders_nothing() {
+    let engine = spawn_core(EngineSettings {
+        fps: 30,
+        power: Power::Running,
+        brightness: 100,
+    });
+    // Wait for the engine to settle into the parked state (up to 10 s: a loaded runner can take
+    // longer than a fixed sleep), then count.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !engine.stats().parked && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(engine.stats().parked, "the engine is parked: nothing consumes its frames");
+
+    let before = engine.park_wakeups();
+    let started = Instant::now();
+    std::thread::sleep(Duration::from_secs(3));
+    let woke = engine.park_wakeups() - before;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+
+    // One wake-up per period, plus room for the wait that was already running when the
+    // window opened. A spinning loop wakes thousands of times in the same window.
+    let allowed = elapsed_ms / crate::engine::PARK_POLL.as_millis() as u64 + 2;
+    assert!(
+        woke <= allowed,
+        "the parked engine woke {woke} times in {elapsed_ms} ms; at most {allowed} wake-ups fit"
+    );
+    assert_eq!(engine.stats().frames_rendered, 0, "no frames were rendered");
+    engine.shutdown();
+}
+
+/// The CPU time of the parked engine, on this machine.
+///
+/// The budget is 0.05 % of a core, and `GetThreadTimes` counts in 15.625 ms ticks: one tick
+/// charged to the parked thread is already 0.52 %, so this measurement can only pass on a
+/// quiet machine. It is the measurement, not the gate; the gate is the wake-up count above.
+///
+/// Run it by hand:
+///
+/// ```text
+/// cargo test -p canvas-core -- --ignored a_parked_engine_costs_almost_no_cpu
+/// ```
+#[test]
+#[ignore = "a perf measurement, not a gate: run it on a quiet machine"]
 fn a_parked_engine_costs_almost_no_cpu() {
     let engine = spawn_core(EngineSettings {
         fps: 30,
@@ -121,6 +187,10 @@ fn a_running_engine_at_thirty_fps_stays_inside_the_budget() {
     use canvas_proto::layout::{Layout, PlacedZone, RenderScale, SamplingMode, ZoneShape};
     use canvas_proto::traits::Engine;
 
+    // This engine runs, so it asks the system for a 1 ms timer (`timeBeginPeriod`, `timer.rs`).
+    // That setting is system-wide, so it is in force for the whole machine while this test
+    // runs, including for the parked engine of the test above. The parked loop's wake-ups do
+    // not depend on it: it waits 100 ms either way.
     let engine = spawn_core(EngineSettings {
         fps: 30,
         power: Power::Running,

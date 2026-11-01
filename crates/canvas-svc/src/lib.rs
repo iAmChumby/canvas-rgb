@@ -34,4 +34,6 @@ mod gpu_fans_tests;
 #[cfg(test)]
 mod openrgb_tests;
 #[cfg(test)]
+pub(crate) mod test_logs;
+#[cfg(test)]
 pub(crate) mod update_install_tests;

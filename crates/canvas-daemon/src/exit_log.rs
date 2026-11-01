@@ -126,6 +126,9 @@ pub fn panic_message(info: &PanicHookInfo<'_>) -> String {
     }
 }
 
+/// The longest the panic line waits to be written straight into the log file.
+const PANIC_WRITE_LIMIT: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Makes every panic leave a line (message, `file:line:col`, thread) before the default hook
 /// runs.
 ///
@@ -136,6 +139,15 @@ pub fn panic_message(info: &PanicHookInfo<'_>) -> String {
 /// closing it would silence every later line for everyone, and the writer thread drains the
 /// line by itself.
 pub fn install_panic_hook() {
+    install_hook(std::sync::Arc::new(|line| crate::logging::write_line_direct_within(PANIC_WRITE_LIMIT, line)));
+}
+
+/// How the hook writes the panic line straight into the log file: gets the line, returns `true`
+/// when the line is in the file or is the writer's to finish (see `logging::write_once_within`),
+/// `false` when the hook must log it through tracing instead. A test passes its own.
+type DirectWrite = std::sync::Arc<dyn Fn(String) -> bool + Send + Sync>;
+
+fn install_hook(write_direct: DirectWrite) {
     let main_thread = std::thread::current().id();
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -143,14 +155,25 @@ pub fn install_panic_hook() {
             .location()
             .map_or_else(|| "an unknown location".to_string(), |at| format!("{}:{}:{}", at.file(), at.line(), at.column()));
         let thread = std::thread::current();
-        tracing::error!(
-            message = %panic_message(info),
-            location = %location,
-            thread = thread.name().unwrap_or("<unnamed>"),
-            "the daemon panicked"
-        );
+        let message = panic_message(info);
+        let thread_name = thread.name().unwrap_or("<unnamed>");
         if thread.id() == main_thread {
+            // This panic ends the process. Its line is written to the day's log file here, in one
+            // bounded write: queued behind a backlog it could be lost to the 250 ms flush below
+            // (#36). At most once: the tracing copy is the fallback, used only when the direct
+            // write failed or had not begun when the limit passed. A write that has begun and is
+            // slow owns the line, so the fallback is skipped and the line is never in the file
+            // twice. A disk that stalls the write can still lose the line.
+            let line = format!(
+                "{} ERROR canvas_daemon::exit_log: the daemon panicked message=\"{message}\" location={location} thread={thread_name}",
+                crate::storage::export_timestamp()
+            );
+            if !write_direct(line) {
+                tracing::error!(message = %message, location = %location, thread = thread_name, "the daemon panicked");
+            }
             crate::logging::close_within_limit();
+        } else {
+            tracing::error!(message = %message, location = %location, thread = thread_name, "the daemon panicked");
         }
         previous(info);
     }));
@@ -196,6 +219,62 @@ mod tests {
         assert!(text.contains("the daemon panicked"), "{text}");
         assert!(text.contains("the render loop lost its sink 7"), "{text}");
         assert!(text.contains("exit_log.rs"), "the location names this file: {text}");
+    }
+
+    /// A writer that blocks every write until `release` is set: a backlog that cannot drain.
+    struct StuckWriter(Arc<std::sync::atomic::AtomicBool>);
+
+    impl std::io::Write for StuckWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            while !self.0.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// #36, through the real hook: the log queue is stuck (nothing queued reaches the file), the
+    /// main thread panics, and the panic line is in the file exactly once. With the hook on the
+    /// queue path (the old hook) the line is behind the backlog and the file holds nothing.
+    #[test]
+    fn the_panic_hook_leaves_its_line_in_the_file_while_the_queue_is_stuck() {
+        let dir = std::env::temp_dir().join(format!("canvas-rgb-hook-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (stuck, stuck_guard) = tracing_appender::non_blocking(StuckWriter(release.clone()));
+        let subscriber = tracing_subscriber::fmt().with_ansi(false).with_writer(stuck).finish();
+        let (d, n) = (dir.clone(), "canvas-rgbd".to_string());
+        let caught = tracing::subscriber::with_default(subscriber, || {
+            install_hook(std::sync::Arc::new(move |line| {
+                let (d, n) = (d.clone(), n.clone());
+                crate::logging::write_once_within(PANIC_WRITE_LIMIT, move || crate::logging::write_line_direct(&d, &n, &line))
+            }));
+            for i in 0..100 {
+                tracing::error!("queued behind the backlog {i}");
+            }
+            std::panic::catch_unwind(|| panic!("the main thread lost its sink behind a stuck queue"))
+        });
+        assert!(caught.is_err());
+
+        let text: String = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| std::fs::read_to_string(e.path()).unwrap_or_default())
+            .collect();
+        release.store(true, std::sync::atomic::Ordering::SeqCst);
+        drop(stuck_guard);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            text.matches("the main thread lost its sink behind a stuck queue").count(),
+            1,
+            "the panic line is in the file once, with the queue stuck: {text:?}"
+        );
+        assert!(!text.contains("queued behind the backlog"), "the stuck queue never reached the file: {text}");
     }
 
     #[test]

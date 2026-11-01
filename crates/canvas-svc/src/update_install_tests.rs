@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::io;
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -304,6 +304,7 @@ pub(crate) fn rig_with(
         user_step_limit: Duration::from_secs(2),
         user_session_wait: Duration::from_millis(30),
         resume_retry: Duration::from_millis(2),
+        now_unix_ms: Arc::new(crate::update_install::now_unix_ms),
     };
     tweak(&mut cfg);
     let untrusted = Arc::new(Mutex::new(Vec::new()));
@@ -347,7 +348,16 @@ impl Rig {
     }
 
     /// A staged file and a marker as a previous service life would have left them.
+    ///
+    /// `started_unix` is in seconds, as a marker from the field has it; the marker also carries
+    /// the same moment in milliseconds, so its age can be measured to the millisecond.
     pub fn leave_pending(&self, pid: u32, created: u64, started_unix: u64) -> PendingUpdate {
+        self.leave_pending_at_ms(pid, created, started_unix.saturating_mul(1000))
+    }
+
+    /// The same, with the marker's start to the millisecond: the clock that reads it is the
+    /// test's, so the age of the marker is the test's to decide (#66).
+    pub fn leave_pending_at_ms(&self, pid: u32, created: u64, started_unix_ms: u64) -> PendingUpdate {
         let updates = self.installer.secure_updates_dir(true).unwrap().unwrap();
         let staged = updates.join("canvas-rgb-setup-1-1-1.exe");
         std::fs::write(&staged, PAYLOAD).unwrap();
@@ -358,7 +368,8 @@ impl Rig {
             setup_created: created,
             requester_pid: 77,
             requester_session: 1,
-            started_unix,
+            started_unix: started_unix_ms / 1000,
+            started_unix_ms,
             tmp_dir: String::new(),
         };
         self.installer.write_marker(&updates, &pending).unwrap();
@@ -843,15 +854,63 @@ fn a_reused_pid_is_not_mistaken_for_setup() {
     assert_eq!(r.commands().len(), 2);
 }
 
+/// A fixed point in time, in milliseconds since the Unix epoch: the clock of the tests that
+/// measure the age of a marker, so the age is the test's and not the wall clock's (#66).
+const FIXED_NOW_MS: u64 = 1_700_000_000_000;
+
+/// The rig with a clock the test drives: the marker age is read from `clock`, not from the wall
+/// clock, so a test decides how old a marker is.
+fn rig_with_clock(
+    own_version: &str,
+    clock: &Arc<AtomicU64>,
+    tweak: impl FnOnce(&mut UpdateConfig),
+) -> Rig {
+    let c = Arc::clone(clock);
+    rig_with(
+        own_version,
+        PUB_TEST,
+        move |cfg| {
+            tweak(cfg);
+            cfg.now_unix_ms = Arc::new(move || c.load(Ordering::SeqCst));
+        },
+        |i| i,
+    )
+}
+
 #[test]
 fn the_wait_for_setup_is_bounded() {
-    let r = rig_with("0.1.1", PUB_TEST, |c| c.setup_wait_limit = Duration::from_millis(40), |i| i);
-    r.leave_pending(5000, 99, now());
+    // The clock is the test's: the marker was written a moment ago, so the setup is inside its
+    // wait limit. The wait itself is bounded by the real clock, and the update stays pending.
+    let clock = Arc::new(AtomicU64::new(FIXED_NOW_MS));
+    let r = rig_with_clock("0.1.1", &clock, |c| {
+        c.setup_wait_limit = Duration::from_millis(40);
+    });
+    r.leave_pending_at_ms(5000, 99, FIXED_NOW_MS);
     r.probe.procs.lock().unwrap().insert(5000, (99, u32::MAX));
     assert_eq!(r.installer.resume_pending(), None);
     assert!(r.commands().is_empty(), "does not finish under a setup that is still running");
     assert!(r.marker_exists(), "the update stays pending for the next start");
     assert!(!r.installer.is_busy());
+}
+
+#[test]
+fn a_wait_limit_shorter_than_a_second_is_not_rounded_down_to_nothing() {
+    // The marker is 500 ms old and the wait limit is 40 ms: the setup is past its limit, so it is
+    // a stranded setup and the marker goes with it. A limit compared in whole seconds would be
+    // 0 seconds, and nothing would ever be overdue.
+    let clock = Arc::new(AtomicU64::new(FIXED_NOW_MS + 500));
+    let r = rig_with_clock("0.1.1", &clock, |c| {
+        c.setup_wait_limit = Duration::from_millis(40);
+    });
+    r.leave_pending_at_ms(5000, 99, FIXED_NOW_MS);
+    r.probe.procs.lock().unwrap().insert(5000, (99, u32::MAX));
+    assert_eq!(r.installer.resume_pending(), None);
+    assert!(
+        r.probe.terminated.lock().unwrap().contains(&5000),
+        "the setup that outlived its wait limit was ended"
+    );
+    assert!(!r.marker_exists(), "the overdue marker is discarded");
+    assert!(r.staged_files().is_empty(), "the staged file goes with it");
 }
 
 #[test]
@@ -1415,25 +1474,9 @@ fn walk(root: &Path) -> Vec<(PathBuf, u64)> {
 
 // ---- setup-user.ps1's outcome is logged, and the tray starts regardless ----
 
-/// Captures what the install code logs on this thread.
+/// Captures what the install code logs on this thread (the shared test helper).
 fn capture_logs<T>(f: impl FnOnce() -> T) -> (T, String) {
-    #[derive(Clone)]
-    struct Sink(Arc<Mutex<Vec<u8>>>);
-    impl io::Write for Sink {
-        fn write(&mut self, b: &[u8]) -> io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(b);
-            Ok(b.len())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-    let sink = Sink(Arc::new(Mutex::new(Vec::new())));
-    let writer = sink.clone();
-    let subscriber = tracing_subscriber::fmt().with_writer(move || writer.clone()).with_ansi(false).with_max_level(tracing::Level::TRACE).finish();
-    let out = tracing::subscriber::with_default(subscriber, f);
-    let text = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
-    (out, text)
+    crate::test_logs::captured(f)
 }
 
 #[test]

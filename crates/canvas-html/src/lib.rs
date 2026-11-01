@@ -54,6 +54,16 @@ const MAX_CANVAS_EDGE: u32 = 4096;
 /// the daemon's import, its rescan or its render thread for ever.
 pub const LOAD_BUDGET_MS: u64 = 2_000;
 
+/// The budget left for the next script of a load, in milliseconds, or `None` when the load
+/// budget is used up.
+///
+/// The budget is one for the whole load, not one per script: the time the earlier scripts took
+/// is taken off it. Pure arithmetic, so it can be checked without running a script (class
+/// `cause:timing-test`, #51).
+pub fn remaining_budget(budget_ms: u64, elapsed_ms: u64) -> Option<u64> {
+    budget_ms.checked_sub(elapsed_ms).filter(|left| *left > 0)
+}
+
 /// The time one frame's script may take, in milliseconds.
 ///
 /// The engine renders at 10 to 60 frames a second, so a frame lasts 16.7 ms at the
@@ -369,12 +379,14 @@ impl HtmlEffect {
             //
             // The script runs with a deadline, so a runaway one is stopped instead of
             // hanging the thread it runs on.
-            let remaining = LOAD_BUDGET_MS.saturating_sub(load_started.elapsed().as_millis() as u64);
-            if remaining == 0 {
-                return Err(HtmlError::Timeout(format!(
-                    "the effect's scripts ran longer than {LOAD_BUDGET_MS} ms together"
-                )));
-            }
+            let remaining = match remaining_budget(LOAD_BUDGET_MS, load_started.elapsed().as_millis() as u64) {
+                Some(left) => left,
+                None => {
+                    return Err(HtmlError::Timeout(format!(
+                        "the effect's scripts ran longer than {LOAD_BUDGET_MS} ms together"
+                    )))
+                }
+            };
             self.runtime.deadline.start(remaining);
             let result = self.runtime.context.with(|ctx| {
                 let mut options = rquickjs::context::EvalOptions::default();
