@@ -121,9 +121,11 @@ export const DEVICE_RESCAN_TIMEOUT_MS = 30_000;
  * What the 30 s covers is the handler's own requests, with one stall per stage. What it does
  * not cover is another holder of the same lock: the supervisor's reconnect
  * (`crates/canvas-daemon/src/openrgb_supervisor.rs`, `connect_and_prepare`) takes the lock,
- * re-applies every saved zone (each of those enumerates the controllers) and enumerates them
- * again, so on a stalled OpenRGB it can hold the lock for 5 s x (saved zones + 1) before the
- * resize even starts. A resize that waits for such a reconnect is given up on by the editor,
+ * enumerates the controllers, re-applies every saved zone (each of those enumerates them) and,
+ * when any zone is saved, enumerates them once more, so on a stalled OpenRGB it can hold the
+ * lock for 5 s x (saved zones + 2) (5 s when none is saved), plus its TCP connect, which has no
+ * timeout of its own (`openrgb.rs`, `connect`), before the resize even starts. A resize that
+ * waits for such a reconnect is given up on by the editor,
  * and the daemon may still carry it out.
  */
 export const ZONE_RESIZE_TIMEOUT_MS = 30_000;
