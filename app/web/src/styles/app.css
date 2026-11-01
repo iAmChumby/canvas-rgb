@@ -2902,6 +2902,22 @@ button.chip:hover {
   grid-column: 1 / -1;
 }
 
+/* A point in a row of two: the number and its unit keep their line. */
+.rd-fans .curve-rows .curve-row {
+  grid-template-columns: 20px minmax(0, 1fr) minmax(0, 1fr) auto;
+}
+
+.rd-fans .curve-rows .num {
+  width: 100%;
+  max-width: 92px;
+  min-width: 0;
+}
+
+.rd-fans .curve-rows .curve-row .row-wrap {
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+
 /* regular and wide: the history column fits beside the rest, narrow enough (64 px) to leave
    the other columns their room. */
 @container page (min-width: 1000px) {
