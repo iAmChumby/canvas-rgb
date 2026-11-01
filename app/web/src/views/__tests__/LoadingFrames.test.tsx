@@ -311,6 +311,34 @@ describe("the devices list", () => {
     patchSnap({ devices: null, devicesTotal: null, devicesError: null });
   });
 
+  it("says a device reports no zones, and offers Try again in its row", async () => {
+    patchSnap({
+      status: { ...status, devices_connected: 1, devices_total: 1 },
+      devices: [
+        {
+          id: "openrgb:empty-1",
+          name: "Mystery Hub",
+          vendor: "Acme",
+          kind: "other",
+          adapter: "openrgb",
+          adapter_index: 0,
+          serial: "",
+          location: "HID: 0x42",
+          connected: true,
+          zones: [],
+        },
+      ],
+      devicesTotal: 1,
+      devicesError: null,
+    });
+    render(<DevicesView />);
+    const row = await screen.findByTestId("device-card");
+    expect(within(row).getByText("Mystery Hub reports no zones")).toBeTruthy();
+    expect(within(row).getByRole("button", { name: "Try again" })).toBeTruthy();
+    cleanup();
+    patchSnap({ devices: null, devicesTotal: null, devicesError: null });
+  });
+
   it("shows no grey placeholder beside the error", async () => {
     // The right column holds the walker. Next to an error a grey skeleton reads as a page
     // that is still loading, so the column says nothing instead.

@@ -2421,9 +2421,11 @@ button.chip:hover {
   font-weight: 600;
 }
 
+/* The sub-line is the kind, the vendor, the adapter and the address: it gives way to the drawing
+   on a narrow row, and the whole line is its tooltip. */
 .rd-devices .rd-dev-sub {
-  flex: 0 0 212px;
-  min-width: 0;
+  flex: 0 1 300px;
+  min-width: 96px;
 }
 
 /* The drawing takes the room the row has left; the count and the state stay put. */
@@ -2465,8 +2467,22 @@ button.chip:hover {
 }
 
 .rd-devices .rd-zone .zone-strip-name {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
   flex: 0 0 116px;
   min-width: 0;
+  line-height: 1.25;
+}
+
+/* The shape of the zone (linear, single, matrix) under its name, as the list showed it before. */
+.rd-devices .rd-zone .rd-zone-shape {
+  font-size: var(--t14);
+}
+
+/* A device that reports no zones: its message and Try again under the row. */
+.rd-devices .rd-zone-empty {
+  border-top: 1px solid var(--line);
 }
 
 .rd-devices .rd-zone .zone-strip-svg {

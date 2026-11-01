@@ -69,6 +69,12 @@ const KIND_RANK: Record<DeviceKind, number> = {
   headset: 5,
 };
 
+function zoneShape(z: ZoneInfo): string {
+  if (z.kind.type === "matrix") return `matrix ${z.kind.width} × ${z.kind.height}`;
+  if (z.kind.type === "linear") return "linear";
+  return "single";
+}
+
 /**
  * The one detail that tells two devices apart when the daemon gives them the same name: the
  * address in their location. Two ENE DRAM sticks both answer to "ENE DRAM"; their SMBus
@@ -270,6 +276,7 @@ export function DevicesView() {
             const accent = ACCENTS[sorted.indexOf(d) % ACCENTS.length];
             const tag = deviceTag(d);
             const sameName = (devices ?? []).filter((x) => x.name === d.name).length > 1;
+            const sub = `${KIND_LABEL[d.kind]} · ${d.vendor} · ${d.adapter} #${d.adapter_index}${tag ? ` · ${tag}` : ""}`;
             // The zones of a device that has one are the device's own row; a device with
             // several gets a row of its own and a row for each of its zones.
             const one = d.zones.length === 1 ? d.zones[0] : null;
@@ -289,8 +296,8 @@ export function DevicesView() {
                     {d.name}
                     {sameName && tag ? ` ${tag}` : ""}
                   </span>
-                  <span className="row-sub fig one-line rd-dev-sub">
-                    {KIND_LABEL[d.kind]} · {d.vendor} · #{d.adapter_index}
+                  <span className="row-sub fig one-line rd-dev-sub" title={sub}>
+                    {sub}
                   </span>
                   {one && <ZoneStrip zone={one} />}
                   {one && (
@@ -317,10 +324,29 @@ export function DevicesView() {
                   </span>
                 </div>
 
+                {d.zones.length === 0 && (
+                  <div className="zone-empty rd-zone-empty">
+                    <EmptyState
+                      icon={<Memory size={20} />}
+                      title={`${d.name} reports no zones`}
+                      action={
+                        <Button size="sm" icon={<ArrowClockwise size={16} />} onClick={() => void refreshDevices()}>
+                          Try again
+                        </Button>
+                      }
+                    >
+                      OpenRGB lists this device but no zones for it yet. Try again once it is lit.
+                    </EmptyState>
+                  </div>
+                )}
+
                 {d.zones.length > 1 &&
                   d.zones.map((z) => (
                     <div className="rd-zone" key={z.index}>
-                      <span className="zone-strip-name one-line">{z.name}</span>
+                      <span className="zone-strip-name">
+                        <span className="one-line">{z.name}</span>
+                        <span className="mute one-line rd-zone-shape">{zoneShape(z)}</span>
+                      </span>
                       <ZoneStrip zone={z} />
                       <span className="zone-strip-count">
                         <AnimatedNumber value={z.led_count} /> {z.led_count === 1 ? "LED" : "LEDs"}
