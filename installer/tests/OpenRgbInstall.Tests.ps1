@@ -125,7 +125,7 @@ function Get-Process { [CmdletBinding()] param([string]$Name, [int]$Id) if ($Nam
 # -ServiceStatus is what the stubbed service reports before the run; -Stuck puts an OpenRGB in the
 # install folder that will not stop (the update fails after it stopped the service); without it
 # the OpenRGB on the list has a path nobody can read (the update refuses at step 1).
-function Invoke-StopCanvasSandbox([string]$Name, [string]$ServiceStatus, [switch]$Stuck) {
+function Invoke-StopCanvasSandbox([string]$Name, [string]$ServiceStatus, [switch]$Stuck, [switch]$MarkerBlocked) {
     $root = Join-Path $dir $Name
     $scripts = Join-Path $root 'scripts'; $inst = Join-Path $root 'install'
     New-Item -ItemType Directory -Path $scripts, $inst -Force | Out-Null
@@ -143,6 +143,10 @@ function Stop-Process { param([int]`$Id, [switch]`$Force, [switch]`$ErrorAction)
 function Start-Sleep { param([int]`$Milliseconds) }
 function Get-CimInstance { param(`$ClassName, `$Filter) [pscustomobject]@{ ProcessId = 4242; ExecutablePath = '$exe' } }
 "@
+    if ($MarkerBlocked) {
+        # No OpenRGB runs, and the marker cannot be written (a machine home that refuses the write).
+        $stubs += "`r`nfunction Get-CimInstance { param(`$ClassName, `$Filter) }`r`nfunction Set-StoppedServiceMarker { return `$false }`r`n"
+    }
     Add-Content -LiteralPath (Join-Path $scripts 'lib.ps1') -Value $stubs
     $log = Join-Path $root 'stop.log'
     # The machine home (ProgramData\canvas-rgb) is faked too: the marker that carries "this run
@@ -663,6 +667,12 @@ try {
     Test-Case 'a service this run stopped is started again when the update then fails' {
         $r = Invoke-StopCanvasSandbox 'svc2' -ServiceStatus 'Running' -Stuck
         Assert-Equal $r.Code 1 "the update fails: $($r.Out)"
+        Assert-True ($r.Out -match 'CALL Stop-Service') "the service was stopped for the update: $($r.Out)"
+        Assert-True ($r.Out -match 'CALL Start-Service') "Start-Service was called: $($r.Out)"
+    }
+    Test-Case 'a marker that cannot be written stops the update before the copy, and the service is started again' {
+        $r = Invoke-StopCanvasSandbox 'svc3' -ServiceStatus 'Running' -MarkerBlocked
+        Assert-Equal $r.Code 1 "the update stops before anything is copied: $($r.Out)"
         Assert-True ($r.Out -match 'CALL Stop-Service') "the service was stopped for the update: $($r.Out)"
         Assert-True ($r.Out -match 'CALL Start-Service') "Start-Service was called: $($r.Out)"
     }

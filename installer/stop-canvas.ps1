@@ -24,7 +24,9 @@ try {
         if (Set-StoppedServiceMarker) {
             Write-Step '  this run stopped a running service: the marker says so for the next step' $LogFile
         } else {
-            Write-Step '  could not write the marker: the next step may not start the service again' $LogFile
+            # Without the marker the next step could not start the service again after a failure, so
+            # the update stops here, before anything is copied, and the catch starts the service again.
+            throw 'Setup could not write the note that lets it start canvas-rgb again if the update fails, so it stopped before copying anything. canvas-rgb was started again. Run setup again.'
         }
     }
     exit 0
