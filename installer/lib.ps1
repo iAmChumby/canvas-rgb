@@ -678,13 +678,17 @@ function Get-OpenRgbStopPlan {
 # runs as another user (the service starts OpenRGB as SYSTEM) can only be read elevated, so this
 # belongs to the elevated steps. A path that cannot be read is ''. If the process list itself
 # cannot be read, that is a refusal: an empty list would read as "nothing is running" (#60).
+# -State says what state the PC is in when the refusal comes too late for "Nothing was changed";
+# -Retry says what to run again (setup or the uninstall).
 function Get-OpenRgbProcessList {
+    param([string]$State = '', [string]$Retry = 'run setup again')
     $out = @()
     try {
         $found = @(Get-CimInstance Win32_Process -Filter "Name='OpenRGB.exe'" -ErrorAction Stop)
     } catch {
+        $was = if ($State) { $State } else { 'Nothing was changed.' }
         throw ("Setup could not list the programs that are running ($($_.Exception.Message)), so it cannot tell whether OpenRGB is. " +
-               'Close OpenRGB (or restart the PC) and run setup again. Nothing was changed.')
+               "$was Close OpenRGB (or restart the PC) and $Retry.")
     }
     foreach ($w in $found) {
         $path = [string]$w.ExecutablePath
@@ -737,10 +741,10 @@ function Get-OpenRgbRefusal {
 # cannot be read. Setup cannot tell whether it holds files it must replace, so it refuses here,
 # while nothing has been stopped or deleted yet (#60).
 function Get-OpenRgbBlockers {
-    param([string]$InstallDir)
+    param([string]$InstallDir, [string]$State = '')
     if ([string]::IsNullOrWhiteSpace($InstallDir)) { return @() }
     $dir = Join-Path $InstallDir 'openrgb'
-    $plan = @(Get-OpenRgbStopPlan -OpenRgbDir $dir -Processes @(Get-OpenRgbProcessList))
+    $plan = @(Get-OpenRgbStopPlan -OpenRgbDir $dir -Processes @(Get-OpenRgbProcessList -State $State))
     return @($plan | Where-Object { $_.Unreadable })
 }
 
@@ -772,14 +776,14 @@ function Get-OpenRgbFoldersToKeep {
 # uninstall keeps the folder whole instead of deleting it half way.
 #   @{ Lines = the log lines; Stopped; Stuck; Unreadable }
 function Stop-BundledOpenRgb {
-    param([string]$InstallDir)
+    param([string]$InstallDir, [string]$State = '', [string]$Retry = 'run setup again')
     $out = @()
     $stopped = @()
     $stuck = @()
     $unreadable = @()
     if (-not [string]::IsNullOrWhiteSpace($InstallDir)) {
         $dir = Join-Path $InstallDir 'openrgb'
-        $plan = @(Get-OpenRgbStopPlan -OpenRgbDir $dir -Processes @(Get-OpenRgbProcessList))
+        $plan = @(Get-OpenRgbStopPlan -OpenRgbDir $dir -Processes @(Get-OpenRgbProcessList -State $State -Retry $Retry))
         # An OpenRGB whose path cannot be read is not stopped: it may be the owner's own.
         $unreadable = @($plan | Where-Object { $_.Unreadable })
         foreach ($row in $unreadable) { $out += "  an OpenRGB (pid $($row.Id)) could not be placed: its path could not be read; it is left running" }
@@ -804,7 +808,7 @@ function Stop-BundledOpenRgb {
 function Assert-NoOpenRgbRunning {
     param([string]$InstallDir, [string]$State = '')
     $dir = Join-Path $InstallDir 'openrgb'
-    $plan = @(Get-OpenRgbStopPlan -OpenRgbDir $dir -Processes @(Get-OpenRgbProcessList))
+    $plan = @(Get-OpenRgbStopPlan -OpenRgbDir $dir -Processes @(Get-OpenRgbProcessList -State $State))
     $blind = @($plan | Where-Object { $_.Unreadable })
     if ($blind.Count -gt 0) { throw (Get-OpenRgbRefusal -Rows $blind -What 'is running and Setup cannot tell where it runs from, so it cannot tell whether it holds files that Setup must replace' -State $State) }
     $held = @($plan | Where-Object { $_.Stop })
@@ -965,9 +969,13 @@ function Stop-CanvasRgbUserProcesses {
 
 # Starts the service again when an update stopped it and then could not carry on. The install
 # folder holds a whole set of files, so this is safe; a service that will not start is said so.
+# -WasRunning is what Stop-CanvasRgbService reported: only a service this run stopped is started
+# again. A service the user had stopped on purpose stays stopped.
 function Start-CanvasRgbService {
+    param([bool]$WasRunning = $false)
     $c = $script:CanvasConst
     $out = @()
+    if (-not $WasRunning) { return $out }
     $svc = Get-Service -Name $c.ServiceName -ErrorAction SilentlyContinue
     if (-not $svc) { return $out }
     if ($svc.Status -eq 'Running') { return $out }
@@ -991,26 +999,36 @@ function Start-CanvasRgbService {
 # claiming that nothing was changed.
 # -CopiedNote says what is already in place (the Inno installer copies the new files before this
 # runs), so a refusal that comes later does not claim that nothing was changed.
+# -Result is a hashtable the caller keeps: ServiceWasRunning is set once the service was stopped,
+# so a failure can start it again only when this run stopped it.
 function Stop-CanvasRgbRunning {
-    param([string]$InstallDir = '', [string]$CopiedNote = '')
+    param([string]$InstallDir = '', [string]$CopiedNote = '', [hashtable]$Result = @{})
     $out = @()
+    $Result.ServiceWasRunning = $false
+    # What is true when the refusal comes BEFORE anything is stopped: in Inno mode the new program
+    # files are already in place, and the OpenRGB folder was left as it was.
+    $early = if ($CopiedNote) { "$CopiedNote; the OpenRGB folder was left as it was." } else { '' }
+    # What is true once canvas-rgb was stopped.
+    $lateState = (@($CopiedNote | Where-Object { $_ }) + 'canvas-rgb was stopped for the update') -join '; '
+    $lateState += '.'
 
     # 1. The OpenRGB plan, before anything is stopped: a path that cannot be read means Setup
     #    cannot tell whether it holds files it must replace. Nothing has been changed yet.
-    $blockers = @(Get-OpenRgbBlockers -InstallDir $InstallDir)
+    $blockers = @(Get-OpenRgbBlockers -InstallDir $InstallDir -State $early)
     if ($blockers.Count -gt 0) {
-        throw (Get-OpenRgbRefusal -Rows $blockers -What 'is running and Setup cannot tell where it runs from, so it cannot tell whether it holds files that Setup must replace')
+        throw (Get-OpenRgbRefusal -Rows $blockers -What 'is running and Setup cannot tell where it runs from, so it cannot tell whether it holds files that Setup must replace' -State $early)
     }
 
     # 2. The service: its shutdown hands the fans back to BIOS.
     $svc = Stop-CanvasRgbService
     $out += $svc.Lines
+    $Result.ServiceWasRunning = [bool]$svc.WasRunning
 
     # 3. The daemon, the tray and the CLI.
     $out += Stop-CanvasRgbUserProcesses
 
     # 4. The bundled OpenRGB.
-    $stop = Stop-BundledOpenRgb -InstallDir $InstallDir
+    $stop = Stop-BundledOpenRgb -InstallDir $InstallDir -State $lateState
     $out += $stop.Lines
     $late = @()
     if ($stop.Unreadable.Count -gt 0) { $late += $stop.Unreadable }
@@ -1018,12 +1036,9 @@ function Stop-CanvasRgbRunning {
     if ($late.Count -gt 0) {
         # Known only now: canvas-rgb has been stopped, so the message must say what state the PC
         # is in. The service is started again by the caller, where that is safe.
-        $state = @()
-        if ($CopiedNote) { $state += $CopiedNote }
-        $state += 'canvas-rgb was stopped for the update'
         $why = if ($stop.Stuck.Count -gt 0) { "is running from '" + $stop.Stuck[0].Path + "' and would not close" }
                else { 'is running and Setup cannot tell where it runs from, so it cannot tell whether it holds files that Setup must replace' }
-        throw (Get-OpenRgbRefusal -Rows $late -What $why -State (($state -join '; ') + '.'))
+        throw (Get-OpenRgbRefusal -Rows $late -What $why -State $lateState)
     }
     return $out
 }

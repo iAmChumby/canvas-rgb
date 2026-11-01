@@ -56,7 +56,7 @@ function New-FakeService {
 # The uninstall runs as a temp COPY of the script with a stubbed lib.ps1: no service, no real
 # install folder, no registry. -OpenRgbStub puts one OpenRGB on the list whose path cannot be
 # read, which is what a reader sees when it cannot place a running process.
-function Invoke-UninstallSandbox([string]$Name, [switch]$OpenRgbStub) {
+function Invoke-UninstallSandbox([string]$Name, [switch]$OpenRgbStub, [switch]$CimFails) {
     $root = Join-Path $dir $Name
     $scripts = Join-Path $root 'scripts'; $pd = Join-Path $root 'PD\canvas-rgb'; $inst = Join-Path $root 'install'
     New-Item -ItemType Directory -Path $scripts, $pd, $inst -Force | Out-Null
@@ -87,11 +87,46 @@ function Remove-Item {
 function Get-CimInstance { param($ClassName, $Filter) [pscustomobject]@{ ProcessId = 4242; ExecutablePath = '' } }
 '@
     }
+    if ($CimFails) {
+        $stubs += @'
+function Get-CimInstance { [CmdletBinding()] param($ClassName, $Filter) Write-Error 'WMI is down' }
+'@
+    }
     Add-Content -LiteralPath (Join-Path $scripts 'lib.ps1') -Value $stubs
     $log = Join-Path $root 'elevated.log'
     $cmd = '$env:ProgramData=''{0}''; & ''{1}'' -InstallDir ''{2}'' -LogFile ''{3}''; exit $LASTEXITCODE' -f (Join-Path $root 'PD'), (Join-Path $scripts 'uninstall-elevated.ps1'), $inst, $log
     $out = & powershell.exe -NoProfile -Command $cmd 2>&1 | Out-String
     return @{ Out = $out; Code = $LASTEXITCODE; Install = $inst; Log = $log }
+}
+
+# stop-canvas.ps1 runs as a temp COPY with a stubbed lib.ps1, as a child PowerShell: no real service,
+# no real process. Every Stop-Service / Start-Service the script makes is printed as a CALL line.
+# -ServiceStatus is what the stubbed service reports before the run; -Stuck puts an OpenRGB in the
+# install folder that will not stop (the update fails after it stopped the service); without it
+# the OpenRGB on the list has a path nobody can read (the update refuses at step 1).
+function Invoke-StopCanvasSandbox([string]$Name, [string]$ServiceStatus, [switch]$Stuck) {
+    $root = Join-Path $dir $Name
+    $scripts = Join-Path $root 'scripts'; $inst = Join-Path $root 'install'
+    New-Item -ItemType Directory -Path $scripts, $inst -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\stop-canvas.ps1') -Destination $scripts
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\lib.ps1') -Destination $scripts
+    $exe = if ($Stuck) { Join-Path $inst 'openrgb\OpenRGB.exe' } else { '' }
+    $stubs = @"
+function Test-IsAdmin { return `$true }
+`$global:SvcStatus = '$ServiceStatus'
+function Get-Service { param(`$Name) `$s = [pscustomobject]@{ Name = 'canvas-rgb-svc'; Status = `$global:SvcStatus }; `$s | Add-Member -MemberType ScriptMethod -Name WaitForStatus -Value { param(`$S, `$T) }; `$s }
+function Stop-Service { param(`$Name, [switch]`$Force) `$global:SvcStatus = 'Stopped'; Write-Host 'CALL Stop-Service' }
+function Start-Service { param(`$Name) `$global:SvcStatus = 'Running'; Write-Host 'CALL Start-Service' }
+function Get-Process { [CmdletBinding()] param([string]`$Name, [int]`$Id) if (`$Id -eq 4242) { [pscustomobject]@{ Id = 4242 } } }
+function Stop-Process { param([int]`$Id, [switch]`$Force, [switch]`$ErrorAction) }
+function Start-Sleep { param([int]`$Milliseconds) }
+function Get-CimInstance { param(`$ClassName, `$Filter) [pscustomobject]@{ ProcessId = 4242; ExecutablePath = '$exe' } }
+"@
+    Add-Content -LiteralPath (Join-Path $scripts 'lib.ps1') -Value $stubs
+    $log = Join-Path $root 'stop.log'
+    $cmd = '& ''{0}'' -InstallDir ''{1}'' -LogFile ''{2}''; exit $LASTEXITCODE' -f (Join-Path $scripts 'stop-canvas.ps1'), $inst, $log
+    $out = & powershell.exe -NoProfile -Command $cmd 2>&1 | Out-String
+    return @{ Out = $out; Code = $LASTEXITCODE }
 }
 
 try {
@@ -513,13 +548,70 @@ try {
         Assert-True ($entries.Count -gt 0) 'the section has entries'
         Assert-True (-not (($entries -join ' ') -match 'openrgb')) 'no entry names the OpenRGB tree: the script decides'
     }
+    # ---- round 4: restart only what this run stopped; the true state in every refusal; the uninstall reads first ----
+    Test-Case 'a service that was stopped on purpose is not started again by a refusal at step 1' {
+        $r = Invoke-StopCanvasSandbox 'svc1' -ServiceStatus 'Stopped'
+        Assert-Equal $r.Code 1 "the update refuses: $($r.Out)"
+        Assert-True ($r.Out -match 'pid 4242') "it names the pid: $($r.Out)"
+        Assert-True ($r.Out -notmatch 'CALL Start-Service') "Start-Service was not called: $($r.Out)"
+        Assert-True ($r.Out -notmatch 'CALL Stop-Service') "nothing was stopped: $($r.Out)"
+    }
+    Test-Case 'a service this run stopped is started again when the update then fails' {
+        $r = Invoke-StopCanvasSandbox 'svc2' -ServiceStatus 'Running' -Stuck
+        Assert-Equal $r.Code 1 "the update fails: $($r.Out)"
+        Assert-True ($r.Out -match 'CALL Stop-Service') "the service was stopped for the update: $($r.Out)"
+        Assert-True ($r.Out -match 'CALL Start-Service') "Start-Service was called: $($r.Out)"
+    }
+    Test-Case 'both elevated scripts pass what the stop reported back to the restart' {
+        foreach ($f in 'setup-elevated.ps1', 'stop-canvas.ps1') {
+            $src = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot "..\$f"))
+            Assert-True ($src -match 'Stop-CanvasRgbRunning[^\r\n]*-Result \$stopState') "$f hands the result to the stop"
+            Assert-True ($src -match 'Start-CanvasRgbService -WasRunning \$stopState\.ServiceWasRunning') "$f restarts only what it stopped"
+        }
+    }
+    Test-Case 'in Inno mode a refusal at step 1 says the new files are in place and the OpenRGB folder was left as it was' {
+        $install = Join-Path $dir 'inno1'
+        function Get-OpenRgbProcessList { @([pscustomobject]@{ Id = 9301; Path = '' }) }
+        function Get-Service { param([string]$Name) $s = New-FakeService; $s.Status = 'Stopped'; $s }
+        $threw = $false
+        try { Stop-CanvasRgbRunning -InstallDir $install -CopiedNote 'The new program files are already in place' | Out-Null } catch { $threw = $true; $why = $_.Exception.Message }
+        Assert-True $threw 'the update refuses'
+        Assert-True ($why -match 'new program files are already in place') "it says the files are in place: $why"
+        Assert-True ($why -match 'OpenRGB folder was left as it was') "it says the OpenRGB folder was left as it was: $why"
+        Assert-True ($why -notmatch 'Nothing was changed') "it must not claim that nothing was changed: $why"
+    }
+    Test-Case 'in Inno mode a process list that cannot be read says the same true state' {
+        $install = Join-Path $dir 'inno2'
+        function Get-CimInstance { [CmdletBinding()] param($ClassName, $Filter) Write-Error 'WMI is down' }
+        function Get-OpenRgbProcessList { param([string]$State = '', [string]$Retry = 'run setup again') & $script:realProcessList -State $State -Retry $Retry }
+        $threw = $false
+        try { Stop-CanvasRgbRunning -InstallDir $install -CopiedNote 'The new program files are already in place' | Out-Null } catch { $threw = $true; $why = $_.Exception.Message }
+        Assert-True $threw 'the update refuses'
+        Assert-True ($why -match 'could not list') "it names the cause: $why"
+        Assert-True ($why -match 'new program files are already in place') "it says the files are in place: $why"
+        Assert-True ($why -notmatch 'Nothing was changed') "it must not claim that nothing was changed: $why"
+    }
+    Test-Case 'the uninstall reads the OpenRGB list before it deletes anything, and says the true state when it cannot' {
+        $un = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\uninstall-elevated.ps1'))
+        $iRead = $un.IndexOf('Get-OpenRgbProcessList')
+        $iDel = $un.IndexOf('& $sc delete')
+        Assert-True ($iRead -gt 0 -and $iDel -gt 0 -and $iRead -lt $iDel) 'the list is read before the service is deleted'
+        $r = Invoke-UninstallSandbox 'uninst2' -CimFails
+        Assert-True ($r.Out -match 'could not list') "it names the cause: $($r.Out)"
+        Assert-True ($r.Out -notmatch 'run setup again') "it must not tell an uninstall to run setup: $($r.Out)"
+        Assert-True ($r.Out -match 'run the uninstall again') "it says to run the uninstall again: $($r.Out)"
+        Assert-True (Test-Path -LiteralPath (Join-Path $r.Install 'openrgb\OpenRGB.exe')) 'the OpenRGB folder is untouched'
+        Assert-True (Test-Path -LiteralPath (Join-Path $r.Install 'canvas-rgbd.exe')) 'nothing was removed'
+        Assert-Equal $r.Code 1 'the uninstall refuses'
+    }
     Test-Case 'the Inno installer deletes the result file last, so a refusal leaves the install folder as it was' {
         $iss = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\inno\canvas-rgb.iss'))
         $p = $iss.IndexOf('function PrepareToInstall')
         $q = $iss.IndexOf('procedure CurStepChanged')
         $prep = $iss.Substring($p, $q - $p)
         $iDel = $prep.IndexOf('DeleteFile')
-        $iStop = $prep.IndexOf('stop-canvas.ps1')
+        # The RunPs call that runs stop-canvas.ps1, not the line that extracts it.
+        $iStop = $prep.IndexOf("RunPs(ExpandConstant('{tmp}\stop-canvas.ps1')")
         Assert-True ($iDel -gt 0 -and $iStop -gt 0) 'the delete and the last check are both in PrepareToInstall'
         Assert-True ($iDel -gt $iStop) 'the result file is deleted after the last check, not before it'
         Assert-True ($prep -match 'Nothing was copied') 'the refusal says that nothing was copied'

@@ -23,6 +23,7 @@ $ErrorActionPreference = 'Stop'
 $c = Get-CanvasConst
 function Say([string]$t) { Write-Step $t $LogFile }
 
+$stopState = @{ ServiceWasRunning = $false }
 try {
     if (-not (Test-IsAdmin)) { throw 'setup-elevated.ps1 must run elevated (setup.ps1 starts it).' }
     $programData = Join-Path $env:ProgramData $c.AppName
@@ -44,7 +45,7 @@ try {
     #    The Inno installer has already copied the new program files into the install folder, so a
     #    refusal from here must not claim that nothing was changed.
     $copiedNote = if ($InnoMode) { 'The new program files are already in place' } else { '' }
-    Stop-CanvasRgbRunning -InstallDir $InstallDir -CopiedNote $copiedNote | ForEach-Object { Say $_ }
+    Stop-CanvasRgbRunning -InstallDir $InstallDir -CopiedNote $copiedNote -Result $stopState | ForEach-Object { Say $_ }
 
     # 4. Install dir: binaries, shim, OpenRGB.
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
@@ -188,8 +189,9 @@ try {
     exit 0
 } catch {
     Say "[elevated] FAILED: $($_.Exception.Message)"
-    # The update stopped the service before it failed, so canvas-rgb would be left down with the
-    # fans on BIOS. The install folder holds a whole set of files, so the service is started again.
-    Start-CanvasRgbService | ForEach-Object { Say $_ }
+    # When this run stopped the service, canvas-rgb would be left down with the fans on BIOS. The
+    # install folder holds a whole set of files, so the service is started again. A service that
+    # was already stopped (on purpose) stays stopped.
+    Start-CanvasRgbService -WasRunning $stopState.ServiceWasRunning | ForEach-Object { Say $_ }
     exit 1
 }
