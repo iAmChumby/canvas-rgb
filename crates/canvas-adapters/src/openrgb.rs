@@ -10,7 +10,7 @@ use canvas_proto::{
     AdapterCapabilities, AdapterError, DeviceAdapter, DeviceId, DeviceInfo, DeviceKind, Rgb8,
     ZoneInfo, ZoneKind,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -127,6 +127,10 @@ struct Session {
     /// When each controller was last switched to direct/custom mode on this connection.
     /// A missing entry means the next frame sends `SET_CUSTOM_MODE` first.
     custom_mode: HashMap<u32, ModeStamp>,
+    /// The controllers `SET_CUSTOM_MODE` was ever sent to on this connection. Only the log reads
+    /// it (the first send per connection is INFO, a re-send after a reset says so); it changes
+    /// nothing about when the mode is sent.
+    mode_sent: HashSet<u32>,
     /// How long a controller stays trusted to be in custom mode before the next frame
     /// sends `SET_CUSTOM_MODE` again.
     keepalive: Duration,
@@ -144,6 +148,7 @@ impl Default for Session {
             reader: None,
             controllers: Vec::new(),
             custom_mode: HashMap::new(),
+            mode_sent: HashSet::new(),
             keepalive: CUSTOM_MODE_KEEPALIVE,
             resets: 0,
         }
@@ -380,40 +385,100 @@ impl OpenRgbAdapter {
     /// after a reset (resume, resize) and whenever the keepalive interval has passed, so a
     /// controller that fell back to its built-in mode heals on its own.
     async fn send_leds(&self, index: u32, colors: &[Rgb8]) -> Result<(), AdapterError> {
-        let needs_mode = {
+        let reason = {
             let session = guard(&self.link.session);
-            session
-                .custom_mode
-                .get(&index)
-                .is_none_or(|stamp| self.mode_is_stale(stamp, session.keepalive))
+            match session.custom_mode.get(&index) {
+                // Sent before on this connection, and forgotten since: a resume or a zone resize.
+                None if session.mode_sent.contains(&index) => Some(ModeReason::AfterReset),
+                None => Some(ModeReason::First),
+                Some(stamp) => self.stale_reason(stamp, session.keepalive),
+            }
         };
-        if needs_mode {
+        if let Some(reason) = reason {
             // Stamped before the send. A resume that lands during the await bumps `resets`; the
             // controller is then not recorded, so the next frame sends the mode again.
             let sent_at = self.clocks.monotonic();
             let sent_wall = self.clocks.wall();
             let resets = guard(&self.link.session).resets;
             self.send(index, SET_CUSTOM_MODE, &[]).await?;
-            let mut session = guard(&self.link.session);
-            if session.resets == resets {
-                session.custom_mode.insert(index, ModeStamp { at: sent_at, wall: sent_wall });
-            }
+            let first_on_connection = {
+                let mut session = guard(&self.link.session);
+                if session.resets == resets {
+                    session.custom_mode.insert(index, ModeStamp { at: sent_at, wall: sent_wall });
+                }
+                session.mode_sent.insert(index)
+            };
+            self.log_mode_sent(index, reason, first_on_connection);
         }
         self.send(index, UPDATE_LEDS, &update_leds_payload(colors)?).await
     }
 
-    /// Whether a controller's mode has to be sent again.
+    /// Says that `SET_CUSTOM_MODE` went to controller `index` (#81). OpenRGB turns each one into an
+    /// SMBus mode write on the stick and reports nothing back over the SDK, so this line (what was
+    /// sent, to which controller, and why) is the only record. The first one per connection is
+    /// INFO; the keepalive and the re-sends after a reset are DEBUG, so a stream of frames adds
+    /// no INFO line.
+    fn log_mode_sent(&self, index: u32, reason: ModeReason, first_on_connection: bool) {
+        let (name, location) = guard(&self.link.session)
+            .controllers
+            .iter()
+            .find(|controller| controller.index == index)
+            .map(|controller| (controller.wire.name.clone(), controller.wire.location.clone()))
+            .unwrap_or_default();
+        let why = reason.text();
+        if first_on_connection {
+            tracing::info!(
+                controller = index, name, location, reason = why,
+                "SET_CUSTOM_MODE sent to OpenRGB controller {index} ({name}, {location}): {why}"
+            );
+        } else {
+            tracing::debug!(
+                controller = index, name, location, reason = why,
+                "SET_CUSTOM_MODE sent to OpenRGB controller {index} ({name}, {location}): {why}"
+            );
+        }
+    }
+
+    /// Why a controller's mode has to be sent again, or `None` when it does not.
     ///
     /// The keepalive covers a controller that lost power over a sleep: the ENE DRAM sticks fall
     /// back to their built-in rainbow. The monotonic clock may not have counted the sleep (the
     /// standard library does not say), so the wall clock is watched too: it follows the RTC, so
     /// it counts a sleep whatever the monotonic clock did (#5).
-    fn mode_is_stale(&self, stamp: &ModeStamp, keepalive: Duration) -> bool {
+    fn stale_reason(&self, stamp: &ModeStamp, keepalive: Duration) -> Option<ModeReason> {
         if self.clocks.monotonic().saturating_duration_since(stamp.at) >= keepalive {
-            return true;
+            return Some(ModeReason::Keepalive);
         }
         // A wall clock that went backwards (the clock was set) is not a sleep.
-        self.clocks.wall().duration_since(stamp.wall).is_ok_and(|gap| gap > keepalive)
+        self.clocks
+            .wall()
+            .duration_since(stamp.wall)
+            .is_ok_and(|gap| gap > keepalive)
+            .then_some(ModeReason::WallClockJump)
+    }
+}
+
+/// Why `SET_CUSTOM_MODE` is sent to a controller (the log line says which).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ModeReason {
+    /// The first frame to this controller on this connection.
+    First,
+    /// The mode map was cleared (a resume or a zone resize) after it was sent before.
+    AfterReset,
+    /// The keepalive interval passed on the monotonic clock.
+    Keepalive,
+    /// The wall clock moved on by more than the keepalive while the monotonic clock did not: a sleep.
+    WallClockJump,
+}
+
+impl ModeReason {
+    fn text(self) -> &'static str {
+        match self {
+            Self::First => "the first frame to this controller on this connection",
+            Self::AfterReset => "again after a reset (a resume or a zone resize)",
+            Self::Keepalive => "again, the keepalive interval passed",
+            Self::WallClockJump => "again, the wall clock jumped past the keepalive (a sleep)",
+        }
     }
 }
 
@@ -486,6 +551,7 @@ impl DeviceAdapter for OpenRgbAdapter {
             session.pending = None;
             session.controllers.clear();
             session.custom_mode.clear();
+            session.mode_sent.clear();
             session.reader.take()
         };
         if let Some(reader) = reader {
@@ -544,8 +610,16 @@ impl DeviceAdapter for OpenRgbAdapter {
         }
         let total = controller.led_count() as usize;
         let mut colors = vec![Rgb8 { r: 0, g: 0, b: 0 }; total];
-        colors[controller.zone_offset(zone as usize) + led as usize] = Rgb8 { r: 255, g: 255, b: 255 };
-        self.send_leds(controller.index, &colors).await
+        let lit = controller.zone_offset(zone as usize) + led as usize;
+        colors[lit] = Rgb8 { r: 255, g: 255, b: 255 };
+        self.send_leds(controller.index, &colors).await?;
+        // OpenRGB answers nothing to a frame, so what was sent is the whole record (#81).
+        tracing::info!(
+            controller = controller.index, device = %device, zone, led, lit, leds = total,
+            "identify sent to OpenRGB controller {} ({device}): LED {lit} of {total} white, the other {} black",
+            controller.index, total - 1
+        );
+        Ok(())
     }
 
     async fn read_back(&mut self, device: &DeviceId) -> Result<Vec<Rgb8>, AdapterError> {
@@ -805,6 +879,96 @@ mod keepalive_tests {
         adapter.write_frame(&id, &[RED; 8]).await.expect("frame");
         // The read-back is a request and a reply, so the frame before it has been handled.
         adapter.read_back(&id).await.expect("readback orders the frame");
+    }
+
+    /// A second stick, as the fake server reports it (controller 1).
+    fn second_stick() -> DeviceInfo {
+        let mut info = stick();
+        info.id = DeviceId("openrgb:dram2".into());
+        info.serial = "dram2".into();
+        info.location = "smbus2".into();
+        info.adapter_index = 1;
+        info
+    }
+
+    /// The adapter over a fake server with two sticks, and the log it writes.
+    async fn two_sticks(state: &Arc<Moved>) -> (FakeOpenRgbServer, OpenRgbAdapter) {
+        let server = FakeOpenRgbServer::start(vec![stick(), second_stick()]).await.expect("the fake server");
+        let mut adapter =
+            OpenRgbAdapter::with_clocks("127.0.0.1", server.port(), CUSTOM_MODE_KEEPALIVE, Moved::clocks(state));
+        adapter.connect().await.expect("connect");
+        (server, adapter)
+    }
+
+    async fn frame_to(adapter: &mut OpenRgbAdapter, id: &str) {
+        let id = DeviceId(id.into());
+        adapter.write_frame(&id, &[RED; 8]).await.expect("frame");
+        adapter.read_back(&id).await.expect("readback orders the frame");
+    }
+
+    /// #81: the first SET_CUSTOM_MODE to each controller on a connection is one INFO line naming the
+    /// controller; later frames add none, and the keepalive and a reset re-send at DEBUG.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the lock keeps `note_resume` tests one at a time
+    async fn the_first_set_custom_mode_per_controller_is_one_info_line_and_the_rest_are_debug() {
+        let _serial = crate::resume_serial();
+        let logs = crate::test_logs::LogBuf::default();
+        let _default = logs.install();
+        let state = Moved::new();
+        let (server, mut adapter) = two_sticks(&state).await;
+
+        for _ in 0..5 {
+            frame_to(&mut adapter, "openrgb:dram").await;
+            frame_to(&mut adapter, "openrgb:dram2").await;
+        }
+        assert_eq!(server.custom_mode_writes(0), 1);
+        assert_eq!(server.custom_mode_writes(1), 1);
+        let info = logs.lines_with(&["INFO", "SET_CUSTOM_MODE sent to OpenRGB controller"]);
+        assert_eq!(info.len(), 2, "one INFO line per controller, none per frame: {info:?}");
+        assert!(info[0].contains("controller 0 (DDR5, smbus)") && info[0].contains("first frame"), "{}", info[0]);
+        assert!(info[1].contains("controller 1 (DDR5, smbus2)") && info[1].contains("first frame"), "{}", info[1]);
+
+        // The keepalive: DEBUG, not INFO.
+        *state.monotonic.lock().expect("the clock's lock") += CUSTOM_MODE_KEEPALIVE;
+        frame_to(&mut adapter, "openrgb:dram").await;
+        let keepalive = logs.lines_with(&["DEBUG", "controller 0", "keepalive interval passed"]);
+        assert_eq!(keepalive.len(), 1, "{}", logs.text());
+
+        // After a reset: DEBUG, and it says so.
+        adapter.reset_custom_mode();
+        frame_to(&mut adapter, "openrgb:dram2").await;
+        let reset = logs.lines_with(&["DEBUG", "controller 1", "after a reset"]);
+        assert_eq!(reset.len(), 1, "{}", logs.text());
+
+        let info = logs.lines_with(&["INFO", "SET_CUSTOM_MODE sent to OpenRGB controller"]);
+        assert_eq!(info.len(), 2, "the re-sends added no INFO line: {info:?}");
+
+        // A new connection is a new "first".
+        adapter.disconnect().await.expect("disconnect");
+        adapter.connect().await.expect("connect again");
+        frame_to(&mut adapter, "openrgb:dram").await;
+        let info = logs.lines_with(&["INFO", "SET_CUSTOM_MODE sent to OpenRGB controller 0"]);
+        assert_eq!(info.len(), 2, "the first frame on the new connection is INFO again: {info:?}");
+    }
+
+    /// #81: an identify says which controller it went to and what was sent.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the lock keeps `note_resume` tests one at a time
+    async fn an_identify_is_logged_with_its_controller_and_what_was_sent() {
+        let _serial = crate::resume_serial();
+        let logs = crate::test_logs::LogBuf::default();
+        let _default = logs.install();
+        let state = Moved::new();
+        let (_server, mut adapter) = two_sticks(&state).await;
+
+        adapter.identify(&DeviceId("openrgb:dram2".into()), 0, 3).await.expect("identify");
+
+        let lines = logs.lines_with(&["INFO", "identify sent to OpenRGB controller 1"]);
+        assert_eq!(lines.len(), 1, "{}", logs.text());
+        assert!(lines[0].contains("openrgb:dram2"), "{}", lines[0]);
+        assert!(lines[0].contains("LED 3 of 8 white, the other 7 black"), "{}", lines[0]);
+        // The mode write that went with it is on record too.
+        assert_eq!(logs.lines_with(&["SET_CUSTOM_MODE sent to OpenRGB controller 1"]).len(), 1);
     }
 
     #[tokio::test]

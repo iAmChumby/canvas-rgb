@@ -14,6 +14,10 @@ serde_json.workspace = true
 tracing.workspace = true
 hidapi = { version = "2.6", default-features = false, features = ["windows-native"] }
 
+[dev-dependencies]
+# The tests read back what the adapters log (#81); the library itself only emits events.
+tracing-subscriber.workspace = true
+
 # The X6's feature reports have to go out with their exact length, and hidapi pads every report
 # to the collection's FeatureReportByteLength. windows-sys is already in the lock file through
 # hidapi, and these are the same features hidapi already turns on, so nothing new is compiled.
