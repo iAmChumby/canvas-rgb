@@ -63,6 +63,7 @@ function Invoke-UninstallSandbox([string]$Name, [switch]$OpenRgbStub) {
     [System.IO.File]::WriteAllText((Join-Path $inst 'canvas-rgbd.exe'), 'x')
     New-OpenRgbTree -Root (Join-Path $inst 'openrgb') -Marker 'live'
     New-OpenRgbTree -Root (Join-Path $inst 'openrgb.old') -Marker 'older'
+    New-Item -ItemType Directory -Path (Join-Path $inst 'bin') -Force | Out-Null
     $src = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\uninstall-elevated.ps1') -Raw
     # GetFolderPath('CommonPrograms') returns '' once %ProgramData% points at a fake folder.
     $src = $src.Replace("[Environment]::GetFolderPath('CommonPrograms')", "'$(Join-Path $root 'StartMenu')'")
@@ -141,11 +142,12 @@ try {
         New-OpenRgbTree -Root (Join-Path $install 'openrgb.old') -Marker 'older'
         New-OpenRgbTree -Root (Join-Path $install 'openrgb.new') -Marker 'staged'
         New-Item -ItemType Directory -Path (Join-Path $install 'bin') -Force | Out-Null
-        $trees = @(Get-OpenRgbTreeFolders -InstallDir $install)
-        Assert-Equal $trees.Count 3 'the tree and the two leftovers'
-        Assert-True ($trees -contains (Join-Path $install 'openrgb')) 'the live tree'
-        Assert-True ($trees -contains (Join-Path $install 'openrgb.old')) 'the leftover'
-        Assert-True (-not ($trees -contains (Join-Path $install 'bin'))) 'another folder is not one of them'
+        # The real uninstall script is what asks: the folders it keeps are the OpenRGB tree and
+        # its leftovers, and nothing else.
+        $r = Invoke-UninstallSandbox 'trees1' -OpenRgbStub
+        Assert-True (Test-Path -LiteralPath (Join-Path $r.Install 'openrgb\OpenRGB.exe')) 'the live tree is kept'
+        Assert-True (Test-Path -LiteralPath (Join-Path $r.Install 'openrgb.old\OpenRGB.exe')) 'the leftover is kept'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $r.Install 'bin'))) 'another folder is not one of them'
     }
 
     # ---- the real stop: a fake OpenRGB under a temp install folder ----
