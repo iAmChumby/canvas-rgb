@@ -106,7 +106,7 @@ impl RenderError {
     /// effect is, so it is [`RenderError::OverBudget`] (retried later). Any other build error
     /// fails the same way every time.
     pub fn from_build_error(why: String) -> Self {
-        if why.starts_with("timeout: ") {
+        if build_error_depends_on_load(&why) {
             RenderError::OverBudget(why)
         } else {
             RenderError::Failed(why)
@@ -137,6 +137,19 @@ impl From<RenderError> for String {
     fn from(error: RenderError) -> Self {
         error.reason().to_string()
     }
+}
+
+/// True when a build error says the machine was too busy, not the effect.
+///
+/// The builders return the text of [`canvas_html::HtmlError`], and its `Timeout` variant reads
+/// `timeout: ...`: an effect whose top-level script ran past its load budget says how busy the
+/// machine was (a game running, a build), not what the effect is. Such a failure is worth
+/// another try later; any other build error fails the same way every time.
+///
+/// This is the one place that knows the rule, so the tile path and the user-effects path
+/// ([`crate::user_effects`]) tell a timeout from a real failure the same way.
+pub fn build_error_depends_on_load(why: &str) -> bool {
+    why.starts_with("timeout: ")
 }
 
 /// What an effect unwinds with when its tile cannot be drawn.

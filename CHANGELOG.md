@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- An effect that was too slow to load the first time is tried again later, instead of staying out of the library. (#56)
+
 ## [0.4.0] - 2026-11-01
 
 ### Fixed
