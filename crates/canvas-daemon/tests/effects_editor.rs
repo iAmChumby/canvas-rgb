@@ -1201,3 +1201,43 @@ async fn at_most_two_previews_render_at_once() {
     assert!(busy >= 1, "the third preview is refused while two run");
     assert_eq!(retry_after.as_deref(), Some("1"), "the busy answer says when to retry");
 }
+
+#[tokio::test]
+async fn a_put_after_the_lease_starts_a_new_draft_with_the_current_prior() {
+    let (router, app, engine, _home, _folder, clock) = build_with_clock();
+    prior_effect(&app, "solid", color("#112233")).await;
+    assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
+
+    // The saved effect changes while the lease runs out, as an edit outside the editor would.
+    {
+        let mut store = app.store.write().await;
+        store.layouts.layouts[0].effect = Some(canvas_proto::layout::ActiveEffect {
+            id: "gradient".to_string(),
+            props: canvas_proto::props::Props::new(),
+        });
+    }
+    clock.advance(canvas_proto::consts::DRAFT_LEASE);
+
+    // The same source, after the lease: the dead draft must not be renewed.
+    let response = put_draft(router.clone(), MOVING, serde_json::json!({})).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let state: canvas_proto::api::DraftStatus =
+        serde_json::from_value(json(response).await).expect("a DraftStatus");
+    assert!(state.active);
+    assert!(state.lease_remaining_ms > 0, "the new draft has a fresh lease");
+
+    // Stopping it puts back what the layout names now, not what the dead draft took over from.
+    assert_eq!(
+        router
+            .oneshot(request("DELETE", routes::EFFECT_DRAFT))
+            .await
+            .expect("the router answers")
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        running(&engine).0.as_deref(),
+        Some("gradient"),
+        "the new draft's prior is the effect in force when it started"
+    );
+}
