@@ -4,6 +4,7 @@
 //! tasks share: the on-disk store, the engine handle, the OpenRGB adapter, the device
 //! list, the preview subscribers and the pipe client.
 
+use canvas_adapters::resume::ResumeBehavior;
 use canvas_proto::api::{LinkState, Status};
 use canvas_proto::device::{DeviceId, DeviceInfo};
 use canvas_proto::fans::FansStatus;
@@ -110,14 +111,20 @@ impl App {
     /// Builds an app from the pieces the caller supplies, with no numeric displays.
     ///
     /// The daemon uses this too, so the tests and the daemon build the same state.
-    pub fn new(
+    ///
+    /// The adapter must say what it does on a resume (`ResumeBehavior`): an adapter that does
+    /// not cannot be handed to the app, so it does not compile.
+    pub fn new<A>(
         store: crate::storage::Store,
         engine: Arc<dyn Engine>,
-        adapter: Box<dyn DeviceAdapter>,
+        adapter: Box<A>,
         token: String,
         version: String,
         quit_tx: tokio::sync::mpsc::UnboundedSender<()>,
-    ) -> Self {
+    ) -> Self
+    where
+        A: DeviceAdapter + ResumeBehavior + 'static,
+    {
         Self::with_displays(
             store,
             engine,
@@ -130,15 +137,21 @@ impl App {
     }
 
     /// Like [`App::new`], with the numeric display adapter the daemon wires in (the CHIONE).
-    pub fn with_displays(
+    ///
+    /// Both adapters must say what they do on a resume (`ResumeBehavior`), as for [`App::new`].
+    pub fn with_displays<A, D>(
         store: crate::storage::Store,
         engine: Arc<dyn Engine>,
-        adapter: Box<dyn DeviceAdapter>,
+        adapter: Box<A>,
         token: String,
         version: String,
         quit_tx: tokio::sync::mpsc::UnboundedSender<()>,
-        display_adapter: Box<dyn canvas_proto::traits::NumericDisplayAdapter>,
-    ) -> Self {
+        display_adapter: Box<D>,
+    ) -> Self
+    where
+        A: DeviceAdapter + ResumeBehavior + 'static,
+        D: canvas_proto::traits::NumericDisplayAdapter + ResumeBehavior + 'static,
+    {
         Self {
             displays: crate::displays::DisplayHub::new(display_adapter),
             peripherals: crate::peripherals::PeripheralHub::new(Vec::new()),
@@ -146,7 +159,7 @@ impl App {
             transient: Default::default(),
             store: tokio::sync::RwLock::new(store),
             engine,
-            adapter: Arc::new(tokio::sync::Mutex::new(adapter)),
+            adapter: Arc::new(tokio::sync::Mutex::new(adapter as Box<dyn DeviceAdapter>)),
             devices: tokio::sync::RwLock::new(Vec::new()),
             zones: Arc::new(tokio::sync::RwLock::new(ZoneSizes::new())),
             preview: PreviewRegistry::default(),

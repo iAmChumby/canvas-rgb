@@ -135,6 +135,13 @@ impl Default for FakeAdapter {
     }
 }
 
+impl canvas_adapters::resume::ResumeBehavior for FakeAdapter {
+    fn on_resume(&self) -> canvas_adapters::resume::OnResume {
+        // A test fake: it holds no mode.
+        canvas_adapters::resume::OnResume::NothingToRestore
+    }
+}
+
 #[async_trait::async_trait]
 impl DeviceAdapter for FakeAdapter {
     fn name(&self) -> &'static str {
@@ -319,6 +326,13 @@ pub fn chione_info() -> canvas_proto::display::DisplayInfo {
         ],
         connected: false,
         blocked_by: None,
+    }
+}
+
+impl canvas_adapters::resume::ResumeBehavior for FakeDisplay {
+    fn on_resume(&self) -> canvas_adapters::resume::OnResume {
+        // A test fake: it holds no mode.
+        canvas_adapters::resume::OnResume::NothingToRestore
     }
 }
 
@@ -572,6 +586,13 @@ fn check_prop_value(def: &PropertyDef, value: &PropValue) -> Result<(), AdapterE
             Ok(())
         }
         (PropKind::Hue { .. }, other) => Err(wrong(other)),
+    }
+}
+
+impl canvas_adapters::resume::ResumeBehavior for FakePeripheral {
+    fn on_resume(&self) -> canvas_adapters::resume::OnResume {
+        // A test fake: it holds no mode.
+        canvas_adapters::resume::OnResume::NothingToRestore
     }
 }
 

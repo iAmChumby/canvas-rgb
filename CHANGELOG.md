@@ -9,6 +9,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Fixed
 
 - An effect that did not show up because the PC was busy (a game loading, for example) is no longer treated as broken: canvas-rgb tries it again, and an effect saved at a busy moment is kept. (#56)
+- After the PC wakes from sleep, canvas-rgb tells the RAM to take the running effect again right away. (#5)
 
 ## [0.4.0] - 2026-11-01
 

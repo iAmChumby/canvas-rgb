@@ -90,7 +90,10 @@ pub fn save(home: &Path, file: &PeripheralsFile) -> std::io::Result<()> {
 /// The spine's `PeripheralAdapter` has no gate, but both adapters have one (an inherent
 /// `set_writes_enabled`). This trait is the daemon's bridge to it: the daemon turns the gate
 /// with the saved access, so nothing ever reaches a device the owner did not allow.
-pub trait Peripheral: PeripheralAdapter {
+///
+/// It also needs `ResumeBehavior`: a peripheral the daemon is given has to say what it does when
+/// the machine resumes from sleep, or it does not compile (`cause:sleep-state`).
+pub trait Peripheral: PeripheralAdapter + canvas_adapters::resume::ResumeBehavior {
     /// Turns config writes on or off. Nothing is written to the hardware while they are off.
     fn set_config_writes(&mut self, on: bool);
 
@@ -648,6 +651,13 @@ mod tests {
 
         fn writes_enabled(&self) -> bool {
             true
+        }
+    }
+
+    impl canvas_adapters::resume::ResumeBehavior for HeldPeripheral {
+        fn on_resume(&self) -> canvas_adapters::resume::OnResume {
+            // A test fake: it holds no mode.
+            canvas_adapters::resume::OnResume::NothingToRestore
         }
     }
 
