@@ -807,7 +807,7 @@ export function EffectsView() {
               onClick={() => setShowFailed((v) => !v)}
             >
               <Warning size={14} aria-hidden="true" />
-              {failed.length} failed
+              {failed.length} file{failed.length === 1 ? "" : "s"} did not load
             </button>
           </span>
         )}

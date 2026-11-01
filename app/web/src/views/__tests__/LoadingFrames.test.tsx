@@ -222,7 +222,7 @@ describe("the gallery's cards", () => {
     expect(gallery).not.toBeNull();
     // The key says a file did not load: that is true for a broken file and for one whose
     // load ran out of time.
-    expect(key?.textContent).toContain("failed");
+    expect(key?.textContent).toContain("did not load");
     // The key stands in the toolbar, above the cards: it comes with the list and must not push
     // them down.
     expect(

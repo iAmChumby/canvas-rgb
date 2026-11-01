@@ -223,7 +223,7 @@ export function SettingsView() {
                 onChange={(m) => {
                   setMotion(m);
                   applyMotion(m);
-                  toast(`Motion: ${m}`);
+                  toast(m === "reduced" ? "Motion reduced" : "Motion on");
                 }}
               />
             </Field>
