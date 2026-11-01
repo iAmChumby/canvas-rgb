@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import type { Icon } from "@phosphor-icons/react";
-import { Fan, GameController, Gear, Monitor, Plugs, SquaresFour, Sparkle } from "@phosphor-icons/react";
+import { Fan, GameController, Gear, Monitor, Circuitry, SquaresFour, Sparkle } from "@phosphor-icons/react";
 import { useToasts } from "@/components/Toast";
 import { BrandMark, Wordmark } from "@/components/BrandMark";
 import { useSnap } from "@/lib/store";
@@ -20,9 +20,10 @@ export interface NavItem {
 const PAGES: NavItem[] = [
   { href: "/", label: "Layout", icon: SquaresFour },
   { href: "/effects/", label: "Effects", icon: Sparkle },
-  // What the daemon found on this machine: the board, the sticks, the card, the keyboard. Plugs
-  // says "the things plugged in", where a chip only said "the processor".
-  { href: "/devices/", label: "Devices", icon: Plugs },
+  // What the daemon found on this machine: the board, the sticks, the card, the keyboard.
+  // #57: the upright circuitry glyph, not the diagonal Plugs: the page is the wiring, not
+  // whatever happens to be plugged in.
+  { href: "/devices/", label: "Devices", icon: Circuitry },
   // The panels that show numbers: a pump head, an AIO screen. A monitor says "a display", where
   // a thermometer said "a temperature".
   { href: "/displays/", label: "Displays", icon: Monitor },

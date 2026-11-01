@@ -30,6 +30,7 @@ import {
 } from "@/shell/prefs";
 import type { Settings } from "@/proto/Settings";
 import { UpdatesPanel } from "./UpdatesPanel";
+import { PageTitle } from "@/shell/PageHeader";
 
 export function SettingsView() {
   const settings = useSnap((s) => s.settings);
@@ -53,10 +54,8 @@ export function SettingsView() {
 
   if (!settings) {
     return (
-      <div className="stack">
-        <div className="page-head">
-          <h1>Settings</h1>
-        </div>
+      <div className="rd-page rd-settings">
+        <PageTitle title="Settings" />
         <LoadFrame
           state={retrying ? "loading" : settingsError ? "error" : "loading"}
           shape={<SettingsShape />}
@@ -155,10 +154,8 @@ export function SettingsView() {
   };
 
   return (
-    <div className="stack">
-      <div className="page-head">
-        <h1>Settings</h1>
-      </div>
+    <div className="rd-page rd-settings">
+      <PageTitle title="Settings" />
 
       {settingsError && (
         // A refresh that failed after the settings were read does not take the page away: the

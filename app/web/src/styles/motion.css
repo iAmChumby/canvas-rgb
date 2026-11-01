@@ -896,7 +896,7 @@
   .toast-host {
     position: fixed;
     top: auto;
-    bottom: var(--rail-h, 65px);
+    bottom: var(--dock-h, 65px);
     left: 0;
     right: 0;
     align-items: stretch;

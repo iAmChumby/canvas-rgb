@@ -29,6 +29,7 @@ import type { PropertyDef } from "@/proto/PropertyDef";
 import type { PropertySchema } from "@/proto/PropertySchema";
 import type { PropValue } from "@/proto/PropValue";
 import type { Props } from "@/proto/props";
+import { PageTitle } from "@/shell/PageHeader";
 
 /** The icon each kind of peripheral wears. */
 const KIND_GLYPH = {
@@ -364,10 +365,8 @@ export function PeripheralsView() {
     listError && !listBusy ? "error" : list === null ? "loading" : rows.length === 0 ? "empty" : "ready";
 
   return (
-    <div className="stack">
-      <div className="page-head">
-        <h1>Peripherals</h1>
-      </div>
+    <div className="rd-page rd-peripherals">
+      <PageTitle title="Peripherals" />
 
       <div className="peripheral-grid" data-step={narrow && selectedId ? "detail" : "list"}>
         <div className="peripheral-list" hidden={narrow && !!selectedId}>

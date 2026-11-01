@@ -25,6 +25,7 @@ import {
   uacLine,
 } from "@/lib/updateWords";
 import type { UpdateState } from "@/proto/UpdateState";
+import { PageTitle } from "@/shell/PageHeader";
 
 /** How long the tray has to answer before the page says that it did not. */
 export const TRAY_TIMEOUT_MS = 5000;
@@ -132,10 +133,8 @@ export function UpdatesView() {
 
   if (!u) {
     return (
-      <div className="stack">
-        <div className="page-head">
-          <h1>Updates</h1>
-        </div>
+      <div className="rd-page rd-updates">
+        <PageTitle title="Updates" />
         {/* The state comes from the tray, not the daemon: there is no error to show while the tray
             is still answering. When it stays quiet the page says so and offers a way to ask again. */}
         <LoadFrame
@@ -165,19 +164,21 @@ export function UpdatesView() {
   const busy = isInstalling(u);
 
   return (
-    <div className="stack">
-      <div className="page-head">
-        <h1>Updates</h1>
-        <span className="mute fig">
-          {u.current_version}
-          {avail && (
-            <>
-              {" "}
-              <ArrowRight size={12} className="upd-arrow" aria-hidden="true" /> {avail.version}
-            </>
-          )}
-        </span>
-      </div>
+    <div className="rd-page rd-updates">
+      <PageTitle
+        title="Updates"
+        context={
+          <span className="fig">
+            {u.current_version}
+            {avail && (
+              <>
+                {" "}
+                <ArrowRight size={12} className="upd-arrow" aria-hidden="true" /> {avail.version}
+              </>
+            )}
+          </span>
+        }
+      />
 
       <div className="settings-grid">
         <div className="stack">

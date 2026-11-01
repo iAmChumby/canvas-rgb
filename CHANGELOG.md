@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Changed
+
+- Every editor screen now fits the window: the page title sits in the status bar and the panels lie side by side instead of in one long column, so the things you act on are where you can see them. (#67)
+
 ## [0.4.1] - 2026-11-01
 
 ### Security

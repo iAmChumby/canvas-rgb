@@ -26,6 +26,7 @@ import type { DeviceKind } from "@/proto/DeviceKind";
 import type { ZoneInfo } from "@/proto/ZoneInfo";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { IdentifyWalker } from "@/views/editor/IdentifyWalker";
+import { PageTitle } from "@/shell/PageHeader";
 
 const KIND_ICON: Record<DeviceKind, Icon> = {
   motherboard: Cpu,
@@ -173,10 +174,8 @@ export function DevicesView() {
   const walkZone = walkDevice?.zones.find((z) => z.index === walk?.zoneIndex) ?? null;
 
   return (
-    <div className="stack">
-      <div className="page-head">
-        <h1>Devices</h1>
-      </div>
+    <div className="rd-page rd-devices">
+      <PageTitle title="Devices" />
 
       {devicesError && devices !== null && (
         // The list is on screen but the last read failed: the cards stay and the page says they

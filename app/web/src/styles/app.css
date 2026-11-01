@@ -123,14 +123,16 @@ html[data-motion="reduced"] *::after {
 :root {
   /* The height of the phone's bottom dock, and the band a toast takes in it. The dock grows by
      the band while a toast is up. */
-  --rail-h: 65px;
+  --dock-h: 65px;
   --toast-band-h: 46px;
 }
 
 .app {
   display: grid;
   grid-template-columns: var(--rail-w) minmax(0, 1fr);
-  min-height: 100vh;
+  /* R1: the window is the page. The shell fills the viewport, so the document never scrolls. */
+  height: 100vh;
+  min-height: 0;
 }
 
 /* The signature: a 2 px spectrum line across the top of the window. The only place, with the
@@ -155,12 +157,20 @@ html[data-motion="reduced"] *::after {
   align-self: stretch;
   border-right: 1px solid var(--line);
   background: var(--panel);
+  /* R1: a rail taller than a short window scrolls inside itself instead of pushing the
+     document (today the icon rail is 810 px tall and overflows a 768 px window). */
+  min-height: 0;
+  height: 100vh;
+  overflow: hidden;
 }
 
 .rail {
   position: sticky;
   top: 0;
   height: 100vh;
+  max-height: 100vh;
+  overflow-y: auto;
+  scrollbar-width: none;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -302,6 +312,9 @@ html[data-motion="reduced"] *::after {
 
 .main {
   min-width: 0;
+  /* R1: the shell is the window. */
+  height: 100vh;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   overflow-x: clip;
@@ -450,6 +463,38 @@ html[data-motion="reduced"] *::after {
   margin-left: auto;
 }
 
+/* R3: now playing appears once. With the rail deck on screen (1280 px and up) the strip names
+   the page instead; below that the deck is hidden and the strip carries it. */
+@media (min-width: 1280px) {
+  .strip-now {
+    display: none;
+  }
+}
+
+/* Below 1280 the strip also carries now playing and the page's own actions: the state mark
+   keeps its icon (its tooltip and accessible name say the state) and drops its words, so
+   nothing truncates. */
+@media (max-width: 1279px) {
+  .strip-mark-text {
+    display: none;
+  }
+}
+
+/* A page with its own strip actions (Apply, Save layout, the fan profiles) needs the room
+   below 1280: now playing shrinks to its colour swatch (the effect's name stays its tooltip
+   and the rail's value), and below 1100 the page's context line goes too. */
+@media (max-width: 1279px) {
+  .strip-inner:has(.rd-actions) .strip-now-text {
+    display: none;
+  }
+}
+
+@media (max-width: 1099px) {
+  .strip-inner:has(.rd-actions) .rd-context {
+    display: none;
+  }
+}
+
 .strip-offline {
   color: var(--mute);
 }
@@ -557,30 +602,103 @@ html[data-motion="reduced"] *::after {
 }
 
 .content {
-  /* The toast floats over the page head's subtitle row, so the content is the anchor it hangs
-     from. */
+  /* The toast floats over the page, so the content is the anchor it hangs from. */
   position: relative;
-  padding: var(--s6) var(--s6) var(--s8);
+  /* R1: the content box is the page. It is the size container every screen lays out against
+     (R5), and it holds the page's own height: the document never scrolls, a long list scrolls
+     inside its own pane. */
+  flex: 1 1 auto;
+  min-height: 0;
+  container: page / size;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: var(--s4) var(--s6) var(--s6);
   min-width: 0;
 }
 
-/* The page head: the title, and the line under it that says what the page is for. The subtitle
-   sits under the title and is aligned to it, so the head reads as one block instead of a title
-   on the left and a sentence marooned at the far right. */
-.page-head {
+/* The page body: the route that is on screen, and the page inside it. Both fill the content
+   box, so a screen that lays out against the box has the height to do it in. */
+.page-enter {
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--s2) var(--s4);
-  min-height: var(--control-h);
-  margin-bottom: var(--s4);
+  flex-direction: column;
 }
 
-.page-head p {
+/* The page itself: a column that fills the content box, with its own gap. */
+.rd-page {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+}
+
+/* A pane: a panel that fills its cell and scrolls its own body, with its title pinned (R1). */
+.rd-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.rd-pane > .panel-head {
+  flex: 0 0 auto;
+}
+
+.rd-pane-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  margin: 0 calc(var(--s4) * -1);
+  padding: 0 var(--s4);
+}
+
+/* R2: the page title lives in the strip, with the page's one-line context in mono. */
+.rd-title {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s3);
+  min-width: 0;
+  flex: 0 1 auto;
+  /* The title never touches the state mark beside it. */
+  margin-right: var(--s2);
+}
+
+.rd-title h1 {
+  margin: 0;
+  font: 600 var(--t20) / 1 var(--fu);
+  color: var(--ink);
+  letter-spacing: -0.01em;
+}
+
+.rd-context {
+  font: var(--t14) / 1 var(--fm);
   color: var(--mute);
-  font-size: var(--t14);
-  max-width: 120ch;
-  text-wrap: pretty;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rd-context b {
+  color: var(--dim);
+  font-weight: 500;
+}
+
+/* The page's own actions, on the strip's right, before Pause and Search. */
+.rd-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding-right: var(--s3);
+  margin-right: var(--s1);
+  border-right: 1px solid var(--line);
+}
+
+/* The strip's slots: an empty slot takes no room at all. */
+.strip-slot {
+  display: contents;
 }
 
 .stack {
@@ -2416,6 +2534,44 @@ button.chip:hover {
 @media (max-width: 720px) {
   .app {
     grid-template-columns: minmax(0, 1fr);
+    /* R1 is a desktop rule: a phone page scrolls, clear of the dock. The document is the
+       scroller there, so the shell is as tall as the page needs it to be. */
+    height: auto;
+    min-height: 100vh;
+  }
+
+  .main {
+    height: auto;
+    min-height: 100vh;
+  }
+
+  .content {
+    /* The content box is the page on a desktop; on a phone the document scrolls, so the box
+       only carries the width the page lays out against. */
+    container-type: inline-size;
+    overflow: visible;
+    flex: 0 0 auto;
+    height: auto;
+    padding: var(--s3) var(--s3) calc(60px + var(--s4));
+  }
+
+  .page-enter,
+  .rd-page {
+    flex: 0 0 auto;
+  }
+
+  /* The phone strip: one row. The brand, the page's title, how it is going, the page's own
+     actions and the control. */
+  .strip-now,
+  .rd-context,
+  .strip-mark-text {
+    display: none;
+  }
+
+  .rd-actions {
+    border-right: 0;
+    padding-right: 0;
+    margin-right: 0;
   }
 
   /* The strip publishes its height for the floating notice. Before it does, the phone value is the
@@ -2479,7 +2635,7 @@ button.chip:hover {
     left: 0;
     right: 0;
     z-index: 20;
-    height: var(--rail-h);
+    height: var(--dock-h);
     flex-direction: row;
     justify-content: space-around;
     gap: 0;
@@ -2491,7 +2647,7 @@ button.chip:hover {
   /* A toast takes a band of the dock's own surface, so it hides nothing the reader could reach:
      the dock grows by exactly the toast's height. */
   .rail[data-toast="on"] {
-    height: calc(var(--rail-h) + var(--toast-band-h));
+    height: calc(var(--dock-h) + var(--toast-band-h));
     padding-top: var(--toast-band-h);
   }
 
@@ -2521,13 +2677,16 @@ button.chip:hover {
     height: 56px;
     flex: 1 1 0;
     min-width: 0;
-    padding: var(--s1) var(--s1) 0;
+    /* #57: the label of the active link clears the bottom edge of its tile. Every link takes
+       the same inset, so the icons stay on one line. */
+    padding: var(--s1) var(--s1) var(--s1);
     font-size: var(--t14);
   }
 
   .rail-link[aria-current="page"] {
     flex: 0 0 auto;
-    padding: var(--s1) var(--s2) 0;
+    /* #57: the active tile's label clears the tile's bottom edge. */
+    padding: var(--s1) var(--s2) var(--s1);
     /* The tint is drawn by the tile below, so it can hug the icon and the name. */
     background: none;
   }
@@ -2757,7 +2916,7 @@ button.chip:hover {
     position: fixed;
     left: var(--s4);
     right: var(--s4);
-    bottom: calc(var(--rail-h) + var(--s2));
+    bottom: calc(var(--dock-h) + var(--s2));
     z-index: 6;
     animation: canvas-enter var(--dur) var(--ease) both;
   }
@@ -3932,12 +4091,24 @@ button.chip:hover {
 }
 
 /* The onboarding's takeover: the rail, the strip and the banners are not drawn (the shell skips
-   them), so the one column is the whole window and the onboarding owns its own padding. */
+   them), so the one column is the whole window and the onboarding owns its own padding. It
+   also owns the window's height: the takeover scrolls like a page of its own. */
 .app[data-takeover="on"] {
   grid-template-columns: minmax(0, 1fr);
+  height: auto;
+  min-height: 100vh;
+}
+
+.app[data-takeover="on"] .main {
+  height: auto;
+  min-height: 100vh;
 }
 
 .app[data-takeover="on"] .content {
+  container-type: inline-size;
+  overflow: visible;
+  flex: 0 0 auto;
+  height: auto;
   padding: 0;
 }
 

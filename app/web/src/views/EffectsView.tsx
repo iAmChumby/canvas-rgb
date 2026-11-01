@@ -33,6 +33,7 @@ import { api } from "@/lib/endpoints";
 import { ApiFailure, messageOf } from "@/lib/errors";
 import { EFFECT_CATEGORIES, categoryOf, type EffectCategory } from "@/lib/effectCategories";
 import { getSnap, refreshAll, retryEffects, useSnap } from "@/lib/store";
+import { PageTitle } from "@/shell/PageHeader";
 import { fillDefaults, nextFreeName } from "@/lib/presetMatch";
 import { appliedName, runningOf, setApplied, setShown } from "@/lib/runningPreset";
 import type { EffectDetail } from "@/proto/EffectDetail";
@@ -737,7 +738,7 @@ export function EffectsView() {
 
   return (
     <div
-      className="stack"
+      className="rd-page rd-effects"
       onDragOver={(e) => {
         e.preventDefault();
         setDragging(true);
@@ -752,9 +753,7 @@ export function EffectsView() {
         if (file) void sendImport(file, false);
       }}
     >
-      <div className="page-head">
-        <h1>Effects</h1>
-      </div>
+      <PageTitle title="Effects" />
 
       {dragging && (
         <div className="drop-overlay" aria-hidden="true">

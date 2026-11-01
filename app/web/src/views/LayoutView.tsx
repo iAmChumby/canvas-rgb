@@ -92,6 +92,7 @@ import desk from "./desk.module.css";
 import type { RenderScale } from "@/proto/RenderScale";
 import type { SamplingMode } from "@/proto/SamplingMode";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
+import { PageTitle, PageActions } from "@/shell/PageHeader";
 
 const DROP_TYPE = "application/x-canvas-zone";
 const CANVAS_W = 320;
@@ -1026,10 +1027,8 @@ export function LayoutView() {
 
   if (!server || !draft) {
     return (
-      <div className="stack">
-        <div className="page-head">
-          <h1>Layout</h1>
-        </div>
+      <div className="rd-page rd-layout">
+        <PageTitle title="Layout" />
         <LoadFrame
           state={
             retrying
@@ -1135,21 +1134,15 @@ export function LayoutView() {
   }
 
   return (
-    <div className="stack">
-      <div className="page-head">
-        {/* The page keeps one name in every state: the layout's own name stands beside it once
-            it is known. */}
-        <h1>Layout</h1>
-        <span className="mute fig">{draft.name}</span>
-        <Button
-          variant="default"
-          icon={<CompassTool size={16} />}
-          onClick={remapAll}
-          style={{ marginLeft: "auto" }}
-        >
+    <div className="rd-page rd-layout">
+      {/* The page keeps one name in every state: the layout's own name stands beside it once
+          it is known. */}
+      <PageTitle title="Layout" context={draft.name} />
+      <PageActions>
+        <Button variant="ghost" icon={<CompassTool size={16} />} onClick={remapAll}>
           Map my PC again
         </Button>
-      </div>
+      </PageActions>
 
       {layoutsError && (
         // A refresh that failed after the layout was read does not take the page away: the desk

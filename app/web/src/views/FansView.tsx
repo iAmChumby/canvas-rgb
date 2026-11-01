@@ -28,6 +28,7 @@ import type { FanMode } from "@/proto/FanMode";
 import type { FansStatus } from "@/proto/FansStatus";
 import type { TempSource } from "@/proto/TempSource";
 import type { TempReading } from "@/proto/TempReading";
+import { PageTitle } from "@/shell/PageHeader";
 
 const MAX_POINTS = 8;
 const MIN_POINTS = 2;
@@ -196,15 +197,17 @@ export function FansView() {
   const stale = fans !== null && fansError !== null;
 
   return (
-    <div className="stack">
-      <div className="page-head">
-        <h1>Fans</h1>
-        {fans && !fansError && (
-          <span className="mute fig">
-            {fans.chip ?? "No chip"} · floor <AnimatedNumber value={fans.floor_percent} />%
-          </span>
-        )}
-      </div>
+    <div className="rd-page rd-fans">
+      <PageTitle
+        title="Fans"
+        context={
+          fans && !fansError ? (
+            <>
+              {fans.chip ?? "No chip"} · floor <AnimatedNumber value={fans.floor_percent} />%
+            </>
+          ) : undefined
+        }
+      />
 
       {stale && (
         <div className="rule rule-warn" role="status">

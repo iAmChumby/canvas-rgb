@@ -22,6 +22,7 @@ import type { DisplayUnit } from "@/proto/DisplayUnit";
 import type { FansStatus } from "@/proto/FansStatus";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { useTweenNumber } from "@/components/Motion";
+import { PageTitle } from "@/shell/PageHeader";
 
 /** The source of a display, as one string: the picker works on keys, not on the spine's shape. */
 function sourceKey(source: DisplaySource): string {
@@ -404,10 +405,8 @@ export function DisplaysView() {
         : "ready";
 
   return (
-    <div className="stack">
-      <div className="page-head">
-        <h1>Displays</h1>
-      </div>
+    <div className="rd-page rd-displays">
+      <PageTitle title="Displays" />
 
       {stale && (
         <div className="rule rule-warn" role="status">
