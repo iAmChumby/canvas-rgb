@@ -815,7 +815,7 @@ try {
     # The PowerShell the installer runs to start canvas-rgb again: the real script, against a
     # stubbed lib.ps1 (no real service, no real process). Every Start-Service it makes is printed
     # as a CALL line, and its exit code says what happened.
-    function Invoke-RestartCanvasSandbox([string]$Name, [switch]$StoppedRunningService, [switch]$ElevatedStepRan, [switch]$CopyStarted, [switch]$StartFails) {
+    function Invoke-RestartCanvasSandbox([string]$Name, [switch]$StoppedRunningService, [switch]$ElevatedStepRan, [switch]$CopyStarted, [switch]$StartFails, [switch]$NoService) {
         $root = Join-Path $dir $Name
         $scripts = Join-Path $root 'scripts'
         New-Item -ItemType Directory -Path $scripts -Force | Out-Null
@@ -830,6 +830,10 @@ function Start-Service { param(`$Name) `$global:SvcStatus = 'Running'; Write-Hos
         if ($StartFails) {
             # The service refuses to start again.
             $stubs += "`r`nfunction Start-Service { param(`$Name) Write-Host 'CALL Start-Service'; throw 'the service could not be started' }`r`n"
+        }
+        if ($NoService) {
+            # There is no service object at all.
+            $stubs += "`r`nfunction Get-Service { param(`$Name) }`r`n"
         }
         Add-Content -LiteralPath (Join-Path $scripts 'lib.ps1') -Value $stubs
         $log = Join-Path $root 'restart.log'
@@ -878,6 +882,16 @@ function Start-Service { param(`$Name) `$global:SvcStatus = 'Running'; Write-Hos
         Assert-Equal $r.Code 1 "the start failed: $($r.Out)"
         Assert-True ($r.Log -match 'could not be started again') "it says so: $($r.Log)"
         Assert-True ($r.Log -notmatch 'canvas-rgb was started again') "it must not say it was started: $($r.Log)"
+    }
+    Test-Case 'a service that is not installed is not reported as started again, and the exit code says it' {
+        $r = Invoke-RestartCanvasSandbox 'restart-h' -StoppedRunningService -NoService
+        Assert-Equal $r.Code 1 "nothing could be started: $($r.Out)"
+        Assert-Equal (@([regex]::Matches($r.Out, 'CALL Start-Service')).Count) 0 "nothing is started: $($r.Out)"
+        Assert-True ($r.Log -match 'not installed') "it says why: $($r.Log)"
+        Assert-True ($r.Log -notmatch 'canvas-rgb was started again') "it must not say it was started: $($r.Log)"
+        # Exit 1 is the code the installer turns into "canvas-rgb is stopped and could not be started again".
+        $restart = Get-IssFunction 'procedure DeinitializeSetup'
+        Assert-True ($restart -match 'RestartCode = 1') 'the installer has a true note for exit 1'
     }
     Test-Case 'a canvas-rgb that is already running is not started a second time' {
         # The service runs again already: nothing is started, and the script says what it did (so

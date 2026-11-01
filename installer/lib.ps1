@@ -972,16 +972,22 @@ function Stop-CanvasRgbUserProcesses {
 # -WasRunning is what Stop-CanvasRgbService reported: only a service this run stopped is started
 # again. A service the user had stopped on purpose stays stopped.
 # -Result says what happened: Started is true when the service runs now, Failed when it could
-# not be started. The caller needs that to tell the truth about the state of the PC (#65).
+# not be started, Missing when there is no such service at all (nothing to start). The caller
+# needs that to tell the truth about the state of the PC (#65).
 function Start-CanvasRgbService {
     param([bool]$WasRunning = $false, [hashtable]$Result = @{})
     $c = $script:CanvasConst
     $out = @()
     $Result.Started = $false
     $Result.Failed = $false
+    $Result.Missing = $false
     if (-not $WasRunning) { return $out }
     $svc = Get-Service -Name $c.ServiceName -ErrorAction SilentlyContinue
-    if (-not $svc) { return $out }
+    if (-not $svc) {
+        $Result.Missing = $true
+        $out += "  the service $($c.ServiceName) is not installed, so it could not be started again"
+        return $out
+    }
     if ($svc.Status -eq 'Running') { $Result.Started = $true; return $out }
     try {
         Start-Service -Name $c.ServiceName

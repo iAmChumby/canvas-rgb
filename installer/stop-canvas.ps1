@@ -45,7 +45,7 @@ try {
     Start-CanvasRgbService -WasRunning $stopState.ServiceWasRunning -Result $restart | ForEach-Object { Write-Step $_ $LogFile }
     if ($restart.Started) {
         Write-Step '  canvas-rgb was started again' $LogFile
-    } elseif ($restart.Failed) {
+    } elseif ($restart.Failed -or $restart.Missing) {
         Write-Step '  canvas-rgb could not be started again: your fans stay on your motherboard''s own settings until you run setup again' $LogFile
     }
     exit 1

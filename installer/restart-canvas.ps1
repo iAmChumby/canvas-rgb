@@ -9,7 +9,8 @@
   -CopyStarted: Inno's copy of the files started, so the install folder holds a mix of the old and
     the new files. The service is not started from that: the fans stay on the motherboard's own
     curve, which is safe.
-  Exit 0: the service runs again. Exit 1: it could not be started. Exit 2: it was left stopped on
+  Exit 0: the service runs again. Exit 1: it could not be started (it failed to start, or there is
+  no such service). Exit 2: it was left stopped on
   purpose (the copy had started). Exit 3: there was nothing to start.
 #>
 param(
@@ -42,6 +43,11 @@ try {
     }
     $r = @{}
     Start-CanvasRgbService -WasRunning $true -Result $r | ForEach-Object { Say $_ }
+    if ($r.Missing) {
+        # No service object: nothing was started, so "started again" would be false.
+        Say '  canvas-rgb is not installed as a service on this PC, so it could not be started again: your fans stay on your motherboard''s own settings until you run setup again'
+        exit 1
+    }
     if ($r.Failed) {
         Say '  canvas-rgb could not be started again: your fans stay on your motherboard''s own settings until you run setup again'
         exit 1
