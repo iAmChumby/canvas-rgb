@@ -417,7 +417,9 @@ impl HtmlEffect {
             let left = at.saturating_duration_since(std::time::Instant::now());
             budget_ms = budget_ms.min(left.as_millis() as u64);
             if budget_ms == 0 {
-                return Err(HtmlError::Timeout("the render's time ran out before this frame".to_string()));
+                return Err(HtmlError::Timeout(
+                    "the render's time ran out before this frame (the frame budget was not the limit)".to_string(),
+                ));
             }
         }
         self.runtime.deadline.start(budget_ms);

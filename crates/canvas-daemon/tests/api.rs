@@ -952,6 +952,54 @@ async fn a_tile_that_ran_past_its_budget_is_tried_again_after_the_retry_interval
     );
 }
 
+/// An effect whose top-level script runs past the load budget on a busy PC is not an effect
+/// that fails for good: the tile is tried again after the retry interval, like a render that
+/// ran past its budget.
+#[tokio::test]
+async fn a_tile_whose_load_ran_out_of_time_is_tried_again_after_the_retry_interval() {
+    const BUSY_AT_LOAD: &str = r##"<head><title>Busy</title></head>
+<body><canvas id="c" width="8" height="8"></canvas></body>
+<script>while (true) {}</script>"##;
+    let builds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let builder: canvas_daemon::user_effects::Builder = {
+        let builds = builds.clone();
+        Arc::new(move |id: &str, _source: &str| {
+            let count = builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if count > 1 {
+                // The tile build: the real HTML loader, whose top-level script never returns.
+                return canvas_daemon::user_effects::html_builder_seeded(1)(id, BUSY_AT_LOAD);
+            }
+            Ok(Box::new(common::FakeEffect::new("busy")) as Box<dyn canvas_proto::traits::Effect>)
+        })
+    };
+    let retry = std::time::Duration::from_millis(300);
+    let cache = canvas_daemon::thumbnail::ThumbnailCache::with_limits(std::time::Duration::from_secs(30), retry);
+    let (router, _app, _home) = build_with_user_effects_and_cache(&["busy"], builder, cache);
+    let ask = || {
+        let router = router.clone();
+        async move {
+            router
+                .oneshot(request("GET", "/api/v1/effects/html:busy/thumbnail"))
+                .await
+                .expect("the router answers")
+        }
+    };
+    assert_eq!(ask().await.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let after_the_first = builds.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(ask().await.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        builds.load(std::sync::atomic::Ordering::SeqCst),
+        after_the_first,
+        "a load timeout inside the retry interval was built again"
+    );
+    tokio::time::sleep(retry * 2).await;
+    assert_eq!(ask().await.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        builds.load(std::sync::atomic::Ordering::SeqCst) > after_the_first,
+        "a load timeout was remembered for good: the tile was never tried again"
+    );
+}
+
 /// A fake service. It answers every request the same way.
 struct FakePipe {
     reply: FakeReply,

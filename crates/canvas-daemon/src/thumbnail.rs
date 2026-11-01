@@ -100,6 +100,19 @@ impl RenderError {
         }
     }
 
+    /// The error of building an effect for a tile. The builders return the text of
+    /// [`canvas_html::HtmlError`], and its `Timeout` variant reads `timeout: ...`: an effect whose
+    /// top-level script ran past its load budget says how busy the machine was, not what the
+    /// effect is, so it is [`RenderError::OverBudget`] (retried later). Any other build error
+    /// fails the same way every time.
+    pub fn from_build_error(why: String) -> Self {
+        if why.starts_with("timeout: ") {
+            RenderError::OverBudget(why)
+        } else {
+            RenderError::Failed(why)
+        }
+    }
+
     /// True when the failure came from the machine's load and not from the effect.
     pub fn depends_on_load(&self) -> bool {
         matches!(self, RenderError::OverBudget(_))
@@ -1218,6 +1231,14 @@ mod tests {
         let mut effect = Failing { updates: 0, really_panic: true, load_dependent: false };
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| render(&mut effect, &Props::new())));
         assert!(outcome.is_err(), "a real panic must reach the caller");
+    }
+
+    #[test]
+    fn a_build_error_that_is_a_timeout_is_over_budget_and_any_other_is_failed() {
+        let timeout = RenderError::from_build_error("timeout: the effect's script ran longer than 2000 ms".into());
+        assert!(timeout.depends_on_load(), "{timeout:?}");
+        let script = RenderError::from_build_error("script: script 0: boom".into());
+        assert_eq!(script, RenderError::Failed("script: script 0: boom".into()));
     }
 
     #[test]

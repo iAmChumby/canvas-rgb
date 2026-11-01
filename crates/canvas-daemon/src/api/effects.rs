@@ -565,7 +565,7 @@ pub async fn thumbnail(
         // request that waited for the slot would find nothing cached and render the tile again.
         let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             crate::create_effect_for_tile(&user, &effect_id)
-                .map_err(crate::thumbnail::RenderError::Failed)
+                .map_err(crate::thumbnail::RenderError::from_build_error)
                 .and_then(|mut effect| crate::thumbnail::render_within(effect.as_mut(), &props, budget))
         }));
         let result = attempt.unwrap_or_else(|payload| {
