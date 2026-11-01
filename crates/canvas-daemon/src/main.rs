@@ -179,6 +179,9 @@ async fn daemon_main() -> Exit {
     // lights black until something activates an effect.
     let saved_effect = app.active_layout().await.and_then(|layout| layout.effect);
     if let Some(effect) = saved_effect {
+        // No draft survives a restart, but every apply follows the same rule: end one first,
+        // and keep a beat off while the saved effect goes on.
+        let _replace = canvas_daemon::draft::hold_for_replace(&app).await;
         match canvas_daemon::apply_effect(&app, &effect.id, &effect.props).await {
             Ok(()) => tracing::info!(effect = %effect.id, "the saved effect was restored"),
             Err(e) => {
