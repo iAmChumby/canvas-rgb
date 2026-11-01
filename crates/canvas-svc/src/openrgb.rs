@@ -102,6 +102,19 @@ impl PaintJob {
         Self { label, color, started, last_count: 0, last_change: None, painted: HashSet::new(), first_write: None, warned: false }
     }
 
+    /// The machine woke: the job's clocks start again from here.
+    ///
+    /// `Instant` may have counted the sleep (the standard library does not say), so the watch
+    /// window must not end at the wake: a controller that OpenRGB announces after the wake
+    /// still gets the color (#29, class `cause:sleep-state`).
+    pub(crate) fn refresh(&mut self, now: Instant) {
+        self.started = Some(now);
+        self.last_change = Some(now);
+        if self.first_write.is_some() {
+            self.first_write = Some(now);
+        }
+    }
+
     /// One pass. Returns true when the job is over (the watch window has passed).
     pub(crate) async fn step(&mut self, now: Instant, session: &mut dyn DeviceAdapter) -> bool {
         let started = *self.started.get_or_insert(now);
@@ -389,6 +402,25 @@ impl OpenRgbSupervisor {
     /// Whether a restart-limit black is still being painted or watched.
     pub fn black_pending(&self) -> bool {
         self.black_job.is_some()
+    }
+
+    /// Whether the boot color is still being painted or watched.
+    pub fn boot_pending(&self) -> bool {
+        self.boot_job.is_some()
+    }
+
+    /// The machine woke: the color job's clocks start again from here.
+    ///
+    /// The job watches for the controllers OpenRGB announces late, and `Instant` may have
+    /// counted the sleep (the standard library does not say), so the watch window must not end
+    /// at the wake (#29, class `cause:sleep-state`).
+    pub fn on_resume(&mut self, now: Instant) {
+        if let Some(job) = self.boot_job.as_mut() {
+            job.refresh(now);
+        }
+        if let Some(job) = self.black_job.as_mut() {
+            job.refresh(now);
+        }
     }
 
     async fn step_black(&mut self, now: Instant) {
