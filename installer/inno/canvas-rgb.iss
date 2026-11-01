@@ -115,6 +115,10 @@ const
   // {app}. Exits 1 on a junction, an owner other than SYSTEM or Administrators, a NULL permission list, or a
   // write right given to anyone else. The install-folder tests run this very text on throwaway folders.
   AppCheckScript = '$k = ''S-1-5-18'',''S-1-5-32-544''; $t = ''S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464''; $w = 0x4 -bor 0x2 -bor 0x10 -bor 0x40 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x40000000 -bor 0x10000000; $r = ([IO.DirectoryInfo]''%APP%'').FullName.TrimEnd(''\''); $bad = 0; foreach ($f in $r, ($r + ''\installer''), ($r + ''\installer\uninstall-elev'' + ''ated.ps1''), ($r + ''\installer\lib.ps1''), ($r + ''\installer\uninstall-user.ps1''), ($r + ''\canvas-rgb-svc.exe'')) { if (-not ([IO.File]::Exists($f) -or [IO.Directory]::Exists($f))) { continue }; if ([IO.File]::GetAttributes($f) -band 0x400) { $bad = 1 }; $a = Get-Acl -LiteralPath $f; if ($a.GetSecurityDescriptorSddlForm(''Access'') -eq '''') { $bad = 1 }; if ($k -notcontains $a.GetOwner([Security.Principal.SecurityIdentifier]).Value) { $bad = 1 }; foreach ($x in $a.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) { if ($x.AccessControlType -eq ''Allow'' -and -not ($x.PropagationFlags -band 2) -and (([int]$x.FileSystemRights -band $w) -ne 0) -and ($k + $t) -notcontains $x.IdentityReference.Value) { $bad = 1 } } }; exit($bad)';
+  // PowerShell that starts canvas-rgb again after an update that failed before the elevated step
+  // ran (#65). It calls the same code the scripts use (lib.ps1), so a service that will not start
+  // is handled the same way. %LIB% is the lib.ps1 that was extracted to {tmp}.
+  RestartServiceScript = '. ''%LIB%''; Start-CanvasRgbService -WasRunning $true';
 
 var
   SignalRgbPage: TInputOptionWizardPage;
@@ -128,6 +132,7 @@ var
   FPrepError: String;       // why PrepareToInstall stopped Setup, for the /UPDATE result file
   FPurge: String;           // ' -PurgeConfig' or empty
   FStoppedRunningService: Boolean;  // the first step stopped a running service (#60)
+  FElevatedStepRan: Boolean;       // the elevated step ran: it starts the service itself when it fails (#65)
   FInstallDirOk: Boolean;           // the uninstall check passed: the folder only administrators can change (#46)
 
 function ScriptsOk: Boolean;
@@ -234,6 +239,26 @@ begin
     Result := ExecAsOriginalUser(PsExe, Params, ExpandConstant('{sys}'), SW_HIDE, ewWaitUntilTerminated, Code)
   else
     Result := Exec(PsExe, Params, ExpandConstant('{sys}'), SW_HIDE, ewWaitUntilTerminated, Code);
+end;
+
+// Starts canvas-rgb again after an update that failed before the elevated step ran (#65): the
+// first step stopped the service before it copied anything, and nothing has started it again, so
+// the fans would stay on the motherboard's own settings. It uses the same code as the scripts
+// (lib.ps1), so a service that will not start is handled the same way.
+function RestartCanvasRgb: Boolean;
+var
+  Code: Integer;
+  Script, Lib: String;
+begin
+  Result := False;
+  Lib := ExpandConstant('{tmp}\lib.ps1');
+  if not FileExists(Lib) then Exit;
+  StringChangeEx(Lib, '''', '''''', True);
+  Script := RestartServiceScript;
+  StringChangeEx(Script, '%LIB%', Lib, True);
+  // token: Exec runs as Setup's own administrator token; the script only starts the service.
+  Result := Exec(PsExe, '-NoProfile -ExecutionPolicy Bypass -Command "' + Script + '"',
+    ExpandConstant('{sys}'), SW_HIDE, ewWaitUntilTerminated, Code);
 end;
 
 function LogTail(const LogPath: String): String;
@@ -473,6 +498,28 @@ begin
     Result := Pos('stoppedByThisRun=yes', Utf8Decode(Text)) > 0;
 end;
 
+// The state an unfinished uninstall left behind (#64). The uninstall script writes it in the
+// protected machine home: it says in plain words what was already removed, so the message below
+// is true instead of "nothing was removed".
+function UninstallStatePath: String;
+begin
+  Result := ExpandConstant('{commonappdata}\canvas-rgb\uninstall-state.marker');
+end;
+
+// The words the uninstall script left behind, or '' when there is none.
+function UninstallStateWords: String;
+var
+  Text: AnsiString;
+begin
+  Result := '';
+  if LoadStringFromFile(UninstallStatePath, Text) then
+  begin
+    Result := Utf8Decode(Text);
+    if (Length(Result) > 0) and (Result[1] = #65279) then Result := Copy(Result, 2, MaxInt);
+    Result := Trim(Result);
+  end;
+end;
+
 // Before any file is copied: fetch and verify OpenRGB (nothing is changed if this fails), then stop a running install.
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
@@ -554,6 +601,10 @@ var
   Log, Args, Pawn: String;
 begin
   if CurStep <> ssPostInstall then Exit;
+  // The elevated step runs from here on. When it fails it starts the service again itself (it is
+  // told what the first step stopped), so the restart in DeinitializeSetup must not start it a
+  // second time (#65).
+  FElevatedStepRan := True;
   Log := ExpandConstant('{tmp}\canvas-rgb-setup-elevated.log');
   Args := '-PayloadDir "' + ExpandConstant('{app}') + '" -InstallDir "' + ExpandConstant('{app}') + '" -InnoMode' +
           ' -OpenRgbZip "' + Trim(String(FOpenRgbZip)) + '" -DisableSignalRgb ' + GetSignalRgb + ' -LogFile "' + Log + '"';
@@ -656,9 +707,17 @@ var
   Msg, Json, Exe: String;
   Lines: TArrayOfString;
 begin
-  if not IsUpdateRun then Exit;
   try
     Ok := FScriptsOk;
+    { The install did not finish, and this run stopped a running service before it copied anything
+      (the first step did, so every fan is back on the motherboard's own settings). Nothing has
+      started it again: the elevated step never ran, so it could not. Start it now, so an update
+      that failed or was cancelled does not leave the fans on BIOS (#65).
+      A service the user had stopped on purpose is not started: the first step writes the marker
+      only when it stopped a running one. }
+    if (not Ok) and FStoppedRunningService and (not FElevatedStepRan) and (not IsServiceUpdateRun) then
+      RestartCanvasRgb;
+    if not IsUpdateRun then Exit;
     Msg := '';
     if not Ok then
     begin
@@ -699,7 +758,7 @@ end;
 function InitializeUninstall: Boolean;
 var
   Code: Integer;
-  Log, Args, CheckLog, CheckScript: String;
+  Log, Args, CheckLog, CheckScript, Msg: String;
   Ran: Boolean;
 begin
   Result := True;
@@ -760,6 +819,8 @@ begin
 
   Log := ExpandConstant('{tmp}\canvas-rgb-uninstall-elevated.log');
   Args := '-InstallDir "' + ExpandConstant('{app}') + '" -InnoMode -LogFile "' + Log + '"' + FPurge;
+  // A state file from an earlier uninstall says nothing about this one.
+  DeleteFile(UninstallStatePath);
   Ran := RunPs(ExpandConstant('{app}\installer\uninstall-elevated.ps1'), Args, False, Code);
   if Ran and (Code = 3) then
   begin
@@ -779,9 +840,22 @@ begin
   end
   else if (not Ran) or (Code <> 0) then
   begin
+    // The uninstall can fail half way: the service or the files can already be gone (#64). The
+    // script writes down what it removed, and that is what is said here. Only when it wrote
+    // nothing (it failed before the machine home existed) and nothing was removed is the old
+    // "nothing was removed" true.
     if not UninstallSilent then
-      MsgBox('canvas-rgb could not stop running or give the fans back to your motherboard (code ' + IntToStr(Code) + '). Nothing was removed.' + #13#10 + #13#10 +
-        LogTail(Log), mbError, MB_OK);
+    begin
+      Msg := UninstallStateWords();
+      if Msg = '' then
+      begin
+        if Code = 4 then
+          Msg := 'canvas-rgb was not removed cleanly. The log below says what was done.'
+        else
+          Msg := 'canvas-rgb could not stop running or give the fans back to your motherboard (code ' + IntToStr(Code) + '). Nothing was removed.';
+      end;
+      MsgBox(Msg + #13#10 + #13#10 + LogTail(Log), mbError, MB_OK);
+    end;
     Result := False;
   end;
 end;

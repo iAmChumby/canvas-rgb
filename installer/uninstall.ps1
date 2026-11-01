@@ -63,6 +63,8 @@ $stage = Join-Path $env:TEMP 'canvas-rgb-uninstall'
 New-Item -ItemType Directory -Path $stage -Force | Out-Null
 $log = Join-Path $stage 'uninstall-elevated.log'
 Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+# A state file from an earlier uninstall says nothing about this one.
+Clear-UninstallState
 $child = Join-Path $PSScriptRoot 'uninstall-elevated.ps1'
 $childArgs = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -InstallDir "{1}" -LogFile "{2}"' -f $child, $InstallDir, $log
 if ($PurgeConfig) { $childArgs += ' -PurgeConfig' }
@@ -73,7 +75,13 @@ if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Encoding UTF8 
 # Exit 2 = the elevated work finished except the SignalRGB machine record (unreadable, kept): carry on with the per-user steps.
 # Exit 3 = the elevated work finished except the OpenRGB folder, which was kept whole because an OpenRGB still runs in it.
 $elevatedPartial = ($p.ExitCode -eq 2 -or $p.ExitCode -eq 3)
-if ($p.ExitCode -ne 0 -and -not $elevatedPartial) { Fail "Elevated step failed (exit $($p.ExitCode)). Per-user steps were not run." }
+if ($p.ExitCode -ne 0 -and -not $elevatedPartial) {
+    # The uninstall can fail half way: the service or the files can already be gone (#64). The
+    # elevated child wrote down what it removed, and that is what is said here.
+    $words = Read-UninstallState
+    if ($words) { Write-Host $words }
+    Fail "Elevated step failed (exit $($p.ExitCode)). Per-user steps were not run."
+}
 Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
 
 # Per-user steps, unelevated (uninstall-user.ps1 is shared with the Inno uninstaller).

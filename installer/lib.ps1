@@ -1005,11 +1005,15 @@ function Get-StoppedServiceMarkerPath {
 # stopped (the user may have stopped it on purpose): that one must not be started again.
 # The machine home is never created here: without one there was no installation, so nothing was
 # stopped and there is nothing to record.
+# The machine home is written like every other machine-home write: the check comes first, and a
+# folder that is not safe is never written to (#65). The check stops with its own message, so the
+# reason is in the log instead of being swallowed.
 function Set-StoppedServiceMarker {
     param([string]$Path = '')
     if (-not $Path) { $Path = Get-StoppedServiceMarkerPath }
     $dir = Split-Path -Parent $Path
     if (-not (Test-Path -LiteralPath $dir -PathType Container)) { return $false }
+    Assert-MachineHomeSafe -Path $dir
     try {
         [System.IO.File]::WriteAllText($Path, "stoppedByThisRun=yes`r`nservice=$($script:CanvasConst.ServiceName)`r`n")
         return $true
@@ -1030,6 +1034,77 @@ function Clear-StoppedServiceMarker {
     param([string]$Path = '')
     if (-not $Path) { $Path = Get-StoppedServiceMarkerPath }
     try { if (Test-Path -LiteralPath $Path -PathType Leaf) { Remove-Item -LiteralPath $Path -Force } } catch { }
+}
+
+# ---- what an unfinished uninstall leaves behind (#64) ----
+# The uninstall can fail half way: the service can be gone and the program files still there. The
+# person must be told what is true, not "nothing was removed". The script records what it removed
+# in one small file in the protected machine home (the same pattern as the stopped-service marker)
+# and the uninstaller that ran it reads the words back and shows them.
+function Get-UninstallStatePath {
+    $c = Get-CanvasConst
+    return (Join-Path (Join-Path $env:ProgramData $c.AppName) 'uninstall-state.marker')
+}
+
+# Records the state in plain words. The machine home is never created here: without one there was
+# no installation to take away, so there is nothing to record.
+# The machine home is written like every other machine-home write: the check comes first, and a
+# folder that is not safe is never written to. The check does not throw here: this runs when the
+# uninstall has already failed, and the failure must not become a different one.
+function Set-UninstallState {
+    param([string]$Text = '', [string]$Path = '')
+    if (-not $Path) { $Path = Get-UninstallStatePath }
+    $dir = Split-Path -Parent $Path
+    if (-not (Test-Path -LiteralPath $dir -PathType Container)) { return $false }
+    try { Assert-MachineHomeSafe -Path $dir } catch { return $false }
+    try {
+        [System.IO.File]::WriteAllText($Path, $Text)
+        return $true
+    } catch { return $false }
+}
+
+# The words of the last state that was recorded, or '' when there is none (an uninstall that never
+# ran, or one that failed before the machine home existed).
+function Read-UninstallState {
+    param([string]$Path = '')
+    if (-not $Path) { $Path = Get-UninstallStatePath }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '' }
+    try { return ([System.IO.File]::ReadAllText($Path)).Trim() } catch { return '' }
+}
+
+# Removes the state of an earlier uninstall: it says nothing about this one.
+function Clear-UninstallState {
+    param([string]$Path = '')
+    if (-not $Path) { $Path = Get-UninstallStatePath }
+    try { if (Test-Path -LiteralPath $Path -PathType Leaf) { Remove-Item -LiteralPath $Path -Force } } catch { }
+}
+
+# The true state of an uninstall that did not finish, in plain words. $State says what is already
+# gone: Service ('none', 'stopped' or 'removed'), and Entries, Files, OpenRgb and Config (true
+# when this uninstall removed them). Pure: it says nothing about the disk.
+# Returns the words, and whether anything was really removed: a service that was only stopped is
+# not a removal, so the caller can still say that nothing was taken away.
+function Get-UninstallStateReport {
+    param([hashtable]$State = @{})
+    $service = [string]$State['Service']
+    $gone = @()
+    if ($service -eq 'stopped') {
+        $gone += 'the background service is stopped, so your fans are back on your motherboard''s own settings'
+    } elseif ($service -eq 'removed') {
+        $gone += 'the background service was removed'
+    }
+    if ($State['Entries']) { $gone += 'the Installed apps entry and the Start menu shortcut were removed' }
+    if ($State['Files']) { $gone += 'the program files were removed' }
+    if ($State['OpenRgb']) { $gone += 'the OpenRGB folder was removed' }
+    if ($State['Config']) { $gone += 'your canvas-rgb settings were removed' }
+    $removed = ($service -eq 'removed') -or [bool]$State['Entries'] -or [bool]$State['Files'] `
+        -or [bool]$State['OpenRgb'] -or [bool]$State['Config']
+    $words = if ($gone.Count -eq 0) {
+        'canvas-rgb was not removed: the uninstall stopped before anything was taken away.'
+    } else {
+        'canvas-rgb was not removed cleanly: ' + ($gone -join ', ') + '. Run the uninstall again to finish.'
+    }
+    return [pscustomobject]@{ Words = $words; Removed = $removed }
 }
 
 # Stops the service (its shutdown hands the fans to BIOS) and the user processes that hold the binaries.
@@ -1058,8 +1133,12 @@ function Stop-CanvasRgbRunning {
     $early = ''
     if ($CopiedNote) {
         $early = "$CopiedNote; the OpenRGB folder was left as it was"
+        # What is known here is what THIS run did, never what the service is doing now: the
+        # switch says the first step of this run stopped a running service, and its absence says
+        # only that this run stopped nothing. It says nothing about a service that was already
+        # stopped on purpose (#65).
         if ($StoppedRunningService) { $early += '; canvas-rgb was stopped for the update' }
-        else { $early += '; canvas-rgb was not running' }
+        else { $early += '; this update did not stop canvas-rgb' }
         $early += '.'
     }
     # What is true once canvas-rgb was stopped.

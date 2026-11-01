@@ -22,6 +22,11 @@ try {
     # the fans do not stay on the motherboard's own settings (#60).
     if ($stopState.ServiceWasRunning) {
         if (Set-StoppedServiceMarker) {
+            # The note must be readable: the next step reads it to learn that this run stopped the
+            # service, and a note that cannot be read leaves canvas-rgb stopped for good (#65).
+            if (-not (Test-StoppedServiceMarker)) {
+                throw 'Setup could not read back the note that lets it start canvas-rgb again if the update fails, so it stopped before copying anything. canvas-rgb was started again. Run setup again.'
+            }
             Write-Step '  this run stopped a running service: the marker says so for the next step' $LogFile
         } else {
             # Without the marker the next step could not start the service again after a failure, so
