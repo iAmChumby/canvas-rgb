@@ -63,7 +63,7 @@ async function main() {
       if (e instanceof MissingAssetError && skipIfMissing) {
         console.log(`setup-sha: the release for v${version} is not out yet: ${e.message}`);
         console.log(
-          "setup-sha: the site build is skipped; the 'release: published' event builds it with the hash.",
+          "setup-sha: the site build is skipped; the Release workflow starts the site's build again, with the hash.",
         );
         writeOutput("skipped", "true");
         return;
