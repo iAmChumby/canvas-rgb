@@ -20,6 +20,38 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// A log sink the tests read back (#81). `install` makes it the log of this thread until the guard
+/// drops; a `#[tokio::test]` runs on one thread, so a router driven with `oneshot` logs into it.
+#[derive(Clone, Default)]
+pub struct LogBuf(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuf {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl LogBuf {
+    pub fn install(&self) -> tracing::subscriber::DefaultGuard {
+        let sink = self.clone();
+        tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::TRACE)
+                .with_writer(move || sink.clone())
+                .finish(),
+        )
+    }
+
+    pub fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap_or_else(|e| e.into_inner())).into_owned()
+    }
+}
+
 /// A test engine that records what it was told.
 pub struct FakeEngine {
     pub layout: Mutex<Option<(canvas_proto::layout::Layout, Vec<DeviceInfo>)>>,

@@ -190,6 +190,30 @@ fn run_of(device: &DeviceInfo, target: &Target) -> Option<std::ops::Range<usize>
     None
 }
 
+/// Says what one identify request sent, and to which controller (#81). OpenRGB answers a frame with
+/// nothing, so when a stick ignores an identify, the log of what went out is the only record:
+/// the controller index (the one OpenRGB uses), the device, the LEDs lit, and that every other
+/// device got an all-black frame. One line per request (the page resends about every 2 s), not per tick.
+pub fn log_sent(device: &DeviceInfo, frames: &[(DeviceId, Vec<Rgb8>)]) {
+    let Some((_, frame)) = frames.iter().find(|(id, _)| id == &device.id) else {
+        tracing::warn!(device = %device.id, "identify: no frame was made for {}; it is not connected", device.id);
+        return;
+    };
+    let lit: Vec<usize> = frame.iter().enumerate().filter(|(_, c)| **c != Rgb8::BLACK).map(|(i, _)| i).collect();
+    let others = frames.len() - 1;
+    let (first, count) = (lit.first().copied(), lit.len());
+    let run = match first {
+        Some(first) => format!("{count} of {} LEDs white from LED {first}", frame.len()),
+        None => format!("no LED white of {}", frame.len()),
+    };
+    tracing::info!(
+        device = %device.id, adapter = %device.adapter, controller = device.adapter_index,
+        name = %device.name, location = %device.location, leds = frame.len(), lit = count, others,
+        "identify sent to {} controller {} ({}; {}, {}): {run}; {others} other devices get an all-black frame",
+        device.adapter, device.adapter_index, device.id, device.name, device.location
+    );
+}
+
 /// Starts the ticker task for the app.
 pub fn spawn_ticker(app: Arc<App>) {
     tokio::spawn(async move {
@@ -374,6 +398,25 @@ mod tests {
         assert!(gate.end_session());
         assert!(!gate.end_session());
         assert_eq!(gate.tick(t0, &devices), Tick::Idle);
+    }
+
+    #[test]
+    fn the_sent_line_names_the_controller_and_the_lit_run_and_a_missing_frame_warns() {
+        let (gate, mut devices, t0) = setup();
+        devices[1].adapter = "openrgb".into();
+        devices[1].adapter_index = 4;
+        devices[1].location = "SMBus 0x71".into();
+        gate.start(DeviceId("openrgb:ram".into()), 0, 5, 2, t0);
+        let frames = frames_of(gate.tick(t0, &devices));
+        let (_, text) = crate::test_logs::captured(|| log_sent(&devices[1], &frames));
+        assert!(text.contains("INFO"), "{text}");
+        assert!(text.contains("openrgb controller 4 (openrgb:ram; openrgb:ram, SMBus 0x71)"), "{text}");
+        assert!(text.contains("2 of 8 LEDs white from LED 5"), "{text}");
+        assert!(text.contains("1 other devices get an all-black frame"), "{text}");
+
+        // A device with no frame (not connected) is a warning, not a silent line.
+        let (_, text) = crate::test_logs::captured(|| log_sent(&devices[1], &[]));
+        assert!(text.contains("WARN") && text.contains("no frame was made for openrgb:ram"), "{text}");
     }
 
     #[test]

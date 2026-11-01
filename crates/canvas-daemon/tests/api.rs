@@ -2521,6 +2521,40 @@ async fn identify_is_an_override_that_stop_ends_even_with_output_paused() {
     assert!(rx.try_recv().is_ok(), "engine frames flow again");
 }
 
+/// #81: each identify request logs the OpenRGB controller it went to and what was sent, so a stick
+/// that stays dark can be told apart from an identify that never went out.
+#[tokio::test]
+async fn an_identify_request_logs_the_controller_and_what_was_sent() {
+    use canvas_proto::device::DeviceKind;
+    let logs = common::LogBuf::default();
+    let _log = logs.install();
+    let (router, app, _home) = build();
+    let mut ram = common::device("Ram", DeviceKind::Dram, 8);
+    ram.adapter = "openrgb".into();
+    ram.adapter_index = 3;
+    ram.location = "SMBus 0x73".into();
+    *app.devices.write().await = vec![common::device("Board", DeviceKind::Motherboard, 12), ram];
+
+    let path = routes::DEVICE_IDENTIFY.replace("{id}", "fake:Ram");
+    let response = router
+        .oneshot(request_with_body("POST", &path, r#"{"zone":0,"led":2,"count":3}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let text = logs.text();
+    let line = text
+        .lines()
+        .find(|l| l.contains("identify sent to"))
+        .unwrap_or_else(|| panic!("no identify-sent line:
+{text}"));
+    assert!(line.contains("INFO"), "{line}");
+    assert!(line.contains("openrgb controller 3 (fake:Ram; Ram, SMBus 0x73)"), "{line}");
+    assert!(line.contains("3 of 8 LEDs white from LED 2"), "{line}");
+    assert!(line.contains("1 other devices get an all-black frame"), "{line}");
+    assert_eq!(text.lines().filter(|l| l.contains("identify sent to")).count(), 1, "one line per request: {text}");
+}
+
 // ---- user presets (#9) ----
 
 /// A number property value as the API writes it.

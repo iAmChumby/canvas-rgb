@@ -268,6 +268,8 @@ fn port_holders(port: u16) -> String {
 /// The quit path (G3), in order. Each step has a bound, so no step holds the daemon up.
 async fn quit_sequence(app: &Arc<App>) {
     app.shutting_down.store(1, Ordering::SeqCst);
+    // The service log has the moment it ended OpenRGB; this is the moment frames last went out (#81).
+    app.last_frame.log("the daemon was told to stop");
 
     // 1. `on_quit`: black, or the last frame left in place.
     if tokio::time::timeout(ON_QUIT_LIMIT, write_on_quit(app)).await.is_err() {
@@ -287,6 +289,8 @@ async fn quit_sequence(app: &Arc<App>) {
     if tokio::time::timeout(ENGINE_STOP_LIMIT, stop).await.is_err() {
         tracing::warn!("the render loop did not stop in time");
     }
+    // The black frame of step 1 counts: this is the last frame the daemon sent before it ended (#81).
+    app.last_frame.log("the daemon finished its quit sequence");
 
     // 4. The OpenRGB server the daemon started.
     kill_openrgb_server(app);
@@ -435,12 +439,17 @@ async fn sync_device_sinks(
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<canvas_proto::Rgb8>>(1);
         let adapter = app.adapter.clone();
         let writer_id = id.clone();
+        let app_for_writer = app.clone();
         let writer = tokio::spawn(async move {
             let mut failures = 0u32;
             while let Some(frame) = rx.recv().await {
                 let result = adapter.lock().await.write_frame(&writer_id, &frame).await;
                 match result {
-                    Ok(()) => failures = 0,
+                    Ok(()) => {
+                        failures = 0;
+                        // Stores a time; logs nothing (#81).
+                        app_for_writer.last_frame.record();
+                    }
                     Err(e) => {
                         failures += 1;
                         // Log the first failure and then every 300th, not every frame.

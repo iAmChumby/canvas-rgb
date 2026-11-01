@@ -133,6 +133,7 @@ pub async fn identify(
     // Send the first frames now; the ticker repeats them and runs the watchdog.
     let devices = app.devices.read().await.clone();
     if let crate::identify::Tick::Frames(frames) = app.identify.tick(std::time::Instant::now(), &devices) {
+        crate::identify::log_sent(&device, &frames);
         app.identify.push(frames);
     }
     if start {
