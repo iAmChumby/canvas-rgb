@@ -1006,8 +1006,8 @@ function Get-StoppedServiceMarkerPath {
 # The machine home is never created here: without one there was no installation, so nothing was
 # stopped and there is nothing to record.
 # The machine home is written like every other machine-home write: the check comes first, and a
-# folder that is not safe is never written to (#65). The check stops with its own message, so the
-# reason is in the log instead of being swallowed.
+# folder that is not safe is never written to (#65). The check stops with its own message (it
+# throws), so the reason ends up in the log instead of being swallowed.
 function Set-StoppedServiceMarker {
     param([string]$Path = '')
     if (-not $Path) { $Path = Get-StoppedServiceMarkerPath }

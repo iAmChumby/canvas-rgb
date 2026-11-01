@@ -254,7 +254,6 @@ begin
   Lib := ExpandConstant('{tmp}\lib.ps1');
   if FileExists(Lib) then
   begin
-    // The same code the scripts use, so a service that will not start is handled the same way.
     StringChangeEx(Lib, '''', '''''', True);
     Script := RestartServiceScript;
     StringChangeEx(Script, '%LIB%', Lib, True);
