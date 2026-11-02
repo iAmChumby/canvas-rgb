@@ -7127,66 +7127,6 @@ button.chip:hover {
   font-size: var(--t14);
 }
 
-.eff-new-menu {
-  width: 330px;
-}
-
-.eff-new-row {
-  display: grid;
-  grid-template-columns: 22px minmax(0, 1fr);
-  gap: var(--s2);
-  align-items: start;
-  width: 100%;
-  padding: var(--s2);
-  border: 1px solid transparent;
-  border-radius: var(--r-sm);
-  background: transparent;
-  color: var(--ink);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.eff-new-row:hover {
-  background: var(--hover);
-}
-
-.eff-new-row > svg {
-  color: var(--dim);
-  margin-top: 2px;
-}
-
-.eff-new-text {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.eff-new-title {
-  display: flex;
-  align-items: center;
-  gap: var(--s2);
-  font-size: var(--t15);
-  font-weight: 600;
-}
-
-.eff-new-rec {
-  padding: 0 5px;
-  border-radius: 3px;
-  background: var(--live-soft);
-  color: var(--live);
-  font: 500 10px / 16px var(--fm);
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
-}
-
-.eff-new-note {
-  color: var(--mute);
-  font-size: var(--t14);
-  line-height: 1.35;
-}
-
 .chip-stack {
   color: var(--a3);
   border-color: var(--a3);

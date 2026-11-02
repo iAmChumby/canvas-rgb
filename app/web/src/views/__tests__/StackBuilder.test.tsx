@@ -155,8 +155,18 @@ describe("the stack builder", () => {
     await screen.findByRole("heading", { name: "Sunset glow" });
   });
 
-  it("starts a new stack empty, with Save and Try held back", async () => {
-    await renderEffects("?stack=new&state=complete,stack");
+  it("opens a new stack straight from the header's New effect key", async () => {
+    await renderEffects("?state=complete,stack");
+    fireEvent.click(await screen.findByRole("button", { name: "New effect" }));
+    await screen.findByTestId("stack-builder");
+    expect(screen.getByRole("heading", { name: "New stack" })).toBeTruthy();
+    // There is no one-item menu any more, and the two HTML ways live under More > Advanced.
+    expect(document.querySelector(".eff-new-menu")).toBeNull();
+    expect(screen.queryByText("Blank HTML file")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Copy an effect…" })).toBeNull();
+  });
+
+  it("starts a new stack empty, with Save and Try held back", async () => {    await renderEffects("?stack=new&state=complete,stack");
     await screen.findByTestId("stack-builder");
     expect(screen.getByText("Nothing to show yet")).toBeTruthy();
     expect(screen.getByText("The bottom layer is painted first.")).toBeTruthy();
