@@ -14,6 +14,7 @@ use canvas_daemon::stack::{
 };
 use canvas_daemon::state::App;
 use canvas_proto::api::{routes, StackLayerState};
+use canvas_proto::config::EFFECTS_FILE;
 use canvas_proto::device::{DeviceId, DeviceInfo, DeviceKind, ZoneInfo, ZoneKind};
 use canvas_proto::layout::{
     Layout, LedSlice, PlacedZone, RenderScale, SamplingMode, ZoneShape,
@@ -553,6 +554,79 @@ async fn a_stack_that_fails_its_rules_is_dropped_as_it_loads() {
         .filter_map(|stack| stack["id"].as_str())
         .collect();
     assert_eq!(names, vec!["stack:Good"]);
+}
+
+// ================================================================ a failed delete
+
+/// A directory where the file should be, so `write_json` cannot rename over it.
+fn block(path: &std::path::Path) {
+    if path.exists() {
+        std::fs::remove_file(path).expect("the file is removed");
+    }
+    std::fs::create_dir(path).expect("a directory stands where the file was");
+}
+
+/// A delete that cannot write the stack file is an error, and the stack, its presets and its
+/// favourite are all still there.
+#[tokio::test]
+async fn a_delete_that_cannot_write_keeps_the_stack_and_its_presets() {
+    let harness = build("t-delete-fail");
+    let stack = stack("stack:Doomed", vec![layer("l1", "solid")]);
+    assert_eq!(put_stack(&harness, &stack).await, StatusCode::OK);
+    {
+        let mut store = harness.app.store.write().await;
+        store.effects.presets.insert("stack:Doomed".into(), Vec::new());
+        store.effects.favorites.push("stack:Doomed".into());
+    }
+    block(&harness.home.path.join(STACKS_FILE));
+
+    let response = harness
+        .router
+        .clone()
+        .oneshot(request("DELETE", &stack_path("stack:Doomed")))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let stored = json(harness.router.clone().oneshot(request("GET", routes::STACKS)).await.unwrap()).await;
+    assert_eq!(stored["stacks"].as_array().map(Vec::len), Some(1), "the stack is still there: {stored}");
+    let store = harness.app.store.read().await;
+    assert!(store.effects.presets.contains_key("stack:Doomed"), "its presets are back");
+    assert!(
+        store.effects.favorites.iter().any(|favorite| favorite == "stack:Doomed"),
+        "its favourite is back"
+    );
+}
+
+/// A delete whose preset save fails removes nothing: the stack is still on the engine's book.
+#[tokio::test]
+async fn a_delete_whose_presets_cannot_be_saved_removes_nothing() {
+    let harness = build("t-delete-presets");
+    let stack = stack("stack:Doomed", vec![layer("l1", "solid")]);
+    assert_eq!(put_stack(&harness, &stack).await, StatusCode::OK);
+    {
+        let mut store = harness.app.store.write().await;
+        store.effects.presets.insert("stack:Doomed".into(), Vec::new());
+        store.effects.favorites.push("stack:Doomed".into());
+    }
+    block(&harness.home.path.join(EFFECTS_FILE));
+
+    let response = harness
+        .router
+        .clone()
+        .oneshot(request("DELETE", &stack_path("stack:Doomed")))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let stored = json(harness.router.clone().oneshot(request("GET", routes::STACKS)).await.unwrap()).await;
+    assert_eq!(stored["stacks"].as_array().map(Vec::len), Some(1), "the stack is still there: {stored}");
+    let store = harness.app.store.read().await;
+    assert!(store.effects.presets.contains_key("stack:Doomed"), "its presets are back");
+    assert!(
+        store.effects.favorites.iter().any(|favorite| favorite == "stack:Doomed"),
+        "its favourite is back"
+    );
 }
 
 // ================================================================ test 2

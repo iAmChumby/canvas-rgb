@@ -425,6 +425,9 @@ impl Stacks {
 
     /// Saves `stack`, replacing a stack of the same id (its case as stored) and refusing a name
     /// that is another stack's, ignoring case.
+    ///
+    /// The file is written first: a save that cannot be written leaves the running store as it
+    /// was, rather than holding a stack the next start will not see.
     pub fn put(&self, stack: Stack, known: &KnownEffects) -> Result<Stack, StacksError> {
         let name = stack.name().to_string();
         let mut guard = write_recovering(&self.file);
@@ -446,32 +449,38 @@ impl Stacks {
         }
         validate_stack(&stack, known, &others).map_err(StacksError::Invalid)?;
         let parsed = Stack { id: stack.id.clone(), layers: stack.layers.clone() };
-        match guard.stacks.iter_mut().find(|existing| existing.id == parsed.id) {
+        let mut file = guard.clone();
+        match file.stacks.iter_mut().find(|existing| existing.id == parsed.id) {
             Some(existing) => *existing = parsed.clone(),
-            None => guard.stacks.push(parsed.clone()),
+            None => file.stacks.push(parsed.clone()),
         }
-        let file = guard.clone();
-        drop(guard);
-        crate::storage::write_json(&self.path(), &file).map_err(|e| StacksError::Io(e.to_string()))?;
+        crate::storage::write_json(&self.path(), &file)
+            .map_err(|e| StacksError::Io(e.to_string()))?;
+        *guard = file;
         self.generation.fetch_add(1, Ordering::SeqCst);
         Ok(parsed)
     }
 
-    /// Removes a stack. `None` when there was none.
-    pub fn delete(&self, id: &str) -> Option<Stack> {
+    /// Removes a stack. `Ok(None)` when there was none.
+    ///
+    /// The file is written first, so a delete that cannot be written is an error to the caller
+    /// and the stack is still there.
+    pub fn delete(&self, id: &str) -> Result<Option<Stack>, StacksError> {
         let mut guard = write_recovering(&self.file);
-        let index = guard
+        let Some(index) = guard
             .stacks
             .iter()
-            .position(|stack| stack.id.eq_ignore_ascii_case(id) || stack.name().eq_ignore_ascii_case(id))?;
-        let removed = guard.stacks.remove(index);
-        let file = guard.clone();
-        drop(guard);
-        if let Err(error) = crate::storage::write_json(&self.path(), &file) {
-            tracing::error!(error = %error, "stacks.json could not be written after a delete");
-        }
+            .position(|stack| stack.id.eq_ignore_ascii_case(id) || stack.name().eq_ignore_ascii_case(id))
+        else {
+            return Ok(None);
+        };
+        let mut file = guard.clone();
+        let removed = file.stacks.remove(index);
+        crate::storage::write_json(&self.path(), &file)
+            .map_err(|e| StacksError::Io(e.to_string()))?;
+        *guard = file;
         self.generation.fetch_add(1, Ordering::SeqCst);
-        Some(removed)
+        Ok(Some(removed))
     }
 
     // ------------------------------------------------------------ runtime state
@@ -757,8 +766,52 @@ mod tests {
         let taken = again.put(stack("stack:Sunset Glow", vec![layer("l1", "solid")]), &known);
         assert!(matches!(taken, Err(StacksError::Conflict(_))));
 
-        assert!(again.delete("stack:Sunset glow").is_some());
+        assert!(again.delete("stack:Sunset glow").expect("the delete is written").is_some());
         assert!(again.all().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A folder where `stacks.json` is a directory, so no write can land on it.
+    fn unwritable(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "canvas-rgb-stacks-unwritable-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(STACKS_FILE)).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_save_that_cannot_be_written_leaves_the_store_as_it_was() {
+        let dir = unwritable("put");
+        let store = Stacks::new(&dir);
+        let outcome = store.put(stack("stack:Fail", vec![layer("l1", "solid")]), &known());
+        assert!(matches!(outcome, Err(StacksError::Io(_))), "{outcome:?}");
+        assert!(store.all().is_empty(), "a failed save holds no stack");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_delete_that_cannot_be_written_keeps_the_stack() {
+        let dir = std::env::temp_dir().join(format!(
+            "canvas-rgb-stacks-unwritable-delete-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Stacks::new(&dir);
+        let saved = store
+            .put(stack("stack:Kept", vec![layer("l1", "solid")]), &known())
+            .expect("the first save is written");
+        // The file is replaced by a directory, so the delete cannot be written.
+        std::fs::remove_file(dir.join(STACKS_FILE)).unwrap();
+        std::fs::create_dir(dir.join(STACKS_FILE)).unwrap();
+        let outcome = store.delete("stack:Kept");
+        assert!(matches!(outcome, Err(StacksError::Io(_))), "{outcome:?}");
+        assert_eq!(store.all(), vec![saved], "the stack is still in the store");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

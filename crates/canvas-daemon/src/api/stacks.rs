@@ -177,27 +177,43 @@ pub async fn delete_stack(
         )));
     }
 
-    let removed = app.stacks.delete(&stack.id).ok_or_else(|| {
-        ApiFailure::not_found(format!("no stack with the id or name {id}"))
-    })?;
-
     // Its presets and its favourite are keyed by the id and would be unreachable with it gone.
+    // They go first: a failed write of effects.json puts them back and leaves the stack alone.
+    let mut store = app.store.write().await;
+    let effects_before = store.effects.clone();
     let mut presets_removed = 0usize;
-    let favorite_removed = {
-        let mut store = app.store.write().await;
-        if let Some(list) = store.effects.presets.remove(&removed.id) {
-            presets_removed = list.len();
-        }
-        let before = store.effects.favorites.len();
-        store.effects.favorites.retain(|favorite| favorite != &removed.id);
-        let favorite_removed = store.effects.favorites.len() != before;
-        if let Err(e) = store.save_effects() {
-            return Err(ApiFailure::internal(format!(
-                "the stack is gone but its presets could not be saved: {e}"
+    if let Some(list) = store.effects.presets.remove(&stack.id) {
+        presets_removed = list.len();
+    }
+    let before = store.effects.favorites.len();
+    store.effects.favorites.retain(|favorite| favorite != &stack.id);
+    let favorite_removed = store.effects.favorites.len() != before;
+    if let Err(e) = store.save_effects() {
+        store.effects = effects_before;
+        return Err(ApiFailure::internal(format!(
+            "the stack and its presets were left as they were: {e}"
+        )));
+    }
+
+    let removed = match app.stacks.delete(&stack.id) {
+        Ok(Some(removed)) => removed,
+        Ok(None) => {
+            store.effects = effects_before;
+            let _ = store.save_effects();
+            return Err(ApiFailure::not_found(format!(
+                "no stack with the id or name {id}"
             )));
         }
-        favorite_removed
+        Err(e) => {
+            // The stack file was not written: put its presets and its favourite back too.
+            store.effects = effects_before;
+            let _ = store.save_effects();
+            return Err(ApiFailure::internal(format!(
+                "the stack could not be deleted, and nothing was removed: {e}"
+            )));
+        }
     };
+    drop(store);
 
     // A stack on the lights ends with black and a note, the ending a deleted prior effect gets.
     let running = app.stacks.running_id().as_deref() == Some(removed.id.as_str());
