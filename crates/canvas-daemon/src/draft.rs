@@ -17,9 +17,11 @@
 //!
 //! The editor renews the slot every [`canvas_proto::consts::DRAFT_HEARTBEAT`]; the slot expires
 //! [`canvas_proto::consts::DRAFT_LEASE`] after the last PUT, and the lease starts when the draft
-//! reaches the lights, not when its build started. Stop and expiry put the effect the draft took
-//! over from back on the lights; an activate or a layout switch drops the slot without
-//! restoring, because the owner chose something else.
+//! reaches the lights, not when its build started. Every accepted PUT renews it, including one
+//! that joins a build in flight, and the lease does not run out while a build the owning page
+//! started is still loading. Stop and expiry put the effect the draft took over from back on the
+//! lights; an activate or a layout switch drops the slot without restoring, because the owner
+//! chose something else.
 //!
 //! The gate orders transitions, not builds: a build runs outside it, so Stop and expiry answer
 //! while a slow HTML layer loads. The gate is taken to read the slot, to swap it and to apply.
@@ -319,6 +321,26 @@ impl Draft {
         *self.lock_in_flight() = None;
     }
 
+    /// Keeps the draft on the lights alive. A beat from the page that owns it renews the slot's
+    /// lease even when it starts or joins a build, so the slot does not run out from under a
+    /// build that is about to land (D95.4.4, item 3).
+    fn renew_lease(&self) {
+        let lease_until = self.now() + canvas_proto::consts::DRAFT_LEASE;
+        if let Some(slot) = self.lock().as_mut() {
+            slot.lease_until = lease_until;
+        }
+    }
+
+    /// True while a build the owning page started is in flight for the live epoch: the slot's
+    /// lease does not end one then.
+    fn building_for_the_live_epoch(&self) -> bool {
+        let Some((live, _)) = self.epochs.live() else {
+            return false;
+        };
+        self.in_flight()
+            .is_some_and(|building| building.epoch.as_deref() == Some(live.as_str()))
+    }
+
     /// The error the last build of `html` failed with, while nothing has landed since.
     fn last_failure(&self, html: &str) -> Option<String> {
         self.lock_failure()
@@ -443,6 +465,7 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<bool, PutE
         if let Some(building) = app.draft.in_flight() {
             if building.is_html(html) {
                 app.draft.update_in_flight(building.token, props);
+                app.draft.renew_lease();
                 return Ok(true);
             }
         }
@@ -587,13 +610,15 @@ pub async fn put_stack(
 
         // The same structure is already building: this beat joins it. The live map is the one
         // the building effect reads, so the values are there when it lands; its props are the
-        // newest, and no second build starts.
+        // newest, and no second build starts. The beat also renews the lease of the draft on the
+        // lights, which is still the one the build will replace.
         if let Some(building) = app.draft.in_flight() {
             if building.is_stack(&stack.id, &structure) {
                 if let Building::Stack { live, .. } = &building.kind {
                     crate::stack::replace_live(live, stack);
                 }
                 app.draft.update_in_flight(building.token, &props);
+                app.draft.renew_lease();
                 tracing::info!(stack = %stack.id, seq, "a beat joined the stack draft build in flight");
                 return Ok(true);
             }
@@ -719,10 +744,14 @@ pub async fn expire_if_due(app: &Arc<App>) -> Option<Ended> {
 /// [`expire_if_due`] with the gate already held.
 async fn expire_locked(app: &Arc<App>) -> Option<Ended> {
     let now = app.draft.now();
+    // A build the page that owns the draft has in flight keeps the slot: the lease is renewed
+    // when that build lands, and expiring the slot now would put the prior effect back under a
+    // draft that is about to reach the lights (D95.4.4, item 3).
+    let building_for_it = app.draft.building_for_the_live_epoch();
     let due = {
         let mut guard = app.draft.lock();
         match guard.as_ref() {
-            Some(slot) if now >= slot.lease_until => guard.take(),
+            Some(slot) if now >= slot.lease_until && !building_for_it => guard.take(),
             _ => None,
         }
     };

@@ -3435,3 +3435,79 @@ async fn a_stack_and_its_own_name_in_another_case_are_the_same_conflict_everywhe
         true
     );
 }
+
+#[tokio::test]
+async fn a_beat_that_joins_a_slow_build_keeps_the_draft_alive_until_it_lands() {
+    let held = HeldBuild::new();
+    let (user, _builds) = counting_user(Some(held.hold));
+    let harness = build_with("r3-join-lease", Some(user));
+    add_html(&harness, "Tinted.html", TINTED_HTML);
+    add_html(&harness, "Other.html", &TINTED_HTML.replace("Tinted", "Other"));
+    prior_is_solid(&harness).await;
+    let epoch = page(0x31);
+
+    // t=0: a good draft lands, with the whole lease left.
+    let landed = stack("stack:Joinlease", vec![layer("l1", "html:Tinted")]);
+    assert_eq!(put_stack_draft(&harness, &landed, &epoch, 1).await.status(), StatusCode::OK);
+    harness.draft_clock.advance(Duration::from_secs(5));
+
+    // t=5 s: a structure change starts a slow build, held open.
+    held.armed.store(true, Ordering::SeqCst);
+    let changed = stack("stack:Joinlease", vec![layer("l1", "html:Other")]);
+    let slow_router = harness.router.clone();
+    let slow_body = stack_draft_body(&changed, &epoch, 2);
+    let slow = tokio::spawn(async move {
+        slow_router
+            .oneshot(request_with_body("PUT", routes::EFFECT_DRAFT, &slow_body))
+            .await
+            .expect("the router answers")
+    });
+    wait_started(held.started).await;
+
+    // A beat of the same structure joins the build and renews the lease of the slot on the
+    // lights: ten seconds were left, and the whole lease is left now.
+    assert_eq!(
+        json(put_stack_draft(&harness, &changed, &epoch, 3).await).await["applied"],
+        true
+    );
+    let status: canvas_proto::api::DraftStatus = serde_json::from_value(
+        json(harness.router.clone().oneshot(request("GET", routes::EFFECT_DRAFT)).await.unwrap()).await,
+    )
+    .expect("a DraftStatus");
+    assert_eq!(
+        status.lease_remaining_ms,
+        canvas_proto::consts::DRAFT_LEASE.as_millis() as u64,
+        "the joining beat renewed the lease"
+    );
+
+    // The clock runs past the lease while the build is still loading: the draft stays active,
+    // because the page that owns it has a build in flight for its epoch.
+    harness
+        .draft_clock
+        .advance(canvas_proto::consts::DRAFT_LEASE + Duration::from_secs(5));
+    let status: canvas_proto::api::DraftStatus = serde_json::from_value(
+        json(harness.router.clone().oneshot(request("GET", routes::EFFECT_DRAFT)).await.unwrap()).await,
+    )
+    .expect("a DraftStatus");
+    assert!(status.active, "a slot does not expire under its own page's build");
+    assert_eq!(
+        harness.engine.effect_id.lock().unwrap().clone(),
+        Some("stack:Joinlease".to_string()),
+        "the prior effect was not put back"
+    );
+
+    // The build lands, and the lease starts again from the landing.
+    held.go.send(()).expect("the build is released");
+    let late = slow.await.expect("the task ends");
+    assert_eq!(json(late).await["applied"], true);
+    let status: canvas_proto::api::DraftStatus = serde_json::from_value(
+        json(harness.router.clone().oneshot(request("GET", routes::EFFECT_DRAFT)).await.unwrap()).await,
+    )
+    .expect("a DraftStatus");
+    assert!(status.active, "the build that outlived the lease landed");
+    assert_eq!(
+        status.lease_remaining_ms,
+        canvas_proto::consts::DRAFT_LEASE.as_millis() as u64,
+        "the landing set a fresh lease"
+    );
+}
