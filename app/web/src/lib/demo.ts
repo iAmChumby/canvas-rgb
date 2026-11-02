@@ -74,6 +74,19 @@ import type { EffectPreviewRequest } from "@/proto/EffectPreviewRequest";
 import type { EffectPreviewResponse } from "@/proto/EffectPreviewResponse";
 import type { DraftRequest } from "@/proto/DraftRequest";
 import type { DraftStatus } from "@/proto/DraftStatus";
+import type { Stack } from "@/proto/Stack";
+import type { StackPreviewRequest } from "@/proto/StackPreviewRequest";
+import type { StackPreviewResponse } from "@/proto/StackPreviewResponse";
+import type { StackSummary } from "@/proto/StackSummary";
+import {
+  seededStacks,
+  stackAsEffect,
+  stackDetail,
+  stackEffectSummary,
+  stackProps,
+  stackSummary,
+} from "@/lib/demoStacks";
+import { stackThumbnailBytes } from "@/lib/stackFrame";
 
 const BASE = "/api/v1";
 const DEMO_LAYOUTS_KEY = "canvas-rgb.demo-layouts";
@@ -91,6 +104,8 @@ interface DemoState {
   settings: Settings;
   devices: DeviceInfo[];
   effects: Record<string, DemoEffect>;
+  /** The saved effect stacks, by `stack:` id. */
+  stacks: Record<string, Stack>;
   favorites: Set<string>;
   saved: Record<string, Props>;
   /** The owner's presets per effect, in the order they were saved. */
@@ -125,6 +140,10 @@ interface DemoState {
     props: Props;
     hash: string;
     leaseUntil: number;
+    /** A stack draft carries the stack, its epoch and its sequence (D95.4.5). */
+    stack?: Stack;
+    epoch?: string;
+    seq?: number;
   } | null;
   /** The preview requests answered, so a test can count them. */
   previews: number;
@@ -136,6 +155,12 @@ interface DemoState {
   draftSeeded: boolean;
   /** `?state=draft-stop-fail` has refused one Stop already. */
   draftStopFailed: boolean;
+  /** The newest `(epoch, seq)` the stack preview accepted. */
+  stackPreviewOwner: { epoch: string; seq: number } | null;
+  /** The stack preview PUTs, so a test can count them and read their sequences. */
+  stackPreviewCalls: { at: number; epoch: string; seq: number; applied: boolean }[];
+  /** `?state=stack-dropped` has dropped one PUT already. */
+  stackPreviewDropped: boolean;
 }
 
 /**
@@ -154,6 +179,26 @@ function seededPresets(): Record<string, Preset[]> {
     ],
     // The user effect of `?state=html`, so its delete asks what to do with the presets.
     "html:fixture-sample": [{ name: "Calm", props: { speed: n(12) } }],
+  };
+}
+
+/** The stack presets the mockups show: values over its own merged map (D95.4.3). */
+function seededStackPresets(
+  stacks: Record<string, Stack>,
+  effects: Record<string, DemoEffect>,
+): Record<string, Preset[]> {
+  const glow = stacks["stack:Sunset glow"];
+  if (!glow) return {};
+  const base = stackProps(glow, effects);
+  const color = (value: string): PropValue => ({ type: "color", value });
+  const number = (value: number): PropValue => ({ type: "number", value });
+  const over = (values: Props): Preset["props"] => ({ ...base, ...values });
+  return {
+    "stack:Sunset glow": [
+      { name: "Golden hour", props: over({ "l1.color1": color("#ffb703"), "l1.color2": color("#ff2d55"), "l2.intensity": number(72) }) },
+      { name: "Embers", props: over({ "l1.color1": color("#8a0303"), "l1.color2": color("#ff5e00"), "l2.intensity": number(90) }) },
+      { name: "Deep water", props: over({ "l1.color1": color("#0a0a4a"), "l1.color2": color("#1e6fd9"), "l3.drop_color": color("#00d8ff") }) },
+    ],
   };
 }
 
@@ -205,15 +250,17 @@ function initialState(): DemoState {
     }
   }
   const everyDevice = DEVICES.map((d) => ({ ...d, zones: d.zones.map((z) => ({ ...z })) }));
+  const stacks = seededStacks(s, effects);
   return {
     settings: { ...INITIAL_SETTINGS },
     onboardingComplete: onboarded,
     held: foundOnRescan() ? everyDevice : [],
     devices: applyDeviceScenarios(DEVICES.map((d) => ({ ...d, zones: d.zones.map((z) => ({ ...z })) }))),
     effects,
+    stacks,
     favorites,
     saved: {},
-    userPresets: s.has("presets") ? seededPresets() : {},
+    userPresets: { ...(s.has("presets") ? seededPresets() : {}), ...seededStackPresets(stacks, effects) },
     activeEffect: "aurora",
     layouts: layouts.layouts,
     activeLayout: layouts.active,
@@ -254,6 +301,9 @@ function initialState(): DemoState {
     previews: 0,
     draftCalls: [],
     draftStopFailed: false,
+    stackPreviewOwner: null,
+    stackPreviewCalls: [],
+    stackPreviewDropped: false,
   };
 }
 
@@ -366,13 +416,15 @@ function draftStatus(s: DemoState): DraftStatus {
   const fast = scenario().has("fast-draft");
   const slow = scenario().has("slow-draft");
   const heartbeat = fast ? 300 : slow ? 600 : 5000;
+  const stack = draft?.stack;
   return {
     active: draft !== null,
-    ...(draft ? { id: `draft:${draft.hash}`, source_hash: draft.hash } : {}),
+    ...(draft ? { id: stack ? stack.id : `draft:${draft.hash}`, source_hash: draft.hash } : {}),
     props: draft ? { ...draft.props } : {},
     lease_remaining_ms: draft ? Math.max(0, draft.leaseUntil - Date.now()) : 0,
     heartbeat_ms: heartbeat,
     lease_ms: fast ? 900 : 15000,
+    ...(stack ? { epoch: draft?.epoch, seq: draft?.seq } : {}),
   };
 }
 
@@ -564,9 +616,24 @@ function statusNow(): Status {
 // ---- effects ----
 
 function effectOrNotFound(id: string): DemoEffect {
-  const e = st().effects[id];
+  const s = st();
+  const stack = s.stacks[id];
+  if (stack) return stackAsEffect(stack, s.effects);
+  const e = s.effects[id];
   if (!e) fail(404, "not_found", `no effect with id ${id}`);
   return e;
+}
+
+/** A stack by its id or its name, ignoring case, as the daemon's store finds it. */
+function stackOrNotFound(id: string): Stack {
+  const wanted = id.trim();
+  const found = Object.values(st().stacks).find(
+    (stack) =>
+      stack.id.toLowerCase() === wanted.toLowerCase() ||
+      stack.id.slice("stack:".length).toLowerCase() === wanted.toLowerCase(),
+  );
+  if (!found) fail(404, "not_found", `no stack with the id or name ${id}`);
+  return found;
 }
 
 function currentProps(e: DemoEffect): Props {
@@ -891,6 +958,10 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       const list = Object.values(s.effects)
         .filter((e) => !isHiddenEffect(e.schema.id))
         .map((e) => ({ ...e.summary, favorite: s.favorites.has(e.schema.id) }));
+      // A saved stack is in the library after the user effects (D95.4.2).
+      for (const stack of Object.values(s.stacks)) {
+        list.push({ ...stackEffectSummary(stack, s.effects), favorite: s.favorites.has(stack.id) });
+      }
       return { effects: list, active: s.activeEffect, failed: s.failedEffects };
     }
     if (seg[1] === "import" && method === "POST") {
@@ -918,6 +989,9 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       return answer;
     }
     if (seg[1] === "active" && seg[2] === "props" && method === "PATCH") {
+      if (s.activeEffect?.startsWith("stack:")) {
+        fail(409, "conflict", `${s.activeEffect} is a stack; change its values in the stack builder, not with this route`);
+      }
       setActiveProps(body as Props);
       return { ok: true };
     }
@@ -936,9 +1010,31 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       }
       if (method === "PUT") {
         const req = body as DraftRequest;
-        const call = { method, at: Date.now(), props: { ...req.props }, htmlBytes: req.html.length };
+        const call = { method, at: Date.now(), props: { ...req.props }, htmlBytes: req.html.length, stack: req.stack };
         s.draftCalls.push(call);
         (globalThis as { __draft?: unknown[] }).__draft?.push(call);
+        // A stack draft (D95.4.5): the same epoch/seq rule as the preview, and a dropped PUT
+        // answers 200 `applied: false`.
+        if (req.stack) {
+          const lease = scenario().has("fast-draft") ? 900 : 15_000;
+          const epoch = req.epoch ?? "";
+          const seq = req.seq ?? 0;
+          let applied = true;
+          if (s.draft?.stack && s.draft.epoch === epoch && seq <= (s.draft.seq ?? 0)) applied = false;
+          if (applied) {
+            if (s.draft === null) s.draftStopFailed = false;
+            s.draft = {
+              html: "",
+              props: {},
+              hash: demoHash(`${req.stack.id}|${JSON.stringify(req.stack.layers.map((layer) => [layer.id, layer.effect]))}`),
+              leaseUntil: Date.now() + lease,
+              stack: req.stack,
+              epoch,
+              seq,
+            };
+          }
+          return { ...draftStatus(s), applied };
+        }
         if (req.html.length > IMPORT_MAX_BYTES) {
           fail(422, "validation", `the draft is ${req.html.length} bytes; the limit is ${IMPORT_MAX_BYTES}`);
         }
@@ -1034,6 +1130,8 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       return bad();
     }
     if (seg.length === 3 && seg[2] === "thumbnail" && method === "GET") {
+      const stack = s.stacks[id];
+      if (stack) return stackThumbnailBytes(stack, activeLayout());
       effectOrNotFound(id);
       return demoThumbnail(id);
     }
@@ -1045,7 +1143,9 @@ export async function demoRequest(method: string, path: string, body: unknown): 
         fail(503, "service_unavailable", "the effect could not start: the engine is busy");
       }
       const req = body as { props?: Props; preset?: string | null };
-      let base: Props = { ...e.defaults, ...(s.saved[id] ?? {}) };
+      const isStack = id.startsWith("stack:");
+      // A stack's values are its layers' own (D95.4.3): there is no `effects.saved` entry.
+      let base: Props = isStack ? { ...e.defaults } : { ...e.defaults, ...(s.saved[id] ?? {}) };
       if (req.preset) {
         const want = req.preset.toLowerCase();
         const preset = [...e.schema.presets, ...(s.userPresets[id] ?? [])].find((p) => p.name.toLowerCase() === want);
@@ -1059,7 +1159,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       s.activeEffect = id;
       const layout = activeLayout();
       layout.effect = { id, props: next };
-      s.saved[id] = next;
+      if (!isStack) s.saved[id] = next;
       return { ok: true };
     }
     if (seg.length === 3 && seg[2] === "favorite" && method === "PUT") {
@@ -1070,6 +1170,9 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       return { ok: true };
     }
     if (seg.length === 2 && method === "DELETE") {
+      if (id.startsWith("stack:")) {
+        fail(409, "conflict", `${id} is a stack; delete it with DELETE /api/v1/stacks/${encodeURIComponent(id.slice("stack:".length))}`);
+      }
       if (!id.startsWith("html:")) {
         fail(422, "validation", `${id} is not a user effect; only html: effects can be deleted`);
       }
@@ -1142,6 +1245,116 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       }
       s.peripheralAccess[id] = { reads: !!next.reads, writes: !!next.writes };
       return s.peripheralAccess[id];
+    }
+    return bad();
+  }
+
+  if (head === "stacks") {
+    // `PUT/DELETE /stacks/preview` first: it is a static route beside `{id}` (PR B).
+    if (seg[1] === "preview" && seg.length === 2) {
+      if (method === "PUT") {
+        const req = body as StackPreviewRequest;
+        const call = { at: Date.now(), epoch: req.epoch, seq: req.seq, applied: true };
+        s.stackPreviewCalls.push(call);
+        (globalThis as { __stackPreview?: unknown[] }).__stackPreview?.push({ ...call, stack: req.stack });
+        if (scenario().has("stack-preview-busy")) {
+          fail(503, "service_unavailable", "the daemon is already rendering 2 previews; try again shortly", 400);
+        }
+        let applied = true;
+        if (scenario().has("stack-dropped") && !s.stackPreviewDropped) {
+          s.stackPreviewDropped = true;
+          applied = false;
+          s.stackPreviewOwner = { epoch: req.epoch, seq: req.seq + 1 };
+        } else if (
+          s.stackPreviewOwner &&
+          s.stackPreviewOwner.epoch === req.epoch &&
+          req.seq <= s.stackPreviewOwner.seq
+        ) {
+          applied = false;
+        } else {
+          s.stackPreviewOwner = { epoch: req.epoch, seq: req.seq };
+        }
+        call.applied = applied;
+        const detail = stackDetail(req.stack, scenario(), s.effects);
+        const answer: StackPreviewResponse = {
+          applied,
+          epoch: s.stackPreviewOwner?.epoch ?? req.epoch,
+          seq: s.stackPreviewOwner?.seq ?? req.seq,
+          layers: detail.layers.map((layer) => ({
+            id: layer.id,
+            status: layer.status,
+            ...(layer.status === "missing_effect" ? { error: `no effect with the id ${req.stack.layers.find((entry) => entry.id === layer.id)?.effect ?? ""}` } : {}),
+          })),
+          running: applied,
+        };
+        return answer;
+      }
+      if (method === "DELETE") {
+        s.stackPreviewOwner = null;
+        return { ok: true, running: false };
+      }
+      return bad();
+    }
+
+    if (seg.length === 1 && method === "GET") {
+      const stacks: StackSummary[] = Object.values(s.stacks)
+        .map((stack) => stackSummary(stack, s.effects))
+        .sort((a, b) => a.name.localeCompare(b.name));
+      return { stacks };
+    }
+
+    const id = seg[1] ?? "";
+    if (seg.length === 2 && method === "GET") {
+      return stackDetail(stackOrNotFound(id), scenario(), s.effects);
+    }
+    if (seg.length === 2 && method === "PUT") {
+      const next = body as Stack;
+      const name = next.id.startsWith("stack:") ? next.id.slice("stack:".length) : next.id;
+      if (next.id !== `stack:${name}`) fail(422, "validation", "a stack's id is stack: and its name");
+      if (name.trim().length === 0) fail(422, "validation", "a stack needs a name");
+      if (name.trim() !== name) fail(422, "validation", `"${name}" has a space at either end`);
+      if (!/^[A-Za-z0-9 ._-]+$/.test(name) || name.includes("..")) {
+        fail(422, "validation", `"${name}" may only hold letters, digits, spaces, '-', '_' and '.'`);
+      }
+      if (name.toLowerCase() === "preview") fail(422, "validation", `"${name}" is reserved for the stack preview route`);
+      if (next.layers.length > 8) fail(422, "validation", `a stack holds at most 8 layers, and this one has ${next.layers.length}`);
+      const html = next.layers.filter((layer) => layer.effect.startsWith("html:")).length;
+      if (html > 2) fail(422, "validation", `a stack holds at most 2 HTML layers, and this one has ${html}`);
+      const ids: string[] = [];
+      for (const layer of next.layers) {
+        if (!/^l\d{1,2}$/.test(layer.id)) fail(422, "validation", `layer ${layer.id}: an id is l and one or two digits`);
+        if (ids.includes(layer.id)) fail(422, "validation", `layer ${layer.id}: two layers share this id`);
+        ids.push(layer.id);
+        if (layer.effect.startsWith("stack:")) fail(422, "validation", `${layer.effect} is a stack, and a stack cannot contain a stack`);
+        if (layer.opacity > 100) fail(422, "validation", `layer ${layer.id}: opacity must be 0..=100`);
+        if (layer.area.kind === "rect") {
+          const { x, y, width, height } = layer.area;
+          if (![x, y, width, height].every(Number.isFinite)) {
+            fail(422, "validation", `layer ${layer.id}: a rectangle's numbers must be finite`);
+          }
+          if (width < 0 || height < 0 || width > 320 || height > 200) {
+            fail(422, "validation", `layer ${layer.id}: a rectangle is at most 320 wide and 200 tall`);
+          }
+        }
+      }
+      const clash = Object.values(s.stacks).find(
+        (stack) => stack.id !== next.id && stack.id.slice("stack:".length).toLowerCase() === name.toLowerCase(),
+      );
+      if (clash) fail(409, "conflict", `${name} is already another stack's name, ignoring case`);
+      s.stacks[next.id] = { id: next.id, layers: next.layers.map((layer) => ({ ...layer, props: { ...layer.props } })) };
+      (globalThis as { __stackSaves?: unknown[] }).__stackSaves?.push({ at: Date.now(), id: next.id, layers: next.layers.length });
+      return s.stacks[next.id];
+    }
+    if (seg.length === 2 && method === "DELETE") {
+      const stack = stackOrNotFound(id);
+      if (s.activeEffect === stack.id && url.searchParams.get("force") !== "true") {
+        fail(409, "conflict", `${stack.id} is on the lights; delete it with ?force=true and the lights will go black`);
+      }
+      delete s.stacks[stack.id];
+      delete s.userPresets[stack.id];
+      s.favorites.delete(stack.id);
+      if (s.activeEffect === stack.id) s.activeEffect = null;
+      return { ok: true, id: stack.id, presets_removed: 0, favorite_removed: false };
     }
     return bad();
   }
