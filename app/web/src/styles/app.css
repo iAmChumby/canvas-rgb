@@ -2415,12 +2415,23 @@ button.chip:hover {
   min-height: 0;
 }
 
+/* roomier windows: the preview and its controls get a wider column, so the picture is larger
+   and the column's spare height smaller */
+@container page (min-width: 1000px) {
+  .eff-edit-main {
+    grid-template-columns: minmax(280px, 420px) minmax(0, 1fr);
+  }
+}
+
 .eff-edit-side {
   display: flex;
   flex-direction: column;
   gap: var(--s2);
   min-height: 0;
   overflow: auto;
+  /* The controls size to their content; the room left over is the preview's, so the group is
+     not stretched into an empty card and does not leave one ragged hole at its foot. */
+  justify-content: center;
 }
 
 .eff-live {
@@ -2725,23 +2736,18 @@ button.chip:hover {
   font-size: var(--t12);
 }
 
-/* Presets and properties in the side column, under the actions they belong to. Properties
-   takes the room left below them, so the column is a pane and not a short stack in a tall
-   empty space. */
+/* Presets and properties in the side column, under the actions they belong to. They size to
+   their content: the room left in the column belongs to the preview, not to a stretched panel. */
 .eff-side-panels {
   display: flex;
   flex-direction: column;
   gap: var(--s3);
-  flex: 1 1 auto;
+  flex: 0 0 auto;
   min-height: 0;
 }
 
 .eff-side-panels .panel {
   padding: var(--s3);
-}
-
-.eff-side-panels .eff-props {
-  flex: 1 1 auto;
 }
 
 .eff-tools-note,
@@ -2790,6 +2796,12 @@ button.chip:hover {
   min-height: 0;
   display: flex;
   flex-direction: column;
+}
+
+/* The leave prompt while the code layer is up: over the code, not behind it. */
+.eff-layer-leave {
+  flex: none;
+  padding-bottom: var(--s2);
 }
 
 .eff-layer-body .eff-code {
@@ -2959,6 +2971,12 @@ button.chip:hover {
 
   .eff-side-panels .panel {
     padding: var(--s2);
+  }
+
+  /* The leave prompt adds its own height; the picture steps back so every row of the
+     properties still stands in the window instead of a cut one at its edge. */
+  .eff-editor[data-leaving="true"] .eff-live {
+    max-width: 288px;
   }
 }
 

@@ -253,6 +253,34 @@ describe("the draft on the lights", () => {
     setState("html,fast-draft,presets");
   });
 
+  it("keeps the banner in its restore-error state when the draft cannot be stopped", async () => {
+    setState("html,fast-draft,presets,activate-fail,draft-stop-fail");
+    await openEditor("Edited sample");
+    await replaceSource(EDITED);
+    fireEvent.click(screen.getByRole("button", { name: "Try on the lights" }));
+    await screen.findByText("Draft on the lights.");
+    const banner = screen.getByText("Draft on the lights.").closest(".eff-draft") as HTMLElement;
+    fireEvent.click(banner.querySelector(".eff-draft-actions button:last-of-type") as HTMLElement);
+    // The save landed, the activate failed, and the Stop that would put the lights back failed
+    // too: the editor stays, with the banner asking for the Retry that settles it.
+    expect(
+      await screen.findByText("The previous effect could not be restored.", {}, { timeout: 5000 }),
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+    expect(screen.getByTestId("effect-editor")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    // The retry stops the draft, and the saved-but-not-started effect is reported and closed.
+    expect(
+      await screen.findByText(/^Edited sample is saved, but it did not start/, {}, { timeout: 5000 }),
+    ).toBeTruthy();
+    await waitFor(() => expect(screen.queryByTestId("effect-editor")).toBeNull(), { timeout: 4000 });
+    await act(async () => {
+      const status = await api.draft();
+      expect(status.active).toBe(false);
+    });
+    setState("html,fast-draft,presets");
+  });
+
   it("saves through the import route, activates the effect, and ends the draft", async () => {
     // The failed-activate test before this one saved the file under the new title.
     await openEditor("Edited sample");

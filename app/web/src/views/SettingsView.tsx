@@ -15,6 +15,7 @@ import { messageOf } from "@/lib/errors";
 import { exportConfig, importConfigFile } from "@/lib/config-transfer";
 import { BLACK_HEX } from "@/lib/color";
 import { openLogsFolder, tauriHost } from "@/lib/host";
+import { requestNavigation } from "@/lib/navigationGuard";
 import { getSnap, patchSnap, refreshAll, refreshRender, refreshSettings, retrySettings, useSnap } from "@/lib/store";
 import { fmt1 } from "@/lib/format";
 import { useToast } from "@/components/Toast";
@@ -278,7 +279,9 @@ export function SettingsView() {
                   } catch {
                     // The address carries it instead.
                   }
-                  router.push("/?map=1");
+                  // Settings cannot be open with a dirty editor (one page at a time), but the
+                  // guard keeps every page change behind the one question.
+                  requestNavigation(() => router.push("/?map=1"));
                 }}
               >
                 Map my PC again

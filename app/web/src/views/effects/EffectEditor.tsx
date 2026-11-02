@@ -137,6 +137,14 @@ export function EffectEditor({
   const firstPreview = useRef(true);
   const restoreStarted = useRef(false);
   const revealedLine = useRef<number | null>(null);
+  // The browser's Back/Forward and a held in-app page change are two different asks: the first
+  // is answered by going back past the guard entry, the second by running the held navigation.
+  const backAsked = useRef(false);
+  const allowBack = useRef(false);
+  const sentinelPushed = useRef(false);
+  // A Save whose activate failed and whose draft could not be stopped: the result waits for
+  // the Retry that ends the draft before the editor closes.
+  const pendingSaved = useRef<SavedEffect | null>(null);
   const previewRef = useRef<(retried?: boolean) => Promise<void>>(async () => {});
 
   useEffect(() => {
@@ -152,15 +160,35 @@ export function EffectEditor({
   useEffect(() => {
     if (!dirty) {
       setNavigationGuard(null);
+      // A guard entry that was never used is taken back, so one Back still leaves the page.
+      if (sentinelPushed.current) {
+        sentinelPushed.current = false;
+        window.history.back();
+      }
       return;
     }
     setNavigationGuard(() => {
+      backAsked.current = false;
       setLeaving(true);
       return false;
     });
+    // The browser's own Back and Forward belong to the router, not the shell. One extra history
+    // entry at this page's own URL catches them: Back lands on the same page, this handler puts
+    // the entry back, and the prompt asks. Discard then goes back twice: past the guard entry
+    // and past the page itself.
+    const onPop = () => {
+      if (allowBack.current) return;
+      window.history.pushState({ canvasRgbEditor: "guard" }, "", window.location.href);
+      sentinelPushed.current = true;
+      backAsked.current = true;
+      setLeaving(true);
+    };
+    window.history.pushState({ canvasRgbEditor: "guard" }, "", window.location.href);
+    sentinelPushed.current = true;
+    window.addEventListener("popstate", onPop);
     return () => {
+      window.removeEventListener("popstate", onPop);
       setNavigationGuard(null);
-      cancelNavigation();
     };
   }, [dirty]);
 
@@ -247,6 +275,9 @@ export function EffectEditor({
       mounted.current = false;
       if (previewTimer.current) clearTimeout(previewTimer.current);
       if (retryTimer.current) clearTimeout(retryTimer.current);
+      // An editor that goes away without the prompt being answered leaves no held page change.
+      setNavigationGuard(null);
+      cancelNavigation();
     },
     [],
   );
@@ -358,6 +389,13 @@ export function EffectEditor({
       setDraft(null);
       setDraftState("off");
       if (status.note) setDraftNote(status.note);
+      // A Save that was waiting for this stop may now finish and close.
+      const saved = pendingSaved.current;
+      if (saved) {
+        pendingSaved.current = null;
+        goAfterLeave();
+        onSaved(saved);
+      }
     } catch (e) {
       if (!mounted.current) return;
       setDraftState("restore-error");
@@ -465,6 +503,20 @@ export function EffectEditor({
 
   // ---- save, revert, leave -----------------------------------------------------------
 
+  /**
+   * Carries out the page change the prompt was holding, if any: a browser Back is answered by
+   * going back past the guard entry and the page, an in-app link by the navigation it held.
+   */
+  const goAfterLeave = () => {
+    if (backAsked.current) {
+      backAsked.current = false;
+      allowBack.current = true;
+      window.history.go(-2);
+    } else {
+      continueNavigation();
+    }
+  };
+
   const save = async (replace = false) => {
     if (saving) return;
     setSaveError(null);
@@ -505,14 +557,29 @@ export function EffectEditor({
       await refreshAll();
     } catch (e) {
       startError = messageOf(e);
+      setSaveError(`Saved, but it did not start: ${startError}`);
       // The saved file did not start, so the draft it would have replaced is stopped too: the
-      // lights go back to what they were before it, and the screen says what happened.
-      if (replacingDraft) await api.deleteDraft().catch(() => undefined);
+      // lights go back to what they were before it, and the screen says what happened. A stop
+      // that fails leaves the banner in its restore-error state with Retry; the editor stays
+      // open so the lights and the screen still agree.
+      if (replacingDraft) {
+        try {
+          await api.deleteDraft();
+        } catch (stopError) {
+          draftOn.current = true;
+          setDraftState("restore-error");
+          setDraftError(messageOf(stopError));
+          pendingSaved.current = { id: savedId, name: savedName, startError };
+          setSaving(false);
+          setClash(null);
+          return;
+        }
+      }
     }
     setSaving(false);
     setClash(null);
     // A page change that waited on this Save may go now.
-    continueNavigation();
+    goAfterLeave();
     onSaved({ id: savedId, name: savedName, startError });
   };
 
@@ -577,7 +644,13 @@ export function EffectEditor({
             Revert
           </Button>
           {narrow && (
-            <Button size="sm" variant="primary" disabled={!canSave} onClick={() => void save()}>
+            // The banner's Save and the prompt's Save are the primary ones while they show.
+            <Button
+              size="sm"
+              variant={leaving || running ? "default" : "primary"}
+              disabled={!canSave}
+              onClick={() => void save()}
+            >
               Save
             </Button>
           )}
@@ -618,8 +691,50 @@ export function EffectEditor({
     </div>
   );
 
+  // The prompt sits with the actions, or over the phone's code layer when that is what is open:
+  // a Back while the code layer is up must not ask a question behind it.
+  const leavePrompt = (
+    <div className="eff-leave" role="alertdialog" aria-label="Unsaved changes">
+      <span>Save your changes before leaving?</span>
+      <div className="row-wrap">
+        <Button size="sm" variant="primary" disabled={saving} onClick={() => void save()}>
+          Save
+        </Button>
+        <Button
+          size="sm"
+          variant="danger"
+          disabled={saving}
+          onClick={() => {
+            setLeaving(false);
+            // A page change that waited on the prompt goes now.
+            goAfterLeave();
+            onClose();
+          }}
+        >
+          Discard
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={() => {
+            setLeaving(false);
+            backAsked.current = false;
+            cancelNavigation();
+          }}
+        >
+          Keep editing
+        </Button>
+      </div>
+    </div>
+  );
+
   return (
-    <div className="eff-editor" data-testid="effect-editor" data-narrow={narrow ? "true" : "false"}>
+    <div
+      className="eff-editor"
+      data-testid="effect-editor"
+      data-narrow={narrow ? "true" : "false"}
+      data-leaving={leaving ? "true" : "false"}
+    >
       {draftState !== "off" && (
         <div className="eff-draft" data-state={draftState} data-draft={draft?.id ?? ""} role="status">
           <span className="eff-draft-mark" data-state={draftState} aria-hidden="true" />
@@ -781,39 +896,7 @@ export function EffectEditor({
                 </div>
               </div>
             )}
-            {leaving && (
-              <div className="eff-leave" role="alertdialog" aria-label="Unsaved changes">
-                <span>Save your changes before leaving?</span>
-                <div className="row-wrap">
-                  <Button size="sm" variant="primary" disabled={saving} onClick={() => void save()}>
-                    Save
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="danger"
-                    disabled={saving}
-                    onClick={() => {
-                      setLeaving(false);
-                      // A page change that waited on the prompt goes now.
-                      continueNavigation();
-                      onClose();
-                    }}
-                  >
-                    Discard
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => {
-                      setLeaving(false);
-                      cancelNavigation();
-                    }}
-                  >
-                    Keep editing
-                  </Button>
-                </div>
-              </div>
-            )}
+            {leaving && !(narrow && showCode) && leavePrompt}
           </div>
 
           <div className="eff-side-panels">
@@ -875,6 +958,7 @@ export function EffectEditor({
 
       {showCode && narrow && (
         <div className="eff-layer" role="dialog" aria-label="The effect's code">
+          {leaving && <div className="eff-layer-leave">{leavePrompt}</div>}
           <div className="eff-layer-body">{codePane}</div>
         </div>
       )}

@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { ToastHost, ToastProvider } from "@/components/Toast";
 import { refreshAll } from "@/lib/store";
@@ -93,6 +93,37 @@ describe("the editor at 390 px", () => {
     await screen.findByRole("heading", { name: "Sample HTML" });
     expect(screen.queryByText("The code could not be read")).toBeNull();
     setState("html");
+  });
+
+  it("keeps the layer's Save plain while the draft banner shows its own", async () => {
+    await mount();
+    fireEvent.click(screen.getByRole("button", { name: "Try on the lights" }));
+    await screen.findByText("Draft on the lights.");
+    fireEvent.click(screen.getByRole("button", { name: "Show code" }));
+    const layer = await screen.findByRole("dialog", { name: "The effect's code" });
+    const save = within(layer).getByRole("button", { name: "Save" });
+    expect(save.className).not.toContain("btn-primary");
+    // The banner's Save is the one primary on the screen.
+    const banner = screen.getByText("Draft on the lights.").closest(".eff-draft") as HTMLElement;
+    expect((within(banner).getByRole("button", { name: "Save" }) as HTMLElement).className).toContain("btn-primary");
+  });
+
+  it("asks inside the code layer when Back is pressed there", async () => {
+    await mount();
+    fireEvent.click(screen.getByRole("button", { name: "Show code" }));
+    const layer = await screen.findByRole("dialog", { name: "The effect's code" });
+    const content = document.querySelector(".cm-content") as HTMLElement;
+    content.focus();
+    fireEvent.keyDown(content, { key: "a", code: "KeyA", keyCode: 65, ctrlKey: true });
+    await act(async () => {
+      fireEvent.paste(content, { clipboardData: { getData: () => "<!-- an edit -->" } });
+    });
+    window.history.back();
+    const prompt = await screen.findByRole("alertdialog", { name: "Unsaved changes" });
+    // The layer stays up, and the question is inside it, not behind it.
+    expect(layer.contains(prompt)).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
+    expect(screen.getByRole("dialog", { name: "The effect's code" })).toBeTruthy();
   });
 
   it("asks before the sheet's Back leaves unsaved edits", async () => {

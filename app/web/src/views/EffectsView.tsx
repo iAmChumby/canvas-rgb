@@ -947,7 +947,8 @@ export function EffectsView() {
       className="rd-page rd-effects"
       onDragOver={(e) => {
         e.preventDefault();
-        setDragging(true);
+        // A drop would replace a file the editor is about to save.
+        if (!editing) setDragging(true);
       }}
       onDragLeave={(e) => {
         if (e.currentTarget === e.target) setDragging(false);
@@ -955,6 +956,7 @@ export function EffectsView() {
       onDrop={(e) => {
         e.preventDefault();
         setDragging(false);
+        if (editing) return;
         const file = e.dataTransfer.files?.[0];
         if (file) void sendImport(file, false);
       }}
@@ -978,7 +980,7 @@ export function EffectsView() {
         <FileButton
           accept=".html,text/html"
           icon={<UploadSimple size={16} />}
-          disabled={importing}
+          disabled={importing || editing}
           label="Import"
           onFile={(file) => void sendImport(file, false)}
         >

@@ -951,6 +951,8 @@ export async function demoRequest(method: string, path: string, body: unknown): 
         // A draft that does not parse leaves a running draft alone, as the daemon's does.
         parseUserEffect(`draft:${hash}`, req.html);
         const lease = scenario().has("fast-draft") ? 900 : 15_000;
+        // A new draft gets its own one refused Stop (`?state=draft-stop-fail`).
+        if (s.draft === null) s.draftStopFailed = false;
         s.draft = { html: req.html, props: { ...req.props }, hash, leaseUntil: Date.now() + lease };
         return draftStatus(s);
       }

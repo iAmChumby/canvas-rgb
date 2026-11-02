@@ -1,7 +1,11 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { ToastHost, ToastProvider } from "@/components/Toast";
-import { refreshAll } from "@/lib/store";
+import { fixtureState } from "@/lib/demoUpdate";
+import { SAMPLE_SOURCE } from "@/lib/demoEffects";
+import { patchSnap, refreshAll } from "@/lib/store";
+import { GlobalBanners } from "@/shell/GlobalBanners";
+import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
 import { Rail } from "@/shell/Rail";
 import { EffectsView } from "@/views/EffectsView";
 
@@ -82,8 +86,13 @@ async function mount() {
   const view = render(
     <ToastProvider>
       <ToastHost />
+      <GlobalBanners />
       <Rail pathname="/effects/" />
-      <EffectsView />
+      <StripSlotsProvider>
+        <StripSlot kind="title" />
+        <StripSlot kind="actions" />
+        <EffectsView />
+      </StripSlotsProvider>
     </ToastProvider>,
   );
   fireEvent.click(await screen.findByRole("button", { name: "Open Sample HTML" }));
@@ -93,13 +102,22 @@ async function mount() {
   return view;
 }
 
-async function dirty() {
+async function replaceSource(text: string) {
   const content = document.querySelector(".cm-content") as HTMLElement;
   content.focus();
   fireEvent.keyDown(content, { key: "a", code: "KeyA", keyCode: 65, ctrlKey: true });
   await act(async () => {
-    fireEvent.paste(content, { clipboardData: { getData: () => "<html><!-- a change --></html>" } });
+    fireEvent.paste(content, { clipboardData: { getData: () => text } });
   });
+}
+
+/** A change that still parses, so the prompt's Save can import it. */
+const validChange = () => replaceSource(`${SAMPLE_SOURCE}
+<!-- an edit that is not saved yet -->
+`);
+
+async function dirty() {
+  await replaceSource("<html><!-- a change --></html>");
 }
 
 const railLink = () => screen.getByRole("link", { name: /^Layout/ });
@@ -129,6 +147,69 @@ describe("leaving the editor for another page", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Keep editing" }));
     expect(push).not.toHaveBeenCalled();
     expect(screen.queryByRole("alertdialog", { name: "Unsaved changes" })).toBeNull();
+  });
+
+  it("asks before the browser's Back leaves unsaved code, and Discard goes back", async () => {
+    window.history.replaceState({}, "", "/devices/?state=html");
+    window.history.pushState({}, "", "/effects/?state=html");
+    await mount();
+    await dirty();
+    window.history.back();
+    expect(await screen.findByRole("alertdialog", { name: "Unsaved changes" })).toBeTruthy();
+    expect(window.location.pathname).toBe("/effects/");
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    await waitFor(() => expect(window.location.pathname).toBe("/devices/"));
+    expect(push).not.toHaveBeenCalled();
+  });
+
+  it("goes back with no prompt when nothing is unsaved", async () => {
+    window.history.replaceState({}, "", "/devices/?state=html");
+    window.history.pushState({}, "", "/effects/?state=html");
+    await mount();
+    window.history.back();
+    await waitFor(() => expect(window.location.pathname).toBe("/devices/"));
+    expect(screen.queryByRole("alertdialog", { name: "Unsaved changes" })).toBeNull();
+    window.history.replaceState({}, "", "/effects/?state=html");
+  });
+
+  it("carries the held rail navigation out when the prompt's Save lands", async () => {
+    window.history.replaceState({}, "", "/effects/?state=html");
+    await mount();
+    await validChange();
+    fireEvent.click(railLink());
+    const dialog = await screen.findByRole("alertdialog", { name: "Unsaved changes" });
+    push.mockClear();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(push).toHaveBeenCalledWith("/"), { timeout: 5000 });
+    expect(push.mock.calls.filter((call) => call[0] === "/").length).toBe(1);
+  });
+
+  it("asks before the update banner's Update now leaves unsaved code", async () => {
+    window.history.replaceState({}, "", "/effects/?state=html&update=available");
+    patchSnap({ update: fixtureState("available") });
+    await mount();
+    await dirty();
+    fireEvent.click(screen.getByRole("button", { name: "Update now" }));
+    expect(await screen.findByRole("alertdialog", { name: "Unsaved changes" })).toBeTruthy();
+    expect(push).not.toHaveBeenCalledWith("/updates/");
+    fireEvent.click(within(screen.getByRole("alertdialog", { name: "Unsaved changes" })).getByRole("button", { name: "Discard" }));
+    await waitFor(() => expect(push).toHaveBeenCalledWith("/updates/"));
+    patchSnap({ update: null });
+    window.history.replaceState({}, "", "/effects/?state=html");
+  });
+
+  it("does not import or take a drop while the editor is open", async () => {
+    await mount();
+    expect((screen.getByRole("button", { name: "Import" }) as HTMLButtonElement).disabled).toBe(true);
+    const imports = ((globalThis as { __imports?: unknown[] }).__imports ??= []);
+    imports.length = 0;
+    const page = document.querySelector(".rd-effects") as HTMLElement;
+    fireEvent.drop(page, {
+      dataTransfer: { files: [new File(["<html></html>"], "drop.html", { type: "text/html" })] },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(imports.length).toBe(0);
+    expect(screen.queryByText(/Drop an .html effect/)).toBeNull();
   });
 
   it("warns the browser only while the source has unsaved changes", async () => {
