@@ -827,12 +827,15 @@ impl StackEffect {
                 let first = !layer.panic_logged;
                 layer.panic_logged = true;
                 layer.hold = Hold::Faulted;
+                // A panic can leave any part of the picture behind; a faulted layer composites
+                // nothing visible, so the half-written canvas goes.
+                layer.canvas.fill([0.0, 0.0, 0.0]);
                 if first {
                     tracing::error!(
                         stack = %self.stack_id,
                         layer = %layer.id,
                         effect = %layer.effect,
-                        "a layer's effect panicked; it is faulted and the rest of the stack runs"
+                        "a layer's effect panicked; it is faulted, its picture is black and the rest of the stack runs"
                     );
                 }
                 None
@@ -1114,7 +1117,8 @@ impl StackEffect {
             if state_of(self.layers[index].hold) != state_of(before) {
                 changed = true;
             }
-            // A held or faulted layer keeps its last good canvas and is composited as usual.
+            // A held layer keeps its last good canvas and is composited as usual; a layer that
+            // panicked had its canvas blacked as it faulted, so it adds nothing to the frame.
             self.composite_layer(index, area, values, canvas);
         }
         self.resolved = resolved;

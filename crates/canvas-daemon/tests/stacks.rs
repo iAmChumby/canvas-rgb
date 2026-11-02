@@ -349,6 +349,40 @@ impl Effect for TileFailingUpdate {
     }
 }
 
+/// A fake layer that paints its top half red and panics on its second frame, so its canvas is
+/// half-written when it faults.
+struct HalfThenPanic {
+    frames: Arc<AtomicU64>,
+}
+
+impl Effect for HalfThenPanic {
+    fn schema(&self) -> PropertySchema {
+        PropertySchema {
+            id: "half".into(),
+            name: "Half".into(),
+            description: String::new(),
+            needs: InputNeeds::default(),
+            properties: Vec::new(),
+            presets: Vec::new(),
+            thumbnail: None,
+        }
+    }
+
+    fn init(&mut self, _props: &Props) {}
+
+    fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &Inputs) {
+        let frame = self.frames.fetch_add(1, Ordering::SeqCst) + 1;
+        for y in 0..canvas.height / 2 {
+            for x in 0..canvas.width {
+                canvas.set(x, y, [1.0, 0.0, 0.0]);
+            }
+        }
+        if frame >= 2 {
+            panic!("a layer's update panicked");
+        }
+    }
+}
+
 /// A leaf builder that hands every layer a [`Paint`] and counts the builds.
 fn paint_leaves(
     updates: Arc<AtomicU64>,
@@ -1857,6 +1891,38 @@ fn a_tile_failure_from_a_layers_update_refuses_the_stack_tile() {
         }
         other => panic!("the stack tile was not refused: {other:?}"),
     }
+}
+
+/// A layer that paints half its picture and then panics leaves no half-written canvas behind:
+/// the faulted layer's picture is black, so its red does not reach the frame.
+#[test]
+fn a_layer_whose_update_panics_leaves_no_half_written_picture() {
+    let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
+    let lay = layout(vec![placed("d", 0, 0.0, 0.0, 100.0, 20.0)], RenderScale::P100, SamplingMode::Nearest);
+    let stack = stack("stack:Half", vec![layer("l1", "half")]);
+    let frames = Arc::new(AtomicU64::new(0));
+    let leaves: LeafBuilder = Arc::new({
+        let frames = Arc::clone(&frames);
+        move |_id: &str| {
+            Ok(Box::new(HalfThenPanic { frames: Arc::clone(&frames) }) as Box<dyn Effect>)
+        }
+    });
+    let mut effect = StackEffect::new(&stack, leaves, live_for(&stack), areas_for(&lay, &devices))
+        .with_clock(ManualClock::new().clock());
+    effect.init(&Props::new());
+    let mut canvas = Canvas::with_scale(1.0);
+    step(&mut effect, &mut canvas);
+    assert_eq!(canvas.get(5, 5), [1.0, 0.0, 0.0], "the first frame paints the top half");
+    step(&mut effect, &mut canvas);
+    assert_eq!(
+        canvas.get(5, 5),
+        [0.0, 0.0, 0.0],
+        "the panicked layer's half-written canvas never reaches the frame"
+    );
+    assert_eq!(
+        effect.layer_status("l1").map(|(state, _)| state),
+        Some(StackLayerState::Faulted)
+    );
 }
 
 /// One frame of a directly-built compositor, at the daemon's default step.
