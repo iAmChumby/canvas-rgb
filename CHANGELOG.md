@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- The name field in the "Name this stack" dialog now fills the dialog, and a name field fills its container wherever it sits (the layer rename row, a new effect's file name). (#108)
+
 ## [0.6.0] - 2026-11-02
 
 ### Added

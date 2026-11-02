@@ -89,7 +89,19 @@ button.chip.chip-add:hover {
   min-width: 0;
 }
 
+/* A name field fills whatever container it sits in (the naming dialog, a new effect's
+   file name, the layer rename). Its old width: 0 beside flex: 1 1 auto only worked
+   when the container was a flex row; anywhere else the field stayed at its padding
+   width (#108). */
 .name-field {
+  width: 100%;
+}
+
+/* In a flex row it takes the space left of its neighbours instead of the whole line,
+   and the cap keeps it from stretching across a wide window (the preset line here,
+   preset save in the stack builder). */
+.preset-line .name-field,
+.preset-save .name-field {
   flex: 1 1 auto;
   width: 0;
   min-width: 0;
@@ -235,7 +247,8 @@ button.chip.chip-add:hover {
     order: -1;
   }
 
-  .name-field {
+  .preset-line .name-field,
+  .preset-save .name-field {
     max-width: none;
   }
 }
