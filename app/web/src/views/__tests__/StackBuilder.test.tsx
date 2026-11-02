@@ -206,6 +206,104 @@ describe("the stack builder", () => {
     }
   });
 
+  it("sends 400 ms after the last change of a burst", async () => {
+    await openBuilder();
+    await waitFor(() => expect(layerNames()).toContain("Sparkles"));
+    // The first draft's own send has to be recorded before the clock is faked and the list cleared.
+    await waitFor(() => expect(previewCalls().length).toBeGreaterThan(0));
+    previewCalls().length = 0;
+    vi.useFakeTimers();
+    try {
+      const toggle = () => screen.getByRole("button", { name: /(Hide|Show) Sparkles/ });
+      act(() => {
+        fireEvent.click(toggle());
+      });
+      act(() => {
+        vi.advanceTimersByTime(300);
+      });
+      act(() => {
+        fireEvent.click(toggle());
+      });
+      // Nothing at t=649: the last change was at 300, so the send is 400 ms after it.
+      await act(async () => {
+        vi.advanceTimersByTime(349);
+        await Promise.resolve();
+      });
+      expect(previewCalls()).toHaveLength(0);
+      await act(async () => {
+        vi.advanceTimersByTime(101);
+        await Promise.resolve();
+      });
+      expect(previewCalls()).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("sends every 400 ms while changes keep coming", async () => {
+    await openBuilder();
+    await waitFor(() => expect(layerNames()).toContain("Sparkles"));
+    // The first draft's own send has to be recorded before the clock is faked and the list cleared.
+    await waitFor(() => expect(previewCalls().length).toBeGreaterThan(0));
+    previewCalls().length = 0;
+    vi.useFakeTimers();
+    try {
+      const start = Date.now();
+      const toggle = () => screen.getByRole("button", { name: /(Hide|Show) Sparkles/ });
+      for (let at = 0; at < 900; at += 100) {
+        act(() => {
+          fireEvent.click(toggle());
+        });
+        await act(async () => {
+          vi.advanceTimersByTime(100);
+          await Promise.resolve();
+        });
+      }
+      const sent = previewCalls().map((call) => call.at - start);
+      expect(sent.length).toBeGreaterThanOrEqual(2);
+      // One send about every 400 ms of the drag, not one per change and not one only at the end.
+      expect(sent[0]).toBeGreaterThanOrEqual(350);
+      expect(sent[0]).toBeLessThanOrEqual(550);
+      const gap = sent[1]! - sent[0]!;
+      expect(gap).toBeGreaterThanOrEqual(350);
+      expect(gap).toBeLessThanOrEqual(500);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not resend a preview the daemon answered applied: false", async () => {
+    await openBuilder();
+    await waitFor(() => expect(layerNames()).toContain("Sparkles"));
+    const spy = vi.spyOn(api, "putStackPreview").mockResolvedValueOnce({
+      applied: false,
+      epoch: "0000000000000000",
+      seq: 0,
+      layers: [],
+      running: false,
+    });
+    try {
+      vi.useFakeTimers();
+      act(() => {
+        fireEvent.click(screen.getByRole("button", { name: /(Hide|Show) Sparkles/ }));
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(500);
+        await Promise.resolve();
+      });
+      expect(spy).toHaveBeenCalledTimes(1);
+      // The superseded answer is the end of that change: no retry and no resend.
+      await act(async () => {
+        vi.advanceTimersByTime(5_000);
+        await Promise.resolve();
+      });
+      expect(spy).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+      spy.mockRestore();
+    }
+  });
+
   it("opens the builder from a stack's tile in the library", async () => {
     await renderEffects("?state=complete,stack");
     const card = await screen.findByRole("button", { name: "Edit the stack Sunset glow" });
@@ -225,7 +323,8 @@ describe("the stack builder", () => {
     expect(screen.queryByRole("button", { name: "Copy an effect…" })).toBeNull();
   });
 
-  it("starts a new stack empty, with Save and Try held back", async () => {    await renderEffects("?stack=new&state=complete,stack");
+  it("starts a new stack empty, with Save and Try held back", async () => {
+    await renderEffects("?stack=new&state=complete,stack");
     await screen.findByTestId("stack-builder");
     expect(screen.getByText("Nothing to show yet")).toBeTruthy();
     expect(screen.getByText("The bottom layer is painted first.")).toBeTruthy();

@@ -177,12 +177,17 @@ export function StackBuilder({
   const session = useRef<StackSession | null>(null);
   if (!session.current) session.current = new StackSession(newEpoch());
   const previewTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const previewPendingSince = useRef(0);
+  const previewSentAt = useRef(0);
+  const previewChangedAt = useRef(0);
   const appliedSeq = useRef(0);
   const previewRetry = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastDraftKey = useRef("");
   const schemasRef = useRef<Record<string, PropertySchema | null>>({});
   const fetching = useRef(new Set<string>());
+  // One add and one effect choice at a time: a second click while the effect is being read is
+  // dropped, so two fast clicks cannot share a layer id or pass the HTML cap twice.
+  const adding = useRef(false);
+  const choosing = useRef(false);
   const draftOn = useRef(false);
   const heartbeatMs = useRef(HEARTBEAT_FALLBACK_MS);
   const leaseMs = useRef(LEASE_FALLBACK_MS);
@@ -332,7 +337,7 @@ export function StackBuilder({
   }
 
   async function sendPreview(retried = false) {
-    previewPendingSince.current = 0;
+    previewSentAt.current = Date.now();
     const current = session.current;
     if (!current) return;
     const { epoch, seq } = current.next();
@@ -359,13 +364,22 @@ export function StackBuilder({
 
   function queuePreview() {
     const now = Date.now();
-    if (previewTimer.current === null) previewPendingSince.current = now;
+    // A change that follows another within one debounce is a continuing drag: while it lasts,
+    // a send goes at least every 400 ms. A lone change always waits 400 ms after itself, so a
+    // burst that ends at t=300 sends at t=700.
+    const inStream = previewChangedAt.current > 0 && now - previewChangedAt.current < PREVIEW_DEBOUNCE_MS;
+    previewChangedAt.current = now;
+    const overdue = inStream && previewSentAt.current > 0 && now - previewSentAt.current >= PREVIEW_DEBOUNCE_MS;
     if (previewTimer.current) clearTimeout(previewTimer.current);
-    const wait = Math.max(0, PREVIEW_DEBOUNCE_MS - (now - previewPendingSince.current));
+    if (overdue) {
+      previewTimer.current = null;
+      void sendPreview();
+      return;
+    }
     previewTimer.current = setTimeout(() => {
       previewTimer.current = null;
       void sendPreview();
-    }, wait);
+    }, PREVIEW_DEBOUNCE_MS);
   }
 
   // The first draft on screen opens the preview at once; every later change waits out the
@@ -783,49 +797,81 @@ export function StackBuilder({
   };
 
   const chooseEffect = async (id: string, effect: string) => {
-    const layer = draft.layers.find((entry) => entry.id === id);
+    if (choosing.current) return;
+    const layer = draftRef.current.layers.find((entry) => entry.id === id);
     if (!layer || effect === layer.effect) return;
-    if (isHtmlEffect(effect) && !isHtmlEffect(layer.effect) && html >= MAX_HTML_LAYERS) {
+    if (isHtmlEffect(effect) && !isHtmlEffect(layer.effect) && htmlLayers(draftRef.current.layers) >= MAX_HTML_LAYERS) {
       toast(`A stack holds ${MAX_HTML_LAYERS} HTML layers`, "warn");
       return;
     }
+    choosing.current = true;
     try {
-      const detail = await api.effect(effect);
-      if (!mounted.current) return;
-      setSchemas((current) => ({ ...current, [effect]: detail.schema }));
-      patch(id, { effect, props: layerValues(detail.schema, detail.props) });
-    } catch {
-      patch(id, { effect, props: {} });
+      let detail = null;
+      try {
+        detail = await api.effect(effect);
+        if (!mounted.current) return;
+        setSchemas((current) => ({ ...current, [effect]: detail!.schema }));
+      } catch {
+        if (!mounted.current) return;
+        setSchemas((current) => ({ ...current, [effect]: null }));
+      }
+      // The draft may have moved while the effect was read: check the cap again.
+      const latest = draftRef.current.layers.find((entry) => entry.id === id);
+      if (!latest || effect === latest.effect) return;
+      if (isHtmlEffect(effect) && !isHtmlEffect(latest.effect) && htmlLayers(draftRef.current.layers) >= MAX_HTML_LAYERS) {
+        toast(`A stack holds ${MAX_HTML_LAYERS} HTML layers`, "warn");
+        return;
+      }
+      patch(id, { effect, props: detail ? layerValues(detail.schema, detail.props) : {} });
+    } finally {
+      choosing.current = false;
     }
   };
 
   const addEffect = async (effect: string) => {
-    const refusal = addLayerRefusal(draft.layers, effect);
+    if (adding.current) return;
+    const refusal = addLayerRefusal(draftRef.current.layers, effect);
     if (refusal) {
       toast(refusal, "warn");
       return;
     }
-    let schema: PropertySchema | null = null;
-    let props: Record<string, PropValue> = {};
+    adding.current = true;
     try {
-      const detail = await api.effect(effect);
-      schema = detail.schema;
-      props = detail.props;
-      setSchemas((current) => ({ ...current, [effect]: detail.schema }));
-    } catch {
-      setSchemas((current) => ({ ...current, [effect]: null }));
+      let schema: PropertySchema | null = null;
+      let props: Record<string, PropValue> = {};
+      try {
+        const detail = await api.effect(effect);
+        schema = detail.schema;
+        props = detail.props;
+        setSchemas((current) => ({ ...current, [effect]: detail.schema }));
+      } catch {
+        setSchemas((current) => ({ ...current, [effect]: null }));
+      }
+      if (!mounted.current) return;
+      // The draft may have moved while the effect was read: check the cap and pick the id
+      // against the latest draft, so two fast clicks cannot exceed the HTML cap or share an id.
+      const layers = draftRef.current.layers;
+      const lateRefusal = addLayerRefusal(layers, effect);
+      if (lateRefusal) {
+        toast(lateRefusal, "warn");
+        return;
+      }
+      const id = nextLayerId(layers);
+      if (!id) return;
+      const layer: StackLayer = {
+        ...makeLayer(effect, freeLayerName(schema?.name ?? effect, layers), schema, props),
+        id,
+      };
+      // The ref is updated with the draft, so a second click in the same tick sees this layer.
+      const next = { ...draftRef.current, layers: addLayer(layers, layer) };
+      draftRef.current = next;
+      setDraft(next);
+      setPicked(id);
+      setAddOpen(false);
+      setAddQuery("");
+    } finally {
+      adding.current = false;
     }
-    if (!mounted.current) return;
-    const id = nextLayerId(draftRef.current.layers);
-    if (!id) return;
-    const layer: StackLayer = {
-      ...makeLayer(effect, freeLayerName(schema?.name ?? effect, draftRef.current.layers), schema, props),
-      id,
-    };
-    setDraft((current) => ({ ...current, layers: addLayer(current.layers, layer) }));
-    setPicked(id);
-    setAddOpen(false);
-    setAddQuery("");
   };
 
   const remove = (id: string) => {
