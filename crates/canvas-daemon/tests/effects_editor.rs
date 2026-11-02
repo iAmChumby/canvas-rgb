@@ -1073,17 +1073,19 @@ struct SlowBuild {
 
 /// Like [`build_with_clock`], with a gated user-effect builder for activations and a fast fake
 /// builder for drafts.
-fn build_slow_activation(
-) -> (
-    axum::Router,
-    Arc<App>,
-    Arc<FakeEngine>,
-    TempHome,
-    PathBuf,
-    TestClock,
-    SlowBuild,
-    Arc<std::sync::atomic::AtomicUsize>,
-) {
+/// The app and the handles a slow-activation test reads back.
+struct SlowActivation {
+    router: axum::Router,
+    app: Arc<App>,
+    engine: Arc<FakeEngine>,
+    folder: PathBuf,
+    /// Kept alive for the whole test, so the temp folder outlives the app.
+    _home: TempHome,
+    slow: SlowBuild,
+    draft_builds: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+fn build_slow_activation() -> SlowActivation {
     let home = TempHome::new();
     let folder = home.path.join("effects");
     std::fs::create_dir_all(&folder).expect("the effects folder is created");
@@ -1128,21 +1130,20 @@ fn build_slow_activation(
     let clock = TestClock::new();
     app.draft = canvas_daemon::draft::Draft::with_builder(clock.clock(), draft_builder);
     let app = Arc::new(app);
-    (
-        api::router(app.clone()),
+    SlowActivation {
+        router: api::router(app.clone()),
         app,
         engine,
-        home,
         folder,
-        clock,
-        SlowBuild { block, started, go },
+        _home: home,
+        slow: SlowBuild { block, started, go },
         draft_builds,
-    )
+    }
 }
 
 #[tokio::test]
 async fn a_put_waits_for_an_activation_that_ends_the_draft() {
-    let (router, app, engine, _home, folder, _clock, slow, draft_builds) = build_slow_activation();
+    let SlowActivation { router, app, engine, folder, slow, draft_builds, _home } = build_slow_activation();
     add_user_effect(&app, &folder, "slow.html", MOVING);
     assert!(
         app.user_effects.schemas().iter().any(|s| s.id == "html:slow"),
