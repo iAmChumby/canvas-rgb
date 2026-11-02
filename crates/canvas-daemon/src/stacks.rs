@@ -123,6 +123,17 @@ pub fn is_html_effect(id: &str) -> bool {
     id.starts_with(crate::user_effects::USER_EFFECT_PREFIX)
 }
 
+/// The canonical id of the effect a layer names, or `None` when nothing builds it: a built-in,
+/// a user effect or a hidden onboarding one, matched by id or by display name. A layer builder
+/// takes ids, so a layer saved with "Fire" is stored as `fire`; a stack is never a layer's
+/// effect, and a name that resolves only to a stack is `None` (D95.4.8).
+pub fn layer_effect_id<'a>(known: &'a KnownEffects, effect: &str) -> Option<&'a str> {
+    if effect.starts_with(STACK_ID_PREFIX) {
+        return None;
+    }
+    known.takes(effect)
+}
+
 /// The part of a layer that decides whether it can exist at all: its id, its name and its
 /// effect. A layer that fails this is a different stack, so it is dropped at load and refused at
 /// PUT.
@@ -216,8 +227,9 @@ pub fn validate_stack(stack: &Stack, known: &KnownEffects, others: &[Stack]) -> 
 }
 
 /// The layers of a stack loaded from a file: the ones the compositor cannot run are dropped with
-/// a logged reason, and the rest of the stack runs (D95.1.6, D95.4.8).
-fn loaded_layers(stack: &Stack) -> Vec<StackLayer> {    let mut seen: Vec<String> = Vec::new();
+/// a logged reason, and the rest of the stack runs (D95.1.6, D95.4.8). A layer's effect is
+/// stored as the canonical id the builder takes, so a file that spelled a display name runs.
+fn loaded_layers(stack: &Stack, known: &KnownEffects) -> Vec<StackLayer> {    let mut seen: Vec<String> = Vec::new();
     let mut out: Vec<StackLayer> = Vec::new();
     let mut html = 0usize;
     for layer in &stack.layers {
@@ -229,6 +241,15 @@ fn loaded_layers(stack: &Stack) -> Vec<StackLayer> {    let mut seen: Vec<String
             );
             break;
         }
+        if let Err(reason) = check_layer_structure(layer, &mut seen) {
+            tracing::warn!(stack = %stack.id, %reason, "a layer was dropped from the stack");
+            continue;
+        }
+        let mut layer = layer.clone();
+        if let Some(id) = layer_effect_id(known, &layer.effect) {
+            layer.effect = id.to_string();
+        }
+        // A layer counts toward the HTML cap once it is a layer the stack can run.
         if is_html_effect(&layer.effect) {
             if html >= STACK_HTML_MAX {
                 tracing::warn!(
@@ -240,15 +261,11 @@ fn loaded_layers(stack: &Stack) -> Vec<StackLayer> {    let mut seen: Vec<String
             }
             html += 1;
         }
-        if let Err(reason) = check_layer_structure(layer, &mut seen) {
-            tracing::warn!(stack = %stack.id, %reason, "a layer was dropped from the stack");
-            continue;
-        }
-        if let Err(reason) = check_layer_values(layer) {
+        if let Err(reason) = check_layer_values(&layer) {
             // A value is not a reason to drop the layer: the compositor clamps it (D95.3.6).
             tracing::warn!(stack = %stack.id, %reason, "a layer's value is out of range; the compositor neutralises it");
         }
-        out.push(layer.clone());
+        out.push(layer);
     }
     out
 }
@@ -371,7 +388,7 @@ impl Stacks {
         };
         let mut accepted: Vec<Stack> = Vec::new();
         for stack in file.stacks.drain(..) {
-            let layers = loaded_layers(&stack);
+            let layers = loaded_layers(&stack, known);
             // The stack is checked as the compositor will run it: a value a hand-written file
             // got wrong is clamped first, so only the structure, the name and the caps can cost
             // the whole stack (D95.3.6).

@@ -785,6 +785,67 @@ async fn names_ids_caps_and_ranges_are_refused() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "a 400-wide rectangle is refused: {message}");
 }
 
+// ================================================================ a display name
+
+/// A layer saved with an effect's display name is stored with the id the builder takes, so it
+/// paints; a layer whose effect does not build reports `missing`, never an ok that draws nothing.
+#[tokio::test]
+async fn a_layer_saved_with_a_display_name_runs_that_effect() {
+    let harness = build("t-display-name");
+    assert_eq!(
+        put_stack(&harness, &stack("stack:Firey", vec![layer("l1", "Fire")])).await,
+        StatusCode::OK
+    );
+    let saved = harness.app.stacks.get("stack:Firey").expect("the stack was saved");
+    assert_eq!(saved.layers[0].effect, "fire", "the display name is stored as the id");
+
+    // Its detail says ok, and a frame over it paints.
+    let detail = json(
+        harness
+            .router
+            .clone()
+            .oneshot(request("GET", &stack_path("stack:Firey")))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(detail["layers"][0]["status"], "ok", "{detail}");
+    let mut effect = canvas_daemon::create_effect(
+        &harness.app.user_effects,
+        &harness.app.stacks,
+        "stack:Firey",
+    )
+    .expect("the stack builds");
+    effect.init(&Props::new());
+    let mut canvas = Canvas::with_scale(1.0);
+    effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+    assert!(
+        canvas.pixels.iter().any(|pixel| pixel.iter().any(|c| *c > 0.0)),
+        "the layer paints"
+    );
+
+    // A layer that names a stack is missing: `find_schema` resolves a stack, and the layer
+    // builder does not, so an ok here would be a layer that draws nothing.
+    assert_eq!(
+        put_stack(&harness, &stack("stack:Glow", vec![layer("l1", "solid")])).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        put_stack(&harness, &stack("stack:Home", vec![layer("l1", "Glow")])).await,
+        StatusCode::OK
+    );
+    let detail = json(
+        harness
+            .router
+            .clone()
+            .oneshot(request("GET", &stack_path("stack:Home")))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(detail["layers"][0]["status"], "missing_effect", "{detail}");
+}
+
 // ================================================================ test 3
 
 /// The blend table of D95.3.3 lives in `stack::blend_pixel` and is tested there, against the
