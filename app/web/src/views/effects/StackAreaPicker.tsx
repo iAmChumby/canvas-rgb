@@ -27,6 +27,10 @@ import {
 
 type Mode = "canvas" | "device" | "zone" | "rect";
 
+/** What Tab reaches inside the picker, in document order. */
+const FOCUSABLE =
+  'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
 const MODES: { value: Mode; label: string }[] = [
   { value: "canvas", label: "Whole canvas" },
   { value: "device", label: "Device" },
@@ -67,18 +71,48 @@ export function StackAreaPicker({
   const dialogRef = useRef<HTMLDivElement>(null);
   const drag = useRef<{ kind: "draw"; from: { x: number; y: number } } | { kind: "pan"; clientX: number; clientY: number; panX: number; panY: number } | null>(null);
 
-  // Escape closes the picker; the builder puts focus back on the key that opened it. The dialog
-  // itself takes focus when it opens, so the keyboard starts inside it.
+  // The dialog takes focus once, when it opens, and keeps the keyboard inside it: Tab wraps from
+  // the last control to the first, and comes back in when focus is outside. The effect depends on
+  // nothing that changes while the picker is open, so a re-render of the builder (its status poll
+  // is one a second) never takes focus back from a control inside it.
+  const closeRef = useRef(onClose);
+  useEffect(() => {
+    closeRef.current = onClose;
+  }, [onClose]);
   useEffect(() => {
     dialogRef.current?.focus();
     const onKey = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      onClose();
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeRef.current();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const dialog = dialogRef.current;
+      if (!dialog) return;
+      const items = Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE));
+      if (items.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = items[0]!;
+      const last = items[items.length - 1]!;
+      const active = document.activeElement;
+      if (!dialog.contains(active)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      } else if (event.shiftKey && (active === first || active === dialog)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (active === last || active === dialog)) {
+        event.preventDefault();
+        first.focus();
+      }
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, []);
 
   const deviceOptions = useMemo(() => {
     const ids: string[] = [];

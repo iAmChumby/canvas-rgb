@@ -90,6 +90,9 @@ import type { StackLayerStatus } from "@/proto/StackLayerStatus";
 const PREVIEW_DEBOUNCE_MS = 400;
 const HEARTBEAT_FALLBACK_MS = 5_000;
 const LEASE_FALLBACK_MS = 15_000;
+/** What Tab reaches inside a dialog, in document order. */
+const FOCUSABLE =
+  'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 const BLENDS: { value: BlendMode; label: string; note: string }[] = [
   { value: "normal", label: "Normal", note: "Normal: covers what is under it; a black part hides it." },
@@ -104,8 +107,18 @@ function nameOf(id: string): string {
   return id.startsWith("stack:") ? id.slice("stack:".length) : id;
 }
 
-function layerLabel(schemas: Record<string, PropertySchema | null>, effect: string): string {
-  return schemas[effect]?.name ?? effect;
+/** An effect's name for a row and the summary: the schema's, then the library's, and never the
+ *  raw id (its fields arrive after the stack's own read). */
+function layerLabel(
+  schemas: Record<string, PropertySchema | null>,
+  effects: EffectSummary[] | null,
+  effect: string,
+): string {
+  const schema = schemas[effect];
+  if (schema?.name) return schema.name;
+  const listed = effects?.find((entry) => entry.id === effect)?.name;
+  if (listed) return listed;
+  return schema === null ? "Missing effect" : "Loading…";
 }
 
 /** A name for a new layer that is not already one of the stack's. */
@@ -180,8 +193,12 @@ export function StackBuilder({
   const tuneRef = useRef<HTMLSpanElement>(null);
   const chooseRef = useRef<HTMLSpanElement>(null);
   const sheetRef = useRef<HTMLDivElement>(null);
-  /** The key that opened the sheet and the area picker: focus returns to them on close. */
-  const sheetOpener = useRef<HTMLElement | null>(null);
+  const backRef = useRef<HTMLSpanElement>(null);
+  const promptRef = useRef<HTMLDivElement>(null);
+  /** Where focus was when the leave prompt opened: it goes back there when the prompt closes. */
+  const leaveOpener = useRef<HTMLElement | null>(null);
+  const leaveWasOpen = useRef(false);
+  /** The key that opened the area picker: focus returns to it on close. */
   const areaOpener = useRef<HTMLElement | null>(null);
   const touchDrag = useRef<{ id: string; over: string | null } | null>(null);
   const draftRef = useRef(draft);
@@ -258,17 +275,23 @@ export function StackBuilder({
     if (opener) setTimeout(() => opener.focus(), 0);
   };
 
-  const openSheet = () => {
-    sheetOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    setSheetOpen(true);
-  };
+  const openSheet = () => setSheetOpen(true);
 
   const closeSheet = useCallback(() => setSheetOpen(false), []);
 
+  /** Keep editing: the leave prompt closes, and focus goes back where it was. */
+  const keepEditing = useCallback(() => {
+    setLeaving(false);
+    backAsked.current = false;
+    cancelNavigation();
+  }, []);
+
   // The sheet's own keys: Tab stays inside it while it is open, and Escape closes it. While the
-  // area picker is over the sheet the picker owns Escape and the sheet's trap steps aside.
+  // area picker or the leave prompt is over the sheet, that dialog owns the keys and the sheet's
+  // trap steps aside. Tab from outside the sheet comes back in rather than leaving the keyboard
+  // on the page behind it.
   useEffect(() => {
-    if (!sheetOpen || pickerFor) return;
+    if (!sheetOpen || pickerFor || leaving) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
@@ -279,11 +302,7 @@ export function StackBuilder({
       if (event.key !== "Tab") return;
       const sheet = sheetRef.current;
       if (!sheet) return;
-      const items = Array.from(
-        sheet.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-        ),
-      );
+      const items = Array.from(sheet.querySelectorAll<HTMLElement>(FOCUSABLE));
       if (items.length === 0) {
         event.preventDefault();
         sheet.focus();
@@ -291,34 +310,119 @@ export function StackBuilder({
       }
       const first = items[0]!;
       const last = items[items.length - 1]!;
-      if (event.shiftKey && (document.activeElement === first || document.activeElement === sheet)) {
+      const active = document.activeElement;
+      if (!sheet.contains(active)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+        return;
+      }
+      if (event.shiftKey && (active === first || active === sheet)) {
         event.preventDefault();
         last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
+      } else if (!event.shiftKey && (active === last || active === sheet)) {
         event.preventDefault();
         first.focus();
       }
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [sheetOpen, pickerFor]);
+  }, [sheetOpen, pickerFor, leaving]);
 
-  // The sheet is opened by Tune and focus goes back there when it closes.
+  // The sheet is opened by Tune: it takes focus, and gives it back to Tune when it closes. Tune
+  // is a key and not a remembered element, so a tap on a phone (where the body is the active
+  // element) still puts focus on the key the sheet came from. When the picked layer is gone —
+  // its Delete closed the sheet and there is no Tune left — focus goes to Add layer.
   const sheetWasOpen = useRef(false);
   useEffect(() => {
     if (sheetOpen) {
       sheetWasOpen.current = true;
       const sheet = sheetRef.current;
-      const first = sheet?.querySelector<HTMLElement>(
-        'button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
-      );
+      const first = sheet?.querySelector<HTMLElement>(FOCUSABLE);
       (first ?? sheet)?.focus();
       return;
     }
     if (!sheetWasOpen.current) return;
     sheetWasOpen.current = false;
-    sheetOpener.current?.focus();
+    const tune = tuneRef.current?.querySelector<HTMLElement>("button");
+    const add = addRef.current?.querySelector<HTMLElement>("button");
+    (tune ?? add)?.focus();
   }, [sheetOpen]);
+
+  // The leave prompt is a modal over the builder and over the sheet: it takes focus, Tab stays
+  // inside it, and Escape is Keep editing. Focus goes back where it was when it closes.
+  useEffect(() => {
+    if (leaving) {
+      leaveWasOpen.current = true;
+      const active = document.activeElement;
+      leaveOpener.current = active instanceof HTMLElement && active !== document.body ? active : null;
+      // Keep editing is the prompt's first key: it takes focus when the prompt opens.
+      promptRef.current?.querySelector<HTMLElement>(FOCUSABLE)?.focus();
+      return;
+    }
+    if (!leaveWasOpen.current) return;
+    leaveWasOpen.current = false;
+    const opener = leaveOpener.current;
+    leaveOpener.current = null;
+    const back = backRef.current?.querySelector<HTMLElement>("button");
+    const tune = tuneRef.current?.querySelector<HTMLElement>("button");
+    const add = addRef.current?.querySelector<HTMLElement>("button");
+    const target = opener && opener.isConnected ? opener : (back ?? tune ?? add);
+    target?.focus();
+  }, [leaving]);
+
+  useEffect(() => {
+    if (!leaving) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        keepEditing();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const prompt = promptRef.current;
+      if (!prompt) return;
+      const items = Array.from(prompt.querySelectorAll<HTMLElement>(FOCUSABLE));
+      if (items.length === 0) {
+        event.preventDefault();
+        prompt.focus();
+        return;
+      }
+      const first = items[0]!;
+      const last = items[items.length - 1]!;
+      const active = document.activeElement;
+      if (!prompt.contains(active)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+        return;
+      }
+      if (event.shiftKey && (active === first || active === prompt)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (active === last || active === prompt)) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [leaving, keepEditing]);
+
+  // A phone-to-desktop resize removes the sheet's Back key from the page, and a focused key that
+  // is removed leaves the keyboard on the body. Focus moves to the picked layer's row, which the
+  // desktop layout has.
+  const wasNarrow = useRef(narrow);
+  useEffect(() => {
+    const was = wasNarrow.current;
+    wasNarrow.current = narrow;
+    if (!was || narrow) return;
+    const active = document.activeElement;
+    if (active && active !== document.body) return;
+    const row = picked
+      ? document.querySelector<HTMLElement>(`.rd-layers .layer-row[data-layer-id="${picked}"]`)
+      : null;
+    row?.focus();
+  }, [narrow, picked]);
 
   // A layer removed while its sheet is open closes the sheet: `remove` does it, where the change
   // happens, rather than an effect watching the list.
@@ -865,7 +969,13 @@ export function StackBuilder({
 
   const leavePrompt = (
     <div className="rd-scrim" role="presentation">
-      <div className="rd-picker rd-confirm" role="alertdialog" aria-modal="true" aria-label="Unsaved changes">
+      <div
+        className="rd-picker rd-confirm"
+        role="alertdialog"
+        aria-modal="true"
+        aria-label="Unsaved changes"
+        ref={promptRef}
+      >
         <div className="rd-picker-head">
           <div>
             <h2>Save your changes?</h2>
@@ -873,15 +983,7 @@ export function StackBuilder({
           </div>
         </div>
         <div className="rd-picker-foot">
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => {
-              setLeaving(false);
-              backAsked.current = false;
-              cancelNavigation();
-            }}
-          >
+          <Button size="sm" variant="ghost" onClick={keepEditing}>
             Keep editing
           </Button>
           <Button
@@ -1188,7 +1290,11 @@ export function StackBuilder({
       <PageTitle
         title={name}
         context={<span className="rd-stacks-context">Stack · {count} {count === 1 ? "layer" : "layers"}</span>}
-        leading={<BackKey onClick={askLeave} />}
+        leading={
+          <span ref={backRef}>
+            <BackKey onClick={askLeave} />
+          </span>
+        }
       />
       <PageActions>
         {/* On a phone the strip carries one key: Save, as an icon with its name (D95.5.7). The
@@ -1473,7 +1579,7 @@ export function StackBuilder({
                           >
                             <DotsIcon />
                           </button>
-                          <Thumb id={layer.effect} size="sm" label={layerLabel(schemas, layer.effect)} />
+                          <Thumb id={layer.effect} size="sm" label={layerLabel(schemas, effects, layer.effect)} />
                           <span className="layer-text">
                             {renaming === layer.id ? (
                               <span onClick={(event) => event.stopPropagation()}>
@@ -1521,11 +1627,11 @@ export function StackBuilder({
                 <section className="panel rd-layer-summary" aria-label="The picked layer">
                   <div className="layer-edit-head">
                     <div className="layer-edit-title">
-                      <Thumb id={pickedLayer.effect} size="md" label={layerLabel(schemas, pickedLayer.effect)} />
+                      <Thumb id={pickedLayer.effect} size="md" label={layerLabel(schemas, effects, pickedLayer.effect)} />
                       <div>
                         <h2>{pickedLayer.name}</h2>
                         <span className="mute">
-                          {layerLabel(schemas, pickedLayer.effect)} · {areaName(pickedLayer.area, layout, devices)}
+                          {layerLabel(schemas, effects, pickedLayer.effect)} · {areaName(pickedLayer.area, layout, devices)}
                         </span>
                       </div>
                     </div>
@@ -1564,11 +1670,11 @@ export function StackBuilder({
                 <Panel className="rd-layer-edit">
                   <div className="layer-edit-head">
                     <div className="layer-edit-title">
-                      <Thumb id={pickedLayer.effect} size="md" label={layerLabel(schemas, pickedLayer.effect)} />
+                      <Thumb id={pickedLayer.effect} size="md" label={layerLabel(schemas, effects, pickedLayer.effect)} />
                       <div>
                         <h2>{pickedLayer.name}</h2>
                         <span className="mute">
-                          {layerLabel(schemas, pickedLayer.effect)} · layer {draft.layers.indexOf(pickedLayer) + 1} of{" "}
+                          {layerLabel(schemas, effects, pickedLayer.effect)} · layer {draft.layers.indexOf(pickedLayer) + 1} of{" "}
                           {count}
                         </span>
                       </div>
@@ -1604,7 +1710,7 @@ export function StackBuilder({
                                   label:
                                     schemas[pickedLayer.effect] === null
                                       ? "Missing effect"
-                                      : layerLabel(schemas, pickedLayer.effect),
+                                      : layerLabel(schemas, effects, pickedLayer.effect),
                                 },
                               ]),
                           ...(effects ?? [])
