@@ -593,7 +593,7 @@ export function StackBuilder({
 
   // ---- save -------------------------------------------------------------------------
 
-  const save = async (then?: () => void, replacing = false) => {
+  const save = async (then?: () => void, replacing = false, replaceId?: string) => {
     if (saveState === "saving") return;
     if (count === 0) {
       setSaveError("Add a layer before saving.");
@@ -616,7 +616,9 @@ export function StackBuilder({
     }
     setSaveState("saving");
     setSaveError(null);
-    const body: Stack = { id: `stack:${wanted}`, layers: draftRef.current.layers };
+    // A replace writes under the other stack's own id: the daemon overwrites that stack and
+    // nothing is deleted first, so a failed write leaves it exactly as it was.
+    const body: Stack = { id: replaceId ?? `stack:${wanted}`, layers: draftRef.current.layers };
     let saved: Stack;
     try {
       saved = await api.putStack(body.id, body);
@@ -635,8 +637,11 @@ export function StackBuilder({
     setBase(saved);
     setDraft({ id: saved.id, layers: saved.layers });
     if (isNew) {
-      setNameDraft(wanted);
-      onName(wanted);
+      // A replace keeps the other stack's own name, so the strip and the URL take the name
+      // that was stored, not the spelling the prompt collected.
+      const stored = nameOf(saved.id);
+      setNameDraft(stored);
+      onName(stored);
     }
     setSaveState("idle");
     setClash(null);
@@ -661,21 +666,24 @@ export function StackBuilder({
     then?.();
   };
 
-  /** A taken name: delete the other stack, then write this one over it. */
+  /** A taken name: overwrite the other stack under its own id in one write. Nothing is deleted
+   *  first, so a failed write leaves the other stack exactly as it was. */
   const replaceOther = async () => {
     const wanted = clash;
     if (!wanted) return;
-    const existing = otherStacks.find((entry) => entry.name.toLowerCase() === wanted.toLowerCase());
     setClash(null);
-    if (existing) {
+    let existing = otherStacks.find((entry) => entry.name.toLowerCase() === wanted.toLowerCase());
+    if (!existing) {
+      // The clash came from another window; read the list again to find the id to replace.
       try {
-        await api.deleteStack(existing.id, true);
-      } catch (e) {
-        setSaveError(messageOf(e));
-        return;
+        const answer = await api.stacks();
+        const found = answer.stacks.find((entry) => entry.name.toLowerCase() === wanted.toLowerCase());
+        if (found) existing = { id: found.id, name: found.name };
+      } catch {
+        // The PUT below answers the same clash again if it is still there.
       }
     }
-    await save(undefined, true);
+    await save(undefined, true, existing?.id);
   };
 
   const nameTheStack = () => {
@@ -959,7 +967,8 @@ export function StackBuilder({
         <div className="import-note" data-tone="ask" role="alert">
           <span>
             <span className="eff-clash-tag">name exists</span> A stack named <span className="fig">{clash}</span> already
-            exists. Replace it?
+            exists. Replace it with this stack? Its layers are overwritten; its presets and favourite stay. If it is
+            running, the lights change to this stack.
           </span>
           <div className="row-wrap">
             <Button size="sm" variant="danger" disabled={saveState === "saving"} onClick={() => void replaceOther()}>

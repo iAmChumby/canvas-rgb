@@ -1,7 +1,10 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { ToastHost, ToastProvider } from "@/components/Toast";
+import { api } from "@/lib/endpoints";
+import { ApiFailure } from "@/lib/errors";
 import { refreshAll } from "@/lib/store";
+import type { StacksResponse } from "@/proto/StacksResponse";
 import { EffectsView } from "@/views/EffectsView";
 import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
 
@@ -145,6 +148,62 @@ describe("the stack builder", () => {
     expect(saveCalls()[0]?.id).toBe("stack:Sunset glow");
     expect(saveCalls()[0]?.layers).toBe(4);
     await waitFor(() => expect(screen.queryByText("Unsaved")).toBeNull());
+  });
+
+  it("replaces a taken name in one write, and a failed write keeps the other stack", async () => {
+    // What the saved stack holds before this test: the file's tests share one demo backend.
+    const before = await api.stacks();
+    const layersBefore = before.stacks.find((entry) => entry.id === "stack:Sunset glow")?.layers ?? null;
+    // The stack list lands after the first Save, as when the name was taken by another window:
+    // the client cannot refuse the name, the daemon's 409 does, and the Replace prompt appears
+    // with the list now loaded.
+    let release: ((value: StacksResponse) => void) | null = null;
+    const listSpy = vi.spyOn(api, "stacks").mockImplementation(
+      () =>
+        new Promise<StacksResponse>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const putSpy = vi.spyOn(api, "putStack");
+    const deleteSpy = vi.spyOn(api, "deleteStack");
+    try {
+      await renderEffects("?stack=new&state=complete,stack");
+      await screen.findByTestId("stack-builder");
+      fireEvent.click(screen.getByRole("button", { name: "Add the first layer" }));
+      fireEvent.click(await screen.findByRole("option", { name: /Solid/ }));
+      await waitFor(() => expect(layerNames()).toHaveLength(1));
+
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      const naming = await screen.findByRole("dialog", { name: "Name the stack" });
+      fireEvent.change(within(naming).getByRole("textbox", { name: "Stack name" }), {
+        target: { value: "sunset glow" },
+      });
+      fireEvent.click(within(naming).getByRole("button", { name: "Save" }));
+      const clash = await screen.findByRole("alert");
+      expect(clash.textContent).toContain("Replace it with this stack?");
+      expect(clash.textContent).toContain("its presets and favourite stay");
+
+      await act(async () => {
+        release?.({
+          stacks: [{ id: "stack:Sunset glow", name: "Sunset glow", layers: 3, html_layers: 0, missing: [] }],
+        });
+        await Promise.resolve();
+      });
+
+      // The write fails: nothing was deleted, the other stack is untouched, and the error shows.
+      putSpy.mockRejectedValueOnce(new ApiFailure(500, "internal", "the store is read-only"));
+      fireEvent.click(screen.getByRole("button", { name: "Replace" }));
+      await waitFor(() => expect(screen.getByText(/read-only/)).toBeTruthy());
+      expect(deleteSpy).not.toHaveBeenCalled();
+      expect(putSpy.mock.calls.at(-1)?.[0]).toBe("stack:Sunset glow");
+      listSpy.mockRestore();
+      const still = await api.stacks();
+      expect(still.stacks.find((entry) => entry.id === "stack:Sunset glow")?.layers).toBe(layersBefore);
+    } finally {
+      listSpy.mockRestore();
+      putSpy.mockRestore();
+      deleteSpy.mockRestore();
+    }
   });
 
   it("opens the builder from a stack's tile in the library", async () => {
