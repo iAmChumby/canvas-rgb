@@ -178,7 +178,8 @@ pub async fn get_draft(State(app): State<Arc<App>>) -> Json<DraftStatus> {
 ///
 /// Starts the draft, or renews its lease (and updates its props). A draft that does not parse
 /// is refused and a running draft is left alone, so a bad keystroke mid-edit never takes the
-/// lights off the last good draft.
+/// lights off the last good draft. Exactly one of `html` and `stack` is set: #2's editor sends
+/// the HTML, the stack builder sends the stack with its epoch and sequence (D95.4.5).
 pub async fn put_draft(
     State(app): State<Arc<App>>,
     body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
@@ -186,24 +187,47 @@ pub async fn put_draft(
     let bytes = crate::api::limited_body(body, crate::api::effects::IMPORT_BODY_LIMIT)?;
     let request: DraftRequest = serde_json::from_slice(&bytes)
         .map_err(|e| ApiFailure::validation(format!("the body is not a draft request: {e}")))?;
-    if request.html.len() > canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES {
-        return Err(ApiFailure::validation(format!(
-            "the draft is {} bytes; the limit is {}",
-            request.html.len(),
-            canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES
-        )));
-    }
-    if let Err(error) = crate::draft::put(&app, &request.html, &request.props).await {
-        return Err(match error {
-            crate::draft::PutError::Build(message) => {
-                let (line, column) = crate::user_effects::error_position(&message);
-                ApiFailure::validation(crate::user_effects::load_error_sentence(&message))
-                    .at(line, column)
+    let applied = match (&request.stack, request.html.is_empty()) {
+        (Some(stack), true) => {
+            let epoch = request
+                .epoch
+                .as_deref()
+                .ok_or_else(|| ApiFailure::validation("a stack draft needs an epoch"))?;
+            let seq = request
+                .seq
+                .ok_or_else(|| ApiFailure::validation("a stack draft needs a seq"))?;
+            crate::draft::put_stack(&app, stack, &request.props, epoch, seq).await
+        }
+        (None, false) => {
+            if request.html.len() > canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES {
+                return Err(ApiFailure::validation(format!(
+                    "the draft is {} bytes; the limit is {}",
+                    request.html.len(),
+                    canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES
+                )));
             }
-            crate::draft::PutError::Internal(message) => ApiFailure::internal(message),
-        });
+            crate::draft::put(&app, &request.html, &request.props).await
+        }
+        (Some(_), false) => {
+            return Err(ApiFailure::validation(
+                "send one of html and stack, not both",
+            ))
+        }
+        (None, true) => {
+            return Err(ApiFailure::validation("a draft needs html or stack"))
+        }
     }
-    Ok(Json(crate::draft::status(&app)))
+    .map_err(|error| match error {
+        crate::draft::PutError::Build(message) => {
+            let (line, column) = crate::user_effects::error_position(&message);
+            ApiFailure::validation(crate::user_effects::load_error_sentence(&message))
+                .at(line, column)
+        }
+        crate::draft::PutError::Internal(message) => ApiFailure::internal(message),
+    })?;
+    let mut status = crate::draft::status(&app);
+    status.applied = Some(applied);
+    Ok(Json(status))
 }
 
 /// `DELETE /api/v1/effects/draft`.

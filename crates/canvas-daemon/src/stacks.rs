@@ -98,6 +98,13 @@ pub fn validate_name(name: &str, max: usize, what: &str) -> Result<(), String> {
 /// called "Fire" would take the built-in's name wherever a person types one.
 pub fn validate_stack_name(name: &str, known: &KnownEffects, others: &[Stack]) -> Result<(), String> {
     validate_name(name, STACK_NAME_MAX, "stack name")?;
+    // `PUT /api/v1/stacks/preview` is the builder's live preview, so a stack may not take that
+    // bare name: the save route and the preview route would be the same URL.
+    if name.eq_ignore_ascii_case("preview") {
+        return Err(format!(
+            "{name:?} is reserved for the stack preview route; give the stack another name"
+        ));
+    }
     if let Some(id) = known.takes(name) {
         return Err(format!(
             "{name:?} is already the name of the effect {id}; give the stack another name"
