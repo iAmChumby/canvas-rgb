@@ -57,6 +57,16 @@ pub fn find_schema(
     find_among(&all, id)
 }
 
+/// The schema a stack's layer runs with: a built-in, a user effect or a hidden onboarding one,
+/// never a stack (a layer names an effect it can build, and a stack cannot nest, D95.4.8).
+fn layer_schema(user: &UserEffects, id: &str) -> Option<PropertySchema> {
+    let mut all: Vec<PropertySchema> =
+        canvas_effects::registry().into_iter().map(|f| f().schema()).collect();
+    all.extend(user.schemas());
+    all.extend(canvas_effects::onboard::hidden_schemas());
+    find_among(&all, id)
+}
+
 /// The user effect files that did not parse, with the parser's message.
 fn failed_effects(user: &UserEffects) -> Vec<FailedEffect> {
     user.failures()
@@ -138,7 +148,7 @@ pub async fn activate(
     let stack = app.stacks.get(&schema.id);
     let mut props = match &stack {
         Some(stack) => crate::stack::stack_props(stack, &|id| {
-            find_schema(&app.user_effects, &app.stacks, id)
+            layer_schema(&app.user_effects, id)
         }),
         None => schema.defaults(),
     };
@@ -621,7 +631,7 @@ pub async fn thumbnail(
     // A stack's tile runs the file's own values, so the tile is a small picture of the stack.
     let props = match app.stacks.get(&schema.id) {
         Some(stack) => crate::stack::stack_props(&stack, &|id| {
-            find_schema(&app.user_effects, &app.stacks, id)
+            layer_schema(&app.user_effects, id)
         }),
         None => schema.defaults(),
     };

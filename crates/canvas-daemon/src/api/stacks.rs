@@ -20,20 +20,18 @@ use crate::stacks::{KnownEffects, StacksError};
 /// `GET /api/v1/stacks`.
 pub async fn list_stacks(State(app): State<Arc<App>>) -> Json<StacksResponse> {
     let stacks = app.stacks.all();
+    let known = KnownEffects::from_user(&app.user_effects);
     Json(StacksResponse {
-        stacks: stacks.iter().map(|stack| summary(&app, stack)).collect(),
+        stacks: stacks.iter().map(|stack| summary(&known, stack)).collect(),
     })
 }
 
 /// A stack as the library lists it.
-fn summary(app: &Arc<App>, stack: &Stack) -> StackSummary {
+fn summary(known: &KnownEffects, stack: &Stack) -> StackSummary {
     let missing = stack
         .layers
         .iter()
-        .filter(|layer| {
-            !layer.effect.starts_with(STACK_ID_PREFIX)
-                && effects::find_schema(&app.user_effects, &app.stacks, &layer.effect).is_none()
-        })
+        .filter(|layer| crate::stacks::layer_effect_id(known, &layer.effect).is_none())
         .map(|layer| layer.id.clone())
         .collect();
     StackSummary {
@@ -71,13 +69,14 @@ fn layer_statuses(app: &Arc<App>, stack: &Stack) -> Vec<StackLayerStatus> {
     };
     let book = app.stacks.areas();
     let areas = crate::stack::read_recovering(&book);
+    let known = KnownEffects::from_user(&app.user_effects);
     stack
         .layers
         .iter()
         .map(|layer| {
             let (status, last_ms) = if layer.effect.starts_with(STACK_ID_PREFIX) {
                 (StackLayerState::NestedStack, None)
-            } else if effects::find_schema(&app.user_effects, &app.stacks, &layer.effect).is_none() {
+            } else if crate::stacks::layer_effect_id(&known, &layer.effect).is_none() {
                 (StackLayerState::MissingEffect, None)
             } else if areas.is_empty_area(&layer.area) {
                 (StackLayerState::NoArea, None)
@@ -104,7 +103,7 @@ pub async fn put_stack(
     // The body is read as bytes, so a body that is not a stack is answered with the API's own
     // error shape and its reason (an unknown blend mode, say), not axum's plain text.
     let bytes = crate::api::limited_body(body, effects::IMPORT_BODY_LIMIT)?;
-    let stack: Stack = serde_json::from_slice(&bytes)
+    let mut stack: Stack = serde_json::from_slice(&bytes)
         .map_err(|e| ApiFailure::validation(format!("the body is not a stack: {e}")))?;
 
     // The id is the path: `stack:<name>`, or the bare name the builder uses. A save never
@@ -122,6 +121,14 @@ pub async fn put_stack(
     }
 
     let known = KnownEffects::from_user(&app.user_effects);
+    // A layer names an effect by the id the builder takes. A body that used the display name
+    // is stored with the id, so the layer paints and its status is never an ok that draws
+    // nothing; a name nothing builds is left as it is and reported missing.
+    for layer in &mut stack.layers {
+        if let Some(id) = crate::stacks::layer_effect_id(&known, &layer.effect) {
+            layer.effect = id.to_string();
+        }
+    }
     let saved = app.stacks.put(stack, &known).map_err(|error| match error {
         StacksError::Invalid(message) => ApiFailure::validation(message),
         StacksError::Conflict(message) => ApiFailure::conflict(message),
@@ -177,27 +184,43 @@ pub async fn delete_stack(
         )));
     }
 
-    let removed = app.stacks.delete(&stack.id).ok_or_else(|| {
-        ApiFailure::not_found(format!("no stack with the id or name {id}"))
-    })?;
-
     // Its presets and its favourite are keyed by the id and would be unreachable with it gone.
+    // They go first: a failed write of effects.json puts them back and leaves the stack alone.
+    let mut store = app.store.write().await;
+    let effects_before = store.effects.clone();
     let mut presets_removed = 0usize;
-    let favorite_removed = {
-        let mut store = app.store.write().await;
-        if let Some(list) = store.effects.presets.remove(&removed.id) {
-            presets_removed = list.len();
-        }
-        let before = store.effects.favorites.len();
-        store.effects.favorites.retain(|favorite| favorite != &removed.id);
-        let favorite_removed = store.effects.favorites.len() != before;
-        if let Err(e) = store.save_effects() {
-            return Err(ApiFailure::internal(format!(
-                "the stack is gone but its presets could not be saved: {e}"
+    if let Some(list) = store.effects.presets.remove(&stack.id) {
+        presets_removed = list.len();
+    }
+    let before = store.effects.favorites.len();
+    store.effects.favorites.retain(|favorite| favorite != &stack.id);
+    let favorite_removed = store.effects.favorites.len() != before;
+    if let Err(e) = store.save_effects() {
+        store.effects = effects_before;
+        return Err(ApiFailure::internal(format!(
+            "the stack and its presets were left as they were: {e}"
+        )));
+    }
+
+    let removed = match app.stacks.delete(&stack.id) {
+        Ok(Some(removed)) => removed,
+        Ok(None) => {
+            store.effects = effects_before;
+            let _ = store.save_effects();
+            return Err(ApiFailure::not_found(format!(
+                "no stack with the id or name {id}"
             )));
         }
-        favorite_removed
+        Err(e) => {
+            // The stack file was not written: put its presets and its favourite back too.
+            store.effects = effects_before;
+            let _ = store.save_effects();
+            return Err(ApiFailure::internal(format!(
+                "the stack could not be deleted, and nothing was removed: {e}"
+            )));
+        }
     };
+    drop(store);
 
     // A stack on the lights ends with black and a note, the ending a deleted prior effect gets.
     let running = app.stacks.running_id().as_deref() == Some(removed.id.as_str());

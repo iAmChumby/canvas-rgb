@@ -111,6 +111,9 @@ pub struct App {
     pub transient: crate::transient::Transient,
     /// The draft on the lights: an editor's unsaved effect, with its lease (see [`crate::draft`]).
     pub draft: crate::draft::Draft,
+    /// The input source the lights' engine was last given. An engine made later (the stack
+    /// preview) starts from the same one (D95.4.4).
+    pub input_source: Mutex<Option<Arc<dyn canvas_proto::traits::InputSource>>>,
     /// The preview render slots. A preview renders up to 30 s of a blocking thread, so at most
     /// [`crate::api::editor::PREVIEW_CONCURRENT`] run at once and the rest answer 503.
     pub preview_slots: Arc<tokio::sync::Semaphore>,
@@ -185,6 +188,7 @@ impl App {
             last_frame: Arc::default(),
             transient: Default::default(),
             draft: Default::default(),
+            input_source: Mutex::new(None),
             preview_slots: Arc::new(tokio::sync::Semaphore::new(crate::api::editor::PREVIEW_CONCURRENT)),
             store: tokio::sync::RwLock::new(store),
             engine,
@@ -239,11 +243,19 @@ impl App {
         self.stack_preview.set_layout(layout, devices);
     }
 
-    /// The input source reaches both engines at the same call sites. On this commit neither
-    /// engine is given one (see D95.4.4), so this exists for the wiring that will.
+    /// The input source reaches both engines at the same call sites. On this commit the daemon
+    /// never calls this, so neither engine has one; the app keeps the last source so an engine
+    /// made later (the preview) starts from the same one (D95.4.4).
     pub fn set_input_source(&self, source: Option<Arc<dyn canvas_proto::traits::InputSource>>) {
+        *self.input_source.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            source.clone();
         self.engine.set_input_source(source.clone());
         self.stack_preview.set_input_source(source);
+    }
+
+    /// The input source the lights' engine has.
+    pub fn input_source(&self) -> Option<Arc<dyn canvas_proto::traits::InputSource>> {
+        self.input_source.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
     }
 
     /// The preview engine, made and configured on first use. It parks while nothing watches

@@ -193,6 +193,11 @@ pub async fn put_draft(
                 .epoch
                 .as_deref()
                 .ok_or_else(|| ApiFailure::validation("a stack draft needs an epoch"))?;
+            if !crate::epoch::valid_epoch(epoch) {
+                return Err(ApiFailure::validation(format!(
+                    "the epoch {epoch:?} is not 16 hexadecimal characters, as a page makes it"
+                )));
+            }
             let seq = request
                 .seq
                 .ok_or_else(|| ApiFailure::validation("a stack draft needs a seq"))?;
@@ -223,6 +228,7 @@ pub async fn put_draft(
             ApiFailure::validation(crate::user_effects::load_error_sentence(&message))
                 .at(line, column)
         }
+        crate::draft::PutError::Validation(message) => ApiFailure::validation(message),
         crate::draft::PutError::Internal(message) => ApiFailure::internal(message),
     })?;
     let mut status = crate::draft::status(&app);

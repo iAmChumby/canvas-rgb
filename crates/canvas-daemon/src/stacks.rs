@@ -130,6 +130,17 @@ pub fn is_html_effect(id: &str) -> bool {
     id.starts_with(crate::user_effects::USER_EFFECT_PREFIX)
 }
 
+/// The canonical id of the effect a layer names, or `None` when nothing builds it: a built-in,
+/// a user effect or a hidden onboarding one, matched by id or by display name. A layer builder
+/// takes ids, so a layer saved with "Fire" is stored as `fire`; a stack is never a layer's
+/// effect, and a name that resolves only to a stack is `None` (D95.4.8).
+pub fn layer_effect_id<'a>(known: &'a KnownEffects, effect: &str) -> Option<&'a str> {
+    if effect.starts_with(STACK_ID_PREFIX) {
+        return None;
+    }
+    known.takes(effect)
+}
+
 /// The part of a layer that decides whether it can exist at all: its id, its name and its
 /// effect. A layer that fails this is a different stack, so it is dropped at load and refused at
 /// PUT.
@@ -222,9 +233,27 @@ pub fn validate_stack(stack: &Stack, known: &KnownEffects, others: &[Stack]) -> 
     Ok(())
 }
 
+/// The rules a stack must keep before it is previewed or drafted (D95.4.4, D95.4.5): the same
+/// ones a Save enforces, with the stack itself left out of the "another stack's name" rule so an
+/// existing stack can be edited. A preview or a draft that breaks one answers 422, as a Save
+/// does, instead of building a stack the Save would refuse.
+pub fn validate_preview(
+    stacks: &Stacks,
+    stack: &Stack,
+    known: &KnownEffects,
+) -> Result<(), String> {
+    let others: Vec<Stack> = stacks
+        .all()
+        .into_iter()
+        .filter(|existing| !existing.id.eq_ignore_ascii_case(&stack.id))
+        .collect();
+    validate_stack(stack, known, &others)
+}
+
 /// The layers of a stack loaded from a file: the ones the compositor cannot run are dropped with
-/// a logged reason, and the rest of the stack runs (D95.1.6, D95.4.8).
-fn loaded_layers(stack: &Stack) -> Vec<StackLayer> {
+/// a logged reason, and the rest of the stack runs (D95.1.6, D95.4.8). A layer's effect is
+/// stored as the canonical id the builder takes, so a file that spelled a display name runs.
+fn loaded_layers(stack: &Stack, known: &KnownEffects) -> Vec<StackLayer> {
     let mut seen: Vec<String> = Vec::new();
     let mut out: Vec<StackLayer> = Vec::new();
     let mut html = 0usize;
@@ -237,6 +266,15 @@ fn loaded_layers(stack: &Stack) -> Vec<StackLayer> {
             );
             break;
         }
+        if let Err(reason) = check_layer_structure(layer, &mut seen) {
+            tracing::warn!(stack = %stack.id, %reason, "a layer was dropped from the stack");
+            continue;
+        }
+        let mut layer = layer.clone();
+        if let Some(id) = layer_effect_id(known, &layer.effect) {
+            layer.effect = id.to_string();
+        }
+        // A layer counts toward the HTML cap once it is a layer the stack can run.
         if is_html_effect(&layer.effect) {
             if html >= STACK_HTML_MAX {
                 tracing::warn!(
@@ -248,17 +286,41 @@ fn loaded_layers(stack: &Stack) -> Vec<StackLayer> {
             }
             html += 1;
         }
-        if let Err(reason) = check_layer_structure(layer, &mut seen) {
-            tracing::warn!(stack = %stack.id, %reason, "a layer was dropped from the stack");
-            continue;
-        }
-        if let Err(reason) = check_layer_values(layer) {
+        if let Err(reason) = check_layer_values(&layer) {
             // A value is not a reason to drop the layer: the compositor clamps it (D95.3.6).
             tracing::warn!(stack = %stack.id, %reason, "a layer's value is out of range; the compositor neutralises it");
         }
-        out.push(layer.clone());
+        out.push(layer);
     }
     out
+}
+
+/// The stack a load validates: the layers that were kept, with the values the compositor would
+/// neutralise clamped first. The stored stack keeps the file's own values; only a structural
+/// problem, a bad name or a broken cap drops the whole stack (D95.3.6).
+fn checked_for_load(stack: &Stack, layers: Vec<StackLayer>) -> Stack {
+    let layers = layers
+        .into_iter()
+        .map(|mut layer| {
+            layer.opacity = layer.opacity.min(100);
+            if let canvas_proto::stack::LayerArea::Rect { x, y, width, height } = layer.area {
+                let finite =
+                    x.is_finite() && y.is_finite() && width.is_finite() && height.is_finite();
+                let in_range = (0.0..=320.0).contains(&width) && (0.0..=200.0).contains(&height);
+                if !finite || !in_range {
+                    // A rectangle the compositor paints nothing for (D95.3.6).
+                    layer.area = canvas_proto::stack::LayerArea::Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 0.0,
+                        height: 0.0,
+                    };
+                }
+            }
+            layer
+        })
+        .collect();
+    Stack { id: stack.id.clone(), layers }
 }
 
 /// Why a stack could not be saved.
@@ -351,16 +413,16 @@ impl Stacks {
         };
         let mut accepted: Vec<Stack> = Vec::new();
         for stack in file.stacks.drain(..) {
-            let mut candidates: Vec<Stack> = accepted.clone();
-            let name = stack.name().to_string();
-            if let Err(reason) = validate_stack_name(&name, known, &candidates) {
+            let layers = loaded_layers(&stack, known);
+            // The stack is checked as the compositor will run it: a value a hand-written file
+            // got wrong is clamped first, so only the structure, the name and the caps can cost
+            // the whole stack (D95.3.6).
+            let checked = checked_for_load(&stack, layers.clone());
+            if let Err(reason) = validate_stack(&checked, known, &accepted) {
                 tracing::warn!(stack = %stack.id, %reason, "a stack was dropped as it was loaded");
                 continue;
             }
-            let layers = loaded_layers(&stack);
-            let kept = Stack { id: stack.id.clone(), layers };
-            candidates.push(kept.clone());
-            accepted.push(kept);
+            accepted.push(Stack { id: stack.id.clone(), layers });
         }
         let mut guard = write_recovering(&self.file);
         *guard = StackFile { schema_version: STACKS_SCHEMA, stacks: accepted };
@@ -405,6 +467,9 @@ impl Stacks {
 
     /// Saves `stack`, replacing a stack of the same id (its case as stored) and refusing a name
     /// that is another stack's, ignoring case.
+    ///
+    /// The file is written first: a save that cannot be written leaves the running store as it
+    /// was, rather than holding a stack the next start will not see.
     pub fn put(&self, stack: Stack, known: &KnownEffects) -> Result<Stack, StacksError> {
         let name = stack.name().to_string();
         let mut guard = write_recovering(&self.file);
@@ -426,32 +491,38 @@ impl Stacks {
         }
         validate_stack(&stack, known, &others).map_err(StacksError::Invalid)?;
         let parsed = Stack { id: stack.id.clone(), layers: stack.layers.clone() };
-        match guard.stacks.iter_mut().find(|existing| existing.id == parsed.id) {
+        let mut file = guard.clone();
+        match file.stacks.iter_mut().find(|existing| existing.id == parsed.id) {
             Some(existing) => *existing = parsed.clone(),
-            None => guard.stacks.push(parsed.clone()),
+            None => file.stacks.push(parsed.clone()),
         }
-        let file = guard.clone();
-        drop(guard);
-        crate::storage::write_json(&self.path(), &file).map_err(|e| StacksError::Io(e.to_string()))?;
+        crate::storage::write_json(&self.path(), &file)
+            .map_err(|e| StacksError::Io(e.to_string()))?;
+        *guard = file;
         self.generation.fetch_add(1, Ordering::SeqCst);
         Ok(parsed)
     }
 
-    /// Removes a stack. `None` when there was none.
-    pub fn delete(&self, id: &str) -> Option<Stack> {
+    /// Removes a stack. `Ok(None)` when there was none.
+    ///
+    /// The file is written first, so a delete that cannot be written is an error to the caller
+    /// and the stack is still there.
+    pub fn delete(&self, id: &str) -> Result<Option<Stack>, StacksError> {
         let mut guard = write_recovering(&self.file);
-        let index = guard
+        let Some(index) = guard
             .stacks
             .iter()
-            .position(|stack| stack.id.eq_ignore_ascii_case(id) || stack.name().eq_ignore_ascii_case(id))?;
-        let removed = guard.stacks.remove(index);
-        let file = guard.clone();
-        drop(guard);
-        if let Err(error) = crate::storage::write_json(&self.path(), &file) {
-            tracing::error!(error = %error, "stacks.json could not be written after a delete");
-        }
+            .position(|stack| stack.id.eq_ignore_ascii_case(id) || stack.name().eq_ignore_ascii_case(id))
+        else {
+            return Ok(None);
+        };
+        let mut file = guard.clone();
+        let removed = file.stacks.remove(index);
+        crate::storage::write_json(&self.path(), &file)
+            .map_err(|e| StacksError::Io(e.to_string()))?;
+        *guard = file;
         self.generation.fetch_add(1, Ordering::SeqCst);
-        Some(removed)
+        Ok(Some(removed))
     }
 
     // ------------------------------------------------------------ runtime state
@@ -464,14 +535,12 @@ impl Stacks {
     /// Publishes a new area book: the layout, the render scale or the sampling mode changed.
     ///
     /// The version moves, so every running stack re-resolves its layers on its next frame and
-    /// rebuilds nothing.
+    /// rebuilds nothing. The map is built outside the lock; the version is read and bumped under
+    /// one write guard, so two publishes cannot both start from the same number.
     pub fn publish_areas(&self, layout: &canvas_proto::layout::Layout, devices: &[canvas_proto::DeviceInfo]) {
-        let version = {
-            let current = read_recovering(&self.areas);
-            current.version.wrapping_add(1)
-        };
-        let map = AreaMap::build(layout, devices, version);
+        let mut map = AreaMap::build(layout, devices, 0);
         let mut guard = write_recovering(&self.areas);
+        map.version = guard.version.wrapping_add(1);
         *guard = map;
     }
 
@@ -497,10 +566,12 @@ impl Stacks {
             let running = self.running.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(running) = running.as_ref() {
                 if running.id == stack.id && running.structure == structure {
-                    {
-                        let mut live = write_recovering(&running.live);
-                        live.replace_with(stack);
-                    }
+                    // The map is built outside the lock; the version is taken and the map
+                    // swapped in under one write guard, so a build is never under it.
+                    let mut next = LiveMap::from_stack(stack, 0);
+                    let mut live = write_recovering(&running.live);
+                    next.version = live.version.wrapping_add(1);
+                    *live = next;
                     return Arc::clone(&running.live);
                 }
             }
@@ -553,8 +624,11 @@ impl Stacks {
         let running = self.running.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(running) = running.as_ref() {
             if running.id == stack.id {
+                // Built outside the guard; the version is taken and the map swapped in under it.
+                let mut next = LiveMap::from_stack(stack, 0);
                 let mut live = write_recovering(&running.live);
-                live.replace_with(stack);
+                next.version = live.version.wrapping_add(1);
+                *live = next;
             }
         }
     }
@@ -737,8 +811,52 @@ mod tests {
         let taken = again.put(stack("stack:Sunset Glow", vec![layer("l1", "solid")]), &known);
         assert!(matches!(taken, Err(StacksError::Conflict(_))));
 
-        assert!(again.delete("stack:Sunset glow").is_some());
+        assert!(again.delete("stack:Sunset glow").expect("the delete is written").is_some());
         assert!(again.all().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A folder where `stacks.json` is a directory, so no write can land on it.
+    fn unwritable(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "canvas-rgb-stacks-unwritable-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(STACKS_FILE)).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_save_that_cannot_be_written_leaves_the_store_as_it_was() {
+        let dir = unwritable("put");
+        let store = Stacks::new(&dir);
+        let outcome = store.put(stack("stack:Fail", vec![layer("l1", "solid")]), &known());
+        assert!(matches!(outcome, Err(StacksError::Io(_))), "{outcome:?}");
+        assert!(store.all().is_empty(), "a failed save holds no stack");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_delete_that_cannot_be_written_keeps_the_stack() {
+        let dir = std::env::temp_dir().join(format!(
+            "canvas-rgb-stacks-unwritable-delete-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Stacks::new(&dir);
+        let saved = store
+            .put(stack("stack:Kept", vec![layer("l1", "solid")]), &known())
+            .expect("the first save is written");
+        // The file is replaced by a directory, so the delete cannot be written.
+        std::fs::remove_file(dir.join(STACKS_FILE)).unwrap();
+        std::fs::create_dir(dir.join(STACKS_FILE)).unwrap();
+        let outcome = store.delete("stack:Kept");
+        assert!(matches!(outcome, Err(StacksError::Io(_))), "{outcome:?}");
+        assert_eq!(store.all(), vec![saved], "the stack is still in the store");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

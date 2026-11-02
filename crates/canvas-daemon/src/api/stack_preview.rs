@@ -22,6 +22,12 @@ pub async fn put_stack_preview(
     let bytes = crate::api::limited_body(body, effects::IMPORT_BODY_LIMIT)?;
     let request: StackPreviewRequest = serde_json::from_slice(&bytes)
         .map_err(|e| ApiFailure::validation(format!("the body is not a preview request: {e}")))?;
+    if !crate::epoch::valid_epoch(&request.epoch) {
+        return Err(ApiFailure::validation(format!(
+            "the epoch {:?} is not 16 hexadecimal characters, as a page makes it",
+            request.epoch
+        )));
+    }
     let answer = crate::preview::put(&app, &request.stack, &request.epoch, request.seq)
         .await
         .map_err(|error| match error {
@@ -30,6 +36,7 @@ pub async fn put_stack_preview(
                 crate::api::editor::PREVIEW_CONCURRENT
             ))
             .with_retry_after(1),
+            PreviewError::Validation(message) => ApiFailure::validation(message),
             PreviewError::Internal(message) => ApiFailure::internal(message),
         })?;
     Ok(Json(answer))

@@ -10,6 +10,7 @@ pub mod conflict;
 pub mod displays;
 pub mod draft;
 pub mod elevated;
+pub mod epoch;
 pub mod exit_log;
 pub mod first_run;
 pub mod identify;
