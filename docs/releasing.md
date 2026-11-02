@@ -18,8 +18,8 @@ A change is **breaking** when something outside the code depends on it and stops
 - the HTTP API on port 9430 and the `canvas-rgb` CLI (routes, fields, flags, output a script reads);
 - the HTML effect format (the `<meta>` properties and the calls an effect makes);
 - the saved files: `config.toml`, `effects.json`, `layouts.json`, `zones.json`, `displays.json`,
-  `peripherals.json`, `fans.toml`. A change that needs a migration is breaking, even when the
-  migration runs by itself.
+  `peripherals.json`, `stacks.json`, `fans.toml`. A change that needs a migration is breaking, even
+  when the migration runs by itself.
 
 1.0 is the promise that these stay stable.
 

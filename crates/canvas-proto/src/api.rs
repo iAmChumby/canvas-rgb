@@ -71,6 +71,15 @@ pub mod routes {
     /// owner chose something else. A bad PUT (one that does not parse) leaves a running draft
     /// alone. Same body cap as [`EFFECTS_IMPORT`].
     pub const EFFECT_DRAFT: &str = "/api/v1/effects/draft";
+    /// `GET`: every saved stack, summarised; `PUT` is not here: a stack is written whole to
+    /// [`STACK`].
+    pub const STACKS: &str = "/api/v1/stacks";
+    /// `GET` with [`super::StackDetail`]: the whole stack and what each layer is doing.
+    /// `PUT` with a [`crate::stack::Stack`]: the whole document in, the saved stack out; 409
+    /// when the name is taken ignoring case, 422 for anything D95.1.1 refuses. `DELETE`
+    /// removes it and what points at it; 409 `in_use` while the stack runs, unless
+    /// `?force=true`.
+    pub const STACK: &str = "/api/v1/stacks/{id}";
     pub const LAYOUTS: &str = "/api/v1/layouts";
     pub const LAYOUT: &str = "/api/v1/layouts/{id}";
     /// `PUT` with [`super::SetActiveLayout`].
@@ -432,6 +441,97 @@ pub struct DeleteEffectResponse {
 pub struct DraftEnded {
     /// The same sentence a Stop carries when the prior effect could not be restored: its file
     /// is gone with the delete, so the lights are black.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub note: Option<String>,
+}
+
+/// `GET /api/v1/stacks`: one row per saved stack.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct StacksResponse {
+    pub stacks: Vec<StackSummary>,
+}
+
+/// A stack as the library lists it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct StackSummary {
+    /// `stack:` + the name.
+    pub id: String,
+    /// The id without the prefix.
+    pub name: String,
+    /// How many layers it has.
+    pub layers: u32,
+    /// How many of those are HTML effects (the slow, capped kind).
+    pub html_layers: u32,
+    /// The ids of the layers whose effect could not be found, so the library can say so.
+    #[serde(default)]
+    pub missing: Vec<String>,
+}
+
+/// What one layer of a saved stack is doing now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum StackLayerState {
+    #[default]
+    Ok,
+    /// The layer's effect id resolves to nothing (a deleted file, an unknown stock id).
+    MissingEffect,
+    /// The layer names another stack, which a stack may not contain.
+    NestedStack,
+    /// The layer's area covers no pixel: a device or zone that is gone or unplaced.
+    NoArea,
+    /// The layer's update overran its budget and is not being called for a while.
+    Held,
+    /// The layer overran its budget three times running: it is frozen on its last picture.
+    Faulted,
+}
+
+/// One layer of a stack, as `GET /api/v1/stacks/{id}` reports it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct StackLayerStatus {
+    /// The layer's id (`l1`, `l2`).
+    pub id: String,
+    pub status: StackLayerState,
+    /// The measured time of the last update that overran, in milliseconds, for a held or
+    /// faulted layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub last_ms: Option<f32>,
+}
+
+/// `GET /api/v1/stacks/{id}`: the stack itself and what each of its layers is doing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct StackDetail {
+    pub stack: crate::stack::Stack,
+    pub layers: Vec<StackLayerStatus>,
+}
+
+/// Query of `DELETE /api/v1/stacks/{id}`. A stack that is running is only deleted with
+/// `?force=true`, because the lights would go black.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DeleteStackQuery {
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// `DELETE /api/v1/stacks/{id}` answer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DeleteStackResponse {
+    pub ok: bool,
+    pub id: String,
+    /// How many presets of the stack went with it.
+    pub presets_removed: usize,
+    /// True when the stack was one of the owner's favourites.
+    pub favorite_removed: bool,
+    /// Set when the deleted stack was on the lights and they went black: the sentence the
+    /// editor shows instead of silently losing the effect.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub note: Option<String>,
