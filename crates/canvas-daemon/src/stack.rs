@@ -97,13 +97,6 @@ impl LiveMap {
             .collect();
         Self { version, layers }
     }
-
-    /// Replaces the values with another stack's, moving the generation forward. The caller holds
-    /// the guard only to assign; the map is built outside it.
-    pub fn replace_with(&mut self, stack: &Stack) {
-        let next = LiveMap::from_stack(stack, self.version.wrapping_add(1));
-        *self = next;
-    }
 }
 
 /// The live map of the stack on the engine.
@@ -360,6 +353,15 @@ impl OwnedArea {
     fn from_resolved(area: ResolvedArea<'_>) -> Self {
         Self { dest: area.dest, mask: area.mask.cloned(), whole_canvas: area.whole_canvas }
     }
+}
+
+/// One layer's resolved area and the live values they were resolved from. The frame reads both
+/// from here, so it never copies the whole live map every frame (D95.4.6).
+#[derive(Debug, Clone, PartialEq)]
+struct ResolvedLayer {
+    values: LiveLayer,
+    /// `None` is "paints nothing".
+    area: Option<OwnedArea>,
 }
 
 /// The bounding box, in logical canvas units, of every visible placement of the zones `which`
@@ -628,8 +630,8 @@ pub struct StackEffect {
     /// The versions the resolved areas were built at.
     live_version: u64,
     area_version: u64,
-    /// What each layer resolved to at those versions; `None` is "paints nothing".
-    resolved: Vec<Option<OwnedArea>>,
+    /// What each layer resolved to at those versions, with the values it resolved with.
+    resolved: Vec<ResolvedLayer>,
     /// The tile seed forwarded to every layer, when the tile path set one.
     seed: Option<canvas_proto::PropValue>,
     /// The render size the layer canvases are built for.
@@ -775,22 +777,31 @@ impl StackEffect {
     ///
     /// The masks are copied out of the book, so its lock is not held while a layer's update runs.
     fn resolve_areas(&mut self) {
-        let (live_version, live_layers) = {
+        let (live_version, area_version) = {
             let live = read_recovering(&self.live);
-            (live.version, live.layers.clone())
+            let areas = read_recovering(&self.areas);
+            (live.version, areas.version)
         };
-        let area_version = read_recovering(&self.areas).version;
         if live_version == self.live_version && area_version == self.area_version {
             return;
         }
         self.live_version = live_version;
         self.area_version = area_version;
+        // The values are copied once, when the live map or the area book moved, and kept with
+        // the area they resolved to: the frame reads them without touching either lock.
+        let live = read_recovering(&self.live);
         let areas = read_recovering(&self.areas);
         let mut resolved = Vec::with_capacity(self.layers.len());
         for layer in &self.layers {
-            let values = live_layers.get(&layer.id).unwrap_or(&layer.values);
-            resolved.push(areas.resolve(&values.area).map(OwnedArea::from_resolved));
+            let values = live
+                .layers
+                .get(&layer.id)
+                .cloned()
+                .unwrap_or_else(|| layer.values.clone());
+            let area = areas.resolve(&values.area).map(OwnedArea::from_resolved);
+            resolved.push(ResolvedLayer { values, area });
         }
+        drop(live);
         drop(areas);
         self.resolved = resolved;
     }
@@ -1015,24 +1026,22 @@ impl StackEffect {
         // with no picture does.
         canvas.fill([0.0, 0.0, 0.0]);
 
-        // The live settings are copied out once, and the guard is dropped before any update.
-        let live_layers = read_recovering(&self.live).layers.clone();
+        // The live values and the resolved areas were read together by `resolve_areas`, which
+        // copies them only when the live map or the area book moved, so nothing is copied here.
         let budget = html_budget(self.fps.load(Ordering::Relaxed));
         let now = (self.clock)();
         let mut changed = false;
-        // The resolved areas are taken out for the loop, so a layer's own update can borrow the
-        // effect mutably while its area is still in hand.
+        // The resolved layers are taken out for the loop, so a layer's own update can borrow the
+        // effect mutably while its values and its area are still in hand.
         let resolved = std::mem::take(&mut self.resolved);
 
         for index in 0..self.layers.len() {
-            let values = match live_layers.get(&self.layers[index].id) {
-                Some(values) => values.clone(),
-                None => self.layers[index].values.clone(),
-            };
+            let Some(entry) = resolved.get(index) else { continue };
+            let values = &entry.values;
             if !values.visible || values.opacity == 0 {
                 continue;
             }
-            let Some(area) = resolved.get(index).and_then(|area| area.as_ref()) else {
+            let Some(area) = entry.area.as_ref() else {
                 // The area covers nothing: a device or zone that is gone or unplaced.
                 continue;
             };
@@ -1092,7 +1101,7 @@ impl StackEffect {
                 changed = true;
             }
             // A held or faulted layer keeps its last good canvas and is composited as usual.
-            self.composite_layer(index, area, &values, canvas);
+            self.composite_layer(index, area, values, canvas);
         }
         self.resolved = resolved;
         if changed {

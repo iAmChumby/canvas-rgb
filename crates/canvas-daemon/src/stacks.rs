@@ -510,14 +510,12 @@ impl Stacks {
     /// Publishes a new area book: the layout, the render scale or the sampling mode changed.
     ///
     /// The version moves, so every running stack re-resolves its layers on its next frame and
-    /// rebuilds nothing.
+    /// rebuilds nothing. The map is built outside the lock; the version is read and bumped under
+    /// one write guard, so two publishes cannot both start from the same number.
     pub fn publish_areas(&self, layout: &canvas_proto::layout::Layout, devices: &[canvas_proto::DeviceInfo]) {
-        let version = {
-            let current = read_recovering(&self.areas);
-            current.version.wrapping_add(1)
-        };
-        let map = AreaMap::build(layout, devices, version);
+        let mut map = AreaMap::build(layout, devices, 0);
         let mut guard = write_recovering(&self.areas);
+        map.version = guard.version.wrapping_add(1);
         *guard = map;
     }
 
@@ -543,10 +541,12 @@ impl Stacks {
             let running = self.running.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(running) = running.as_ref() {
                 if running.id == stack.id && running.structure == structure {
-                    {
-                        let mut live = write_recovering(&running.live);
-                        live.replace_with(stack);
-                    }
+                    // The map is built outside the lock; the version is taken and the map
+                    // swapped in under one write guard, so a build is never under it.
+                    let mut next = LiveMap::from_stack(stack, 0);
+                    let mut live = write_recovering(&running.live);
+                    next.version = live.version.wrapping_add(1);
+                    *live = next;
                     return Arc::clone(&running.live);
                 }
             }
@@ -599,8 +599,11 @@ impl Stacks {
         let running = self.running.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(running) = running.as_ref() {
             if running.id == stack.id {
+                // Built outside the guard; the version is taken and the map swapped in under it.
+                let mut next = LiveMap::from_stack(stack, 0);
                 let mut live = write_recovering(&running.live);
-                live.replace_with(stack);
+                next.version = live.version.wrapping_add(1);
+                *live = next;
             }
         }
     }

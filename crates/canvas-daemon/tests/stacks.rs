@@ -975,12 +975,14 @@ fn masks_share(a: &Mask, b: &Mask) -> bool {
     (y0..y1).any(|y| (x0..x1).any(|x| a.contains(x, y) && b.contains(x, y)))
 }
 
+/// For each device, whether each of its LEDs has an owner.
+type OwnedLeds = Vec<Vec<bool>>;
+/// For each device, each zone's `(index, start, count)` in that device's colour list.
+type ZoneRanges = Vec<Vec<(u32, usize, usize)>>;
+
 /// The desk's LEDs from the sample plan: for each device, whether each LED has an owner, and
 /// each zone's `(index, start, count)` range in that device's colour list.
-fn desk_leds(
-    layout: &Layout,
-    devices: &[DeviceInfo],
-) -> (Vec<Vec<bool>>, Vec<Vec<(u32, usize, usize)>>) {
+fn desk_leds(layout: &Layout, devices: &[DeviceInfo]) -> (OwnedLeds, ZoneRanges) {
     let plan = stack::sample_plan(layout, devices);
     let mut owned = Vec::new();
     let mut ranges = Vec::new();
