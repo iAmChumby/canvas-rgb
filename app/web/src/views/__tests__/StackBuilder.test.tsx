@@ -304,6 +304,33 @@ describe("the stack builder", () => {
     }
   });
 
+  it("shows the daemon's validation answer for a refused Try or preview", async () => {
+    await openBuilder();
+    await waitFor(() => expect(layerNames()).toContain("Sparkles"));
+    const draftSpy = vi.spyOn(api, "putDraft").mockRejectedValueOnce(
+      new ApiFailure(422, "validation", "a stack holds at most 2 HTML layers"),
+    );
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Try on the lights" }));
+      await waitFor(() =>
+        expect(screen.getByText(/Try on the lights failed: a stack holds at most 2 HTML layers/)).toBeTruthy(),
+      );
+    } finally {
+      draftSpy.mockRestore();
+    }
+    const previewSpy = vi.spyOn(api, "putStackPreview").mockRejectedValueOnce(
+      new ApiFailure(422, "validation", "layer l1: opacity must be 0..=100"),
+    );
+    try {
+      fireEvent.click(screen.getByRole("button", { name: /(Hide|Show) Sparkles/ }));
+      await waitFor(() =>
+        expect(screen.getByText(/The preview stopped: layer l1: opacity must be 0..=100/)).toBeTruthy(),
+      );
+    } finally {
+      previewSpy.mockRestore();
+    }
+  });
+
   it("opens the builder from a stack's tile in the library", async () => {
     await renderEffects("?state=complete,stack");
     const card = await screen.findByRole("button", { name: "Edit the stack Sunset glow" });

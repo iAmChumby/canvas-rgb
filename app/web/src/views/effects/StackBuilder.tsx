@@ -1108,7 +1108,9 @@ export function StackBuilder({
                     <span className="note">
                       {previewError
                         ? `The preview stopped: ${previewError}`
-                        : "Preview only — nothing is on the lights."}
+                        : draftError
+                          ? `Try on the lights failed: ${draftError}`
+                          : "Preview only — nothing is on the lights."}
                     </span>
                     <span className="row-wrap">
                       {fpsTarget > 50 && html > 0 && (
