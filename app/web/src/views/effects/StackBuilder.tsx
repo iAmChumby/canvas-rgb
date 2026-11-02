@@ -1235,7 +1235,7 @@ export function StackBuilder({
                         </span>
                       </div>
                     </div>
-                    <span className="row-wrap" style={{ gap: 2 }}>
+                    <span className="layer-edit-actions">
                       <IconButton
                         label={`Duplicate ${pickedLayer.name}`}
                         icon={<CopySimple size={16} />}
