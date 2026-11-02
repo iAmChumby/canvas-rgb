@@ -1053,7 +1053,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
         return draftStatus(s);
       }
       if (method === "DELETE") {
-        const call = { method, at: Date.now() };
+        const call = { method, at: Date.now(), epoch: url.searchParams.get("epoch") };
         s.draftCalls.push(call);
         (globalThis as { __draft?: unknown[] }).__draft?.push(call);
         // `?state=draft-stop-fail`: the first Stop cannot restore the prior effect, so the
@@ -1062,7 +1062,12 @@ export async function demoRequest(method: string, path: string, body: unknown): 
           s.draftStopFailed = true;
           fail(503, "service_unavailable", "the previous effect could not be restored; try again");
         }
-        return endDraft(s);
+        // A Stop from a page that does not own the draft ends nothing, as the daemon's does.
+        const epoch = url.searchParams.get("epoch");
+        if (epoch !== null && s.draft !== null && s.draft.epoch !== epoch) {
+          return { ...draftStatus(s), applied: false };
+        }
+        return epoch === null ? endDraft(s) : { ...endDraft(s), applied: true };
       }
       return bad();
     }
@@ -1290,8 +1295,13 @@ export async function demoRequest(method: string, path: string, body: unknown): 
         return answer;
       }
       if (method === "DELETE") {
+        const epoch = url.searchParams.get("epoch");
+        // A page that does not own the preview drops nothing, as the daemon's does.
+        if (epoch !== null && s.stackPreviewOwner !== null && s.stackPreviewOwner.epoch !== epoch) {
+          return { ok: true, running: false, applied: false };
+        }
         s.stackPreviewOwner = null;
-        return { ok: true, running: false };
+        return { ok: true, running: false, applied: true };
       }
       return bad();
     }

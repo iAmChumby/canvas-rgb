@@ -102,8 +102,13 @@ export const api = {
   draft: () => request<DraftStatus>("GET", routes.effectsDraft),
   /** Starts the draft, or renews its lease with the current source and props. */
   putDraft: (body: DraftRequest) => request<DraftStatus>("PUT", routes.effectsDraft, body),
-  /** Stops the draft: the effect it took over from comes back. */
-  deleteDraft: () => request<DraftStatus>("DELETE", routes.effectsDraft),
+  /** Stops the draft: the effect it took over from comes back. The page's epoch goes with it, so
+   *  a page that no longer owns the lights ends nothing and is answered `applied: false`. */
+  deleteDraft: (epoch?: string) =>
+    request<DraftStatus>(
+      "DELETE",
+      epoch ? `${routes.effectsDraft}?epoch=${encodeURIComponent(epoch)}` : routes.effectsDraft,
+    ),
 
   /** Every peripheral the adapters see. The list opens nothing. */
   peripherals: () => request<{ peripherals: PeripheralRow[] }>("GET", routes.peripherals),
@@ -129,9 +134,13 @@ export const api = {
   /** Builds or updates the preview engine's stack; a superseded PUT answers `applied: false`. */
   putStackPreview: (body: StackPreviewRequest) =>
     request<StackPreviewResponse>("PUT", routes.stackPreview, body),
-  /** Drops the preview and clears the sequence watermark. */
-  deleteStackPreview: () =>
-    request<{ ok: boolean; running: boolean }>("DELETE", routes.stackPreview),
+  /** Drops the preview and clears the sequence watermark. The page's epoch goes with it, so a
+   *  page that no longer owns the preview drops nothing and is answered `applied: false`. */
+  deleteStackPreview: (epoch?: string) =>
+    request<{ ok: boolean; running: boolean; applied?: boolean }>(
+      "DELETE",
+      epoch ? `${routes.stackPreview}?epoch=${encodeURIComponent(epoch)}` : routes.stackPreview,
+    ),
 
   layouts: () => request<LayoutsResponse>("GET", routes.layouts),
   putLayout: (id: string, body: Layout) => request<Layout>("PUT", routes.layout(id), body),
