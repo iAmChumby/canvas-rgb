@@ -371,6 +371,8 @@ pub enum PutError {
     /// The draft's HTML did not build: the editor's problem (422), and a running draft is left
     /// alone.
     Build(String),
+    /// The stack's name is another stack's, ignoring case: the answer is a 409, as Save's is.
+    Conflict(String),
     /// The stack breaks a rule a Save enforces (422).
     Validation(String),
     /// The daemon could not hand the effect over: not the editor's problem (500).
@@ -381,6 +383,7 @@ impl std::fmt::Display for PutError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PutError::Build(message)
+            | PutError::Conflict(message)
             | PutError::Validation(message)
             | PutError::Internal(message) => f.write_str(message),
         }
@@ -527,10 +530,19 @@ pub async fn put_stack(
     epoch: &str,
     seq: u64,
 ) -> Result<bool, PutError> {
-    // The rules a Save enforces, so the builder never tries a stack the Save would refuse
-    // (D95.4.5, item 2): the HTML cap, the layer cap, names, ranges and nested stacks.
+    // The one check a Save also runs, on the canonical stack (D95.4.4, D95.4.5): a layer written
+    // by its display name is the id it becomes, so the HTML cap counts it, the name rule leaves
+    // out this stack by exact id as `Stacks::put` does, and the stack that is built and hashed is
+    // the one a Save would store.
+    let mut canonical = stack.clone();
     let known = crate::stacks::KnownEffects::from_user(&app.user_effects);
-    crate::stacks::validate_preview(&app.stacks, stack, &known).map_err(PutError::Validation)?;
+    crate::stacks::canonicalise_and_validate(&mut canonical, &app.stacks, &known).map_err(
+        |refusal| match refusal {
+            crate::stacks::StackRefusal::Conflict(message) => PutError::Conflict(message),
+            crate::stacks::StackRefusal::Invalid(message) => PutError::Validation(message),
+        },
+    )?;
+    let stack = &canonical;
 
     let structure = crate::preview::structure_of(app, stack);
     let mut props = crate::preview::props_of(app, stack);

@@ -36,6 +36,7 @@ pub async fn put_stack_preview(
                 crate::api::editor::PREVIEW_CONCURRENT
             ))
             .with_retry_after(1),
+            PreviewError::Conflict(message) => ApiFailure::conflict(message),
             PreviewError::Validation(message) => ApiFailure::validation(message),
             PreviewError::Internal(message) => ApiFailure::internal(message),
         })?;

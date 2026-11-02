@@ -3363,3 +3363,75 @@ async fn a_builder_that_panics_leaves_the_preview_route_free() {
         "the beat after the panic reached the preview engine"
     );
 }
+
+#[tokio::test]
+async fn a_layer_written_by_display_name_counts_as_its_html_layer_on_every_route() {
+    let harness = build("r3-display-names");
+    add_html(&harness, "Spark.html", VALID_HTML);
+    let epoch = page(0xf1);
+
+    // Two layers named "Spark" are the two HTML layers they become: allowed everywhere.
+    let two = stack(
+        "stack:TwoByName",
+        vec![layer("l1", "Spark"), layer("l2", "Spark")],
+    );
+    assert_eq!(put_stack(&harness, &two).await, StatusCode::OK);
+    assert_eq!(json(put_preview(&harness, &two, &epoch, 1).await).await["applied"], true);
+    assert_eq!(json(put_stack_draft(&harness, &two, &epoch, 1).await).await["applied"], true);
+
+    // Three are over the cap of two, on all three routes, before anything is built.
+    let three = stack(
+        "stack:ThreeByName",
+        vec![layer("l1", "Spark"), layer("l2", "Spark"), layer("l3", "Spark")],
+    );
+    assert_eq!(
+        put_stack(&harness, &three).await,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a Save counts the layers a display name becomes"
+    );
+    assert_eq!(
+        put_preview(&harness, &three, &epoch, 2).await.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a preview counts them too"
+    );
+    assert_eq!(
+        put_stack_draft(&harness, &three, &epoch, 2).await.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "and so does a stack draft"
+    );
+}
+
+#[tokio::test]
+async fn a_stack_and_its_own_name_in_another_case_are_the_same_conflict_everywhere() {
+    let harness = build("r3-name-case");
+    let epoch = page(0xf2);
+    let saved = stack("stack:Foo", vec![layer("l1", "solid")]);
+    let other_case = stack("stack:foo", vec![layer("l1", "solid")]);
+
+    assert_eq!(put_stack(&harness, &saved).await, StatusCode::OK);
+
+    // Save's answer for another case of the same name is a 409: the preview and the draft say
+    // the same, on the same rule (the stack being edited is left out by its exact id).
+    let save = put_stack(&harness, &other_case).await;
+    assert_eq!(save, StatusCode::CONFLICT);
+    let preview = put_preview(&harness, &other_case, &epoch, 1).await;
+    assert_eq!(preview.status(), StatusCode::CONFLICT);
+    let body = json(preview).await;
+    assert_eq!(body["error"], "conflict");
+    assert!(
+        body["message"].as_str().unwrap_or_default().contains("another stack's name"),
+        "the reason names the rule: {body}"
+    );
+    let draft = put_stack_draft(&harness, &other_case, &epoch, 1).await;
+    assert_eq!(draft.status(), StatusCode::CONFLICT);
+
+    // The saved stack itself is not another stack: both routes still take it.
+    assert_eq!(
+        json(put_preview(&harness, &saved, &epoch, 2).await).await["applied"],
+        true
+    );
+    assert_eq!(
+        json(put_stack_draft(&harness, &saved, &epoch, 2).await).await["applied"],
+        true
+    );
+}

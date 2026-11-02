@@ -229,6 +229,7 @@ pub async fn put_draft(
                 .at(line, column)
         }
         crate::draft::PutError::Validation(message) => ApiFailure::validation(message),
+        crate::draft::PutError::Conflict(message) => ApiFailure::conflict(message),
         crate::draft::PutError::Internal(message) => ApiFailure::internal(message),
     })?;
     let mut status = crate::draft::status(&app);

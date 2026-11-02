@@ -123,12 +123,14 @@ pub async fn put_stack(
     let known = KnownEffects::from_user(&app.user_effects);
     // A layer names an effect by the id the builder takes. A body that used the display name
     // is stored with the id, so the layer paints and its status is never an ok that draws
-    // nothing; a name nothing builds is left as it is and reported missing.
-    for layer in &mut stack.layers {
-        if let Some(id) = crate::stacks::layer_effect_id(&known, &layer.effect) {
-            layer.effect = id.to_string();
-        }
-    }
+    // nothing; a name nothing builds is left as it is and reported missing. The same helper
+    // checks the rules, so a Save, a preview and a draft refuse the same stacks.
+    crate::stacks::canonicalise_and_validate(&mut stack, &app.stacks, &known).map_err(
+        |refusal| match refusal {
+            crate::stacks::StackRefusal::Conflict(message) => ApiFailure::conflict(message),
+            crate::stacks::StackRefusal::Invalid(message) => ApiFailure::validation(message),
+        },
+    )?;
     let saved = app.stacks.put(stack, &known).map_err(|error| match error {
         StacksError::Invalid(message) => ApiFailure::validation(message),
         StacksError::Conflict(message) => ApiFailure::conflict(message),

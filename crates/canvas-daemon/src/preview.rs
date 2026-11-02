@@ -344,6 +344,8 @@ impl Default for StackPreview {
 pub enum PreviewError {
     /// Two previews already render: the answer is a 503 with `Retry-After`.
     Busy,
+    /// The stack's name is another stack's, ignoring case: the answer is a 409, as Save's is.
+    Conflict(String),
     /// The stack breaks a rule a Save enforces: the answer is a 422 with the reason.
     Validation(String),
     /// The daemon could not hand the effect over.
@@ -385,10 +387,19 @@ pub async fn put(
         return Err(PreviewError::Busy);
     };
 
-    // The rules a Save enforces, so the builder never previews a stack the Save would refuse
-    // (D95.4.4, item 2): the HTML cap, the layer cap, names, ranges and nested stacks.
+    // The one check a Save also runs, on the canonical stack (D95.4.4, D95.4.5): a layer written
+    // by its display name is the id it becomes, so the HTML cap counts it, the name rule leaves
+    // out this stack by exact id as `Stacks::put` does, and the stack that is built and hashed is
+    // the one a Save would store.
+    let mut canonical = stack.clone();
     let known = crate::stacks::KnownEffects::from_user(&app.user_effects);
-    crate::stacks::validate_preview(&app.stacks, stack, &known).map_err(PreviewError::Validation)?;
+    crate::stacks::canonicalise_and_validate(&mut canonical, &app.stacks, &known).map_err(
+        |refusal| match refusal {
+            crate::stacks::StackRefusal::Conflict(message) => PreviewError::Conflict(message),
+            crate::stacks::StackRefusal::Invalid(message) => PreviewError::Validation(message),
+        },
+    )?;
+    let stack = &canonical;
 
     let structure = structure_of(app, stack);
     let props = props_of(app, stack);

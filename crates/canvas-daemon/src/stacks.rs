@@ -233,21 +233,59 @@ pub fn validate_stack(stack: &Stack, known: &KnownEffects, others: &[Stack]) -> 
     Ok(())
 }
 
-/// The rules a stack must keep before it is previewed or drafted (D95.4.4, D95.4.5): the same
-/// ones a Save enforces, with the stack itself left out of the "another stack's name" rule so an
-/// existing stack can be edited. A preview or a draft that breaks one answers 422, as a Save
-/// does, instead of building a stack the Save would refuse.
-pub fn validate_preview(
+/// Why a stack was refused, as the route answers it: the two kinds a Save already separates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StackRefusal {
+    /// The name is another stack's, ignoring case: a 409, as `PUT /stacks/{id}` answers.
+    Conflict(String),
+    /// A name, a layer, a cap or a value breaks a rule: a 422 everywhere.
+    Invalid(String),
+}
+
+impl StackRefusal {
+    pub fn message(&self) -> &str {
+        match self {
+            StackRefusal::Conflict(message) | StackRefusal::Invalid(message) => message,
+        }
+    }
+}
+
+/// The one check every route that accepts a stack goes through: canonicalise every layer's
+/// effect to the id the builder takes, then apply the rules a Save enforces (D95.4.1, D95.4.4,
+/// D95.4.5).
+///
+/// Save, the preview and a stack draft all call it, so the three refuse the same stacks: the HTML
+/// cap counts a layer written as a display name ("Spark") as the `html:` layer it becomes, and the
+/// name rule leaves out exactly the stack being saved, by id, as `Stacks::put` does. A stack spelled
+/// with another case is another stack, and answers 409 here as it does at Save.
+///
+/// The caller builds and hashes the *canonical* stack, so a preview of a stack saved from the same
+/// layers has the same structure hash.
+pub fn canonicalise_and_validate(
+    stack: &mut Stack,
     stacks: &Stacks,
-    stack: &Stack,
     known: &KnownEffects,
-) -> Result<(), String> {
+) -> Result<(), StackRefusal> {
+    for layer in &mut stack.layers {
+        if let Some(id) = layer_effect_id(known, &layer.effect) {
+            layer.effect = id.to_string();
+        }
+    }
+    let name = stack.name().to_string();
     let others: Vec<Stack> = stacks
         .all()
         .into_iter()
-        .filter(|existing| !existing.id.eq_ignore_ascii_case(&stack.id))
+        .filter(|existing| existing.id != stack.id)
         .collect();
-    validate_stack(stack, known, &others)
+    if others
+        .iter()
+        .any(|other| other.name().eq_ignore_ascii_case(&name))
+    {
+        return Err(StackRefusal::Conflict(format!(
+            "{name:?} is already another stack's name, ignoring case"
+        )));
+    }
+    validate_stack(stack, known, &others).map_err(StackRefusal::Invalid)
 }
 
 /// The layers of a stack loaded from a file: the ones the compositor cannot run are dropped with
