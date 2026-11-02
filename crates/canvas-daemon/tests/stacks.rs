@@ -270,6 +270,31 @@ impl Effect for Paint {
     }
 }
 
+/// A fake layer whose `init` panics: the compositor must fault it, not unwind into the engine.
+struct PanickyInit;
+
+impl Effect for PanickyInit {
+    fn schema(&self) -> PropertySchema {
+        PropertySchema {
+            id: "panicky".into(),
+            name: "Panicky".into(),
+            description: String::new(),
+            needs: InputNeeds::default(),
+            properties: Vec::new(),
+            presets: Vec::new(),
+            thumbnail: None,
+        }
+    }
+
+    fn init(&mut self, _props: &Props) {
+        panic!("a layer's init panicked");
+    }
+
+    fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &Inputs) {
+        canvas.fill([1.0, 0.0, 0.0]);
+    }
+}
+
 /// A leaf builder that hands every layer a [`Paint`] and counts the builds.
 fn paint_leaves(
     updates: Arc<AtomicU64>,
@@ -1671,6 +1696,69 @@ fn the_compositor_does_not_allocate_per_frame() {
         after_first,
         "a layer's canvas was reallocated after the first frame"
     );
+}
+
+/// A layer whose `init` panics is faulted, and the rest of the stack keeps running: a panic in
+/// one layer's start never unwinds into the engine (D95.3.6).
+#[test]
+fn a_layer_whose_init_panics_is_faulted_and_the_rest_run() {
+    let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
+    let lay = layout(vec![placed("d", 0, 0.0, 0.0, 100.0, 20.0)], RenderScale::P100, SamplingMode::Nearest);
+    let stack = stack("stack:Init", vec![layer("l1", "panicky"), layer("l2", "paint")]);
+    let leaves: LeafBuilder = Arc::new(|id: &str| {
+        if id == "panicky" {
+            Ok(Box::new(PanickyInit) as Box<dyn Effect>)
+        } else {
+            Ok(Box::new(Paint {
+                colour: [0.0, 1.0, 0.0],
+                updates: Arc::new(AtomicU64::new(0)),
+                cost: None,
+                id: id.to_string(),
+            }) as Box<dyn Effect>)
+        }
+    });
+    let mut effect = StackEffect::new(&stack, leaves, live_for(&stack), areas_for(&lay, &devices))
+        .with_clock(ManualClock::new().clock());
+    effect.init(&Props::new());
+    assert_eq!(
+        effect.layer_status("l1"),
+        Some((StackLayerState::Faulted, None)),
+        "the panicking layer is faulted"
+    );
+
+    let mut canvas = Canvas::with_scale(1.0);
+    step(&mut effect, &mut canvas);
+    assert_eq!(canvas.get(5, 5), [0.0, 1.0, 0.0], "the other layer still paints");
+    assert_eq!(
+        effect.layer_status("l2").map(|(state, _)| state),
+        Some(StackLayerState::Ok),
+        "the other layer is fine"
+    );
+}
+
+/// A panic anywhere in the compositor's own frame work is a black frame for that frame, not an
+/// unwind into the engine: the clock here panics where a compositor bug would.
+#[test]
+fn a_panic_in_the_compositors_own_work_is_a_black_frame() {
+    let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
+    let lay = layout(vec![placed("d", 0, 0.0, 0.0, 100.0, 20.0)], RenderScale::P100, SamplingMode::Nearest);
+    let stack = stack("stack:Broken", vec![layer("l1", "paint")]);
+    let clock: Clock = Arc::new(|| panic!("the compositor's own work panicked"));
+    let mut effect = StackEffect::new(
+        &stack,
+        paint_leaves(Arc::new(AtomicU64::new(0)), Arc::new(AtomicUsize::new(0)), [1.0, 0.0, 0.0], None),
+        live_for(&stack),
+        areas_for(&lay, &devices),
+    )
+    .with_clock(clock);
+    effect.init(&Props::new());
+    let mut canvas = Canvas::with_scale(1.0);
+    canvas.fill([1.0, 1.0, 1.0]);
+    effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+    assert_eq!(canvas.get(5, 5), [0.0, 0.0, 0.0], "the frame is black");
+    // The stack keeps running: a second frame is black too, and nothing unwinds.
+    effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+    assert_eq!(canvas.get(5, 5), [0.0, 0.0, 0.0]);
 }
 
 /// One frame of a directly-built compositor, at the daemon's default step.

@@ -634,6 +634,8 @@ pub struct StackEffect {
     seed: Option<canvas_proto::PropValue>,
     /// The render size the layer canvases are built for.
     frame_size: (u32, u32),
+    /// True once the compositor's own frame work panicked: it logs once and keeps going.
+    frame_panicked: bool,
 }
 
 impl StackEffect {
@@ -696,6 +698,7 @@ impl StackEffect {
             resolved: Vec::new(),
             seed: None,
             frame_size: (0, 0),
+            frame_panicked: false,
         }
     }
 
@@ -952,19 +955,60 @@ impl Effect for StackEffect {
         let width = ((CANVAS_WIDTH as f32 * scale).round() as u32).max(1);
         let height = ((CANVAS_HEIGHT as f32 * scale).round() as u32).max(1);
         self.fit_canvases(width, height);
+        // A reactivation clears a fault (D95.3.5); a layer whose start panics below faults again.
+        self.clear_faults();
         let seed = self.seed.clone();
         for layer in &mut self.layers {
-            if let Some(effect) = layer.built.as_mut() {
-                effect.init(&layer_props(props, &layer.id, seed.as_ref()));
+            let Some(effect) = layer.built.as_mut() else { continue };
+            let layer_props = layer_props(props, &layer.id, seed.as_ref());
+            // A panic in one layer's start is a faulted layer, not a dead render thread
+            // (D95.3.6): the rest of the stack starts and runs.
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                effect.init(&layer_props);
+            }));
+            if outcome.is_err() {
+                layer.hold = Hold::Faulted;
+                layer.panic_logged = true;
+                tracing::error!(
+                    stack = %self.stack_id,
+                    layer = %layer.id,
+                    effect = %layer.effect,
+                    "a layer's effect panicked while it started; it is faulted and the rest of the stack runs"
+                );
             }
         }
-        // A reactivation clears a fault (D95.3.5).
-        self.clear_faults();
         self.resolve_areas();
         self.report_statuses();
     }
 
     fn update(&mut self, dt: f32, canvas: &mut Canvas, inputs: &Inputs) {
+        // The compositor's own work is guarded as each layer's update is: a panic in the area
+        // resolution, the canvas fit or the composite is a black frame for this frame, logged
+        // once, and the stack keeps running (D95.3.6). It never unwinds into the engine.
+        let frame = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.frame(dt, canvas, inputs);
+        }));
+        if frame.is_err() {
+            canvas.fill([0.0, 0.0, 0.0]);
+            // A panic may have left the resolved areas taken out of the compositor; the next
+            // frame resolves them again.
+            self.resolved.clear();
+            self.live_version = u64::MAX;
+            self.area_version = u64::MAX;
+            if !self.frame_panicked {
+                self.frame_panicked = true;
+                tracing::error!(
+                    stack = %self.stack_id,
+                    "the stack's own frame work panicked; the frame is black and the stack keeps running"
+                );
+            }
+        }
+    }
+}
+
+impl StackEffect {
+    /// One frame of the compositor's own work, run inside [`StackEffect::update`]'s guard.
+    fn frame(&mut self, dt: f32, canvas: &mut Canvas, inputs: &Inputs) {
         self.fit_canvases(canvas.width, canvas.height);
         self.resolve_areas();
         // The frame starts black: a stack with nothing to show paints black, as every effect
