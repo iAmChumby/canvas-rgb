@@ -385,6 +385,29 @@ To take an effect out again, call the API. It needs the token, like every other 
 DELETE /api/v1/effects/html:my-effect
 ```
 
+## Edit an effect's code in the app
+
+The Effects page has a **More** menu with **New from code** under "Advanced". *Copy* starts from
+any HTML effect in the library, a user one or a stock one the daemon ships, and keeps that file's
+author and licence comment at the top. *Blank* starts from the smallest file that runs: the
+structure above, two properties and a draw loop that moves. A Rust built-in has no HTML file, so
+it is not offered as a copy.
+
+The editor shows the daemon's preview of the draft beside the code: a few frames rendered a
+moment after typing stops, with the runtime's errors marked on the line they came from, and the
+check's warnings under the code. The property controls come from the file's own
+`<meta property>` tags, so the draft is tried with the same controls the effect gets in the
+library. **Show code** hides the code pane when the preview and the controls are what you need.
+
+**Try on the lights** runs the draft on the devices without writing anything. It keeps running
+while the editor is open, stops when you press Stop or leave the editor, and the effect that ran
+before comes back. A preset key inside the editor sets the draft's values; it never starts the
+saved effect.
+
+**Save** writes the file into the effects folder, starts it, and the library shows it. A file of
+the same name is replaced only after the editor asks. **Edit code**, beside Delete on any
+`html:` effect, opens that file in the same editor.
+
 ## A complete example
 
 This effect is a bright head that crosses the canvas and leaves a fading trail behind

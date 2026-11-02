@@ -3,6 +3,7 @@
 import { useEffect } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { useSnap } from "@/lib/store";
+import { requestNavigation } from "@/lib/navigationGuard";
 import { markRedirected, redirectedThisLaunch, shouldOpen } from "@/views/editor/flow";
 
 /**
@@ -19,7 +20,9 @@ export function OnboardingGate() {
     if (!status || redirectedThisLaunch()) return;
     markRedirected();
     const onLayoutPage = pathname === "/" || pathname === "";
-    if (!onLayoutPage && shouldOpen(status)) router.replace("/");
+    // The gate never runs while the code editor is open (the onboarding owns the window), but
+    // the guard costs nothing and keeps every navigation behind the one question.
+    if (!onLayoutPage && shouldOpen(status)) requestNavigation(() => router.replace("/"));
   }, [status, pathname, router]);
 
   return null;

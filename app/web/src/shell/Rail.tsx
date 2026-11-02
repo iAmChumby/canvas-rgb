@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import type { Icon } from "@phosphor-icons/react";
 import { Fan, GameController, Gear, Monitor, Circuitry, SquaresFour, Sparkle } from "@phosphor-icons/react";
@@ -8,6 +9,7 @@ import { useToasts } from "@/components/Toast";
 import { BrandMark, Wordmark } from "@/components/BrandMark";
 import { useSnap } from "@/lib/store";
 import { useRailData, type RailValues } from "@/shell/RailData";
+import { hasNavigationGuard, requestNavigation } from "@/lib/navigationGuard";
 import { RailDeck } from "@/shell/RailDeck";
 
 export interface NavItem {
@@ -163,6 +165,7 @@ export function Rail({ pathname }: { pathname: string }) {
 
 function RailLink({ item, current, children }: { item: NavItem; current: boolean; children?: ReactNode }) {
   const Glyph = item.icon;
+  const router = useRouter();
   return (
     <Link
       href={item.href}
@@ -170,6 +173,13 @@ function RailLink({ item, current, children }: { item: NavItem; current: boolean
       className="rail-link"
       data-label={item.label}
       aria-current={current ? "page" : undefined}
+      onClick={(e) => {
+        // An editor with unsaved code asks before the page goes. Without a guard the link
+        // navigates as it always did.
+        if (!hasNavigationGuard()) return;
+        e.preventDefault();
+        requestNavigation(() => router.push(item.href));
+      }}
     >
       <span className="rail-icon" aria-hidden="true">
         <Glyph size={18} weight={current ? "fill" : "regular"} />

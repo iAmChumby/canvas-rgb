@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { startSync, useSnap, getSnap, patchSnap, refreshAll, refreshStatus, statusRetry } from "@/lib/store";
 import { startHueTint, startPreview, stopPreview } from "@/lib/preview";
 import { onNavigate } from "@/lib/host";
+import { requestNavigation } from "@/lib/navigationGuard";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
 import { Rail, NAV } from "@/shell/Rail";
@@ -84,7 +85,7 @@ function Frame({ children }: { children: ReactNode }) {
     let unlisten: (() => void) | null = null;
     void onNavigate((page) => {
       const path = PAGE_PATHS[page];
-      if (path) router.push(path);
+      if (path) requestNavigation(() => router.push(path));
     }).then((u) => {
       if (stopped) u();
       else unlisten = u;
@@ -169,7 +170,7 @@ function Frame({ children }: { children: ReactNode }) {
         group: "Pages",
         label: `Go to ${item.label}`,
         hint: item.href,
-        run: () => router.push(item.href),
+        run: () => requestNavigation(() => router.push(item.href)),
       });
     }
     list.push({

@@ -201,18 +201,23 @@ export function PresetStrip({
   const chipFor = (p: Preset, mine: boolean) => {
     const lit = running?.name === p.name;
     const marked = lit && running.modified;
+    // A built-in preset added under a name this owner's preset already uses wins: the daemon
+    // looks up built-ins first, so the user's key cannot be reached until it is renamed.
+    const shadowed = mine && builtIn.some((b) => b.name.toLowerCase() === p.name.toLowerCase());
     const chip = (
       <Chip
         key={p.name}
-        label={`Apply preset ${p.name}${marked ? " (modified)" : ""}`}
+        label={`Apply preset ${p.name}${marked ? " (modified)" : ""}${shadowed ? " (shadowed)" : ""}`}
         pressed={lit}
         marked={marked}
+        title={shadowed ? "A built-in preset now has this name; the built-in wins" : undefined}
         onClick={() => {
           setError(null);
           void attempt("apply", () => onApply(p.name));
         }}
       >
         {p.name}
+        {shadowed && <span className="preset-shadowed">shadowed</span>}
       </Chip>
     );
     if (!mine) return chip;
