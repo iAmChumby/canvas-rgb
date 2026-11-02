@@ -7022,6 +7022,14 @@ button.chip:hover {
   fill: var(--a1);
 }
 
+/* The size tag is a readout, not text to select: a drag on the desk must not highlight it. */
+.rd-desk .size-tag,
+.rd-desk .size-text {
+  user-select: none;
+  -webkit-user-select: none;
+  pointer-events: none;
+}
+
 .rd-desk .size-text {
   fill: var(--on-accent);
   font: 500 8px var(--fm);
