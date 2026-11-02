@@ -540,6 +540,91 @@ impl Effect for TileFailingInit {
     fn update(&mut self, _dt: f32, _canvas: &mut Canvas, _inputs: &Inputs) {}
 }
 
+/// A fake tile layer whose `update` unwinds with the tile render's own failure payload: a stack
+/// tile must refuse the tile rather than cache a picture the failing layer never drew.
+struct TileFailingUpdate;
+
+impl Effect for TileFailingUpdate {
+    fn schema(&self) -> PropertySchema {
+        PropertySchema {
+            id: "tile-update".into(),
+            name: "Tile update".into(),
+            description: String::new(),
+            needs: InputNeeds::default(),
+            properties: Vec::new(),
+            presets: Vec::new(),
+            thumbnail: None,
+        }
+    }
+
+    fn init(&mut self, _props: &Props) {}
+
+    fn update(&mut self, _dt: f32, _canvas: &mut Canvas, _inputs: &Inputs) {
+        std::panic::resume_unwind(Box::new(canvas_daemon::thumbnail::TileFailure {
+            reason: "the layer's script failed while the tile was drawn".into(),
+            load_dependent: false,
+        }));
+    }
+}
+
+/// A fake layer that paints its top half red and panics on its second frame, so its canvas is
+/// half-written when it faults.
+struct HalfThenPanic {
+    frames: Arc<AtomicU64>,
+}
+
+impl Effect for HalfThenPanic {
+    fn schema(&self) -> PropertySchema {
+        PropertySchema {
+            id: "half".into(),
+            name: "Half".into(),
+            description: String::new(),
+            needs: InputNeeds::default(),
+            properties: Vec::new(),
+            presets: Vec::new(),
+            thumbnail: None,
+        }
+    }
+
+    fn init(&mut self, _props: &Props) {}
+
+    fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &Inputs) {
+        let frame = self.frames.fetch_add(1, Ordering::SeqCst) + 1;
+        for y in 0..canvas.height / 2 {
+            for x in 0..canvas.width {
+                canvas.set(x, y, [1.0, 0.0, 0.0]);
+            }
+        }
+        if frame >= 2 {
+            panic!("a layer's update panicked");
+        }
+    }
+}
+
+/// A fake layer whose output breaks the canvas invariant: it empties its own picture, which the
+/// composite path reads. There the panic comes from `composite_layer`, not from the layer.
+struct BrokeItsCanvas;
+
+impl Effect for BrokeItsCanvas {
+    fn schema(&self) -> PropertySchema {
+        PropertySchema {
+            id: "broken".into(),
+            name: "Broken".into(),
+            description: String::new(),
+            needs: InputNeeds::default(),
+            properties: Vec::new(),
+            presets: Vec::new(),
+            thumbnail: None,
+        }
+    }
+
+    fn init(&mut self, _props: &Props) {}
+
+    fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &Inputs) {
+        canvas.pixels.clear();
+    }
+}
+
 /// A leaf builder that hands every layer a [`Paint`] and counts the builds.
 fn paint_leaves(
     updates: Arc<AtomicU64>,
@@ -1983,10 +2068,10 @@ fn a_layer_whose_init_panics_is_faulted_and_the_rest_run() {
     );
 }
 
-/// A panic anywhere in the compositor's own frame work is a black frame for that frame, not an
-/// unwind into the engine: the clock here panics where a compositor bug would.
+/// A panic in the compositor's own frame work is a black frame for that frame, not an unwind
+/// into the engine: the clock here panics where a compositor bug would.
 #[test]
-fn a_panic_in_the_compositors_own_work_is_a_black_frame() {
+fn a_panic_in_the_compositor_clock_is_a_black_frame() {
     let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
     let lay = layout(vec![placed("d", 0, 0.0, 0.0, 100.0, 20.0)], RenderScale::P100, SamplingMode::Nearest);
     let stack = stack("stack:Broken", vec![layer("l1", "paint")]);
@@ -2008,10 +2093,10 @@ fn a_panic_in_the_compositors_own_work_is_a_black_frame() {
     assert_eq!(canvas.get(5, 5), [0.0, 0.0, 0.0]);
 }
 
-/// A tile's own failure unwinds through the layer's start: the stack hands it to the tile
-/// render, which refuses the tile, instead of faulting the layer and drawing a different picture.
+/// A tile's own failure unwinds through the layer's start: `StackEffect::init` hands the payload
+/// on as it is, rather than faulting the layer and drawing a different picture.
 #[test]
-fn a_tile_failure_from_a_layers_init_reaches_the_tile_render() {
+fn a_tile_failure_from_a_layers_init_is_handed_on_by_the_stacks_init() {
     let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
     let lay = layout(vec![placed("d", 0, 0.0, 0.0, 100.0, 20.0)], RenderScale::P100, SamplingMode::Nearest);
     let stack = stack("stack:Tile", vec![layer("l1", "tile")]);
@@ -2025,6 +2110,82 @@ fn a_tile_failure_from_a_layers_init_reaches_the_tile_render() {
     assert!(
         payload.downcast_ref::<canvas_daemon::thumbnail::TileFailure>().is_some(),
         "the payload is still the tile's own"
+    );
+}
+
+/// A tile's own failure raised by a layer's `update` is handed on to the tile render too: the
+/// stack tile is refused (`RenderError::Failed`) instead of being cached with that layer missing.
+#[test]
+fn a_tile_failure_from_a_layers_update_refuses_the_stack_tile() {
+    let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
+    let lay = layout(vec![placed("d", 0, 0.0, 0.0, 100.0, 20.0)], RenderScale::P100, SamplingMode::Nearest);
+    let stack = stack("stack:TileUpdate", vec![layer("l1", "tile-update")]);
+    let leaves: LeafBuilder = Arc::new(|_id: &str| Ok(Box::new(TileFailingUpdate) as Box<dyn Effect>));
+    let mut effect = StackEffect::new(&stack, leaves, live_for(&stack), areas_for(&lay, &devices));
+    let outcome = canvas_daemon::thumbnail::render_within(
+        &mut effect,
+        &Props::new(),
+        Duration::from_secs(5),
+    );
+    match outcome {
+        Err(canvas_daemon::thumbnail::RenderError::Failed(reason)) => {
+            assert!(reason.contains("the layer's script failed"), "{reason}");
+        }
+        other => panic!("the stack tile was not refused: {other:?}"),
+    }
+}
+
+/// A panic in the composite path is a black frame for that frame, not an unwind into the engine.
+/// The panic here comes from a layer's output (it empties its own canvas), so `composite_layer`
+/// reads past the picture.
+#[test]
+fn a_panic_in_the_composite_path_is_a_black_frame() {
+    let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
+    let lay = layout(vec![placed("d", 0, 0.0, 0.0, 100.0, 20.0)], RenderScale::P100, SamplingMode::Nearest);
+    let stack = stack("stack:BrokenLayer", vec![layer("l1", "broken")]);
+    let leaves: LeafBuilder = Arc::new(|_id: &str| Ok(Box::new(BrokeItsCanvas) as Box<dyn Effect>));
+    let mut effect = StackEffect::new(&stack, leaves, live_for(&stack), areas_for(&lay, &devices))
+        .with_clock(ManualClock::new().clock());
+    effect.init(&Props::new());
+    let mut canvas = Canvas::with_scale(1.0);
+    canvas.fill([1.0, 1.0, 1.0]);
+    step(&mut effect, &mut canvas);
+    assert_eq!(canvas.get(5, 5), [0.0, 0.0, 0.0], "the frame is black");
+    // The stack keeps running: the next frame is black too, and nothing unwinds.
+    canvas.fill([1.0, 1.0, 1.0]);
+    step(&mut effect, &mut canvas);
+    assert_eq!(canvas.get(5, 5), [0.0, 0.0, 0.0]);
+}
+
+/// A layer that paints half its picture and then panics leaves no half-written canvas behind:
+/// the faulted layer's picture is black, so its red does not reach the frame.
+#[test]
+fn a_layer_whose_update_panics_leaves_no_half_written_picture() {
+    let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
+    let lay = layout(vec![placed("d", 0, 0.0, 0.0, 100.0, 20.0)], RenderScale::P100, SamplingMode::Nearest);
+    let stack = stack("stack:Half", vec![layer("l1", "half")]);
+    let frames = Arc::new(AtomicU64::new(0));
+    let leaves: LeafBuilder = Arc::new({
+        let frames = Arc::clone(&frames);
+        move |_id: &str| {
+            Ok(Box::new(HalfThenPanic { frames: Arc::clone(&frames) }) as Box<dyn Effect>)
+        }
+    });
+    let mut effect = StackEffect::new(&stack, leaves, live_for(&stack), areas_for(&lay, &devices))
+        .with_clock(ManualClock::new().clock());
+    effect.init(&Props::new());
+    let mut canvas = Canvas::with_scale(1.0);
+    step(&mut effect, &mut canvas);
+    assert_eq!(canvas.get(5, 5), [1.0, 0.0, 0.0], "the first frame paints the top half");
+    step(&mut effect, &mut canvas);
+    assert_eq!(
+        canvas.get(5, 5),
+        [0.0, 0.0, 0.0],
+        "the panicked layer's half-written canvas never reaches the frame"
+    );
+    assert_eq!(
+        effect.layer_status("l1").map(|(state, _)| state),
+        Some(StackLayerState::Faulted)
     );
 }
 
