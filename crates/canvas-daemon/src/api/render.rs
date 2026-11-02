@@ -78,7 +78,7 @@ pub async fn patch_render(
         // Re-set the layout on the engine so the new scale and sampling take effect.
         if let Some(layout) = layout {
             let devices = app.devices.read().await.clone();
-            app.engine.set_layout(layout.clone(), devices.clone());
+            app.set_layout(&layout, &devices);
             // The masks are built at the render scale and the sampling mode, so they are
             // rebuilt with the layout (D95.2.3).
             app.stacks.publish_areas(&layout, &devices);

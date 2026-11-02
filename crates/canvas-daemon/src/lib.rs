@@ -22,6 +22,7 @@ pub mod peer;
 pub mod peripherals;
 pub mod pipe_client;
 pub mod power;
+pub mod preview;
 pub mod state;
 pub mod stack;
 pub mod stacks;

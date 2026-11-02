@@ -15,6 +15,7 @@ pub mod peripherals;
 pub mod preview;
 pub mod render;
 pub mod settings;
+pub mod stack_preview;
 pub mod stacks;
 pub mod status;
 pub mod update;
@@ -76,6 +77,12 @@ pub fn router(app: Arc<App>) -> Router {
         .route(routes::LAYOUT, get(layouts::get_layout).put(layouts::put_layout))
         .route(routes::LAYOUT_ACTIVE, put(layouts::put_active_layout))
         .route(routes::STACKS, get(stacks::list_stacks))
+        .route(
+            routes::STACK_PREVIEW,
+            put(stack_preview::put_stack_preview)
+                .delete(stack_preview::delete_stack_preview)
+                .layer(axum::extract::DefaultBodyLimit::max(effects::IMPORT_BODY_LIMIT)),
+        )
         .route(
             routes::STACK,
             get(stacks::get_stack)

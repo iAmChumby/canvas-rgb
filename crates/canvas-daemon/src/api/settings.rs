@@ -219,7 +219,7 @@ pub async fn config_import(
     app.stacks.set_fps(settings.fps);
     if let Some(layout) = app.active_layout().await {
         let devices = app.devices.read().await.clone();
-        app.engine.set_layout(layout.clone(), devices.clone());
+        app.set_layout(&layout, &devices);
         app.stacks.publish_areas(&layout, &devices);
     }
 
