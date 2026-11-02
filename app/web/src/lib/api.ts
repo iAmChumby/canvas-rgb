@@ -90,6 +90,15 @@ export const PERIPHERAL_TIMEOUT_MS = 30_000;
 export const EFFECT_IMPORT_TIMEOUT_MS = 60_000;
 
 /**
+ * The deadline of a draft preview: the daemon parses the draft and renders its 24-frame loop on
+ * a blocking thread with the renderer's own 30 s budget (`RENDER_BUDGET`,
+ * `crates/canvas-daemon/src/thumbnail.rs`). A draft whose script never returns is stopped at
+ * that budget; the request then still answers, so the deadline only gives up on a daemon that
+ * stopped mid-render. Five seconds of margin cover handing the answer back.
+ */
+export const EFFECT_PREVIEW_TIMEOUT_MS = 35_000;
+
+/**
  * The deadline of the config export and import: the whole configuration moves, and the export
  * asks the fan service over the pipe before it answers.
  */
@@ -154,6 +163,8 @@ export function deadlineFor(path: string): number {
   if (path.startsWith(routes.peripherals)) return PERIPHERAL_TIMEOUT_MS;
   // The effect import: the file is parsed, written and the folder is parsed again.
   if (path.startsWith(routes.effectsImport)) return EFFECT_IMPORT_TIMEOUT_MS;
+  // The draft preview: one render of the loop, inside the renderer's 30 s budget.
+  if (path === routes.effectPreview) return EFFECT_PREVIEW_TIMEOUT_MS;
   // The config export and import: the whole configuration moves.
   if (path.startsWith(routes.configExport) || path.startsWith(routes.configImport)) {
     return CONFIG_TRANSFER_TIMEOUT_MS;
@@ -256,7 +267,11 @@ async function send<T>(
           typeof parsed.message === "string" && parsed.message.length > 0
             ? parsed.message
             : `HTTP ${res.status}`;
-        throw new ApiFailure(res.status, code, message);
+        // The preview route says how long to wait while both render slots are busy. Seconds
+        // in the header; milliseconds everywhere in the editor.
+        const retry = Number(res.headers.get("retry-after"));
+        const retryAfterMs = Number.isFinite(retry) && retry > 0 ? retry * 1000 : undefined;
+        throw new ApiFailure(res.status, code, message, retryAfterMs);
       }
       // The body is read under the same deadline: a body that never finishes is a timeout too.
       return await read(res);

@@ -239,13 +239,6 @@ export function isHiddenEffect(id: string): boolean {
   return id.startsWith("onboard-");
 }
 
-/** A user HTML effect, shown only with ?state=html so the HTML badge can be checked. */
-export const HTML_FIXTURE: DemoEffect = build(
-  "html:fixture-sample", "Sample HTML", "Demo fixture: a user HTML effect.", NO_INPUT,
-  [{ key: "speed", label: "Speed", kind: numberKind(0, 100, 1, 40) }],
-  [], false,
-);
-
 const zone = (index: number, name: string, kind: DeviceInfo["zones"][number]["kind"], led: number, min: number, max: number, resizable: boolean) => ({
   index,
   name,

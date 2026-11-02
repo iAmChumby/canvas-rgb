@@ -20,6 +20,11 @@ import type { PresetReplace } from "@/proto/PresetReplace";
 import type { PresetsResponse } from "@/proto/PresetsResponse";
 import type { ImportEffect } from "@/proto/ImportEffect";
 import type { ImportEffectResponse } from "@/proto/ImportEffectResponse";
+import type { EffectSource } from "@/proto/EffectSource";
+import type { EffectPreviewRequest } from "@/proto/EffectPreviewRequest";
+import type { EffectPreviewResponse } from "@/proto/EffectPreviewResponse";
+import type { DraftRequest } from "@/proto/DraftRequest";
+import type { DraftStatus } from "@/proto/DraftStatus";
 import type { SetFavorite } from "@/proto/SetFavorite";
 import type { Props } from "@/proto/props";
 import type { PeripheralDetail } from "@/proto/PeripheralDetail";
@@ -81,6 +86,18 @@ export const api = {
   /** Removes a user effect. Only the `html:` ids can go. */
   deleteEffect: (id: string, keepPresets = false) =>
     request<unknown>("DELETE", `${routes.effect(id)}${keepPresets ? "?keep_presets=true" : ""}`),
+
+  /** The HTML the editor opens and the file name Save writes. A Rust built-in is a 404. */
+  effectSource: (id: string) => request<EffectSource>("GET", routes.effectSource(id)),
+  /** Renders a draft headless: its schema, the runtime's errors and its loop. */
+  previewEffect: (body: EffectPreviewRequest) =>
+    request<EffectPreviewResponse>("POST", routes.effectPreview, body),
+  /** The draft on the lights now, for the banner a reload opens with. */
+  draft: () => request<DraftStatus>("GET", routes.effectsDraft),
+  /** Starts the draft, or renews its lease with the current source and props. */
+  putDraft: (body: DraftRequest) => request<DraftStatus>("PUT", routes.effectsDraft, body),
+  /** Stops the draft: the effect it took over from comes back. */
+  deleteDraft: () => request<DraftStatus>("DELETE", routes.effectsDraft),
 
   /** Every peripheral the adapters see. The list opens nothing. */
   peripherals: () => request<{ peripherals: PeripheralRow[] }>("GET", routes.peripherals),

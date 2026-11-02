@@ -3,9 +3,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   CaretLeft,
+  Code,
+  DotsThreeOutline,
   FileHtml,
   MagnifyingGlass,
   MonitorPlay,
+  PencilSimple,
   Play,
   SquaresFour,
   Star,
@@ -30,6 +33,9 @@ import { EffectDetailShape, EffectGalleryShape } from "@/components/LoadShapes";
 import { useToast } from "@/components/Toast";
 import { PropertyControls, type Values } from "@/views/PropertyControls";
 import { PresetStrip } from "@/views/PresetStrip";
+import { EffectEditor, type EffectEditorHandle, type EditorTarget, type SavedEffect } from "@/views/effects/EffectEditor";
+import { NewEffectChooser } from "@/views/effects/NewEffectChooser";
+import { BLANK_EFFECT, blankFileName, copyFileName, titleOf, withTitle } from "@/views/effects/blankEffect";
 import { api } from "@/lib/endpoints";
 import { ApiFailure, messageOf } from "@/lib/errors";
 import { EFFECT_CATEGORIES, categoryOf, type EffectCategory } from "@/lib/effectCategories";
@@ -85,6 +91,19 @@ export function EffectsView() {
   const [deleting, setDeleting] = useState<string | null>(null);
   // The failed files' list, folded away until it is asked for.
   const [showFailed, setShowFailed] = useState(false);
+  // The editor: the effect whose code is open, the code being read, and the New from code
+  // chooser. Only one of them is on screen at a time.
+  const [editorTarget, setEditorTarget] = useState<EditorTarget | null>(null);
+  const [editBusy, setEditBusy] = useState<string | null>(null);
+  const [editError, setEditError] = useState<string | null>(null);
+  const [newOpen, setNewOpen] = useState(false);
+  const [newBusy, setNewBusy] = useState<string | null>(null);
+  const [newError, setNewError] = useState<string | null>(null);
+  // The page's overflow menu, where the code editor's way in sits under Advanced.
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreRef = useRef<HTMLSpanElement>(null);
+  // The sheet's Back reaches the editor's unsaved prompt through this.
+  const editorRef = useRef<EffectEditorHandle | null>(null);
   // On a phone the detail is pushed over the gallery.
   const narrow = useMediaQuery("(max-width: 720px)");
   const [pushed, setPushed] = useState(false);
@@ -395,6 +414,131 @@ export function EffectsView() {
     }
   };
 
+  /** The library's ids, so a new file's name can be checked before Save writes anything. */
+  const libraryIds = (effects ?? []).map((e) => e.id);
+
+  /**
+   * On a phone the pushed sheet starts under the status strip. If the page behind has been
+   * scrolled (a card far down the gallery), the strip has scrolled away and a band of the page
+   * shows above the sheet. The edit mode puts the page back at the top first.
+   */
+  const pinTop = () => {
+    if (narrow && typeof window !== "undefined") window.scrollTo({ top: 0 });
+  };
+
+  /** On a phone the sheet is the detail view: a new editor opens in it, never behind it. */
+  const pushSheet = () => {
+    if (!narrow) return;
+    pinTop();
+    setPushed(true);
+    setSettled(false);
+    setSheetTop(currentStripHeight());
+    setTimeout(() => setSettled(true), 240);
+  };
+
+  /** Switches the inspector into the code editor for one effect (D2.2). */
+  const startEdit = (id: string, detail: EffectDetail) => {
+    // A slider edit still waiting to be sent belongs to the saved effect; a draft would answer
+    // its PATCH with a 404, so it is dropped here rather than fired into the editor.
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = null;
+    pending.current = {};
+    pendingFor.current = null;
+    pinTop();
+    setNewOpen(false);
+    setEditError(null);
+    setEditBusy(id);
+    api
+      .effectSource(id)
+      .then((source) => {
+        setEditBusy(null);
+        setEditorTarget({
+          id,
+          name: detail.schema.name,
+          fileName: source.file_name,
+          source: source.source,
+          props: detail.props,
+          schema: detail.schema,
+          presets: detail.schema.presets,
+          userPresets: detail.user_presets,
+        });
+      })
+      .catch((e: unknown) => {
+        setEditBusy(null);
+        setEditError(messageOf(e));
+      });
+  };
+
+  /** New from code > Blank (D2.3): the minimal file the docs show. */
+  const startBlank = () => {
+    setNewOpen(false);
+    setNewError(null);
+    pushSheet();
+    setEditorTarget({
+      id: null,
+      name: "My effect",
+      fileName: blankFileName(libraryIds),
+      source: BLANK_EFFECT,
+      props: {},
+      schema: null,
+      presets: [],
+      userPresets: [],
+    });
+  };
+
+  /** New from code > Copy: the source from the route, licence line and all, under a new name. */
+  const startCopy = (id: string) => {
+    setNewBusy(id);
+    setNewError(null);
+    api
+      .effectSource(id)
+      .then((source) => {
+        const name = `${titleOf(source.source) || "Effect"} copy`;
+        setNewBusy(null);
+        setNewOpen(false);
+        pushSheet();
+        setEditorTarget({
+          id: null,
+          name,
+          fileName: copyFileName(source.file_name, libraryIds),
+          source: withTitle(source.source, name),
+          props: {},
+          schema: null,
+          presets: [],
+          userPresets: [],
+        });
+      })
+      .catch((e: unknown) => {
+        setNewBusy(null);
+        setNewError(messageOf(e));
+      });
+  };
+
+  /** The editor is done: the page shows the saved effect, or the library again on a phone. */
+  const closeEditor = () => {
+    setEditorTarget(null);
+    setEditBusy(null);
+    setEditError(null);
+    setNewOpen(false);
+    if (narrow) close();
+  };
+
+  /** Save succeeded: the library reads again and the saved effect is the one on screen. */
+  const finishSave = (saved: SavedEffect) => {
+    setEditorTarget(null);
+    setEditBusy(null);
+    setEditError(null);
+    setPicked(saved.id);
+    void refreshAll();
+    if (saved.startError) {
+      toast(`${saved.name} is saved, but it did not start: ${saved.startError}`, "warn");
+    } else {
+      toast(`${saved.name} is running`);
+    }
+  };
+
+  const editing = editorTarget !== null;
+
   const q = query.trim();
   // The search is loose: the words may come in any order, one letter may be wrong, and a word
   // may match the description. The letters that matched are marked in the name.
@@ -518,7 +662,13 @@ export function EffectsView() {
                 className="effect-card-open"
                 aria-label={`Open ${e.name}`}
                 aria-current={selected ? "true" : undefined}
-                onClick={() => pick(e.id)}
+                aria-disabled={editing ? "true" : undefined}
+                title={editing ? "Finish editing to open another effect" : undefined}
+                onClick={() => {
+                  // The gallery is a strip while the editor is open: it never steals the edit.
+                  if (editing) return;
+                  pick(e.id);
+                }}
               >
                 <span className="effect-card-preview">
                   <Thumb id={e.id} size="md" label={e.name} live={selected} />
@@ -560,7 +710,7 @@ export function EffectsView() {
     </LoadFrame>
   );
 
-  const detailPane = (
+  const detailNormal = (
     <div className="stack">
       {noLayout && (
         <EmptyState
@@ -673,14 +823,25 @@ export function EffectsView() {
                       </div>
                     </>
                   ) : (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      icon={<Trash size={16} />}
-                      onClick={() => setDeleting(selectedId)}
-                    >
-                      Delete effect
-                    </Button>
+                    <div className="row-wrap effect-edit-row">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        icon={<PencilSimple size={16} />}
+                        disabled={stale}
+                        onClick={() => startEdit(selectedId, detail)}
+                      >
+                        Edit code
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        icon={<Trash size={16} />}
+                        onClick={() => setDeleting(selectedId)}
+                      >
+                        Delete effect
+                      </Button>
+                    </div>
                   )}
                 </div>
               )}
@@ -721,6 +882,48 @@ export function EffectsView() {
     </div>
   );
 
+  // Edit mode (D2.2): the inspector becomes the editor, and nothing else about the page moves.
+  const editorPane = (
+    <div className="eff-pane">
+      {editorTarget ? (
+        <EffectEditor
+          key={editorTarget.id ?? `new:${editorTarget.fileName}`}
+          ref={editorRef}
+          target={editorTarget}
+          narrow={narrow}
+          effects={effects ?? []}
+          onClose={closeEditor}
+          onSaved={finishSave}
+        />
+      ) : newOpen ? (
+        <NewEffectChooser
+          effects={effects ?? []}
+          busy={newBusy}
+          error={newError}
+          narrow={narrow}
+          onBlank={startBlank}
+          onCopy={startCopy}
+          onCancel={() => setNewOpen(false)}
+        />
+      ) : editError ? (
+        <ErrorPanel
+          title="The code could not be read"
+          summary="canvas-rgb could not read that effect's file. Nothing was changed."
+          message={editError}
+          onRetry={() => {
+            setEditError(null);
+            if (selectedId && detail && !stale) startEdit(selectedId, detail);
+          }}
+        />
+      ) : (
+        <LoadFrame className="stack" state="loading" shape={<EffectDetailShape />} label="Loading the code">
+          <span />
+        </LoadFrame>
+      )}
+    </div>
+  );
+  const detailPane = editorTarget || newOpen || editBusy || editError ? editorPane : detailNormal;
+
   return (
     <div
       className="rd-page rd-effects"
@@ -747,6 +950,13 @@ export function EffectsView() {
         }
       />
       <PageActions>
+        <span ref={moreRef} className="row-wrap">
+          <IconButton
+            label="More effect actions"
+            icon={<DotsThreeOutline size={16} />}
+            onClick={() => setMoreOpen((open) => !open)}
+          />
+        </span>
         <FileButton
           accept=".html,text/html"
           icon={<UploadSimple size={16} />}
@@ -757,6 +967,36 @@ export function EffectsView() {
           <span className="rd-btn-text">Import</span>
         </FileButton>
       </PageActions>
+
+      {/* The overflow menu: the stack builder (issue #95) will take the headline. Code is the
+          advanced way in, so it sits behind More rather than beside Import. */}
+      <Popover
+        anchor={moreRef}
+        open={moreOpen}
+        onClose={() => setMoreOpen(false)}
+        label="More effect actions"
+      >
+        <div className="stack eff-menu">
+          <p className="eff-menu-heading">Advanced</p>
+          <Button
+            size="sm"
+            icon={<Code size={15} />}
+            disabled={editing}
+            title={editing ? "Finish editing first" : undefined}
+            onClick={() => {
+              setMoreOpen(false);
+              setNewError(null);
+              pushSheet();
+              setNewOpen(true);
+            }}
+          >
+            New from code
+          </Button>
+          <p className="eff-menu-note">
+            An HTML effect you write here: copy one of the library&apos;s, or start blank.
+          </p>
+        </div>
+      </Popover>
 
       {dragging && (
         <div className="drop-overlay" aria-hidden="true">
@@ -876,7 +1116,16 @@ export function EffectsView() {
           {pushed && (
             <div className="effect-sheet" data-closing={closing ? "true" : "false"} style={{ "--sheet-top": sheetTop ?? "0px" } as React.CSSProperties}>
               <div className="effect-sheet-head">
-                <IconButton label="Back to the effects" icon={<CaretLeft size={18} />} onClick={close} />
+                <IconButton
+                  label="Back to the effects"
+                  icon={<CaretLeft size={18} />}
+                  onClick={() => {
+                    // The editor asks before unsaved work is left (D2.2).
+                    if (editing) editorRef.current?.requestLeave();
+                    else if (newOpen) setNewOpen(false);
+                    else close();
+                  }}
+                />
                 <span>Effects</span>
               </div>
               {detailPane}
@@ -884,7 +1133,7 @@ export function EffectsView() {
           )}
         </div>
       ) : (
-        <div className="rd-eff-body">
+        <div className="rd-eff-body" data-editing={editing ? "true" : "false"}>
           <div className="rd-eff-gallery">{gallery}</div>
           <div className="rd-eff-inspector">{detailPane}</div>
         </div>

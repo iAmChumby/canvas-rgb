@@ -2367,6 +2367,570 @@ button.chip:hover {
   }
 }
 
+/* ---------- effects page: edit mode (issue #2) ---------- */
+
+/* Edit mode widens the inspector over the gallery, which becomes a strip of tiles (spec #67:
+   the inspector grows to 1fr and the gallery shrinks to one column of 96 px). */
+.rd-effects .rd-eff-body[data-editing="true"] {
+  grid-template-columns: 96px minmax(0, 1fr);
+}
+
+.rd-effects .rd-eff-body[data-editing="true"] .effect-gallery {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.rd-effects .rd-eff-body[data-editing="true"] .effect-card-meta,
+.rd-effects .rd-eff-body[data-editing="true"] .effect-card-fav-wrap {
+  display: none;
+}
+
+.rd-effects .rd-eff-body[data-editing="true"] .effect-card-open {
+  cursor: default;
+}
+
+/* The pane the editor replaces the detail with: it fills the inspector and never the page. */
+.rd-effects .eff-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.eff-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+/* The preview and its actions on the left, the code on the right (D2.2). */
+.eff-edit-main {
+  display: grid;
+  grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
+  gap: var(--s3);
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.eff-edit-side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  min-height: 0;
+  overflow: auto;
+}
+
+.eff-live {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  width: 160px;
+  max-width: 100%;
+}
+
+.eff-live .preview-canvas {
+  width: 160px;
+  max-width: 100%;
+  aspect-ratio: 16 / 10;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line);
+  background: var(--sunk);
+  image-rendering: pixelated;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+/* Rendering dims the pane; the last good picture stays behind the dim. */
+.eff-live[data-preview="rendering"] .preview-canvas,
+.eff-live[data-preview="busy"] .preview-canvas {
+  opacity: 0.45;
+}
+
+.eff-live-note {
+  font-size: var(--t12);
+  color: var(--mute);
+}
+
+.eff-live-note[data-tone="warn"] {
+  color: var(--warn);
+}
+
+.eff-edit-title {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.eff-name-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.eff-edit-title .effect-title {
+  font-size: var(--t18);
+  line-height: 1.2;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.eff-file {
+  color: var(--mute);
+  font-size: var(--t12);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.eff-edit-actions {
+  gap: var(--s1);
+}
+
+/* The unsaved prompt and the file-exists prompt sit with the actions that raised them. */
+.eff-leave {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding: var(--s2);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background: var(--raised);
+  font-size: var(--t14);
+}
+
+.eff-clash-tag {
+  display: inline-block;
+  margin-right: var(--s1);
+  padding: 0 var(--s1);
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
+  color: var(--warn);
+  font-size: var(--t12);
+}
+
+/* The code pane: its own box, its own scroll. */
+.eff-code {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--sunk);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+}
+
+.eff-code-head {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s1) var(--s2);
+  border-bottom: 1px solid var(--line);
+  color: var(--dim);
+  min-width: 0;
+}
+
+.eff-code-title {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.eff-code-file {
+  color: var(--mute);
+  font-size: var(--t12);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.eff-code-count {
+  margin-left: auto;
+  color: var(--mute);
+  font-size: var(--t12);
+  white-space: nowrap;
+}
+
+.eff-code-actions {
+  display: flex;
+  gap: var(--s1);
+}
+
+.eff-code-body {
+  flex: 1 1 auto;
+  min-height: 180px;
+  overflow: hidden;
+}
+
+.cm-host,
+.cm-host .cm-editor {
+  height: 100%;
+}
+
+.cm-loading {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  min-height: 180px;
+  color: var(--mute);
+  font-size: var(--t14);
+}
+
+/* The errors the daemon reported, under the code: a row jumps the cursor to its line. */
+.eff-errors,
+.eff-warnings {
+  margin: 0;
+  padding: var(--s1) var(--s2);
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-top: 1px solid var(--line);
+  /* Its rows are never squeezed: a half-said error is worse than a shorter code pane. */
+  flex: 0 0 auto;
+  max-height: 132px;
+  overflow: auto;
+}
+
+.eff-error-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  width: 100%;
+  padding: var(--s1);
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--down);
+  text-align: left;
+  font: inherit;
+  font-size: var(--t12);
+  cursor: pointer;
+}
+
+.eff-error-row:hover {
+  background: var(--hover);
+}
+
+.eff-error-row:focus-visible {
+  outline: 2px solid var(--a1);
+  outline-offset: 1px;
+}
+
+.eff-error-line {
+  flex: none;
+  color: var(--warn);
+}
+
+.eff-error-text {
+  color: var(--dim);
+  overflow-wrap: anywhere;
+}
+
+.eff-warnings {
+  border-top: 1px solid var(--line);
+  color: var(--warn);
+  font-size: var(--t12);
+}
+
+.eff-preview-error {
+  margin: 0;
+  padding: var(--s1) var(--s2);
+  border-top: 1px solid var(--line);
+}
+
+/* The draft banner: always inside the pane, above the controls (D2.5). */
+.eff-draft {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  padding: var(--s2) var(--s3);
+  border: 1px solid color-mix(in srgb, var(--work) 40%, transparent);
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--work) 8%, var(--panel));
+}
+
+.eff-draft[data-state="expiring"],
+.eff-draft[data-state="restoring"],
+.eff-draft[data-state="restore-error"] {
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+  background: color-mix(in srgb, var(--warn) 8%, var(--panel));
+}
+
+.eff-draft[data-state="restore-error"] {
+  border-color: color-mix(in srgb, var(--down) 45%, transparent);
+  background: color-mix(in srgb, var(--down) 8%, var(--panel));
+}
+
+.eff-draft-mark {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--work);
+  flex: none;
+}
+
+.eff-draft-mark[data-state="expiring"],
+.eff-draft-mark[data-state="restoring"] {
+  background: var(--warn);
+}
+
+.eff-draft-mark[data-state="restore-error"] {
+  background: var(--down);
+}
+
+.eff-draft-text {
+  flex: 1 1 200px;
+  min-width: 0;
+  font-size: var(--t14);
+}
+
+.eff-draft-actions {
+  margin-left: auto;
+  gap: var(--s1);
+}
+
+.eff-note {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s1);
+  margin: 0;
+  padding: var(--s1) var(--s2);
+  border-left: 2px solid var(--warn);
+  color: var(--warn);
+  font-size: var(--t12);
+}
+
+/* Presets and properties under the editor: their own natural height, and the code gives way. */
+.eff-tools {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s3);
+  flex: 0 0 auto;
+  min-height: 0;
+  max-height: 52%;
+  overflow: auto;
+}
+
+.eff-tools .panel {
+  padding: var(--s3);
+  align-self: start;
+}
+
+.eff-tools-note,
+.eff-empty-props {
+  margin: var(--s2) 0 0;
+  font-size: var(--t12);
+  color: var(--mute);
+}
+
+/* The phone's code layer: full screen over the sheet, with Back (D2.2). */
+.eff-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  background: var(--g1);
+  padding: var(--s2) var(--s3) var(--s3);
+  animation: push-in-right var(--dur-slow) var(--ease) both;
+}
+
+.eff-layer-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.eff-layer-body .eff-code {
+  flex: 1 1 auto;
+}
+
+.eff-layer-body .eff-code-body {
+  min-height: 0;
+}
+
+.eff-layer-chooser {
+  overflow: auto;
+}
+
+/* The overflow menu: the code editor is the advanced way in, under its own heading. */
+.eff-menu {
+  gap: var(--s2);
+  min-width: 200px;
+}
+
+.eff-menu-heading {
+  margin: 0;
+  color: var(--dim);
+  font-size: var(--t14);
+  font-weight: 600;
+}
+
+.eff-menu-note {
+  margin: 0;
+  color: var(--mute);
+  font-size: var(--t14);
+  line-height: 1.4;
+}
+
+/* New effect: a copy first, a blank second (D2.3). */
+.eff-choose {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  min-height: 0;
+}
+
+.eff-choose-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-height: 36px;
+}
+
+.eff-choose-head .effect-title {
+  margin: 0;
+  font-size: var(--t18);
+}
+
+.eff-choose-cancel {
+  margin-left: auto;
+}
+
+.eff-choose-sub {
+  margin: 0 0 var(--s2);
+  font-size: var(--t14);
+}
+
+.eff-choose-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  max-height: 240px;
+  overflow: auto;
+}
+
+.eff-choose-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  width: 100%;
+  padding: var(--s1);
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: var(--raised);
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--t14);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+}
+
+.eff-choose-row:hover:not(:disabled) {
+  background: var(--hover);
+  border-color: var(--line-2);
+}
+
+.eff-choose-row:focus-visible {
+  outline: 2px solid var(--a1);
+  outline-offset: 1px;
+}
+
+.eff-choose-row:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.eff-choose-thumb {
+  width: 64px;
+  flex: none;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.eff-choose-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.eff-choose-go {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  color: var(--dim);
+  font-size: var(--t14);
+  flex: none;
+}
+
+.eff-choose-empty {
+  margin: 0;
+  font-size: var(--t14);
+}
+
+.eff-empty-props {
+  margin: 0;
+}
+
+/* A narrow inspector (a small window, not a phone): the preview above the code. */
+@container page (max-width: 780px) {
+  .eff-edit-main {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .eff-edit-side {
+    overflow: visible;
+  }
+
+  .eff-tools {
+    grid-template-columns: minmax(0, 1fr);
+    max-height: none;
+  }
+}
+
+/* The short window: the code keeps its room, the tools give theirs up. */
+@container page (max-height: 700px) {
+  .eff-editor {
+    gap: var(--s2);
+  }
+
+  .eff-tools {
+    max-height: 38%;
+  }
+
+  .eff-tools .panel {
+    padding: var(--s2);
+  }
+}
+
+@container page (max-width: 640px) {
+  .eff-live {
+    width: 128px;
+  }
+
+  .eff-live .preview-canvas {
+    width: 128px;
+  }
+
+  .eff-draft-actions {
+    margin-left: 0;
+  }
+}
+
 /* ---------- effects page: the grid and its parts live in motion.css ---------- */
 
 .list-panel {

@@ -8,7 +8,7 @@
 // save-error|handback:<header id>`.
 
 import { ApiFailure } from "@/lib/errors";
-import { demoThumbnail } from "@/lib/thumb-demo";
+import { demoThumbnail, thumbnailBytes } from "@/lib/thumb-demo";
 import {
   answerDelayMs,
   applyDeviceScenarios,
@@ -32,7 +32,6 @@ import {
   EFFECTS,
   FAN_HEADERS,
   FAN_PROFILES,
-  HTML_FIXTURE,
   INITIAL_SETTINGS,
   ONBOARD_EFFECTS,
   isHiddenEffect,
@@ -42,6 +41,8 @@ import {
   type DemoEffect,
   type Props,
 } from "@/lib/fixtures";
+import { demoHtmlEffects, demoSource, parseUserEffect } from "@/lib/demoEffects";
+import { scriptBody } from "@/lib/effectSource";
 import { PERIPHERALS, type DemoPeripheral } from "@/lib/peripheralFixtures";
 import type { Status } from "@/proto/Status";
 import type { Layout } from "@/proto/Layout";
@@ -54,7 +55,6 @@ import type { Settings } from "@/proto/Settings";
 import type { ExportBundle } from "@/proto/ExportBundle";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { PropValue } from "@/proto/PropValue";
-import type { PropKind } from "@/proto/PropKind";
 import type { Preset } from "@/proto/Preset";
 import type { PresetCreate } from "@/proto/PresetCreate";
 import type { PresetReplace } from "@/proto/PresetReplace";
@@ -69,6 +69,11 @@ import type { ReadProgress } from "@/proto/ReadProgress";
 import type { ImportEffect } from "@/proto/ImportEffect";
 import type { ImportEffectResponse } from "@/proto/ImportEffectResponse";
 import type { FailedEffect } from "@/proto/FailedEffect";
+import type { EffectError } from "@/proto/EffectError";
+import type { EffectPreviewRequest } from "@/proto/EffectPreviewRequest";
+import type { EffectPreviewResponse } from "@/proto/EffectPreviewResponse";
+import type { DraftRequest } from "@/proto/DraftRequest";
+import type { DraftStatus } from "@/proto/DraftStatus";
 
 const BASE = "/api/v1";
 const DEMO_LAYOUTS_KEY = "canvas-rgb.demo-layouts";
@@ -114,6 +119,21 @@ interface DemoState {
   peripheralAccess: Record<string, PeripheralAccess>;
   /** The user effect files that did not parse. */
   failedEffects: FailedEffect[];
+  /** The draft on the lights, in memory only, as the daemon holds one. */
+  draft: {
+    html: string;
+    props: Props;
+    hash: string;
+    leaseUntil: number;
+  } | null;
+  /** The preview requests answered, so a test can count them. */
+  previews: number;
+  /** The draft requests made, so a test can count them and read what they carried. */
+  draftCalls: { method: string; at: number; props?: Props; htmlBytes?: number }[];
+  /** The sentence the next draft ending carries (a prior that could not be restored). */
+  draftNote: string | null;
+  /** `?state=draft-running` has put its draft on the lights once. */
+  draftSeeded: boolean;
 }
 
 /**
@@ -140,7 +160,14 @@ function initialState(): DemoState {
   const effects: Record<string, DemoEffect> = {};
   for (const e of EFFECTS) effects[e.schema.id] = e;
   for (const e of ONBOARD_EFFECTS) effects[e.schema.id] = e;
-  if (s.has("html")) effects[HTML_FIXTURE.schema.id] = HTML_FIXTURE;
+  if (s.has("html")) for (const e of demoHtmlEffects()) effects[e.schema.id] = e;
+  // `?state=stock`: the two stock HTML effects a fresh install ships (the copy flow's second
+  // source). The fixture sample stays out unless `html` is asked for too.
+  if (s.has("stock")) {
+    for (const e of demoHtmlEffects()) {
+      if (e.schema.id !== "html:fixture-sample") effects[e.schema.id] = e;
+    }
+  }
   const profile = FAN_PROFILES[0];
   const fanModes: Record<string, FanMode> = {};
   for (const h of FAN_HEADERS) fanModes[h.id] = profile?.headers[h.id] ?? { mode: "bios" };
@@ -208,6 +235,16 @@ function initialState(): DemoState {
         error: "the effect does not parse: effect html:neon-grid has no script",
       },
     ],
+    // `?state=draft-running`: a draft is already on the lights when the page opens, as a reload
+    // during a draft finds it.
+    draft: s.has("draft-running") ? seededDraft() : null,
+    draftSeeded: s.has("draft-running"),
+    // `?state=draft-note`: the prior effect cannot be put back, so an ending says so.
+    draftNote: s.has("draft-note")
+      ? "the effect the draft took over from could not be restored: its file is gone, so the lights are black"
+      : null,
+    previews: 0,
+    draftCalls: [],
   };
 }
 
@@ -217,8 +254,129 @@ function st(): DemoState {
   return state;
 }
 
-function fail(status: number, code: string, message: string): never {
-  throw new ApiFailure(status, code, message);
+function fail(status: number, code: string, message: string, retryAfterMs?: number): never {
+  throw new ApiFailure(status, code, message, retryAfterMs);
+}
+
+/** The daemon's `source_hash`: FNV-1a over the bytes, 16 hex characters. */
+export function demoHash(source: string): string {
+  let hash = 0xcbf29ce484222325n;
+  const prime = 0x100000001b3n;
+  const mask = 0xffffffffffffffffn;
+  for (let i = 0; i < source.length; i++) {
+    hash ^= BigInt(source.charCodeAt(i));
+    hash = (hash * prime) & mask;
+  }
+  return hash.toString(16).padStart(16, "0");
+}
+
+/** A binary loop as the base64 the preview route answers with. */
+function base64Of(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf);
+  let text = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    text += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(text);
+}
+
+/**
+ * `?state=source-error`: the source the editor opens throws on its first drawn frame, so the
+ * preview's error, its list and its gutter can be seen (and tested) without typing.
+ */
+function withThrow(source: string): string {
+  return source.replace(/(function draw\(\) \{\n)/, '$1    throw new Error("the ink ran out");\n');
+}
+
+/**
+ * What the demo answers a preview with. The schema comes from the draft itself; an error is
+ * reported where the source writes `throw` (the demo has no JavaScript engine, so a real
+ * runtime's line is simulated there); the check's "never moves" warning is read from the
+ * source; and the loop is the demo's generic one, as the daemon renders a draft.
+ */
+function previewAnswer(req: EffectPreviewRequest, s: DemoState): EffectPreviewResponse {
+  s.previews += 1;
+  (globalThis as { __preview?: unknown[] }).__preview?.push({
+    at: Date.now(),
+    html: req.html,
+    props: req.props,
+  });
+  if (scenario().has("preview-busy")) {
+    fail(503, "service_unavailable", "the daemon is already rendering 2 previews; try again shortly", 400);
+  }
+  const hash = demoHash(req.html);
+  const id = `draft:${hash}`;
+  const effect = parseUserEffect(id, req.html);
+  const errors: EffectError[] = [];
+  // `?state=preview-late-error`: the first draft draws, every later one fails the way a frame
+  // callback that runs past its deadline does. The last good loop is what the editor keeps.
+  if (scenario().has("preview-late-error") && s.previews > 1) {
+    errors.push({
+      message: "Error: the frame callback ran past its deadline and was stopped",
+      line: 4,
+      column: 1,
+    });
+  }
+  const script = scriptBody(req.html);
+  if (script) {
+    script.body.split(/\r?\n/).forEach((text, i) => {
+      if (!/^\s*throw\b/.test(text)) return;
+      errors.push({
+        message: "Error: the effect threw where the runtime stopped",
+        line: i + 1,
+        column: text.indexOf("throw") + 1,
+      });
+    });
+  }
+  const warnings: string[] = [];
+  if (script && !/requestAnimationFrame/.test(script.body)) {
+    warnings.push("the picture never moves: the effect asks for no more frames");
+  }
+  return {
+    schema: { ...effect.schema, id },
+    source_hash: hash,
+    errors,
+    warnings,
+    thumbnail: base64Of(thumbnailBytes(id)),
+  };
+}
+
+/** The draft `?state=draft-running` finds on the lights: the sample's source, no props. */
+function seededDraft(): NonNullable<DemoState["draft"]> {
+  const html = demoSource("html:fixture-sample")?.source ?? "";
+  return { html, props: {}, hash: demoHash(html), leaseUntil: Date.now() + 15_000 };
+}
+
+/** The draft on the lights, as the daemon answers `GET`/`PUT`/`DELETE /effects/draft`. */
+function draftStatus(s: DemoState): DraftStatus {
+  if (s.draft && s.draft.leaseUntil <= Date.now()) s.draft = null;
+  const draft = s.draft;
+  // `?state=fast-draft`: the same beats, a few times quicker, so the states can be watched (and
+  // tested) without waiting out a 5 s heartbeat and a 15 s lease.
+  const fast = scenario().has("fast-draft");
+  return {
+    active: draft !== null,
+    ...(draft ? { id: `draft:${draft.hash}`, source_hash: draft.hash } : {}),
+    props: draft ? { ...draft.props } : {},
+    lease_remaining_ms: draft ? Math.max(0, draft.leaseUntil - Date.now()) : 0,
+    heartbeat_ms: fast ? 300 : 5000,
+    lease_ms: fast ? 900 : 15000,
+  };
+}
+
+/** Ends the draft and answers with the note the ending carries, when it has one. */
+function endDraft(s: DemoState): DraftStatus {
+  const note = s.draftNote ?? undefined;
+  s.draftNote = null;
+  s.draft = null;
+  return {
+    active: false,
+    props: {},
+    lease_remaining_ms: 0,
+    heartbeat_ms: scenario().has("fast-draft") ? 300 : 5000,
+    lease_ms: scenario().has("fast-draft") ? 900 : 15000,
+    ...(note ? { note } : {}),
+  };
 }
 
 function activeLayout(): Layout {
@@ -606,68 +764,6 @@ function checkFileName(fileName: string): string {
   return trimmed;
 }
 
-/**
- * The demo's small reader of a SignalRGB-format HTML effect: the title, the property metas
- * and the script. A file with no script does not parse, exactly as the daemon says.
- */
-function parseUserEffect(id: string, html: string): DemoEffect {
-  const script = /<script\b[^>]*>[\s\S]*?<\/script>/i.exec(html);
-  if (!script) {
-    fail(422, "validation", `the effect does not parse: effect ${id} has no script`);
-  }
-  const title = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1]?.trim() ?? "";
-  const name = title.length > 0 ? title : id.slice("html:".length);
-  const properties: { key: string; label: string; kind: PropKind }[] = [];
-  for (const match of html.matchAll(/<meta\b([^>]*)>/gi)) {
-    const attrs = match[1] ?? "";
-    const property = /\bproperty\s*=\s*"([^"]*)"/i.exec(attrs)?.[1];
-    if (!property) continue;
-    const label = /\blabel\s*=\s*"([^"]*)"/i.exec(attrs)?.[1] ?? property;
-    const type = /\btype\s*=\s*"([^"]*)"/i.exec(attrs)?.[1] ?? "number";
-    properties.push({ key: property, label, kind: kindFromType(type) });
-  }
-  const defaults: Props = {};
-  for (const p of properties) defaults[p.key] = defaultValueOf(p.kind);
-  const schema = {
-    id,
-    name,
-    description: "A user effect.",
-    needs: { screen: false, audio: false },
-    properties: properties.map((p) => ({ key: p.key, label: p.label, kind: p.kind })),
-    presets: [],
-  };
-  return {
-    schema,
-    defaults,
-    summary: { id, name, description: schema.description, needs: schema.needs, favorite: false },
-  };
-}
-
-/** The kind a property meta names. */
-function kindFromType(type: string): PropKind {
-  if (type === "color") return { type: "color", default: "#6000fc" };
-  if (type === "bool") return { type: "bool", default: false };
-  if (type === "hue") return { type: "hue", default: 0 };
-  if (type === "choice") return { type: "choice", options: ["a", "b"], default: "a" };
-  return { type: "number", min: 0, max: 100, step: 1, default: 0 };
-}
-
-/** The value a kind starts at. */
-function defaultValueOf(kind: PropKind): PropValue {
-  switch (kind.type) {
-    case "color":
-      return { type: "color", value: kind.default };
-    case "number":
-      return { type: "number", value: kind.default };
-    case "bool":
-      return { type: "bool", value: kind.default };
-    case "choice":
-      return { type: "choice", value: kind.default };
-    case "hue":
-      return { type: "hue", value: kind.default };
-  }
-}
-
 // ---- router ----
 
 export async function demoRequest(method: string, path: string, body: unknown): Promise<unknown> {
@@ -804,7 +900,56 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       setActiveProps(body as Props);
       return { ok: true };
     }
+    if (seg[1] === "preview" && seg.length === 2 && method === "POST") {
+      return previewAnswer(body as EffectPreviewRequest, s);
+    }
+    if (seg[1] === "draft" && seg.length === 2) {
+      if (method === "GET") {
+        // A reload during a draft finds the slot still there. The scenario seeds it once, so a
+        // Stop is not undone by the next read.
+        if (scenario().has("draft-running") && !s.draftSeeded) {
+          s.draftSeeded = true;
+          s.draft = seededDraft();
+        }
+        return draftStatus(s);
+      }
+      if (method === "PUT") {
+        const req = body as DraftRequest;
+        const call = { method, at: Date.now(), props: { ...req.props }, htmlBytes: req.html.length };
+        s.draftCalls.push(call);
+        (globalThis as { __draft?: unknown[] }).__draft?.push(call);
+        if (req.html.length > IMPORT_MAX_BYTES) {
+          fail(422, "validation", `the draft is ${req.html.length} bytes; the limit is ${IMPORT_MAX_BYTES}`);
+        }
+        // `?state=draft-beat-fail`: the first beat starts the draft, the rest fail, so the
+        // expiring banner and the daemon's own restore can be seen.
+        if (scenario().has("draft-beat-fail") && s.draft !== null) {
+          fail(503, "service_unavailable", "the draft could not be renewed");
+        }
+        const hash = demoHash(req.html);
+        // A draft that does not parse leaves a running draft alone, as the daemon's does.
+        parseUserEffect(`draft:${hash}`, req.html);
+        const lease = scenario().has("fast-draft") ? 900 : 15_000;
+        s.draft = { html: req.html, props: { ...req.props }, hash, leaseUntil: Date.now() + lease };
+        return draftStatus(s);
+      }
+      if (method === "DELETE") {
+        const call = { method, at: Date.now() };
+        s.draftCalls.push(call);
+        (globalThis as { __draft?: unknown[] }).__draft?.push(call);
+        return endDraft(s);
+      }
+      return bad();
+    }
     const id = seg[1] ?? "";
+    if (seg.length === 3 && seg[2] === "source" && method === "GET") {
+      const found = demoSource(id);
+      if (!found) {
+        fail(404, "not_found", `${id} is a built-in effect written in Rust; it has no HTML source to edit`);
+      }
+      const source = scenario().has("source-error") ? withThrow(found.source) : found.source;
+      return { source, file_name: found.file_name };
+    }
     if (seg.length === 2 && method === "GET") {
       const e = effectOrNotFound(id);
       return {
@@ -872,6 +1017,8 @@ export async function demoRequest(method: string, path: string, body: unknown): 
         // A preset sits on the defaults, never on the saved values.
         base = { ...e.defaults, ...preset.props };
       }
+      // An activate ends a running draft without putting the old effect back.
+      s.draft = null;
       const next = mergeProps(base, req.props ?? {});
       s.activeEffect = id;
       const layout = activeLayout();

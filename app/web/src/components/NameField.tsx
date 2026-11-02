@@ -15,6 +15,7 @@ export function NameField({
   disabled,
   invalid,
   describedBy,
+  autoFocus = true,
   onChange,
   onEnter,
   onEscape,
@@ -27,14 +28,19 @@ export function NameField({
   invalid?: boolean;
   /** The id of the line that says why the entry is refused. */
   describedBy?: string;
+  /** False when the field sits beside a control that should keep the focus (the code editor). */
+  autoFocus?: boolean;
   onChange: (v: string) => void;
   onEnter: () => void;
   onEscape: () => void;
 }) {
   const ref = useRef<HTMLInputElement>(null);
   useEffect(() => {
+    if (!autoFocus) return;
     ref.current?.focus();
     ref.current?.select();
+    // The field takes the focus once, when it appears.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   return (
     <input
