@@ -213,7 +213,7 @@ pub async fn put_layout(
         // The layout's effect is what runs now: a draft on the lights ends, and the guard
         // holds a beat off until this layout's effect is on.
         let replace = crate::draft::hold_for_replace(&app).await;
-        app.engine.set_layout(layout.clone(), devices.clone());
+        app.set_layout(&layout, &devices);
         app.stacks.publish_areas(&layout, &devices);
         if let Some(effect) = &layout.effect {
             if let Err(error) = crate::apply_effect(&app, &effect.id, &effect.props).await {
@@ -273,7 +273,7 @@ pub async fn put_active_layout(
     // beat off until this layout's effect is on. The guard goes before the answer moves `app`.
     {
         let replace = crate::draft::hold_for_replace(&app).await;
-        app.engine.set_layout(layout.clone(), devices.clone());
+        app.set_layout(&layout, &devices);
         app.stacks.publish_areas(&layout, &devices);
         if let Some(effect) = &layout.effect {
             if let Err(error) = crate::apply_effect(&app, &effect.id, &effect.props).await {

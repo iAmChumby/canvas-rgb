@@ -80,6 +80,11 @@ pub mod routes {
     /// removes it and what points at it; 409 `in_use` while the stack runs, unless
     /// `?force=true`.
     pub const STACK: &str = "/api/v1/stacks/{id}";
+    /// `PUT` with [`super::StackPreviewRequest`]: builds or updates the stack the preview
+    /// engine runs and answers [`super::StackPreviewResponse`]. `DELETE` drops the preview and
+    /// clears the sequence watermark. The preview engine has no device sink, so nothing here
+    /// reaches a light. Same body cap as [`EFFECTS_IMPORT`].
+    pub const STACK_PREVIEW: &str = "/api/v1/stacks/preview";
     pub const LAYOUTS: &str = "/api/v1/layouts";
     pub const LAYOUT: &str = "/api/v1/layouts/{id}";
     /// `PUT` with [`super::SetActiveLayout`].
@@ -137,7 +142,8 @@ pub mod routes {
     /// Diagnostics: current colors as the adapter reads them back from the hardware.
     pub const DIAG_READBACK: &str = "/api/v1/diag/readback";
     /// WebSocket. Binary messages: `u16 LE width, u16 LE height, width*height*3 RGB bytes`,
-    /// at most [`crate::consts::PREVIEW_MAX_FPS`].
+    /// at most [`crate::consts::PREVIEW_MAX_FPS`]. Without a query it streams the running
+    /// effect; `?stack=1` streams the preview engine ([`STACK_PREVIEW`]) instead.
     pub const PREVIEW: &str = "/api/v1/preview";
 }
 
@@ -537,6 +543,50 @@ pub struct DeleteStackResponse {
     pub note: Option<String>,
 }
 
+/// `PUT /api/v1/stacks/preview`: the draft stack and its position in the builder session.
+///
+/// `epoch` is made by the page when the builder opens (16 random hex characters) and `seq`
+/// starts at 1 for that epoch. A PUT whose epoch is the stored one and whose seq is not above
+/// the stored one is superseded: it answers 200 with `applied: false`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct StackPreviewRequest {
+    pub stack: crate::stack::Stack,
+    pub epoch: String,
+    #[ts(type = "number")]
+    pub seq: u64,
+}
+
+/// One layer of a previewed stack, as `PUT /api/v1/stacks/preview` reports it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct StackPreviewLayer {
+    pub id: String,
+    pub status: StackLayerState,
+    /// Why the layer cannot run: its effect is gone, or it names another stack.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error: Option<String>,
+}
+
+/// `PUT /api/v1/stacks/preview` answer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct StackPreviewResponse {
+    /// False when the PUT was superseded by a newer one (or a newer epoch owns the preview):
+    /// the answer is a 200 and the page stops resending that change.
+    pub applied: bool,
+    /// The epoch that owns the preview after this PUT.
+    pub epoch: String,
+    /// The highest sequence accepted for that epoch.
+    #[ts(type = "number")]
+    pub seq: u64,
+    /// What each layer of the previewed stack is doing.
+    pub layers: Vec<StackPreviewLayer>,
+    /// True while the preview engine has a stack effect.
+    pub running: bool,
+}
+
 /// The effect's user presets after a change, in their stored order.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -611,8 +661,24 @@ pub struct EffectPreviewResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct DraftRequest {
-    /// The draft, at most [`crate::consts::EFFECT_IMPORT_MAX_BYTES`]. Sent on every beat.
+    /// The draft HTML, at most [`crate::consts::EFFECT_IMPORT_MAX_BYTES`]. Sent on every beat
+    /// by #2's editor. A stack draft leaves it out (which reads as empty); exactly one of
+    /// `html` and `stack` is set.
+    #[serde(default)]
     pub html: String,
+    /// A whole stack as the draft (D95.4.5). It is built against the main engine, with its
+    /// layer settings from this document, and its props laid under `props`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub stack: Option<crate::stack::Stack>,
+    /// The builder session's epoch, as for [`StackPreviewRequest`]. A stack draft needs it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub epoch: Option<String>,
+    /// The sequence in that epoch; a dropped PUT answers 200 `applied: false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub seq: Option<u64>,
     /// The props the draft runs with.
     pub props: Props,
 }
@@ -648,6 +714,21 @@ pub struct DraftStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub note: Option<String>,
+    /// A PUT's answer: whether it left a draft on the lights. A stack draft that was superseded
+    /// by a newer epoch or sequence answers `false` with a 200. A DELETE that carries the page's
+    /// epoch answers `false` when that page does not own the draft, which is left running.
+    /// Absent on GET and on a DELETE with no epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub applied: Option<bool>,
+    /// The epoch that owns a stack draft, when one is running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub epoch: Option<String>,
+    /// The highest sequence accepted for that epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub seq: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]

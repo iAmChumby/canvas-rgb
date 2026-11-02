@@ -772,6 +772,17 @@ pub async fn should_run(app: &std::sync::Arc<crate::state::App>) -> bool {
 /// second would rebuild the layout without the effect the first one activated).
 static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Gives the flag back when the first run ends for any reason: its own return, an error, or a
+/// panic in the task. Clearing it after the await alone leaves the flag set for the life of the
+/// daemon when the task does not reach the end (docs/bug-classes.md, `cause:state-token`).
+struct RunningGuard;
+
+impl Drop for RunningGuard {
+    fn drop(&mut self) {
+        RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 pub async fn maybe_run(app: &std::sync::Arc<crate::state::App>) {
     if !should_run(app).await {
         return;
@@ -779,8 +790,8 @@ pub async fn maybe_run(app: &std::sync::Arc<crate::state::App>) {
     if RUNNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return;
     }
+    let _running = RunningGuard;
     run(app).await;
-    RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
 }
 
 async fn run(app: &std::sync::Arc<crate::state::App>) {
@@ -879,7 +890,7 @@ async fn run(app: &std::sync::Arc<crate::state::App>) {
     // completed setup is walked through again) ends here, and a beat cannot start another
     // until this effect is on.
     let _replace = crate::draft::hold_for_replace(app).await;
-    app.engine.set_layout(layout.clone(), device_list.clone());
+    app.set_layout(&layout, &device_list);
     app.stacks.publish_areas(&layout, &device_list);
 
     if let Err(e) = crate::apply_effect(app, FIRST_RUN_EFFECT, &props).await {

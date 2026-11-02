@@ -102,6 +102,18 @@ impl LiveMap {
 /// The live map of the stack on the engine.
 pub type LiveStack = Arc<RwLock<LiveMap>>;
 
+/// Rebuilds a running effect's live map from `stack` and swaps it in, bumping the version so
+/// the effect re-resolves its layers on its next frame.
+///
+/// The new map is built outside the lock and the old one is swapped in under it, as a save does
+/// (`Stacks::update_live`), so the render thread never waits for a map to be built.
+pub fn replace_live(live: &LiveStack, stack: &Stack) {
+    let mut next = LiveMap::from_stack(stack, 0);
+    let mut map = write_recovering(live);
+    next.version = map.version.wrapping_add(1);
+    *map = next;
+}
+
 /// The area book every `StackEffect` resolves its layers against.
 pub type AreaBook = Arc<RwLock<AreaMap>>;
 

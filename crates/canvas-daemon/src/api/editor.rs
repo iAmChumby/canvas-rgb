@@ -4,7 +4,7 @@
 //! lives here is everything it needs to open a file, render a draft, and try one on the lights
 //! without saving anything.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::Json;
 use canvas_proto::api::{
     DraftRequest, DraftStatus, EffectPreviewRequest, EffectPreviewResponse, EffectSource,
@@ -178,7 +178,8 @@ pub async fn get_draft(State(app): State<Arc<App>>) -> Json<DraftStatus> {
 ///
 /// Starts the draft, or renews its lease (and updates its props). A draft that does not parse
 /// is refused and a running draft is left alone, so a bad keystroke mid-edit never takes the
-/// lights off the last good draft.
+/// lights off the last good draft. Exactly one of `html` and `stack` is set: #2's editor sends
+/// the HTML, the stack builder sends the stack with its epoch and sequence (D95.4.5).
 pub async fn put_draft(
     State(app): State<Arc<App>>,
     body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
@@ -186,24 +187,66 @@ pub async fn put_draft(
     let bytes = crate::api::limited_body(body, crate::api::effects::IMPORT_BODY_LIMIT)?;
     let request: DraftRequest = serde_json::from_slice(&bytes)
         .map_err(|e| ApiFailure::validation(format!("the body is not a draft request: {e}")))?;
-    if request.html.len() > canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES {
-        return Err(ApiFailure::validation(format!(
-            "the draft is {} bytes; the limit is {}",
-            request.html.len(),
-            canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES
-        )));
-    }
-    if let Err(error) = crate::draft::put(&app, &request.html, &request.props).await {
-        return Err(match error {
-            crate::draft::PutError::Build(message) => {
-                let (line, column) = crate::user_effects::error_position(&message);
-                ApiFailure::validation(crate::user_effects::load_error_sentence(&message))
-                    .at(line, column)
+    let applied = match (&request.stack, request.html.is_empty()) {
+        (Some(stack), true) => {
+            let epoch = request
+                .epoch
+                .as_deref()
+                .ok_or_else(|| ApiFailure::validation("a stack draft needs an epoch"))?;
+            if !crate::epoch::valid_epoch(epoch) {
+                return Err(ApiFailure::validation(format!(
+                    "the epoch {epoch:?} is not 16 hexadecimal characters, as a page makes it"
+                )));
             }
-            crate::draft::PutError::Internal(message) => ApiFailure::internal(message),
-        });
+            let seq = request
+                .seq
+                .ok_or_else(|| ApiFailure::validation("a stack draft needs a seq"))?;
+            crate::draft::put_stack(&app, stack, &request.props, epoch, seq).await
+        }
+        (None, false) => {
+            if request.html.len() > canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES {
+                return Err(ApiFailure::validation(format!(
+                    "the draft is {} bytes; the limit is {}",
+                    request.html.len(),
+                    canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES
+                )));
+            }
+            crate::draft::put(&app, &request.html, &request.props).await
+        }
+        (Some(_), false) => {
+            return Err(ApiFailure::validation(
+                "send one of html and stack, not both",
+            ))
+        }
+        (None, true) => {
+            return Err(ApiFailure::validation("a draft needs html or stack"))
+        }
     }
-    Ok(Json(crate::draft::status(&app)))
+    .map_err(|error| match error {
+        crate::draft::PutError::Build(message) => {
+            let (line, column) = crate::user_effects::error_position(&message);
+            ApiFailure::validation(crate::user_effects::load_error_sentence(&message))
+                .at(line, column)
+        }
+        crate::draft::PutError::Validation(message) => ApiFailure::validation(message),
+        crate::draft::PutError::Conflict(message) => ApiFailure::conflict(message),
+        crate::draft::PutError::Internal(message) => ApiFailure::internal(message),
+    })?;
+    let mut status = crate::draft::status(&app);
+    status.applied = Some(applied);
+    Ok(Json(status))
+}
+
+/// The query `DELETE /effects/draft` takes: the page's session epoch, when it sends one.
+///
+/// The field is optional and the route has no request type in `canvas-proto`, so it stays here:
+/// a caller that sends no epoch (an earlier editor, the delete-an-effect route) keeps the old
+/// behaviour, and one that sends its epoch is answered `applied: false` when it does not own the
+/// draft.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct DeleteDraftQuery {
+    #[serde(default)]
+    pub epoch: Option<String>,
 }
 
 /// `DELETE /api/v1/effects/draft`.
@@ -211,7 +254,24 @@ pub async fn put_draft(
 /// Stops the draft and puts the prior effect back. Without a draft it is a no-op, so a banner's
 /// Stop after a lease already ran out is not an error. The slot always goes: when the prior
 /// effect cannot be built, black goes on the lights and `note` says why, with a 200.
-pub async fn delete_draft(State(app): State<Arc<App>>) -> ApiResult<Json<DraftStatus>> {
-    crate::draft::stop(&app).await;
-    Ok(Json(crate::draft::status(&app)))
+///
+/// A page that sends its epoch and does not own the draft ends nothing: the answer is
+/// `applied: false` and the draft that does own the lights keeps running (D95.4.4, item 4).
+pub async fn delete_draft(
+    State(app): State<Arc<App>>,
+    Query(query): Query<DeleteDraftQuery>,
+) -> ApiResult<Json<DraftStatus>> {
+    if let Some(epoch) = &query.epoch {
+        if !crate::epoch::valid_epoch(epoch) {
+            return Err(ApiFailure::validation(format!(
+                "the epoch {epoch:?} is not 16 hexadecimal characters, as a page makes it"
+            )));
+        }
+    }
+    let outcome = crate::draft::stop(&app, query.epoch.as_deref()).await;
+    let mut status = crate::draft::status(&app);
+    if query.epoch.is_some() {
+        status.applied = Some(outcome.applied);
+    }
+    Ok(Json(status))
 }

@@ -55,8 +55,13 @@ pub struct App {
     ///
     /// Behind an `Arc` so the OpenRGB supervisor can share it with the API handlers.
     pub zones: Arc<tokio::sync::RwLock<ZoneSizes>>,
-    /// Preview subscribers, so the engine only runs while the editor watches.
-    pub preview: PreviewRegistry,
+    /// The running effect's preview subscribers (`GET /preview`), so the main engine only runs
+    /// while the editor watches.
+    pub preview_subs: PreviewRegistry,
+    /// The stack preview engine's subscribers (`GET /preview?stack=1`).
+    pub stack_subs: PreviewRegistry,
+    /// The stack preview engine and the stack it runs (D95.4.4).
+    pub stack_preview: crate::preview::StackPreview,
     /// The screen and audio captures. They only run while an effect needs them.
     pub inputs: Mutex<crate::capture::DaemonInputs>,
     /// The API token every request must carry.
@@ -106,6 +111,9 @@ pub struct App {
     pub transient: crate::transient::Transient,
     /// The draft on the lights: an editor's unsaved effect, with its lease (see [`crate::draft`]).
     pub draft: crate::draft::Draft,
+    /// The input source the lights' engine was last given. An engine made later (the stack
+    /// preview) starts from the same one (D95.4.4).
+    pub input_source: Mutex<Option<Arc<dyn canvas_proto::traits::InputSource>>>,
     /// The preview render slots. A preview renders up to 30 s of a blocking thread, so at most
     /// [`crate::api::editor::PREVIEW_CONCURRENT`] run at once and the rest answer 503.
     pub preview_slots: Arc<tokio::sync::Semaphore>,
@@ -180,13 +188,16 @@ impl App {
             last_frame: Arc::default(),
             transient: Default::default(),
             draft: Default::default(),
+            input_source: Mutex::new(None),
             preview_slots: Arc::new(tokio::sync::Semaphore::new(crate::api::editor::PREVIEW_CONCURRENT)),
             store: tokio::sync::RwLock::new(store),
             engine,
             adapter: Arc::new(tokio::sync::Mutex::new(adapter as Box<dyn DeviceAdapter>)),
             devices: tokio::sync::RwLock::new(Vec::new()),
             zones: Arc::new(tokio::sync::RwLock::new(ZoneSizes::new())),
-            preview: PreviewRegistry::default(),
+            preview_subs: PreviewRegistry::default(),
+            stack_subs: PreviewRegistry::default(),
+            stack_preview: crate::preview::StackPreview::new(),
             inputs: Mutex::new(crate::capture::DaemonInputs::empty()),
             token,
             version,
@@ -223,6 +234,34 @@ impl App {
     /// The active layout, if any.
     pub async fn active_layout(&self) -> Option<Layout> {
         self.store.read().await.active_layout().cloned()
+    }
+
+    /// The layout reaches both engines at the same call sites: the lights' engine and, when
+    /// the builder has made it, the preview engine (D95.4.4).
+    pub fn set_layout(&self, layout: &Layout, devices: &[DeviceInfo]) {
+        self.engine.set_layout(layout.clone(), devices.to_vec());
+        self.stack_preview.set_layout(layout, devices);
+    }
+
+    /// The input source reaches both engines at the same call sites. On this commit the daemon
+    /// never calls this, so neither engine has one; the app keeps the last source so an engine
+    /// made later (the preview) starts from the same one (D95.4.4).
+    pub fn set_input_source(&self, source: Option<Arc<dyn canvas_proto::traits::InputSource>>) {
+        *self.input_source.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            source.clone();
+        self.engine.set_input_source(source.clone());
+        self.stack_preview.set_input_source(source);
+    }
+
+    /// The input source the lights' engine has.
+    pub fn input_source(&self) -> Option<Arc<dyn canvas_proto::traits::InputSource>> {
+        self.input_source.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
+    }
+
+    /// The preview engine, made and configured on first use. It parks while nothing watches
+    /// it and never has a device sink.
+    pub async fn stack_preview_engine(&self) -> Arc<dyn canvas_proto::traits::Engine> {
+        self.stack_preview.engine(self).await
     }
 
     /// The device with this id, if it is known.
@@ -269,7 +308,7 @@ impl App {
             parked: stats.parked,
             devices_connected: self.devices_connected().await,
             devices_total: self.devices_total().await,
-            preview_subscribers: self.preview.subscribers(),
+            preview_subscribers: self.preview_subs.subscribers() + self.stack_subs.subscribers(),
             active_layout,
             active_effect,
             openrgb,

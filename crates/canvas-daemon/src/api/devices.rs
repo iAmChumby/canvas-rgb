@@ -82,7 +82,7 @@ pub async fn patch_zone(
         *list = devices.clone();
     }
     if let Some(layout) = app.active_layout().await {
-        app.engine.set_layout(layout.clone(), devices.clone());
+        app.set_layout(&layout, &devices);
         app.stacks.publish_areas(&layout, &devices);
     }
 

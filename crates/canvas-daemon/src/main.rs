@@ -525,7 +525,7 @@ fn spawn_openrgb_supervisor(app: Arc<App>) {
                         // The engine needs the new devices and the zone sizes.
                         if let Some(layout) = app.active_layout().await {
                             let device_list = app.devices.read().await.clone();
-                            app.engine.set_layout(layout.clone(), device_list.clone());
+                            app.set_layout(&layout, &device_list);
                             app.stacks.publish_areas(&layout, &device_list);
                         }
                         sync_device_sinks(&app, &devices, &sinks).await;

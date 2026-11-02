@@ -4,36 +4,40 @@
 //! `PREVIEW_MAX_FPS`. The WebSocket takes the token as `?token=` because a browser
 //! cannot set headers on a WebSocket handshake.
 //!
-//! The preview sink is registered only while at least one subscriber is connected, so
-//! the engine parks when the editor window is closed.
+//! Without a query the socket streams the running effect from the main engine. With
+//! `?stack=1` it streams the stack preview engine instead (D95.4.4): a second engine with no
+//! device sink, so what the builder shows never reaches a light.
+//!
+//! Each preview sink is registered only while at least one subscriber is connected, so the
+//! engine parks when the editor window is closed. A preview engine has one sink, so only one
+//! `?stack=1` socket streams at a time: a second one is closed with code 1013 and a reason the
+//! page can show, rather than taking the frames of the socket already open.
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
-use axum::response::Response;
-use canvas_proto::consts::PREVIEW_MAX_FPS;
-use std::collections::HashMap;
+use axum::response::{IntoResponse, Response};
 use std::sync::Arc;
 
 use crate::state::{App, WebsocketPreview};
 
-/// The token the client passes in the query string.
-#[derive(Debug, Clone, serde::Deserialize)]
+/// The query a preview socket carries: the token (a browser cannot set a header on the
+/// handshake) and `stack=1` for the preview engine.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct PreviewQuery {
     #[serde(default)]
     pub token: Option<String>,
+    /// Any of `1` or `true` streams the stack preview engine.
+    #[serde(default)]
+    pub stack: Option<String>,
 }
 
 /// `GET /api/v1/preview`.
 pub async fn preview(
     State(app): State<Arc<App>>,
-    Query(query): Query<HashMap<String, String>>,
+    Query(query): Query<PreviewQuery>,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    let presented = query
-        .get(canvas_proto::consts::PREVIEW_TOKEN_QUERY)
-        .map(String::as_str)
-        .or(query.get("token").map(String::as_str));
-    let Some(presented) = presented else {
+    let Some(presented) = query.token.as_deref() else {
         return crate::api::ApiFailure::new(
             axum::http::StatusCode::UNAUTHORIZED,
             canvas_proto::api::error_codes::UNAUTHORIZED,
@@ -49,23 +53,68 @@ pub async fn preview(
         )
         .into_response();
     }
-
-    upgrade.on_upgrade(move |socket| run(socket, app))
+    let stack = query
+        .stack
+        .as_deref()
+        .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+    // The stack preview's engine is made now when the builder opens its socket first.
+    let engine = if stack {
+        Some(app.stack_preview_engine().await)
+    } else {
+        None
+    };
+    upgrade.on_upgrade(move |socket| run(socket, app, engine))
 }
 
-use axum::response::IntoResponse;
+/// The socket's place in the preview registry and the engine's sink, for as long as the session
+/// lasts. Both are state tokens taken when the socket opens and given back at the end of
+/// [`run`]; a session whose task is dropped early would otherwise leave the engine rendering for
+/// nobody, so the drop is what releases them.
+struct Session<'a> {
+    engine: &'a Arc<dyn canvas_proto::traits::Engine>,
+    subscribers: &'a crate::state::PreviewRegistry,
+}
+
+impl Drop for Session<'_> {
+    fn drop(&mut self) {
+        self.subscribers.unsubscribe();
+        if self.subscribers.subscribers() == 0 {
+            // The last subscriber left: the engine parks again.
+            self.engine.set_preview(None);
+        }
+    }
+}
 
 /// The preview session.
-async fn run(mut socket: WebSocket, app: Arc<App>) {
+async fn run(mut socket: WebSocket, app: Arc<App>, stack_engine: Option<Arc<dyn canvas_proto::traits::Engine>>) {
+    let (engine, subscribers): (Arc<dyn canvas_proto::traits::Engine>, &crate::state::PreviewRegistry) =
+        match &stack_engine {
+            Some(engine) => (Arc::clone(engine), &app.stack_subs),
+            None => (Arc::clone(&app.engine), &app.preview_subs),
+        };
     let (tx, mut rx) = tokio::sync::mpsc::channel::<(u32, u32, Vec<u8>)>(4);
     let sink = Arc::new(WebsocketPreview::new(tx));
-    app.engine.set_preview(Some(sink));
-    app.preview.subscribe();
-    tracing::info!("the editor preview connected");
+    let count = subscribers.subscribe();
+    let _session = Session { engine: &engine, subscribers };
+    // The preview engine has one sink. A second `?stack=1` socket would take the frames of the
+    // socket already streaming, so it is refused with a close the page can show, and the first
+    // one keeps its sink. (The plain socket has the same limit; it is left as it was so an
+    // editor window that reconnects before its old socket closes still works.)
+    if stack_engine.is_some() && count > 1 {
+        let _ = socket
+            .send(Message::Close(Some(CloseFrame {
+                code: 1013,
+                reason: "another stack preview is open; close it first".into(),
+            })))
+            .await;
+        tracing::info!("a second stack preview socket was refused");
+        return;
+    }
+    engine.set_preview(Some(sink));
+    tracing::info!(stack = stack_engine.is_some(), "the editor preview connected");
 
-    let mut last = std::time::Instant::now();
-    let interval = std::time::Duration::from_millis(1000 / PREVIEW_MAX_FPS.max(1) as u64);
-
+    // The engine's own rate is the cap: it submits at `PREVIEW_MAX_FPS` at most, which is the
+    // same figure the socket promises, so the socket forwards every frame it is handed.
     loop {
         tokio::select! {
             // Forward the frames to the editor.
@@ -90,17 +139,10 @@ async fn run(mut socket: WebSocket, app: Arc<App>) {
                     Some(Err(_)) => break,
                 }
             }
-            // The rate limit.
-            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(last + interval)) => {
-                last = std::time::Instant::now();
-            }
         }
     }
 
-    app.preview.unsubscribe();
-    if app.preview.subscribers() == 0 {
-        // The last subscriber left: the engine parks again.
-        app.engine.set_preview(None);
-    }
-    tracing::info!("the editor preview disconnected");
+    // `_session` gives the registry place and the engine's sink back here: the loop's breaks,
+    // an error, and a dropped task all release them the same way.
+    tracing::info!(stack = stack_engine.is_some(), "the editor preview disconnected");
 }

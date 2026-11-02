@@ -326,3 +326,33 @@ line. Three mechanisms, and one bug the timing only exposed.
 - **How to check a new test:** if it compares `elapsed`, `took` or `waited` with `<`, or sleeps and
   then asserts, expect the scan to flag it; use `wait_until`, a count, a driven clock, or (for log
   lines in canvas-svc) `test_logs::captured`. Run `cargo test -p canvas-svc --test timing_class`.
+
+### `cause:state-token`: a state token taken before an await and given back only on the happy path
+
+A route or task marks something as busy or in flight before it awaits, and takes the mark away at the
+end of the success path only. Every other exit — an error, a panic, a join error, a cancelled or
+dropped task — leaves the mark set. The next caller reads the mark as true, so it either joins work
+that is already dead or is refused, and nothing can clear it until a restart.
+
+- [#95](https://github.com/iAmChumby/canvas-rgb/issues/95), PR #100: a stack draft or preview whose
+  build failed kept its token in `in_flight`. `begin_build` wrote it before the blocking build, and
+  `take_in_flight_if` ran only after the build *and* the apply succeeded; the `?` on the build error
+  (`crates/canvas-daemon/src/draft.rs`, `crates/canvas-daemon/src/preview.rs`) returned first. Later
+  beats joined the dead build and answered `200 applied:true`, so a bad HTML source looked applied
+  forever. Fix: `BuildLease`, a drop guard taken right after `begin_build`, which takes only its own
+  token back (`draft.rs`, `preview.rs`); the join answers the stored build error (422) when the
+  failure is known. Tests: `a_failed_draft_build_answers_its_error_on_every_beat`,
+  `a_builder_that_panics_leaves_the_draft_route_free`,
+  `a_builder_that_panics_leaves_the_preview_route_free` (`crates/canvas-daemon/tests/stacks.rs`).
+- **Class fix:** done for this PR's routes, with the drop guard as the pattern the sibling guards
+  already use (`peripherals::ReadingGuard`, `thumbnail::GiveUpAtGuard`). Sibling search, same PR:
+  `api/preview.rs` `run` gave the subscriber count and the engine's preview sink back only at the end
+  of its loop (a cancelled socket left the engine rendering for nobody) — now `Session`'s drop;
+  `StackPreview::engine` set `configured` before reading the layout (a caller dropped in that window
+  left the engine unconfigured for good) — the flag is now set last; `first_run::maybe_run` cleared
+  `RUNNING` after `run` returns, so a panic in the task left the first run off for the daemon's life —
+  now `RunningGuard`'s drop.
+- **Left open:** no route was found that takes a token into a *lock* and relies on the happy path:
+  the API's per-route guards are RAII already (`effect_writes`, `preview_slots`, the adapters'
+  `tokio::sync::Mutex`). When adding a route that starts asynchronous work, take the token and the
+  guard in the same statement.

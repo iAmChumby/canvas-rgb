@@ -991,7 +991,7 @@ pub async fn delete_effect(
             // draft is in memory only, and deleting what the lights show is what the owner
             // asked for. The restore cannot build the file any more, so the lights go black
             // and the note says so, in the answer as well as the log.
-            if let Some(ended) = crate::draft::stop(&app).await {
+            if let Some(ended) = crate::draft::stop(&app, None).await.ended {
                 if let Some(note) = &ended.note {
                     tracing::warn!(%note, "the draft ended when its prior effect was deleted");
                 }
