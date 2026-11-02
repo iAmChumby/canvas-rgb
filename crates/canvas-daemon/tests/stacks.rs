@@ -383,6 +383,30 @@ impl Effect for HalfThenPanic {
     }
 }
 
+/// A fake layer whose output breaks the canvas invariant: it empties its own picture, which the
+/// composite path reads. There the panic comes from `composite_layer`, not from the layer.
+struct BrokeItsCanvas;
+
+impl Effect for BrokeItsCanvas {
+    fn schema(&self) -> PropertySchema {
+        PropertySchema {
+            id: "broken".into(),
+            name: "Broken".into(),
+            description: String::new(),
+            needs: InputNeeds::default(),
+            properties: Vec::new(),
+            presets: Vec::new(),
+            thumbnail: None,
+        }
+    }
+
+    fn init(&mut self, _props: &Props) {}
+
+    fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &Inputs) {
+        canvas.pixels.clear();
+    }
+}
+
 /// A leaf builder that hands every layer a [`Paint`] and counts the builds.
 fn paint_leaves(
     updates: Arc<AtomicU64>,
@@ -1826,10 +1850,10 @@ fn a_layer_whose_init_panics_is_faulted_and_the_rest_run() {
     );
 }
 
-/// A panic anywhere in the compositor's own frame work is a black frame for that frame, not an
-/// unwind into the engine: the clock here panics where a compositor bug would.
+/// A panic in the compositor's own frame work is a black frame for that frame, not an unwind
+/// into the engine: the clock here panics where a compositor bug would.
 #[test]
-fn a_panic_in_the_compositors_own_work_is_a_black_frame() {
+fn a_panic_in_the_compositor_clock_is_a_black_frame() {
     let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
     let lay = layout(vec![placed("d", 0, 0.0, 0.0, 100.0, 20.0)], RenderScale::P100, SamplingMode::Nearest);
     let stack = stack("stack:Broken", vec![layer("l1", "paint")]);
@@ -1891,6 +1915,28 @@ fn a_tile_failure_from_a_layers_update_refuses_the_stack_tile() {
         }
         other => panic!("the stack tile was not refused: {other:?}"),
     }
+}
+
+/// A panic in the composite path is a black frame for that frame, not an unwind into the engine.
+/// The panic here comes from a layer's output (it empties its own canvas), so `composite_layer`
+/// reads past the picture.
+#[test]
+fn a_panic_in_the_composite_path_is_a_black_frame() {
+    let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
+    let lay = layout(vec![placed("d", 0, 0.0, 0.0, 100.0, 20.0)], RenderScale::P100, SamplingMode::Nearest);
+    let stack = stack("stack:BrokenLayer", vec![layer("l1", "broken")]);
+    let leaves: LeafBuilder = Arc::new(|_id: &str| Ok(Box::new(BrokeItsCanvas) as Box<dyn Effect>));
+    let mut effect = StackEffect::new(&stack, leaves, live_for(&stack), areas_for(&lay, &devices))
+        .with_clock(ManualClock::new().clock());
+    effect.init(&Props::new());
+    let mut canvas = Canvas::with_scale(1.0);
+    canvas.fill([1.0, 1.0, 1.0]);
+    step(&mut effect, &mut canvas);
+    assert_eq!(canvas.get(5, 5), [0.0, 0.0, 0.0], "the frame is black");
+    // The stack keeps running: the next frame is black too, and nothing unwinds.
+    canvas.fill([1.0, 1.0, 1.0]);
+    step(&mut effect, &mut canvas);
+    assert_eq!(canvas.get(5, 5), [0.0, 0.0, 0.0]);
 }
 
 /// A layer that paints half its picture and then panics leaves no half-written canvas behind:
