@@ -134,6 +134,8 @@ interface DemoState {
   draftNote: string | null;
   /** `?state=draft-running` has put its draft on the lights once. */
   draftSeeded: boolean;
+  /** `?state=draft-stop-fail` has refused one Stop already. */
+  draftStopFailed: boolean;
 }
 
 /**
@@ -245,6 +247,7 @@ function initialState(): DemoState {
       : null,
     previews: 0,
     draftCalls: [],
+    draftStopFailed: false,
   };
 }
 
@@ -937,12 +940,20 @@ export async function demoRequest(method: string, path: string, body: unknown): 
         const call = { method, at: Date.now() };
         s.draftCalls.push(call);
         (globalThis as { __draft?: unknown[] }).__draft?.push(call);
+        // `?state=draft-stop-fail`: the first Stop cannot restore the prior effect, so the
+        // restore-error state and its Retry can be seen. The next Stop goes through.
+        if (scenario().has("draft-stop-fail") && !s.draftStopFailed) {
+          s.draftStopFailed = true;
+          fail(503, "service_unavailable", "the previous effect could not be restored; try again");
+        }
         return endDraft(s);
       }
       return bad();
     }
     const id = seg[1] ?? "";
     if (seg.length === 3 && seg[2] === "source" && method === "GET") {
+      // `?state=source-fail`: the file cannot be read, as a locked or moved file answers.
+      if (scenario().has("source-fail")) fail(500, "internal", "could not read the effect file: access is denied (os error 5)");
       const found = demoSource(id);
       if (!found) {
         fail(404, "not_found", `${id} is a built-in effect written in Rust; it has no HTML source to edit`);

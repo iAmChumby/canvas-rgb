@@ -62,6 +62,9 @@ async function mount() {
   await screen.findByRole("button", { name: "Open Solid" });
 }
 
+const setState = (tokens: string) =>
+  window.history.replaceState({}, "", `/effects/?state=${tokens}`);
+
 const newEffect = async () => {
   // The code editor's way in is advanced, behind the page's overflow menu.
   fireEvent.click(screen.getByRole("button", { name: "More effect actions" }));
@@ -77,7 +80,7 @@ describe("a new effect", () => {
     expect(chooser.textContent).toContain("Ink Drop");
     expect(chooser.textContent).toContain("Wet Smear");
     expect(chooser.textContent).not.toContain("Solid");
-    fireEvent.click(within(chooser).getByRole("button", { name: /Ink Drop/ }));
+    fireEvent.click(within(chooser).getByRole("button", { name: "Copy Ink Drop" }));
     await screen.findByTestId("effect-code");
     const field = screen.getByLabelText("File name") as HTMLInputElement;
     expect(field.value).toBe("ink-drop copy.html");
@@ -119,5 +122,25 @@ describe("a new effect", () => {
     expect(screen.queryByText("file exists")).toBeNull();
     // Nothing was written: the blank is still the file it was.
     expect(screen.getByLabelText("File name")).toBeTruthy();
+  });
+
+  it("says why a copy could not be read and stays in the chooser", async () => {
+    await mount();
+    setState("html,stock,source-fail");
+    const chooser = await newEffect();
+    fireEvent.click(within(chooser).getByRole("button", { name: "Copy Ink Drop" }));
+    expect(await screen.findByText(/could not read the effect file/)).toBeTruthy();
+    expect(screen.getByTestId("new-effect")).toBeTruthy();
+    setState("html,stock");
+  });
+
+  it("says it is reading a copy while the file is on its way", async () => {
+    await mount();
+    setState("html,stock,slow");
+    const chooser = await newEffect();
+    fireEvent.click(within(chooser).getByRole("button", { name: "Copy Wet Smear" }));
+    expect(await screen.findByText("Reading…")).toBeTruthy();
+    await screen.findByTestId("effect-code", {}, { timeout: 5000 });
+    setState("html,stock");
   });
 });

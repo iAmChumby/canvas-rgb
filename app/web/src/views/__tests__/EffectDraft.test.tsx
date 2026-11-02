@@ -150,6 +150,34 @@ describe("the draft on the lights", () => {
     await waitFor(() => expect(draftCalls().some((c) => c.method === "DELETE")).toBe(true), { timeout: 3000 });
   });
 
+  it("counts the seconds after a failed beat and restores when the lease runs out", async () => {
+    setState("html,fast-draft,presets,draft-beat-fail");
+    await openEditor();
+    fireEvent.click(screen.getByRole("button", { name: "Try on the lights" }));
+    await screen.findByText("Draft on the lights.");
+    // The next beat is refused: the banner counts what is left of the lease.
+    expect(await screen.findByText(/Draft on the lights, expiring in \d+s\./, {}, { timeout: 3000 })).toBeTruthy();
+    // The lease runs out; the daemon puts the previous effect back by itself and the banner goes.
+    await waitFor(() => expect(document.querySelector(".eff-draft")).toBeNull(), { timeout: 6000 });
+    setState("html,fast-draft,presets");
+  });
+
+  it("says so and offers Retry when a Stop cannot restore the previous effect", async () => {
+    setState("html,fast-draft,presets,draft-stop-fail");
+    await openEditor();
+    fireEvent.click(screen.getByRole("button", { name: "Try on the lights" }));
+    await screen.findByText("Draft on the lights.");
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    expect(
+      await screen.findByText("The previous effect could not be restored.", {}, { timeout: 3000 }),
+    ).toBeTruthy();
+    // Retry sends the DELETE again, and this time it lands.
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(document.querySelector(".eff-draft")).toBeNull(), { timeout: 3000 });
+    expect(draftCalls().filter((c) => c.method === "DELETE").length).toBeGreaterThanOrEqual(2);
+    setState("html,fast-draft,presets");
+  });
+
   it("saves through the import route, activates the effect, and ends the draft", async () => {
     await openEditor();
     await replaceSource(EDITED);

@@ -59,6 +59,7 @@ export function NewEffectChooser({
                 key={effect.id}
                 type="button"
                 className="eff-choose-row"
+                aria-label={`Copy ${effect.name}`}
                 disabled={busy !== null}
                 onClick={() => onCopy(effect.id)}
               >
