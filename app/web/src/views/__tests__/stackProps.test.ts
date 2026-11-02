@@ -75,6 +75,17 @@ describe("the merged map", () => {
     expect(next[1]?.props.intensity).toEqual(number(90));
   });
 
+  it("writes no key into a layer whose schema is not here yet", () => {
+    // A preset applied before a layer's effect has been read must not give it a key it has not.
+    const next = applyMergedProps(
+      layers,
+      { "l1.color": color("#00ff00"), "l2.intensity": number(90) },
+      {},
+    );
+    expect(next[0]?.props).toEqual(layers[0]?.props);
+    expect(next[1]?.props).toEqual(layers[1]?.props);
+  });
+
   it("round-trips", () => {
     const merged = mergedProps(layers, schemas);
     const back = applyMergedProps(layers, merged, schemas);
