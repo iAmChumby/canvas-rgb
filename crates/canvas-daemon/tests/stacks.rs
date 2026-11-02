@@ -3630,3 +3630,64 @@ async fn a_stale_pages_stop_and_delete_end_nothing() {
         );
     }
 }
+
+/// Reads one server frame: its opcode and payload (the server's frames are unmasked).
+async fn read_frame(stream: &mut tokio::net::TcpStream) -> (u8, Vec<u8>) {
+    use tokio::io::AsyncReadExt;
+    let mut header = [0u8; 2];
+    stream
+        .read_exact(&mut header)
+        .await
+        .expect("a frame header is read");
+    let opcode = header[0] & 0x0f;
+    assert_eq!(header[1] & 0x80, 0, "a server frame is unmasked");
+    let mut len = u64::from(header[1] & 0x7f);
+    if len == 126 {
+        let mut extended = [0u8; 2];
+        stream.read_exact(&mut extended).await.expect("the length");
+        len = u64::from(u16::from_be_bytes(extended));
+    } else if len == 127 {
+        let mut extended = [0u8; 8];
+        stream.read_exact(&mut extended).await.expect("the length");
+        len = u64::from_be_bytes(extended);
+    }
+    let mut payload = vec![0u8; len as usize];
+    stream
+        .read_exact(&mut payload)
+        .await
+        .expect("the payload is read");
+    (opcode, payload)
+}
+
+#[tokio::test]
+async fn a_second_stack_preview_socket_is_refused_with_a_reason() {
+    let harness = build("r3-one-socket");
+    let addr = serve(harness.router.clone()).await;
+
+    // The first stack socket takes the preview engine's sink.
+    let mut first = open_preview_socket(addr, "&stack=1").await;
+    let sink = preview_sink(&harness.preview_engine).await;
+
+    // The second is closed at once, with a reason the page can show, and takes nothing.
+    let mut second = open_preview_socket(addr, "&stack=1").await;
+    let (opcode, payload) = tokio::time::timeout(Duration::from_secs(10), read_frame(&mut second))
+        .await
+        .expect("the second socket is answered, not left hanging");
+    assert_eq!(opcode, 0x8, "a close frame, not a stream");
+    assert!(payload.len() >= 2, "the close carries a code");
+    let code = u16::from_be_bytes([payload[0], payload[1]]);
+    assert_eq!(code, 1013, "try again later");
+    let reason = String::from_utf8_lossy(&payload[2..]).into_owned();
+    assert!(
+        reason.contains("stack preview"),
+        "the reason says what is open: {reason:?}"
+    );
+
+    // The first socket still streams from the same sink.
+    submit_frame(&sink, &[1, 2, 3, 4, 5, 6]);
+    let (opcode, payload) = tokio::time::timeout(Duration::from_secs(10), read_frame(&mut first))
+        .await
+        .expect("the first socket still streams");
+    assert_eq!(opcode, 0x2, "the first socket still streams");
+    assert_eq!(payload, vec![2, 0, 1, 0, 1, 2, 3, 4, 5, 6]);
+}
