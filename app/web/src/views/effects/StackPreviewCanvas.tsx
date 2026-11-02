@@ -73,7 +73,7 @@ export function StackPreviewCanvas({
         {empty && (
           <div className="rd-canvas-empty">
             <strong>Nothing to show yet</strong>
-            <span>Add a layer to see the stack.</span>
+            <span>Add a layer and its picture appears here.</span>
           </div>
         )}
         {bounds && picked && (

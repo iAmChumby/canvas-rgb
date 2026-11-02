@@ -182,7 +182,9 @@ export function applyMergedProps(
     for (const [key, value] of Object.entries(merged)) {
       if (!key.startsWith(prefix)) continue;
       const own = key.slice(prefix.length);
-      if (known.size > 0 && !known.has(own)) continue;
+      // Only the keys the effect has. A schema that is not here yet is not a licence to write
+      // any key: the layer keeps its own values until the schema says what it takes.
+      if (!known.has(own)) continue;
       props[own] = value;
     }
     return { ...layer, props };

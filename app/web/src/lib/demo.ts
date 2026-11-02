@@ -1019,6 +1019,11 @@ export async function demoRequest(method: string, path: string, body: unknown): 
           const lease = scenario().has("fast-draft") ? 900 : 15_000;
           const epoch = req.epoch ?? "";
           const seq = req.seq ?? 0;
+          // `?state=stack-beat-fail`: the first beat starts the draft, the rest fail, so the
+          // expiring banner and its countdown can be seen on a stack (D95.5.8).
+          if (scenario().has("stack-beat-fail") && s.draft !== null) {
+            fail(503, "service_unavailable", "the draft could not be renewed");
+          }
           let applied = true;
           if (s.draft?.stack && s.draft.epoch === epoch && seq <= (s.draft.seq ?? 0)) applied = false;
           if (applied) {
@@ -1319,6 +1324,10 @@ export async function demoRequest(method: string, path: string, body: unknown): 
     }
     if (seg.length === 2 && method === "PUT") {
       const next = body as Stack;
+      // `?state=stack-save-error`: the write fails as a locked file does (D95.5.8).
+      if (scenario().has("stack-save-error")) {
+        fail(500, "internal", "could not write stacks.json: the file is locked");
+      }
       const name = next.id.startsWith("stack:") ? next.id.slice("stack:".length) : next.id;
       if (next.id !== `stack:${name}`) fail(422, "validation", "a stack's id is stack: and its name");
       if (name.trim().length === 0) fail(422, "validation", "a stack needs a name");

@@ -87,7 +87,21 @@ export function seededStacks(scenario: Set<string>, effects: Record<string, Demo
       layer("l8", "Flat", "solid", effects.solid?.defaults ?? {}, { opacity: 20 }),
     ],
   };
-  return { [sunsetGlow.id]: sunsetGlow, [eight.id]: eight };
+  const stacks: Record<string, Stack> = { [sunsetGlow.id]: sunsetGlow, [eight.id]: eight };
+  // `?state=stack-nested`: a hand-edited stack whose middle layer is another stack, so the row's
+  // `Nested stack` and the picked layer's explanation can be seen (D95.4.8).
+  if (scenario.has("stack-nested")) {
+    const nested: Stack = {
+      id: "stack:Nested demo",
+      layers: [
+        layer("l1", "Base", "gradient", gradient),
+        layer("l2", "Twin", "stack:Sunset glow", {}),
+        layer("l3", "Sparkles", "rain", rain),
+      ],
+    };
+    stacks[nested.id] = nested;
+  }
+  return stacks;
 }
 
 /** The library's row for a stack (D95.4.2). */
