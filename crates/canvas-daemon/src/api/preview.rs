@@ -9,9 +9,11 @@
 //! device sink, so what the builder shows never reaches a light.
 //!
 //! Each preview sink is registered only while at least one subscriber is connected, so the
-//! engine parks when the editor window is closed.
+//! engine parks when the editor window is closed. A preview engine has one sink, so only one
+//! `?stack=1` socket streams at a time: a second one is closed with code 1013 and a reason the
+//! page can show, rather than taking the frames of the socket already open.
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Response};
 use std::sync::Arc;
@@ -64,6 +66,25 @@ pub async fn preview(
     upgrade.on_upgrade(move |socket| run(socket, app, engine))
 }
 
+/// The socket's place in the preview registry and the engine's sink, for as long as the session
+/// lasts. Both are state tokens taken when the socket opens and given back at the end of
+/// [`run`]; a session whose task is dropped early would otherwise leave the engine rendering for
+/// nobody, so the drop is what releases them.
+struct Session<'a> {
+    engine: &'a Arc<dyn canvas_proto::traits::Engine>,
+    subscribers: &'a crate::state::PreviewRegistry,
+}
+
+impl Drop for Session<'_> {
+    fn drop(&mut self) {
+        self.subscribers.unsubscribe();
+        if self.subscribers.subscribers() == 0 {
+            // The last subscriber left: the engine parks again.
+            self.engine.set_preview(None);
+        }
+    }
+}
+
 /// The preview session.
 async fn run(mut socket: WebSocket, app: Arc<App>, stack_engine: Option<Arc<dyn canvas_proto::traits::Engine>>) {
     let (engine, subscribers): (Arc<dyn canvas_proto::traits::Engine>, &crate::state::PreviewRegistry) =
@@ -73,8 +94,23 @@ async fn run(mut socket: WebSocket, app: Arc<App>, stack_engine: Option<Arc<dyn 
         };
     let (tx, mut rx) = tokio::sync::mpsc::channel::<(u32, u32, Vec<u8>)>(4);
     let sink = Arc::new(WebsocketPreview::new(tx));
+    let count = subscribers.subscribe();
+    let _session = Session { engine: &engine, subscribers };
+    // The preview engine has one sink. A second `?stack=1` socket would take the frames of the
+    // socket already streaming, so it is refused with a close the page can show, and the first
+    // one keeps its sink. (The plain socket has the same limit; it is left as it was so an
+    // editor window that reconnects before its old socket closes still works.)
+    if stack_engine.is_some() && count > 1 {
+        let _ = socket
+            .send(Message::Close(Some(CloseFrame {
+                code: 1013,
+                reason: "another stack preview is open; close it first".into(),
+            })))
+            .await;
+        tracing::info!("a second stack preview socket was refused");
+        return;
+    }
     engine.set_preview(Some(sink));
-    subscribers.subscribe();
     tracing::info!(stack = stack_engine.is_some(), "the editor preview connected");
 
     // The engine's own rate is the cap: it submits at `PREVIEW_MAX_FPS` at most, which is the
@@ -106,10 +142,7 @@ async fn run(mut socket: WebSocket, app: Arc<App>, stack_engine: Option<Arc<dyn 
         }
     }
 
-    subscribers.unsubscribe();
-    if subscribers.subscribers() == 0 {
-        // The last subscriber left: the engine parks again.
-        engine.set_preview(None);
-    }
+    // `_session` gives the registry place and the engine's sink back here: the loop's breaks,
+    // an error, and a dropped task all release them the same way.
     tracing::info!(stack = stack_engine.is_some(), "the editor preview disconnected");
 }

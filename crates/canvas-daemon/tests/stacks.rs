@@ -101,15 +101,25 @@ fn build(tag: &str) -> Harness {
 }
 
 fn build_with(tag: &str, user: Option<Arc<canvas_daemon::user_effects::UserEffects>>) -> Harness {
-    harness_in(TempHome::new(tag), user)
+    harness_in(TempHome::new(tag), user, None)
+}
+
+/// The daemon whose draft route builds with `builder` instead of the real HTML builder: a test
+/// that counts a draft's builds, or makes one panic.
+fn build_with_draft(tag: &str, builder: canvas_daemon::user_effects::Builder) -> Harness {
+    harness_in(TempHome::new(tag), None, Some(builder))
 }
 
 /// The daemon on a home a test wrote first (a hand-written or corrupt `stacks.json`).
 fn harness_at(home: TempHome) -> Harness {
-    harness_in(home, None)
+    harness_in(home, None, None)
 }
 
-fn harness_in(home: TempHome, user: Option<Arc<canvas_daemon::user_effects::UserEffects>>) -> Harness {
+fn harness_in(
+    home: TempHome,
+    user: Option<Arc<canvas_daemon::user_effects::UserEffects>>,
+    draft_builder: Option<canvas_daemon::user_effects::Builder>,
+) -> Harness {
     let folder = home.path.join("effects");
     std::fs::create_dir_all(&folder).expect("the effects folder is created");
     let store = canvas_daemon::storage::Store::at(&home.path);
@@ -134,7 +144,10 @@ fn harness_in(home: TempHome, user: Option<Arc<canvas_daemon::user_effects::User
     app.stack_preview.install_engine(preview_engine.clone());
     // A stack draft's lease is measured on a clock the test moves, never the wall clock.
     let draft_clock = LeaseClock::new();
-    app.draft = canvas_daemon::draft::Draft::with_clock(draft_clock.clock());
+    app.draft = match draft_builder {
+        Some(builder) => canvas_daemon::draft::Draft::with_builder(draft_clock.clock(), builder),
+        None => canvas_daemon::draft::Draft::with_clock(draft_clock.clock()),
+    };
     let app = Arc::new(app);
     Harness {
         router: api::router(app.clone()),
@@ -538,6 +551,91 @@ impl Effect for TileFailingInit {
     }
 
     fn update(&mut self, _dt: f32, _canvas: &mut Canvas, _inputs: &Inputs) {}
+}
+
+/// A fake tile layer whose `update` unwinds with the tile render's own failure payload: a stack
+/// tile must refuse the tile rather than cache a picture the failing layer never drew.
+struct TileFailingUpdate;
+
+impl Effect for TileFailingUpdate {
+    fn schema(&self) -> PropertySchema {
+        PropertySchema {
+            id: "tile-update".into(),
+            name: "Tile update".into(),
+            description: String::new(),
+            needs: InputNeeds::default(),
+            properties: Vec::new(),
+            presets: Vec::new(),
+            thumbnail: None,
+        }
+    }
+
+    fn init(&mut self, _props: &Props) {}
+
+    fn update(&mut self, _dt: f32, _canvas: &mut Canvas, _inputs: &Inputs) {
+        std::panic::resume_unwind(Box::new(canvas_daemon::thumbnail::TileFailure {
+            reason: "the layer's script failed while the tile was drawn".into(),
+            load_dependent: false,
+        }));
+    }
+}
+
+/// A fake layer that paints its top half red and panics on its second frame, so its canvas is
+/// half-written when it faults.
+struct HalfThenPanic {
+    frames: Arc<AtomicU64>,
+}
+
+impl Effect for HalfThenPanic {
+    fn schema(&self) -> PropertySchema {
+        PropertySchema {
+            id: "half".into(),
+            name: "Half".into(),
+            description: String::new(),
+            needs: InputNeeds::default(),
+            properties: Vec::new(),
+            presets: Vec::new(),
+            thumbnail: None,
+        }
+    }
+
+    fn init(&mut self, _props: &Props) {}
+
+    fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &Inputs) {
+        let frame = self.frames.fetch_add(1, Ordering::SeqCst) + 1;
+        for y in 0..canvas.height / 2 {
+            for x in 0..canvas.width {
+                canvas.set(x, y, [1.0, 0.0, 0.0]);
+            }
+        }
+        if frame >= 2 {
+            panic!("a layer's update panicked");
+        }
+    }
+}
+
+/// A fake layer whose output breaks the canvas invariant: it empties its own picture, which the
+/// composite path reads. There the panic comes from `composite_layer`, not from the layer.
+struct BrokeItsCanvas;
+
+impl Effect for BrokeItsCanvas {
+    fn schema(&self) -> PropertySchema {
+        PropertySchema {
+            id: "broken".into(),
+            name: "Broken".into(),
+            description: String::new(),
+            needs: InputNeeds::default(),
+            properties: Vec::new(),
+            presets: Vec::new(),
+            thumbnail: None,
+        }
+    }
+
+    fn init(&mut self, _props: &Props) {}
+
+    fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &Inputs) {
+        canvas.pixels.clear();
+    }
 }
 
 /// A leaf builder that hands every layer a [`Paint`] and counts the builds.
@@ -1983,10 +2081,10 @@ fn a_layer_whose_init_panics_is_faulted_and_the_rest_run() {
     );
 }
 
-/// A panic anywhere in the compositor's own frame work is a black frame for that frame, not an
-/// unwind into the engine: the clock here panics where a compositor bug would.
+/// A panic in the compositor's own frame work is a black frame for that frame, not an unwind
+/// into the engine: the clock here panics where a compositor bug would.
 #[test]
-fn a_panic_in_the_compositors_own_work_is_a_black_frame() {
+fn a_panic_in_the_compositor_clock_is_a_black_frame() {
     let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
     let lay = layout(vec![placed("d", 0, 0.0, 0.0, 100.0, 20.0)], RenderScale::P100, SamplingMode::Nearest);
     let stack = stack("stack:Broken", vec![layer("l1", "paint")]);
@@ -2008,10 +2106,10 @@ fn a_panic_in_the_compositors_own_work_is_a_black_frame() {
     assert_eq!(canvas.get(5, 5), [0.0, 0.0, 0.0]);
 }
 
-/// A tile's own failure unwinds through the layer's start: the stack hands it to the tile
-/// render, which refuses the tile, instead of faulting the layer and drawing a different picture.
+/// A tile's own failure unwinds through the layer's start: `StackEffect::init` hands the payload
+/// on as it is, rather than faulting the layer and drawing a different picture.
 #[test]
-fn a_tile_failure_from_a_layers_init_reaches_the_tile_render() {
+fn a_tile_failure_from_a_layers_init_is_handed_on_by_the_stacks_init() {
     let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
     let lay = layout(vec![placed("d", 0, 0.0, 0.0, 100.0, 20.0)], RenderScale::P100, SamplingMode::Nearest);
     let stack = stack("stack:Tile", vec![layer("l1", "tile")]);
@@ -2025,6 +2123,82 @@ fn a_tile_failure_from_a_layers_init_reaches_the_tile_render() {
     assert!(
         payload.downcast_ref::<canvas_daemon::thumbnail::TileFailure>().is_some(),
         "the payload is still the tile's own"
+    );
+}
+
+/// A tile's own failure raised by a layer's `update` is handed on to the tile render too: the
+/// stack tile is refused (`RenderError::Failed`) instead of being cached with that layer missing.
+#[test]
+fn a_tile_failure_from_a_layers_update_refuses_the_stack_tile() {
+    let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
+    let lay = layout(vec![placed("d", 0, 0.0, 0.0, 100.0, 20.0)], RenderScale::P100, SamplingMode::Nearest);
+    let stack = stack("stack:TileUpdate", vec![layer("l1", "tile-update")]);
+    let leaves: LeafBuilder = Arc::new(|_id: &str| Ok(Box::new(TileFailingUpdate) as Box<dyn Effect>));
+    let mut effect = StackEffect::new(&stack, leaves, live_for(&stack), areas_for(&lay, &devices));
+    let outcome = canvas_daemon::thumbnail::render_within(
+        &mut effect,
+        &Props::new(),
+        Duration::from_secs(5),
+    );
+    match outcome {
+        Err(canvas_daemon::thumbnail::RenderError::Failed(reason)) => {
+            assert!(reason.contains("the layer's script failed"), "{reason}");
+        }
+        other => panic!("the stack tile was not refused: {other:?}"),
+    }
+}
+
+/// A panic in the composite path is a black frame for that frame, not an unwind into the engine.
+/// The panic here comes from a layer's output (it empties its own canvas), so `composite_layer`
+/// reads past the picture.
+#[test]
+fn a_panic_in_the_composite_path_is_a_black_frame() {
+    let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
+    let lay = layout(vec![placed("d", 0, 0.0, 0.0, 100.0, 20.0)], RenderScale::P100, SamplingMode::Nearest);
+    let stack = stack("stack:BrokenLayer", vec![layer("l1", "broken")]);
+    let leaves: LeafBuilder = Arc::new(|_id: &str| Ok(Box::new(BrokeItsCanvas) as Box<dyn Effect>));
+    let mut effect = StackEffect::new(&stack, leaves, live_for(&stack), areas_for(&lay, &devices))
+        .with_clock(ManualClock::new().clock());
+    effect.init(&Props::new());
+    let mut canvas = Canvas::with_scale(1.0);
+    canvas.fill([1.0, 1.0, 1.0]);
+    step(&mut effect, &mut canvas);
+    assert_eq!(canvas.get(5, 5), [0.0, 0.0, 0.0], "the frame is black");
+    // The stack keeps running: the next frame is black too, and nothing unwinds.
+    canvas.fill([1.0, 1.0, 1.0]);
+    step(&mut effect, &mut canvas);
+    assert_eq!(canvas.get(5, 5), [0.0, 0.0, 0.0]);
+}
+
+/// A layer that paints half its picture and then panics leaves no half-written canvas behind:
+/// the faulted layer's picture is black, so its red does not reach the frame.
+#[test]
+fn a_layer_whose_update_panics_leaves_no_half_written_picture() {
+    let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
+    let lay = layout(vec![placed("d", 0, 0.0, 0.0, 100.0, 20.0)], RenderScale::P100, SamplingMode::Nearest);
+    let stack = stack("stack:Half", vec![layer("l1", "half")]);
+    let frames = Arc::new(AtomicU64::new(0));
+    let leaves: LeafBuilder = Arc::new({
+        let frames = Arc::clone(&frames);
+        move |_id: &str| {
+            Ok(Box::new(HalfThenPanic { frames: Arc::clone(&frames) }) as Box<dyn Effect>)
+        }
+    });
+    let mut effect = StackEffect::new(&stack, leaves, live_for(&stack), areas_for(&lay, &devices))
+        .with_clock(ManualClock::new().clock());
+    effect.init(&Props::new());
+    let mut canvas = Canvas::with_scale(1.0);
+    step(&mut effect, &mut canvas);
+    assert_eq!(canvas.get(5, 5), [1.0, 0.0, 0.0], "the first frame paints the top half");
+    step(&mut effect, &mut canvas);
+    assert_eq!(
+        canvas.get(5, 5),
+        [0.0, 0.0, 0.0],
+        "the panicked layer's half-written canvas never reaches the frame"
+    );
+    assert_eq!(
+        effect.layer_status("l1").map(|(state, _)| state),
+        Some(StackLayerState::Faulted)
     );
 }
 
@@ -3071,4 +3245,449 @@ async fn a_preview_and_a_draft_require_a_sixteen_hex_epoch() {
         put_preview(&harness, &preview, &page(7), 1).await.status(),
         StatusCode::OK
     );
+}
+
+// ================================================================ round 3 (job 75)
+
+/// HTML whose script does not parse: the builder refuses it, so a PUT of it answers 422.
+const BROKEN_HTML: &str = "<head><title>Broken</title></head><body><canvas id=\"c\"></canvas></body><script>\nvar = ;\n</script>";
+
+/// A PUT to the draft route with one HTML file, as #2's editor sends it.
+async fn put_html_draft(harness: &Harness, html: &str) -> axum::response::Response {
+    let body = serde_json::json!({ "html": html, "props": {} }).to_string();
+    harness
+        .router
+        .clone()
+        .oneshot(request_with_body("PUT", routes::EFFECT_DRAFT, &body))
+        .await
+        .expect("the router answers")
+}
+
+/// A builder that panics once, when it is armed, and then builds as the real one does.
+fn panicking_builder() -> (canvas_daemon::user_effects::Builder, Arc<std::sync::atomic::AtomicBool>) {
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = Arc::clone(&armed);
+    let base = canvas_daemon::user_effects::html_builder();
+    let builder: canvas_daemon::user_effects::Builder = Arc::new(move |id: &str, source: &str| {
+        if flag.swap(false, Ordering::SeqCst) {
+            panic!("the builder panicked");
+        }
+        base(id, source)
+    });
+    (builder, armed)
+}
+
+/// A user-effects library whose builder panics once, when it is armed, and then behaves.
+/// Loading a file into the library is itself a build, so the test arms it after its setup.
+fn panicking_user() -> (Arc<canvas_daemon::user_effects::UserEffects>, Arc<std::sync::atomic::AtomicBool>) {
+    let (builder, armed) = panicking_builder();
+    (Arc::new(canvas_daemon::user_effects::UserEffects::new(builder)), armed)
+}
+
+#[tokio::test]
+async fn a_failed_draft_build_answers_its_error_on_every_beat() {
+    let builds = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&builds);
+    let base = canvas_daemon::user_effects::html_builder();
+    let builder: canvas_daemon::user_effects::Builder = Arc::new(move |id: &str, source: &str| {
+        counted.fetch_add(1, Ordering::SeqCst);
+        base(id, source)
+    });
+    let harness = build_with_draft("r3-draft-failure", builder);
+    prior_is_solid(&harness).await;
+
+    // Three beats of a file that cannot load: each one is refused, and the route stays free
+    // (the second beat answers the stored error rather than joining the dead build).
+    for beat in 1..=3 {
+        let response = put_html_draft(&harness, BROKEN_HTML).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "beat {beat} of a broken draft is refused"
+        );
+    }
+    assert_eq!(
+        builds.load(Ordering::SeqCst),
+        1,
+        "the source that cannot load is not loaded again on every beat"
+    );
+    assert_eq!(
+        harness.engine.effect_id.lock().unwrap().clone(),
+        Some("solid".to_string()),
+        "no failed build reached the lights"
+    );
+}
+
+#[tokio::test]
+async fn a_builder_that_panics_leaves_the_draft_route_free() {
+    let (builder, armed) = panicking_builder();
+    let harness = build_with_draft("r3-draft-panic", builder);
+    prior_is_solid(&harness).await;
+
+    // The first build panics: the daemon answers 500, as a daemon problem, not the file's.
+    armed.store(true, Ordering::SeqCst);
+    let panicked = put_html_draft(&harness, VALID_HTML).await;
+    assert_eq!(panicked.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    // The route is free: the next beat builds and lands instead of joining the dead build.
+    let landed = put_html_draft(&harness, VALID_HTML).await;
+    assert_eq!(landed.status(), StatusCode::OK);
+    assert_eq!(json(landed).await["applied"], true);
+    let hash = canvas_daemon::user_effects::source_hash(VALID_HTML);
+    assert_eq!(
+        harness.engine.effect_id.lock().unwrap().clone(),
+        Some(format!("{}{hash}", canvas_proto::consts::DRAFT_ID_PREFIX)),
+        "the beat after the panic reached the lights"
+    );
+}
+
+#[tokio::test]
+async fn a_builder_that_panics_leaves_the_preview_route_free() {
+    let (user, armed) = panicking_user();
+    let harness = build_with("r3-preview-panic", Some(user));
+    add_html(&harness, "Spark.html", VALID_HTML);
+    let preview = stack("stack:Panes", vec![layer("l1", "html:Spark")]);
+    let epoch = page(0xe1);
+
+    armed.store(true, Ordering::SeqCst);
+    let panicked = put_preview(&harness, &preview, &epoch, 1).await;
+    assert_eq!(panicked.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    // The next beat builds the same structure again and it lands on the preview engine.
+    let landed = put_preview(&harness, &preview, &epoch, 2).await;
+    assert_eq!(landed.status(), StatusCode::OK);
+    assert_eq!(json(landed).await["applied"], true);
+    assert_eq!(
+        harness.preview_engine.effect_id.lock().unwrap().clone(),
+        Some("stack:Panes".to_string()),
+        "the beat after the panic reached the preview engine"
+    );
+}
+
+#[tokio::test]
+async fn a_layer_written_by_display_name_counts_as_its_html_layer_on_every_route() {
+    let harness = build("r3-display-names");
+    add_html(&harness, "Spark.html", VALID_HTML);
+    let epoch = page(0xf1);
+
+    // Two layers named "Spark" are the two HTML layers they become: allowed everywhere.
+    let two = stack(
+        "stack:TwoByName",
+        vec![layer("l1", "Spark"), layer("l2", "Spark")],
+    );
+    assert_eq!(put_stack(&harness, &two).await, StatusCode::OK);
+    assert_eq!(json(put_preview(&harness, &two, &epoch, 1).await).await["applied"], true);
+    assert_eq!(json(put_stack_draft(&harness, &two, &epoch, 1).await).await["applied"], true);
+
+    // Three are over the cap of two, on all three routes, before anything is built.
+    let three = stack(
+        "stack:ThreeByName",
+        vec![layer("l1", "Spark"), layer("l2", "Spark"), layer("l3", "Spark")],
+    );
+    assert_eq!(
+        put_stack(&harness, &three).await,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a Save counts the layers a display name becomes"
+    );
+    assert_eq!(
+        put_preview(&harness, &three, &epoch, 2).await.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a preview counts them too"
+    );
+    assert_eq!(
+        put_stack_draft(&harness, &three, &epoch, 2).await.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "and so does a stack draft"
+    );
+}
+
+#[tokio::test]
+async fn a_stack_and_its_own_name_in_another_case_are_the_same_conflict_everywhere() {
+    let harness = build("r3-name-case");
+    let epoch = page(0xf2);
+    let saved = stack("stack:Foo", vec![layer("l1", "solid")]);
+    let other_case = stack("stack:foo", vec![layer("l1", "solid")]);
+
+    assert_eq!(put_stack(&harness, &saved).await, StatusCode::OK);
+
+    // Save's answer for another case of the same name is a 409: the preview and the draft say
+    // the same, on the same rule (the stack being edited is left out by its exact id).
+    let save = put_stack(&harness, &other_case).await;
+    assert_eq!(save, StatusCode::CONFLICT);
+    let preview = put_preview(&harness, &other_case, &epoch, 1).await;
+    assert_eq!(preview.status(), StatusCode::CONFLICT);
+    let body = json(preview).await;
+    assert_eq!(body["error"], "conflict");
+    assert!(
+        body["message"].as_str().unwrap_or_default().contains("another stack's name"),
+        "the reason names the rule: {body}"
+    );
+    let draft = put_stack_draft(&harness, &other_case, &epoch, 1).await;
+    assert_eq!(draft.status(), StatusCode::CONFLICT);
+
+    // The saved stack itself is not another stack: both routes still take it.
+    assert_eq!(
+        json(put_preview(&harness, &saved, &epoch, 2).await).await["applied"],
+        true
+    );
+    assert_eq!(
+        json(put_stack_draft(&harness, &saved, &epoch, 2).await).await["applied"],
+        true
+    );
+}
+
+#[tokio::test]
+async fn a_beat_that_joins_a_slow_build_keeps_the_draft_alive_until_it_lands() {
+    let held = HeldBuild::new();
+    let (user, _builds) = counting_user(Some(held.hold));
+    let harness = build_with("r3-join-lease", Some(user));
+    add_html(&harness, "Tinted.html", TINTED_HTML);
+    add_html(&harness, "Other.html", &TINTED_HTML.replace("Tinted", "Other"));
+    prior_is_solid(&harness).await;
+    let epoch = page(0x31);
+
+    // t=0: a good draft lands, with the whole lease left.
+    let landed = stack("stack:Joinlease", vec![layer("l1", "html:Tinted")]);
+    assert_eq!(put_stack_draft(&harness, &landed, &epoch, 1).await.status(), StatusCode::OK);
+    harness.draft_clock.advance(Duration::from_secs(5));
+
+    // t=5 s: a structure change starts a slow build, held open.
+    held.armed.store(true, Ordering::SeqCst);
+    let changed = stack("stack:Joinlease", vec![layer("l1", "html:Other")]);
+    let slow_router = harness.router.clone();
+    let slow_body = stack_draft_body(&changed, &epoch, 2);
+    let slow = tokio::spawn(async move {
+        slow_router
+            .oneshot(request_with_body("PUT", routes::EFFECT_DRAFT, &slow_body))
+            .await
+            .expect("the router answers")
+    });
+    wait_started(held.started).await;
+
+    // A beat of the same structure joins the build and renews the lease of the slot on the
+    // lights: ten seconds were left, and the whole lease is left now.
+    assert_eq!(
+        json(put_stack_draft(&harness, &changed, &epoch, 3).await).await["applied"],
+        true
+    );
+    let status: canvas_proto::api::DraftStatus = serde_json::from_value(
+        json(harness.router.clone().oneshot(request("GET", routes::EFFECT_DRAFT)).await.unwrap()).await,
+    )
+    .expect("a DraftStatus");
+    assert_eq!(
+        status.lease_remaining_ms,
+        canvas_proto::consts::DRAFT_LEASE.as_millis() as u64,
+        "the joining beat renewed the lease"
+    );
+
+    // The clock runs past the lease while the build is still loading: the draft stays active,
+    // because the page that owns it has a build in flight for its epoch.
+    harness
+        .draft_clock
+        .advance(canvas_proto::consts::DRAFT_LEASE + Duration::from_secs(5));
+    let status: canvas_proto::api::DraftStatus = serde_json::from_value(
+        json(harness.router.clone().oneshot(request("GET", routes::EFFECT_DRAFT)).await.unwrap()).await,
+    )
+    .expect("a DraftStatus");
+    assert!(status.active, "a slot does not expire under its own page's build");
+    assert_eq!(
+        harness.engine.effect_id.lock().unwrap().clone(),
+        Some("stack:Joinlease".to_string()),
+        "the prior effect was not put back"
+    );
+
+    // The build lands, and the lease starts again from the landing.
+    held.go.send(()).expect("the build is released");
+    let late = slow.await.expect("the task ends");
+    assert_eq!(json(late).await["applied"], true);
+    let status: canvas_proto::api::DraftStatus = serde_json::from_value(
+        json(harness.router.clone().oneshot(request("GET", routes::EFFECT_DRAFT)).await.unwrap()).await,
+    )
+    .expect("a DraftStatus");
+    assert!(status.active, "the build that outlived the lease landed");
+    assert_eq!(
+        status.lease_remaining_ms,
+        canvas_proto::consts::DRAFT_LEASE.as_millis() as u64,
+        "the landing set a fresh lease"
+    );
+}
+
+#[tokio::test]
+async fn a_stale_pages_stop_and_delete_end_nothing() {
+    let (user, _builds) = counting_user(None);
+    let harness = build_with("r3-epoch-gate", Some(user));
+    add_html(&harness, "Tinted.html", TINTED_HTML);
+    prior_is_solid(&harness).await;
+    let draft_stack = stack("stack:Gated", vec![layer("l1", "html:Tinted")]);
+    let page_a = page(0xa1);
+    let page_b = page(0xb1);
+
+    // B opens first; A is the newer page and takes the draft.
+    assert_eq!(
+        json(put_stack_draft(&harness, &draft_stack, &page_b, 1).await).await["applied"],
+        true
+    );
+    assert_eq!(
+        json(put_stack_draft(&harness, &draft_stack, &page_a, 1).await).await["applied"],
+        true
+    );
+
+    // B's Stop ends nothing, and says who owns the draft.
+    let stale = harness
+        .router
+        .clone()
+        .oneshot(request("DELETE", &format!("{}?epoch={page_b}", routes::EFFECT_DRAFT)))
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::OK);
+    let body = json(stale).await;
+    assert_eq!(body["applied"], false, "{body}");
+    assert_eq!(body["active"], true, "A's draft is still on the lights: {body}");
+    assert_eq!(body["epoch"], page_a.as_str());
+    assert_eq!(
+        harness.engine.effect_id.lock().unwrap().clone(),
+        Some("stack:Gated".to_string()),
+        "the prior effect was not put back"
+    );
+
+    // A's own Stop applies, and an older caller's Stop with no epoch still works as it did.
+    let owned = harness
+        .router
+        .clone()
+        .oneshot(request("DELETE", &format!("{}?epoch={page_a}", routes::EFFECT_DRAFT)))
+        .await
+        .unwrap();
+    let body = json(owned).await;
+    assert_eq!(body["applied"], true);
+    assert_eq!(body["active"], false);
+    assert_eq!(
+        harness.engine.effect_id.lock().unwrap().clone(),
+        Some("solid".to_string())
+    );
+    let without_epoch = harness
+        .router
+        .clone()
+        .oneshot(request("DELETE", routes::EFFECT_DRAFT))
+        .await
+        .unwrap();
+    assert_eq!(without_epoch.status(), StatusCode::OK);
+    let body = json(without_epoch).await;
+    assert!(body["applied"].is_null(), "a DELETE with no epoch answers no applied: {body}");
+
+    // The preview route takes the same epoch, with the same rule.
+    let preview = stack("stack:Previewgate", vec![layer("l1", "solid")]);
+    assert_eq!(json(put_preview(&harness, &preview, &page_b, 1).await).await["applied"], true);
+    assert_eq!(json(put_preview(&harness, &preview, &page_a, 1).await).await["applied"], true);
+    let stale = harness
+        .router
+        .clone()
+        .oneshot(request("DELETE", &format!("{}?epoch={page_b}", routes::STACK_PREVIEW)))
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::OK);
+    let body = json(stale).await;
+    assert_eq!(body["applied"], false, "{body}");
+    assert_eq!(body["running"], false, "nothing was dropped: {body}");
+    assert!(
+        harness.app.stack_preview.snapshot().is_some(),
+        "A's preview is still on screen"
+    );
+
+    let owned = harness
+        .router
+        .clone()
+        .oneshot(request("DELETE", &format!("{}?epoch={page_a}", routes::STACK_PREVIEW)))
+        .await
+        .unwrap();
+    let body = json(owned).await;
+    assert_eq!(body["applied"], true);
+    assert_eq!(body["running"], true);
+    assert!(harness.app.stack_preview.snapshot().is_none());
+
+    // An epoch that is not 16 hex characters is refused before anything ends.
+    for bad in ["", "e", "0123456789abcde", "0123456789abcdeg"] {
+        assert_eq!(
+            harness
+                .router
+                .clone()
+                .oneshot(request("DELETE", &format!("{}?epoch={bad}", routes::EFFECT_DRAFT)))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "the draft Stop refuses the epoch {bad:?}"
+        );
+        assert_eq!(
+            harness
+                .router
+                .clone()
+                .oneshot(request("DELETE", &format!("{}?epoch={bad}", routes::STACK_PREVIEW)))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "the preview DELETE refuses the epoch {bad:?}"
+        );
+    }
+}
+
+/// Reads one server frame: its opcode and payload (the server's frames are unmasked).
+async fn read_frame(stream: &mut tokio::net::TcpStream) -> (u8, Vec<u8>) {
+    use tokio::io::AsyncReadExt;
+    let mut header = [0u8; 2];
+    stream
+        .read_exact(&mut header)
+        .await
+        .expect("a frame header is read");
+    let opcode = header[0] & 0x0f;
+    assert_eq!(header[1] & 0x80, 0, "a server frame is unmasked");
+    let mut len = u64::from(header[1] & 0x7f);
+    if len == 126 {
+        let mut extended = [0u8; 2];
+        stream.read_exact(&mut extended).await.expect("the length");
+        len = u64::from(u16::from_be_bytes(extended));
+    } else if len == 127 {
+        let mut extended = [0u8; 8];
+        stream.read_exact(&mut extended).await.expect("the length");
+        len = u64::from_be_bytes(extended);
+    }
+    let mut payload = vec![0u8; len as usize];
+    stream
+        .read_exact(&mut payload)
+        .await
+        .expect("the payload is read");
+    (opcode, payload)
+}
+
+#[tokio::test]
+async fn a_second_stack_preview_socket_is_refused_with_a_reason() {
+    let harness = build("r3-one-socket");
+    let addr = serve(harness.router.clone()).await;
+
+    // The first stack socket takes the preview engine's sink.
+    let mut first = open_preview_socket(addr, "&stack=1").await;
+    let sink = preview_sink(&harness.preview_engine).await;
+
+    // The second is closed at once, with a reason the page can show, and takes nothing.
+    let mut second = open_preview_socket(addr, "&stack=1").await;
+    let (opcode, payload) = tokio::time::timeout(Duration::from_secs(10), read_frame(&mut second))
+        .await
+        .expect("the second socket is answered, not left hanging");
+    assert_eq!(opcode, 0x8, "a close frame, not a stream");
+    assert!(payload.len() >= 2, "the close carries a code");
+    let code = u16::from_be_bytes([payload[0], payload[1]]);
+    assert_eq!(code, 1013, "try again later");
+    let reason = String::from_utf8_lossy(&payload[2..]).into_owned();
+    assert!(
+        reason.contains("stack preview"),
+        "the reason says what is open: {reason:?}"
+    );
+
+    // The first socket still streams from the same sink.
+    submit_frame(&sink, &[1, 2, 3, 4, 5, 6]);
+    let (opcode, payload) = tokio::time::timeout(Duration::from_secs(10), read_frame(&mut first))
+        .await
+        .expect("the first socket still streams");
+    assert_eq!(opcode, 0x2, "the first socket still streams");
+    assert_eq!(payload, vec![2, 0, 1, 0, 1, 2, 3, 4, 5, 6]);
 }
