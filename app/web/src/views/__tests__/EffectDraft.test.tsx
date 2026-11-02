@@ -48,20 +48,34 @@ const setState = (tokens: string) =>
   window.history.replaceState({}, "", `/effects/?state=${tokens}`);
 const draftCalls = () => ((globalThis as { __draft?: DraftCall[] }).__draft ??= []);
 
-async function openEditor() {
+async function openEditor(name = "Sample HTML") {
   await refreshAll();
-  render(
+  const view = render(
     <ToastProvider>
       <ToastHost />
       <EffectsView />
     </ToastProvider>,
   );
-  fireEvent.click(await screen.findByRole("button", { name: "Open Sample HTML" }));
-  await screen.findByRole("heading", { name: "Sample HTML" });
+  fireEvent.click(await screen.findByRole("button", { name: `Open ${name}` }));
+  await screen.findByRole("heading", { name });
   fireEvent.click(screen.getByRole("button", { name: "Edit code" }));
   await screen.findByTestId("effect-code");
   // The property controls (and the preset keys) appear with the first preview.
   await screen.findByText("Preview");
+  return view;
+}
+
+/** Starts a draft and returns the gaps between the beats, in ms, after the first PUT. */
+async function beatGaps(): Promise<number[]> {
+  await openEditor();
+  draftCalls().length = 0;
+  fireEvent.click(screen.getByRole("button", { name: "Try on the lights" }));
+  await screen.findByText("Draft on the lights.");
+  await waitFor(() => expect(draftCalls().filter((c) => c.method === "PUT").length).toBeGreaterThanOrEqual(3), {
+    timeout: 4000,
+  });
+  const times = draftCalls().filter((c) => c.method === "PUT").map((c) => c.at);
+  return times.slice(1).map((at, i) => at - (times[i] ?? at));
 }
 
 async function replaceSource(text: string) {
@@ -114,14 +128,37 @@ describe("the draft on the lights", () => {
     expect(draftCalls().some((c) => c.method === "DELETE")).toBe(true);
   });
 
-  it("stops the draft when the editor is left", async () => {
-    await openEditor();
+  it("stops the draft when the editor unmounts, without a Done", async () => {
+    const view = await openEditor();
     draftCalls().length = 0;
     fireEvent.click(screen.getByRole("button", { name: "Try on the lights" }));
     await screen.findByText("Draft on the lights.");
-    fireEvent.click(screen.getByRole("button", { name: "Done" }));
-    await waitFor(() => expect(screen.queryByTestId("effect-editor")).toBeNull());
+    // The page goes away (a route change, a close): only the editor's own cleanup can stop it.
+    view.unmount();
     await waitFor(() => expect(draftCalls().some((c) => c.method === "DELETE")).toBe(true), { timeout: 3000 });
+    expect(draftCalls().filter((c) => c.method === "DELETE").length).toBe(1);
+  });
+
+  it("beats at the daemon's own interval: two heartbeat values give two rhythms", async () => {
+    setState("html,fast-draft,presets");
+    const fast = await beatGaps();
+    cleanup();
+    setState("html,slow-draft,presets");
+    const slow = await beatGaps();
+    cleanup();
+    setState("html,fast-draft,presets");
+    expect(fast.length).toBeGreaterThanOrEqual(2);
+    expect(slow.length).toBeGreaterThanOrEqual(2);
+    for (const gap of fast) {
+      expect(gap).toBeGreaterThanOrEqual(200);
+      expect(gap).toBeLessThanOrEqual(520);
+    }
+    for (const gap of slow) {
+      expect(gap).toBeGreaterThanOrEqual(460);
+      expect(gap).toBeLessThanOrEqual(980);
+    }
+    const mean = (g: number[]) => g.reduce((a, b) => a + b, 0) / g.length;
+    expect(mean(slow) - mean(fast)).toBeGreaterThan(150);
   });
 
   it("sends a preset's values to the draft, never to activate", async () => {
@@ -130,10 +167,16 @@ describe("the draft on the lights", () => {
     fireEvent.click(screen.getByRole("button", { name: "Try on the lights" }));
     await screen.findByText("Draft on the lights.");
     draftCalls().length = 0;
+    const patches = ((globalThis as { __patches?: unknown[] }).__patches ??= []);
+    patches.length = 0;
     fireEvent.click(screen.getByRole("button", { name: "Try Calm on the draft" }));
     await waitFor(() => expect(draftCalls().some((c) => c.method === "PUT")).toBe(true), { timeout: 3000 });
     const put = [...draftCalls()].reverse().find((c) => c.method === "PUT");
     expect(put?.props?.speed).toEqual({ type: "number", value: 12 });
+    // While a draft runs the app never patches the active effect: the daemon would 404 on a
+    // `draft:` id, and the saved effect must not change under the draft.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(patches.length).toBe(0);
     // Nothing was activated: the effect on the lights is the draft, not the saved one.
     await act(async () => {
       await refreshAll();
@@ -148,6 +191,17 @@ describe("the draft on the lights", () => {
     draftCalls().length = 0;
     fireEvent.click(screen.getByRole("button", { name: "Stop" }));
     await waitFor(() => expect(draftCalls().some((c) => c.method === "DELETE")).toBe(true), { timeout: 3000 });
+  });
+
+  it("starts the draft once, even when the button is clicked twice", async () => {
+    await openEditor();
+    draftCalls().length = 0;
+    const tryButton = screen.getByRole("button", { name: "Try on the lights" });
+    fireEvent.click(tryButton);
+    fireEvent.click(tryButton);
+    expect(await screen.findByText("Draft on the lights.")).toBeTruthy();
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(draftCalls().filter((c) => c.method === "PUT").length).toBe(1);
   });
 
   it("counts the seconds after a failed beat and restores when the lease runs out", async () => {
@@ -178,11 +232,35 @@ describe("the draft on the lights", () => {
     setState("html,fast-draft,presets");
   });
 
-  it("saves through the import route, activates the effect, and ends the draft", async () => {
+  it("stops a running draft when the saved effect cannot start", async () => {
+    setState("html,fast-draft,presets,activate-fail");
     await openEditor();
     await replaceSource(EDITED);
     fireEvent.click(screen.getByRole("button", { name: "Try on the lights" }));
     await screen.findByText("Draft on the lights.");
+    draftCalls().length = 0;
+    const banner = screen.getByText("Draft on the lights.").closest(".eff-draft") as HTMLElement;
+    fireEvent.click(banner.querySelector(".eff-draft-actions button:last-of-type") as HTMLElement);
+    // Saved, but it did not start: the lights go back rather than keeping the draft behind a
+    // cleared banner.
+    expect(await screen.findByText(/is saved, but it did not start/, {}, { timeout: 4000 })).toBeTruthy();
+    await waitFor(() => expect(screen.queryByTestId("effect-editor")).toBeNull(), { timeout: 3000 });
+    await waitFor(() => expect(draftCalls().some((c) => c.method === "DELETE")).toBe(true), { timeout: 3000 });
+    await act(async () => {
+      const status = await api.draft();
+      expect(status.active).toBe(false);
+    });
+    setState("html,fast-draft,presets");
+  });
+
+  it("saves through the import route, activates the effect, and ends the draft", async () => {
+    // The failed-activate test before this one saved the file under the new title.
+    await openEditor("Edited sample");
+    await replaceSource(EDITED);
+    fireEvent.click(screen.getByRole("button", { name: "Try on the lights" }));
+    await screen.findByText("Draft on the lights.");
+    const imports = ((globalThis as { __imports?: { file_name: string; replace: boolean }[] }).__imports ??= []);
+    imports.length = 0;
     // Save from the banner, as the banner offers.
     const banner = screen.getByText("Draft on the lights.").closest(".eff-draft") as HTMLElement;
     fireEvent.click(banner.querySelector(".eff-draft-actions button:last-of-type") as HTMLElement);
@@ -190,6 +268,9 @@ describe("the draft on the lights", () => {
     await waitFor(() => expect(screen.queryByTestId("effect-editor")).toBeNull(), { timeout: 3000 });
     // The library has it, under the title the file declares.
     expect(await screen.findByRole("button", { name: "Open Edited sample" })).toBeTruthy();
+    // An effect that is already on disk is saved over itself: replace is asked up front.
+    expect(imports.map((call) => call.replace)).toEqual([true]);
+    expect(imports[0]?.file_name).toBe("fixture-sample.html");
     // The import replaced the file, and the activate put it on the lights.
     expect(getSnap().status?.active_effect).toBe("html:fixture-sample");
     // The activate ended the draft, so nothing is left on the lights but the saved effect.

@@ -40,12 +40,14 @@ const theme = EditorView.theme({
   },
   ".cm-scroller": {
     fontFamily: "var(--mono)",
-    lineHeight: "1.6",
+    // The pane rounds its height to whole lines (app.css), so both read one length.
+    lineHeight: "var(--code-line, 1.6)",
     overflow: "auto",
   },
   ".cm-content": {
     caretColor: "var(--a1)",
-    padding: "var(--s2) 0",
+    // No vertical inset: the first line starts at the pane's top, so whole lines fit exactly.
+    padding: "0",
   },
   ".cm-line": { padding: "0 var(--s3) 0 var(--s2)" },
   ".cm-gutters": {

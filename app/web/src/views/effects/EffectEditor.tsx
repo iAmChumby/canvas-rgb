@@ -25,13 +25,13 @@ import { PropertyControls, type Values } from "@/views/PropertyControls";
 import { EffectCode } from "@/views/effects/EffectCode";
 import { api } from "@/lib/endpoints";
 import { ApiFailure, messageOf } from "@/lib/errors";
+import { cancelNavigation, continueNavigation, setNavigationGuard } from "@/lib/navigationGuard";
 import { matchingPreset } from "@/lib/presetMatch";
 import { sourceLineOf } from "@/lib/effectSource";
 import { refreshAll } from "@/lib/store";
 import { thumbFromBase64, type Thumb } from "@/lib/thumbs";
 import type { DraftStatus } from "@/proto/DraftStatus";
 import type { EffectPreviewResponse } from "@/proto/EffectPreviewResponse";
-import type { EffectSummary } from "@/proto/EffectSummary";
 import type { Preset } from "@/proto/Preset";
 import type { PropKind } from "@/proto/PropKind";
 import type { PropertySchema } from "@/proto/PropertySchema";
@@ -78,15 +78,12 @@ export type EffectEditorHandle = { requestLeave: () => void };
 export function EffectEditor({
   target,
   narrow,
-  effects,
   onClose,
   onSaved,
   ref,
 }: {
   target: EditorTarget;
   narrow: boolean;
-  /** The library, so a new file's name can be checked before Save sends it. */
-  effects: EffectSummary[];
   onClose: () => void;
   onSaved: (saved: SavedEffect) => void;
   ref?: Ref<EffectEditorHandle>;
@@ -107,7 +104,9 @@ export function EffectEditor({
   const [reveal, setReveal] = useState<{ line: number; nonce: number } | null>(null);
 
   const [preview, setPreview] = useState<EffectPreviewResponse | null>(null);
-  const [lastGood, setLastGood] = useState<{ thumb: Thumb; hash: string } | null>(null);
+  // The last render with no errors: its loop, the daemon's hash of the exact source, and the
+  // source text itself, so a later failure can say whether the loop still matches the draft.
+  const [lastGood, setLastGood] = useState<{ thumb: Thumb; hash: string; source: string } | null>(null);
   const [previewState, setPreviewState] = useState<PreviewState>("idle");
   const [previewError, setPreviewError] = useState<string | null>(null);
 
@@ -147,22 +146,52 @@ export function EffectEditor({
     valuesRef.current = values;
   }, [values]);
 
+  // Unsaved code is never dropped by an in-app page change: the shell asks this guard first,
+  // and the same Save / Discard / Keep editing prompt answers it. Registered only while there
+  // is something to lose.
+  useEffect(() => {
+    if (!dirty) {
+      setNavigationGuard(null);
+      return;
+    }
+    setNavigationGuard(() => {
+      setLeaving(true);
+      return false;
+    });
+    return () => {
+      setNavigationGuard(null);
+      cancelNavigation();
+    };
+  }, [dirty]);
+
+  // Reloading or closing the window is the browser's own navigation: it asks in its words.
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
+
   // ---- preview (D2.4) ----------------------------------------------------------------
 
   const runPreview = useCallback(async (retried = false) => {
     const seq = ++requestSeq.current;
     setPreviewState("rendering");
     setPreviewError(null);
+    const sent = sourceRef.current;
     try {
       const answer = await api.previewEffect({
-        html: sourceRef.current,
+        html: sent,
         props: { ...valuesRef.current },
       });
       if (!mounted.current || seq !== requestSeq.current) return;
       setPreview(answer);
       if (answer.errors.length === 0) {
         const thumb = thumbFromBase64(answer.thumbnail);
-        if (thumb) setLastGood({ thumb, hash: answer.source_hash });
+        if (thumb) setLastGood({ thumb, hash: answer.source_hash, source: sent });
         setPreviewState("ok");
         revealedLine.current = null;
       } else {
@@ -171,7 +200,7 @@ export function EffectEditor({
         // same error on every beat never moves the view the typing is in.
         const first = answer.errors.find((error) => error.line !== undefined);
         if (first?.line !== undefined) {
-          const line = sourceLineOf(sourceRef.current, first.line);
+          const line = sourceLineOf(sent, first.line);
           if (line !== revealedLine.current) {
             revealedLine.current = line;
             setReveal((before) => ({ line, nonce: (before?.nonce ?? 0) + 1 }));
@@ -226,8 +255,11 @@ export function EffectEditor({
     () => (preview ? thumbFromBase64(preview.thumbnail) : null),
     [preview],
   );
-  const stale = previewState === "error" && lastGood !== null;
-  // The last good loop stays on screen while the draft has errors, and says which it is.
+  // A failure that is not about the current source leaves the old loop on screen. Its
+  // source_hash is what says which draft it is (D2.4), so it is shown with the stale label.
+  const errors = preview?.errors ?? [];
+  const warnings = preview?.warnings ?? [];
+  const stale = previewState === "error" && lastGood !== null && lastGood.source !== source;
   const thumb = stale ? lastGood?.thumb ?? null : responseThumb ?? lastGood?.thumb ?? null;
   const liveNote =
     previewState === "rendering"
@@ -237,7 +269,9 @@ export function EffectEditor({
         : stale
           ? "Stale: last good render"
           : previewState === "error"
-            ? "The draft stopped"
+            ? errors.length > 0
+              ? "Preview stopped: the code has an error"
+              : "Preview stopped: the daemon did not answer"
             : "Preview";
 
   const codeErrors = useMemo(
@@ -249,9 +283,6 @@ export function EffectEditor({
       })),
     [preview, source],
   );
-  const errors = preview?.errors ?? [];
-  const warnings = preview?.warnings ?? [];
-
   // ---- draft on the lights (D2.5) ----------------------------------------------------
 
   const beatRef = useRef<() => Promise<void>>(async () => {});
@@ -438,19 +469,17 @@ export function EffectEditor({
     if (saving) return;
     setSaveError(null);
     const wanted = fileName.trim();
-    if (!replace && isNew) {
-      const stem = wanted.replace(/\.html$/i, "").toLowerCase();
-      const exists = effects.some((e) => e.id.toLowerCase() === `html:${stem}`);
-      if (exists) {
-        setClash(wanted);
-        return;
-      }
-    }
+    // An effect that is already on disk is saved over itself. A new file is written without
+    // asking to replace: the route answers a clash when another window got the name first,
+    // and only then does the prompt ask, and the write retry with replace.
+    const replaceOnDisk = !isNew || replace;
     setSaving(true);
+    // A Save whose activate fails must not leave a draft running behind a cleared banner.
+    const replacingDraft = draftOn.current;
     let savedId: string | null = null;
     let savedName = name;
     try {
-      const answer = await api.importEffect({ file_name: wanted, html: source, replace: true });
+      const answer = await api.importEffect({ file_name: wanted, html: source, replace: replaceOnDisk });
       savedId = answer.effect.id;
       savedName = answer.effect.name;
       setSavedSource(source);
@@ -461,8 +490,12 @@ export function EffectEditor({
       setDraftState("off");
       await refreshAll();
     } catch (e) {
-      setSaveError(messageOf(e));
       setSaving(false);
+      if (!replaceOnDisk && e instanceof ApiFailure && e.status === 409) {
+        setClash(wanted);
+        return;
+      }
+      setSaveError(messageOf(e));
       setClash(null);
       return;
     }
@@ -472,9 +505,14 @@ export function EffectEditor({
       await refreshAll();
     } catch (e) {
       startError = messageOf(e);
+      // The saved file did not start, so the draft it would have replaced is stopped too: the
+      // lights go back to what they were before it, and the screen says what happened.
+      if (replacingDraft) await api.deleteDraft().catch(() => undefined);
     }
     setSaving(false);
     setClash(null);
+    // A page change that waited on this Save may go now.
+    continueNavigation();
     onSaved({ id: savedId, name: savedName, startError });
   };
 
@@ -577,25 +615,74 @@ export function EffectEditor({
         </ul>
       )}
       {previewError && <p className="error-line eff-preview-error">{previewError}</p>}
-      {warnings.length > 0 && (
-        <ul className="eff-warnings" aria-label="Warnings">
-          {warnings.map((warning) => (
-            <li key={warning}>{warning}</li>
-          ))}
-        </ul>
-      )}
     </div>
   );
 
   return (
     <div className="eff-editor" data-testid="effect-editor" data-narrow={narrow ? "true" : "false"}>
-      <div className="eff-edit-main">
+      {draftState !== "off" && (
+        <div className="eff-draft" data-state={draftState} data-draft={draft?.id ?? ""} role="status">
+          <span className="eff-draft-mark" data-state={draftState} aria-hidden="true" />
+          <span className="eff-draft-text">
+            {draftState === "starting"
+              ? "Starting the draft…"
+              : draftState === "running"
+                ? "Draft on the lights."
+                : draftState === "expiring"
+                  ? `Draft on the lights, expiring in ${expiresIn}s.`
+                  : draftState === "restoring"
+                    ? "Restoring the previous effect…"
+                    : "The previous effect could not be restored."}
+          </span>
+          <span className="row-wrap eff-draft-actions">
+            {draftState === "restore-error" ? (
+              <Button size="sm" icon={<Play size={14} />} onClick={() => void stopDraft()}>
+                Retry
+              </Button>
+            ) : (
+              <>
+                <Button size="sm" variant="ghost" disabled={draftState === "restoring"} onClick={() => void stopDraft()}>
+                  Stop
+                </Button>
+                {/* One primary action at a time: the prompt's Save is the primary while it asks. */}
+                <Button size="sm" variant={leaving ? "default" : "primary"} disabled={saving} onClick={() => void save()}>
+                  Save
+                </Button>
+              </>
+            )}
+          </span>
+        </div>
+      )}
+      {draftNote && (
+        <p className="eff-note" role="status">
+          <Warning size={14} aria-hidden="true" /> {draftNote}
+        </p>
+      )}
+      {draftState === "restore-error" && draftError && (
+        <p className="error-line" role="alert">
+          {draftError}
+        </p>
+      )}
+
+      <div className="eff-edit-main" data-code={showCode && !narrow ? "true" : "false"}>
         <div className="eff-edit-side">
           <div className="eff-live" data-preview={previewState}>
             <LoopPreview thumb={thumb} label={`Preview of ${name}`} />
-            <span className="eff-live-note" data-tone={previewState === "error" ? "warn" : undefined}>
+            <span
+              className="eff-live-note"
+              data-tone={previewState === "error" ? "warn" : undefined}
+              data-source={stale ? lastGood?.hash : undefined}
+              title={stale && lastGood ? `The last good render is from source ${lastGood.hash}` : undefined}
+            >
               {liveNote}
             </span>
+            {warnings.length > 0 && (
+              <ul className="eff-live-warnings" aria-label="Warnings">
+                {warnings.map((warning) => (
+                  <li key={warning}>{warning}</li>
+                ))}
+              </ul>
+            )}
             {(previewState === "busy" || (previewState === "error" && previewError)) && (
               <Button size="sm" variant="ghost" onClick={() => void runPreview()}>
                 Try again
@@ -633,9 +720,14 @@ export function EffectEditor({
               </span>
             )}
             <div className="row-wrap eff-edit-actions">
-              {!running && draftState !== "restoring" && draftState !== "restore-error" && (
-                <Button size="sm" icon={<Lightbulb size={15} />} onClick={() => void startDraft()}>
-                  Try on the lights
+              {(draftState === "off" || draftState === "starting") && (
+                <Button
+                  size="sm"
+                  icon={<Lightbulb size={15} />}
+                  disabled={draftState === "starting"}
+                  onClick={() => void startDraft()}
+                >
+                  {draftState === "starting" ? "Starting…" : "Try on the lights"}
                 </Button>
               )}
               <Button
@@ -647,9 +739,11 @@ export function EffectEditor({
               >
                 {showCode ? "Hide code" : "Show code"}
               </Button>
+              {/* Not a second primary beside the banner's Save, and not one while the prompt
+                  asks: the prompt's Save is the one to press. */}
               <Button
                 size="sm"
-                variant="primary"
+                variant={leaving || running ? "default" : "primary"}
                 icon={<FloppyDisk size={15} />}
                 disabled={!canSave}
                 onClick={() => void save()}
@@ -694,105 +788,96 @@ export function EffectEditor({
                   <Button size="sm" variant="primary" disabled={saving} onClick={() => void save()}>
                     Save
                   </Button>
-                  <Button size="sm" variant="danger" disabled={saving} onClick={onClose}>
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    disabled={saving}
+                    onClick={() => {
+                      setLeaving(false);
+                      // A page change that waited on the prompt goes now.
+                      continueNavigation();
+                      onClose();
+                    }}
+                  >
                     Discard
                   </Button>
-                  <Button size="sm" variant="ghost" onClick={() => setLeaving(false)}>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => {
+                      setLeaving(false);
+                      cancelNavigation();
+                    }}
+                  >
                     Keep editing
                   </Button>
                 </div>
               </div>
             )}
           </div>
+
+          <div className="eff-side-panels">
+            {(target.presets.length > 0 || target.userPresets.length > 0) && (
+              <Panel title="Presets" className="eff-presets">
+                <div className="preset-chips" role="group" aria-label="Presets">
+                  {target.presets.map((preset) => (
+                    <Chip
+                      key={preset.name}
+                      pressed={presetPressed(preset)}
+                      label={`Try ${preset.name} on the draft`}
+                      onClick={() => tryPreset(preset)}
+                    >
+                      {preset.name}
+                    </Chip>
+                  ))}
+                  {target.userPresets.map((preset) => {
+                    const shadowed = target.presets.some(
+                      (builtIn) => builtIn.name.toLowerCase() === preset.name.toLowerCase(),
+                    );
+                    return (
+                      <Chip
+                        key={preset.name}
+                        pressed={presetPressed(preset)}
+                        label={`Try ${preset.name} on the draft${shadowed ? " (shadowed)" : ""}`}
+                        title={shadowed ? "A built-in preset now has this name; the built-in wins" : undefined}
+                        onClick={() => tryPreset(preset)}
+                      >
+                        {preset.name}
+                        {shadowed && <span className="preset-shadowed">shadowed</span>}
+                      </Chip>
+                    );
+                  })}
+                </div>
+                <p className="eff-tools-note">A preset sets the values here; it never starts the saved effect.</p>
+              </Panel>
+            )}
+
+            <Panel title="Properties" className="eff-props">
+              {!schema || defs.length === 0 ? (
+                <p className="dim eff-empty-props">
+                  {previewState === "rendering" || previewState === "idle"
+                    ? "The controls appear with the first preview."
+                    : "This effect declares no properties."}
+                </p>
+              ) : (
+                <PropertyControls
+                  schema={schema}
+                  values={values}
+                  onChange={(key: string, value: PropValue) => setValues((prev) => ({ ...prev, [key]: value }))}
+                />
+              )}
+            </Panel>
+          </div>
         </div>
 
         {showCode && !narrow && codePane}
       </div>
-
-      {draftState !== "off" && (
-        <div className="eff-draft" data-state={draftState} data-draft={draft?.id ?? ""} role="status">
-          <span className="eff-draft-mark" data-state={draftState} aria-hidden="true" />
-          <span className="eff-draft-text">
-            {draftState === "starting"
-              ? "Starting the draft…"
-              : draftState === "running"
-                ? "Draft on the lights."
-                : draftState === "expiring"
-                  ? `Draft on the lights, expiring in ${expiresIn}s.`
-                  : draftState === "restoring"
-                    ? "Restoring the previous effect…"
-                    : "The previous effect could not be restored."}
-          </span>
-          <span className="row-wrap eff-draft-actions">
-            {draftState === "restore-error" ? (
-              <Button size="sm" icon={<Play size={14} />} onClick={() => void stopDraft()}>
-                Retry
-              </Button>
-            ) : (
-              <>
-                <Button size="sm" variant="ghost" disabled={draftState === "restoring"} onClick={() => void stopDraft()}>
-                  Stop
-                </Button>
-                <Button size="sm" variant="primary" disabled={saving} onClick={() => void save()}>
-                  Save
-                </Button>
-              </>
-            )}
-          </span>
-        </div>
-      )}
-      {draftNote && (
-        <p className="eff-note" role="status">
-          <Warning size={14} aria-hidden="true" /> {draftNote}
-        </p>
-      )}
-      {draftState === "restore-error" && draftError && (
-        <p className="error-line" role="alert">
-          {draftError}
-        </p>
-      )}
 
       {showCode && narrow && (
         <div className="eff-layer" role="dialog" aria-label="The effect's code">
           <div className="eff-layer-body">{codePane}</div>
         </div>
       )}
-
-      <div className="eff-tools">
-        {(target.presets.length > 0 || target.userPresets.length > 0) && (
-          <Panel title="Presets" className="eff-presets">
-            <div className="preset-chips" role="group" aria-label="Presets">
-              {[...target.presets, ...target.userPresets].map((preset) => (
-                <Chip
-                  key={preset.name}
-                  pressed={presetPressed(preset)}
-                  label={`Try ${preset.name} on the draft`}
-                  onClick={() => tryPreset(preset)}
-                >
-                  {preset.name}
-                </Chip>
-              ))}
-            </div>
-            <p className="eff-tools-note">A preset sets the values here; it never starts the saved effect.</p>
-          </Panel>
-        )}
-
-        <Panel title="Properties" className="eff-props">
-          {!schema || defs.length === 0 ? (
-            <p className="dim eff-empty-props">
-              {previewState === "rendering" || previewState === "idle"
-                ? "The controls appear with the first preview."
-                : "This effect declares no properties."}
-            </p>
-          ) : (
-            <PropertyControls
-              schema={schema}
-              values={values}
-              onChange={(key: string, value: PropValue) => setValues((prev) => ({ ...prev, [key]: value }))}
-            />
-          )}
-        </Panel>
-      </div>
     </div>
   );
 }

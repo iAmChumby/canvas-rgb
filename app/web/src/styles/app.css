@@ -2407,7 +2407,9 @@ button.chip:hover {
 /* The preview and its actions on the left, the code on the right (D2.2). */
 .eff-edit-main {
   display: grid;
-  grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
+  /* The side column holds the preview, the actions and the controls; the code gets the rest
+     of the width and the whole height beside it (arranging only, no second visual language). */
+  grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
   gap: var(--s3);
   flex: 1 1 auto;
   min-height: 0;
@@ -2425,13 +2427,11 @@ button.chip:hover {
   display: flex;
   flex-direction: column;
   gap: var(--s1);
-  width: 160px;
-  max-width: 100%;
+  width: 100%;
 }
 
 .eff-live .preview-canvas {
-  width: 160px;
-  max-width: 100%;
+  width: 100%;
   aspect-ratio: 16 / 10;
   border-radius: var(--r-sm);
   border: 1px solid var(--line);
@@ -2516,6 +2516,9 @@ button.chip:hover {
 
 /* The code pane: its own box, its own scroll. */
 .eff-code {
+  /* The code line's height, shared with the editor's own line-height. The pane rounds its
+     height to this, so a line is never half drawn at its bottom edge. */
+  --code-line: 20.8px;
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -2564,12 +2567,32 @@ button.chip:hover {
 }
 
 .eff-code-body {
+  position: relative;
   flex: 1 1 auto;
   min-height: 180px;
   overflow: hidden;
 }
 
-.cm-host,
+/* The scroller ends at the pane's edge, so a line can be taller than the room left for it. A
+   short fade under the last line makes that an edge, not a line cut in half. */
+.eff-code-body::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 10px;
+  pointer-events: none;
+  background: linear-gradient(to bottom, transparent, var(--sunk));
+}
+
+.cm-host {
+  height: 100%;
+  /* Whole lines only: the leftover at the bottom stays empty instead of showing half a line.
+     The first height is the fallback for a browser without round(). */
+  height: calc(round(down, 100%, var(--code-line, 20.8px)));
+}
+
 .cm-host .cm-editor {
   height: 100%;
 }
@@ -2584,8 +2607,7 @@ button.chip:hover {
 }
 
 /* The errors the daemon reported, under the code: a row jumps the cursor to its line. */
-.eff-errors,
-.eff-warnings {
+.eff-errors {
   margin: 0;
   padding: var(--s1) var(--s2);
   list-style: none;
@@ -2632,12 +2654,6 @@ button.chip:hover {
 .eff-error-text {
   color: var(--dim);
   overflow-wrap: anywhere;
-}
-
-.eff-warnings {
-  border-top: 1px solid var(--line);
-  color: var(--warn);
-  font-size: var(--t12);
 }
 
 .eff-preview-error {
@@ -2709,20 +2725,23 @@ button.chip:hover {
   font-size: var(--t12);
 }
 
-/* Presets and properties under the editor: their own natural height, and the code gives way. */
-.eff-tools {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+/* Presets and properties in the side column, under the actions they belong to. Properties
+   takes the room left below them, so the column is a pane and not a short stack in a tall
+   empty space. */
+.eff-side-panels {
+  display: flex;
+  flex-direction: column;
   gap: var(--s3);
-  flex: 0 0 auto;
+  flex: 1 1 auto;
   min-height: 0;
-  max-height: 52%;
-  overflow: auto;
 }
 
-.eff-tools .panel {
+.eff-side-panels .panel {
   padding: var(--s3);
-  align-self: start;
+}
+
+.eff-side-panels .eff-props {
+  flex: 1 1 auto;
 }
 
 .eff-tools-note,
@@ -2730,6 +2749,28 @@ button.chip:hover {
   margin: var(--s2) 0 0;
   font-size: var(--t12);
   color: var(--mute);
+}
+
+/* The check's warnings sit beside the preview, so Show code off does not hide them (D2.4). */
+.eff-live-warnings {
+  margin: var(--s1) 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--warn);
+  font-size: var(--t12);
+  line-height: 1.35;
+}
+
+/* A user preset whose name a built-in preset now takes (D2.2, A8). */
+.preset-shadowed {
+  margin-left: 6px;
+  color: var(--warn);
+  font-size: var(--t12);
+  font-weight: 600;
+  text-transform: none;
 }
 
 /* The phone's code layer: full screen over the sheet, with Back (D2.2). */
@@ -2885,45 +2926,45 @@ button.chip:hover {
   margin: 0;
 }
 
-/* A narrow inspector (a small window, not a phone): the preview above the code. */
+/* A narrow inspector (a small window, not a phone): the side column above the code, each
+   with half the height and its own scroll. With the code in a layer (a phone) the side has
+   the whole height. */
 @container page (max-width: 780px) {
   .eff-edit-main {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .eff-edit-main[data-code="true"] {
+    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
   }
 
   .eff-edit-side {
-    overflow: visible;
+    overflow: auto;
   }
 
-  .eff-tools {
-    grid-template-columns: minmax(0, 1fr);
-    max-height: none;
+  .eff-side-panels {
+    gap: var(--s2);
   }
 }
 
-/* The short window: the code keeps its room, the tools give theirs up. */
+/* The short window: the panels tighten rather than the code giving up its room. */
 @container page (max-height: 700px) {
   .eff-editor {
     gap: var(--s2);
   }
 
-  .eff-tools {
-    max-height: 38%;
+  .eff-edit-side {
+    gap: var(--s1);
   }
 
-  .eff-tools .panel {
+  .eff-side-panels .panel {
     padding: var(--s2);
   }
 }
 
 @container page (max-width: 640px) {
   .eff-live {
-    width: 128px;
-  }
-
-  .eff-live .preview-canvas {
-    width: 128px;
+    width: 100%;
   }
 
   .eff-draft-actions {

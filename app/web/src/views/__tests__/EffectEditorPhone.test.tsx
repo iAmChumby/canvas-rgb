@@ -40,7 +40,11 @@ beforeAll(() => {
 
 afterEach(cleanup);
 
-async function mount() {
+const setState = (tokens: string) =>
+  window.history.replaceState({}, "", `/effects/?state=${tokens}`);
+
+/** The pushed sheet with the sample effect, before any editing. */
+async function openSheet() {
   await refreshAll();
   render(
     <ToastProvider>
@@ -50,6 +54,10 @@ async function mount() {
   );
   fireEvent.click(await screen.findByRole("button", { name: "Open Sample HTML" }));
   await screen.findByRole("heading", { name: "Sample HTML" });
+}
+
+async function mount() {
+  await openSheet();
   fireEvent.click(screen.getByRole("button", { name: "Edit code" }));
   await screen.findByTestId("effect-editor");
 }
@@ -71,6 +79,20 @@ describe("the editor at 390 px", () => {
     expect(screen.getByTestId("effect-editor")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Try on the lights" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Done" })).toBeNull();
+  });
+
+  it("drops a failed source read when the sheet's Back leaves it", async () => {
+    setState("html,source-fail");
+    await openSheet();
+    fireEvent.click(screen.getByRole("button", { name: "Edit code" }));
+    expect(await screen.findByText("The code could not be read")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Back to the effects" }));
+    // The sheet is gone; opening the effect again shows its detail, not the old error.
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "Sample HTML" })).toBeNull());
+    fireEvent.click(await screen.findByRole("button", { name: "Open Sample HTML" }));
+    await screen.findByRole("heading", { name: "Sample HTML" });
+    expect(screen.queryByText("The code could not be read")).toBeNull();
+    setState("html");
   });
 
   it("asks before the sheet's Back leaves unsaved edits", async () => {

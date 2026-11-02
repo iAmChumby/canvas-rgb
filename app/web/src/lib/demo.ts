@@ -170,6 +170,12 @@ function initialState(): DemoState {
       if (e.schema.id !== "html:fixture-sample") effects[e.schema.id] = e;
     }
   }
+  // `?state=shadowed`: a built-in preset takes a name the owner's own preset already has, as a
+  // new build's preset table can. The user key is shown as shadowed (D2.2, A8).
+  if (s.has("shadowed")) {
+    const fixture = effects["html:fixture-sample"];
+    if (fixture) fixture.schema.presets = [{ name: "Calm", props: { ...fixture.defaults } }];
+  }
   const profile = FAN_PROFILES[0];
   const fanModes: Record<string, FanMode> = {};
   for (const h of FAN_HEADERS) fanModes[h.id] = profile?.headers[h.id] ?? { mode: "bios" };
@@ -355,14 +361,17 @@ function draftStatus(s: DemoState): DraftStatus {
   if (s.draft && s.draft.leaseUntil <= Date.now()) s.draft = null;
   const draft = s.draft;
   // `?state=fast-draft`: the same beats, a few times quicker, so the states can be watched (and
-  // tested) without waiting out a 5 s heartbeat and a 15 s lease.
+  // tested) without waiting out a 5 s heartbeat and a 15 s lease. `?state=slow-draft` is a
+  // second interval, so a test can tell that the beat follows the answer and not a constant.
   const fast = scenario().has("fast-draft");
+  const slow = scenario().has("slow-draft");
+  const heartbeat = fast ? 300 : slow ? 600 : 5000;
   return {
     active: draft !== null,
     ...(draft ? { id: `draft:${draft.hash}`, source_hash: draft.hash } : {}),
     props: draft ? { ...draft.props } : {},
     lease_remaining_ms: draft ? Math.max(0, draft.leaseUntil - Date.now()) : 0,
-    heartbeat_ms: fast ? 300 : 5000,
+    heartbeat_ms: heartbeat,
     lease_ms: fast ? 900 : 15000,
   };
 }
@@ -578,6 +587,8 @@ function mergeProps(base: Props, over: Props): Props {
 }
 
 function setActiveProps(over: Props): void {
+  // A test can see that the editor never patches the active effect while a draft runs.
+  (globalThis as { __patches?: unknown[] }).__patches?.push({ at: Date.now(), props: over });
   const s = st();
   if (!s.activeEffect) fail(422, "validation", "no effect is active");
   const e = effectOrNotFound(s.activeEffect);
@@ -885,12 +896,19 @@ export async function demoRequest(method: string, path: string, body: unknown): 
     if (seg[1] === "import" && method === "POST") {
       const req = body as ImportEffect;
       const fileName = checkFileName(req.file_name);
+      (globalThis as { __imports?: unknown[] }).__imports?.push({
+        file_name: fileName,
+        replace: req.replace,
+        at: Date.now(),
+      });
       if (req.html.length > IMPORT_MAX_BYTES) {
         fail(422, "validation", `the effect is ${req.html.length} bytes; the limit is ${IMPORT_MAX_BYTES}`);
       }
       const id = `html:${fileName.slice(0, fileName.length - ".html".length)}`;
       const existing = s.effects[id];
-      if (existing && !req.replace) {
+      // `?state=import-clash`: another window saved the file between this window's read of the
+      // list and its Save, so the route refuses a write that did not ask to replace.
+      if (!req.replace && (existing || scenario().has("import-clash"))) {
         fail(409, "conflict", `${req.file_name} is already installed; ask for a replace to overwrite it`);
       }
       const effect = parseUserEffect(id, req.html);
@@ -1019,6 +1037,11 @@ export async function demoRequest(method: string, path: string, body: unknown): 
     }
     if (seg.length === 3 && seg[2] === "activate" && method === "POST") {
       const e = effectOrNotFound(id);
+      // `?state=activate-fail`: the file saved but the effect would not start, the one failure
+      // that must not leave a draft on the lights while the editor says it is saved.
+      if (scenario().has("activate-fail")) {
+        fail(503, "service_unavailable", "the effect could not start: the engine is busy");
+      }
       const req = body as { props?: Props; preset?: string | null };
       let base: Props = { ...e.defaults, ...(s.saved[id] ?? {}) };
       if (req.preset) {

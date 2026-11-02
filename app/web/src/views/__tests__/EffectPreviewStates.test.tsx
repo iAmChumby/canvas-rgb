@@ -1,6 +1,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { ToastHost, ToastProvider } from "@/components/Toast";
+import { demoHash } from "@/lib/demo";
+import { SAMPLE_SOURCE } from "@/lib/demoEffects";
 import { refreshAll } from "@/lib/store";
 import { EffectsView } from "@/views/EffectsView";
 
@@ -58,13 +60,13 @@ async function openEditor() {
   await screen.findByTestId("effect-code");
 }
 
-/** Moves the preview's Speed control, which asks the daemon for a new render. */
-async function moveSpeed(to: string) {
-  const speed = screen.getByLabelText("Speed value");
-  fireEvent.focus(speed);
-  fireEvent.change(speed, { target: { value: to } });
+/** Replaces the whole document: select all, then paste over it. */
+async function replaceSource(text: string) {
+  const content = document.querySelector(".cm-content") as HTMLElement;
+  content.focus();
+  fireEvent.keyDown(content, { key: "a", code: "KeyA", keyCode: 65, ctrlKey: true });
   await act(async () => {
-    fireEvent.blur(speed);
+    fireEvent.paste(content, { clipboardData: { getData: () => text } });
   });
 }
 
@@ -76,27 +78,61 @@ describe("the editor's live preview", () => {
     await screen.findByText("Preview");
     expect(screen.queryByText("Stale: last good render")).toBeNull();
 
-    await moveSpeed("55");
-    // 400 ms after the last change the daemon answers with the runtime's error.
+    // A new draft fails the way a frame callback past its deadline does: its source is not
+    // the one the loop on screen was drawn from.
+    await replaceSource(`${SAMPLE_SOURCE}
+<!-- a change that fails to draw -->
+`);
     expect(await screen.findByText("Stale: last good render", {}, { timeout: 3000 })).toBeTruthy();
     expect(screen.getByText(/ran past its deadline/)).toBeTruthy();
+    // The stale label says which render it is by the daemon's own source hash (D2.4).
+    expect(screen.getByText("Stale: last good render").getAttribute("data-source")).toBe(
+      demoHash(SAMPLE_SOURCE),
+    );
     // The loop that was drawn is the loop on screen: it is still labelled as the preview.
     expect(screen.getByRole("img", { name: "Preview of Sample HTML" })).toBeTruthy();
     // And the error has its gutter marker (the API's line, not the message parsed).
     expect(document.querySelector(".cm-lint-marker-error")).toBeTruthy();
   });
 
-  it("waits out a busy daemon once, never spins, and offers Try again", async () => {
+  it("shows the check's warnings beside the preview with the code hidden", async () => {
+    setState("html");
+    await openEditor();
+    // A draft with no frame request: the daemon's check says the picture never moves.
+    await replaceSource(
+      `<html><head><title>Still</title></head><body><canvas id="stage"></canvas></body>` +
+        `<script>var ctx = document.getElementById("stage").getContext("2d");` +
+        `ctx.fillStyle = "#f00"; ctx.fillRect(0, 0, 320, 200);</script></html>`,
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Hide code" }));
+    });
+    expect(await screen.findByText(/never moves/)).toBeTruthy();
+    // The code pane is closed, so this is the copy beside the preview.
+    expect(screen.queryByTestId("code-panel")).toBeNull();
+    setState("html,preview-late-error");
+  });
+
+  it("waits Retry-After, retries exactly once, never spins, and offers Try again", async () => {
     setState("html,preview-busy");
-    const calls: unknown[] = [];
+    const calls: { at: number }[] = [];
     (globalThis as { __preview?: unknown[] }).__preview = calls;
     await openEditor();
     expect(await screen.findByText("Busy: the daemon is rendering other previews")).toBeTruthy();
-    // One answer, then one retry after Retry-After (400 ms in the demo), and no more.
-    await waitFor(() => expect(calls.length).toBe(2), { timeout: 3000 });
+    expect(calls.length).toBe(1);
+    // The 503 said Retry-After: 1 s on the daemon (400 ms in the demo). Nothing may be sent
+    // before that wait is over...
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(calls.length).toBe(1);
+    // ...and exactly one retry follows it.
+    await waitFor(() => expect(calls.length).toBe(2), { timeout: 2500 });
+    const waited = (calls[1]?.at ?? 0) - (calls[0]?.at ?? 0);
+    expect(waited).toBeGreaterThanOrEqual(380);
+    expect(waited).toBeLessThan(1000);
+    // A second busy answer stops there: a busy daemon is never polled.
     await new Promise((resolve) => setTimeout(resolve, 900));
     expect(calls.length).toBe(2);
-    // A busy daemon is never polled; the person asks again when they choose to.
+    // The person asks again when they choose to.
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(calls.length).toBe(3), { timeout: 3000 });
     expect(await screen.findByText("Busy: the daemon is rendering other previews")).toBeTruthy();

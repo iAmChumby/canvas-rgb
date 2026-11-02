@@ -96,6 +96,9 @@ export function EffectsView() {
   const [editorTarget, setEditorTarget] = useState<EditorTarget | null>(null);
   const [editBusy, setEditBusy] = useState<string | null>(null);
   const [editError, setEditError] = useState<string | null>(null);
+  // The effect whose source could not be read, so Try again retries that one and not whatever
+  // the list happens to select later.
+  const [editFailed, setEditFailed] = useState<{ id: string; name: string } | null>(null);
   const [newOpen, setNewOpen] = useState(false);
   const [newBusy, setNewBusy] = useState<string | null>(null);
   const [newError, setNewError] = useState<string | null>(null);
@@ -436,8 +439,12 @@ export function EffectsView() {
     setTimeout(() => setSettled(true), 240);
   };
 
-  /** Switches the inspector into the code editor for one effect (D2.2). */
-  const startEdit = (id: string, detail: EffectDetail) => {
+  /**
+   * Switches the inspector into the code editor for one effect (D2.2). The detail is optional:
+   * Try again after a failed read asks for the effect itself, so it retries what failed even
+   * when the list has moved on.
+   */
+  const startEdit = (id: string, detail?: EffectDetail) => {
     // A slider edit still waiting to be sent belongs to the saved effect; a draft would answer
     // its PATCH with a 404, so it is dropped here rather than fired into the editor.
     if (timer.current) clearTimeout(timer.current);
@@ -447,26 +454,36 @@ export function EffectsView() {
     pinTop();
     setNewOpen(false);
     setEditError(null);
+    setEditFailed({ id, name: detail?.schema.name ?? id });
     setEditBusy(id);
-    api
-      .effectSource(id)
-      .then((source) => {
-        setEditBusy(null);
-        setEditorTarget({
-          id,
-          name: detail.schema.name,
-          fileName: source.file_name,
-          source: source.source,
-          props: detail.props,
-          schema: detail.schema,
-          presets: detail.schema.presets,
-          userPresets: detail.user_presets,
-        });
-      })
+    Promise.resolve(detail ?? api.effect(id))
+      .then((loaded) =>
+        api.effectSource(id).then((source) => {
+          setEditBusy(null);
+          setEditFailed(null);
+          setEditorTarget({
+            id,
+            name: loaded.schema.name,
+            fileName: source.file_name,
+            source: source.source,
+            props: loaded.props,
+            schema: loaded.schema,
+            presets: loaded.schema.presets,
+            userPresets: loaded.user_presets,
+          });
+        }),
+      )
       .catch((e: unknown) => {
         setEditBusy(null);
         setEditError(messageOf(e));
       });
+  };
+
+  /** Try again on the panel: the same effect that failed, not the one selected now. */
+  const retryEdit = () => {
+    const failed = editFailed;
+    setEditError(null);
+    if (failed) startEdit(failed.id);
   };
 
   /** New from code > Blank (D2.3): the minimal file the docs show. */
@@ -519,6 +536,7 @@ export function EffectsView() {
     setEditorTarget(null);
     setEditBusy(null);
     setEditError(null);
+    setEditFailed(null);
     setNewOpen(false);
     if (narrow) close();
   };
@@ -528,6 +546,7 @@ export function EffectsView() {
     setEditorTarget(null);
     setEditBusy(null);
     setEditError(null);
+    setEditFailed(null);
     setPicked(saved.id);
     void refreshAll();
     if (saved.startError) {
@@ -585,6 +604,9 @@ export function EffectsView() {
   // in from the right, with a back control.
   const pick = (id: string) => {
     setSelectedId(id);
+    // A read that failed belongs to the effect it was for: picking anything else drops it.
+    setEditError(null);
+    setEditFailed(null);
     if (narrow) {
       setPushed(true);
       setSettled(false);
@@ -891,7 +913,6 @@ export function EffectsView() {
           ref={editorRef}
           target={editorTarget}
           narrow={narrow}
-          effects={effects ?? []}
           onClose={closeEditor}
           onSaved={finishSave}
         />
@@ -910,10 +931,7 @@ export function EffectsView() {
           title="The code could not be read"
           summary="canvas-rgb could not read that effect's file. Nothing was changed."
           message={editError}
-          onRetry={() => {
-            setEditError(null);
-            if (selectedId && detail && !stale) startEdit(selectedId, detail);
-          }}
+          onRetry={retryEdit}
         />
       ) : (
         <LoadFrame className="stack" state="loading" shape={<EffectDetailShape />} label="Loading the code">
@@ -1123,7 +1141,12 @@ export function EffectsView() {
                     // The editor asks before unsaved work is left (D2.2).
                     if (editing) editorRef.current?.requestLeave();
                     else if (newOpen) setNewOpen(false);
-                    else close();
+                    else if (editError) {
+                      // A source read that failed is this effect's, not the sheet's: Back drops it.
+                      setEditError(null);
+                      setEditFailed(null);
+                      close();
+                    } else close();
                   }}
                 />
                 <span>Effects</span>

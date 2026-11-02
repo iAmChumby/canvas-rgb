@@ -124,6 +124,28 @@ describe("a new effect", () => {
     expect(screen.getByLabelText("File name")).toBeTruthy();
   });
 
+  it("writes a new file without replace, asks on the route's clash, then replaces", async () => {
+    await mount();
+    // Another window saved the name after this one read the list: the list does not have it,
+    // and the import route refuses a write that did not ask to replace.
+    setState("html,stock,import-clash");
+    const imports = ((globalThis as { __imports?: { file_name: string; replace: boolean }[] }).__imports ??= []);
+    imports.length = 0;
+    await newEffect();
+    fireEvent.click(screen.getByRole("button", { name: "Blank effect" }));
+    await screen.findByTestId("effect-code");
+    const field = screen.getByLabelText("File name") as HTMLInputElement;
+    fireEvent.change(field, { target: { value: "race.html" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("file exists")).toBeTruthy();
+    expect(imports.map((call) => call.replace)).toEqual([false]);
+    fireEvent.click(screen.getByRole("button", { name: "Replace" }));
+    expect(await screen.findByText("My effect is running", {}, { timeout: 3000 })).toBeTruthy();
+    expect(imports.map((call) => call.replace)).toEqual([false, true]);
+    expect(imports.at(-1)?.file_name).toBe("race.html");
+    setState("html,stock");
+  });
+
   it("says why a copy could not be read and stays in the chooser", async () => {
     await mount();
     setState("html,stock,source-fail");
