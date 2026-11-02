@@ -936,6 +936,12 @@ async fn deleting_a_drafts_prior_ends_the_draft_at_once() {
         .await
         .expect("the router answers");
     assert_eq!(deleted.status(), StatusCode::OK);
+    let answer = json(deleted).await;
+    let note = answer["draft_ended"]["note"].as_str().unwrap_or_default();
+    assert!(
+        note.contains("html:foo"),
+        "the delete answer says the lights fell back: {answer}"
+    );
 
     let state = draft_state(router.clone()).await;
     assert!(!state.active, "the delete ended the draft");
@@ -945,6 +951,23 @@ async fn deleting_a_drafts_prior_ends_the_draft_at_once() {
         .await
         .expect("the router answers");
     assert_eq!(stopped.status(), StatusCode::OK, "a Stop after the delete is a no-op");
+}
+
+#[tokio::test]
+async fn deleting_an_effect_without_a_draft_says_nothing_about_one() {
+    let (router, app, _engine, _home, folder, _clock) = build_with_clock();
+    add_user_effect(&app, &folder, "bar.html", MOVING);
+    let response = router
+        .oneshot(request("DELETE", "/api/v1/effects/html:bar"))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let answer = json(response).await;
+    assert_eq!(answer["id"], serde_json::json!("html:bar"));
+    assert!(
+        answer.get("draft_ended").is_none(),
+        "no draft ended, so the answer says nothing about one: {answer}"
+    );
 }
 
 #[tokio::test]

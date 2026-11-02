@@ -35,8 +35,8 @@ pub mod routes {
     /// `POST` with [`super::ImportEffect`], answers [`super::ImportEffectResponse`]. The daemon
     /// parses the file before it writes it; a file that does not parse is refused with the
     /// parser's message and nothing is written. `DELETE` on [`EFFECT`] removes a user effect's
-    /// file (built-ins refuse). Its presets go with it unless the query says
-    /// `?keep_presets=true` ([`super::DeleteEffectQuery`]).
+    /// file (built-ins refuse) and answers [`super::DeleteEffectResponse`]. Its presets go with
+    /// it unless the query says `?keep_presets=true` ([`super::DeleteEffectQuery`]).
     pub const EFFECTS_IMPORT: &str = "/api/v1/effects/import";
     /// `POST` with [`super::PresetCreate`]: saves a user preset for the effect. Answers
     /// [`super::PresetsResponse`]. 409 when the name equals, ignoring ASCII case, a built-in or
@@ -410,6 +410,31 @@ pub struct PresetReplace {
 pub struct DeleteEffectQuery {
     #[serde(default)]
     pub keep_presets: bool,
+}
+
+/// `DELETE /api/v1/effects/{id}` answer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DeleteEffectResponse {
+    pub ok: bool,
+    pub id: String,
+    pub presets_removed: usize,
+    /// Set when the delete ended a draft on the lights, so the editor can tell the person the
+    /// lights fell back. A delete with no draft on the lights leaves it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub draft_ended: Option<DraftEnded>,
+}
+
+/// What a delete did to a draft that took the deleted effect over from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DraftEnded {
+    /// The same sentence a Stop carries when the prior effect could not be restored: its file
+    /// is gone with the delete, so the lights are black.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub note: Option<String>,
 }
 
 /// The effect's user presets after a change, in their stored order.

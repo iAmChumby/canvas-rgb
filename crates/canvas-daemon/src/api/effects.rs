@@ -4,8 +4,9 @@ use axum::extract::{Path, Query, State};
 use axum::response::IntoResponse;
 use axum::Json;
 use canvas_proto::api::{
-    ActivateEffect, DeleteEffectQuery, EffectDetail, EffectSummary, EffectsResponse, FailedEffect, ImportEffect,
-    ImportEffectResponse, PresetCreate, PresetReplace, PresetsResponse, SetFavorite,
+    ActivateEffect, DeleteEffectQuery, DeleteEffectResponse, DraftEnded, EffectDetail, EffectSummary,
+    EffectsResponse, FailedEffect, ImportEffect, ImportEffectResponse, PresetCreate, PresetReplace,
+    PresetsResponse, SetFavorite,
 };
 use canvas_proto::props::{Preset, Props, PropertySchema};
 use std::collections::BTreeMap;
@@ -846,7 +847,7 @@ pub async fn delete_effect(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
     Query(query): Query<DeleteEffectQuery>,
-) -> ApiResult<Json<serde_json::Value>> {
+) -> ApiResult<Json<DeleteEffectResponse>> {
     let stem = id
         .strip_prefix(crate::user_effects::USER_EFFECT_PREFIX)
         .ok_or_else(|| {
@@ -899,6 +900,7 @@ pub async fn delete_effect(
     // the file is missing. The active layout still names it, so the restore path
     // cannot build it any more and says so, exactly as it does at start.
     let active = app.active_layout().await.and_then(|l| l.effect);
+    let mut draft_ended = None;
     if let Some(active) = active {
         if active.id == id {
             tracing::warn!(effect = %id, "the active user effect was deleted");
@@ -906,11 +908,12 @@ pub async fn delete_effect(
             // gone. End the draft first, chosen over refusing the delete with a 409: the
             // draft is in memory only, and deleting what the lights show is what the owner
             // asked for. The restore cannot build the file any more, so the lights go black
-            // and the note says so.
+            // and the note says so, in the answer as well as the log.
             if let Some(ended) = crate::draft::stop(&app).await {
-                if let Some(note) = ended.note {
+                if let Some(note) = &ended.note {
                     tracing::warn!(%note, "the draft ended when its prior effect was deleted");
                 }
+                draft_ended = Some(DraftEnded { note: ended.note });
             }
             if let Err(e) = crate::apply_effect(&app, &active.id, &active.props).await {
                 tracing::warn!(
@@ -922,7 +925,7 @@ pub async fn delete_effect(
         }
     }
 
-    Ok(Json(serde_json::json!({ "ok": true, "id": id, "presets_removed": presets_removed })))
+    Ok(Json(DeleteEffectResponse { ok: true, id, presets_removed, draft_ended }))
 }
 
 /// The largest request body the import route accepts, in bytes.
