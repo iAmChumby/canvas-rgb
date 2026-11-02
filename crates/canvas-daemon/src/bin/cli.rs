@@ -333,10 +333,10 @@ fn effects_check(cli: &Cli, args: &canvas_daemon::cli::CheckArgs) -> Result<(), 
 
     let mut problems: Vec<String> = Vec::new();
     if !report.moves {
-        problems.push("every frame is the same: the effect does not move".to_string());
+        problems.push(canvas_daemon::thumbnail::NO_MOVEMENT.to_string());
     }
     if report.flat {
-        problems.push("the picture is one flat colour".to_string());
+        problems.push(canvas_daemon::thumbnail::FLAT_COLOUR.to_string());
     }
     if !report.errors.is_empty() {
         problems.push("the script reported an error while the frames were rendered".to_string());

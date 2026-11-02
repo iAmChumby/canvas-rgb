@@ -372,11 +372,20 @@ pub struct CheckReport {
 
 /// Checks a SignalRGB-format HTML effect file, with no daemon involved.
 ///
-/// The file is parsed with the same runtime the daemon uses, then 120 frames are
-/// rendered on the 320x200 canvas. The error is the parser's own message.
+/// The file is read and handed to [`check_source`]. The error is the parser's own message, or
+/// why the file could not be read.
 pub fn check_effect(path: &str, png: Option<&str>) -> Result<CheckReport, String> {
     let source = std::fs::read_to_string(path).map_err(|e| format!("could not read {path}: {e}"))?;
-    let mut effect = canvas_html::HtmlEffect::from_source("check", &source, &canvas_proto::props::Props::new())
+    check_source(&source, png)
+}
+
+/// Checks a SignalRGB-format HTML effect's source, with no daemon involved.
+///
+/// The source is parsed with the same runtime the daemon uses, then 120 frames are rendered on
+/// the 320x200 canvas. The error is the parser's own message. `effects check` reads a file and
+/// calls this; the editor's preview route renders a draft with the same runtime.
+pub fn check_source(source: &str, png: Option<&str>) -> Result<CheckReport, String> {
+    let mut effect = canvas_html::HtmlEffect::from_source("check", source, &canvas_proto::props::Props::new())
         .map_err(|e| e.to_string())?;
     let schema = effect.schema();
     effect.init(&schema.defaults());
@@ -1197,6 +1206,17 @@ mod tests {
   }
   window.requestAnimationFrame(draw);
 </script>"##;
+
+    /// The check works on the source itself, with no file involved (the editor's preview
+    /// renders a draft the same way the CLI checks one).
+    #[test]
+    fn check_source_checks_a_draft_with_no_file() {
+        let report = check_source(MOVING, None).expect("the source loads");
+        assert_eq!(report.name, "Moving");
+        assert!(report.moves, "the picture moves");
+        assert!(!report.flat, "the picture is not one flat colour");
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+    }
 
     #[test]
     fn a_moving_effect_passes_the_check() {

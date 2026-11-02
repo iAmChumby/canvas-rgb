@@ -6,6 +6,7 @@
 pub mod diag;
 pub mod devices;
 pub mod displays;
+pub mod editor;
 pub mod effects;
 pub mod fans;
 pub mod layouts;
@@ -57,6 +58,19 @@ pub fn router(app: Arc<App>) -> Router {
         .route(routes::EFFECT_THUMBNAIL, get(effects::thumbnail))
         .route(routes::EFFECT_ACTIVE_PROPS, patch(effects::patch_active_props))
         .route(routes::EFFECT_FAVORITE, put(effects::put_favorite))
+        .route(routes::EFFECT_SOURCE, get(editor::effect_source))
+        .route(
+            routes::EFFECT_PREVIEW,
+            post(editor::preview_effect)
+                .layer(axum::extract::DefaultBodyLimit::max(effects::IMPORT_BODY_LIMIT)),
+        )
+        .route(
+            routes::EFFECT_DRAFT,
+            get(editor::get_draft)
+                .put(editor::put_draft)
+                .delete(editor::delete_draft)
+                .layer(axum::extract::DefaultBodyLimit::max(effects::IMPORT_BODY_LIMIT)),
+        )
         .route(routes::LAYOUTS, get(layouts::list_layouts))
         .route(routes::LAYOUT, get(layouts::get_layout).put(layouts::put_layout))
         .route(routes::LAYOUT_ACTIVE, put(layouts::put_active_layout))
@@ -102,11 +116,30 @@ pub struct ApiFailure {
     pub status: axum::http::StatusCode,
     pub code: &'static str,
     pub message: String,
+    /// A `Retry-After` header, in seconds, when the answer says to try again later.
+    pub retry_after: Option<u64>,
+    /// The line in a draft's script, when the failure is the runtime refusing it.
+    pub line: Option<u32>,
+    /// The column, when the runtime gave one.
+    pub column: Option<u32>,
 }
 
 impl ApiFailure {
     pub fn new(status: axum::http::StatusCode, code: &'static str, message: impl Into<String>) -> Self {
-        Self { status, code, message: message.into() }
+        Self { status, code, message: message.into(), retry_after: None, line: None, column: None }
+    }
+
+    /// Adds `Retry-After: <seconds>` to the answer.
+    pub fn with_retry_after(mut self, seconds: u64) -> Self {
+        self.retry_after = Some(seconds);
+        self
+    }
+
+    /// Adds the runtime's position to the answer, for the editor's error gutter.
+    pub fn at(mut self, line: Option<u32>, column: Option<u32>) -> Self {
+        self.line = line;
+        self.column = column;
+        self
     }
 
     pub fn not_found(message: impl Into<String>) -> Self {
@@ -155,10 +188,39 @@ impl axum::response::IntoResponse for ApiFailure {
         let body = canvas_proto::api::ApiError {
             error: self.code.to_string(),
             message: self.message,
+            line: self.line,
+            column: self.column,
         };
-        (self.status, axum::Json(body)).into_response()
+        let mut response = (self.status, axum::Json(body)).into_response();
+        if let Some(seconds) = self.retry_after {
+            if let Ok(value) = axum::http::HeaderValue::from_str(&seconds.to_string()) {
+                response.headers_mut().insert(axum::http::header::RETRY_AFTER, value);
+            }
+        }
+        response
     }
 }
 
 /// The result type every handler returns.
 pub type ApiResult<T> = Result<T, ApiFailure>;
+
+/// A request body, within `limit` bytes, or the API's own error shape.
+///
+/// The body is read as bytes so an oversized one is answered with [`ApiFailure`] and not with
+/// axum's plain-text rejection. The import, the preview and the draft all use this, so the
+/// three carry the same cap and say the same thing when a body is over it.
+pub fn limited_body(
+    body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
+    limit: usize,
+) -> ApiResult<axum::body::Bytes> {
+    body.map_err(|rejection| match rejection {
+        axum::extract::rejection::BytesRejection::FailedToBufferBody(
+            axum::extract::rejection::FailedToBufferBody::LengthLimitError(_),
+        ) => ApiFailure::new(
+            axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+            canvas_proto::api::error_codes::VALIDATION,
+            format!("the request body is over the limit of {limit} bytes"),
+        ),
+        other => ApiFailure::validation(format!("the request body could not be read: {other}")),
+    })
+}

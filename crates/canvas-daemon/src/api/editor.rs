@@ -1,0 +1,217 @@
+//! The editor's routes: an effect's source, a draft's preview, and the draft on the lights.
+//!
+//! These are the daemon half of the effect editor (#2). The editor itself is a later PR; what
+//! lives here is everything it needs to open a file, render a draft, and try one on the lights
+//! without saving anything.
+
+use axum::extract::{Path, State};
+use axum::Json;
+use canvas_proto::api::{
+    DraftRequest, DraftStatus, EffectPreviewRequest, EffectPreviewResponse, EffectSource,
+};
+use canvas_proto::props::Props;
+use canvas_proto::traits::Effect as _;
+use std::sync::Arc;
+
+use crate::api::{ApiFailure, ApiResult};
+use crate::state::App;
+
+/// `GET /api/v1/effects/{id}/source`.
+///
+/// The HTML of an `html:` effect, user or stock, and the file name its Save would write.
+/// A Rust built-in has no source: it is part of the app, so the route says so with a 404.
+pub async fn effect_source(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<EffectSource>> {
+    if let Some((source, file_name)) = app.user_effects.source_and_file_name(&id) {
+        return Ok(Json(EffectSource { source: source.to_string(), file_name }));
+    }
+    // A file that does not parse is in the folder but not in the library. Its source is
+    // exactly what the editor needs to fix it, so a valid html: id falls back to the file.
+    if let Some(stem) = id.strip_prefix(crate::user_effects::USER_EFFECT_PREFIX) {
+        let file_name = format!("{stem}.html");
+        // The stem comes out of the URL: it is checked like any other file name, so no
+        // folder and no `..` reaches the read.
+        if crate::user_effects::check_file_name(&file_name).is_ok() {
+            if let Some(path) = crate::user_effects::existing_file(&app.effects_dir, &file_name) {
+                let source = std::fs::read_to_string(&path).map_err(|e| {
+                    ApiFailure::internal(format!("could not read the effect file: {e}"))
+                })?;
+                let file_name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or(file_name);
+                return Ok(Json(EffectSource { source, file_name }));
+            }
+        }
+    }
+    // An id that is not an html: effect is a Rust built-in (or one the daemon does not know).
+    match crate::api::effects::find_schema(&app.user_effects, &id) {
+        Some(schema) if !schema.id.starts_with(crate::user_effects::USER_EFFECT_PREFIX) => {
+            Err(ApiFailure::not_found(format!(
+                "{} is a built-in effect written in Rust; it has no HTML source to edit",
+                schema.id
+            )))
+        }
+        _ => Err(ApiFailure::not_found(format!("no effect with the id or name {id}"))),
+    }
+}
+
+/// How many previews may render at once. Each one can hold a blocking thread for up to the
+/// render budget (30 s), so the rest answer 503 with `Retry-After` instead of queueing behind a
+/// slow draft until the editor gives up.
+pub const PREVIEW_CONCURRENT: usize = 2;
+
+/// `POST /api/v1/effects/preview`.
+///
+/// The draft's HTML and the editor's props, rendered headless: the schema, the runtime's
+/// errors, the check warnings, a source hash, and the 64x40 24-frame loop. No device is
+/// touched and nothing is written. At most [`PREVIEW_CONCURRENT`] previews render at once; a
+/// request that finds them all busy answers 503 with `Retry-After: 1`.
+///
+/// The parse and the render run on a blocking thread, so a draft that runs a script past its
+/// deadline never holds the API: the runtime stops it at its load or frame budget and the
+/// answer says what happened. A draft whose top-level script runs over is refused (422);
+/// one whose frame callback runs over still answers with its loop and lists the error, so the
+/// editor can keep the last good picture.
+pub async fn preview_effect(
+    State(app): State<Arc<App>>,
+    body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
+) -> ApiResult<Json<EffectPreviewResponse>> {
+    let bytes = crate::api::limited_body(body, crate::api::effects::IMPORT_BODY_LIMIT)?;
+    let request: EffectPreviewRequest = serde_json::from_slice(&bytes)
+        .map_err(|e| ApiFailure::validation(format!("the body is not a preview request: {e}")))?;
+    if request.html.len() > canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES {
+        return Err(ApiFailure::validation(format!(
+            "the draft is {} bytes; the limit is {}",
+            request.html.len(),
+            canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES
+        )));
+    }
+    // The slot is held until the render is over. A busy answer is a 503 with a retry hint, not
+    // a queue: the editor sends a new preview 400 ms after the next keystroke anyway.
+    let Ok(slot) = app.preview_slots.clone().try_acquire_owned() else {
+        return Err(ApiFailure::service_unavailable(format!(
+            "the daemon is already rendering {PREVIEW_CONCURRENT} previews; try again shortly"
+        ))
+        .with_retry_after(1));
+    };
+    Ok(Json(preview(&request.html, &request.props, slot).await?))
+}
+
+/// Renders a draft for [`preview_effect`], off the async workers. The slot stays with the
+/// render: a client that goes away does not free it while the render still runs.
+async fn preview(
+    html: &str,
+    props: &Props,
+    slot: tokio::sync::OwnedSemaphorePermit,
+) -> Result<EffectPreviewResponse, ApiFailure> {
+    let source_hash = crate::user_effects::source_hash(html);
+    let id = format!("{}{source_hash}", canvas_proto::consts::DRAFT_ID_PREFIX);
+    let html = html.to_string();
+    let props = props.clone();
+    tokio::task::spawn_blocking(move || -> Result<EffectPreviewResponse, ApiFailure> {
+        let _slot = slot;
+        // The same build the lights use, so the preview is judged by the runtime that will
+        // run it.
+        let mut effect = crate::user_effects::html_effect(&id, &html).map_err(|error| {
+            let (line, column) = crate::user_effects::error_position(&error);
+            ApiFailure::validation(crate::user_effects::load_error_sentence(&error)).at(line, column)
+        })?;
+        let schema = effect.schema();
+        let thumbnail = crate::thumbnail::render(&mut effect, &props).map_err(|e| {
+            ApiFailure::service_unavailable(format!("the preview was given up: {}", e.reason()))
+        })?;
+        let mut warnings: Vec<String> = effect
+            .warnings()
+            .iter()
+            .map(|warning| format!("the file was read with a part ignored: {warning}"))
+            .collect();
+        if !crate::thumbnail::body_moves(&thumbnail) {
+            warnings.push(crate::thumbnail::NO_MOVEMENT.to_string());
+        }
+        if crate::thumbnail::body_is_flat(&thumbnail) {
+            warnings.push(crate::thumbnail::FLAT_COLOUR.to_string());
+        }
+        let errors = effect
+            .errors()
+            .iter()
+            .map(|message| {
+                let (line, column) = crate::user_effects::error_position(message);
+                canvas_proto::api::EffectError {
+                    message: message.clone(),
+                    line,
+                    column,
+                }
+            })
+            .collect();
+        Ok(EffectPreviewResponse {
+            schema,
+            source_hash,
+            errors,
+            warnings,
+            thumbnail: preview_base64(&thumbnail),
+        })
+    })
+    .await
+    .map_err(|e| ApiFailure::internal(format!("the preview task stopped: {e}")))?
+}
+
+/// The loop's bytes as base64, for the JSON answer.
+fn preview_base64(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// `GET /api/v1/effects/draft`.
+///
+/// The draft on the lights, for the editor's banner after a reload. A lease that ran out is
+/// ended here first, so the answer never reports a draft that is already over; when ending it
+/// could not put the prior effect back, `note` says so.
+pub async fn get_draft(State(app): State<Arc<App>>) -> Json<DraftStatus> {
+    crate::draft::expire_if_due(&app).await;
+    Json(crate::draft::status(&app))
+}
+
+/// `PUT /api/v1/effects/draft`.
+///
+/// Starts the draft, or renews its lease (and updates its props). A draft that does not parse
+/// is refused and a running draft is left alone, so a bad keystroke mid-edit never takes the
+/// lights off the last good draft.
+pub async fn put_draft(
+    State(app): State<Arc<App>>,
+    body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
+) -> ApiResult<Json<DraftStatus>> {
+    let bytes = crate::api::limited_body(body, crate::api::effects::IMPORT_BODY_LIMIT)?;
+    let request: DraftRequest = serde_json::from_slice(&bytes)
+        .map_err(|e| ApiFailure::validation(format!("the body is not a draft request: {e}")))?;
+    if request.html.len() > canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES {
+        return Err(ApiFailure::validation(format!(
+            "the draft is {} bytes; the limit is {}",
+            request.html.len(),
+            canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES
+        )));
+    }
+    if let Err(error) = crate::draft::put(&app, &request.html, &request.props).await {
+        return Err(match error {
+            crate::draft::PutError::Build(message) => {
+                let (line, column) = crate::user_effects::error_position(&message);
+                ApiFailure::validation(crate::user_effects::load_error_sentence(&message))
+                    .at(line, column)
+            }
+            crate::draft::PutError::Internal(message) => ApiFailure::internal(message),
+        });
+    }
+    Ok(Json(crate::draft::status(&app)))
+}
+
+/// `DELETE /api/v1/effects/draft`.
+///
+/// Stops the draft and puts the prior effect back. Without a draft it is a no-op, so a banner's
+/// Stop after a lease already ran out is not an error. The slot always goes: when the prior
+/// effect cannot be built, black goes on the lights and `note` says why, with a 200.
+pub async fn delete_draft(State(app): State<Arc<App>>) -> ApiResult<Json<DraftStatus>> {
+    crate::draft::stop(&app).await;
+    Ok(Json(crate::draft::status(&app)))
+}

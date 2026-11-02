@@ -875,6 +875,10 @@ async fn run(app: &std::sync::Arc<crate::state::App>) {
         crate::logging::warn_if_err("the first run could not save the layouts", store.save_layouts());
     }
     let device_list = app.devices.read().await.clone();
+    // The first run puts an effect of its own on the lights: a draft (only possible when a
+    // completed setup is walked through again) ends here, and a beat cannot start another
+    // until this effect is on.
+    let _replace = crate::draft::hold_for_replace(app).await;
     app.engine.set_layout(layout.clone(), device_list);
 
     if let Err(e) = crate::apply_effect(app, FIRST_RUN_EFFECT, &props).await {

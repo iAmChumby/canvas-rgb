@@ -1,6 +1,7 @@
 //! Ports, paths, names and limits shared across processes.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 pub const APP_NAME: &str = "canvas-rgb";
 pub const API_HOST: &str = "127.0.0.1";
@@ -23,6 +24,17 @@ pub const FPS_DEFAULT: u32 = 30;
 pub const PREVIEW_MAX_FPS: u32 = 15;
 /// The largest user HTML effect `POST /effects/import` accepts, in bytes.
 pub const EFFECT_IMPORT_MAX_BYTES: usize = 1024 * 1024;
+/// How often the editor sends its draft to `PUT /effects/draft` while the draft is on the
+/// lights. A beat is a lease renewal: a PUT at least this often keeps the draft running.
+pub const DRAFT_HEARTBEAT: Duration = Duration::from_secs(5);
+/// How long a draft keeps the lights after the last PUT. Three missed beats: the draft ends
+/// and the previous effect comes back, so a closed, crashed or throttled editor can leave
+/// the lights on a draft for at most this long.
+pub const DRAFT_LEASE: Duration = Duration::from_secs(15);
+/// The id prefix of a draft effect (`draft:` + its source hash). A draft is never a saved
+/// effect: no route that saves an effect or a layout stores one, and `find_schema` has no id
+/// that starts with this.
+pub const DRAFT_ID_PREFIX: &str = "draft:";
 /// Screen Ambience capture rate cap.
 pub const SCREEN_CAPTURE_MAX_FPS: u32 = 30;
 

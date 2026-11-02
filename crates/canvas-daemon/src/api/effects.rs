@@ -4,8 +4,9 @@ use axum::extract::{Path, Query, State};
 use axum::response::IntoResponse;
 use axum::Json;
 use canvas_proto::api::{
-    ActivateEffect, DeleteEffectQuery, EffectDetail, EffectSummary, EffectsResponse, FailedEffect, ImportEffect,
-    ImportEffectResponse, PresetCreate, PresetReplace, PresetsResponse, SetFavorite,
+    ActivateEffect, DeleteEffectQuery, DeleteEffectResponse, DraftEnded, EffectDetail, EffectSummary,
+    EffectsResponse, FailedEffect, ImportEffect, ImportEffectResponse, PresetCreate, PresetReplace,
+    PresetsResponse, SetFavorite,
 };
 use canvas_proto::props::{Preset, Props, PropertySchema};
 use std::collections::BTreeMap;
@@ -184,6 +185,9 @@ pub async fn activate(
 
     // Any activation ends an earlier timer; an onboarding effect arms a new one below.
     app.transient.cancel();
+    // The owner chose a saved effect: a draft on the lights ends, and the guard keeps a beat
+    // from starting a new one until this effect is on the lights.
+    let _replace = crate::draft::hold_for_replace(&app).await;
     crate::apply_effect(&app, &schema.id, &props)
         .await
         .map_err(|e| ApiFailure::internal(format!("could not activate the effect: {e}")))?;
@@ -202,6 +206,17 @@ pub async fn patch_active_props(
     State(app): State<Arc<App>>,
     Json(props): Json<Props>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    // A draft holds the lights; the layout's effect is not what is running. The props of a
+    // draft are changed with PUT /effects/draft, so this is a clear 404 and not a silent
+    // overwrite of the draft with the saved effect. The draft gate is held across the check
+    // and the apply, so a PUT that is already building is seen here and one that arrives
+    // during the apply waits until the saved effect is on (its PUT then starts a new draft).
+    let _draft_gate = app.draft.gate().lock().await;
+    if app.draft.is_active() {
+        return Err(ApiFailure::not_found(
+            "a draft is on the lights; change its props with PUT /api/v1/effects/draft",
+        ));
+    }
     let (schema, merged) = {
         let store = app.store.read().await;
         let active = store
@@ -674,16 +689,7 @@ pub async fn import_effect(
 ) -> ApiResult<Json<ImportEffectResponse>> {
     // The body is read as bytes, so an oversized body is answered with the API's own
     // error shape and not with axum's plain text.
-    let bytes = body.map_err(|rejection| match rejection {
-        axum::extract::rejection::BytesRejection::FailedToBufferBody(
-            axum::extract::rejection::FailedToBufferBody::LengthLimitError(_),
-        ) => ApiFailure::new(
-            axum::http::StatusCode::PAYLOAD_TOO_LARGE,
-            canvas_proto::api::error_codes::VALIDATION,
-            format!("the request body is over the limit of {IMPORT_BODY_LIMIT} bytes"),
-        ),
-        other => ApiFailure::validation(format!("the request body could not be read: {other}")),
-    })?;
+    let bytes = crate::api::limited_body(body, IMPORT_BODY_LIMIT)?;
     let request: ImportEffect = serde_json::from_slice(&bytes)
         .map_err(|e| ApiFailure::validation(format!("the body is not an import request: {e}")))?;
 
@@ -841,7 +847,7 @@ pub async fn delete_effect(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
     Query(query): Query<DeleteEffectQuery>,
-) -> ApiResult<Json<serde_json::Value>> {
+) -> ApiResult<Json<DeleteEffectResponse>> {
     let stem = id
         .strip_prefix(crate::user_effects::USER_EFFECT_PREFIX)
         .ok_or_else(|| {
@@ -894,9 +900,21 @@ pub async fn delete_effect(
     // the file is missing. The active layout still names it, so the restore path
     // cannot build it any more and says so, exactly as it does at start.
     let active = app.active_layout().await.and_then(|l| l.effect);
+    let mut draft_ended = None;
     if let Some(active) = active {
         if active.id == id {
             tracing::warn!(effect = %id, "the active user effect was deleted");
+            // A draft took this effect over from, and its prior now names a file that is
+            // gone. End the draft first, chosen over refusing the delete with a 409: the
+            // draft is in memory only, and deleting what the lights show is what the owner
+            // asked for. The restore cannot build the file any more, so the lights go black
+            // and the note says so, in the answer as well as the log.
+            if let Some(ended) = crate::draft::stop(&app).await {
+                if let Some(note) = &ended.note {
+                    tracing::warn!(%note, "the draft ended when its prior effect was deleted");
+                }
+                draft_ended = Some(DraftEnded { note: ended.note });
+            }
             if let Err(e) = crate::apply_effect(&app, &active.id, &active.props).await {
                 tracing::warn!(
                     effect = %active.id,
@@ -907,7 +925,7 @@ pub async fn delete_effect(
         }
     }
 
-    Ok(Json(serde_json::json!({ "ok": true, "id": id, "presets_removed": presets_removed })))
+    Ok(Json(DeleteEffectResponse { ok: true, id, presets_removed, draft_ended }))
 }
 
 /// The largest request body the import route accepts, in bytes.

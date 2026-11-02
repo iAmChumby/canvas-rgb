@@ -4,4 +4,13 @@ export type ApiError = {
 /**
  * One of [`error_codes`].
  */
-error: string, message: string, };
+error: string, message: string, 
+/**
+ * For an effect that failed to load (a preview or a draft): the line in its script, when
+ * the runtime gave one.
+ */
+line?: number, 
+/**
+ * The column, when the runtime gave one.
+ */
+column?: number, };
