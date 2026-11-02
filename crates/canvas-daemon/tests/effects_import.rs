@@ -689,7 +689,7 @@ async fn deleting_the_active_effect_falls_back_like_a_missing_file() {
 
     // The daemon is still answering, and the effect can no longer be built: the same
     // answer the daemon gives when the file went missing by hand.
-    let made = canvas_daemon::create_effect(&app.user_effects, "html:spark");
+    let made = canvas_daemon::create_effect(&app.user_effects, &app.stacks, "html:spark");
     assert!(made.is_err(), "the deleted effect cannot be built any more");
 }
 

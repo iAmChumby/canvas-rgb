@@ -41,6 +41,8 @@ pub async fn put_settings(
 
     app.engine.set_fps(settings.fps);
     app.engine.set_brightness(settings.brightness);
+    // The HTML budget a stack's layers are held to follows the frame rate.
+    app.stacks.set_fps(settings.fps);
     let current_power = app.store.read().await.config.settings.power;
     if settings.power != current_power {
         crate::api::output::apply_power(&app, settings.power)?;
@@ -132,6 +134,7 @@ pub async fn config_export(State(app): State<Arc<App>>) -> ApiResult<Json<Export
         effects: store.effects.clone(),
         fans,
         displays: store.displays.displays.clone(),
+        stacks: app.stacks.all(),
     };
     Ok(Json(bundle))
 }
@@ -178,9 +181,22 @@ pub async fn config_import(
     crate::storage::validate_bundle(&bundle)
         .map_err(|e| ApiFailure::validation(e.to_string()))?;
 
+    // The stacks in the bundle go through the rules a PUT does (D95.1.2). A bundle from before
+    // stacks has none, and importing it replaces the saved stacks with none, as it does the
+    // display configs.
+    let known = crate::stacks::KnownEffects::from_user(&app.user_effects);
+    let mut stacks: Vec<canvas_proto::stack::Stack> = Vec::new();
+    for stack in &bundle.stacks {
+        crate::stacks::validate_stack(stack, &known, &stacks)
+            .map_err(ApiFailure::validation)?;
+        stacks.push(stack.clone());
+    }
+
     let home = app.store.read().await.home.clone();
     crate::storage::import_bundle(&home, &bundle)
         .map_err(|e| ApiFailure::internal(format!("could not import the config: {e}")))?;
+    crate::stacks::write_file(&home, &stacks)
+        .map_err(|e| ApiFailure::internal(format!("could not save the stacks: {e}")))?;
 
     // Reload the store from disk and apply it.
     let store = crate::storage::Store::load_from(&home);
@@ -191,15 +207,20 @@ pub async fn config_import(
             .await;
         *guard = store;
     }
+    // The stacks are read again from the file the import wrote, so the library shows them at
+    // once and the next frame resolves them against the new layout.
+    app.stacks.reload_with(&known);
     // The display task reads the saved configs on its next pass; wake it so it does not wait.
     app.displays.changed();
     let settings = app.store.read().await.config.settings.clone();
     app.engine.set_fps(settings.fps);
     app.engine.set_brightness(settings.brightness);
     app.engine.set_power(settings.power);
+    app.stacks.set_fps(settings.fps);
     if let Some(layout) = app.active_layout().await {
         let devices = app.devices.read().await.clone();
-        app.engine.set_layout(layout, devices);
+        app.engine.set_layout(layout.clone(), devices.clone());
+        app.stacks.publish_areas(&layout, &devices);
     }
 
     tracing::info!("the config was imported");

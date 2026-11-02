@@ -79,6 +79,9 @@ pub struct App {
     pub quit_tx: tokio::sync::mpsc::UnboundedSender<()>,
     /// The user HTML effects found in `%APPDATA%\canvas-rgb\effects\`.
     pub user_effects: Arc<crate::user_effects::UserEffects>,
+    /// The saved effect stacks (`stacks.json`) and the runtime state a stack shares: the area
+    /// book, the live map of the stack on the engine, and the frame rate its budget uses.
+    pub stacks: Arc<crate::stacks::Stacks>,
     /// The folder the user HTML effects live in. The import writes here and the
     /// delete removes from here, so both work on the folder the daemon watches.
     pub effects_dir: PathBuf,
@@ -159,6 +162,17 @@ impl App {
         A: DeviceAdapter + ResumeBehavior + 'static,
         D: canvas_proto::traits::NumericDisplayAdapter + ResumeBehavior + 'static,
     {
+        let user_effects = Arc::new(crate::user_effects::UserEffects::with_stock_and_tiles(
+            crate::user_effects::html_builder(),
+            crate::user_effects::html_builder_seeded(crate::thumbnail::TILE_SEED),
+            crate::user_effects::STOCK_EFFECTS,
+        ));
+        // The stacks are read before the API answers; the effect names they are checked against
+        // are the stock ones until the effects folder is scanned (the daemon scans it right
+        // after it builds the app and reads the file again then).
+        let stacks = Arc::new(crate::stacks::Stacks::new(store.home.clone()));
+        stacks.set_fps(store.config.settings.fps);
+        stacks.reload(&user_effects);
         Self {
             displays: crate::displays::DisplayHub::new(display_adapter),
             peripherals: crate::peripherals::PeripheralHub::new(Vec::new()),
@@ -183,11 +197,8 @@ impl App {
             openrgb: tokio::sync::RwLock::new(LinkState::Down),
             shutting_down: AtomicU32::new(0),
             quit_tx,
-            user_effects: Arc::new(crate::user_effects::UserEffects::with_stock_and_tiles(
-                crate::user_effects::html_builder(),
-                crate::user_effects::html_builder_seeded(crate::thumbnail::TILE_SEED),
-                crate::user_effects::STOCK_EFFECTS,
-            )),
+            user_effects,
+            stacks,
             effects_dir: crate::paths::effects_dir(),
             effect_writes: tokio::sync::Mutex::new(()),
             openrgb_child: Mutex::new(None),

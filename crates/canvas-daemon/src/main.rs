@@ -174,6 +174,9 @@ async fn daemon_main() -> Exit {
 
     // The user HTML effects are listed before the API answers; the watcher keeps them current.
     app.user_effects.rescan(&app.effects_dir);
+    // The stacks are read again now the effects folder is known: a stack's name may not be a
+    // user effect's name, and a layer may name one (D95.1.4).
+    app.stacks.reload(&app.user_effects);
 
     // The effect saved on the active layout runs again, so a restart does not leave the
     // lights black until something activates an effect.
@@ -522,7 +525,8 @@ fn spawn_openrgb_supervisor(app: Arc<App>) {
                         // The engine needs the new devices and the zone sizes.
                         if let Some(layout) = app.active_layout().await {
                             let device_list = app.devices.read().await.clone();
-                            app.engine.set_layout(layout, device_list);
+                            app.engine.set_layout(layout.clone(), device_list.clone());
+                            app.stacks.publish_areas(&layout, &device_list);
                         }
                         sync_device_sinks(&app, &devices, &sinks).await;
                         // The first run waits for the devices.

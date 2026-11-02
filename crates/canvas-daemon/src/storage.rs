@@ -126,6 +126,12 @@ macro_rules! impl_schema_version {
 
 impl_schema_version!(ConfigFile, LayoutsFile, ZonesFile, EffectsFile, FansFile);
 
+impl SchemaVersioned for canvas_proto::stack::StackFile {
+    fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+}
+
 impl SchemaVersioned for DisplaysFile {
     fn schema_version(&self) -> u32 {
         self.schema_version
@@ -186,6 +192,7 @@ pub fn snapshot(home: &Path, label: &str) -> std::io::Result<PathBuf> {
         "layouts.json",
         "zones.json",
         "effects.json",
+        canvas_proto::stack::STACKS_FILE,
         DISPLAYS_FILE,
         PERIPHERALS_FILE,
         "fans.last.toml",
@@ -426,6 +433,7 @@ pub fn export_bundle(home: &Path, fans: FansFile) -> ExportBundle {
         effects: store.effects.clone(),
         fans,
         displays: store.displays.displays.clone(),
+        stacks: crate::stacks::read_file(home).stacks,
     }
 }
 
@@ -499,6 +507,9 @@ pub fn import_bundle(home: &Path, bundle: &ExportBundle) -> Result<(), ImportErr
     write_json(&home.join(ZONES_FILE), &zones)?;
     write_json(&home.join(EFFECTS_FILE), &effects)?;
     write_json(&home.join(DISPLAYS_FILE), &displays)?;
+    // The stacks replace the saved ones like the other files; a bundle from before stacks has
+    // none and leaves none behind. The route validates them before it gets here.
+    crate::stacks::write_file(home, &bundle.stacks)?;
     // The daemon keeps its own copy so an export while the service is down still works.
     write_toml(&home.join("fans.last.toml"), &fans)?;
     Ok(())

@@ -47,7 +47,7 @@ pub async fn effect_source(
         }
     }
     // An id that is not an html: effect is a Rust built-in (or one the daemon does not know).
-    match crate::api::effects::find_schema(&app.user_effects, &id) {
+    match crate::api::effects::find_schema(&app.user_effects, &app.stacks, &id) {
         Some(schema) if !schema.id.starts_with(crate::user_effects::USER_EFFECT_PREFIX) => {
             Err(ApiFailure::not_found(format!(
                 "{} is a built-in effect written in Rust; it has no HTML source to edit",

@@ -741,6 +741,15 @@ const RESERVED_NAMES: &[&str] = &[
     "lpt8", "lpt9",
 ];
 
+/// True when `base` is one of the names Windows reserves, ignoring ASCII case. The caller passes
+/// the part of a name before its first dot.
+///
+/// A stack's name is a file-ish key too, so it keeps this rule (D95.1.4 rule 4) as well as a
+/// file does.
+pub fn is_reserved_name(base: &str) -> bool {
+    RESERVED_NAMES.contains(&base.to_ascii_lowercase().as_str())
+}
+
 /// Checks a file name for an effect and returns the id the file will carry.
 ///
 /// The name may hold letters, digits, spaces, `-`, `_` and `.`, and it must end in
@@ -776,7 +785,7 @@ pub fn check_file_name(file_name: &str) -> Result<String, String> {
     }
     // The part of the stem before the first dot is the name Windows reserves.
     let base = stem.split('.').next().unwrap_or(stem);
-    if RESERVED_NAMES.contains(&base.to_ascii_lowercase().as_str()) {
+    if is_reserved_name(base) {
         return Err(format!("{base:?} is a name Windows reserves"));
     }
     if canvas_proto::EFFECT_IDS.iter().any(|id| id.eq_ignore_ascii_case(stem)) {

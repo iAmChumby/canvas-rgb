@@ -17,30 +17,44 @@ use crate::state::App;
 use crate::user_effects::UserEffects;
 
 /// Every effect's schema: the eleven built-ins first, then the user HTML effects sorted by
-/// name. The registry is read once per call: it is cheap (eleven effects) and always
-/// reflects the current build.
-pub fn schemas(user: &UserEffects) -> Vec<PropertySchema> {
+/// name, then the saved stacks (D95.4.2). The registry is read once per call: it is cheap
+/// (eleven effects) and always reflects the current build.
+///
+/// A stack's schema is derived from the effects its layers name (D95.4.3), and never from
+/// another stack: a stack cannot contain a stack, so a nested layer contributes no property.
+pub fn schemas(user: &UserEffects, stacks: &crate::stacks::Stacks) -> Vec<PropertySchema> {
     let mut all: Vec<PropertySchema> =
         canvas_effects::registry().into_iter().map(|f| f().schema()).collect();
     all.extend(user.schemas());
+    let effects = all.clone();
+    for stack in stacks.all() {
+        all.push(crate::stack::schema_for(&stack, &|id| find_among(&effects, id)));
+    }
     all
+}
+
+/// A schema by id, case-insensitively, or else by display name: the same match `find_schema`
+/// makes over the whole list.
+fn find_among(all: &[PropertySchema], id: &str) -> Option<PropertySchema> {
+    all.iter()
+        .find(|s| s.id.eq_ignore_ascii_case(id))
+        .or_else(|| all.iter().find(|s| s.name.eq_ignore_ascii_case(id)))
+        .cloned()
 }
 
 /// Finds a schema by id, case-insensitively (the CLI matches names case-insensitively).
 ///
 /// The hidden onboarding effects are found here (so the activate route runs them) but are
 /// not in [`schemas`], so they never reach `GET /effects`.
-pub fn find_schema(user: &UserEffects, id: &str) -> Option<PropertySchema> {
+pub fn find_schema(
+    user: &UserEffects,
+    stacks: &crate::stacks::Stacks,
+    id: &str,
+) -> Option<PropertySchema> {
     let id = id.trim();
-    let mut all = schemas(user);
+    let mut all = schemas(user, stacks);
     all.extend(canvas_effects::onboard::hidden_schemas());
-    all.iter()
-        .find(|s| s.id.eq_ignore_ascii_case(id))
-        .or_else(|| {
-            // The CLI accepts the effect's display name too.
-            all.iter().find(|s| s.name.eq_ignore_ascii_case(id))
-        })
-        .cloned()
+    find_among(&all, id)
 }
 
 /// The user effect files that did not parse, with the parser's message.
@@ -61,7 +75,7 @@ fn failed_effects(user: &UserEffects) -> Vec<FailedEffect> {
 pub async fn list_effects(State(app): State<Arc<App>>) -> Json<EffectsResponse> {
     let store = app.store.read().await;
     let favorites = store.effects.favorites.clone();
-    let effects: Vec<EffectSummary> = schemas(&app.user_effects)
+    let effects: Vec<EffectSummary> = schemas(&app.user_effects, &app.stacks)
         .into_iter()
         .map(|s| EffectSummary {
             favorite: favorites.iter().any(|f| f == &s.id),
@@ -81,7 +95,7 @@ pub async fn get_effect(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<EffectDetail>> {
-    let schema = find_schema(&app.user_effects, &id)
+    let schema = find_schema(&app.user_effects, &app.stacks, &id)
         .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id or name {id}")))?;
     let store = app.store.read().await;
     let favorite = store.effects.favorites.iter().any(|f| f == &schema.id);
@@ -116,10 +130,18 @@ pub async fn activate(
     Path(id): Path<String>,
     Json(request): Json<ActivateEffect>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let schema = find_schema(&app.user_effects, &id)
+    let schema = find_schema(&app.user_effects, &app.stacks, &id)
         .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id or name {id}")))?;
 
-    let mut props = schema.defaults();
+    // A stack runs its file's layer values, namespaced into one props map (D95.4.3): the file's
+    // values on the layer schemas' defaults, then the preset, then the request.
+    let stack = app.stacks.get(&schema.id);
+    let mut props = match &stack {
+        Some(stack) => crate::stack::stack_props(stack, &|id| {
+            find_schema(&app.user_effects, &app.stacks, id)
+        }),
+        None => schema.defaults(),
+    };
     if let Some(preset_name) = &request.preset {
         // A built-in preset first, then the user's own; the save routes keep the two
         // namespaces apart, so a name never matches both.
@@ -161,16 +183,20 @@ pub async fn activate(
     // own effect, and a timer puts that effect back (see `crate::transient`).
     let transient = canvas_effects::onboard::is_onboard_id(&schema.id);
 
-    // Save the props for next time, then apply the effect.
+    // Save the props for next time, then apply the effect. A stack is never in `effects.saved`
+    // (D95.4.3): its values live in `stacks.json`, and the layout keeps the snapshot.
+    let is_stack = stack.is_some();
     if !transient {
         let mut store = app
             .store
             .write()
             .await;
-        store.effects.saved.insert(schema.id.clone(), props.clone());
-        store
-            .save_effects()
-            .map_err(|e| ApiFailure::internal(format!("could not save the effects: {e}")))?;
+        if !is_stack {
+            store.effects.saved.insert(schema.id.clone(), props.clone());
+            store
+                .save_effects()
+                .map_err(|e| ApiFailure::internal(format!("could not save the effects: {e}")))?;
+        }
 
         if let Some(layout) = store.active_layout_mut() {
             layout.effect = Some(canvas_proto::layout::ActiveEffect {
@@ -188,9 +214,32 @@ pub async fn activate(
     // The owner chose a saved effect: a draft on the lights ends, and the guard keeps a beat
     // from starting a new one until this effect is on the lights.
     let _replace = crate::draft::hold_for_replace(&app).await;
-    crate::apply_effect(&app, &schema.id, &props)
-        .await
-        .map_err(|e| ApiFailure::internal(format!("could not activate the effect: {e}")))?;
+    // Activating a stack whose structure is the one already on the engine reuses the running
+    // effect: the live map is updated from the file and the props go through `set_props`, so
+    // pressing Save twice never reloads an HTML layer (D95.4.3, D95.4.6).
+    let reused = match &stack {
+        Some(stack) => {
+            let structure = crate::stack::structure_hash(&crate::stack::structure(stack, &|id| {
+                app.user_effects
+                    .source_and_file_name(id)
+                    .map(|(source, _)| source.to_string())
+            }));
+            if app.stacks.running_is(&stack.id, &structure) {
+                app.stacks.update_live(stack);
+                app.engine.set_props(&props);
+                tracing::info!(effect = %schema.id, "the running stack was reused: no layer was rebuilt");
+                true
+            } else {
+                false
+            }
+        }
+        None => false,
+    };
+    if !reused {
+        crate::apply_effect(&app, &schema.id, &props)
+            .await
+            .map_err(|e| ApiFailure::internal(format!("could not activate the effect: {e}")))?;
+    }
     if transient {
         crate::transient::arm(&app, &schema.id);
     }
@@ -223,7 +272,15 @@ pub async fn patch_active_props(
             .active_layout()
             .and_then(|l| l.effect.clone())
             .ok_or_else(|| ApiFailure::not_found("no effect is active"))?;
-        let schema = find_schema(&app.user_effects, &active.id)
+        // A stack's property values are edited in its builder, not with this route: a preset is
+        // a merged-props map, and the builder owns the draft (D95.4.3).
+        if active.id.starts_with(canvas_proto::stack::STACK_ID_PREFIX) {
+            return Err(ApiFailure::conflict(format!(
+                "{} is a stack; change its values in the stack builder, not with this route",
+                active.id
+            )));
+        }
+        let schema = find_schema(&app.user_effects, &app.stacks, &active.id)
             .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id {}", active.id)))?;
         let mut merged = active.props;
         merged.extend(props.clone());
@@ -262,7 +319,7 @@ pub async fn put_favorite(
     Path(id): Path<String>,
     Json(request): Json<SetFavorite>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let schema = find_schema(&app.user_effects, &id)
+    let schema = find_schema(&app.user_effects, &app.stacks, &id)
         .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id or name {id}")))?;
     {
         let mut store = app
@@ -289,7 +346,7 @@ pub async fn put_effect(
     Path(id): Path<String>,
     Json(detail): Json<EffectDetail>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let schema = find_schema(&app.user_effects, &id)
+    let schema = find_schema(&app.user_effects, &app.stacks, &id)
         .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id or name {id}")))?;
     {
         let mut store = app
@@ -458,7 +515,7 @@ pub async fn create_preset(
     Path(id): Path<String>,
     Json(request): Json<PresetCreate>,
 ) -> ApiResult<Json<PresetsResponse>> {
-    let schema = find_schema(&app.user_effects, &id)
+    let schema = find_schema(&app.user_effects, &app.stacks, &id)
         .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id or name {id}")))?;
     let name = clean_preset_name(&request.name)?;
     check_preset_caps(&request.props)?;
@@ -487,7 +544,7 @@ pub async fn replace_preset(
     Path((id, name)): Path<(String, String)>,
     Json(request): Json<PresetReplace>,
 ) -> ApiResult<Json<PresetsResponse>> {
-    let schema = find_schema(&app.user_effects, &id)
+    let schema = find_schema(&app.user_effects, &app.stacks, &id)
         .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id or name {id}")))?;
     let rename_to = request.rename_to.as_deref().map(clean_preset_name).transpose()?;
     check_preset_caps(&request.props)?;
@@ -521,7 +578,7 @@ pub async fn delete_preset(
     State(app): State<Arc<App>>,
     Path((id, name)): Path<(String, String)>,
 ) -> ApiResult<Json<PresetsResponse>> {
-    let schema = find_schema(&app.user_effects, &id)
+    let schema = find_schema(&app.user_effects, &app.stacks, &id)
         .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id or name {id}")))?;
     let mut store = app.store.write().await;
     let mut list = store.effects.presets.get(&schema.id).cloned().unwrap_or_default();
@@ -543,9 +600,11 @@ pub async fn thumbnail(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
 ) -> ApiResult<axum::response::Response> {
-    let schema = find_schema(&app.user_effects, &id)
+    let schema = find_schema(&app.user_effects, &app.stacks, &id)
         .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id or name {id}")))?;
-    let generation = app.user_effects.generation();
+    // The tile moves with the user effects and with the stacks: a stack edited in the builder is
+    // a different picture, even though the effects folder did not change (D95.4.10).
+    let generation = (app.user_effects.generation(), app.stacks.generation());
 
     if let Some(bytes) = app.thumbnails.get(generation, &schema.id) {
         return Ok(binary_response(&bytes));
@@ -556,9 +615,16 @@ pub async fn thumbnail(
         return Err(ApiFailure::service_unavailable(given_up(&id, &why)));
     }
 
-    let user = app.user_effects.clone();
+    let user = Arc::clone(&app.user_effects);
+    let stacks = Arc::clone(&app.stacks);
     let effect_id = schema.id.clone();
-    let props = schema.defaults();
+    // A stack's tile runs the file's own values, so the tile is a small picture of the stack.
+    let props = match app.stacks.get(&schema.id) {
+        Some(stack) => crate::stack::stack_props(&stack, &|id| {
+            find_schema(&app.user_effects, &app.stacks, id)
+        }),
+        None => schema.defaults(),
+    };
     let rendering = Arc::clone(&app);
     let budget = app.thumbnails.render_budget();
     // The permit is taken before the render and handed to the render task, so it is held
@@ -579,7 +645,7 @@ pub async fn thumbnail(
         // instead (from the join), the permit has already dropped during the unwind and a
         // request that waited for the slot would find nothing cached and render the tile again.
         let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::create_effect_for_tile(&user, &effect_id)
+            crate::create_effect_for_tile(&user, &stacks, &effect_id)
                 .map_err(crate::thumbnail::RenderError::from_build_error)
                 .and_then(|mut effect| crate::thumbnail::render_within(effect.as_mut(), &props, budget))
         }));
@@ -848,6 +914,12 @@ pub async fn delete_effect(
     Path(id): Path<String>,
     Query(query): Query<DeleteEffectQuery>,
 ) -> ApiResult<Json<DeleteEffectResponse>> {
+    // A stack is not a file: it lives in `stacks.json` and has its own route (D95.4.2).
+    if let Some(name) = id.strip_prefix(canvas_proto::stack::STACK_ID_PREFIX) {
+        return Err(ApiFailure::conflict(format!(
+            "{id} is a stack, not an effect file; delete it with DELETE /api/v1/stacks/{name}"
+        )));
+    }
     let stem = id
         .strip_prefix(crate::user_effects::USER_EFFECT_PREFIX)
         .ok_or_else(|| {

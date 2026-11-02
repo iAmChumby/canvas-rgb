@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Added
+
+- A saved stack shows in the effect library and can be switched on. (#95)
+
 ## [0.5.0] - 2026-11-01
 
 ### Changed

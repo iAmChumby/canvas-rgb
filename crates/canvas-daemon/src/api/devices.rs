@@ -82,7 +82,8 @@ pub async fn patch_zone(
         *list = devices.clone();
     }
     if let Some(layout) = app.active_layout().await {
-        app.engine.set_layout(layout, devices);
+        app.engine.set_layout(layout.clone(), devices.clone());
+        app.stacks.publish_areas(&layout, &devices);
     }
 
     tracing::info!(device = %id, zone, leds = patch.led_count, "the zone size changed");
