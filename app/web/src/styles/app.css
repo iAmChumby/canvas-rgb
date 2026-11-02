@@ -6466,16 +6466,20 @@ button.chip:hover {
   border-radius: var(--r-md);
   background: var(--sunk);
   overflow: hidden;
+  /* The wrap is the picture's size container: the canvas below takes the smaller of its
+     width and 1.6 x its height, so it never overflows the stage (D95.5.2). */
+  container-type: size;
 }
 
 /* The canvas is 320 x 200: the whole desk, as the engine sees it. It is fitted without ever
    changing that ratio: the picture takes the smaller of the stage's width and 1.6 x its
-   height. */
+   height. `160cqh` is 1.6 x the wrap's height, so a wide, short stage is height-limited. */
 .rd-canvas {
   position: relative;
   aspect-ratio: 320 / 200;
   width: min(100%, 160cqh);
   height: auto;
+  max-height: 100%;
   background: var(--sunk);
 }
 
