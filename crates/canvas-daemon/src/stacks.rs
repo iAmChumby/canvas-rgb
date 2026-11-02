@@ -217,8 +217,7 @@ pub fn validate_stack(stack: &Stack, known: &KnownEffects, others: &[Stack]) -> 
 
 /// The layers of a stack loaded from a file: the ones the compositor cannot run are dropped with
 /// a logged reason, and the rest of the stack runs (D95.1.6, D95.4.8).
-fn loaded_layers(stack: &Stack) -> Vec<StackLayer> {
-    let mut seen: Vec<String> = Vec::new();
+fn loaded_layers(stack: &Stack) -> Vec<StackLayer> {    let mut seen: Vec<String> = Vec::new();
     let mut out: Vec<StackLayer> = Vec::new();
     let mut html = 0usize;
     for layer in &stack.layers {
@@ -252,6 +251,34 @@ fn loaded_layers(stack: &Stack) -> Vec<StackLayer> {
         out.push(layer.clone());
     }
     out
+}
+
+/// The stack a load validates: the layers that were kept, with the values the compositor would
+/// neutralise clamped first. The stored stack keeps the file's own values; only a structural
+/// problem, a bad name or a broken cap drops the whole stack (D95.3.6).
+fn checked_for_load(stack: &Stack, layers: Vec<StackLayer>) -> Stack {
+    let layers = layers
+        .into_iter()
+        .map(|mut layer| {
+            layer.opacity = layer.opacity.min(100);
+            if let canvas_proto::stack::LayerArea::Rect { x, y, width, height } = layer.area {
+                let finite =
+                    x.is_finite() && y.is_finite() && width.is_finite() && height.is_finite();
+                let in_range = (0.0..=320.0).contains(&width) && (0.0..=200.0).contains(&height);
+                if !finite || !in_range {
+                    // A rectangle the compositor paints nothing for (D95.3.6).
+                    layer.area = canvas_proto::stack::LayerArea::Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 0.0,
+                        height: 0.0,
+                    };
+                }
+            }
+            layer
+        })
+        .collect();
+    Stack { id: stack.id.clone(), layers }
 }
 
 /// Why a stack could not be saved.
@@ -344,16 +371,16 @@ impl Stacks {
         };
         let mut accepted: Vec<Stack> = Vec::new();
         for stack in file.stacks.drain(..) {
-            let mut candidates: Vec<Stack> = accepted.clone();
-            let name = stack.name().to_string();
-            if let Err(reason) = validate_stack_name(&name, known, &candidates) {
+            let layers = loaded_layers(&stack);
+            // The stack is checked as the compositor will run it: a value a hand-written file
+            // got wrong is clamped first, so only the structure, the name and the caps can cost
+            // the whole stack (D95.3.6).
+            let checked = checked_for_load(&stack, layers.clone());
+            if let Err(reason) = validate_stack(&checked, known, &accepted) {
                 tracing::warn!(stack = %stack.id, %reason, "a stack was dropped as it was loaded");
                 continue;
             }
-            let layers = loaded_layers(&stack);
-            let kept = Stack { id: stack.id.clone(), layers };
-            candidates.push(kept.clone());
-            accepted.push(kept);
+            accepted.push(Stack { id: stack.id.clone(), layers });
         }
         let mut guard = write_recovering(&self.file);
         *guard = StackFile { schema_version: STACKS_SCHEMA, stacks: accepted };

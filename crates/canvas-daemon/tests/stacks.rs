@@ -519,6 +519,42 @@ async fn stacks_round_trip_and_a_broken_file_never_stops_the_daemon() {
     assert_eq!(canvas.get(5, 5), [1.0, 0.0, 0.0]);
 }
 
+// ================================================================ a load check
+
+/// A stack read from the file is validated like a save: one that breaks a rule (here an id
+/// without the `stack:` prefix) is dropped with its reason logged, and the rest load.
+#[tokio::test]
+async fn a_stack_that_fails_its_rules_is_dropped_as_it_loads() {
+    let home = TempHome::new("t-load-check");
+    std::fs::write(
+        home.path.join(STACKS_FILE),
+        r#"{"schema_version":1,"stacks":[
+            {"id":"stack:Good","layers":[{"id":"l1","name":"Base","effect":"solid"}]},
+            {"id":"Glow","layers":[{"id":"l1","name":"Base","effect":"solid"}]}]}"#,
+    )
+    .unwrap();
+    let harness = harness_at(home);
+
+    let effects = json(harness.router.clone().oneshot(request("GET", routes::EFFECTS)).await.unwrap()).await;
+    let ids: Vec<&str> = effects["effects"]
+        .as_array()
+        .expect("the effect list is an array")
+        .iter()
+        .filter_map(|effect| effect["id"].as_str())
+        .collect();
+    assert!(ids.contains(&"stack:Good"), "the valid stack loads: {ids:?}");
+    assert!(!ids.contains(&"stack:Glow"), "the stack with no prefix is dropped: {ids:?}");
+
+    let stored = json(harness.router.clone().oneshot(request("GET", routes::STACKS)).await.unwrap()).await;
+    let names: Vec<&str> = stored["stacks"]
+        .as_array()
+        .expect("the stack list is an array")
+        .iter()
+        .filter_map(|stack| stack["id"].as_str())
+        .collect();
+    assert_eq!(names, vec!["stack:Good"]);
+}
+
 // ================================================================ test 2
 
 /// A stack body as JSON, so a test can write a value serde would refuse (an opacity of -1).
