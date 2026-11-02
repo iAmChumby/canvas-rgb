@@ -9,7 +9,9 @@
 //!
 //! - [`AreaMap`] (the *area book*): every device's and zone's per-LED pixel mask, built from the
 //!   same sample plan the engine samples with. It is rebuilt when the layout, the render scale or
-//!   the sampling mode changes, never per frame.
+//!   the sampling mode changes, never per frame. A device area lights the pixels its own LEDs
+//!   read, and a second device drawn over those same pixels reads them too: the canvas has no
+//!   z-order, so two overlapping footprints share the pixels they share.
 //! - [`LiveMap`]: each layer's blend, opacity, visibility and area, read once per frame, so a
 //!   slider drag or a blend change costs no rebuild.
 //! - [`StackEffect`]: builds one effect per layer, calls each layer's `update` into its own

@@ -10,7 +10,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use canvas_daemon::api;
 use canvas_daemon::stack::{
-    self, blend_pixel, html_budget, AreaMap, Clock, LeafBuilder, LiveMap, StackEffect,
+    self, blend_pixel, html_budget, AreaMap, Clock, LeafBuilder, LiveMap, Mask, StackEffect,
 };
 use canvas_daemon::state::App;
 use canvas_proto::api::{routes, StackLayerState};
@@ -767,10 +767,61 @@ fn paint_area(area: LayerArea, layout: &Layout, devices: &[DeviceInfo]) -> Canva
     canvas
 }
 
+/// True when the two masks cover at least one shared pixel.
+fn masks_share(a: &Mask, b: &Mask) -> bool {
+    let (Some(ear), Some(ebr)) = (a.extent(), b.extent()) else {
+        return false;
+    };
+    let x0 = ear[0].max(ebr[0]).floor().max(0.0) as u32;
+    let y0 = ear[1].max(ebr[1]).floor().max(0.0) as u32;
+    let x1 = ear[2].min(ebr[2]).ceil().max(0.0) as u32;
+    let y1 = ear[3].min(ebr[3]).ceil().max(0.0) as u32;
+    (y0..y1).any(|y| (x0..x1).any(|x| a.contains(x, y) && b.contains(x, y)))
+}
+
+/// The desk's LEDs from the sample plan: for each device, whether each LED has an owner, and
+/// each zone's `(index, start, count)` range in that device's colour list.
+fn desk_leds(
+    layout: &Layout,
+    devices: &[DeviceInfo],
+) -> (Vec<Vec<bool>>, Vec<Vec<(u32, usize, usize)>>) {
+    let plan = stack::sample_plan(layout, devices);
+    let mut owned = Vec::new();
+    let mut ranges = Vec::new();
+    for device in &plan.devices {
+        let mut flags = Vec::new();
+        let mut zones = Vec::new();
+        for zone in &device.zones {
+            let start = flags.len();
+            flags.extend(zone.leds.iter().map(|led| led.sampled));
+            zones.push((zone.zone_index, start, zone.leds.len()));
+        }
+        owned.push(flags);
+        ranges.push(zones);
+    }
+    (owned, ranges)
+}
+
+/// The other desk devices whose sample footprint shares a pixel with `device`'s at `scale`:
+/// the canvas has no z-order, so two parts drawn over each other share those pixels (D95.2.3).
+/// The roof strip and the top front fan meet at the fan's top edge at 50 % area average, and
+/// at 100 % nearest the two are four pixels apart.
+fn shares_with(device: &str, scale: RenderScale) -> Vec<&'static str> {
+    if !matches!(scale, RenderScale::P50) {
+        return Vec::new();
+    }
+    match device {
+        ROOF_STRIP => vec![FRONT_HUB],
+        FRONT_HUB => vec![ROOF_STRIP],
+        _ => Vec::new(),
+    }
+}
+
 #[test]
-fn areas_paint_only_their_own_pixels_and_their_own_leds() {
+fn areas_paint_their_own_leds_and_share_the_pixels_their_footprints_share() {
     let devices = desk_devices();
     let desk = desk_layout(RenderScale::P50, SamplingMode::AreaAverage);
+    let red = canvas_proto::Rgb8::new(255, 0, 0);
 
     // A 40 x 20 rectangle at the origin changes only those pixels.
     let rect = paint_area(LayerArea::Rect { x: 0.0, y: 0.0, width: 40.0, height: 20.0 }, &desk, &devices);
@@ -782,28 +833,116 @@ fn areas_paint_only_their_own_pixels_and_their_own_leds() {
         }
     }
 
-    // The keyboard's device area: only its own LEDs read the layer, and every other device's
-    // LEDs sample exactly what they did before it was there.
+    // Every device, painted as a Device area and then as a Zone area, at both sampling
+    // settings. The area's own LEDs read the layer; a device whose sample footprint shares
+    // no pixel with the painted one is byte-identical; the devices that do share are exactly
+    // the known pair named in `shares_with`, and they change.
     for (scale, sampling) in [
         (RenderScale::P50, SamplingMode::AreaAverage),
         (RenderScale::P100, SamplingMode::Nearest),
     ] {
         let lay = desk_layout(scale, sampling);
-        let black = Canvas::with_scale(scale.factor());
-        let before = sampled(&lay, &devices, &black);
-        let painted = paint_area(LayerArea::Device { device: DeviceId(KEYBOARD.into()) }, &lay, &devices);
-        let after = sampled(&lay, &devices, &painted);
-        let keyboard = devices.iter().position(|d| d.id.0 == KEYBOARD).expect("the keyboard is on the desk");
+        let (owned, ranges) = desk_leds(&lay, &devices);
+        let map = AreaMap::build(&lay, &devices, 1);
+        let before = sampled(&lay, &devices, &Canvas::with_scale(scale.factor()));
+
         for (index, device) in devices.iter().enumerate() {
-            if index == keyboard {
-                assert!(
-                    after[index].iter().all(|c| *c == canvas_proto::Rgb8::new(255, 0, 0)),
-                    "the keyboard's own LED reads the layer at {scale:?}/{sampling:?}"
-                );
-            } else {
+            let painted = paint_area(LayerArea::Device { device: device.id.clone() }, &lay, &devices);
+            let after = sampled(&lay, &devices, &painted);
+            for (led, has_owner) in owned[index].iter().enumerate() {
+                let want = if *has_owner { red } else { canvas_proto::Rgb8::BLACK };
                 assert_eq!(
-                    after[index], before[index],
-                    "{} sampled differently at {scale:?}/{sampling:?}",
+                    after[index][led], want,
+                    "{} LED {led} as a Device area at {scale:?}/{sampling:?}",
+                    device.id.0
+                );
+            }
+            let mut shared: Vec<&str> = Vec::new();
+            for (other_index, other) in devices.iter().enumerate() {
+                if other_index == index {
+                    continue;
+                }
+                let shares = masks_share(
+                    map.devices.get(&device.id).expect("the device has a mask"),
+                    map.devices.get(&other.id).expect("the other device has a mask"),
+                );
+                if shares {
+                    shared.push(other.id.0.as_str());
+                    assert_ne!(
+                        after[other_index], before[other_index],
+                        "{} shares pixels with {} at {scale:?}/{sampling:?}, so its LEDs must read the layer",
+                        other.id.0, device.id.0
+                    );
+                } else {
+                    assert_eq!(
+                        after[other_index], before[other_index],
+                        "{} shares no pixel with {} at {scale:?}/{sampling:?}, so it must not change",
+                        other.id.0, device.id.0
+                    );
+                }
+            }
+            shared.sort();
+            let mut expected = shares_with(&device.id.0, scale);
+            expected.sort();
+            assert_eq!(
+                shared, expected,
+                "the devices sharing pixels with {} at {scale:?}/{sampling:?}",
+                device.id.0
+            );
+
+            for (zone_index, start, count) in &ranges[index] {
+                let painted = paint_area(
+                    LayerArea::Zone { device: device.id.clone(), zone: *zone_index },
+                    &lay,
+                    &devices,
+                );
+                let after = sampled(&lay, &devices, &painted);
+                for (led, has_owner) in owned[index].iter().enumerate() {
+                    let want = if !*has_owner {
+                        canvas_proto::Rgb8::BLACK
+                    } else if (*start..*start + *count).contains(&led) {
+                        red
+                    } else {
+                        before[index][led]
+                    };
+                    assert_eq!(
+                        after[index][led], want,
+                        "{} LED {led} as zone {zone_index} at {scale:?}/{sampling:?}",
+                        device.id.0
+                    );
+                }
+                let mut shared: Vec<&str> = Vec::new();
+                for (other_index, other) in devices.iter().enumerate() {
+                    if other_index == index {
+                        continue;
+                    }
+                    let shares = masks_share(
+                        map.zones
+                            .get(&(device.id.clone(), *zone_index))
+                            .expect("the zone has a mask"),
+                        map.devices.get(&other.id).expect("the other device has a mask"),
+                    );
+                    if shares {
+                        shared.push(other.id.0.as_str());
+                        assert_ne!(
+                            after[other_index], before[other_index],
+                            "{} shares pixels with {}'s zone {zone_index} at {scale:?}/{sampling:?}",
+                            other.id.0, device.id.0
+                        );
+                    } else {
+                        assert_eq!(
+                            after[other_index], before[other_index],
+                            "{} shares no pixel with {}'s zone {zone_index} at {scale:?}/{sampling:?}",
+                            other.id.0, device.id.0
+                        );
+                    }
+                }
+                shared.sort();
+                let mut expected = shares_with(&device.id.0, scale);
+                expected.sort();
+                assert_eq!(
+                    shared, expected,
+                    "the devices sharing pixels with {}'s zone {zone_index} at {scale:?}/{sampling:?}",
                     device.id.0
                 );
             }
@@ -1535,3 +1674,4 @@ fn the_schema_namespaces_every_layer_property() {
     let merged = stack::stack_props(&stack, &resolve);
     assert!(merged.keys().all(|key| key.starts_with("l1.") || key.starts_with("l2.")));
 }
+
