@@ -692,11 +692,15 @@ fn sloped_spectrum() -> AudioSpectrum {
     AudioSpectrum { centers_hz, magnitudes }
 }
 
+/// What a tile cache belongs to: the user-effects generation and the stacks generation. A cache
+/// built from either moving drops every entry.
+pub type TileGeneration = (u64, u64);
+
 /// The rendered thumbnails, keyed by effect id.
 ///
-/// Every entry belongs to one generation of the user-effects set. A `get` for a different
-/// generation drops everything first, so an edited or removed user effect never serves a
-/// stale thumbnail.
+/// Every entry belongs to one generation of the user-effects set and of the stacks set. A `get`
+/// for a different generation drops everything first, so an edited or removed user effect, or an
+/// edited stack, never serves a stale thumbnail (D95.4.10).
 pub struct ThumbnailCache {
     inner: Mutex<CacheState>,
     /// How many renders may run at once. The library asks for every tile together, and each
@@ -739,7 +743,7 @@ enum CacheEntry {
 
 #[derive(Default)]
 struct CacheState {
-    generation: u64,
+    generation: TileGeneration,
     entries: HashMap<String, CacheEntry>,
 }
 
@@ -777,7 +781,7 @@ impl ThumbnailCache {
     }
 
     /// The cached thumbnail for `id`, if the cache belongs to `generation`.
-    pub fn get(&self, generation: u64, id: &str) -> Option<Arc<Vec<u8>>> {
+    pub fn get(&self, generation: TileGeneration, id: &str) -> Option<Arc<Vec<u8>>> {
         let mut state = lock(&self.inner);
         if state.generation != generation {
             state.entries.clear();
@@ -795,7 +799,7 @@ impl ThumbnailCache {
     /// A render that ran past its budget is due another try once
     /// [`ThumbnailCache::with_limits`]' retry interval has passed: its entry is dropped here
     /// and the answer is `None`.
-    pub fn failure(&self, generation: u64, id: &str) -> Option<String> {
+    pub fn failure(&self, generation: TileGeneration, id: &str) -> Option<String> {
         let mut state = lock(&self.inner);
         if state.generation != generation {
             state.entries.clear();
@@ -815,7 +819,7 @@ impl ThumbnailCache {
 
     /// Stores a thumbnail rendered for `generation`. A render that finished after the set
     /// changed is dropped rather than cached.
-    pub fn put(&self, generation: u64, id: &str, bytes: Arc<Vec<u8>>) {
+    pub fn put(&self, generation: TileGeneration, id: &str, bytes: Arc<Vec<u8>>) {
         let mut state = lock(&self.inner);
         if state.generation == generation {
             state.entries.insert(id.to_string(), CacheEntry::Rendered(bytes));
@@ -831,7 +835,7 @@ impl ThumbnailCache {
     /// not build, its script errors, it panics) fails the same way every time, so that is
     /// remembered until the effect changes. A render that only ran past its budget depends on
     /// how busy the machine was, so that is remembered for the retry interval only.
-    pub fn put_failure(&self, generation: u64, id: &str, error: &RenderError) {
+    pub fn put_failure(&self, generation: TileGeneration, id: &str, error: &RenderError) {
         let mut state = lock(&self.inner);
         if state.generation == generation {
             let retry_at = error
@@ -1233,13 +1237,15 @@ mod tests {
     #[test]
     fn the_cache_drops_its_entries_when_the_generation_changes() {
         let cache = ThumbnailCache::default();
-        assert!(cache.get(0, "a").is_none());
-        cache.put(0, "a", Arc::new(vec![1, 2, 3]));
-        assert_eq!(cache.get(0, "a").as_deref(), Some(&vec![1, 2, 3]));
+        assert!(cache.get((0, 0), "a").is_none());
+        cache.put((0, 0), "a", Arc::new(vec![1, 2, 3]));
+        assert_eq!(cache.get((0, 0), "a").as_deref(), Some(&vec![1, 2, 3]));
 
-        // A new generation finds nothing, and a late put for the old one is dropped.
-        assert!(cache.get(1, "a").is_none());
-        cache.put(0, "a", Arc::new(vec![9]));
+        // A new generation of either set finds nothing, and a late put for the old one is
+        // dropped.
+        assert!(cache.get((1, 0), "a").is_none());
+        assert!(cache.get((0, 1), "a").is_none());
+        cache.put((0, 0), "a", Arc::new(vec![9]));
         assert!(cache.is_empty());
     }
 
@@ -1363,14 +1369,18 @@ mod tests {
     fn a_failure_is_remembered_for_good_and_a_timeout_only_for_the_retry_interval() {
         let retry = std::time::Duration::from_millis(60);
         let cache = ThumbnailCache::with_limits(RENDER_BUDGET, retry);
-        cache.put_failure(0, "broken", &RenderError::Failed("it panicked".into()));
-        cache.put_failure(0, "slow", &RenderError::OverBudget("past its budget".into()));
-        assert_eq!(cache.failure(0, "broken").as_deref(), Some("it panicked"));
-        assert_eq!(cache.failure(0, "slow").as_deref(), Some("past its budget"));
+        cache.put_failure((0, 0), "broken", &RenderError::Failed("it panicked".into()));
+        cache.put_failure((0, 0), "slow", &RenderError::OverBudget("past its budget".into()));
+        assert_eq!(cache.failure((0, 0), "broken").as_deref(), Some("it panicked"));
+        assert_eq!(cache.failure((0, 0), "slow").as_deref(), Some("past its budget"));
 
         std::thread::sleep(retry * 3);
         // The deterministic failure is still remembered; the timeout is due another try.
-        assert_eq!(cache.failure(0, "broken").as_deref(), Some("it panicked"));
-        assert_eq!(cache.failure(0, "slow"), None, "a timeout was remembered past the retry interval");
+        assert_eq!(cache.failure((0, 0), "broken").as_deref(), Some("it panicked"));
+        assert_eq!(
+            cache.failure((0, 0), "slow"),
+            None,
+            "a timeout was remembered past the retry interval"
+        );
     }
 }

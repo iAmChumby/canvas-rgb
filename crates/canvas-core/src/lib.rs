@@ -5,12 +5,14 @@
 //! nothing consumes frames, and writes one black frame when it is paused.
 //!
 //! The public surface is [`spawn`], which returns the [`canvas_proto::Engine`] handle
-//! the daemon drives. Everything else is private.
+//! the daemon drives. [`geometry`] and [`sampling`] are public because the daemon's stack
+//! compositor resolves a layer's area from the same sample plan the engine samples with
+//! (`canvas-daemon`'s `stack` module); nothing else is.
 
 mod engine;
-mod geometry;
+pub mod geometry;
 mod preview;
-mod sampling;
+pub mod sampling;
 mod timer;
 
 #[cfg(test)]

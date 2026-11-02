@@ -879,7 +879,8 @@ async fn run(app: &std::sync::Arc<crate::state::App>) {
     // completed setup is walked through again) ends here, and a beat cannot start another
     // until this effect is on.
     let _replace = crate::draft::hold_for_replace(app).await;
-    app.engine.set_layout(layout.clone(), device_list);
+    app.engine.set_layout(layout.clone(), device_list.clone());
+    app.stacks.publish_areas(&layout, &device_list);
 
     if let Err(e) = crate::apply_effect(app, FIRST_RUN_EFFECT, &props).await {
         tracing::error!(error = %e, effect = FIRST_RUN_EFFECT, "the first run could not activate the effect");

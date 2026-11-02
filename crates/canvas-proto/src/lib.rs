@@ -13,6 +13,7 @@ pub mod layout;
 pub mod peripheral;
 pub mod pipe;
 pub mod props;
+pub mod stack;
 pub mod tauri;
 pub mod traits;
 

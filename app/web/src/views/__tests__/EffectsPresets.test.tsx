@@ -2,7 +2,9 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { ToastHost, ToastProvider } from "@/components/Toast";
 import { api } from "@/lib/endpoints";
+import type { EffectDetail } from "@/proto/EffectDetail";
 import { refreshAll } from "@/lib/store";
+import { stackLayerNames } from "@/lib/stackLayers";
 import { EffectsView } from "@/views/EffectsView";
 
 // The Effects view against the demo backend (`?state=presets`: Aurora, with the owner's presets
@@ -120,5 +122,34 @@ describe("the Effects view with presets", () => {
     expect(await screen.findByText("That preset was removed in another window")).toBeTruthy();
     // The list is read again: the key is gone.
     await waitFor(() => expect(screen.queryByRole("button", { name: /^Apply preset Late shift$/ })).toBeNull());
+  });
+});
+
+describe("stackLayerNames", () => {
+  const schema = (labels: string[], description = "") =>
+    ({
+      id: "stack:Test",
+      name: "Test",
+      description,
+      needs: { audio: false, screen: false },
+      properties: labels.map((label, index) => ({ key: `l${index + 1}.speed`, label })),
+      presets: [],
+      thumbnail: null,
+    }) as unknown as EffectDetail["schema"];
+
+  it("reads each layer's name from the part before the property label", () => {
+    expect(stackLayerNames(schema(["Front fan · Speed", "Heat · Tint"]))).toEqual([
+      "Front fan",
+      "Heat",
+    ]);
+  });
+
+  it("keeps a property label that holds the separator out of the layer name", () => {
+    // The label is `Base · Speed · Fast`: the layer is "Base", the property is "Speed · Fast".
+    expect(stackLayerNames(schema(["Base · Speed · Fast"]))).toEqual(["Base"]);
+  });
+
+  it("falls back to the description's names when no layer has a property", () => {
+    expect(stackLayerNames(schema([], "2 layers: Gradient, Fire"))).toEqual(["Gradient", "Fire"]);
   });
 });

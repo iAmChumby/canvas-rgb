@@ -23,6 +23,8 @@ pub mod peripherals;
 pub mod pipe_client;
 pub mod power;
 pub mod state;
+pub mod stack;
+pub mod stacks;
 pub mod storage;
 pub mod thumbnail;
 pub mod transient;
@@ -38,14 +40,69 @@ use std::sync::Arc;
 
 use crate::state::App;
 
+/// The builder one layer of a stack is built with: the lights' builder, which refuses a `stack:`
+/// id outright so a stack can never contain a stack (D95.4.8).
+pub fn leaf_builder(user: &Arc<user_effects::UserEffects>) -> crate::stack::LeafBuilder {
+    let user = Arc::clone(user);
+    Arc::new(move |id: &str| {
+        if id.starts_with(canvas_proto::stack::STACK_ID_PREFIX) {
+            return Err(format!(
+                "{id} is a stack, and a stack cannot contain a stack"
+            ));
+        }
+        match user.create(id) {
+            Some(made) => made,
+            None => canvas_effects::create(id).ok_or_else(|| format!("no effect with the id {id}")),
+        }
+    })
+}
+
+/// The builder a stack's library tile is built from: the same leaf rule, with the tile's fixed
+/// seed, so a layer draws the tile's own picture (D95.4.10).
+pub fn tile_leaf_builder(user: &Arc<user_effects::UserEffects>) -> crate::stack::LeafBuilder {
+    let user = Arc::clone(user);
+    Arc::new(move |id: &str| {
+        if id.starts_with(canvas_proto::stack::STACK_ID_PREFIX) {
+            return Err(format!(
+                "{id} is a stack, and a stack cannot contain a stack"
+            ));
+        }
+        match user.create_for_tile(id) {
+            Some(made) => made,
+            None => canvas_effects::create(id).ok_or_else(|| format!("no effect with the id {id}")),
+        }
+    })
+}
+
 /// A fresh instance of the effect with this id. User HTML effects (`html:<stem>`) come from
-/// the effects folder; everything else from the built-in registry.
+/// the effects folder, stacks (`stack:<name>`) from `stacks.json`, and everything else from the
+/// built-in registry.
 ///
 /// Returns an error when the id is unknown or the effect fails to build.
 pub fn create_effect(
-    user: &user_effects::UserEffects,
+    user: &Arc<user_effects::UserEffects>,
+    stacks: &crate::stacks::Stacks,
     id: &str,
 ) -> Result<Box<dyn canvas_proto::traits::Effect>, String> {
+    if let Some(stack) = stacks.get(id) {
+        let structure = crate::stack::structure_hash(&crate::stack::structure(&stack, &|id| {
+            user.source_and_file_name(id).map(|(source, _)| source.to_string())
+        }));
+        let live = stacks.live_for(&stack, &structure);
+        let effect = crate::stack::StackEffect::new(
+            &stack,
+            leaf_builder(user),
+            Arc::clone(&live),
+            stacks.areas(),
+        )
+        .with_clock(stacks.clock())
+        .with_fps(stacks.fps_handle())
+        .with_status_sink(stacks.status_sink());
+        // The engine is about to run this stack: record the structure it was built from, so a
+        // save-then-activate with the same structure reuses it instead of rebuilding.
+        stacks.note_running(&stack.id, &structure, live);
+        return Ok(Box::new(effect));
+    }
     match user.create(id) {
         Some(made) => made,
         None => canvas_effects::create(id).ok_or_else(|| format!("no effect with the id {id}")),
@@ -57,11 +114,25 @@ pub fn create_effect(
 /// The same effect the lights would run, but with a fixed seed: a tile is rendered again
 /// and again, so it has to be the same picture every time. An HTML effect is built with
 /// the seeded builder; a built-in one reads the seed from the properties the tile path
-/// hands it (see [`crate::thumbnail::render`]).
+/// hands it (see [`crate::thumbnail::render`]). A stack is built from the seeded builders too,
+/// with a live map of its own: a tile may render while another stack runs, and it touches
+/// nothing that runs.
 pub fn create_effect_for_tile(
-    user: &user_effects::UserEffects,
+    user: &Arc<user_effects::UserEffects>,
+    stacks: &crate::stacks::Stacks,
     id: &str,
 ) -> Result<Box<dyn canvas_proto::traits::Effect>, String> {
+    if let Some(stack) = stacks.get(id) {
+        let live = Arc::new(std::sync::RwLock::new(crate::stack::LiveMap::from_stack(&stack, 1)));
+        let effect = crate::stack::StackEffect::new(
+            &stack,
+            tile_leaf_builder(user),
+            live,
+            stacks.areas(),
+        )
+        .with_fps(stacks.fps_handle());
+        return Ok(Box::new(effect));
+    }
     match user.create_for_tile(id) {
         Some(made) => made,
         None => canvas_effects::create(id).ok_or_else(|| format!("no effect with the id {id}")),
@@ -80,7 +151,7 @@ pub async fn apply_effect(app: &Arc<App>, id: &str, props: &Props) -> Result<(),
         let id = id.to_string();
         let props = props.clone();
         tokio::task::spawn_blocking(move || {
-            let mut effect = create_effect(&app.user_effects, &id)?;
+            let mut effect = create_effect(&app.user_effects, &app.stacks, &id)?;
             effect.init(&props);
             Ok::<_, String>(effect)
         })
@@ -105,6 +176,16 @@ pub async fn apply_built(
     // The captures follow the effect's `needs`.
     let needs = effect.schema().needs;
     app.inputs.lock().map_err(|_| "the capture state is poisoned")?.apply_needs(needs);
+
+    // Anything that is not a stack means no stack is on the engine: whatever was running is
+    // gone, and a later activation of it must build again.
+    if !effect
+        .schema()
+        .id
+        .starts_with(canvas_proto::stack::STACK_ID_PREFIX)
+    {
+        app.stacks.clear_running();
+    }
 
     app.engine.set_effect(effect, props);
     Ok(())

@@ -4,6 +4,7 @@ import type { EffectsFile } from "./EffectsFile";
 import type { FansFile } from "./FansFile";
 import type { LayoutsFile } from "./LayoutsFile";
 import type { Settings } from "./Settings";
+import type { Stack } from "./Stack";
 import type { ZonesFile } from "./ZonesFile";
 
 /**
@@ -14,4 +15,11 @@ export type ExportBundle = { schema_version: number, exported_at: string, app_ve
  * The numeric displays' configs (`displays.json`). Absent in bundles from before displays;
  * import replaces the saved display configs with these, like the other files.
  */
-displays: Array<DisplayConfig>, };
+displays: Array<DisplayConfig>, 
+/**
+ * The saved effect stacks (`stacks.json`). Absent in bundles from before stacks; import
+ * replaces the saved stacks with these, like the other files. A bundle never carries the
+ * HTML files a stack's layers may name, so an imported stack whose layers are HTML shows
+ * them `Missing` until those files are imported too.
+ */
+stacks: Array<Stack>, };

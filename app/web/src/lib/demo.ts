@@ -1322,6 +1322,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
           boot_color: s.settings.boot_color,
         },
         displays: s.displayConfig ? [{ ...s.displayConfig }] : [],
+        stacks: [],
       };
       return bundle;
     }

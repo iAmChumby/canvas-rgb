@@ -304,6 +304,28 @@ pub struct ReplaceGuard<'a> {
     _gate: tokio::sync::MutexGuard<'a, ()>,
     /// True when a draft was on the lights and was dropped here.
     pub dropped: bool,
+    /// The draft that was dropped here. If the caller's own apply then fails, the engine is
+    /// left showing a draft nothing owns, so the guard can put this slot's prior effect back
+    /// (or black, with a note) instead (D95.4.5, test 12).
+    dropped_slot: Option<Slot>,
+}
+
+impl ReplaceGuard<'_> {
+    /// Puts the dropped draft's prior effect back on the lights, exactly as Stop would, and
+    /// remembers the ending's note. `None` when no draft was dropped.
+    ///
+    /// Called once, by the caller whose apply failed.
+    pub async fn restore_dropped(&self, app: &Arc<App>) -> Option<Ended> {
+        let slot = self.dropped_slot.as_ref()?;
+        let ended = restore(app, slot).await;
+        app.draft.remember_ending(&ended);
+        tracing::info!(
+            draft = %slot.id,
+            note = ended.note.as_deref().unwrap_or(""),
+            "the draft ended and its prior effect went back after the layout's effect failed"
+        );
+        Some(ended)
+    }
 }
 
 /// Ends any draft (without restoring it) and holds the gate until the guard is dropped.
@@ -313,7 +335,7 @@ pub async fn hold_for_replace(app: &Arc<App>) -> ReplaceGuard<'_> {
     if let Some(slot) = &dropped {
         tracing::info!(draft = %slot.id, "the draft ended: a saved effect is being put on");
     }
-    ReplaceGuard { _gate: gate, dropped: dropped.is_some() }
+    ReplaceGuard { _gate: gate, dropped: dropped.is_some(), dropped_slot: dropped }
 }
 
 /// The answer `GET`/`PUT`/`DELETE /effects/draft` give. A `note` is only set by an ending that

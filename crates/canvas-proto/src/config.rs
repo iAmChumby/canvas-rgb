@@ -172,4 +172,10 @@ pub struct ExportBundle {
     /// import replaces the saved display configs with these, like the other files.
     #[serde(default)]
     pub displays: Vec<crate::display::DisplayConfig>,
+    /// The saved effect stacks (`stacks.json`). Absent in bundles from before stacks; import
+    /// replaces the saved stacks with these, like the other files. A bundle never carries the
+    /// HTML files a stack's layers may name, so an imported stack whose layers are HTML shows
+    /// them `Missing` until those files are imported too.
+    #[serde(default)]
+    pub stacks: Vec<crate::stack::Stack>,
 }

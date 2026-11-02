@@ -9,6 +9,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Added
 
 - If you write effects yourself, you can now edit an effect's code in the app and see it run before you save it. (#2)
+- A saved stack shows in the effect library and can be switched on. (#95)
 
 ## [0.5.0] - 2026-11-01
 
