@@ -1806,7 +1806,7 @@ async fn the_stack_preview_runs_on_its_own_double_sinkless_engine() {
     let (user, _builds) = counting_user(None);
     let harness = build_with("t10-engine", Some(user));
     add_html(&harness, "Spark.html", VALID_HTML);
-    let preview = stack("stack:Preview", vec![layer("l1", "html:Spark")]);
+    let preview = stack("stack:Screen", vec![layer("l1", "html:Spark")]);
 
     let response = put_preview(&harness, &preview, "0123456789abcdef", 1).await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -1837,7 +1837,7 @@ async fn the_stack_preview_runs_on_its_own_double_sinkless_engine() {
     assert_eq!(*harness.engine.effect_id.lock().unwrap(), None);
     assert_eq!(
         harness.preview_engine.effect_id.lock().unwrap().clone(),
-        Some("stack:Preview".to_string())
+        Some("stack:Screen".to_string())
     );
 
     // `?stack=1` streams the preview engine; the plain socket still streams the running effect.
@@ -1871,36 +1871,38 @@ async fn the_stack_preview_runs_on_its_own_double_sinkless_engine() {
 async fn a_preview_put_is_superseded_by_a_newer_epoch_or_sequence_and_delete_clears_it() {
     let harness = build("t10-sequence");
     let preview = stack("stack:Sup", vec![layer("l1", "solid")]);
+    let page_a = "aaaaaaaaaaaaaaaa";
+    let page_b = "bbbbbbbbbbbbbbbb";
 
     // An older page opens: its epoch owns the preview.
-    let accepted = put_preview(&harness, &preview, "old", 1).await;
+    let accepted = put_preview(&harness, &preview, page_a, 1).await;
     assert_eq!(accepted.status(), StatusCode::OK);
     assert_eq!(json(accepted).await["applied"], true);
 
     // A newer page (a reload or a second tab) wins and replaces the watermark.
-    let accepted = put_preview(&harness, &preview, "new", 1).await;
+    let accepted = put_preview(&harness, &preview, page_b, 1).await;
     assert_eq!(accepted.status(), StatusCode::OK);
     assert_eq!(json(accepted).await["applied"], true);
 
     // A lower sequence in the accepted epoch is superseded and says who owns the preview.
-    let stale = put_preview(&harness, &preview, "new", 0).await;
+    let stale = put_preview(&harness, &preview, page_b, 0).await;
     assert_eq!(stale.status(), StatusCode::OK, "superseded is still a 200");
     let body = json(stale).await;
     assert_eq!(body["applied"], false);
-    assert_eq!(body["epoch"], "new");
+    assert_eq!(body["epoch"], page_b);
     assert_eq!(body["seq"], 1);
 
     // The older tab, whose epoch was replaced, learns it lost even with a higher sequence.
-    let older = put_preview(&harness, &preview, "old", 99).await;
+    let older = put_preview(&harness, &preview, page_a, 99).await;
     assert_eq!(older.status(), StatusCode::OK);
     let body = json(older).await;
     assert_eq!(body["applied"], false);
-    assert_eq!(body["epoch"], "new");
+    assert_eq!(body["epoch"], page_b);
 
     // A preview shares the two render slots with `POST /effects/preview`.
     let first = harness.app.preview_slots.clone().try_acquire_owned().unwrap();
     let second = harness.app.preview_slots.clone().try_acquire_owned().unwrap();
-    let busy = put_preview(&harness, &preview, "new", 2).await;
+    let busy = put_preview(&harness, &preview, page_b, 2).await;
     assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(
         busy.headers().get("retry-after").and_then(|v| v.to_str().ok()),
@@ -1909,7 +1911,7 @@ async fn a_preview_put_is_superseded_by_a_newer_epoch_or_sequence_and_delete_cle
     drop(first);
     drop(second);
 
-    // DELETE drops the effect, paints black and clears the watermark.
+    // DELETE drops the effect, paints black and clears the live sequence.
     let dropped = harness
         .router
         .clone()
@@ -1927,10 +1929,41 @@ async fn a_preview_put_is_superseded_by_a_newer_epoch_or_sequence_and_delete_cle
     );
     assert_eq!(*harness.preview_engine.props.lock().unwrap(), canvas_daemon::draft::black());
 
-    // With the watermark cleared, even the old epoch starts a new preview.
-    let after = put_preview(&harness, &preview, "old", 1).await;
+    // The older page does not take the preview back after the DELETE (item 4).
+    let after = put_preview(&harness, &preview, page_a, 2).await;
     assert_eq!(after.status(), StatusCode::OK);
-    assert_eq!(json(after).await["applied"], true);
+    let body = json(after).await;
+    assert_eq!(body["applied"], false);
+    assert_eq!(body["epoch"], page_b, "the newest page still owns the preview");
+
+    // The newest page can take it again with its next PUT.
+    let resumed = put_preview(&harness, &preview, page_b, 2).await;
+    assert_eq!(resumed.status(), StatusCode::OK);
+    assert_eq!(json(resumed).await["applied"], true);
+}
+
+#[tokio::test]
+async fn a_preview_epoch_still_loses_after_forty_page_loads() {
+    let harness = build("t10-forty");
+    let preview = stack("stack:Forty", vec![layer("l1", "solid")]);
+    let oldest = "0000000000000000";
+    assert_eq!(
+        json(put_preview(&harness, &preview, oldest, 1).await).await["applied"],
+        true
+    );
+    for page in 1..=40u64 {
+        let epoch = format!("{page:016x}");
+        let answer = put_preview(&harness, &preview, &epoch, 1).await;
+        assert_eq!(answer.status(), StatusCode::OK);
+        assert_eq!(json(answer).await["applied"], true, "a new page always wins");
+    }
+    let stale = put_preview(&harness, &preview, oldest, 2).await;
+    assert_eq!(stale.status(), StatusCode::OK);
+    assert_eq!(
+        json(stale).await["applied"],
+        false,
+        "the tab that owned the preview 40 loads ago is still older"
+    );
 }
 
 #[tokio::test]
@@ -1941,28 +1974,28 @@ async fn preview_value_changes_never_rebuild_an_html_layer() {
     builds.store(0, Ordering::SeqCst);
 
     let mut preview = stack("stack:Tuned", vec![layer("l1", "html:Tinted")]);
-    let first = put_preview(&harness, &preview, "e", 1).await;
+    let first = put_preview(&harness, &preview, "eeeeeeeeeeeeeeee", 1).await;
     assert_eq!(first.status(), StatusCode::OK);
     assert_eq!(builds.load(Ordering::SeqCst), 1, "the first preview built the layer");
 
     // A props change, a blend change, an opacity drag, a visibility toggle and an area change
     // are all values: the structure (layer ids, effects, HTML source) did not move.
     preview.layers[0].props.insert("tint".into(), tint("#2200ff"));
-    assert_eq!(put_preview(&harness, &preview, "e", 2).await.status(), StatusCode::OK);
+    assert_eq!(put_preview(&harness, &preview, "eeeeeeeeeeeeeeee", 2).await.status(), StatusCode::OK);
 
     preview.layers[0].blend = BlendMode::Add;
-    assert_eq!(put_preview(&harness, &preview, "e", 3).await.status(), StatusCode::OK);
+    assert_eq!(put_preview(&harness, &preview, "eeeeeeeeeeeeeeee", 3).await.status(), StatusCode::OK);
 
     for (seq, opacity) in [(4, 90), (5, 70), (6, 50), (7, 30)] {
         preview.layers[0].opacity = opacity;
-        assert_eq!(put_preview(&harness, &preview, "e", seq).await.status(), StatusCode::OK);
+        assert_eq!(put_preview(&harness, &preview, "eeeeeeeeeeeeeeee", seq).await.status(), StatusCode::OK);
     }
 
     preview.layers[0].visible = false;
-    assert_eq!(put_preview(&harness, &preview, "e", 8).await.status(), StatusCode::OK);
+    assert_eq!(put_preview(&harness, &preview, "eeeeeeeeeeeeeeee", 8).await.status(), StatusCode::OK);
 
     preview.layers[0].area = LayerArea::Rect { x: 10.0, y: 20.0, width: 100.0, height: 50.0 };
-    assert_eq!(put_preview(&harness, &preview, "e", 9).await.status(), StatusCode::OK);
+    assert_eq!(put_preview(&harness, &preview, "eeeeeeeeeeeeeeee", 9).await.status(), StatusCode::OK);
 
     assert_eq!(
         builds.load(Ordering::SeqCst),
@@ -1976,52 +2009,68 @@ async fn preview_value_changes_never_rebuild_an_html_layer() {
 
 #[tokio::test]
 async fn two_preview_puts_out_of_order_leave_the_newer_one_on_screen() {
-    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let (started_tx, started) = std::sync::mpsc::channel::<()>();
-    let (go, go_rx) = std::sync::mpsc::channel::<()>();
-    let (user, _builds) =
-        counting_user(Some((Arc::clone(&armed), started_tx, Arc::new(Mutex::new(go_rx)))));
+    let held = HeldBuild::new();
+    let (user, _builds) = counting_user(Some(held.hold));
     let harness = build_with("t10-order", Some(user));
     add_html(&harness, "Tinted.html", TINTED_HTML);
+    add_html(&harness, "Other.html", &TINTED_HTML.replace("Tinted", "Other"));
 
+    // Two structures: a different HTML file is a different build, not a value.
     let mut red = stack("stack:Order", vec![layer("l1", "html:Tinted")]);
     red.layers[0].props.insert("tint".into(), tint("#ff0000"));
-    let mut green = red.clone();
+    let mut green = stack("stack:Order", vec![layer("l1", "html:Other")]);
     green.layers[0].props.insert("tint".into(), tint("#00ff00"));
 
     // The first PUT's build is held open.
-    armed.store(true, Ordering::SeqCst);
+    held.armed.store(true, Ordering::SeqCst);
     let first_router = harness.router.clone();
-    let first_body = serde_json::json!({ "stack": red, "epoch": "e", "seq": 1 }).to_string();
+    let first_body =
+        serde_json::json!({ "stack": red, "epoch": "eeeeeeeeeeeeeeee", "seq": 1 }).to_string();
     let first = tokio::spawn(async move {
         first_router
             .oneshot(request_with_body("PUT", routes::STACK_PREVIEW, &first_body))
             .await
             .expect("the router answers")
     });
-    tokio::task::spawn_blocking(move || {
-        started
-            .recv_timeout(Duration::from_secs(10))
-            .expect("the first build started")
-    })
-    .await
-    .expect("the wait ends");
+    wait_started(held.started).await;
 
-    // The newer PUT builds and lands while the older one is still building.
-    let newer = put_preview(&harness, &green, "e", 2).await;
-    assert_eq!(newer.status(), StatusCode::OK);
-    assert_eq!(json(newer).await["applied"], true);
+    // The newer PUT takes the route over and waits for the build in flight to let go: one build
+    // runs at a time per route.
+    let newer_router = harness.router.clone();
+    let newer_body =
+        serde_json::json!({ "stack": green, "epoch": "eeeeeeeeeeeeeeee", "seq": 2 }).to_string();
+    let newer = tokio::spawn(async move {
+        newer_router
+            .oneshot(request_with_body("PUT", routes::STACK_PREVIEW, &newer_body))
+            .await
+            .expect("the router answers")
+    });
+    // The newer PUT has taken the route over once its sequence owns the watermark.
+    for _ in 0..2_000 {
+        if harness.app.stack_preview.watermark() == Some(("eeeeeeeeeeeeeeee".to_string(), 2)) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
 
-    go.send(()).expect("the first build is released");
+    held.go.send(()).expect("the first build is released");
     let older = first.await.expect("the task ends");
     assert_eq!(older.status(), StatusCode::OK);
-    assert_eq!(json(older).await["applied"], false);
+    assert_eq!(json(older).await["applied"], false, "the superseded build landed nowhere");
+
+    let newer = newer.await.expect("the task ends");
+    assert_eq!(newer.status(), StatusCode::OK);
+    assert_eq!(json(newer).await["applied"], true);
 
     let props = harness.preview_engine.props.lock().unwrap().clone();
     assert_eq!(
         props.get("l1.tint"),
         Some(&tint("#00ff00")),
         "the late older build did not land over the newer one"
+    );
+    assert_eq!(
+        harness.preview_engine.effect_id.lock().unwrap().clone(),
+        Some("stack:Order".to_string())
     );
 }
 
@@ -2036,14 +2085,14 @@ async fn a_stack_draft_builds_once_across_its_values_and_a_save() {
     prior_is_solid(&harness).await;
 
     let mut draft_stack = stack("stack:Session", vec![layer("l1", "html:Tinted")]);
-    let first = put_stack_draft(&harness, &draft_stack, "e", 1).await;
+    let first = put_stack_draft(&harness, &draft_stack, "eeeeeeeeeeeeeeee", 1).await;
     assert_eq!(first.status(), StatusCode::OK);
     let status: canvas_proto::api::DraftStatus =
         serde_json::from_value(json(first).await).expect("a DraftStatus");
     assert_eq!(status.applied, Some(true));
     assert!(status.active);
     assert_eq!(status.id.as_deref(), Some("stack:Session"));
-    assert_eq!(status.epoch.as_deref(), Some("e"));
+    assert_eq!(status.epoch.as_deref(), Some("eeeeeeeeeeeeeeee"));
     assert_eq!(status.seq, Some(1));
     assert_eq!(builds.load(Ordering::SeqCst), 1, "the draft built the layer once");
     assert_eq!(
@@ -2055,16 +2104,16 @@ async fn a_stack_draft_builds_once_across_its_values_and_a_save() {
     // An opacity drag, a blend change, a visibility toggle and an area change are values.
     for (seq, opacity) in [(2, 90), (3, 70), (4, 50), (5, 30)] {
         draft_stack.layers[0].opacity = opacity;
-        let response = put_stack_draft(&harness, &draft_stack, "e", seq).await;
+        let response = put_stack_draft(&harness, &draft_stack, "eeeeeeeeeeeeeeee", seq).await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(json(response).await["applied"], true);
     }
     draft_stack.layers[0].blend = BlendMode::Add;
-    assert_eq!(put_stack_draft(&harness, &draft_stack, "e", 6).await.status(), StatusCode::OK);
+    assert_eq!(put_stack_draft(&harness, &draft_stack, "eeeeeeeeeeeeeeee", 6).await.status(), StatusCode::OK);
     draft_stack.layers[0].visible = false;
-    assert_eq!(put_stack_draft(&harness, &draft_stack, "e", 7).await.status(), StatusCode::OK);
+    assert_eq!(put_stack_draft(&harness, &draft_stack, "eeeeeeeeeeeeeeee", 7).await.status(), StatusCode::OK);
     draft_stack.layers[0].area = LayerArea::Rect { x: 4.0, y: 8.0, width: 80.0, height: 40.0 };
-    assert_eq!(put_stack_draft(&harness, &draft_stack, "e", 8).await.status(), StatusCode::OK);
+    assert_eq!(put_stack_draft(&harness, &draft_stack, "eeeeeeeeeeeeeeee", 8).await.status(), StatusCode::OK);
 
     assert_eq!(
         builds.load(Ordering::SeqCst),
@@ -2105,7 +2154,7 @@ async fn a_stack_draft_restores_the_prior_on_stop_and_on_expiry() {
     prior_is_solid(&harness).await;
     let draft_stack = stack("stack:Restore", vec![layer("l1", "html:Tinted")]);
 
-    assert_eq!(put_stack_draft(&harness, &draft_stack, "e", 1).await.status(), StatusCode::OK);
+    assert_eq!(put_stack_draft(&harness, &draft_stack, "eeeeeeeeeeeeeeee", 1).await.status(), StatusCode::OK);
     assert_eq!(
         harness.engine.effect_id.lock().unwrap().clone(),
         Some("stack:Restore".to_string())
@@ -2125,7 +2174,7 @@ async fn a_stack_draft_restores_the_prior_on_stop_and_on_expiry() {
     assert!(!harness.app.draft.is_active());
 
     // The lease runs out on the injected clock: the prior comes back without a Stop.
-    assert_eq!(put_stack_draft(&harness, &draft_stack, "e", 2).await.status(), StatusCode::OK);
+    assert_eq!(put_stack_draft(&harness, &draft_stack, "eeeeeeeeeeeeeeee", 2).await.status(), StatusCode::OK);
     assert_eq!(
         harness.engine.effect_id.lock().unwrap().clone(),
         Some("stack:Restore".to_string())
@@ -2162,13 +2211,13 @@ async fn a_stop_during_a_slow_stack_build_answers_without_waiting() {
     prior_is_solid(&harness).await;
 
     let first = stack("stack:Slow", vec![layer("l1", "html:Tinted")]);
-    assert_eq!(put_stack_draft(&harness, &first, "e", 1).await.status(), StatusCode::OK);
+    assert_eq!(put_stack_draft(&harness, &first, "eeeeeeeeeeeeeeee", 1).await.status(), StatusCode::OK);
 
     // A structure change: another HTML file, whose build is held open.
     armed.store(true, Ordering::SeqCst);
     let changed = stack("stack:Slow", vec![layer("l1", "html:Other")]);
     let slow_router = harness.router.clone();
-    let slow_body = stack_draft_body(&changed, "e", 2);
+    let slow_body = stack_draft_body(&changed, "eeeeeeeeeeeeeeee", 2);
     let slow = tokio::spawn(async move {
         slow_router
             .oneshot(request_with_body("PUT", routes::EFFECT_DRAFT, &slow_body))
@@ -2210,5 +2259,369 @@ async fn a_stop_during_a_slow_stack_build_answers_without_waiting() {
         harness.engine.effect_id.lock().unwrap().clone(),
         Some("solid".to_string()),
         "the stopped draft stayed off the lights"
+    );
+}
+
+// ================================================================ round 2 (job 72)
+
+/// A page epoch: exactly the 16 hexadecimal characters the builder makes.
+fn page(n: u64) -> String {
+    format!("{n:016x}")
+}
+
+/// A build a test holds open.
+struct HeldBuild {
+    /// Arms the next build and tells the test when it started.
+    hold: BuildHold,
+    /// The flag that arms the next build.
+    armed: Arc<std::sync::atomic::AtomicBool>,
+    /// Says the held build started.
+    started: std::sync::mpsc::Receiver<()>,
+    /// Releases the held build.
+    go: std::sync::mpsc::Sender<()>,
+}
+
+impl HeldBuild {
+    fn new() -> Self {
+        let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (started_tx, started) = std::sync::mpsc::channel::<()>();
+        let (go, go_rx) = std::sync::mpsc::channel::<()>();
+        Self {
+            hold: (Arc::clone(&armed), started_tx, Arc::new(Mutex::new(go_rx))),
+            armed,
+            started,
+            go,
+        }
+    }
+}
+
+/// Waits for a held build to start, without a sleep over 100 ms.
+async fn wait_started(started: std::sync::mpsc::Receiver<()>) {
+    tokio::task::spawn_blocking(move || {
+        started
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the held build started")
+    })
+    .await
+    .expect("the wait ends");
+}
+
+#[tokio::test]
+async fn a_stack_draft_build_slower_than_the_beat_still_lands_once() {
+    let held = HeldBuild::new();
+    let (user, builds) = counting_user(Some(held.hold));
+    let harness = build_with("r2-draft-beats", Some(user));
+    add_html(&harness, "Tinted.html", TINTED_HTML);
+    builds.store(0, Ordering::SeqCst);
+    prior_is_solid(&harness).await;
+    let epoch = page(0xd1);
+    let draft_stack = stack("stack:Slowbeat", vec![layer("l1", "html:Tinted")]);
+
+    // The first PUT's build is held open, as a slow HTML layer would be.
+    held.armed.store(true, Ordering::SeqCst);
+    let first_router = harness.router.clone();
+    let first_body = stack_draft_body(&draft_stack, &epoch, 1);
+    let first = tokio::spawn(async move {
+        first_router
+            .oneshot(request_with_body("PUT", routes::EFFECT_DRAFT, &first_body))
+            .await
+            .expect("the router answers")
+    });
+    wait_started(held.started).await;
+
+    // Beats arrive faster than the build: each one joins it instead of starting another.
+    for seq in 2..=6 {
+        let beat = put_stack_draft(&harness, &draft_stack, &epoch, seq).await;
+        assert_eq!(beat.status(), StatusCode::OK);
+        assert_eq!(
+            json(beat).await["applied"],
+            true,
+            "a beat of the same structure is not superseded"
+        );
+    }
+    assert_eq!(builds.load(Ordering::SeqCst), 1, "one build for six beats");
+
+    held.go.send(()).expect("the build is released");
+    let landed = first.await.expect("the task ends");
+    assert_eq!(landed.status(), StatusCode::OK);
+    assert_eq!(json(landed).await["applied"], true);
+    assert_eq!(
+        harness.engine.effect_id.lock().unwrap().clone(),
+        Some("stack:Slowbeat".to_string()),
+        "the build that outlived the beats landed"
+    );
+    assert!(harness.app.draft.is_active());
+    assert_eq!(builds.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_preview_build_slower_than_the_beat_still_lands_once() {
+    let held = HeldBuild::new();
+    let (user, builds) = counting_user(Some(held.hold));
+    let harness = build_with("r2-preview-beats", Some(user));
+    add_html(&harness, "Tinted.html", TINTED_HTML);
+    builds.store(0, Ordering::SeqCst);
+    let epoch = page(0xd2);
+    let preview = stack("stack:Quickview", vec![layer("l1", "html:Tinted")]);
+
+    // The preview's first open builds; its build is held open.
+    held.armed.store(true, Ordering::SeqCst);
+    let first_router = harness.router.clone();
+    let first_body =
+        serde_json::json!({ "stack": preview, "epoch": epoch, "seq": 1 }).to_string();
+    let first = tokio::spawn(async move {
+        first_router
+            .oneshot(request_with_body("PUT", routes::STACK_PREVIEW, &first_body))
+            .await
+            .expect("the router answers")
+    });
+    wait_started(held.started).await;
+
+    for seq in 2..=6 {
+        let beat = put_preview(&harness, &preview, &epoch, seq).await;
+        assert_eq!(beat.status(), StatusCode::OK);
+        assert_eq!(
+            json(beat).await["applied"],
+            true,
+            "a beat of the structure already building joins it"
+        );
+    }
+    assert_eq!(builds.load(Ordering::SeqCst), 1, "one build for six PUTs");
+
+    held.go.send(()).expect("the build is released");
+    let landed = first.await.expect("the task ends");
+    assert_eq!(landed.status(), StatusCode::OK);
+    let body = json(landed).await;
+    assert_eq!(body["applied"], true);
+    assert_eq!(body["running"], true);
+    assert_eq!(
+        harness.preview_engine.effect_id.lock().unwrap().clone(),
+        Some("stack:Quickview".to_string()),
+        "the preview that outlived the beats landed"
+    );
+    assert_eq!(builds.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_preview_and_a_draft_refuse_a_stack_a_save_would_refuse() {
+    let harness = build("r2-caps");
+    let three_html = stack(
+        "stack:ThreeHtml",
+        vec![layer("l1", "html:A"), layer("l2", "html:B"), layer("l3", "html:C")],
+    );
+    let nine = stack(
+        "stack:NineLayers",
+        (1..=9).map(|n| layer(&format!("l{n}"), "solid")).collect(),
+    );
+    let epoch = page(2);
+
+    // Three HTML layers is over the cap of two, on both routes.
+    let preview = put_preview(&harness, &three_html, &epoch, 1).await;
+    assert_eq!(preview.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let draft = put_stack_draft(&harness, &three_html, &epoch, 1).await;
+    assert_eq!(draft.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Nine layers is over the cap of eight, on both routes.
+    let preview = put_preview(&harness, &nine, &epoch, 2).await;
+    assert_eq!(preview.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let draft = put_stack_draft(&harness, &nine, &epoch, 2).await;
+    assert_eq!(draft.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Neither route built anything or lit a light.
+    assert_eq!(*harness.engine.effect_id.lock().unwrap(), None);
+    assert_eq!(*harness.preview_engine.effect_id.lock().unwrap(), None);
+    assert!(!harness.app.draft.is_active());
+}
+
+#[tokio::test]
+async fn a_stack_draft_epoch_still_loses_after_forty_page_loads() {
+    let (user, _builds) = counting_user(None);
+    let harness = build_with("r2-draft-forty", Some(user));
+    add_html(&harness, "Tinted.html", TINTED_HTML);
+    prior_is_solid(&harness).await;
+    let draft_stack = stack("stack:Fortyloads", vec![layer("l1", "html:Tinted")]);
+    let oldest = "0000000000000000";
+
+    assert_eq!(
+        json(put_stack_draft(&harness, &draft_stack, oldest, 1).await).await["applied"],
+        true
+    );
+    for load in 1..=40u64 {
+        let answer = put_stack_draft(&harness, &draft_stack, &page(load), 1).await;
+        assert_eq!(answer.status(), StatusCode::OK);
+        assert_eq!(json(answer).await["applied"], true, "a new page always wins");
+    }
+    let stale = put_stack_draft(&harness, &draft_stack, oldest, 2).await;
+    assert_eq!(stale.status(), StatusCode::OK);
+    assert_eq!(
+        json(stale).await["applied"],
+        false,
+        "the tab that owned the draft 40 loads ago is still older"
+    );
+}
+
+#[tokio::test]
+async fn a_tab_that_lost_the_draft_cannot_take_it_back_after_a_stop_or_an_expiry() {
+    let (user, _builds) = counting_user(None);
+    let harness = build_with("r2-draft-tabs", Some(user));
+    add_html(&harness, "Tinted.html", TINTED_HTML);
+    prior_is_solid(&harness).await;
+    let draft_stack = stack("stack:Twotabs", vec![layer("l1", "html:Tinted")]);
+    let page_a = page(0xa);
+    let page_b = page(0xb);
+
+    // A owns the draft; B (a newer page) takes it.
+    assert_eq!(
+        json(put_stack_draft(&harness, &draft_stack, &page_a, 1).await).await["applied"],
+        true
+    );
+    assert_eq!(
+        json(put_stack_draft(&harness, &draft_stack, &page_b, 1).await).await["applied"],
+        true
+    );
+
+    // B Stops.
+    let stopped = harness
+        .router
+        .clone()
+        .oneshot(request("DELETE", routes::EFFECT_DRAFT))
+        .await
+        .unwrap();
+    assert_eq!(stopped.status(), StatusCode::OK);
+    assert_eq!(
+        harness.engine.effect_id.lock().unwrap().clone(),
+        Some("solid".to_string())
+    );
+
+    // A may not re-take the lights with a newer sequence of its older epoch.
+    let stale = put_stack_draft(&harness, &draft_stack, &page_a, 2).await;
+    assert_eq!(stale.status(), StatusCode::OK);
+    assert_eq!(json(stale).await["applied"], false, "the older tab lost the draft");
+    assert!(!harness.app.draft.is_active());
+    assert_eq!(
+        harness.engine.effect_id.lock().unwrap().clone(),
+        Some("solid".to_string()),
+        "the stale tab did not put its draft back on the lights"
+    );
+
+    // The newest page can start again with its next PUT.
+    assert_eq!(
+        json(put_stack_draft(&harness, &draft_stack, &page_b, 2).await).await["applied"],
+        true
+    );
+
+    // The lease runs out on the injected clock: A still cannot take the slot back.
+    harness
+        .draft_clock
+        .advance(canvas_proto::consts::DRAFT_LEASE + Duration::from_secs(1));
+    let state = harness
+        .router
+        .clone()
+        .oneshot(request("GET", routes::EFFECT_DRAFT))
+        .await
+        .unwrap();
+    let state: canvas_proto::api::DraftStatus =
+        serde_json::from_value(json(state).await).expect("a DraftStatus");
+    assert!(!state.active, "the lease ended");
+    let stale = put_stack_draft(&harness, &draft_stack, &page_a, 3).await;
+    assert_eq!(stale.status(), StatusCode::OK);
+    assert_eq!(
+        json(stale).await["applied"],
+        false,
+        "the older tab lost the draft to expiry too"
+    );
+}
+
+#[tokio::test]
+async fn the_draft_lease_starts_when_its_build_lands() {
+    let held = HeldBuild::new();
+    let (user, _builds) = counting_user(Some(held.hold));
+    let harness = build_with("r2-draft-lease", Some(user));
+    add_html(&harness, "Tinted.html", TINTED_HTML);
+    prior_is_solid(&harness).await;
+    let draft_stack = stack("stack:Slowlease", vec![layer("l1", "html:Tinted")]);
+
+    // The build is held open, and the clock moves past the whole lease while it runs.
+    held.armed.store(true, Ordering::SeqCst);
+    let first_router = harness.router.clone();
+    let first_body = stack_draft_body(&draft_stack, &page(0x1e), 1);
+    let first = tokio::spawn(async move {
+        first_router
+            .oneshot(request_with_body("PUT", routes::EFFECT_DRAFT, &first_body))
+            .await
+            .expect("the router answers")
+    });
+    wait_started(held.started).await;
+    harness
+        .draft_clock
+        .advance(canvas_proto::consts::DRAFT_LEASE + Duration::from_secs(5));
+    held.go.send(()).expect("the build is released");
+    let landed = first.await.expect("the task ends");
+    assert_eq!(json(landed).await["applied"], true);
+
+    let state = harness
+        .router
+        .clone()
+        .oneshot(request("GET", routes::EFFECT_DRAFT))
+        .await
+        .unwrap();
+    let state: canvas_proto::api::DraftStatus =
+        serde_json::from_value(json(state).await).expect("a DraftStatus");
+    assert!(state.active, "the lease starts when the draft lands, not when the build did");
+    assert_eq!(
+        state.lease_remaining_ms,
+        canvas_proto::consts::DRAFT_LEASE.as_millis() as u64,
+        "the whole lease is left"
+    );
+}
+
+#[tokio::test]
+async fn the_preview_engine_reads_the_apps_input_source_when_it_is_made() {
+    let harness = build("r2-input-source");
+    let preview = stack("stack:Withinput", vec![layer("l1", "solid")]);
+    let source: Arc<dyn canvas_proto::traits::InputSource> =
+        Arc::new(common::FakeInputs::empty());
+    harness.app.set_input_source(Some(Arc::clone(&source)));
+
+    // The engine is configured the first time a preview asks for it.
+    let answer = put_preview(&harness, &preview, &page(6), 1).await;
+    assert_eq!(answer.status(), StatusCode::OK);
+
+    let reached = harness
+        .preview_engine
+        .input_source
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the preview engine was given the app's input source");
+    assert!(
+        Arc::ptr_eq(&reached, &source),
+        "the preview engine reads the source the app has when the engine is made"
+    );
+    assert!(harness.engine.input_source.lock().unwrap().is_some());
+}
+
+#[tokio::test]
+async fn a_preview_and_a_draft_require_a_sixteen_hex_epoch() {
+    let harness = build("r2-epoch-shape");
+    let preview = stack("stack:Epochshape", vec![layer("l1", "solid")]);
+
+    for bad in ["", "e", "old", "0123456789abcde", "0123456789abcdef0", "0123456789abcdeg"] {
+        assert_eq!(
+            put_preview(&harness, &preview, bad, 1).await.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "the preview refuses the epoch {bad:?}"
+        );
+        assert_eq!(
+            put_stack_draft(&harness, &preview, bad, 1).await.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "the draft refuses the epoch {bad:?}"
+        );
+    }
+
+    // The right shape is accepted on both routes.
+    assert_eq!(
+        put_preview(&harness, &preview, &page(7), 1).await.status(),
+        StatusCode::OK
     );
 }

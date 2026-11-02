@@ -222,6 +222,23 @@ pub fn validate_stack(stack: &Stack, known: &KnownEffects, others: &[Stack]) -> 
     Ok(())
 }
 
+/// The rules a stack must keep before it is previewed or drafted (D95.4.4, D95.4.5): the same
+/// ones a Save enforces, with the stack itself left out of the "another stack's name" rule so an
+/// existing stack can be edited. A preview or a draft that breaks one answers 422, as a Save
+/// does, instead of building a stack the Save would refuse.
+pub fn validate_preview(
+    stacks: &Stacks,
+    stack: &Stack,
+    known: &KnownEffects,
+) -> Result<(), String> {
+    let others: Vec<Stack> = stacks
+        .all()
+        .into_iter()
+        .filter(|existing| !existing.id.eq_ignore_ascii_case(&stack.id))
+        .collect();
+    validate_stack(stack, known, &others)
+}
+
 /// The layers of a stack loaded from a file: the ones the compositor cannot run are dropped with
 /// a logged reason, and the rest of the stack runs (D95.1.6, D95.4.8).
 fn loaded_layers(stack: &Stack) -> Vec<StackLayer> {

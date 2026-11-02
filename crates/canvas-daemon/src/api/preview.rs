@@ -14,7 +14,6 @@
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Response};
-use canvas_proto::consts::PREVIEW_MAX_FPS;
 use std::sync::Arc;
 
 use crate::state::{App, WebsocketPreview};
@@ -78,9 +77,8 @@ async fn run(mut socket: WebSocket, app: Arc<App>, stack_engine: Option<Arc<dyn 
     subscribers.subscribe();
     tracing::info!(stack = stack_engine.is_some(), "the editor preview connected");
 
-    let mut last = std::time::Instant::now();
-    let interval = std::time::Duration::from_millis(1000 / PREVIEW_MAX_FPS.max(1) as u64);
-
+    // The engine's own rate is the cap: it submits at `PREVIEW_MAX_FPS` at most, which is the
+    // same figure the socket promises, so the socket forwards every frame it is handed.
     loop {
         tokio::select! {
             // Forward the frames to the editor.
@@ -104,10 +102,6 @@ async fn run(mut socket: WebSocket, app: Arc<App>, stack_engine: Option<Arc<dyn 
                     Some(Ok(_)) => {}
                     Some(Err(_)) => break,
                 }
-            }
-            // The rate limit.
-            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(last + interval)) => {
-                last = std::time::Instant::now();
             }
         }
     }
