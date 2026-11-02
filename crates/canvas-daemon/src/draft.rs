@@ -48,6 +48,10 @@ pub struct Slot {
 /// The draft slot and the lock that orders its transitions.
 pub struct Draft {
     slot: Mutex<Option<Slot>>,
+    /// The note from the last ending, kept until the next draft starts. The sweeper ends a
+    /// draft without an answer of its own, so the note has to outlive it for the next
+    /// `GET /effects/draft` to say the lights fell back to black.
+    last_note: Mutex<Option<String>>,
     /// Held across a transition (put, stop, expire), so an apply and a restore never
     /// interleave. A restore that landed after a new draft would leave the lights showing the
     /// prior effect while the slot said the draft was running.
@@ -73,7 +77,30 @@ impl Draft {
 
     /// A draft slot with its own builder, for a test that holds a build open.
     pub fn with_builder(clock: Clock, builder: crate::user_effects::Builder) -> Self {
-        Self { slot: Mutex::new(None), gate: tokio::sync::Mutex::new(()), clock, builder }
+        Self {
+            slot: Mutex::new(None),
+            last_note: Mutex::new(None),
+            gate: tokio::sync::Mutex::new(()),
+            clock,
+            builder,
+        }
+    }
+
+    /// Keeps the note of an ending that just happened (or clears it when the prior went back
+    /// normally), for the next `status`.
+    fn remember_ending(&self, ended: &Ended) {
+        *self.last_note.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            ended.note.clone();
+    }
+
+    /// A new draft is on the lights: the last ending's note is no longer news.
+    fn clear_ending(&self) {
+        *self.last_note.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
+    /// The note from the last ending, until the next draft starts.
+    pub fn last_note(&self) -> Option<String> {
+        self.last_note.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
     }
 
     /// The builder a draft's HTML is built with.
@@ -154,6 +181,7 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<Slot, PutE
         let ended = app.draft.lock().take();
         if let Some(slot) = ended {
             let outcome = restore(app, &slot).await;
+            app.draft.remember_ending(&outcome);
             tracing::info!(
                 draft = %slot.id,
                 note = outcome.note.as_deref().unwrap_or(""),
@@ -214,6 +242,7 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<Slot, PutE
         lease_until,
     };
     *app.draft.lock() = Some(slot.clone());
+    app.draft.clear_ending();
     // A draft started after an onboarding greeting outranks its restore: the owner is choosing
     // a look, and ending the draft puts the layout's effect back anyway.
     app.transient.cancel();
@@ -226,18 +255,17 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<Slot, PutE
 /// The slot always goes: a Stop, an expiry or a GET after the lease is over never leaves a
 /// draft behind. When the prior effect cannot be built (its file was deleted mid-draft, say),
 /// black goes on the lights and [`Ended::note`] says so; the answer is still a success.
-pub async fn stop(app: &Arc<App>) -> Ended {
+pub async fn stop(app: &Arc<App>) -> Option<Ended> {
     let _gate = app.draft.gate.lock().await;
-    let Some(slot) = app.draft.lock().take() else {
-        return Ended::default();
-    };
+    let slot = app.draft.lock().take()?;
     let ended = restore(app, &slot).await;
+    app.draft.remember_ending(&ended);
     tracing::info!(
         draft = %slot.id,
         note = ended.note.as_deref().unwrap_or(""),
         "the draft stopped"
     );
-    ended
+    Some(ended)
 }
 
 /// Ends a draft whose lease ran out: Stop, without the editor asking. Returns what happened
@@ -257,6 +285,7 @@ pub async fn expire_if_due(app: &Arc<App>) -> Option<Ended> {
     };
     let slot = due?;
     let ended = restore(app, &slot).await;
+    app.draft.remember_ending(&ended);
     tracing::info!(
         draft = %slot.id,
         note = ended.note.as_deref().unwrap_or(""),
@@ -302,7 +331,7 @@ pub fn status(app: &App) -> canvas_proto::api::DraftStatus {
             lease_remaining_ms: slot.lease_until.saturating_sub(now).as_millis() as u64,
             heartbeat_ms,
             lease_ms,
-            note: None,
+            note: app.draft.last_note(),
         },
         None => canvas_proto::api::DraftStatus {
             active: false,
@@ -312,7 +341,7 @@ pub fn status(app: &App) -> canvas_proto::api::DraftStatus {
             lease_remaining_ms: 0,
             heartbeat_ms,
             lease_ms,
-            note: None,
+            note: app.draft.last_note(),
         },
     }
 }

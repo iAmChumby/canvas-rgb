@@ -170,10 +170,8 @@ fn preview_base64(bytes: &[u8]) -> String {
 /// ended here first, so the answer never reports a draft that is already over; when ending it
 /// could not put the prior effect back, `note` says so.
 pub async fn get_draft(State(app): State<Arc<App>>) -> Json<DraftStatus> {
-    let ended = crate::draft::expire_if_due(&app).await;
-    let mut status = crate::draft::status(&app);
-    status.note = ended.and_then(|ended| ended.note);
-    Json(status)
+    crate::draft::expire_if_due(&app).await;
+    Json(crate::draft::status(&app))
 }
 
 /// `PUT /api/v1/effects/draft`.
@@ -214,8 +212,6 @@ pub async fn put_draft(
 /// Stop after a lease already ran out is not an error. The slot always goes: when the prior
 /// effect cannot be built, black goes on the lights and `note` says why, with a 200.
 pub async fn delete_draft(State(app): State<Arc<App>>) -> ApiResult<Json<DraftStatus>> {
-    let ended = crate::draft::stop(&app).await;
-    let mut status = crate::draft::status(&app);
-    status.note = ended.note;
-    Ok(Json(status))
+    crate::draft::stop(&app).await;
+    Ok(Json(crate::draft::status(&app)))
 }

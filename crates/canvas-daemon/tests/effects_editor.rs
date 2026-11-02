@@ -1241,3 +1241,26 @@ async fn a_draft_put_with_a_syntax_error_carries_its_line() {
     assert_eq!(body["line"], serde_json::json!(4), "the 422 carries the line: {body}");
     assert_eq!(body["column"], serde_json::json!(5), "and the column: {body}");
 }
+
+#[tokio::test]
+async fn the_sweepers_ending_keeps_its_note_for_a_later_get() {
+    let (router, app, engine, _home, folder, clock) = build_with_clock();
+    add_user_effect(&app, &folder, "foo.html", MOVING);
+    prior_effect(&app, "html:foo", canvas_proto::props::Props::new()).await;
+    assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
+    std::fs::remove_file(folder.join("foo.html")).expect("the effect file is removed");
+    app.user_effects.rescan(&folder);
+    clock.advance(canvas_proto::consts::DRAFT_LEASE);
+
+    // What the sweeper does on a tick: call `expire_if_due` and throw its outcome away.
+    let _ = canvas_daemon::draft::expire_if_due(&app).await;
+
+    let state = draft_state(router).await;
+    assert!(!state.active, "the sweeper ended the draft");
+    let note = state.note.as_deref().unwrap_or_default();
+    assert!(
+        note.contains("html:foo"),
+        "the GET after the sweeper still says the lights fell back: {note:?}"
+    );
+    assert_eq!(running(&engine).0.as_deref(), Some("solid"));
+}
