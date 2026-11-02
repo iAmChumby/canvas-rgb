@@ -39,6 +39,11 @@ export const routes = {
   // GET binary: u16 LE w, u16 LE h, u16 LE frames, then frames*w*h*3 RGB (64x40, 24 frames, 12 fps).
   effectThumbnail: (id: string) => `/api/v1/effects/${encodeURIComponent(id)}/thumbnail`,
   effectFavorite: (id: string) => `/api/v1/effects/${id}/favorite`,
+  // GET every saved stack, summarised; the whole document in and out is `stack(id)`.
+  stacks: "/api/v1/stacks",
+  stack: (id: string) => `/api/v1/stacks/${encodeURIComponent(id)}`,
+  // PUT a StackPreviewRequest (the draft, its epoch and seq); DELETE drops the preview.
+  stackPreview: "/api/v1/stacks/preview",
   layouts: "/api/v1/layouts",
   layout: (id: string) => `/api/v1/layouts/${encodeURIComponent(id)}`,
   layoutActive: "/api/v1/layouts/active",

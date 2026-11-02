@@ -43,6 +43,12 @@ import type { DisplayConfig } from "@/proto/DisplayConfig";
 import type { DisplayStatus } from "@/proto/DisplayStatus";
 import type { SetDisplayValue } from "@/proto/SetDisplayValue";
 import type { ExportBundle } from "@/proto/ExportBundle";
+import type { Stack } from "@/proto/Stack";
+import type { StackDetail } from "@/proto/StackDetail";
+import type { StacksResponse } from "@/proto/StacksResponse";
+import type { DeleteStackResponse } from "@/proto/DeleteStackResponse";
+import type { StackPreviewRequest } from "@/proto/StackPreviewRequest";
+import type { StackPreviewResponse } from "@/proto/StackPreviewResponse";
 
 /** POST /api/v1/onboarding/session (canvas-proto `ONBOARDING_SESSION`). */
 const ONBOARDING_SESSION = "/api/v1/onboarding/session";
@@ -96,8 +102,13 @@ export const api = {
   draft: () => request<DraftStatus>("GET", routes.effectsDraft),
   /** Starts the draft, or renews its lease with the current source and props. */
   putDraft: (body: DraftRequest) => request<DraftStatus>("PUT", routes.effectsDraft, body),
-  /** Stops the draft: the effect it took over from comes back. */
-  deleteDraft: () => request<DraftStatus>("DELETE", routes.effectsDraft),
+  /** Stops the draft: the effect it took over from comes back. The page's epoch goes with it, so
+   *  a page that no longer owns the lights ends nothing and is answered `applied: false`. */
+  deleteDraft: (epoch?: string) =>
+    request<DraftStatus>(
+      "DELETE",
+      epoch ? `${routes.effectsDraft}?epoch=${encodeURIComponent(epoch)}` : routes.effectsDraft,
+    ),
 
   /** Every peripheral the adapters see. The list opens nothing. */
   peripherals: () => request<{ peripherals: PeripheralRow[] }>("GET", routes.peripherals),
@@ -110,6 +121,26 @@ export const api = {
     request<PeripheralAccess>("PUT", routes.peripheralAccess(id), body),
   /** The stage of the read of one peripheral that is open now. Answers at once, even mid-read. */
   peripheralRead: (id: string) => request<ReadProgress>("GET", routes.peripheralRead(id)),
+
+  /** Every saved stack, summarised. */
+  stacks: () => request<StacksResponse>("GET", routes.stacks),
+  /** One stack and what each of its layers is doing. */
+  stack: (id: string) => request<StackDetail>("GET", routes.stack(id)),
+  /** The whole document in, the saved stack out (409 on a taken name, 422 on a broken value). */
+  putStack: (id: string, body: Stack) => request<Stack>("PUT", routes.stack(id), body),
+  /** Removes a stack and what points at it; `force` is needed while it runs. */
+  deleteStack: (id: string, force = false) =>
+    request<DeleteStackResponse>("DELETE", `${routes.stack(id)}${force ? "?force=true" : ""}`),
+  /** Builds or updates the preview engine's stack; a superseded PUT answers `applied: false`. */
+  putStackPreview: (body: StackPreviewRequest) =>
+    request<StackPreviewResponse>("PUT", routes.stackPreview, body),
+  /** Drops the preview and clears the sequence watermark. The page's epoch goes with it, so a
+   *  page that no longer owns the preview drops nothing and is answered `applied: false`. */
+  deleteStackPreview: (epoch?: string) =>
+    request<{ ok: boolean; running: boolean; applied?: boolean }>(
+      "DELETE",
+      epoch ? `${routes.stackPreview}?epoch=${encodeURIComponent(epoch)}` : routes.stackPreview,
+    ),
 
   layouts: () => request<LayoutsResponse>("GET", routes.layouts),
   putLayout: (id: string, body: Layout) => request<Layout>("PUT", routes.layout(id), body),

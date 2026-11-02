@@ -95,11 +95,21 @@ function useSlot(pick: (slots: StripSlots) => HTMLElement | null): HTMLElement |
  *
  * The title is the page's own heading, so it is an `h1` wherever it is drawn.
  */
-export function PageTitle({ title, context }: { title: string; context?: ReactNode }) {
+export function PageTitle({
+  title,
+  context,
+  leading,
+}: {
+  title: string;
+  context?: ReactNode;
+  /** A quiet control before the title (a build mode's back key). */
+  leading?: ReactNode;
+}) {
   const slot = useSlot(pickTitle);
   if (!slot) return null;
   return createPortal(
     <span className="rd-title">
+      {leading}
       <h1>{title}</h1>
       {context ? <span className="rd-context">{context}</span> : null}
     </span>,

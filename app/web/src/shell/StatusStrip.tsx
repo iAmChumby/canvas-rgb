@@ -92,6 +92,8 @@ export function StatusStrip({
   const phone = useMediaQuery("(max-width: 720px)");
   const fullText = list[0]?.text ?? ALL_GOOD;
   const markText = list[0] ? (phone ? (list[0].short ?? list[0].text) : list[0].text) : ALL_GOOD;
+  // The swatch's own name, for the widths where the effect's name is dropped from the row.
+  const swatchLabel = now.name === "—" ? "Nothing is running" : now.name;
   // Each link and what it is doing: the panel shows them all, one after another.
   const linkList = links(status, offline);
 
@@ -123,7 +125,15 @@ export function StatusStrip({
 
         {/* What the lights are doing, with a chip of the running light's own colour. */}
         <span className="strip-now">
-          <span className="strip-swatch" data-paused={paused ? "true" : "false"} aria-hidden="true" />
+          {/* The swatch is the only part of "now playing" left below 1280, where the effect's
+              name is dropped from the row: its label carries the name to a screen reader. */}
+          <span
+            className="strip-swatch"
+            data-paused={paused ? "true" : "false"}
+            role="img"
+            aria-label={swatchLabel}
+            title={swatchLabel}
+          />
           <span className="strip-now-text">
             <span className="strip-effect-name">
               {now.name}

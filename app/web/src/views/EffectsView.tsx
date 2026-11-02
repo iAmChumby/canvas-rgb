@@ -10,6 +10,7 @@ import {
   MonitorPlay,
   PencilSimple,
   Play,
+  Plus,
   SquaresFour,
   Star,
   Trash,
@@ -35,6 +36,8 @@ import { PropertyControls, type Values } from "@/views/PropertyControls";
 import { PresetStrip } from "@/views/PresetStrip";
 import { EffectEditor, type EffectEditorHandle, type EditorTarget, type SavedEffect } from "@/views/effects/EffectEditor";
 import { NewEffectChooser } from "@/views/effects/NewEffectChooser";
+import { StackBuilder } from "@/views/effects/StackBuilder";
+import { useStackParam } from "@/lib/stackRoute";
 import { BLANK_EFFECT, blankFileName, copyFileName, titleOf, withTitle } from "@/views/effects/blankEffect";
 import { api } from "@/lib/endpoints";
 import { ApiFailure, messageOf } from "@/lib/errors";
@@ -106,6 +109,9 @@ export function EffectsView() {
   // The page's overflow menu, where the code editor's way in sits under Advanced.
   const [moreOpen, setMoreOpen] = useState(false);
   const moreRef = useRef<HTMLSpanElement>(null);
+  // Build mode is `?stack=<name>` on this route (D95.5.1).
+  const [stackParam, goStack] = useStackParam();
+  const openStack = (name: string) => goStack(name);
   // The sheet's Back reaches the editor's unsaved prompt through this.
   const editorRef = useRef<EffectEditorHandle | null>(null);
   // On a phone the detail is pushed over the gallery.
@@ -676,6 +682,7 @@ export function EffectsView() {
       {list.map((row, i) => {
         const e = row.effect;
         const html = e.id.startsWith("html:");
+        const stackEffect = e.id.startsWith("stack:");
         const selected = e.id === selectedId;
         return (
           <Enter key={e.id} delay={Math.min(i, 8) * 26}>
@@ -683,13 +690,24 @@ export function EffectsView() {
               <button
                 type="button"
                 className="effect-card-open"
-                aria-label={`Open ${e.name}`}
+                aria-label={stackEffect ? `Edit the stack ${e.name}` : `Open ${e.name}`}
                 aria-current={selected ? "true" : undefined}
                 aria-disabled={editing ? "true" : undefined}
-                title={editing ? "Finish editing to open another effect" : undefined}
+                title={
+                  editing
+                    ? "Finish editing to open another effect"
+                    : stackEffect
+                      ? "Open the stack builder"
+                      : undefined
+                }
                 onClick={() => {
                   // The gallery is a strip while the editor is open: it never steals the edit.
                   if (editing) return;
+                  // A stack's tile opens its builder (D95.5.1); the inspector is for its summary.
+                  if (stackEffect) {
+                    openStack(e.id.slice("stack:".length));
+                    return;
+                  }
                   pick(e.id);
                 }}
               >
@@ -708,6 +726,7 @@ export function EffectsView() {
                     )}
                   </span>
                   {html && <Chip html>HTML</Chip>}
+                  {stackEffect && <Chip className="chip-stack">Stack</Chip>}
                   {e.id === activeId && (
                     <span className="effect-card-badge">
                       <span className="effect-card-badge-dot" aria-hidden="true" />
@@ -788,6 +807,7 @@ export function EffectsView() {
                     {detail.schema.needs.screen && <Chip icon={<MonitorPlay size={14} />}>Screen capture</Chip>}
                     {detail.schema.needs.audio && <Chip icon={<Waveform size={14} />}>Audio input</Chip>}
                     {selectedId?.startsWith("html:") && <Chip html>HTML effect</Chip>}
+                    {isStack && <Chip className="chip-stack">Stack</Chip>}
                     <StateDot tone={running ? "ok" : "mute"}>{running ? "Running" : "Idle"}</StateDot>
                   </div>
                 </div>
@@ -907,9 +927,18 @@ export function EffectsView() {
                   A stack keeps its layers, blends and areas in its own builder; the values have
                   no controls here.
                 </p>
-                <div>
+                <div className="row-wrap">
                   <Button
-                    variant={running ? "default" : "primary"}
+                    variant="primary"
+                    size="sm"
+                    disabled={stale}
+                    onClick={() => openStack(detail.schema.id.slice("stack:".length))}
+                    icon={<PencilSimple size={14} />}
+                  >
+                    Edit stack
+                  </Button>
+                  <Button
+                    variant="default"
                     size="sm"
                     disabled={running || stale}
                     onClick={() => void activate(null)}
@@ -973,6 +1002,17 @@ export function EffectsView() {
   );
   const detailPane = editorTarget || newOpen || editBusy || editError ? editorPane : detailNormal;
 
+  // Build mode: the builder takes the whole page, and the strip carries its own title and keys.
+  if (stackParam !== null) {
+    return (
+      <StackBuilder
+        initialName={stackParam}
+        onClose={() => goStack(null, { replace: true })}
+        onName={(name) => goStack(name, { replace: true })}
+      />
+    );
+  }
+
   return (
     <div
       className="rd-page rd-effects"
@@ -1001,6 +1041,16 @@ export function EffectsView() {
         }
       />
       <PageActions>
+        <Button
+          size="sm"
+          variant="primary"
+          icon={<Plus size={15} />}
+          disabled={editing}
+          title={editing ? "Finish editing first" : "Build an effect by stacking effects as layers"}
+          onClick={() => openStack("new")}
+        >
+          <span className="rd-btn-text">New effect</span>
+        </Button>
         <span ref={moreRef} className="row-wrap">
           <IconButton
             label="More effect actions"
@@ -1019,8 +1069,8 @@ export function EffectsView() {
         </FileButton>
       </PageActions>
 
-      {/* The overflow menu: the stack builder (issue #95) will take the headline. Code is the
-          advanced way in, so it sits behind More rather than beside Import. */}
+      {/* The overflow menu: code is the advanced way in, so it sits behind More rather than
+          beside Import (the New effect key opens the builder directly). */}
       <Popover
         anchor={moreRef}
         open={moreOpen}
