@@ -5,7 +5,7 @@ import { useDocumentVisible } from "@/lib/motion";
 import { useMotionOff } from "@/components/Motion";
 import { onFrame } from "@/lib/preview";
 import { useSnap } from "@/lib/store";
-import { loadThumb, type Thumb } from "@/lib/thumbs";
+import { loadThumb, blit, type Surface, type Thumb } from "@/lib/thumbs";
 import type { PropValue } from "@/proto/PropValue";
 
 /**
@@ -23,25 +23,6 @@ export type PreviewValues = { [key: string]: PropValue };
 
 /** The loop the daemon's thumbnails run on. */
 const THUMB_FPS = 12;
-
-type Surface = { ctx: CanvasRenderingContext2D; canvas: HTMLCanvasElement; img: ImageData | null };
-
-/** Copies one RGB frame (3 bytes a pixel, starting at `offset`) onto the canvas. */
-function blit(s: Surface, rgb: Uint8Array, offset: number, w: number, h: number): void {
-  if (s.canvas.width !== w || s.canvas.height !== h || !s.img) {
-    s.canvas.width = w;
-    s.canvas.height = h;
-    s.img = s.ctx.createImageData(w, h);
-  }
-  const out = s.img.data;
-  for (let i = 0, o = 0, p = offset; i < w * h; i++, o += 4, p += 3) {
-    out[o] = rgb[p] ?? 0;
-    out[o + 1] = rgb[p + 1] ?? 0;
-    out[o + 2] = rgb[p + 2] ?? 0;
-    out[o + 3] = 255;
-  }
-  s.ctx.putImageData(s.img, 0, 0);
-}
 
 export function EffectPreview({ id, className }: { id: string; className?: string }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);

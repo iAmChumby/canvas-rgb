@@ -18,6 +18,16 @@ export const routes = {
   // POST an ImportEffect: a SignalRGB-format HTML effect to add to the effects folder.
   // 409 when the name is taken and no replace is asked for; 422 when the file does not parse.
   effectsImport: "/api/v1/effects/import",
+  // GET an EffectSource: the HTML of an `html:` effect (user or stock) and the file name Save
+  // writes. A Rust built-in answers 404.
+  effectSource: (id: string) => `/api/v1/effects/${id}/source`,
+  // POST an EffectPreviewRequest: a draft's HTML and the editor's props, answered with the
+  // schema, the runtime's errors (with their line and column) and its 64x40 loop. 503 with
+  // Retry-After while two previews render.
+  effectPreview: "/api/v1/effects/preview",
+  // GET the draft on the lights (DraftStatus); PUT a DraftRequest starts or renews it; DELETE
+  // stops it and restores the effect it took over from.
+  effectsDraft: "/api/v1/effects/draft",
   // DELETE removes a user effect (an `html:` id).
   // GET every peripheral the adapters see; GET one peripheral's detail; PATCH writes the
   // changed keys to the device; PUT the access says what the daemon may do with it.

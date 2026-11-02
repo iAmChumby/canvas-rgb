@@ -11,6 +11,7 @@ import { sendUpdate } from "@/lib/updateActions";
 import { installFailedSentence, isInstalling, isSkipped } from "@/lib/updateWords";
 import { messageOf } from "@/lib/errors";
 import { fmtSeconds } from "@/lib/format";
+import { requestNavigation } from "@/lib/navigationGuard";
 import { patchSnap, useSnap } from "@/lib/store";
 
 /** The service banner appears after this many ms without the fan service (G4). */
@@ -192,7 +193,7 @@ export function GlobalBanners() {
                 size="sm"
                 onClick={() => {
                   void sendUpdate(updateInstall);
-                  router.push("/updates/");
+                  requestNavigation(() => router.push("/updates/"));
                 }}
               >
                 Update now
@@ -224,7 +225,7 @@ export function GlobalBanners() {
                 size="sm"
                 onClick={() => {
                   void sendUpdate(updateInstall);
-                  router.push("/updates/");
+                  requestNavigation(() => router.push("/updates/"));
                 }}
               >
                 Try again

@@ -2,7 +2,9 @@
 
 import { useRef, type ButtonHTMLAttributes, type ChangeEvent, type ReactNode } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { Tooltip } from "@/components/Tooltip";
+import { hasNavigationGuard, requestNavigation } from "@/lib/navigationGuard";
 
 type Variant = "default" | "primary" | "ghost" | "danger";
 
@@ -70,6 +72,7 @@ export function ButtonLink({
   children,
   className,
   prefetch = false,
+  onClick,
 }: {
   href: string;
   variant?: Variant;
@@ -78,9 +81,22 @@ export function ButtonLink({
   children: ReactNode;
   className?: string;
   prefetch?: boolean;
+  onClick?: () => void;
 }) {
+  const router = useRouter();
   return (
-    <Link href={href} className={buttonClass(variant, size, className)} prefetch={prefetch}>
+    <Link
+      href={href}
+      className={buttonClass(variant, size, className)}
+      prefetch={prefetch}
+      onClick={(e) => {
+        onClick?.();
+        // An editor with unsaved code asks before any link leaves the page, like the rail.
+        if (!hasNavigationGuard()) return;
+        e.preventDefault();
+        requestNavigation(() => router.push(href));
+      }}
+    >
       {icon}
       {children}
     </Link>
