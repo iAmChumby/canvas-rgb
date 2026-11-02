@@ -196,6 +196,13 @@ export function StackBuilder({
   const backAsked = useRef(false);
   const allowBack = useRef(false);
   const sentinelPushed = useRef(false);
+  /** A Save or Discard that will leave the builder: the guard entry is not popped separately. */
+  const pendingLeave = useRef(false);
+  /** True when this builder was opened from another page, so there are two entries behind the
+   *  prompt's own sentinel: the page and the guard. A direct load has none. */
+  const openedInApp = useRef(
+    typeof window !== "undefined" && window.history.state?.canvasRgbStack !== undefined,
+  );
 
   useEffect(() => {
     draftRef.current = draft;
@@ -547,7 +554,11 @@ export function StackBuilder({
     if (backAsked.current) {
       backAsked.current = false;
       allowBack.current = true;
-      window.history.go(-2);
+      pendingLeave.current = true;
+      // Back goes past the guard entry and past the builder, one page in all. A direct load
+      // has no page behind it, so the builder closes onto the effects page instead.
+      if (openedInApp.current) window.history.go(-2);
+      else onClose();
       return;
     }
     if (hasPendingNavigation()) {
@@ -562,7 +573,9 @@ export function StackBuilder({
       setNavigationGuard(null);
       if (sentinelPushed.current) {
         sentinelPushed.current = false;
-        window.history.back();
+        // A leave that is under way navigates itself; popping the guard first would move
+        // history one extra time.
+        if (!pendingLeave.current) window.history.back();
       }
       return;
     }
@@ -573,12 +586,20 @@ export function StackBuilder({
     });
     const onPop = () => {
       if (allowBack.current) return;
-      window.history.pushState({ canvasRgbStackGuard: true }, "", window.location.href);
+      window.history.pushState(
+        { ...(window.history.state ?? {}), canvasRgbStackGuard: true },
+        "",
+        window.location.href,
+      );
       sentinelPushed.current = true;
       backAsked.current = true;
       setLeaving(true);
     };
-    window.history.pushState({ canvasRgbStackGuard: true }, "", window.location.href);
+    window.history.pushState(
+      { ...(window.history.state ?? {}), canvasRgbStackGuard: true },
+      "",
+      window.location.href,
+    );
     sentinelPushed.current = true;
     window.addEventListener("popstate", onPop);
     return () => {
@@ -628,6 +649,8 @@ export function StackBuilder({
         return;
       }
     }
+    // A save that will leave the builder must not also pop its guard entry.
+    pendingLeave.current = then !== undefined;
     setSaveState("saving");
     setSaveError(null);
     // A replace writes under the other stack's own id: the daemon overwrites that stack and
@@ -638,6 +661,8 @@ export function StackBuilder({
       saved = await api.putStack(body.id, body);
     } catch (e) {
       setSaveState("idle");
+      // The save failed, so the builder is not leaving after all.
+      pendingLeave.current = false;
       if (e instanceof ApiFailure && e.status === 409) {
         setClash(wanted);
         return;
@@ -1197,11 +1222,6 @@ export function StackBuilder({
                           className="layer-row"
                           data-selected={layer.id === picked ? "true" : "false"}
                           data-hidden={layer.visible ? "false" : "true"}
-                          draggable
-                          onDragStart={(event) => {
-                            event.dataTransfer.effectAllowed = "move";
-                            event.dataTransfer.setData("text/plain", layer.id);
-                          }}
                           onDragOver={(event) => {
                             event.preventDefault();
                             event.dataTransfer.dropEffect = "move";
@@ -1216,8 +1236,13 @@ export function StackBuilder({
                           <button
                             type="button"
                             className="layer-grip"
+                            draggable
                             aria-label={`Reorder ${layer.name}`}
                             title="Drag to reorder; Alt+↑/↓ on the keyboard"
+                            onDragStart={(event) => {
+                              event.dataTransfer.effectAllowed = "move";
+                              event.dataTransfer.setData("text/plain", layer.id);
+                            }}
                             onKeyDown={(event) => {
                               if (!event.altKey) return;
                               if (event.key === "ArrowUp" && index < count - 1) {
