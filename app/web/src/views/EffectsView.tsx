@@ -1007,7 +1007,7 @@ export function EffectsView() {
     return (
       <StackBuilder
         initialName={stackParam}
-        onClose={() => goStack(null)}
+        onClose={() => goStack(null, { replace: true })}
         onName={(name) => goStack(name, { replace: true })}
       />
     );
