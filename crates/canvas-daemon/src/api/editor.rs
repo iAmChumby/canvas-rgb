@@ -4,7 +4,7 @@
 //! lives here is everything it needs to open a file, render a draft, and try one on the lights
 //! without saving anything.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::Json;
 use canvas_proto::api::{
     DraftRequest, DraftStatus, EffectPreviewRequest, EffectPreviewResponse, EffectSource,
@@ -237,12 +237,41 @@ pub async fn put_draft(
     Ok(Json(status))
 }
 
+/// The query `DELETE /effects/draft` takes: the page's session epoch, when it sends one.
+///
+/// The field is optional and the route has no request type in `canvas-proto`, so it stays here:
+/// a caller that sends no epoch (an earlier editor, the delete-an-effect route) keeps the old
+/// behaviour, and one that sends its epoch is answered `applied: false` when it does not own the
+/// draft.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct DeleteDraftQuery {
+    #[serde(default)]
+    pub epoch: Option<String>,
+}
+
 /// `DELETE /api/v1/effects/draft`.
 ///
 /// Stops the draft and puts the prior effect back. Without a draft it is a no-op, so a banner's
 /// Stop after a lease already ran out is not an error. The slot always goes: when the prior
 /// effect cannot be built, black goes on the lights and `note` says why, with a 200.
-pub async fn delete_draft(State(app): State<Arc<App>>) -> ApiResult<Json<DraftStatus>> {
-    crate::draft::stop(&app).await;
-    Ok(Json(crate::draft::status(&app)))
+///
+/// A page that sends its epoch and does not own the draft ends nothing: the answer is
+/// `applied: false` and the draft that does own the lights keeps running (D95.4.4, item 4).
+pub async fn delete_draft(
+    State(app): State<Arc<App>>,
+    Query(query): Query<DeleteDraftQuery>,
+) -> ApiResult<Json<DraftStatus>> {
+    if let Some(epoch) = &query.epoch {
+        if !crate::epoch::valid_epoch(epoch) {
+            return Err(ApiFailure::validation(format!(
+                "the epoch {epoch:?} is not 16 hexadecimal characters, as a page makes it"
+            )));
+        }
+    }
+    let outcome = crate::draft::stop(&app, query.epoch.as_deref()).await;
+    let mut status = crate::draft::status(&app);
+    if query.epoch.is_some() {
+        status.applied = Some(outcome.applied);
+    }
+    Ok(Json(status))
 }

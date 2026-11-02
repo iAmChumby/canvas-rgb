@@ -5,7 +5,7 @@
 //! the route shares [`crate::api::editor::PREVIEW_CONCURRENT`] with `POST /effects/preview`, so
 //! at most two preview builds run at once and the rest answer 503 with `Retry-After: 1`.
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::Json;
 use canvas_proto::api::StackPreviewRequest;
 use std::sync::Arc;
@@ -43,8 +43,37 @@ pub async fn put_stack_preview(
     Ok(Json(answer))
 }
 
+/// The query `DELETE /stacks/preview` takes: the page's session epoch, when it sends one.
+///
+/// The route has no request type in `canvas-proto` (its answer is plain JSON), so the query stays
+/// here: a caller that sends no epoch keeps the old behaviour, and one that does is answered
+/// `applied: false` when it does not own the preview.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct DeleteStackPreviewQuery {
+    #[serde(default)]
+    pub epoch: Option<String>,
+}
+
 /// `DELETE /api/v1/stacks/preview`: drops the preview and clears the sequence watermark.
-pub async fn delete_stack_preview(State(app): State<Arc<App>>) -> Json<serde_json::Value> {
-    let had = crate::preview::clear(&app).await;
-    Json(serde_json::json!({ "ok": true, "running": had }))
+///
+/// A page that sends its epoch and does not own the preview drops nothing: `applied` is `false`
+/// and the page that owns it keeps previewing (D95.4.4, item 4). `running` still says whether a
+/// preview was dropped here, so an earlier caller's answer means what it always did.
+pub async fn delete_stack_preview(
+    State(app): State<Arc<App>>,
+    Query(query): Query<DeleteStackPreviewQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if let Some(epoch) = &query.epoch {
+        if !crate::epoch::valid_epoch(epoch) {
+            return Err(ApiFailure::validation(format!(
+                "the epoch {epoch:?} is not 16 hexadecimal characters, as a page makes it"
+            )));
+        }
+    }
+    let outcome = crate::preview::clear(&app, query.epoch.as_deref()).await;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "running": outcome.running,
+        "applied": outcome.applied,
+    })))
 }

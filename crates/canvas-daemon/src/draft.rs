@@ -707,20 +707,40 @@ pub async fn put_stack(
     Ok(true)
 }
 
+/// What `DELETE /effects/draft` did.
+pub struct StopOutcome {
+    /// False when the page that asked does not own the draft: nothing ended, and the draft of
+    /// the page that does own it is left alone (D95.4.4, item 4).
+    pub applied: bool,
+    /// What ending the draft did to the lights, when one ended here.
+    pub ended: Option<Ended>,
+}
+
 /// Stops the draft and puts the prior effect back (the editor's Stop).
+///
+/// `epoch` is the page's session epoch when the caller sends one: a page that does not own the
+/// draft ends nothing and is answered `applied: false`, so a stale tab's Stop cannot take the
+/// lights off the page that owns them.
 ///
 /// The slot always goes: a Stop, an expiry or a GET after the lease is over never leaves a
 /// draft behind. When the prior effect cannot be built (its file was deleted mid-draft, say),
 /// black goes on the lights and [`Ended::note`] says so; the answer is still a success.
-pub async fn stop(app: &Arc<App>) -> Option<Ended> {
+pub async fn stop(app: &Arc<App>, epoch: Option<&str>) -> StopOutcome {
     let _gate = app.draft.gate.lock().await;
+    if let Some(epoch) = epoch {
+        if !app.draft.epochs.holds(epoch) {
+            return StopOutcome { applied: false, ended: None };
+        }
+    }
     // An explicit Stop cancels a build that is still running, even when the first draft has
     // not landed yet: a builder that stopped does not want it on the lights afterwards.
     app.draft.supersede_build();
     // The live sequence goes, the epoch order stays: the tab that stopped can start again with
     // its next PUT, and an older tab still cannot take the lights (D95.4.4, item 4).
     app.draft.epochs.clear_live();
-    let slot = app.draft.lock().take()?;
+    let Some(slot) = app.draft.lock().take() else {
+        return StopOutcome { applied: true, ended: None };
+    };
     let ended = restore(app, &slot).await;
     app.draft.remember_ending(&ended);
     tracing::info!(
@@ -728,7 +748,7 @@ pub async fn stop(app: &Arc<App>) -> Option<Ended> {
         note = ended.note.as_deref().unwrap_or(""),
         "the draft stopped"
     );
-    Some(ended)
+    StopOutcome { applied: true, ended: Some(ended) }
 }
 
 /// Ends a draft whose lease ran out: Stop, without the editor asking. Returns what happened

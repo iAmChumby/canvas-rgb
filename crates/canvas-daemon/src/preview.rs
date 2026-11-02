@@ -546,13 +546,30 @@ pub async fn put(
     Ok(answer(app, true, &owned_epoch, owned_seq, layers))
 }
 
+/// What `DELETE /stacks/preview` did.
+pub struct ClearOutcome {
+    /// False when the page that asked does not own the preview: nothing was dropped, and the
+    /// page that owns it keeps previewing (D95.4.4, item 4).
+    pub applied: bool,
+    /// True when a preview was on screen and is dropped now.
+    pub running: bool,
+}
+
 /// `DELETE /api/v1/stacks/preview`.
 ///
 /// Drops the preview, clears the live sequence (the epoch order stays, so a stale tab cannot
 /// re-take the preview) and answers 200. A build still running lands nowhere. The preview
 /// engine, if it exists, paints black instead of keeping the last stack on the channel.
-pub async fn clear(app: &Arc<App>) -> bool {
+///
+/// `epoch` is the page's session epoch when the caller sends one: a page that does not own the
+/// preview drops nothing and is answered `applied: false`.
+pub async fn clear(app: &Arc<App>, epoch: Option<&str>) -> ClearOutcome {
     let _gate = app.stack_preview.gate.lock().await;
+    if let Some(epoch) = epoch {
+        if !app.stack_preview.epochs.holds(epoch) {
+            return ClearOutcome { applied: false, running: false };
+        }
+    }
     app.stack_preview.epochs.clear_live();
     app.stack_preview.supersede_build();
     let had = app
@@ -570,7 +587,7 @@ pub async fn clear(app: &Arc<App>) -> bool {
         }
         tracing::info!("the preview was dropped");
     }
-    had
+    ClearOutcome { applied: true, running: had }
 }
 
 /// The answer a superseded PUT gives: 200, `applied: false`, and the epoch/seq that own the

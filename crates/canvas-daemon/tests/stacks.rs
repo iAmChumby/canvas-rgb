@@ -3511,3 +3511,122 @@ async fn a_beat_that_joins_a_slow_build_keeps_the_draft_alive_until_it_lands() {
         "the landing set a fresh lease"
     );
 }
+
+#[tokio::test]
+async fn a_stale_pages_stop_and_delete_end_nothing() {
+    let (user, _builds) = counting_user(None);
+    let harness = build_with("r3-epoch-gate", Some(user));
+    add_html(&harness, "Tinted.html", TINTED_HTML);
+    prior_is_solid(&harness).await;
+    let draft_stack = stack("stack:Gated", vec![layer("l1", "html:Tinted")]);
+    let page_a = page(0xa1);
+    let page_b = page(0xb1);
+
+    // B opens first; A is the newer page and takes the draft.
+    assert_eq!(
+        json(put_stack_draft(&harness, &draft_stack, &page_b, 1).await).await["applied"],
+        true
+    );
+    assert_eq!(
+        json(put_stack_draft(&harness, &draft_stack, &page_a, 1).await).await["applied"],
+        true
+    );
+
+    // B's Stop ends nothing, and says who owns the draft.
+    let stale = harness
+        .router
+        .clone()
+        .oneshot(request("DELETE", &format!("{}?epoch={page_b}", routes::EFFECT_DRAFT)))
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::OK);
+    let body = json(stale).await;
+    assert_eq!(body["applied"], false, "{body}");
+    assert_eq!(body["active"], true, "A's draft is still on the lights: {body}");
+    assert_eq!(body["epoch"], page_a.as_str());
+    assert_eq!(
+        harness.engine.effect_id.lock().unwrap().clone(),
+        Some("stack:Gated".to_string()),
+        "the prior effect was not put back"
+    );
+
+    // A's own Stop applies, and an older caller's Stop with no epoch still works as it did.
+    let owned = harness
+        .router
+        .clone()
+        .oneshot(request("DELETE", &format!("{}?epoch={page_a}", routes::EFFECT_DRAFT)))
+        .await
+        .unwrap();
+    let body = json(owned).await;
+    assert_eq!(body["applied"], true);
+    assert_eq!(body["active"], false);
+    assert_eq!(
+        harness.engine.effect_id.lock().unwrap().clone(),
+        Some("solid".to_string())
+    );
+    let without_epoch = harness
+        .router
+        .clone()
+        .oneshot(request("DELETE", routes::EFFECT_DRAFT))
+        .await
+        .unwrap();
+    assert_eq!(without_epoch.status(), StatusCode::OK);
+    let body = json(without_epoch).await;
+    assert!(body["applied"].is_null(), "a DELETE with no epoch answers no applied: {body}");
+
+    // The preview route takes the same epoch, with the same rule.
+    let preview = stack("stack:Previewgate", vec![layer("l1", "solid")]);
+    assert_eq!(json(put_preview(&harness, &preview, &page_b, 1).await).await["applied"], true);
+    assert_eq!(json(put_preview(&harness, &preview, &page_a, 1).await).await["applied"], true);
+    let stale = harness
+        .router
+        .clone()
+        .oneshot(request("DELETE", &format!("{}?epoch={page_b}", routes::STACK_PREVIEW)))
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::OK);
+    let body = json(stale).await;
+    assert_eq!(body["applied"], false, "{body}");
+    assert_eq!(body["running"], false, "nothing was dropped: {body}");
+    assert!(
+        harness.app.stack_preview.snapshot().is_some(),
+        "A's preview is still on screen"
+    );
+
+    let owned = harness
+        .router
+        .clone()
+        .oneshot(request("DELETE", &format!("{}?epoch={page_a}", routes::STACK_PREVIEW)))
+        .await
+        .unwrap();
+    let body = json(owned).await;
+    assert_eq!(body["applied"], true);
+    assert_eq!(body["running"], true);
+    assert!(harness.app.stack_preview.snapshot().is_none());
+
+    // An epoch that is not 16 hex characters is refused before anything ends.
+    for bad in ["", "e", "0123456789abcde", "0123456789abcdeg"] {
+        assert_eq!(
+            harness
+                .router
+                .clone()
+                .oneshot(request("DELETE", &format!("{}?epoch={bad}", routes::EFFECT_DRAFT)))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "the draft Stop refuses the epoch {bad:?}"
+        );
+        assert_eq!(
+            harness
+                .router
+                .clone()
+                .oneshot(request("DELETE", &format!("{}?epoch={bad}", routes::STACK_PREVIEW)))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "the preview DELETE refuses the epoch {bad:?}"
+        );
+    }
+}
