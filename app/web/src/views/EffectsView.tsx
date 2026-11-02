@@ -52,6 +52,21 @@ function currentStripHeight(): string {
   return value || "0px";
 }
 
+/** The layer names a stack's schema carries: each property's label starts with `{layer} · `. */
+function stackLayerNames(schema: EffectDetail["schema"]): string[] {
+  const names: string[] = [];
+  for (const def of schema.properties) {
+    const name = def.label.split(" · ")[0];
+    if (name && !names.includes(name)) names.push(name);
+  }
+  if (names.length === 0) {
+    // A stack whose layers have no properties still names them in its description.
+    const after = schema.description.split(": ")[1];
+    if (after) return after.split(", ");
+  }
+  return names;
+}
+
 export function EffectsView() {
   const effects = useSnap((s) => s.effects);
   const effectsError = useSnap((s) => s.effectsError);
@@ -560,6 +575,8 @@ export function EffectsView() {
     </LoadFrame>
   );
 
+  const isStack = selectedId?.startsWith("stack:") ?? false;
+
   const detailPane = (
     <div className="stack">
       {noLayout && (
@@ -706,12 +723,40 @@ export function EffectsView() {
             }}
           />
 
-          <Panel title="Properties">
-            <PropertyControls
-              schema={detail.schema}
-              values={values}
-              onChange={onChange}
-            />
+          <Panel title={isStack ? "Layers" : "Properties"}>
+            {isStack ? (
+              <div className="stack" style={{ gap: 10 }}>
+                <p className="dim" style={{ margin: 0 }}>
+                  {detail.schema.description}
+                </p>
+                <div className="row-wrap">
+                  {stackLayerNames(detail.schema).map((name) => (
+                    <Chip key={name}>{name}</Chip>
+                  ))}
+                </div>
+                <p className="dim rd-eff-desc">
+                  A stack keeps its layers, blends and areas in its own builder; the values have
+                  no controls here.
+                </p>
+                <div>
+                  <Button
+                    variant={running ? "default" : "primary"}
+                    size="sm"
+                    disabled={running || stale}
+                    onClick={() => void activate(null)}
+                    icon={<Play size={14} weight="fill" />}
+                  >
+                    <Swap labels={["Activate", "Running"]} at={running ? 1 : 0} />
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <PropertyControls
+                schema={detail.schema}
+                values={values}
+                onChange={onChange}
+              />
+            )}
             {error && <p className="error-line" style={{ marginTop: 8 }}>{error}</p>}
           </Panel>
         </>
