@@ -818,7 +818,12 @@ impl StackEffect {
         let elapsed = (self.clock)().saturating_duration_since(started);
         match outcome {
             Ok(()) => Some(elapsed),
-            Err(_) => {
+            Err(payload) => {
+                // A tile's HTML layer unwinds with a `TileFailure` by design, and the tile
+                // render catches it to refuse the tile; that one belongs to the caller.
+                if payload.downcast_ref::<crate::thumbnail::TileFailure>().is_some() {
+                    std::panic::resume_unwind(payload);
+                }
                 let first = !layer.panic_logged;
                 layer.panic_logged = true;
                 layer.hold = Hold::Faulted;
@@ -1004,13 +1009,17 @@ impl Effect for StackEffect {
         let frame = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.frame(dt, canvas, inputs);
         }));
-        if frame.is_err() {
-            canvas.fill([0.0, 0.0, 0.0]);
+        if let Err(payload) = frame {
             // A panic may have left the resolved areas taken out of the compositor; the next
             // frame resolves them again.
             self.resolved.clear();
             self.live_version = u64::MAX;
             self.area_version = u64::MAX;
+            // A layer's tile failure is handed on to the tile render, which refuses the tile.
+            if payload.downcast_ref::<crate::thumbnail::TileFailure>().is_some() {
+                std::panic::resume_unwind(payload);
+            }
+            canvas.fill([0.0, 0.0, 0.0]);
             if !self.frame_panicked {
                 self.frame_panicked = true;
                 tracing::error!(

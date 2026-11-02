@@ -322,6 +322,33 @@ impl Effect for TileFailingInit {
     fn update(&mut self, _dt: f32, _canvas: &mut Canvas, _inputs: &Inputs) {}
 }
 
+/// A fake tile layer whose `update` unwinds with the tile render's own failure payload: a stack
+/// tile must refuse the tile rather than cache a picture the failing layer never drew.
+struct TileFailingUpdate;
+
+impl Effect for TileFailingUpdate {
+    fn schema(&self) -> PropertySchema {
+        PropertySchema {
+            id: "tile-update".into(),
+            name: "Tile update".into(),
+            description: String::new(),
+            needs: InputNeeds::default(),
+            properties: Vec::new(),
+            presets: Vec::new(),
+            thumbnail: None,
+        }
+    }
+
+    fn init(&mut self, _props: &Props) {}
+
+    fn update(&mut self, _dt: f32, _canvas: &mut Canvas, _inputs: &Inputs) {
+        std::panic::resume_unwind(Box::new(canvas_daemon::thumbnail::TileFailure {
+            reason: "the layer's script failed while the tile was drawn".into(),
+            load_dependent: false,
+        }));
+    }
+}
+
 /// A leaf builder that hands every layer a [`Paint`] and counts the builds.
 fn paint_leaves(
     updates: Arc<AtomicU64>,
@@ -1790,10 +1817,10 @@ fn a_panic_in_the_compositors_own_work_is_a_black_frame() {
     assert_eq!(canvas.get(5, 5), [0.0, 0.0, 0.0]);
 }
 
-/// A tile's own failure unwinds through the layer's start: the stack hands it to the tile
-/// render, which refuses the tile, instead of faulting the layer and drawing a different picture.
+/// A tile's own failure unwinds through the layer's start: `StackEffect::init` hands the payload
+/// on as it is, rather than faulting the layer and drawing a different picture.
 #[test]
-fn a_tile_failure_from_a_layers_init_reaches_the_tile_render() {
+fn a_tile_failure_from_a_layers_init_is_handed_on_by_the_stacks_init() {
     let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
     let lay = layout(vec![placed("d", 0, 0.0, 0.0, 100.0, 20.0)], RenderScale::P100, SamplingMode::Nearest);
     let stack = stack("stack:Tile", vec![layer("l1", "tile")]);
@@ -1808,6 +1835,28 @@ fn a_tile_failure_from_a_layers_init_reaches_the_tile_render() {
         payload.downcast_ref::<canvas_daemon::thumbnail::TileFailure>().is_some(),
         "the payload is still the tile's own"
     );
+}
+
+/// A tile's own failure raised by a layer's `update` is handed on to the tile render too: the
+/// stack tile is refused (`RenderError::Failed`) instead of being cached with that layer missing.
+#[test]
+fn a_tile_failure_from_a_layers_update_refuses_the_stack_tile() {
+    let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
+    let lay = layout(vec![placed("d", 0, 0.0, 0.0, 100.0, 20.0)], RenderScale::P100, SamplingMode::Nearest);
+    let stack = stack("stack:TileUpdate", vec![layer("l1", "tile-update")]);
+    let leaves: LeafBuilder = Arc::new(|_id: &str| Ok(Box::new(TileFailingUpdate) as Box<dyn Effect>));
+    let mut effect = StackEffect::new(&stack, leaves, live_for(&stack), areas_for(&lay, &devices));
+    let outcome = canvas_daemon::thumbnail::render_within(
+        &mut effect,
+        &Props::new(),
+        Duration::from_secs(5),
+    );
+    match outcome {
+        Err(canvas_daemon::thumbnail::RenderError::Failed(reason)) => {
+            assert!(reason.contains("the layer's script failed"), "{reason}");
+        }
+        other => panic!("the stack tile was not refused: {other:?}"),
+    }
 }
 
 /// One frame of a directly-built compositor, at the daemon's default step.
