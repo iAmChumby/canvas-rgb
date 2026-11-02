@@ -229,7 +229,8 @@ pub fn validate_stack(stack: &Stack, known: &KnownEffects, others: &[Stack]) -> 
 /// The layers of a stack loaded from a file: the ones the compositor cannot run are dropped with
 /// a logged reason, and the rest of the stack runs (D95.1.6, D95.4.8). A layer's effect is
 /// stored as the canonical id the builder takes, so a file that spelled a display name runs.
-fn loaded_layers(stack: &Stack, known: &KnownEffects) -> Vec<StackLayer> {    let mut seen: Vec<String> = Vec::new();
+fn loaded_layers(stack: &Stack, known: &KnownEffects) -> Vec<StackLayer> {
+    let mut seen: Vec<String> = Vec::new();
     let mut out: Vec<StackLayer> = Vec::new();
     let mut html = 0usize;
     for layer in &stack.layers {
