@@ -650,6 +650,8 @@ pub struct StackEffect {
     frame_size: (u32, u32),
     /// True once the compositor's own frame work panicked: it logs once and keeps going.
     frame_panicked: bool,
+    /// True once the compositor's own start panicked: it logs once and keeps going.
+    init_panicked: bool,
 }
 
 impl StackEffect {
@@ -713,6 +715,7 @@ impl StackEffect {
             seed: None,
             frame_size: (0, 0),
             frame_panicked: false,
+            init_panicked: false,
         }
     }
 
@@ -785,6 +788,13 @@ impl StackEffect {
         }
     }
 
+    /// Blanks every layer's canvas: what a stack whose own start panicked shows.
+    fn blacken_canvases(&mut self) {
+        for layer in &mut self.layers {
+            layer.canvas.fill([0.0, 0.0, 0.0]);
+        }
+    }
+
     /// Re-resolves every layer's area when the live map or the area book moved.
     ///
     /// The masks are copied out of the book, so its lock is not held while a layer's update runs.
@@ -830,16 +840,24 @@ impl StackEffect {
         let elapsed = (self.clock)().saturating_duration_since(started);
         match outcome {
             Ok(()) => Some(elapsed),
-            Err(_) => {
+            Err(payload) => {
+                // A tile's HTML layer unwinds with a `TileFailure` by design, and the tile
+                // render catches it to refuse the tile; that one belongs to the caller.
+                if payload.downcast_ref::<crate::thumbnail::TileFailure>().is_some() {
+                    std::panic::resume_unwind(payload);
+                }
                 let first = !layer.panic_logged;
                 layer.panic_logged = true;
                 layer.hold = Hold::Faulted;
+                // A panic can leave any part of the picture behind; a faulted layer composites
+                // nothing visible, so the half-written canvas goes.
+                layer.canvas.fill([0.0, 0.0, 0.0]);
                 if first {
                     tracing::error!(
                         stack = %self.stack_id,
                         layer = %layer.id,
                         effect = %layer.effect,
-                        "a layer's effect panicked; it is faulted and the rest of the stack runs"
+                        "a layer's effect panicked; it is faulted, its picture is black and the rest of the stack runs"
                     );
                 }
                 None
@@ -972,6 +990,63 @@ impl Effect for StackEffect {
     }
 
     fn init(&mut self, props: &Props) {
+        // The stack's own start is guarded as each layer's is: `fit_canvases`, `clear_faults`,
+        // `resolve_areas` and the status report are a panic turned into a black stack, logged
+        // once, and it never unwinds into the engine (D95.3.6).
+        let started = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.start(props)));
+        if let Err(payload) = started {
+            // A tile's HTML layer unwinds with a `TileFailure` by design, and the tile
+            // render catches it to refuse the tile; that one belongs to the caller.
+            if payload.downcast_ref::<crate::thumbnail::TileFailure>().is_some() {
+                std::panic::resume_unwind(payload);
+            }
+            self.blacken_canvases();
+            // The start may not have reached the area resolution; the first frame resolves.
+            self.resolved.clear();
+            self.live_version = u64::MAX;
+            self.area_version = u64::MAX;
+            if !self.init_panicked {
+                self.init_panicked = true;
+                tracing::error!(
+                    stack = %self.stack_id,
+                    "the stack's own start panicked; its layers stay black and the stack keeps running"
+                );
+            }
+        }
+    }
+
+    fn update(&mut self, dt: f32, canvas: &mut Canvas, inputs: &Inputs) {
+        // The compositor's own work is guarded as each layer's update is: a panic in the area
+        // resolution, the canvas fit or the composite is a black frame for this frame, logged
+        // once, and the stack keeps running (D95.3.6). It never unwinds into the engine.
+        let frame = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.frame(dt, canvas, inputs);
+        }));
+        if let Err(payload) = frame {
+            // A panic may have left the resolved areas taken out of the compositor; the next
+            // frame resolves them again.
+            self.resolved.clear();
+            self.live_version = u64::MAX;
+            self.area_version = u64::MAX;
+            // A layer's tile failure is handed on to the tile render, which refuses the tile.
+            if payload.downcast_ref::<crate::thumbnail::TileFailure>().is_some() {
+                std::panic::resume_unwind(payload);
+            }
+            canvas.fill([0.0, 0.0, 0.0]);
+            if !self.frame_panicked {
+                self.frame_panicked = true;
+                tracing::error!(
+                    stack = %self.stack_id,
+                    "the stack's own frame work panicked; the frame is black and the stack keeps running"
+                );
+            }
+        }
+    }
+}
+
+impl StackEffect {
+    /// The body of [`Effect::init`], run inside its guard.
+    fn start(&mut self, props: &Props) {
         self.seed = tile_seed(props);
         // A render-scale change rebuilds a layer's canvas; the areas know the scale.
         let scale = self.area_scale();
@@ -997,11 +1072,14 @@ impl Effect for StackEffect {
                 }
                 layer.hold = Hold::Faulted;
                 layer.panic_logged = true;
+                // A half-started effect can leave anything behind; a faulted layer composites
+                // nothing visible, so its canvas goes.
+                layer.canvas.fill([0.0, 0.0, 0.0]);
                 tracing::error!(
                     stack = %self.stack_id,
                     layer = %layer.id,
                     effect = %layer.effect,
-                    "a layer's effect panicked while it started; it is faulted and the rest of the stack runs"
+                    "a layer's effect panicked while it started; it is faulted, its picture is black and the rest of the stack runs"
                 );
             }
         }
@@ -1009,32 +1087,6 @@ impl Effect for StackEffect {
         self.report_statuses();
     }
 
-    fn update(&mut self, dt: f32, canvas: &mut Canvas, inputs: &Inputs) {
-        // The compositor's own work is guarded as each layer's update is: a panic in the area
-        // resolution, the canvas fit or the composite is a black frame for this frame, logged
-        // once, and the stack keeps running (D95.3.6). It never unwinds into the engine.
-        let frame = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.frame(dt, canvas, inputs);
-        }));
-        if frame.is_err() {
-            canvas.fill([0.0, 0.0, 0.0]);
-            // A panic may have left the resolved areas taken out of the compositor; the next
-            // frame resolves them again.
-            self.resolved.clear();
-            self.live_version = u64::MAX;
-            self.area_version = u64::MAX;
-            if !self.frame_panicked {
-                self.frame_panicked = true;
-                tracing::error!(
-                    stack = %self.stack_id,
-                    "the stack's own frame work panicked; the frame is black and the stack keeps running"
-                );
-            }
-        }
-    }
-}
-
-impl StackEffect {
     /// One frame of the compositor's own work, run inside [`StackEffect::update`]'s guard.
     fn frame(&mut self, dt: f32, canvas: &mut Canvas, inputs: &Inputs) {
         self.fit_canvases(canvas.width, canvas.height);
@@ -1117,7 +1169,8 @@ impl StackEffect {
             if state_of(self.layers[index].hold) != state_of(before) {
                 changed = true;
             }
-            // A held or faulted layer keeps its last good canvas and is composited as usual.
+            // A held layer keeps its last good canvas and is composited as usual; a layer that
+            // panicked had its canvas blacked as it faulted, so it adds nothing to the frame.
             self.composite_layer(index, area, values, canvas);
         }
         self.resolved = resolved;

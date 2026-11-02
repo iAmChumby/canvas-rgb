@@ -144,8 +144,9 @@ describe("stackLayerNames", () => {
     ]);
   });
 
-  it("never splits a layer name on the separator it holds", () => {
-    expect(stackLayerNames(schema(["Front · fan · Speed"]))).toEqual(["Front · fan"]);
+  it("keeps a property label that holds the separator out of the layer name", () => {
+    // The label is `Base · Speed · Fast`: the layer is "Base", the property is "Speed · Fast".
+    expect(stackLayerNames(schema(["Base · Speed · Fast"]))).toEqual(["Base"]);
   });
 
   it("falls back to the description's names when no layer has a property", () => {

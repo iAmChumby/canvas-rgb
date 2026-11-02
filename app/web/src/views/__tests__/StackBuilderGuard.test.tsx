@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { ToastHost, ToastProvider } from "@/components/Toast";
 import { refreshAll } from "@/lib/store";
@@ -116,6 +116,41 @@ describe("the builder's unsaved guard", () => {
 
     await waitFor(() => expect(screen.queryByTestId("stack-builder")).toBeNull());
     expect(window.location.pathname).toBe("/effects/");
+    expect(window.location.search).toBe("");
+
+    // No entry behind the effects page reopens the builder: Back leaves it closed.
+    window.history.back();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.queryByTestId("stack-builder")).toBeNull();
+    expect(window.location.pathname).toBe("/effects/");
+  });
+
+  it("does not carry a Back's leave over to the close key", async () => {
+    // Back asked first, the save it asked for got no name, and the naming dialog was cancelled.
+    // The close key's Discard after that is the close key's: it lands on the effects page.
+    window.history.replaceState({}, "", "/devices/?state=stack");
+    window.history.pushState({ canvasRgbStack: "new" }, "", "/effects/?stack=new&state=complete,stack");
+    await mount();
+    await screen.findByTestId("stack-builder");
+    fireEvent.click(await screen.findByRole("button", { name: "Add the first layer" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Solid/ }));
+    await waitFor(() => expect(screen.getByText("Unsaved")).toBeTruthy());
+
+    window.history.back();
+    const dialog = await screen.findByRole("alertdialog", { name: "Unsaved changes" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+    const naming = await screen.findByRole("dialog", { name: "Name the stack" });
+    fireEvent.click(within(naming).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Name the stack" })).toBeNull());
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to the effects" }));
+    const prompt = await screen.findByRole("alertdialog", { name: "Unsaved changes" });
+    fireEvent.click(within(prompt).getByRole("button", { name: "Discard" }));
+    await waitFor(() => expect(window.location.pathname).toBe("/effects/"));
+    await waitFor(() => expect(screen.queryByTestId("stack-builder")).toBeNull());
+    expect(window.location.search).toBe("");
   });
 
   it("Save on browser Back lands exactly one page back", async () => {

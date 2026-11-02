@@ -85,11 +85,13 @@ describe("adding a layer while its effect is still loading", () => {
     try {
       fireEvent.click(screen.getByRole("button", { name: /Add layer/ }));
       const row = await screen.findByRole("option", { name: /Ink Drop/ });
-      act(() => {
+      await act(async () => {
         fireEvent.click(row);
         fireEvent.click(row);
+        await Promise.resolve();
+        await Promise.resolve();
       });
-      // The second click is dropped, not queued behind the first.
+      // The second click is the same add: one read, not two.
       expect(pending).toHaveLength(1);
       await act(async () => {
         pending[0]?.(ink);
@@ -100,6 +102,51 @@ describe("adding a layer while its effect is still loading", () => {
         const layers = previewCalls().at(-1)?.stack?.layers ?? [];
         expect(layers.length).toBe(before + 1);
       });
+      const ids = (previewCalls().at(-1)?.stack?.layers ?? []).map((layer) => layer.id);
+      expect(new Set(ids).size).toBe(ids.length);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("adds both when two different effects are clicked while the first is read", async () => {
+    await renderBuilder();
+    await screen.findByTestId("stack-builder");
+    await waitFor(() => expect(layerNames()).toContain("Sparkles"));
+    const before = layerNames().length;
+    const realEffect = api.effect;
+    const ink = await realEffect("html:ink-drop");
+    const solid = await realEffect("solid");
+    const pending: Array<{ effect: string; resolve: (detail: typeof ink) => void }> = [];
+    const spy = vi.spyOn(api, "effect").mockImplementation((id) => {
+      if (id === "html:ink-drop" || id === "solid") {
+        return new Promise((resolve) => pending.push({ effect: id, resolve }));
+      }
+      return realEffect(id);
+    });
+    try {
+      fireEvent.click(screen.getByRole("button", { name: /Add layer/ }));
+      const inkRow = await screen.findByRole("option", { name: /Ink Drop/ });
+      const solidRow = await screen.findByRole("option", { name: /Solid/ });
+      await act(async () => {
+        fireEvent.click(inkRow);
+        fireEvent.click(solidRow);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      // The second add waits its turn in the queue rather than being dropped.
+      expect(pending.map((entry) => entry.effect)).toEqual(["html:ink-drop"]);
+      await act(async () => {
+        pending[0]?.resolve(ink);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitFor(() => expect(pending.map((entry) => entry.effect)).toEqual(["html:ink-drop", "solid"]));
+      await act(async () => {
+        pending[1]?.resolve(solid);
+        await Promise.resolve();
+      });
+      await waitFor(() => expect(layerNames()).toHaveLength(before + 2));
       const ids = (previewCalls().at(-1)?.stack?.layers ?? []).map((layer) => layer.id);
       expect(new Set(ids).size).toBe(ids.length);
     } finally {

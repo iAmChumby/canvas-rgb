@@ -11,6 +11,23 @@ import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
 // The stack builder against the demo backend (D95.5): the seeded Sunset glow, its layers, the
 // preview PUTs, Try on the lights and Save. No daemon, no socket: the demo answers every route.
 
+// The preview feed's own problem (a second stack socket, refused by the daemon) arrives through
+// this subscription; the test drives it directly.
+const feed = vi.hoisted(() => ({ listener: null as ((problem: string | null) => void) | null }));
+
+vi.mock("@/lib/stackPreview", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/stackPreview")>();
+  return {
+    ...actual,
+    onStackPreviewFeed: (listener: (problem: string | null) => void) => {
+      feed.listener = listener;
+      return () => {
+        feed.listener = null;
+      };
+    },
+  };
+});
+
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 beforeAll(() => {
@@ -46,7 +63,7 @@ afterEach(cleanup);
 
 type PreviewCall = { at: number; epoch: string; seq: number; applied: boolean; stack?: { layers: Array<{ id: string; opacity: number }> } };
 type SaveCall = { at: number; id: string; layers: number };
-type DraftCall = { method: string; stack?: { id: string } };
+type DraftCall = { method: string; epoch?: string | null; stack?: { id: string } };
 
 const previewCalls = () => ((globalThis as { __stackPreview?: PreviewCall[] }).__stackPreview ??= []);
 const saveCalls = () => ((globalThis as { __stackSaves?: SaveCall[] }).__stackSaves ??= []);
@@ -132,7 +149,32 @@ describe("the stack builder", () => {
     expect(put?.stack?.id).toBe("stack:Sunset glow");
     fireEvent.click(screen.getByRole("button", { name: "Stop" }));
     await waitFor(() => expect(screen.queryByText("Draft on the lights")).toBeNull());
-    expect(draftCalls().some((call) => call.method === "DELETE")).toBe(true);
+    // The Stop carries this page's epoch, so a page that lost the lights ends nothing (PR #100).
+    const stop = draftCalls().find((call) => call.method === "DELETE");
+    expect(stop?.epoch).toMatch(/^[0-9a-f]{16}$/);
+  });
+
+  it("says nothing ended when another page owns the draft", async () => {
+    await openBuilder();
+    await waitFor(() => expect(layerNames()).toContain("Sparkles"));
+    fireEvent.click(screen.getByRole("button", { name: "Try on the lights" }));
+    await screen.findByText("Draft on the lights");
+    const spy = vi.spyOn(api, "deleteDraft").mockResolvedValueOnce({
+      active: true,
+      props: {},
+      lease_remaining_ms: 12_000,
+      heartbeat_ms: 5_000,
+      lease_ms: 15_000,
+      applied: false,
+    });
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+      await waitFor(() =>
+        expect(screen.getByText(/Another window has the lights now/)).toBeTruthy(),
+      );
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("saves the stack, then activates it", async () => {
@@ -206,7 +248,7 @@ describe("the stack builder", () => {
     }
   });
 
-  it("sends 400 ms after the last change of a burst", async () => {
+  it("sends 400 ms after a lone change", async () => {
     await openBuilder();
     await waitFor(() => expect(layerNames()).toContain("Sparkles"));
     // The first draft's own send has to be recorded before the clock is faked and the list cleared.
@@ -215,16 +257,15 @@ describe("the stack builder", () => {
     vi.useFakeTimers();
     try {
       const toggle = () => screen.getByRole("button", { name: /(Hide|Show) Sparkles/ });
+      // A quiet spell first, so the change is alone and no max wait is due.
+      await act(async () => {
+        vi.advanceTimersByTime(2_000);
+        await Promise.resolve();
+      });
       act(() => {
         fireEvent.click(toggle());
       });
-      act(() => {
-        vi.advanceTimersByTime(300);
-      });
-      act(() => {
-        fireEvent.click(toggle());
-      });
-      // Nothing at t=649: the last change was at 300, so the send is 400 ms after it.
+      // Nothing at t=349: the change waits 400 ms after itself.
       await act(async () => {
         vi.advanceTimersByTime(349);
         await Promise.resolve();
@@ -238,6 +279,53 @@ describe("the stack builder", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  /** Changes every `step` ms: every send before the last change is at most ~420 ms after the one
+   *  before it, which is what a drag looks like to the daemon (D95.4.4). */
+  async function drag(step: number) {
+    await openBuilder();
+    await waitFor(() => expect(layerNames()).toContain("Sparkles"));
+    await waitFor(() => expect(previewCalls().length).toBeGreaterThan(0));
+    previewCalls().length = 0;
+    vi.useFakeTimers();
+    try {
+      const start = Date.now();
+      const toggle = () => screen.getByRole("button", { name: /(Hide|Show) Sparkles/ });
+      const changes = 4;
+      for (let i = 0; i < changes; i++) {
+        act(() => {
+          fireEvent.click(toggle());
+        });
+        await act(async () => {
+          vi.advanceTimersByTime(step);
+          await Promise.resolve();
+        });
+      }
+      // The send the last change asks for is still to come.
+      await act(async () => {
+        vi.advanceTimersByTime(420);
+        await Promise.resolve();
+      });
+      const lastChange = (changes - 1) * step;
+      const inDrag = previewCalls()
+        .map((call) => call.at - start)
+        .filter((at) => at <= lastChange);
+      expect(inDrag.length).toBeGreaterThanOrEqual(2);
+      for (let i = 1; i < inDrag.length; i++) {
+        expect(inDrag[i]! - inDrag[i - 1]!).toBeLessThanOrEqual(420);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+
+  it("sends every 400 ms while the stack changes every 300 ms", async () => {
+    await drag(300);
+  });
+
+  it("sends every 400 ms while the stack changes every 390 ms", async () => {
+    await drag(390);
   });
 
   it("sends every 400 ms while changes keep coming", async () => {
@@ -377,5 +465,71 @@ describe("the stack builder", () => {
       const sparkles = previewCalls().at(-1)?.stack?.layers.find((layer) => layer.id === "l3");
       expect(sparkles?.opacity).toBeLessThan(80);
     });
+  });
+
+  it("tries the last preview once more after a transport error", async () => {
+    await openBuilder();
+    await waitFor(() => expect(layerNames()).toContain("Sparkles"));
+    await waitFor(() => expect(previewCalls().length).toBeGreaterThan(0));
+    const spy = vi.spyOn(api, "putStackPreview").mockRejectedValueOnce(new TypeError("fetch failed"));
+    vi.useFakeTimers();
+    try {
+      act(() => {
+        fireEvent.click(screen.getByRole("button", { name: /(Hide|Show) Sparkles/ }));
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(420);
+        await Promise.resolve();
+      });
+      expect(spy).toHaveBeenCalledTimes(1);
+      // The failed change is asked once more 400 ms later, and not a third time.
+      await act(async () => {
+        vi.advanceTimersByTime(400);
+        await Promise.resolve();
+      });
+      expect(spy).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        vi.advanceTimersByTime(5_000);
+        await Promise.resolve();
+      });
+      expect(spy).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+      spy.mockRestore();
+    }
+  });
+
+  it("says why the preview feed is not showing", async () => {
+    await openBuilder();
+    await waitFor(() => expect(layerNames()).toContain("Sparkles"));
+    act(() => feed.listener?.("another stack preview is open; close it first"));
+    expect(
+      screen.getByText(/The preview is not showing: another stack preview is open; close it first/),
+    ).toBeTruthy();
+  });
+
+  it("keeps the saved stack's name in the URL after the first save", async () => {
+    await renderEffects("?stack=new&state=complete,stack");
+    await screen.findByTestId("stack-builder");
+    fireEvent.click(screen.getByRole("button", { name: "Add the first layer" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Solid/ }));
+    await waitFor(() => expect(layerNames()).toHaveLength(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    const naming = await screen.findByRole("dialog", { name: "Name the stack" });
+    fireEvent.change(within(naming).getByRole("textbox", { name: "Stack name" }), {
+      target: { value: "Probe glow" },
+    });
+    fireEvent.click(within(naming).getByRole("button", { name: "Save" }));
+    // The guard entry is dropped after the save, and the entry the builder lands on takes the
+    // name: a reload of the URL it sits on opens the saved stack, not a blank one.
+    await waitFor(() => expect(window.location.search).toContain("stack=Probe%20glow"));
+    expect(window.location.search).not.toContain("stack=new");
+
+    cleanup();
+    await renderEffects(`?stack=${encodeURIComponent("Probe glow")}&state=complete,stack`);
+    await screen.findByTestId("stack-builder");
+    await screen.findByRole("heading", { name: "Probe glow" });
+    await waitFor(() => expect(layerNames()).toHaveLength(1));
   });
 });

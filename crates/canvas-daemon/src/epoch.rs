@@ -13,6 +13,10 @@
 //! memory (a 32-entry list, say) is exactly the bug this replaces: once the owning epoch falls
 //! out of it, the daemon can no longer tell a stale tab from a page that just opened, and the
 //! stale tab takes the lights.
+//!
+//! The order is by when the daemon first saw a page, not by when the page loaded: a page whose
+//! first PUT arrives after a newer page's takes the route, because the newest user action wins.
+//! Only a page that has been superseded is stale.
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -82,6 +86,17 @@ impl EpochBook {
     /// The newest epoch the daemon has seen, even after Stop or DELETE cleared the live one.
     pub fn owner(&self) -> Option<String> {
         self.lock().owner.clone()
+    }
+
+    /// True when `epoch` owns the route now: it is the live epoch, or, when nothing is live
+    /// because a Stop or a DELETE cleared it, the newest page the daemon has seen. A page that
+    /// has been superseded never owns it, however many loads have happened since.
+    pub fn holds(&self, epoch: &str) -> bool {
+        let book = self.lock();
+        match &book.live {
+            Some((live, _)) => live == epoch,
+            None => book.owner.as_deref() == Some(epoch),
+        }
     }
 
     /// The route is empty (Stop, expiry, DELETE, a replacement). The generations stay: the tab

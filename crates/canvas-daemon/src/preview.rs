@@ -167,25 +167,31 @@ impl StackPreview {
                 }
             }
         };
-        if !self.configured.swap(true, Ordering::SeqCst) {
-            engine.set_fps(canvas_proto::consts::PREVIEW_MAX_FPS);
-            let latest = self
-                .latest_layout
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone();
-            let layout = match latest {
-                Some(found) => Some(found),
-                None => match app.active_layout().await {
-                    Some(layout) => Some((layout, app.devices.read().await.clone())),
-                    None => None,
-                },
-            };
-            if let Some((layout, devices)) = layout {
-                engine.set_layout(layout, devices);
-            }
-            engine.set_input_source(app.input_source());
+        if self.configured.load(Ordering::SeqCst) {
+            return engine;
         }
+        // The flag is set last, after the engine has its rate, layout and source: a caller that
+        // goes away between the read of the layout and the configuration leaves the flag false,
+        // so the next open configures the engine instead of trusting a flag that is not true
+        // yet. Two callers that overlap both configure it with the same values.
+        let latest = self
+            .latest_layout
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let layout = match latest {
+            Some(found) => Some(found),
+            None => match app.active_layout().await {
+                Some(layout) => Some((layout, app.devices.read().await.clone())),
+                None => None,
+            },
+        };
+        engine.set_fps(canvas_proto::consts::PREVIEW_MAX_FPS);
+        if let Some((layout, devices)) = layout {
+            engine.set_layout(layout, devices);
+        }
+        engine.set_input_source(app.input_source());
+        self.configured.store(true, Ordering::SeqCst);
         engine
     }
 
@@ -307,6 +313,26 @@ impl StackPreview {
     }
 }
 
+/// Frees the route when a build ends without landing: an error, a join error, or a panic in the
+/// blocking task. Every exit path after [`StackPreview::begin_build`] holds one, so a failed
+/// build's token never stays in the book for later beats to join.
+struct BuildLease<'a> {
+    preview: &'a StackPreview,
+    token: u64,
+}
+
+impl<'a> BuildLease<'a> {
+    fn new(preview: &'a StackPreview, token: u64) -> Self {
+        Self { preview, token }
+    }
+}
+
+impl Drop for BuildLease<'_> {
+    fn drop(&mut self) {
+        self.preview.take_in_flight_if(self.token);
+    }
+}
+
 impl Default for StackPreview {
     fn default() -> Self {
         Self::new()
@@ -318,6 +344,8 @@ impl Default for StackPreview {
 pub enum PreviewError {
     /// Two previews already render: the answer is a 503 with `Retry-After`.
     Busy,
+    /// The stack's name is another stack's, ignoring case: the answer is a 409, as Save's is.
+    Conflict(String),
     /// The stack breaks a rule a Save enforces: the answer is a 422 with the reason.
     Validation(String),
     /// The daemon could not hand the effect over.
@@ -359,10 +387,19 @@ pub async fn put(
         return Err(PreviewError::Busy);
     };
 
-    // The rules a Save enforces, so the builder never previews a stack the Save would refuse
-    // (D95.4.4, item 2): the HTML cap, the layer cap, names, ranges and nested stacks.
+    // The one check a Save also runs, on the canonical stack (D95.4.4, D95.4.5): a layer written
+    // by its display name is the id it becomes, so the HTML cap counts it, the name rule leaves
+    // out this stack by exact id as `Stacks::put` does, and the stack that is built and hashed is
+    // the one a Save would store.
+    let mut canonical = stack.clone();
     let known = crate::stacks::KnownEffects::from_user(&app.user_effects);
-    crate::stacks::validate_preview(&app.stacks, stack, &known).map_err(PreviewError::Validation)?;
+    crate::stacks::canonicalise_and_validate(&mut canonical, &app.stacks, &known).map_err(
+        |refusal| match refusal {
+            crate::stacks::StackRefusal::Conflict(message) => PreviewError::Conflict(message),
+            crate::stacks::StackRefusal::Invalid(message) => PreviewError::Validation(message),
+        },
+    )?;
+    let stack = &canonical;
 
     let structure = structure_of(app, stack);
     let props = props_of(app, stack);
@@ -421,6 +458,9 @@ pub async fn put(
         token = app.stack_preview.begin_build(stack, &structure, props.clone());
     }
 
+    // Every exit path from here frees the route: an error, a join error, or a panic in the
+    // blocking task must not leave a token for later beats to join.
+    let _lease = BuildLease::new(&app.stack_preview, token);
     // One build runs per route: a PUT with a different structure waits for the one in flight to
     // let go, and then builds (or finds it was superseded itself).
     let _build = app.stack_preview.build_lock.lock().await;
@@ -506,13 +546,30 @@ pub async fn put(
     Ok(answer(app, true, &owned_epoch, owned_seq, layers))
 }
 
+/// What `DELETE /stacks/preview` did.
+pub struct ClearOutcome {
+    /// False when the page that asked does not own the preview: nothing was dropped, and the
+    /// page that owns it keeps previewing (D95.4.4, item 4).
+    pub applied: bool,
+    /// True when a preview was on screen and is dropped now.
+    pub running: bool,
+}
+
 /// `DELETE /api/v1/stacks/preview`.
 ///
 /// Drops the preview, clears the live sequence (the epoch order stays, so a stale tab cannot
 /// re-take the preview) and answers 200. A build still running lands nowhere. The preview
 /// engine, if it exists, paints black instead of keeping the last stack on the channel.
-pub async fn clear(app: &Arc<App>) -> bool {
+///
+/// `epoch` is the page's session epoch when the caller sends one: a page that does not own the
+/// preview drops nothing and is answered `applied: false`.
+pub async fn clear(app: &Arc<App>, epoch: Option<&str>) -> ClearOutcome {
     let _gate = app.stack_preview.gate.lock().await;
+    if let Some(epoch) = epoch {
+        if !app.stack_preview.epochs.holds(epoch) {
+            return ClearOutcome { applied: false, running: false };
+        }
+    }
     app.stack_preview.epochs.clear_live();
     app.stack_preview.supersede_build();
     let had = app
@@ -530,7 +587,7 @@ pub async fn clear(app: &Arc<App>) -> bool {
         }
         tracing::info!("the preview was dropped");
     }
-    had
+    ClearOutcome { applied: true, running: had }
 }
 
 /// The answer a superseded PUT gives: 200, `applied: false`, and the epoch/seq that own the

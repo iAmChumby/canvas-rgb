@@ -17,13 +17,18 @@ import { routes } from "@/proto/routes";
 import { CANVAS_H, CANVAS_W } from "@/views/effects/stackDraft";
 
 type Listener = (frame: Frame) => void;
+/** What the feed is saying about itself: `null` when it is fine, the daemon's reason when not. */
+type FeedListener = (problem: string | null) => void;
 
 const listeners = new Set<Listener>();
+const feedListeners = new Set<FeedListener>();
 let active = false;
 let socket: WebSocket | null = null;
 let reconnect: ReturnType<typeof setTimeout> | null = null;
 let demoTimer: ReturnType<typeof setInterval> | null = null;
 let last: Frame | null = null;
+/** The feed's own last word, so a builder that subscribes late still sees it. */
+let problem: string | null = null;
 /** What the demo composites: the draft stack and the layout its device areas name. */
 let stack: Stack | null = null;
 let layout: Layout | null = null;
@@ -35,6 +40,20 @@ export function onStackFrame(listener: Listener): () => void {
   return () => {
     listeners.delete(listener);
   };
+}
+
+/** A problem the preview feed has: a second graph refused by the daemon, and its reason. */
+export function onStackPreviewFeed(listener: FeedListener): () => void {
+  feedListeners.add(listener);
+  if (problem) listener(problem);
+  return () => {
+    feedListeners.delete(listener);
+  };
+}
+
+function setProblem(next: string | null): void {
+  problem = next;
+  for (const listener of feedListeners) listener(next);
 }
 
 function emit(frame: Frame): void {
@@ -82,6 +101,7 @@ export function stopStackPreview(): void {
     socket = null;
   }
   last = null;
+  setProblem(null);
 }
 
 async function connect(): Promise<void> {
@@ -97,14 +117,23 @@ async function connect(): Promise<void> {
   }
   const ws = new WebSocket(url);
   ws.binaryType = "arraybuffer";
+  ws.onopen = () => setProblem(null);
   ws.onmessage = (event: MessageEvent) => {
     if (!(event.data instanceof ArrayBuffer)) return;
     const frame = parseFrame(event.data);
     if (frame) emit(frame);
   };
-  ws.onclose = () => {
+  ws.onclose = (event: CloseEvent) => {
     socket = null;
     dropApiConfig();
+    // The daemon opens one stack preview at a time and refuses a second socket with code 1013
+    // and a reason (`api/preview.rs`). Show it, and ask again at a walking pace: the window that
+    // holds the preview may close, and a burst of refused sockets helps nobody.
+    if (event.code === 1013) {
+      setProblem(event.reason || "another window is showing a stack preview; close it first");
+      if (active) scheduleReconnect(5_000);
+      return;
+    }
     if (active) scheduleReconnect();
   };
   ws.onerror = () => {
@@ -113,12 +142,12 @@ async function connect(): Promise<void> {
   socket = ws;
 }
 
-function scheduleReconnect(): void {
+function scheduleReconnect(delay = 1_200): void {
   if (reconnect || !active) return;
   reconnect = setTimeout(() => {
     reconnect = null;
     void connect();
-  }, 1200);
+  }, delay);
 }
 
 function parseFrame(buffer: ArrayBuffer): Frame | null {

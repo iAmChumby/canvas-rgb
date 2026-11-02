@@ -17,9 +17,11 @@
 //!
 //! The editor renews the slot every [`canvas_proto::consts::DRAFT_HEARTBEAT`]; the slot expires
 //! [`canvas_proto::consts::DRAFT_LEASE`] after the last PUT, and the lease starts when the draft
-//! reaches the lights, not when its build started. Stop and expiry put the effect the draft took
-//! over from back on the lights; an activate or a layout switch drops the slot without
-//! restoring, because the owner chose something else.
+//! reaches the lights, not when its build started. Every accepted PUT renews it, including one
+//! that joins a build in flight, and the lease does not run out while a build the owning page
+//! started is still loading. Stop and expiry put the effect the draft took over from back on the
+//! lights; an activate or a layout switch drops the slot without restoring, because the owner
+//! chose something else.
 //!
 //! The gate orders transitions, not builds: a build runs outside it, so Stop and expiry answer
 //! while a slow HTML layer loads. The gate is taken to read the slot, to swap it and to apply.
@@ -106,6 +108,15 @@ impl Slot {
     }
 }
 
+/// The build that last failed and the draft it was for. A beat that carries a failed draft's
+/// source again answers that build's error (422) instead of loading a file that cannot load
+/// every five seconds; the note is dropped when a draft lands.
+struct FailedBuild {
+    /// The HTML source the build was given, exactly as the beat gave it.
+    source: Arc<str>,
+    message: String,
+}
+
 /// What a build in flight is building.
 #[derive(Clone)]
 enum Building {
@@ -129,6 +140,10 @@ struct InFlight {
     props: Props,
     /// The effect the draft takes over from, read when the build starts.
     prior: Option<ActiveEffect>,
+    /// The page whose PUT started a stack build. A stack draft's lease does not run out under
+    /// a build the owning page has in flight (D95.4.4). `None` for an HTML draft, which has no
+    /// epoch.
+    epoch: Option<String>,
 }
 
 impl InFlight {
@@ -168,6 +183,8 @@ pub struct Draft {
     tokens: AtomicU64,
     /// Held across a build, so one build runs per route even when drafts change quickly.
     build_lock: tokio::sync::Mutex<()>,
+    /// The build that last failed, until a draft lands.
+    last_failure: Mutex<Option<FailedBuild>>,
 }
 
 impl Default for Draft {
@@ -194,6 +211,7 @@ impl Draft {
             in_flight: Mutex::new(None),
             tokens: AtomicU64::new(0),
             build_lock: tokio::sync::Mutex::new(()),
+            last_failure: Mutex::new(None),
         }
     }
 
@@ -266,10 +284,16 @@ impl Draft {
 
     /// Starts a build and returns its token. A build already in flight is superseded: its
     /// result will find another token and land nowhere.
-    fn begin_build(&self, kind: Building, props: &Props, prior: Option<ActiveEffect>) -> u64 {
+    fn begin_build(
+        &self,
+        kind: Building,
+        props: &Props,
+        prior: Option<ActiveEffect>,
+        epoch: Option<String>,
+    ) -> u64 {
         let token = self.tokens.fetch_add(1, Ordering::SeqCst) + 1;
         *self.lock_in_flight() =
-            Some(InFlight { token, kind, props: props.clone(), prior });
+            Some(InFlight { token, kind, props: props.clone(), prior, epoch });
         token
     }
 
@@ -296,6 +320,71 @@ impl Draft {
     fn supersede_build(&self) {
         *self.lock_in_flight() = None;
     }
+
+    /// Keeps the draft on the lights alive. A beat from the page that owns it renews the slot's
+    /// lease even when it starts or joins a build, so the slot does not run out from under a
+    /// build that is about to land (D95.4.4, item 3).
+    fn renew_lease(&self) {
+        let lease_until = self.now() + canvas_proto::consts::DRAFT_LEASE;
+        if let Some(slot) = self.lock().as_mut() {
+            slot.lease_until = lease_until;
+        }
+    }
+
+    /// True while a build the owning page started is in flight for the live epoch: the slot's
+    /// lease does not end one then.
+    fn building_for_the_live_epoch(&self) -> bool {
+        let Some((live, _)) = self.epochs.live() else {
+            return false;
+        };
+        self.in_flight()
+            .is_some_and(|building| building.epoch.as_deref() == Some(live.as_str()))
+    }
+
+    /// The error the last build of `html` failed with, while nothing has landed since.
+    fn last_failure(&self, html: &str) -> Option<String> {
+        self.lock_failure()
+            .as_ref()
+            .filter(|failed| &*failed.source == html)
+            .map(|failed| failed.message.clone())
+    }
+
+    /// The build of `html` failed: a later beat of the same source answers this, not a reload.
+    fn record_failure(&self, html: &str, message: &str) {
+        *self.lock_failure() = Some(FailedBuild {
+            source: Arc::from(html),
+            message: message.to_string(),
+        });
+    }
+
+    fn clear_failure(&self) {
+        *self.lock_failure() = None;
+    }
+
+    fn lock_failure(&self) -> MutexGuard<'_, Option<FailedBuild>> {
+        self.last_failure.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// Frees the route when a build ends without landing: an error, a join error, or a panic in the
+/// blocking task. Every exit path after [`Draft::begin_build`] holds one, so a failed build's
+/// token never stays in the book for later beats to join. A build that lands has already taken
+/// its token, so the guard is a no-op there; a newer PUT's token is left alone.
+struct BuildLease<'a> {
+    draft: &'a Draft,
+    token: u64,
+}
+
+impl<'a> BuildLease<'a> {
+    fn new(draft: &'a Draft, token: u64) -> Self {
+        Self { draft, token }
+    }
+}
+
+impl Drop for BuildLease<'_> {
+    fn drop(&mut self) {
+        self.draft.take_in_flight_if(self.token);
+    }
 }
 
 /// Why a PUT did not leave a draft on the lights.
@@ -304,6 +393,8 @@ pub enum PutError {
     /// The draft's HTML did not build: the editor's problem (422), and a running draft is left
     /// alone.
     Build(String),
+    /// The stack's name is another stack's, ignoring case: the answer is a 409, as Save's is.
+    Conflict(String),
     /// The stack breaks a rule a Save enforces (422).
     Validation(String),
     /// The daemon could not hand the effect over: not the editor's problem (500).
@@ -314,6 +405,7 @@ impl std::fmt::Display for PutError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PutError::Build(message)
+            | PutError::Conflict(message)
             | PutError::Validation(message)
             | PutError::Internal(message) => f.write_str(message),
         }
@@ -373,8 +465,15 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<bool, PutE
         if let Some(building) = app.draft.in_flight() {
             if building.is_html(html) {
                 app.draft.update_in_flight(building.token, props);
+                app.draft.renew_lease();
                 return Ok(true);
             }
+        }
+
+        // This source failed to load the last time it was built and nothing has landed since:
+        // answer that error instead of loading a file that cannot load on every beat.
+        if let Some(message) = app.draft.last_failure(html) {
+            return Err(PutError::Build(message));
         }
 
         // The layout is read only when the draft starts: a refresh keeps the prior it took over
@@ -387,8 +486,12 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<bool, PutE
             Building::Html { source: Arc::from(html) },
             props,
             prior,
+            None,
         );
     }
+    // Every exit path from here frees the route: an error, a join error, or a panic in the
+    // blocking task must not leave a token for later beats to join.
+    let _lease = BuildLease::new(&app.draft, token);
     // One build per route: a PUT for another source waits for the one in flight to let go.
     let _build = app.draft.build_lock.lock().await;
     if app.draft.in_flight_token() != Some(token) {
@@ -403,7 +506,10 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<bool, PutE
     let effect = tokio::task::spawn_blocking(move || build(&build_id, &build_source))
         .await
         .map_err(|e| PutError::Internal(format!("the draft load task failed: {e}")))?
-        .map_err(PutError::Build)?;
+        .map_err(|message| {
+            app.draft.record_failure(html, &message);
+            PutError::Build(message)
+        })?;
 
     let _gate = app.draft.gate.lock().await;
     // A Stop, an expiry, or another PUT landed while this built: this one is stale.
@@ -413,6 +519,7 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<bool, PutE
     crate::apply_built(app, effect, &building.props)
         .await
         .map_err(PutError::Internal)?;
+    app.draft.clear_failure();
     // The lease starts when the draft reaches the lights, not when its build started: a slow
     // build must not eat the editor's beat.
     let lease_until = app.draft.now() + canvas_proto::consts::DRAFT_LEASE;
@@ -446,10 +553,19 @@ pub async fn put_stack(
     epoch: &str,
     seq: u64,
 ) -> Result<bool, PutError> {
-    // The rules a Save enforces, so the builder never tries a stack the Save would refuse
-    // (D95.4.5, item 2): the HTML cap, the layer cap, names, ranges and nested stacks.
+    // The one check a Save also runs, on the canonical stack (D95.4.4, D95.4.5): a layer written
+    // by its display name is the id it becomes, so the HTML cap counts it, the name rule leaves
+    // out this stack by exact id as `Stacks::put` does, and the stack that is built and hashed is
+    // the one a Save would store.
+    let mut canonical = stack.clone();
     let known = crate::stacks::KnownEffects::from_user(&app.user_effects);
-    crate::stacks::validate_preview(&app.stacks, stack, &known).map_err(PutError::Validation)?;
+    crate::stacks::canonicalise_and_validate(&mut canonical, &app.stacks, &known).map_err(
+        |refusal| match refusal {
+            crate::stacks::StackRefusal::Conflict(message) => PutError::Conflict(message),
+            crate::stacks::StackRefusal::Invalid(message) => PutError::Validation(message),
+        },
+    )?;
+    let stack = &canonical;
 
     let structure = crate::preview::structure_of(app, stack);
     let mut props = crate::preview::props_of(app, stack);
@@ -494,13 +610,15 @@ pub async fn put_stack(
 
         // The same structure is already building: this beat joins it. The live map is the one
         // the building effect reads, so the values are there when it lands; its props are the
-        // newest, and no second build starts.
+        // newest, and no second build starts. The beat also renews the lease of the draft on the
+        // lights, which is still the one the build will replace.
         if let Some(building) = app.draft.in_flight() {
             if building.is_stack(&stack.id, &structure) {
                 if let Building::Stack { live, .. } = &building.kind {
                     crate::stack::replace_live(live, stack);
                 }
                 app.draft.update_in_flight(building.token, &props);
+                app.draft.renew_lease();
                 tracing::info!(stack = %stack.id, seq, "a beat joined the stack draft build in flight");
                 return Ok(true);
             }
@@ -518,8 +636,12 @@ pub async fn put_stack(
             },
             &props,
             prior,
+            Some(epoch.to_string()),
         );
     }
+    // Every exit path from here frees the route: an error, a join error, or a panic in the
+    // blocking task must not leave a token for later beats to join.
+    let _lease = BuildLease::new(&app.draft, token);
     // One build per route: a PUT for another structure waits for the one in flight to let go.
     let _build = app.draft.build_lock.lock().await;
     if app.draft.in_flight_token() != Some(token) {
@@ -564,6 +686,7 @@ pub async fn put_stack(
     crate::apply_built(app, effect, &building.props)
         .await
         .map_err(PutError::Internal)?;
+    app.draft.clear_failure();
     // The stack is what the main engine runs: a save-then-activate with the same structure
     // reuses it instead of building again (D95.4.3, D95.4.6).
     app.stacks.note_running(&stack.id, &structure, Arc::clone(&live));
@@ -584,20 +707,40 @@ pub async fn put_stack(
     Ok(true)
 }
 
+/// What `DELETE /effects/draft` did.
+pub struct StopOutcome {
+    /// False when the page that asked does not own the draft: nothing ended, and the draft of
+    /// the page that does own it is left alone (D95.4.4, item 4).
+    pub applied: bool,
+    /// What ending the draft did to the lights, when one ended here.
+    pub ended: Option<Ended>,
+}
+
 /// Stops the draft and puts the prior effect back (the editor's Stop).
+///
+/// `epoch` is the page's session epoch when the caller sends one: a page that does not own the
+/// draft ends nothing and is answered `applied: false`, so a stale tab's Stop cannot take the
+/// lights off the page that owns them.
 ///
 /// The slot always goes: a Stop, an expiry or a GET after the lease is over never leaves a
 /// draft behind. When the prior effect cannot be built (its file was deleted mid-draft, say),
 /// black goes on the lights and [`Ended::note`] says so; the answer is still a success.
-pub async fn stop(app: &Arc<App>) -> Option<Ended> {
+pub async fn stop(app: &Arc<App>, epoch: Option<&str>) -> StopOutcome {
     let _gate = app.draft.gate.lock().await;
+    if let Some(epoch) = epoch {
+        if !app.draft.epochs.holds(epoch) {
+            return StopOutcome { applied: false, ended: None };
+        }
+    }
     // An explicit Stop cancels a build that is still running, even when the first draft has
     // not landed yet: a builder that stopped does not want it on the lights afterwards.
     app.draft.supersede_build();
     // The live sequence goes, the epoch order stays: the tab that stopped can start again with
     // its next PUT, and an older tab still cannot take the lights (D95.4.4, item 4).
     app.draft.epochs.clear_live();
-    let slot = app.draft.lock().take()?;
+    let Some(slot) = app.draft.lock().take() else {
+        return StopOutcome { applied: true, ended: None };
+    };
     let ended = restore(app, &slot).await;
     app.draft.remember_ending(&ended);
     tracing::info!(
@@ -605,7 +748,7 @@ pub async fn stop(app: &Arc<App>) -> Option<Ended> {
         note = ended.note.as_deref().unwrap_or(""),
         "the draft stopped"
     );
-    Some(ended)
+    StopOutcome { applied: true, ended: Some(ended) }
 }
 
 /// Ends a draft whose lease ran out: Stop, without the editor asking. Returns what happened
@@ -621,10 +764,14 @@ pub async fn expire_if_due(app: &Arc<App>) -> Option<Ended> {
 /// [`expire_if_due`] with the gate already held.
 async fn expire_locked(app: &Arc<App>) -> Option<Ended> {
     let now = app.draft.now();
+    // A build the page that owns the draft has in flight keeps the slot: the lease is renewed
+    // when that build lands, and expiring the slot now would put the prior effect back under a
+    // draft that is about to reach the lights (D95.4.4, item 3).
+    let building_for_it = app.draft.building_for_the_live_epoch();
     let due = {
         let mut guard = app.draft.lock();
         match guard.as_ref() {
-            Some(slot) if now >= slot.lease_until => guard.take(),
+            Some(slot) if now >= slot.lease_until && !building_for_it => guard.take(),
             _ => None,
         }
     };

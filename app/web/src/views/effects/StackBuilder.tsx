@@ -67,6 +67,7 @@ import {
 } from "@/views/effects/stackDraft";
 import { api } from "@/lib/endpoints";
 import { ApiFailure, messageOf } from "@/lib/errors";
+import { onStackPreviewFeed } from "@/lib/stackPreview";
 import {
   cancelNavigation,
   continueNavigation,
@@ -102,6 +103,8 @@ const BLENDS: { value: BlendMode; label: string; note: string }[] = [
 ];
 
 type DraftState = "off" | "starting" | "running" | "expiring" | "restoring" | "restore-error";
+/** Why the unsaved prompt is open, recorded when it opens and read when it is answered. */
+type LeaveReason = "back" | "navigation" | "close";
 
 function nameOf(id: string): string {
   return id.startsWith("stack:") ? id.slice("stack:".length) : id;
@@ -174,8 +177,12 @@ export function StackBuilder({
   const [namingError, setNamingError] = useState<string | null>(null);
   /** A leave the unsaved prompt asked for, carried out once the new stack has a name. */
   const leaveAfterName = useRef<(() => void) | null>(null);
-  const [leaving, setLeaving] = useState(false);
+  /** The name a new stack was saved under: the guard entry the builder lands on takes it. */
+  const pendingName = useRef<string | null>(null);
+  const [leaving, setLeaving] = useState<LeaveReason | false>(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  /** What the preview feed says is wrong with it: the daemon refuses a second stack socket. */
+  const [feedProblem, setFeedProblem] = useState<string | null>(null);
   const [draftState, setDraftState] = useState<DraftState>("off");
   const [draftError, setDraftError] = useState<string | null>(null);
   const [draftNote, setDraftNote] = useState<string | null>(null);
@@ -209,23 +216,28 @@ export function StackBuilder({
   const session = useRef<StackSession | null>(null);
   if (!session.current) session.current = new StackSession(newEpoch());
   const previewTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const previewSentAt = useRef(0);
+  /** The max wait's own timer: a change never moves it, so a steady stream of changes cannot put
+   *  a send off for ever. */
+  const previewWait = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** When the last change arrived: a change that follows another within one debounce is part of
+   *  the same drag, and only then does the max wait apply. */
   const previewChangedAt = useRef(0);
+  const previewSentAt = useRef(0);
   const appliedSeq = useRef(0);
   const previewRetry = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastDraftKey = useRef("");
   const schemasRef = useRef<Record<string, PropertySchema | null>>({});
   const fetching = useRef(new Set<string>());
-  // One add and one effect choice at a time: a second click while the effect is being read is
-  // dropped, so two fast clicks cannot share a layer id or pass the HTML cap twice.
-  const adding = useRef(false);
+  // One add and one effect choice at a time: adds wait their turn in `addChain`, so two fast
+  // clicks cannot share a layer id or pass the HTML cap twice.
+  const addChain = useRef<Promise<void>>(Promise.resolve());
+  const addQueued = useRef(new Set<string>());
   const choosing = useRef(false);
   const draftOn = useRef(false);
   const heartbeatMs = useRef(HEARTBEAT_FALLBACK_MS);
   const leaseMs = useRef(LEASE_FALLBACK_MS);
   const lastBeatAt = useRef(0);
   const restoreStarted = useRef(false);
-  const backAsked = useRef(false);
   const allowBack = useRef(false);
   const sentinelPushed = useRef(false);
   /** A Save or Discard that will leave the builder: the guard entry is not popped separately. */
@@ -282,7 +294,6 @@ export function StackBuilder({
   /** Keep editing: the leave prompt closes, and focus goes back where it was. */
   const keepEditing = useCallback(() => {
     setLeaving(false);
-    backAsked.current = false;
     cancelNavigation();
   }, []);
 
@@ -568,32 +579,48 @@ export function StackBuilder({
       }
     } catch (e) {
       if (!mounted.current) return;
-      if (!retried && e instanceof ApiFailure && e.status === 503) {
-        previewRetry.current = setTimeout(() => void sendPreview(true), e.retryAfterMs ?? 1_000);
+      // A busy daemon says when to ask again. Anything else is a transport failure or a server
+      // error, and one more try 400 ms later is the difference between a preview that catches up
+      // and one that stays on the last frame until the next change.
+      const wait =
+        e instanceof ApiFailure ? (e.status === 503 ? (e.retryAfterMs ?? 1_000) : null) : PREVIEW_DEBOUNCE_MS;
+      if (!retried && wait !== null) {
+        previewRetry.current = setTimeout(() => void sendPreview(true), wait);
         return;
       }
       setPreviewError(messageOf(e));
     }
   }
 
+  /** Sends now, and forgets both timers: a send is the end of the wait either way. */
+  function flushPreview() {
+    if (previewTimer.current) clearTimeout(previewTimer.current);
+    if (previewWait.current) clearTimeout(previewWait.current);
+    previewTimer.current = null;
+    previewWait.current = null;
+    void sendPreview();
+  }
+
   function queuePreview() {
     const now = Date.now();
-    // A change that follows another within one debounce is a continuing drag: while it lasts,
-    // a send goes at least every 400 ms. A lone change always waits 400 ms after itself, so a
-    // burst that ends at t=300 sends at t=700.
-    const inStream = previewChangedAt.current > 0 && now - previewChangedAt.current < PREVIEW_DEBOUNCE_MS;
+    // A change waits 400 ms after itself. A change that follows another within one debounce is
+    // part of a drag, and the drag gets a wait of its own that a change does not move, due 400 ms
+    // after the last send: a change every 300 or 390 ms then sends every 400 ms, not every 600
+    // or 780 (D95.4.4). A change after a quiet spell is alone, and waits out the debounce.
+    const inStream = previewChangedAt.current > 0 && now - previewChangedAt.current <= PREVIEW_DEBOUNCE_MS;
     previewChangedAt.current = now;
-    const overdue = inStream && previewSentAt.current > 0 && now - previewSentAt.current >= PREVIEW_DEBOUNCE_MS;
     if (previewTimer.current) clearTimeout(previewTimer.current);
-    if (overdue) {
-      previewTimer.current = null;
-      void sendPreview();
-      return;
-    }
     previewTimer.current = setTimeout(() => {
       previewTimer.current = null;
-      void sendPreview();
+      flushPreview();
     }, PREVIEW_DEBOUNCE_MS);
+    if (inStream && !previewWait.current) {
+      const due = Math.max(0, previewSentAt.current + PREVIEW_DEBOUNCE_MS - now);
+      previewWait.current = setTimeout(() => {
+        previewWait.current = null;
+        flushPreview();
+      }, due);
+    }
   }
 
   // The first draft on screen opens the preview at once; every later change waits out the
@@ -614,11 +641,16 @@ export function StackBuilder({
   useEffect(
     () => () => {
       if (previewTimer.current) clearTimeout(previewTimer.current);
+      if (previewWait.current) clearTimeout(previewWait.current);
       if (previewRetry.current) clearTimeout(previewRetry.current);
-      void api.deleteStackPreview().catch(() => undefined);
+      void api.deleteStackPreview(session.current?.epoch).catch(() => undefined);
     },
     [],
   );
+
+  // The daemon opens one stack preview at a time: a second builder's socket is refused with a
+  // reason (`api/preview.rs`), and the page says so instead of showing a still picture.
+  useEffect(() => onStackPreviewFeed(setFeedProblem), []);
 
   // ---- the draft on the lights ------------------------------------------------------
 
@@ -692,11 +724,17 @@ export function StackBuilder({
     draftOn.current = false;
     setDraftState("restoring");
     setDraftError(null);
+    setDraftNote(null);
+    const epoch = session.current?.epoch;
     try {
-      const answer = await api.deleteDraft();
+      const answer = await api.deleteDraft(epoch);
       if (!mounted.current) return;
       setDraftState("off");
-      if (answer.note) setDraftNote(answer.note);
+      if (answer.applied === false) {
+        // Another page owns the lights now: this Stop ended nothing, and saying it did would be
+        // a lie (D95.4.4, item 4).
+        setDraftNote("Another window has the lights now; this window's Stop ended nothing.");
+      } else if (answer.note) setDraftNote(answer.note);
     } catch (e) {
       if (!mounted.current) return;
       setDraftState("restore-error");
@@ -705,11 +743,13 @@ export function StackBuilder({
   };
 
   // Leaving the builder stops the draft: nothing is left on the lights without a page to stop it.
+  // The page's epoch goes with it, so a builder that lost the lights leaves the newer page's
+  // draft alone.
   useEffect(
     () => () => {
       if (draftOn.current) {
         draftOn.current = false;
-        void api.deleteDraft().catch(() => undefined);
+        void api.deleteDraft(session.current?.epoch).catch(() => undefined);
       }
     },
     [],
@@ -756,23 +796,61 @@ export function StackBuilder({
 
   // ---- unsaved changes --------------------------------------------------------------
 
-  /** Carries out the way out the prompt was asked about: Back, a held page change, or a close. */
-  const goAfterLeave = () => {
-    if (backAsked.current) {
-      backAsked.current = false;
+  /** A direct load has no page behind the builder, and a save or a discard leaves the guard entry
+   *  on top of the builder's own. Land on that entry and rewrite it, so no entry the browser can
+   *  reach reopens the builder (D95.5.8). */
+  const closeDirect = () => {
+    pendingLeave.current = true;
+    allowBack.current = true;
+    if (!sentinelPushed.current) {
+      onClose();
+      return;
+    }
+    sentinelPushed.current = false;
+    const done = () => {
+      window.removeEventListener("popstate", done);
+      onClose();
+    };
+    window.addEventListener("popstate", done);
+    window.history.go(-1);
+  };
+
+  /** The guard entry is a copy of the builder's. When the builder was saved under a new name, the
+   *  entry behind it still reads the `new` sentinel: land on it and rewrite its URL (D95.5.1). */
+  const dropGuardEntry = () => {
+    const wanted = pendingName.current;
+    pendingName.current = null;
+    if (!wanted) {
+      window.history.back();
+      return;
+    }
+    const done = () => {
+      window.removeEventListener("popstate", done);
+      onName(wanted);
+    };
+    window.addEventListener("popstate", done);
+    window.history.back();
+  };
+
+  /** Carries out the way out the prompt was asked about, as it was asked: a Back the guard
+   *  caught is not the same leave as the close key pressed afterwards. */
+  const goAfterLeave = (reason: LeaveReason) => {
+    pendingName.current = null;
+    if (reason === "back") {
       allowBack.current = true;
       pendingLeave.current = true;
       // Back goes past the guard entry and past the builder, one page in all. A direct load
       // has no page behind it, so the builder closes onto the effects page instead.
       if (openedInApp.current) window.history.go(-2);
-      else onClose();
+      else closeDirect();
       return;
     }
     if (hasPendingNavigation()) {
       continueNavigation();
       return;
     }
-    onClose();
+    if (sentinelPushed.current) closeDirect();
+    else onClose();
   };
 
   useEffect(() => {
@@ -782,13 +860,13 @@ export function StackBuilder({
         sentinelPushed.current = false;
         // A leave that is under way navigates itself; popping the guard first would move
         // history one extra time.
-        if (!pendingLeave.current) window.history.back();
+        if (!pendingLeave.current) dropGuardEntry();
       }
+      pendingName.current = null;
       return;
     }
     setNavigationGuard(() => {
-      backAsked.current = false;
-      setLeaving(true);
+      setLeaving("navigation");
       return false;
     });
     const onPop = () => {
@@ -799,8 +877,7 @@ export function StackBuilder({
         window.location.href,
       );
       sentinelPushed.current = true;
-      backAsked.current = true;
-      setLeaving(true);
+      setLeaving("back");
     };
     window.history.pushState(
       { ...(window.history.state ?? {}), canvasRgbStackGuard: true },
@@ -813,6 +890,9 @@ export function StackBuilder({
       window.removeEventListener("popstate", onPop);
       setNavigationGuard(null);
     };
+    // The guard's own history and the leave helpers read refs and props; only a change to
+    // `dirty` registers or drops it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dirty]);
 
   useEffect(() => {
@@ -887,7 +967,10 @@ export function StackBuilder({
       // that was stored, not the spelling the prompt collected.
       const stored = nameOf(saved.id);
       setNameDraft(stored);
-      onName(stored);
+      // Leaving now: the URL is rewritten here, because no guard pop will follow. Otherwise the
+      // guard entry is dropped and the entry the builder lands on takes the name (D95.5.1).
+      if (pendingLeave.current) onName(stored);
+      else pendingName.current = stored;
     }
     setSaveState("idle");
     setClash(null);
@@ -963,7 +1046,7 @@ export function StackBuilder({
   };
 
   const askLeave = () => {
-    if (dirty) setLeaving(true);
+    if (dirty) setLeaving("close");
     else onClose();
   };
 
@@ -991,8 +1074,9 @@ export function StackBuilder({
             variant="danger"
             disabled={saveState === "saving"}
             onClick={() => {
+              const reason: LeaveReason = leaving || "close";
               setLeaving(false);
-              goAfterLeave();
+              goAfterLeave(reason);
             }}
           >
             Discard
@@ -1002,16 +1086,18 @@ export function StackBuilder({
             variant="primary"
             disabled={saveState === "saving"}
             onClick={() => {
+              // The leave the prompt was asked about, carried out once there is a name.
+              const reason: LeaveReason = leaving || "close";
               setLeaving(false);
               const wanted = (isNew ? nameRef.current : name).trim();
               if (wanted.length === 0) {
                 // The name prompt comes first; saving it also carries out the leave.
-                leaveAfterName.current = goAfterLeave;
+                leaveAfterName.current = () => goAfterLeave(reason);
                 setNaming(true);
                 setNamingError(null);
                 return;
               }
-              void save(goAfterLeave);
+              void save(() => goAfterLeave(reason));
             }}
           >
             Save
@@ -1059,50 +1145,60 @@ export function StackBuilder({
     }
   };
 
-  const addEffect = async (effect: string) => {
-    if (adding.current) return;
+  const addOne = async (effect: string) => {
     const refusal = addLayerRefusal(draftRef.current.layers, effect);
     if (refusal) {
       toast(refusal, "warn");
       return;
     }
-    adding.current = true;
+    let schema: PropertySchema | null = null;
+    let props: Record<string, PropValue> = {};
     try {
-      let schema: PropertySchema | null = null;
-      let props: Record<string, PropValue> = {};
-      try {
-        const detail = await api.effect(effect);
-        schema = detail.schema;
-        props = detail.props;
-        setSchemas((current) => ({ ...current, [effect]: detail.schema }));
-      } catch {
-        setSchemas((current) => ({ ...current, [effect]: null }));
-      }
-      if (!mounted.current) return;
-      // The draft may have moved while the effect was read: check the cap and pick the id
-      // against the latest draft, so two fast clicks cannot exceed the HTML cap or share an id.
-      const layers = draftRef.current.layers;
-      const lateRefusal = addLayerRefusal(layers, effect);
-      if (lateRefusal) {
-        toast(lateRefusal, "warn");
-        return;
-      }
-      const id = nextLayerId(layers);
-      if (!id) return;
-      const layer: StackLayer = {
-        ...makeLayer(effect, freeLayerName(schema?.name ?? effect, layers), schema, props),
-        id,
-      };
-      // The ref is updated with the draft, so a second click in the same tick sees this layer.
-      const next = { ...draftRef.current, layers: addLayer(layers, layer) };
-      draftRef.current = next;
-      setDraft(next);
-      setPicked(id);
-      closeAdd();
-      setAddQuery("");
-    } finally {
-      adding.current = false;
+      const detail = await api.effect(effect);
+      schema = detail.schema;
+      props = detail.props;
+      setSchemas((current) => ({ ...current, [effect]: detail.schema }));
+    } catch {
+      setSchemas((current) => ({ ...current, [effect]: null }));
     }
+    if (!mounted.current) return;
+    // The draft may have moved while the effect was read: check the cap and pick the id
+    // against the latest draft, so two fast clicks cannot exceed the HTML cap or share an id.
+    const layers = draftRef.current.layers;
+    const lateRefusal = addLayerRefusal(layers, effect);
+    if (lateRefusal) {
+      toast(lateRefusal, "warn");
+      return;
+    }
+    const id = nextLayerId(layers);
+    if (!id) return;
+    const layer: StackLayer = {
+      ...makeLayer(effect, freeLayerName(schema?.name ?? effect, layers), schema, props),
+      id,
+    };
+    // The ref is updated with the draft, so a queued add sees this layer.
+    const next = { ...draftRef.current, layers: addLayer(layers, layer) };
+    draftRef.current = next;
+    setDraft(next);
+    setPicked(id);
+    setAddOpen(false);
+    setAddQuery("");
+  };
+
+  const addEffect = (effect: string) => {
+    // One add at a time, in the order the clicks came (D95.5.3). A second click on a different
+    // row waits its turn and lands; a second click on the same row is the same add.
+    if (addQueued.current.has(effect)) return;
+    addQueued.current.add(effect);
+    const run = addChain.current.then(async () => {
+      try {
+        await addOne(effect);
+      } finally {
+        addQueued.current.delete(effect);
+      }
+    });
+    addChain.current = run.catch(() => undefined);
+    return run;
   };
 
   const remove = (id: string) => {
@@ -1410,9 +1506,11 @@ export function StackBuilder({
                         ? `The preview stopped: ${previewError}`
                         : draftError
                           ? `Try on the lights failed: ${draftError}`
-                          : count === 0
-                            ? "An empty stack runs nothing; the lights keep their effect."
-                            : "Preview only — nothing is on the lights."}
+                          : feedProblem
+                            ? `The preview is not showing: ${feedProblem}`
+                            : count === 0
+                              ? "An empty stack runs nothing; the lights keep their effect."
+                              : "Preview only — nothing is on the lights."}
                     </span>
                     <span className="row-wrap">
                       {fpsTarget > 50 && html > 0 && (

@@ -715,7 +715,9 @@ pub struct DraftStatus {
     #[ts(optional)]
     pub note: Option<String>,
     /// A PUT's answer: whether it left a draft on the lights. A stack draft that was superseded
-    /// by a newer epoch or sequence answers `false` with a 200. Absent on GET and DELETE.
+    /// by a newer epoch or sequence answers `false` with a 200. A DELETE that carries the page's
+    /// epoch answers `false` when that page does not own the draft, which is left running.
+    /// Absent on GET and on a DELETE with no epoch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub applied: Option<bool>,
