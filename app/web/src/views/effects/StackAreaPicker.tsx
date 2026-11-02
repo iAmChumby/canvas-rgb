@@ -64,7 +64,21 @@ export function StackAreaPicker({
     layer.area.kind === "zone" ? layer.area.zone : layout?.zones.find((zone) => zone.visible)?.zone_index ?? 0,
   );
   const svgRef = useRef<SVGSVGElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
   const drag = useRef<{ kind: "draw"; from: { x: number; y: number } } | { kind: "pan"; clientX: number; clientY: number; panX: number; panY: number } | null>(null);
+
+  // Escape closes the picker; the builder puts focus back on the key that opened it. The dialog
+  // itself takes focus when it opens, so the keyboard starts inside it.
+  useEffect(() => {
+    dialogRef.current?.focus();
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
 
   const deviceOptions = useMemo(() => {
     const ids: string[] = [];
@@ -179,7 +193,7 @@ export function StackAreaPicker({
 
   return (
     <div className="rd-scrim" role="presentation" onPointerDown={(event) => event.target === event.currentTarget && onClose()}>
-      <div className="rd-picker" role="dialog" aria-modal="true" aria-label={`Area for ${layer.name}`}>
+      <div className="rd-picker" role="dialog" aria-modal="true" aria-label={`Area for ${layer.name}`} ref={dialogRef} tabIndex={-1}>
         <div className="rd-picker-head">
           <div>
             <h2>Area for {layer.name}</h2>

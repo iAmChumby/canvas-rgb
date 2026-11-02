@@ -354,7 +354,7 @@ describe("the stack builder", () => {
     await renderEffects("?stack=new&state=complete,stack");
     await screen.findByTestId("stack-builder");
     expect(screen.getByText("Nothing to show yet")).toBeTruthy();
-    expect(screen.getByText("The bottom layer is painted first.")).toBeTruthy();
+    expect(screen.getByText("The bottom layer is painted first, then each layer over it.")).toBeTruthy();
     const save = screen.getByRole("button", { name: "Save" });
     expect(save).toHaveProperty("disabled", true);
     const tryOn = screen.getByRole("button", { name: "Try on the lights" });
@@ -365,6 +365,7 @@ describe("the stack builder", () => {
 
   it("changes the picked layer's opacity, and the preview carries it", async () => {
     await openBuilder();
+    await waitFor(() => expect(layerNames()).toContain("Sparkles"));
     const row = screen.getByText("Sparkles").closest("li");
     expect(row).not.toBeNull();
     if (row) fireEvent.click(row);
