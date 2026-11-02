@@ -10,10 +10,11 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use canvas_daemon::api;
 use canvas_daemon::stack::{
-    self, blend_pixel, html_budget, AreaMap, Clock, LeafBuilder, LiveMap, StackEffect,
+    self, blend_pixel, html_budget, AreaMap, Clock, LeafBuilder, LiveMap, Mask, StackEffect,
 };
 use canvas_daemon::state::App;
 use canvas_proto::api::{routes, StackLayerState};
+use canvas_proto::config::EFFECTS_FILE;
 use canvas_proto::device::{DeviceId, DeviceInfo, DeviceKind, ZoneInfo, ZoneKind};
 use canvas_proto::layout::{
     Layout, LedSlice, PlacedZone, RenderScale, SamplingMode, ZoneShape,
@@ -487,6 +488,58 @@ impl Effect for Paint {
     }
 }
 
+/// A fake layer whose `init` panics: the compositor must fault it, not unwind into the engine.
+struct PanickyInit;
+
+impl Effect for PanickyInit {
+    fn schema(&self) -> PropertySchema {
+        PropertySchema {
+            id: "panicky".into(),
+            name: "Panicky".into(),
+            description: String::new(),
+            needs: InputNeeds::default(),
+            properties: Vec::new(),
+            presets: Vec::new(),
+            thumbnail: None,
+        }
+    }
+
+    fn init(&mut self, _props: &Props) {
+        panic!("a layer's init panicked");
+    }
+
+    fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &Inputs) {
+        canvas.fill([1.0, 0.0, 0.0]);
+    }
+}
+
+/// A fake tile layer whose start unwinds with the tile render's own failure payload: a stack
+/// tile must still refuse the tile rather than draw a quietly different picture.
+struct TileFailingInit;
+
+impl Effect for TileFailingInit {
+    fn schema(&self) -> PropertySchema {
+        PropertySchema {
+            id: "tile".into(),
+            name: "Tile".into(),
+            description: String::new(),
+            needs: InputNeeds::default(),
+            properties: Vec::new(),
+            presets: Vec::new(),
+            thumbnail: None,
+        }
+    }
+
+    fn init(&mut self, _props: &Props) {
+        std::panic::resume_unwind(Box::new(canvas_daemon::thumbnail::TileFailure {
+            reason: "the tile's script failed".into(),
+            load_dependent: false,
+        }));
+    }
+
+    fn update(&mut self, _dt: f32, _canvas: &mut Canvas, _inputs: &Inputs) {}
+}
+
 /// A leaf builder that hands every layer a [`Paint`] and counts the builds.
 fn paint_leaves(
     updates: Arc<AtomicU64>,
@@ -737,6 +790,115 @@ async fn stacks_round_trip_and_a_broken_file_never_stops_the_daemon() {
     assert_eq!(canvas.get(5, 5), [1.0, 0.0, 0.0]);
 }
 
+// ================================================================ a load check
+
+/// A stack read from the file is validated like a save: one that breaks a rule (here an id
+/// without the `stack:` prefix) is dropped with its reason logged, and the rest load.
+#[tokio::test]
+async fn a_stack_that_fails_its_rules_is_dropped_as_it_loads() {
+    let home = TempHome::new("t-load-check");
+    std::fs::write(
+        home.path.join(STACKS_FILE),
+        r#"{"schema_version":1,"stacks":[
+            {"id":"stack:Good","layers":[{"id":"l1","name":"Base","effect":"solid"}]},
+            {"id":"Glow","layers":[{"id":"l1","name":"Base","effect":"solid"}]}]}"#,
+    )
+    .unwrap();
+    let harness = harness_at(home);
+
+    let effects = json(harness.router.clone().oneshot(request("GET", routes::EFFECTS)).await.unwrap()).await;
+    let ids: Vec<&str> = effects["effects"]
+        .as_array()
+        .expect("the effect list is an array")
+        .iter()
+        .filter_map(|effect| effect["id"].as_str())
+        .collect();
+    assert!(ids.contains(&"stack:Good"), "the valid stack loads: {ids:?}");
+    assert!(!ids.contains(&"stack:Glow"), "the stack with no prefix is dropped: {ids:?}");
+
+    let stored = json(harness.router.clone().oneshot(request("GET", routes::STACKS)).await.unwrap()).await;
+    let names: Vec<&str> = stored["stacks"]
+        .as_array()
+        .expect("the stack list is an array")
+        .iter()
+        .filter_map(|stack| stack["id"].as_str())
+        .collect();
+    assert_eq!(names, vec!["stack:Good"]);
+}
+
+// ================================================================ a failed delete
+
+/// A directory where the file should be, so `write_json` cannot rename over it.
+fn block(path: &std::path::Path) {
+    if path.exists() {
+        std::fs::remove_file(path).expect("the file is removed");
+    }
+    std::fs::create_dir(path).expect("a directory stands where the file was");
+}
+
+/// A delete that cannot write the stack file is an error, and the stack, its presets and its
+/// favourite are all still there.
+#[tokio::test]
+async fn a_delete_that_cannot_write_keeps_the_stack_and_its_presets() {
+    let harness = build("t-delete-fail");
+    let stack = stack("stack:Doomed", vec![layer("l1", "solid")]);
+    assert_eq!(put_stack(&harness, &stack).await, StatusCode::OK);
+    {
+        let mut store = harness.app.store.write().await;
+        store.effects.presets.insert("stack:Doomed".into(), Vec::new());
+        store.effects.favorites.push("stack:Doomed".into());
+    }
+    block(&harness.home.path.join(STACKS_FILE));
+
+    let response = harness
+        .router
+        .clone()
+        .oneshot(request("DELETE", &stack_path("stack:Doomed")))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let stored = json(harness.router.clone().oneshot(request("GET", routes::STACKS)).await.unwrap()).await;
+    assert_eq!(stored["stacks"].as_array().map(Vec::len), Some(1), "the stack is still there: {stored}");
+    let store = harness.app.store.read().await;
+    assert!(store.effects.presets.contains_key("stack:Doomed"), "its presets are back");
+    assert!(
+        store.effects.favorites.iter().any(|favorite| favorite == "stack:Doomed"),
+        "its favourite is back"
+    );
+}
+
+/// A delete whose preset save fails removes nothing: the stack is still on the engine's book.
+#[tokio::test]
+async fn a_delete_whose_presets_cannot_be_saved_removes_nothing() {
+    let harness = build("t-delete-presets");
+    let stack = stack("stack:Doomed", vec![layer("l1", "solid")]);
+    assert_eq!(put_stack(&harness, &stack).await, StatusCode::OK);
+    {
+        let mut store = harness.app.store.write().await;
+        store.effects.presets.insert("stack:Doomed".into(), Vec::new());
+        store.effects.favorites.push("stack:Doomed".into());
+    }
+    block(&harness.home.path.join(EFFECTS_FILE));
+
+    let response = harness
+        .router
+        .clone()
+        .oneshot(request("DELETE", &stack_path("stack:Doomed")))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let stored = json(harness.router.clone().oneshot(request("GET", routes::STACKS)).await.unwrap()).await;
+    assert_eq!(stored["stacks"].as_array().map(Vec::len), Some(1), "the stack is still there: {stored}");
+    let store = harness.app.store.read().await;
+    assert!(store.effects.presets.contains_key("stack:Doomed"), "its presets are back");
+    assert!(
+        store.effects.favorites.iter().any(|favorite| favorite == "stack:Doomed"),
+        "its favourite is back"
+    );
+}
+
 // ================================================================ test 2
 
 /// A stack body as JSON, so a test can write a value serde would refuse (an opacity of -1).
@@ -893,6 +1055,67 @@ async fn names_ids_caps_and_ranges_are_refused() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "a 400-wide rectangle is refused: {message}");
 }
 
+// ================================================================ a display name
+
+/// A layer saved with an effect's display name is stored with the id the builder takes, so it
+/// paints; a layer whose effect does not build reports `missing`, never an ok that draws nothing.
+#[tokio::test]
+async fn a_layer_saved_with_a_display_name_runs_that_effect() {
+    let harness = build("t-display-name");
+    assert_eq!(
+        put_stack(&harness, &stack("stack:Firey", vec![layer("l1", "Fire")])).await,
+        StatusCode::OK
+    );
+    let saved = harness.app.stacks.get("stack:Firey").expect("the stack was saved");
+    assert_eq!(saved.layers[0].effect, "fire", "the display name is stored as the id");
+
+    // Its detail says ok, and a frame over it paints.
+    let detail = json(
+        harness
+            .router
+            .clone()
+            .oneshot(request("GET", &stack_path("stack:Firey")))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(detail["layers"][0]["status"], "ok", "{detail}");
+    let mut effect = canvas_daemon::create_effect(
+        &harness.app.user_effects,
+        &harness.app.stacks,
+        "stack:Firey",
+    )
+    .expect("the stack builds");
+    effect.init(&Props::new());
+    let mut canvas = Canvas::with_scale(1.0);
+    effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+    assert!(
+        canvas.pixels.iter().any(|pixel| pixel.iter().any(|c| *c > 0.0)),
+        "the layer paints"
+    );
+
+    // A layer that names a stack is missing: `find_schema` resolves a stack, and the layer
+    // builder does not, so an ok here would be a layer that draws nothing.
+    assert_eq!(
+        put_stack(&harness, &stack("stack:Glow", vec![layer("l1", "solid")])).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        put_stack(&harness, &stack("stack:Home", vec![layer("l1", "Glow")])).await,
+        StatusCode::OK
+    );
+    let detail = json(
+        harness
+            .router
+            .clone()
+            .oneshot(request("GET", &stack_path("stack:Home")))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(detail["layers"][0]["status"], "missing_effect", "{detail}");
+}
+
 // ================================================================ test 3
 
 /// The blend table of D95.3.3 lives in `stack::blend_pixel` and is tested there, against the
@@ -985,10 +1208,63 @@ fn paint_area(area: LayerArea, layout: &Layout, devices: &[DeviceInfo]) -> Canva
     canvas
 }
 
+/// True when the two masks cover at least one shared pixel.
+fn masks_share(a: &Mask, b: &Mask) -> bool {
+    let (Some(ear), Some(ebr)) = (a.extent(), b.extent()) else {
+        return false;
+    };
+    let x0 = ear[0].max(ebr[0]).floor().max(0.0) as u32;
+    let y0 = ear[1].max(ebr[1]).floor().max(0.0) as u32;
+    let x1 = ear[2].min(ebr[2]).ceil().max(0.0) as u32;
+    let y1 = ear[3].min(ebr[3]).ceil().max(0.0) as u32;
+    (y0..y1).any(|y| (x0..x1).any(|x| a.contains(x, y) && b.contains(x, y)))
+}
+
+/// For each device, whether each of its LEDs has an owner.
+type OwnedLeds = Vec<Vec<bool>>;
+/// For each device, each zone's `(index, start, count)` in that device's colour list.
+type ZoneRanges = Vec<Vec<(u32, usize, usize)>>;
+
+/// The desk's LEDs from the sample plan: for each device, whether each LED has an owner, and
+/// each zone's `(index, start, count)` range in that device's colour list.
+fn desk_leds(layout: &Layout, devices: &[DeviceInfo]) -> (OwnedLeds, ZoneRanges) {
+    let plan = stack::sample_plan(layout, devices);
+    let mut owned = Vec::new();
+    let mut ranges = Vec::new();
+    for device in &plan.devices {
+        let mut flags = Vec::new();
+        let mut zones = Vec::new();
+        for zone in &device.zones {
+            let start = flags.len();
+            flags.extend(zone.leds.iter().map(|led| led.sampled));
+            zones.push((zone.zone_index, start, zone.leds.len()));
+        }
+        owned.push(flags);
+        ranges.push(zones);
+    }
+    (owned, ranges)
+}
+
+/// The other desk devices whose sample footprint shares a pixel with `device`'s at `scale`:
+/// the canvas has no z-order, so two parts drawn over each other share those pixels (D95.2.3).
+/// The roof strip and the top front fan meet at the fan's top edge at 50 % area average, and
+/// at 100 % nearest the two are four pixels apart.
+fn shares_with(device: &str, scale: RenderScale) -> Vec<&'static str> {
+    if !matches!(scale, RenderScale::P50) {
+        return Vec::new();
+    }
+    match device {
+        ROOF_STRIP => vec![FRONT_HUB],
+        FRONT_HUB => vec![ROOF_STRIP],
+        _ => Vec::new(),
+    }
+}
+
 #[test]
-fn areas_paint_only_their_own_pixels_and_their_own_leds() {
+fn areas_paint_their_own_leds_and_share_the_pixels_their_footprints_share() {
     let devices = desk_devices();
     let desk = desk_layout(RenderScale::P50, SamplingMode::AreaAverage);
+    let red = canvas_proto::Rgb8::new(255, 0, 0);
 
     // A 40 x 20 rectangle at the origin changes only those pixels.
     let rect = paint_area(LayerArea::Rect { x: 0.0, y: 0.0, width: 40.0, height: 20.0 }, &desk, &devices);
@@ -1000,28 +1276,116 @@ fn areas_paint_only_their_own_pixels_and_their_own_leds() {
         }
     }
 
-    // The keyboard's device area: only its own LEDs read the layer, and every other device's
-    // LEDs sample exactly what they did before it was there.
+    // Every device, painted as a Device area and then as a Zone area, at both sampling
+    // settings. The area's own LEDs read the layer; a device whose sample footprint shares
+    // no pixel with the painted one is byte-identical; the devices that do share are exactly
+    // the known pair named in `shares_with`, and they change.
     for (scale, sampling) in [
         (RenderScale::P50, SamplingMode::AreaAverage),
         (RenderScale::P100, SamplingMode::Nearest),
     ] {
         let lay = desk_layout(scale, sampling);
-        let black = Canvas::with_scale(scale.factor());
-        let before = sampled(&lay, &devices, &black);
-        let painted = paint_area(LayerArea::Device { device: DeviceId(KEYBOARD.into()) }, &lay, &devices);
-        let after = sampled(&lay, &devices, &painted);
-        let keyboard = devices.iter().position(|d| d.id.0 == KEYBOARD).expect("the keyboard is on the desk");
+        let (owned, ranges) = desk_leds(&lay, &devices);
+        let map = AreaMap::build(&lay, &devices, 1);
+        let before = sampled(&lay, &devices, &Canvas::with_scale(scale.factor()));
+
         for (index, device) in devices.iter().enumerate() {
-            if index == keyboard {
-                assert!(
-                    after[index].iter().all(|c| *c == canvas_proto::Rgb8::new(255, 0, 0)),
-                    "the keyboard's own LED reads the layer at {scale:?}/{sampling:?}"
-                );
-            } else {
+            let painted = paint_area(LayerArea::Device { device: device.id.clone() }, &lay, &devices);
+            let after = sampled(&lay, &devices, &painted);
+            for (led, has_owner) in owned[index].iter().enumerate() {
+                let want = if *has_owner { red } else { canvas_proto::Rgb8::BLACK };
                 assert_eq!(
-                    after[index], before[index],
-                    "{} sampled differently at {scale:?}/{sampling:?}",
+                    after[index][led], want,
+                    "{} LED {led} as a Device area at {scale:?}/{sampling:?}",
+                    device.id.0
+                );
+            }
+            let mut shared: Vec<&str> = Vec::new();
+            for (other_index, other) in devices.iter().enumerate() {
+                if other_index == index {
+                    continue;
+                }
+                let shares = masks_share(
+                    map.devices.get(&device.id).expect("the device has a mask"),
+                    map.devices.get(&other.id).expect("the other device has a mask"),
+                );
+                if shares {
+                    shared.push(other.id.0.as_str());
+                    assert_ne!(
+                        after[other_index], before[other_index],
+                        "{} shares pixels with {} at {scale:?}/{sampling:?}, so its LEDs must read the layer",
+                        other.id.0, device.id.0
+                    );
+                } else {
+                    assert_eq!(
+                        after[other_index], before[other_index],
+                        "{} shares no pixel with {} at {scale:?}/{sampling:?}, so it must not change",
+                        other.id.0, device.id.0
+                    );
+                }
+            }
+            shared.sort();
+            let mut expected = shares_with(&device.id.0, scale);
+            expected.sort();
+            assert_eq!(
+                shared, expected,
+                "the devices sharing pixels with {} at {scale:?}/{sampling:?}",
+                device.id.0
+            );
+
+            for (zone_index, start, count) in &ranges[index] {
+                let painted = paint_area(
+                    LayerArea::Zone { device: device.id.clone(), zone: *zone_index },
+                    &lay,
+                    &devices,
+                );
+                let after = sampled(&lay, &devices, &painted);
+                for (led, has_owner) in owned[index].iter().enumerate() {
+                    let want = if !*has_owner {
+                        canvas_proto::Rgb8::BLACK
+                    } else if (*start..*start + *count).contains(&led) {
+                        red
+                    } else {
+                        before[index][led]
+                    };
+                    assert_eq!(
+                        after[index][led], want,
+                        "{} LED {led} as zone {zone_index} at {scale:?}/{sampling:?}",
+                        device.id.0
+                    );
+                }
+                let mut shared: Vec<&str> = Vec::new();
+                for (other_index, other) in devices.iter().enumerate() {
+                    if other_index == index {
+                        continue;
+                    }
+                    let shares = masks_share(
+                        map.zones
+                            .get(&(device.id.clone(), *zone_index))
+                            .expect("the zone has a mask"),
+                        map.devices.get(&other.id).expect("the other device has a mask"),
+                    );
+                    if shares {
+                        shared.push(other.id.0.as_str());
+                        assert_ne!(
+                            after[other_index], before[other_index],
+                            "{} shares pixels with {}'s zone {zone_index} at {scale:?}/{sampling:?}",
+                            other.id.0, device.id.0
+                        );
+                    } else {
+                        assert_eq!(
+                            after[other_index], before[other_index],
+                            "{} shares no pixel with {}'s zone {zone_index} at {scale:?}/{sampling:?}",
+                            other.id.0, device.id.0
+                        );
+                    }
+                }
+                shared.sort();
+                let mut expected = shares_with(&device.id.0, scale);
+                expected.sort();
+                assert_eq!(
+                    shared, expected,
+                    "the devices sharing pixels with {}'s zone {zone_index} at {scale:?}/{sampling:?}",
                     device.id.0
                 );
             }
@@ -1578,6 +1942,89 @@ fn the_compositor_does_not_allocate_per_frame() {
         effect.layer_canvas_capacities(),
         after_first,
         "a layer's canvas was reallocated after the first frame"
+    );
+}
+
+/// A layer whose `init` panics is faulted, and the rest of the stack keeps running: a panic in
+/// one layer's start never unwinds into the engine (D95.3.6).
+#[test]
+fn a_layer_whose_init_panics_is_faulted_and_the_rest_run() {
+    let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
+    let lay = layout(vec![placed("d", 0, 0.0, 0.0, 100.0, 20.0)], RenderScale::P100, SamplingMode::Nearest);
+    let stack = stack("stack:Init", vec![layer("l1", "panicky"), layer("l2", "paint")]);
+    let leaves: LeafBuilder = Arc::new(|id: &str| {
+        if id == "panicky" {
+            Ok(Box::new(PanickyInit) as Box<dyn Effect>)
+        } else {
+            Ok(Box::new(Paint {
+                colour: [0.0, 1.0, 0.0],
+                updates: Arc::new(AtomicU64::new(0)),
+                cost: None,
+                id: id.to_string(),
+            }) as Box<dyn Effect>)
+        }
+    });
+    let mut effect = StackEffect::new(&stack, leaves, live_for(&stack), areas_for(&lay, &devices))
+        .with_clock(ManualClock::new().clock());
+    effect.init(&Props::new());
+    assert_eq!(
+        effect.layer_status("l1"),
+        Some((StackLayerState::Faulted, None)),
+        "the panicking layer is faulted"
+    );
+
+    let mut canvas = Canvas::with_scale(1.0);
+    step(&mut effect, &mut canvas);
+    assert_eq!(canvas.get(5, 5), [0.0, 1.0, 0.0], "the other layer still paints");
+    assert_eq!(
+        effect.layer_status("l2").map(|(state, _)| state),
+        Some(StackLayerState::Ok),
+        "the other layer is fine"
+    );
+}
+
+/// A panic anywhere in the compositor's own frame work is a black frame for that frame, not an
+/// unwind into the engine: the clock here panics where a compositor bug would.
+#[test]
+fn a_panic_in_the_compositors_own_work_is_a_black_frame() {
+    let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
+    let lay = layout(vec![placed("d", 0, 0.0, 0.0, 100.0, 20.0)], RenderScale::P100, SamplingMode::Nearest);
+    let stack = stack("stack:Broken", vec![layer("l1", "paint")]);
+    let clock: Clock = Arc::new(|| panic!("the compositor's own work panicked"));
+    let mut effect = StackEffect::new(
+        &stack,
+        paint_leaves(Arc::new(AtomicU64::new(0)), Arc::new(AtomicUsize::new(0)), [1.0, 0.0, 0.0], None),
+        live_for(&stack),
+        areas_for(&lay, &devices),
+    )
+    .with_clock(clock);
+    effect.init(&Props::new());
+    let mut canvas = Canvas::with_scale(1.0);
+    canvas.fill([1.0, 1.0, 1.0]);
+    effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+    assert_eq!(canvas.get(5, 5), [0.0, 0.0, 0.0], "the frame is black");
+    // The stack keeps running: a second frame is black too, and nothing unwinds.
+    effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+    assert_eq!(canvas.get(5, 5), [0.0, 0.0, 0.0]);
+}
+
+/// A tile's own failure unwinds through the layer's start: the stack hands it to the tile
+/// render, which refuses the tile, instead of faulting the layer and drawing a different picture.
+#[test]
+fn a_tile_failure_from_a_layers_init_reaches_the_tile_render() {
+    let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
+    let lay = layout(vec![placed("d", 0, 0.0, 0.0, 100.0, 20.0)], RenderScale::P100, SamplingMode::Nearest);
+    let stack = stack("stack:Tile", vec![layer("l1", "tile")]);
+    let leaves: LeafBuilder = Arc::new(|_id: &str| Ok(Box::new(TileFailingInit) as Box<dyn Effect>));
+    let mut effect = StackEffect::new(&stack, leaves, live_for(&stack), areas_for(&lay, &devices))
+        .with_clock(ManualClock::new().clock());
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        effect.init(&Props::new());
+    }));
+    let payload = outcome.expect_err("the tile failure is handed on, not swallowed");
+    assert!(
+        payload.downcast_ref::<canvas_daemon::thumbnail::TileFailure>().is_some(),
+        "the payload is still the tile's own"
     );
 }
 

@@ -33,7 +33,7 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::Duration;
 
 use crate::epoch::EpochBook;
-use crate::stack::{write_recovering, LiveMap, LiveStack};
+use crate::stack::{LiveMap, LiveStack};
 use crate::state::App;
 
 /// The clock a lease is measured against. The daemon uses the time since it started; the tests
@@ -471,10 +471,7 @@ pub async fn put_stack(
             if slot.structure() == Some(structure.as_str()) {
                 if let SlotKind::Stack { stack_id, live, .. } = &slot.kind {
                     if stack_id == &stack.id {
-                        {
-                            let mut map = write_recovering(live);
-                            map.replace_with(stack);
-                        }
+                        crate::stack::replace_live(live, stack);
                         let lease_until = app.draft.now() + canvas_proto::consts::DRAFT_LEASE;
                         {
                             let mut guard = app.draft.lock();
@@ -501,8 +498,7 @@ pub async fn put_stack(
         if let Some(building) = app.draft.in_flight() {
             if building.is_stack(&stack.id, &structure) {
                 if let Building::Stack { live, .. } = &building.kind {
-                    let mut map = write_recovering(live);
-                    map.replace_with(stack);
+                    crate::stack::replace_live(live, stack);
                 }
                 app.draft.update_in_flight(building.token, &props);
                 tracing::info!(stack = %stack.id, seq, "a beat joined the stack draft build in flight");

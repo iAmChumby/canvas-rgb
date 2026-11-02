@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::epoch::EpochBook;
-use crate::stack::{read_recovering, write_recovering, LiveMap, LiveStack};
+use crate::stack::{read_recovering, LiveMap, LiveStack};
 use crate::state::{App, PreviewRegistry};
 
 /// The preview engine's settings: 15 fps is its render rate and the WebSocket sink's cap, and
@@ -378,10 +378,7 @@ pub async fn put(
         }
         if let Some(slot) = app.stack_preview.snapshot() {
             if slot.stack_id == stack.id && slot.structure == structure {
-                {
-                    let mut live = write_recovering(&slot.live);
-                    live.replace_with(stack);
-                }
+                crate::stack::replace_live(&slot.live, stack);
                 // The structure on screen is the one the page wants; a build for another one
                 // that is still running is superseded by this newer PUT.
                 app.stack_preview.supersede_build();
@@ -408,10 +405,7 @@ pub async fn put(
         // newest, and no second build starts.
         if let Some(building) = app.stack_preview.in_flight() {
             if building.stack_id == stack.id && building.structure == structure {
-                {
-                    let mut live = write_recovering(&building.live);
-                    live.replace_with(stack);
-                }
+                crate::stack::replace_live(&building.live, stack);
                 app.stack_preview.update_in_flight(building.token, &props);
                 let errors = building
                     .errors

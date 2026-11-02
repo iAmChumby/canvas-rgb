@@ -9,7 +9,9 @@
 //!
 //! - [`AreaMap`] (the *area book*): every device's and zone's per-LED pixel mask, built from the
 //!   same sample plan the engine samples with. It is rebuilt when the layout, the render scale or
-//!   the sampling mode changes, never per frame.
+//!   the sampling mode changes, never per frame. A device area lights the pixels its own LEDs
+//!   read, and a second device drawn over those same pixels reads them too: the canvas has no
+//!   z-order, so two overlapping footprints share the pixels they share.
 //! - [`LiveMap`]: each layer's blend, opacity, visibility and area, read once per frame, so a
 //!   slider drag or a blend change costs no rebuild.
 //! - [`StackEffect`]: builds one effect per layer, calls each layer's `update` into its own
@@ -95,17 +97,22 @@ impl LiveMap {
             .collect();
         Self { version, layers }
     }
-
-    /// Replaces the values with another stack's, moving the generation forward. The caller holds
-    /// the guard only to assign; the map is built outside it.
-    pub fn replace_with(&mut self, stack: &Stack) {
-        let next = LiveMap::from_stack(stack, self.version.wrapping_add(1));
-        *self = next;
-    }
 }
 
 /// The live map of the stack on the engine.
 pub type LiveStack = Arc<RwLock<LiveMap>>;
+
+/// Rebuilds a running effect's live map from `stack` and swaps it in, bumping the version so
+/// the effect re-resolves its layers on its next frame.
+///
+/// The new map is built outside the lock and the old one is swapped in under it, as a save does
+/// (`Stacks::update_live`), so the render thread never waits for a map to be built.
+pub fn replace_live(live: &LiveStack, stack: &Stack) {
+    let mut next = LiveMap::from_stack(stack, 0);
+    let mut map = write_recovering(live);
+    next.version = map.version.wrapping_add(1);
+    *map = next;
+}
 
 /// The area book every `StackEffect` resolves its layers against.
 pub type AreaBook = Arc<RwLock<AreaMap>>;
@@ -358,6 +365,15 @@ impl OwnedArea {
     fn from_resolved(area: ResolvedArea<'_>) -> Self {
         Self { dest: area.dest, mask: area.mask.cloned(), whole_canvas: area.whole_canvas }
     }
+}
+
+/// One layer's resolved area and the live values they were resolved from. The frame reads both
+/// from here, so it never copies the whole live map every frame (D95.4.6).
+#[derive(Debug, Clone, PartialEq)]
+struct ResolvedLayer {
+    values: LiveLayer,
+    /// `None` is "paints nothing".
+    area: Option<OwnedArea>,
 }
 
 /// The bounding box, in logical canvas units, of every visible placement of the zones `which`
@@ -626,12 +642,14 @@ pub struct StackEffect {
     /// The versions the resolved areas were built at.
     live_version: u64,
     area_version: u64,
-    /// What each layer resolved to at those versions; `None` is "paints nothing".
-    resolved: Vec<Option<OwnedArea>>,
+    /// What each layer resolved to at those versions, with the values it resolved with.
+    resolved: Vec<ResolvedLayer>,
     /// The tile seed forwarded to every layer, when the tile path set one.
     seed: Option<canvas_proto::PropValue>,
     /// The render size the layer canvases are built for.
     frame_size: (u32, u32),
+    /// True once the compositor's own frame work panicked: it logs once and keeps going.
+    frame_panicked: bool,
 }
 
 impl StackEffect {
@@ -694,6 +712,7 @@ impl StackEffect {
             resolved: Vec::new(),
             seed: None,
             frame_size: (0, 0),
+            frame_panicked: false,
         }
     }
 
@@ -770,22 +789,31 @@ impl StackEffect {
     ///
     /// The masks are copied out of the book, so its lock is not held while a layer's update runs.
     fn resolve_areas(&mut self) {
-        let (live_version, live_layers) = {
+        let (live_version, area_version) = {
             let live = read_recovering(&self.live);
-            (live.version, live.layers.clone())
+            let areas = read_recovering(&self.areas);
+            (live.version, areas.version)
         };
-        let area_version = read_recovering(&self.areas).version;
         if live_version == self.live_version && area_version == self.area_version {
             return;
         }
         self.live_version = live_version;
         self.area_version = area_version;
+        // The values are copied once, when the live map or the area book moved, and kept with
+        // the area they resolved to: the frame reads them without touching either lock.
+        let live = read_recovering(&self.live);
         let areas = read_recovering(&self.areas);
         let mut resolved = Vec::with_capacity(self.layers.len());
         for layer in &self.layers {
-            let values = live_layers.get(&layer.id).unwrap_or(&layer.values);
-            resolved.push(areas.resolve(&values.area).map(OwnedArea::from_resolved));
+            let values = live
+                .layers
+                .get(&layer.id)
+                .cloned()
+                .unwrap_or_else(|| layer.values.clone());
+            let area = areas.resolve(&values.area).map(OwnedArea::from_resolved);
+            resolved.push(ResolvedLayer { values, area });
         }
+        drop(live);
         drop(areas);
         self.resolved = resolved;
     }
@@ -950,43 +978,87 @@ impl Effect for StackEffect {
         let width = ((CANVAS_WIDTH as f32 * scale).round() as u32).max(1);
         let height = ((CANVAS_HEIGHT as f32 * scale).round() as u32).max(1);
         self.fit_canvases(width, height);
+        // A reactivation clears a fault (D95.3.5); a layer whose start panics below faults again.
+        self.clear_faults();
         let seed = self.seed.clone();
         for layer in &mut self.layers {
-            if let Some(effect) = layer.built.as_mut() {
-                effect.init(&layer_props(props, &layer.id, seed.as_ref()));
+            let Some(effect) = layer.built.as_mut() else { continue };
+            let layer_props = layer_props(props, &layer.id, seed.as_ref());
+            // A panic in one layer's start is a faulted layer, not a dead render thread
+            // (D95.3.6): the rest of the stack starts and runs.
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                effect.init(&layer_props);
+            }));
+            if let Err(payload) = outcome {
+                // A tile's HTML layer unwinds with a `TileFailure` by design, and the tile
+                // render catches it to refuse the tile; that one belongs to the caller.
+                if payload.downcast_ref::<crate::thumbnail::TileFailure>().is_some() {
+                    std::panic::resume_unwind(payload);
+                }
+                layer.hold = Hold::Faulted;
+                layer.panic_logged = true;
+                tracing::error!(
+                    stack = %self.stack_id,
+                    layer = %layer.id,
+                    effect = %layer.effect,
+                    "a layer's effect panicked while it started; it is faulted and the rest of the stack runs"
+                );
             }
         }
-        // A reactivation clears a fault (D95.3.5).
-        self.clear_faults();
         self.resolve_areas();
         self.report_statuses();
     }
 
     fn update(&mut self, dt: f32, canvas: &mut Canvas, inputs: &Inputs) {
+        // The compositor's own work is guarded as each layer's update is: a panic in the area
+        // resolution, the canvas fit or the composite is a black frame for this frame, logged
+        // once, and the stack keeps running (D95.3.6). It never unwinds into the engine.
+        let frame = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.frame(dt, canvas, inputs);
+        }));
+        if frame.is_err() {
+            canvas.fill([0.0, 0.0, 0.0]);
+            // A panic may have left the resolved areas taken out of the compositor; the next
+            // frame resolves them again.
+            self.resolved.clear();
+            self.live_version = u64::MAX;
+            self.area_version = u64::MAX;
+            if !self.frame_panicked {
+                self.frame_panicked = true;
+                tracing::error!(
+                    stack = %self.stack_id,
+                    "the stack's own frame work panicked; the frame is black and the stack keeps running"
+                );
+            }
+        }
+    }
+}
+
+impl StackEffect {
+    /// One frame of the compositor's own work, run inside [`StackEffect::update`]'s guard.
+    fn frame(&mut self, dt: f32, canvas: &mut Canvas, inputs: &Inputs) {
         self.fit_canvases(canvas.width, canvas.height);
         self.resolve_areas();
         // The frame starts black: a stack with nothing to show paints black, as every effect
         // with no picture does.
         canvas.fill([0.0, 0.0, 0.0]);
 
-        // The live settings are copied out once, and the guard is dropped before any update.
-        let live_layers = read_recovering(&self.live).layers.clone();
+        // The live values and the resolved areas were read together by `resolve_areas`, which
+        // copies them only when the live map or the area book moved, so nothing is copied here.
         let budget = html_budget(self.fps.load(Ordering::Relaxed));
         let now = (self.clock)();
         let mut changed = false;
-        // The resolved areas are taken out for the loop, so a layer's own update can borrow the
-        // effect mutably while its area is still in hand.
+        // The resolved layers are taken out for the loop, so a layer's own update can borrow the
+        // effect mutably while its values and its area are still in hand.
         let resolved = std::mem::take(&mut self.resolved);
 
         for index in 0..self.layers.len() {
-            let values = match live_layers.get(&self.layers[index].id) {
-                Some(values) => values.clone(),
-                None => self.layers[index].values.clone(),
-            };
+            let Some(entry) = resolved.get(index) else { continue };
+            let values = &entry.values;
             if !values.visible || values.opacity == 0 {
                 continue;
             }
-            let Some(area) = resolved.get(index).and_then(|area| area.as_ref()) else {
+            let Some(area) = entry.area.as_ref() else {
                 // The area covers nothing: a device or zone that is gone or unplaced.
                 continue;
             };
@@ -1046,7 +1118,7 @@ impl Effect for StackEffect {
                 changed = true;
             }
             // A held or faulted layer keeps its last good canvas and is composited as usual.
-            self.composite_layer(index, area, &values, canvas);
+            self.composite_layer(index, area, values, canvas);
         }
         self.resolved = resolved;
         if changed {

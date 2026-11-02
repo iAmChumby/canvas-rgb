@@ -43,6 +43,7 @@ import { getSnap, refreshAll, retryEffects, useSnap } from "@/lib/store";
 import { PageActions, PageTitle } from "@/shell/PageHeader";
 import { Popover } from "@/components/Popover";
 import { fillDefaults, nextFreeName } from "@/lib/presetMatch";
+import { stackLayerNames } from "@/lib/stackLayers";
 import { appliedName, runningOf, setApplied, setShown } from "@/lib/runningPreset";
 import type { EffectDetail } from "@/proto/EffectDetail";
 import type { PropValue } from "@/proto/PropValue";
@@ -56,21 +57,6 @@ function currentStripHeight(): string {
   if (typeof document === "undefined") return "0px";
   const value = getComputedStyle(document.documentElement).getPropertyValue("--strip-h").trim();
   return value || "0px";
-}
-
-/** The layer names a stack's schema carries: each property's label starts with `{layer} · `. */
-function stackLayerNames(schema: EffectDetail["schema"]): string[] {
-  const names: string[] = [];
-  for (const def of schema.properties) {
-    const name = def.label.split(" · ")[0];
-    if (name && !names.includes(name)) names.push(name);
-  }
-  if (names.length === 0) {
-    // A stack whose layers have no properties still names them in its description.
-    const after = schema.description.split(": ")[1];
-    if (after) return after.split(", ");
-  }
-  return names;
 }
 
 export function EffectsView() {
