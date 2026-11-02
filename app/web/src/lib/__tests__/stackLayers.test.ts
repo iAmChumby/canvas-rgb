@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { EffectDetail } from "@/proto/EffectDetail";
-import { stackLayerNames } from "@/views/EffectsView";
+import { stackLayerNames } from "@/lib/stackLayers";
 
 /** A stack schema with the property labels the daemon derives: `{layer} · {property}`. */
 function schemaWith(labels: string[], description = ""): EffectDetail["schema"] {
