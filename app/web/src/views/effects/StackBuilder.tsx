@@ -5,17 +5,20 @@
 // second engine (`?stack=1`); Try on the lights is a stack draft; Save writes the stack and
 // activates it. Nothing here writes an effect file or the layout except those two routes.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import {
   ArrowCounterClockwise,
   ArrowLeft,
+  CaretLeft,
   CopySimple,
   Eye,
   EyeSlash,
   FloppyDisk,
   Lightbulb,
   Monitor,
+  Play,
   Plus,
+  SlidersHorizontal,
   Trash,
   Warning,
   X,
@@ -167,8 +170,20 @@ export function StackBuilder({
   const [presetName, setPresetName] = useState<string | null>(null);
   const [otherStacks, setOtherStacks] = useState<{ id: string; name: string }[]>([]);
   const narrow = useMediaQuery("(max-width: 720px)");
+  // The phone's layer sheet: Tune pushes it over the builder (D95.5.7).
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const [chooseFor, setChooseFor] = useState<string | null>(null);
+  /** A layer row picked up by a finger on its grip, and the row it is over. */
+  const [touchId, setTouchId] = useState<string | null>(null);
 
   const addRef = useRef<HTMLSpanElement>(null);
+  const tuneRef = useRef<HTMLSpanElement>(null);
+  const chooseRef = useRef<HTMLSpanElement>(null);
+  const sheetRef = useRef<HTMLDivElement>(null);
+  /** The key that opened the sheet and the area picker: focus returns to them on close. */
+  const sheetOpener = useRef<HTMLElement | null>(null);
+  const areaOpener = useRef<HTMLElement | null>(null);
+  const touchDrag = useRef<{ id: string; over: string | null } | null>(null);
   const draftRef = useRef(draft);
   const nameRef = useRef("");
   const baseRef = useRef<Stack | null>(null);
@@ -219,6 +234,94 @@ export function StackBuilder({
   useEffect(() => {
     schemasRef.current = schemas;
   }, [schemas]);
+
+  // ---- focus and keys (D95.5.7, D95.7 item 4) ---------------------------------------
+
+  /** A popover closed by Escape puts focus back on the key that opened it. A click outside
+   *  closes it without moving the focus the person already has. */
+  const closePopover = (selector: string, opener: RefObject<HTMLElement | null>, close: () => void) => {
+    const panel = document.querySelector(selector);
+    const inside = panel !== null && document.activeElement instanceof Node && panel.contains(document.activeElement);
+    close();
+    if (inside) {
+      setTimeout(() => opener.current?.querySelector<HTMLElement>("button")?.focus(), 0);
+    }
+  };
+
+  const closeAdd = () => closePopover(".rd-add-layer:not(.rd-choose-effect)", addRef, () => setAddOpen(false));
+  const closeChoose = () => closePopover(".rd-choose-effect", chooseRef, () => setChooseFor(null));
+
+  /** The area picker closed: focus goes back to the key that opened it. */
+  const closePicker = () => {
+    setPickerFor(null);
+    const opener = areaOpener.current;
+    if (opener) setTimeout(() => opener.focus(), 0);
+  };
+
+  const openSheet = () => {
+    sheetOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setSheetOpen(true);
+  };
+
+  const closeSheet = useCallback(() => setSheetOpen(false), []);
+
+  // The sheet's own keys: Tab stays inside it while it is open, and Escape closes it. While the
+  // area picker is over the sheet the picker owns Escape and the sheet's trap steps aside.
+  useEffect(() => {
+    if (!sheetOpen || pickerFor) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        setSheetOpen(false);
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const sheet = sheetRef.current;
+      if (!sheet) return;
+      const items = Array.from(
+        sheet.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      );
+      if (items.length === 0) {
+        event.preventDefault();
+        sheet.focus();
+        return;
+      }
+      const first = items[0]!;
+      const last = items[items.length - 1]!;
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === sheet)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [sheetOpen, pickerFor]);
+
+  // The sheet is opened by Tune and focus goes back there when it closes.
+  const sheetWasOpen = useRef(false);
+  useEffect(() => {
+    if (sheetOpen) {
+      sheetWasOpen.current = true;
+      const sheet = sheetRef.current;
+      const first = sheet?.querySelector<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      );
+      (first ?? sheet)?.focus();
+      return;
+    }
+    if (!sheetWasOpen.current) return;
+    sheetWasOpen.current = false;
+    sheetOpener.current?.focus();
+  }, [sheetOpen]);
+
+  // A layer removed while its sheet is open closes the sheet: `remove` does it, where the change
+  // happens, rather than an effect watching the list.
 
   const name = isNew
     ? nameDraft.trim() || "New stack"
@@ -750,6 +853,7 @@ export function StackBuilder({
       setNameDraft("");
       setPicked(null);
     }
+    setSheetOpen(false);
     setSaveError(null);
     setClash(null);
   };
@@ -892,7 +996,7 @@ export function StackBuilder({
       draftRef.current = next;
       setDraft(next);
       setPicked(id);
-      setAddOpen(false);
+      closeAdd();
       setAddQuery("");
     } finally {
       adding.current = false;
@@ -903,7 +1007,11 @@ export function StackBuilder({
     const index = draft.layers.findIndex((layer) => layer.id === id);
     const next = removeLayer(draft.layers, id);
     setDraft((current) => ({ ...current, layers: next }));
-    if (picked === id) setPicked(next[Math.min(index, next.length - 1)]?.id ?? null);
+    if (picked === id) {
+      setPicked(next[Math.min(index, next.length - 1)]?.id ?? null);
+      // The sheet is the removed layer's: it closes rather than showing the next one unsought.
+      setSheetOpen(false);
+    }
   };
 
   const duplicate = (id: string) => {
@@ -942,7 +1050,49 @@ export function StackBuilder({
 
   const applyArea = (area: LayerArea) => {
     if (pickerFor) patch(pickerFor, { area });
-    setPickerFor(null);
+    closePicker();
+  };
+
+  // ---- touch reorder ------------------------------------------------------------------
+  // A finger on the grip moves the row past its neighbours' middles; the row reorders as it
+  // passes, so what the finger is over is what the list shows (D95.5.3, D95.5.7).
+
+  const touchStart = (event: ReactPointerEvent<HTMLButtonElement>, layer: StackLayer) => {
+    // A mouse keeps the HTML drag and drop it already has; a finger and a pen use this.
+    if (event.pointerType === "mouse") return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    touchDrag.current = { id: layer.id, over: null };
+    setTouchId(layer.id);
+  };
+
+  const touchMove = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const drag = touchDrag.current;
+    if (!drag) return;
+    event.preventDefault();
+    const rows = Array.from(document.querySelectorAll<HTMLElement>(".rd-layers .layer-row"));
+    let over: string | null = null;
+    for (const row of rows) {
+      const box = row.getBoundingClientRect();
+      if (event.clientY >= box.top && event.clientY <= box.bottom) {
+        over = row.dataset.layerId ?? null;
+        break;
+      }
+    }
+    if (!over || over === drag.id || over === drag.over) return;
+    drag.over = over;
+    setDraft((now) => {
+      const target = now.layers.findIndex((layer) => layer.id === over);
+      if (target < 0) return now;
+      return { ...now, layers: moveLayer(now.layers, drag.id, target) };
+    });
+  };
+
+  const touchEnd = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    touchDrag.current = null;
+    setTouchId(null);
   };
 
   // ---- presets ----------------------------------------------------------------------
@@ -978,53 +1128,94 @@ export function StackBuilder({
       .sort((a, b) => (b.match.score ?? 0) - (a.match.score ?? 0));
   }, [effects, addQuery]);
 
+  /** Every effect a layer may take: a stack is never offered (D95.4.8). */
+  const chooseList = useMemo(() => {
+    return (effects ?? [])
+      .filter((effect) => !effect.id.startsWith("stack:"))
+      .map((effect) => ({ effect, match: matchEffect("", effect.name, effect.description) }))
+      .filter((row): row is { effect: EffectSummary; match: NonNullable<typeof row.match> } => row.match !== null);
+  }, [effects]);
+
+  /** One row of an effect list: Add layer offers it with its cap's reason, Choose effect picks
+   *  it for the picked layer. */
+  const effectRow = (
+    row: { effect: EffectSummary; match: NonNullable<ReturnType<typeof matchEffect>> },
+    forAdd: boolean,
+  ) => {
+    const refusal = forAdd ? addLayerRefusal(draft.layers, row.effect.id) : null;
+    const full = !forAdd && html > 0 && !isHtmlEffect(pickedLayer?.effect ?? "") && isHtmlEffect(row.effect.id);
+    return (
+      <li key={row.effect.id}>
+        <button
+          type="button"
+          className="rd-add-row"
+          role="option"
+          aria-selected={pickedLayer?.effect === row.effect.id}
+          disabled={refusal !== null}
+          title={refusal ?? undefined}
+          onClick={() => {
+            if (forAdd) {
+              void addEffect(row.effect.id);
+              return;
+            }
+            if (!chooseFor) return;
+            void chooseEffect(chooseFor, row.effect.id);
+            closeChoose();
+          }}
+        >
+          <Thumb id={row.effect.id} size="sm" label={row.effect.name} />
+          <span className="rd-add-text">
+            <span className="rd-add-name">
+              <Highlighted text={row.effect.name} ranges={row.match.ranges} />
+            </span>
+            <span className="rd-add-desc">
+              {refusal ?? (full ? "HTML layers are full" : row.effect.description)}
+            </span>
+          </span>
+          {isHtmlEffect(row.effect.id) && <Chip html>HTML</Chip>}
+        </button>
+      </li>
+    );
+  };
+
   // ---- rendering --------------------------------------------------------------------
 
-  if (narrow) {
-    return (
-      <>
-        <PageTitle title={name} context={<span>Stack · {count} layers</span>} leading={<BackKey onClick={askLeave} />} />
-        <div className="rd-page rd-stacks" data-testid="stack-builder">
-          <Panel title="Open on a wider window" className="rd-builder-narrow">
-            <p className="dim">
-              The stack builder needs a window wider than 720 pixels. Everything that is on the lights can still be
-              seen and activated from this page.
-            </p>
-            <Button size="sm" variant="primary" onClick={askLeave}>
-              Back to the effects
-            </Button>
-          </Panel>
-        </div>
-      </>
-    );
-  }
-
   return (
-    <div className="rd-page rd-stacks" data-testid="stack-builder">
+    <div
+      className={narrow ? "rd-page rd-stacks rd-stacks-phone" : "rd-page rd-stacks"}
+      data-testid="stack-builder"
+    >
       <PageTitle
         title={name}
         context={<span className="rd-stacks-context">Stack · {count} {count === 1 ? "layer" : "layers"}</span>}
         leading={<BackKey onClick={askLeave} />}
       />
       <PageActions>
-        {dirty && <span className="mute rd-unsaved">Unsaved</span>}
+        {/* On a phone the strip carries one key: Save, as an icon with its name (D95.5.7). The
+            word Unsaved and Revert are desktop keys: the phone's way out asks Save or Discard. */}
+        {!narrow && dirty && <span className="mute rd-unsaved">Unsaved</span>}
+        {!narrow && (
+          <Button
+            size="sm"
+            variant="ghost"
+            icon={<ArrowCounterClockwise size={14} />}
+            disabled={!dirty || saveState === "saving"}
+            onClick={revert}
+          >
+            Revert
+          </Button>
+        )}
         <Button
-          size="sm"
-          variant="ghost"
-          icon={<ArrowCounterClockwise size={14} />}
-          disabled={!dirty || saveState === "saving"}
-          onClick={revert}
-        >
-          Revert
-        </Button>
-        <Button
+          className="rd-stack-strip-save"
           size="sm"
           variant="primary"
           icon={<FloppyDisk size={14} />}
-          disabled={count === 0 || saveState === "saving"}
+          aria-label={narrow ? "Save" : undefined}
+          title={narrow ? "Save the stack" : undefined}
+          disabled={count === 0 || saveState === "saving" || phase !== "ready" || loadError !== null}
           onClick={() => void save()}
         >
-          {saveState === "saving" ? "Saving…" : "Save"}
+          <span className="rd-btn-text">{saveState === "saving" ? "Saving…" : "Save"}</span>
         </Button>
       </PageActions>
 
@@ -1052,12 +1243,6 @@ export function StackBuilder({
         </div>
       )}
 
-      {saveError && (
-        <p className="error-line" role="alert">
-          {saveError}
-        </p>
-      )}
-
       {phase === "error" ? (
         <div className="rd-stack-body">
           <div className="rd-stack-main">
@@ -1083,6 +1268,15 @@ export function StackBuilder({
         >
           <div className="rd-stack-body">
             <div className="rd-stack-main">
+              {saveError && (
+                <ErrorPanel
+                  title="The stack could not be saved"
+                  summary="canvas-rgb could not save that stack. Nothing on the lights changed."
+                  message={saveError}
+                  onRetry={() => void save()}
+                />
+              )}
+
               <Panel
                 className="rd-stack-stage"
                 title="Preview"
@@ -1110,7 +1304,9 @@ export function StackBuilder({
                         ? `The preview stopped: ${previewError}`
                         : draftError
                           ? `Try on the lights failed: ${draftError}`
-                          : "Preview only — nothing is on the lights."}
+                          : count === 0
+                            ? "An empty stack runs nothing; the lights keep their effect."
+                            : "Preview only — nothing is on the lights."}
                     </span>
                     <span className="row-wrap">
                       {fpsTarget > 50 && html > 0 && (
@@ -1121,12 +1317,13 @@ export function StackBuilder({
                       )}
                       <Button
                         size="sm"
-                        icon={<Lightbulb size={15} />}
+                        icon={<Play size={15} />}
+                        aria-label="Try on the lights"
                         disabled={count === 0}
                         title={count === 0 ? "Add a layer first" : undefined}
                         onClick={() => void startDraft()}
                       >
-                        Try on the lights
+                        <span className="rd-btn-text">Try on the lights</span>
                       </Button>
                     </span>
                   </div>
@@ -1187,6 +1384,7 @@ export function StackBuilder({
                         size="sm"
                         variant="primary"
                         icon={<Plus size={15} />}
+                        aria-label={`Add layer${count >= MAX_LAYERS ? ` (a stack holds ${MAX_LAYERS})` : ""}`}
                         disabled={count >= MAX_LAYERS}
                         title={count >= MAX_LAYERS ? `A stack holds ${MAX_LAYERS} layers` : undefined}
                         onClick={() => {
@@ -1194,7 +1392,7 @@ export function StackBuilder({
                           setAddOpen((open) => !open);
                         }}
                       >
-                        Add layer
+                        <span className="rd-btn-text">Add layer</span>
                       </Button>
                     </span>
                   </>
@@ -1202,11 +1400,11 @@ export function StackBuilder({
               >
                 {count === 0 ? (
                   <div className="rd-layers-empty">
-                    <p>Add the first layer</p>
+                    <p>No layers yet. A stack is a list of effects drawn one over the other, bottom to top.</p>
                     <ul className="rd-how-list">
-                      <li>The bottom layer is painted first.</li>
-                      <li>Each layer has its own area and blend.</li>
-                      <li>A stack runs as one effect on the lights.</li>
+                      <li>The bottom layer is painted first, then each layer over it.</li>
+                      <li>A layer paints on its canvas, a device, a zone or a rectangle.</li>
+                      <li>Blend and opacity mix it over what is under it.</li>
                     </ul>
                     <Button size="sm" variant="primary" icon={<Plus size={15} />} onClick={() => setAddOpen(true)}>
                       Add the first layer
@@ -1222,8 +1420,12 @@ export function StackBuilder({
                         <li
                           key={layer.id}
                           className="layer-row"
+                          data-layer-id={layer.id}
                           data-selected={layer.id === picked ? "true" : "false"}
                           data-hidden={layer.visible ? "false" : "true"}
+                          data-dragging={touchId === layer.id ? "true" : "false"}
+                          tabIndex={0}
+                          aria-current={layer.id === picked ? "true" : undefined}
                           onDragOver={(event) => {
                             event.preventDefault();
                             event.dataTransfer.dropEffect = "move";
@@ -1234,6 +1436,15 @@ export function StackBuilder({
                             if (id) reorder(id, index);
                           }}
                           onClick={() => setPicked(layer.id)}
+                          onKeyDown={(event) => {
+                            // A row is in the tab order so the picked layer can be changed from
+                            // the keyboard; the grip's own keys reorder it.
+                            if (event.target !== event.currentTarget) return;
+                            if (event.key === "Enter" || event.key === " ") {
+                              event.preventDefault();
+                              setPicked(layer.id);
+                            }
+                          }}
                         >
                           <button
                             type="button"
@@ -1245,6 +1456,10 @@ export function StackBuilder({
                               event.dataTransfer.effectAllowed = "move";
                               event.dataTransfer.setData("text/plain", layer.id);
                             }}
+                            onPointerDown={(event) => touchStart(event, layer)}
+                            onPointerMove={touchMove}
+                            onPointerUp={touchEnd}
+                            onPointerCancel={touchEnd}
                             onKeyDown={(event) => {
                               if (!event.altKey) return;
                               if (event.key === "ArrowUp" && index < count - 1) {
@@ -1301,9 +1516,50 @@ export function StackBuilder({
                   </ol>
                 )}
               </Panel>
+
+              {narrow && pickedLayer && (
+                <section className="panel rd-layer-summary" aria-label="The picked layer">
+                  <div className="layer-edit-head">
+                    <div className="layer-edit-title">
+                      <Thumb id={pickedLayer.effect} size="md" label={layerLabel(schemas, pickedLayer.effect)} />
+                      <div>
+                        <h2>{pickedLayer.name}</h2>
+                        <span className="mute">
+                          {layerLabel(schemas, pickedLayer.effect)} · {areaName(pickedLayer.area, layout, devices)}
+                        </span>
+                      </div>
+                    </div>
+                    <span ref={tuneRef}>
+                      <Button
+                        size="sm"
+                        icon={<SlidersHorizontal size={15} />}
+                        aria-label={`Tune ${pickedLayer.name}`}
+                        onClick={openSheet}
+                      >
+                        Tune
+                      </Button>
+                    </span>
+                  </div>
+                </section>
+              )}
             </div>
 
-            <div className="rd-stack-side">
+            <div
+              ref={narrow ? sheetRef : undefined}
+              className={narrow ? "effect-sheet rd-layer-sheet" : "rd-stack-side"}
+              data-open={narrow ? (sheetOpen ? "true" : "false") : undefined}
+              role={narrow ? "dialog" : undefined}
+              aria-modal={narrow ? true : undefined}
+              aria-label={narrow && pickedLayer ? `Tune ${pickedLayer.name}` : undefined}
+              tabIndex={narrow ? -1 : undefined}
+              hidden={narrow ? !sheetOpen : undefined}
+            >
+              {narrow && (
+                <div className="effect-sheet-head">
+                  <IconButton label="Back to the stack" icon={<CaretLeft size={18} />} onClick={closeSheet} />
+                  <span>{pickedLayer ? `Tune ${pickedLayer.name}` : "Tune"}</span>
+                </div>
+              )}
               {pickedLayer ? (
                 <Panel className="rd-layer-edit">
                   <div className="layer-edit-head">
@@ -1337,14 +1593,29 @@ export function StackBuilder({
                       <Select
                         label="Effect"
                         value={pickedLayer.effect}
-                        options={(effects ?? [])
-                          .filter((effect) => !effect.id.startsWith("stack:"))
-                          .map((effect) => ({
-                            value: effect.id,
-                            label: html && !isHtmlEffect(pickedLayer.effect) && isHtmlEffect(effect.id)
-                              ? `${effect.name} (HTML layers full)`
-                              : effect.name,
-                          }))}
+                        options={[
+                          // A layer whose effect is gone (or is a stack, which the list never offers)
+                          // keeps its own entry, so the select says what the layer has.
+                          ...((effects ?? []).some((effect) => effect.id === pickedLayer.effect)
+                            ? []
+                            : [
+                                {
+                                  value: pickedLayer.effect,
+                                  label:
+                                    schemas[pickedLayer.effect] === null
+                                      ? "Missing effect"
+                                      : layerLabel(schemas, pickedLayer.effect),
+                                },
+                              ]),
+                          ...(effects ?? [])
+                            .filter((effect) => !effect.id.startsWith("stack:"))
+                            .map((effect) => ({
+                              value: effect.id,
+                              label: html && !isHtmlEffect(pickedLayer.effect) && isHtmlEffect(effect.id)
+                                ? `${effect.name} (HTML layers full)`
+                                : effect.name,
+                            })),
+                        ]}
                         onChange={(next) => void chooseEffect(pickedLayer.id, next)}
                       />
                     </div>
@@ -1384,13 +1655,32 @@ export function StackBuilder({
                       <Monitor size={16} aria-hidden="true" />
                       <span>{areaName(pickedLayer.area, layout, devices)}</span>
                     </div>
-                    <Button size="sm" variant="ghost" onClick={() => setPickerFor(pickedLayer.id)}>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={(event) => {
+                        areaOpener.current = event.currentTarget;
+                        setPickerFor(pickedLayer.id);
+                      }}
+                    >
                       Change area
                     </Button>
                   </div>
 
                   {schemas[pickedLayer.effect] === null || statuses[pickedLayer.id]?.status === "missing_effect" ? (
-                    <p className="error-line">This effect is gone. Choose another.</p>
+                    <div className="rd-gone">
+                      <p className="error-line">This effect is gone. Choose another.</p>
+                      <span ref={chooseRef}>
+                        <Button
+                          size="sm"
+                          icon={<Plus size={15} />}
+                          aria-label={`Choose effect for ${pickedLayer.name}`}
+                          onClick={() => setChooseFor(pickedLayer.id)}
+                        >
+                          Choose effect
+                        </Button>
+                      </span>
+                    </div>
                   ) : schemas[pickedLayer.effect] === undefined ? (
                     <p className="dim">Loading the effect&apos;s properties…</p>
                   ) : (
@@ -1412,6 +1702,11 @@ export function StackBuilder({
                       This layer is slower than the frame; the rest of the stack keeps its rate.
                     </p>
                   )}
+                  {statuses[pickedLayer.id]?.status === "nested_stack" && (
+                    <p className="layer-warn" role="status">
+                      A stack cannot contain a stack. This layer does not run; the rest of the stack does.
+                    </p>
+                  )}
                 </Panel>
               ) : (
                 <Panel className="rd-layer-edit rd-layer-none" title="No layer picked">
@@ -1419,6 +1714,7 @@ export function StackBuilder({
                 </Panel>
               )}
 
+              {!narrow && (
               <Panel title="Presets" className="rd-presets">
                 <div className="preset-chips" role="group" aria-label="Presets">
                   {presets.builtIn.map((preset) => (
@@ -1475,12 +1771,13 @@ export function StackBuilder({
                   <span className="preset-status">{appliedPreset ?? "Custom values"}</span>
                 </div>
               </Panel>
+              )}
             </div>
           </div>
         </LoadFrame>
       )}
 
-      <Popover anchor={addRef} open={addOpen} onClose={() => setAddOpen(false)} label="Add a layer" className="rd-add-layer">
+      <Popover anchor={addRef} open={addOpen} onClose={closeAdd} label="Add a layer" className="rd-add-layer">
         <div className="stack rd-add-layer-body">
           <div className="rd-add-search">
             <input
@@ -1493,34 +1790,24 @@ export function StackBuilder({
             />
           </div>
           <ul className="rd-add-list" role="listbox" aria-label="Effects to add">
-            {addable.map((row) => {
-              const refusal = addLayerRefusal(draft.layers, row.effect.id);
-              return (
-                <li key={row.effect.id}>
-                  <button
-                    type="button"
-                    className="rd-add-row"
-                    role="option"
-                    aria-selected={false}
-                    disabled={refusal !== null}
-                    title={refusal ?? undefined}
-                    onClick={() => void addEffect(row.effect.id)}
-                  >
-                    <Thumb id={row.effect.id} size="sm" label={row.effect.name} />
-                    <span className="rd-add-text">
-                      <span className="rd-add-name">
-                        <Highlighted text={row.effect.name} ranges={row.match.ranges} />
-                      </span>
-                      <span className="rd-add-desc">{refusal ?? row.effect.description}</span>
-                    </span>
-                    {isHtmlEffect(row.effect.id) && <Chip html>HTML</Chip>}
-                  </button>
-                </li>
-              );
-            })}
+            {addable.map((row) => effectRow(row, true))}
             {addable.length === 0 && (
               <li className="dim rd-add-empty">No effect matches that.</li>
             )}
+          </ul>
+        </div>
+      </Popover>
+
+      <Popover
+        anchor={chooseRef}
+        open={chooseFor !== null}
+        onClose={closeChoose}
+        label="Choose effect"
+        className="rd-add-layer rd-choose-effect"
+      >
+        <div className="stack rd-add-layer-body">
+          <ul className="rd-add-list" role="listbox" aria-label="Effects to choose">
+            {chooseList.map((row) => effectRow(row, false))}
           </ul>
         </div>
       </Popover>
@@ -1531,7 +1818,7 @@ export function StackBuilder({
           layout={layout}
           devices={devices}
           onUse={(area) => applyArea(area)}
-          onClose={() => setPickerFor(null)}
+          onClose={closePicker}
         />
       )}
 

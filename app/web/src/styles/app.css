@@ -6646,6 +6646,12 @@ button.chip:hover {
   background: transparent;
   color: var(--mute);
   cursor: grab;
+  /* A finger on the grip reorders the row; it must not scroll the list under it. */
+  touch-action: none;
+}
+
+.layer-row[data-dragging="true"] {
+  opacity: 0.6;
 }
 
 .layer-row:hover .layer-grip {
@@ -7170,6 +7176,216 @@ button.chip:hover {
 .rd-builder-narrow {
   max-width: 52ch;
   gap: var(--s3);
+}
+
+/* ---------- the stack builder on a phone (issue #95, D95.5.7, PR D) ---------- */
+
+@media (max-width: 720px) {
+  /* The builder owns the window's height: only the layer list and the properties scroll. The
+     shell's phone rules let a page scroll; this page is the exception D95.5.7 asks for. */
+  .app:has(.rd-stacks-phone) {
+    height: 100dvh;
+    min-height: 0;
+  }
+
+  /* The builder's title yields to its one key: a long stack name ellipsises instead of pushing
+     Save off the strip. The `Stack · N layers` context is a desktop line: the mockup's phone
+     strip is the back key, the name and Save (D95.5.7). */
+  .strip-inner:has(.rd-stack-strip-save) .rd-title {
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+
+  .strip-inner:has(.rd-stack-strip-save) .rd-title h1 {
+    max-width: 46vw;
+  }
+
+  .strip-inner:has(.rd-actions) .rd-context:has(.rd-stacks-context) {
+    display: none;
+  }
+
+  .app:has(.rd-stacks-phone) .main {
+    height: 100dvh;
+    min-height: 0;
+  }
+
+  .app:has(.rd-stacks-phone) .content {
+    flex: 1 1 auto;
+    min-height: 0;
+    height: auto;
+    overflow: hidden;
+    padding: var(--s2) var(--s3) calc(var(--dock-h) + var(--s2));
+  }
+
+  .app:has(.rd-stacks-phone) .page-enter {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .rd-stacks-phone {
+    flex: 1 1 auto;
+    min-height: 0;
+    gap: var(--s3);
+  }
+
+  .rd-stacks-phone .rd-stack-frame {
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+
+  /* The wait keeps the phone's shape too: the picture, then the list. */
+  .rd-stacks-phone .rd-stack-shape {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--s3);
+    min-height: 0;
+  }
+
+  .rd-stacks-phone .rd-stack-shape .skeleton {
+    min-height: 0;
+    height: 300px;
+  }
+
+  .rd-stacks-phone .rd-stack-shape .skeleton:first-child {
+    grid-row: auto;
+  }
+
+  .rd-stacks-phone .rd-stack-shape .skeleton:last-child {
+    height: 190px;
+  }
+
+  /* One column: the picture, the list, then the picked layer's one-line summary. */
+  .rd-stacks-phone .rd-stack-body {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--s3);
+    min-height: 0;
+  }
+
+  .rd-stacks-phone .rd-stack-main {
+    min-height: 0;
+    gap: var(--s3);
+  }
+
+  /* The preview keeps its 320:200 picture and gives up height before anything is cut. The wrap
+     takes its height from its width: the picture is the stage's own 320:200 rectangle, as the
+     mockup draws it, rather than a square the height happens to give. */
+  .rd-stacks-phone .rd-stack-stage {
+    flex: 0 1 auto;
+    min-height: 0;
+    gap: var(--s2);
+    padding: var(--s3);
+  }
+
+  .rd-stacks-phone .rd-canvas-wrap {
+    flex: 0 1 auto;
+    min-height: 0;
+    max-height: 100%;
+    aspect-ratio: 320 / 200;
+  }
+
+  .rd-stacks-phone .rd-stack-stage .panel-head {
+    gap: var(--s2);
+  }
+
+  /* The mockup's phone head carries the size and the rate; the areas are drawn, and the switch
+     that hides them is a desktop control. */
+  .rd-stacks-phone .rd-show-areas {
+    display: none;
+  }
+
+  .rd-stacks-phone .rd-stage-foot {
+    gap: var(--s2);
+  }
+
+  .rd-stacks-phone .rd-layers {
+    flex: 0 0 auto;
+    padding: var(--s2);
+  }
+
+  /* A phone screen holds the picture, the list and the summary without the page scrolling: the
+     list is the thing that scrolls, capped at 22 dvh (D95.5.7). */
+  .rd-stacks-phone .rd-layers > .layer-list {
+    max-height: 22dvh;
+  }
+
+  /* A touch row is a little shorter than a pointer row, which leaves the next one showing at
+     the pane's edge: a list that scrolls says so. */
+  .rd-stacks-phone .layer-row {
+    min-height: 50px;
+  }
+
+  .rd-stacks-phone .rd-layer-summary {
+    flex: 0 0 auto;
+    padding: var(--s3);
+  }
+
+  .rd-stacks-phone .rd-layer-summary .layer-edit-head {
+    margin-bottom: 0;
+  }
+
+  /* The picked layer's sheet: #2's phone sheet (`.effect-sheet`), holding the effect, blend,
+     opacity, area and properties (D95.5.7). Nothing scrolls in it but the properties. */
+  .rd-layer-sheet[data-open="true"] {
+    display: flex;
+    flex-direction: column;
+    gap: var(--s3);
+    overflow: hidden;
+    padding: var(--s2) var(--s3) calc(var(--dock-h) + var(--s2));
+  }
+
+  .rd-layer-sheet .effect-sheet-head {
+    flex: 0 0 auto;
+  }
+
+  .rd-layer-sheet .rd-layer-edit {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+    padding: 0;
+    border: 0;
+    background: transparent;
+  }
+
+  .rd-layer-sheet .rd-layer-edit .prop-list {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  /* The area picker is a sheet on a phone, over the layer sheet (D95.5.6). */
+  .rd-scrim {
+    z-index: 70;
+    align-items: end;
+    padding: var(--s3) var(--s3) 0;
+  }
+
+  .rd-picker {
+    width: 100%;
+    max-height: calc(100dvh - var(--strip-h) - var(--s3));
+    border-radius: var(--r-lg) var(--r-lg) 0 0;
+    padding-bottom: calc(var(--dock-h) + var(--s3));
+  }
+
+  /* Four ways to say where a layer paints do not fit one phone row: they are a 2 x 2 grid,
+     with the same sliding thumb. */
+  .rd-picker .seg {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    width: 100%;
+  }
+
+  .rd-picker .seg-item {
+    justify-content: center;
+    height: 30px;
+    padding: 0 var(--s2);
+  }
+
+  .rd-layer-summary .layer-edit-title .thumb,
+  .rd-layer-summary .layer-edit-title .thumb-md {
+    width: 44px;
+    height: 28px;
+  }
 }
 
 @container page (max-height: 720px) {
