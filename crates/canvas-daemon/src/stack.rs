@@ -638,6 +638,8 @@ pub struct StackEffect {
     frame_size: (u32, u32),
     /// True once the compositor's own frame work panicked: it logs once and keeps going.
     frame_panicked: bool,
+    /// True once the compositor's own start panicked: it logs once and keeps going.
+    init_panicked: bool,
 }
 
 impl StackEffect {
@@ -701,6 +703,7 @@ impl StackEffect {
             seed: None,
             frame_size: (0, 0),
             frame_panicked: false,
+            init_panicked: false,
         }
     }
 
@@ -770,6 +773,13 @@ impl StackEffect {
             if layer.canvas.width != width || layer.canvas.height != height {
                 layer.canvas = Canvas::new(width, height);
             }
+        }
+    }
+
+    /// Blanks every layer's canvas: what a stack whose own start panicked shows.
+    fn blacken_canvases(&mut self) {
+        for layer in &mut self.layers {
+            layer.canvas.fill([0.0, 0.0, 0.0]);
         }
     }
 
@@ -968,41 +978,29 @@ impl Effect for StackEffect {
     }
 
     fn init(&mut self, props: &Props) {
-        self.seed = tile_seed(props);
-        // A render-scale change rebuilds a layer's canvas; the areas know the scale.
-        let scale = self.area_scale();
-        let width = ((CANVAS_WIDTH as f32 * scale).round() as u32).max(1);
-        let height = ((CANVAS_HEIGHT as f32 * scale).round() as u32).max(1);
-        self.fit_canvases(width, height);
-        // A reactivation clears a fault (D95.3.5); a layer whose start panics below faults again.
-        self.clear_faults();
-        let seed = self.seed.clone();
-        for layer in &mut self.layers {
-            let Some(effect) = layer.built.as_mut() else { continue };
-            let layer_props = layer_props(props, &layer.id, seed.as_ref());
-            // A panic in one layer's start is a faulted layer, not a dead render thread
-            // (D95.3.6): the rest of the stack starts and runs.
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                effect.init(&layer_props);
-            }));
-            if let Err(payload) = outcome {
-                // A tile's HTML layer unwinds with a `TileFailure` by design, and the tile
-                // render catches it to refuse the tile; that one belongs to the caller.
-                if payload.downcast_ref::<crate::thumbnail::TileFailure>().is_some() {
-                    std::panic::resume_unwind(payload);
-                }
-                layer.hold = Hold::Faulted;
-                layer.panic_logged = true;
+        // The stack's own start is guarded as each layer's is: `fit_canvases`, `clear_faults`,
+        // `resolve_areas` and the status report are a panic turned into a black stack, logged
+        // once, and it never unwinds into the engine (D95.3.6).
+        let started = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.start(props)));
+        if let Err(payload) = started {
+            // A tile's HTML layer unwinds with a `TileFailure` by design, and the tile
+            // render catches it to refuse the tile; that one belongs to the caller.
+            if payload.downcast_ref::<crate::thumbnail::TileFailure>().is_some() {
+                std::panic::resume_unwind(payload);
+            }
+            self.blacken_canvases();
+            // The start may not have reached the area resolution; the first frame resolves.
+            self.resolved.clear();
+            self.live_version = u64::MAX;
+            self.area_version = u64::MAX;
+            if !self.init_panicked {
+                self.init_panicked = true;
                 tracing::error!(
                     stack = %self.stack_id,
-                    layer = %layer.id,
-                    effect = %layer.effect,
-                    "a layer's effect panicked while it started; it is faulted and the rest of the stack runs"
+                    "the stack's own start panicked; its layers stay black and the stack keeps running"
                 );
             }
         }
-        self.resolve_areas();
-        self.report_statuses();
     }
 
     fn update(&mut self, dt: f32, canvas: &mut Canvas, inputs: &Inputs) {
@@ -1035,6 +1033,48 @@ impl Effect for StackEffect {
 }
 
 impl StackEffect {
+    /// The body of [`Effect::init`], run inside its guard.
+    fn start(&mut self, props: &Props) {
+        self.seed = tile_seed(props);
+        // A render-scale change rebuilds a layer's canvas; the areas know the scale.
+        let scale = self.area_scale();
+        let width = ((CANVAS_WIDTH as f32 * scale).round() as u32).max(1);
+        let height = ((CANVAS_HEIGHT as f32 * scale).round() as u32).max(1);
+        self.fit_canvases(width, height);
+        // A reactivation clears a fault (D95.3.5); a layer whose start panics below faults again.
+        self.clear_faults();
+        let seed = self.seed.clone();
+        for layer in &mut self.layers {
+            let Some(effect) = layer.built.as_mut() else { continue };
+            let layer_props = layer_props(props, &layer.id, seed.as_ref());
+            // A panic in one layer's start is a faulted layer, not a dead render thread
+            // (D95.3.6): the rest of the stack starts and runs.
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                effect.init(&layer_props);
+            }));
+            if let Err(payload) = outcome {
+                // A tile's HTML layer unwinds with a `TileFailure` by design, and the tile
+                // render catches it to refuse the tile; that one belongs to the caller.
+                if payload.downcast_ref::<crate::thumbnail::TileFailure>().is_some() {
+                    std::panic::resume_unwind(payload);
+                }
+                layer.hold = Hold::Faulted;
+                layer.panic_logged = true;
+                // A half-started effect can leave anything behind; a faulted layer composites
+                // nothing visible, so its canvas goes.
+                layer.canvas.fill([0.0, 0.0, 0.0]);
+                tracing::error!(
+                    stack = %self.stack_id,
+                    layer = %layer.id,
+                    effect = %layer.effect,
+                    "a layer's effect panicked while it started; it is faulted, its picture is black and the rest of the stack runs"
+                );
+            }
+        }
+        self.resolve_areas();
+        self.report_statuses();
+    }
+
     /// One frame of the compositor's own work, run inside [`StackEffect::update`]'s guard.
     fn frame(&mut self, dt: f32, canvas: &mut Canvas, inputs: &Inputs) {
         self.fit_canvases(canvas.width, canvas.height);
