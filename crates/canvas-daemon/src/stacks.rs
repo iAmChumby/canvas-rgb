@@ -10,7 +10,7 @@ use canvas_proto::stack::{
     STACK_ID_PREFIX, STACK_MAX_LAYERS, STACK_NAME_MAX,
 };
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
@@ -333,6 +333,9 @@ pub struct Stacks {
     running: Mutex<Option<Running>>,
     /// What the running stack's layers last reported (held, faulted), for `GET /stacks/{id}`.
     statuses: Arc<Mutex<Vec<canvas_proto::api::StackLayerStatus>>>,
+    /// True once a load left a stack or a layer out: the file still holds it, so the first write
+    /// keeps the file aside before the write erases it.
+    dropped_on_load: AtomicBool,
 }
 
 impl Stacks {
@@ -347,6 +350,7 @@ impl Stacks {
             clock: real_clock(),
             running: Mutex::new(None),
             statuses: Arc::new(Mutex::new(Vec::new())),
+            dropped_on_load: AtomicBool::new(false),
         }
     }
 
@@ -388,17 +392,28 @@ impl Stacks {
             return;
         };
         let mut accepted: Vec<Stack> = Vec::new();
+        let mut dropped = false;
         for stack in file.stacks.drain(..) {
             let layers = loaded_layers(&stack, known);
+            // A layer the compositor cannot run is out of memory but still in the file.
+            if layers.len() != stack.layers.len() {
+                dropped = true;
+            }
             // The stack is checked as the compositor will run it: a value a hand-written file
             // got wrong is clamped first, so only the structure, the name and the caps can cost
             // the whole stack (D95.3.6).
             let checked = checked_for_load(&stack, layers.clone());
             if let Err(reason) = validate_stack(&checked, known, &accepted) {
                 tracing::warn!(stack = %stack.id, %reason, "a stack was dropped as it was loaded");
+                dropped = true;
                 continue;
             }
             accepted.push(Stack { id: stack.id.clone(), layers });
+        }
+        if dropped {
+            // The stack that was dropped is still in the file; the first write must not erase it
+            // without a copy (see `keep_aside_after_a_dropped_load`).
+            self.dropped_on_load.store(true, Ordering::SeqCst);
         }
         let mut guard = write_recovering(&self.file);
         *guard = StackFile { schema_version: STACKS_SCHEMA, stacks: accepted };
@@ -409,7 +424,42 @@ impl Stacks {
     /// Writes what the store holds to `stacks.json`.
     pub fn save(&self) -> Result<(), std::io::Error> {
         let file = read_recovering(&self.file).clone();
+        self.keep_aside_after_a_dropped_load()
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
         crate::storage::write_json(&self.path(), &file)
+    }
+
+    /// Keeps the file as it was loaded aside before the first write after a load left a stack or
+    /// a layer out: what is not in memory is still in the file, and the write would erase it.
+    ///
+    /// The copy is kept as `read_parsed` keeps an unparseable file: renamed to
+    /// `stacks.json.<stamp>.corrupt` beside it. A copy that cannot be made fails the write, so the
+    /// file is never overwritten without it.
+    fn keep_aside_after_a_dropped_load(&self) -> Result<(), StacksError> {
+        if !self.dropped_on_load.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let path = self.path();
+        match crate::storage::quarantine(&path) {
+            Ok(()) => {
+                self.dropped_on_load.store(false, Ordering::SeqCst);
+                tracing::warn!(
+                    path = %path.display(),
+                    "a stack this build does not run was left out as stacks.json loaded; the file is kept aside before the first save"
+                );
+                Ok(())
+            }
+            Err(error) => {
+                tracing::error!(
+                    path = %path.display(),
+                    %error,
+                    "stacks.json could not be kept aside; nothing is written over it"
+                );
+                Err(StacksError::Io(format!(
+                    "stacks.json could not be kept aside: {error}"
+                )))
+            }
+        }
     }
 
     /// Where `stacks.json` lives.
@@ -472,6 +522,7 @@ impl Stacks {
             Some(existing) => *existing = parsed.clone(),
             None => file.stacks.push(parsed.clone()),
         }
+        self.keep_aside_after_a_dropped_load()?;
         crate::storage::write_json(&self.path(), &file)
             .map_err(|e| StacksError::Io(e.to_string()))?;
         *guard = file;
@@ -494,6 +545,7 @@ impl Stacks {
         };
         let mut file = guard.clone();
         let removed = file.stacks.remove(index);
+        self.keep_aside_after_a_dropped_load()?;
         crate::storage::write_json(&self.path(), &file)
             .map_err(|e| StacksError::Io(e.to_string()))?;
         *guard = file;
@@ -833,6 +885,47 @@ mod tests {
         let outcome = store.delete("stack:Kept");
         assert!(matches!(outcome, Err(StacksError::Io(_))), "{outcome:?}");
         assert_eq!(store.all(), vec![saved], "the stack is still in the store");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_refused_stack_is_kept_aside_before_the_first_save_erases_it() {
+        let dir = std::env::temp_dir().join(format!(
+            "canvas-rgb-stacks-kept-aside-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(STACKS_FILE),
+            r#"{"schema_version":1,"stacks":[
+                {"id":"stack:Good","layers":[{"id":"l1","name":"Base","effect":"solid"}]},
+                {"id":"Glow","layers":[{"id":"l1","name":"Base","effect":"solid"}]}]}"#,
+        )
+        .unwrap();
+        let store = Stacks::new(&dir);
+        store.reload(&UserEffects::new(crate::user_effects::html_builder()));
+        assert_eq!(store.all().len(), 1, "the stack with no prefix is dropped as it loads");
+
+        store
+            .put(stack("stack:New", vec![layer("l1", "solid")]), &known())
+            .expect("the save is written");
+
+        // The refused stack is out of memory; the file as it loaded is kept beside the new one.
+        let kept = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .find(|name| name.starts_with(STACKS_FILE) && name.ends_with(".corrupt"))
+            .expect("the file as it loaded is kept aside");
+        let text = std::fs::read_to_string(dir.join(&kept)).unwrap();
+        assert!(text.contains("Glow"), "the kept file still holds the refused stack: {text}");
+
+        let after = std::fs::read_to_string(dir.join(STACKS_FILE)).unwrap();
+        assert!(after.contains("stack:New"), "{after}");
+        assert!(after.contains("stack:Good"), "{after}");
+        assert!(!after.contains("stack:Glow"), "{after}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
