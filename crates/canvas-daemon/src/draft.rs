@@ -106,6 +106,15 @@ impl Slot {
     }
 }
 
+/// The build that last failed and the draft it was for. A beat that carries a failed draft's
+/// source again answers that build's error (422) instead of loading a file that cannot load
+/// every five seconds; the note is dropped when a draft lands.
+struct FailedBuild {
+    /// The HTML source the build was given, exactly as the beat gave it.
+    source: Arc<str>,
+    message: String,
+}
+
 /// What a build in flight is building.
 #[derive(Clone)]
 enum Building {
@@ -129,6 +138,10 @@ struct InFlight {
     props: Props,
     /// The effect the draft takes over from, read when the build starts.
     prior: Option<ActiveEffect>,
+    /// The page whose PUT started a stack build. A stack draft's lease does not run out under
+    /// a build the owning page has in flight (D95.4.4). `None` for an HTML draft, which has no
+    /// epoch.
+    epoch: Option<String>,
 }
 
 impl InFlight {
@@ -168,6 +181,8 @@ pub struct Draft {
     tokens: AtomicU64,
     /// Held across a build, so one build runs per route even when drafts change quickly.
     build_lock: tokio::sync::Mutex<()>,
+    /// The build that last failed, until a draft lands.
+    last_failure: Mutex<Option<FailedBuild>>,
 }
 
 impl Default for Draft {
@@ -194,6 +209,7 @@ impl Draft {
             in_flight: Mutex::new(None),
             tokens: AtomicU64::new(0),
             build_lock: tokio::sync::Mutex::new(()),
+            last_failure: Mutex::new(None),
         }
     }
 
@@ -266,10 +282,16 @@ impl Draft {
 
     /// Starts a build and returns its token. A build already in flight is superseded: its
     /// result will find another token and land nowhere.
-    fn begin_build(&self, kind: Building, props: &Props, prior: Option<ActiveEffect>) -> u64 {
+    fn begin_build(
+        &self,
+        kind: Building,
+        props: &Props,
+        prior: Option<ActiveEffect>,
+        epoch: Option<String>,
+    ) -> u64 {
         let token = self.tokens.fetch_add(1, Ordering::SeqCst) + 1;
         *self.lock_in_flight() =
-            Some(InFlight { token, kind, props: props.clone(), prior });
+            Some(InFlight { token, kind, props: props.clone(), prior, epoch });
         token
     }
 
@@ -295,6 +317,51 @@ impl Draft {
     /// A PUT whose draft is already on the lights supersedes any build for another one.
     fn supersede_build(&self) {
         *self.lock_in_flight() = None;
+    }
+
+    /// The error the last build of `html` failed with, while nothing has landed since.
+    fn last_failure(&self, html: &str) -> Option<String> {
+        self.lock_failure()
+            .as_ref()
+            .filter(|failed| &*failed.source == html)
+            .map(|failed| failed.message.clone())
+    }
+
+    /// The build of `html` failed: a later beat of the same source answers this, not a reload.
+    fn record_failure(&self, html: &str, message: &str) {
+        *self.lock_failure() = Some(FailedBuild {
+            source: Arc::from(html),
+            message: message.to_string(),
+        });
+    }
+
+    fn clear_failure(&self) {
+        *self.lock_failure() = None;
+    }
+
+    fn lock_failure(&self) -> MutexGuard<'_, Option<FailedBuild>> {
+        self.last_failure.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// Frees the route when a build ends without landing: an error, a join error, or a panic in the
+/// blocking task. Every exit path after [`Draft::begin_build`] holds one, so a failed build's
+/// token never stays in the book for later beats to join. A build that lands has already taken
+/// its token, so the guard is a no-op there; a newer PUT's token is left alone.
+struct BuildLease<'a> {
+    draft: &'a Draft,
+    token: u64,
+}
+
+impl<'a> BuildLease<'a> {
+    fn new(draft: &'a Draft, token: u64) -> Self {
+        Self { draft, token }
+    }
+}
+
+impl Drop for BuildLease<'_> {
+    fn drop(&mut self) {
+        self.draft.take_in_flight_if(self.token);
     }
 }
 
@@ -377,6 +444,12 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<bool, PutE
             }
         }
 
+        // This source failed to load the last time it was built and nothing has landed since:
+        // answer that error instead of loading a file that cannot load on every beat.
+        if let Some(message) = app.draft.last_failure(html) {
+            return Err(PutError::Build(message));
+        }
+
         // The layout is read only when the draft starts: a refresh keeps the prior it took over
         // from, even if something changed the layout meanwhile.
         let prior = match &existing {
@@ -387,8 +460,12 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<bool, PutE
             Building::Html { source: Arc::from(html) },
             props,
             prior,
+            None,
         );
     }
+    // Every exit path from here frees the route: an error, a join error, or a panic in the
+    // blocking task must not leave a token for later beats to join.
+    let _lease = BuildLease::new(&app.draft, token);
     // One build per route: a PUT for another source waits for the one in flight to let go.
     let _build = app.draft.build_lock.lock().await;
     if app.draft.in_flight_token() != Some(token) {
@@ -403,7 +480,10 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<bool, PutE
     let effect = tokio::task::spawn_blocking(move || build(&build_id, &build_source))
         .await
         .map_err(|e| PutError::Internal(format!("the draft load task failed: {e}")))?
-        .map_err(PutError::Build)?;
+        .map_err(|message| {
+            app.draft.record_failure(html, &message);
+            PutError::Build(message)
+        })?;
 
     let _gate = app.draft.gate.lock().await;
     // A Stop, an expiry, or another PUT landed while this built: this one is stale.
@@ -413,6 +493,7 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<bool, PutE
     crate::apply_built(app, effect, &building.props)
         .await
         .map_err(PutError::Internal)?;
+    app.draft.clear_failure();
     // The lease starts when the draft reaches the lights, not when its build started: a slow
     // build must not eat the editor's beat.
     let lease_until = app.draft.now() + canvas_proto::consts::DRAFT_LEASE;
@@ -518,8 +599,12 @@ pub async fn put_stack(
             },
             &props,
             prior,
+            Some(epoch.to_string()),
         );
     }
+    // Every exit path from here frees the route: an error, a join error, or a panic in the
+    // blocking task must not leave a token for later beats to join.
+    let _lease = BuildLease::new(&app.draft, token);
     // One build per route: a PUT for another structure waits for the one in flight to let go.
     let _build = app.draft.build_lock.lock().await;
     if app.draft.in_flight_token() != Some(token) {
@@ -564,6 +649,7 @@ pub async fn put_stack(
     crate::apply_built(app, effect, &building.props)
         .await
         .map_err(PutError::Internal)?;
+    app.draft.clear_failure();
     // The stack is what the main engine runs: a save-then-activate with the same structure
     // reuses it instead of building again (D95.4.3, D95.4.6).
     app.stacks.note_running(&stack.id, &structure, Arc::clone(&live));

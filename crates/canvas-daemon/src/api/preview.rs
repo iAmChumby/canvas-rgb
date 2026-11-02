@@ -64,6 +64,25 @@ pub async fn preview(
     upgrade.on_upgrade(move |socket| run(socket, app, engine))
 }
 
+/// The socket's place in the preview registry and the engine's sink, for as long as the session
+/// lasts. Both are state tokens taken when the socket opens and given back at the end of
+/// [`run`]; a session whose task is dropped early would otherwise leave the engine rendering for
+/// nobody, so the drop is what releases them.
+struct Session<'a> {
+    engine: &'a Arc<dyn canvas_proto::traits::Engine>,
+    subscribers: &'a crate::state::PreviewRegistry,
+}
+
+impl Drop for Session<'_> {
+    fn drop(&mut self) {
+        self.subscribers.unsubscribe();
+        if self.subscribers.subscribers() == 0 {
+            // The last subscriber left: the engine parks again.
+            self.engine.set_preview(None);
+        }
+    }
+}
+
 /// The preview session.
 async fn run(mut socket: WebSocket, app: Arc<App>, stack_engine: Option<Arc<dyn canvas_proto::traits::Engine>>) {
     let (engine, subscribers): (Arc<dyn canvas_proto::traits::Engine>, &crate::state::PreviewRegistry) =
@@ -73,8 +92,9 @@ async fn run(mut socket: WebSocket, app: Arc<App>, stack_engine: Option<Arc<dyn 
         };
     let (tx, mut rx) = tokio::sync::mpsc::channel::<(u32, u32, Vec<u8>)>(4);
     let sink = Arc::new(WebsocketPreview::new(tx));
-    engine.set_preview(Some(sink));
     subscribers.subscribe();
+    let _session = Session { engine: &engine, subscribers };
+    engine.set_preview(Some(sink));
     tracing::info!(stack = stack_engine.is_some(), "the editor preview connected");
 
     // The engine's own rate is the cap: it submits at `PREVIEW_MAX_FPS` at most, which is the
@@ -106,10 +126,7 @@ async fn run(mut socket: WebSocket, app: Arc<App>, stack_engine: Option<Arc<dyn 
         }
     }
 
-    subscribers.unsubscribe();
-    if subscribers.subscribers() == 0 {
-        // The last subscriber left: the engine parks again.
-        engine.set_preview(None);
-    }
+    // `_session` gives the registry place and the engine's sink back here: the loop's breaks,
+    // an error, and a dropped task all release them the same way.
     tracing::info!(stack = stack_engine.is_some(), "the editor preview disconnected");
 }

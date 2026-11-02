@@ -101,15 +101,25 @@ fn build(tag: &str) -> Harness {
 }
 
 fn build_with(tag: &str, user: Option<Arc<canvas_daemon::user_effects::UserEffects>>) -> Harness {
-    harness_in(TempHome::new(tag), user)
+    harness_in(TempHome::new(tag), user, None)
+}
+
+/// The daemon whose draft route builds with `builder` instead of the real HTML builder: a test
+/// that counts a draft's builds, or makes one panic.
+fn build_with_draft(tag: &str, builder: canvas_daemon::user_effects::Builder) -> Harness {
+    harness_in(TempHome::new(tag), None, Some(builder))
 }
 
 /// The daemon on a home a test wrote first (a hand-written or corrupt `stacks.json`).
 fn harness_at(home: TempHome) -> Harness {
-    harness_in(home, None)
+    harness_in(home, None, None)
 }
 
-fn harness_in(home: TempHome, user: Option<Arc<canvas_daemon::user_effects::UserEffects>>) -> Harness {
+fn harness_in(
+    home: TempHome,
+    user: Option<Arc<canvas_daemon::user_effects::UserEffects>>,
+    draft_builder: Option<canvas_daemon::user_effects::Builder>,
+) -> Harness {
     let folder = home.path.join("effects");
     std::fs::create_dir_all(&folder).expect("the effects folder is created");
     let store = canvas_daemon::storage::Store::at(&home.path);
@@ -134,7 +144,10 @@ fn harness_in(home: TempHome, user: Option<Arc<canvas_daemon::user_effects::User
     app.stack_preview.install_engine(preview_engine.clone());
     // A stack draft's lease is measured on a clock the test moves, never the wall clock.
     let draft_clock = LeaseClock::new();
-    app.draft = canvas_daemon::draft::Draft::with_clock(draft_clock.clock());
+    app.draft = match draft_builder {
+        Some(builder) => canvas_daemon::draft::Draft::with_builder(draft_clock.clock(), builder),
+        None => canvas_daemon::draft::Draft::with_clock(draft_clock.clock()),
+    };
     let app = Arc::new(app);
     Harness {
         router: api::router(app.clone()),
@@ -3231,5 +3244,122 @@ async fn a_preview_and_a_draft_require_a_sixteen_hex_epoch() {
     assert_eq!(
         put_preview(&harness, &preview, &page(7), 1).await.status(),
         StatusCode::OK
+    );
+}
+
+// ================================================================ round 3 (job 75)
+
+/// HTML whose script does not parse: the builder refuses it, so a PUT of it answers 422.
+const BROKEN_HTML: &str = "<head><title>Broken</title></head><body><canvas id=\"c\"></canvas></body><script>\nvar = ;\n</script>";
+
+/// A PUT to the draft route with one HTML file, as #2's editor sends it.
+async fn put_html_draft(harness: &Harness, html: &str) -> axum::response::Response {
+    let body = serde_json::json!({ "html": html, "props": {} }).to_string();
+    harness
+        .router
+        .clone()
+        .oneshot(request_with_body("PUT", routes::EFFECT_DRAFT, &body))
+        .await
+        .expect("the router answers")
+}
+
+/// A builder that panics once, when it is armed, and then builds as the real one does.
+fn panicking_builder() -> (canvas_daemon::user_effects::Builder, Arc<std::sync::atomic::AtomicBool>) {
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = Arc::clone(&armed);
+    let base = canvas_daemon::user_effects::html_builder();
+    let builder: canvas_daemon::user_effects::Builder = Arc::new(move |id: &str, source: &str| {
+        if flag.swap(false, Ordering::SeqCst) {
+            panic!("the builder panicked");
+        }
+        base(id, source)
+    });
+    (builder, armed)
+}
+
+/// A user-effects library whose builder panics once, when it is armed, and then behaves.
+/// Loading a file into the library is itself a build, so the test arms it after its setup.
+fn panicking_user() -> (Arc<canvas_daemon::user_effects::UserEffects>, Arc<std::sync::atomic::AtomicBool>) {
+    let (builder, armed) = panicking_builder();
+    (Arc::new(canvas_daemon::user_effects::UserEffects::new(builder)), armed)
+}
+
+#[tokio::test]
+async fn a_failed_draft_build_answers_its_error_on_every_beat() {
+    let builds = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&builds);
+    let base = canvas_daemon::user_effects::html_builder();
+    let builder: canvas_daemon::user_effects::Builder = Arc::new(move |id: &str, source: &str| {
+        counted.fetch_add(1, Ordering::SeqCst);
+        base(id, source)
+    });
+    let harness = build_with_draft("r3-draft-failure", builder);
+    prior_is_solid(&harness).await;
+
+    // Three beats of a file that cannot load: each one is refused, and the route stays free
+    // (the second beat answers the stored error rather than joining the dead build).
+    for beat in 1..=3 {
+        let response = put_html_draft(&harness, BROKEN_HTML).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "beat {beat} of a broken draft is refused"
+        );
+    }
+    assert_eq!(
+        builds.load(Ordering::SeqCst),
+        1,
+        "the source that cannot load is not loaded again on every beat"
+    );
+    assert_eq!(
+        harness.engine.effect_id.lock().unwrap().clone(),
+        Some("solid".to_string()),
+        "no failed build reached the lights"
+    );
+}
+
+#[tokio::test]
+async fn a_builder_that_panics_leaves_the_draft_route_free() {
+    let (builder, armed) = panicking_builder();
+    let harness = build_with_draft("r3-draft-panic", builder);
+    prior_is_solid(&harness).await;
+
+    // The first build panics: the daemon answers 500, as a daemon problem, not the file's.
+    armed.store(true, Ordering::SeqCst);
+    let panicked = put_html_draft(&harness, VALID_HTML).await;
+    assert_eq!(panicked.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    // The route is free: the next beat builds and lands instead of joining the dead build.
+    let landed = put_html_draft(&harness, VALID_HTML).await;
+    assert_eq!(landed.status(), StatusCode::OK);
+    assert_eq!(json(landed).await["applied"], true);
+    let hash = canvas_daemon::user_effects::source_hash(VALID_HTML);
+    assert_eq!(
+        harness.engine.effect_id.lock().unwrap().clone(),
+        Some(format!("{}{hash}", canvas_proto::consts::DRAFT_ID_PREFIX)),
+        "the beat after the panic reached the lights"
+    );
+}
+
+#[tokio::test]
+async fn a_builder_that_panics_leaves_the_preview_route_free() {
+    let (user, armed) = panicking_user();
+    let harness = build_with("r3-preview-panic", Some(user));
+    add_html(&harness, "Spark.html", VALID_HTML);
+    let preview = stack("stack:Panes", vec![layer("l1", "html:Spark")]);
+    let epoch = page(0xe1);
+
+    armed.store(true, Ordering::SeqCst);
+    let panicked = put_preview(&harness, &preview, &epoch, 1).await;
+    assert_eq!(panicked.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    // The next beat builds the same structure again and it lands on the preview engine.
+    let landed = put_preview(&harness, &preview, &epoch, 2).await;
+    assert_eq!(landed.status(), StatusCode::OK);
+    assert_eq!(json(landed).await["applied"], true);
+    assert_eq!(
+        harness.preview_engine.effect_id.lock().unwrap().clone(),
+        Some("stack:Panes".to_string()),
+        "the beat after the panic reached the preview engine"
     );
 }

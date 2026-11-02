@@ -167,25 +167,31 @@ impl StackPreview {
                 }
             }
         };
-        if !self.configured.swap(true, Ordering::SeqCst) {
-            engine.set_fps(canvas_proto::consts::PREVIEW_MAX_FPS);
-            let latest = self
-                .latest_layout
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone();
-            let layout = match latest {
-                Some(found) => Some(found),
-                None => match app.active_layout().await {
-                    Some(layout) => Some((layout, app.devices.read().await.clone())),
-                    None => None,
-                },
-            };
-            if let Some((layout, devices)) = layout {
-                engine.set_layout(layout, devices);
-            }
-            engine.set_input_source(app.input_source());
+        if self.configured.load(Ordering::SeqCst) {
+            return engine;
         }
+        // The flag is set last, after the engine has its rate, layout and source: a caller that
+        // goes away between the read of the layout and the configuration leaves the flag false,
+        // so the next open configures the engine instead of trusting a flag that is not true
+        // yet. Two callers that overlap both configure it with the same values.
+        let latest = self
+            .latest_layout
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let layout = match latest {
+            Some(found) => Some(found),
+            None => match app.active_layout().await {
+                Some(layout) => Some((layout, app.devices.read().await.clone())),
+                None => None,
+            },
+        };
+        engine.set_fps(canvas_proto::consts::PREVIEW_MAX_FPS);
+        if let Some((layout, devices)) = layout {
+            engine.set_layout(layout, devices);
+        }
+        engine.set_input_source(app.input_source());
+        self.configured.store(true, Ordering::SeqCst);
         engine
     }
 
@@ -307,6 +313,26 @@ impl StackPreview {
     }
 }
 
+/// Frees the route when a build ends without landing: an error, a join error, or a panic in the
+/// blocking task. Every exit path after [`StackPreview::begin_build`] holds one, so a failed
+/// build's token never stays in the book for later beats to join.
+struct BuildLease<'a> {
+    preview: &'a StackPreview,
+    token: u64,
+}
+
+impl<'a> BuildLease<'a> {
+    fn new(preview: &'a StackPreview, token: u64) -> Self {
+        Self { preview, token }
+    }
+}
+
+impl Drop for BuildLease<'_> {
+    fn drop(&mut self) {
+        self.preview.take_in_flight_if(self.token);
+    }
+}
+
 impl Default for StackPreview {
     fn default() -> Self {
         Self::new()
@@ -421,6 +447,9 @@ pub async fn put(
         token = app.stack_preview.begin_build(stack, &structure, props.clone());
     }
 
+    // Every exit path from here frees the route: an error, a join error, or a panic in the
+    // blocking task must not leave a token for later beats to join.
+    let _lease = BuildLease::new(&app.stack_preview, token);
     // One build runs per route: a PUT with a different structure waits for the one in flight to
     // let go, and then builds (or finds it was superseded itself).
     let _build = app.stack_preview.build_lock.lock().await;
