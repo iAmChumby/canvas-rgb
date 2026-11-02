@@ -295,6 +295,33 @@ impl Effect for PanickyInit {
     }
 }
 
+/// A fake tile layer whose start unwinds with the tile render's own failure payload: a stack
+/// tile must still refuse the tile rather than draw a quietly different picture.
+struct TileFailingInit;
+
+impl Effect for TileFailingInit {
+    fn schema(&self) -> PropertySchema {
+        PropertySchema {
+            id: "tile".into(),
+            name: "Tile".into(),
+            description: String::new(),
+            needs: InputNeeds::default(),
+            properties: Vec::new(),
+            presets: Vec::new(),
+            thumbnail: None,
+        }
+    }
+
+    fn init(&mut self, _props: &Props) {
+        std::panic::resume_unwind(Box::new(canvas_daemon::thumbnail::TileFailure {
+            reason: "the tile's script failed".into(),
+            load_dependent: false,
+        }));
+    }
+
+    fn update(&mut self, _dt: f32, _canvas: &mut Canvas, _inputs: &Inputs) {}
+}
+
 /// A leaf builder that hands every layer a [`Paint`] and counts the builds.
 fn paint_leaves(
     updates: Arc<AtomicU64>,
@@ -1761,6 +1788,26 @@ fn a_panic_in_the_compositors_own_work_is_a_black_frame() {
     // The stack keeps running: a second frame is black too, and nothing unwinds.
     effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
     assert_eq!(canvas.get(5, 5), [0.0, 0.0, 0.0]);
+}
+
+/// A tile's own failure unwinds through the layer's start: the stack hands it to the tile
+/// render, which refuses the tile, instead of faulting the layer and drawing a different picture.
+#[test]
+fn a_tile_failure_from_a_layers_init_reaches_the_tile_render() {
+    let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
+    let lay = layout(vec![placed("d", 0, 0.0, 0.0, 100.0, 20.0)], RenderScale::P100, SamplingMode::Nearest);
+    let stack = stack("stack:Tile", vec![layer("l1", "tile")]);
+    let leaves: LeafBuilder = Arc::new(|_id: &str| Ok(Box::new(TileFailingInit) as Box<dyn Effect>));
+    let mut effect = StackEffect::new(&stack, leaves, live_for(&stack), areas_for(&lay, &devices))
+        .with_clock(ManualClock::new().clock());
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        effect.init(&Props::new());
+    }));
+    let payload = outcome.expect_err("the tile failure is handed on, not swallowed");
+    assert!(
+        payload.downcast_ref::<canvas_daemon::thumbnail::TileFailure>().is_some(),
+        "the payload is still the tile's own"
+    );
 }
 
 /// One frame of a directly-built compositor, at the daemon's default step.

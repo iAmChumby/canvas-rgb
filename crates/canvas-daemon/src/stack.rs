@@ -977,7 +977,12 @@ impl Effect for StackEffect {
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 effect.init(&layer_props);
             }));
-            if outcome.is_err() {
+            if let Err(payload) = outcome {
+                // A tile's HTML layer unwinds with a `TileFailure` by design, and the tile
+                // render catches it to refuse the tile; that one belongs to the caller.
+                if payload.downcast_ref::<crate::thumbnail::TileFailure>().is_some() {
+                    std::panic::resume_unwind(payload);
+                }
                 layer.hold = Hold::Faulted;
                 layer.panic_logged = true;
                 tracing::error!(
