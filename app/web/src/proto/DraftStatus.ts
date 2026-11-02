@@ -34,4 +34,17 @@ lease_ms: number,
  * restored (its file was deleted mid-draft), so the lights are black. Absent when the
  * prior, or black for a layout with no effect, went on normally.
  */
-note?: string, };
+note?: string, 
+/**
+ * A PUT's answer: whether it left a draft on the lights. A stack draft that was superseded
+ * by a newer epoch or sequence answers `false` with a 200. Absent on GET and DELETE.
+ */
+applied?: boolean, 
+/**
+ * The epoch that owns a stack draft, when one is running.
+ */
+epoch?: string, 
+/**
+ * The highest sequence accepted for that epoch.
+ */
+seq?: number, };
