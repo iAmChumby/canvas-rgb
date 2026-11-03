@@ -471,10 +471,11 @@ pub fn fit_props_to_schema(schema: &PropertySchema, props: Props, what: &str) ->
                 tracing::debug!(effect = %schema.id, preset = %what, key = %key, from = h, to = angle, "read a saved hue as the angle it was stored for");
                 Some(PropValue::Angle(angle))
             }
-            // Rainbow Wave's direction was a plain number before it became an angle: the same
-            // number of degrees reads on.
+            // A number saved for an angle property (Rainbow Wave's direction was a number
+            // slider before it became an angle) reads as the degrees the old number reader
+            // gave it: clamped to 0..360, then 360 wraps to 0.
             (PropKind::Angle { .. }, PropValue::Number(n)) if n.is_finite() => {
-                let angle = n.rem_euclid(360.0);
+                let angle = n.clamp(0.0, 360.0).rem_euclid(360.0);
                 tracing::debug!(effect = %schema.id, preset = %what, key = %key, from = n, to = angle, "read a saved number as the angle it was stored for");
                 Some(PropValue::Angle(angle))
             }
@@ -1051,7 +1052,12 @@ mod tests {
         let mut over = Props::new();
         over.insert("direction".into(), PropValue::Number(405.0));
         let fitted = fit_props_to_schema(&schema, over, "saved");
-        assert_eq!(fitted.get("direction"), Some(&PropValue::Angle(45.0)));
+        assert_eq!(fitted.get("direction"), Some(&PropValue::Angle(0.0)));
+
+        let mut under = Props::new();
+        under.insert("direction".into(), PropValue::Number(-90.0));
+        let fitted = fit_props_to_schema(&schema, under, "saved");
+        assert_eq!(fitted.get("direction"), Some(&PropValue::Angle(0.0)));
 
         let mut bad = Props::new();
         bad.insert("direction".into(), PropValue::Number(f64::NAN));

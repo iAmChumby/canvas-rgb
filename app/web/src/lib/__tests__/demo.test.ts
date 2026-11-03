@@ -52,8 +52,12 @@ describe("the demo's value validator (#106)", () => {
     expect(() => checkPeripheralValue(device, "angle", { type: "hue", value: 120 })).not.toThrow();
   });
 
+  it("takes a saved number for an angle setting, as the same degrees (#121)", () => {
+    expect(() => checkPeripheralValue(device, "angle", { type: "number", value: 45 })).not.toThrow();
+  });
+
   it("still refuses the kinds that do not fit", () => {
-    expect(() => checkPeripheralValue(device, "angle", { type: "number", value: 120 })).toThrow();
+    expect(() => checkPeripheralValue(device, "angle", { type: "number", value: NaN })).toThrow();
     expect(() => checkPeripheralValue(device, "tint", { type: "angle", value: 120 })).toThrow();
     expect(() => checkPeripheralValue(device, "tint", { type: "number", value: 120 })).toThrow();
   });

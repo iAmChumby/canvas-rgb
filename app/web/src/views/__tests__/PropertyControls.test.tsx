@@ -65,4 +65,10 @@ describe("PropertyControls (#106)", () => {
     const { dial } = setup({ angle: { type: "number", value: 45 } });
     expect(dial.getAttribute("aria-valuenow")).toBe("45");
   });
+
+  it("clamps a saved number to 0..360 as the old slider reader did", () => {
+    expect(setup({ angle: { type: "number", value: -90 } }).dial.getAttribute("aria-valuenow")).toBe("0");
+    cleanup();
+    expect(setup({ angle: { type: "number", value: 405 } }).dial.getAttribute("aria-valuenow")).toBe("0");
+  });
 });

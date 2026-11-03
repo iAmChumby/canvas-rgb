@@ -47,7 +47,8 @@ function normalValue(kind: PropKind, value: PropValue): PropValue {
   // An angle compares as its degrees; a hue or a number saved for an angle property (an
   // effect saved before the kind existed) reads as the same degrees, in either direction.
   if (kind.type === "angle" && (value.type === "angle" || value.type === "hue" || value.type === "number")) {
-    const whole = Math.round(value.value);
+    // A saved number was clamped to 0..360 by the reader it came from (405 read as 360).
+    const whole = Math.round(value.type === "number" ? Math.min(360, Math.max(0, value.value)) : value.value);
     return { type: "angle", value: ((whole % 360) + 360) % 360 };
   }
   if (value.type === "color") return { type: "color", value: value.value.toLowerCase() };
