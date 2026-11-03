@@ -103,4 +103,27 @@ describe("Slider (#13)", () => {
     fireEvent.pointerUp(el, { clientX: 7 + 50, pointerId: 1 });
     expect(onCommit.mock.calls).toEqual([[50]]);
   });
+
+  // #105: a press whose default is not canceled leaves the compatibility mousedown free, and
+  // Chromium starts a native selection or element drag from it: the no-drop cursor. fireEvent
+  // returns false when the default was prevented.
+  it("prevents the default of a press, so the browser never starts a selection or drag", () => {
+    const { el, onChange } = setup();
+    expect(fireEvent.pointerDown(el, { clientX: 7 + 20, pointerId: 1 })).toBe(false);
+    fireEvent.pointerUp(el, { clientX: 7 + 20, pointerId: 1 });
+    // The drag itself still works: the press still ran the handler and moved the value.
+    expect(onChange).toHaveBeenCalledWith(25);
+  });
+
+  it("takes focus on a press, so the keyboard keeps working after a mouse press", () => {
+    const { el } = setup();
+    fireEvent.pointerDown(el, { clientX: 7 + 10, pointerId: 1 });
+    fireEvent.pointerUp(el, { clientX: 7 + 10, pointerId: 1 });
+    expect(document.activeElement).toBe(el);
+  });
+
+  it("prevents a dragstart fired on the slider", () => {
+    const { el } = setup();
+    expect(fireEvent.dragStart(el)).toBe(false);
+  });
 });

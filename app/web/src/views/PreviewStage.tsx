@@ -65,6 +65,7 @@ import {
   type PointerKind,
 } from "@/lib/hitTest";
 import { usePrefersReducedMotion } from "@/lib/motion";
+import { cancelPress, focusForKeys } from "@/lib/pressDrag";
 import { FIT_VIEW, forgetView, readView, writeView } from "@/lib/viewPrefs";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { CaseForm } from "@/proto/CaseForm";
@@ -1474,7 +1475,7 @@ export function PreviewStage({
     handle: HandleDef | null = null,
     startAt?: Point,
   ) => {
-    e.preventDefault();
+    cancelPress(e);
     const zone = sel.kind === "zone" ? liveRef.current[sel.index] : undefined;
     const landmark = sel.kind === "landmark" ? liveLmRef.current[sel.index] : undefined;
     if (!zone && !landmark) return;
@@ -1538,7 +1539,7 @@ export function PreviewStage({
     if (stageRef.current && kind !== "resize") stageRef.current.style.cursor = "grabbing";
     onDraggingChange?.(true);
     // A move leaves focus on the part pressed (set by the press); a handle drag has no element.
-    if (kind !== "move") stageRef.current?.focus({ preventScroll: true });
+    if (kind !== "move" && stageRef.current) focusForKeys(stageRef.current);
     if (!stageRef.current?.hasPointerCapture(e.pointerId)) stageRef.current?.setPointerCapture(e.pointerId);
   };
 
@@ -1552,7 +1553,7 @@ export function PreviewStage({
       activePointer.current = e.pointerId;
       panRef.current = { start: { x: e.clientX, y: e.clientY }, orig: { ...viewRef.current } };
       stage.setPointerCapture(e.pointerId);
-      e.preventDefault();
+      cancelPress(e);
       return;
     }
     if (e.button !== 0) return;
@@ -1570,6 +1571,7 @@ export function PreviewStage({
     }
     if (target.kind === "desk") {
       // The empty desk: a marquee picks what it touches.
+      cancelPress(e);
       onSelect([]);
       setSizing(null);
       const box = stage.getBoundingClientRect();
@@ -1580,10 +1582,11 @@ export function PreviewStage({
     }
     // A part, or the case by its edge or its body.
     const sel = target.ref as Sel;
-    e.preventDefault();
-    // Focus goes to the part pressed (so Tab continues from it), without scrolling the page.
+    cancelPress(e);
+    // Focus goes to the part pressed (so Tab continues from it), without scrolling the page,
+    // and without claiming the keyboard's ring.
     const partEl = sel.kind === "zone" ? zoneEls.current[sel.index] : lmEls.current[sel.index];
-    (partEl ?? stage).focus({ preventScroll: true });
+    focusForKeys(partEl ?? stage);
     const picked = selectionRef.current.some((s) => s.kind === sel.kind && s.index === sel.index);
     if (e.shiftKey && !e.altKey) {
       // Shift-click picks one more part, or lets one go.
