@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, type CSSProperties } from "react";
-import { ArrowClockwise, Check, CopySimple, DotsThreeOutline, Fan, FloppyDisk, ListChecks, Plus, Trash, X } from "@phosphor-icons/react";
+import { ArrowClockwise, Check, CopySimple, DotsThreeOutline, Fan, FloppyDisk, ListChecks, Minus, Plus, Trash, X } from "@phosphor-icons/react";
 import { Button, IconButton } from "@/components/Button";
 import { Checkbox } from "@/components/Checkbox";
 import { Chip } from "@/components/Chip";
@@ -21,8 +21,9 @@ import { FansShape } from "@/components/LoadShapes";
 import { useToast } from "@/components/Toast";
 import { FanCurveEditor } from "@/views/FanCurveEditor";
 import { FanBulkBar } from "@/views/FanBulk";
-import { TACH_ONLY_WHY, canDrive } from "@/lib/fanBulk";
+import { TACH_ONLY_WHY, canDrive, isHandedBack, plainLabel } from "@/lib/fanBulk";
 import { api } from "@/lib/endpoints";
+import { writeFanMode } from "@/lib/fanWrites";
 import { messageOf } from "@/lib/errors";
 import { refreshFans, retryFans as retryFansNow, useSnap } from "@/lib/store";
 import { baseFloor, hotRuleText } from "@/lib/fan-rules";
@@ -148,6 +149,8 @@ export function FansView() {
   const [ticked, setTicked] = useState<string[]>([]);
   const [selectMode, setSelectMode] = useState(false);
   const lastTick = useRef<string | null>(null);
+  // The bulk bar is applying: the Select/Done key waits, so the run is not cut off from its report.
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   // The headers last read: from this session if there was one, else from the viewer's memory.
   const [saved] = useState<KnownHeader[]>(() => readKnownHeaders());
@@ -220,6 +223,14 @@ export function FansView() {
     lastTick.current = id;
     setTicked((cur) => (on ? [...new Set([...cur, ...ids])] : cur.filter((x) => !ids.includes(x))));
   };
+  // A header that leaves the list (a profile switch, a chip that stops reporting it) leaves the ticks.
+  const idsKey = headers.map((h) => h.id).join("|");
+  const [seenIds, setSeenIds] = useState(idsKey);
+  if (seenIds !== idsKey) {
+    setSeenIds(idsKey);
+    const live = new Set(idsKey.split("|"));
+    setTicked((cur) => (cur.every((id) => live.has(id)) ? cur : cur.filter((id) => live.has(id))));
+  }
   const allTicked = drivable.length > 0 && checked.length === drivable.length;
   const clearTicks = () => {
     setTicked([]);
@@ -297,6 +308,8 @@ export function FansView() {
                   variant={selectMode ? "primary" : "default"}
                   icon={<ListChecks size={14} />}
                   aria-pressed={selectMode}
+                  disabled={bulkBusy}
+                  className="fan-select-key"
                   onClick={() => {
                     if (selectMode) clearTicks();
                     setSelectMode(!selectMode);
@@ -313,6 +326,7 @@ export function FansView() {
               checked={checked}
               focusedId={selected?.id ?? null}
               onClear={clearTicks}
+              onBusy={setBulkBusy}
               write={writeFanMode}
             />
           )}
@@ -343,11 +357,11 @@ export function FansView() {
                         onToggle={() => setTicked(allTicked ? [] : drivable.map((h) => h.id))}
                       />
                     </th>
-                    <th scope="col">Header</th>
+                    <th scope="col" className="name-col">Header</th>
                     <th scope="col" className="num-col">RPM</th>
                     <th scope="col">Duty</th>
                     <th scope="col">Mode</th>
-                    <th scope="col" className="rd-history">Last 60 s</th>
+                    <th scope="col" className="rd-history hist-head">Last 60 s</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -430,10 +444,10 @@ function FanRow({
           onToggle={onTick}
         />
       </td>
-      <td>
-        <span className="fig" style={{ fontWeight: 600 }}>{header.label}</span>
+      <td className="name-col">
+        <span className="fig" style={{ fontWeight: 600 }}>{plainLabel(header.label)}</span>
         {header.pwm_percent === null && <Chip className="rd-hdr-chip">tach only</Chip>}
-        <Handoff header={header} />
+        <Handoff header={header} ticked={checked} />
       </td>
       <td className="num-col">
         <span className="rpm-big">
@@ -468,12 +482,12 @@ function FanRow({
  * is doing something else, the daemon has handed the header back, and that is said here, with
  * the reason.
  */
-function Handoff({ header }: { header: FanHeaderStatus }) {
-  const handedBack = header.on_bios && header.mode.mode !== "bios";
-  if (!handedBack) return null;
+function Handoff({ header, ticked }: { header: FanHeaderStatus; ticked?: boolean }) {
+  if (!isHandedBack(header)) return null;
   return (
     <>
-      <span className="fan-handoff">Handed back to BIOS</span>
+      {/* A handed-back header can be ticked, and a bulk apply leaves it as it is: the row says so. */}
+      <span className="fan-handoff">{ticked ? "Handed back to BIOS, skipped when applied" : "Handed back to BIOS"}</span>
       {header.override_reason && <span className="fan-reason">{header.override_reason}</span>}
     </>
   );
@@ -515,7 +529,7 @@ function FanCard({
     >
       {selectMode && (
         <span className="tick-box" data-checked={checked ? "true" : "false"} aria-hidden="true">
-          {checked && <Check size={12} weight="bold" />}
+          {checked ? <Check size={12} weight="bold" /> : tach ? <Minus size={12} weight="bold" /> : null}
         </span>
       )}
       <span className="fan-card-head">
@@ -523,7 +537,7 @@ function FanCard({
         <ModeState mode={header.mode} />
         {selected && !selectMode && <span className="fan-card-editing">Editing</span>}
         {selectMode && tach && <span className="fan-card-editing">Tach only, cannot be set</span>}
-        <Handoff header={header} />
+        <Handoff header={header} ticked={selectMode && checked} />
       </span>
       <span className="fan-card-readouts">
         <span className="fan-card-rpm">
@@ -695,42 +709,6 @@ function FanProfileActions({ fans }: { fans: FansStatus }) {
       </Popover>
     </PageActions>
   );
-}
-
-/** The writes to one fan header: one request at a time, and while one is out only the newest waits. */
-const fanWrites = new Map<string, { done: Promise<void> | null; queued: FanMode | null }>();
-
-/**
- * Sends a mode to a header so the latest choice is the one the chip ends on. Requests that
- * overlap can land out of order, so a new request waits for the one in flight, and a request
- * that is still waiting when a newer one arrives is dropped. Resolves when the header has no
- * writes left.
- */
-function writeFanMode(header: string, mode: FanMode, onError: (e: unknown) => void): Promise<void> {
-  let slot = fanWrites.get(header);
-  if (!slot) {
-    slot = { done: null, queued: null };
-    fanWrites.set(header, slot);
-  }
-  slot.queued = mode;
-  if (slot.done) return slot.done;
-  const mine = slot;
-  mine.done = (async () => {
-    try {
-      while (mine.queued) {
-        const next = mine.queued;
-        mine.queued = null;
-        try {
-          await api.patchFanHeader(header, next);
-        } catch (e) {
-          onError(e);
-        }
-      }
-    } finally {
-      mine.done = null;
-    }
-  })();
-  return mine.done;
 }
 
 function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansStatus }) {

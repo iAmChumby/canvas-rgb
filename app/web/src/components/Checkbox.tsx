@@ -41,7 +41,7 @@ export function Checkbox({
       }}
     >
       <span className="tick-box" aria-hidden="true">
-        {mixed ? <Minus size={12} weight="bold" /> : checked ? <Check size={12} weight="bold" /> : null}
+        {mixed || (blocked && !checked) ? <Minus size={12} weight="bold" /> : checked ? <Check size={12} weight="bold" /> : null}
       </span>
     </button>
   );

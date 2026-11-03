@@ -1,12 +1,14 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { ToastProvider } from "@/components/Toast";
+import { useState } from "react";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { ToastHost, ToastProvider } from "@/components/Toast";
 import { api } from "@/lib/endpoints";
 import { patchSnap, refreshFans } from "@/lib/store";
 import { FansView } from "@/views/FansView";
 import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
 import type { CurvePoint } from "@/proto/CurvePoint";
 import type { FanHeaderStatus } from "@/proto/FanHeaderStatus";
+import type { FanMode } from "@/proto/FanMode";
 
 // Setting several fan headers at once (#110): tick headers in the Headers table, then BIOS, one
 // Fixed % or a copied curve goes to every ticked header. The demo backend answers like the
@@ -49,6 +51,7 @@ beforeAll(() => {
 const DRIVABLE = ["cpu_fan", "pump_fan", "sys_fan1", "sys_fan2", "sys_fan3", "sys_fan4", "sys_fan5", "sys_fan6", "gpu_fan1", "gpu_fan2"];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   cleanup();
   pageWidth = 1100;
   window.history.replaceState({}, "", "/fans/");
@@ -279,5 +282,150 @@ describe("select mode on a phone", () => {
     await setFixed("45");
     await waitFor(() => expect(screen.getByText(/1 set to Fixed 45%/)).toBeTruthy());
     expect((await header("cpu_fan")).mode).toEqual({ mode: "fixed", percent: 45 });
+  });
+});
+
+describe("the run belongs to the bar", () => {
+  /** A PATCH the test releases by hand: each request waits until its release is called. */
+  function holdPatches() {
+    const real = api.patchFanHeader.bind(api);
+    const held: Array<() => void> = [];
+    const sent: string[] = [];
+    vi.spyOn(api, "patchFanHeader").mockImplementation((id: string, mode: FanMode) => {
+      sent.push(id);
+      return new Promise((resolve) => {
+        held.push(() => resolve(real(id, mode)));
+      });
+    });
+    return { held, sent };
+  }
+  const settle = (ms = 10) => act(async () => void (await new Promise((r) => setTimeout(r, ms))));
+
+  it("keeps Done and Clear shut while it runs, and opens them when it has reported", async () => {
+    pageWidth = 358;
+    await page();
+    await screen.findByRole("heading", { level: 2, name: "Headers" });
+    fireEvent.click(screen.getByRole("button", { name: "Select" }));
+    const cards = screen.getAllByRole("checkbox");
+    fireEvent.click(cards.find((c) => /CPU fan/.test(c.textContent ?? "")) as HTMLElement);
+    fireEvent.click(cards.find((c) => /System fan 1/.test(c.textContent ?? "")) as HTMLElement);
+    const { held } = holdPatches();
+    await setFixed("45");
+    await waitFor(() => expect((screen.getByRole("button", { name: "Done" }) as HTMLButtonElement).disabled).toBe(true));
+    expect((screen.getByRole("button", { name: "Clear" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText("Applying")).toBeTruthy();
+
+    // Release each request as it goes out, until both headers are written.
+    for (let i = 0; i < 2; i++) {
+      await waitFor(() => expect(held.length).toBeGreaterThan(i));
+      await act(async () => held[i]!());
+      await settle();
+    }
+    await waitFor(() => expect(screen.getByText(/2 set to Fixed 45%/)).toBeTruthy());
+    expect((screen.getByRole("button", { name: "Done" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "Clear" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("stops writing when the page goes away mid-run and leaves a toast of what was applied", async () => {
+    function Host() {
+      const [shown, setShown] = useState(true);
+      return (
+        <ToastProvider>
+          <ToastHost />
+          <button onClick={() => setShown(false)}>leave</button>
+          <StripSlotsProvider>
+            <header>
+              <StripSlot kind="title" />
+              <StripSlot kind="actions" />
+            </header>
+            <main className="content">{shown && <FansView />}</main>
+          </StripSlotsProvider>
+        </ToastProvider>
+      );
+    }
+    await act(async () => {
+      await refreshFans();
+    });
+    render(<Host />);
+    await screen.findByRole("checkbox", { name: "Select CPU fan" });
+    fireEvent.click(tick("CPU fan"));
+    fireEvent.click(tick("System fan 1"));
+    fireEvent.click(tick("System fan 2"));
+    const { held, sent } = holdPatches();
+    await setFixed("40");
+    await waitFor(() => expect(sent).toEqual(["cpu_fan"]));
+
+    // The page goes while the first header's request is out.
+    fireEvent.click(screen.getByRole("button", { name: "leave" }));
+    await act(async () => held[0]!());
+    await settle(30);
+
+    // The two headers behind it were never written, and the toast says so.
+    expect(sent).toEqual(["cpu_fan"]);
+    await waitFor(() => expect(screen.getByText(/1 set to Fixed 40%, 2 not sent/)).toBeTruthy());
+    expect((await header("cpu_fan")).mode).toEqual({ mode: "fixed", percent: 40 });
+    expect((await header("sys_fan1")).mode).toEqual({ mode: "bios" });
+  });
+});
+
+describe("what the bar refuses and keeps", () => {
+  it("refuses a curve with points under the CPU fan's floor, per header, with the daemon's words", async () => {
+    // System fan 1's curve dips to 25%: fine for a 20% floor, under CPU_FAN's 30%.
+    const points: CurvePoint[] = [
+      { temp_c: 30, percent: 25 },
+      { temp_c: 60, percent: 28 },
+      { temp_c: 80, percent: 70 },
+    ];
+    await api.patchFanHeader("sys_fan1", { mode: "curve", source: { type: "cpu" }, points });
+    await page();
+    await screen.findByRole("checkbox", { name: "Select CPU fan" });
+    // Focus the header that has the curve, so it is the one to copy.
+    fireEvent.click(tick("System fan 1").closest("tr") as HTMLElement);
+    fireEvent.click(tick("CPU fan"));
+    fireEvent.click(screen.getByRole("button", { name: "Copy curve" }));
+    await waitFor(() => expect(screen.getByText(/0 set to the curve of System fan 1, 1 failed/)).toBeTruthy());
+    expect((await header("cpu_fan")).mode).toEqual({ mode: "bios" });
+    fireEvent.click(screen.getByRole("button", { name: "Details" }));
+    const list = await screen.findByRole("dialog", { name: "What each header did" });
+    const row = within(list).getByText("CPU fan").closest("li") as HTMLElement;
+    expect(row.getAttribute("data-state")).toBe("failed");
+    expect(row.textContent).toMatch(/below the floor of 30%/);
+  });
+
+  it("the demo takes BIOS for the tach-only header and refuses every other mode, as the daemon does", async () => {
+    await expect(api.patchFanHeader("pump_fan2", { mode: "bios" })).resolves.toBeTruthy();
+    await expect(api.patchFanHeader("pump_fan2", { mode: "fixed", percent: 50 })).rejects.toThrow(/tach-only/);
+  });
+
+  it("drops a tick when its header leaves the list, and it stays gone when the header returns", async () => {
+    await page();
+    await screen.findByRole("checkbox", { name: "Select System fan 1" });
+    fireEvent.click(tick("System fan 1"));
+    fireEvent.click(tick("System fan 2"));
+    expect(screen.getByText("2 selected")).toBeTruthy();
+    const full = await api.fans();
+    await act(async () => {
+      patchSnap({ fans: { ...full, headers: full.headers.filter((h) => h.id !== "sys_fan1") } });
+    });
+    expect(screen.getByText("1 selected")).toBeTruthy();
+    await act(async () => {
+      patchSnap({ fans: full });
+    });
+    expect(screen.getByText("1 selected")).toBeTruthy();
+    expect(tick("System fan 1").getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("a handed-back header can be ticked, and its row says it will be skipped", async () => {
+    await api.patchFanHeader("sys_fan4", { mode: "fixed", percent: 60 });
+    await page();
+    window.history.replaceState({}, "", "/fans/?state=handback:sys_fan4");
+    await act(async () => {
+      await refreshFans();
+    });
+    await screen.findByRole("checkbox", { name: "Select System fan 4" });
+    const row = tick("System fan 4").closest("tr") as HTMLElement;
+    expect(within(row).getByText("Handed back to BIOS")).toBeTruthy();
+    fireEvent.click(tick("System fan 4"));
+    expect(within(row).getByText("Handed back to BIOS, skipped when applied")).toBeTruthy();
   });
 });

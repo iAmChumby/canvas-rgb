@@ -539,7 +539,7 @@ function validateMode(header: string, mode: FanMode, configured: number): void {
   }
 }
 
-/** Headers the chip reads and cannot drive: no duty, and the daemon refuses a mode for them. */
+/** Headers the chip reads and cannot drive: no duty, and the daemon refuses every mode but BIOS for them. */
 const TACH_ONLY = ["pump_fan2"];
 
 function fansStatus(): FansStatus {
@@ -1424,7 +1424,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       const header = seg[2] ?? "";
       if (!FAN_HEADERS.some((h) => h.id === header)) fail(404, "not_found", `no header ${header}`);
       const mode = body as FanMode;
-      if (TACH_ONLY.includes(header)) fail(422, "validation", `${header} is tach-only and cannot take a mode`);
+      if (TACH_ONLY.includes(header) && mode.mode !== "bios") fail(422, "validation", `${header} is tach-only and cannot take a mode`);
       validateMode(header, mode, s.fanFloor);
       s.fanModes[header] = mode;
       return { ok: true, header, mode };

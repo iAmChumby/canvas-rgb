@@ -1666,6 +1666,7 @@
 .tick {
   display: inline-grid;
   place-items: center;
+  vertical-align: middle;
   flex: none;
   width: 24px;
   height: 24px;
@@ -1679,6 +1680,7 @@
 .tick-box {
   display: inline-grid;
   place-items: center;
+  vertical-align: middle;
   flex: none;
   width: 18px;
   height: 18px;
@@ -1706,14 +1708,27 @@
   cursor: not-allowed;
 }
 
+/* A box that cannot be ticked reads as a closed slot, not a faded one: a raised face, a full-strength
+   outline and a dash, so it shows on a white panel as well as a dark one. */
 .tick[aria-disabled="true"] .tick-box {
-  opacity: 0.4;
+  border-color: var(--line-2);
+  background: var(--raised);
+  color: var(--mute);
+}
+
+.tick[aria-disabled="true"]:hover .tick-box {
+  border-color: var(--line-2);
 }
 
 .fan-table th.tick-col,
 .fan-table td.tick-col {
   width: 36px;
   padding-right: 0;
+}
+
+/* The header names and the history label stay on one line, so every row is the same height. */
+.fan-table th.hist-head {
+  white-space: nowrap;
 }
 
 /* The bar above the list. The idle line and the live bar share one cell, so the cell is as tall as
@@ -1739,7 +1754,8 @@
   align-items: center;
   gap: var(--s2);
   padding: var(--s2) var(--s3);
-  border: 1px dashed var(--line-2);
+  border: 1px solid transparent;
+  background: var(--raised);
   color: var(--mute);
 }
 
@@ -1757,11 +1773,37 @@
   visibility: hidden;
 }
 
+/* One line on a wide pane: count, the status, Details, Clear. On a phone the status takes a line of
+   its own below, two lines high at all times, so a long result wraps inside space the bar already
+   holds. */
 .fan-bulk-top {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
   align-items: center;
-  gap: var(--s2);
+  gap: 0 var(--s2);
   min-height: 28px;
+}
+
+.fan-bulk-result[data-tone="down"] {
+  color: var(--down);
+}
+
+.fan-bulk-result[data-tone="ok"] {
+  color: var(--dim);
+}
+
+.fan-bulk-details {
+  grid-column: 3;
+}
+
+.fan-bulk-clear {
+  grid-column: 4;
+}
+
+/* The Fixed % entry sits on the bar's tinted face, so it takes the panel's own face rather than the
+   grey well, which read as disabled on the light theme. */
+.fan-bulk .num {
+  background: var(--panel);
 }
 
 .fan-bulk-count {
@@ -1770,12 +1812,10 @@
 }
 
 .fan-bulk-result {
-  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--dim);
 }
 
 .fan-bulk-actions {
@@ -1832,7 +1872,8 @@
   color: var(--warn);
 }
 
-/* On the phone a card is a 44 px tick target while select mode is on. */
+/* On the phone a card is a 44 px tick target while select mode is on, the Select/Done key is 44 px
+   tall in both of its states, and the status line sits under the count, two lines high. */
 @container page (max-width: 640px) {
   .rd-fans .fan-card[role="checkbox"] {
     min-height: 44px;
@@ -1841,5 +1882,46 @@
   .rd-fans .fan-card[role="checkbox"][aria-disabled="true"] {
     opacity: 0.6;
     cursor: not-allowed;
+  }
+
+  .rd-fans .fan-card .tick-box {
+    width: 24px;
+    height: 24px;
+    border-radius: 6px;
+  }
+
+  .rd-fans .fan-select-key {
+    min-height: 44px;
+    min-width: 88px;
+  }
+
+  .rd-fans .fan-bulk-top {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-areas:
+      "count details clear"
+      "result result result";
+  }
+
+  .rd-fans .fan-bulk-top .fan-bulk-count {
+    grid-area: count;
+  }
+
+  .rd-fans .fan-bulk-top .fan-bulk-details {
+    grid-area: details;
+  }
+
+  .rd-fans .fan-bulk-top .fan-bulk-clear {
+    grid-area: clear;
+  }
+
+  .rd-fans .fan-bulk-top .fan-bulk-result {
+    grid-area: result;
+    min-height: 2lh;
+    white-space: normal;
+    text-overflow: clip;
+  }
+
+  .rd-fans .fan-bulk-top .btn {
+    min-height: 32px;
   }
 }

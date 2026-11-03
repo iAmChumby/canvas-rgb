@@ -10,6 +10,7 @@ import type { CurvePoint } from "@/proto/CurvePoint";
 import type { FanHeaderStatus } from "@/proto/FanHeaderStatus";
 import type { FanMode } from "@/proto/FanMode";
 import type { FansStatus } from "@/proto/FansStatus";
+import type { WriteResult } from "@/lib/fanWrites";
 
 /** Why a tach-only header cannot be ticked. */
 export const TACH_ONLY_WHY = "Tach only: canvas-rgb reads its speed and cannot set it.";
@@ -27,6 +28,11 @@ export interface BulkOutcome {
   state: BulkState;
   /** What happened to this header, in words. */
   detail: string;
+}
+
+/** A header's label without the "(tach only)" the daemon appends: the row's chip says it. */
+export function plainLabel(label: string): string {
+  return label.replace(/ \(tach only\)$/, "");
 }
 
 /** A header the chip can drive. Tach-only headers report no duty. */
@@ -59,20 +65,24 @@ export function modeFor(a: BulkAction, h: FanHeaderStatus, fans: FansStatus): Fa
   return { mode: "curve", source: { ...src.mode.source }, points };
 }
 
-type Write = (header: string, mode: FanMode, onError: (e: unknown) => void) => Promise<void>;
+export type Write = (header: string, mode: FanMode, onError: (e: unknown) => void) => Promise<WriteResult>;
 
 /**
  * Sends the action to every header in `targets`, in order. A header the daemon handed back to
- * BIOS keeps that state: it is skipped and says why. The refresh after the writes is the caller's.
+ * BIOS keeps that state: it is skipped and says why. A write that a newer edit of the same header
+ * replaced before it went out is reported skipped, never applied. When `signal` aborts, no further
+ * header is written and the outcomes so far come back. The refresh after the writes is the caller's.
  */
 export async function applyBulk(
   targets: FanHeaderStatus[],
   action: BulkAction,
   fans: FansStatus,
   write: Write,
+  signal?: AbortSignal,
 ): Promise<BulkOutcome[]> {
   const out: BulkOutcome[] = [];
   for (const h of targets) {
+    if (signal?.aborted) break;
     const base = { id: h.id, label: h.label };
     if (!canDrive(h)) {
       out.push({ ...base, state: "skipped", detail: TACH_ONLY_WHY });
@@ -93,10 +103,12 @@ export async function applyBulk(
       continue;
     }
     const failure: { text: string | null } = { text: null };
-    await write(h.id, mode, (e) => {
+    const sent = await write(h.id, mode, (e) => {
       failure.text = messageOf(e);
     });
-    if (failure.text !== null) {
+    if (sent === "superseded") {
+      out.push({ ...base, state: "skipped", detail: "Superseded by your edit of this header: that edit went out instead." });
+    } else if (failure.text !== null) {
       out.push({ ...base, state: "failed", detail: failure.text });
     } else if (action.kind === "fixed" && mode.mode === "fixed" && mode.percent !== Math.round(action.percent)) {
       out.push({ ...base, state: "applied", detail: `Raised to its floor, Fixed ${mode.percent}%.` });
@@ -108,7 +120,7 @@ export async function applyBulk(
 }
 
 /** The one line that sums an apply up: how many took it, how many did not. */
-export function summaryOf(outcomes: BulkOutcome[], words: string): string {
+export function summaryOf(outcomes: BulkOutcome[], words: string, total = outcomes.length): string {
   const n = (s: BulkState) => outcomes.filter((o) => o.state === s).length;
   const applied = n("applied");
   const failed = n("failed");
@@ -116,5 +128,6 @@ export function summaryOf(outcomes: BulkOutcome[], words: string): string {
   const parts = [`${applied} set to ${words}`];
   if (failed) parts.push(`${failed} failed`);
   if (skipped) parts.push(`${skipped} skipped`);
+  if (total > outcomes.length) parts.push(`${total - outcomes.length} not sent`);
   return parts.join(", ");
 }
