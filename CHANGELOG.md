@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Changed
+
+- Rainbow Wave's Direction is now a direction dial instead of a slider; saved waves keep their direction. (#121)
+
 ## [0.7.0] - 2026-11-02
 
 ### Added
@@ -15,7 +19,6 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Changed
 
 - On a stack's preview you can now drag a layer's rectangle area to move it and drag its corners (or edges) to resize it, the way parts move on the Layout page, and the arrow keys nudge it (Shift for 10). The area picker stays for other areas and exact numbers. (#104)
-- Rainbow Wave's Direction is now a direction dial instead of a slider; saved waves keep their direction. (#121)
 - Gradient's Angle is now a direction dial instead of a colour wheel; saved gradients keep their angle. (#106)
 
 ### Fixed
