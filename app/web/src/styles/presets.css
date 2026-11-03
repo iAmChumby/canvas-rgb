@@ -89,11 +89,39 @@ button.chip.chip-add:hover {
   min-width: 0;
 }
 
+/* A name field fills whatever container it sits in (the naming dialog, a new effect's
+   file name, the layer rename). Its old width: 0 beside flex: 1 1 auto only worked
+   when the container was a flex row; anywhere else the field stayed at its padding
+   width (#108). */
 .name-field {
+  width: 100%;
+}
+
+/* In a flex row it takes the space left of its neighbours instead of the whole line,
+   and the cap keeps it from stretching across a wide window (the preset line here,
+   preset save in the stack builder). */
+.preset-line .name-field,
+.preset-save .name-field {
   flex: 1 1 auto;
   width: 0;
   min-width: 0;
   max-width: 320px;
+}
+
+/* Renaming a layer must not move the row: the field is a block (an inline input adds a
+   baseline strut that grew the row by a third of a pixel), it takes 24px — the minimum
+   touch target — and its margin halves the difference from the name's 21.75px line box,
+   so the layer-text column keeps its height and the row's grip, thumb and tip stay put.
+   Its type reads as the name (weight 600, no horizontal inset), and the radius is the
+   small token: 10px on a 24px field is a pill. */
+.layer-text .name-field {
+  display: block;
+  vertical-align: top;
+  height: 24px;
+  margin: calc((var(--t15) * 1.45 - 24px) / 2) 0; /* (21.75px − 24px) / 2 = −1.125px */
+  padding: 0;
+  font-weight: 600;
+  border-radius: var(--r-sm);
 }
 
 .name-field[aria-invalid="true"] {
@@ -235,7 +263,8 @@ button.chip.chip-add:hover {
     order: -1;
   }
 
-  .name-field {
+  .preset-line .name-field,
+  .preset-save .name-field {
     max-width: none;
   }
 }

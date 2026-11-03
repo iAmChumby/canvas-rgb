@@ -1364,7 +1364,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       );
       if (clash) fail(409, "conflict", `${name} is already another stack's name, ignoring case`);
       s.stacks[next.id] = { id: next.id, layers: next.layers.map((layer) => ({ ...layer, props: { ...layer.props } })) };
-      (globalThis as { __stackSaves?: unknown[] }).__stackSaves?.push({ at: Date.now(), id: next.id, layers: next.layers.length });
+      (globalThis as { __stackSaves?: unknown[] }).__stackSaves?.push({ at: Date.now(), id: next.id, layers: next.layers.length, areas: next.layers.map((layer) => layer.area) });
       return s.stacks[next.id];
     }
     if (seg.length === 2 && method === "DELETE") {
