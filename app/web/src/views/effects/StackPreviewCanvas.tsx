@@ -5,6 +5,7 @@
 // on. Frames are drawn straight into the canvas, so a 15 fps feed never re-renders the page.
 
 import { useEffect, useRef, type KeyboardEvent, type PointerEvent } from "react";
+import { cancelPress } from "@/lib/pressDrag";
 import { hitTest, type HandleDef, type HitPart, type PartRef, type PointerKind } from "@/lib/hitTest";
 import { onStackFrame, setStackPreviewStack, startStackPreview, stopStackPreview } from "@/lib/stackPreview";
 import type { Layout } from "@/proto/Layout";
@@ -98,7 +99,8 @@ export function StackPreviewCanvas({
     [],
   );
 
-  const bounds = picked && showAreas ? areaBounds(picked.area, layout) : null;
+  // A layer that is switched off paints nothing, so its area is neither drawn nor dragged.
+  const bounds = picked && picked.visible && showAreas ? areaBounds(picked.area, layout) : null;
   // Only a rectangle is dragged here. A whole-canvas, device or zone area follows the layout;
   // turning it into a rectangle is a choice the area picker asks for by name, so a stray drag
   // never does it.
@@ -136,10 +138,8 @@ export function StackPreviewCanvas({
       next = { mode: "move", id: e.pointerId, from: point, start };
     }
     if (!next) return;
-    // The press is ours: no native drag, text selection or focus theft. TODO(#113): use the
-    // shared helper in lib/pressDrag.ts once that PR lands.
-    e.preventDefault();
-    e.currentTarget.focus();
+    // The press is ours: no native drag, text selection or focus theft (lib/pressDrag.ts).
+    cancelPress(e, { focus: true });
     try {
       e.currentTarget.setPointerCapture(e.pointerId);
     } catch {
@@ -163,6 +163,11 @@ export function StackPreviewCanvas({
       return;
     }
     if (d.id !== e.pointerId) return;
+    // A mouse that moves with no button down means the release was missed: the drag is over.
+    if (e.pointerType === "mouse" && e.buttons === 0) {
+      drag.current = null;
+      return;
+    }
     const box = stageRef.current?.getBoundingClientRect();
     if (!box) return;
     const p = pointerToCanvas(e.clientX, e.clientY, box, VIEW);
@@ -181,6 +186,12 @@ export function StackPreviewCanvas({
     drag.current = null;
     // A cancelled press (a call, a system gesture) puts the area back where it started.
     if (e.type === "pointercancel") emit(d.start);
+  };
+
+  // Capture lost without a pointerup (the window lost focus, the element went away): the drag
+  // ends where it is.
+  const onLost = (e: PointerEvent<HTMLDivElement>) => {
+    if (drag.current?.id === e.pointerId) drag.current = null;
   };
 
   const onKey = (e: KeyboardEvent<HTMLDivElement>) => {
@@ -217,6 +228,7 @@ export function StackPreviewCanvas({
                   onPointerMove: onMove,
                   onPointerUp: onUp,
                   onPointerCancel: onUp,
+                  onLostPointerCapture: onLost,
                   onKeyDown: onKey,
                 }
               : {})}

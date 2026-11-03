@@ -469,21 +469,25 @@ export function resizeBounds(
 ): Bounds {
   const right = start.x + start.width;
   const bottom = start.y + start.height;
+  // The smallest a side gets is MIN_AREA, or the side's own length when it started shorter (the
+  // picker draws one-unit rectangles): a resize never grows a small area and never leaves the canvas.
+  const minW = Math.min(MIN_AREA, start.width);
+  const minH = Math.min(MIN_AREA, start.height);
   let x0 = start.x;
   let x1 = right;
   let y0 = start.y;
   let y1 = bottom;
-  if (sx < 0) x0 = Math.min(right - MIN_AREA, Math.max(0, start.x + dx));
-  if (sx > 0) x1 = Math.max(start.x + MIN_AREA, Math.min(CANVAS_W, right + dx));
-  if (sy < 0) y0 = Math.min(bottom - MIN_AREA, Math.max(0, start.y + dy));
-  if (sy > 0) y1 = Math.max(start.y + MIN_AREA, Math.min(CANVAS_H, bottom + dy));
+  if (sx < 0) x0 = Math.max(0, Math.min(right - minW, start.x + dx));
+  if (sx > 0) x1 = Math.min(CANVAS_W, Math.max(start.x + minW, right + dx));
+  if (sy < 0) y0 = Math.max(0, Math.min(bottom - minH, start.y + dy));
+  if (sy > 0) y1 = Math.min(CANVAS_H, Math.max(start.y + minH, bottom + dy));
   if (keepAspect && sx !== 0 && sy !== 0) {
     const room = {
       w: sx > 0 ? CANVAS_W - start.x : right,
       h: sy > 0 ? CANVAS_H - start.y : bottom,
     };
     const most = Math.min(room.w / start.width, room.h / start.height);
-    const least = Math.max(MIN_AREA / start.width, MIN_AREA / start.height);
+    const least = Math.max(minW / start.width, minH / start.height);
     const want = Math.max((x1 - x0) / start.width, (y1 - y0) / start.height);
     const scale = Math.min(most, Math.max(least, want));
     const w = start.width * scale;

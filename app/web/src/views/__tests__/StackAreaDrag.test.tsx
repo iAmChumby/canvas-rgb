@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { rectFromDrag } from "@/views/effects/stackDraft";
 import { ToastHost, ToastProvider } from "@/components/Toast";
 import { refreshAll } from "@/lib/store";
 import { EffectsView } from "@/views/EffectsView";
@@ -96,13 +97,18 @@ const readout = () => document.querySelector(".layer-area-text")?.textContent ??
 /** Canvas units to the stage's css pixels. */
 const px = (u: number) => u * K;
 
+const mouse = { pointerId: 1, pointerType: "mouse", buttons: 1 };
+
 function drag(el: HTMLElement, from: [number, number], to: [number, number], extra: object = {}) {
   act(() => {
-    fireEvent.pointerDown(el, { pointerId: 1, clientX: from[0], clientY: from[1] });
-    fireEvent.pointerMove(el, { pointerId: 1, clientX: to[0], clientY: to[1], ...extra });
-    fireEvent.pointerUp(el, { pointerId: 1, clientX: to[0], clientY: to[1] });
+    fireEvent.pointerDown(el, { ...mouse, clientX: from[0], clientY: from[1] });
+    fireEvent.pointerMove(el, { ...mouse, clientX: to[0], clientY: to[1], ...extra });
+    fireEvent.pointerUp(el, { ...mouse, buttons: 0, clientX: to[0], clientY: to[1] });
   });
 }
+
+type Saved = { areas?: Array<{ kind: string; x?: number; y?: number; width?: number; height?: number }> };
+const saves = () => ((globalThis as { __stackSaves?: Saved[] }).__stackSaves ??= []);
 
 describe("dragging a rectangle area on the preview", () => {
   it("moves the area by the pointer delta, in canvas units, and marks the draft unsaved", async () => {
@@ -175,5 +181,71 @@ describe("dragging a rectangle area on the preview", () => {
     fireEvent.keyDown(frame(), { key: "ArrowRight" });
     expect(readout()).toBe(before);
     expect(screen.queryByText("Unsaved")).toBeNull();
+  });
+
+  it("puts the area back when the pointer is cancelled", async () => {
+    await openBuilderWith("Heat");
+    act(() => {
+      fireEvent.pointerDown(frame(), { ...mouse, clientX: px(71), clientY: px(173) });
+      fireEvent.pointerMove(frame(), { ...mouse, clientX: px(71) + 60, clientY: px(173) - 40 });
+    });
+    await waitFor(() => expect(readout()).toContain("x 46, y 130"));
+    act(() => {
+      fireEvent.pointerCancel(frame(), { ...mouse, buttons: 0 });
+    });
+    await waitFor(() => expect(readout()).toContain("x 16, y 150"));
+  });
+
+  it("grabs a corner from a press in the 12 px skirt", async () => {
+    await openBuilderWith("Heat");
+    // Ten css pixels outside the south-east corner (126, 196), still inside the 12 px reach.
+    drag(frame(), [px(126) + 8, px(196) + 8], [px(126) + 8 - 40, px(196) + 8 - 20]);
+    await waitFor(() => expect(readout()).toContain("90 × 36"));
+    expect(readout()).toContain("x 16, y 150");
+  });
+
+  it("ends the drag when a mouse moves with no button down", async () => {
+    await openBuilderWith("Heat");
+    act(() => {
+      fireEvent.pointerDown(frame(), { ...mouse, clientX: px(71), clientY: px(173) });
+      fireEvent.pointerMove(frame(), { ...mouse, clientX: px(71) + 40, clientY: px(173) - 20 });
+    });
+    await waitFor(() => expect(readout()).toContain("x 36, y 140"));
+    // The pointerup was lost: the next move has no button, and the area stays where it is.
+    act(() => {
+      fireEvent.pointerMove(frame(), { ...mouse, buttons: 0, clientX: px(71) + 200, clientY: px(173) - 20 });
+    });
+    expect(readout()).toContain("x 36, y 140");
+  });
+
+  it("ends the drag when the pointer capture is lost", async () => {
+    await openBuilderWith("Heat");
+    act(() => {
+      fireEvent.pointerDown(frame(), { ...mouse, clientX: px(71), clientY: px(173) });
+      fireEvent.pointerMove(frame(), { ...mouse, clientX: px(71) + 40, clientY: px(173) - 20 });
+      fireEvent.lostPointerCapture(frame(), { ...mouse });
+      fireEvent.pointerMove(frame(), { ...mouse, clientX: px(71) + 200, clientY: px(173) - 20 });
+    });
+    expect(readout()).toContain("x 36, y 140");
+  });
+
+  it("neither draws nor drags the area of a layer that is switched off", async () => {
+    await openBuilderWith("Heat");
+    expect(frame()).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Hide Heat" }));
+    await waitFor(() => expect(document.querySelector(".rd-area-frame")).toBeNull());
+  });
+
+  // Last: the Save writes the demo store, and a later test would open the moved stack.
+  it("saves exactly the rectangle the area picker's Rectangle mode would make", async () => {
+    await openBuilderWith("Heat");
+    saves().length = 0;
+    drag(frame(), [px(71), px(173)], [px(71) + 40, px(173) - 20]);
+    await waitFor(() => expect(readout()).toContain("x 36, y 140"));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(saves()).toHaveLength(1));
+    const picker = { kind: "rect", ...rectFromDrag({ x: 36, y: 140 }, { x: 146, y: 186 }) };
+    expect(saves()[0]?.areas).toContainEqual(picker);
+    await waitFor(() => expect(screen.queryByText("Unsaved")).toBeNull());
   });
 });

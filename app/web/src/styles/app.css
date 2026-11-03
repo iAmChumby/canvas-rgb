@@ -6475,7 +6475,6 @@ button.chip:hover {
   place-items: center;
   border-radius: var(--r-md);
   background: var(--sunk);
-  overflow: hidden;
   /* A corner handle on the picture's edge draws and takes a press whole, not half cut (#104). */
   overflow: clip;
   overflow-clip-margin: 12px;
@@ -6534,8 +6533,9 @@ button.chip:hover {
   pointer-events: none;
 }
 
-/* A rectangle area is dragged on the picture (#104): the frame takes the press, with a 12px
-   skirt so a corner is a 24px target for a finger. The handles only draw; the hit-test decides. */
+/* A rectangle area is dragged on the picture (#104): the frame takes the press, and each corner
+   is a 24px target for a finger with a 12px knob drawn in its middle. touch-action is off only
+   on the area and its corners, so a swipe that starts elsewhere still scrolls the page. */
 .rd-area-frame[data-editable="true"] {
   pointer-events: auto;
   touch-action: none;
@@ -6545,29 +6545,37 @@ button.chip:hover {
   outline: none;
 }
 
-.rd-area-frame[data-editable="true"]::after {
-  content: "";
-  position: absolute;
-  inset: -12px;
-}
-
 .rd-area-frame[data-editable="true"]:focus-visible {
   box-shadow: 0 0 0 2px var(--sunk), 0 0 0 4px var(--a1);
 }
 
 .rd-area-frame .handle {
   position: absolute;
-  width: 9px;
-  height: 9px;
-  border-radius: 2px;
-  background: var(--a1);
-  box-shadow: 0 0 0 1.5px var(--sunk);
+  width: 24px;
+  height: 24px;
+  touch-action: none;
 }
 
-.rd-area-frame .handle.nw { left: -5px; top: -5px; }
-.rd-area-frame .handle.ne { right: -5px; top: -5px; }
-.rd-area-frame .handle.sw { left: -5px; bottom: -5px; }
-.rd-area-frame .handle.se { right: -5px; bottom: -5px; }
+/* The knob: a round 12px accent dot in a 2px light ring and a 2px dark ring, so one of the two
+   rings reads against any colour the effect paints behind it. */
+.rd-area-frame .handle::before {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 6px;
+  width: 12px;
+  height: 12px;
+  box-sizing: border-box;
+  border-radius: 50%;
+  background: var(--a1);
+  border: 2px solid var(--knob-ring);
+  box-shadow: 0 0 0 2px var(--knob-edge);
+}
+
+.rd-area-frame .handle.nw { left: -13px; top: -13px; }
+.rd-area-frame .handle.ne { right: -13px; top: -13px; }
+.rd-area-frame .handle.sw { left: -13px; bottom: -13px; }
+.rd-area-frame .handle.se { right: -13px; bottom: -13px; }
 
 .rd-area-label {
   position: absolute;

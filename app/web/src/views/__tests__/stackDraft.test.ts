@@ -11,11 +11,13 @@ import {
   duplicateLayer,
   layerNameProblem,
   makeLayer,
+  moveBounds,
   moveLayer,
   newEpoch,
   nextLayerId,
   patchLayer,
   removeLayer,
+  resizeBounds,
   stackNameProblem,
   StackSession,
   toggleLayer,
@@ -163,5 +165,44 @@ describe("the stack name", () => {
     expect(stackNameProblem("Sunset glow", ["sunset glow"])).not.toBeNull();
     expect(stackNameProblem("con", [])).toContain("Windows");
     expect(stackNameProblem("a".repeat(61), [])).not.toBeNull();
+  });
+});
+
+describe("resizing a rectangle", () => {
+  const inside = (b: { x: number; y: number; width: number; height: number }) =>
+    b.x >= 0 && b.y >= 0 && b.x + b.width <= 320 && b.y + b.height <= 200 && b.width >= 1 && b.height >= 1;
+
+  it("keeps a one-unit rectangle in the canvas when its left edge is dragged right", () => {
+    const r = resizeBounds({ x: 0, y: 0, width: 1, height: 1 }, -1, -1, 50, 50);
+    expect(r).toEqual({ x: 0, y: 0, width: 1, height: 1 });
+  });
+
+  it("keeps a one-unit rectangle at the right edge in the canvas when its right edge is dragged right", () => {
+    const r = resizeBounds({ x: 319, y: 199, width: 1, height: 1 }, 1, 1, 50, 50);
+    expect(r).toEqual({ x: 319, y: 199, width: 1, height: 1 });
+    expect(inside(resizeBounds({ x: 319, y: 0, width: 1, height: 1 }, 1, 0, 9, 0))).toBe(true);
+  });
+
+  it("never grows a two-unit area when an edge is dragged inward", () => {
+    const r = resizeBounds({ x: 10, y: 10, width: 2, height: 2 }, -1, 0, 30, 0);
+    expect(r.width).toBe(2);
+    expect(r.x).toBe(10);
+  });
+
+  it("stops at four units on a larger area, and stays inside on every edge and corner", () => {
+    const start = { x: 100, y: 80, width: 50, height: 30 };
+    for (const sx of [-1, 0, 1] as const) {
+      for (const sy of [-1, 0, 1] as const) {
+        for (const d of [-999, -5, 0, 5, 999]) {
+          const r = resizeBounds(start, sx, sy, d, -d, d % 2 === 0);
+          expect(inside(r)).toBe(true);
+        }
+      }
+    }
+    expect(resizeBounds(start, -1, 0, 999, 0).width).toBe(4);
+  });
+
+  it("moves a rectangle whole inside the canvas", () => {
+    expect(moveBounds({ x: 10, y: 10, width: 300, height: 190 }, 500, 500)).toEqual({ x: 20, y: 10, width: 300, height: 190 });
   });
 });
