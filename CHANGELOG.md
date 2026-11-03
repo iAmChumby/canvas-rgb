@@ -6,12 +6,13 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
-### Changed
-
-- On a stack's preview you can now drag a layer's rectangle area to move it and drag its corners (or edges) to resize it, the way parts move on the Layout page, and the arrow keys nudge it (Shift for 10). The area picker stays for other areas and exact numbers. (#104)
 ### Added
 
 - On the Fans page you can tick several headers and set them all at once: BIOS, one Fixed %, or a copy of another header's curve. Each header keeps its own floor, the Details list shows what each one did and runs at afterwards, a header the daemon handed back to BIOS is left as it is and named as skipped, and a tach-only header cannot be ticked. On a phone, a Select key turns the header list into tick boxes. (#110)
+
+### Changed
+
+- On a stack's preview you can now drag a layer's rectangle area to move it and drag its corners (or edges) to resize it, the way parts move on the Layout page, and the arrow keys nudge it (Shift for 10). The area picker stays for other areas and exact numbers. (#104)
 
 ### Fixed
 
