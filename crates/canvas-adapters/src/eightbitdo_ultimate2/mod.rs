@@ -711,6 +711,7 @@ fn check_value(def: &PropertyDef, value: &PropValue) -> Result<(), AdapterError>
         (PropKind::Color { .. }, PropValue::Color(_)) => Ok(()),
         (PropKind::Bool { .. }, PropValue::Bool(_)) => Ok(()),
         (PropKind::Hue { .. }, PropValue::Hue(_)) => Ok(()),
+        (PropKind::Angle { .. }, PropValue::Angle(_)) => Ok(()),
         _ => Err(refuse(format!("{} does not take that kind of value", def.key))),
     }
 }

@@ -2865,7 +2865,8 @@ async fn user_presets_are_saved_to_disk_and_survive_a_restart() {
 /// The rule in `docs/preset-equality.json`. The editor's rule is the only production one; this
 /// copy pins the fixture, with JavaScript's rounding. Missing keys take the default, a number rounds to
 /// its step, a hue to a whole degree modulo 360, colours compare without case, keys the schema
-/// does not name are ignored. The editor reads the same file in `presetMatch.test.ts`.
+/// does not name are ignored. An angle compares as its degrees, and a hue saved for an angle
+/// property reads as the same degrees. The editor reads the same file in `presetMatch.test.ts`.
 #[test]
 fn the_preset_equality_fixture_holds() {
     use canvas_proto::props::{PropKind, PropValue, PropertyDef, Props};
@@ -2889,6 +2890,11 @@ fn the_preset_equality_fixture_holds() {
                         format!("{}", (rounded * 1e4 + 0.5).floor() / 1e4)
                     }
                     (PropKind::Hue { .. }, PropValue::Hue(v)) => {
+                        format!("{}", (v + 0.5).floor().rem_euclid(360.0))
+                    }
+                    // An angle compares as its degrees; a hue saved for an angle property
+                    // (before the kind existed) reads as the same degrees.
+                    (PropKind::Angle { .. }, PropValue::Angle(v) | PropValue::Hue(v)) => {
                         format!("{}", (v + 0.5).floor().rem_euclid(360.0))
                     }
                     (_, PropValue::Color(c)) => {
@@ -3067,6 +3073,46 @@ async fn preset_props_are_fitted_to_the_schema_and_capped() {
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "the 101st preset is refused");
+}
+
+#[tokio::test]
+async fn a_saved_hue_for_the_gradient_angle_is_listed_and_used_as_the_same_degrees() {
+    // A gradient saved before the angle kind existed stores its angle as a hue. The fitter must
+    // read it as the same degrees, both when the preset is listed and when it is used — not
+    // silently drop it and let the 90° default show.
+    let (router, _app, _home) = build();
+    let (status, _) = send(
+        &router,
+        "POST",
+        "/api/v1/effects/gradient/presets",
+        serde_json::json!({
+            "name": "Twelve o'clock",
+            "props": { "angle": { "type": "hue", "value": 120.0 } },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the preset is saved");
+
+    // Listed as the angle it was stored for.
+    let (_, detail) = send(&router, "GET", "/api/v1/effects/gradient", serde_json::json!({})).await;
+    let props = &detail["user_presets"][0]["props"];
+    assert_eq!(
+        props["angle"]["type"], "angle",
+        "the saved hue is listed as the angle it was stored for"
+    );
+    assert_eq!(props["angle"]["value"], 120.0, "the degrees survive, not the 90 default");
+
+    // Used as the angle it was stored for.
+    let (status, body) = send(
+        &router,
+        "POST",
+        "/api/v1/effects/gradient/activate",
+        serde_json::json!({ "preset": "Twelve o'clock" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the preset is applied");
+    assert_eq!(body["props"]["angle"]["type"], "angle", "the used value is an angle");
+    assert_eq!(body["props"]["angle"]["value"], 120.0, "the used angle is the saved degrees");
 }
 
 #[tokio::test]

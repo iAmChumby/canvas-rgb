@@ -175,6 +175,8 @@ function defaultValueOf(kind: PropKind): PropValue {
       return { type: "choice", value: kind.default };
     case "hue":
       return { type: "hue", value: kind.default };
+    case "angle":
+      return { type: "angle", value: kind.default };
   }
 }
 

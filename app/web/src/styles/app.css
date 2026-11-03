@@ -1616,6 +1616,72 @@ button.chip:hover {
   outline-offset: 3px;
 }
 
+/* The direction dial (components/AngleDial.tsx): a neutral ring and a needle, never colours. */
+
+.angle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s3);
+}
+
+.angle-dial {
+  position: relative;
+  width: 88px;
+  height: 88px;
+  flex: none;
+  border-radius: 50%;
+  cursor: pointer;
+  touch-action: none;
+  /* A drag never starts a text selection either (#105). */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.angle-dial svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.angle-dial line {
+  stroke: var(--mute);
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+/* The ring takes the dial's own token: a plain line-2 ring reads dim on the dark panel, so the
+   dark theme lifts it a touch; the needle (--ink) stays the strongest element either way. */
+.angle-dial circle {
+  fill: none;
+  stroke: var(--dial-ring);
+  stroke-width: 7;
+}
+
+.angle-dial .angle-dial-needle line {
+  stroke: var(--ink);
+  stroke-width: 3;
+  stroke-linecap: round;
+}
+
+.angle-dial .angle-dial-needle polygon {
+  fill: var(--ink);
+}
+
+.angle-dial .angle-dial-needle circle {
+  fill: var(--ink);
+  stroke: none;
+}
+
+.angle-dial:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 3px;
+}
+
+.angle-dial[data-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 /* ---------- tooltip ---------- */
 
 .tip {
@@ -3052,6 +3118,15 @@ button.chip:hover {
   /* One row: label, slider, number. The control wrapper steps out of the grid. */
   grid-template-columns: minmax(64px, 96px) minmax(0, 1fr) 64px;
   gap: var(--s3);
+}
+
+.prop-item[data-kind="hue"],
+.prop-item[data-kind="angle"] {
+  /* A ring or dial (88 px, unsquashed) plus its degrees field need the room the wide label
+     column would take, and the field must never leave the control column: the pair takes the
+     number row's narrower label column, and the control keeps the rest (the inspector's 360 px
+     pane leaves 224 px for the 208 px pair, at every width the row renders at). */
+  grid-template-columns: minmax(64px, 96px) minmax(0, 1fr);
 }
 
 .prop-item[data-kind="number"] .prop-control {

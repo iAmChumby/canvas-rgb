@@ -56,7 +56,7 @@ export function seededStacks(scenario: Set<string>, effects: Record<string, Demo
     ...gradient,
     color1: color("#ff2d55"),
     color2: color("#ffb703"),
-    angle: { type: "hue", value: 112 },
+    angle: { type: "angle", value: 112 },
   });
   const heat = layer(
     "l2",
@@ -192,6 +192,8 @@ function defaultValue(kind: PropertyDef["kind"]): PropValue {
       return { type: "choice", value: kind.default };
     case "hue":
       return { type: "hue", value: kind.default };
+    case "angle":
+      return { type: "angle", value: kind.default };
     default:
       return { type: "number", value: 0 };
   }

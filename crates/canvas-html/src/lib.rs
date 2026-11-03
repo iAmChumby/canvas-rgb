@@ -361,6 +361,13 @@ impl HtmlEffect {
                             .set(key.as_str(), *h)
                             .map_err(|e| HtmlError::Script(format!("cannot set {key}: {e}")))?;
                     }
+                    // A SignalRGB file never declares an angle kind; if a value is set
+                    // from the API anyway, the script sees its degrees, as a hue's.
+                    PropValue::Angle(a) => {
+                        globals
+                            .set(key.as_str(), *a)
+                            .map_err(|e| HtmlError::Script(format!("cannot set {key}: {e}")))?;
+                    }
                 }
             }
             Ok(())
@@ -759,6 +766,11 @@ fn thumbnail_recipe(
                 let h = text.parse::<f64>().ok().filter(|h| h.is_finite()).ok_or_else(bad)?;
                 PropValue::Hue(h.clamp(0.0, 360.0))
             }
+            // An HTML file never declares an angle kind; this arm only completes the match.
+            PropKind::Angle { .. } => {
+                let a = text.parse::<f64>().ok().filter(|a| a.is_finite()).ok_or_else(bad)?;
+                PropValue::Angle(a.clamp(0.0, 360.0))
+            }
             PropKind::Bool { .. } => match text.to_ascii_lowercase().as_str() {
                 "true" | "1" => PropValue::Bool(true),
                 "false" | "0" => PropValue::Bool(false),
@@ -795,6 +807,7 @@ fn apply_overrides(schema: &mut PropertySchema, overrides: &Props) {
                 PropKind::Choice { options, default: s.clone() }
             }
             (PropKind::Hue { .. }, PropValue::Hue(h)) => PropKind::Hue { default: *h },
+            (PropKind::Angle { .. }, PropValue::Angle(a)) => PropKind::Angle { default: *a },
             // A type mismatch keeps the declared kind.
             _ => def.kind.clone(),
         };
@@ -824,6 +837,9 @@ impl Effect for HtmlEffect {
                 }
                 (PropKind::Hue { default }, PropValue::Hue(h)) => {
                     *h = if h.is_finite() { h.clamp(0.0, 360.0) } else { *default };
+                }
+                (PropKind::Angle { default }, PropValue::Angle(a)) => {
+                    *a = if a.is_finite() { a.clamp(0.0, 360.0) } else { *default };
                 }
                 _ => {}
             }

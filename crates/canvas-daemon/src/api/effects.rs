@@ -463,6 +463,14 @@ pub fn fit_props_to_schema(schema: &PropertySchema, props: Props, what: &str) ->
                 Some(PropValue::Number(clamped))
             }
             (PropKind::Hue { .. }, v @ PropValue::Hue(h)) if h.is_finite() => Some(v),
+            (PropKind::Angle { .. }, v @ PropValue::Angle(a)) if a.is_finite() => Some(v),
+            // Effects saved before the angle kind existed stored the angle as a hue: the
+            // same number of degrees reads on, so the saved angle survives the kind change.
+            (PropKind::Angle { .. }, PropValue::Hue(h)) if h.is_finite() => {
+                let angle = h.rem_euclid(360.0);
+                tracing::debug!(effect = %schema.id, preset = %what, key = %key, from = h, to = angle, "read a saved hue as the angle it was stored for");
+                Some(PropValue::Angle(angle))
+            }
             (PropKind::Color { .. }, v @ PropValue::Color(_)) => Some(v),
             (PropKind::Bool { .. }, v @ PropValue::Bool(_)) => Some(v),
             (PropKind::Choice { options, .. }, v @ PropValue::Choice(_)) => match &v {

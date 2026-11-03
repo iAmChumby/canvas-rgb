@@ -27,6 +27,7 @@ fn main() {
                     format!("choice {options:?} default {default}")
                 }
                 canvas_proto::PropKind::Hue { default } => format!("hue default {default}"),
+                canvas_proto::PropKind::Angle { default } => format!("angle default {default}"),
             };
             println!("      - {} ({kind})", p.label);
         }

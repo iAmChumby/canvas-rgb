@@ -618,6 +618,13 @@ fn check_prop_value(def: &PropertyDef, value: &PropValue) -> Result<(), AdapterE
             Ok(())
         }
         (PropKind::Hue { .. }, other) => Err(wrong(other)),
+        (PropKind::Angle { .. }, PropValue::Angle(angle)) => {
+            if !(0.0..=360.0).contains(angle) {
+                return Err(AdapterError::Protocol(format!("an angle must be 0..=360, got {angle}")));
+            }
+            Ok(())
+        }
+        (PropKind::Angle { .. }, other) => Err(wrong(other)),
     }
 }
 

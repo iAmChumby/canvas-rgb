@@ -96,6 +96,16 @@ impl SchemaBuilder {
         self
     }
 
+    /// Adds an angle property: a direction in degrees, 0..360, not a colour.
+    pub fn angle(mut self, key: &str, label: &str, default: f64) -> Self {
+        self.properties.push(PropertyDef {
+            key: key.to_string(),
+            label: label.to_string(),
+            kind: PropKind::Angle { default },
+        });
+        self
+    }
+
     /// Adds a preset with the given properties. Any property the preset does not
     /// mention takes the schema's default, so every preset covers every property.
     pub fn preset(mut self, name: &str, props: Vec<(&str, PropKind)>) -> Self {

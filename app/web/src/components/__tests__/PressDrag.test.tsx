@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi, type Mock } from "vitest";
 import { act, useState } from "react";
+import { AngleDial } from "@/components/AngleDial";
 import { ColorPicker } from "@/components/ColorPicker";
 import { HueRing } from "@/components/HueRing";
 import { NumberField } from "@/components/NumberField";
@@ -78,6 +79,14 @@ function renderHueRing(): HTMLDivElement {
   return container.querySelector(".hue-ring") as HTMLDivElement;
 }
 
+/** A dial 100 px square at x=0, y=0, like the AngleDial test's own measure. */
+function renderAngleDial(): HTMLDivElement {
+  const { container } = render(<AngleDial value={0} label="Angle" onChange={vi.fn()} />);
+  const el = container.querySelector(".angle-dial") as HTMLDivElement;
+  el.getBoundingClientRect = () => ({ left: 0, width: 100, top: 0, right: 100, bottom: 100, height: 100, x: 0, y: 0, toJSON() {} });
+  return el;
+}
+
 function renderColorPicker(): { sv: HTMLDivElement; hue: HTMLDivElement } {
   const { container } = render(<ColorPicker label="Colour" value="#ff0000" onChange={vi.fn()} />);
   return {
@@ -113,6 +122,30 @@ describe("PressDrag: a press never starts a native drag or a text selection (#10
     fireEvent.pointerUp(el, { pointerId: 1 });
     expect(fireEvent.dragStart(el)).toBe(false);
     expect(el.getAttribute("draggable")).toBe("false");
+  });
+
+  it("the angle dial's press is prevented, its dragstart is refused, and it is not draggable", () => {
+    const el = renderAngleDial();
+    expect(fireEvent.pointerDown(el, { clientX: 100, clientY: 50, pointerId: 1 })).toBe(false);
+    fireEvent.pointerUp(el, { pointerId: 1 });
+    expect(fireEvent.dragStart(el)).toBe(false);
+    expect(el.getAttribute("draggable")).toBe("false");
+  });
+
+  it("the angle dial's press is prevented and still blurs a focused field", () => {
+    const onBlur: Mock = vi.fn();
+    const { container } = render(
+      <>
+        <input aria-label="Field" onBlur={onBlur} />
+        <AngleDial value={0} label="Angle" onChange={vi.fn()} />
+      </>,
+    );
+    const input = container.querySelector("input") as HTMLInputElement;
+    act(() => input.focus());
+    const el = container.querySelector(".angle-dial") as HTMLDivElement;
+    el.getBoundingClientRect = () => ({ left: 0, width: 100, top: 0, right: 100, bottom: 100, height: 100, x: 0, y: 0, toJSON() {} });
+    expect(fireEvent.pointerDown(el, { clientX: 100, clientY: 50, pointerId: 1 })).toBe(false);
+    expect(onBlur).toHaveBeenCalled();
   });
 
   it("the colour picker's square and strip are prevented and refuse a dragstart", () => {

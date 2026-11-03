@@ -33,11 +33,11 @@ const numberKind = (min: number, max: number, step: number, def: number): PropKi
   default: def,
 });
 const choiceKind = (options: string[], def: string): PropKind => ({ type: "choice", options, default: def });
-const hueKind = (def: number): PropKind => ({ type: "hue", default: def });
+const angleKind = (def: number): PropKind => ({ type: "angle", default: def });
 
 const c = (hex: string): PropValue => ({ type: "color", value: hex });
 const n = (value: number): PropValue => ({ type: "number", value });
-const h = (value: number): PropValue => ({ type: "hue", value });
+const a = (value: number): PropValue => ({ type: "angle", value });
 const ch = (value: string): PropValue => ({ type: "choice", value });
 
 type Overrides = { [key: string]: PropValue };
@@ -87,6 +87,8 @@ function defaultValue(kind: PropKind): PropValue {
       return { type: "choice", value: kind.default };
     case "hue":
       return { type: "hue", value: kind.default };
+    case "angle":
+      return { type: "angle", value: kind.default };
   }
 }
 
@@ -105,12 +107,12 @@ export const EFFECTS: DemoEffect[] = [
     [
       { key: "color1", label: "Color 1", kind: colorKind("#6000fc") },
       { key: "color2", label: "Color 2", kind: colorKind("#00d8ff") },
-      { key: "angle", label: "Angle", kind: hueKind(90) },
+      { key: "angle", label: "Angle", kind: angleKind(90) },
       { key: "scroll_speed", label: "Scroll Speed", kind: numberKind(0, 100, 1, 0) },
     ],
     [
-      { name: "Sunset", over: { color1: c("#ff2d55"), color2: c("#ffb703"), angle: h(120) } },
-      { name: "Ocean", over: { color1: c("#0a0a4a"), color2: c("#1e6fd9"), angle: h(90) } },
+      { name: "Sunset", over: { color1: c("#ff2d55"), color2: c("#ffb703"), angle: a(120) } },
+      { name: "Ocean", over: { color1: c("#0a0a4a"), color2: c("#1e6fd9"), angle: a(90) } },
       { name: "Scrolling", over: { scroll_speed: n(20) } },
     ], false),
   build("rainbow_wave", "Rainbow Wave", "A rainbow band that travels across the canvas.", NO_INPUT,
