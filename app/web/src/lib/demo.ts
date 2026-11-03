@@ -791,6 +791,9 @@ export function checkPeripheralValue(device: DemoPeripheral, key: string, value:
   // peripheral adapters are stricter — their check refuses a hue on an angle — so this arm is
   // the demo's own preset-shaped leniency, not something a device would take.
   if (kind.type === "angle" && (value.type === "angle" || value.type === "hue")) return;
+  // A saved number for an angle reads as the same degrees (clamped to 0..360, as the old
+  // number reader did).
+  if (kind.type === "angle" && value.type === "number" && Number.isFinite(value.value)) return;
   fail(422, "validation", `${key} does not take that kind of value`);
 }
 
