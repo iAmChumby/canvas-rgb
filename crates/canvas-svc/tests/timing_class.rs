@@ -95,6 +95,7 @@ const SLEEP_ASSERT_ALLOWED: &[(&str, &str, &str)] = &[
     ("canvas-daemon/src/peripherals.rs", "sleep(Duration::from_millis(200))", "safe: asserts the gated sink has NOT written yet"),
     ("canvas-daemon/src/thumbnail.rs", "sleep(std::time::Duration::from_millis(100))", "safe: asserts a waiting task has NOT finished"),
     ("canvas-daemon/src/thumbnail.rs", "sleep(retry * 3)", "safe: sleeps past the retry interval; slowness only passes it further"),
+    ("canvas-daemon/tests/peripherals.rs", "sleep(Duration::from_millis(2200))", "safe: sleeps past the 2 s read cache #7 removed and asserts a second device read did NOT happen; a slower runner only waits longer (#7)"),
     ("canvas-daemon/tests/api.rs", "sleep(retry * 2)", "safe: sleeps past the retry interval; slowness only passes it further"),
     ("canvas-daemon/tests/api.rs", "from_millis(60)", "open: onboarding timer on a compressed time scale (transient.rs); listed sibling"),
     ("canvas-daemon/tests/api.rs", "from_millis(70)", "open: onboarding timer on a compressed time scale (transient.rs); listed sibling"),
