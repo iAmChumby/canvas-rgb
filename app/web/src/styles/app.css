@@ -1468,6 +1468,8 @@ button.chip:hover {
     linear-gradient(to right, var(--field-white), transparent);
   cursor: crosshair;
   touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 /* The handle is a ring, so the colour under it still shows. */
@@ -1495,6 +1497,8 @@ button.chip:hover {
   background: var(--hue-ramp);
   cursor: ew-resize;
   touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .picker-hue-handle {
@@ -1572,6 +1576,8 @@ button.chip:hover {
   height: 32px;
   cursor: pointer;
   touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
   /* the focus ring is drawn on the cap, so the slot itself takes none */
   outline: none;
 }
@@ -1595,6 +1601,8 @@ button.chip:hover {
   border-radius: 50%;
   cursor: pointer;
   touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .hue-ring svg {
@@ -4007,6 +4015,8 @@ button.chip:hover {
   width: 100%;
   height: 100%;
   overflow: visible;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .curve-point {
@@ -7052,6 +7062,8 @@ button.chip:hover {
   background: var(--sunk);
   overflow: hidden;
   touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .rd-desk .part {

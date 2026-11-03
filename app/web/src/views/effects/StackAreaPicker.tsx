@@ -14,6 +14,7 @@ import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { LayerArea } from "@/proto/LayerArea";
 import type { Layout } from "@/proto/Layout";
 import type { StackLayer } from "@/proto/StackLayer";
+import { cancelPress } from "@/lib/pressDrag";
 import {
   areaIsOnDesk,
   areaReadout,
@@ -172,6 +173,8 @@ export function StackAreaPicker({
   };
 
   const down = (event: ReactPointerEvent<SVGSVGElement>) => {
+    // A press on the desk never starts a native drag or a text selection (#105).
+    cancelPress(event);
     if (pan(event)) return;
     if (mode !== "rect") return;
     const box = event.currentTarget.getBoundingClientRect();

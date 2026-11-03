@@ -5,6 +5,7 @@ import type { CurvePoint } from "@/proto/CurvePoint";
 import { HOT_FLOOR, HOT_CPU_FAN_FLOOR, HOT_TEMP_C, CPU_FAN } from "@/lib/fan-rules";
 import { clamp } from "@/lib/format";
 import { dragThresholdPx } from "@/lib/hitTest";
+import { cancelPress } from "@/lib/pressDrag";
 
 const TEMP_MIN = 20;
 const TEMP_MAX = 100;
@@ -90,9 +91,10 @@ export function FanCurveEditor({
   };
 
   const onDown = (i: number, e: PointerEvent<SVGCircleElement>) => {
-    // A second finger never takes a point that is already held.
+    // A press never starts a native drag or a text selection (#105); a second finger never
+    // takes a point that is already held.
+    cancelPress(e);
     if (drag.current !== null) return;
-    e.preventDefault();
     drag.current = i;
     press.current = { x: e.clientX, y: e.clientY, moved: false, touch: e.pointerType === "touch", start: points.map((p) => ({ ...p })), id: e.pointerId };
     e.currentTarget.setPointerCapture(e.pointerId);

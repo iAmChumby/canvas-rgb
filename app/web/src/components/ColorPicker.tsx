@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
 import { hexToHsv, hsvToHex, parseHex, type Hsv } from "@/lib/color";
+import { cancelPress, refuseDragStart } from "@/lib/pressDrag";
 
 /** A colour the effect already uses, offered as a one-click choice. */
 export interface ColorSwatch {
@@ -110,6 +111,7 @@ export function ColorPicker({
   };
 
   const onSvDown = (e: PointerEvent<HTMLDivElement>) => {
+    cancelPress(e, { focus: true });
     e.currentTarget.setPointerCapture(e.pointerId);
     const next = svAt(e.clientX, e.clientY);
     if (next) now(next);
@@ -149,6 +151,7 @@ export function ColorPicker({
   };
 
   const onHueDown = (e: PointerEvent<HTMLDivElement>) => {
+    cancelPress(e, { focus: true });
     e.currentTarget.setPointerCapture(e.pointerId);
     const h = hueAt(e.clientX);
     if (h !== null) now({ ...liveRef.current, h });
@@ -220,6 +223,8 @@ export function ColorPicker({
         aria-valuemax={100}
         aria-valuenow={Math.round(hsv.v * 100)}
         aria-valuetext={`saturation ${Math.round(hsv.s * 100)}%, brightness ${Math.round(hsv.v * 100)}%`}
+        draggable={false}
+        onDragStart={refuseDragStart}
         onPointerDown={onSvDown}
         onPointerMove={onSvMove}
         onPointerUp={onSvUp}
@@ -238,6 +243,8 @@ export function ColorPicker({
         aria-valuemin={0}
         aria-valuemax={360}
         aria-valuenow={Math.round(hsv.h)}
+        draggable={false}
+        onDragStart={refuseDragStart}
         onPointerDown={onHueDown}
         onPointerMove={onHueMove}
         onPointerUp={onHueUp}
