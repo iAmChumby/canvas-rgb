@@ -117,7 +117,6 @@ describe("the fan editor panel while the daemon has a reason", () => {
     expect(floor).toBeTruthy();
     expect(floor!.compareDocumentPosition(region!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(region!.compareDocumentPosition(document.querySelector(".curve-rows")!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    // The same reason shows no matter the mode: Fixed has the region too.
     expect(document.querySelectorAll("[data-slot='fan-status']")).toHaveLength(1);
   });
 
@@ -190,5 +189,58 @@ describe("the fan editor panel while the daemon has a reason", () => {
     // A different kind of reason is announced.
     withReason("write failed: busy", true);
     expect(live().textContent).toBe("CPU fan: canvas-rgb handed this header back to BIOS");
+  });
+
+  it("says who is in charge in the same box when there is no reason, and announces nothing", async () => {
+    await page("");
+    const region = document.querySelector("[data-slot='fan-status-reason']")!;
+    expect(region.textContent).toBe("Curve in charge: canvas-rgb has not changed this fan.");
+    expect(region.querySelector(".rule-warn")).toBeNull();
+    expect(document.querySelector("[data-slot='fan-status-announce']")?.textContent).toBe("");
+  });
+
+  it("offers More only for a reason that is cut, and opens it over the page without adding a block", async () => {
+    // jsdom has no layout: the text reports that it is taller than its two lines.
+    const sh = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollHeight");
+    const ch = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientHeight");
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", { configurable: true, get(this: HTMLElement) { return this.classList.contains("fan-status-text") ? 120 : (sh?.get?.call(this) as number) ?? 0; } });
+    Object.defineProperty(HTMLElement.prototype, "clientHeight", { configurable: true, get(this: HTMLElement) { return this.classList.contains("fan-status-text") ? 40 : (ch?.get?.call(this) as number) ?? 0; } });
+    try {
+      await page("?state=handback:cpu_fan");
+      const before = signature();
+      const more = await screen.findByRole("button", { name: "More" });
+      expect(more.getAttribute("aria-expanded")).toBe("false");
+      fireEvent.click(more);
+      const less = screen.getByRole("button", { name: "Less" });
+      expect(less.getAttribute("aria-expanded")).toBe("true");
+      expect(document.querySelector(".fan-status-box.is-open")).not.toBeNull();
+      expect(signature()).toBe(before);
+      fireEvent.keyDown(less, { key: "Escape" });
+      expect(screen.getByRole("button", { name: "More" })).toBeTruthy();
+    } finally {
+      if (sh) Object.defineProperty(HTMLElement.prototype, "scrollHeight", sh); else delete (HTMLElement.prototype as unknown as Record<string, unknown>).scrollHeight;
+      if (ch) Object.defineProperty(HTMLElement.prototype, "clientHeight", ch); else delete (HTMLElement.prototype as unknown as Record<string, unknown>).clientHeight;
+    }
+  });
+
+  // Last: it switches the demo's CPU fan to Fixed, which the other tests do not expect.
+  it("keeps the same live node and the same words across a switch to Fixed, and the reason stands in Fixed too", async () => {
+    await page("?state=handback:cpu_fan");
+    const live = document.querySelector("[data-slot='fan-status-announce']")!;
+    const words = live.textContent;
+    expect(words).toBe("CPU fan: canvas-rgb handed this header back to BIOS");
+
+    fireEvent.click(screen.getByRole("radio", { name: "Fixed %" }));
+    await screen.findByLabelText("CPU fan duty value");
+    await waitFor(() => expect(screen.getByRole("radio", { name: "Fixed %" }).getAttribute("aria-checked")).toBe("true"));
+    // The same element, the same words: nothing was mounted again for a screen reader to say twice.
+    expect(document.querySelector("[data-slot='fan-status-announce']")).toBe(live);
+    expect(live.textContent).toBe(words);
+    // Fixed has the region too: the floor note, then the Duty field, then the reason.
+    const region = document.querySelector("[data-slot='fan-status-reason']")!;
+    expect(region.textContent).toContain("canvas-rgb handed CPU fan back to BIOS: ");
+    expect(document.querySelectorAll("[data-slot='fan-status']")).toHaveLength(1);
+    const duty = screen.getByLabelText("CPU fan duty value");
+    expect(duty.compareDocumentPosition(region) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });
