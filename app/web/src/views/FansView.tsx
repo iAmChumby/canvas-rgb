@@ -719,15 +719,6 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
           onChange={setMode}
         />
 
-        {header.override_reason && (
-          <p className={handedBack ? "rule rule-warn" : "rule"}>
-            {handedBack
-              ? "canvas-rgb handed this header back to BIOS"
-              : "canvas-rgb overrode this"}
-            : {header.override_reason}
-          </p>
-        )}
-
         {mode.mode === "bios" && (
           <p className="mute">Chip auto control. Floors off.</p>
         )}
@@ -848,8 +839,24 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
             Duty <Figure unit="%">{header.pwm_percent === null ? "—" : <AnimatedNumber value={header.pwm_percent} />}</Figure>
           </p>
         )}
-        {err && <p className="error-line">{err}</p>}
-        {busy && <p className="mute" style={{ fontSize: 14 }}>Applying</p>}
+        {/* The status stays in the page whether it has anything to say or not: the daemon's reason,
+            an error and "Applying" fill space that is already reserved, so a commit or a hot floor
+            never grows the panel, never flashes its scrollbar and never moves the points (#109). */}
+        <div className="fan-status" data-slot="fan-status" aria-live="polite">
+          <div className="fan-status-reason" data-slot="fan-status-reason">
+            {header.override_reason && (
+              <p className={handedBack ? "rule rule-warn" : "rule"}>
+                {handedBack
+                  ? "canvas-rgb handed this header back to BIOS"
+                  : "canvas-rgb overrode this"}
+                : {header.override_reason}
+              </p>
+            )}
+          </div>
+          <p className={err ? "fan-status-line error-line" : "fan-status-line mute"} data-slot="fan-status-line">
+            {err ?? (busy ? "Applying" : "")}
+          </p>
+        </div>
       </div>
     </Panel>
   );

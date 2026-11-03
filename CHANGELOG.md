@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- Editing a fan curve no longer makes the editor panel jump or flash a scrollbar: the reason canvas-rgb gives for a fan override, an error and "Applying" now share one reserved spot at the bottom of the panel, and every point stays in its row. (#109)
+
 ## [0.6.0] - 2026-11-02
 
 ### Added
