@@ -87,6 +87,7 @@ pub fn save(home: &Path, file: &PeripheralsFile) -> std::io::Result<()> {
 ///
 /// It also needs `ResumeBehavior`: a peripheral the daemon is given has to say what it does when
 /// the machine resumes from sleep, or it does not compile (`cause:sleep-state`).
+#[async_trait::async_trait]
 pub trait Peripheral: PeripheralAdapter + canvas_adapters::resume::ResumeBehavior {
     /// Turns config writes on or off. Nothing is written to the hardware while they are off.
     fn set_config_writes(&mut self, on: bool);
@@ -95,9 +96,35 @@ pub trait Peripheral: PeripheralAdapter + canvas_adapters::resume::ResumeBehavio
     /// enough to be worth reporting. An adapter that reports nothing keeps this default, and its
     /// read shows as one stage.
     fn set_read_sink(&mut self, _sink: Option<ReadSink>) {}
+
+    /// Writes the settings and returns the values the device holds for them afterwards. An
+    /// adapter whose device changes keys it was not asked to (a mode that forces a brightness,
+    /// a count that turns stages off) overrides this and returns those too, so the hub can keep
+    /// the values without reading the device again. The default holds that the device took
+    /// exactly what was written.
+    async fn write_effective(
+        &mut self,
+        device: &DeviceId,
+        props: &Props,
+    ) -> Result<Props, AdapterError> {
+        self.write_settings(device, props).await?;
+        Ok(props.clone())
+    }
 }
 
+#[async_trait::async_trait]
 impl Peripheral for canvas_adapters::attack_shark_x6::AttackSharkX6 {
+    async fn write_effective(
+        &mut self,
+        device: &DeviceId,
+        props: &Props,
+    ) -> Result<Props, AdapterError> {
+        // What the mouse holds after the write, with the keys that were written as the floor.
+        let mut effective = props.clone();
+        effective.extend(AttackSharkX6::write_effective(self, device, props).await?);
+        Ok(effective)
+    }
+
     fn set_config_writes(&mut self, on: bool) {
         self.set_writes_enabled(on);
     }
@@ -126,10 +153,24 @@ pub struct PeripheralHub {
     /// because a read stalls the pointer on the receiver's radio link (issue #7). The read path
     /// answers from them while the `adapters` lock is held, so concurrent reads of one device
     /// queue behind the first and find its answer here (single-flight).
-    reads: std::sync::Mutex<BTreeMap<DeviceId, Props>>,
+    reads: std::sync::Mutex<BTreeMap<DeviceId, Kept>>,
+    /// How many fresh reads of each device have finished. A fresh read that waited for the
+    /// adapters' lock while another one finished answers with that one's result.
+    fresh_done: std::sync::Mutex<BTreeMap<DeviceId, u64>>,
+    /// The `reads` of the access each device was last given: only a change of it makes the kept
+    /// values stale (the device is opened or closed); a repeat, or a change of `writes`, keeps them.
+    reads_applied: std::sync::Mutex<BTreeMap<DeviceId, bool>>,
     /// The stage of the read that is running, per device id. A plain lock, never held across an
     /// await and never the adapters' lock: asking for it must answer while a read is still open.
     progress: Arc<StdMutex<BTreeMap<String, ReadProgress>>>,
+}
+
+/// The values kept for one device, and the adapter that read them.
+struct Kept {
+    /// The adapter that owns the device, so a failed enumeration of another adapter leaves
+    /// these alone.
+    adapter: &'static str,
+    props: Props,
 }
 
 /// Clears the stage of a read when the read ends or its request is dropped, and stops a sink that
@@ -306,6 +347,8 @@ impl PeripheralHub {
             discovery: tokio::sync::Mutex::new(None),
             progress: Arc::new(StdMutex::new(BTreeMap::new())),
             reads: std::sync::Mutex::new(BTreeMap::new()),
+            fresh_done: std::sync::Mutex::new(BTreeMap::new()),
+            reads_applied: std::sync::Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -354,20 +397,23 @@ impl PeripheralHub {
     async fn enumerate(&self) -> Vec<PeripheralInfo> {
         let mut adapters = self.adapters.lock().await;
         let mut found = Vec::new();
+        let mut failed: Vec<&'static str> = Vec::new();
         for adapter in adapters.iter_mut() {
             let name = adapter.name();
             match adapter.discover().await {
                 Ok(list) => found.extend(list),
                 Err(error) => {
+                    failed.push(name);
                     tracing::warn!(adapter = name, error = %error, "could not enumerate the peripherals");
                 }
             }
         }
-        // A device the enumeration no longer lists is gone: what was kept for it is stale.
+        // A device that an adapter no longer lists is gone: what was kept for it is stale. An
+        // adapter whose enumeration failed said nothing, so its devices keep their values.
         self.reads
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|id, _| found.iter().any(|info| &info.id == id));
+            .retain(|id, kept| failed.contains(&kept.adapter) || found.iter().any(|info| &info.id == id));
         found
     }
 
@@ -398,6 +444,8 @@ impl PeripheralHub {
     /// device. A failed read keeps nothing. A read that fails because the device is gone closes
     /// it, so the next read opens it again.
     async fn read_with(&self, device: &DeviceId, fresh: bool) -> Result<Props, AdapterError> {
+        // How many fresh reads of this device had finished when this ask arrived.
+        let done_on_arrival = self.fresh_finished(device);
         // One lock for all adapters. A blocking open inside an adapter holds it, so a slow open
         // of one device queues the reads of the others behind it (the adapters' own HID caches
         // are per adapter and do not share this).
@@ -415,7 +463,9 @@ impl PeripheralHub {
         // Kept values of a device that has since been closed are not an answer. `is_connected`
         // only says the adapter still holds its handle: an unplug shows on the next I/O or the
         // next enumeration, which drops the kept values.
-        if !fresh && adapter.is_connected() {
+        if adapter.is_connected() && (!fresh || self.fresh_finished(device) > done_on_arrival) {
+            // A fresh ask that waited while another fresh read of this device ran takes that
+            // one's result (a double click is one read).
             if let Some(props) = self.kept_read(device) {
                 return Ok(props);
             }
@@ -452,7 +502,15 @@ impl PeripheralHub {
                 self.reads
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .insert(device.clone(), props.clone());
+                    .insert(device.clone(), Kept { adapter: adapter.name(), props: props.clone() });
+                if fresh {
+                    *self
+                        .fresh_done
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .entry(device.clone())
+                        .or_insert(0) += 1;
+                }
             }
             Err(error) => {
                 // A failed read leaves nothing kept: the old values may no longer be true.
@@ -467,7 +525,12 @@ impl PeripheralHub {
 
     /// The values kept for this device, if any.
     fn kept_read(&self, device: &DeviceId) -> Option<Props> {
-        self.reads.lock().unwrap_or_else(|e| e.into_inner()).get(device).cloned()
+        self.reads.lock().unwrap_or_else(|e| e.into_inner()).get(device).map(|k| k.props.clone())
+    }
+
+    /// How many fresh reads of this device have finished.
+    fn fresh_finished(&self, device: &DeviceId) -> u64 {
+        self.fresh_done.lock().unwrap_or_else(|e| e.into_inner()).get(device).copied().unwrap_or(0)
     }
 
     /// Forgets the kept values of this device: they are stale.
@@ -487,16 +550,17 @@ impl PeripheralHub {
             self.forget_read(device);
             adapter.connect().await?;
         }
-        let result = adapter.write_settings(device, props).await;
+        let result = adapter.write_effective(device, props).await;
         match &result {
-            Ok(()) => {
-                // The device holds what was written now: merge it into the kept values, so the
-                // next read needs no trip to the device. Nothing kept means the next read reads.
+            Ok(effective) => {
+                // The device holds what it reports back now, including keys it changed itself:
+                // merge them into the kept values, so the next read needs no trip to the
+                // device. Nothing kept means the next read reads.
                 if let Some(kept) =
                     self.reads.lock().unwrap_or_else(|e| e.into_inner()).get_mut(device)
                 {
-                    for (key, value) in props {
-                        kept.insert(key.clone(), value.clone());
+                    for (key, value) in effective {
+                        kept.props.insert(key.clone(), value.clone());
                     }
                 }
             }
@@ -508,7 +572,7 @@ impl PeripheralHub {
                 }
             }
         }
-        result
+        result.map(|_| ())
     }
 
     /// Applies the access to a device: opens it when reads are on, closes it when they are
@@ -520,7 +584,16 @@ impl PeripheralHub {
         let mut adapters = self.adapters.lock().await;
         let (index, _) = owner_of(&mut adapters, device).await?;
         let adapter = adapters[index].as_mut();
-        self.forget_read(device);
+        // Only a change of `reads` makes the kept values stale: the device is opened or closed.
+        // A repeat of the same access, or a change of `writes` alone, keeps them.
+        let previous = self
+            .reads_applied
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(device.clone(), access.reads);
+        if previous != Some(access.reads) {
+            self.forget_read(device);
+        }
         // The gate follows the access, whatever the access is. Writes need reads, so an
         // access that says otherwise keeps the writes off.
         adapter.set_config_writes(access.writes && access.reads);

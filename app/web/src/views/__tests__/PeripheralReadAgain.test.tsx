@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ToastProvider } from "@/components/Toast";
 import { PeripheralsView } from "@/views/PeripheralsView";
@@ -115,5 +115,35 @@ describe("the Read again key", () => {
     open();
     const key = await screen.findByRole("button", { name: "Read again" });
     expect((key as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+describe("one read per press", () => {
+  it("makes one fresh request for a double click", async () => {
+    open();
+    const key = await screen.findByRole("button", { name: "Read again" });
+    await waitFor(() => expect(api.peripheral).toHaveBeenCalledTimes(1));
+    let finish!: (d: PeripheralDetail) => void;
+    api.peripheral.mockImplementationOnce(
+      () => new Promise<PeripheralDetail>((resolve) => (finish = resolve)),
+    );
+    // Both presses land before React draws the disabled key.
+    act(() => {
+      key.click();
+      key.click();
+    });
+    finish(mouseDetail());
+    await waitFor(() => expect(api.peripheral).toHaveBeenCalledTimes(2));
+    expect(api.peripheral.mock.calls.filter((c) => c.length === 2).length).toBe(1);
+  });
+
+  it("refreshes after an access change with a plain request, never a fresh one", async () => {
+    api.putPeripheralAccess.mockResolvedValue({ reads: true, writes: true });
+    open();
+    await screen.findByRole("button", { name: "Read again" });
+    fireEvent.click(await screen.findByRole("switch", { name: "Change settings on the device" }));
+    await waitFor(() => expect(api.putPeripheralAccess).toHaveBeenCalled());
+    await waitFor(() => expect(api.peripheral).toHaveBeenCalledTimes(2));
+    expect(api.peripheral).toHaveBeenLastCalledWith("x6:one");
   });
 });

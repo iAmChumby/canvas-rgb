@@ -31,9 +31,9 @@ pub async fn list_peripherals(State(app): State<Arc<App>>) -> Json<PeripheralsRe
 /// The query `GET /api/v1/peripherals/{id}` accepts.
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct GetPeripheralQuery {
-    /// `?fresh=true` reads the device even when the daemon keeps its values.
-    #[serde(default)]
-    pub fresh: bool,
+    /// `?fresh=true` (or `1`) reads the device even when the daemon keeps its values; `false`
+    /// and `0` are the plain read. Anything else is a validation error.
+    pub fresh: Option<String>,
 }
 
 /// `GET /api/v1/peripherals/{id}`: what the device is, what it has and what it holds now.
@@ -50,6 +50,15 @@ pub async fn get_peripheral(
     Path(id): Path<String>,
     Query(query): Query<GetPeripheralQuery>,
 ) -> ApiResult<Json<PeripheralDetail>> {
+    let fresh = match query.fresh.as_deref() {
+        None | Some("false") | Some("0") => false,
+        Some("true") | Some("1") => true,
+        Some(other) => {
+            return Err(ApiFailure::validation(format!(
+                "fresh is {other}; use true, false, 1 or 0"
+            )))
+        }
+    };
     let device = DeviceId(id.clone());
     let access = app.store.read().await.peripherals.access(&device);
     let info = find_info(&app, &device)
@@ -57,7 +66,7 @@ pub async fn get_peripheral(
         .ok_or_else(|| ApiFailure::not_found(format!("no peripheral with the id {id}")))?;
     let schema = app.peripherals.describe(&device).await.map_err(adapter_failure)?;
     let (values, problem) = if access.reads {
-        let read = if query.fresh {
+        let read = if fresh {
             app.peripherals.read_fresh(&device).await
         } else {
             app.peripherals.read(&device).await

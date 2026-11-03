@@ -452,9 +452,9 @@ function activeLayout(): Layout {
 // ---- a slow device read (`?state=slow-read`) ----
 
 /** When each open read started. */
+const readStartedAt = new Map<string, number>();
 /** The devices the demo daemon has read once and keeps the values of, like the daemon does (#7). */
 const keptReads = new Set<string>();
-const readStartedAt = new Map<string, number>();
 /** Opening, waking, then five reports a little under a second apart. */
 const OPEN_MS = 700;
 const WAKE_MS = 1500;

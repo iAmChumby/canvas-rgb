@@ -1216,7 +1216,7 @@ impl AttackSharkX6 {
     fn plan_dpi(&self, props: &Props) -> Result<Vec<u8>, AdapterError> {
         if self.cache.dpi_stale {
             return Err(refuse(
-                "the DPI button was pressed since the DPI settings were read; read the device first",
+                "the DPI button was pressed since the DPI settings were read; press Read again to read the device first",
             ));
         }
         let Some(frame) = self.cache.dpi.clone() else {
@@ -1475,6 +1475,22 @@ impl PeripheralAdapter for AttackSharkX6 {
     }
 
     async fn write_settings(&mut self, device: &DeviceId, props: &Props) -> Result<(), AdapterError> {
+        self.write_effective(device, props).await.map(|_| ())
+    }
+
+    fn writes_enabled(&self) -> bool {
+        self.writes_enabled
+    }
+}
+
+impl AttackSharkX6 {
+    /// Writes the settings and returns the values the device holds for them afterwards.
+    ///
+    /// The mouse changes keys it was not asked to: a lighting mode without brightness forces the
+    /// brightness to 8, and a smaller `dpi-stage-count` turns the stages beyond it off. The
+    /// returned props are every key of each report that went out, as a read would decode them,
+    /// so a caller that keeps the values can merge them instead of reading the device again.
+    pub async fn write_effective(&mut self, device: &DeviceId, props: &Props) -> Result<Props, AdapterError> {
         self.check_id(device)?;
         if !self.writes_enabled {
             return Err(AdapterError::Unsupported(
@@ -1482,7 +1498,7 @@ impl PeripheralAdapter for AttackSharkX6 {
             ));
         }
         if props.is_empty() {
-            return Ok(());
+            return Ok(Props::new());
         }
         let schema = self.schema();
         for (key, value) in props {
@@ -1496,7 +1512,7 @@ impl PeripheralAdapter for AttackSharkX6 {
         }
         let plan = self.plan(props)?;
         if plan.packets.is_empty() {
-            return Ok(());
+            return Ok(Props::new());
         }
         let Some(mut config) = self.config.take() else {
             return Err(AdapterError::NotConnected);
@@ -1525,17 +1541,16 @@ impl PeripheralAdapter for AttackSharkX6 {
         result?;
         // The device now holds what we sent, so the next write builds on it instead of dropping
         // this one. A read re-syncs the cache from the device either way.
+        let mut effective = Props::new();
         if let Some(frame) = plan.dpi {
+            read_dpi(&frame, &mut effective);
             self.cache.dpi = Some(frame);
         }
         if let Some(frame) = plan.light {
+            read_light(&frame, &mut effective);
             self.cache.light = Some(frame);
         }
-        Ok(())
-    }
-
-    fn writes_enabled(&self) -> bool {
-        self.writes_enabled
+        Ok(effective)
     }
 }
 
@@ -2497,6 +2512,28 @@ mod tests {
         assert_eq!(stages[3].dpi, Some(3200), "the first four stages stay on");
         assert_eq!(stages[4].dpi, None, "the fifth stage is off");
         assert_eq!(stages[4].rgb, (0, 0xFF, 0xFF), "an off stage keeps its colour");
+    }
+
+    #[tokio::test]
+    async fn a_write_returns_the_keys_the_mouse_changed_by_itself() {
+        let (mut a, _s) = rig();
+        a.connect().await.unwrap();
+        a.read_settings(&a.device_id()).await.unwrap();
+        a.set_writes_enabled(true);
+        // A mode without brightness makes the mouse hold brightness 8.
+        let effective = a
+            .write_effective(&a.device_id(), &choice(&[("led-mode", "breathing")]))
+            .await
+            .unwrap();
+        assert_eq!(effective.get("led-mode"), Some(&PropValue::Choice("breathing".into())));
+        assert_eq!(effective.get("led-brightness"), Some(&PropValue::Number(8.0)));
+        // A smaller count turns the stages beyond it off: the count is what the mouse reports.
+        let effective = a
+            .write_effective(&a.device_id(), &number(&[("dpi-stage-count", 4.0)]))
+            .await
+            .unwrap();
+        assert_eq!(effective.get("dpi-stage-count"), Some(&PropValue::Number(4.0)));
+        assert!(effective.contains_key("dpi-stage-5"), "every stage of the report is returned");
     }
 
     #[tokio::test]

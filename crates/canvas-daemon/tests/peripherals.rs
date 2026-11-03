@@ -649,18 +649,175 @@ async fn fresh_reads_the_device_even_with_kept_values() {
     assert_eq!(after.pointer("/values/dpi-stage-1/value").and_then(|v| v.as_f64()), Some(1200.0));
 }
 
-/// An access change makes the kept values stale.
+/// Turning reads off and on again closes and reopens the device: the kept values are stale.
 #[tokio::test]
-async fn an_access_change_makes_the_next_get_read() {
+async fn turning_reads_off_and_on_makes_the_next_get_read() {
     let fake = FakePeripheral::default();
     let (router, _app, _home) = build(fake.clone());
     let path = reads_on(&router, &fake, false).await;
     call(&router, "GET", &path).await;
     assert_eq!(fake.log().reads, 1);
-    reads_on(&router, &fake, true).await;
+    let id = fake.id().0.clone();
+    call_with_body(&router, "PUT", &access_path_of(&id), r#"{"reads":false,"writes":false}"#).await;
+    reads_on(&router, &fake, false).await;
     call(&router, "GET", &path).await;
-    assert_eq!(fake.log().reads, 2, "the access change forced a read");
+    assert_eq!(fake.log().reads, 2, "the device was closed and opened: a read");
 }
+
+/// F2: a change of `writes` alone, or the same access again, makes no device read.
+#[tokio::test]
+async fn a_writes_only_toggle_or_a_repeat_put_keeps_the_values_and_reads_nothing() {
+    let fake = FakePeripheral::default();
+    let (router, _app, _home) = build(fake.clone());
+    let path = reads_on(&router, &fake, false).await;
+    call(&router, "GET", &path).await;
+    assert_eq!(fake.log().reads, 1);
+    reads_on(&router, &fake, true).await; // writes on
+    call(&router, "GET", &path).await;
+    reads_on(&router, &fake, true).await; // the same again
+    call(&router, "GET", &path).await;
+    reads_on(&router, &fake, false).await; // writes off
+    let detail = json(call(&router, "GET", &path).await).await;
+    assert_eq!(fake.log().reads, 1, "no device read for any of them");
+    assert_eq!(detail.pointer("/values/dpi-stage-1/value").and_then(|v| v.as_f64()), Some(800.0));
+}
+
+/// F1: a key the device changes by itself on a write is in the kept values, not the stale one.
+#[tokio::test]
+async fn a_key_the_device_changed_by_itself_is_kept_as_the_device_reports_it() {
+    let fake = FakePeripheral::default();
+    let (router, _app, _home) = build(fake.clone());
+    let path = reads_on(&router, &fake, true).await;
+    call(&router, "GET", &path).await;
+    fake.0.lock().unwrap().side_effect = Some(("dpi-stage-2".into(), PropValue::Number(3200.0)));
+    let patched = call_with_body(
+        &router,
+        "PATCH",
+        &path,
+        r#"{"dpi-stage-1":{"type":"number","value":1600}}"#,
+    )
+    .await;
+    assert_eq!(patched.status(), StatusCode::OK);
+    let detail = json(call(&router, "GET", &path).await).await;
+    assert_eq!(fake.log().reads, 1, "no device read after the write");
+    assert_eq!(detail.pointer("/values/dpi-stage-1/value").and_then(|v| v.as_f64()), Some(1600.0));
+    assert_eq!(
+        detail.pointer("/values/dpi-stage-2/value").and_then(|v| v.as_f64()),
+        Some(3200.0),
+        "the key the device changed itself is what the device now holds"
+    );
+}
+
+/// F3: an adapter whose enumeration failed said nothing about its devices.
+#[tokio::test]
+async fn a_failed_enumeration_keeps_the_values_of_that_adapters_devices() {
+    use canvas_daemon::peripherals::{Peripheral, PeripheralHub};
+    let fake = FakePeripheral::default();
+    let hub = PeripheralHub::new(vec![Box::new(fake.clone()) as Box<dyn Peripheral>]);
+    let id = fake.id();
+    hub.apply(&id, PeripheralAccess { reads: true, writes: false }).await.unwrap();
+    hub.read(&id).await.unwrap();
+    fake.0.lock().unwrap().fail_discover = true;
+    assert!(hub.discover_now().await.is_empty());
+    hub.read(&id).await.unwrap();
+    assert_eq!(fake.log().reads, 1, "the scan failed: the values stay");
+}
+
+/// F4: `fresh` takes true, false, 1 and 0; anything else is a JSON validation error.
+#[tokio::test]
+async fn fresh_takes_true_false_one_and_zero_and_refuses_anything_else_as_json() {
+    let fake = FakePeripheral::default();
+    let (router, _app, _home) = build(fake.clone());
+    let path = reads_on(&router, &fake, false).await;
+    call(&router, "GET", &path).await;
+    assert_eq!(fake.log().reads, 1);
+    for (query, reads) in [("fresh=0", 1), ("fresh=false", 1), ("fresh=1", 2), ("fresh=true", 3)] {
+        let response = call(&router, "GET", &format!("{path}?{query}")).await;
+        assert_eq!(response.status(), StatusCode::OK, "{query}");
+        assert_eq!(fake.log().reads, reads, "{query}");
+    }
+    let response = call(&router, "GET", &format!("{path}?fresh=yes")).await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = json(response).await;
+    assert_eq!(
+        body.get("error").and_then(|v| v.as_str()),
+        Some(canvas_proto::api::error_codes::VALIDATION)
+    );
+    assert_eq!(fake.log().reads, 3, "a refused ask reads nothing");
+}
+
+/// F5: a fresh read that arrives while another one is in flight takes that one's result.
+#[tokio::test]
+async fn a_second_fresh_read_while_one_is_in_flight_shares_its_result() {
+    use canvas_daemon::peripherals::{Peripheral, PeripheralHub};
+    use canvas_proto::peripheral::{ReadProgress, ReadStage};
+    let fake = FakePeripheral::default();
+    let hub = Arc::new(PeripheralHub::new(vec![Box::new(fake.clone()) as Box<dyn Peripheral>]));
+    let id = fake.id();
+    hub.apply(&id, PeripheralAccess { reads: true, writes: false }).await.unwrap();
+    hub.read(&id).await.unwrap();
+    assert_eq!(fake.log().reads, 1);
+    let (reached_tx, mut reached_rx) = tokio::sync::mpsc::unbounded_channel();
+    let go = Arc::new(tokio::sync::Semaphore::new(0));
+    {
+        let mut log = fake.0.lock().unwrap();
+        log.stages = vec![ReadProgress::at(ReadStage::Reading)];
+        log.gate = Some(common::StageGate { reached: reached_tx, go: go.clone() });
+    }
+    let first = {
+        let (hub, id) = (hub.clone(), id.clone());
+        tokio::spawn(async move { hub.read_fresh(&id).await })
+    };
+    next_step(&mut reached_rx, "the first fresh read is open").await;
+    let second = {
+        let (hub, id) = (hub.clone(), id.clone());
+        tokio::spawn(async move { hub.read_fresh(&id).await })
+    };
+    // The second ask is queued behind the first one's lock.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    go.add_permits(10);
+    ends(first, "the first").await.unwrap();
+    ends(second, "the second").await.unwrap();
+    assert_eq!(fake.log().reads, 2, "the initial read and one fresh read, not two");
+}
+
+/// A write that the device refuses may have gone part of the way: the kept values are stale.
+#[tokio::test]
+async fn a_failed_write_drops_the_kept_values() {
+    let fake = FakePeripheral::default();
+    let (router, _app, _home) = build(fake.clone());
+    let path = reads_on(&router, &fake, true).await;
+    call(&router, "GET", &path).await;
+    assert_eq!(fake.log().reads, 1);
+    let refused = call_with_body(
+        &router,
+        "PATCH",
+        &path,
+        r#"{"dpi-stage-99":{"type":"number","value":1600}}"#,
+    )
+    .await;
+    assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    call(&router, "GET", &path).await;
+    assert_eq!(fake.log().reads, 2, "the next GET reads the device");
+}
+
+/// A read that fails leaves nothing kept: the next GET reads again.
+#[tokio::test]
+async fn a_failed_read_drops_the_kept_values() {
+    let fake = FakePeripheral::default();
+    let (router, _app, _home) = build(fake.clone());
+    let path = reads_on(&router, &fake, false).await;
+    call(&router, "GET", &path).await;
+    assert_eq!(fake.log().reads, 1);
+    fake.0.lock().unwrap().fail_read = 1;
+    let failed = json(call(&router, "GET", &format!("{path}?fresh=true")).await).await;
+    assert!(failed.get("problem").and_then(|v| v.as_str()).is_some(), "the failure is reported");
+    assert_eq!(fake.log().reads, 2);
+    let again = json(call(&router, "GET", &path).await).await;
+    assert_eq!(fake.log().reads, 3, "nothing was kept: the plain GET reads");
+    assert_eq!(again.get("problem"), Some(&serde_json::Value::Null));
+}
+
 
 /// A device that drops out of the enumeration loses its kept values: when it comes back, the
 /// next GET reads it.
@@ -684,10 +841,9 @@ async fn a_device_that_leaves_the_enumeration_loses_its_kept_values() {
     assert_eq!(fake.log().reads, 2, "the kept values were dropped with the device");
 }
 
-
-/// A shared read of a device that is no longer open is not an answer.
+/// Kept values of a device that is no longer open are not an answer: the next GET opens and reads it.
 #[tokio::test]
-async fn a_shared_read_is_not_served_for_a_device_that_is_no_longer_open() {
+async fn kept_values_are_not_served_for_a_device_that_is_no_longer_open() {
     let fake = FakePeripheral::default();
     let (router, _app, _home) = build(fake.clone());
     let id = fake.id().0.clone();

@@ -149,9 +149,18 @@ export function PeripheralsView() {
   // dropped: a slow reload of one device must not put its error on another.
   const detailRequest = useRef(0);
 
-  // Reads one device again: after a write, or after the access changed. `landed` says that the
-  // change is already on the device, so a failed refresh is not a failed change.
+  // A Read again that is out: a second press while it runs is the same read, not another one.
+  const rereading = useRef(false);
+
+  // Asks for one device's detail again: after a write, or after the access changed (the daemon
+  // answers those from the values it keeps), or on the Read again key (`forceRead`: the daemon
+  // reads the device). `landed` says that the change is already on the device, so a failed
+  // refresh is not a failed change.
   const loadDetail = useCallback(async (id: string, landed = false, forceRead = false) => {
+    if (forceRead) {
+      if (rereading.current) return;
+      rereading.current = true;
+    }
     const n = ++detailRequest.current;
     setReloadingId(id);
     try {
@@ -169,6 +178,7 @@ export function PeripheralsView() {
       setDetailError(messageOf(e));
       setChangeSaved(landed);
     } finally {
+      if (forceRead) rereading.current = false;
       if (n === detailRequest.current) setReloadingId(null);
     }
   }, []);
