@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
+import { cancelPress, refuseDragStart } from "@/lib/pressDrag";
 
 /**
  * The cap's width in css pixels. The cap is the only thing that travels, and it travels
@@ -92,7 +93,13 @@ export function Slider({
   };
 
   const onPointerDown = (e: PointerEvent<HTMLDivElement>) => {
-    if (disabled || owner.current !== null) return;
+    // A disabled slider keeps the old press: a click on it must still blur (and so commit) a
+    // field focused elsewhere, and that blur rides on the browser's own press behaviour.
+    if (disabled) return;
+    // A press never starts a native drag or a text selection (#105); the keyboard keeps working
+    // after a mouse press, without claiming the keyboard's focus ring.
+    cancelPress(e, { focus: true });
+    if (owner.current !== null) return;
     owner.current = e.pointerId;
     e.currentTarget.setPointerCapture(e.pointerId);
     setDragging(true);
@@ -162,6 +169,8 @@ export function Slider({
       aria-disabled={disabled ? true : undefined}
       data-dragging={dragging ? "true" : "false"}
       data-disabled={disabled ? "true" : undefined}
+      draggable={false}
+      onDragStart={refuseDragStart}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
