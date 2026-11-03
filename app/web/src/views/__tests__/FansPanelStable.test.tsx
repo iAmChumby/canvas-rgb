@@ -191,11 +191,20 @@ describe("the fan editor panel while the daemon has a reason", () => {
     expect(live().textContent).toBe("CPU fan: canvas-rgb handed this header back to BIOS");
   });
 
+  it("has no More key for a reason that fits its two lines", async () => {
+    await page("?state=handback:cpu_fan");
+    expect(screen.getByText(/canvas-rgb handed CPU fan back to BIOS/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "More" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Less" })).toBeNull();
+  });
+
   it("says who is in charge in the same box when there is no reason, and announces nothing", async () => {
     await page("");
     const region = document.querySelector("[data-slot='fan-status-reason']")!;
-    expect(region.textContent).toBe("Curve in charge: canvas-rgb has not changed this fan.");
+    expect(region.textContent).toBe("The curve is in charge; nothing is overriding it.");
     expect(region.querySelector(".rule-warn")).toBeNull();
+    // An uncut reason (and no reason at all) has no More key.
+    expect(screen.queryByRole("button", { name: "More" })).toBeNull();
     expect(document.querySelector("[data-slot='fan-status-announce']")?.textContent).toBe("");
   });
 
@@ -214,9 +223,67 @@ describe("the fan editor panel while the daemon has a reason", () => {
       const less = screen.getByRole("button", { name: "Less" });
       expect(less.getAttribute("aria-expanded")).toBe("true");
       expect(document.querySelector(".fan-status-box.is-open")).not.toBeNull();
+      // Open, the box is out of flow: the editor's blocks and the region's own children are as they were.
       expect(signature()).toBe(before);
+      const region = document.querySelector("[data-slot='fan-status-reason']")!;
+      expect([...region.children].map((c) => c.className)).toEqual(["rule rule-warn fan-status-box is-open"]);
+      // It closes on Escape wherever focus is in the panel, even on a point's field.
+      fireEvent.keyDown(screen.getByLabelText("Point 1 temperature"), { key: "Escape" });
+      await waitFor(() => expect(screen.getByRole("button", { name: "More" })).toBeTruthy());
+      // On a press outside it.
+      fireEvent.click(screen.getByRole("button", { name: "More" }));
+      fireEvent.pointerDown(screen.getByLabelText("Point 1 temperature"));
+      await waitFor(() => expect(screen.queryByRole("button", { name: "Less" })).toBeNull());
+      // A press inside it keeps it open.
+      fireEvent.click(screen.getByRole("button", { name: "More" }));
+      fireEvent.pointerDown(screen.getByRole("button", { name: "Less" }));
+      expect(screen.getByRole("button", { name: "Less" })).toBeTruthy();
+      // When focus leaves it for something outside.
+      fireEvent.blur(screen.getByRole("button", { name: "Less" }), { relatedTarget: screen.getByLabelText("Point 1 temperature") });
+      await waitFor(() => expect(screen.queryByRole("button", { name: "Less" })).toBeNull());
+      // But a blur to nowhere (the window losing focus) does not close it.
+      fireEvent.click(screen.getByRole("button", { name: "More" }));
+      fireEvent.blur(screen.getByRole("button", { name: "Less" }), { relatedTarget: null });
+      expect(screen.getByRole("button", { name: "Less" })).toBeTruthy();
       fireEvent.keyDown(less, { key: "Escape" });
-      expect(screen.getByRole("button", { name: "More" })).toBeTruthy();
+      await waitFor(() => expect(screen.getByRole("button", { name: "More" })).toBeTruthy());
+    } finally {
+      if (sh) Object.defineProperty(HTMLElement.prototype, "scrollHeight", sh); else delete (HTMLElement.prototype as unknown as Record<string, unknown>).scrollHeight;
+      if (ch) Object.defineProperty(HTMLElement.prototype, "clientHeight", ch); else delete (HTMLElement.prototype as unknown as Record<string, unknown>).clientHeight;
+    }
+  });
+
+  it("moves focus to the reason's region when the key that had it goes away", async () => {
+    let cut = true;
+    const sh = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollHeight");
+    const ch = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientHeight");
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", { configurable: true, get(this: HTMLElement) { return this.classList.contains("fan-status-text") ? (cut ? 120 : 20) : 0; } });
+    Object.defineProperty(HTMLElement.prototype, "clientHeight", { configurable: true, get(this: HTMLElement) { return this.classList.contains("fan-status-text") ? 40 : 0; } });
+    const setReason = (reason: string | null) => {
+      const fans = getSnap().fans!;
+      act(() => {
+        patchSnap({ fans: { ...fans, headers: fans.headers.map((h) => (h.id === "cpu_fan" ? { ...h, override_reason: reason } : h)) } });
+      });
+    };
+    try {
+      await page("?state=handback:cpu_fan");
+      const region = document.querySelector<HTMLElement>("[data-slot='fan-status-reason']")!;
+      // The text stops being cut while More has focus.
+      const more = await screen.findByRole("button", { name: "More" });
+      more.focus();
+      expect(document.activeElement).toBe(more);
+      cut = false;
+      setReason("hot floor 50% while CPU is 78 °C");
+      await waitFor(() => expect(screen.queryByRole("button", { name: "More" })).toBeNull());
+      expect(document.activeElement).toBe(region);
+      // The reason clears while More has focus.
+      cut = true;
+      setReason("write failed: " + "x".repeat(150));
+      const again = await screen.findByRole("button", { name: "More" });
+      again.focus();
+      setReason(null);
+      await waitFor(() => expect(screen.queryByRole("button", { name: "More" })).toBeNull());
+      expect(document.activeElement).toBe(region);
     } finally {
       if (sh) Object.defineProperty(HTMLElement.prototype, "scrollHeight", sh); else delete (HTMLElement.prototype as unknown as Record<string, unknown>).scrollHeight;
       if (ch) Object.defineProperty(HTMLElement.prototype, "clientHeight", ch); else delete (HTMLElement.prototype as unknown as Record<string, unknown>).clientHeight;

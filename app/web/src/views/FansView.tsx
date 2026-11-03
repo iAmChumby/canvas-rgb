@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
 import { ArrowClockwise, CopySimple, DotsThreeOutline, Fan, FloppyDisk, Plus, Trash, X } from "@phosphor-icons/react";
 import { Button, IconButton } from "@/components/Button";
 import { Chip } from "@/components/Chip";
@@ -640,6 +640,8 @@ function reasonKindOf(header: FanHeaderStatus): string {
  * nothing. With no reason it says what is in charge, in the same box.
  */
 function StatusReason({ text, warn, quiet }: { text: string | null; warn: boolean; quiet: string }) {
+  const region = useRef<HTMLDivElement>(null);
+  const box = useRef<HTMLDivElement>(null);
   const textRef = useRef<HTMLSpanElement>(null);
   const [clamped, setClamped] = useState(false);
   const [open, setOpen] = useState(false);
@@ -655,23 +657,63 @@ function StatusReason({ text, warn, quiet }: { text: string | null; warn: boolea
     ro.observe(el);
     return () => ro.disconnect();
   }, [text, open]);
-  if (!text) return <p className="fan-status-quiet mute">{quiet}</p>;
+  // Open, the box closes on a press outside it, on Escape anywhere, and when focus leaves it.
+  useEffect(() => {
+    if (!open) return;
+    const press = (e: PointerEvent) => {
+      if (!box.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", press, true);
+    document.addEventListener("keydown", key);
+    return () => {
+      document.removeEventListener("pointerdown", press, true);
+      document.removeEventListener("keydown", key);
+    };
+  }, [open]);
+  const shown = open && text !== null;
   return (
-    <div
-      className={`rule${warn ? " rule-warn" : ""} fan-status-box${open ? " is-open" : ""}`}
-      onKeyDown={(e) => {
-        if (e.key === "Escape") setOpen(false);
-      }}
-    >
-      <span className="fan-status-text" ref={textRef}>
-        {text}
-      </span>
-      {(clamped || open) && (
-        <Button size="sm" variant="ghost" aria-expanded={open} onClick={() => setOpen(!open)}>
-          {open ? "Less" : "More"}
-        </Button>
+    // The region is the stable element: it takes focus when the key that had it goes away.
+    <div className="fan-status-reason" data-slot="fan-status-reason" ref={region} tabIndex={-1}>
+      {text ? (
+        <div
+          ref={box}
+          className={`rule${warn ? " rule-warn" : ""} fan-status-box${shown ? " is-open" : ""}`}
+          onBlur={(e) => {
+            if (e.relatedTarget && !e.currentTarget.contains(e.relatedTarget as Node)) setOpen(false);
+          }}
+        >
+          <span className="fan-status-text" ref={textRef}>
+            {text}
+          </span>
+          {(clamped || shown) && (
+            <MoreKey open={shown} onToggle={() => setOpen(!shown)} fallback={region} />
+          )}
+        </div>
+      ) : (
+        <p className="fan-status-quiet mute">{quiet}</p>
       )}
     </div>
+  );
+}
+
+/** The More / Less key. If it goes away with focus on it, focus moves to a stable element first. */
+function MoreKey({ open, onToggle, fallback }: { open: boolean; onToggle: () => void; fallback: RefObject<HTMLElement | null> }) {
+  const ref = useRef<HTMLSpanElement>(null);
+  useLayoutEffect(
+    () => () => {
+      if (ref.current?.contains(document.activeElement)) fallback.current?.focus();
+    },
+    [fallback],
+  );
+  return (
+    <span className="fan-status-more" ref={ref}>
+      <Button size="sm" variant="ghost" aria-expanded={open} onClick={onToggle}>
+        {open ? "Less" : "More"}
+      </Button>
+    </span>
   );
 }
 
@@ -764,15 +806,13 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
   // panel, never flashes its scrollbar and never moves the points (#109). It stands under the
   // control it explains: the chart, the duty or the mode note.
   const quiet = {
-    bios: "BIOS in charge: canvas-rgb has not changed this fan.",
-    fixed: "Fixed duty in charge: canvas-rgb has not changed this fan.",
-    curve: "Curve in charge: canvas-rgb has not changed this fan.",
+    bios: "The BIOS is in charge of this fan.",
+    fixed: "Fixed duty is in charge; nothing is overriding it.",
+    curve: "The curve is in charge; nothing is overriding it.",
   }[mode.mode];
   const status = (
     <div className="fan-status" data-slot="fan-status">
-      <div className="fan-status-reason" data-slot="fan-status-reason">
-        <StatusReason text={reasonText} warn={handedBack} quiet={quiet} />
-      </div>
+      <StatusReason text={reasonText} warn={handedBack} quiet={quiet} />
       <div className="fan-status-line" data-slot="fan-status-line">
         <span className="fan-status-error error-line" role="alert" title={err ?? undefined}>
           {err ?? ""}

@@ -3986,8 +3986,8 @@ button.chip:hover {
 
 /* The fan editor's status: the daemon's reason, an error, "Applying". The region is as tall
    empty as full, so none of them moves the points or grows the panel (#109). The reason has
-   room for two lines and is cut at two, whole text in its title (the header's row in the list
-   has it in full); the line under it holds the error and "Applying" side by side, one line. */
+   room for two lines and is cut at two, with a More key that opens the rest over the page (the
+   header's row in the list has it in full); the line under it holds the error and "Applying" side by side, one line. */
 .fan-status {
   display: flex;
   flex-direction: column;
@@ -4039,7 +4039,7 @@ button.chip:hover {
   overflow: visible;
 }
 
-.fan-status-box .btn {
+.fan-status-more {
   flex: none;
 }
 
