@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
+import { cancelPress, refuseDragStart } from "@/lib/pressDrag";
 
 /** Where an angle points, in words, in eighths of the dial: 0 points right, 90 down, as on the canvas. */
 function directionWord(deg: number): string {
@@ -61,9 +62,13 @@ export function AngleDial({
   };
 
   const onPointerDown = (e: PointerEvent<HTMLDivElement>) => {
-    if (disabled || owner.current !== null) return;
-    // The press starts our drag, never the browser's own (no native drag, #105).
-    e.preventDefault();
+    // A disabled dial keeps the old press: a click on it must still blur (and so commit) a
+    // field focused elsewhere, and that blur rides on the browser's own press behaviour.
+    if (disabled) return;
+    // A press never starts a native drag or a text selection (#105, the shared rule); the
+    // keyboard keeps working after a mouse press, without claiming the keyboard's focus ring.
+    cancelPress(e, { focus: true });
+    if (owner.current !== null) return;
     owner.current = e.pointerId;
     e.currentTarget.setPointerCapture(e.pointerId);
     setDragging(true);
@@ -131,6 +136,8 @@ export function AngleDial({
       aria-disabled={disabled ? true : undefined}
       data-dragging={dragging ? "true" : "false"}
       data-disabled={disabled ? "true" : undefined}
+      draggable={false}
+      onDragStart={refuseDragStart}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
