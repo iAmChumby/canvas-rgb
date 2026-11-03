@@ -756,7 +756,7 @@ const READS_OFF = "reads are off for this device";
  * Checks one value against the property's kind, the way the adapter does: the key must be
  * one the device has, it must be writable, and the value must be inside its range.
  */
-function checkPeripheralValue(device: DemoPeripheral, key: string, value: PropValue): void {
+export function checkPeripheralValue(device: DemoPeripheral, key: string, value: PropValue): void {
   const def = device.schema.sections.flatMap((s) => s.properties).find((p) => p.key === key);
   if (!def) fail(422, "validation", `the device has no setting called ${key}`);
   if (device.schema.read_only.includes(key)) {
@@ -781,6 +781,9 @@ function checkPeripheralValue(device: DemoPeripheral, key: string, value: PropVa
   if (kind.type === "color" && value.type === "color") return;
   if (kind.type === "bool" && value.type === "bool") return;
   if (kind.type === "hue" && value.type === "hue") return;
+  // An angle takes its own value, or the hue a value saved before the kind existed carries:
+  // the same degrees read on, exactly as the daemon's validator does.
+  if (kind.type === "angle" && (value.type === "angle" || value.type === "hue")) return;
   fail(422, "validation", `${key} does not take that kind of value`);
 }
 

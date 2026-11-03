@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Changed
+
+- Gradient's Angle is now a direction dial instead of a colour wheel; saved gradients keep their angle. (#106)
+
 ## [0.6.0] - 2026-11-02
 
 ### Added

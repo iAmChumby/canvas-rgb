@@ -1,6 +1,7 @@
 "use client";
 
 import type { CSSProperties } from "react";
+import { AngleDial } from "@/components/AngleDial";
 import { ColorField } from "@/components/ColorField";
 import type { ColorSwatch } from "@/components/ColorPicker";
 import { HueRing } from "@/components/HueRing";
@@ -105,6 +106,8 @@ function defaultFor(kind: PropKind): PropValue {
       return { type: "choice", value: kind.default };
     case "hue":
       return { type: "hue", value: kind.default };
+    case "angle":
+      return { type: "angle", value: kind.default };
   }
 }
 
@@ -217,6 +220,25 @@ function control(
             unit="°"
             disabled={disabled}
             onCommit={(v) => onChange(key, { type: "hue", value: v })}
+          />
+        </div>
+      );
+    }
+    case "angle": {
+      // A saved hue for an angle (an effect saved before the kind existed) reads as the same
+      // degrees; anything else takes the kind's default.
+      const deg = value.type === "angle" || value.type === "hue" ? value.value : kind.default;
+      return (
+        <div className="angle">
+          <AngleDial label={label} value={deg} disabled={disabled} onChange={(v) => onChange(key, { type: "angle", value: v })} />
+          <NumberField
+            label={`${label} degrees`}
+            min={0}
+            max={359}
+            value={((Math.round(deg) % 360) + 360) % 360}
+            unit="°"
+            disabled={disabled}
+            onCommit={(v) => onChange(key, { type: "angle", value: v })}
           />
         </div>
       );

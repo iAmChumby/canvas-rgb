@@ -264,7 +264,7 @@ pub enum ConfigCommand {
 
 /// Parses a `--color #ff0000` style property value against a property kind.
 ///
-/// The kinds are: color, number, bool, choice and hue.
+/// The kinds are: color, number, bool, choice, hue and angle.
 pub fn parse_prop_value(kind: &canvas_proto::props::PropKind, raw: &str) -> Result<canvas_proto::props::PropValue, String> {
     use canvas_proto::props::{PropKind, PropValue};
     match kind {
@@ -297,6 +297,13 @@ pub fn parse_prop_value(kind: &canvas_proto::props::PropKind, raw: &str) -> Resu
                 return Err(format!("a hue must be 0..=360, got {value}"));
             }
             Ok(PropValue::Hue(value))
+        }
+        PropKind::Angle { .. } => {
+            let value: f64 = raw.parse().map_err(|_| format!("{raw:?} is not a number"))?;
+            if !(0.0..=360.0).contains(&value) {
+                return Err(format!("an angle must be 0..=360, got {value}"));
+            }
+            Ok(PropValue::Angle(value))
         }
     }
 }
@@ -468,6 +475,7 @@ fn prop_kind_name(kind: &canvas_proto::props::PropKind) -> &'static str {
         PropKind::Bool { .. } => "boolean",
         PropKind::Choice { .. } => "choice",
         PropKind::Hue { .. } => "hue",
+        PropKind::Angle { .. } => "angle",
     }
 }
 
@@ -480,6 +488,7 @@ fn prop_default(kind: &canvas_proto::props::PropKind) -> String {
         PropKind::Bool { default } => format!("{default}"),
         PropKind::Choice { default, .. } => default.clone(),
         PropKind::Hue { default } => format!("{default}"),
+        PropKind::Angle { default } => format!("{default}"),
     }
 }
 
@@ -1023,6 +1032,7 @@ fn prop_value_text(value: &serde_json::Value) -> String {
         }
         Ok(canvas_proto::props::PropValue::Choice(choice)) => choice,
         Ok(canvas_proto::props::PropValue::Hue(hue)) => format!("{hue}"),
+        Ok(canvas_proto::props::PropValue::Angle(angle)) => format!("{angle}"),
         Err(_) => value.to_string(),
     }
 }
@@ -1046,6 +1056,7 @@ fn prop_kind_summary(kind: &serde_json::Value) -> String {
         Some("bool") => "bool".to_string(),
         Some("color") => "color".to_string(),
         Some("hue") => "hue".to_string(),
+        Some("angle") => "angle".to_string(),
         _ => "?".to_string(),
     }
 }
@@ -1122,6 +1133,17 @@ mod tests {
         let kind = PropKind::Hue { default: 0.0 };
         assert!(parse_prop_value(&kind, "180").is_ok());
         assert!(parse_prop_value(&kind, "400").is_err());
+    }
+
+    #[test]
+    fn angles_are_parsed() {
+        let kind = PropKind::Angle { default: 90.0 };
+        assert_eq!(
+            parse_prop_value(&kind, "180").unwrap(),
+            canvas_proto::props::PropValue::Angle(180.0)
+        );
+        assert!(parse_prop_value(&kind, "400").is_err());
+        assert!(parse_prop_value(&kind, "abc").is_err());
     }
 
     #[test]

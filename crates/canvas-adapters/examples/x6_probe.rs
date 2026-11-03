@@ -34,6 +34,7 @@ fn show(value: &PropValue) -> String {
         PropValue::Bool(b) => format!("{b}"),
         PropValue::Choice(c) => c.clone(),
         PropValue::Hue(h) => format!("{h}"),
+        PropValue::Angle(a) => format!("{a}"),
     }
 }
 
@@ -47,6 +48,7 @@ fn shape(kind: &PropKind) -> String {
         PropKind::Bool { .. } => "on / off".to_string(),
         PropKind::Color { .. } => "colour".to_string(),
         PropKind::Hue { .. } => "hue".to_string(),
+        PropKind::Angle { .. } => "angle".to_string(),
     }
 }
 
@@ -190,6 +192,7 @@ mod tests {
         );
         assert_eq!(show(&PropValue::Bool(true)), "true");
         assert_eq!(show(&PropValue::Hue(90.0)), "90");
+        assert_eq!(show(&PropValue::Angle(90.0)), "90");
     }
 
     #[test]

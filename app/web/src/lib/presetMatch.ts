@@ -3,7 +3,8 @@
 // The rule is shared with the daemon's test through docs/preset-equality.json: fill every
 // missing key with the schema default, round a number to its step, round a hue to a whole
 // degree modulo 360, compare colours without regard to case, ignore keys the schema does not
-// name, then compare key by key.
+// name, then compare key by key. An angle compares as its degrees, and a hue saved for an
+// angle property (an effect saved before the kind existed) reads as the same degrees.
 
 import type { Preset } from "@/proto/Preset";
 import type { PropertyDef } from "@/proto/PropertyDef";
@@ -23,6 +24,8 @@ function defaultOf(kind: PropKind): PropValue {
       return { type: "choice", value: kind.default };
     case "hue":
       return { type: "hue", value: kind.default };
+    case "angle":
+      return { type: "angle", value: kind.default };
   }
 }
 
@@ -40,6 +43,12 @@ function normalValue(kind: PropKind, value: PropValue): PropValue {
   if (kind.type === "hue" && value.type === "hue") {
     const whole = Math.round(value.value);
     return { type: "hue", value: ((whole % 360) + 360) % 360 };
+  }
+  // An angle compares as its degrees; a hue saved for an angle property (an effect saved
+  // before the kind existed) reads as the same degrees, in either direction.
+  if (kind.type === "angle" && (value.type === "angle" || value.type === "hue")) {
+    const whole = Math.round(value.value);
+    return { type: "angle", value: ((whole % 360) + 360) % 360 };
   }
   if (value.type === "color") return { type: "color", value: value.value.toLowerCase() };
   return value;
@@ -87,6 +96,8 @@ export function formatValue(v: PropValue): string {
     case "bool":
       return v.value ? "on" : "off";
     case "hue":
+      return `${v.value}°`;
+    case "angle":
       return `${v.value}°`;
     case "number":
       return String(tidy(v.value));

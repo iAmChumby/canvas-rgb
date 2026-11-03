@@ -1608,6 +1608,67 @@ button.chip:hover {
   outline-offset: 3px;
 }
 
+/* The direction dial (components/AngleDial.tsx): a neutral ring and a needle, never colours. */
+
+.angle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s3);
+}
+
+.angle-dial {
+  position: relative;
+  width: 88px;
+  height: 88px;
+  flex: none;
+  border-radius: 50%;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.angle-dial svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.angle-dial line {
+  stroke: var(--mute);
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.angle-dial circle {
+  fill: none;
+  stroke: var(--line-2);
+  stroke-width: 7;
+}
+
+.angle-dial .angle-dial-needle line {
+  stroke: var(--ink);
+  stroke-width: 3;
+  stroke-linecap: round;
+}
+
+.angle-dial .angle-dial-needle polygon {
+  fill: var(--ink);
+}
+
+.angle-dial .angle-dial-needle circle {
+  fill: var(--ink);
+  stroke: none;
+}
+
+.angle-dial:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 3px;
+}
+
+.angle-dial[data-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 /* ---------- tooltip ---------- */
 
 .tip {

@@ -2865,7 +2865,8 @@ async fn user_presets_are_saved_to_disk_and_survive_a_restart() {
 /// The rule in `docs/preset-equality.json`. The editor's rule is the only production one; this
 /// copy pins the fixture, with JavaScript's rounding. Missing keys take the default, a number rounds to
 /// its step, a hue to a whole degree modulo 360, colours compare without case, keys the schema
-/// does not name are ignored. The editor reads the same file in `presetMatch.test.ts`.
+/// does not name are ignored. An angle compares as its degrees, and a hue saved for an angle
+/// property reads as the same degrees. The editor reads the same file in `presetMatch.test.ts`.
 #[test]
 fn the_preset_equality_fixture_holds() {
     use canvas_proto::props::{PropKind, PropValue, PropertyDef, Props};
@@ -2889,6 +2890,11 @@ fn the_preset_equality_fixture_holds() {
                         format!("{}", (rounded * 1e4 + 0.5).floor() / 1e4)
                     }
                     (PropKind::Hue { .. }, PropValue::Hue(v)) => {
+                        format!("{}", (v + 0.5).floor().rem_euclid(360.0))
+                    }
+                    // An angle compares as its degrees; a hue saved for an angle property
+                    // (before the kind existed) reads as the same degrees.
+                    (PropKind::Angle { .. }, PropValue::Angle(v) | PropValue::Hue(v)) => {
                         format!("{}", (v + 0.5).floor().rem_euclid(360.0))
                     }
                     (_, PropValue::Color(c)) => {

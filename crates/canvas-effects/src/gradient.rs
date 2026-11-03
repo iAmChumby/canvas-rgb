@@ -25,14 +25,14 @@ impl Gradient {
         )
         .color("color1", "Color 1", "#6000fc")
         .color("color2", "Color 2", "#00d8ff")
-        .hue("angle", "Angle", 90.0)
+        .angle("angle", "Angle", 90.0)
         .number("scroll_speed", "Scroll Speed", 0.0, 100.0, 1.0, 0.0)
         .preset(
             "Sunset",
             vec![
                 ("color1", color_kind("#ff2d55")),
                 ("color2", color_kind("#ffb703")),
-                ("angle", hue_kind(120.0)),
+                ("angle", angle_kind(120.0)),
             ],
         )
         .preset(
@@ -40,7 +40,7 @@ impl Gradient {
             vec![
                 ("color1", color_kind("#0a0a4a")),
                 ("color2", color_kind("#1e6fd9")),
-                ("angle", hue_kind(90.0)),
+                ("angle", angle_kind(90.0)),
             ],
         )
         .preset(
@@ -77,7 +77,7 @@ impl Effect for Gradient {
     fn init(&mut self, props: &Props) {
         self.from = to_linear(p::color(&self.schema, props, "color1"));
         self.to = to_linear(p::color(&self.schema, props, "color2"));
-        self.angle_deg = p::hue(&self.schema, props, "angle") as f32;
+        self.angle_deg = p::angle(&self.schema, props, "angle") as f32;
         self.scroll = p::number(&self.schema, props, "scroll_speed") as f32;
     }
 
@@ -135,8 +135,8 @@ fn number_kind(n: f64) -> canvas_proto::PropKind {
     canvas_proto::PropKind::Number { min: 0.0, max: 100.0, step: 1.0, default: n }
 }
 
-fn hue_kind(h: f64) -> canvas_proto::PropKind {
-    canvas_proto::PropKind::Hue { default: h }
+fn angle_kind(a: f64) -> canvas_proto::PropKind {
+    canvas_proto::PropKind::Angle { default: a }
 }
 
 #[cfg(test)]
@@ -175,9 +175,58 @@ mod tests {
         e.update(1.0 / 30.0, &mut canvas, &Inputs::default());
         let before = canvas.pixels.clone();
         let mut props = e.schema.defaults();
-        props.insert("angle".into(), canvas_proto::PropValue::Hue(0.0));
+        props.insert("angle".into(), canvas_proto::PropValue::Angle(0.0));
         e.init(&props);
         e.update(1.0 / 30.0, &mut canvas, &Inputs::default());
         assert_ne!(before, canvas.pixels);
+    }
+
+    #[test]
+    fn the_angle_is_declared_as_a_direction() {
+        let schema = Gradient::schema();
+        let def = schema
+            .properties
+            .iter()
+            .find(|p| p.key == "angle")
+            .expect("the angle property");
+        assert_eq!(def.kind, canvas_proto::PropKind::Angle { default: 90.0 });
+        // The presets that set an angle hold angle values, not hues.
+        for preset in &schema.presets {
+            if let Some(v) = preset.props.get("angle") {
+                assert!(
+                    matches!(v, canvas_proto::PropValue::Angle(_)),
+                    "preset {} holds {v:?}",
+                    preset.name
+                );
+            }
+        }
+    }
+
+    /// A gradient saved before the angle kind existed stored its angle as a hue: it loads
+    /// with the angle it was saved with, not the default.
+    #[test]
+    fn a_saved_hue_angle_loads_as_the_same_direction() {
+        let mut e = Gradient::new();
+        assert_eq!(e.angle_deg, 90.0, "the default");
+        let mut props = e.schema.defaults();
+        props.insert("angle".into(), canvas_proto::PropValue::Hue(120.0));
+        e.init(&props);
+        assert_eq!(e.angle_deg, 120.0);
+    }
+
+    #[test]
+    fn an_angle_prop_and_the_hue_it_replaced_render_the_same() {
+        let mut e = Gradient::new();
+        let mut via_angle = Canvas::new(64, 40);
+        let mut props = e.schema.defaults();
+        props.insert("angle".into(), canvas_proto::PropValue::Angle(30.0));
+        e.init(&props);
+        e.update(1.0 / 30.0, &mut via_angle, &Inputs::default());
+        let mut via_hue = Canvas::new(64, 40);
+        let mut props = e.schema.defaults();
+        props.insert("angle".into(), canvas_proto::PropValue::Hue(30.0));
+        e.init(&props);
+        e.update(1.0 / 30.0, &mut via_hue, &Inputs::default());
+        assert_eq!(via_angle.pixels, via_hue.pixels);
     }
 }

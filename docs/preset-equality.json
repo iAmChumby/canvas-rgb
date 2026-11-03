@@ -1,5 +1,5 @@
 {
-  "about": "When do live property values count as a saved preset? The editor's rule (app/web/src/lib/presetMatch.ts) is the only production rule: the daemon never asks the question. The daemon test (crates/canvas-daemon/tests/api.rs, the_preset_equality_fixture_holds) holds a second copy of the rule that pins this file, with JavaScript's rounding (a half rounds toward +infinity: Math.round(-2.5) is -2), so the file cannot say one thing to the editor and another to anyone porting the rule. The rule: fill every missing key with the schema default, round a number to its step, round a hue to a whole degree modulo 360, compare colours without regard to case, ignore keys the schema does not name, then compare key by key. The hue wrap and the colour case are additions to the consensus's 'rounded to the slider step'; the cases below pin them.",
+  "about": "When do live property values count as a saved preset? The editor's rule (app/web/src/lib/presetMatch.ts) is the only production rule: the daemon never asks the question. The daemon test (crates/canvas-daemon/tests/api.rs, the_preset_equality_fixture_holds) holds a second copy of the rule that pins this file, with JavaScript's rounding (a half rounds toward +infinity: Math.round(-2.5) is -2), so the file cannot say one thing to the editor and another to anyone porting the rule. The rule: fill every missing key with the schema default, round a number to its step, round a hue to a whole degree modulo 360, compare colours without regard to case, ignore keys the schema does not name, then compare key by key. The hue wrap and the colour case are additions to the consensus's 'rounded to the slider step'; the cases below pin them. An angle compares as its degrees the same way, and a hue saved for an angle property (an effect saved before the kind existed) reads as the same degrees, so the saved angle still matches.",
   "properties": [
     { "key": "tint", "label": "Tint", "kind": { "type": "color", "default": "#00d8a0" } },
     { "key": "speed", "label": "Speed", "kind": { "type": "number", "min": 0, "max": 100, "step": 1, "default": 20 } },
@@ -7,6 +7,7 @@
     { "key": "mode", "label": "Mode", "kind": { "type": "choice", "options": ["Soft", "Hard"], "default": "Soft" } },
     { "key": "glow", "label": "Glow", "kind": { "type": "bool", "default": false } },
     { "key": "hue", "label": "Hue", "kind": { "type": "hue", "default": 0 } },
+    { "key": "angle", "label": "Angle", "kind": { "type": "angle", "default": 90 } },
     { "key": "offset", "label": "Offset", "kind": { "type": "number", "min": -10, "max": 10, "step": 1, "default": 0 } }
   ],
   "cases": [
@@ -139,6 +140,42 @@
       "preset": { "hue": { "type": "hue", "value": 10 } },
       "live": { "hue": { "type": "hue", "value": 370 } },
       "equal": true
+    },
+    {
+      "name": "a hue saved for an angle property equals the same angle",
+      "preset": { "angle": { "type": "hue", "value": 120 } },
+      "live": { "angle": { "type": "angle", "value": 120 } },
+      "equal": true
+    },
+    {
+      "name": "an angle equals the hue it was saved as, the other way round too",
+      "preset": { "angle": { "type": "angle", "value": 120 } },
+      "live": { "angle": { "type": "hue", "value": 120 } },
+      "equal": true
+    },
+    {
+      "name": "an angle a degree away is another angle",
+      "preset": { "angle": { "type": "angle", "value": 10 } },
+      "live": { "angle": { "type": "angle", "value": 12 } },
+      "equal": false
+    },
+    {
+      "name": "a saved hue that is another angle is not equal",
+      "preset": { "angle": { "type": "hue", "value": 10 } },
+      "live": { "angle": { "type": "angle", "value": 12 } },
+      "equal": false
+    },
+    {
+      "name": "an angle wraps at 360 degrees",
+      "preset": { "angle": { "type": "angle", "value": 0 } },
+      "live": { "angle": { "type": "angle", "value": 359.6 } },
+      "equal": true
+    },
+    {
+      "name": "a hue and an angle of the same degrees are different properties",
+      "preset": { "hue": { "type": "hue", "value": 90 }, "angle": { "type": "angle", "value": 90 } },
+      "live": { "hue": { "type": "hue", "value": 90 }, "angle": { "type": "angle", "value": 120 } },
+      "equal": false
     },
     {
       "name": "a key the schema does not name is ignored",

@@ -124,6 +124,29 @@ pub fn hue(schema: &PropertySchema, props: &Props, key: &str) -> f64 {
     raw.rem_euclid(360.0)
 }
 
+/// Reads an angle property (degrees, 0..360: a direction), falling back to the schema
+/// default.
+///
+/// A saved `Hue` value reads as the same number of degrees: effects saved before the angle
+/// kind existed stored their angle as a hue.
+pub fn angle(schema: &PropertySchema, props: &Props, key: &str) -> f64 {
+    let def = schema
+        .properties
+        .iter()
+        .find(|p| p.key == key)
+        .map(|p| p.kind.default_value())
+        .and_then(|v| match v {
+            PropValue::Angle(a) | PropValue::Hue(a) => Some(a),
+            _ => None,
+        })
+        .unwrap_or(0.0);
+    let raw = match props.get(key) {
+        Some(PropValue::Angle(a) | PropValue::Hue(a)) if a.is_finite() => *a,
+        _ => def,
+    };
+    raw.rem_euclid(360.0)
+}
+
 /// Clamps `value` to the range the schema declares for `key`, if it declares one.
 fn clamp_to_schema(schema: &PropertySchema, key: &str, value: f64) -> f64 {
     for p in &schema.properties {
@@ -177,6 +200,11 @@ mod tests {
                     label: "h".into(),
                     kind: PropKind::Hue { default: 30.0 },
                 },
+                PropertyDef {
+                    key: "a".into(),
+                    label: "a".into(),
+                    kind: PropKind::Angle { default: 90.0 },
+                },
             ],
             presets: vec![],
             thumbnail: None,
@@ -192,6 +220,7 @@ mod tests {
         assert!(boolean(&s, &p, "b"));
         assert_eq!(choice(&s, &p, "ch"), "x");
         assert_eq!(hue(&s, &p, "h"), 30.0);
+        assert_eq!(angle(&s, &p, "a"), 90.0);
     }
 
     #[test]
@@ -203,11 +232,13 @@ mod tests {
         p.insert("b".into(), PropValue::Number(1.0));
         p.insert("ch".into(), PropValue::Number(1.0));
         p.insert("h".into(), PropValue::Number(1.0));
+        p.insert("a".into(), PropValue::Number(1.0));
         assert_eq!(color(&s, &p, "c"), canvas_proto::Rgb8::new(1, 2, 3));
         assert_eq!(number(&s, &p, "n"), 5.0);
         assert!(boolean(&s, &p, "b"));
         assert_eq!(choice(&s, &p, "ch"), "x");
         assert_eq!(hue(&s, &p, "h"), 30.0);
+        assert_eq!(angle(&s, &p, "a"), 90.0);
     }
 
     #[test]
@@ -251,6 +282,36 @@ mod tests {
         assert_eq!(hue(&s, &p, "h"), 330.0);
         p.insert("h".into(), PropValue::Hue(400.0));
         assert_eq!(hue(&s, &p, "h"), 40.0);
+    }
+
+    /// A gradient saved before the angle kind existed stored its angle as a hue: the same
+    /// number of degrees reads on, not the default.
+    #[test]
+    fn a_saved_hue_reads_as_the_same_angle() {
+        let s = schema();
+        let mut p = Props::new();
+        p.insert("a".into(), PropValue::Hue(120.0));
+        assert_eq!(angle(&s, &p, "a"), 120.0);
+        p.insert("a".into(), PropValue::Angle(120.0));
+        assert_eq!(angle(&s, &p, "a"), 120.0);
+    }
+
+    #[test]
+    fn a_non_finite_saved_hue_takes_the_angle_default() {
+        let s = schema();
+        let mut p = Props::new();
+        p.insert("a".into(), PropValue::Hue(f64::NAN));
+        assert_eq!(angle(&s, &p, "a"), 90.0);
+    }
+
+    #[test]
+    fn angle_wraps() {
+        let s = schema();
+        let mut p = Props::new();
+        p.insert("a".into(), PropValue::Hue(-30.0));
+        assert_eq!(angle(&s, &p, "a"), 330.0);
+        p.insert("a".into(), PropValue::Angle(400.0));
+        assert_eq!(angle(&s, &p, "a"), 40.0);
     }
 
 }
