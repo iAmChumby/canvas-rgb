@@ -46,6 +46,7 @@ import {
   addLayerRefusal,
   applyMergedProps,
   areaName,
+  areaPosition,
   duplicateLayer,
   htmlLayers,
   isHtmlEffect,
@@ -1498,6 +1499,7 @@ export function StackBuilder({
                   devices={devices}
                   picked={pickedLayer}
                   showAreas={showAreas}
+                  onAreaChange={(area) => pickedLayer && patch(pickedLayer.id, { area })}
                 />
                 {draftState === "off" ? (
                   <div className="rd-stage-foot">
@@ -1857,7 +1859,12 @@ export function StackBuilder({
                   <div className="layer-area">
                     <div className="layer-area-text">
                       <Monitor size={16} aria-hidden="true" />
-                      <span>{areaName(pickedLayer.area, layout, devices)}</span>
+                      <span className="layer-area-words">
+                        <span>{areaName(pickedLayer.area, layout, devices)}</span>
+                        {areaPosition(pickedLayer.area) && (
+                          <span className="mute fig">{areaPosition(pickedLayer.area)}</span>
+                        )}
+                      </span>
                     </div>
                     <Button
                       size="sm"

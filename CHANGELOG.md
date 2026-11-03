@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Changed
+
+- On a stack's preview you can now drag a layer's rectangle area to move it and drag its corners (or edges) to resize it, the way parts move on the Layout page, and the arrow keys nudge it (Shift for 10). The area picker stays for other areas and exact numbers. (#104)
+
 ### Fixed
 
 - A scrolling Gradient now flows color 1 → color 2 → color 1 and back instead of jumping between the two colors, and Scroll Speed back at 0 leaves no line behind; the full round trip takes twice as long as the old one-way scroll. (#107)
