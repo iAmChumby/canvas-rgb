@@ -108,11 +108,20 @@ button.chip.chip-add:hover {
   max-width: 320px;
 }
 
-/* Renaming a layer must not move the row: the field takes the line box the name
-   occupied (15px type at the body's 1.45 line-height = 21.75px), so the layer-text
-   column keeps its height and the row's grip, thumb and tip stay put. */
+/* Renaming a layer must not move the row: the field is a block (an inline input adds a
+   baseline strut that grew the row by a third of a pixel), it takes 24px — the minimum
+   touch target — and its margin halves the difference from the name's 21.75px line box,
+   so the layer-text column keeps its height and the row's grip, thumb and tip stay put.
+   Its type reads as the name (weight 600, no horizontal inset), and the radius is the
+   small token: 10px on a 24px field is a pill. */
 .layer-text .name-field {
-  height: calc(var(--t15) * 1.45);
+  display: block;
+  vertical-align: top;
+  height: 24px;
+  margin: calc((var(--t15) * 1.45 - 24px) / 2) 0; /* (21.75px − 24px) / 2 = −1.125px */
+  padding: 0;
+  font-weight: 600;
+  border-radius: var(--r-sm);
 }
 
 .name-field[aria-invalid="true"] {

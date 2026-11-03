@@ -79,11 +79,20 @@ describe("the name field rules", () => {
     expect(phoneRow).toMatch(/max-width:\s*none/);
   });
 
-  it("the layer-row rule keeps renaming from moving the row", () => {
-    // The field must keep the line box the name occupies: 15px at the body's 1.45
-    // line-height, so the layer-text column and the row's height stay as they were.
+  it("the layer-row rule keeps renaming from moving the row and keeps the field easy to hit", () => {
+    // The field is a block (an inline input adds a baseline strut that grew the row),
+    // it takes the 24px minimum touch target, and the margin halves the difference
+    // from the name's 21.75px line box, so the column and the row keep their height.
     const rename = ruleBody(css, ".layer-text .name-field");
-    expect(rename).toMatch(/height:\s*calc\(var\(--t15\) \* 1\.45\)/);
+    expect(rename).toMatch(/display:\s*block/);
+    expect(rename).toMatch(/height:\s*24px/);
+    expect(rename).toMatch(/margin:\s*calc\(\(var\(--t15\) \* 1\.45 - 24px\) \/ 2\)\s*0/);
     expect(rename).not.toMatch(/flex:/);
+    // The field reads as the name: its weight, no horizontal inset, so the text does
+    // not jump when editing starts.
+    expect(rename).toMatch(/font-weight:\s*600/);
+    expect(rename).toMatch(/padding:\s*0/);
+    // The small radius token: 10px on a 24px field is a pill.
+    expect(rename).toMatch(/border-radius:\s*var\(--r-sm\)/);
   });
 });
