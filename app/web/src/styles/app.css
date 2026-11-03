@@ -6572,6 +6572,37 @@ button.chip:hover {
   box-shadow: 0 0 0 2px var(--knob-edge);
 }
 
+.rd-area-frame .edge {
+  position: absolute;
+  touch-action: none;
+}
+
+.rd-area-frame .edge.n,
+.rd-area-frame .edge.s {
+  left: 12px;
+  right: 12px;
+  height: 24px;
+  cursor: ns-resize;
+}
+
+.rd-area-frame .edge.e,
+.rd-area-frame .edge.w {
+  top: 12px;
+  bottom: 12px;
+  width: 24px;
+  cursor: ew-resize;
+}
+
+.rd-area-frame .edge.n { top: -13px; }
+.rd-area-frame .edge.s { bottom: -13px; }
+.rd-area-frame .edge.e { right: -13px; }
+.rd-area-frame .edge.w { left: -13px; }
+
+.rd-area-frame .handle.nw,
+.rd-area-frame .handle.se { cursor: nwse-resize; }
+.rd-area-frame .handle.ne,
+.rd-area-frame .handle.sw { cursor: nesw-resize; }
+
 .rd-area-frame .handle.nw { left: -13px; top: -13px; }
 .rd-area-frame .handle.ne { right: -13px; top: -13px; }
 .rd-area-frame .handle.sw { left: -13px; bottom: -13px; }

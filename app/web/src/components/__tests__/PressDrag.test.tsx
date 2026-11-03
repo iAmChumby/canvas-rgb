@@ -9,6 +9,7 @@ import type { CurvePoint } from "@/proto/CurvePoint";
 import type { StackLayer } from "@/proto/StackLayer";
 import { FanCurveEditor } from "@/views/FanCurveEditor";
 import { PreviewStage } from "@/views/PreviewStage";
+import { StackPreviewCanvas } from "@/views/effects/StackPreviewCanvas";
 import { StackAreaPicker } from "@/views/effects/StackAreaPicker";
 
 // The class test for `cause:ui-interaction` (#105): one rule over every control the pointer
@@ -17,6 +18,14 @@ import { StackAreaPicker } from "@/views/effects/StackAreaPicker";
 // the native press did — a focused field outside the surface loses focus (a NumberField's
 // draft commits on blur), because canceling the press canceled the mousedown that carried it.
 // fireEvent returns false when the default was prevented.
+
+// The stack preview's area frame draws a live picture; the test needs only the frame.
+vi.mock("@/lib/stackPreview", () => ({
+  onStackFrame: () => () => {},
+  setStackPreviewStack: () => {},
+  startStackPreview: () => {},
+  stopStackPreview: () => {},
+}));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -221,5 +230,43 @@ describe("PressDrag: a press never starts a native drag or a text selection (#10
     const el = container.querySelector(".curve-point") as SVGCircleElement;
     expect(fireEvent.pointerDown(el, { clientX: 10, clientY: 10, pointerId: 1 })).toBe(false);
     expect(onBlur).toHaveBeenCalled();
+  });
+
+  it("the stack preview's area frame is prevented, refuses a dragstart and still blurs a focused field", () => {
+    const onBlur: Mock = vi.fn();
+    const layer = {
+      id: "l1",
+      name: "Heat",
+      effect: "fire",
+      props: {},
+      blend: "add",
+      opacity: 70,
+      visible: true,
+      area: { kind: "rect", x: 16, y: 150, width: 110, height: 46 },
+    } as unknown as StackLayer;
+    const { container } = render(
+      <>
+        <input aria-label="Field" onBlur={onBlur} />
+        <StackPreviewCanvas
+          stack={{ id: "stack:T", layers: [layer] }}
+          layout={null}
+          devices={null}
+          picked={layer}
+          showAreas
+          onAreaChange={vi.fn()}
+        />
+      </>,
+    );
+    const stage = container.querySelector(".rd-canvas") as HTMLElement;
+    stage.getBoundingClientRect = () => ({ left: 0, top: 0, width: 640, height: 400, right: 640, bottom: 400, x: 0, y: 0, toJSON() {} });
+    const input = container.querySelector("input") as HTMLInputElement;
+    act(() => input.focus());
+    const el = container.querySelector(".rd-area-frame") as HTMLElement;
+    // Inside the rectangle: a body press.
+    expect(fireEvent.pointerDown(el, { clientX: 142, clientY: 346, button: 0, pointerId: 1 })).toBe(false);
+    expect(onBlur).toHaveBeenCalled();
+    fireEvent.pointerUp(el, { pointerId: 1 });
+    expect(fireEvent.dragStart(el)).toBe(false);
+    expect(el.getAttribute("draggable")).toBe("false");
   });
 });

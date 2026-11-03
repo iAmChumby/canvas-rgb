@@ -444,13 +444,22 @@ export function rectFromDrag(a: { x: number; y: number }, b: { x: number; y: num
 /** The smallest a dragged rectangle gets, in canvas units. */
 export const MIN_AREA = 4;
 
+/**
+ * A rectangle from its four edges, each rounded to a whole unit on its own, so the right and
+ * bottom edges never round past the canvas the way a rounded x plus a rounded width can
+ * (219.5 + 100.5 is 220 + 101 = 321).
+ */
+export function boundsFromEdges(x0: number, y0: number, x1: number, y1: number): Bounds {
+  const left = Math.round(x0);
+  const top = Math.round(y0);
+  return { x: left, y: top, width: Math.round(x1) - left, height: Math.round(y1) - top };
+}
+
 /** A rectangle moved by a canvas-unit delta, kept whole inside the canvas. */
 export function moveBounds(start: Bounds, dx: number, dy: number): Bounds {
-  return roundRect({
-    ...start,
-    x: Math.min(CANVAS_W - start.width, Math.max(0, start.x + dx)),
-    y: Math.min(CANVAS_H - start.height, Math.max(0, start.y + dy)),
-  });
+  const x = Math.min(CANVAS_W - start.width, Math.max(0, start.x + dx));
+  const y = Math.min(CANVAS_H - start.height, Math.max(0, start.y + dy));
+  return boundsFromEdges(x, y, x + start.width, y + start.height);
 }
 
 /**
@@ -497,7 +506,7 @@ export function resizeBounds(
     if (sy < 0) y0 = bottom - h;
     else y1 = start.y + h;
   }
-  return roundRect({ x: x0, y: y0, width: x1 - x0, height: y1 - y0 });
+  return boundsFromEdges(x0, y0, x1, y1);
 }
 
 export interface AreaReadout {

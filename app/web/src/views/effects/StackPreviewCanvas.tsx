@@ -5,7 +5,7 @@
 // on. Frames are drawn straight into the canvas, so a 15 fps feed never re-renders the page.
 
 import { useEffect, useRef, type KeyboardEvent, type PointerEvent } from "react";
-import { cancelPress } from "@/lib/pressDrag";
+import { cancelPress, refuseDragStart } from "@/lib/pressDrag";
 import { hitTest, type HandleDef, type HitPart, type PartRef, type PointerKind } from "@/lib/hitTest";
 import { onStackFrame, setStackPreviewStack, startStackPreview, stopStackPreview } from "@/lib/stackPreview";
 import type { Layout } from "@/proto/Layout";
@@ -229,6 +229,8 @@ export function StackPreviewCanvas({
                   onPointerUp: onUp,
                   onPointerCancel: onUp,
                   onLostPointerCapture: onLost,
+                  onDragStart: refuseDragStart,
+                  draggable: false,
                   onKeyDown: onKey,
                 }
               : {})}
@@ -248,6 +250,12 @@ export function StackPreviewCanvas({
                 <span className="handle ne" aria-hidden="true" />
                 <span className="handle sw" aria-hidden="true" />
                 <span className="handle se" aria-hidden="true" />
+                {/* The edges: nothing drawn (the knobs are the mark), a 24px hit span each with
+                    the resize cursor, so the outer half of the hit-test's reach lands too. */}
+                <span className="edge n" aria-hidden="true" />
+                <span className="edge e" aria-hidden="true" />
+                <span className="edge s" aria-hidden="true" />
+                <span className="edge w" aria-hidden="true" />
               </>
             )}
           </div>

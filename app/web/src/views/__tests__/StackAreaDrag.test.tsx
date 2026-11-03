@@ -218,6 +218,35 @@ describe("dragging a rectangle area on the preview", () => {
     expect(readout()).toContain("x 36, y 140");
   });
 
+  it("resizes from an edge press 8 px outside the edge", async () => {
+    await openBuilderWith("Heat");
+    // The east edge is x 126; press 8 css px outside it, mid-height, and drag 40 px left.
+    drag(frame(), [px(126) + 8, px(173)], [px(126) + 8 - 40, px(173)]);
+    await waitFor(() => expect(readout()).toContain("90 × 46"));
+    expect(readout()).toContain("x 16, y 150");
+    // The north edge (y 150): 8 px above it, drag 20 px down.
+    drag(frame(), [px(60), px(150) - 8], [px(60), px(150) - 8 + 20]);
+    await waitFor(() => expect(readout()).toContain("90 × 36"));
+    expect(readout()).toContain("x 16, y 160");
+  });
+
+  it.each(["pen", "touch"])("a %s move with no buttons does not end the drag", async (pointerType) => {
+    await openBuilderWith("Heat");
+    const kind = { pointerId: 1, pointerType, buttons: 0 };
+    act(() => {
+      fireEvent.pointerDown(frame(), { ...kind, clientX: px(71), clientY: px(173) });
+      fireEvent.pointerMove(frame(), { ...kind, clientX: px(71) + 40, clientY: px(173) - 20 });
+    });
+    await waitFor(() => expect(readout()).toContain("x 36, y 140"));
+    act(() => {
+      fireEvent.pointerMove(frame(), { ...kind, clientX: px(71) + 60, clientY: px(173) - 20 });
+    });
+    await waitFor(() => expect(readout()).toContain("x 46, y 140"));
+    act(() => {
+      fireEvent.pointerUp(frame(), { ...kind, clientX: px(71) + 60, clientY: px(173) - 20 });
+    });
+  });
+
   it("ends the drag when the pointer capture is lost", async () => {
     await openBuilderWith("Heat");
     act(() => {
