@@ -101,8 +101,15 @@ impl Effect for Gradient {
         }
         let span = (hi - lo).max(f32::EPSILON);
         let s = canvas.scale();
-        // The scroll shifts the gradient along its own axis, as a fraction of a period.
-        let shift = (self.offset / 320.0).rem_euclid(1.0);
+        // The scroll shifts the gradient along its own axis. The period is the mirrored
+        // triangle wave below: the position runs 0..1..0, so a scrolling gradient runs
+        // color1..color2..color1 with no jump anywhere, and the wrap point never lands
+        // inside the canvas. The offset keeps its accumulated value when Scroll Speed
+        // goes back to 0: at any constant offset the triangle position is continuous,
+        // so the still gradient stays seamless, and resetting or unwinding it would
+        // jump or animate. With offset 0 the position inside the canvas is exactly the
+        // plain color1..color2 blend.
+        let shift = (self.offset / 320.0).rem_euclid(2.0);
         let inv_span = 1.0 / span;
         let width = canvas.width as usize;
         for y in 0..canvas.height {
@@ -111,15 +118,16 @@ impl Effect for Gradient {
             let out_row = &mut canvas.pixels[y as usize * width..(y as usize + 1) * width];
             for (x, out) in out_row.iter_mut().enumerate() {
                 let lx = (x as f32 + 0.5) / s;
-                // Wrap into 0..1 with one conditional add or subtract: the position is
-                // already within one period, and the shift is in 0..1.
-                let mut t = (lx * dx + row_t) * inv_span + shift;
-                if t >= 1.0 {
-                    t -= 1.0;
-                } else if t < 0.0 {
-                    t += 1.0;
+                // The canvas projection is in 0..1 and the shift in 0..2, so one
+                // conditional wrap puts the position inside its 0..2 period. The
+                // triangle wave reads 0 at the ends of the period and 1 in the
+                // middle, which is continuous everywhere the sawtooth was not.
+                let mut u = (lx * dx + row_t) * inv_span + shift;
+                if u >= 2.0 {
+                    u -= 2.0;
                 }
-                *out = mix(self.from, self.to, t.clamp(0.0, 1.0));
+                let t = 1.0 - (u - 1.0).abs();
+                *out = mix(self.from, self.to, t);
             }
         }
     }
@@ -179,5 +187,70 @@ mod tests {
         e.init(&props);
         e.update(1.0 / 30.0, &mut canvas, &Inputs::default());
         assert_ne!(before, canvas.pixels);
+    }
+
+    /// The biggest per-channel step a seamless blend allows between two pixels one
+    /// render row apart, along the default angle's axis (90 °, so the axis runs down
+    /// the 200 logical-unit height). On a 64x40 canvas (scale 0.2) neighbouring rows
+    /// are 5 logical units apart, so the plain blend steps 5/200 = 0.025 of the full
+    /// blend per row; the mirrored period at worst doubles that slope. A wrap seam
+    /// instead jumps nearly the whole blend (about 0.85 on the green channel for the
+    /// default colors), far above this bound.
+    fn neighbour_step_bound(e: &Gradient, canvas: &Canvas) -> f32 {
+        let span = 200.0; // the default angle's axis span, in logical units
+        let step = (1.0 / canvas.scale()) / span;
+        let range = (0..3).map(|i| (e.to[i] - e.from[i]).abs()).fold(0.0f32, f32::max);
+        2.0 * step * range + 0.01
+    }
+
+    /// Fails on the first pair of vertically neighbouring pixels whose channels differ
+    /// by more than `bound`.
+    fn assert_no_seam(canvas: &Canvas, bound: f32, context: &str) {
+        let w = canvas.width as usize;
+        for y in 0..canvas.height as usize - 1 {
+            for x in 0..w {
+                let a = canvas.pixels[y * w + x];
+                let b = canvas.pixels[(y + 1) * w + x];
+                let d = (0..3).map(|i| (a[i] - b[i]).abs()).fold(0.0f32, f32::max);
+                assert!(d <= bound, "{context}: rows {y}/{y1} at x {x} differ by {d} > {bound}", y1 = y + 1);
+            }
+        }
+    }
+
+    /// A scroll that stops leaves no seam: after the offset has scrolled in, Scroll
+    /// Speed back to 0 still renders a seamless blend. 240 frames at 20 units/s puts
+    /// the old wrap point exactly mid-canvas, where it freezes.
+    #[test]
+    fn a_scroll_that_stops_leaves_no_seam() {
+        let mut e = Gradient::new();
+        let mut props = e.schema.defaults();
+        props.insert("scroll_speed".into(), canvas_proto::PropValue::Number(20.0));
+        e.init(&props);
+        let mut canvas = Canvas::new(64, 40);
+        for _ in 0..240 {
+            e.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+        }
+        props.insert("scroll_speed".into(), canvas_proto::PropValue::Number(0.0));
+        e.init(&props);
+        e.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+        let bound = neighbour_step_bound(&e, &canvas);
+        assert_no_seam(&canvas, bound, "after scroll stops");
+    }
+
+    /// While scrolling, every frame is seamless. 960 frames at 20 units/s move the
+    /// offset by 640 logical units, one full mirrored period, so the position sweeps
+    /// the whole 0..2 range: up the blend, back down, and past the wrap point.
+    #[test]
+    fn the_gradient_blends_without_a_jump_while_scrolling() {
+        let mut e = Gradient::new();
+        let mut props = e.schema.defaults();
+        props.insert("scroll_speed".into(), canvas_proto::PropValue::Number(20.0));
+        e.init(&props);
+        let mut canvas = Canvas::new(64, 40);
+        for frame in 0..960 {
+            e.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+            let bound = neighbour_step_bound(&e, &canvas);
+            assert_no_seam(&canvas, bound, &format!("frame {frame}"));
+        }
     }
 }

@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- A scrolling Gradient now runs color 1 → color 2 → color 1 without a jump, and no seam stays frozen in place after Scroll Speed goes back to 0. (#107)
+
 ## [0.6.0] - 2026-11-02
 
 ### Added
