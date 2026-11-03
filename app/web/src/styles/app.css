@@ -6466,6 +6466,9 @@ button.chip:hover {
   border-radius: var(--r-md);
   background: var(--sunk);
   overflow: hidden;
+  /* A corner handle on the picture's edge draws and takes a press whole, not half cut (#104). */
+  overflow: clip;
+  overflow-clip-margin: 12px;
   /* The wrap is the picture's size container: the canvas below takes the smaller of its
      width and 1.6 x its height, so it never overflows the stage (D95.5.2). */
   container-type: size;
@@ -6521,24 +6524,46 @@ button.chip:hover {
   pointer-events: none;
 }
 
+/* A rectangle area is dragged on the picture (#104): the frame takes the press, with a 12px
+   skirt so a corner is a 24px target for a finger. The handles only draw; the hit-test decides. */
+.rd-area-frame[data-editable="true"] {
+  pointer-events: auto;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: move;
+  outline: none;
+}
+
+.rd-area-frame[data-editable="true"]::after {
+  content: "";
+  position: absolute;
+  inset: -12px;
+}
+
+.rd-area-frame[data-editable="true"]:focus-visible {
+  box-shadow: 0 0 0 2px var(--sunk), 0 0 0 4px var(--a1);
+}
+
 .rd-area-frame .handle {
   position: absolute;
-  width: 7px;
-  height: 7px;
+  width: 9px;
+  height: 9px;
   border-radius: 2px;
   background: var(--a1);
   box-shadow: 0 0 0 1.5px var(--sunk);
 }
 
-.rd-area-frame .handle.nw { left: -4px; top: -4px; }
-.rd-area-frame .handle.ne { right: -4px; top: -4px; }
-.rd-area-frame .handle.sw { left: -4px; bottom: -4px; }
-.rd-area-frame .handle.se { right: -4px; bottom: -4px; }
+.rd-area-frame .handle.nw { left: -5px; top: -5px; }
+.rd-area-frame .handle.ne { right: -5px; top: -5px; }
+.rd-area-frame .handle.sw { left: -5px; bottom: -5px; }
+.rd-area-frame .handle.se { right: -5px; bottom: -5px; }
 
 .rd-area-label {
   position: absolute;
-  left: 4px;
-  top: 4px;
+  left: 12px;
+  top: 8px;
+  pointer-events: none;
   white-space: nowrap;
   padding: 1px 5px;
   border-radius: 4px;
@@ -6858,6 +6883,11 @@ button.chip:hover {
   border-top: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
   margin-bottom: var(--s3);
+}
+
+.layer-area-words {
+  display: grid;
+  min-width: 0;
 }
 
 .layer-area-text {

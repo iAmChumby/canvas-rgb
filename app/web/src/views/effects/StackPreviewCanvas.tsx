@@ -4,10 +4,12 @@
 // without ever changing its ratio, with the picked layer's area drawn on it when `Show areas` is
 // on. Frames are drawn straight into the canvas, so a 15 fps feed never re-renders the page.
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type KeyboardEvent, type PointerEvent } from "react";
+import { hitTest, type HandleDef, type HitPart, type PartRef, type PointerKind } from "@/lib/hitTest";
 import { onStackFrame, setStackPreviewStack, startStackPreview, stopStackPreview } from "@/lib/stackPreview";
 import type { Layout } from "@/proto/Layout";
 import type { Stack } from "@/proto/Stack";
+import type { LayerArea } from "@/proto/LayerArea";
 import type { StackLayer } from "@/proto/StackLayer";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import {
@@ -15,7 +17,33 @@ import {
   areaName,
   CANVAS_H,
   CANVAS_W,
+  moveBounds,
+  pointerToCanvas,
+  resizeBounds,
+  type Bounds,
 } from "@/views/effects/stackDraft";
+
+// The one part the hit-test sees: the picked layer's rectangle.
+const AREA_REF: PartRef = { kind: "zone", index: 0 };
+const VIEW = { zoom: 1, panX: 0, panY: 0 };
+/** An arrow key nudges the area this many canvas units; with Shift, the big step. */
+const NUDGE = 1;
+const NUDGE_BIG = 10;
+
+const HANDLE_CURSOR: Record<HandleDef["id"], string> = {
+  nw: "nwse-resize",
+  se: "nwse-resize",
+  ne: "nesw-resize",
+  sw: "nesw-resize",
+  n: "ns-resize",
+  s: "ns-resize",
+  e: "ew-resize",
+  w: "ew-resize",
+};
+
+type Drag =
+  | { mode: "move"; id: number; from: { x: number; y: number }; start: Bounds }
+  | { mode: "resize"; id: number; from: { x: number; y: number }; start: Bounds; handle: HandleDef };
 
 export function StackPreviewCanvas({
   stack,
@@ -23,14 +51,19 @@ export function StackPreviewCanvas({
   devices,
   picked,
   showAreas,
+  onAreaChange,
 }: {
   stack: Stack;
   layout: Layout | null;
   devices: DeviceInfo[] | null;
   picked: StackLayer | null;
   showAreas: boolean;
+  /** The picked layer's rectangle, dragged or nudged on the picture; the caller edits the draft. */
+  onAreaChange?: (area: LayerArea) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
+  const drag = useRef<Drag | null>(null);
   const empty = stack.layers.length === 0;
 
   useEffect(() => {
@@ -66,9 +99,104 @@ export function StackPreviewCanvas({
   );
 
   const bounds = picked && showAreas ? areaBounds(picked.area, layout) : null;
+  // Only a rectangle is dragged here. A whole-canvas, device or zone area follows the layout;
+  // turning it into a rectangle is a choice the area picker asks for by name, so a stray drag
+  // never does it.
+  const editable = !!onAreaChange && picked?.area.kind === "rect";
+
+  /** Where a press lands on the picked rectangle, by the Layout page's own hit-test. */
+  const hitAt = (e: PointerEvent<HTMLDivElement>, area: Bounds) => {
+    const box = stageRef.current?.getBoundingClientRect();
+    if (!box) return null;
+    const point = pointerToCanvas(e.clientX, e.clientY, box, VIEW);
+    const part: HitPart = { ref: AREA_REF, ...area, rotation_deg: 0, isCase: false, locked: false };
+    const pointer = (e.pointerType || "mouse") as PointerKind;
+    const target = hitTest({
+      point,
+      parts: [part],
+      selection: [AREA_REF],
+      k: box.width / CANVAS_W,
+      pointer,
+    });
+    return { box, point, target };
+  };
+
+  const emit = (area: Bounds) => onAreaChange?.({ kind: "rect", ...area });
+
+  const onDown = (e: PointerEvent<HTMLDivElement>) => {
+    if (!editable || !picked || picked.area.kind !== "rect" || e.button > 0) return;
+    const start = { x: picked.area.x, y: picked.area.y, width: picked.area.width, height: picked.area.height };
+    const hit = hitAt(e, start);
+    if (!hit) return;
+    const { target, point } = hit;
+    let next: Drag | null = null;
+    if (target.kind === "handle" && target.handle !== "rotate") {
+      next = { mode: "resize", id: e.pointerId, from: point, start, handle: target.handle };
+    } else if (target.kind === "part") {
+      next = { mode: "move", id: e.pointerId, from: point, start };
+    }
+    if (!next) return;
+    // The press is ours: no native drag, text selection or focus theft. TODO(#113): use the
+    // shared helper in lib/pressDrag.ts once that PR lands.
+    e.preventDefault();
+    e.currentTarget.focus();
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      // A pointer that is already gone has nothing to capture.
+    }
+    drag.current = next;
+  };
+
+  const onMove = (e: PointerEvent<HTMLDivElement>) => {
+    if (!editable || !picked || picked.area.kind !== "rect") return;
+    const d = drag.current;
+    if (!d) {
+      const hit = hitAt(e, picked.area);
+      const t = hit?.target;
+      e.currentTarget.style.cursor =
+        t?.kind === "handle" && t.handle !== "rotate"
+          ? HANDLE_CURSOR[t.handle.id]
+          : t?.kind === "part"
+            ? "move"
+            : "";
+      return;
+    }
+    if (d.id !== e.pointerId) return;
+    const box = stageRef.current?.getBoundingClientRect();
+    if (!box) return;
+    const p = pointerToCanvas(e.clientX, e.clientY, box, VIEW);
+    const dx = p.x - d.from.x;
+    const dy = p.y - d.from.y;
+    emit(
+      d.mode === "move"
+        ? moveBounds(d.start, dx, dy)
+        : resizeBounds(d.start, d.handle.sx, d.handle.sy, dx, dy, e.shiftKey),
+    );
+  };
+
+  const onUp = (e: PointerEvent<HTMLDivElement>) => {
+    const d = drag.current;
+    if (!d || d.id !== e.pointerId) return;
+    drag.current = null;
+    // A cancelled press (a call, a system gesture) puts the area back where it started.
+    if (e.type === "pointercancel") emit(d.start);
+  };
+
+  const onKey = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (!editable || !picked || picked.area.kind !== "rect") return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const step = e.shiftKey ? NUDGE_BIG : NUDGE;
+    const dx = e.key === "ArrowLeft" ? -step : e.key === "ArrowRight" ? step : 0;
+    const dy = e.key === "ArrowUp" ? -step : e.key === "ArrowDown" ? step : 0;
+    if (dx === 0 && dy === 0) return;
+    e.preventDefault();
+    emit(moveBounds(picked.area, dx, dy));
+  };
+
   return (
     <div className="rd-canvas-wrap">
-      <div className="rd-canvas" data-empty={empty ? "true" : "false"}>
+      <div className="rd-canvas" ref={stageRef} data-empty={empty ? "true" : "false"}>
         {!empty && <canvas ref={canvasRef} width={CANVAS_W} height={CANVAS_H} aria-label="The stack's preview" />}
         {empty && (
           <div className="rd-canvas-empty">
@@ -79,6 +207,19 @@ export function StackPreviewCanvas({
         {bounds && picked && (
           <div
             className="rd-area-frame"
+            data-editable={editable ? "true" : "false"}
+            {...(editable
+              ? {
+                  role: "group",
+                  tabIndex: 0,
+                  "aria-label": `Area of ${picked.name}. Drag to move, drag a corner to resize, arrow keys nudge.`,
+                  onPointerDown: onDown,
+                  onPointerMove: onMove,
+                  onPointerUp: onUp,
+                  onPointerCancel: onUp,
+                  onKeyDown: onKey,
+                }
+              : {})}
             style={{
               left: `${(bounds.x / CANVAS_W) * 100}%`,
               top: `${(bounds.y / CANVAS_H) * 100}%`,
@@ -89,10 +230,14 @@ export function StackPreviewCanvas({
             <span className="rd-area-label">
               {picked.name} · {areaName(picked.area, layout, devices)}
             </span>
-            <span className="handle nw" aria-hidden="true" />
-            <span className="handle ne" aria-hidden="true" />
-            <span className="handle sw" aria-hidden="true" />
-            <span className="handle se" aria-hidden="true" />
+            {editable && (
+              <>
+                <span className="handle nw" aria-hidden="true" />
+                <span className="handle ne" aria-hidden="true" />
+                <span className="handle sw" aria-hidden="true" />
+                <span className="handle se" aria-hidden="true" />
+              </>
+            )}
           </div>
         )}
       </div>

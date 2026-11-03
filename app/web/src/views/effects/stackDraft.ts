@@ -441,6 +441,61 @@ export function rectFromDrag(a: { x: number; y: number }, b: { x: number; y: num
   };
 }
 
+/** The smallest a dragged rectangle gets, in canvas units. */
+export const MIN_AREA = 4;
+
+/** A rectangle moved by a canvas-unit delta, kept whole inside the canvas. */
+export function moveBounds(start: Bounds, dx: number, dy: number): Bounds {
+  return roundRect({
+    ...start,
+    x: Math.min(CANVAS_W - start.width, Math.max(0, start.x + dx)),
+    y: Math.min(CANVAS_H - start.height, Math.max(0, start.y + dy)),
+  });
+}
+
+/**
+ * A rectangle resized by dragging one handle by a canvas-unit delta. `sx` and `sy` are the
+ * handle's direction (-1 the left or top edge, 1 the right or bottom, 0 an axis it leaves alone);
+ * the opposite edge stays put. The result stays inside the canvas and at least `MIN_AREA` each
+ * way. `keepAspect` (a corner with Shift) holds the starting ratio.
+ */
+export function resizeBounds(
+  start: Bounds,
+  sx: -1 | 0 | 1,
+  sy: -1 | 0 | 1,
+  dx: number,
+  dy: number,
+  keepAspect = false,
+): Bounds {
+  const right = start.x + start.width;
+  const bottom = start.y + start.height;
+  let x0 = start.x;
+  let x1 = right;
+  let y0 = start.y;
+  let y1 = bottom;
+  if (sx < 0) x0 = Math.min(right - MIN_AREA, Math.max(0, start.x + dx));
+  if (sx > 0) x1 = Math.max(start.x + MIN_AREA, Math.min(CANVAS_W, right + dx));
+  if (sy < 0) y0 = Math.min(bottom - MIN_AREA, Math.max(0, start.y + dy));
+  if (sy > 0) y1 = Math.max(start.y + MIN_AREA, Math.min(CANVAS_H, bottom + dy));
+  if (keepAspect && sx !== 0 && sy !== 0) {
+    const room = {
+      w: sx > 0 ? CANVAS_W - start.x : right,
+      h: sy > 0 ? CANVAS_H - start.y : bottom,
+    };
+    const most = Math.min(room.w / start.width, room.h / start.height);
+    const least = Math.max(MIN_AREA / start.width, MIN_AREA / start.height);
+    const want = Math.max((x1 - x0) / start.width, (y1 - y0) / start.height);
+    const scale = Math.min(most, Math.max(least, want));
+    const w = start.width * scale;
+    const h = start.height * scale;
+    if (sx < 0) x0 = right - w;
+    else x1 = start.x + w;
+    if (sy < 0) y0 = bottom - h;
+    else y1 = start.y + h;
+  }
+  return roundRect({ x: x0, y: y0, width: x1 - x0, height: y1 - y0 });
+}
+
 export interface AreaReadout {
   /** The line's first part: "Rectangle 110 × 46", "Whole canvas", "Keyboard · Zone 1". */
   title: string;
