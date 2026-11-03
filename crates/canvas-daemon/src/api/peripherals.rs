@@ -6,7 +6,7 @@
 //! and a write only while writes are on. What the daemon may do with a device is saved in
 //! `peripherals.json` (see `crate::peripherals`).
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::Json;
 use canvas_proto::device::DeviceId;
 use canvas_proto::peripheral::{
@@ -28,7 +28,19 @@ pub async fn list_peripherals(State(app): State<Arc<App>>) -> Json<PeripheralsRe
     Json(PeripheralsResponse { peripherals })
 }
 
+/// The query `GET /api/v1/peripherals/{id}` accepts.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct GetPeripheralQuery {
+    /// `?fresh=true` reads the device even when the daemon keeps its values.
+    #[serde(default)]
+    pub fresh: bool,
+}
+
 /// `GET /api/v1/peripherals/{id}`: what the device is, what it has and what it holds now.
+///
+/// The values are the ones the daemon kept from the last read, with the writes since merged in.
+/// The device is read only when nothing is kept, or with `?fresh=true` (issue #7: a read stalls
+/// the pointer).
 ///
 /// The schema is always there. The values are read from the device only while reads are on for
 /// this id; otherwise they are empty and `problem` says why. A read that fails leaves the
@@ -36,6 +48,7 @@ pub async fn list_peripherals(State(app): State<Arc<App>>) -> Json<PeripheralsRe
 pub async fn get_peripheral(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
+    Query(query): Query<GetPeripheralQuery>,
 ) -> ApiResult<Json<PeripheralDetail>> {
     let device = DeviceId(id.clone());
     let access = app.store.read().await.peripherals.access(&device);
@@ -44,7 +57,12 @@ pub async fn get_peripheral(
         .ok_or_else(|| ApiFailure::not_found(format!("no peripheral with the id {id}")))?;
     let schema = app.peripherals.describe(&device).await.map_err(adapter_failure)?;
     let (values, problem) = if access.reads {
-        match app.peripherals.read(&device).await {
+        let read = if query.fresh {
+            app.peripherals.read_fresh(&device).await
+        } else {
+            app.peripherals.read(&device).await
+        };
+        match read {
             Ok(values) => (values, None),
             Err(error) => {
                 tracing::warn!(device = %id, error = %error, "the peripheral did not answer the read");
