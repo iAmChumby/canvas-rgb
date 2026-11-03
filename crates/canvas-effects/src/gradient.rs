@@ -85,7 +85,10 @@ impl Effect for Gradient {
         if !dt.is_finite() || dt <= 0.0 {
             return;
         }
-        self.offset += self.scroll * dt;
+        // Wrapped to one mirrored period in logical units (2 shift turns x 320
+        // logical units) so a long run cannot grind f32 precision down. 640 is an
+        // exact number of periods, so the rendered position is unchanged.
+        self.offset = (self.offset + self.scroll * dt).rem_euclid(640.0);
 
         let rad = self.angle_deg.to_radians();
         // The gradient axis, in logical units.
@@ -126,7 +129,12 @@ impl Effect for Gradient {
                 if u >= 2.0 {
                     u -= 2.0;
                 }
-                let t = 1.0 - (u - 1.0).abs();
+                // The exact mirrored form: below the period's middle the plain
+                // blend, above it the same ramp mirrored. Written without abs so
+                // offset 0 is bit-identical to the plain blend: `u - 1.0` loses
+                // the low bits of a small u, and `1.0 - (u - 1.0).abs()` rounds
+                // them away.
+                let t = if u < 1.0 { u } else { 2.0 - u };
                 *out = mix(self.from, self.to, t);
             }
         }
@@ -189,68 +197,162 @@ mod tests {
         assert_ne!(before, canvas.pixels);
     }
 
-    /// The biggest per-channel step a seamless blend allows between two pixels one
-    /// render row apart, along the default angle's axis (90 °, so the axis runs down
-    /// the 200 logical-unit height). On a 64x40 canvas (scale 0.2) neighbouring rows
-    /// are 5 logical units apart, so the plain blend steps 5/200 = 0.025 of the full
-    /// blend per row; the mirrored period at worst doubles that slope. A wrap seam
-    /// instead jumps nearly the whole blend (about 0.85 on the green channel for the
-    /// default colors), far above this bound.
-    fn neighbour_step_bound(e: &Gradient, canvas: &Canvas) -> f32 {
-        let span = 200.0; // the default angle's axis span, in logical units
-        let step = (1.0 / canvas.scale()) / span;
-        let range = (0..3).map(|i| (e.to[i] - e.from[i]).abs()).fold(0.0f32, f32::max);
-        2.0 * step * range + 0.01
+    /// The angles the seam tests sweep. 0 and 180 run the gradient across the
+    /// columns, 45 and 90 across the rows, so a seam on either axis can fail them.
+    const SEAM_ANGLES: [f64; 4] = [0.0, 45.0, 90.0, 180.0];
+
+    /// A Gradient with Scroll Speed 20 and the given angle.
+    fn scrolling_gradient(angle: f64) -> Gradient {
+        let mut e = Gradient::new();
+        let mut props = e.schema.defaults();
+        props.insert("scroll_speed".into(), canvas_proto::PropValue::Number(20.0));
+        props.insert("angle".into(), canvas_proto::PropValue::Hue(angle));
+        e.init(&props);
+        e
     }
 
-    /// Fails on the first pair of vertically neighbouring pixels whose channels differ
-    /// by more than `bound`.
+    /// The biggest per-channel step a seamless blend allows between two neighbouring
+    /// pixels, on either canvas axis. The blend parameter is piecewise linear in the
+    /// gradient position with slope 1 on every branch (the plain ramp and the
+    /// mirrored half alike), so two neighbours differ by at most their position
+    /// step: one render row or column is 1/scale logical units apart, the angle's
+    /// axis span is 320*|dx| + 200*|dy| logical units, so the step is
+    /// max(|dx|, |dy|) / (scale * span) of the full blend, plus one 8-bit level of
+    /// rounding slack. A wrap seam instead jumps nearly the whole blend.
+    fn neighbour_step_bound(e: &Gradient, angle: f64, canvas: &Canvas) -> f32 {
+        let rad = (angle as f32).to_radians();
+        let (dx, dy) = (rad.cos().abs(), rad.sin().abs());
+        let span = 320.0 * dx + 200.0 * dy;
+        let step = dx.max(dy) / (canvas.scale() * span);
+        let range = (0..3).map(|i| (e.to[i] - e.from[i]).abs()).fold(0.0f32, f32::max);
+        step * range + 1.0 / 255.0
+    }
+
+    /// Fails on the first pair of horizontally or vertically neighbouring pixels
+    /// whose channels differ by more than `bound`.
     fn assert_no_seam(canvas: &Canvas, bound: f32, context: &str) {
         let w = canvas.width as usize;
-        for y in 0..canvas.height as usize - 1 {
+        let h = canvas.height as usize;
+        for y in 0..h {
             for x in 0..w {
                 let a = canvas.pixels[y * w + x];
-                let b = canvas.pixels[(y + 1) * w + x];
-                let d = (0..3).map(|i| (a[i] - b[i]).abs()).fold(0.0f32, f32::max);
-                assert!(d <= bound, "{context}: rows {y}/{y1} at x {x} differ by {d} > {bound}", y1 = y + 1);
+                if x + 1 < w {
+                    let x1 = x + 1;
+                    let b = canvas.pixels[y * w + x1];
+                    let d = (0..3).map(|i| (a[i] - b[i]).abs()).fold(0.0f32, f32::max);
+                    assert!(d <= bound, "{context}: row {y}, columns {x}/{x1} differ by {d} > {bound}");
+                }
+                if y + 1 < h {
+                    let y1 = y + 1;
+                    let b = canvas.pixels[y1 * w + x];
+                    let d = (0..3).map(|i| (a[i] - b[i]).abs()).fold(0.0f32, f32::max);
+                    assert!(d <= bound, "{context}: rows {y}/{y1} at column {x} differ by {d} > {bound}");
+                }
             }
         }
     }
 
-    /// A scroll that stops leaves no seam: after the offset has scrolled in, Scroll
-    /// Speed back to 0 still renders a seamless blend. 240 frames at 20 units/s puts
-    /// the old wrap point exactly mid-canvas, where it freezes.
+    /// A scroll that stops leaves no seam at any angle: after the offset has
+    /// scrolled in, Scroll Speed back to 0 still renders a seamless blend.
+    /// 240 frames at 20 units/s put the old wrap point exactly mid-canvas,
+    /// where it freezes.
     #[test]
-    fn a_scroll_that_stops_leaves_no_seam() {
-        let mut e = Gradient::new();
-        let mut props = e.schema.defaults();
-        props.insert("scroll_speed".into(), canvas_proto::PropValue::Number(20.0));
-        e.init(&props);
-        let mut canvas = Canvas::new(64, 40);
-        for _ in 0..240 {
+    fn a_scroll_that_stops_leaves_no_seam_at_every_angle() {
+        for &angle in &SEAM_ANGLES {
+            let mut e = scrolling_gradient(angle);
+            let mut canvas = Canvas::new(64, 40);
+            for _ in 0..240 {
+                e.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+            }
+            let mut props = e.schema.defaults();
+            props.insert("scroll_speed".into(), canvas_proto::PropValue::Number(0.0));
+            props.insert("angle".into(), canvas_proto::PropValue::Hue(angle));
+            e.init(&props);
             e.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+            let bound = neighbour_step_bound(&e, angle, &canvas);
+            assert_no_seam(&canvas, bound, &format!("angle {angle}: after scroll stops"));
         }
-        props.insert("scroll_speed".into(), canvas_proto::PropValue::Number(0.0));
-        e.init(&props);
-        e.update(1.0 / 30.0, &mut canvas, &Inputs::default());
-        let bound = neighbour_step_bound(&e, &canvas);
-        assert_no_seam(&canvas, bound, "after scroll stops");
     }
 
-    /// While scrolling, every frame is seamless. 960 frames at 20 units/s move the
-    /// offset by 640 logical units, one full mirrored period, so the position sweeps
-    /// the whole 0..2 range: up the blend, back down, and past the wrap point.
+    /// While scrolling, every frame is seamless at every angle. 960 frames at
+    /// 20 units/s move the offset by 640 logical units, one full mirrored period,
+    /// so the position sweeps the whole 0..2 range: up the blend, back down, and
+    /// past the wrap point.
     #[test]
     fn the_gradient_blends_without_a_jump_while_scrolling() {
-        let mut e = Gradient::new();
-        let mut props = e.schema.defaults();
-        props.insert("scroll_speed".into(), canvas_proto::PropValue::Number(20.0));
-        e.init(&props);
+        for &angle in &SEAM_ANGLES {
+            let mut e = scrolling_gradient(angle);
+            let mut canvas = Canvas::new(64, 40);
+            for frame in 0..960 {
+                e.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+                let bound = neighbour_step_bound(&e, angle, &canvas);
+                assert_no_seam(&canvas, bound, &format!("angle {angle}, frame {frame}"));
+            }
+        }
+    }
+
+    /// The offset wraps every 640 logical units (one mirrored period), so a long
+    /// run cannot grind f32 precision down. The wrap is phase-exact, so the blend
+    /// stays seamless across it: 2880 frames at 20 units/s run 1920 logical units,
+    /// three periods, crossing the wrap twice.
+    #[test]
+    fn the_offset_wrap_stays_seamless() {
+        let mut e = scrolling_gradient(90.0);
         let mut canvas = Canvas::new(64, 40);
-        for frame in 0..960 {
+        for frame in 0..2880 {
             e.update(1.0 / 30.0, &mut canvas, &Inputs::default());
-            let bound = neighbour_step_bound(&e, &canvas);
-            assert_no_seam(&canvas, bound, &format!("frame {frame}"));
+            let bound = neighbour_step_bound(&e, 90.0, &canvas);
+            assert_no_seam(&canvas, bound, &format!("wrap, frame {frame}"));
+        }
+    }
+
+    /// The plain blend the old code rendered for a still gradient: the projection
+    /// clamped to 0..1, mixed between the colors. The same corner order and the
+    /// same expressions as `update`, so the comparison is bit-for-bit.
+    fn old_still_blend(e: &Gradient, angle: f64, canvas: &mut Canvas) {
+        let rad = (angle as f32).to_radians();
+        let (dx, dy) = (rad.cos(), rad.sin());
+        let corners = [(0.0f32, 0.0f32), (320.0, 0.0), (0.0, 200.0), (320.0, 200.0)];
+        let mut lo = f32::MAX;
+        let mut hi = f32::MIN;
+        for (x, y) in corners {
+            let t = x * dx + y * dy;
+            lo = lo.min(t);
+            hi = hi.max(t);
+        }
+        let span = (hi - lo).max(f32::EPSILON);
+        let s = canvas.scale();
+        let inv_span = 1.0 / span;
+        let width = canvas.width as usize;
+        for y in 0..canvas.height {
+            let ly = (y as f32 + 0.5) / s;
+            let row_t = ly * dy - lo;
+            let out_row = &mut canvas.pixels[y as usize * width..(y as usize + 1) * width];
+            for (x, out) in out_row.iter_mut().enumerate() {
+                let lx = (x as f32 + 0.5) / s;
+                let t = (lx * dx + row_t) * inv_span;
+                *out = mix(e.from, e.to, t.clamp(0.0, 1.0));
+            }
+        }
+    }
+
+    /// A still gradient (offset 0, Scroll Speed 0) is exactly the plain
+    /// color1..color2 blend the old code rendered, at every angle: every rendered
+    /// pixel equals the old formula's pixel.
+    #[test]
+    fn a_still_gradient_is_pixel_identical_to_the_plain_blend_at_every_angle() {
+        for &angle in &[0.0f64, 45.0, 90.0, 135.0, 180.0, 270.0, 359.0] {
+            let mut e = Gradient::new();
+            let mut props = e.schema.defaults();
+            props.insert("angle".into(), canvas_proto::PropValue::Hue(angle));
+            e.init(&props);
+            let mut canvas = Canvas::new(64, 40);
+            e.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+            let mut expected = Canvas::new(64, 40);
+            old_still_blend(&e, angle, &mut expected);
+            for (i, (got, want)) in canvas.pixels.iter().zip(expected.pixels.iter()).enumerate() {
+                assert_eq!(got, want, "angle {angle}: pixel {i}: got {got:?}, want {want:?}");
+            }
         }
     }
 }
