@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { ToastProvider } from "@/components/Toast";
-import { patchSnap, refreshFans } from "@/lib/store";
+import { getSnap, patchSnap, refreshFans } from "@/lib/store";
 import { FansView } from "@/views/FansView";
 import { StripSlotsProvider } from "@/shell/PageHeader";
 
@@ -95,21 +95,30 @@ describe("the fan editor panel while the daemon has a reason", () => {
   it("keeps four point rows, the same blocks and the same place for the points with the reason and without it", async () => {
     const quiet = await page("");
     const without = { sig: signature(), at: pointsAt(), rows: document.querySelectorAll(".curve-row").length };
-    const emptySlot = document.querySelector("[data-slot='fan-status-reason']")?.textContent;
     expect(screen.queryByText(/canvas-rgb (overrode|handed)/)).toBeNull();
     quiet.unmount();
 
     await page("?state=handback:cpu_fan");
-    // The reason is said, on the page.
-    expect(screen.getByText(/canvas-rgb handed this header back to BIOS/)).toBeTruthy();
     const withReason = { sig: signature(), at: pointsAt(), rows: document.querySelectorAll(".curve-row").length };
 
     expect(without.rows).toBe(4);
     expect(withReason.rows).toBe(4);
     expect(withReason.sig).toBe(without.sig);
     expect(withReason.at).toBe(without.at);
-    // With no reason the status region is still in the page, empty: its room is reserved.
-    expect(emptySlot).toBe("");
+  });
+
+  it("says the reason under the chart, naming the fan, and never above the floor note", async () => {
+    await page("?state=handback:cpu_fan");
+    const reason = screen.getByText(/canvas-rgb handed CPU fan back to BIOS: /);
+    const region = document.querySelector("[data-slot='fan-status-reason']");
+    expect(region?.contains(reason)).toBe(true);
+    // The floor note comes first in the page, the reason after it, and the points after both.
+    const floor = [...document.querySelectorAll(".rd-fans-right .rule")].find((e) => e.textContent?.startsWith("Floor"));
+    expect(floor).toBeTruthy();
+    expect(floor!.compareDocumentPosition(region!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(region!.compareDocumentPosition(document.querySelector(".curve-rows")!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // The same reason shows no matter the mode: Fixed has the region too.
+    expect(document.querySelectorAll("[data-slot='fan-status']")).toHaveLength(1);
   });
 
   it("keeps every block of the panel from the first moment of an edit to the last, Applying included", async () => {
@@ -123,16 +132,63 @@ describe("the fan editor panel while the daemon has a reason", () => {
     });
     watch.observe(stack(), { childList: true, subtree: true, characterData: true });
 
-    // A change to point 2's temperature: the commit goes out after 250 ms and the page says
-    // Applying while it is out.
     fireEvent.keyDown(screen.getByLabelText("Point 2 temperature"), { key: "ArrowUp" });
     await waitFor(() => expect(sawApplying).toBe(true), { timeout: 3000 });
     await waitFor(() => expect(stack().textContent).not.toContain("Applying"), { timeout: 3000 });
     watch.disconnect();
 
-    expect(sawApplying).toBe(true);
     expect([...seen]).toEqual([before]);
     expect(document.querySelectorAll(".curve-row")).toHaveLength(4);
     expect(document.querySelector(".curve-rows")?.textContent).toContain("of 8 points");
+  });
+
+  it("shows an error as an alert and keeps Applying beside it while the request is out", async () => {
+    await page("?state=save-error");
+    const both: boolean[] = [];
+    const watch = new MutationObserver(() => {
+      const alert = document.querySelector(".rd-fans-right [role='alert']");
+      both.push(!!alert?.textContent && !!stack().textContent?.includes("Applying"));
+    });
+    watch.observe(stack(), { childList: true, subtree: true, characterData: true });
+    fireEvent.keyDown(screen.getByLabelText("Point 2 temperature"), { key: "ArrowUp" });
+    const alert = await waitFor(
+      () => {
+        const el = document.querySelector<HTMLElement>(".rd-fans-right [role='alert']");
+        if (!el?.textContent) throw new Error("no error yet");
+        return el;
+      },
+      { timeout: 3000 },
+    );
+    watch.disconnect();
+    expect(alert.getAttribute("role")).toBe("alert");
+    expect(both).toContain(true);
+  });
+
+  it("announces one stable sentence per kind of reason, not the temperature inside it", async () => {
+    await page("");
+    const live = () => document.querySelector("[data-slot='fan-status-announce']") as HTMLElement;
+    expect(live().getAttribute("aria-live")).toBe("polite");
+    expect(live().textContent).toBe("");
+
+    const withReason = (reason: string, onBios: boolean) => {
+      const fans = getSnap().fans!;
+      act(() => {
+        patchSnap({
+          fans: { ...fans, headers: fans.headers.map((h) => (h.id === "cpu_fan" ? { ...h, on_bios: onBios, override_reason: reason } : h)) },
+        });
+      });
+    };
+    withReason("hot floor 50% while CPU is 78 °C", false);
+    const first = live().textContent;
+    expect(first).toBe("canvas-rgb is overriding CPU fan");
+    // Only the temperature changes: the announced words stay as they were.
+    withReason("hot floor 50% while CPU is 79 °C", false);
+    expect(live().textContent).toBe(first);
+    // The words the eye reads do carry the live value, and sit outside the live region.
+    expect(screen.getByText(/while CPU is 79/)).toBeTruthy();
+    expect(live().contains(screen.getByText(/while CPU is 79/))).toBe(false);
+    // A different kind of reason is announced.
+    withReason("write failed: busy", true);
+    expect(live().textContent).toBe("CPU fan: canvas-rgb handed this header back to BIOS");
   });
 });

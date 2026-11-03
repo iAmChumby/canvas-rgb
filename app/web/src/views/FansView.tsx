@@ -696,6 +696,43 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
   const current = mode.mode;
   // The chip is doing something else than what was asked for: the daemon handed it back.
   const handedBack = header.on_bios && mode.mode !== "bios";
+  // What the daemon says about this header, in words that name it. The words are on the page for
+  // the eye; the reader of a screen hears one stable sentence per KIND of reason, so a live
+  // temperature inside the reason ("while CPU is 78 °C") is not read again at every change.
+  const reasonText = header.override_reason
+    ? handedBack
+      ? `canvas-rgb handed ${header.label} back to BIOS: ${header.override_reason}`
+      : `canvas-rgb overrode ${header.label}: ${header.override_reason}`
+    : null;
+  const reasonKind = !header.override_reason
+    ? ""
+    : handedBack
+      ? `${header.label}: canvas-rgb handed this header back to BIOS`
+      : `canvas-rgb is overriding ${header.label}`;
+  // The status stays in the page whether it has anything to say or not: the reason, an error and
+  // "Applying" fill room that is already reserved, so a commit or a hot floor never grows the
+  // panel, never flashes its scrollbar and never moves the points (#109). It stands under the
+  // control it explains: the chart, the duty or the mode note.
+  const status = (
+    <div className="fan-status" data-slot="fan-status">
+      <span className="sr-only" aria-live="polite" data-slot="fan-status-announce">
+        {reasonKind}
+      </span>
+      <div className="fan-status-reason" data-slot="fan-status-reason">
+        {reasonText && (
+          <p className={handedBack ? "rule rule-warn" : "rule"} title={reasonText}>
+            <span className="fan-status-text">{reasonText}</span>
+          </p>
+        )}
+      </div>
+      <div className="fan-status-line" data-slot="fan-status-line">
+        <span className="fan-status-error error-line" role="alert" title={err ?? undefined}>
+          {err ?? ""}
+        </span>
+        <span className="fan-status-busy mute">{busy ? "Applying" : ""}</span>
+      </div>
+    </div>
+  );
 
   return (
     <Panel
@@ -722,6 +759,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
         {mode.mode === "bios" && (
           <p className="mute">Chip auto control. Floors off.</p>
         )}
+        {mode.mode === "bios" && status}
 
         {manual && (
           <div className="rule">
@@ -753,6 +791,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
             </div>
           </Field>
         )}
+        {mode.mode === "fixed" && status}
 
         {mode.mode === "curve" && (
           <>
@@ -778,6 +817,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
               onChange={setPoints}
               onCommit={commitCurve}
             />
+            {status}
             <div className="curve-rows">
               {points.map((p, i) => (
                 <div className="curve-row" key={i}>
@@ -839,24 +879,6 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
             Duty <Figure unit="%">{header.pwm_percent === null ? "—" : <AnimatedNumber value={header.pwm_percent} />}</Figure>
           </p>
         )}
-        {/* The status stays in the page whether it has anything to say or not: the daemon's reason,
-            an error and "Applying" fill space that is already reserved, so a commit or a hot floor
-            never grows the panel, never flashes its scrollbar and never moves the points (#109). */}
-        <div className="fan-status" data-slot="fan-status" aria-live="polite">
-          <div className="fan-status-reason" data-slot="fan-status-reason">
-            {header.override_reason && (
-              <p className={handedBack ? "rule rule-warn" : "rule"}>
-                {handedBack
-                  ? "canvas-rgb handed this header back to BIOS"
-                  : "canvas-rgb overrode this"}
-                : {header.override_reason}
-              </p>
-            )}
-          </div>
-          <p className={err ? "fan-status-line error-line" : "fan-status-line mute"} data-slot="fan-status-line">
-            {err ?? (busy ? "Applying" : "")}
-          </p>
-        </div>
       </div>
     </Panel>
   );

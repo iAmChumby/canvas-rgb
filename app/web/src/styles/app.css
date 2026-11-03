@@ -3666,15 +3666,10 @@ button.chip:hover {
   min-width: 52px;
 }
 
-/* A column too narrow for two points side by side holds one point to a row; the daemon's
-   reason wraps to a third line there. */
+/* A column too narrow for two points side by side holds one point to a row. */
 @container fans-editor (max-width: 559px) {
   .rd-fans .curve-rows {
     grid-template-columns: minmax(0, 1fr);
-  }
-
-  .rd-fans .fan-status-reason {
-    min-height: calc(3lh + 2 * var(--s2) + 2px);
   }
 }
 
@@ -3836,6 +3831,8 @@ button.chip:hover {
     z-index: 25;
     padding: var(--s3);
     overflow: auto;
+    /* On the phone the sheet is what scrolls, not the panel in it: its gutter is kept too. */
+    scrollbar-gutter: stable;
     background: var(--g1);
   }
 }
@@ -3988,12 +3985,13 @@ button.chip:hover {
 }
 
 /* The fan editor's status: the daemon's reason, an error, "Applying". The region is as tall
-   empty as full, so none of them moves the points or grows the panel (#109). The reason has two
-   lines of room, three where the column is narrow; the line under it has one. */
+   empty as full, so none of them moves the points or grows the panel (#109). The reason has
+   room for two lines and is cut at two, whole text in its title (the header's row in the list
+   has it in full); the line under it holds the error and "Applying" side by side, one line. */
 .fan-status {
   display: flex;
   flex-direction: column;
-  gap: var(--s2);
+  gap: var(--s1);
 }
 
 .fan-status-reason {
@@ -4001,9 +3999,39 @@ button.chip:hover {
   font-size: var(--t14);
 }
 
+.fan-status-reason .rule {
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+  background: var(--warn-wash);
+}
+
+.fan-status-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
 .fan-status-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s3);
   min-height: 1lh;
   font-size: var(--t14);
+}
+
+.fan-status-error {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fan-status-busy {
+  flex: none;
+  min-width: 8ch;
+  text-align: right;
 }
 
 .profile-row {
