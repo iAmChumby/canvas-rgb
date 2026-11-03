@@ -1657,3 +1657,271 @@
   height: 100%;
   image-rendering: pixelated;
 }
+
+/* ==========================================================================
+   Fans: ticking several headers to set them at once (#110)
+   ========================================================================== */
+
+/* The tick box: a 24 px target around an 18 px box, the same on the table and on the cards. */
+.tick {
+  display: inline-grid;
+  place-items: center;
+  vertical-align: middle;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--on-accent);
+  cursor: pointer;
+}
+
+.tick-box {
+  display: inline-grid;
+  place-items: center;
+  vertical-align: middle;
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--line-2);
+  border-radius: 5px;
+  background: var(--sunk);
+  color: var(--on-accent);
+  transition:
+    background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.tick:hover .tick-box {
+  border-color: var(--mute);
+}
+
+.tick[aria-checked="true"] .tick-box,
+.tick[aria-checked="mixed"] .tick-box,
+.tick-box[data-checked="true"] {
+  border-color: transparent;
+  background: var(--live);
+}
+
+.tick[aria-disabled="true"] {
+  cursor: not-allowed;
+}
+
+/* A box that cannot be ticked reads as a closed slot, not a faded one: a raised face, a full-strength
+   outline and a dash, so it shows on a white panel as well as a dark one. */
+.tick[aria-disabled="true"] .tick-box {
+  border-color: var(--line-2);
+  background: var(--raised);
+  color: var(--mute);
+}
+
+.tick[aria-disabled="true"]:hover .tick-box {
+  border-color: var(--line-2);
+}
+
+.fan-table th.tick-col,
+.fan-table td.tick-col {
+  width: 36px;
+  padding-right: 0;
+}
+
+/* The header names and the history label stay on one line, so every row is the same height. */
+.fan-table th.hist-head {
+  white-space: nowrap;
+}
+
+/* The bar above the list. The idle line and the live bar share one cell, so the cell is as tall as
+   the taller of the two and the list under it does not move when the first header is ticked. */
+.fan-bulk {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  margin-bottom: var(--s2);
+}
+
+.fan-bulk > * {
+  grid-area: 1 / 1;
+}
+
+.fan-bulk-idle,
+.fan-bulk-live {
+  border-radius: var(--r-md);
+  font-size: var(--t14);
+}
+
+.fan-bulk-idle {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s2) var(--s3);
+  border: 1px solid transparent;
+  background: var(--raised);
+  color: var(--mute);
+}
+
+.fan-bulk-live {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--live);
+  background: var(--live-soft);
+}
+
+.fan-bulk[data-active="false"] .fan-bulk-live,
+.fan-bulk[data-active="true"] .fan-bulk-idle {
+  visibility: hidden;
+}
+
+/* One line on a wide pane: count, the status, Details, Clear. On a phone the status takes a line of
+   its own below, two lines high at all times, so a long result wraps inside space the bar already
+   holds. */
+.fan-bulk-top {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 0 var(--s2);
+  min-height: 28px;
+}
+
+.fan-bulk-result[data-tone="down"] {
+  color: var(--down);
+}
+
+.fan-bulk-result[data-tone="ok"] {
+  color: var(--dim);
+}
+
+.fan-bulk-details {
+  grid-column: 3;
+}
+
+.fan-bulk-clear {
+  grid-column: 4;
+}
+
+/* The Fixed % entry sits on the bar's tinted face, so it takes the panel's own face rather than the
+   grey well, which read as disabled on the light theme. */
+.fan-bulk .num {
+  background: var(--panel);
+}
+
+.fan-bulk-count {
+  flex: none;
+  font-weight: 600;
+}
+
+.fan-bulk-result {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fan-bulk-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+}
+
+.fan-bulk-group {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  min-height: 32px;
+}
+
+.fan-bulk-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  min-width: 260px;
+  max-width: 420px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--t14);
+}
+
+.fan-bulk-list li {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0 var(--s3);
+}
+
+.fan-bulk-list li > .fan-bulk-detail,
+.fan-bulk-list li > .fan-bulk-duty {
+  grid-column: 1 / -1;
+  color: var(--mute);
+}
+
+.fan-bulk-state {
+  font-weight: 600;
+}
+
+.fan-bulk-list li[data-state="applied"] .fan-bulk-state {
+  color: var(--ok);
+}
+
+.fan-bulk-list li[data-state="failed"] .fan-bulk-state {
+  color: var(--down);
+}
+
+.fan-bulk-list li[data-state="skipped"] .fan-bulk-state {
+  color: var(--warn);
+}
+
+/* On the phone a card is a 44 px tick target while select mode is on, the Select/Done key is 44 px
+   tall in both of its states, and the status line sits under the count, two lines high. */
+@container page (max-width: 640px) {
+  .rd-fans .fan-card[role="checkbox"] {
+    min-height: 44px;
+  }
+
+  .rd-fans .fan-card[role="checkbox"][aria-disabled="true"] {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .rd-fans .fan-card .tick-box {
+    width: 24px;
+    height: 24px;
+    border-radius: 6px;
+  }
+
+  .rd-fans .fan-select-key {
+    min-height: 44px;
+    min-width: 88px;
+  }
+
+  .rd-fans .fan-bulk-top {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-areas:
+      "count details clear"
+      "result result result";
+  }
+
+  .rd-fans .fan-bulk-top .fan-bulk-count {
+    grid-area: count;
+  }
+
+  .rd-fans .fan-bulk-top .fan-bulk-details {
+    grid-area: details;
+  }
+
+  .rd-fans .fan-bulk-top .fan-bulk-clear {
+    grid-area: clear;
+  }
+
+  .rd-fans .fan-bulk-top .fan-bulk-result {
+    grid-area: result;
+    min-height: 2lh;
+    white-space: normal;
+    text-overflow: clip;
+  }
+
+  .rd-fans .fan-bulk-top .btn {
+    min-height: 32px;
+  }
+}

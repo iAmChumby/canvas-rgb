@@ -3699,8 +3699,8 @@ button.chip:hover {
 }
 
 /* The name and its chip share one line: the cell never breaks between them. */
-.rd-fans .fan-table th:first-child,
-.rd-fans .fan-table td:first-child {
+.rd-fans .fan-table th.name-col,
+.rd-fans .fan-table td.name-col {
   white-space: nowrap;
 }
 
@@ -3798,8 +3798,8 @@ button.chip:hover {
     width: 44px;
   }
 
-  .rd-fans .fan-table th:first-child,
-  .rd-fans .fan-table td:first-child {
+  .rd-fans .fan-table th.name-col,
+  .rd-fans .fan-table td.name-col {
     white-space: normal;
   }
 }
@@ -6646,7 +6646,9 @@ button.chip:hover {
   place-items: center;
   border-radius: var(--r-md);
   background: var(--sunk);
-  overflow: hidden;
+  /* A corner handle on the picture's edge draws and takes a press whole, not half cut (#104). */
+  overflow: clip;
+  overflow-clip-margin: 12px;
   /* The wrap is the picture's size container: the canvas below takes the smaller of its
      width and 1.6 x its height, so it never overflows the stage (D95.5.2). */
   container-type: size;
@@ -6702,24 +6704,86 @@ button.chip:hover {
   pointer-events: none;
 }
 
-.rd-area-frame .handle {
-  position: absolute;
-  width: 7px;
-  height: 7px;
-  border-radius: 2px;
-  background: var(--a1);
-  box-shadow: 0 0 0 1.5px var(--sunk);
+/* A rectangle area is dragged on the picture (#104): the frame takes the press, and each corner
+   is a 24px target for a finger with a 12px knob drawn in its middle. touch-action is off only
+   on the area and its corners, so a swipe that starts elsewhere still scrolls the page. */
+.rd-area-frame[data-editable="true"] {
+  pointer-events: auto;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: move;
+  outline: none;
 }
 
-.rd-area-frame .handle.nw { left: -4px; top: -4px; }
-.rd-area-frame .handle.ne { right: -4px; top: -4px; }
-.rd-area-frame .handle.sw { left: -4px; bottom: -4px; }
-.rd-area-frame .handle.se { right: -4px; bottom: -4px; }
+.rd-area-frame[data-editable="true"]:focus-visible {
+  box-shadow: 0 0 0 2px var(--sunk), 0 0 0 4px var(--a1);
+}
+
+.rd-area-frame .handle {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  touch-action: none;
+}
+
+/* The knob: a round 12px accent dot in a 2px light ring and a 2px dark ring, so one of the two
+   rings reads against any colour the effect paints behind it. */
+.rd-area-frame .handle::before {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 6px;
+  width: 12px;
+  height: 12px;
+  box-sizing: border-box;
+  border-radius: 50%;
+  background: var(--a1);
+  border: 2px solid var(--knob-ring);
+  box-shadow: 0 0 0 2px var(--knob-edge);
+}
+
+.rd-area-frame .edge {
+  position: absolute;
+  touch-action: none;
+}
+
+.rd-area-frame .edge.n,
+.rd-area-frame .edge.s {
+  left: 12px;
+  right: 12px;
+  height: 24px;
+  cursor: ns-resize;
+}
+
+.rd-area-frame .edge.e,
+.rd-area-frame .edge.w {
+  top: 12px;
+  bottom: 12px;
+  width: 24px;
+  cursor: ew-resize;
+}
+
+.rd-area-frame .edge.n { top: -13px; }
+.rd-area-frame .edge.s { bottom: -13px; }
+.rd-area-frame .edge.e { right: -13px; }
+.rd-area-frame .edge.w { left: -13px; }
+
+.rd-area-frame .handle.nw,
+.rd-area-frame .handle.se { cursor: nwse-resize; }
+.rd-area-frame .handle.ne,
+.rd-area-frame .handle.sw { cursor: nesw-resize; }
+
+.rd-area-frame .handle.nw { left: -13px; top: -13px; }
+.rd-area-frame .handle.ne { right: -13px; top: -13px; }
+.rd-area-frame .handle.sw { left: -13px; bottom: -13px; }
+.rd-area-frame .handle.se { right: -13px; bottom: -13px; }
 
 .rd-area-label {
   position: absolute;
-  left: 4px;
-  top: 4px;
+  left: 12px;
+  top: 8px;
+  pointer-events: none;
   white-space: nowrap;
   padding: 1px 5px;
   border-radius: 4px;
@@ -7039,6 +7103,11 @@ button.chip:hover {
   border-top: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
   margin-bottom: var(--s3);
+}
+
+.layer-area-words {
+  display: grid;
+  min-width: 0;
 }
 
 .layer-area-text {

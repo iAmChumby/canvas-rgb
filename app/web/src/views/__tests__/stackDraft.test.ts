@@ -11,11 +11,13 @@ import {
   duplicateLayer,
   layerNameProblem,
   makeLayer,
+  moveBounds,
   moveLayer,
   newEpoch,
   nextLayerId,
   patchLayer,
   removeLayer,
+  resizeBounds,
   stackNameProblem,
   StackSession,
   toggleLayer,
@@ -163,5 +165,81 @@ describe("the stack name", () => {
     expect(stackNameProblem("Sunset glow", ["sunset glow"])).not.toBeNull();
     expect(stackNameProblem("con", [])).toContain("Windows");
     expect(stackNameProblem("a".repeat(61), [])).not.toBeNull();
+  });
+});
+
+describe("resizing a rectangle", () => {
+  const inside = (b: { x: number; y: number; width: number; height: number }) =>
+    b.x >= 0 && b.y >= 0 && b.x + b.width <= 320 && b.y + b.height <= 200 && b.width >= 1 && b.height >= 1;
+
+  it("keeps a one-unit rectangle in the canvas when its left edge is dragged right", () => {
+    const r = resizeBounds({ x: 0, y: 0, width: 1, height: 1 }, -1, -1, 50, 50);
+    expect(r).toEqual({ x: 0, y: 0, width: 1, height: 1 });
+  });
+
+  it("keeps a one-unit rectangle at the right edge in the canvas when its right edge is dragged right", () => {
+    const r = resizeBounds({ x: 319, y: 199, width: 1, height: 1 }, 1, 1, 50, 50);
+    expect(r).toEqual({ x: 319, y: 199, width: 1, height: 1 });
+    expect(inside(resizeBounds({ x: 319, y: 0, width: 1, height: 1 }, 1, 0, 9, 0))).toBe(true);
+  });
+
+  it("never grows a two-unit area when an edge is dragged inward", () => {
+    const r = resizeBounds({ x: 10, y: 10, width: 2, height: 2 }, -1, 0, 30, 0);
+    expect(r.width).toBe(2);
+    expect(r.x).toBe(10);
+  });
+
+  it("stops at four units on a larger area, and stays inside on every edge and corner", () => {
+    const start = { x: 100, y: 80, width: 50, height: 30 };
+    for (const sx of [-1, 0, 1] as const) {
+      for (const sy of [-1, 0, 1] as const) {
+        for (const d of [-999, -5, 0, 5, 999]) {
+          const r = resizeBounds(start, sx, sy, d, -d, d % 2 === 0);
+          expect(inside(r)).toBe(true);
+        }
+      }
+    }
+    expect(resizeBounds(start, -1, 0, 999, 0).width).toBe(4);
+  });
+
+  it("rounds the edges, not the width, so a half-unit never leaves the canvas", () => {
+    // x 219.5 with the right edge clamped to 320: width 100.5 rounds to 221 - 220 = 100, not 101.
+    const r = resizeBounds({ x: 219.5, y: 100, width: 50, height: 50 }, 1, 0, 9999, 0);
+    expect(r.x + r.width).toBe(320);
+    const b = resizeBounds({ x: 10, y: 199.5, width: 5, height: 0.5 }, 0, 1, 0, 9999);
+    expect(b.y + b.height).toBeLessThanOrEqual(200);
+  });
+
+  it("stays inside the canvas for every half-unit start, handle and delta", () => {
+    for (const x of [0, 0.5, 219.5, 300.5, 315.5]) {
+      for (const y of [0, 0.5, 149.5, 195.5]) {
+        for (const w of [1, 4.5, 100.5]) {
+          for (const h of [1, 4.5, 45.5]) {
+            if (x + w > 320 || y + h > 200) continue;
+            for (const sx of [-1, 0, 1] as const) {
+              for (const sy of [-1, 0, 1] as const) {
+                for (const d of [-999, -7.5, 0.5, 7.5, 999]) {
+                  for (const r of [
+                    resizeBounds({ x, y, width: w, height: h }, sx, sy, d, -d),
+                    resizeBounds({ x, y, width: w, height: h }, sx, sy, d, d, true),
+                    moveBounds({ x, y, width: w, height: h }, d, -d),
+                  ]) {
+                    expect(r.x).toBeGreaterThanOrEqual(0);
+                    expect(r.y).toBeGreaterThanOrEqual(0);
+                    expect(r.x + r.width).toBeLessThanOrEqual(320);
+                    expect(r.y + r.height).toBeLessThanOrEqual(200);
+                    expect(Number.isInteger(r.width) && Number.isInteger(r.height)).toBe(true);
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  });
+
+  it("moves a rectangle whole inside the canvas", () => {
+    expect(moveBounds({ x: 10, y: 10, width: 300, height: 190 }, 500, 500)).toEqual({ x: 20, y: 10, width: 300, height: 190 });
   });
 });

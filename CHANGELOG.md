@@ -6,8 +6,13 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Added
+
+- On the Fans page you can tick several headers and set them all at once: BIOS, one Fixed %, or a copy of another header's curve. Each header keeps its own floor, the Details list shows what each one did and runs at afterwards, a header the daemon handed back to BIOS is left as it is and named as skipped, and a tach-only header cannot be ticked. On a phone, a Select key turns the header list into tick boxes. (#110)
+
 ### Changed
 
+- On a stack's preview you can now drag a layer's rectangle area to move it and drag its corners (or edges) to resize it, the way parts move on the Layout page, and the arrow keys nudge it (Shift for 10). The area picker stays for other areas and exact numbers. (#104)
 - Gradient's Angle is now a direction dial instead of a colour wheel; saved gradients keep their angle. (#106)
 
 ### Fixed
@@ -15,6 +20,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - A scrolling Gradient now flows color 1 → color 2 → color 1 and back instead of jumping between the two colors, and Scroll Speed back at 0 leaves no line behind; the full round trip takes twice as long as the old one-way scroll. (#107)
 - Dragging a slider cap now moves the value instead of showing the browser's no-drop cursor: a press on a slider never starts a native drag or a text selection. (#105)
 - Editing a fan curve no longer makes the editor panel jump or flash a scrollbar. The note on why canvas-rgb changed a fan now sits in its own reserved spot under the chart, names the fan, and never pushes the points down; "Applying" and any error share a reserved line beside it. (#109)
+- The stack's name field is full width again. (#108)
 
 ## [0.6.0] - 2026-11-02
 

@@ -443,6 +443,74 @@ export function rectFromDrag(a: { x: number; y: number }, b: { x: number; y: num
   };
 }
 
+/** The smallest a dragged rectangle gets, in canvas units. */
+export const MIN_AREA = 4;
+
+/**
+ * A rectangle from its four edges, each rounded to a whole unit on its own, so the right and
+ * bottom edges never round past the canvas the way a rounded x plus a rounded width can
+ * (219.5 + 100.5 is 220 + 101 = 321).
+ */
+export function boundsFromEdges(x0: number, y0: number, x1: number, y1: number): Bounds {
+  const left = Math.round(x0);
+  const top = Math.round(y0);
+  return { x: left, y: top, width: Math.round(x1) - left, height: Math.round(y1) - top };
+}
+
+/** A rectangle moved by a canvas-unit delta, kept whole inside the canvas. */
+export function moveBounds(start: Bounds, dx: number, dy: number): Bounds {
+  const x = Math.min(CANVAS_W - start.width, Math.max(0, start.x + dx));
+  const y = Math.min(CANVAS_H - start.height, Math.max(0, start.y + dy));
+  return boundsFromEdges(x, y, x + start.width, y + start.height);
+}
+
+/**
+ * A rectangle resized by dragging one handle by a canvas-unit delta. `sx` and `sy` are the
+ * handle's direction (-1 the left or top edge, 1 the right or bottom, 0 an axis it leaves alone);
+ * the opposite edge stays put. The result stays inside the canvas and at least `MIN_AREA` each
+ * way. `keepAspect` (a corner with Shift) holds the starting ratio.
+ */
+export function resizeBounds(
+  start: Bounds,
+  sx: -1 | 0 | 1,
+  sy: -1 | 0 | 1,
+  dx: number,
+  dy: number,
+  keepAspect = false,
+): Bounds {
+  const right = start.x + start.width;
+  const bottom = start.y + start.height;
+  // The smallest a side gets is MIN_AREA, or the side's own length when it started shorter (the
+  // picker draws one-unit rectangles): a resize never grows a small area and never leaves the canvas.
+  const minW = Math.min(MIN_AREA, start.width);
+  const minH = Math.min(MIN_AREA, start.height);
+  let x0 = start.x;
+  let x1 = right;
+  let y0 = start.y;
+  let y1 = bottom;
+  if (sx < 0) x0 = Math.max(0, Math.min(right - minW, start.x + dx));
+  if (sx > 0) x1 = Math.min(CANVAS_W, Math.max(start.x + minW, right + dx));
+  if (sy < 0) y0 = Math.max(0, Math.min(bottom - minH, start.y + dy));
+  if (sy > 0) y1 = Math.min(CANVAS_H, Math.max(start.y + minH, bottom + dy));
+  if (keepAspect && sx !== 0 && sy !== 0) {
+    const room = {
+      w: sx > 0 ? CANVAS_W - start.x : right,
+      h: sy > 0 ? CANVAS_H - start.y : bottom,
+    };
+    const most = Math.min(room.w / start.width, room.h / start.height);
+    const least = Math.max(minW / start.width, minH / start.height);
+    const want = Math.max((x1 - x0) / start.width, (y1 - y0) / start.height);
+    const scale = Math.min(most, Math.max(least, want));
+    const w = start.width * scale;
+    const h = start.height * scale;
+    if (sx < 0) x0 = right - w;
+    else x1 = start.x + w;
+    if (sy < 0) y0 = bottom - h;
+    else y1 = start.y + h;
+  }
+  return boundsFromEdges(x0, y0, x1, y1);
+}
+
 export interface AreaReadout {
   /** The line's first part: "Rectangle 110 × 46", "Whole canvas", "Keyboard · Zone 1". */
   title: string;

@@ -34,6 +34,8 @@
   --dim: #b4b9c1;
   --mute: #858b95;
   --on-accent: #0b0c0e;
+  --knob-ring: #ffffff;  /* a drag knob on the picture: light inner ring, dark outer ring, */
+  --knob-edge: #101216;  /* so it reads on any effect colour */
 
   /* accents: five real hues, one per device family and per control role */
   --a1: #8fb4e8;          /* blue: primary actions, focus */
@@ -150,6 +152,8 @@
   --dim: #3c4149;
   --mute: #5f6571;
   --on-accent: #ffffff;
+  --knob-ring: #ffffff;
+  --knob-edge: #1a1d24;
   --a1: #2f6fbf;
   --a2: #6a4bc4;
   --a3: #13877a;
@@ -183,6 +187,8 @@
     --dim: #3c4149;
     --mute: #5f6571;
     --on-accent: #ffffff;
+    --knob-ring: #ffffff;
+    --knob-edge: #1a1d24;
     --a1: #2f6fbf;
     --a2: #6a4bc4;
     --a3: #13877a;
