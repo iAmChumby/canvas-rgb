@@ -225,9 +225,9 @@ function control(
       );
     }
     case "angle": {
-      // A saved hue for an angle (an effect saved before the kind existed) reads as the same
-      // degrees; anything else takes the kind's default.
-      const deg = value.type === "angle" || value.type === "hue" ? value.value : kind.default;
+      // A saved hue or number for an angle (an effect saved before the kind existed) reads as
+      // the same degrees; anything else takes the kind's default.
+      const deg = value.type === "angle" || value.type === "hue" || value.type === "number" ? value.value : kind.default;
       return (
         <div className="angle">
           <AngleDial label={label} value={deg} disabled={disabled} onChange={(v) => onChange(key, { type: "angle", value: v })} />

@@ -60,4 +60,9 @@ describe("PropertyControls (#106)", () => {
     fireEvent.keyDown(dial, { key: "End" });
     expect(onChange).toHaveBeenCalledWith("angle", { type: "angle", value: 359 });
   });
+
+  it("reads a saved number for the angle as the same degrees (Rainbow Wave's old direction, #121)", () => {
+    const { dial } = setup({ angle: { type: "number", value: 45 } });
+    expect(dial.getAttribute("aria-valuenow")).toBe("45");
+  });
 });

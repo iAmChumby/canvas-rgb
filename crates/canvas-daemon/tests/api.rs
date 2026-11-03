@@ -2894,7 +2894,7 @@ fn the_preset_equality_fixture_holds() {
                     }
                     // An angle compares as its degrees; a hue saved for an angle property
                     // (before the kind existed) reads as the same degrees.
-                    (PropKind::Angle { .. }, PropValue::Angle(v) | PropValue::Hue(v)) => {
+                    (PropKind::Angle { .. }, PropValue::Angle(v) | PropValue::Hue(v) | PropValue::Number(v)) => {
                         format!("{}", (v + 0.5).floor().rem_euclid(360.0))
                     }
                     (_, PropValue::Color(c)) => {

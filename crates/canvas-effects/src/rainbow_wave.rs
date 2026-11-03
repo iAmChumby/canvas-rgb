@@ -35,7 +35,7 @@ impl RainbowWave {
         // being a thin sliver on black. The range reaches the whole travel period (480),
         // so a band can be as wide as the canvas is tall and never leave a black gap.
         .number("width", "Width", 5.0, 480.0, 1.0, 190.0)
-        .number("direction", "Direction", 0.0, 360.0, 1.0, 0.0)
+        .angle("direction", "Direction", 0.0)
         .number("cycles", "Cycles", 1.0, 8.0, 1.0, 1.0)
         .preset(
             "Fast sweep",
@@ -43,7 +43,7 @@ impl RainbowWave {
         )
         .preset(
             "Diagonal",
-            vec![("direction", number_kind(45.0)), ("speed", number_kind(40.0))],
+            vec![("direction", canvas_proto::PropKind::Angle { default: 45.0 }), ("speed", number_kind(40.0))],
         )
         .preset(
             "Wide arc",
@@ -53,7 +53,7 @@ impl RainbowWave {
         // it covers the canvas from end to end and no part of the tile is ever black, and
         // the loop drifts slowly enough that the crossfade at its restart does not double
         // the picture.
-        .thumbnail(crate::schema::recipe(18.0, 3.75, 8, vec![("speed", crate::schema::num(0.4)), ("direction", crate::schema::num(90.0)), ("cycles", crate::schema::num(2.0)), ("width", crate::schema::num(400.0))]))
+        .thumbnail(crate::schema::recipe(18.0, 3.75, 8, vec![("speed", crate::schema::num(0.4)), ("direction", canvas_proto::PropValue::Angle(90.0)), ("cycles", crate::schema::num(2.0)), ("width", crate::schema::num(400.0))]))
         .build()
     }
 
@@ -95,7 +95,7 @@ impl Effect for RainbowWave {
     fn init(&mut self, props: &Props) {
         self.speed = p::number(&self.schema, props, "speed") as f32;
         self.width = p::number(&self.schema, props, "width") as f32;
-        self.direction = p::number(&self.schema, props, "direction") as f32;
+        self.direction = p::angle_or_saved_number(&self.schema, props, "direction") as f32;
         self.cycles = p::number(&self.schema, props, "cycles") as f32;
     }
 
@@ -211,6 +211,38 @@ mod tests {
         }
         let fraction = black as f32 / total as f32;
         assert!(fraction < 0.7, "{:.0}% of the pixels are black", fraction * 100.0);
+    }
+
+    #[test]
+    fn the_direction_is_declared_as_an_angle() {
+        let schema = RainbowWave::schema();
+        let def = schema.properties.iter().find(|p| p.key == "direction").expect("direction");
+        assert_eq!(def.kind, canvas_proto::PropKind::Angle { default: 0.0 });
+        for preset in &schema.presets {
+            if let Some(v) = preset.props.get("direction") {
+                assert!(matches!(v, canvas_proto::PropValue::Angle(_)), "preset {} holds {v:?}", preset.name);
+            }
+        }
+        let thumb = schema.thumbnail.as_ref().expect("a thumbnail recipe");
+        assert!(matches!(thumb.props.get("direction"), Some(canvas_proto::PropValue::Angle(_))));
+    }
+
+    fn frame(direction: canvas_proto::PropValue) -> Vec<[f32; 3]> {
+        let mut e = RainbowWave::new();
+        let mut p = e.schema.defaults();
+        p.insert("direction".into(), direction);
+        e.init(&p);
+        let mut canvas = Canvas::new(64, 40);
+        e.update(0.5, &mut canvas, &Inputs::default());
+        canvas.pixels.clone()
+    }
+
+    /// A wave saved when Direction was a number loads with the direction it was saved with.
+    #[test]
+    fn a_saved_number_direction_renders_as_the_same_angle() {
+        let saved = frame(canvas_proto::PropValue::Number(45.0));
+        assert_eq!(saved, frame(canvas_proto::PropValue::Angle(45.0)));
+        assert_ne!(saved, frame(canvas_proto::PropValue::Angle(0.0)), "45 is not the default");
     }
 
     fn black_fraction(props: &[(&str, f64)]) -> f32 {

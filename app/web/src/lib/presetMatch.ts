@@ -44,9 +44,9 @@ function normalValue(kind: PropKind, value: PropValue): PropValue {
     const whole = Math.round(value.value);
     return { type: "hue", value: ((whole % 360) + 360) % 360 };
   }
-  // An angle compares as its degrees; a hue saved for an angle property (an effect saved
-  // before the kind existed) reads as the same degrees, in either direction.
-  if (kind.type === "angle" && (value.type === "angle" || value.type === "hue")) {
+  // An angle compares as its degrees; a hue or a number saved for an angle property (an
+  // effect saved before the kind existed) reads as the same degrees, in either direction.
+  if (kind.type === "angle" && (value.type === "angle" || value.type === "hue" || value.type === "number")) {
     const whole = Math.round(value.value);
     return { type: "angle", value: ((whole % 360) + 360) % 360 };
   }
