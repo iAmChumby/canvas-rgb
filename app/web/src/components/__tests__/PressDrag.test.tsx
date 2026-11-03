@@ -1,17 +1,22 @@
 import { cleanup, fireEvent, render } from "@testing-library/react";
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi, type Mock } from "vitest";
+import { act, useState } from "react";
 import { ColorPicker } from "@/components/ColorPicker";
 import { HueRing } from "@/components/HueRing";
+import { NumberField } from "@/components/NumberField";
 import { Slider } from "@/components/Slider";
+import type { CurvePoint } from "@/proto/CurvePoint";
+import type { StackLayer } from "@/proto/StackLayer";
+import { FanCurveEditor } from "@/views/FanCurveEditor";
+import { PreviewStage } from "@/views/PreviewStage";
+import { StackAreaPicker } from "@/views/effects/StackAreaPicker";
 
 // The class test for `cause:ui-interaction` (#105): one rule over every control the pointer
-// drags. A press is defaultPrevented (so Chromium's compatibility mousedown never starts a
-// native drag or a text selection), a dragstart from the surface is refused, and the surface
-// says it is not draggable. fireEvent returns false when the default was prevented.
-//
-// The four surfaces here are the ones the helper guards with `draggable={false}`; the SVG
-// surfaces (the stack area picker's desk, the fan curve points, the layout stage) have no
-// draggable attribute and are covered by their own views' tests.
+// drags. On each drag surface a press is defaultPrevented (so Chromium's compatibility
+// mousedown never starts a native drag or a text selection), and it still moves focus the way
+// the native press did — a focused field outside the surface loses focus (a NumberField's
+// draft commits on blur), because canceling the press canceled the mousedown that carried it.
+// fireEvent returns false when the default was prevented.
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -28,19 +33,34 @@ beforeAll(() => {
     (window as unknown as { PointerEvent: unknown }).PointerEvent = PE;
   }
   const captured = new Set<number>();
-  HTMLElement.prototype.setPointerCapture = (id: number) => void captured.add(id);
-  HTMLElement.prototype.releasePointerCapture = (id: number) => void captured.delete(id);
-  HTMLElement.prototype.hasPointerCapture = (id: number) => captured.has(id);
+  // On Element, not HTMLElement: the SVG surfaces (curve points, the area picker's desk) take
+  // pointer capture too.
+  Element.prototype.setPointerCapture = (id: number) => void captured.add(id);
+  Element.prototype.releasePointerCapture = (id: number) => void captured.delete(id);
+  Element.prototype.hasPointerCapture = (id: number) => captured.has(id);
+  // jsdom has none; the motion hooks and every drag surface measure themselves with these.
+  window.matchMedia ??= ((query: string) =>
+    ({ matches: false, media: query, addEventListener() {}, removeEventListener() {} }) as unknown as MediaQueryList);
+  globalThis.ResizeObserver = class {
+    observe(): void {}
+    unobserve(): void {}
+    disconnect(): void {}
+  } as unknown as typeof ResizeObserver;
 });
 
 afterEach(cleanup);
+
+/** A slot 114 px wide at x=0: with the 14 px cap, 100 px of travel, so clientX 7 + n is n %. */
+function measureSlider(el: HTMLDivElement): void {
+  el.getBoundingClientRect = () => ({ left: 0, width: 114, top: 0, right: 114, bottom: 24, height: 24, x: 0, y: 0, toJSON() {} });
+}
 
 function renderSlider(disabled = false): HTMLDivElement {
   const { container } = render(
     <Slider value={0} min={0} max={100} step={25} label="Key response" disabled={disabled} onChange={vi.fn()} />,
   );
   const el = container.querySelector(".slider") as HTMLDivElement;
-  el.getBoundingClientRect = () => ({ left: 0, width: 114, top: 0, right: 114, bottom: 24, height: 24, x: 0, y: 0, toJSON() {} });
+  measureSlider(el);
   return el;
 }
 
@@ -58,13 +78,11 @@ function renderColorPicker(): { sv: HTMLDivElement; hue: HTMLDivElement } {
 }
 
 describe("PressDrag: a press never starts a native drag or a text selection (#105)", () => {
-  const surfaces = (el: HTMLDivElement) => el;
-
   it("the slider's press is prevented, its dragstart is refused, and it is not draggable", () => {
     const el = renderSlider();
     expect(fireEvent.pointerDown(el, { clientX: 7 + 20, pointerId: 1 })).toBe(false);
     fireEvent.pointerUp(el, { pointerId: 1 });
-    expect(fireEvent.dragStart(surfaces(el))).toBe(false);
+    expect(fireEvent.dragStart(el)).toBe(false);
     expect(el.getAttribute("draggable")).toBe("false");
   });
 
@@ -105,5 +123,103 @@ describe("PressDrag: a press never starts a native drag or a text selection (#10
     fireEvent.pointerDown(el, { clientX: 7 + 20, pointerId: 1 });
     fireEvent.pointerUp(el, { pointerId: 1 });
     expect(document.activeElement).toBe(el);
+  });
+
+  it("pressing the slider still blurs a focused field: the draft commits", () => {
+    const commit = vi.fn();
+    function Host() {
+      const [v, setV] = useState(30);
+      return (
+        <>
+          <NumberField value={v} min={0} max={100} label="Opacity value" onCommit={(n) => { commit(n); setV(n); }} />
+          <Slider value={v} min={0} max={100} step={25} label="Key response" onChange={() => {}} />
+        </>
+      );
+    }
+    const { container } = render(<Host />);
+    const input = container.querySelector("input") as HTMLInputElement;
+    act(() => input.focus());
+    // A field with no draft commits nothing on blur; a typed draft commits.
+    fireEvent.change(input, { target: { value: "45" } });
+    const el = container.querySelector(".slider") as HTMLDivElement;
+    measureSlider(el);
+    fireEvent.pointerDown(el, { clientX: 7 + 20, pointerId: 1 });
+    fireEvent.pointerUp(el, { pointerId: 1 });
+    expect(commit).toHaveBeenCalledWith(45);
+    expect(document.activeElement).toBe(el);
+  });
+
+  it("the layout stage's empty-desk press is prevented and still blurs a focused field", () => {
+    const onBlur: Mock = vi.fn();
+    const { container } = render(
+      <>
+        <input aria-label="Field" onBlur={onBlur} />
+        <PreviewStage
+          zones={[]}
+          landmarks={[]}
+          devices={null}
+          selection={[]}
+          onSelect={vi.fn()}
+          onChangeZones={vi.fn()}
+          onChangeLandmark={vi.fn()}
+          onChangeParts={vi.fn()}
+          onDrop={vi.fn()}
+          dropPayloadType="layout-zone"
+          layoutId="t1"
+          mode="lights"
+          onMode={vi.fn()}
+          unit="cm"
+        />
+      </>,
+    );
+    const input = container.querySelector("input") as HTMLInputElement;
+    act(() => input.focus());
+    const el = container.querySelector(".stage") as HTMLDivElement;
+    expect(fireEvent.pointerDown(el, { clientX: 10, clientY: 10, button: 0, pointerId: 1 })).toBe(false);
+    expect(onBlur).toHaveBeenCalled();
+  });
+
+  it("the area picker's desk press is prevented and still blurs a focused field", () => {
+    const onBlur: Mock = vi.fn();
+    const layer: StackLayer = {
+      id: "l1",
+      name: "One",
+      effect: "gradient",
+      props: {},
+      area: { kind: "canvas" },
+      blend: "normal",
+      opacity: 100,
+      visible: true,
+    };
+    const { container } = render(
+      <>
+        <input aria-label="Field" onBlur={onBlur} />
+        <StackAreaPicker layer={layer} layout={null} devices={null} onUse={vi.fn()} onClose={vi.fn()} />
+      </>,
+    );
+    const input = container.querySelector("input") as HTMLInputElement;
+    act(() => input.focus());
+    const el = container.querySelector(".rd-desk") as SVGSVGElement;
+    expect(fireEvent.pointerDown(el, { clientX: 10, clientY: 10, button: 0, pointerId: 1 })).toBe(false);
+    expect(onBlur).toHaveBeenCalled();
+  });
+
+  it("the fan curve point's press is prevented and still blurs a focused field", () => {
+    const onBlur: Mock = vi.fn();
+    const points: CurvePoint[] = [
+      { temp_c: 40, percent: 30 },
+      { temp_c: 60, percent: 50 },
+    ];
+    const { container } = render(
+      <>
+        <input aria-label="Field" onBlur={onBlur} />
+        <FanCurveEditor header="CPU" points={points} floor={0} currentTemp={null} currentDuty={null} onChange={vi.fn()} onCommit={vi.fn()} />
+      </>,
+    );
+    const input = container.querySelector("input") as HTMLInputElement;
+    act(() => input.focus());
+    const el = container.querySelector(".curve-point") as SVGCircleElement;
+    expect(fireEvent.pointerDown(el, { clientX: 10, clientY: 10, pointerId: 1 })).toBe(false);
+    expect(onBlur).toHaveBeenCalled();
   });
 });

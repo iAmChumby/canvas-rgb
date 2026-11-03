@@ -10,6 +10,12 @@ import type { DragEvent, PointerEvent } from "react";
  * tries from inside the surface. A drag surface also carries `draggable={false}` where it is
  * an HTML element and `user-select: none` in its own CSS, as the second guard.
  *
+ * The press also moved focus: canceling it must not strand focus where it was (a field's
+ * draft commits on blur). `focus` asks for focus to move onto the pressed surface itself, so
+ * the keyboard keeps working after a mouse press without claiming the keyboard's ring; without
+ * `focus`, focus still leaves whatever the press would have blurred, unless it lives inside
+ * the pressed surface.
+ *
  * A disabled control keeps the old press: a click on it must still blur — and so commit — a
  * field focused elsewhere, and that blur rides on the browser's own press behaviour.
  */
@@ -33,7 +39,18 @@ export function cancelPress<T extends HTMLElement | SVGElement>(
   opts?: { focus?: boolean },
 ): void {
   e.preventDefault();
-  if (opts?.focus) focusForKeys(e.currentTarget);
+  const surface = e.currentTarget;
+  if (opts?.focus) {
+    focusForKeys(surface);
+    return;
+  }
+  // The press also moved focus, and the mousedown that did it was canceled, so do it here:
+  // what is focused now and lives outside the pressed surface loses focus (a field's draft
+  // commits on blur). What is inside the surface keeps it: the surface owns its own press.
+  const active = document.activeElement;
+  if (active && active !== document.body && !surface.contains(active)) {
+    (active as HTMLElement).blur();
+  }
 }
 
 /** Refuses any dragstart the browser still tries from inside the surface. */
