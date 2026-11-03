@@ -13,6 +13,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Fixed
 
 - A scrolling Gradient now flows color 1 → color 2 → color 1 and back instead of jumping between the two colors, and Scroll Speed back at 0 leaves no line behind; the full round trip takes twice as long as the old one-way scroll. (#107)
+- Dragging a slider cap now moves the value instead of showing the browser's no-drop cursor: a press on a slider never starts a native drag or a text selection. (#105)
+- Editing a fan curve no longer makes the editor panel jump or flash a scrollbar. The note on why canvas-rgb changed a fan now sits in its own reserved spot under the chart, names the fan, and never pushes the points down; "Applying" and any error share a reserved line beside it. (#109)
 
 ## [0.6.0] - 2026-11-02
 
