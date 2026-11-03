@@ -453,6 +453,8 @@ function activeLayout(): Layout {
 
 /** When each open read started. */
 const readStartedAt = new Map<string, number>();
+/** The devices the demo daemon has read once and keeps the values of, like the daemon does (#7). */
+const keptReads = new Set<string>();
 /** Opening, waking, then five reports a little under a second apart. */
 const OPEN_MS = 700;
 const WAKE_MS = 1500;
@@ -1228,8 +1230,10 @@ export async function demoRequest(method: string, path: string, body: unknown): 
         access,
         problem: READS_OFF,
       };
+      // The daemon reads the device only when it keeps nothing, or when `?fresh=true` asks.
+      const readsDevice = access.reads && (url.searchParams.get("fresh") === "true" || !keptReads.has(id));
       // `?state=slow-read`: the read goes through its stages, as a mouse that has to wake does.
-      if (access.reads && slowRead()) {
+      if (readsDevice && slowRead()) {
         readStartedAt.set(id, Date.now());
         await new Promise((resolve) => setTimeout(resolve, SLOW_READ_TOTAL_MS));
         readStartedAt.delete(id);
@@ -1240,6 +1244,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
           detail.problem = "the mouse is asleep: move it and try again";
         } else {
           detail.values = { ...device.values };
+          keptReads.add(id);
           detail.problem = null;
         }
       }
@@ -1265,6 +1270,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
         fail(422, "validation", "config writes need reads: turn reads on too");
       }
       s.peripheralAccess[id] = { reads: !!next.reads, writes: !!next.writes };
+      keptReads.delete(id);
       return s.peripheralAccess[id];
     }
     return bad();

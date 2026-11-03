@@ -44,12 +44,6 @@ pub const PERIPHERALS_SCHEMA: u32 = 1;
 /// enumerate on every request.
 pub const DISCOVERY_CACHE: Duration = Duration::from_secs(5);
 
-/// A settings read is shared this long. Opening the Peripherals view can ask for the same device
-/// more than once (a reload, a second window, a page that refetches); each ask would be another
-/// run of feature-report round trips over the receiver's radio link (issue #7), so the asks
-/// inside this window share one read. A write or an access change drops it at once.
-pub const READ_CACHE: Duration = Duration::from_secs(2);
-
 /// The message the detail carries when the values are missing because reads are off.
 pub const READS_OFF: &str = "reads are off for this device";
 
@@ -93,6 +87,7 @@ pub fn save(home: &Path, file: &PeripheralsFile) -> std::io::Result<()> {
 ///
 /// It also needs `ResumeBehavior`: a peripheral the daemon is given has to say what it does when
 /// the machine resumes from sleep, or it does not compile (`cause:sleep-state`).
+#[async_trait::async_trait]
 pub trait Peripheral: PeripheralAdapter + canvas_adapters::resume::ResumeBehavior {
     /// Turns config writes on or off. Nothing is written to the hardware while they are off.
     fn set_config_writes(&mut self, on: bool);
@@ -101,9 +96,35 @@ pub trait Peripheral: PeripheralAdapter + canvas_adapters::resume::ResumeBehavio
     /// enough to be worth reporting. An adapter that reports nothing keeps this default, and its
     /// read shows as one stage.
     fn set_read_sink(&mut self, _sink: Option<ReadSink>) {}
+
+    /// Writes the settings and returns the values the device holds for them afterwards. An
+    /// adapter whose device changes keys it was not asked to (a mode that forces a brightness,
+    /// a count that turns stages off) overrides this and returns those too, so the hub can keep
+    /// the values without reading the device again. The default holds that the device took
+    /// exactly what was written.
+    async fn write_effective(
+        &mut self,
+        device: &DeviceId,
+        props: &Props,
+    ) -> Result<Props, AdapterError> {
+        self.write_settings(device, props).await?;
+        Ok(props.clone())
+    }
 }
 
+#[async_trait::async_trait]
 impl Peripheral for canvas_adapters::attack_shark_x6::AttackSharkX6 {
+    async fn write_effective(
+        &mut self,
+        device: &DeviceId,
+        props: &Props,
+    ) -> Result<Props, AdapterError> {
+        // What the mouse holds after the write, with the keys that were written as the floor.
+        let mut effective = props.clone();
+        effective.extend(AttackSharkX6::write_effective(self, device, props).await?);
+        Ok(effective)
+    }
+
     fn set_config_writes(&mut self, on: bool) {
         self.set_writes_enabled(on);
     }
@@ -126,16 +147,30 @@ pub struct PeripheralHub {
     adapters: tokio::sync::Mutex<Vec<Box<dyn Peripheral>>>,
     /// The last enumeration, and when it was taken.
     discovery: tokio::sync::Mutex<Option<Discovery>>,
-    /// The last good read of each device, and when it was taken. Only touched while the
-    /// `adapters` lock is held, so concurrent reads of one device queue behind the first and
-    /// find its answer here (single-flight).
-    reads: std::sync::Mutex<BTreeMap<DeviceId, (Instant, Props)>>,
-    /// How long a read is shared. [`READ_CACHE`] in the daemon; the tests set it to zero to
-    /// count the reads the hub made before it shared any.
-    read_cache: Duration,
+    /// The values the daemon keeps for each device: its last good read, with every write since
+    /// merged in. They stay until something makes them stale (a failed write or read, an
+    /// access change, the device leaving the enumeration) or a caller asks for a fresh read,
+    /// because a read stalls the pointer on the receiver's radio link (issue #7). The read path
+    /// answers from them while the `adapters` lock is held, so concurrent reads of one device
+    /// queue behind the first and find its answer here (single-flight).
+    reads: std::sync::Mutex<BTreeMap<DeviceId, Kept>>,
+    /// How many fresh reads of each device have finished. A fresh read that waited for the
+    /// adapters' lock while another one finished answers with that one's result.
+    fresh_done: std::sync::Mutex<BTreeMap<DeviceId, u64>>,
+    /// The `reads` of the access each device was last given: only a change of it makes the kept
+    /// values stale (the device is opened or closed); a repeat, or a change of `writes`, keeps them.
+    reads_applied: std::sync::Mutex<BTreeMap<DeviceId, bool>>,
     /// The stage of the read that is running, per device id. A plain lock, never held across an
     /// await and never the adapters' lock: asking for it must answer while a read is still open.
     progress: Arc<StdMutex<BTreeMap<String, ReadProgress>>>,
+}
+
+/// The values kept for one device, and the adapter that read them.
+struct Kept {
+    /// The adapter that owns the device, so a failed enumeration of another adapter leaves
+    /// these alone.
+    adapter: &'static str,
+    props: Props,
 }
 
 /// Clears the stage of a read when the read ends or its request is dropped, and stops a sink that
@@ -307,18 +342,13 @@ impl PeripheralHub {
     /// The hub with these adapters. The daemon builds it with the real adapters; the tests
     /// build it with fakes.
     pub fn new(adapters: Vec<Box<dyn Peripheral>>) -> Self {
-        Self::with_read_cache(adapters, READ_CACHE)
-    }
-
-    /// The hub with its own read-sharing window. Zero shares nothing: every read goes to the
-    /// device, as it did before the window existed.
-    pub fn with_read_cache(adapters: Vec<Box<dyn Peripheral>>, read_cache: Duration) -> Self {
         Self {
-            read_cache,
             adapters: tokio::sync::Mutex::new(adapters),
             discovery: tokio::sync::Mutex::new(None),
             progress: Arc::new(StdMutex::new(BTreeMap::new())),
             reads: std::sync::Mutex::new(BTreeMap::new()),
+            fresh_done: std::sync::Mutex::new(BTreeMap::new()),
+            reads_applied: std::sync::Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -367,15 +397,23 @@ impl PeripheralHub {
     async fn enumerate(&self) -> Vec<PeripheralInfo> {
         let mut adapters = self.adapters.lock().await;
         let mut found = Vec::new();
+        let mut failed: Vec<&'static str> = Vec::new();
         for adapter in adapters.iter_mut() {
             let name = adapter.name();
             match adapter.discover().await {
                 Ok(list) => found.extend(list),
                 Err(error) => {
+                    failed.push(name);
                     tracing::warn!(adapter = name, error = %error, "could not enumerate the peripherals");
                 }
             }
         }
+        // A device that an adapter no longer lists is gone: what was kept for it is stale. An
+        // adapter whose enumeration failed said nothing, so its devices keep their values.
+        self.reads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|id, kept| failed.contains(&kept.adapter) || found.iter().any(|info| &info.id == id));
         found
     }
 
@@ -388,13 +426,26 @@ impl PeripheralHub {
         Ok(schema)
     }
 
+    /// The device's settings, from the values the hub keeps when it has them. The device is
+    /// opened and read only when nothing is kept for it.
+    pub async fn read(&self, device: &DeviceId) -> Result<Props, AdapterError> {
+        self.read_with(device, false).await
+    }
+
+    /// The device's settings, read from the device now even when values are kept.
+    pub async fn read_fresh(&self, device: &DeviceId) -> Result<Props, AdapterError> {
+        self.read_with(device, true).await
+    }
+
     /// The device's settings. The device is opened first if it is not open.
     ///
-    /// Asks inside [`READ_CACHE`] of the last good read share its answer: one view-open is one
-    /// run of feature reports to the device, however many requests it makes. A write or an
-    /// access change drops the shared answer, and a failed read is never shared. A read that
-    /// fails because the device is gone closes it, so the next read opens it again.
-    pub async fn read(&self, device: &DeviceId) -> Result<Props, AdapterError> {
+    /// Unless `fresh` is set, the values kept from the last good read (with the writes since
+    /// merged in) answer: opening the view again, or reading after a change, never touches the
+    /// device. A failed read keeps nothing. A read that fails because the device is gone closes
+    /// it, so the next read opens it again.
+    async fn read_with(&self, device: &DeviceId, fresh: bool) -> Result<Props, AdapterError> {
+        // How many fresh reads of this device had finished when this ask arrived.
+        let done_on_arrival = self.fresh_finished(device);
         // One lock for all adapters. A blocking open inside an adapter holds it, so a slow open
         // of one device queues the reads of the others behind it (the adapters' own HID caches
         // are per adapter and do not share this).
@@ -409,11 +460,13 @@ impl PeripheralHub {
             live: live.clone(),
             progress: self.progress.clone(),
         };
-        // A shared read of a device that has since been closed is not an answer. `is_connected`
-        // only says the adapter still holds its handle: an unplug shows on the next I/O, so for
-        // up to `read_cache` after an unplug the shared values are served as they were read.
-        if adapter.is_connected() {
-            if let Some(props) = self.shared_read(device) {
+        // Kept values of a device that has since been closed are not an answer. `is_connected`
+        // only says the adapter still holds its handle: an unplug shows on the next I/O or the
+        // next enumeration, which drops the kept values.
+        if adapter.is_connected() && (!fresh || self.fresh_finished(device) > done_on_arrival) {
+            // A fresh ask that waited while another fresh read of this device ran takes that
+            // one's result (a double click is one read).
+            if let Some(props) = self.kept_read(device) {
                 return Ok(props);
             }
         }
@@ -449,26 +502,38 @@ impl PeripheralHub {
                 self.reads
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .insert(device.clone(), (Instant::now(), props.clone()));
+                    .insert(device.clone(), Kept { adapter: adapter.name(), props: props.clone() });
+                if fresh {
+                    *self
+                        .fresh_done
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .entry(device.clone())
+                        .or_insert(0) += 1;
+                }
             }
-            Err(error) if device_failure(error) => {
-                let _ = adapter.disconnect().await;
+            Err(error) => {
+                // A failed read leaves nothing kept: the old values may no longer be true.
+                self.forget_read(device);
+                if device_failure(error) {
+                    let _ = adapter.disconnect().await;
+                }
             }
-            Err(_) => {}
         }
         result
     }
 
-    /// The last good read of this device, when it is younger than [`READ_CACHE`].
-    fn shared_read(&self, device: &DeviceId) -> Option<Props> {
-        let reads = self.reads.lock().unwrap_or_else(|e| e.into_inner());
-        reads
-            .get(device)
-            .filter(|(at, _)| at.elapsed() < self.read_cache)
-            .map(|(_, props)| props.clone())
+    /// The values kept for this device, if any.
+    fn kept_read(&self, device: &DeviceId) -> Option<Props> {
+        self.reads.lock().unwrap_or_else(|e| e.into_inner()).get(device).map(|k| k.props.clone())
     }
 
-    /// Forgets the shared read of this device: the device changed, or is about to.
+    /// How many fresh reads of this device have finished.
+    fn fresh_finished(&self, device: &DeviceId) -> u64 {
+        self.fresh_done.lock().unwrap_or_else(|e| e.into_inner()).get(device).copied().unwrap_or(0)
+    }
+
+    /// Forgets the kept values of this device: they are stale.
     fn forget_read(&self, device: &DeviceId) {
         self.reads.lock().unwrap_or_else(|e| e.into_inner()).remove(device);
     }
@@ -481,17 +546,35 @@ impl PeripheralHub {
         let mut adapters = self.adapters.lock().await;
         let (index, _) = owner_of(&mut adapters, device).await?;
         let adapter = adapters[index].as_mut();
-        self.forget_read(device);
         if !adapter.is_connected() {
+            self.forget_read(device);
             adapter.connect().await?;
         }
-        let result = adapter.write_settings(device, props).await;
-        if let Err(error) = &result {
-            if device_failure(error) {
-                let _ = adapter.disconnect().await;
+        let result = adapter.write_effective(device, props).await;
+        match &result {
+            Ok(effective) => {
+                // The device holds what it reports back now, including keys it changed itself:
+                // merge them into the kept values, so the next read needs no trip to the
+                // device. Nothing kept means the next read reads.
+                if let Some(kept) =
+                    self.reads.lock().unwrap_or_else(|e| e.into_inner()).get_mut(device)
+                {
+                    for (key, value) in effective {
+                        kept.props.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+            Err(error) => {
+                // A refusal before anything was sent (a key the device lacks, a value out of
+                // range, writes off) changed nothing: the kept values stand. A device failure
+                // may have sent part of the write, so how far it got is unknown: they are stale.
+                if device_failure(error) {
+                    self.forget_read(device);
+                    let _ = adapter.disconnect().await;
+                }
             }
         }
-        result
+        result.map(|_| ())
     }
 
     /// Applies the access to a device: opens it when reads are on, closes it when they are
@@ -503,7 +586,16 @@ impl PeripheralHub {
         let mut adapters = self.adapters.lock().await;
         let (index, _) = owner_of(&mut adapters, device).await?;
         let adapter = adapters[index].as_mut();
-        self.forget_read(device);
+        // Only a change of `reads` makes the kept values stale: the device is opened or closed.
+        // A repeat of the same access, or a change of `writes` alone, keeps them.
+        let previous = self
+            .reads_applied
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(device.clone(), access.reads);
+        if previous != Some(access.reads) {
+            self.forget_read(device);
+        }
         // The gate follows the access, whatever the access is. Writes need reads, so an
         // access that says otherwise keeps the writes off.
         adapter.set_config_writes(access.writes && access.reads);
@@ -681,9 +773,8 @@ mod tests {
     async fn a_report_that_arrives_after_the_read_ended_does_not_bring_the_stage_back() {
         sink_hook::reset();
         let id = DeviceId("held:one".into());
-        let hub = Arc::new(PeripheralHub::with_read_cache(
+        let hub = Arc::new(PeripheralHub::new(
             vec![Box::new(HeldPeripheral::new(id.clone()))],
-            Duration::ZERO,
         ));
 
         let reader = {
@@ -743,9 +834,8 @@ mod tests {
         }
         sink_hook::reset();
         let id = DeviceId("held:never".into());
-        let hub = Arc::new(PeripheralHub::with_read_cache(
+        let hub = Arc::new(PeripheralHub::new(
             vec![Box::new(HeldPeripheral::new(id.clone()))],
-            Duration::ZERO,
         ));
         let _reader = {
             let hub = hub.clone();

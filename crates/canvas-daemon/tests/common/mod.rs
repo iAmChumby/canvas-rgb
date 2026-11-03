@@ -464,6 +464,13 @@ pub struct PeripheralLog {
     pub gate_connect: bool,
     /// Makes this many reads fail (after they reported their stages), as a pulled cable does.
     pub fail_read: u32,
+    /// A key the device changes by itself when anything is written (as the X6 forces a
+    /// brightness): the device's own values change, and the adapter reports it back.
+    pub side_effect: Option<(String, PropValue)>,
+    /// Makes the enumeration fail, as a HID scan that errors does.
+    pub fail_discover: bool,
+    /// Makes this many writes fail with an I/O error (a cable pulled mid-write).
+    pub fail_write: u32,
 }
 
 /// The sink the daemon gave the fake. `ReadSink` has no `Debug`, so the log holds it in here.
@@ -564,6 +571,9 @@ impl Default for FakePeripheral {
             gate: None,
             gate_connect: false,
             fail_read: 0,
+            side_effect: None,
+            fail_discover: false,
+            fail_write: 0,
         })))
     }
 }
@@ -671,6 +681,9 @@ impl canvas_proto::traits::PeripheralAdapter for FakePeripheral {
     async fn discover(&mut self) -> Result<Vec<PeripheralInfo>, AdapterError> {
         let mut log = self.0.lock().unwrap();
         log.discovers += 1;
+        if log.fail_discover {
+            return Err(AdapterError::Io(std::io::Error::other("scan failed")));
+        }
         Ok(log.found.clone())
     }
 
@@ -739,7 +752,18 @@ impl canvas_proto::traits::PeripheralAdapter for FakePeripheral {
             }
             check_prop_value(def, value)?;
         }
+        if log.fail_write > 0 {
+            log.fail_write -= 1;
+            return Err(AdapterError::Io(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "write failed")));
+        }
         log.writes.push(props.clone());
+        // The device's own values follow what was written, and its side effect.
+        for (key, value) in props {
+            log.values.insert(key.clone(), value.clone());
+        }
+        if let Some((key, value)) = log.side_effect.clone() {
+            log.values.insert(key, value);
+        }
         Ok(())
     }
 
@@ -748,7 +772,17 @@ impl canvas_proto::traits::PeripheralAdapter for FakePeripheral {
     }
 }
 
+#[async_trait::async_trait]
 impl canvas_daemon::peripherals::Peripheral for FakePeripheral {
+    async fn write_effective(&mut self, device: &DeviceId, props: &Props) -> Result<Props, AdapterError> {
+        canvas_proto::traits::PeripheralAdapter::write_settings(self, device, props).await?;
+        let mut effective = props.clone();
+        if let Some((key, value)) = self.0.lock().unwrap().side_effect.clone() {
+            effective.insert(key, value);
+        }
+        Ok(effective)
+    }
+
     fn set_config_writes(&mut self, on: bool) {
         self.0.lock().unwrap().writes_enabled = on;
     }

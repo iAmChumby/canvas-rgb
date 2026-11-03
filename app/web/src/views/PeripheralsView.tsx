@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
   ArrowCounterClockwise,
+  ArrowsClockwise,
   BatteryCharging,
   BatteryFull,
   GameController,
@@ -148,13 +149,22 @@ export function PeripheralsView() {
   // dropped: a slow reload of one device must not put its error on another.
   const detailRequest = useRef(0);
 
-  // Reads one device again: after a write, or after the access changed. `landed` says that the
-  // change is already on the device, so a failed refresh is not a failed change.
-  const loadDetail = useCallback(async (id: string, landed = false) => {
+  // A Read again that is out: a second press while it runs is the same read, not another one.
+  const rereading = useRef(false);
+
+  // Asks for one device's detail again: after a write, or after the access changed (the daemon
+  // answers those from the values it keeps), or on the Read again key (`forceRead`: the daemon
+  // reads the device). `landed` says that the change is already on the device, so a failed
+  // refresh is not a failed change.
+  const loadDetail = useCallback(async (id: string, landed = false, forceRead = false) => {
+    if (forceRead) {
+      if (rereading.current) return;
+      rereading.current = true;
+    }
     const n = ++detailRequest.current;
     setReloadingId(id);
     try {
-      const d = await api.peripheral(id);
+      const d = forceRead ? await api.peripheral(id, { fresh: true }) : await api.peripheral(id);
       if (n !== detailRequest.current) return;
       lastRead.set(id, d);
       setLoaded({ id, detail: d });
@@ -168,6 +178,7 @@ export function PeripheralsView() {
       setDetailError(messageOf(e));
       setChangeSaved(landed);
     } finally {
+      if (forceRead) rereading.current = false;
       if (n === detailRequest.current) setReloadingId(null);
     }
   }, []);
@@ -352,6 +363,8 @@ export function PeripheralsView() {
           onPickButton={setPickedButton}
           onChange={onChange}
           onAccess={(next) => void setAccess(next)}
+          reading={reading}
+          onReadAgain={() => selectedId && void loadDetail(selectedId, false, true)}
         />
       )}
     </LoadFrame>
@@ -473,7 +486,11 @@ function PeripheralDetail({
   onPickButton,
   onChange,
   onAccess,
+  reading,
+  onReadAgain,
 }: {
+  reading: boolean;
+  onReadAgain: () => void;
   detail: PeripheralDetail;
   values: Values;
   pickedStage: number | null;
@@ -583,6 +600,18 @@ function PeripheralDetail({
                   checked={reads}
                   onChange={(v) => onAccess({ reads: v, writes: v ? undefined : false })}
                 />
+              </span>
+            </Tooltip>
+            <Tooltip label="asks the device for its settings again, for changes made on the mouse itself">
+              <span className="rd-peri-toggle">
+                <Button
+                  size="sm"
+                  icon={<ArrowsClockwise size={16} />}
+                  disabled={!reads || reading}
+                  onClick={onReadAgain}
+                >
+                  Read again
+                </Button>
               </span>
             </Tooltip>
             <Tooltip label="lets canvas-rgb change settings on the device">

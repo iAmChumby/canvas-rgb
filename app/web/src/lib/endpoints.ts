@@ -112,8 +112,12 @@ export const api = {
 
   /** Every peripheral the adapters see. The list opens nothing. */
   peripherals: () => request<{ peripherals: PeripheralRow[] }>("GET", routes.peripherals),
-  /** What one peripheral is, what it has and what it holds now. */
-  peripheral: (id: string) => request<PeripheralDetail>("GET", routes.peripheral(id)),
+  /**
+   * What one peripheral is, what it has and what it holds now. The daemon answers with the
+   * values it kept; `fresh` makes it read the device (a read stalls the pointer for seconds).
+   */
+  peripheral: (id: string, opts?: { fresh?: boolean }) =>
+    request<PeripheralDetail>("GET", routes.peripheral(id) + (opts?.fresh ? "?fresh=true" : "")),
   /** Writes the changed keys to the device. Only while writes are on. */
   patchPeripheral: (id: string, body: Props) => request<Props>("PATCH", routes.peripheral(id), body),
   /** What the daemon may do with one peripheral. */

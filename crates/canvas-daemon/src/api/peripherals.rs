@@ -6,7 +6,7 @@
 //! and a write only while writes are on. What the daemon may do with a device is saved in
 //! `peripherals.json` (see `crate::peripherals`).
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, RawQuery, State};
 use axum::Json;
 use canvas_proto::device::DeviceId;
 use canvas_proto::peripheral::{
@@ -28,7 +28,34 @@ pub async fn list_peripherals(State(app): State<Arc<App>>) -> Json<PeripheralsRe
     Json(PeripheralsResponse { peripherals })
 }
 
+/// Reads `?fresh=` from the raw query: `true` or `1` reads the device even when the daemon keeps
+/// its values; `false`, `0` or no `fresh` is the plain read. Any other value, or `fresh` given
+/// twice, is a validation error in the API's JSON shape (a typed extractor would answer with
+/// axum's plain-text 400).
+fn parse_fresh(query: Option<&str>) -> Result<bool, ApiFailure> {
+    let mut seen: Option<&str> = None;
+    for pair in query.unwrap_or("").split('&') {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        if key != "fresh" {
+            continue;
+        }
+        if seen.is_some() {
+            return Err(ApiFailure::validation("fresh is given more than once"));
+        }
+        seen = Some(value);
+    }
+    match seen {
+        None | Some("false") | Some("0") => Ok(false),
+        Some("true") | Some("1") => Ok(true),
+        Some(other) => Err(ApiFailure::validation(format!("fresh is {other}; use true, false, 1 or 0"))),
+    }
+}
+
 /// `GET /api/v1/peripherals/{id}`: what the device is, what it has and what it holds now.
+///
+/// The values are the ones the daemon kept from the last read, with the writes since merged in.
+/// The device is read only when nothing is kept, or with `?fresh=true` (issue #7: a read stalls
+/// the pointer).
 ///
 /// The schema is always there. The values are read from the device only while reads are on for
 /// this id; otherwise they are empty and `problem` says why. A read that fails leaves the
@@ -36,7 +63,9 @@ pub async fn list_peripherals(State(app): State<Arc<App>>) -> Json<PeripheralsRe
 pub async fn get_peripheral(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
+    RawQuery(query): RawQuery,
 ) -> ApiResult<Json<PeripheralDetail>> {
+    let fresh = parse_fresh(query.as_deref())?;
     let device = DeviceId(id.clone());
     let access = app.store.read().await.peripherals.access(&device);
     let info = find_info(&app, &device)
@@ -44,7 +73,12 @@ pub async fn get_peripheral(
         .ok_or_else(|| ApiFailure::not_found(format!("no peripheral with the id {id}")))?;
     let schema = app.peripherals.describe(&device).await.map_err(adapter_failure)?;
     let (values, problem) = if access.reads {
-        match app.peripherals.read(&device).await {
+        let read = if fresh {
+            app.peripherals.read_fresh(&device).await
+        } else {
+            app.peripherals.read(&device).await
+        };
+        match read {
             Ok(values) => (values, None),
             Err(error) => {
                 tracing::warn!(device = %id, error = %error, "the peripheral did not answer the read");

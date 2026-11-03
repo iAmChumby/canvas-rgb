@@ -1286,7 +1286,9 @@ impl EightBitDoUltimate2 {
         .await
         .map_err(join_error)?;
         self.vendor = Some(vendor);
-        result
+        // A session that went wrong may have sent chunks: it is an I/O failure for the caller,
+        // which then treats the pad as changed by an unknown amount.
+        result.map_err(|e| AdapterError::Io(std::io::Error::other(e.to_string())))
     }
 
     /// The pad applies the map of the profile it is on, so only that profile's paddles are
@@ -2474,7 +2476,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(&err, AdapterError::Protocol(m) if m.contains("wrong") && m.contains("request word 2")),
+            matches!(&err, AdapterError::Io(m) if m.to_string().contains("wrong") && m.to_string().contains("request word 2")),
             "{err:?}"
         );
         let sent = s.lock().unwrap().sent[before..].to_vec();
@@ -2493,7 +2495,7 @@ mod tests {
             .write_settings(&a.device_id(), &choice(&[("profile-3-paddle-1", "a")]))
             .await
             .unwrap_err();
-        assert!(matches!(&err, AdapterError::Protocol(m) if m.contains("did not reply")), "{err:?}");
+        assert!(matches!(&err, AdapterError::Io(m) if m.to_string().contains("did not reply")), "{err:?}");
         let sent = s.lock().unwrap().sent[before..].to_vec();
         assert_eq!(sent.len(), 3);
         assert_eq!(sent[2], codec::report_state_request(1));
@@ -2511,7 +2513,7 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(
-                matches!(&err, AdapterError::Protocol(m) if m.contains("commit") && m.contains("uncommitted")),
+                matches!(&err, AdapterError::Io(m) if m.to_string().contains("commit") && m.to_string().contains("uncommitted")),
                 "{err:?}"
             );
             let sent = s.lock().unwrap().sent[before..].to_vec();
