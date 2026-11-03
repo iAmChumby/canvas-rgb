@@ -1484,6 +1484,25 @@ impl PeripheralAdapter for AttackSharkX6 {
 }
 
 impl AttackSharkX6 {
+    /// Reads the DPI report alone and stores it, so the next DPI frame is built on what the
+    /// device holds now (its active stage in particular).
+    async fn refresh_dpi(&mut self) -> Result<(), AdapterError> {
+        let Some(mut config) = self.config.take() else {
+            return Err(AdapterError::NotConnected);
+        };
+        let pace = self.pace;
+        let (config, frame) = tokio::task::spawn_blocking(move || {
+            let frame = read_report(&mut *config, Kind::Dpi, pace);
+            (config, frame)
+        })
+        .await
+        .map_err(join_error)?;
+        self.config = Some(config);
+        let frame = frame.map_err(|f| refuse(format!("the DPI settings could not be read before the write: {}", f.message())))?;
+        self.store(Kind::Dpi, &frame);
+        Ok(())
+    }
+
     /// Writes the settings and returns the values the device holds for them afterwards.
     ///
     /// The mouse changes keys it was not asked to: a lighting mode without brightness forces the
@@ -1510,6 +1529,19 @@ impl AttackSharkX6 {
             }
             check_value(def, value)?;
         }
+        // The DPI frame carries the active stage, which the mouse moves with its own button and the
+        // daemon never hears about. Plan from the device's own frame: one DPI report round trip,
+        // a short stall per DPI write by design (a full read is five). A write that was never
+        // preceded by a read is still refused by `plan_dpi`.
+        if props.keys().any(|k| k.starts_with("dpi-stage-")) && self.cache.dpi.is_some() {
+            // A write the cached frame already refuses (a stage beyond the count) sends nothing.
+            // (The refresh is about to clear a stale frame, so the check ignores that flag.)
+            let stale = std::mem::replace(&mut self.cache.dpi_stale, false);
+            let dry = self.plan(props);
+            self.cache.dpi_stale = stale;
+            dry?;
+            self.refresh_dpi().await?;
+        }
         let plan = self.plan(props)?;
         if plan.packets.is_empty() {
             return Ok(Props::new());
@@ -1529,7 +1561,11 @@ impl AttackSharkX6 {
                 }
                 tracing::info!(bytes = packet.len(), raw = %hex(packet), "the X6 write goes out");
                 if let Err(e) = config.send_feature(packet) {
-                    result = Err(refuse(format!("the X6 write failed: {e}")));
+                    // An I/O failure with bytes possibly sent: the caller treats the device as
+                    // changed by an unknown amount (it keeps nothing it held before).
+                    result = Err(AdapterError::Io(std::io::Error::other(format!(
+                        "the X6 write failed: {e}"
+                    ))));
                     break;
                 }
             }
@@ -2383,7 +2419,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_dpi_button_event_is_announced_and_makes_the_next_dpi_write_wait() {
+    async fn the_dpi_button_event_is_announced_and_the_next_dpi_write_reads_the_dpi_report_first() {
         let (mut a, s) = rig();
         s.lock().unwrap().events.push_back(vec![0x03, 0x10, 0x10, 0x04, 0x00]);
         a.connect().await.unwrap();
@@ -2391,16 +2427,49 @@ mod tests {
         a.read_settings(&a.device_id()).await.unwrap();
         let events = a.read_events(10).await.unwrap();
         assert_eq!(events, vec![PeripheralEvent::Notice { message: "active-dpi-stage=4".into() }]);
-        // The next DPI write waits for a fresh read: the frame's active stage is out of date.
+        // The next DPI write reads the DPI report first: the frame's active stage was out of date.
         a.set_writes_enabled(true);
-        let err = a
-            .write_settings(&a.device_id(), &number(&[("dpi-stage-1", 800.0)]))
-            .await
-            .unwrap_err();
-        assert!(matches!(&err, AdapterError::Protocol(m) if m.contains("DPI button")), "{err:?}");
-        // A fresh read clears it.
-        a.read_settings(&a.device_id()).await.unwrap();
+        let before = s.lock().unwrap().sent.len();
         a.write_settings(&a.device_id(), &number(&[("dpi-stage-1", 800.0)])).await.unwrap();
+        let sent = s.lock().unwrap().sent[before..].to_vec();
+        assert_eq!(sent[0], codec::read_request(Kind::Dpi), "the DPI report is asked for first");
+        assert_eq!(sent.len(), 3, "the DPI read request, the apply header and the DPI frame");
+    }
+
+    /// A reply for report 04 with the active stage the device holds now, checksum fixed.
+    fn dpi_reply_with_active_stage(stage: u8) -> Vec<u8> {
+        let mut reply = codec::evidence::REPLY_04.to_vec();
+        reply[24] = stage;
+        let sum: u16 = reply[3..50].iter().fold(0u16, |a, b| a.wrapping_add(u16::from(*b)));
+        reply[50..52].copy_from_slice(&sum.to_be_bytes());
+        reply
+    }
+
+    #[tokio::test]
+    async fn a_dpi_write_keeps_the_stage_the_mouses_own_button_moved_to() {
+        let (mut a, s) = rig();
+        a.connect().await.unwrap();
+        let read = a.read_settings(&a.device_id()).await.unwrap();
+        let Some(PropValue::Choice(was)) = read.get("dpi-active-stage").cloned() else {
+            panic!("the read reports an active stage")
+        };
+        // The DPI button is pressed on the mouse after the read; nobody hears of it.
+        let now = if was == "3" { 2 } else { 3 };
+        s.lock().unwrap().replies.insert(0x04, dpi_reply_with_active_stage(now));
+        a.set_writes_enabled(true);
+        let before = s.lock().unwrap().sent.len();
+        let effective = a
+            .write_effective(&a.device_id(), &number(&[("dpi-stage-2", 2000.0)]))
+            .await
+            .unwrap();
+        let sent = s.lock().unwrap().sent[before..].to_vec();
+        let frame = sent.last().unwrap();
+        assert_eq!(codec::active_stage_of(frame), Some(now), "the write keeps the device's stage");
+        assert_eq!(
+            effective.get("dpi-active-stage"),
+            Some(&PropValue::Choice(now.to_string())),
+            "the values to keep show the device's stage"
+        );
     }
 
     #[tokio::test]
@@ -2474,7 +2543,7 @@ mod tests {
         // And the DPI frame.
         let before = s.lock().unwrap().sent.len();
         a.write_settings(&a.device_id(), &number(&[("dpi-stage-3", 2000.0)])).await.unwrap();
-        let sent = s.lock().unwrap().sent[before..].to_vec();
+        let sent = s.lock().unwrap().sent[before + 1..].to_vec();
         let stages = codec::stages_of(&sent[1]);
         assert_eq!(stages[2].dpi, Some(2000));
         assert_eq!(stages[0].dpi, Some(800), "the other stages keep the device's own values");
@@ -2488,7 +2557,7 @@ mod tests {
         let before = s.lock().unwrap().sent.len();
         a.set_writes_enabled(true);
         a.write_settings(&a.device_id(), &number(&[("dpi-stage-3", 2000.0)])).await.unwrap();
-        let sent = s.lock().unwrap().sent[before..].to_vec();
+        let sent = s.lock().unwrap().sent[before + 1..].to_vec();
         assert_eq!(sent.len(), 2);
         assert_eq!(sent[0], codec::APPLY_HEADER.to_vec());
         let frame = &sent[1];
@@ -2507,7 +2576,7 @@ mod tests {
         let before = s.lock().unwrap().sent.len();
         a.set_writes_enabled(true);
         a.write_settings(&a.device_id(), &number(&[("dpi-stage-count", 4.0)])).await.unwrap();
-        let sent = s.lock().unwrap().sent[before..].to_vec();
+        let sent = s.lock().unwrap().sent[before + 1..].to_vec();
         let stages = codec::stages_of(&sent[1]);
         assert_eq!(stages[3].dpi, Some(3200), "the first four stages stay on");
         assert_eq!(stages[4].dpi, None, "the fifth stage is off");
@@ -2656,7 +2725,7 @@ mod tests {
         let before = s.lock().unwrap().sent.len();
         a.set_writes_enabled(true);
         a.write_settings(&a.device_id(), &number(&[("dpi-stage-3", 2000.0)])).await.unwrap();
-        let sent = s.lock().unwrap().sent[before..].to_vec();
+        let sent = s.lock().unwrap().sent[before + 1..].to_vec();
         assert_eq!(sent.len(), 2);
         assert_eq!(sent[0].len(), 10, "the apply header is ten bytes (research 3.2)");
         assert_eq!(sent[1].len(), 56, "report 0x04 is 56 bytes (research 3.2)");

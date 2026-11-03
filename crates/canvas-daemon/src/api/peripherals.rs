@@ -6,7 +6,7 @@
 //! and a write only while writes are on. What the daemon may do with a device is saved in
 //! `peripherals.json` (see `crate::peripherals`).
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, RawQuery, State};
 use axum::Json;
 use canvas_proto::device::DeviceId;
 use canvas_proto::peripheral::{
@@ -28,12 +28,27 @@ pub async fn list_peripherals(State(app): State<Arc<App>>) -> Json<PeripheralsRe
     Json(PeripheralsResponse { peripherals })
 }
 
-/// The query `GET /api/v1/peripherals/{id}` accepts.
-#[derive(Debug, Default, serde::Deserialize)]
-pub struct GetPeripheralQuery {
-    /// `?fresh=true` (or `1`) reads the device even when the daemon keeps its values; `false`
-    /// and `0` are the plain read. Anything else is a validation error.
-    pub fresh: Option<String>,
+/// Reads `?fresh=` from the raw query: `true` or `1` reads the device even when the daemon keeps
+/// its values; `false`, `0` or no `fresh` is the plain read. Any other value, or `fresh` given
+/// twice, is a validation error in the API's JSON shape (a typed extractor would answer with
+/// axum's plain-text 400).
+fn parse_fresh(query: Option<&str>) -> Result<bool, ApiFailure> {
+    let mut seen: Option<&str> = None;
+    for pair in query.unwrap_or("").split('&') {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        if key != "fresh" {
+            continue;
+        }
+        if seen.is_some() {
+            return Err(ApiFailure::validation("fresh is given more than once"));
+        }
+        seen = Some(value);
+    }
+    match seen {
+        None | Some("false") | Some("0") => Ok(false),
+        Some("true") | Some("1") => Ok(true),
+        Some(other) => Err(ApiFailure::validation(format!("fresh is {other}; use true, false, 1 or 0"))),
+    }
 }
 
 /// `GET /api/v1/peripherals/{id}`: what the device is, what it has and what it holds now.
@@ -48,17 +63,9 @@ pub struct GetPeripheralQuery {
 pub async fn get_peripheral(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
-    Query(query): Query<GetPeripheralQuery>,
+    RawQuery(query): RawQuery,
 ) -> ApiResult<Json<PeripheralDetail>> {
-    let fresh = match query.fresh.as_deref() {
-        None | Some("false") | Some("0") => false,
-        Some("true") | Some("1") => true,
-        Some(other) => {
-            return Err(ApiFailure::validation(format!(
-                "fresh is {other}; use true, false, 1 or 0"
-            )))
-        }
-    };
+    let fresh = parse_fresh(query.as_deref())?;
     let device = DeviceId(id.clone());
     let access = app.store.read().await.peripherals.access(&device);
     let info = find_info(&app, &device)

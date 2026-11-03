@@ -781,24 +781,63 @@ async fn a_second_fresh_read_while_one_is_in_flight_shares_its_result() {
     assert_eq!(fake.log().reads, 2, "the initial read and one fresh read, not two");
 }
 
-/// A write that the device refuses may have gone part of the way: the kept values are stale.
+/// A write that failed on the device may have gone part of the way: the kept values are stale.
 #[tokio::test]
-async fn a_failed_write_drops_the_kept_values() {
+async fn a_write_that_failed_on_the_device_drops_the_kept_values() {
     let fake = FakePeripheral::default();
     let (router, _app, _home) = build(fake.clone());
     let path = reads_on(&router, &fake, true).await;
     call(&router, "GET", &path).await;
     assert_eq!(fake.log().reads, 1);
-    let refused = call_with_body(
+    fake.0.lock().unwrap().fail_write = 1;
+    let failed = call_with_body(
         &router,
         "PATCH",
         &path,
-        r#"{"dpi-stage-99":{"type":"number","value":1600}}"#,
+        r#"{"dpi-stage-1":{"type":"number","value":1600}}"#,
     )
     .await;
-    assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
     call(&router, "GET", &path).await;
     assert_eq!(fake.log().reads, 2, "the next GET reads the device");
+}
+
+/// A write the adapter refuses before sending anything changed nothing: the values stand.
+#[tokio::test]
+async fn a_refused_write_keeps_the_values_and_the_next_get_reads_nothing() {
+    let fake = FakePeripheral::default();
+    let (router, _app, _home) = build(fake.clone());
+    let path = reads_on(&router, &fake, true).await;
+    call(&router, "GET", &path).await;
+    assert_eq!(fake.log().reads, 1);
+    for body in [
+        r#"{"dpi-stage-99":{"type":"number","value":1600}}"#,
+        r#"{"profile":{"type":"choice","value":"2"}}"#,
+        r#"{"dpi-stage-1":{"type":"number","value":99999999}}"#,
+    ] {
+        let refused = call_with_body(&router, "PATCH", &path, body).await;
+        assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    }
+    let detail = json(call(&router, "GET", &path).await).await;
+    assert_eq!(fake.log().reads, 1, "nothing was read again");
+    assert_eq!(detail.pointer("/values/dpi-stage-1/value").and_then(|v| v.as_f64()), Some(800.0));
+}
+
+/// `fresh` given twice is the JSON validation error, not axum's plain-text rejection.
+#[tokio::test]
+async fn fresh_given_twice_is_a_json_validation_error() {
+    let fake = FakePeripheral::default();
+    let (router, _app, _home) = build(fake.clone());
+    let path = reads_on(&router, &fake, false).await;
+    call(&router, "GET", &path).await;
+    let response = call(&router, "GET", &format!("{path}?fresh=1&fresh=0")).await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = json(response).await;
+    assert_eq!(
+        body.get("error").and_then(|v| v.as_str()),
+        Some(canvas_proto::api::error_codes::VALIDATION)
+    );
+    assert_eq!(fake.log().reads, 1);
 }
 
 /// A read that fails leaves nothing kept: the next GET reads again.

@@ -469,6 +469,8 @@ pub struct PeripheralLog {
     pub side_effect: Option<(String, PropValue)>,
     /// Makes the enumeration fail, as a HID scan that errors does.
     pub fail_discover: bool,
+    /// Makes this many writes fail with an I/O error (a cable pulled mid-write).
+    pub fail_write: u32,
 }
 
 /// The sink the daemon gave the fake. `ReadSink` has no `Debug`, so the log holds it in here.
@@ -571,6 +573,7 @@ impl Default for FakePeripheral {
             fail_read: 0,
             side_effect: None,
             fail_discover: false,
+            fail_write: 0,
         })))
     }
 }
@@ -748,6 +751,10 @@ impl canvas_proto::traits::PeripheralAdapter for FakePeripheral {
                 return Err(AdapterError::Protocol(format!("{key} is read-only")));
             }
             check_prop_value(def, value)?;
+        }
+        if log.fail_write > 0 {
+            log.fail_write -= 1;
+            return Err(AdapterError::Io(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "write failed")));
         }
         log.writes.push(props.clone());
         // The device's own values follow what was written, and its side effect.

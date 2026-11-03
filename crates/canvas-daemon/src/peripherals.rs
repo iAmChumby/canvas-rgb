@@ -565,9 +565,11 @@ impl PeripheralHub {
                 }
             }
             Err(error) => {
-                // How far a failed write got is unknown, so the kept values are stale.
-                self.forget_read(device);
+                // A refusal before anything was sent (a key the device lacks, a value out of
+                // range, writes off) changed nothing: the kept values stand. A device failure
+                // may have sent part of the write, so how far it got is unknown: they are stale.
                 if device_failure(error) {
+                    self.forget_read(device);
                     let _ = adapter.disconnect().await;
                 }
             }
