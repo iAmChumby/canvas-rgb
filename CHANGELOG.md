@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Added
+
+- On the Fans page you can tick several headers and set them all at once: BIOS, one Fixed %, or a copy of another header's curve. Each header keeps its own floor, the Details list shows what each one did and runs at afterwards, a header the daemon handed back to BIOS is left as it is and named as skipped, and a tach-only header cannot be ticked. On a phone, a Select key turns the header list into tick boxes. (#110)
+
 ### Fixed
 
 - A scrolling Gradient now flows color 1 → color 2 → color 1 and back instead of jumping between the two colors, and Scroll Speed back at 0 leaves no line behind; the full round trip takes twice as long as the old one-way scroll. (#107)

@@ -539,6 +539,9 @@ function validateMode(header: string, mode: FanMode, configured: number): void {
   }
 }
 
+/** Headers the chip reads and cannot drive: no duty, and the daemon refuses a mode for them. */
+const TACH_ONLY = ["pump_fan2"];
+
 function fansStatus(): FansStatus {
   const s = st();
   const r = temps();
@@ -559,7 +562,7 @@ function fansStatus(): FansStatus {
       on_bios: mode.mode === "bios",
       override_reason: null,
     };
-  });
+  }).map((h) => (TACH_ONLY.includes(h.id) ? { ...h, pwm_percent: null } : h));
   const temperatures: TempReading[] = [
     { source: { type: "cpu" }, label: "CPU Tctl", celsius: Math.round(r.cpu * 10) / 10 },
     { source: { type: "gpu" }, label: "GPU", celsius: Math.round(r.gpu * 10) / 10 },
@@ -1421,6 +1424,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       const header = seg[2] ?? "";
       if (!FAN_HEADERS.some((h) => h.id === header)) fail(404, "not_found", `no header ${header}`);
       const mode = body as FanMode;
+      if (TACH_ONLY.includes(header)) fail(422, "validation", `${header} is tach-only and cannot take a mode`);
       validateMode(header, mode, s.fanFloor);
       s.fanModes[header] = mode;
       return { ok: true, header, mode };
