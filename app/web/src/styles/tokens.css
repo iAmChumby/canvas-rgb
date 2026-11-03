@@ -25,6 +25,10 @@
   --dot: rgba(255, 255, 255, 0.15);
   --scrim: rgba(0, 0, 0, 0.6);
 
+  /* the angle dial's ring: a plain line-2 ring reads dim against the dark panel, so the dial's
+     ring takes a touch more of the white there; the needle (--ink) stays the strongest element */
+  --dial-ring: rgba(255, 255, 255, 0.22);
+
   /* ink */
   --ink: #eef0f3;
   --dim: #b4b9c1;
@@ -140,6 +144,7 @@
   --press: rgba(15, 18, 24, 0.12);
   --dot: rgba(15, 18, 24, 0.2);
   --scrim: rgba(15, 18, 24, 0.35);
+  --dial-ring: rgba(15, 18, 24, 0.26);
   --ink: #15171a;
   --dim: #3c4149;
   --mute: #5f6571;
@@ -171,6 +176,7 @@
     --press: rgba(15, 18, 24, 0.12);
     --dot: rgba(15, 18, 24, 0.2);
     --scrim: rgba(15, 18, 24, 0.35);
+    --dial-ring: rgba(15, 18, 24, 0.26);
     --ink: #15171a;
     --dim: #3c4149;
     --mute: #5f6571;

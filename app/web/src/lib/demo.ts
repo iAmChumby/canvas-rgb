@@ -781,8 +781,10 @@ export function checkPeripheralValue(device: DemoPeripheral, key: string, value:
   if (kind.type === "color" && value.type === "color") return;
   if (kind.type === "bool" && value.type === "bool") return;
   if (kind.type === "hue" && value.type === "hue") return;
-  // An angle takes its own value, or the hue a value saved before the kind existed carries:
-  // the same degrees read on, exactly as the daemon's validator does.
+  // An angle takes its own value, or the hue a preset saved before the kind existed carries:
+  // the same degrees read on, the lift the daemon's preset fitter gives a saved preset. The
+  // peripheral adapters are stricter — their check refuses a hue on an angle — so this arm is
+  // the demo's own preset-shaped leniency, not something a device would take.
   if (kind.type === "angle" && (value.type === "angle" || value.type === "hue")) return;
   fail(422, "validation", `${key} does not take that kind of value`);
 }

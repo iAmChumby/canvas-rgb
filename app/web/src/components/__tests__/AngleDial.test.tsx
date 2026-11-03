@@ -122,6 +122,12 @@ describe("AngleDial (#106)", () => {
     expect(up.getAttribute("aria-valuetext")).toBe("270°, pointing up");
   });
 
+  it("keeps the read-out inside 0..359: 359.6 reads as 0, never past the max", () => {
+    const { el } = setup(undefined, undefined, 359.6);
+    expect(el.getAttribute("aria-valuenow")).toBe("0");
+    expect(el.getAttribute("aria-valuetext")).toBe("0°, pointing right");
+  });
+
   it("does nothing while disabled", () => {
     const onChange = vi.fn();
     const onCommit = vi.fn();

@@ -25,6 +25,12 @@ function numberProp(layer: StackLayer, key: string, fallback: number): number {
   return value?.type === "number" ? value.value : fallback;
 }
 
+/** The degrees an angle prop holds, including the hue a preset saved before the kind existed. */
+function angleProp(layer: StackLayer, key: string, fallback: number): number {
+  const value = layer.props[key];
+  return value?.type === "angle" || value?.type === "hue" ? value.value : fallback;
+}
+
 /** One layer's demo picture. A handful of effects have a look built from their props. */
 function demoLayerPicture(layer: StackLayer, width: number, height: number, seconds: number): Uint8Array {
   if (layer.effect === "solid") {
@@ -40,7 +46,7 @@ function demoLayerPicture(layer: StackLayer, width: number, height: number, seco
   if (layer.effect === "gradient") {
     const from = colorOf(layer.props.color1, "#ff2d55");
     const to = colorOf(layer.props.color2, "#ffb703");
-    const angle = ((numberProp(layer, "angle", 90) % 360) * Math.PI) / 180;
+    const angle = ((angleProp(layer, "angle", 90) % 360) * Math.PI) / 180;
     const dx = Math.cos(angle);
     const dy = Math.sin(angle);
     const out = new Uint8Array(width * height * 3);

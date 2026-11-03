@@ -3076,6 +3076,46 @@ async fn preset_props_are_fitted_to_the_schema_and_capped() {
 }
 
 #[tokio::test]
+async fn a_saved_hue_for_the_gradient_angle_is_listed_and_used_as_the_same_degrees() {
+    // A gradient saved before the angle kind existed stores its angle as a hue. The fitter must
+    // read it as the same degrees, both when the preset is listed and when it is used — not
+    // silently drop it and let the 90° default show.
+    let (router, _app, _home) = build();
+    let (status, _) = send(
+        &router,
+        "POST",
+        "/api/v1/effects/gradient/presets",
+        serde_json::json!({
+            "name": "Twelve o'clock",
+            "props": { "angle": { "type": "hue", "value": 120.0 } },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the preset is saved");
+
+    // Listed as the angle it was stored for.
+    let (_, detail) = send(&router, "GET", "/api/v1/effects/gradient", serde_json::json!({})).await;
+    let props = &detail["user_presets"][0]["props"];
+    assert_eq!(
+        props["angle"]["type"], "angle",
+        "the saved hue is listed as the angle it was stored for"
+    );
+    assert_eq!(props["angle"]["value"], 120.0, "the degrees survive, not the 90 default");
+
+    // Used as the angle it was stored for.
+    let (status, body) = send(
+        &router,
+        "POST",
+        "/api/v1/effects/gradient/activate",
+        serde_json::json!({ "preset": "Twelve o'clock" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the preset is applied");
+    assert_eq!(body["props"]["angle"]["type"], "angle", "the used value is an angle");
+    assert_eq!(body["props"]["angle"]["value"], 120.0, "the used angle is the saved degrees");
+}
+
+#[tokio::test]
 async fn a_preset_saved_before_the_effect_narrowed_applies_clamped() {
     let (router, app, _home, folder) = build_with_speed_effect();
     let (status, _) = send(

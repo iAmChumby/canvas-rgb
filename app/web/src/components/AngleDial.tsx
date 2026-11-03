@@ -41,6 +41,9 @@ export function AngleDial({
   const owner = useRef<number | null>(null);
   const [dragging, setDragging] = useState(false);
   const deg = ((value % 360) + 360) % 360;
+  // The read-out stays inside [0, 359]: a value a whisker under 360 rounds to 360, which sits
+  // past aria-valuemax, so it wraps to 0 — the number the degrees field beside the dial shows.
+  const now = Math.round(deg) % 360;
 
   /** The dial angle under the pointer: 0 at the right, growing clockwise (90 points down). */
   const angleAt = (e: PointerEvent<HTMLDivElement>): number => {
@@ -120,8 +123,8 @@ export function AngleDial({
       aria-label={label}
       aria-valuemin={0}
       aria-valuemax={359}
-      aria-valuenow={Math.round(deg)}
-      aria-valuetext={`${Math.round(deg)}°, pointing ${directionWord(deg)}`}
+      aria-valuenow={now}
+      aria-valuetext={`${now}°, pointing ${directionWord(now)}`}
       aria-disabled={disabled ? true : undefined}
       data-dragging={dragging ? "true" : "false"}
       data-disabled={disabled ? "true" : undefined}
