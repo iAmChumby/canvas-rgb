@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
+import { cancelPress, refuseDragStart } from "@/lib/pressDrag";
 
 /**
  * The cap's width in css pixels. The cap is the only thing that travels, and it travels
@@ -92,14 +93,13 @@ export function Slider({
   };
 
   const onPointerDown = (e: PointerEvent<HTMLDivElement>) => {
-    // A press never starts a native drag or a text selection (#105): canceling the pointerdown
-    // keeps the compatibility mousedown, the event Chromium starts a selection or an element
-    // drag from, from firing, so the cursor stays a pointer and the move stays ours.
-    e.preventDefault();
-    if (disabled || owner.current !== null) return;
-    // Focus is ours now: the canceled press would have carried it, and the keyboard has to keep
-    // working after a mouse press.
-    e.currentTarget.focus({ preventScroll: true });
+    // A disabled slider keeps the old press: a click on it must still blur (and so commit) a
+    // field focused elsewhere, and that blur rides on the browser's own press behaviour.
+    if (disabled) return;
+    // A press never starts a native drag or a text selection (#105); the keyboard keeps working
+    // after a mouse press, without claiming the keyboard's focus ring.
+    cancelPress(e, { focus: true });
+    if (owner.current !== null) return;
     owner.current = e.pointerId;
     e.currentTarget.setPointerCapture(e.pointerId);
     setDragging(true);
@@ -170,8 +170,7 @@ export function Slider({
       data-dragging={dragging ? "true" : "false"}
       data-disabled={disabled ? "true" : undefined}
       draggable={false}
-      // Whatever dragstart the browser still tries from inside the slider is refused.
-      onDragStart={(e) => e.preventDefault()}
+      onDragStart={refuseDragStart}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}

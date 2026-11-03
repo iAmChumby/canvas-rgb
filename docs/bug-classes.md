@@ -36,6 +36,30 @@ elements with `pointer-events: none`, so a press on such an element lands on wha
   first in sorted order, not the nearest; arrow-key nudging moves a selected case alone and ignores
   locks (unchanged from before #3; pointer drags carry and respect locks).
 
+- [#105](https://github.com/iAmChumby/canvas-rgb/issues/105): dragging a slider cap showed the
+  browser's no-drop cursor instead of moving the value. A press on the slider never canceled its
+  default (`app/web/src/components/Slider.tsx`), so Chromium started a text-selection drag from the
+  compatibility mousedown (headless-Chromium evidence: on the old Slider every press-drag fired
+  `selectstart` once, `dragstart` 0; the HueRing did the same, so the sibling was real). The same
+  fault shape was in the hue ring, the colour picker's saturation/brightness square and hue strip,
+  and the stack area picker's desk; the fan curve points and the layout stage already canceled
+  their presses.
+- **Class fix:** done (#105). One helper, `app/web/src/lib/pressDrag.ts`, is the whole rule:
+  `cancelPress` cancels the press (and, for a keyboard-operable control, focuses the surface with
+  `focusVisible: false`, so the keyboard keeps working after a mouse press without claiming the
+  keyboard's ring), and `refuseDragStart` refuses any dragstart the browser still tries from
+  inside. Every pointer-drag control goes through it — the Slider, the HueRing, the colour
+  picker's square and strip, the stack area picker's desk, the fan curve points and the layout
+  stage's pan, handle and part-press branches — and each surface also carries `user-select: none`
+  and `-webkit-user-select: none` in its own CSS, with `draggable={false}` where it is an HTML
+  element. One test over every surface
+  (`app/web/src/components/__tests__/PressDrag.test.tsx`): a pointerdown is defaultPrevented, a
+  dragstart is refused, and the surface says it is not draggable. A disabled control keeps the old
+  press on purpose: a click on it must still blur — and so commit — a field focused elsewhere.
+  Left: the per-control fault on real hardware rests on the same headless `selectstart` evidence
+  as #105 (UNKNOWN per control until one real press-drag); the stage's own `user-select: none`
+  stays as the second guard for the empty-desk marquee.
+
 ### `cause:platform-api`: a Windows API called the wrong way
 
 The call compiles and returns an error code, or no data, at run time. The fakes do not exercise these
