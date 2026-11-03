@@ -108,6 +108,13 @@ button.chip.chip-add:hover {
   max-width: 320px;
 }
 
+/* Renaming a layer must not move the row: the field takes the line box the name
+   occupied (15px type at the body's 1.45 line-height = 21.75px), so the layer-text
+   column keeps its height and the row's grip, thumb and tip stay put. */
+.layer-text .name-field {
+  height: calc(var(--t15) * 1.45);
+}
+
 .name-field[aria-invalid="true"] {
   border-color: var(--down);
 }
