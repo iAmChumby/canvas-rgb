@@ -55,7 +55,7 @@ elements with `pointer-events: none`, so a press on such an element lands on wha
   Slider, the HueRing, the colour picker's square and strip, the stack area picker's desk, the
   fan curve points and the layout stage's pan, handle, part-press and marquee branches — and
   each surface also carries `user-select: none` and `-webkit-user-select: none` in its own CSS,
-  with `draggable={false}` where it is an HTML element. One test over every surface
+  with `draggable={false}` on the HTML controls (Slider, HueRing, ColorPicker); the SVG and stage surfaces rely on the cancelled press. One test over every surface
   (`app/web/src/components/__tests__/PressDrag.test.tsx`): a pointerdown is defaultPrevented, a
   dragstart is refused, the surface says it is not draggable, and a focused field outside still
   blurs. A disabled control keeps the old press on purpose: a click on it must still blur — and
