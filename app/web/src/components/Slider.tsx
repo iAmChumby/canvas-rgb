@@ -92,7 +92,14 @@ export function Slider({
   };
 
   const onPointerDown = (e: PointerEvent<HTMLDivElement>) => {
+    // A press never starts a native drag or a text selection (#105): canceling the pointerdown
+    // keeps the compatibility mousedown, the event Chromium starts a selection or an element
+    // drag from, from firing, so the cursor stays a pointer and the move stays ours.
+    e.preventDefault();
     if (disabled || owner.current !== null) return;
+    // Focus is ours now: the canceled press would have carried it, and the keyboard has to keep
+    // working after a mouse press.
+    e.currentTarget.focus({ preventScroll: true });
     owner.current = e.pointerId;
     e.currentTarget.setPointerCapture(e.pointerId);
     setDragging(true);
@@ -162,6 +169,9 @@ export function Slider({
       aria-disabled={disabled ? true : undefined}
       data-dragging={dragging ? "true" : "false"}
       data-disabled={disabled ? "true" : undefined}
+      draggable={false}
+      // Whatever dragstart the browser still tries from inside the slider is refused.
+      onDragStart={(e) => e.preventDefault()}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}

@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- Dragging a slider cap now moves the value instead of showing the browser's no-drop cursor: a press on a slider never starts a native drag or a text selection. (#105)
+
 ## [0.6.0] - 2026-11-02
 
 ### Added
