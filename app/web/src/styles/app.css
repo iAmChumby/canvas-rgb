@@ -3635,12 +3635,15 @@ button.chip:hover {
   vertical-align: middle;
 }
 
-/* The editor: the app's panel, with the curve taking the height the column has left. */
+/* The editor: the app's panel, with the curve taking the height the column has left. Its
+   scrollbar gutter is always there, so a panel that starts to scroll keeps its width and its
+   points keep their columns (#109). */
 .rd-fans .rd-fans-right > .panel {
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
   min-height: 0;
+  scrollbar-gutter: stable;
 }
 
 .rd-fans .rd-fans-right > .panel > .panel-head {
@@ -3836,6 +3839,8 @@ button.chip:hover {
     z-index: 25;
     padding: var(--s3);
     overflow: auto;
+    /* On the phone the sheet is what scrolls, not the panel in it: its gutter is kept too. */
+    scrollbar-gutter: stable;
     background: var(--g1);
   }
 }
@@ -3987,6 +3992,97 @@ button.chip:hover {
 .rule-warn {
   border-color: color-mix(in srgb, var(--warn) 40%, transparent);
   background: color-mix(in srgb, var(--warn) 8%, var(--sunk));
+}
+
+/* The fan editor's status: the daemon's reason, an error, "Applying". The region is as tall
+   empty as full, so none of them moves the points or grows the panel (#109). The reason has
+   room for two lines and is cut at two, with a More key that opens the rest over the page (the
+   header's row in the list has it in full); the line under it holds the error and "Applying" side by side, one line. */
+.fan-status {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+}
+
+.fan-status-reason {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: calc(2lh + 2 * var(--s2) + 2px);
+  font-size: var(--t14);
+}
+
+.fan-status-reason .rule {
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+  background: var(--warn-wash);
+}
+
+/* The reason: its text, and a More key when the text is cut at two lines. Open, the box lies
+   over what is below it (the region keeps its height), so nothing moves. */
+.fan-status-box {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s2);
+}
+
+.fan-status-box.is-open {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 3;
+}
+
+.fan-status-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.fan-status-box.is-open .fan-status-text {
+  -webkit-line-clamp: unset;
+  display: block;
+  overflow: visible;
+}
+
+.fan-status-more {
+  flex: none;
+}
+
+/* With no reason the region still says who is in charge: the same box, no warning tone. */
+.fan-status-quiet {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+}
+
+.fan-status-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s3);
+  min-height: 1lh;
+  font-size: var(--t14);
+}
+
+.fan-status-error {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fan-status-busy {
+  flex: none;
+  min-width: 8ch;
+  text-align: right;
 }
 
 .profile-row {

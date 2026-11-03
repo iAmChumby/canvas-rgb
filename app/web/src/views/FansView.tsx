@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
 import { ArrowClockwise, CopySimple, DotsThreeOutline, Fan, FloppyDisk, Plus, Trash, X } from "@phosphor-icons/react";
 import { Button, IconButton } from "@/components/Button";
 import { Chip } from "@/components/Chip";
@@ -302,6 +302,11 @@ export function FansView() {
 
         {selected && (
           <div className="rd-fans-right">
+            {/* One live node for the whole editor, outside the keyed HeaderEditor: it is the same
+                element across a mode switch, so a reason that is there stays said once. */}
+            <span className="sr-only" aria-live="polite" data-slot="fan-status-announce">
+              {reasonKindOf(selected)}
+            </span>
             <HeaderEditor
               key={`${selected.id}|${selected.mode.mode}|${fans.active_profile}`}
               header={selected}
@@ -620,6 +625,98 @@ function writeFanMode(header: string, mode: FanMode, onError: (e: unknown) => vo
   return mine.done;
 }
 
+/** The one sentence a screen reader hears for a header's reason: it names the KIND, never the live value. */
+function reasonKindOf(header: FanHeaderStatus): string {
+  if (!header.override_reason) return "";
+  const handedBack = header.on_bios && header.mode.mode !== "bios";
+  return handedBack
+    ? `${header.label}: canvas-rgb handed this header back to BIOS`
+    : `canvas-rgb is overriding ${header.label}`;
+}
+
+/**
+ * The reason box: two lines, whole text behind a More key when it is cut. Open, the box lies over
+ * what is below it and does not push it (the region keeps its height), so reading the rest moves
+ * nothing. With no reason it says what is in charge, in the same box.
+ */
+function StatusReason({ text, warn, quiet }: { text: string | null; warn: boolean; quiet: string }) {
+  const region = useRef<HTMLDivElement>(null);
+  const box = useRef<HTMLDivElement>(null);
+  const textRef = useRef<HTMLSpanElement>(null);
+  const [clamped, setClamped] = useState(false);
+  const [open, setOpen] = useState(false);
+  useLayoutEffect(() => {
+    const el = textRef.current;
+    if (!el) return;
+    const measure = () => {
+      if (!open) setClamped(el.scrollHeight > el.clientHeight + 1);
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [text, open]);
+  // Open, the box closes on a press outside it, on Escape anywhere, and when focus leaves it.
+  useEffect(() => {
+    if (!open) return;
+    const press = (e: PointerEvent) => {
+      if (!box.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", press, true);
+    document.addEventListener("keydown", key);
+    return () => {
+      document.removeEventListener("pointerdown", press, true);
+      document.removeEventListener("keydown", key);
+    };
+  }, [open]);
+  const shown = open && text !== null;
+  return (
+    // The region is the stable element: it takes focus when the key that had it goes away.
+    <div className="fan-status-reason" data-slot="fan-status-reason" ref={region} tabIndex={-1}>
+      {text ? (
+        <div
+          ref={box}
+          className={`rule${warn ? " rule-warn" : ""} fan-status-box${shown ? " is-open" : ""}`}
+          onBlur={(e) => {
+            if (e.relatedTarget && !e.currentTarget.contains(e.relatedTarget as Node)) setOpen(false);
+          }}
+        >
+          <span className="fan-status-text" ref={textRef}>
+            {text}
+          </span>
+          {(clamped || shown) && (
+            <MoreKey open={shown} onToggle={() => setOpen(!shown)} fallback={region} />
+          )}
+        </div>
+      ) : (
+        <p className="fan-status-quiet mute">{quiet}</p>
+      )}
+    </div>
+  );
+}
+
+/** The More / Less key. If it goes away with focus on it, focus moves to a stable element first. */
+function MoreKey({ open, onToggle, fallback }: { open: boolean; onToggle: () => void; fallback: RefObject<HTMLElement | null> }) {
+  const ref = useRef<HTMLSpanElement>(null);
+  useLayoutEffect(
+    () => () => {
+      if (ref.current?.contains(document.activeElement)) fallback.current?.focus();
+    },
+    [fallback],
+  );
+  return (
+    <span className="fan-status-more" ref={ref}>
+      <Button size="sm" variant="ghost" aria-expanded={open} onClick={onToggle}>
+        {open ? "Less" : "More"}
+      </Button>
+    </span>
+  );
+}
+
 function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansStatus }) {
   const base = baseFloor(header.id, fans.floor_percent);
   const [err, setErr] = useState<string | null>(null);
@@ -696,6 +793,34 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
   const current = mode.mode;
   // The chip is doing something else than what was asked for: the daemon handed it back.
   const handedBack = header.on_bios && mode.mode !== "bios";
+  // What the daemon says about this header, in words that name it. The words are on the page for
+  // the eye; the reader of a screen hears one stable sentence per KIND of reason, so a live
+  // temperature inside the reason ("while CPU is 78 °C") is not read again at every change.
+  const reasonText = header.override_reason
+    ? handedBack
+      ? `canvas-rgb handed ${header.label} back to BIOS: ${header.override_reason}`
+      : `canvas-rgb overrode ${header.label}: ${header.override_reason}`
+    : null;
+  // The status stays in the page whether it has anything to say or not: the reason, an error and
+  // "Applying" fill room that is already reserved, so a commit or a hot floor never grows the
+  // panel, never flashes its scrollbar and never moves the points (#109). It stands under the
+  // control it explains: the chart, the duty or the mode note.
+  const quiet = {
+    bios: "The BIOS is in charge of this fan.",
+    fixed: "Fixed duty is in charge; nothing is overriding it.",
+    curve: "The curve is in charge; nothing is overriding it.",
+  }[mode.mode];
+  const status = (
+    <div className="fan-status" data-slot="fan-status">
+      <StatusReason text={reasonText} warn={handedBack} quiet={quiet} />
+      <div className="fan-status-line" data-slot="fan-status-line">
+        <span className="fan-status-error error-line" role="alert" title={err ?? undefined}>
+          {err ?? ""}
+        </span>
+        <span className="fan-status-busy mute">{busy ? "Applying" : ""}</span>
+      </div>
+    </div>
+  );
 
   return (
     <Panel
@@ -719,18 +844,10 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
           onChange={setMode}
         />
 
-        {header.override_reason && (
-          <p className={handedBack ? "rule rule-warn" : "rule"}>
-            {handedBack
-              ? "canvas-rgb handed this header back to BIOS"
-              : "canvas-rgb overrode this"}
-            : {header.override_reason}
-          </p>
-        )}
-
         {mode.mode === "bios" && (
           <p className="mute">Chip auto control. Floors off.</p>
         )}
+        {mode.mode === "bios" && status}
 
         {manual && (
           <div className="rule">
@@ -762,6 +879,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
             </div>
           </Field>
         )}
+        {mode.mode === "fixed" && status}
 
         {mode.mode === "curve" && (
           <>
@@ -787,6 +905,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
               onChange={setPoints}
               onCommit={commitCurve}
             />
+            {status}
             <div className="curve-rows">
               {points.map((p, i) => (
                 <div className="curve-row" key={i}>
@@ -848,8 +967,6 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
             Duty <Figure unit="%">{header.pwm_percent === null ? "—" : <AnimatedNumber value={header.pwm_percent} />}</Figure>
           </p>
         )}
-        {err && <p className="error-line">{err}</p>}
-        {busy && <p className="mute" style={{ fontSize: 14 }}>Applying</p>}
       </div>
     </Panel>
   );
