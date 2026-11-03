@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- Opening Peripherals no longer makes the mouse pointer stutter each time: canvas-rgb reads the mouse once and keeps its settings, and a Read again key reads it on demand. (#7)
+
 ## [0.7.0] - 2026-11-02
 
 ### Added
@@ -23,7 +27,6 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - Dragging a slider cap now moves the value instead of showing the browser's no-drop cursor: a press on a slider never starts a native drag or a text selection. (#105)
 - Editing a fan curve no longer makes the editor panel jump or flash a scrollbar. The note on why canvas-rgb changed a fan now sits in its own reserved spot under the chart, names the fan, and never pushes the points down; "Applying" and any error share a reserved line beside it. (#109)
 - The stack's name field is full width again. (#108)
-- Opening Peripherals no longer makes the mouse pointer stutter each time: canvas-rgb reads the mouse once and keeps its settings, and a Read again key reads it on demand. (#7)
 
 ## [0.6.0] - 2026-11-02
 
