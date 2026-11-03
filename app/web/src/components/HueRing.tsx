@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, type KeyboardEvent, type PointerEvent } from "react";
+import { cancelPress, refuseDragStart } from "@/lib/pressDrag";
 
 const SEGMENTS = 36;
 
@@ -47,7 +48,9 @@ export function HueRing({
   };
 
   const onDown = (e: PointerEvent<HTMLDivElement>) => {
+    // A disabled ring keeps the old press, so a click on it still blurs a focused field.
     if (disabled) return;
+    cancelPress(e, { focus: true });
     e.currentTarget.setPointerCapture(e.pointerId);
     onChange(angleAt(e));
   };
@@ -99,6 +102,8 @@ export function HueRing({
       aria-valuemax={360}
       aria-valuenow={Math.round(hue)}
       aria-disabled={disabled ? true : undefined}
+      draggable={false}
+      onDragStart={refuseDragStart}
       onPointerDown={onDown}
       onPointerMove={onMove}
       onPointerUp={onUp}
