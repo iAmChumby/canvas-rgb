@@ -3624,8 +3624,8 @@ button.chip:hover {
 }
 
 /* The name and its chip share one line: the cell never breaks between them. */
-.rd-fans .fan-table th:first-child,
-.rd-fans .fan-table td:first-child {
+.rd-fans .fan-table th.name-col,
+.rd-fans .fan-table td.name-col {
   white-space: nowrap;
 }
 
@@ -3723,8 +3723,8 @@ button.chip:hover {
     width: 44px;
   }
 
-  .rd-fans .fan-table th:first-child,
-  .rd-fans .fan-table td:first-child {
+  .rd-fans .fan-table th.name-col,
+  .rd-fans .fan-table td.name-col {
     white-space: normal;
   }
 }

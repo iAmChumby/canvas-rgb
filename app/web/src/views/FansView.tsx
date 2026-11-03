@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
-import { ArrowClockwise, CopySimple, DotsThreeOutline, Fan, FloppyDisk, Plus, Trash, X } from "@phosphor-icons/react";
+import { ArrowClockwise, Check, CopySimple, DotsThreeOutline, Fan, FloppyDisk, ListChecks, Minus, Plus, Trash, X } from "@phosphor-icons/react";
 import { Button, IconButton } from "@/components/Button";
+import { Checkbox } from "@/components/Checkbox";
 import { Chip } from "@/components/Chip";
 import { Popover } from "@/components/Popover";
 import { EmptyState } from "@/components/EmptyState";
@@ -19,7 +20,10 @@ import { Details, LoadFrame } from "@/components/Loading";
 import { FansShape } from "@/components/LoadShapes";
 import { useToast } from "@/components/Toast";
 import { FanCurveEditor } from "@/views/FanCurveEditor";
+import { FanBulkBar } from "@/views/FanBulk";
+import { TACH_ONLY_WHY, canDrive, isHandedBack, plainLabel } from "@/lib/fanBulk";
 import { api } from "@/lib/endpoints";
+import { writeFanMode } from "@/lib/fanWrites";
 import { messageOf } from "@/lib/errors";
 import { refreshFans, retryFans as retryFansNow, useSnap } from "@/lib/store";
 import { baseFloor, hotRuleText } from "@/lib/fan-rules";
@@ -141,6 +145,12 @@ export function FansView() {
   // The first header is the default selection until one is clicked. On a phone the list is the
   // page and the editor is a sheet a tap pushes over it, so nothing is selected until then.
   const selectedId = picked ?? (narrow ? null : fans?.headers[0]?.id ?? null);
+  // The headers ticked for a change to several at once (#110), and the phone's select mode.
+  const [ticked, setTicked] = useState<string[]>([]);
+  const [selectMode, setSelectMode] = useState(false);
+  const lastTick = useRef<string | null>(null);
+  // The bulk bar is applying: the Select/Done key waits, so the run is not cut off from its report.
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   // The headers last read: from this session if there was one, else from the viewer's memory.
   const [saved] = useState<KnownHeader[]>(() => readKnownHeaders());
@@ -196,6 +206,36 @@ export function FansView() {
 
   const selected = fans ? (fans.headers.find((h) => h.id === selectedId) ?? (narrow ? null : fans.headers[0] ?? null)) : null;
   const headers = fans?.headers ?? [];
+  const checked = headers.filter((h) => canDrive(h) && ticked.includes(h.id));
+  const drivable = headers.filter(canDrive);
+  /** Ticks or unticks a header; with shift, every header between the last tick and this one. */
+  const toggleTick = (id: string, shift = false) => {
+    const h = headers.find((x) => x.id === id);
+    if (!h || !canDrive(h)) return;
+    const last = lastTick.current;
+    const on = !ticked.includes(id);
+    let ids = [id];
+    if (shift && last) {
+      const a = drivable.findIndex((x) => x.id === last);
+      const b = drivable.findIndex((x) => x.id === id);
+      if (a >= 0 && b >= 0) ids = drivable.slice(Math.min(a, b), Math.max(a, b) + 1).map((x) => x.id);
+    }
+    lastTick.current = id;
+    setTicked((cur) => (on ? [...new Set([...cur, ...ids])] : cur.filter((x) => !ids.includes(x))));
+  };
+  // A header that leaves the list (a profile switch, a chip that stops reporting it) leaves the ticks.
+  const idsKey = headers.map((h) => h.id).join("|");
+  const [seenIds, setSeenIds] = useState(idsKey);
+  if (seenIds !== idsKey) {
+    setSeenIds(idsKey);
+    const live = new Set(idsKey.split("|"));
+    setTicked((cur) => (cur.every((id) => live.has(id)) ? cur : cur.filter((id) => live.has(id))));
+  }
+  const allTicked = drivable.length > 0 && checked.length === drivable.length;
+  const clearTicks = () => {
+    setTicked([]);
+    lastTick.current = null;
+  };
   // A refresh that failed after the readings were read does not take the page away: the numbers
   // stay and the page says they may be old.
   const stale = fans !== null && fansError !== null;
@@ -258,7 +298,38 @@ export function FansView() {
               })}
             </div>
           </Panel>
-          <Panel title="Headers" className="rd-headers">
+          <Panel
+            title="Headers"
+            className="rd-headers"
+            actions={
+              narrow ? (
+                <Button
+                  size="sm"
+                  variant={selectMode ? "primary" : "default"}
+                  icon={<ListChecks size={14} />}
+                  aria-pressed={selectMode}
+                  disabled={bulkBusy}
+                  className="fan-select-key"
+                  onClick={() => {
+                    if (selectMode) clearTicks();
+                    setSelectMode(!selectMode);
+                  }}
+                >
+                  {selectMode ? "Done" : "Select"}
+                </Button>
+              ) : undefined
+            }
+          >
+          {(!narrow || selectMode) && (
+            <FanBulkBar
+              fans={fans}
+              checked={checked}
+              focusedId={selected?.id ?? null}
+              onClear={clearTicks}
+              onBusy={setBulkBusy}
+              write={writeFanMode}
+            />
+          )}
           {narrow ? (
             <div className="fan-cards">
               {headers.map((h) => (
@@ -267,7 +338,9 @@ export function FansView() {
                   header={h}
                   selected={selected?.id === h.id}
                   history={rpm[h.id] ?? []}
-                  onSelect={() => setSelectedId(h.id)}
+                  selectMode={selectMode}
+                  checked={ticked.includes(h.id)}
+                  onSelect={() => (selectMode ? toggleTick(h.id) : setSelectedId(h.id))}
                 />
               ))}
             </div>
@@ -276,11 +349,19 @@ export function FansView() {
               <table className="fan-table">
                 <thead>
                   <tr>
-                    <th scope="col">Header</th>
+                    <th scope="col" className="tick-col">
+                      <Checkbox
+                        label="Select every header that can be set"
+                        checked={allTicked}
+                        mixed={checked.length > 0 && !allTicked}
+                        onToggle={() => setTicked(allTicked ? [] : drivable.map((h) => h.id))}
+                      />
+                    </th>
+                    <th scope="col" className="name-col">Header</th>
                     <th scope="col" className="num-col">RPM</th>
                     <th scope="col">Duty</th>
                     <th scope="col">Mode</th>
-                    <th scope="col" className="rd-history">Last 60 s</th>
+                    <th scope="col" className="rd-history hist-head">Last 60 s</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -290,6 +371,8 @@ export function FansView() {
                       header={h}
                       selected={selected?.id === h.id}
                       history={rpm[h.id] ?? []}
+                      checked={ticked.includes(h.id)}
+                      onTick={(shift) => toggleTick(h.id, shift)}
                       onSelect={() => setSelectedId(h.id)}
                     />
                   ))}
@@ -325,31 +408,51 @@ function FanRow({
   header,
   selected,
   history,
+  checked,
+  onTick,
   onSelect,
 }: {
   header: FanHeaderStatus;
   selected: boolean;
   history: number[];
+  checked: boolean;
+  onTick: (shift: boolean) => void;
   onSelect: () => void;
 }) {
   const peak = Math.max(2000, ...history);
   const duty = header.pwm_percent ?? 0;
+  const tach = !canDrive(header);
   return (
     <tr
       aria-selected={selected}
       tabIndex={0}
       onClick={onSelect}
       onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
+        if (e.target !== e.currentTarget) return;
+        // Enter opens the header in the editor; Space ticks it for a change to several.
+        if (e.key === "Enter") {
           e.preventDefault();
           onSelect();
         }
+        if (e.key === " ") {
+          e.preventDefault();
+          onTick(e.shiftKey);
+        }
       }}
     >
-      <td>
-        <span className="fig" style={{ fontWeight: 600 }}>{header.label}</span>
+      <td className="tick-col">
+        <Checkbox
+          label={tach ? `${header.label}: tach only, cannot be selected` : `Select ${header.label}`}
+          checked={checked}
+          blocked={tach}
+          title={tach ? TACH_ONLY_WHY : undefined}
+          onToggle={onTick}
+        />
+      </td>
+      <td className="name-col">
+        <span className="fig" style={{ fontWeight: 600 }}>{plainLabel(header.label)}</span>
         {header.pwm_percent === null && <Chip className="rd-hdr-chip">tach only</Chip>}
-        <Handoff header={header} />
+        <Handoff header={header} ticked={checked} />
       </td>
       <td className="num-col">
         <span className="rpm-big">
@@ -384,12 +487,12 @@ function FanRow({
  * is doing something else, the daemon has handed the header back, and that is said here, with
  * the reason.
  */
-function Handoff({ header }: { header: FanHeaderStatus }) {
-  const handedBack = header.on_bios && header.mode.mode !== "bios";
-  if (!handedBack) return null;
+function Handoff({ header, ticked }: { header: FanHeaderStatus; ticked?: boolean }) {
+  if (!isHandedBack(header)) return null;
   return (
     <>
-      <span className="fan-handoff">Handed back to BIOS</span>
+      {/* A handed-back header can be ticked, and a bulk apply leaves it as it is: the row says so. */}
+      <span className="fan-handoff">{ticked ? "Handed back to BIOS, skipped when applied" : "Handed back to BIOS"}</span>
       {header.override_reason && <span className="fan-reason">{header.override_reason}</span>}
     </>
   );
@@ -400,22 +503,46 @@ function FanCard({
   header,
   selected,
   history,
+  selectMode,
+  checked,
   onSelect,
 }: {
   header: FanHeaderStatus;
   selected: boolean;
   history: number[];
+  selectMode: boolean;
+  checked: boolean;
   onSelect: () => void;
 }) {
   const peak = Math.max(2000, ...history);
   const duty = header.pwm_percent ?? 0;
+  const tach = !canDrive(header);
+  // In select mode a card is a tick box: a tap ticks it, and a tach-only card says why it cannot be.
+  const pick = selectMode
+    ? ({ role: "checkbox", "aria-checked": checked, "aria-disabled": tach || undefined } as const)
+    : {};
   return (
-    <button type="button" className="fan-card" data-selected={selected ? "true" : "false"} onClick={onSelect}>
+    <button
+      type="button"
+      className="fan-card"
+      data-selected={(selectMode ? checked : selected) ? "true" : "false"}
+      title={selectMode && tach ? TACH_ONLY_WHY : undefined}
+      {...pick}
+      onClick={() => {
+        if (!selectMode || !tach) onSelect();
+      }}
+    >
+      {selectMode && (
+        <span className="tick-box" data-checked={checked ? "true" : "false"} aria-hidden="true">
+          {checked ? <Check size={12} weight="bold" /> : tach ? <Minus size={12} weight="bold" /> : null}
+        </span>
+      )}
       <span className="fan-card-head">
         <span className="fig fan-card-name">{header.label}</span>
         <ModeState mode={header.mode} />
-        {selected && <span className="fan-card-editing">Editing</span>}
-        <Handoff header={header} />
+        {selected && !selectMode && <span className="fan-card-editing">Editing</span>}
+        {selectMode && tach && <span className="fan-card-editing">Tach only, cannot be set</span>}
+        <Handoff header={header} ticked={selectMode && checked} />
       </span>
       <span className="fan-card-readouts">
         <span className="fan-card-rpm">
@@ -589,41 +716,6 @@ function FanProfileActions({ fans }: { fans: FansStatus }) {
   );
 }
 
-/** The writes to one fan header: one request at a time, and while one is out only the newest waits. */
-const fanWrites = new Map<string, { done: Promise<void> | null; queued: FanMode | null }>();
-
-/**
- * Sends a mode to a header so the latest choice is the one the chip ends on. Requests that
- * overlap can land out of order, so a new request waits for the one in flight, and a request
- * that is still waiting when a newer one arrives is dropped. Resolves when the header has no
- * writes left.
- */
-function writeFanMode(header: string, mode: FanMode, onError: (e: unknown) => void): Promise<void> {
-  let slot = fanWrites.get(header);
-  if (!slot) {
-    slot = { done: null, queued: null };
-    fanWrites.set(header, slot);
-  }
-  slot.queued = mode;
-  if (slot.done) return slot.done;
-  const mine = slot;
-  mine.done = (async () => {
-    try {
-      while (mine.queued) {
-        const next = mine.queued;
-        mine.queued = null;
-        try {
-          await api.patchFanHeader(header, next);
-        } catch (e) {
-          onError(e);
-        }
-      }
-    } finally {
-      mine.done = null;
-    }
-  })();
-  return mine.done;
-}
 
 /** The one sentence a screen reader hears for a header's reason: it names the KIND, never the live value. */
 function reasonKindOf(header: FanHeaderStatus): string {
