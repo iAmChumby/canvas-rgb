@@ -119,12 +119,12 @@ export const EFFECTS: DemoEffect[] = [
     [
       { key: "speed", label: "Speed", kind: numberKind(0, 100, 1, 30) },
       { key: "width", label: "Width", kind: numberKind(5, 200, 1, 60) },
-      { key: "direction", label: "Direction", kind: numberKind(0, 360, 1, 0) },
+      { key: "direction", label: "Direction", kind: angleKind(0) },
       { key: "cycles", label: "Cycles", kind: numberKind(1, 8, 1, 1) },
     ],
     [
       { name: "Fast sweep", over: { speed: n(60), width: n(40) } },
-      { name: "Diagonal", over: { direction: n(45), speed: n(40) } },
+      { name: "Diagonal", over: { direction: a(45), speed: n(40) } },
       { name: "Wide arc", over: { width: n(150), cycles: n(2) } },
     ], true),
   build("spiral", "Spiral", "Rotating arms of color winding around the canvas center.", NO_INPUT,

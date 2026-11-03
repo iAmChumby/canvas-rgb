@@ -471,6 +471,14 @@ pub fn fit_props_to_schema(schema: &PropertySchema, props: Props, what: &str) ->
                 tracing::debug!(effect = %schema.id, preset = %what, key = %key, from = h, to = angle, "read a saved hue as the angle it was stored for");
                 Some(PropValue::Angle(angle))
             }
+            // A number saved for an angle property (Rainbow Wave's direction was a number
+            // slider before it became an angle) reads as the degrees the old number reader
+            // gave it: clamped to 0..360, then 360 wraps to 0.
+            (PropKind::Angle { .. }, PropValue::Number(n)) if n.is_finite() => {
+                let angle = n.clamp(0.0, 360.0).rem_euclid(360.0);
+                tracing::debug!(effect = %schema.id, preset = %what, key = %key, from = n, to = angle, "read a saved number as the angle it was stored for");
+                Some(PropValue::Angle(angle))
+            }
             (PropKind::Color { .. }, v @ PropValue::Color(_)) => Some(v),
             (PropKind::Bool { .. }, v @ PropValue::Bool(_)) => Some(v),
             (PropKind::Choice { options, .. }, v @ PropValue::Choice(_)) => match &v {
@@ -1026,3 +1034,33 @@ pub async fn delete_effect(
 /// file name. The limit is that, with 4 KiB of room.
 pub const IMPORT_BODY_LIMIT: usize =
     6 * canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES + 4096;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use canvas_proto::props::PropValue;
+
+    /// A Rainbow Wave saved when Direction was a plain number loads with the same direction.
+    #[test]
+    fn a_saved_number_direction_is_fitted_as_the_same_angle() {
+        let schema = canvas_effects::rainbow_wave::RainbowWave::schema();
+        let mut saved = Props::new();
+        saved.insert("direction".into(), PropValue::Number(45.0));
+        let fitted = fit_props_to_schema(&schema, saved, "saved");
+        assert_eq!(fitted.get("direction"), Some(&PropValue::Angle(45.0)));
+
+        let mut over = Props::new();
+        over.insert("direction".into(), PropValue::Number(405.0));
+        let fitted = fit_props_to_schema(&schema, over, "saved");
+        assert_eq!(fitted.get("direction"), Some(&PropValue::Angle(0.0)));
+
+        let mut under = Props::new();
+        under.insert("direction".into(), PropValue::Number(-90.0));
+        let fitted = fit_props_to_schema(&schema, under, "saved");
+        assert_eq!(fitted.get("direction"), Some(&PropValue::Angle(0.0)));
+
+        let mut bad = Props::new();
+        bad.insert("direction".into(), PropValue::Number(f64::NAN));
+        assert!(fit_props_to_schema(&schema, bad, "saved").is_empty());
+    }
+}

@@ -2897,6 +2897,10 @@ fn the_preset_equality_fixture_holds() {
                     (PropKind::Angle { .. }, PropValue::Angle(v) | PropValue::Hue(v)) => {
                         format!("{}", (v + 0.5).floor().rem_euclid(360.0))
                     }
+                    // A saved number was clamped to 0..360 by the reader it came from.
+                    (PropKind::Angle { .. }, PropValue::Number(v)) => {
+                        format!("{}", (v.clamp(0.0, 360.0) + 0.5).floor().rem_euclid(360.0))
+                    }
                     (_, PropValue::Color(c)) => {
                         serde_json::to_value(c).unwrap().as_str().unwrap().to_lowercase()
                     }

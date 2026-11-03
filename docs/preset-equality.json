@@ -166,6 +166,18 @@
       "equal": false
     },
     {
+      "name": "a number saved for an angle property equals the same angle",
+      "preset": { "angle": { "type": "number", "value": 45 } },
+      "live": { "angle": { "type": "angle", "value": 45 } },
+      "equal": true
+    },
+    {
+      "name": "a number saved for an angle property is clamped to 0..360 first",
+      "preset": { "angle": { "type": "number", "value": 405 } },
+      "live": { "angle": { "type": "angle", "value": 0 } },
+      "equal": true
+    },
+    {
       "name": "an angle wraps at 360 degrees",
       "preset": { "angle": { "type": "angle", "value": 0 } },
       "live": { "angle": { "type": "angle", "value": 359.6 } },

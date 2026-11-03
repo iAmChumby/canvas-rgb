@@ -147,6 +147,19 @@ pub fn angle(schema: &PropertySchema, props: &Props, key: &str) -> f64 {
     raw.rem_euclid(360.0)
 }
 
+/// Reads an angle property that older saves stored as a plain `Number` of degrees (Rainbow
+/// Wave's direction): a saved number reads as the same direction, and every other value reads
+/// as [`angle`] reads it. Only an effect whose angle used to be a number should call this; the
+/// other effects keep the strict reader, which takes a mistyped number for a stray value.
+pub fn angle_or_saved_number(schema: &PropertySchema, props: &Props, key: &str) -> f64 {
+    match props.get(key) {
+        // The old reader clamped a number to 0..360, so 405 and -90 read as 360 and 0: the
+        // same direction, then 360 wraps to 0.
+        Some(PropValue::Number(n)) if n.is_finite() => n.clamp(0.0, 360.0).rem_euclid(360.0),
+        _ => angle(schema, props, key),
+    }
+}
+
 /// Clamps `value` to the range the schema declares for `key`, if it declares one.
 fn clamp_to_schema(schema: &PropertySchema, key: &str, value: f64) -> f64 {
     for p in &schema.properties {
@@ -294,6 +307,24 @@ mod tests {
         assert_eq!(angle(&s, &p, "a"), 120.0);
         p.insert("a".into(), PropValue::Angle(120.0));
         assert_eq!(angle(&s, &p, "a"), 120.0);
+    }
+
+    /// Rainbow Wave's direction was a plain number before it became an angle.
+    #[test]
+    fn a_saved_number_reads_as_the_same_angle() {
+        let s = schema();
+        let mut p = Props::new();
+        p.insert("a".into(), PropValue::Number(45.0));
+        assert_eq!(angle_or_saved_number(&s, &p, "a"), 45.0);
+        // The old number reader clamped to 0..360: 405 read as 360 (0 degrees), -90 as 0.
+        p.insert("a".into(), PropValue::Number(405.0));
+        assert_eq!(angle_or_saved_number(&s, &p, "a"), 0.0);
+        p.insert("a".into(), PropValue::Number(-90.0));
+        assert_eq!(angle_or_saved_number(&s, &p, "a"), 0.0);
+        p.insert("a".into(), PropValue::Number(f64::NAN));
+        assert_eq!(angle_or_saved_number(&s, &p, "a"), 90.0);
+        p.insert("a".into(), PropValue::Angle(10.0));
+        assert_eq!(angle_or_saved_number(&s, &p, "a"), 10.0);
     }
 
     #[test]

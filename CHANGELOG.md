@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Changed
+
+- Rainbow Wave's Direction is now a direction dial instead of a slider; saved waves keep their direction. (#121)
+
 ## [0.7.0] - 2026-11-02
 
 ### Added
