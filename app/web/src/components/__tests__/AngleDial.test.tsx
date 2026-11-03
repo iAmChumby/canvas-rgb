@@ -52,6 +52,15 @@ describe("AngleDial (#106)", () => {
     expect(onChange.mock.calls).toEqual([[0], [90], [180], [270]]);
   });
 
+  it("commits 0 for a pointer a whisker below the 0° line, never 360", () => {
+    // atan2(-0.5, 100) is -0.3°: 359.7 before rounding, which rounds to 360 — past the max.
+    const { el, onChange, onCommit } = setup();
+    fireEvent.pointerDown(el, { clientX: 150, clientY: 49.5, pointerId: 1 });
+    fireEvent.pointerUp(el, { clientX: 150, clientY: 49.5, pointerId: 1 });
+    expect(onChange).toHaveBeenLastCalledWith(0);
+    expect(onCommit).toHaveBeenLastCalledWith(0);
+  });
+
   it("commits the angle under the pointer on release", () => {
     const { el, onCommit } = setup();
     fireEvent.pointerDown(el, { clientX: 50, clientY: 100, pointerId: 1 });

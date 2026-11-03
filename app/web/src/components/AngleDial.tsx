@@ -54,7 +54,10 @@ export function AngleDial({
     // Screen coordinates run down, so the angle from +x grows clockwise, which is exactly
     // the canvas' angle: right 0, down 90, left 180, up 270.
     const raw = (Math.atan2(e.clientY - cy, e.clientX - cx) * 180) / Math.PI;
-    return Math.round((raw + 360) % 360);
+    // The wrap happens after rounding: a pointer a whisker below 0° is 359.7 before it rounds,
+    // which rounds to 360 — past the max. Rounding first, then wrapping, keeps every committed
+    // value inside 0..359 (−0.3° commits 0, as the read-out shows).
+    return ((Math.round(raw) % 360) + 360) % 360;
   };
 
   const onPointerDown = (e: PointerEvent<HTMLDivElement>) => {
