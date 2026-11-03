@@ -14,8 +14,11 @@ pub enum PropValue {
     Number(f64),
     Bool(bool),
     Choice(String),
-    /// Degrees, 0..360.
+    /// Degrees, 0..360: a colour on the hue wheel.
     Hue(f64),
+    /// Degrees, 0..360: a direction (0 points right, 90 points down, as on the canvas). Not a
+    /// colour, so the editor draws a direction dial, never a hue ring.
+    Angle(f64),
 }
 
 /// Property values by property key.
@@ -30,6 +33,9 @@ pub enum PropKind {
     Bool { default: bool },
     Choice { options: Vec<String>, default: String },
     Hue { default: f64 },
+    /// A direction in degrees, 0..360. A saved `Hue` value for an `Angle` property is read as
+    /// the same number of degrees (effects saved before the kind existed used `Hue`).
+    Angle { default: f64 },
 }
 
 impl PropKind {
@@ -40,6 +46,7 @@ impl PropKind {
             Self::Bool { default } => PropValue::Bool(*default),
             Self::Choice { default, .. } => PropValue::Choice(default.clone()),
             Self::Hue { default } => PropValue::Hue(*default),
+            Self::Angle { default } => PropValue::Angle(*default),
         }
     }
 }
