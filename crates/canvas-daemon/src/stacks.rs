@@ -168,8 +168,9 @@ fn check_layer_structure(layer: &StackLayer, seen: &mut Vec<String>) -> Result<(
 
 /// The part of a layer that is only a value: its opacity and its rectangle. A PUT is refused for
 /// either (422), and a file loaded from disk keeps the layer and lets the compositor clamp it
-/// (D95.3.6), so a hand-written file never takes the render thread down.
-fn check_layer_values(layer: &StackLayer) -> Result<(), String> {
+/// (D95.3.6), so a hand-written file never takes the render thread down. `index` is the layer's
+/// position in the stack, named in the refusal so the editor can point at the offending layer.
+fn check_layer_values(layer: &StackLayer, index: usize) -> Result<(), String> {
     if layer.opacity > 100 {
         return Err(format!(
             "layer {}: opacity must be 0..=100, and it is {}",
@@ -194,6 +195,39 @@ fn check_layer_values(layer: &StackLayer) -> Result<(), String> {
             return Err(format!(
                 "layer {}: a rectangle's width and height are 0 or more",
                 layer.id
+            ));
+        }
+        let canvas_w = canvas_proto::CANVAS_WIDTH as f32;
+        let canvas_h = canvas_proto::CANVAS_HEIGHT as f32;
+        // The rectangle's right and bottom edges are computed in f32: a huge x or width
+        // overflows to infinity here, and infinity is past the canvas, so the check refuses
+        // it as an edge failure instead of panicking.
+        if x < 0.0 {
+            return Err(format!(
+                "layer {} ({}) at index {index}: the left edge x = {x} is past the canvas; x must be 0 or more in the {canvas_w}-wide canvas",
+                layer.id, layer.effect
+            ));
+        }
+        if y < 0.0 {
+            return Err(format!(
+                "layer {} ({}) at index {index}: the top edge y = {y} is past the canvas; y must be 0 or more in the {canvas_h}-tall canvas",
+                layer.id, layer.effect
+            ));
+        }
+        if x + width > canvas_w {
+            return Err(format!(
+                "layer {} ({}) at index {index}: the right edge x + width = {} is past the {canvas_w}-wide canvas",
+                layer.id,
+                layer.effect,
+                x + width
+            ));
+        }
+        if y + height > canvas_h {
+            return Err(format!(
+                "layer {} ({}) at index {index}: the bottom edge y + height = {} is past the {canvas_h}-tall canvas",
+                layer.id,
+                layer.effect,
+                y + height
             ));
         }
     }
@@ -226,9 +260,9 @@ pub fn validate_stack(stack: &Stack, known: &KnownEffects, others: &[Stack]) -> 
         ));
     }
     let mut seen = Vec::new();
-    for layer in &stack.layers {
+    for (index, layer) in stack.layers.iter().enumerate() {
         check_layer_structure(layer, &mut seen)?;
-        check_layer_values(layer)?;
+        check_layer_values(layer, index)?;
     }
     Ok(())
 }
@@ -295,7 +329,7 @@ fn loaded_layers(stack: &Stack, known: &KnownEffects) -> Vec<StackLayer> {
     let mut seen: Vec<String> = Vec::new();
     let mut out: Vec<StackLayer> = Vec::new();
     let mut html = 0usize;
-    for layer in &stack.layers {
+    for (index, layer) in stack.layers.iter().enumerate() {
         if out.len() >= STACK_MAX_LAYERS {
             tracing::warn!(
                 stack = %stack.id,
@@ -324,7 +358,7 @@ fn loaded_layers(stack: &Stack, known: &KnownEffects) -> Vec<StackLayer> {
             }
             html += 1;
         }
-        if let Err(reason) = check_layer_values(&layer) {
+        if let Err(reason) = check_layer_values(&layer, index) {
             // A value is not a reason to drop the layer: the compositor clamps it (D95.3.6).
             tracing::warn!(stack = %stack.id, %reason, "a layer's value is out of range; the compositor neutralises it");
         }
@@ -344,7 +378,18 @@ fn checked_for_load(stack: &Stack, layers: Vec<StackLayer>) -> Stack {
             if let canvas_proto::stack::LayerArea::Rect { x, y, width, height } = layer.area {
                 let finite =
                     x.is_finite() && y.is_finite() && width.is_finite() && height.is_finite();
-                let in_range = (0.0..=320.0).contains(&width) && (0.0..=200.0).contains(&height);
+                let canvas_w = canvas_proto::CANVAS_WIDTH as f32;
+                let canvas_h = canvas_proto::CANVAS_HEIGHT as f32;
+                // An edge past the canvas is neutralised like a bad width or height, so a
+                // hand-written rectangle that starts or ends outside the canvas still passes
+                // the load check and the stored stack is kept (D95.3.6). The compositor
+                // itself clips the stored rectangle to the canvas when it renders it.
+                let in_range = (0.0..=canvas_w).contains(&width)
+                    && (0.0..=canvas_h).contains(&height)
+                    && x >= 0.0
+                    && y >= 0.0
+                    && x + width <= canvas_w
+                    && y + height <= canvas_h;
                 if !finite || !in_range {
                     // A rectangle the compositor paints nothing for (D95.3.6).
                     layer.area = canvas_proto::stack::LayerArea::Rect {
@@ -874,6 +919,126 @@ mod tests {
         wide.area = LayerArea::Rect { x: 0.0, y: 0.0, width: 400.0, height: 10.0 };
         let error = validate_stack(&stack("stack:A", vec![wide]), &known, &[]).unwrap_err();
         assert!(error.contains("at most 320 wide"), "{error}");
+    }
+
+    #[test]
+    fn a_rect_off_the_left_edge_is_refused() {
+        let known = known();
+        let mut layer = layer("l1", "solid");
+        layer.area = LayerArea::Rect { x: -3.0, y: 0.0, width: 10.0, height: 10.0 };
+        let error = validate_stack(&stack("stack:A", vec![layer]), &known, &[]).unwrap_err();
+        assert!(error.contains("l1"), "{error}");
+        assert!(error.contains('0'), "{error}");
+        assert!(error.contains("solid"), "{error}");
+        assert!(error.contains("left"), "{error}");
+    }
+
+    #[test]
+    fn a_rect_off_the_top_edge_is_refused() {
+        let known = known();
+        let mut layer = layer("l1", "solid");
+        layer.area = LayerArea::Rect { x: 0.0, y: -1.0, width: 10.0, height: 10.0 };
+        let error = validate_stack(&stack("stack:A", vec![layer]), &known, &[]).unwrap_err();
+        assert!(error.contains("l1"), "{error}");
+        assert!(error.contains("solid"), "{error}");
+        assert!(error.contains("top"), "{error}");
+    }
+
+    #[test]
+    fn a_rect_off_the_right_edge_is_refused() {
+        let known = known();
+        let mut layer = layer("l1", "solid");
+        layer.area = LayerArea::Rect { x: 300.0, y: 0.0, width: 40.0, height: 10.0 };
+        let error = validate_stack(&stack("stack:A", vec![layer]), &known, &[]).unwrap_err();
+        assert!(error.contains("l1"), "{error}");
+        assert!(error.contains("solid"), "{error}");
+        assert!(error.contains("right"), "{error}");
+    }
+
+    #[test]
+    fn a_rect_off_the_bottom_edge_is_refused() {
+        let known = known();
+        let mut layer = layer("l1", "solid");
+        layer.area = LayerArea::Rect { x: 0.0, y: 190.0, width: 10.0, height: 20.0 };
+        let error = validate_stack(&stack("stack:A", vec![layer]), &known, &[]).unwrap_err();
+        assert!(error.contains("l1"), "{error}");
+        assert!(error.contains("solid"), "{error}");
+        assert!(error.contains("bottom"), "{error}");
+    }
+
+    #[test]
+    fn a_rect_exactly_touching_the_edges_is_accepted() {
+        let known = known();
+        let mut corner = layer("l1", "solid");
+        corner.area = LayerArea::Rect { x: 310.0, y: 190.0, width: 10.0, height: 10.0 };
+        assert!(
+            validate_stack(&stack("stack:A", vec![corner]), &known, &[]).is_ok(),
+            "x + width == 320 and y + height == 200 touch the edges and are accepted"
+        );
+        let mut full = layer("l1", "solid");
+        full.area = LayerArea::Rect { x: 0.0, y: 0.0, width: 320.0, height: 200.0 };
+        assert!(validate_stack(&stack("stack:A", vec![full]), &known, &[]).is_ok());
+    }
+
+    #[test]
+    fn a_rect_with_huge_numbers_is_refused_without_panicking() {
+        let known = known();
+        let mut far = layer("l1", "solid");
+        far.area = LayerArea::Rect { x: 1.0e30, y: 0.0, width: 10.0, height: 10.0 };
+        let error = validate_stack(&stack("stack:A", vec![far]), &known, &[]).unwrap_err();
+        assert!(error.contains("l1"), "{error}");
+        assert!(error.contains("right"), "{error}");
+
+        let mut maxed = layer("l1", "solid");
+        maxed.area = LayerArea::Rect { x: f32::MAX, y: 0.0, width: 10.0, height: 10.0 };
+        let error = validate_stack(&stack("stack:A", vec![maxed]), &known, &[]).unwrap_err();
+        assert!(error.contains("l1"), "{error}");
+        assert!(error.contains("right"), "{error}");
+    }
+
+    #[test]
+    fn a_file_with_an_out_of_canvas_area_still_loads_and_renders_inside_the_canvas() {
+        let dir = std::env::temp_dir().join(format!(
+            "canvas-rgb-stacks-oob-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(STACKS_FILE),
+            r#"{"schema_version":1,"stacks":[
+                {"id":"stack:Hand","layers":[
+                  {"id":"l1","name":"Base","effect":"solid",
+                   "area":{"kind":"rect","x":-3.0,"y":5.0,"width":10.0,"height":10.0}}]}]}"#,
+        )
+        .unwrap();
+        let store = Stacks::new(&dir);
+        store.reload(&UserEffects::new(crate::user_effects::html_builder()));
+        let hands = store.all();
+        assert_eq!(hands.len(), 1, "the stack with an out-of-canvas area still loads");
+        assert_eq!(hands[0].layers.len(), 1, "its layer is kept");
+
+        let layout = canvas_proto::layout::Layout {
+            id: "l".into(),
+            name: "l".into(),
+            render_scale: canvas_proto::layout::RenderScale::P100,
+            sampling: canvas_proto::layout::SamplingMode::Nearest,
+            zones: Vec::new(),
+            effect: None,
+            case_form: canvas_proto::layout::CaseForm::None,
+            landmarks: Vec::new(),
+        };
+        let map = crate::stack::AreaMap::build(&layout, &[], 1);
+        let resolved = map
+            .resolve(&hands[0].layers[0].area)
+            .expect("the clipped area covers the canvas edge, not nothing");
+        assert_eq!(resolved.dest, [0.0, 5.0, 7.0, 15.0], "the render resolution clips to the canvas");
+        assert!(!map.is_empty_area(&hands[0].layers[0].area));
+        assert!(map
+            .resolve(&LayerArea::Rect { x: 400.0, y: 0.0, width: 10.0, height: 10.0 })
+            .is_none(), "a wholly out-of-canvas rect paints nothing");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
