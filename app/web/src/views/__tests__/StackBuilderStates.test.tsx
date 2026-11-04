@@ -146,7 +146,8 @@ describe("the stack builder's states", () => {
     await openBuilder();
     saveCalls().length = 0;
     previewCalls().length = 0;
-    fireEvent.click(screen.getByRole("button", { name: "Apply preset Embers" }));
+    // The preset chips arrive through their own read after the stack's, so wait for the chip.
+    fireEvent.click(await screen.findByRole("button", { name: "Apply preset Embers" }));
     // The change is unsaved, and nothing is written.
     expect(await screen.findByText("Unsaved")).toBeTruthy();
     expect(saveCalls()).toHaveLength(0);

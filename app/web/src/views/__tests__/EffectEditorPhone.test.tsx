@@ -3,6 +3,7 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { ToastHost, ToastProvider } from "@/components/Toast";
 import { refreshAll } from "@/lib/store";
 import { editorContent } from "@/test/editor";
+import { waitForEditorGuard } from "@/test/historyGuard";
 import { EffectsView } from "@/views/EffectsView";
 
 // The editor at 390 px (D2.2): the code is a full-screen layer over the pushed sheet, closed on
@@ -119,6 +120,8 @@ describe("the editor at 390 px", () => {
     await act(async () => {
       fireEvent.paste(content, { clipboardData: { getData: () => "<!-- an edit -->" } });
     });
+    // The guard entry and listener land in the dirty effect after the paste.
+    await waitForEditorGuard();
     window.history.back();
     const prompt = await screen.findByRole("alertdialog", { name: "Unsaved changes" });
     // The layer stays up, and the question is inside it, not behind it.
