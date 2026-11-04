@@ -37,6 +37,14 @@
   --knob-ring: #ffffff;  /* a drag knob on the picture: light inner ring, dark outer ring, */
   --knob-edge: #101216;  /* so it reads on any effect colour */
 
+  /* the scrollbar (#92): one look for every scrolling pane. The thumb is the muted ink, a
+     control grey that reads on a panel (5.4:1), on the page (5.7:1) and in a well; on hover it
+     steps up to --dim. The track is the pane's own background, so the bar never draws a box
+     around the pane. */
+  --scroll-thumb: var(--mute);
+  --scroll-thumb-hover: var(--dim);
+  --scroll-track: transparent;
+
   /* accents: five real hues, one per device family and per control role */
   --a1: #8fb4e8;          /* blue: primary actions, focus */
   --a2: #b49cf0;          /* violet: profiles, curves */
@@ -154,6 +162,10 @@
   --on-accent: #ffffff;
   --knob-ring: #ffffff;
   --knob-edge: #1a1d24;
+  /* the scrollbar (#92): the same pair, in the light theme's ink */
+  --scroll-thumb: var(--mute);
+  --scroll-thumb-hover: var(--dim);
+  --scroll-track: transparent;
   --a1: #2f6fbf;
   --a2: #6a4bc4;
   --a3: #13877a;
@@ -189,6 +201,10 @@
     --on-accent: #ffffff;
     --knob-ring: #ffffff;
     --knob-edge: #1a1d24;
+    /* the scrollbar (#92): the same pair, in the light theme's ink */
+    --scroll-thumb: var(--mute);
+    --scroll-thumb-hover: var(--dim);
+    --scroll-track: transparent;
     --a1: #2f6fbf;
     --a2: #6a4bc4;
     --a3: #13877a;

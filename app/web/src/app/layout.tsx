@@ -7,6 +7,7 @@ import "@/styles/motion.css";
 import "@/styles/hardware.css";
 import "@/styles/presets.css";
 import "@/styles/update.css";
+import "@/styles/scrollbars.css";
 import { Shell } from "@/shell/Shell";
 import { OnboardingGate } from "@/views/editor/OnboardingGate";
 

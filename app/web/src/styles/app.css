@@ -170,7 +170,6 @@ html[data-motion="reduced"] *::after {
   height: 100vh;
   max-height: 100vh;
   overflow-y: auto;
-  scrollbar-width: none;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -6203,7 +6202,8 @@ button.chip:hover {
 
 .rail {
   /* Nothing is clipped here: the rail's tooltips have to be able to reach over the page. A
-     window too short for the whole rail is handled below. */
+     window too short for the whole rail is handled below. The bar is thin and in the theme's
+     colours (styles/scrollbars.css); this says so here, where the rail's own rules live. */
   scrollbar-width: thin;
 }
 
@@ -6904,14 +6904,14 @@ button.chip:hover {
   gap: var(--s3);
 }
 
-/* A long stack scrolls inside its own list, so the picture never moves (R1). */
+/* A long stack scrolls inside its own list, so the picture never moves (R1). The bar is the
+   shared one (styles/scrollbars.css): the same thin bar in the theme's colours as every other
+   pane, so this one is not styled again here. */
 .rd-layers > .layer-list {
   max-height: 182px;
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;
-  scrollbar-width: thin;
-  scrollbar-color: var(--line-2) transparent;
 }
 
 .layer-list {

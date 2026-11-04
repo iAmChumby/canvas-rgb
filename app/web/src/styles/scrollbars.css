@@ -1,0 +1,36 @@
+/* The scrollbar, once for the whole editor (#92).
+ *
+ * Every pane that scrolls since #67 (the Layout parts list, the Effects gallery and inspector,
+ * the Peripherals detail, the Fans editor, the Settings columns, the Devices list, the code
+ * pane, the pickers and the sheets) had the browser's own bar: a plain grey Windows bar that
+ * ignored the theme and the app's tokens, and looked bolted on next to the panels.
+ *
+ * One rule gives them all the same bar, in the tokens from tokens.css, so it follows the light
+ * and dark themes:
+ *
+ *   - the thumb is --scroll-thumb (the muted ink): visible on a panel, on the page and in a
+ *     well, in both themes;
+ *   - the thumb steps up to --scroll-thumb-hover while the pointer is over the pane, so the bar
+ *     is quiet at rest and clear when it is being used;
+ *   - the track is the pane's own background, so the bar never draws a box around the pane.
+ *
+ * The rule is the standard one (scrollbar-width / scrollbar-color), which Chromium 121 and
+ * WebView2 support: the wheel, the drag, the click on the track, the keyboard, the touch and
+ * the screen reader all keep working exactly as they do with the native bar.
+ *
+ * The bars that hide themselves on purpose keep hiding: a rule with a class of its own
+ * (scrollbar-width: none) is stronger than this one. The panes that scroll sideways and show
+ * no bar at all are .rd-peri-keys (the Peripherals key row) and .preset-chips (the preset keys
+ * on a phone).
+ */
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scroll-thumb) var(--scroll-track);
+}
+
+/* The pointer is over the pane: the thumb is clearer. :hover also matches every ancestor of the
+   hovered element, so the bars of the panes around it step up too (cosmetic, accepted). */
+*:hover {
+  scrollbar-color: var(--scroll-thumb-hover) var(--scroll-track);
+}
