@@ -6,8 +6,8 @@
 //! #45 and #55).
 //!
 //! [`captured`] holds a lock while it runs: one capture at a time among the tests that go through
-//! it. Some tests (in `openrgb_tests.rs`) still install `LogBuf::subscriber()` themselves with
-//! `set_default` / `with_default`, outside that lock.
+//! it. Every service test capture goes through [`captured`] (or [`captured_async`] for the
+//! async ones), so every capture takes that one lock.
 
 use std::io;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -54,6 +54,30 @@ fn one_capture_at_a_time() -> MutexGuard<'static, ()> {
 pub(crate) fn captured<T>(run: impl FnOnce() -> T) -> (T, String) {
     let _turn = one_capture_at_a_time();
     let logs = LogBuf::default();
-    let out = tracing::subscriber::with_default(logs.subscriber(), run);
+    let out = tracing::subscriber::with_default(logs.subscriber(), || {
+        // No `rebuild_interest_cache()` here: tracing-core already rebuilds callsite
+        // interest whenever a dispatcher is created (`Dispatch::new` ->
+        // `callsite::register_dispatch`), so a stale interest cache is not #45's cause.
+        run()
+    });
+    (out, logs.text())
+}
+
+/// The async twin of [`captured`]: runs the future under the same lock and subscriber, via a
+/// `set_default` guard held across `.await` points, so the subscriber stays installed
+/// wherever the task wakes. `MutexGuard` is `!Send`, so the future is `!Send`; the
+/// `#[tokio::test]` runtime is current-thread and runs it on one thread.
+#[allow(clippy::await_holding_lock)]
+pub(crate) async fn captured_async<F, T>(run: F) -> (T, String)
+where
+    F: std::future::Future<Output = T>,
+{
+    // Held across `.await` on purpose: the lock must serialize every capture for its
+    // whole duration, including when a task sleeps inside the run.
+    let _turn = one_capture_at_a_time();
+    let logs = LogBuf::default();
+    let _default = tracing::subscriber::set_default(logs.subscriber());
+    let out = run.await;
+    drop(_default);
     (out, logs.text())
 }

@@ -18,6 +18,13 @@ use canvas_proto::CANVAS_WIDTH;
 
 use crate::spawn;
 
+/// The deadline for a first frame to arrive (#143, class `cause:timing-test`; same shape as
+/// #59, which raised the web waits to 10 s). The waits stay event-based: `wait_until`
+/// returns on the first frame, so a passing run costs nothing; 20 s is only the ceiling a
+/// starved runner gets. No assertion here measures time, so this never widens a measured
+/// budget.
+const FIRST_FRAME_WAIT: Duration = Duration::from_secs(20);
+
 /// A sink that records every frame it receives.
 #[derive(Default)]
 struct RecordingSink {
@@ -366,7 +373,7 @@ fn a_solid_red_effect_yields_all_red_frames_for_all_placed_leds() {
         &Props::new(),
     );
 
-    assert!(wait_until(Duration::from_secs(3), || sink.frame_count() > 0));
+    assert!(wait_until(FIRST_FRAME_WAIT, || sink.frame_count() > 0));
 
     let frame = sink.last().expect("a frame was submitted");
     assert_eq!(frame.len(), 12, "a frame has one color per LED");
@@ -401,7 +408,7 @@ fn unplaced_zones_get_black_but_placed_ones_do_not() {
         &Props::new(),
     );
 
-    assert!(wait_until(Duration::from_secs(3), || sink.frame_count() > 0));
+    assert!(wait_until(FIRST_FRAME_WAIT, || sink.frame_count() > 0));
     let frame = sink.last().expect("a frame was submitted");
     assert_eq!(frame.len(), 10, "the frame covers every LED of the device");
     for c in frame.iter().take(4) {
@@ -438,7 +445,7 @@ fn a_frame_has_one_color_per_led_in_zone_order() {
         )),
         &Props::new(),
     );
-    assert!(wait_until(Duration::from_secs(3), || sink.frame_count() > 0));
+    assert!(wait_until(FIRST_FRAME_WAIT, || sink.frame_count() > 0));
     let frame = sink.last().expect("a frame was submitted");
     assert_eq!(frame.len(), 8);
     engine.shutdown();
@@ -528,7 +535,7 @@ fn pausing_writes_one_black_frame_and_stops_the_loop() {
         )),
         &Props::new(),
     );
-    assert!(wait_until(Duration::from_secs(3), || sink.frame_count() > 0));
+    assert!(wait_until(FIRST_FRAME_WAIT, || sink.frame_count() > 0));
 
     engine.set_power(Power::Paused);
 
@@ -565,7 +572,7 @@ fn running_resumes_the_loop_after_a_pause() {
         )),
         &Props::new(),
     );
-    assert!(wait_until(Duration::from_secs(3), || sink.frame_count() > 0));
+    assert!(wait_until(FIRST_FRAME_WAIT, || sink.frame_count() > 0));
 
     engine.set_power(Power::Paused);
     assert!(wait_until(Duration::from_secs(2), || sink
@@ -576,7 +583,7 @@ fn running_resumes_the_loop_after_a_pause() {
     engine.set_power(Power::Running);
     let frames_at_resume = sink.frame_count();
     assert!(
-        wait_until(Duration::from_secs(3), || sink.frame_count() > frames_at_resume),
+        wait_until(FIRST_FRAME_WAIT, || sink.frame_count() > frames_at_resume),
         "frames are submitted again after resuming"
     );
     engine.shutdown();
@@ -592,7 +599,7 @@ fn resuming_from_a_pause_does_not_replay_the_missed_ticks() {
         Box::new(SolidEffect::new([1.0, 0.0, 0.0], Arc::new(AtomicBool::new(false)))),
         &Props::new(),
     );
-    assert!(wait_until(Duration::from_secs(3), || sink.frame_count() > 0));
+    assert!(wait_until(FIRST_FRAME_WAIT, || sink.frame_count() > 0));
 
     engine.set_power(Power::Paused);
     assert!(wait_until(Duration::from_secs(2), || sink
@@ -630,7 +637,7 @@ fn a_sink_added_before_its_layout_never_receives_an_empty_frame() {
         RenderScale::P100,
     );
     engine.set_layout(lay, vec![dev]);
-    assert!(wait_until(Duration::from_secs(3), || sink.last().is_some_and(|f| f.len() == 8)));
+    assert!(wait_until(FIRST_FRAME_WAIT, || sink.last().is_some_and(|f| f.len() == 8)));
     let empties = sink.frames.lock().unwrap().iter().filter(|f| f.is_empty()).count();
     assert_eq!(empties, 0, "{empties} zero-length frames were submitted");
     engine.shutdown();
@@ -647,14 +654,14 @@ fn set_fps_takes_effect_without_a_restart() {
     engine.add_sink(DeviceId("d0".into()), sink.clone());
 
     // Let the measured fps settle at 30.
-    assert!(wait_until(Duration::from_secs(3), || {
+    assert!(wait_until(FIRST_FRAME_WAIT, || {
         let fps = engine.stats().fps_measured;
         (fps - 30.0).abs() <= 1.0
     }));
 
     engine.set_fps(20);
     assert!(
-        wait_until(Duration::from_secs(3), || {
+        wait_until(FIRST_FRAME_WAIT, || {
             let fps = engine.stats().fps_measured;
             (fps - 20.0).abs() <= 1.0
         }),
@@ -692,7 +699,7 @@ fn the_measured_fps_is_within_one_of_the_target() {
     let engine = spawn(settings(60));
     let sink = RecordingSink::new();
     engine.add_sink(DeviceId("d0".into()), sink.clone());
-    assert!(wait_until(Duration::from_secs(3), || {
+    assert!(wait_until(FIRST_FRAME_WAIT, || {
         let fps = engine.stats().fps_measured;
         (fps - 60.0).abs() <= 1.0
     }), "measured {}", engine.stats().fps_measured);
@@ -707,14 +714,14 @@ fn fps_is_clamped_to_the_supported_range() {
 
     // Below the minimum: clamped to 10.
     engine.set_fps(1);
-    assert!(wait_until(Duration::from_secs(3), || {
+    assert!(wait_until(FIRST_FRAME_WAIT, || {
         let fps = engine.stats().fps_measured;
         (fps - 10.0).abs() <= 1.0
     }), "measured {}", engine.stats().fps_measured);
 
     // Above the maximum: clamped to 60.
     engine.set_fps(500);
-    assert!(wait_until(Duration::from_secs(3), || {
+    assert!(wait_until(FIRST_FRAME_WAIT, || {
         let fps = engine.stats().fps_measured;
         (fps - 60.0).abs() <= 1.0
     }), "measured {}", engine.stats().fps_measured);
@@ -744,11 +751,11 @@ fn brightness_scales_the_sampled_colors() {
         )),
         &Props::new(),
     );
-    assert!(wait_until(Duration::from_secs(3), || sink.frame_count() > 0));
+    assert!(wait_until(FIRST_FRAME_WAIT, || sink.frame_count() > 0));
     assert_eq!(sink.last().expect("a frame")[0], Rgb8::new(255, 255, 255));
 
     engine.set_brightness(50);
-    assert!(wait_until(Duration::from_secs(3), || sink
+    assert!(wait_until(FIRST_FRAME_WAIT, || sink
         .last()
         .map(|f| f[0] == Rgb8::new(128, 128, 128))
         .unwrap_or(false)));
@@ -878,7 +885,7 @@ fn the_effect_receives_the_real_dt_and_a_monotonic_time() {
         &Props::new(),
     );
 
-    assert!(wait_until(Duration::from_secs(3), || {
+    assert!(wait_until(FIRST_FRAME_WAIT, || {
         dts.lock().unwrap_or_else(|e| e.into_inner()).len() >= 20
     }));
 
@@ -914,7 +921,7 @@ fn the_preview_is_downscaled_and_rate_limited() {
     let preview = RecordingPreview::new();
     engine.set_preview(Some(preview.clone()));
 
-    assert!(wait_until(Duration::from_secs(3), || preview.count() > 0));
+    assert!(wait_until(FIRST_FRAME_WAIT, || preview.count() > 0));
     let frames = preview.frames.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let (w, h, len) = frames[0];
     assert!(w <= 160 && h <= 100, "the preview is {w}x{h}");
@@ -932,7 +939,7 @@ fn the_preview_stops_when_the_subscriber_goes_away() {
     let engine = spawn(settings(30));
     let preview = RecordingPreview::new();
     engine.set_preview(Some(preview.clone()));
-    assert!(wait_until(Duration::from_secs(3), || preview.count() > 0));
+    assert!(wait_until(FIRST_FRAME_WAIT, || preview.count() > 0));
 
     engine.set_preview(None);
     let count = preview.count();
@@ -966,7 +973,7 @@ fn gradient_frame(
         Box::new(GradientEffect),
         &Props::new(),
     );
-    assert!(wait_until(Duration::from_secs(3), || sink.frame_count() > 0));
+    assert!(wait_until(FIRST_FRAME_WAIT, || sink.frame_count() > 0));
     let frame = sink.last().expect("a frame");
     engine.shutdown();
     frame
@@ -1073,7 +1080,7 @@ fn the_leds_of_a_split_zone_that_nobody_owns_are_black() {
         &Props::new(),
     );
 
-    assert!(wait_until(Duration::from_secs(3), || sink.frame_count() > 0));
+    assert!(wait_until(FIRST_FRAME_WAIT, || sink.frame_count() > 0));
     let frame = sink.last().expect("a frame was submitted");
     assert_eq!(frame.len(), 40, "a frame has one color per LED");
     for (i, c) in frame.iter().enumerate() {
@@ -1106,7 +1113,7 @@ fn a_zone_that_is_split_still_gets_one_color_per_led() {
         Box::new(SolidEffect::new([0.0, 1.0, 0.0], initialized)),
         &Props::new(),
     );
-    assert!(wait_until(Duration::from_secs(3), || sink.frame_count() > 0));
+    assert!(wait_until(FIRST_FRAME_WAIT, || sink.frame_count() > 0));
     let frame = sink.last().expect("a frame was submitted");
     assert_eq!(frame.len(), 40, "the frame still covers every LED of the zone");
     // The two runs cover LEDs 0..24; the other 16 belong to nobody.
@@ -1433,11 +1440,11 @@ fn a_panicking_update_does_not_kill_the_engine() {
     engine.set_effect(Box::new(PanicUpdateEffect { updates: updates.clone() }), &Props::new());
 
     // The first update panics, but the loop keeps delivering frames.
-    assert!(wait_until(Duration::from_secs(3), || sink.frame_count() > 0));
-    assert!(wait_until(Duration::from_secs(3), || updates.load(Ordering::Acquire) >= 1));
+    assert!(wait_until(FIRST_FRAME_WAIT, || sink.frame_count() > 0));
+    assert!(wait_until(FIRST_FRAME_WAIT, || updates.load(Ordering::Acquire) >= 1));
     let frames_after_panic = sink.frame_count();
     assert!(
-        wait_until(Duration::from_secs(3), || sink.frame_count() >= frames_after_panic + 10),
+        wait_until(FIRST_FRAME_WAIT, || sink.frame_count() >= frames_after_panic + 10),
         "frames keep arriving after the update panic (got {})",
         sink.frame_count()
     );
@@ -1450,7 +1457,7 @@ fn a_panicking_update_does_not_kill_the_engine() {
         Box::new(SolidEffect::new([0.0, 1.0, 0.0], initialized.clone())),
         &Props::new(),
     );
-    assert!(wait_until(Duration::from_secs(3), || sink
+    assert!(wait_until(FIRST_FRAME_WAIT, || sink
         .last()
         .map(|f| f.iter().all(|c| *c == Rgb8::new(0, 255, 0)))
         .unwrap_or(false)));
@@ -1466,25 +1473,25 @@ fn a_panicking_init_does_not_kill_the_engine() {
 
     let inits = Arc::new(AtomicU32::new(0));
     engine.set_effect(Box::new(PanicInitEffect { inits: inits.clone() }), &Props::new());
-    assert!(wait_until(Duration::from_secs(3), || sink.frame_count() > 0));
+    assert!(wait_until(FIRST_FRAME_WAIT, || sink.frame_count() > 0));
 
     // The second init panics, on the calling thread when the effect is idle or
     // on the render thread when it is queued as pending props. Either way the
     // engine must survive it.
     engine.set_props(&Props::new());
-    assert!(wait_until(Duration::from_secs(3), || {
+    assert!(wait_until(FIRST_FRAME_WAIT, || {
         inits.load(Ordering::Acquire) >= 2 && engine.stats().frames_rendered > 5
     }));
     let frames_after_panic = sink.frame_count();
     let rendered_after_panic = engine.stats().frames_rendered;
     assert!(
-        wait_until(Duration::from_secs(3), || engine.stats().frames_rendered >= rendered_after_panic + 10),
+        wait_until(FIRST_FRAME_WAIT, || engine.stats().frames_rendered >= rendered_after_panic + 10),
         "the loop keeps ticking after the init panic (got {})",
         engine.stats().frames_rendered
     );
     // A stopped effect is not initialised again.
     engine.set_props(&Props::new());
-    assert!(wait_until(Duration::from_secs(3), || {
+    assert!(wait_until(FIRST_FRAME_WAIT, || {
         engine.stats().frames_rendered >= rendered_after_panic + 15
     }));
     // Nothing was delivered on panicked ticks after the last good black frame.
@@ -1497,7 +1504,7 @@ fn a_panicking_init_does_not_kill_the_engine() {
         Box::new(SolidEffect::new([0.0, 0.0, 1.0], initialized.clone())),
         &Props::new(),
     );
-    assert!(wait_until(Duration::from_secs(3), || sink
+    assert!(wait_until(FIRST_FRAME_WAIT, || sink
         .last()
         .map(|f| f.iter().all(|c| *c == Rgb8::new(0, 0, 255)))
         .unwrap_or(false)));
@@ -1513,8 +1520,8 @@ fn a_panicking_effect_logs_once_and_is_never_called_again() {
 
     let updates = Arc::new(AtomicU32::new(0));
     engine.set_effect(Box::new(PanicUpdateEffect { updates: updates.clone() }), &Props::new());
-    assert!(wait_until(Duration::from_secs(3), || sink.frame_count() > 0));
-    assert!(wait_until(Duration::from_secs(3), || updates.load(Ordering::Acquire) >= 1));
+    assert!(wait_until(FIRST_FRAME_WAIT, || sink.frame_count() > 0));
+    assert!(wait_until(FIRST_FRAME_WAIT, || updates.load(Ordering::Acquire) >= 1));
 
     // More frames and more prop changes would each panic again if the engine
     // kept calling the effect; the effect must stay stopped.
@@ -1522,7 +1529,7 @@ fn a_panicking_effect_logs_once_and_is_never_called_again() {
     engine.set_props(&Props::new());
     engine.set_props(&Props::new());
     assert!(
-        wait_until(Duration::from_secs(3), || sink.frame_count() >= frames_after_panic + 20),
+        wait_until(FIRST_FRAME_WAIT, || sink.frame_count() >= frames_after_panic + 20),
         "frames keep arriving (got {})",
         sink.frame_count()
     );
@@ -1548,7 +1555,7 @@ fn the_lights_never_receive_the_half_drawn_frame_after_an_update_panic() {
         &Props::new(),
     );
     assert!(wait_until(
-        Duration::from_secs(3),
+        FIRST_FRAME_WAIT,
         || sink.last().is_some_and(|f| f.iter().all(|c| *c == green)),
     ));
 
@@ -1556,11 +1563,11 @@ fn the_lights_never_receive_the_half_drawn_frame_after_an_update_panic() {
     // sampled from that torn canvas must never reach the sink.
     let updates = Arc::new(AtomicU32::new(0));
     engine.set_effect(Box::new(HalfPanickedEffect { updates: updates.clone() }), &Props::new());
-    assert!(wait_until(Duration::from_secs(3), || updates.load(Ordering::Acquire) >= 1));
+    assert!(wait_until(FIRST_FRAME_WAIT, || updates.load(Ordering::Acquire) >= 1));
     let rendered_after_panic = engine.stats().frames_rendered;
     assert!(
         wait_until(
-            Duration::from_secs(3),
+            FIRST_FRAME_WAIT,
             || engine.stats().frames_rendered >= rendered_after_panic + 10
         ),
         "the loop keeps ticking after the update panic (got {})",
@@ -1618,7 +1625,7 @@ fn replacing_an_effect_whose_drop_panics_does_not_panic_the_caller() {
     let green = Rgb8::new(0, 255, 0);
     assert!(
         wait_until(
-            Duration::from_secs(3),
+            FIRST_FRAME_WAIT,
             || sink.last().is_some_and(|f| f.iter().all(|c| *c == green)),
         ),
         "the engine runs the new effect after the drop panic"
@@ -1640,11 +1647,11 @@ fn a_panicking_schema_does_not_kill_the_engine() {
         &Props::new(),
     );
     // No good frame ever: the sink gets black and keeps getting frames.
-    assert!(wait_until(Duration::from_secs(3), || sink.frame_count() > 0));
+    assert!(wait_until(FIRST_FRAME_WAIT, || sink.frame_count() > 0));
     let frames_after_panic = sink.frame_count();
     assert!(
         wait_until(
-            Duration::from_secs(3),
+            FIRST_FRAME_WAIT,
             || sink.frame_count() >= frames_after_panic + 10
         ),
         "frames keep arriving after the schema panic (got {})",
@@ -1664,7 +1671,7 @@ fn a_panicking_schema_does_not_kill_the_engine() {
     let blue = Rgb8::new(0, 0, 255);
     assert!(
         wait_until(
-            Duration::from_secs(3),
+            FIRST_FRAME_WAIT,
             || sink.last().is_some_and(|f| f.iter().all(|c| *c == blue)),
         ),
         "a later effect renders after the schema panic"
@@ -1716,7 +1723,7 @@ fn a_new_effect_that_panics_before_a_good_frame_shows_black_not_the_previous_eff
         &Props::new(),
     );
     assert!(wait_until(
-        Duration::from_secs(3),
+        FIRST_FRAME_WAIT,
         || sink.last().is_some_and(|f| f.iter().all(|c| *c == green)),
     ));
 
@@ -1725,9 +1732,9 @@ fn a_new_effect_that_panics_before_a_good_frame_shows_black_not_the_previous_eff
     // sink was sent and black never arrives.
     let updates = Arc::new(AtomicU32::new(0));
     engine.set_effect(Box::new(PanicUpdateEffect { updates: updates.clone() }), &Props::new());
-    assert!(wait_until(Duration::from_secs(3), || updates.load(Ordering::Acquire) >= 1));
+    assert!(wait_until(FIRST_FRAME_WAIT, || updates.load(Ordering::Acquire) >= 1));
     assert!(
-        wait_until(Duration::from_secs(3), || sink
+        wait_until(FIRST_FRAME_WAIT, || sink
             .last()
             .is_some_and(|f| f.iter().all(|c| *c == Rgb8::BLACK))),
         "the panicking new effect shows black, not the previous green frame; last = {:?}",
@@ -1752,19 +1759,19 @@ fn a_replacement_effect_starts_from_a_cleared_canvas_not_a_torn_one() {
         &Props::new(),
     );
     assert!(wait_until(
-        Duration::from_secs(3),
+        FIRST_FRAME_WAIT,
         || sink.last().is_some_and(|f| f.iter().all(|c| *c == green)),
     ));
 
     // The torn effect paints the left half red, then panics.
     let updates = Arc::new(AtomicU32::new(0));
     engine.set_effect(Box::new(HalfPanickedEffect { updates: updates.clone() }), &Props::new());
-    assert!(wait_until(Duration::from_secs(3), || updates.load(Ordering::Acquire) >= 1));
+    assert!(wait_until(FIRST_FRAME_WAIT, || updates.load(Ordering::Acquire) >= 1));
 
     engine.set_effect(Box::new(RightHalfEffect), &Props::new());
     // The 4 LEDs of the test layout are spread across the canvas; after the clear,
     // the replacement's frame has green on the right and black on the left.
-    assert!(wait_until(Duration::from_secs(3), || {
+    assert!(wait_until(FIRST_FRAME_WAIT, || {
         sink.last().is_some_and(|f| {
             f.contains(&green) && f.contains(&Rgb8::BLACK)
         })

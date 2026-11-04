@@ -1,10 +1,11 @@
 //! `POST /api/v1/quit` makes the built daemon exit promptly with code 0 (G3). Run elevated, the
 //! test instead checks that the daemon refuses to start.
 //!
-//! The test runs the real `canvas-rgbd` binary against a temporary home. The API must
-//! use 127.0.0.1:9430 (the Host check allows only that), so the test refuses to run when
-//! something already holds that port: it never talks to the user's running daemon. The
-//! OpenRGB port comes from the temporary config, so the test never reaches a real
+//! The test runs the real `canvas-rgbd` binary against a temporary home. The API port comes
+//! from the temporary config (`exit_lines.rs` does the same), so the test never needs
+//! 127.0.0.1:9430 and never touches a running daemon. The Host check wants 9430, so
+//! requests carry an explicit `Host: 127.0.0.1:9430` header while connecting to the free
+//! port. The OpenRGB port is likewise a free port, so the test never reaches a real
 //! OpenRGB server.
 
 use std::net::TcpListener;
@@ -12,7 +13,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-const API_BASE: &str = "http://127.0.0.1:9430";
+const HOST_HEADER: &str = "127.0.0.1:9430";
 
 /// The longest the daemon may take to exit after it answers the quit request.
 const EXIT_DEADLINE: Duration = Duration::from_secs(3);
@@ -70,18 +71,17 @@ fn agent() -> ureq::Agent {
 
 #[test]
 fn quit_makes_the_daemon_exit_with_code_zero_within_three_seconds() {
-    assert!(
-        TcpListener::bind("127.0.0.1:9430").is_ok(),
-        "127.0.0.1:9430 is busy: stop canvas-rgbd before running this test"
-    );
-
     let home = std::env::temp_dir().join(format!("canvas-rgb-quit-test-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&home);
     std::fs::create_dir_all(&home).expect("the temporary home is created");
     let home = TempHome(home);
 
-    // The OpenRGB port is a free port nothing listens on, so no real server is touched.
+    // The API and OpenRGB ports are free ports nothing listens on, so no real daemon or
+    // server is touched (#88). The free port is taken a moment later by the daemon.
+    let api_port = free_port();
+    let api_base = format!("http://127.0.0.1:{api_port}");
     let config = canvas_proto::config::ConfigFile {
+        api_port,
         openrgb_port: free_port(),
         ..Default::default()
     };
@@ -106,7 +106,12 @@ fn quit_makes_the_daemon_exit_with_code_zero_within_three_seconds() {
     let agent = agent();
     let started = Instant::now();
     loop {
-        if agent.get(&format!("{API_BASE}/api/v1/status")).call().is_ok() {
+        if agent
+            .get(&format!("{api_base}/api/v1/status"))
+            .header("Host", HOST_HEADER)
+            .call()
+            .is_ok()
+        {
             break;
         }
         if let Some(status) = daemon.0.try_wait().expect("the child can be polled") {
@@ -136,7 +141,8 @@ fn quit_makes_the_daemon_exit_with_code_zero_within_three_seconds() {
         .to_string();
 
     let response = agent
-        .post(&format!("{API_BASE}/api/v1/quit"))
+        .post(&format!("{api_base}/api/v1/quit"))
+        .header("Host", HOST_HEADER)
         .header("Authorization", &format!("Bearer {token}"))
         .send_empty()
         .expect("the quit request is answered");

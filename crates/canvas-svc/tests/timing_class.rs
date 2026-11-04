@@ -62,7 +62,7 @@ const ACCESSORS: &[&str] = &[".as_millis()", ".as_secs_f64()", ".as_secs_f32()",
 const BOUND_ALLOWED: &[(&str, &str, &str)] = &[
     ("canvas-core/src/timer.rs", "elapsed < Duration::from_millis(120)", "open: 120 ms ceiling on three frames at 100 fps (30 ms of scheduled sleeps); a stalled runner overshoots it"),
     ("canvas-core/src/timer.rs", "start.elapsed() < Duration::from_millis(100)", "open: 100 ms ceiling on a catch-up that should cost nothing"),
-    ("canvas-core/src/timer.rs", "start.elapsed() < Duration::from_millis(60)", "open: 60 ms ceiling after a reset; one 16.7 ms frame of slack"),
+    ("canvas-core/src/timer.rs", "start.elapsed() < Duration::from_millis(60)", "open: 60 ms ceiling after a reset; about 43 ms of slack over one 16.7 ms frame"),
     ("canvas-daemon/src/cli.rs", "elapsed.as_millis() < 5_000", "hang guard: 5 s against a check that must stop at its first frame"),
     ("canvas-daemon/src/logging.rs", "took < std::time::Duration::from_millis(1000)", "open: a 1 s ceiling on run_bounded giving up after its 250 ms limit; a runner stalled for 750 ms past the limit fails it"),
     ("canvas-daemon/src/user_effects.rs", "took < std::time::Duration::from_secs(5)", "hang guard: a 400 ms render budget against a 30 s frame budget; 5 s means the frame was not held to the budget"),
