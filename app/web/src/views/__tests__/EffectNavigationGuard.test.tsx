@@ -4,6 +4,7 @@ import { ToastHost, ToastProvider } from "@/components/Toast";
 import { fixtureState } from "@/lib/demoUpdate";
 import { SAMPLE_SOURCE } from "@/lib/demoEffects";
 import { patchSnap, refreshAll } from "@/lib/store";
+import { editorContent } from "@/test/editor";
 import { GlobalBanners } from "@/shell/GlobalBanners";
 import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
 import { Rail } from "@/shell/Rail";
@@ -103,7 +104,7 @@ async function mount() {
 }
 
 async function replaceSource(text: string) {
-  const content = document.querySelector(".cm-content") as HTMLElement;
+  const content = await editorContent();
   content.focus();
   fireEvent.keyDown(content, { key: "a", code: "KeyA", keyCode: 65, ctrlKey: true });
   await act(async () => {

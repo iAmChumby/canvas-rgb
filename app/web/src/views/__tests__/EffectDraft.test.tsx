@@ -3,6 +3,7 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { ToastHost, ToastProvider } from "@/components/Toast";
 import { api } from "@/lib/endpoints";
 import { getSnap, refreshAll } from "@/lib/store";
+import { editorContent } from "@/test/editor";
 import { EffectsView } from "@/views/EffectsView";
 
 // Try on the lights (D2.5) against the demo backend. `fast-draft` keeps the daemon's shape but
@@ -79,7 +80,7 @@ async function beatGaps(): Promise<number[]> {
 }
 
 async function replaceSource(text: string) {
-  const content = document.querySelector(".cm-content") as HTMLElement;
+  const content = await editorContent();
   content.focus();
   fireEvent.keyDown(content, { key: "a", code: "KeyA", keyCode: 65, ctrlKey: true });
   await act(async () => {

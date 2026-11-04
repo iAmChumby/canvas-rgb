@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { ToastHost, ToastProvider } from "@/components/Toast";
 import { refreshAll } from "@/lib/store";
+import { editorContent, editorSource, lintMarker } from "@/test/editor";
 import { EffectsView } from "@/views/EffectsView";
 
 // Edit mode of the Effects inspector (issue #2, D2.2) against the demo backend: `?state=html`
@@ -62,27 +63,25 @@ async function mount() {
   await screen.findByTestId("effect-code");
 }
 
-// The four text lines CM draws, joined: the source as the editor holds it.
-const source = () =>
-  Array.from(document.querySelectorAll(".cm-line"))
-    .map((line) => line.textContent ?? "")
-    .join("\n");
+// The source as the editor holds it (awaited: the editor mounts after the host div).
+async function source() {
+  return editorSource();
+}
 
 /** Types by replacing the whole document: select all, then paste over it. */
 async function replaceSource(text: string) {
-  const content = document.querySelector(".cm-content") as HTMLElement | null;
-  expect(content).toBeTruthy();
-  content!.focus();
-  fireEvent.keyDown(content!, { key: "a", code: "KeyA", keyCode: 65, ctrlKey: true });
+  const content = await editorContent();
+  content.focus();
+  fireEvent.keyDown(content, { key: "a", code: "KeyA", keyCode: 65, ctrlKey: true });
   await act(async () => {
-    fireEvent.paste(content!, { clipboardData: { getData: () => text } });
+    fireEvent.paste(content, { clipboardData: { getData: () => text } });
   });
 }
 
 describe("the effect editor", () => {
   it("opens the effect's source in the code pane and closes with Done", async () => {
     await mount();
-    expect(source()).toContain("<title>Sample HTML</title>");
+    expect(await source()).toContain("<title>Sample HTML</title>");
     expect(screen.getAllByText("fixture-sample.html").length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("button", { name: "Done" }));
     expect(screen.queryByTestId("effect-editor")).toBeNull();
@@ -91,7 +90,7 @@ describe("the effect editor", () => {
 
   it("asks Save or Discard before leaving unsaved edits", async () => {
     await mount();
-    await replaceSource(`${source()}\n<!-- an edit that was not saved -->\n`);
+    await replaceSource(`${await source()}\n<!-- an edit that was not saved -->\n`);
     fireEvent.click(screen.getByRole("button", { name: "Done" }));
     expect(await screen.findByRole("alertdialog", { name: "Unsaved changes" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
@@ -107,11 +106,11 @@ describe("the effect editor", () => {
     // runtime's script-relative line, and the editor adds the script tag's line.
     const row = await screen.findByRole("button", { name: /line \d+/ });
     const shown = Number(/line (\d+)/.exec(row.textContent ?? "")?.[1]);
-    const throwLine = source()
+    const throwLine = (await source())
       .split("\n")
       .findIndex((line) => line.includes("throw new Error")) + 1;
     expect(shown).toBe(throwLine);
-    expect(document.querySelector(".cm-lint-marker-error")).toBeTruthy();
+    expect(await lintMarker()).toBeTruthy();
     expect(row.textContent).toContain("threw where the runtime stopped");
   });
 });

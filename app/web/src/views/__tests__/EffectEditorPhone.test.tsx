@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { ToastHost, ToastProvider } from "@/components/Toast";
 import { refreshAll } from "@/lib/store";
+import { editorContent } from "@/test/editor";
 import { EffectsView } from "@/views/EffectsView";
 
 // The editor at 390 px (D2.2): the code is a full-screen layer over the pushed sheet, closed on
@@ -112,7 +113,7 @@ describe("the editor at 390 px", () => {
     await mount();
     fireEvent.click(screen.getByRole("button", { name: "Show code" }));
     const layer = await screen.findByRole("dialog", { name: "The effect's code" });
-    const content = document.querySelector(".cm-content") as HTMLElement;
+    const content = await editorContent();
     content.focus();
     fireEvent.keyDown(content, { key: "a", code: "KeyA", keyCode: 65, ctrlKey: true });
     await act(async () => {
@@ -130,7 +131,7 @@ describe("the editor at 390 px", () => {
     await mount();
     fireEvent.click(screen.getByRole("button", { name: "Show code" }));
     const content = await screen.findByTestId("effect-code");
-    const editor = content.querySelector(".cm-content") as HTMLElement;
+    const editor = await editorContent(content);
     editor.focus();
     fireEvent.keyDown(editor, { key: "a", code: "KeyA", keyCode: 65, ctrlKey: true });
     await act(async () => {
