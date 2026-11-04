@@ -2421,14 +2421,14 @@ button.chip:hover {
   }
 }
 
-/* phone: the gallery is the page and the inspector is the sheet that a tap pushes over it. */
+/* One column (the page is 640 px wide or less). The gallery keeps the overflow: auto it has
+   above, so a library taller than its row scrolls inside the row. The gallery pane exists only
+   on a desktop shell (721 px and up, where the document never scrolls); a phone renders the
+   tiles in `.effect-gallery-wrap` instead. An overflow: visible here let the last rows spill over
+   the inspector's row at 721 to about 752 px (#132). */
 @container page (max-width: 640px) {
   .rd-effects .rd-eff-body {
     grid-template-columns: minmax(0, 1fr);
-  }
-
-  .rd-effects .rd-eff-gallery {
-    overflow: visible;
   }
 
   .rd-effects .effect-toolbar .effect-search {
