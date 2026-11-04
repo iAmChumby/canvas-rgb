@@ -102,6 +102,19 @@ struct State {
     stop: bool,
     /// Set when a black frame must be written to every sink (the pause transition).
     pending_black: bool,
+    /// Set when a sink was added and has not been given a frame yet (#145).
+    ///
+    /// A panicked effect stops the delivery (#99), so a sink that arrives while the
+    /// effect is stopped would wait for the next effect. The render thread re-sends the
+    /// last good frame when it sees this.
+    pending_sink: bool,
+    /// Set when the power came back to running after a pause, and the devices have not
+    /// been given a frame again yet (#145).
+    ///
+    /// The flag is set by `set_power`, not by the render thread noticing the pause: a
+    /// pause and a resume that both land between two ticks would never be seen by the
+    /// thread, and the devices would keep the black frame the pause wrote.
+    pending_resume: bool,
     /// Bumped on every state change. The parked thread remembers the value it saw
     /// and only re-reads the state when it changes, so a notification that arrives
     /// between the check and the wait cannot be missed.
@@ -136,6 +149,8 @@ impl State {
             frame_time_ms: 0.0,
             stop: false,
             pending_black: false,
+            pending_sink: false,
+            pending_resume: false,
             wake_generation: 0,
             render_thread_id: None,
         }
@@ -400,10 +415,16 @@ impl Engine for CoreEngine {
             if state.power == power {
                 return;
             }
+            let was_paused = state.power == Power::Paused;
             state.power = power;
             if power == Power::Paused {
                 // "Paused writes black once, then stops the render loop."
                 state.pending_black = true;
+            } else if was_paused {
+                // The output came back. The devices need a frame again: the pause wrote
+                // black, and a panicked effect stops the delivery (#99), so the render
+                // thread re-sends the last good frame (#145).
+                state.pending_resume = true;
             }
         });
         info!(?power, "power changed");
@@ -429,6 +450,9 @@ impl Engine for CoreEngine {
                 sink,
                 led_count,
             });
+            // The new sink has no frame yet. A panicked effect stops the delivery, so the
+            // render thread re-sends the last good frame when it sees this (#145).
+            state.pending_sink = true;
         });
         info!(device = %device, "sink added");
     }
@@ -579,6 +603,22 @@ fn render_loop(engine: Arc<CoreEngine>) {
     // before a good frame shows black, never the previous effect's colours.
     let mut seen_generation = u64::MAX;
     let mut delivered_good_frame = false;
+    // The last good colours of every device, kept so a device that needs a frame again
+    // gets it (#145): a resume from a pause, a resume from sleep, a sink that was added
+    // while the effect was stopped. Without it the delivery stays stopped until another
+    // effect is picked, and the lights keep the frame they had (or black, after the
+    // pause) while the adapter's keepalive and resume re-send never run
+    // (`crates/canvas-adapters/src/openrgb.rs`).
+    //
+    // The copy is refreshed on every good frame, so it is the last good frame and not an
+    // old one. `clone_from` reuses the destination's capacity, so the good path stays
+    // allocation-free; the copy is a memcpy of the device's colours, next to nothing
+    // compared with the sampling of the whole canvas.
+    //
+    // It is emptied when the effect is replaced: a new effect never starts from the
+    // previous effect's frame (#99, finding 3), and its first frame is the one that is
+    // kept.
+    let mut last_good: Vec<Vec<Rgb8>> = Vec::new();
 
     loop {
         // ---- read the state --------------------------------------------------
@@ -668,6 +708,8 @@ fn render_loop(engine: Arc<CoreEngine>) {
             preview_on,
             input_source,
             effect_start,
+            pending_sink,
+            pending_resume,
         ) = {
             let mut state = engine.state.lock().unwrap_or_else(|e| e.into_inner());
             // Pick up a new plan only when the layout actually changed.
@@ -681,6 +723,15 @@ fn render_loop(engine: Arc<CoreEngine>) {
                         device_index.insert(d.device_id.clone(), i);
                     }
                     plan = p;
+                }
+                // The saved frames belong to the old plan (#145): a frame of a device
+                // that changed its LED count is the wrong length, so it goes; a frame
+                // of a device that is still the same stays.
+                last_good.resize(plan.devices.len(), Vec::new());
+                for (i, device) in plan.devices.iter().enumerate() {
+                    if last_good[i].len() != device.led_count as usize {
+                        last_good[i].clear();
+                    }
                 }
             }
             // `schema` used to be read here under the lock; it is effect code and
@@ -703,6 +754,8 @@ fn render_loop(engine: Arc<CoreEngine>) {
                 state.preview.is_some(),
                 state.input_source.clone(),
                 state.effect_started,
+                state.pending_sink,
+                state.pending_resume,
             )
         };
 
@@ -713,6 +766,11 @@ fn render_loop(engine: Arc<CoreEngine>) {
         if effect_generation != seen_generation {
             seen_generation = effect_generation;
             delivered_good_frame = false;
+            // The saved frames belong to the previous effect (#145): the new effect's
+            // first good frame is the one that is kept, never the old one.
+            for saved in last_good.iter_mut() {
+                saved.clear();
+            }
             for pixel in buffers.canvas.pixels.iter_mut() {
                 *pixel = [0.0, 0.0, 0.0];
             }
@@ -840,6 +898,10 @@ fn render_loop(engine: Arc<CoreEngine>) {
                     ]);
                 }
             }
+            // Keep this device's last good colours (#145): a device that needs a frame
+            // again (a resume, a sink that was added) gets them. `clone_from` reuses the
+            // destination's capacity, so the good path allocates nothing.
+            last_good[device_index].clone_from(device_colors);
         }
         delivered_good_frame = true;
         }
@@ -849,12 +911,24 @@ fn render_loop(engine: Arc<CoreEngine>) {
         // preview client keeps the last frame it received. Black before a good frame is
         // the only panicked delivery.
         let deliver = !panicked || !delivered_good_frame;
+        // Something needs a frame again while the delivery is stopped (#145): a resume
+        // from a pause, a resume from sleep, or a sink that was added. The last good
+        // frame goes out then, so a device is never left on a stale or black frame, and
+        // the adapter's keepalive and resume re-send run again
+        // (`crates/canvas-adapters/src/openrgb.rs`).
+        let redeliver = !deliver && (pending_resume || pending_sink);
         if !deliver {
             // Skip to bookkeeping: no sink submit, no preview submit.
+            if redeliver {
+                let mut state = engine.state.lock().unwrap_or_else(|e| e.into_inner());
+                redeliver_last_good(&state, &last_good, &device_index);
+                state.pending_sink = false;
+                state.pending_resume = false;
+            }
         } else {
         // ---- deliver ---------------------------------------------------------
         {
-            let state = engine.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = engine.state.lock().unwrap_or_else(|e| e.into_inner());
             for sink in &state.sinks {
                 // The sink takes ownership of the colors, so the buffer is moved out
                 // rather than copied. `FrameSink::submit` takes a `Vec`, so one
@@ -875,6 +949,9 @@ fn render_loop(engine: Arc<CoreEngine>) {
                 }
                 sink.sink.submit(colors);
             }
+            // Every sink has this frame now, the new ones included.
+            state.pending_sink = false;
+            state.pending_resume = false;
         }
 
         // ---- preview ---------------------------------------------------------
@@ -921,6 +998,36 @@ fn render_loop(engine: Arc<CoreEngine>) {
 fn write_black(state: &State) {
     for sink in state.sinks.iter().filter(|s| s.led_count > 0) {
         sink.sink.submit(vec![Rgb8::BLACK; sink.led_count as usize]);
+    }
+}
+
+/// Sends the last good frame to every sink again (#145).
+///
+/// A panicked effect stops the delivery (#99), so a device that needs a frame again (a
+/// resume from a pause, a resume from sleep, a sink that was added) would keep the frame
+/// it was last sent, or the black frame the pause wrote, until another effect is picked.
+/// The last good colours go out instead; black when the effect never drew one.
+///
+/// The frame is copied here, not moved: the saved copy stays for the next time.
+fn redeliver_last_good(
+    state: &State,
+    last_good: &[Vec<Rgb8>],
+    device_index: &std::collections::HashMap<DeviceId, usize>,
+) {
+    for sink in state.sinks.iter().filter(|s| s.led_count > 0) {
+        let led_count = sink.led_count as usize;
+        let saved = device_index
+            .get(&sink.device_id)
+            .copied()
+            .and_then(|i| last_good.get(i))
+            .filter(|frame| frame.len() == led_count);
+        let colors = match saved {
+            Some(frame) => frame.clone(),
+            // The effect never drew a frame for this device, or the plan changed under
+            // it: black, at the device's full length, never an empty frame.
+            None => vec![Rgb8::BLACK; led_count],
+        };
+        sink.sink.submit(colors);
     }
 }
 

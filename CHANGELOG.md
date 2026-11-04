@@ -9,6 +9,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Fixed
 
 - Stacks: the daemon now refuses a layer area that runs off the canvas, naming the layer and the edge. A stack saved before this still loads and looks the same, and the editor fits such an area to the canvas the next time it saves, so the stack saves again. (#118)
+- After an effect crashes, the lights get their frame back when they need one: turning the output off and on again, waking the PC from sleep, or plugging a device in now sends the last frame the effect drew (black if it never drew one) instead of leaving the lights black or on a stale frame. (#145)
 
 ## [0.8.2] - 2026-11-04
 
