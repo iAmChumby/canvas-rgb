@@ -104,12 +104,14 @@ function publishWidth(next: number, keep: boolean): number {
  * width is kept in this viewer's localStorage and applied before the first paint, so the rail is
  * already the right width when the page appears.
  *
- * The bounds are the editor's: never narrower than the default, never wider than 320 px, and
- * never more than a quarter of the window. When the window shrinks the rail gives way first, so
- * the page column keeps the room its layouts were fitted to.
+ * The bounds are the editor's (`lib/railWidth.ts`): never narrower than the default, never wider
+ * than 320 px or a quarter of the window, and never so wide that the page column drops below the
+ * width #67's layouts were fitted to. When the window shrinks the rail gives way first.
  *
- * Below 1280 px the rail is the icon rail and the phone has a dock of its own; there is nothing
- * to resize there, and the handle is not drawn (the stylesheet hides it).
+ * Where the bounds meet (at 1280 px the widest the rail may be is its default) there is nothing
+ * to move, so no handle is drawn: a separator that cannot move would still take focus. Below
+ * 1280 px the rail is the icon rail and the phone has a dock of its own; the stylesheet hides it
+ * there too.
  */
 export function RailResizeHandle() {
   const width = useSyncExternalStore(subscribeWidth, getWidth, getServerWidth);
@@ -219,6 +221,10 @@ export function RailResizeHandle() {
     e.preventDefault();
     publishWidth(next, true);
   };
+
+  // The bounds meet: nothing to resize, so nothing to focus. Before the window is measured
+  // (`windowWidth` is 0) the handle is drawn, so server and first client render agree.
+  if (windowWidth > 0 && bound <= RAIL_MIN_PX) return null;
 
   return (
     <div

@@ -267,6 +267,8 @@ describe("PressDrag: a press never starts a native drag or a text selection (#10
   });
 
   it("the rail's resize handle is prevented, refuses a dragstart and is not draggable", () => {
+    // The handle is drawn where the rail has room to move: a window wider than the fitted page.
+    Object.defineProperty(window, "innerWidth", { value: 1440, configurable: true, writable: true });
     const { container } = render(<RailResizeHandle />);
     const el = container.querySelector(".rail-resize") as HTMLDivElement;
     expect(fireEvent.pointerDown(el, { clientX: 200, pointerId: 1 })).toBe(false);

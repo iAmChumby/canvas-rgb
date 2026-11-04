@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render } from "@testing-library/react";
+import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { RailResizeHandle } from "@/components/RailResizeHandle";
 import { RAIL_KEY } from "@/lib/railWidth";
@@ -28,7 +28,16 @@ beforeAll(() => {
   Object.defineProperty(window, "innerWidth", { value: 1440, configurable: true, writable: true });
 });
 
+/** Sets the window's width and tells the page it changed, the way a resize does. */
+function resizeTo(width: number): void {
+  Object.defineProperty(window, "innerWidth", { value: width, configurable: true, writable: true });
+  act(() => {
+    window.dispatchEvent(new Event("resize"));
+  });
+}
+
 afterEach(() => {
+  Object.defineProperty(window, "innerWidth", { value: 1440, configurable: true, writable: true });
   cleanup();
   vi.restoreAllMocks();
   window.localStorage.clear();
@@ -60,12 +69,51 @@ describe("the rail's resize handle (#126)", () => {
     expect(document.documentElement.style.getPropertyValue("--rail-w")).toBe("260px");
   });
 
-  it("clamps a stored width the window cannot hold", () => {
-    // A 1000 px window: a quarter is 250, so the rail gives way before the page does.
-    Object.defineProperty(window, "innerWidth", { value: 1000, configurable: true, writable: true });
+  it("clamps a stored width the window cannot hold, where the fitted page width binds", () => {
+    // A 1360 px window: a quarter is 340 and the cap is 320, but the page keeps 1080, so the
+    // rail may take 280.
+    Object.defineProperty(window, "innerWidth", { value: 1360, configurable: true, writable: true });
     const el = setup("320");
-    expect(el.getAttribute("aria-valuenow")).toBe("250");
-    Object.defineProperty(window, "innerWidth", { value: 1440, configurable: true, writable: true });
+    expect(el.getAttribute("aria-valuenow")).toBe("280");
+    expect(el.getAttribute("aria-valuemax")).toBe("280");
+    expect(document.documentElement.style.getPropertyValue("--rail-w")).toBe("280px");
+    // The keyboard stops at the same bound.
+    fireEvent.keyDown(el, { key: "End" });
+    expect(el.getAttribute("aria-valuenow")).toBe("280");
+  });
+
+  it("re-clamps the width and the bound when the window is resized", () => {
+    const el = setup("320");
+    expect(document.documentElement.style.getPropertyValue("--rail-w")).toBe("320px");
+    expect(el.getAttribute("aria-valuemax")).toBe("320");
+    resizeTo(1360);
+    expect(document.documentElement.style.getPropertyValue("--rail-w")).toBe("280px");
+    expect(el.getAttribute("aria-valuenow")).toBe("280");
+    expect(el.getAttribute("aria-valuemax")).toBe("280");
+    // The stored width is kept, so a wider window gives it back.
+    expect(window.localStorage.getItem(RAIL_KEY)).toBe("320");
+    resizeTo(1440);
+    expect(document.documentElement.style.getPropertyValue("--rail-w")).toBe("320px");
+    expect(el.getAttribute("aria-valuenow")).toBe("320");
+    expect(el.getAttribute("aria-valuemax")).toBe("320");
+  });
+
+  it("draws no handle where the rail cannot be any wider than its default", () => {
+    Object.defineProperty(window, "innerWidth", { value: 1280, configurable: true, writable: true });
+    const { container } = render(<RailResizeHandle />);
+    expect(container.querySelector(".rail-resize")).toBeNull();
+    expect(document.querySelector('[role="separator"]')).toBeNull();
+  });
+
+  it("drops the handle when the window shrinks to 1280 and draws it again when it grows", () => {
+    const el = setup();
+    expect(el.isConnected).toBe(true);
+    resizeTo(1280);
+    expect(document.querySelector(".rail-resize")).toBeNull();
+    resizeTo(1360);
+    const back = document.querySelector(".rail-resize") as HTMLElement;
+    expect(back).not.toBeNull();
+    expect(back.getAttribute("aria-valuemax")).toBe("280");
   });
 
   it("steps 8 px with the arrow keys, and 32 px with shift", () => {

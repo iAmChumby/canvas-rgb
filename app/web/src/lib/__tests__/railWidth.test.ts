@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  PAGE_FITTED_PX,
   RAIL_DEFAULT_PX,
   RAIL_EARLY_SCRIPT,
   RAIL_KEY,
@@ -14,6 +15,7 @@ import {
 } from "@/lib/railWidth";
 
 afterEach(() => {
+  vi.restoreAllMocks();
   window.localStorage.clear();
   document.documentElement.style.removeProperty("--rail-w");
 });
@@ -33,9 +35,6 @@ describe("the rail's width (#126)", () => {
   });
 
   it("never takes more than a quarter of the window", () => {
-    // 1000 px wide: a quarter is 250, so that is the rail's widest it can be.
-    expect(railMaxPx(1000)).toBe(250);
-    expect(clampRailWidth(300, 1000)).toBe(250);
     // 1440 px wide: a quarter is 360, but the 320 px cap is the smaller of the two.
     expect(railMaxPx(1440)).toBe(320);
     expect(clampRailWidth(360, 1440)).toBe(320);
@@ -43,18 +42,36 @@ describe("the rail's width (#126)", () => {
     expect(railMaxPx(800)).toBe(200);
   });
 
-  it("keeps the minimum when a quarter of the window is less than it", () => {
+  it("keeps the minimum when the other bounds are less than it", () => {
     // 390 px wide (a phone): a quarter is 97, so the rail's own minimum is the bound.
     expect(railMaxPx(390)).toBe(200);
     expect(clampRailWidth(320, 390)).toBe(200);
   });
 
+  it("names the page width #67's layouts were fitted to", () => {
+    expect(PAGE_FITTED_PX).toBe(1080);
+  });
+
+  it("never narrows the page below the width its layouts are fitted to", () => {
+    expect(railMaxPx(1280)).toBe(200);
+    expect(railMaxPx(1360)).toBe(280);
+    expect(railMaxPx(1440)).toBe(320);
+    expect(railMaxPx(1920)).toBe(320);
+    // Whatever width is asked for, the page column keeps its fitted width wherever the window can hold it.
+    for (let w = 1280; w <= 2560; w += 10) {
+      for (const asked of [200, 260, 320, 900]) {
+        expect(w - clampRailWidth(asked, w)).toBeGreaterThanOrEqual(PAGE_FITTED_PX);
+      }
+    }
+  });
+
   it("clamps the stored width when the window shrinks: the rail gives way first", () => {
     expect(clampRailWidth(320, 1440)).toBe(320);
     // The same stored width in a narrower window: the rail takes the loss, not the page.
-    expect(clampRailWidth(320, 1200)).toBe(300);
-    expect(clampRailWidth(320, 1000)).toBe(250);
-    expect(clampRailWidth(240, 1000)).toBe(240);
+    expect(clampRailWidth(320, 1360)).toBe(280);
+    expect(clampRailWidth(320, 1280)).toBe(200);
+    expect(clampRailWidth(320, 1000)).toBe(200);
+    expect(clampRailWidth(240, 1360)).toBe(240);
   });
 
   it("reads the stored width back", () => {
@@ -68,6 +85,17 @@ describe("the rail's width (#126)", () => {
     window.localStorage.setItem(RAIL_KEY, "wide");
     expect(readStoredRailWidth()).toBeNull();
     window.localStorage.setItem(RAIL_KEY, "");
+    expect(readStoredRailWidth()).toBeNull();
+    window.localStorage.setItem(RAIL_KEY, "NaN");
+    expect(readStoredRailWidth()).toBeNull();
+    window.localStorage.setItem(RAIL_KEY, "Infinity");
+    expect(readStoredRailWidth()).toBeNull();
+  });
+
+  it("reads no width when storage throws", () => {
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("storage is blocked");
+    });
     expect(readStoredRailWidth()).toBeNull();
   });
 
@@ -103,8 +131,19 @@ describe("the early script (#126)", () => {
   });
 
   it("clamps the stored width to the window it runs in", () => {
-    expect(run("320", 1000)).toBe("--rail-w=250px");
+    expect(run("320", 1360)).toBe("--rail-w=280px");
+    expect(run("320", 1280)).toBe("--rail-w=200px");
+    expect(run("320", 1000)).toBe("--rail-w=200px");
     expect(run("120", 1440)).toBe("--rail-w=200px");
+  });
+
+  it("agrees with the editor's clamp at every window width", () => {
+    // First paint and the live value must be the same number.
+    for (let w = 900; w <= 2560; w += 10) {
+      for (const stored of [120, 200, 260, 320, 900]) {
+        expect(run(String(stored), w)).toBe(`--rail-w=${clampRailWidth(stored, w)}px`);
+      }
+    }
   });
 
   it("leaves the width alone when nothing was stored", () => {
