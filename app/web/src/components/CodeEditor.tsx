@@ -43,6 +43,16 @@ const theme = EditorView.theme({
     // The pane rounds its height to whole lines (app.css), so both read one length.
     lineHeight: "var(--code-line, 1.6)",
     overflow: "auto",
+    // The code pane scrolls inside itself, so it gets the shared scrollbar (#92): the same thin
+    // bar in the theme's colours as every other pane. The colours are the CSS variables, so
+    // they follow the theme.
+    scrollbarWidth: "thin",
+    scrollbarColor: "var(--scroll-thumb) var(--scroll-track)",
+  },
+  // The shared rule's :hover cannot reach this one: a theme selector is the stronger one, so
+  // the hover state of the code pane's bar is written here too.
+  ".cm-scroller:hover": {
+    scrollbarColor: "var(--scroll-thumb-hover) var(--scroll-track)",
   },
   ".cm-content": {
     caretColor: "var(--a1)",

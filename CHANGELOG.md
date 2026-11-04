@@ -8,6 +8,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Changed
 
+- Every pane that scrolls now shows the same thin scrollbar, in the app's own colours in the dark and light themes, instead of the browser's plain grey bar. (#92)
 - Rainbow Wave's Direction is now a direction dial instead of a slider; saved waves keep their direction. (#121)
 
 ### Fixed
