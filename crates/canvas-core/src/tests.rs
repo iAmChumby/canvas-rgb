@@ -1766,7 +1766,7 @@ fn a_replacement_effect_starts_from_a_cleared_canvas_not_a_torn_one() {
     // the replacement's frame has green on the right and black on the left.
     assert!(wait_until(Duration::from_secs(3), || {
         sink.last().is_some_and(|f| {
-            f.iter().any(|c| *c == green) && f.iter().any(|c| *c == Rgb8::BLACK)
+            f.contains(&green) && f.contains(&Rgb8::BLACK)
         })
     }), "the replacement drew green on the right and black on the left; last = {:?}", sink.last());
     let red = Rgb8::new(255, 0, 0);
