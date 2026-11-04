@@ -1058,7 +1058,11 @@ fn the_hot_floor_releases_after_a_hold_continuously_below_50() {
     }
     assert_eq!(r.chip.duty_raw(CPU_FAN), 128, "the floor is engaged at 51 C");
     let mut duty = 128;
-    for s in 4..=70 {
+    for s in 4..=20 {
+        duty = tick_cpu_at_temp(&mut r, t0, s, 40.0);
+    }
+    assert_eq!(duty, 128, "16 s below 50 C the latched floor still holds: {duty}");
+    for s in 21..=70 {
         duty = tick_cpu_at_temp(&mut r, t0, s, 40.0);
     }
     assert!(duty < 128, "after 60 s below 50 C the floor released: {duty}");
