@@ -1612,7 +1612,7 @@ mod tests {
     fn the_mode_cell(text: &str, id: &str) -> String {
         let row = text
             .lines()
-            .find(|line| line.starts_with(id))
+            .find(|line| line.split_whitespace().next() == Some(id))
             .unwrap_or_else(|| panic!("no row for {id} in:\n{text}"));
         row.split_whitespace().collect::<Vec<_>>().join(" ")
     }
@@ -1624,9 +1624,9 @@ mod tests {
     fn a_header_that_is_not_on_this_board_says_so_and_asks_for_nothing() {
         let answer = a_fans_answer(vec![a_header("sys_fan5", a_curve(), true, false)]);
         let text = fans_status_text(&answer);
-        assert!(
-            text.contains("not on this board"),
-            "the mode column must say the header is not on this board:\n{text}"
+        assert_eq!(
+            the_mode_cell(&text, "sys_fan5"),
+            "sys_fan5 1200 40% not on this board"
         );
         assert!(
             !text.contains("asked"),
