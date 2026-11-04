@@ -384,8 +384,8 @@ fn checked_for_load(stack: &Stack, layers: Vec<StackLayer>) -> Stack {
                 // layers are kept as they are. An edge past the canvas (refused on save,
                 // preview and import since #118) is neutralised here like a bad width or
                 // height, so the new edge check cannot drop a stack saved before it. The
-                // compositor clips the kept rectangle to the canvas when it renders it
-                // (`stack.rs` `rect_px`), so the part on the canvas still shows (D95.3.6).
+                // compositor draws the kept rectangle into its on-canvas box when it renders it
+                // (`stack.rs` `rect_px`), so the stack looks as it did (D95.3.6).
                 let in_range = (0.0..=canvas_w).contains(&width)
                     && (0.0..=canvas_h).contains(&height)
                     && x >= 0.0
@@ -999,7 +999,7 @@ mod tests {
     }
 
     #[test]
-    fn a_file_with_an_out_of_canvas_area_still_loads_and_renders_inside_the_canvas() {
+    fn a_file_with_an_out_of_canvas_area_still_loads_and_resolves_to_its_on_canvas_box() {
         let dir = std::env::temp_dir().join(format!(
             "canvas-rgb-stacks-oob-{}-{:?}",
             std::process::id(),
@@ -1040,7 +1040,7 @@ mod tests {
         let resolved = map
             .resolve(&hands[0].layers[0].area)
             .expect("the clipped area covers the canvas edge, not nothing");
-        assert_eq!(resolved.dest, [0.0, 5.0, 7.0, 15.0], "the render resolution clips to the canvas");
+        assert_eq!(resolved.dest, [0.0, 5.0, 7.0, 15.0], "the area resolves to its on-canvas box (the compositor draws the layer into it)");
         assert!(!map.is_empty_area(&hands[0].layers[0].area));
         assert!(map
             .resolve(&LayerArea::Rect { x: 400.0, y: 0.0, width: 10.0, height: 10.0 })

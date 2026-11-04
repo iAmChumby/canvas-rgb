@@ -12,7 +12,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 - Fan headers that are not on your board no longer show as driveable: they stay in the Headers list as muted "Not on this board" rows, cannot be ticked in bulk, and the service refuses to write them. (#128)
 - An effect that crashes while it draws no longer stops the lights for good or flashes a half-drawn frame: the broken effect is skipped, the lights keep its last good frame (black if it never drew one), and picking another effect brings them back. (#99)
-- Saving or previewing a stack whose layer rectangle sticks out of the 320 × 200 canvas is now refused with a message naming the layer and the edge, instead of being stored; stacks already saved with such a rectangle still load and are clipped when rendered. (#118)
+- Stacks: the daemon now refuses a layer area that runs off the canvas, naming the layer and the edge. A stack saved before this still loads and looks the same, and the editor fits such an area to the canvas the next time it saves, so the stack saves again. (#118)
 
 ## [0.8.1] - 2026-11-04
 

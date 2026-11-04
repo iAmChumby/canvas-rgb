@@ -315,6 +315,27 @@ export interface Bounds {
   height: number;
 }
 
+/**
+ * The layers as the daemon must receive them (#118): every rect area clamped to the canvas.
+ * The daemon refuses an edge past the canvas, but a stack saved before that rule can still hold
+ * one, and the editor sends stored areas back as they are. The compositor already draws such a
+ * layer into its on-canvas box, so clamping to that box changes nothing on screen and lets the
+ * stack save again. A rect wholly off the canvas becomes an empty one, which paints nothing,
+ * as before.
+ */
+export function layersForServer(layers: StackLayer[]): StackLayer[] {
+  return layers.map((layer) => {
+    const area = layer.area;
+    if (area.kind !== "rect") return layer;
+    const x0 = Math.min(CANVAS_W, Math.max(0, area.x));
+    const y0 = Math.min(CANVAS_H, Math.max(0, area.y));
+    const x1 = Math.min(CANVAS_W, Math.max(x0, area.x + area.width));
+    const y1 = Math.min(CANVAS_H, Math.max(y0, area.y + area.height));
+    if (x0 === area.x && y0 === area.y && x1 - x0 === area.width && y1 - y0 === area.height) return layer;
+    return { ...layer, area: { kind: "rect", x: x0, y: y0, width: x1 - x0, height: y1 - y0 } };
+  });
+}
+
 /** Where an area paints on the 320 × 200 canvas: a rect, or the union of its placed zones. */
 export function areaBounds(area: LayerArea, layout: Layout | null): Bounds | null {
   if (area.kind === "canvas") return { x: 0, y: 0, width: CANVAS_W, height: CANVAS_H };
