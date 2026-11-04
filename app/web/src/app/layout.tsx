@@ -10,6 +10,7 @@ import "@/styles/update.css";
 import "@/styles/scrollbars.css";
 import { Shell } from "@/shell/Shell";
 import { OnboardingGate } from "@/views/editor/OnboardingGate";
+import { RAIL_EARLY_SCRIPT } from "@/lib/railWidth";
 
 export const metadata: Metadata = {
   title: "canvas-rgb",
@@ -20,6 +21,9 @@ export const metadata: Metadata = {
 // prefers-color-scheme rules in tokens.css apply, in the stylesheet itself, so the first paint is
 // already right. Only an explicit "light" or "dark" choice (localStorage, per viewer) sets the
 // attribute. The motion preference works the same way: "reduced" turns the editor's motion off.
+// The rail's width works the same way too (#126): the width this viewer chose is put on the
+// document before anything is painted, so the rail is the right width from the first frame and
+// the page never jumps.
 const THEME_SCRIPT = `try{var t=localStorage.getItem("canvas-rgb.theme");if(t==="light"||t==="dark"){document.documentElement.setAttribute("data-theme",t)}}catch(e){}try{var m=localStorage.getItem("canvas-rgb.motion");if(m==="reduced"){document.documentElement.setAttribute("data-motion","reduced")}}catch(e){}`;
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
@@ -27,6 +31,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en" suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: THEME_SCRIPT }} />
+        <script dangerouslySetInnerHTML={{ __html: RAIL_EARLY_SCRIPT }} />
       </head>
       <body>
         <Shell>{children}</Shell>

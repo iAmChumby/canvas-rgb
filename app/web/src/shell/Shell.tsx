@@ -15,6 +15,7 @@ import { applyMotion, applyTheme, nextTheme, readMotion, readTheme } from "@/she
 import { ToastProvider, ToastHost, useToast } from "@/components/Toast";
 import { CommandPalette, type Command } from "@/components/CommandPalette";
 import { DaemonDown } from "@/components/DaemonDown";
+import { RailResizeHandle } from "@/components/RailResizeHandle";
 import { links, playingLine } from "@/lib/status";
 import { useTakeover } from "@/views/editor/takeover";
 import { StripSlotsProvider } from "@/shell/PageHeader";
@@ -248,6 +249,10 @@ function Frame({ children }: { children: ReactNode }) {
       {!takeover && (
         <div className="rail-col">
           <Rail pathname={current} />
+          {/* The rail's width is the shell's first column, so the handle that changes it sits on
+              the rail's right edge. It is drawn from 1280 px up (the stylesheet hides it below
+              that, where the rail is the icon rail). */}
+          <RailResizeHandle />
         </div>
       )}
       <div className="main">
