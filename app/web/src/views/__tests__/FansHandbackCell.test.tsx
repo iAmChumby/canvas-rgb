@@ -97,6 +97,7 @@ describe("a handed-back header's name cell (#114)", () => {
     expect(cell).toMatch(/flex-wrap\s*:\s*wrap/);
     expect(cell).toMatch(/max-width\s*:/);
     expect(cell).toMatch(/gap\s*:/);
+    expect(cell).not.toMatch(/white-space\s*:\s*nowrap/);
     const reason = /\.rd-fans \.fan-name-cell \.fan-reason\s*\{([^}]*)\}/.exec(css)?.[1] ?? "";
     expect(reason).toMatch(/white-space\s*:\s*normal/);
   });
