@@ -13,6 +13,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Fixed
 
 - The What's new notes, Settings, Peripherals and Effects panels now scroll at every window width, so the end of a long list can be reached instead of running off the bottom of the window. (#124)
+- A fan that is slow to answer a write no longer causes the service to restart a healthy daemon for missed heartbeats. (#129)
 - Opening Peripherals no longer makes the mouse pointer stutter each time: canvas-rgb reads the mouse once and keeps its settings, and a Read again key reads it on demand. (#7)
 
 ## [0.7.0] - 2026-11-02

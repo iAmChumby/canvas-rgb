@@ -21,6 +21,7 @@ use crate::service::Core;
 use crate::update_install::{win::ImpersonatingReader, ClientFileReader, RefusingReader};
 use canvas_proto::api::error_codes;
 use canvas_proto::pipe::{decode_body, decode_len, encode, PipeRequest, PipeResponse, PIPE_NAME};
+use crate::daemon::{HeartbeatClock, Stamp};
 use std::ffi::c_void;
 use std::io;
 use std::os::windows::io::AsRawHandle;
@@ -225,6 +226,9 @@ pub fn create_instance(name: &str, first: bool) -> io::Result<NamedPipeServer> {
 /// Serves requests forever on `first` and on new instances created after each connect.
 /// `peers` builds the OS probe for each connection.
 pub async fn serve(core: Arc<Mutex<Core>>, name: String, first: NamedPipeServer, peers: PeerFactory) -> io::Result<()> {
+    // Heartbeats are stamped on arrival, off the core lock, so a slow fan write (which holds
+    // the lock) cannot age a heartbeat (#129). Grabbed once before anything can block.
+    let heartbeats = core.lock().await.daemon.shared_heartbeats();
     let mut server = first;
     loop {
         server.connect().await?;
@@ -239,7 +243,7 @@ pub async fn serve(core: Arc<Mutex<Core>>, name: String, first: NamedPipeServer,
         };
         let connected = std::mem::replace(&mut server, next);
         let peer = peers(&connected);
-        tokio::spawn(handle_client(connected, Arc::clone(&core), peer));
+        tokio::spawn(handle_client(connected, Arc::clone(&core), peer, Arc::clone(&heartbeats)));
     }
 }
 
@@ -288,8 +292,14 @@ async fn install_update(
 }
 
 /// Admits one client, then reads requests from it until it disconnects. The first message must
-/// be `Hello`.
-pub async fn handle_client(mut pipe: NamedPipeServer, core: Arc<Mutex<Core>>, peer: Box<dyn PeerProbe>) {
+/// be `Hello`. `heartbeats` is the shared clock a heartbeat stamps on arrival, off the core
+/// lock.
+pub async fn handle_client(
+    mut pipe: NamedPipeServer,
+    core: Arc<Mutex<Core>>,
+    peer: Box<dyn PeerProbe>,
+    heartbeats: Arc<std::sync::Mutex<HeartbeatClock>>,
+) {
     let launched = core.lock().await.daemon.daemon_pid();
     let who = match admit(peer.as_ref(), launched) {
         Ok(who) => who,
@@ -306,6 +316,7 @@ pub async fn handle_client(mut pipe: NamedPipeServer, core: Arc<Mutex<Core>>, pe
     };
     tracing::debug!(pid = who.pid, session = who.session, "admitted a pipe client");
     let mut greeted = false;
+    let mut logged_foreign_beat = false;
     loop {
         let mut prefix = [0u8; 4];
         if pipe.read_exact(&mut prefix).await.is_err() {
@@ -343,6 +354,18 @@ pub async fn handle_client(mut pipe: NamedPipeServer, core: Arc<Mutex<Core>>, pe
                 let readmit = admit_install(peer.as_ref(), launched);
                 let reader = peer.file_reader();
                 install_update(&core, who, readmit, reader, installer, signature).await
+            }
+            Ok(PipeRequest::Heartbeat) => {
+                // Stamped on arrival and answered without the core lock: a slow fan write
+                // holding it must not delay a heartbeat (#129). Only the launched daemon's
+                // pid stamps the clock, so a stale daemon's queued beats after a restart
+                // cannot revive it; foreign beats are answered but not counted.
+                let outcome = heartbeats.lock().unwrap_or_else(|p| p.into_inner()).stamp(who.pid, Instant::now());
+                if outcome == Stamp::Foreign && !logged_foreign_beat {
+                    tracing::warn!(pid = who.pid, session = who.session, "ignoring a heartbeat from a pid that is not the launched daemon");
+                    logged_foreign_beat = true;
+                }
+                PipeResponse::Ok
             }
             Ok(request) => core.lock().await.handle(request, Instant::now()),
             Err(e) => error(error_codes::VALIDATION, format!("invalid request: {e}")),
@@ -893,6 +916,194 @@ pub(crate) mod tests {
         greet(&mut client).await;
         let response = round_trip(&mut client, &install_request()).await;
         assert!(matches!(&response, PipeResponse::Error { code, .. } if code == error_codes::SERVICE_UNAVAILABLE), "{response:?}");
+    }
+
+    /// A core wired to a launched fake daemon, returning the chip so the test can arm a
+    /// stuck duty (a header whose duty never reads back) after engaging it.
+    fn blocking_core(home: PathBuf) -> (Core, FakeChip, FakeProcesses) {
+        let chip = FakeChip::new(MSI_ALT1_MAP);
+        let chip_box: Box<dyn crate::chip::FanChip> =
+            Box::new(crate::chip::Nct6687::detect(chip.clone(), MSI_ALT1_MAP).unwrap());
+        let mut fans = FanController::new(
+            home.clone(),
+            Some(chip_box),
+            None,
+            BTreeMap::new(),
+            FansFile::default(),
+            Some(MSI_ALT1_MAP.name.to_string()),
+        );
+        fans.startup(Instant::now());
+        let openrgb = OpenRgbSupervisor::new(
+            PathBuf::from("OpenRGB.exe"),
+            6742,
+            PathBuf::from("cfg"),
+            home,
+            Box::new(FakeSpawner(FakeProcesses::new())),
+            Box::new(|| Box::new(canvas_adapters::openrgb::OpenRgbAdapter::new("127.0.0.1", 1))),
+        );
+        let processes = FakeProcesses::new();
+        let daemon = DaemonSupervisor::new(PathBuf::from("canvas-rgbd.exe"), Box::new(FakeLauncher(processes.clone())));
+        (Core::new(fans, openrgb, daemon), chip, processes)
+    }
+
+    /// #129: two headers whose duty never reads back are written back to back, which holds the
+    /// core's lock for two READBACK_SETTLE waits. A heartbeat arriving during the write must be
+    /// answered without waiting for the write, and the daemon must not be ended for missed
+    /// heartbeats.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_slow_fan_write_does_not_starve_the_daemon_heartbeat() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, chip, processes) = blocking_core(dir.path().to_path_buf());
+        let mut core = core;
+        core.daemon.start(Instant::now());
+        let daemon_pid = core.daemon.daemon_pid().expect("the launched daemon has a pid");
+        let core = Arc::new(Mutex::new(core));
+        let name = unique_name("slow-fan-write");
+        let first = create_instance(&name, true).unwrap();
+        tokio::spawn(serve(Arc::clone(&core), name.clone(), first, peers(peer(CONSOLE, daemon_pid))));
+
+        // Engage both headers while the chip behaves, so the blocking write comes after.
+        let mut writer = connect(&name).await;
+        greet(&mut writer).await;
+        for header in ["sys_fan5", "sys_fan6"] {
+            let response = round_trip(
+                &mut writer,
+                &PipeRequest::SetHeaderMode { header: header.into(), mode: FanMode::Fixed { percent: 45 } },
+            )
+            .await;
+            assert_eq!(response, PipeResponse::Ok, "{header}");
+        }
+        // Both fans accept the write but never move: every readback stays at the BIOS
+        // duty (the stuck-readback of issue #129).
+        chip.set_stuck_duty(6, true);
+        chip.set_stuck_duty(7, true);
+        let writes_at_start = chip.writes();
+
+        // The daemon's heartbeat connection, greeted before the write starts; it beats
+        // every 50 ms, like the real daemon's 1 Hz loop.
+        let mut beats = connect(&name).await;
+        greet(&mut beats).await;
+        let stop_beats = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let beats_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let beats_task = {
+            let stop = Arc::clone(&stop_beats);
+            let count = Arc::clone(&beats_count);
+            tokio::spawn(async move {
+                loop {
+                    if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                        break;
+                    }
+                    if round_trip(&mut beats, &PipeRequest::Heartbeat).await != PipeResponse::Ok {
+                        break;
+                    }
+                    count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+        };
+
+        // The 1 Hz loop's fan pass, backgrounded: both headers are driven, each waiting the
+        // full readback settle before it hands back to BIOS.
+        let blocked = {
+            let core = Arc::clone(&core);
+            tokio::spawn(async move { core.lock().await.tick(Instant::now()).await })
+        };
+        // Wait until the fan pass has started writing (it runs under the core lock), so the
+        // heartbeats below are guaranteed to arrive while the write is blocked.
+        for _ in 0..500 {
+            if chip.writes() > writes_at_start {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        blocked.await.unwrap();
+        stop_beats.store(true, std::sync::atomic::Ordering::SeqCst);
+        beats_task.await.unwrap();
+        let beats = beats_count.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(beats >= 5, "the daemon did not keep beating through the write: {beats} heartbeats");
+        // Supervision after the window: the daemon has not been ended for missed heartbeats.
+        for _ in 0..3 {
+            core.lock().await.tick(Instant::now()).await;
+        }
+        assert_eq!(processes.spawns().len(), 1, "the healthy daemon was ended for missed heartbeats");
+        assert!(!core.lock().await.daemon.stopped());
+    }
+
+    /// A probe whose pid the test can move between connections, admitted per connection.
+    struct AnyPidPeer {
+        session: u32,
+        console: u32,
+        reported: Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    impl PeerProbe for AnyPidPeer {
+        fn client_session_id(&self) -> io::Result<u32> {
+            Ok(self.session)
+        }
+        fn client_process_id(&self) -> io::Result<u32> {
+            Ok(self.reported.load(std::sync::atomic::Ordering::SeqCst))
+        }
+        fn console_session_id(&self) -> u32 {
+            self.console
+        }
+    }
+
+    /// The shared heartbeat clock's stamp time, as the supervisor sees it.
+    async fn clock_at(core: &Arc<Mutex<Core>>) -> Option<Instant> {
+        core.lock().await.daemon.shared_heartbeats().lock().unwrap_or_else(|p| p.into_inner()).at()
+    }
+
+    /// The stale connection of a daemon the service has since restarted keeps beating; its
+    /// beats must not stamp the new daemon's heartbeat clock.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_heartbeat_from_the_old_pid_after_a_restart_does_not_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let (core, _chip, processes) = blocking_core(dir.path().to_path_buf());
+        let mut core = core;
+        core.daemon.start(Instant::now());
+        let pid1 = core.daemon.daemon_pid().expect("the launched daemon has a pid");
+        let core = Arc::new(Mutex::new(core));
+        let name = unique_name("stale-beat");
+        let first = create_instance(&name, true).unwrap();
+        let reported = Arc::new(std::sync::atomic::AtomicU32::new(pid1));
+        let factory_reported = Arc::clone(&reported);
+        let peers: PeerFactory = Arc::new(move |_: &NamedPipeServer| -> Box<dyn PeerProbe> {
+            Box::new(AnyPidPeer { session: CONSOLE, console: CONSOLE, reported: Arc::clone(&factory_reported) })
+        });
+        tokio::spawn(serve(Arc::clone(&core), name.clone(), first, peers));
+
+        // The launched daemon's own connection, admitted before the restart.
+        let mut stale = connect(&name).await;
+        greet(&mut stale).await;
+        assert_eq!(round_trip(&mut stale, &PipeRequest::Heartbeat).await, PipeResponse::Ok);
+
+        // A crash ends the daemon; the service restarts it under a new pid.
+        processes.exit_last();
+        core.lock().await.tick(Instant::now()).await;
+        let pid2 = core.lock().await.daemon.daemon_pid().expect("the daemon restarted");
+        assert_ne!(pid1, pid2);
+        let at_after_restart = clock_at(&core).await;
+
+        // The stale connection keeps beating: answered, but the clock does not move.
+        assert_eq!(round_trip(&mut stale, &PipeRequest::Heartbeat).await, PipeResponse::Ok);
+        assert_eq!(clock_at(&core).await, at_after_restart, "a beat from the old pid after the restart was counted");
+
+        // The new daemon's own beat does count.
+        reported.store(pid2, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let mut fresh = connect(&name).await;
+        greet(&mut fresh).await;
+        let fresh_response = round_trip(&mut fresh, &PipeRequest::Heartbeat).await;
+        let at_fresh = clock_at(&core).await;
+        assert_eq!(fresh_response, PipeResponse::Ok);
+        assert!(at_fresh > at_after_restart, "the launched daemon's beat was not counted");
+        assert!(core.lock().await.daemon.is_connected(Instant::now()));
+
+        // Once the supervisor is stopped, even the launched daemon's beats are ignored.
+        core.lock().await.daemon.stop();
+        let at_stopped = clock_at(&core).await;
+        assert_eq!(round_trip(&mut fresh, &PipeRequest::Heartbeat).await, PipeResponse::Ok);
+        assert_eq!(clock_at(&core).await, at_stopped, "a beat after the supervisor stopped was counted");
     }
 
     /// Real Win32, no fake: a client in this process must show this process's PID and session.

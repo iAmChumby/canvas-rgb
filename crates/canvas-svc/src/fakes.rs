@@ -48,6 +48,9 @@ struct Sim {
     manual: [bool; CHANNELS],
     drop_duty_writes: bool,
     drop_commands: bool,
+    /// The duty write is accepted by the EC, but the duty the chip reports never moves
+    /// (the fan is stuck): readbacks stay at the BIOS value. Per header.
+    stuck_duty: [bool; CHANNELS],
     /// Firmware owns the fan controller (the resume transition): mode and duty writes are
     /// ignored and the duty reads back as the BIOS value, until [`FakeChip::release_to_service`].
     firmware_owned: bool,
@@ -114,6 +117,7 @@ impl FakeChip {
             manual: [false; CHANNELS],
             drop_duty_writes: false,
             drop_commands: false,
+            stuck_duty: [false; CHANNELS],
             firmware_owned: false,
             clock: Duration::ZERO,
             owned_until: None,
@@ -128,6 +132,15 @@ impl FakeChip {
     /// Simulates a chip that ignores duty writes (readback will not match).
     pub fn set_drop_duty_writes(&self, drop: bool) {
         lock(&self.sim).drop_duty_writes = drop;
+    }
+
+    /// Simulates a fan whose duty write the EC accepts (the driver's own readback inside
+    /// the write passes), but whose reported duty never changes: every readback stays at
+    /// the BIOS value. This is the stuck-readback case of issue #129.
+    pub fn set_stuck_duty(&self, channel: usize, stuck: bool) {
+        if let Some(slot) = lock(&self.sim).stuck_duty.get_mut(channel) {
+            *slot = stuck;
+        }
     }
 
     /// Simulates a chip that never acknowledges the command handshake.
@@ -264,6 +277,16 @@ impl Sim {
         }
     }
 
+    /// The duty the fan reports: the BIOS value while firmware owns the controller or while the
+    /// fan is stuck, otherwise what was written.
+    fn reported_duty(&self, ch: usize) -> u8 {
+        if self.owned() || self.stuck_duty[ch] {
+            BIOS_RAW_DUTY
+        } else {
+            self.duty_raw[ch]
+        }
+    }
+
     /// Whether firmware owns the fan controller at the chip's current clock.
     fn owned(&self) -> bool {
         self.firmware_owned && self.owned_until.is_none_or(|until| self.clock < until)
@@ -283,7 +306,7 @@ impl Sim {
             return self.duty_value(ch);
         }
         if let Some(ch) = self.channel_of_pwm_read(reg) {
-            return self.duty_value(ch);
+            return self.reported_duty(ch);
         }
         if let Some((ch, high)) = self.channel_of_rpm(reg) {
             let value = self.rpm[ch].round().clamp(0.0, 65535.0) as u16;

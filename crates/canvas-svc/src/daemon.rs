@@ -9,6 +9,7 @@ use canvas_proto::consts::{DAEMON_RESTART_LIMIT, DAEMON_RESTART_WINDOW_S};
 use std::collections::VecDeque;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 /// A missed-heartbeat run this long counts as a crash.
@@ -151,12 +152,71 @@ pub enum DaemonAction {
     WriteBlack,
 }
 
+/// Shared with the pipe server: the heartbeat clock the supervisor watches, and the pid it
+/// belongs to. The pipe stamps this on arrival so a fan write that holds the core lock cannot
+/// age a heartbeat (#129), and only for beats from the launched daemon's pid, so a stale
+/// daemon's queued beats after a restart cannot stamp the new daemon's clock.
+#[derive(Default)]
+pub struct HeartbeatClock {
+    /// When the launched daemon's last heartbeat arrived; cleared when a daemon is killed or stopped.
+    at: Option<Instant>,
+    /// The pid of the daemon the supervisor launched; `None` while no daemon runs (or after a stop).
+    pid: Option<u32>,
+    /// True once the supervisor is stopped; beats are ignored from then on.
+    stopped: bool,
+}
+
+/// What the pipe server does with one heartbeat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stamp {
+    /// The launched daemon's beat, freshly stamped.
+    Stamped,
+    /// A beat from a pid that is not the launched daemon; ignored.
+    Foreign,
+    /// The supervisor is stopped; the beat is ignored.
+    Stopped,
+}
+
+impl HeartbeatClock {
+    /// Stamps a beat from `pid`; reports what was done with it.
+    pub(crate) fn stamp(&mut self, pid: u32, now: Instant) -> Stamp {
+        if self.stopped {
+            return Stamp::Stopped;
+        }
+        if self.pid == Some(pid) {
+            self.at = Some(now);
+            return Stamp::Stamped;
+        }
+        Stamp::Foreign
+    }
+
+    /// The clock's current beat time, for tests.
+    #[cfg(test)]
+    pub(crate) fn at(&self) -> Option<Instant> {
+        self.at
+    }
+
+    /// No daemon runs (or it was killed/expected to exit): beats from any pid are ignored.
+    fn clear(&mut self) {
+        self.at = None;
+        self.pid = None;
+    }
+
+    /// The supervisor is stopped: beats are ignored from then on, and the clock is cleared.
+    fn mark_stopped(&mut self) {
+        self.stopped = true;
+        self.at = None;
+        self.pid = None;
+    }
+}
+
 pub struct DaemonSupervisor {
     exe: PathBuf,
     launcher: Box<dyn SessionLauncher>,
     child: Option<Box<dyn ChildProcess>>,
     started: bool,
-    last_heartbeat: Option<Instant>,
+    /// Shared with the pipe server (see [`HeartbeatClock`]).
+    last_heartbeat: Arc<Mutex<HeartbeatClock>>,
     restarts: VecDeque<Instant>,
     quitting: bool,
     stopped: bool,
@@ -181,7 +241,7 @@ impl DaemonSupervisor {
             launcher,
             child: None,
             started: false,
-            last_heartbeat: None,
+            last_heartbeat: Arc::new(Mutex::new(HeartbeatClock::default())),
             restarts: VecDeque::new(),
             quitting: false,
             stopped: false,
@@ -282,15 +342,20 @@ impl DaemonSupervisor {
         let session = self.launcher.console_session();
         match self.launcher.launch(&self.exe) {
             Ok(child) => {
+                let pid = child.id();
                 self.child = Some(child);
                 self.child_session = session;
                 self.waiting_for_session = false;
-                // The first heartbeat gets the same 5 s the rest do.
-                self.last_heartbeat = Some(now);
+                {
+                    let mut hb = self.heartbeat_clock();
+                    hb.at = Some(now);
+                    hb.pid = Some(pid);
+                }
                 tracing::info!(exe = %self.exe.display(), "daemon started in the user session");
             }
             Err(e) if e.kind() == io::ErrorKind::NotConnected => {
                 self.child = None;
+                self.clear_heartbeat_clock();
                 // Logged once; the ticks that follow retry without a line each.
                 if !self.waiting_for_session {
                     tracing::info!(error = %e, "no user is logged on yet; waiting for a session to start the daemon");
@@ -300,14 +365,34 @@ impl DaemonSupervisor {
             Err(e) => {
                 self.child = None;
                 self.waiting_for_session = false;
+                self.clear_heartbeat_clock();
                 tracing::error!(error = %e, "could not start the daemon");
             }
         }
     }
 
+    /// The shared heartbeat clock the pipe server stamps on every heartbeat message (#129).
+    pub fn shared_heartbeats(&self) -> Arc<Mutex<HeartbeatClock>> {
+        Arc::clone(&self.last_heartbeat)
+    }
+
+    fn heartbeat_clock(&self) -> MutexGuard<'_, HeartbeatClock> {
+        self.last_heartbeat.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// No daemon is running: beats are ignored, and the clock is cleared.
+    fn clear_heartbeat_clock(&self) {
+        self.heartbeat_clock().clear();
+    }
+
+    fn last_heartbeat(&self) -> Option<Instant> {
+        self.heartbeat_clock().at
+    }
+
     pub fn on_heartbeat(&mut self, now: Instant) {
-        if !self.stopped {
-            self.last_heartbeat = Some(now);
+        let mut hb = self.heartbeat_clock();
+        if !hb.stopped {
+            hb.at = Some(now);
         }
     }
 
@@ -316,6 +401,7 @@ impl DaemonSupervisor {
     /// service's daemon cannot bind and crash-loops (lighting session 2).
     pub fn stop(&mut self) {
         self.stopped = true;
+        self.heartbeat_clock().mark_stopped();
         if let Some(mut child) = self.child.take() {
             let pid = child.id();
             // The stop is recorded only when the daemon really ended. A kill that failed leaves
@@ -358,7 +444,7 @@ impl DaemonSupervisor {
     pub fn is_connected(&self, now: Instant) -> bool {
         self.child.is_some()
             && self
-                .last_heartbeat
+                .last_heartbeat()
                 .is_some_and(|hb| now.saturating_duration_since(hb) < HEARTBEAT_TIMEOUT)
     }
 
@@ -376,6 +462,7 @@ impl DaemonSupervisor {
             match child.try_wait() {
                 Ok(Some(code)) => {
                     self.child = None;
+                    self.clear_heartbeat_clock();
                     let was = self.child_session;
                     if self.session_ended(was) {
                         // Its session logged off or lost the console: the exit is not a crash.
@@ -394,18 +481,20 @@ impl DaemonSupervisor {
                     let _ = terminate_daemon(child.as_mut(), "the active console session changed");
                     let pid = child.id();
                     wait_for_exit(child.as_mut(), pid);
+                    self.clear_heartbeat_clock();
                 }
                 self.launch(now);
                 return DaemonAction::None;
             }
             let stale = self
-                .last_heartbeat
+                .last_heartbeat()
                 .is_some_and(|hb| now.saturating_duration_since(hb) >= HEARTBEAT_TIMEOUT);
             if stale {
                 if let Some(mut child) = self.child.take() {
                     let _ = terminate_daemon(child.as_mut(), "it missed heartbeats for 5 s");
                     let pid = child.id();
                     wait_for_exit(child.as_mut(), pid);
+                    self.clear_heartbeat_clock();
                 }
                 return self.crashed(now, "missed heartbeats for 5 s");
             }
@@ -431,6 +520,7 @@ impl DaemonSupervisor {
         }
         if self.restarts.len() as u32 >= DAEMON_RESTART_LIMIT {
             self.stopped = true;
+            self.heartbeat_clock().mark_stopped();
             tracing::error!(
                 reason,
                 limit = DAEMON_RESTART_LIMIT,
