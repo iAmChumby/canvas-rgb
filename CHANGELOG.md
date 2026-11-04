@@ -14,6 +14,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Fixed
 
 - Fans: a header handed back to BIOS no longer pushes the Mode and Last 60 s columns out of the Headers table. Its reason now wraps under the name, and the name and the "Handed back to BIOS" label have a gap between them. (#114)
+- The "Updated to" banner no longer stays over the page: opening What's new counts as seen and dismisses it, it is never drawn on the Updates page, and it leaves on its own after the toast timeout or on the first navigation. (#125)
 - The What's new notes, Settings, Peripherals and Effects panels now scroll at every window width, so the end of a long list can be reached instead of running off the bottom of the window. (#124)
 - A fan that is slow to answer a write no longer causes the service to restart a healthy daemon for missed heartbeats. (#129)
 - Opening Peripherals no longer makes the mouse pointer stutter each time: canvas-rgb reads the mouse once and keeps its settings, and a Read again key reads it on demand. (#7)

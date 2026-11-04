@@ -736,6 +736,13 @@ html[data-motion="reduced"] *::after {
   animation: canvas-enter var(--dur) var(--ease) both;
 }
 
+/* The leaving half. The enter animation holds its last frame (fill both), which beats a plain
+   opacity declaration, so leaving swaps the animation instead of overriding a property. Under
+   reduced motion the global block zeroes the duration, so the banner is simply gone. */
+.banner[data-leaving="true"] {
+  animation: canvas-fade-out var(--dur) var(--ease) both;
+}
+
 .banner-icon {
   color: var(--tone);
   display: inline-flex;

@@ -55,7 +55,7 @@ export function useToasts(): ToastState {
 
 const LIFETIME_MS = 2600;
 /** A toast that offers an answer stays long enough to read it and reach it. */
-const ACTION_LIFETIME_MS = 7000;
+export const ACTION_LIFETIME_MS = 7000;
 
 const ICONS: Record<ToastTone, ReactNode> = {
   ok: <CheckCircle size={16} weight="fill" />,
