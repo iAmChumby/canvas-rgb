@@ -96,8 +96,7 @@ impl From<FanValidationError> for FanError {
 }
 
 /// Per-header state that smooths a curve and holds its output steady (issue #17). A rise is
-/// taken on the second consecutive tick the curve asks for more than the held duty:
-/// a lone tick is a `Tctl` spike, not a trend. Step down needs the smoothed temperature
+/// taken at once (a fan never lags a climbing temperature). Step down needs the smoothed temperature
 /// to fall `CURVE_STEP_DOWN_DROP_C` below the peak since the last duty change and to stay
 /// there for the smoothing time constant, or `CURVE_STEP_DOWN_HOLD` to pass.
 #[derive(Default)]
@@ -184,9 +183,9 @@ impl CurveState {
         self.below_since = None;
     }
 
-    /// Latches the hot floor: engages on the first reading at or above `HOT_TEMP_C` while
-    /// the held duty is below `hot`, and releases only after the temperature stays below
-    /// it for the curve's hold time. A missing reading changes nothing.
+    /// Latches the hot floor: engages on every reading at or above `HOT_TEMP_C`, and releases
+    /// only after the temperature stays below it for the curve's hold time. It is a floor
+    /// under the curve, never a cap. A missing reading changes nothing.
     fn note_temp(&mut self, temp_c: Option<f32>, now: Instant) {
         let Some(temp) = temp_c else { return };
         if temp >= HOT_TEMP_C {

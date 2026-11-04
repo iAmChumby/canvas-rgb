@@ -8,7 +8,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
-- The CPU fan no longer flaps between the hot-floor speed and the curve speed when the temperature hovers near 50 °C: the hot floor now stays on from the first hot reading until the temperature has been below 50 °C for 60 s, a hotter CPU still raises the fan at once, and the fan steps down only after the temperature has fallen well below its last peak. (#17)
+- The CPU fan no longer flaps between the hot-floor speed and the curve speed when the temperature hovers near 50 °C: the hot floor now stays on from the first hot reading until the temperature has been below 50 °C for 60 s, a hotter CPU still raises the fan at once, and the fan steps down only once the temperature has fallen well below its last peak or the 60 s hold has passed. (#17)
 
 ## [0.8.0] - 2026-11-03
 
