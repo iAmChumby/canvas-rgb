@@ -380,10 +380,12 @@ fn checked_for_load(stack: &Stack, layers: Vec<StackLayer>) -> Stack {
                     x.is_finite() && y.is_finite() && width.is_finite() && height.is_finite();
                 let canvas_w = canvas_proto::CANVAS_WIDTH as f32;
                 let canvas_h = canvas_proto::CANVAS_HEIGHT as f32;
-                // An edge past the canvas is neutralised like a bad width or height, so a
-                // hand-written rectangle that starts or ends outside the canvas still passes
-                // the load check and the stored stack is kept (D95.3.6). The compositor
-                // itself clips the stored rectangle to the canvas when it renders it.
+                // This is the copy `reload` validates, not the stack it keeps: the stored
+                // layers are kept as they are. An edge past the canvas (refused on save,
+                // preview and import since #118) is neutralised here like a bad width or
+                // height, so the new edge check cannot drop a stack saved before it. The
+                // compositor clips the kept rectangle to the canvas when it renders it
+                // (`stack.rs` `rect_px`), so the part on the canvas still shows (D95.3.6).
                 let in_range = (0.0..=canvas_w).contains(&width)
                     && (0.0..=canvas_h).contains(&height)
                     && x >= 0.0
@@ -1018,6 +1020,11 @@ mod tests {
         let hands = store.all();
         assert_eq!(hands.len(), 1, "the stack with an out-of-canvas area still loads");
         assert_eq!(hands[0].layers.len(), 1, "its layer is kept");
+        assert_eq!(
+            hands[0].layers[0].area,
+            LayerArea::Rect { x: -3.0, y: 5.0, width: 10.0, height: 10.0 },
+            "a stored area that is only partly off the canvas is kept as it is, not emptied"
+        );
 
         let layout = canvas_proto::layout::Layout {
             id: "l".into(),
