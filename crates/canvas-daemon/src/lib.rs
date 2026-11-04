@@ -141,6 +141,18 @@ pub fn create_effect_for_tile(
     }
 }
 
+/// A panic payload as text. Same rule as the engine's `panic_text`
+/// (`crates/canvas-core/src/engine.rs`).
+fn panic_payload_text(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        (*text).to_string()
+    } else if let Some(text) = payload.downcast_ref::<String>() {
+        text.clone()
+    } else {
+        "a panic with a payload that is not text".to_string()
+    }
+}
+
 /// Creates the effect and hands it to the engine, starting and stopping the captures to
 /// match what the effect needs.
 ///
@@ -154,7 +166,9 @@ pub async fn apply_effect(app: &Arc<App>, id: &str, props: &Props) -> Result<(),
         let props = props.clone();
         tokio::task::spawn_blocking(move || {
             let mut effect = create_effect(&app.user_effects, &app.stacks, &id)?;
-            effect.init(&props);
+            // Mark the init as a guarded effect call so the panic hook logs a panic
+            // here as a caught one; the panic still becomes the apply error below.
+            canvas_core::effect_guard::run_guarded(|| effect.init(&props));
             Ok::<_, String>(effect)
         })
         .await
@@ -175,17 +189,25 @@ pub async fn apply_built(
     effect: Box<dyn canvas_proto::traits::Effect>,
     props: &Props,
 ) -> Result<(), String> {
+    // Finding 4: `schema()` is effect code. Guard it once and reuse the result, so a
+    // panicking schema is an apply error, never a crash.
+    let schema = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        canvas_core::effect_guard::run_guarded(|| effect.schema())
+    })) {
+        Ok(schema) => schema,
+        Err(payload) => {
+            return Err(format!(
+                "the effect's schema panicked: {}",
+                panic_payload_text(&payload)
+            ));
+        }
+    };
     // The captures follow the effect's `needs`.
-    let needs = effect.schema().needs;
-    app.inputs.lock().map_err(|_| "the capture state is poisoned")?.apply_needs(needs);
+    app.inputs.lock().map_err(|_| "the capture state is poisoned")?.apply_needs(schema.needs);
 
     // Anything that is not a stack means no stack is on the engine: whatever was running is
     // gone, and a later activation of it must build again.
-    if !effect
-        .schema()
-        .id
-        .starts_with(canvas_proto::stack::STACK_ID_PREFIX)
-    {
+    if !schema.id.starts_with(canvas_proto::stack::STACK_ID_PREFIX) {
         app.stacks.clear_running();
     }
 

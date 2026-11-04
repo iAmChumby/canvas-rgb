@@ -129,15 +129,43 @@ pub fn panic_message(info: &PanicHookInfo<'_>) -> String {
 /// The longest the panic line waits to be written straight into the log file.
 const PANIC_WRITE_LIMIT: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// How the panic hook handles one panic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanicHandling {
+    /// A caught effect panic: log at WARN and leave logging open.
+    CaughtEffectPanic,
+    /// A main-thread panic that ends the process: write the line, then close logging.
+    FatalMainThread,
+    /// A panic on any other thread, uncaught: log it and carry on.
+    OtherThread,
+}
+
+/// Decides the hook's handling before it writes anything.
+///
+/// The marker comes first: a caught effect panic on the main thread (the startup
+/// restore runs over `runtime.block_on` there) is not a fatal panic, and the hook must
+/// neither print "the daemon panicked" nor close the log.
+pub fn panic_handling(in_guarded_call: bool, is_main_thread: bool) -> PanicHandling {
+    if in_guarded_call {
+        PanicHandling::CaughtEffectPanic
+    } else if is_main_thread {
+        PanicHandling::FatalMainThread
+    } else {
+        PanicHandling::OtherThread
+    }
+}
+
 /// Makes every panic leave a line (message, `file:line:col`, thread) before the default hook
 /// runs.
 ///
-/// A panic on the thread that installed the hook (the main thread) ends the process, and the log
-/// guard is a `static` that Rust never drops at exit, so the hook drains the log itself, bounded
-/// by [`crate::logging::FLUSH_LIMIT`], before the default hook runs. A panic on any other thread
-/// (a task) is logged and the daemon carries on: the hook leaves the log open there, because
-/// closing it would silence every later line for everyone, and the writer thread drains the
-/// line by itself.
+/// A caught effect panic is logged at WARN and leaves the log open, even on the main
+/// thread (#99, finding 1). A panic on the thread that installed the hook (the main
+/// thread) is otherwise fatal: it ends the process, and the log guard is a `static`
+/// that Rust never drops at exit, so the hook drains the log itself, bounded by
+/// [`crate::logging::FLUSH_LIMIT`], before the default hook runs. A panic on any other
+/// thread (a task) is logged and the daemon carries on: the hook leaves the log open
+/// there, because closing it would silence every later line for everyone, and the
+/// writer thread drains the line by itself.
 pub fn install_panic_hook() {
     install_hook(std::sync::Arc::new(|line| crate::logging::write_line_direct_within(PANIC_WRITE_LIMIT, line)));
 }
@@ -157,7 +185,13 @@ fn install_hook(write_direct: DirectWrite) {
         let thread = std::thread::current();
         let message = panic_message(info);
         let thread_name = thread.name().unwrap_or("<unnamed>");
-        if thread.id() == main_thread {
+        match panic_handling(canvas_core::effect_guard::in_guarded_call(), thread.id() == main_thread) {
+            PanicHandling::CaughtEffectPanic => {
+                // A caught effect panic: it never ends the process, so logging stays
+                // open, and the engine logs its own error line too.
+                tracing::warn!(message = %message, location = %location, thread = thread_name, "an effect panicked (caught)");
+            }
+            PanicHandling::FatalMainThread => {
             // This panic ends the process. Its line is written to the day's log file here, in one
             // bounded write: queued behind a backlog it could be lost to the 250 ms flush below
             // (#36). At most once: the tracing copy is the fallback, used only when the direct
@@ -172,8 +206,10 @@ fn install_hook(write_direct: DirectWrite) {
                 tracing::error!(message = %message, location = %location, thread = thread_name, "the daemon panicked");
             }
             crate::logging::close_within_limit();
-        } else {
-            tracing::error!(message = %message, location = %location, thread = thread_name, "the daemon panicked");
+            }
+            PanicHandling::OtherThread => {
+                tracing::error!(message = %message, location = %location, thread = thread_name, "the daemon panicked");
+            }
         }
         previous(info);
     }));
@@ -355,5 +391,23 @@ mod tests {
     fn a_stop_request_logs_the_reason() {
         let (_, text) = capture(|| log_stop_requested(StopReason::ConsoleShutdown));
         assert!(text.contains("console-shutdown") && text.contains("CTRL_SHUTDOWN_EVENT"), "{text}");
+    }
+
+    /// #99, finding 1: a caught effect panic is never the fatal one, on any thread.
+    #[test]
+    fn the_hook_treats_a_guarded_panic_as_caught_on_every_thread() {
+        assert_eq!(panic_handling(true, true), PanicHandling::CaughtEffectPanic);
+        assert_eq!(panic_handling(true, false), PanicHandling::CaughtEffectPanic);
+        assert_eq!(panic_handling(false, true), PanicHandling::FatalMainThread);
+        assert_eq!(panic_handling(false, false), PanicHandling::OtherThread);
+    }
+
+    /// The marker the hook asks is set inside a guarded call, and cleared after.
+    #[test]
+    fn the_marker_is_set_inside_a_guarded_call() {
+        use canvas_core::effect_guard::{in_guarded_call, run_guarded};
+        assert!(!in_guarded_call());
+        run_guarded(|| assert!(in_guarded_call(), "the marker is true inside the guard"));
+        assert!(!in_guarded_call());
     }
 }
