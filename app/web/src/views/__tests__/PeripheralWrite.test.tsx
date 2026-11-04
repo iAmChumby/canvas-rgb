@@ -120,9 +120,20 @@ describe("a change that landed", () => {
       </ToastProvider>,
     );
     const reads = await screen.findByRole("switch", { name: "Read settings from this device" });
+    // The switch can stand on the cached read (`lastRead`, PeripheralsView.tsx:82,140)
+    // before the picked-device read lands (PeripheralsView.tsx:224-244), and that read's
+    // success clears `saveError` (PeripheralsView.tsx:241). Clicking before it lands lets
+    // the late read erase the failed write's message, so wait until the read has landed:
+    // its call is the event, and the act flush runs its resolution.
+    await waitFor(() => expect(api.peripheral).toHaveBeenCalled());
+    await act(async () => {
+      await Promise.resolve();
+    });
 
     fireEvent.click(reads);
 
+    // The message comes from the rejected write: wait for that call, then for its words.
+    await waitFor(() => expect(api.putPeripheralAccess).toHaveBeenCalledTimes(1));
     await screen.findByText("the device did not take the change");
     // The change did not land, so the page says so.
     expect(screen.queryByText("The change was saved, but the page could not be refreshed.")).toBeNull();
