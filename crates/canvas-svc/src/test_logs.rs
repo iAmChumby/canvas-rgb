@@ -55,11 +55,9 @@ pub(crate) fn captured<T>(run: impl FnOnce() -> T) -> (T, String) {
     let _turn = one_capture_at_a_time();
     let logs = LogBuf::default();
     let out = tracing::subscriber::with_default(logs.subscriber(), || {
-        // Per-thread `with_default` plus the global callsite interest cache can drop a
-        // line (#45 settler): a callsite already judged off by an earlier subscriber
-        // stays off. Rebuild the cache while this subscriber is installed, so every
-        // callsite is judged against this subscriber's levels.
-        tracing::callsite::rebuild_interest_cache();
+        // No `rebuild_interest_cache()` here: tracing-core already rebuilds callsite
+        // interest whenever a dispatcher is created (`Dispatch::new` ->
+        // `callsite::register_dispatch`), so a stale interest cache is not #45's cause.
         run()
     });
     (out, logs.text())
@@ -79,8 +77,6 @@ where
     let _turn = one_capture_at_a_time();
     let logs = LogBuf::default();
     let _default = tracing::subscriber::set_default(logs.subscriber());
-    // Same rebuild as `captured` (#45): rebuild while this subscriber is installed.
-    tracing::callsite::rebuild_interest_cache();
     let out = run.await;
     drop(_default);
     (out, logs.text())
