@@ -450,9 +450,13 @@ function FanRow({
         />
       </td>
       <td className="name-col">
-        <span className="fig" style={{ fontWeight: 600 }}>{plainLabel(header.label)}</span>
-        {header.pwm_percent === null && <Chip className="rd-hdr-chip">tach only</Chip>}
-        <Handoff header={header} ticked={checked} />
+        {/* The name and its chips wrap as items, and the reason stands on its own line under
+            them, inside the cell: the cell never widens the table past its pane (#114). */}
+        <div className="fan-name-cell">
+          <span className="fig" style={{ fontWeight: 600 }}>{plainLabel(header.label)}</span>
+          {header.pwm_percent === null && <Chip className="rd-hdr-chip">tach only</Chip>}
+          <Handoff header={header} ticked={checked} />
+        </div>
       </td>
       <td className="num-col">
         <span className="rpm-big">

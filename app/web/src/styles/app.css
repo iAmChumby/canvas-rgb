@@ -3698,14 +3698,30 @@ button.chip:hover {
   padding: var(--s1) var(--s3);
 }
 
-/* The name and its chip share one line: the cell never breaks between them. */
-.rd-fans .fan-table th.name-col,
-.rd-fans .fan-table td.name-col {
+/* The name cell: the name and its chips are items that wrap between themselves (each one stays
+   whole), and a handed-back header's reason stands on its own line under them. The cell has a
+   width of its own, so a long reason wraps inside it and never widens the table past its pane
+   and cuts off the Mode and Last 60 s columns (#114). */
+.rd-fans .fan-name-cell {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1) var(--s2);
+  max-width: 34ch;
+}
+
+.rd-fans .fan-name-cell > .fig,
+.rd-fans .fan-name-cell > .chip {
   white-space: nowrap;
 }
 
+.rd-fans .fan-name-cell .fan-reason {
+  flex: 1 1 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .rd-fans .rd-hdr-chip {
-  margin-left: var(--s1);
   padding: 0 var(--s1);
   vertical-align: middle;
 }
@@ -3798,8 +3814,7 @@ button.chip:hover {
     width: 44px;
   }
 
-  .rd-fans .fan-table th.name-col,
-  .rd-fans .fan-table td.name-col {
+  .rd-fans .fan-name-cell > .fig {
     white-space: normal;
   }
 }

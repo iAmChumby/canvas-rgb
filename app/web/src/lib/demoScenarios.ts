@@ -189,6 +189,12 @@ export function handbackHeaders(): string[] {
     .filter(Boolean);
 }
 
+/** The reason a handed-back header gives: "handback-reason:<text>" (the text has no comma). */
+export function handbackReason(): string {
+  const t = tokens().find((x) => x.startsWith("handback-reason:"));
+  return t ? t.slice("handback-reason:".length) : HANDBACK_REASON;
+}
+
 /** Applies the fan scenarios to a status. */
 export function applyFanScenarios(status: FansStatus): FansStatus {
   const ids = handbackHeaders();
@@ -197,7 +203,7 @@ export function applyFanScenarios(status: FansStatus): FansStatus {
     ...status,
     headers: status.headers.map((h) =>
       ids.includes(h.id)
-        ? { ...h, on_bios: true, override_reason: h.override_reason ?? HANDBACK_REASON }
+        ? { ...h, on_bios: true, override_reason: h.override_reason ?? handbackReason() }
         : h,
     ),
   };
