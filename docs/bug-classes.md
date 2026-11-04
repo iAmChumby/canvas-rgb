@@ -350,7 +350,7 @@ line. Three mechanisms, and one bug the timing only exposed.
   then expect parked" tests and `wave1.rs`, and the `api.rs` onboarding timers (60-350 ms sleeps against
   100 ms timers on a compressed time scale, `transient.rs`), the riskiest. Also open: canvas-daemon's
   own hand-rolled `with_default` log captures (`logging.rs` tests `captured` and
-  `close_flushes_the_last_line_to_the_file`, `exit_log.rs` tests `capture`), not on the shared
+  `close_flushes_the_last_line_to_the_file` at `logging.rs:373`, `exit_log.rs` tests `capture` at `exit_log.rs:252`), not on the shared
   helper, which lives in canvas-svc. Delete an entry when its test is fixed.
 - **What stays UNKNOWN:** the mechanism behind the vanished log line in #45/#55. The shared capture
   helper and the stricter assertion are mitigations, not a diagnosis; a 50-run loop of the canvas-svc

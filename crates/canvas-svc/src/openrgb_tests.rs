@@ -208,7 +208,7 @@ async fn a_resume_starts_the_boot_color_watch_window_again() {
 
 use std::time::Duration;
 
-use crate::test_logs::LogBuf;
+use crate::test_logs::captured;
 
 #[tokio::test]
 async fn the_boot_color_waits_until_openrgb_has_found_its_devices() {
@@ -249,31 +249,29 @@ async fn the_boot_color_waits_until_openrgb_has_found_its_devices() {
 
 #[tokio::test]
 async fn a_pc_with_no_devices_logs_that_nothing_was_painted() {
-    let logs = LogBuf::default();
-    let _default = tracing::subscriber::set_default(logs.subscriber());
-    let fake = FakeOpenRgbServer::start(Vec::new()).await.unwrap();
-    let processes = FakeProcesses::new();
-    let (root, exe) = install();
-    let mut sup = supervisor(&processes, &root, &exe, fake.port(), None);
-    let mut now = Instant::now();
-    for _ in 0..8 {
-        sup.tick(now, false, Some(Rgb8::new(1, 2, 3))).await;
-        now += Duration::from_secs(1);
-    }
-    assert!(!sup.boot_written(), "nothing was painted, so the boot color is not marked written");
-    let text = logs.text();
+    let (_, text) = crate::test_logs::captured_async(async {
+        let fake = FakeOpenRgbServer::start(Vec::new()).await.unwrap();
+        let processes = FakeProcesses::new();
+        let (root, exe) = install();
+        let mut sup = supervisor(&processes, &root, &exe, fake.port(), None);
+        let mut now = Instant::now();
+        for _ in 0..8 {
+            sup.tick(now, false, Some(Rgb8::new(1, 2, 3))).await;
+            now += Duration::from_secs(1);
+        }
+        assert!(!sup.boot_written(), "nothing was painted, so the boot color is not marked written");
+    })
+    .await;
     assert!(text.contains("WARN"), "{text}");
     assert!(text.contains("0 devices") && text.contains("nothing was written"), "{text}");
 }
 
 #[test]
 fn a_write_to_zero_devices_is_a_warning_and_a_write_to_some_is_info() {
-    let logs = LogBuf::default();
-    tracing::subscriber::with_default(logs.subscriber(), || {
+    let (_, text) = captured(|| {
         crate::openrgb::log_device_write("painted the test color", 0);
         crate::openrgb::log_device_write("painted the test color", 3);
     });
-    let text = logs.text();
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(lines.len(), 2, "{text}");
     assert!(lines[0].contains("WARN") && lines[0].contains("0 devices"), "{}", lines[0]);
@@ -335,24 +333,24 @@ async fn a_controller_announced_after_the_boot_write_is_painted_too() {
 /// changing at the cap now logs how many devices OpenRGB reports.
 #[tokio::test]
 async fn an_unsettled_nonzero_count_at_the_cap_is_logged_with_the_count() {
-    let logs = LogBuf::default();
-    let _default = tracing::subscriber::set_default(logs.subscriber());
-    // A device is announced every second, so the count differs at every tick and never settles.
-    let devices: Vec<_> = (0..9).map(|i| device(i, 2)).collect();
-    let fake = FakeOpenRgbServer::start_detecting(devices, Duration::from_millis(500), Duration::from_secs(1))
-        .await
-        .unwrap();
-    let processes = FakeProcesses::new();
-    let (root, exe) = install();
-    let mut sup = supervisor(&processes, &root, &exe, fake.port(), None);
+    let (_, text) = crate::test_logs::captured_async(async {
+        // A device is announced every second, so the count differs at every tick and never settles.
+        let devices: Vec<_> = (0..9).map(|i| device(i, 2)).collect();
+        let fake = FakeOpenRgbServer::start_detecting(devices, Duration::from_millis(500), Duration::from_secs(1))
+            .await
+            .unwrap();
+        let processes = FakeProcesses::new();
+        let (root, exe) = install();
+        let mut sup = supervisor(&processes, &root, &exe, fake.port(), None);
 
-    let mut ticker = tokio::time::interval(Duration::from_secs(1));
-    for _ in 0..7 {
-        ticker.tick().await;
-        sup.tick(Instant::now(), false, Some(Rgb8::new(1, 2, 3))).await;
-    }
-    assert!(!sup.boot_written(), "the count never held still, so nothing was painted");
-    let text = logs.text();
+        let mut ticker = tokio::time::interval(Duration::from_secs(1));
+        for _ in 0..7 {
+            ticker.tick().await;
+            sup.tick(Instant::now(), false, Some(Rgb8::new(1, 2, 3))).await;
+        }
+        assert!(!sup.boot_written(), "the count never held still, so nothing was painted");
+    })
+    .await;
     let line = text
         .lines()
         .find(|l| l.contains("not written: OpenRGB has found"))
@@ -366,69 +364,75 @@ async fn an_unsettled_nonzero_count_at_the_cap_is_logged_with_the_count() {
 /// OpenRGB was still detecting), then forget. It now waits for detection like the boot color.
 #[tokio::test]
 async fn the_restart_limit_black_waits_for_detection_and_paints_late_devices() {
-    let logs = LogBuf::default();
-    let _default = tracing::subscriber::set_default(logs.subscriber());
-    let fake = FakeOpenRgbServer::start_detecting(
-        vec![device(0, 4), device(1, 6)],
-        Duration::from_millis(250),
-        Duration::from_millis(300),
-    )
-    .await
-    .unwrap();
-    let processes = FakeProcesses::new();
-    let (root, exe) = install();
-    let mut sup = supervisor(&processes, &root, &exe, fake.port(), None);
+    let (colors, text) = crate::test_logs::captured_async(async {
+        let fake = FakeOpenRgbServer::start_detecting(
+            vec![device(0, 4), device(1, 6)],
+            Duration::from_millis(250),
+            Duration::from_millis(300),
+        )
+        .await
+        .unwrap();
+        let processes = FakeProcesses::new();
+        let (root, exe) = install();
+        let mut sup = supervisor(&processes, &root, &exe, fake.port(), None);
 
-    sup.request_black(Instant::now());
-    assert!(sup.black_pending());
-    // The first tick connects while the server lists no device: nothing may be written, and the
-    // old "wrote black ... to 0 devices" outcome must not be logged.
-    sup.tick(Instant::now(), false, Some(Rgb8::new(9, 9, 9))).await;
-    assert_eq!(fake.custom_mode_writes(0), 0);
-    assert!(!logs.text().contains("0 devices"), "{}", logs.text());
-
-    let mut ticker = tokio::time::interval(Duration::from_millis(250));
-    for _ in 0..40 {
-        ticker.tick().await;
+        sup.request_black(Instant::now());
+        assert!(sup.black_pending());
+        // The first tick connects while the server lists no device: nothing may be written, and the
+        // old "wrote black ... to 0 devices" outcome must not be logged (asserted on the text below).
         sup.tick(Instant::now(), false, Some(Rgb8::new(9, 9, 9))).await;
-        if fake.custom_mode_writes(0) > 0 && fake.custom_mode_writes(1) > 0 {
-            break;
+        assert_eq!(fake.custom_mode_writes(0), 0);
+
+        let mut ticker = tokio::time::interval(Duration::from_millis(250));
+        for _ in 0..40 {
+            ticker.tick().await;
+            sup.tick(Instant::now(), false, Some(Rgb8::new(9, 9, 9))).await;
+            if fake.custom_mode_writes(0) > 0 && fake.custom_mode_writes(1) > 0 {
+                break;
+            }
         }
-    }
-    assert!(wait_for_write(&fake, 0).await > 0, "device 0 got the black write");
-    assert!(wait_for_write(&fake, 1).await > 0, "device 1 got the black write");
-    let text = logs.text();
+        assert!(wait_for_write(&fake, 0).await > 0, "device 0 got the black write");
+        assert!(wait_for_write(&fake, 1).await > 0, "device 1 got the black write");
+        fake.colors(0)
+    })
+    .await;
+    assert!(!text.contains("0 devices"), "{text}");
     assert!(text.contains("black after the daemon restart limit written to"), "{text}");
     // The boot color (9,9,9) never went out: black replaced it.
-    assert_eq!(fake.colors(0), vec![Rgb8::BLACK; 4]);
+    assert_eq!(colors, vec![Rgb8::BLACK; 4]);
 }
 
 // ---- #18 review: the end of the 15 s watch window is logged ----
 
-/// Drives a `PaintJob` on synthetic clocks against a live fake: settles, writes, runs `between`,
-/// then jumps `WATCH_WINDOW` past the first write. Returns the log text.
-async fn run_job_to_window_end(fake: &FakeOpenRgbServer, between: Duration) -> String {
+/// Drives a `PaintJob` on synthetic clocks against a live fake: settles, writes, announces
+/// `late` (when given), runs `between`, then jumps `WATCH_WINDOW` past the first write.
+/// Returns the log text.
+async fn run_job_to_window_end(fake: &FakeOpenRgbServer, late: Option<DeviceInfo>, between: Duration) -> String {
     use crate::openrgb::{PaintJob, WATCH_WINDOW};
     use canvas_proto::traits::DeviceAdapter;
-    let logs = LogBuf::default();
-    let _default = tracing::subscriber::set_default(logs.subscriber());
-    let mut session = OpenRgbAdapter::new(SERVER_HOST, fake.port());
-    session.connect().await.unwrap();
-    let mut job = PaintJob::new("boot color", Rgb8::new(1, 2, 3), None);
-    let t0 = Instant::now();
-    assert!(!job.step(t0, &mut session).await);
-    let t1 = t0 + Duration::from_secs(1);
-    assert!(!job.step(t1, &mut session).await);
-    assert!(!job.painted.is_empty(), "the first write was made");
-    tokio::time::sleep(between).await;
-    assert!(job.step(t1 + WATCH_WINDOW, &mut session).await, "the window has ended");
-    logs.text()
+    let (_, text) = crate::test_logs::captured_async(async {
+        let mut session = OpenRgbAdapter::new(SERVER_HOST, fake.port());
+        session.connect().await.unwrap();
+        let mut job = PaintJob::new("boot color", Rgb8::new(1, 2, 3), None);
+        let t0 = Instant::now();
+        assert!(!job.step(t0, &mut session).await);
+        let t1 = t0 + Duration::from_secs(1);
+        assert!(!job.step(t1, &mut session).await);
+        assert!(!job.painted.is_empty(), "the first write was made");
+        if let Some(info) = late {
+            fake.announce(info);
+        }
+        tokio::time::sleep(between).await;
+        assert!(job.step(t1 + WATCH_WINDOW, &mut session).await, "the window has ended");
+    })
+    .await;
+    text
 }
 
 #[tokio::test]
 async fn the_watch_window_ending_with_all_devices_painted_says_so() {
     let fake = FakeOpenRgbServer::start(vec![device(0, 4), device(1, 2)]).await.unwrap();
-    let text = run_job_to_window_end(&fake, Duration::ZERO).await;
+    let text = run_job_to_window_end(&fake, None, Duration::ZERO).await;
     let line = text.lines().find(|l| l.contains("watch ended")).unwrap_or_else(|| panic!("no window-end line:
 {text}"));
     assert!(line.contains("INFO") && line.contains("15 s") && line.contains("all 2 devices were painted"), "{line}");
@@ -436,17 +440,11 @@ async fn the_watch_window_ending_with_all_devices_painted_says_so() {
 
 #[tokio::test]
 async fn the_watch_window_ending_with_an_unpainted_device_warns_with_the_count() {
-    // Device 0 is listed at once; device 1 is announced 300 ms later, after the first write and
-    // before the window's last pass, which only counts and does not paint.
-    let fake = FakeOpenRgbServer::start_detecting(
-        vec![device(0, 4), device(1, 2)],
-        Duration::from_millis(50),
-        Duration::from_millis(300),
-    )
-    .await
-    .unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let text = run_job_to_window_end(&fake, Duration::from_millis(500)).await;
+    // Device 0 is listed at once; device 1 is announced after the first write (event, no
+    // clock) and before the window's last pass, which only counts and does not paint.
+    // A time-based announce raced the first write under load (`cause:timing-test`).
+    let fake = FakeOpenRgbServer::start(vec![device(0, 4)]).await.unwrap();
+    let text = run_job_to_window_end(&fake, Some(device(1, 2)), Duration::from_millis(500)).await;
     let line = text.lines().find(|l| l.contains("watch ended")).unwrap_or_else(|| panic!("no window-end line:
 {text}"));
     assert!(line.contains("WARN") && line.contains("1 devices are still unpainted") && line.contains("15 s"), "{line}");
@@ -527,13 +525,11 @@ async fn a_stop_with_no_server_process_says_so() {
 async fn an_openrgb_that_exits_on_its_own_is_logged_with_its_pid_as_an_exit() {
     let (root, exe) = install();
     let (_daemon, mut sup, processes) = running_pair(&root, &exe).await;
-    let logs = LogBuf::default();
-    let _default = tracing::subscriber::set_default(logs.subscriber());
-
-    processes.exit_last();
-    sup.tick(Instant::now(), true, None).await;
-
-    let text = logs.text();
+    let (_, text) = crate::test_logs::captured_async(async {
+        processes.exit_last();
+        sup.tick(Instant::now(), true, None).await;
+    })
+    .await;
     let line = text
         .lines()
         .find(|line| line.contains("OpenRGB server (pid 4001) exited on its own"))
