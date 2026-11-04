@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Added
+
+- The left rail can now be dragged to a new width: a handle on its right edge, the arrow keys for a step (Shift for a bigger one), Home and End for the bounds, and a double-click to put it back to 200 px. The width is remembered, and the rail never takes more than a quarter of the window. (#126)
+
 ### Changed
 
 - Every pane that scrolls now shows the same thin scrollbar, in the app's own colours in the dark and light themes, instead of the browser's plain grey bar. (#92)

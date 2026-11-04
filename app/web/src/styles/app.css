@@ -162,6 +162,54 @@ html[data-motion="reduced"] *::after {
   min-height: 0;
   height: 100vh;
   overflow: hidden;
+  /* The resize handle on the rail's right edge is placed against this box. */
+  position: relative;
+}
+
+/* The rail's resize handle: a thin grab strip on the rail's right edge, from 1280 px up.
+   Below that the rail is the icon rail, and on a phone the nav is a dock of its own: there is
+   nothing to resize, so the handle is not drawn at all. */
+.rail-resize {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  z-index: 6;
+  width: 8px;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* The line: nothing at rest, a hairline on hover, on focus and while the rail is dragged. */
+.rail-resize::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  width: 2px;
+  background: var(--a1);
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+.rail-resize:hover::after,
+.rail-resize:focus-visible::after,
+.rail-resize[data-dragging="true"]::after {
+  opacity: 1;
+}
+
+/* The line is the focus ring: an outline around a full-height strip would only double it. */
+.rail-resize:focus-visible {
+  outline: none;
+}
+
+@media (max-width: 1279px) {
+  .rail-resize {
+    display: none;
+  }
 }
 
 .rail {

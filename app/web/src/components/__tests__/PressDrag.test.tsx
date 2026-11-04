@@ -5,6 +5,7 @@ import { AngleDial } from "@/components/AngleDial";
 import { ColorPicker } from "@/components/ColorPicker";
 import { HueRing } from "@/components/HueRing";
 import { NumberField } from "@/components/NumberField";
+import { RailResizeHandle } from "@/components/RailResizeHandle";
 import { Slider } from "@/components/Slider";
 import type { CurvePoint } from "@/proto/CurvePoint";
 import type { StackLayer } from "@/proto/StackLayer";
@@ -263,6 +264,15 @@ describe("PressDrag: a press never starts a native drag or a text selection (#10
     const el = container.querySelector(".curve-point") as SVGCircleElement;
     expect(fireEvent.pointerDown(el, { clientX: 10, clientY: 10, pointerId: 1 })).toBe(false);
     expect(onBlur).toHaveBeenCalled();
+  });
+
+  it("the rail's resize handle is prevented, refuses a dragstart and is not draggable", () => {
+    const { container } = render(<RailResizeHandle />);
+    const el = container.querySelector(".rail-resize") as HTMLDivElement;
+    expect(fireEvent.pointerDown(el, { clientX: 200, pointerId: 1 })).toBe(false);
+    fireEvent.pointerUp(el, { clientX: 200, pointerId: 1 });
+    expect(fireEvent.dragStart(el)).toBe(false);
+    expect(el.getAttribute("draggable")).toBe("false");
   });
 
   it("the stack preview's area frame is prevented, refuses a dragstart and still blurs a focused field", () => {
