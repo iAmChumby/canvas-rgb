@@ -99,9 +99,9 @@ function Parse-Semver {
     $m = [regex]::Match($Version, '^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$')
     if (-not $m.Success) { return $null }
     return [pscustomobject]@{
-        Major = [int]$m.Groups[1].Value
-        Minor = [int]$m.Groups[2].Value
-        Patch = [int]$m.Groups[3].Value
+        Major = [bigint]$m.Groups[1].Value
+        Minor = [bigint]$m.Groups[2].Value
+        Patch = [bigint]$m.Groups[3].Value
         Pre   = $m.Groups[4].Value
     }
 }
@@ -118,8 +118,8 @@ function Compare-PreRelease {
         $aNum = ($a -match '^\d+$')
         $bNum = ($b -match '^\d+$')
         if ($aNum -and $bNum) {
-            $ai = [int]$a
-            $bi = [int]$b
+            $ai = [bigint]$a
+            $bi = [bigint]$b
             if ($ai -ne $bi) { return ($ai - $bi) }
             continue
         }
@@ -314,7 +314,7 @@ foreach ($r in $removed) {
     $section = $baseSectionAt[$r.LineNumber]
     if (-not $section) { $section = '(top of file)' }
     if ($r.Text.Trim() -ceq '## [Unreleased]') {
-        [void]$violations.Add([pscustomobject]@{ LineNumber = $r.LineNumber; Text = $r.Text; Section = $section })
+        [void]$violations.Add([pscustomobject]@{ LineNumber = $r.LineNumber; Text = $r.Text; Section = $section; Message = "is the '## [Unreleased]' heading itself and was removed; a release keeps that heading" })
         continue
     }
     if (-not (Test-DatedSection -Section $section)) { continue }
@@ -337,6 +337,10 @@ if ($violations.Count -eq 0) {
 }
 
 foreach ($v in $violations) {
+    if ($v.PSObject.Properties['Message']) {
+        Write-Host "CHANGELOG.md:$($v.LineNumber): '$($v.Text.Trim())' $($v.Message)."
+        continue
+    }
     Write-Host "CHANGELOG.md:$($v.LineNumber): '$($v.Text.Trim())' is under '$($v.Section)', expected '## [Unreleased]'."
 }
 Write-Host "fail: $($violations.Count) added or removed CHANGELOG.md line(s) outside '## [Unreleased]'."
