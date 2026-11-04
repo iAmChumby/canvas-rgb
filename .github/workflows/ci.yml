@@ -86,3 +86,27 @@ jobs:
       - name: Installer tests
         shell: pwsh
         run: pwsh -NoProfile -File installer/tests/run-all.ps1
+
+  changelog:
+    # PRs only: a new CHANGELOG.md line must land under ## [Unreleased] (#149).
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      # Full history: the check diffs against the merge base with the base branch.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch the base branch
+        shell: pwsh
+        run: git fetch origin ${{ github.base_ref }}
+
+      - name: Changelog lines land under Unreleased
+        shell: pwsh
+        run: pwsh -NoProfile -File tools/check-changelog-unreleased.ps1 -BaseRef origin/${{ github.base_ref }}
+
+      # The check's own tests: throwaway git repos, so the check logic is covered.
+      - name: Changelog check tests
+        shell: pwsh
+        run: pwsh -NoProfile -File tools/tests/run-all.ps1

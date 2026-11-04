@@ -409,3 +409,20 @@ scroll, so the content was clipped and unreachable.
   Chromium script at 390, 720, 721, 736, 752, 760, 900, 961 and 1440 px (`.build/updates-scroll.mjs`,
   in the main checkout). Left: Displays, Devices and Fans may clip long real content with no pane of
   their own (UNKNOWN, not measured).
+
+### `cause:changelog-drift`: a pull request's changelog line lands in an already-released section
+
+A branch that was opened before a release still names `## [Unreleased]` where it was written, but a
+rebase or merge over the release moves that text under the newly dated `## [X.Y.Z]` heading. The line
+then reads as if it shipped in an old release, or lands in a section whose tag is already cut.
+
+- [#99](https://github.com/iAmChumby/canvas-rgb/issues/99) (PR #141): the branch started before
+  v0.8.0, and its `## [Unreleased]` line landed under `## [0.8.0]` when it merged after that release.
+- [#118](https://github.com/iAmChumby/canvas-rgb/issues/118) (PR #148): a rebase over the 0.8.2
+  release put its line under `## [0.8.2]`, an already-tagged section.
+- **Class fix:** done (#149). `tools/check-changelog-unreleased.ps1` is a pull_request CI check that
+  diffs `CHANGELOG.md` against the merge base with the base branch and fails when any added non-blank
+  line sits under anything but `## [Unreleased]`, naming the line, its line number and its section.
+  A release commit is the one exception: the check lets dated-section lines through when the workspace
+  version in `Cargo.toml` changed, the file `docs/releasing.md` makes the version's source of truth.
+  The check's own tests build throwaway git repos (`tools/tests/`).
