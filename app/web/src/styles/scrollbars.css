@@ -29,8 +29,8 @@
   scrollbar-color: var(--scroll-thumb) var(--scroll-track);
 }
 
-/* The pointer is over the pane: the thumb is clearer. The pane is the thing that is hovered,
-   so the bar of a pane the pointer is in is the one that changes. */
+/* The pointer is over the pane: the thumb is clearer. :hover also matches every ancestor of the
+   hovered element, so the bars of the panes around it step up too (cosmetic, accepted). */
 *:hover {
   scrollbar-color: var(--scroll-thumb-hover) var(--scroll-track);
 }

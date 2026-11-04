@@ -10,7 +10,7 @@
 // against the stylesheets, so a pane that is added later has to be classified here too: it
 // either takes the shared scrollbar or it hides its bar on purpose.
 
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -66,8 +66,13 @@ const STYLES = [
   "src/views/editor/onboarding.module.css",
 ];
 const SHARED = "src/styles/scrollbars.css";
+// Every other stylesheet under src/ too (a new module or sheet is scanned without being listed),
+// so "the shared rule is the only place a scrollbar colour is set" holds for files added later.
+const FOUND = (readdirSync(resolve(process.cwd(), "src"), { recursive: true }) as string[])
+  .map((f) => `src/${f.replace(/\\/g, "/")}`)
+  .filter((f) => f.endsWith(".css") && f !== SHARED && !STYLES.includes(f));
 
-const all: Rule[] = STYLES.flatMap((f) => rules(strip(readIf(f)), f));
+const all: Rule[] = [...STYLES, ...FOUND].flatMap((f) => rules(strip(readIf(f)), f));
 const shared = rules(strip(readIf(SHARED)), SHARED);
 
 const decl = (r: Rule, prop: string) =>
