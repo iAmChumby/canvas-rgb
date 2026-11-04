@@ -1265,3 +1265,180 @@ fn capture_the_golden_plan() {
     print!("{}", golden_dump());
     println!("<<<END>>>");
 }
+
+// ---------------------------------------------------------------------------
+// #99: a panicking effect must not kill the render thread
+//
+// These count calls on the fakes instead of reading a new engine flag, so they
+// compile and run against the unguarded engine too: on the old code the render
+// thread or the test thread panics and the frames stop, while the fix keeps
+// the thread running, stops calling the effect, and lets a later effect run.
+// The call counts are the "one record" of the fix: one caught panic, then no
+// further calls until a new effect is set.
+// ---------------------------------------------------------------------------
+
+/// An effect whose `update` always panics. `updates` counts update calls.
+struct PanicUpdateEffect {
+    updates: Arc<AtomicU32>,
+}
+
+impl Effect for PanicUpdateEffect {
+    fn schema(&self) -> PropertySchema {
+        PropertySchema {
+            id: "test_panic_update".into(),
+            name: "Test Panic Update".into(),
+            description: "Panics in update (#99).".into(),
+            needs: InputNeeds::default(),
+            properties: vec![],
+            presets: vec![],
+            thumbnail: None,
+        }
+    }
+
+    fn init(&mut self, _props: &Props) {}
+
+    fn update(&mut self, _dt: f32, _canvas: &mut Canvas, _inputs: &canvas_proto::traits::Inputs) {
+        self.updates.fetch_add(1, Ordering::AcqRel);
+        panic!("update boom");
+    }
+}
+
+/// An effect whose `init` panics on every call but the first (the `set_effect`
+/// one). `inits` counts init calls.
+struct PanicInitEffect {
+    inits: Arc<AtomicU32>,
+}
+
+impl Effect for PanicInitEffect {
+    fn schema(&self) -> PropertySchema {
+        PropertySchema {
+            id: "test_panic_init".into(),
+            name: "Test Panic Init".into(),
+            description: "Panics in init after the first call (#99).".into(),
+            needs: InputNeeds::default(),
+            properties: vec![],
+            presets: vec![],
+            thumbnail: None,
+        }
+    }
+
+    fn init(&mut self, _props: &Props) {
+        let n = self.inits.fetch_add(1, Ordering::AcqRel) + 1;
+        if n >= 2 {
+            panic!("init boom");
+        }
+    }
+
+    fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &canvas_proto::traits::Inputs) {
+        canvas.fill([0.0, 0.0, 0.0]);
+    }
+}
+
+#[test]
+fn a_panicking_update_does_not_kill_the_engine() {
+    let engine = spawn(settings(30));
+    let sink = RecordingSink::new();
+    give_d0_a_layout(&engine);
+    engine.add_sink(DeviceId("d0".into()), sink.clone());
+
+    let updates = Arc::new(AtomicU32::new(0));
+    engine.set_effect(Box::new(PanicUpdateEffect { updates: updates.clone() }), &Props::new());
+
+    // The first update panics, but the loop keeps delivering frames.
+    assert!(wait_until(Duration::from_secs(3), || sink.frame_count() > 0));
+    assert!(wait_until(Duration::from_secs(3), || updates.load(Ordering::Acquire) >= 1));
+    let frames_after_panic = sink.frame_count();
+    assert!(
+        wait_until(Duration::from_secs(3), || sink.frame_count() >= frames_after_panic + 10),
+        "frames keep arriving after the update panic (got {})",
+        sink.frame_count()
+    );
+    // One panic, then the effect is not called again until it is replaced.
+    assert_eq!(updates.load(Ordering::Acquire), 1, "update ran once, then stopped");
+
+    // A later effect set after it renders frames.
+    let initialized = Arc::new(AtomicBool::new(false));
+    engine.set_effect(
+        Box::new(SolidEffect::new([0.0, 1.0, 0.0], initialized.clone())),
+        &Props::new(),
+    );
+    assert!(wait_until(Duration::from_secs(3), || sink
+        .last()
+        .map(|f| f.iter().all(|c| *c == Rgb8::new(0, 255, 0)))
+        .unwrap_or(false)));
+    engine.shutdown();
+}
+
+#[test]
+fn a_panicking_init_does_not_kill_the_engine() {
+    let engine = spawn(settings(30));
+    let sink = RecordingSink::new();
+    give_d0_a_layout(&engine);
+    engine.add_sink(DeviceId("d0".into()), sink.clone());
+
+    let inits = Arc::new(AtomicU32::new(0));
+    engine.set_effect(Box::new(PanicInitEffect { inits: inits.clone() }), &Props::new());
+    assert!(wait_until(Duration::from_secs(3), || sink.frame_count() > 0));
+
+    // The second init panics, on the calling thread when the effect is idle or
+    // on the render thread when it is queued as pending props. Either way the
+    // engine must survive it.
+    engine.set_props(&Props::new());
+    assert!(wait_until(Duration::from_secs(3), || {
+        inits.load(Ordering::Acquire) >= 2 && engine.stats().frames_rendered > 5
+    }));
+    let frames_after_panic = sink.frame_count();
+    assert!(
+        wait_until(Duration::from_secs(3), || sink.frame_count() >= frames_after_panic + 10),
+        "frames keep arriving after the init panic (got {})",
+        sink.frame_count()
+    );
+    // A stopped effect is not initialised again.
+    engine.set_props(&Props::new());
+    assert!(wait_until(Duration::from_secs(3), || {
+        sink.frame_count() >= frames_after_panic + 15
+    }));
+    assert_eq!(inits.load(Ordering::Acquire), 2, "init ran twice, then stopped");
+
+    // A later effect set after it renders frames.
+    let initialized = Arc::new(AtomicBool::new(false));
+    engine.set_effect(
+        Box::new(SolidEffect::new([0.0, 0.0, 1.0], initialized.clone())),
+        &Props::new(),
+    );
+    assert!(wait_until(Duration::from_secs(3), || sink
+        .last()
+        .map(|f| f.iter().all(|c| *c == Rgb8::new(0, 0, 255)))
+        .unwrap_or(false)));
+    engine.shutdown();
+}
+
+#[test]
+fn a_panicking_effect_logs_once_and_is_never_called_again() {
+    let engine = spawn(settings(30));
+    let sink = RecordingSink::new();
+    give_d0_a_layout(&engine);
+    engine.add_sink(DeviceId("d0".into()), sink.clone());
+
+    let updates = Arc::new(AtomicU32::new(0));
+    engine.set_effect(Box::new(PanicUpdateEffect { updates: updates.clone() }), &Props::new());
+    assert!(wait_until(Duration::from_secs(3), || sink.frame_count() > 0));
+    assert!(wait_until(Duration::from_secs(3), || updates.load(Ordering::Acquire) >= 1));
+
+    // More frames and more prop changes would each panic again if the engine
+    // kept calling the effect; the effect must stay stopped.
+    let frames_after_panic = sink.frame_count();
+    engine.set_props(&Props::new());
+    engine.set_props(&Props::new());
+    assert!(
+        wait_until(Duration::from_secs(3), || sink.frame_count() >= frames_after_panic + 20),
+        "frames keep arriving (got {})",
+        sink.frame_count()
+    );
+    assert_eq!(
+        updates.load(Ordering::Acquire),
+        1,
+        "a second panic in a row did not call the effect again"
+    );
+    engine.shutdown();
+}

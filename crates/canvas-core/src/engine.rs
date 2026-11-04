@@ -9,6 +9,7 @@
 //!   the condvar so the thread reacts immediately.
 
 use std::collections::VecDeque;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -63,6 +64,10 @@ struct State {
     input_source: Option<Arc<dyn InputSource>>,
     /// The active effect. `None` means "paint nothing" (a black canvas).
     effect: Option<Box<dyn Effect>>,
+    /// True when the active effect panicked in `init`/`update`/`schema` and must not be
+    /// called again until `set_effect` replaces it (#99). The canvas keeps the last good
+    /// frame while the effect is skipped.
+    effect_panicked: bool,
     /// Bumped whenever the effect is replaced, so the render thread knows that the
     /// effect it is drawing with has been superseded.
     effect_generation: u64,
@@ -110,6 +115,7 @@ impl State {
             preview: None,
             input_source: None,
             effect: None,
+            effect_panicked: false,
             effect_generation: 0,
             props: Props::new(),
             pending_props: Props::new(),
@@ -174,6 +180,10 @@ pub struct CoreEngine {
     /// How many times the parked loop woke up. A test counts them: a parked engine that
     /// spins shows thousands of wake-ups a second (#39, #47).
     park_wakeups: std::sync::atomic::AtomicU64,
+    /// How many effect panics the engine has caught (one per effect instance, #99).
+    /// A test reads it to check that a panicking effect logs once and is never called
+    /// again until it is replaced.
+    effect_panics: std::sync::atomic::AtomicU64,
 }
 
 impl CoreEngine {
@@ -209,6 +219,57 @@ impl CoreEngine {
     pub(crate) fn park_wakeups(&self) -> u64 {
         self.park_wakeups.load(std::sync::atomic::Ordering::Relaxed)
     }
+
+    /// How many effect panics the engine has caught (one per effect instance).
+    ///
+    /// Exposed for tests and diagnostics; the regression tests count calls on the
+    /// fakes so they also compile against the unguarded engine.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn effect_panic_count(&self) -> u64 {
+        self.effect_panics.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Whether the active effect must no longer be called (it panicked, #99).
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn effect_panicked(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .effect_panicked
+    }
+}
+
+/// A caught panic's payload as text. Same rule as the daemon's `panic_message`
+/// (`crates/canvas-daemon/src/exit_log.rs`): `panic!("x")` carries a `&str`,
+/// `panic!("{x}")` a `String`.
+fn panic_text(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        (*text).to_string()
+    } else if let Some(text) = payload.downcast_ref::<String>() {
+        text.clone()
+    } else {
+        "a panic with a payload that is not text".to_string()
+    }
+}
+
+/// An effect's id, for the panic log (#99), without ever panicking itself: a `schema`
+/// that panics gives `"<unknown>"`.
+fn effect_id_guarded(effect: &dyn Effect) -> String {
+    match catch_unwind(AssertUnwindSafe(|| effect.schema().id)) {
+        Ok(id) => id,
+        Err(_) => "<unknown effect id>".to_string(),
+    }
+}
+
+/// Logs one caught effect panic: the effect id and the panic message, once per effect
+/// instance. The caller marks the effect stopped, so this is the only line that effect
+/// gives until it is replaced.
+fn report_effect_panic(effect: &dyn Effect, phase: &str, payload: &Box<dyn std::any::Any + Send>) {
+    let effect_id = effect_id_guarded(effect);
+    let message = panic_text(payload);
+    tracing::error!(effect_id = %effect_id, phase, message = %message, "an effect panicked; it will not be called again until a new effect is set");
 }
 
 impl Engine for CoreEngine {
@@ -243,9 +304,20 @@ impl Engine for CoreEngine {
 
     fn set_effect(&self, effect: Box<dyn Effect>, props: &Props) {
         let mut effect = effect;
-        effect.init(props);
+        // #99: an initialising panic must not take the calling thread (or, when the new
+        // effect is handed to the render thread, the render thread) down with it. The
+        // effect is installed as stopped, so the loop skips it until it is replaced.
+        let init_panicked = match catch_unwind(AssertUnwindSafe(|| effect.init(props))) {
+            Ok(()) => false,
+            Err(payload) => {
+                report_effect_panic(effect.as_ref(), "init", &payload);
+                self.effect_panics.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                true
+            }
+        };
         self.mutate(|state| {
             state.effect = Some(effect);
+            state.effect_panicked = init_panicked;
             state.effect_generation = state.effect_generation.wrapping_add(1);
             state.effect_started = Some(Instant::now());
             state.props = props.clone();
@@ -258,17 +330,37 @@ impl Engine for CoreEngine {
     fn set_props(&self, props: &Props) {
         // The effect may be in the render thread's hands right now, so the new props
         // are queued and applied at the start of the next frame.
+        let mut panicked: Option<(String, String)> = None;
         self.mutate(|state| {
             state.pending_props = props.clone();
             state.props_dirty = true;
             // If the effect is idle in the state, initialise it right away; there is
-            // no frame in flight to race with.
+            // no frame in flight to race with. A stopped effect is never called again
+            // until it is replaced (#99).
+            if state.effect_panicked {
+                return;
+            }
             if let Some(effect) = state.effect.as_mut() {
-                effect.init(props);
-                state.props = props.clone();
-                state.props_dirty = false;
+                let outcome = catch_unwind(AssertUnwindSafe(|| effect.init(props)));
+                match outcome {
+                    Ok(()) => {
+                        state.props = props.clone();
+                        state.props_dirty = false;
+                    }
+                    Err(payload) => {
+                        // Leave `props_dirty` set: the render thread clears it without
+                        // calling the stopped effect again.
+                        state.effect_panicked = true;
+                        let effect_id = effect_id_guarded(effect.as_ref());
+                        panicked = Some((effect_id, panic_text(&payload)));
+                    }
+                }
             }
         });
+        if let Some((effect_id, message)) = panicked {
+            self.effect_panics.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::error!(effect_id = %effect_id, phase = "init", message = %message, "an effect panicked; it will not be called again until a new effect is set");
+        }
     }
 
     fn set_fps(&self, fps: u32) {
@@ -385,6 +477,7 @@ pub fn spawn_core(settings: EngineSettings) -> Arc<CoreEngine> {
         wake: Condvar::new(),
         thread: Mutex::new(None),
         park_wakeups: std::sync::atomic::AtomicU64::new(0),
+        effect_panics: std::sync::atomic::AtomicU64::new(0),
     });
 
     let thread_engine = Arc::clone(&engine);
@@ -525,7 +618,16 @@ fn render_loop(engine: Arc<CoreEngine>) {
 
         // Take the effect out of the state for the duration of the frame, so the API
         // thread is never blocked by a long effect update.
-        let (effect, effect_generation, pending_props, brightness, preview_on, needs, input_source, effect_start) = {
+        let (
+            effect,
+            effect_generation,
+            effect_panicked,
+            pending_props,
+            brightness,
+            preview_on,
+            input_source,
+            effect_start,
+        ) = {
             let mut state = engine.state.lock().unwrap_or_else(|e| e.into_inner());
             // Pick up a new plan only when the layout actually changed.
             if state.plan_generation != plan_generation {
@@ -540,7 +642,8 @@ fn render_loop(engine: Arc<CoreEngine>) {
                     plan = p;
                 }
             }
-            let needs = state.effect.as_ref().map(|e| e.schema().needs).unwrap_or_default();
+            // `schema` used to be read here under the lock; it is effect code and
+            // runs unguarded below (#99), so it moved below, outside the lock.
             // Props requested while this frame's effect was in flight are applied
             // before the next update.
             let pending_props = if state.props_dirty {
@@ -553,10 +656,10 @@ fn render_loop(engine: Arc<CoreEngine>) {
             (
                 state.effect.take(),
                 state.effect_generation,
+                state.effect_panicked,
                 pending_props,
                 state.brightness,
                 state.preview.is_some(),
-                needs,
                 state.input_source.clone(),
                 state.effect_started,
             )
@@ -567,18 +670,69 @@ fn render_loop(engine: Arc<CoreEngine>) {
         let dt = frame_start.duration_since(last_frame_at).as_secs_f32();
         last_frame_at = frame_start;
 
+        // Every effect call runs behind a guard (#99): a panicking effect is logged
+        // once per instance and skipped until `set_effect` replaces it, and the
+        // canvas below keeps the last good frame (black before the first one).
+        let mut panicked = effect_panicked;
+        let mut needs = InputNeeds::default();
+        if let Some(e) = effect.as_ref() {
+            if !panicked {
+                let outcome = catch_unwind(AssertUnwindSafe(|| e.schema().needs));
+                match outcome {
+                    Ok(needs_now) => needs = needs_now,
+                    Err(payload) => {
+                        panicked = true;
+                        report_effect_panic(e.as_ref(), "schema", &payload);
+                        engine
+                            .effect_panics
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            }
+        }
+
         let inputs = build_inputs(needs, &input_source, effect_start);
 
         if let Some(mut e) = effect {
-            if let Some(props) = pending_props {
-                e.init(&props);
+            if !panicked {
+                let mut step_panicked = false;
+                if let Some(props) = pending_props {
+                    let outcome = catch_unwind(AssertUnwindSafe(|| e.init(&props)));
+                    if let Err(payload) = outcome {
+                        step_panicked = true;
+                        report_effect_panic(e.as_ref(), "init", &payload);
+                        engine
+                            .effect_panics
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                if !step_panicked {
+                    let canvas = &mut buffers.canvas;
+                    let inputs_ref = &inputs;
+                    let outcome = catch_unwind(AssertUnwindSafe(|| {
+                        e.update(dt, &mut *canvas, inputs_ref);
+                    }));
+                    if let Err(payload) = outcome {
+                        step_panicked = true;
+                        report_effect_panic(e.as_ref(), "update", &payload);
+                        engine
+                            .effect_panics
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                panicked = step_panicked || panicked;
             }
-            e.update(dt, &mut buffers.canvas, &inputs);
             // Put the effect back, unless a newer one was activated while this one
-            // was drawing; in that case the newer one wins.
+            // was drawing; in that case the newer one wins. The drop of a superseded
+            // effect is effect code too: guard it so a panicking `drop` cannot kill
+            // the render thread.
             let mut state = engine.state.lock().unwrap_or_else(|e| e.into_inner());
             if state.effect.is_none() && state.effect_generation == effect_generation {
                 state.effect = Some(e);
+                state.effect_panicked = panicked;
+            } else {
+                drop(state);
+                let _ = catch_unwind(AssertUnwindSafe(|| drop(e)));
             }
         }
 
