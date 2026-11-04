@@ -211,7 +211,16 @@ describe("leaving the editor for another page", () => {
     fireEvent.drop(page, {
       dataTransfer: { files: [new File(["<html></html>"], "drop.html", { type: "text/html" })] },
     });
-    await new Promise((resolve) => setTimeout(resolve, 80));
+    // The drop handler refuses synchronously while editing (EffectsView.tsx:1030), so an
+    // import that was going to happen would already be inside `sendImport` (EffectsView.tsx:1032):
+    // its only step before the POST is `await file.text()` (EffectsView.tsx:382), and the POST
+    // itself is pushed to `__imports` only after the demo's answer-delay timer
+    // (demo.ts:868,985). A `refreshAll()` issued after the drop goes through that same timer
+    // queue after any import timer, so awaiting it proves the import chain would have run
+    // first — for any wall-clock delay, not just 80 ms.
+    await act(async () => {
+      await refreshAll();
+    });
     expect(imports.length).toBe(0);
     expect(screen.queryByText(/Drop an .html effect/)).toBeNull();
   });
