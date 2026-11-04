@@ -551,7 +551,9 @@ function FanCard({
         <span className="fig fan-card-name">{header.label}</span>
         <ModeState mode={header.mode} />
         {selected && !selectMode && <span className="fan-card-editing">Editing</span>}
-        {selectMode && unavailable && <span className="fan-card-editing">Not on this board, cannot be set</span>}
+        {unavailable && (
+          <span className="fan-card-editing">{selectMode ? "Not on this board, cannot be set" : "Not on this board"}</span>
+        )}
         {selectMode && tach && <span className="fan-card-editing">Tach only, cannot be set</span>}
         <Handoff header={header} ticked={selectMode && checked} />
       </span>
