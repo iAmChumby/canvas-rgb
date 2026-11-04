@@ -18,4 +18,11 @@ on_bios: boolean,
 /**
  * Why the header is not doing what `mode` asks (safety handback, hot floor), if so.
  */
-override_reason: string | null, };
+override_reason: string | null, 
+/**
+ * `false` when this board does not route the channel to a header (issue #128: the
+ * chip has the channel, the board has no connector). Such a header stays in the list,
+ * is never written, and cannot be ticked in bulk. Old payloads without it parse as
+ * available.
+ */
+available: boolean, };

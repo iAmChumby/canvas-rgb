@@ -932,6 +932,7 @@ impl FanController {
                 mode,
                 on_bios,
                 override_reason,
+                available: true,
             });
         }
         let mut temps: Vec<TempReading> = Vec::new();
