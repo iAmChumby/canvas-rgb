@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- Fan headers that are not on your board no longer show as driveable: they stay in the Headers list as muted "Not on this board" rows, cannot be ticked in bulk, and the service refuses to write them. (#128)
+
 ## [0.8.1] - 2026-11-04
 
 ### Fixed

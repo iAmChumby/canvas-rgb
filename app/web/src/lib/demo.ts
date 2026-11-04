@@ -21,6 +21,7 @@ import {
   failsArea,
   holdMs,
   slowRead,
+  unavailableHeaders,
   foundOnRescan,
   onboardingDone,
   openRgbConnecting,
@@ -563,6 +564,7 @@ function fansStatus(): FansStatus {
       mode,
       on_bios: mode.mode === "bios",
       override_reason: null,
+      available: true,
     };
   }).map((h) => (TACH_ONLY.includes(h.id) ? { ...h, pwm_percent: null } : h));
   const temperatures: TempReading[] = [
@@ -1439,6 +1441,10 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       if (!FAN_HEADERS.some((h) => h.id === header)) fail(404, "not_found", `no header ${header}`);
       const mode = body as FanMode;
       if (TACH_ONLY.includes(header) && mode.mode !== "bios") fail(422, "validation", `${header} is tach-only and cannot take a mode`);
+      // Issue #128: a header the board does not route answers 503, like the service's Unavailable.
+      if (unavailableHeaders().includes(header) && mode.mode !== "bios") {
+        fail(503, "service_unavailable", `${header} is not on this board: the chip has the channel, the board has no connector`);
+      }
       validateMode(header, mode, s.fanFloor);
       s.fanModes[header] = mode;
       return { ok: true, header, mode };

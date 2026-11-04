@@ -6,6 +6,7 @@
 //! `TempReader`, `ProcessSpawner`, `SessionLauncher`), so the test suite runs against fakes.
 
 pub mod app;
+pub mod board;
 pub mod chip;
 pub mod daemon;
 pub mod fakes;

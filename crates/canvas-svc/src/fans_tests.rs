@@ -1103,3 +1103,101 @@ fn an_oscillating_hot_temperature_still_raises_the_curve_at_once() {
         assert!(duty >= 128, "never below the hot floor while it oscillates hot: {duty} at {s} s");
     }
 }
+
+const MS7E56: &str = "PRO B850-P WIFI (MS-7E56)";
+
+fn board_controller(dir: &tempfile::TempDir, chip: &FakeChip, cpu: &FakeTemp, config: FansFile, now: Instant, board: Option<&str>) -> FanController {
+    let chip_box: Box<dyn FanChip> = Box::new(Nct6687::detect(chip.clone(), MSI_ALT1_MAP).unwrap());
+    let temps: BTreeMap<TempSource, Box<dyn TempReader>> =
+        BTreeMap::from([(TempSource::Cpu, Box::new(cpu.clone()) as Box<dyn TempReader>)]);
+    let mut fans = FanController::new(dir.path().to_path_buf(), Some(chip_box), None, temps, config, confirmed());
+    fans.set_board_product(board.map(str::to_string));
+    fans.startup(now);
+    fans
+}
+
+#[test]
+fn ms7e56_sys_fan5_and_6_are_unavailable_and_refuse_writes_without_a_chip_write() {
+    let t0 = Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let chip = FakeChip::new(MSI_ALT1_MAP);
+    let cpu = FakeTemp::new(40.0);
+    let mut fans = board_controller(&dir, &chip, &cpu, FansFile::default(), t0, Some(MS7E56));
+    // The issue's real symptom: the read register of an unrouted channel stays at 0.
+    chip.set_stuck_zero_duty(6, true);
+    chip.set_stuck_zero_duty(7, true);
+    let status = fans.status();
+    for id in ["sys_fan5", "sys_fan6"] {
+        let h = header(&status, id);
+        assert!(!h.available, "{id} reports available");
+        assert!(h.on_bios, "{id} stays on BIOS");
+        assert_eq!(h.override_reason, None, "{id} carries no other reason");
+    }
+    for id in ["cpu_fan", "sys_fan1", "sys_fan3"] {
+        assert!(header(&status, id).available, "{id} reports available");
+    }
+    let writes_before = chip.writes();
+    let err = fans.set_header_mode("sys_fan5", FanMode::Fixed { percent: 45 }, t0).unwrap_err();
+    assert!(matches!(err, FanError::Unavailable(_)), "set_header_mode on an absent header is Unavailable: {err}");
+    assert_eq!(chip.writes(), writes_before, "a refused write writes nothing");
+}
+
+#[test]
+fn ms7e56_profile_apply_skips_the_absent_headers_and_drives_the_rest() {
+    let t0 = Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let chip = FakeChip::new(MSI_ALT1_MAP);
+    let cpu = FakeTemp::new(40.0);
+    let mut profile = FansFile::default().profiles[0].clone();
+    profile.headers.insert("cpu_fan".into(), FanMode::Fixed { percent: 50 });
+    profile.headers.insert("sys_fan5".into(), FanMode::Fixed { percent: 50 });
+    profile.headers.insert("sys_fan6".into(), FanMode::Fixed { percent: 50 });
+    let config = FansFile { profiles: vec![profile], ..Default::default() };
+    let mut fans = board_controller(&dir, &chip, &cpu, config, t0, Some(MS7E56));
+    fans.apply_profile(t0);
+    assert!(chip.manual(CPU_FAN), "cpu_fan was driven");
+    assert!(!chip.manual(6), "sys_fan5 was skipped");
+    assert!(!chip.manual(7), "sys_fan6 was skipped");
+    assert!(!chip.written_regs().contains(&0x261), "no write to the sys_fan5 duty register");
+    assert!(!chip.written_regs().contains(&0x260), "no write to the sys_fan6 duty register");
+}
+
+#[test]
+fn an_unknown_board_reports_every_header_available() {
+    let t0 = Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let chip = FakeChip::new(MSI_ALT1_MAP);
+    let cpu = FakeTemp::new(40.0);
+    let mut fans = board_controller(&dir, &chip, &cpu, FansFile::default(), t0, Some("Some other board"));
+    let status = fans.status();
+    assert!(status.headers.iter().all(|h| h.available), "every header is available on an unknown board");
+    let writes_before = chip.writes();
+    fans.set_header_mode("sys_fan5", FanMode::Fixed { percent: 45 }, t0).unwrap();
+    assert!(chip.writes() > writes_before, "a present header is written as before");
+}
+
+#[test]
+fn the_header_override_shows_sys_fan5_anyway_and_hides_sys_fan3() {
+    let t0 = Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let chip = FakeChip::new(MSI_ALT1_MAP);
+    let cpu = FakeTemp::new(40.0);
+    let mut fans = board_controller(&dir, &chip, &cpu, FansFile::default(), t0, Some(MS7E56));
+    fans.set_header_override("sys_fan5", true).unwrap();
+    fans.set_header_override("sys_fan3", false).unwrap();
+    let status = fans.status();
+    assert!(header(&status, "sys_fan5").available, "show anyway makes sys_fan5 available again");
+    assert!(!header(&status, "sys_fan6").available, "sys_fan6 stays absent");
+    assert!(!header(&status, "sys_fan3").available, "not on my board hides sys_fan3");
+    let writes_before = chip.writes();
+    fans.set_header_mode("sys_fan5", FanMode::Fixed { percent: 45 }, t0).unwrap();
+    assert!(chip.manual(6), "an overridden-available header drives again");
+    let err = fans.set_header_mode("sys_fan3", FanMode::Fixed { percent: 45 }, t0).unwrap_err();
+    assert!(matches!(err, FanError::Unavailable(_)), "a hidden header refuses: {err}");
+    assert!(!chip.manual(CPU_FAN + 4), "the hidden header was never taken manual");
+    assert!(chip.writes() >= writes_before);
+    // Overrides persist in chip.toml.
+    let saved = store::load_chip_state(&paths::chip_path(dir.path())).unwrap();
+    assert_eq!(saved.header_overrides.get("sys_fan5"), Some(&true));
+    assert_eq!(saved.header_overrides.get("sys_fan3"), Some(&false));
+}

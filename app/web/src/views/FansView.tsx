@@ -21,7 +21,7 @@ import { FansShape } from "@/components/LoadShapes";
 import { useToast } from "@/components/Toast";
 import { FanCurveEditor } from "@/views/FanCurveEditor";
 import { FanBulkBar } from "@/views/FanBulk";
-import { TACH_ONLY_WHY, canDrive, isHandedBack, plainLabel } from "@/lib/fanBulk";
+import { TACH_ONLY_WHY, UNAVAILABLE_WHY, canDrive, isHandedBack, isUnavailable, plainLabel } from "@/lib/fanBulk";
 import { api } from "@/lib/endpoints";
 import { writeFanMode } from "@/lib/fanWrites";
 import { messageOf } from "@/lib/errors";
@@ -421,10 +421,13 @@ function FanRow({
 }) {
   const peak = Math.max(2000, ...history);
   const duty = header.pwm_percent ?? 0;
-  const tach = !canDrive(header);
+  const unavailable = isUnavailable(header);
+  const tach = !unavailable && !canDrive(header);
+  const blocked = !canDrive(header);
   return (
     <tr
       aria-selected={selected}
+      className={unavailable ? "fan-unavailable" : undefined}
       tabIndex={0}
       onClick={onSelect}
       onKeyDown={(e) => {
@@ -442,10 +445,10 @@ function FanRow({
     >
       <td className="tick-col">
         <Checkbox
-          label={tach ? `${header.label}: tach only, cannot be selected` : `Select ${header.label}`}
+          label={unavailable ? `${header.label}: not on this board, cannot be selected` : tach ? `${header.label}: tach only, cannot be selected` : `Select ${header.label}`}
           checked={checked}
-          blocked={tach}
-          title={tach ? TACH_ONLY_WHY : undefined}
+          blocked={blocked}
+          title={unavailable ? UNAVAILABLE_WHY : tach ? TACH_ONLY_WHY : undefined}
           onToggle={onTick}
         />
       </td>
@@ -454,7 +457,8 @@ function FanRow({
             them, inside the cell: the cell never widens the table past its pane (#114). */}
         <div className="fan-name-cell">
           <span className="fig" style={{ fontWeight: 600 }}>{plainLabel(header.label)}</span>
-          {header.pwm_percent === null && <Chip className="rd-hdr-chip">tach only</Chip>}
+          {unavailable && <Chip className="rd-hdr-chip">Not on this board</Chip>}
+          {header.pwm_percent === null && !unavailable && <Chip className="rd-hdr-chip">tach only</Chip>}
           <Handoff header={header} ticked={checked} />
         </div>
       </td>
@@ -520,31 +524,34 @@ function FanCard({
 }) {
   const peak = Math.max(2000, ...history);
   const duty = header.pwm_percent ?? 0;
-  const tach = !canDrive(header);
-  // In select mode a card is a tick box: a tap ticks it, and a tach-only card says why it cannot be.
+  const unavailable = isUnavailable(header);
+  const tach = !unavailable && !canDrive(header);
+  const blocked = !canDrive(header);
+  // In select mode a card is a tick box: a tap ticks it, and a header that cannot be set says why it cannot be.
   const pick = selectMode
-    ? ({ role: "checkbox", "aria-checked": checked, "aria-disabled": tach || undefined } as const)
+    ? ({ role: "checkbox", "aria-checked": checked, "aria-disabled": blocked || undefined } as const)
     : {};
   return (
     <button
       type="button"
-      className="fan-card"
+      className={unavailable ? "fan-card fan-unavailable" : "fan-card"}
       data-selected={(selectMode ? checked : selected) ? "true" : "false"}
-      title={selectMode && tach ? TACH_ONLY_WHY : undefined}
+      title={selectMode && unavailable ? UNAVAILABLE_WHY : selectMode && tach ? TACH_ONLY_WHY : undefined}
       {...pick}
       onClick={() => {
-        if (!selectMode || !tach) onSelect();
+        if (!selectMode || !blocked) onSelect();
       }}
     >
       {selectMode && (
         <span className="tick-box" data-checked={checked ? "true" : "false"} aria-hidden="true">
-          {checked ? <Check size={12} weight="bold" /> : tach ? <Minus size={12} weight="bold" /> : null}
+          {checked ? <Check size={12} weight="bold" /> : blocked ? <Minus size={12} weight="bold" /> : null}
         </span>
       )}
       <span className="fan-card-head">
         <span className="fig fan-card-name">{header.label}</span>
         <ModeState mode={header.mode} />
         {selected && !selectMode && <span className="fan-card-editing">Editing</span>}
+        {selectMode && unavailable && <span className="fan-card-editing">Not on this board, cannot be set</span>}
         {selectMode && tach && <span className="fan-card-editing">Tach only, cannot be set</span>}
         <Handoff header={header} ticked={selectMode && checked} />
       </span>
@@ -921,6 +928,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
   return (
     <Panel
       title={header.label}
+      className={isUnavailable(header) ? "fan-unavailable" : undefined}
       actions={
         <span className="rpm-readout">
           <AnimatedNumber value={header.rpm ?? 0} />
@@ -928,6 +936,9 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
         </span>
       }
     >
+      {isUnavailable(header) ? (
+        <p className="mute">Not on this board: this header is not fitted on your board, so there is no mode to set.</p>
+      ) : (
       <div className="stack" style={{ gap: 14 }}>
         <Segmented<"bios" | "fixed" | "curve">
           label={`${header.label} mode`}
@@ -1064,6 +1075,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
           </p>
         )}
       </div>
+      )}
     </Panel>
   );
 }

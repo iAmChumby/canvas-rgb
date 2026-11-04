@@ -195,18 +195,35 @@ export function handbackReason(): string {
   return t ? t.slice("handback-reason:".length) : HANDBACK_REASON;
 }
 
+/** The header ids the demo reports as not on this board: "unavailable:<header id>". */
+export function unavailableHeaders(): string[] {
+  return tokens()
+    .filter((t) => t.startsWith("unavailable:"))
+    .map((t) => t.slice("unavailable:".length))
+    .filter(Boolean);
+}
+
 /** Applies the fan scenarios to a status. */
 export function applyFanScenarios(status: FansStatus): FansStatus {
   const ids = handbackHeaders();
-  if (ids.length === 0) return status;
-  return {
-    ...status,
-    headers: status.headers.map((h) =>
-      ids.includes(h.id)
-        ? { ...h, on_bios: true, override_reason: h.override_reason ?? handbackReason() }
-        : h,
-    ),
-  };
+  const unavailable = unavailableHeaders();
+  let next = status;
+  if (ids.length > 0 || unavailable.length > 0) {
+    next = {
+      ...status,
+      headers: status.headers.map((h) => {
+        if (unavailable.includes(h.id)) {
+          // Issue #128: the read register stays 0 for an unrouted channel, rpm 0, on BIOS.
+          return { ...h, available: false, on_bios: true, override_reason: null, rpm: 0, pwm_percent: 0 };
+        }
+        if (ids.includes(h.id)) {
+          return { ...h, on_bios: true, override_reason: h.override_reason ?? handbackReason() };
+        }
+        return h;
+      }),
+    };
+  }
+  return next;
 }
 
 /** Applies the status scenarios: OpenRGB is not connected, or the lights run slow. */

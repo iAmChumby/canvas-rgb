@@ -54,6 +54,9 @@ struct Sim {
     /// Firmware owns the fan controller (the resume transition): mode and duty writes are
     /// ignored and the duty reads back as the BIOS value, until [`FakeChip::release_to_service`].
     firmware_owned: bool,
+    /// The duty read register is stuck at 0 (issue #128: an unrouted channel reports 0%
+    /// while a present-but-empty header reports its BIOS duty). Per header.
+    stuck_zero_duty: [bool; CHANNELS],
     /// The chip's own clock, moved by tests ([`FakeChip::set_clock`]); firmware ownership set with
     /// [`FakeChip::simulate_resume_for`] ends when this reaches `owned_until`.
     clock: Duration,
@@ -118,6 +121,7 @@ impl FakeChip {
             drop_duty_writes: false,
             drop_commands: false,
             stuck_duty: [false; CHANNELS],
+            stuck_zero_duty: [false; CHANNELS],
             firmware_owned: false,
             clock: Duration::ZERO,
             owned_until: None,
@@ -139,6 +143,15 @@ impl FakeChip {
     /// the BIOS value. This is the stuck-readback case of issue #129.
     pub fn set_stuck_duty(&self, channel: usize, stuck: bool) {
         if let Some(slot) = lock(&self.sim).stuck_duty.get_mut(channel) {
+            *slot = stuck;
+        }
+    }
+
+    /// Pins this channel's PWM read register at 0, the duty an unrouted channel reports
+    /// (issue #128, the 2026-11-03 read-only dump: sys_fan5/6 read 0% with a stored BIOS
+    /// curve whose floor was 40%, while empty-but-present headers read 50.2%).
+    pub fn set_stuck_zero_duty(&self, channel: usize, stuck: bool) {
+        if let Some(slot) = lock(&self.sim).stuck_zero_duty.get_mut(channel) {
             *slot = stuck;
         }
     }
@@ -280,6 +293,9 @@ impl Sim {
     /// The duty the fan reports: the BIOS value while firmware owns the controller or while the
     /// fan is stuck, otherwise what was written.
     fn reported_duty(&self, ch: usize) -> u8 {
+        if self.stuck_zero_duty[ch] {
+            return 0;
+        }
         if self.owned() || self.stuck_duty[ch] {
             BIOS_RAW_DUTY
         } else {
@@ -803,4 +819,22 @@ impl crate::daemon::SessionLauncher for FakeLauncher {
 /// Board sensor names, for tests that want to name them.
 pub fn board_sensor_names() -> &'static [&'static str] {
     &BOARD_SENSORS
+}
+
+/// [`crate::board::BoardProbe`] over a fixed product string (issue #128 tests).
+#[derive(Clone)]
+pub struct FakeBoardProbe {
+    product: Option<String>,
+}
+
+impl FakeBoardProbe {
+    pub fn new(product: Option<&str>) -> Self {
+        Self { product: product.map(str::to_string) }
+    }
+}
+
+impl crate::board::BoardProbe for FakeBoardProbe {
+    fn base_board_product(&self) -> Option<String> {
+        self.product.clone()
+    }
 }
