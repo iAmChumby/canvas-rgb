@@ -180,7 +180,8 @@ export function UpdatesView() {
         }
       />
 
-      <div className="settings-grid">
+      {/* The notes column is the pane that scrolls when the notes run past the window (R1, #124); the update card stays in view. */}
+      <div className="settings-grid rd-updates-grid">
         <div className="stack">
           {avail ? (
             <Panel title={`canvas-rgb ${avail.version}`}>
@@ -243,7 +244,7 @@ export function UpdatesView() {
           )}
         </div>
 
-        <div className="stack">
+        <div className="stack rd-updates-notes">
           {notesOf &&
             (blocks.length > 0 ? (
               blocks.map((b, i) => <NotePanel key={`${b.title}-${i}`} block={b} />)

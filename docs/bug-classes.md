@@ -384,3 +384,23 @@ that is already dead or is refused, and nothing can clear it until a restart.
   the API's per-route guards are RAII already (`effect_writes`, `preview_slots`, the adapters'
   `tokio::sync::Mutex`). When adding a route that starts asynchronous work, take the token and the
   guard in the same statement.
+
+### `cause:css-layout`: a pane's scroll rule and the phone fallback key on different widths
+
+On a desktop window `.content` is `overflow: hidden` (R1), so a column taller than the window needs its
+own scrolling pane. On a phone (viewport 720 px and under) the document scrolls instead. The pane's
+scroll rule was keyed on the page container (`@container page (min-width: 641px)`), but the phone
+fallback is keyed on the viewport, and the icon rail (64 px) plus the content padding make the page
+narrower than the window. Windows 721 to about 752 px wide had neither a pane scroll nor the document
+scroll, so the content was clipped and unreachable.
+
+- [#124](https://github.com/iAmChumby/canvas-rgb/issues/124): the What's new notes ran past the bottom
+  of the window. The same gap existed for Settings (`.rd-settings-scroll`), Peripherals
+  (`.peripheral-detail`) and Effects (`.rd-eff-inspector`), and for the Fans right panel.
+- **Class fix:** done (#124). A pane scrolls by default and the `@media (max-width: 720px)` block in
+  `app/web/src/styles/app.css` hands scrolling back to the document. One test,
+  `app/web/src/styles/__tests__/updatesScroll.test.ts`, parses `app.css` and fails if any rule inside
+  `@container page (min-width ...)` sets `overflow`. The layout itself is measured by a headless
+  Chromium script at 390, 720, 721, 736, 752, 760, 900, 961 and 1440 px (`.build/updates-scroll.mjs`,
+  in the main checkout). Left: Displays, Devices and Fans may clip long real content with no pane of
+  their own (UNKNOWN, not measured).

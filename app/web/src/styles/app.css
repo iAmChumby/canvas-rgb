@@ -4450,6 +4450,14 @@ button.chip:hover {
 .rd-settings .rd-settings-scroll {
   flex: 1 1 auto;
   min-height: 0;
+  /* The pane scrolls from the desktop shell up (721 px and over); the phone block below hands
+     the scrolling to the document. The panes' scroll rule keys on the window, as the shell
+     does, never on the page's width: the icon rail makes the page narrower than the window,
+     and a rule on the page's width left a band of windows where nothing scrolled (#124). */
+  overflow-y: auto;
+  /* The focus ring and the panels' edges stay whole at the pane's sides. */
+  margin: 0 calc(var(--s1) * -1);
+  padding: 0 var(--s1);
 }
 
 .rd-settings .rd-settings-grid {
@@ -4475,28 +4483,29 @@ button.chip:hover {
 
 /* R1 on a desktop window: what is taller than the window scrolls inside its own pane, so
    nothing stands cut off and the page itself never scrolls. The panes below are the ones a
-   short window (700 px and under) reaches; a taller window never scrolls them. */
-@container page (min-width: 641px) {
-  .rd-settings .rd-settings-scroll,
-  .rd-peripherals .peripheral-detail,
-  .rd-effects .rd-eff-inspector {
-    overflow-y: auto;
-    /* The focus ring and the panels' edges stay whole at the pane's sides. */
-    margin: 0 calc(var(--s1) * -1);
-    padding: 0 var(--s1);
-  }
+   short window (700 px and under) reaches; a taller window never scrolls them.
+   They scroll by default, and the phone block (720 px and under) hands the scrolling to the
+   document. Never key a pane's overflow on `@container page (min-width ...)`: the icon rail
+   and the content padding make the page narrower than the window, so the two breakpoints
+   leave a band of windows (721 to about 752 px) with no scroller at all (#124). */
+.rd-peripherals .peripheral-detail,
+.rd-effects .rd-eff-inspector {
+  overflow-y: auto;
+  /* The focus ring and the panels' edges stay whole at the pane's sides. */
+  margin: 0 calc(var(--s1) * -1);
+  padding: 0 var(--s1);
+}
 
-  .rd-peripherals .peripheral-detail {
-    flex: 1 1 auto;
-    min-height: 0;
-    /* The Read and Change tooltips hang past the pane's edge while hidden; they do not make the
-       pane scroll sideways. */
-    overflow-x: hidden;
-  }
+.rd-peripherals .peripheral-detail {
+  flex: 1 1 auto;
+  min-height: 0;
+  /* The Read and Change tooltips hang past the pane's edge while hidden; they do not make the
+     pane scroll sideways. */
+  overflow-x: hidden;
+}
 
-  .rd-fans .rd-fans-right > .panel {
-    overflow-y: auto;
-  }
+.rd-fans .rd-fans-right > .panel {
+  overflow-y: auto;
 }
 
 /* Phone: the panels are tighter: every row counts when the page scrolls. */
@@ -4511,6 +4520,54 @@ button.chip:hover {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: var(--s4);
   align-items: start;
+}
+
+/* What's new (#124): in two columns the grid fills the page and only the notes column
+   scrolls, so the update card stays in view. In one column (960 px and under) the whole grid
+   is the pane; on a phone (720 px and under) the document scrolls and neither is. */
+.rd-updates .rd-updates-grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  grid-template-rows: minmax(0, 1fr);
+  align-items: stretch;
+}
+
+.rd-updates .rd-updates-notes {
+  overflow-y: auto;
+  margin: 0 calc(var(--s1) * -1);
+  padding: 0 var(--s1);
+}
+
+@media (max-width: 960px) {
+  .rd-updates .rd-updates-grid {
+    grid-template-rows: none;
+    align-items: start;
+    overflow-y: auto;
+    margin: 0 calc(var(--s1) * -1);
+    padding: 0 var(--s1);
+  }
+
+  .rd-updates .rd-updates-notes {
+    overflow: visible;
+    margin: 0;
+    padding: 0;
+  }
+}
+
+@media (max-width: 720px) {
+  .rd-settings .rd-settings-scroll,
+  .rd-updates .rd-updates-grid,
+  .rd-peripherals .peripheral-detail,
+  .rd-effects .rd-eff-inspector {
+    flex: 0 0 auto;
+    overflow: visible;
+    margin: 0;
+    padding: 0;
+  }
+
+  .rd-fans .rd-fans-right > .panel {
+    overflow: visible;
+  }
 }
 
 .kv {
