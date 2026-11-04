@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { ToastHost, ToastProvider } from "@/components/Toast";
 import { refreshAll, refreshStatus } from "@/lib/store";
+import { waitForStackGuard } from "@/test/historyGuard";
 import { EffectsView } from "@/views/EffectsView";
 import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
 
@@ -216,6 +217,8 @@ describe("the stack builder on a phone", () => {
     fireEvent.click(screen.getByRole("button", { name: /Add layer/ }));
     fireEvent.click(await screen.findByRole("option", { name: /Solid/ }));
     await waitFor(() => expect(layerNames()).toHaveLength(4));
+    // The in-app leave goes through the guard the dirty effect registers.
+    await waitForStackGuard();
     fireEvent.click(screen.getByRole("button", { name: "Back to the effects" }));
     const prompt = await screen.findByRole("alertdialog", { name: "Unsaved changes" });
     expect(prompt).toBeTruthy();
@@ -355,6 +358,8 @@ describe("the stack builder on a phone", () => {
     pick("Heat");
     focusAndClick(screen.getByRole("button", { name: "Tune Heat" }));
     const sheet = await screen.findByRole("dialog", { name: "Tune Heat" });
+    // A held page change asks via the same listener Back would hit; it must be installed first.
+    await waitForStackGuard();
     // A held page change asks, with the sheet still under the prompt.
     act(() => {
       window.dispatchEvent(new PopStateEvent("popstate"));

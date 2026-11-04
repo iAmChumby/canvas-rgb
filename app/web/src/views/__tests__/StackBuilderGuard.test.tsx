@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { ToastHost, ToastProvider } from "@/components/Toast";
 import { refreshAll } from "@/lib/store";
+import { waitForStackGuard } from "@/test/historyGuard";
 import { Rail } from "@/shell/Rail";
 import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
 import { EffectsView } from "@/views/EffectsView";
@@ -100,6 +101,9 @@ async function builderReady() {
 async function dirty() {
   fireEvent.click(screen.getByRole("button", { name: /(Hide|Show) Sparkles/ }));
   await waitFor(() => expect(screen.getByText("Unsaved")).toBeTruthy());
+  // The guard entry and its listener land in the dirty effect after the "Unsaved" commit;
+  // wait for them before any history.back(), or Back can race past the guard.
+  await waitForStackGuard();
 }
 
 describe("the builder's unsaved guard", () => {
@@ -137,6 +141,7 @@ describe("the builder's unsaved guard", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Add the first layer" }));
     fireEvent.click(await screen.findByRole("option", { name: /Solid/ }));
     await waitFor(() => expect(screen.getByText("Unsaved")).toBeTruthy());
+    await waitForStackGuard();
 
     window.history.back();
     const dialog = await screen.findByRole("alertdialog", { name: "Unsaved changes" });

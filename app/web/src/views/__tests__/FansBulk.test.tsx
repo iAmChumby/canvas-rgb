@@ -299,8 +299,6 @@ describe("the run belongs to the bar", () => {
     });
     return { held, sent };
   }
-  const settle = (ms = 10) => act(async () => void (await new Promise((r) => setTimeout(r, ms))));
-
   it("keeps Done and Clear shut while it runs, and opens them when it has reported", async () => {
     pageWidth = 358;
     await page();
@@ -312,18 +310,17 @@ describe("the run belongs to the bar", () => {
     const { held } = holdPatches();
     await setFixed("45");
     await waitFor(() => expect((screen.getByRole("button", { name: "Done" }) as HTMLButtonElement).disabled).toBe(true));
-    expect((screen.getByRole("button", { name: "Clear" }) as HTMLButtonElement).disabled).toBe(true);
+    await waitFor(() => expect((screen.getByRole("button", { name: "Clear" }) as HTMLButtonElement).disabled).toBe(true));
     expect(screen.getByText("Applying")).toBeTruthy();
 
     // Release each request as it goes out, until both headers are written.
     for (let i = 0; i < 2; i++) {
       await waitFor(() => expect(held.length).toBeGreaterThan(i));
       await act(async () => held[i]!());
-      await settle();
     }
     await waitFor(() => expect(screen.getByText(/2 set to Fixed 45%/)).toBeTruthy());
-    expect((screen.getByRole("button", { name: "Done" }) as HTMLButtonElement).disabled).toBe(false);
-    expect((screen.getByRole("button", { name: "Clear" }) as HTMLButtonElement).disabled).toBe(false);
+    await waitFor(() => expect((screen.getByRole("button", { name: "Done" }) as HTMLButtonElement).disabled).toBe(false));
+    await waitFor(() => expect((screen.getByRole("button", { name: "Clear" }) as HTMLButtonElement).disabled).toBe(false));
   });
 
   it("stops writing when the page goes away mid-run and leaves a toast of what was applied", async () => {
@@ -358,11 +355,10 @@ describe("the run belongs to the bar", () => {
     // The page goes while the first header's request is out.
     fireEvent.click(screen.getByRole("button", { name: "leave" }));
     await act(async () => held[0]!());
-    await settle(30);
-
-    // The two headers behind it were never written, and the toast says so.
-    expect(sent).toEqual(["cpu_fan"]);
+    // The toast is the report of what was applied before it stopped; wait for it.
     await waitFor(() => expect(screen.getByText(/1 set to Fixed 40%, 2 not sent/)).toBeTruthy());
+    // The two headers behind it were never written.
+    expect(sent).toEqual(["cpu_fan"]);
     expect((await header("cpu_fan")).mode).toEqual({ mode: "fixed", percent: 40 });
     expect((await header("sys_fan1")).mode).toEqual({ mode: "bios" });
   });

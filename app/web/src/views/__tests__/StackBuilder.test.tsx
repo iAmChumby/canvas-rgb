@@ -4,6 +4,7 @@ import { ToastHost, ToastProvider } from "@/components/Toast";
 import { api } from "@/lib/endpoints";
 import { ApiFailure } from "@/lib/errors";
 import { refreshAll } from "@/lib/store";
+import { waitForStackGuard } from "@/test/historyGuard";
 import type { StacksResponse } from "@/proto/StacksResponse";
 import { EffectsView } from "@/views/EffectsView";
 import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
@@ -131,6 +132,8 @@ describe("the stack builder", () => {
     fireEvent.click(screen.getByRole("button", { name: /Add layer/ }));
     fireEvent.click(await screen.findByRole("option", { name: /Solid/ }));
     await waitFor(() => expect(layerNames()).toHaveLength(4));
+    // The in-app leave goes through the guard the dirty effect registers.
+    await waitForStackGuard();
     expect(screen.getByText("Unsaved")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Back to the effects" }));
     const prompt = await screen.findByRole("alertdialog", { name: "Unsaved changes" });

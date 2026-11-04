@@ -5,6 +5,7 @@ import { fixtureState } from "@/lib/demoUpdate";
 import { SAMPLE_SOURCE } from "@/lib/demoEffects";
 import { patchSnap, refreshAll } from "@/lib/store";
 import { editorContent } from "@/test/editor";
+import { waitForEditorGuard } from "@/test/historyGuard";
 import { GlobalBanners } from "@/shell/GlobalBanners";
 import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
 import { Rail } from "@/shell/Rail";
@@ -155,6 +156,8 @@ describe("leaving the editor for another page", () => {
     window.history.pushState({}, "", "/effects/?state=html");
     await mount();
     await dirty();
+    // The guard entry and listener land in the dirty effect after the edit.
+    await waitForEditorGuard();
     window.history.back();
     expect(await screen.findByRole("alertdialog", { name: "Unsaved changes" })).toBeTruthy();
     expect(window.location.pathname).toBe("/effects/");
