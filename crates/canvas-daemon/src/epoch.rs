@@ -7,19 +7,39 @@
 //! slot in between, and however many pages have loaded. A page the daemon has never seen is a
 //! new page and always wins, so a reload is never locked out.
 //!
-//! The book keeps one entry per epoch the daemon has seen and never evicts one. An entry is a
-//! 16-character epoch and a generation, about 50 bytes; the builder opens an epoch when it opens
-//! and a heavy day of reloads is a few hundred kilobytes for the lifetime of the daemon. A fixed
-//! memory (a 32-entry list, say) is exactly the bug this replaces: once the owning epoch falls
-//! out of it, the daemon can no longer tell a stale tab from a page that just opened, and the
-//! stale tab takes the lights.
+//! The book keeps the epochs it has seen in two tiers, so its memory does not grow with the
+//! number of page loads: the exact entries (the epoch and its generation) for the pages that are
+//! still talking to the daemon, and a fingerprint of every epoch that has fallen out of them. A
+//! page whose entry fell out is an older page, and it keeps losing: the fingerprint is enough to
+//! know the daemon has seen it before, and it never takes the lights from a newer page. Only a
+//! page the daemon has never seen at all is a new page.
 //!
 //! The order is by when the daemon first saw a page, not by when the page loaded: a page whose
 //! first PUT arrives after a newer page's takes the route, because the newest user action wins.
 //! Only a page that has been superseded is stale.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::sync::Mutex;
+
+/// How many epochs the book remembers exactly: the newest page and the pages that are still
+/// talking to the daemon.
+///
+/// The cap is safe because the entry that can still win is never dropped. The owner (the newest
+/// epoch the daemon has seen) is always in the book, so the newest page keeps the route and
+/// every older page keeps losing to it. The entries that fall out are the ones that have been
+/// superseded by this many other page loads, and the daemon still recognises them (see
+/// [`EPOCH_BOOK_FORGOTTEN`]), so a page that falls out never takes the lights from a newer one.
+/// The pages that are still talking are kept longer than the quiet ones: the book drops the
+/// least recently used entry that can no longer win, so a stale tab that keeps sending beats
+/// stays known and keeps losing.
+pub const EPOCH_BOOK_CAPACITY: usize = 1024;
+
+/// How many forgotten epochs the book still refuses, as a fingerprint each.
+///
+/// A fingerprint is eight bytes, so the daemon can remember a good many of them: a page that
+/// fell out of the book keeps losing for thousands of page loads after it did.
+pub const EPOCH_BOOK_FORGOTTEN: usize = 8192;
 
 /// True for a session epoch: exactly 16 hexadecimal characters, as the page makes it.
 pub fn valid_epoch(epoch: &str) -> bool {
@@ -37,8 +57,8 @@ pub struct EpochBook {
 struct Inner {
     /// The generation the next epoch the daemon has never seen gets.
     next: u64,
-    /// Every epoch this daemon has seen, and the generation it was given.
-    seen: BTreeMap<String, u64>,
+    /// Every epoch this daemon still remembers exactly, and the generation it was given.
+    seen: BTreeMap<String, Entry>,
     /// The newest generation issued. It only moves when a new epoch appears.
     ceiling: u64,
     /// The newest epoch the daemon has seen. It stays after the route is cleared, so a stale
@@ -46,6 +66,26 @@ struct Inner {
     owner: Option<String>,
     /// The epoch and the highest sequence accepted from it, while one owns the route.
     live: Option<(String, u64)>,
+    /// The fingerprints of the epochs that fell out of `seen`. One of them goes when the set
+    /// is full.
+    forgotten: HashSet<u64>,
+    /// The clock the book stamps its entries with. The least recently used entry has the
+    /// smallest stamp.
+    used: u64,
+}
+
+/// One epoch the book remembers: the generation it was given, and when the daemon last heard
+/// from it.
+struct Entry {
+    generation: u64,
+    used: u64,
+}
+
+impl Entry {
+    /// The entry of an epoch the daemon saw, at the time it last heard from it.
+    fn new(generation: u64, used: u64) -> Self {
+        Entry { generation, used }
+    }
 }
 
 impl EpochBook {
@@ -54,14 +94,35 @@ impl EpochBook {
     /// epoch, or a sequence the route already saw, is superseded.
     pub fn offer(&self, epoch: &str, seq: u64) -> bool {
         let mut book = self.lock();
-        let generation = match book.seen.get(epoch) {
-            Some(generation) => *generation,
+        let stamp = book.tick();
+        let known = book.seen.get(epoch).map(|entry| entry.generation);
+        let generation = match known {
+            Some(generation) => {
+                // The daemon heard from this epoch again: it is the page it knows, and it is
+                // the most recently used entry now.
+                if let Some(entry) = book.seen.get_mut(epoch) {
+                    entry.used = stamp;
+                }
+                generation
+            }
             None => {
+                // The book does not remember this epoch. It is either a page the daemon has
+                // never seen (a new page, which always wins) or one it has forgotten (an older
+                // page, which must never take the lights from a newer one).
+                let fingerprint = fingerprint(epoch);
+                if book.is_forgotten(fingerprint) {
+                    // A page that fell out of the book: it is older than the newest page, and
+                    // it learns it lost. Its fingerprint stays in the book, so a page that
+                    // keeps talking after it fell out keeps losing.
+                    return false;
+                }
                 book.next += 1;
                 let generation = book.next;
-                book.seen.insert(epoch.to_string(), generation);
+                let entry = Entry::new(generation, stamp);
+                book.seen.insert(epoch.to_string(), entry);
                 book.ceiling = generation;
                 book.owner = Some(epoch.to_string());
+                book.trim();
                 generation
             }
         };
@@ -105,9 +166,72 @@ impl EpochBook {
         self.lock().live = None;
     }
 
+    /// How many epochs the book remembers exactly. The tests watch it stay bounded.
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.lock().seen.len()
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+}
+
+impl Inner {
+    /// The next stamp for the book's least-recently-used order.
+    fn tick(&mut self) -> u64 {
+        self.used += 1;
+        self.used
+    }
+
+    /// Keeps the book within [`EPOCH_BOOK_CAPACITY`].
+    ///
+    /// The entry that can still win (the owner, the only one whose generation is the ceiling)
+    /// is never dropped. The entries that can no longer win go first, the least recently used of
+    /// them first, so a tab that keeps sending beats stays known and keeps losing.
+    fn trim(&mut self) {
+        while self.seen.len() > EPOCH_BOOK_CAPACITY {
+            let victim = self
+                .seen
+                .iter()
+                .filter(|(_, entry)| entry.generation != self.ceiling)
+                .min_by_key(|(_, entry)| entry.used)
+                .map(|(epoch, _)| epoch.clone());
+            let Some(victim) = victim else {
+                // Only the entry that can still win is left: it stays.
+                return;
+            };
+            self.seen.remove(&victim);
+            self.forget(&victim);
+        }
+    }
+
+    /// Remembers a fingerprint of an epoch the book drops, so a page that comes back is refused
+    /// rather than treated as a new page.
+    fn forget(&mut self, epoch: &str) {
+        self.forgotten.insert(fingerprint(epoch));
+        while self.forgotten.len() > EPOCH_BOOK_FORGOTTEN {
+            // Any fingerprint will do: the set holds thousands of them, so a page that fell
+            // out keeps losing for thousands of page loads after it did.
+            let Some(dropped) = self.forgotten.iter().next().copied() else {
+                return;
+            };
+            self.forgotten.remove(&dropped);
+        }
+    }
+
+    /// True when the daemon has seen this epoch and forgotten it: it is an older page, and it
+    /// must never take the route from a newer one.
+    fn is_forgotten(&self, fingerprint: u64) -> bool {
+        self.forgotten.contains(&fingerprint)
+    }
+}
+
+/// A small fingerprint of an epoch: eight bytes, so the daemon can remember many of them.
+fn fingerprint(epoch: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    epoch.hash(&mut hasher);
+    hasher.finish()
 }
 
 #[cfg(test)]
@@ -180,5 +304,83 @@ mod tests {
         assert!(book.offer("aaaaaaaaaaaaaaaa", 7));
         book.clear_live();
         assert!(book.offer("bbbbbbbbbbbbbbbb", 1));
+    }
+
+    #[test]
+    fn the_book_keeps_at_most_its_capacity_of_epochs() {
+        let book = EpochBook::default();
+        let loads = EPOCH_BOOK_CAPACITY as u64 * 4;
+        for page in 0..loads {
+            let epoch = format!("{page:016x}");
+            assert!(book.offer(&epoch, 1), "a new page always wins");
+        }
+        assert!(
+            book.len() <= EPOCH_BOOK_CAPACITY,
+            "the book holds {} entries after {loads} page loads",
+            book.len()
+        );
+    }
+
+    #[test]
+    fn the_newest_pages_still_win_and_the_older_ones_still_lose_after_the_book_rolled_over() {
+        let book = EpochBook::default();
+        let oldest = "0000000000000000";
+        assert!(book.offer(oldest, 1));
+        let loads = EPOCH_BOOK_CAPACITY as u64 * 2;
+        for page in 1..=loads {
+            let epoch = format!("{page:016x}");
+            assert!(book.offer(&epoch, 1), "a new page always wins");
+        }
+        let newest = format!("{:016x}", loads + 1);
+        assert!(book.offer(&newest, 1), "the newest page owns the route");
+        assert!(!book.offer(oldest, 2), "the oldest page still loses");
+        assert!(
+            !book.offer(&newest, 1),
+            "a sequence the route already saw is refused"
+        );
+        assert!(book.offer(&newest, 2), "the newest page can send again");
+    }
+
+    #[test]
+    fn a_page_that_fell_out_of_the_book_never_wins_over_a_newer_one() {
+        let book = EpochBook::default();
+        let stale = "1111111111111111";
+        assert!(book.offer(stale, 1), "the page owns the route");
+        let loads = EPOCH_BOOK_CAPACITY as u64 * 2;
+        for page in 0..loads {
+            let epoch = format!("{page:016x}");
+            assert!(book.offer(&epoch, 1), "a new page always wins");
+        }
+        let newer = "2222222222222222";
+        assert!(book.offer(newer, 1), "the newer page takes the route");
+        assert!(
+            !book.offer(stale, 2),
+            "the page that fell out of the book never wins over a newer one"
+        );
+        assert_eq!(
+            book.live(),
+            Some((newer.to_string(), 1)),
+            "the newer page kept the route"
+        );
+    }
+
+    #[test]
+    fn the_page_that_owns_the_route_is_never_dropped_from_the_book() {
+        let book = EpochBook::default();
+        let owner = "1111111111111111";
+        assert!(book.offer(owner, 1), "the page owns the route");
+        let loads = EPOCH_BOOK_CAPACITY as u64 * 3;
+        for page in 0..loads {
+            let epoch = format!("{page:016x}");
+            assert!(book.offer(&epoch, 1), "a new page always wins");
+        }
+        assert!(
+            !book.offer(owner, 2),
+            "the page that owned the route keeps losing to the newer pages"
+        );
+        assert!(
+            book.holds(&format!("{:016x}", loads - 1)),
+            "the newest page owns the route"
+        );
     }
 }
