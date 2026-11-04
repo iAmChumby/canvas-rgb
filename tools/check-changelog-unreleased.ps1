@@ -11,7 +11,8 @@
   naming the old line number (in the base version of the file), the line, and the section. The
   one pass for a removed released line is the hand fix for drift: removing the line from the
   released section and adding the same text under '## [Unreleased]' in the same diff. That move
-  passes; a removed released line that is not re-added under '## [Unreleased]' fails.
+  passes; a removed released line that is not re-added under '## [Unreleased]' fails. A removed
+  '## [Unreleased]' heading line also fails, naming it: a real release keeps that heading.
 
   Blank (whitespace-only) added or removed lines pass: they do not put content in the wrong
   section. No CHANGELOG.md change passes.
@@ -19,8 +20,13 @@
   Release commits are the one exception for added lines, scoped narrowly: when the workspace
   version in Cargo.toml changed between the merge base and HEAD to a semver strictly greater
   than the old one, added lines under '## [<newVersion>]' (with or without a date suffix) are
-  allowed. Lines under any other dated section still fail, with or without a version bump, and
-  an equal or lower version (a downgrade) earns no exemption. Cargo.toml is the signal because
+  allowed. Version ordering follows semver section 11: the major, minor and patch compare as
+  integers, a version without a pre-release outranks one with it, and the pre-release
+  identifiers compare dot by dot (numeric identifiers as integers, numeric below alphanumeric,
+  alphanumeric by ordinal, and a shorter list below a longer one when all prior identifiers
+  agree). So '0.9.0-rc.2' to '0.9.0-rc.10' is an upgrade and the reverse is a downgrade. Lines
+  under any other dated section still fail, with or without a version bump, and an equal or
+  lower version (a downgrade) earns no exemption. Cargo.toml is the signal because
   docs/releasing.md makes it the version's source of truth and tools/set-version.ps1 keeps every
   other copy in step with it (CI runs set-version.ps1 -Check on every push), so a release must
   bump it while an ordinary fix must not. A version change in any other file alone would be a
@@ -30,7 +36,12 @@
   (docs/releasing.md, step 3 of Cutting a release): the '[Unreleased]:' line and a new
   '[<newVersion>]:' line. Those footer link definitions are not changelog entries, so on an
   upgrade the check allows an added or removed footer link definition whose label is
-  'Unreleased' or the new version. Every other line is judged by the rules above.
+  'Unreleased' or the new version but only when the line sits in the trailing link-definition
+  block at the end of the file (the contiguous run of '[label]: https://...' lines, blank
+  lines allowed, after the last '## [' heading's content), taken from the head version for
+  added lines and from the base version for removed lines, and only when the destination
+  starts with 'https://'. A link-looking line anywhere else (for example inside a dated
+  section) is judged as an ordinary line and fails. Every other line is judged by the rules above.
 
   A release commit renames '## [Unreleased]' to '## [<new>]' and adds a fresh '## [Unreleased]'
   above it, so the released content stays as context lines and only the two headings (plus the
@@ -95,16 +106,41 @@ function Parse-Semver {
     }
 }
 
+function Compare-PreRelease {
+    param([string]$A, [string]$B)
+    $aParts = $A -split '\.'
+    $bParts = $B -split '\.'
+    $len = [Math]::Min($aParts.Count, $bParts.Count)
+    for ($i = 0; $i -lt $len; $i++) {
+        $a = $aParts[$i]
+        $b = $bParts[$i]
+        if ($a -ceq $b) { continue }
+        $aNum = ($a -match '^\d+$')
+        $bNum = ($b -match '^\d+$')
+        if ($aNum -and $bNum) {
+            $ai = [int]$a
+            $bi = [int]$b
+            if ($ai -ne $bi) { return ($ai - $bi) }
+            continue
+        }
+        if ($aNum) { return -1 }
+        if ($bNum) { return 1 }
+        $c = [string]::Compare($a, $b, [System.StringComparison]::Ordinal)
+        if ($c -ne 0) { return $c }
+    }
+    return ($aParts.Count - $bParts.Count)
+}
+
 function Compare-Semver {
     param($A, $B)
     if ($A.Major -ne $B.Major) { return ($A.Major - $B.Major) }
     if ($A.Minor -ne $B.Minor) { return ($A.Minor - $B.Minor) }
     if ($A.Patch -ne $B.Patch) { return ($A.Patch - $B.Patch) }
-    $aPre = ($A.Pre -ne '')
-    $bPre = ($B.Pre -ne '')
+    $aPre = (-not [string]::IsNullOrEmpty($A.Pre))
+    $bPre = (-not [string]::IsNullOrEmpty($B.Pre))
     if ($aPre -and -not $bPre) { return -1 }
     if ($bPre -and -not $aPre) { return 1 }
-    if ($aPre -and $bPre) { return [string]::Compare($A.Pre, $B.Pre, $false) }
+    if ($aPre -and $bPre) { return (Compare-PreRelease -A $A.Pre -B $B.Pre) }
     return 0
 }
 
@@ -115,9 +151,30 @@ function Test-DatedSection {
 
 function Get-LinkLabel {
     param([string]$Text)
-    $m = [regex]::Match($Text, '^\s*\[([^\]]+)\]:\s*\S+')
+    $m = [regex]::Match($Text, '^\s*\[([^\]]+)\]:\s*https://\S+')
     if ($m.Success) { return $m.Groups[1].Value }
     return $null
+}
+
+function Get-FooterLinkLineNumbers {
+    param([string[]]$Lines)
+    $set = @{}
+    if (-not $Lines -or $Lines.Count -eq 0) { return $set }
+    $lastHeading = 0
+    for ($i = 0; $i -lt $Lines.Count; $i++) {
+        if ($Lines[$i] -match '^ {0,3}## \[') { $lastHeading = $i + 1 }
+    }
+    for ($i = $Lines.Count; $i -ge 1; $i--) {
+        $text = $Lines[$i - 1]
+        if ([string]::IsNullOrWhiteSpace($text)) { continue }
+        if ($text -match '^\s*\[([^\]]+)\]:\s*https://\S+') {
+            if ($lastHeading -gt 0 -and $i -le $lastHeading) { break }
+            $set[$i] = $true
+            continue
+        }
+        break
+    }
+    return $set
 }
 
 $mergeBase = ((Invoke-RepoGit -GitArgs @('rev-parse', '--verify', "$BaseRef^{commit}")) | Select-Object -First 1).Trim()
@@ -224,18 +281,23 @@ if ($baseVersion -and $headVersion) {
 $newSectionPattern = if ($isUpgrade) { '^## \[' + [regex]::Escape($headVersion) + '\](\s.*)?$' } else { $null }
 
 function Test-FooterLink {
-    param([string]$Text)
+    param([string]$Text, [int]$LineNumber, $FooterSet)
     if (-not $isUpgrade) { return $false }
+    if (-not $FooterSet) { return $false }
+    if (-not $FooterSet.ContainsKey($LineNumber)) { return $false }
     $label = Get-LinkLabel -Text $Text
     return ($label -and (($label -ceq 'Unreleased') -or ($label -ceq $headVersion)))
 }
+
+$headFooter = Get-FooterLinkLineNumbers -Lines $headLines
+$baseFooter = Get-FooterLinkLineNumbers -Lines $baseLines
 
 $violations = New-Object System.Collections.ArrayList
 foreach ($a in $added) {
     $section = Get-AddedSection -Item $a
     if ($section -cne '## [Unreleased]') {
         if ($isUpgrade -and ($section -match $newSectionPattern)) { continue }
-        if (Test-FooterLink -Text $a.Text) { continue }
+        if (Test-FooterLink -Text $a.Text -LineNumber $a.LineNumber -FooterSet $headFooter) { continue }
         [void]$violations.Add([pscustomobject]@{ LineNumber = $a.LineNumber; Text = $a.Text; Section = $section })
     }
 }
@@ -251,8 +313,12 @@ foreach ($a in $added) {
 foreach ($r in $removed) {
     $section = $baseSectionAt[$r.LineNumber]
     if (-not $section) { $section = '(top of file)' }
+    if ($r.Text.Trim() -ceq '## [Unreleased]') {
+        [void]$violations.Add([pscustomobject]@{ LineNumber = $r.LineNumber; Text = $r.Text; Section = $section })
+        continue
+    }
     if (-not (Test-DatedSection -Section $section)) { continue }
-    if (Test-FooterLink -Text $r.Text) { continue }
+    if (Test-FooterLink -Text $r.Text -LineNumber $r.LineNumber -FooterSet $baseFooter) { continue }
     if ($unreleasedAddedText.ContainsKey($r.Text.Trim())) { continue }
     [void]$violations.Add([pscustomobject]@{ LineNumber = $r.LineNumber; Text = $r.Text; Section = $section })
 }

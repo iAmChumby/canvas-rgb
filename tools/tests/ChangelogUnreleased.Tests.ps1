@@ -28,6 +28,7 @@ function Invoke-RepoGit {
 }
 
 function New-ThrowawayRepo {
+    param([string]$BaseVersion = '0.8.2')
     $d = Join-Path ([System.IO.Path]::GetTempPath()) ("canvas-rgb-changelog-" + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $d | Out-Null
     Invoke-RepoGit -Repo $d -GitArgs @('init', '-b', 'main') | Out-Null
@@ -40,7 +41,7 @@ function New-ThrowawayRepo {
         '## [0.8.1] - 2026-11-04', '', '### Fixed', '', '- Older line. (#3)', ''
     ) -join "`n"
     Write-RepoFile -Repo $d -Name 'CHANGELOG.md' -Text $baseChangelog
-    Write-RepoFile -Repo $d -Name 'Cargo.toml' -Text "[workspace.package]`nversion = `"0.8.2`"`n"
+    Write-RepoFile -Repo $d -Name 'Cargo.toml' -Text "[workspace.package]`nversion = `"$BaseVersion`"`n"
     Invoke-RepoGit -Repo $d -GitArgs @('add', '.') | Out-Null
     Invoke-RepoGit -Repo $d -GitArgs @('commit', '-m', 'base') | Out-Null
     $base = ((Invoke-RepoGit -Repo $d -GitArgs @('rev-parse', 'HEAD')) | Select-Object -First 1).Trim()
@@ -247,6 +248,78 @@ try {
         $result = Invoke-Check -Repo $r.Path -Base $r.Base
         Assert-Equal $result.Exit 0 "exit: $($result.Output)"
         Assert-True ($result.Output -match 'release commit') 'says a release was detected'
+    }
+
+    Test-Case 'SF2: pre-release upgrade 0.9.0-rc.2 to 0.9.0-rc.10 passes' {
+        $r = New-ThrowawayRepo -BaseVersion '0.9.0-rc.2'; [void]$repos.Add($r)
+        Write-RepoFile -Repo $r.Path -Name 'Cargo.toml' -Text "[workspace.package]`nversion = `"0.9.0-rc.10`"`n"
+        $lines = @(Get-Content -LiteralPath (Join-Path $r.Path 'CHANGELOG.md') -Encoding UTF8)
+        $at = [array]::IndexOf($lines, '## [Unreleased]')
+        $new = @($lines[0..($at - 1)] + @('## [Unreleased]', '', '## [0.9.0-rc.10] - 2026-11-05') + $lines[($at + 1)..($lines.Count - 1)])
+        Write-RepoFile -Repo $r.Path -Name 'CHANGELOG.md' -Text ($new -join "`n")
+        Invoke-RepoGit -Repo $r.Path -GitArgs @('add', '.') | Out-Null
+        Invoke-RepoGit -Repo $r.Path -GitArgs @('commit', '-m', 'Release: 0.9.0-rc.10') | Out-Null
+        $result = Invoke-Check -Repo $r.Path -Base $r.Base
+        Assert-Equal $result.Exit 0 "exit: $($result.Output)"
+        Assert-True ($result.Output -match 'release commit') 'says a release was detected'
+    }
+
+    Test-Case 'SF2: pre-release downgrade 0.9.0-rc.10 to 0.9.0-rc.2 with dated line fails' {
+        $r = New-ThrowawayRepo -BaseVersion '0.9.0-rc.10'; [void]$repos.Add($r)
+        Write-RepoFile -Repo $r.Path -Name 'Cargo.toml' -Text "[workspace.package]`nversion = `"0.9.0-rc.2`"`n"
+        $lines = @(Get-Content -LiteralPath (Join-Path $r.Path 'CHANGELOG.md') -Encoding UTF8)
+        $at = [array]::IndexOf($lines, '## [Unreleased]')
+        $new = @($lines[0..($at - 1)] + @('## [Unreleased]', '', '## [0.9.0-rc.2] - 2026-11-05', '', '- Downgrade rc line. (#30)') + $lines[($at + 1)..($lines.Count - 1)])
+        Write-RepoFile -Repo $r.Path -Name 'CHANGELOG.md' -Text ($new -join "`n")
+        Invoke-RepoGit -Repo $r.Path -GitArgs @('add', '.') | Out-Null
+        Invoke-RepoGit -Repo $r.Path -GitArgs @('commit', '-m', 'Release: 0.9.0-rc.2') | Out-Null
+        $result = Invoke-Check -Repo $r.Path -Base $r.Base
+        Assert-True ($result.Exit -ne 0) 'non-zero exit'
+        Assert-True ($result.Output.Contains('Downgrade rc line')) "names the line: $($result.Output)"
+        Assert-True ($result.Output.Contains('## [0.9.0-rc.2]')) "names the section: $($result.Output)"
+    }
+
+    Test-Case 'SF3: a footer-looking link inserted in the middle of a released section fails' {
+        $r = New-ThrowawayRepo; [void]$repos.Add($r)
+        Write-RepoFile -Repo $r.Path -Name 'Cargo.toml' -Text "[workspace.package]`nversion = `"0.8.3`"`n"
+        $lines = @(Get-Content -LiteralPath (Join-Path $r.Path 'CHANGELOG.md') -Encoding UTF8)
+        $at = [array]::IndexOf($lines, '- Released line. (#2)')
+        $new = @($lines[0..$at] + @('[Unreleased]: https://evil.example/x') + $lines[($at + 1)..($lines.Count - 1)])
+        Write-RepoFile -Repo $r.Path -Name 'CHANGELOG.md' -Text ($new -join "`n")
+        Invoke-RepoGit -Repo $r.Path -GitArgs @('add', '.') | Out-Null
+        Invoke-RepoGit -Repo $r.Path -GitArgs @('commit', '-m', 'evil footer link') | Out-Null
+        $result = Invoke-Check -Repo $r.Path -Base $r.Base
+        Assert-True ($result.Exit -ne 0) 'non-zero exit'
+        Assert-True ($result.Output.Contains('https://evil.example/x')) "names the line: $($result.Output)"
+        Assert-True ($result.Output.Contains('## [0.8.2]')) "names the section: $($result.Output)"
+    }
+
+    Test-Case 'SF4: deleting only the Unreleased heading fails naming it' {
+        $r = New-ThrowawayRepo; [void]$repos.Add($r)
+        $lines = @(Get-Content -LiteralPath (Join-Path $r.Path 'CHANGELOG.md') -Encoding UTF8)
+        $at = [array]::IndexOf($lines, '## [Unreleased]')
+        $new = @($lines[0..($at - 1)] + $lines[($at + 1)..($lines.Count - 1)])
+        Write-RepoFile -Repo $r.Path -Name 'CHANGELOG.md' -Text ($new -join "`n")
+        Invoke-RepoGit -Repo $r.Path -GitArgs @('add', '.') | Out-Null
+        Invoke-RepoGit -Repo $r.Path -GitArgs @('commit', '-m', 'delete Unreleased') | Out-Null
+        $result = Invoke-Check -Repo $r.Path -Base $r.Base
+        Assert-True ($result.Exit -ne 0) 'non-zero exit'
+        Assert-True ($result.Output.Contains('## [Unreleased]')) "names the line: $($result.Output)"
+    }
+
+    Test-Case 'Nit5: a downgrade with a new dated heading for the downgraded version fails' {
+        $r = New-ThrowawayRepo -BaseVersion '0.9.0'; [void]$repos.Add($r)
+        Write-RepoFile -Repo $r.Path -Name 'Cargo.toml' -Text "[workspace.package]`nversion = `"0.8.9`"`n"
+        $lines = @(Get-Content -LiteralPath (Join-Path $r.Path 'CHANGELOG.md') -Encoding UTF8)
+        $at = [array]::IndexOf($lines, '## [Unreleased]')
+        $new = @($lines[0..($at - 1)] + @('## [Unreleased]', '', '## [0.8.9] - 2026-11-05', '', '- Downgrade drift. (#31)') + $lines[($at + 1)..($lines.Count - 1)])
+        Write-RepoFile -Repo $r.Path -Name 'CHANGELOG.md' -Text ($new -join "`n")
+        Invoke-RepoGit -Repo $r.Path -GitArgs @('add', '.') | Out-Null
+        Invoke-RepoGit -Repo $r.Path -GitArgs @('commit', '-m', 'downgrade') | Out-Null
+        $result = Invoke-Check -Repo $r.Path -Base $r.Base
+        Assert-True ($result.Exit -ne 0) 'non-zero exit'
+        Assert-True ($result.Output.Contains('Downgrade drift')) "names the line: $($result.Output)"
+        Assert-True ($result.Output.Contains('## [0.8.9]')) "names the section: $($result.Output)"
     }
 
     Test-Case 'rebase over a release: the line now under the released section fails' {
