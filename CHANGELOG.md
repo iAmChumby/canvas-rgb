@@ -6,6 +6,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-03
+
 ### Added
 
 - The left rail can now be dragged to a new width: a handle on its right edge, the arrow keys for a step (Shift for a bigger one), Home and End for the bounds, and a double-click to put it back to 200 px. The width is remembered, and the rail never narrows the page below the width its layouts are fitted to. (#126)
@@ -164,7 +166,8 @@ The first release.
 - Settings for the Attack Shark X6 mouse and the 8BitDo Ultimate 2 controller.
 - The editor, the tray app, the `canvas-rgb` CLI and the Windows installer.
 
-[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.4.2...v0.5.0
