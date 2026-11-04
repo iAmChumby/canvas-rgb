@@ -11,6 +11,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Fixed
 
 - Fan headers that are not on your board no longer show as driveable: they stay in the Headers list as muted "Not on this board" rows, cannot be ticked in bulk, and the service refuses to write them. (#128)
+- An effect that crashes while it draws no longer stops the lights for good or flashes a half-drawn frame: the broken effect is skipped, the lights keep its last good frame (black if it never drew one), and picking another effect brings them back. (#99)
 
 ## [0.8.1] - 2026-11-04
 
@@ -37,7 +38,6 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - A fan that is slow to answer a write no longer causes the service to restart a healthy daemon for missed heartbeats. (#129)
 - Opening Peripherals no longer makes the mouse pointer stutter each time: canvas-rgb reads the mouse once and keeps its settings, and a Read again key reads it on demand. (#7)
 - The Effects gallery no longer slides under the Properties panel between about 721 and 752 px wide: its last rows scroll inside the gallery and the favourite stars stay in their tiles. (#132)
-- An effect that crashes while it draws no longer stops the lights for good or flashes a half-drawn frame: the broken effect is skipped, the lights keep its last good frame (black if it never drew one), and picking another effect brings them back. (#99)
 
 ## [0.7.0] - 2026-11-02
 
