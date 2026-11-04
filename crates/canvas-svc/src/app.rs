@@ -273,7 +273,19 @@ pub fn confirm_channel_map(boot: &Boot, name: &str) -> Result<(), String> {
     }
     let chip = hardware::open_chip()?;
     check_confirmation(chip.map_name(), name)?;
-    store::save_chip_state(&paths::chip_path(boot.home()), &ChipState::confirmed(name)).map_err(|e| e.to_string())
+    let path = paths::chip_path(boot.home());
+    let state = confirmed_state(store::load_chip_state(&path).ok(), name);
+    store::save_chip_state(&path, &state).map_err(|e| e.to_string())
+}
+
+/// The state `--confirm-channel-map` saves: the confirmation, keeping any per-header override
+/// the user already chose (issue #128: re-confirming must not undo "not on my board").
+pub fn confirmed_state(existing: Option<ChipState>, name: &str) -> ChipState {
+    let mut state = ChipState::confirmed(name);
+    if let Some(old) = existing {
+        state.header_overrides = old.header_overrides;
+    }
+    state
 }
 
 /// The confirmation must name exactly the map that is detected.
