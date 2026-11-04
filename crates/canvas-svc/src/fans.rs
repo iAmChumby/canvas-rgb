@@ -54,10 +54,6 @@ pub const CURVE_STEP_DOWN_MIN_PERCENT: u8 = 3;
 /// A gap between two curve updates longer than this (a missing sensor, a sleep) restarts the
 /// smoothing from the current reading.
 const CURVE_RESEED: Duration = Duration::from_secs(10);
-/// Consecutive 1 s ticks the curve must ask for more than the held duty before a rise is
-/// taken (issue #17): a lone tick is a Ryzen `Tctl` spike, not a trend. A sustained rise
-/// still lands within two seconds.
-const RISE_CONFIRM_TICKS: u8 = 2;
 /// How long the controller leaves the fan chip alone after a resume before it writes again.
 /// Issue #29: a duty write that landed in the resume transition, while firmware still owned the
 /// fan controller, read back the BIOS duty for the whole `READBACK_SETTLE` and tripped the safety
@@ -116,8 +112,6 @@ struct CurveState {
     /// cannot walk the duty down a few degrees at a time.
     peak: f32,
     changed_at: Option<Instant>,
-    /// Ticks in a row the curve has asked for more than the held duty.
-    rise_streak: u8,
     /// When the smoothed temperature first fell `CURVE_STEP_DOWN_DROP_C` below `peak`,
     /// while that fall lasts.
     below_since: Option<Instant>,
@@ -152,14 +146,11 @@ impl CurveState {
             self.set(raw, now);
             return raw;
         };
+        // A rise is taken at once (issue #37, and Fan Control / BIOS Smart Fan step up
+        // immediately): a fan must never lag a temperature that is climbing.
         if raw > held {
-            self.rise_streak = self.rise_streak.saturating_add(1);
-            if self.rise_streak >= RISE_CONFIRM_TICKS {
-                self.set(raw, now);
-                return raw;
-            }
-        } else {
-            self.rise_streak = 0;
+            self.set(raw, now);
+            return raw;
         }
         let calm = curve_percent(points, smoothed);
         let waited = self.changed_at.is_none_or(|t| now.saturating_duration_since(t) >= CURVE_STEP_DOWN_HOLD)
@@ -190,19 +181,16 @@ impl CurveState {
         // every fall after this is measured from here.
         self.peak = self.smoothed.unwrap_or_default();
         self.changed_at = Some(now);
-        self.rise_streak = 0;
         self.below_since = None;
     }
 
     /// Latches the hot floor: engages on the first reading at or above `HOT_TEMP_C` while
     /// the held duty is below `hot`, and releases only after the temperature stays below
     /// it for the curve's hold time. A missing reading changes nothing.
-    fn note_temp(&mut self, temp_c: Option<f32>, now: Instant, hot: u8) {
+    fn note_temp(&mut self, temp_c: Option<f32>, now: Instant) {
         let Some(temp) = temp_c else { return };
         if temp >= HOT_TEMP_C {
-            if self.held.is_none_or(|held| held < hot) {
-                self.hot_latched = true;
-            }
+            self.hot_latched = true;
             self.hot_below_since = None;
         } else if self.hot_latched {
             let since = *self.hot_below_since.get_or_insert(now);
@@ -704,14 +692,10 @@ impl FanController {
                     if curve.mode.as_ref() != Some(&mode) {
                         *curve = CurveState { mode: Some(mode.clone()), ..CurveState::default() };
                     }
-                    // While the hot floor is latched the duty is pinned to the floor:
-                    // the curve is not stepped, so nothing writes above or below it
-                    // until the temperature has cooled through the hold.
-                    let target = if curve.hot_latched {
-                        curve.held.unwrap_or(0)
-                    } else {
-                        curve.step(points, temp, now)
-                    };
+                    // The curve keeps stepping while the hot floor is latched: the latch is a
+                    // floor under it (`target.max(floor)` below), never a cap, so a CPU that
+                    // keeps heating still gets the curve's higher duty at once.
+                    let target = curve.step(points, temp, now);
                     (target, Some(temp))
                 } else {
                     let since = self.slots[ch].manual_since.unwrap_or(now);
@@ -727,13 +711,13 @@ impl FanController {
             }
         };
         let base = floor_for(spec.id, self.config.floor_percent);
-        // The hot floor is latched per header, in the same state as the curve: it engages
-        // on the first tick at or above HOT_TEMP_C while the held duty is below the hot
-        // floor, and the duty stays pinned to that floor until the temperature has
-        // stayed below HOT_TEMP_C for the curve's hold time — a temperature hovering
-        // at the line cannot flip the duty every tick (issue #17).
+        // The hot floor is latched per header, in the same state as the curve: it engages on
+        // the first reading at or above HOT_TEMP_C and stays a floor until the temperature has
+        // stayed below HOT_TEMP_C for the curve's hold time, so a temperature hovering at the
+        // line cannot flip the duty every tick (issue #17). It is only ever a floor: a higher
+        // curve or Fixed duty always wins (`target.max(floor)`).
         let hot = runtime_floor(spec.id, self.config.floor_percent, Some(HOT_TEMP_C));
-        self.slots[ch].curve.note_temp(reference, now, hot);
+        self.slots[ch].curve.note_temp(reference, now);
         let latched = self.slots[ch].curve.hot_latched;
         let floor = if latched && reference.is_some() {
             hot

@@ -1017,19 +1017,15 @@ fn a_spike_train_on_cpu_fan_does_not_staircase() {
     let mut r = rig(FansFile::default(), t0);
     r.cpu.set(Some(39.0));
     r.fans.set_header_mode("cpu_fan", cpu_curve(), t0).unwrap();
-    let mut last = r.chip.duty_raw(CPU_FAN);
-    let mut changes = 0;
-    for (i, &temp) in [39.0f32, 60.0, 66.0, 60.0, 50.0, 42.0, 52.0, 62.0, 65.0, 57.0, 50.0, 41.0]
-        .iter()
-        .enumerate()
-    {
-        let duty = tick_cpu_at_temp(&mut r, t0, (i + 1) as u64, temp);
-        if duty != last {
-            changes += 1;
-            last = duty;
-        }
+    // The logged sequence from issue #17 (23:26:56-23:27:40). Rises follow the temperature at
+    // once (that is the safe direction); a staircase is the duty stepping DOWN again and again
+    // inside the hold. At most one fall over the whole train.
+    let mut duties = vec![tick_cpu_at_temp(&mut r, t0, 1, 39.0)];
+    for (i, &temp) in [60.0f32, 66.0, 60.0, 50.0, 42.0, 52.0, 62.0, 65.0, 57.0, 50.0, 41.0].iter().enumerate() {
+        duties.push(tick_cpu_at_temp(&mut r, t0, (i + 2) as u64, temp));
     }
-    assert!(changes <= 2, "the duty changed {changes} times over the spike train");
+    let falls = duties.windows(2).filter(|w| w[1] < w[0]).count();
+    assert!(falls <= 1, "the duty fell {falls} times over the spike train: {duties:?}");
 }
 
 #[test]
@@ -1066,4 +1062,44 @@ fn the_hot_floor_releases_after_a_hold_continuously_below_50() {
         duty = tick_cpu_at_temp(&mut r, t0, s, 40.0);
     }
     assert!(duty < 128, "after 60 s below 50 C the floor released: {duty}");
+}
+
+#[test]
+fn a_latched_hot_floor_never_caps_a_rising_curve() {
+    // Review of PR #142: the latch must be a floor, not a cap. Latch at 51 C, then heat to 90 C:
+    // the curve's 100 % must be written on that same tick.
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    let curve = FanMode::Curve {
+        source: TempSource::Cpu,
+        points: vec![point(30.0, 30), point(50.0, 44), point(90.0, 100)],
+    };
+    r.cpu.set(Some(51.0));
+    r.fans.set_header_mode("cpu_fan", curve, t0).unwrap();
+    for s in 1..=3 {
+        tick_cpu_at_temp(&mut r, t0, s, 51.0);
+    }
+    assert_eq!(r.chip.duty_raw(CPU_FAN), 128, "latched at the 50 % hot floor at 51 C");
+    let duty = tick_cpu_at_temp(&mut r, t0, 4, 90.0);
+    assert_eq!(duty, 255, "90 C takes the curve's 100 % on the same tick: {duty}");
+}
+
+#[test]
+fn an_oscillating_hot_temperature_still_raises_the_curve_at_once() {
+    // Review of PR #142: a temperature alternating 90/54 C must not hold the fan at a low duty.
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    let curve = FanMode::Curve {
+        source: TempSource::Cpu,
+        points: vec![point(30.0, 30), point(50.0, 44), point(90.0, 100)],
+    };
+    r.cpu.set(Some(40.0));
+    r.fans.set_header_mode("cpu_fan", curve, t0).unwrap();
+    tick_cpu_at_temp(&mut r, t0, 1, 40.0);
+    let first_hot = tick_cpu_at_temp(&mut r, t0, 2, 90.0);
+    assert_eq!(first_hot, 255, "the first 90 C tick takes 100 %: {first_hot}");
+    for s in 3..=20 {
+        let duty = tick_cpu_at_temp(&mut r, t0, s, if s % 2 == 0 { 90.0 } else { 54.0 });
+        assert!(duty >= 128, "never below the hot floor while it oscillates hot: {duty} at {s} s");
+    }
 }
