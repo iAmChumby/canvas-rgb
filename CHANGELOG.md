@@ -6,6 +6,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-04
+
 ### Fixed
 
 - The CPU fan no longer flaps between the hot-floor speed and the curve speed when the temperature hovers near 50 °C: the hot floor now stays on from the first hot reading until the temperature has been below 50 °C for 60 s, a hotter CPU still raises the fan at once, and the fan steps down only once the temperature has fallen well below its last peak or the 60 s hold has passed. (#17)
@@ -170,7 +172,8 @@ The first release.
 - Settings for the Attack Shark X6 mouse and the 8BitDo Ultimate 2 controller.
 - The editor, the tray app, the `canvas-rgb` CLI and the Windows installer.
 
-[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.5.0...v0.6.0

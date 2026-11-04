@@ -23,7 +23,7 @@ export function Hero() {
           </ButtonLink>
           <ButtonLink href={REPO}>Source</ButtonLink>
         </div>
-        <p className="site-hero-note">Windows 11 · v0.8.0 · Apache-2.0</p>
+        <p className="site-hero-note">Windows 11 · v0.8.1 · Apache-2.0</p>
       </div>
     </section>
   );
