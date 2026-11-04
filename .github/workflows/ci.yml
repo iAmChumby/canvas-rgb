@@ -100,11 +100,15 @@ jobs:
 
       - name: Fetch the base branch
         shell: pwsh
-        run: git fetch origin ${{ github.base_ref }}
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: git fetch --no-tags origin "+refs/heads/$env:BASE_REF:refs/remotes/origin/$env:BASE_REF"
 
       - name: Changelog lines land under Unreleased
         shell: pwsh
-        run: pwsh -NoProfile -File tools/check-changelog-unreleased.ps1 -BaseRef origin/${{ github.base_ref }}
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: pwsh -NoProfile -File tools/check-changelog-unreleased.ps1 -BaseRef "origin/$env:BASE_REF"
 
       # The check's own tests: throwaway git repos, so the check logic is covered.
       - name: Changelog check tests

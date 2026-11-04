@@ -423,6 +423,15 @@ then reads as if it shipped in an old release, or lands in a section whose tag i
 - **Class fix:** done (#149). `tools/check-changelog-unreleased.ps1` is a pull_request CI check that
   diffs `CHANGELOG.md` against the merge base with the base branch and fails when any added non-blank
   line sits under anything but `## [Unreleased]`, naming the line, its line number and its section.
-  A release commit is the one exception: the check lets dated-section lines through when the workspace
-  version in `Cargo.toml` changed, the file `docs/releasing.md` makes the version's source of truth.
+  A pure deletion of a non-blank line under a released `## [X.Y.Z]` section also fails (naming the
+  old line number from the base file). The one pass for a removed released line is the hand fix for
+  drift: removing it from the released section and adding the same text under `## [Unreleased]` in
+  the same diff. A release commit is the one exception for added lines, scoped narrowly: when the
+  workspace version in `Cargo.toml` (the file `docs/releasing.md` makes the version's source of
+  truth) changed to a semver strictly greater than the old one, added lines under `## [<newVersion>]`
+  (with or without a date suffix) are allowed, and so are the footer compare-link definitions
+  (`[Unreleased]:` and `[<newVersion>]:`) that a release updates. A line under any other dated
+  section still fails, release or not; an equal or lower version earns no exemption, so a downgrade
+  with a dated-section line fails too. A release renames `## [Unreleased]` to `## [<new>]` and adds
+  a fresh `## [Unreleased]` above it, so the released content stays as context and the shape passes.
   The check's own tests build throwaway git repos (`tools/tests/`).
