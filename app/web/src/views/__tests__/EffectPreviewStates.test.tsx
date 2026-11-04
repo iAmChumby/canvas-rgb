@@ -4,6 +4,7 @@ import { ToastHost, ToastProvider } from "@/components/Toast";
 import { demoHash } from "@/lib/demo";
 import { SAMPLE_SOURCE } from "@/lib/demoEffects";
 import { refreshAll } from "@/lib/store";
+import { editorContent, lintMarker } from "@/test/editor";
 import { EffectsView } from "@/views/EffectsView";
 
 // The live preview (D2.4) against the demo backend. `preview-late-error` draws the first draft
@@ -62,7 +63,7 @@ async function openEditor() {
 
 /** Replaces the whole document: select all, then paste over it. */
 async function replaceSource(text: string) {
-  const content = document.querySelector(".cm-content") as HTMLElement;
+  const content = await editorContent();
   content.focus();
   fireEvent.keyDown(content, { key: "a", code: "KeyA", keyCode: 65, ctrlKey: true });
   await act(async () => {
@@ -92,7 +93,7 @@ describe("the editor's live preview", () => {
     // The loop that was drawn is the loop on screen: it is still labelled as the preview.
     expect(screen.getByRole("img", { name: "Preview of Sample HTML" })).toBeTruthy();
     // And the error has its gutter marker (the API's line, not the message parsed).
-    expect(document.querySelector(".cm-lint-marker-error")).toBeTruthy();
+    expect(await lintMarker()).toBeTruthy();
   });
 
   it("shows the check's warnings beside the preview with the code hidden", async () => {

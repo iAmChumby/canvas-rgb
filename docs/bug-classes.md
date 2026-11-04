@@ -295,6 +295,11 @@ line. Three mechanisms, and one bug the timing only exposed.
 - [#36](https://github.com/iAmChumby/canvas-rgb/issues/36): not a test bug. The panic hook queued its line
   behind a deep log backlog, gave up draining after 250 ms and ignored the result
   (`crates/canvas-daemon/src/exit_log.rs`, `logging.rs`); the test was right to fail.
+- [#120](https://github.com/iAmChumby/canvas-rgb/issues/120): ten test sites read CodeMirror's `.cm-content`
+  (or `.cm-line`, a lint marker) right after finding its host div; the editor loads through `next/dynamic` and
+  builds `.cm-content` in an effect, so under load the node was not there yet (`null.focus()`). Fixed with waiting
+  helpers in `app/web/src/test/editor.ts`, and `app/web/src/test/editorGuard.test.ts` fails on any direct
+  `.cm-*` query in a test file.
 - **Class fix:** partial. Each test named below is fixed, and a guard stops new instances of two shapes; siblings remain open (listed below). The rule: a test never decides on how long
   something took. It waits for an event (`wait_until`, `findBy*`), counts (wake-ups, frames), injects the
   clock, sizes its work by a warm-up and the best of several samples, or is an `#[ignore]`d measurement.

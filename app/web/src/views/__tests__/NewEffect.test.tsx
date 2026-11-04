@@ -3,6 +3,7 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { ToastHost, ToastProvider } from "@/components/Toast";
 import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
 import { refreshAll } from "@/lib/store";
+import { editorSource } from "@/test/editor";
 import { EffectsView } from "@/views/EffectsView";
 
 // New from code (D2.3) against the demo backend: `?state=html,stock` puts the sample user effect
@@ -41,10 +42,10 @@ beforeAll(() => {
 
 afterEach(cleanup);
 
-const source = () =>
-  Array.from(document.querySelectorAll(".cm-line"))
-    .map((line) => line.textContent ?? "")
-    .join("\n");
+// The source as the editor holds it (awaited: the editor mounts after the host div).
+async function source() {
+  return editorSource();
+}
 
 async function mount() {
   await refreshAll();
@@ -84,8 +85,8 @@ describe("a new effect", () => {
     await screen.findByTestId("effect-code");
     const field = screen.getByLabelText("File name") as HTMLInputElement;
     expect(field.value).toBe("ink-drop copy.html");
-    expect(source()).toContain("MIT licence");
-    expect(source()).toContain("<title>Ink Drop copy</title>");
+    expect(await source()).toContain("MIT licence");
+    expect(await source()).toContain("<title>Ink Drop copy</title>");
     // Saving reads the file name, imports it, and the library shows the copy.
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     expect(await screen.findByText("Ink Drop copy is running", {}, { timeout: 3000 })).toBeTruthy();
@@ -99,8 +100,8 @@ describe("a new effect", () => {
     await screen.findByTestId("effect-code");
     const field = screen.getByLabelText("File name") as HTMLInputElement;
     expect(field.value).toBe("my-effect.html");
-    expect(source()).toContain("<title>My effect</title>");
-    expect(source()).toContain("<canvas id=\"stage\"");
+    expect(await source()).toContain("<title>My effect</title>");
+    expect(await source()).toContain("<canvas id=\"stage\"");
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     expect(await screen.findByText("My effect is running", {}, { timeout: 3000 })).toBeTruthy();
     expect(await screen.findByRole("button", { name: "Open My effect" })).toBeTruthy();
