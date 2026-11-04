@@ -42,6 +42,10 @@ function rules(text: string, at = ""): Rule[] {
 
 const GALLERY = ".rd-effects .rd-eff-gallery";
 const all = rules(css).filter((r) => r.selectors.includes(GALLERY));
+// Any rule that styles the gallery element itself, however the selector is written
+// (`.rd-eff-gallery`, `.rd-eff-body > .rd-eff-gallery`, ...): its last compound names the class.
+const targetsGallery = (s: string) => /\.rd-eff-gallery(?![\w-])[^\s>+~]*$/.test(s);
+const anyGallery = rules(css).filter((r) => r.selectors.some(targetsGallery));
 const overflow = (r: Rule) => /(^|[;\s])overflow(-y)?\s*:\s*([^;]+)/.exec(r.body)?.[3]?.trim();
 
 describe("Effects gallery pane (#132)", () => {
@@ -52,11 +56,11 @@ describe("Effects gallery pane (#132)", () => {
   it("no @container rule gives the gallery overflow: visible", () => {
     // A container query keys on the page's width, which is narrower than the window (icon rail
     // plus padding): it fires on a desktop shell where the document does not scroll.
-    const offenders = all.filter((r) => r.at.startsWith("@container") && overflow(r) === "visible");
+    const offenders = anyGallery.filter((r) => r.at.startsWith("@container") && overflow(r) === "visible");
     expect(offenders.map((r) => r.at)).toEqual([]);
   });
 
   it("no rule at all gives the gallery overflow: visible (a phone renders .effect-gallery-wrap instead)", () => {
-    expect(all.filter((r) => overflow(r) === "visible").map((r) => r.at)).toEqual([]);
+    expect(anyGallery.filter((r) => overflow(r) === "visible").map((r) => `${r.at} ${r.selectors.join(", ")}`)).toEqual([]);
   });
 });
