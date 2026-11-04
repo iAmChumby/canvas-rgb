@@ -284,6 +284,14 @@ pub struct FanController {
     /// Set by the service once the state file passes the owner check.
     state_trusted: bool,
     sleep: SleepState,
+    /// Baseboard product from the registry probe (issue #128); `None` until probed.
+    board_product: Option<String>,
+    /// Headers the board does not route for `board_product` (issue #128), from the table in
+    /// `board.rs`. Empty when the board is unknown.
+    absent_headers: BTreeSet<String>,
+    /// Per-header `available` overrides in `chip.toml` (issue #128): `true` says "show
+    /// anyway", `false` says "not on my board". No entry means the table decides.
+    header_overrides: BTreeMap<String, bool>,
 }
 
 impl FanController {
@@ -318,7 +326,61 @@ impl FanController {
             writes_allowed,
             state_trusted: false,
             sleep: SleepState::default(),
+            board_product: None,
+            absent_headers: BTreeSet::new(),
+            header_overrides: BTreeMap::new(),
         }
+    }
+
+    /// Sets the baseboard product the service probed at startup (issue #128) and recomputes
+    /// which headers the per-board table says this board does not route.
+    pub fn set_board_product(&mut self, product: Option<String>) {
+        if let Some(p) = &product {
+            tracing::info!(board = %p, "baseboard product read at startup");
+        }
+        self.absent_headers = crate::board::absent_headers_for(product.as_deref());
+        self.board_product = product;
+    }
+
+    /// Loads the per-header `available` overrides saved in `chip.toml` (issue #128).
+    pub fn set_header_overrides(&mut self, overrides: BTreeMap<String, bool>) {
+        self.header_overrides = overrides;
+    }
+
+    /// Whether `header` is routed on this board: a `chip.toml` override wins both ways,
+    /// otherwise the per-board table decides (issue #128).
+    pub fn header_available(&self, header: &str) -> bool {
+        if let Some(available) = self.header_overrides.get(header) {
+            return *available;
+        }
+        !self.absent_headers.contains(header)
+    }
+
+    /// Marks a header available ("show anyway") or absent ("not on my board") and persists
+    /// it in `chip.toml` (issue #128, decision 3). A header marked absent is returned to
+    /// BIOS here, and never written afterwards.
+    ///
+    /// This is the service half of the override. The Fans-page control that calls it needs a
+    /// pipe request of its own, and `crates/canvas-proto` is the spine the main agent owns:
+    /// until that route exists the override is set from `chip.toml` only (see the report).
+    pub fn set_header_override(&mut self, header: &str, available: bool) -> Result<(), FanError> {
+        if let Some(chip) = self.chip.as_ref() {
+            if !chip.channels().iter().any(|c| c.id == header) {
+                return Err(FanError::Validation(format!("unknown header {header}")));
+            }
+        }
+        self.header_overrides.insert(header.to_string(), available);
+        let path = paths::chip_path(&self.home);
+        let mut state = store::load_chip_state(&path)?;
+        state.header_overrides = self.header_overrides.clone();
+        store::save_chip_state(&path, &state)?;
+        tracing::info!(header, available, "header availability override saved");
+        if !available {
+            if let Some(ch) = self.chip.as_ref().and_then(|c| c.channels().iter().position(|s| s.id == header)) {
+                self.release(ch, "header marked not on this board");
+            }
+        }
+        Ok(())
     }
 
     /// Whether this controller may write fan registers (the channel map is confirmed).
@@ -460,6 +522,13 @@ impl FanController {
     fn apply_header(&mut self, ch: usize, now: Instant) {
         if ch >= self.slots.len() || !self.writes_allowed {
             return;
+        }
+        let header = self.chip.as_ref().and_then(|c| c.channels().get(ch)).map(|s| s.id.to_string());
+        if let Some(id) = header.as_deref() {
+            if !self.header_available(id) {
+                tracing::info!(header = id, "header not on this board: skipped");
+                return;
+            }
         }
         if self.sleep.in_window(now) {
             // Issue #29: a write during the resume transition is exactly what failed. The config is
@@ -679,6 +748,10 @@ impl FanController {
     fn drive(&mut self, ch: usize, now: Instant) {
         let mode = self.desired(ch);
         let Some(spec) = self.chip.as_ref().and_then(|c| c.channels().get(ch).copied()) else { return };
+        // Issue #128: never drive a header the board does not route.
+        if !self.header_available(spec.id) {
+            return;
+        }
         let (target, reference) = match &mode {
             FanMode::Bios => return,
             FanMode::Fixed { percent } => {
@@ -849,6 +922,14 @@ impl FanController {
                 self.chip_error.clone().unwrap_or_else(|| "no fan chip is attached".into()),
             ));
         }
+        // Issue #128: a header this board does not route is never written. BIOS is not a
+        // write, so it stays allowed; every driving mode is refused before anything is
+        // persisted or applied.
+        if !self.header_available(header) && mode != FanMode::Bios {
+            return Err(FanError::Unavailable(format!(
+                "{header} is not on this board: the chip has the channel, the board has no connector"
+            )));
+        }
         validate_mode(header, &mode, self.config.floor_percent)?;
         let single = BTreeMap::from([(header.to_string(), mode.clone())]);
         self.check_headers(&single)?;
@@ -918,8 +999,11 @@ impl FanController {
                 ),
                 None => (None, None),
             };
-            let on_bios = !self.writes_allowed || slot.manual_since.is_none() || matches!(mode, FanMode::Bios);
-            let override_reason = if self.writes_allowed {
+            let available = self.header_available(spec.id);
+            let on_bios = !available || !self.writes_allowed || slot.manual_since.is_none() || matches!(mode, FanMode::Bios);
+            let override_reason = if !available {
+                None
+            } else if self.writes_allowed {
                 slot.override_reason.clone()
             } else {
                 unconfirmed.clone()
@@ -932,6 +1016,7 @@ impl FanController {
                 mode,
                 on_bios,
                 override_reason,
+                available,
             });
         }
         let mut temps: Vec<TempReading> = Vec::new();

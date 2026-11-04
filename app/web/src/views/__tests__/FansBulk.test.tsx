@@ -424,4 +424,27 @@ describe("what the bar refuses and keeps", () => {
     fireEvent.click(tick("System fan 4"));
     expect(within(row).getByText("Handed back to BIOS, skipped when applied")).toBeTruthy();
   });
+
+  it("an unavailable header shows the Not on this board chip, cannot be ticked, and bulk never sends it", async () => {
+    await page();
+    window.history.replaceState({}, "", "/fans/?state=unavailable:sys_fan5,unavailable:sys_fan6");
+    await act(async () => {
+      await refreshFans();
+    });
+    const box = await screen.findByRole("checkbox", { name: /System fan 5.*not on this board/ });
+    const row = box.closest("tr") as HTMLElement;
+    expect(within(row).getByText("Not on this board")).toBeTruthy();
+    expect(box.getAttribute("aria-disabled")).toBe("true");
+    expect(box.getAttribute("title")).toMatch(/Not on this board/);
+    fireEvent.click(box);
+    expect(box.getAttribute("aria-checked")).toBe("false");
+    // Select-all takes the eight drivable headers and leaves the two absent ones out.
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select every header that can be set" }));
+    expect(screen.getByText("8 selected")).toBeTruthy();
+    await setFixed("40");
+    await waitFor(() => expect(screen.getByText(/8 set to Fixed 40%/)).toBeTruthy());
+    expect((await header("sys_fan5")).mode).toEqual({ mode: "bios" });
+    expect((await header("sys_fan6")).mode).toEqual({ mode: "bios" });
+    expect((await header("cpu_fan")).mode).toEqual({ mode: "fixed", percent: 40 });
+  });
 });

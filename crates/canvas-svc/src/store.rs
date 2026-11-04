@@ -67,21 +67,27 @@ pub const CHIP_SCHEMA: u32 = 1;
 
 /// `chip.toml`: the channel map the operator confirmed against LibreHardwareMonitor on this
 /// board (`canvas-rgb-svc.exe --confirm-channel-map <name>`). Until a confirmation names the
-/// map that is detected, the service makes no register writes that drive fans.
+/// map that is detected, the service makes no register writes that drive fans. Carries also
+/// the per-header overrides for issue #128 (see below).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChipState {
     pub schema_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirmed_map: Option<String>,
+    /// Per-header `available` overrides for issue #128: `true` says "show anyway" (the header
+    /// is treated as present whatever the per-board table says), `false` says "not on my
+    /// board" (the header is treated as absent). A header with no entry follows the table.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub header_overrides: BTreeMap<String, bool>,
 }
 
 impl ChipState {
     pub fn unconfirmed() -> Self {
-        Self { schema_version: CHIP_SCHEMA, confirmed_map: None }
+        Self { schema_version: CHIP_SCHEMA, confirmed_map: None, header_overrides: BTreeMap::new() }
     }
 
     pub fn confirmed(map: &str) -> Self {
-        Self { schema_version: CHIP_SCHEMA, confirmed_map: Some(map.to_string()) }
+        Self { schema_version: CHIP_SCHEMA, confirmed_map: Some(map.to_string()), header_overrides: BTreeMap::new() }
     }
 }
 

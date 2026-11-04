@@ -9,6 +9,7 @@
 //! `Boot` can only be made by `secure_boot`, so a caller cannot reach `build_core` without the
 //! secure step having run.
 
+use crate::board::BoardProbe;
 use crate::chip::FanChip;
 use crate::daemon::{DaemonSupervisor, SessionLauncher};
 use crate::fans::FanController;
@@ -151,6 +152,16 @@ pub fn build_core(boot: &Boot, deps: Deps) -> Core {
     };
 
     let mut fans = FanController::new(home.to_path_buf(), chip, chip_error, temps, file, confirmed);
+    // Issue #128: read the board name once, and load the per-header overrides from chip.toml.
+    fans.set_board_product(crate::board::RealBoardProbe.base_board_product());
+    if boot.secured() {
+        let chip_path = paths::chip_path(home);
+        if trusted_file(boot, &chip_path) {
+            if let Ok(state) = store::load_chip_state(&chip_path) {
+                fans.set_header_overrides(state.header_overrides);
+            }
+        }
+    }
     if boot.secured() {
         fans.set_state_trusted(trusted_file(boot, &paths::bios_state_path(home)));
         fans.startup(now);
@@ -262,7 +273,19 @@ pub fn confirm_channel_map(boot: &Boot, name: &str) -> Result<(), String> {
     }
     let chip = hardware::open_chip()?;
     check_confirmation(chip.map_name(), name)?;
-    store::save_chip_state(&paths::chip_path(boot.home()), &ChipState::confirmed(name)).map_err(|e| e.to_string())
+    let path = paths::chip_path(boot.home());
+    let state = confirmed_state(store::load_chip_state(&path).ok(), name);
+    store::save_chip_state(&path, &state).map_err(|e| e.to_string())
+}
+
+/// The state `--confirm-channel-map` saves: the confirmation, keeping any per-header override
+/// the user already chose (issue #128: re-confirming must not undo "not on my board").
+pub fn confirmed_state(existing: Option<ChipState>, name: &str) -> ChipState {
+    let mut state = ChipState::confirmed(name);
+    if let Some(old) = existing {
+        state.header_overrides = old.header_overrides;
+    }
+    state
 }
 
 /// The confirmation must name exactly the map that is detected.

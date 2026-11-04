@@ -15,6 +15,9 @@ import type { WriteResult } from "@/lib/fanWrites";
 /** Why a tach-only header cannot be ticked. */
 export const TACH_ONLY_WHY = "Tach only: canvas-rgb reads its speed and cannot set it.";
 
+/** Why a header the board does not route cannot be ticked (issue #128). */
+export const UNAVAILABLE_WHY = "Not on this board: this header is not fitted on your board.";
+
 export type BulkAction =
   | { kind: "bios" }
   | { kind: "fixed"; percent: number }
@@ -35,9 +38,15 @@ export function plainLabel(label: string): string {
   return label.replace(/ \(tach only\)$/, "");
 }
 
-/** A header the chip can drive. Tach-only headers report no duty. */
+/** A header the chip can drive. A header the board does not route (issue #128: the chip has
+ *  the channel, the board has no connector) and a tach-only header cannot be driven. */
 export function canDrive(h: FanHeaderStatus): boolean {
-  return h.pwm_percent !== null;
+  return h.available && h.pwm_percent !== null;
+}
+
+/** A header this board does not route (issue #128). */
+export function isUnavailable(h: FanHeaderStatus): boolean {
+  return !h.available;
 }
 
 /** The daemon handed this header back to BIOS although a mode was asked for. */
@@ -84,6 +93,12 @@ export async function applyBulk(
   for (const h of targets) {
     if (signal?.aborted) break;
     const base = { id: h.id, label: h.label };
+    // Issue #128: a header the board does not route is skipped like a handed-back header:
+    // it is never sent.
+    if (isUnavailable(h)) {
+      out.push({ ...base, state: "skipped", detail: UNAVAILABLE_WHY });
+      continue;
+    }
     if (!canDrive(h)) {
       out.push({ ...base, state: "skipped", detail: TACH_ONLY_WHY });
       continue;

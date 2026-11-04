@@ -3780,6 +3780,16 @@ button.chip:hover {
   vertical-align: middle;
 }
 
+/* A header the board does not route (issue #128): muted row, token colours only. */
+.rd-fans tr.fan-unavailable,
+.rd-fans .fan-unavailable {
+  color: var(--mute);
+}
+.rd-fans tr.fan-unavailable .fig,
+.rd-fans .fan-unavailable .fan-card-name {
+  color: var(--mute);
+}
+
 /* The editor: the app's panel, with the curve taking the height the column has left. Its
    scrollbar gutter is always there, so a panel that starts to scroll keeps its width and its
    points keep their columns (#109). */

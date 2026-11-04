@@ -87,6 +87,16 @@ pub struct FanHeaderStatus {
     pub on_bios: bool,
     /// Why the header is not doing what `mode` asks (safety handback, hot floor), if so.
     pub override_reason: Option<String>,
+    /// `false` when this board does not route the channel to a header (issue #128: the
+    /// chip has the channel, the board has no connector). Such a header stays in the list,
+    /// is never written, and cannot be ticked in bulk. Old payloads without it parse as
+    /// available.
+    #[serde(default = "available_by_default")]
+    pub available: bool,
+}
+
+fn available_by_default() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -191,6 +201,16 @@ pub fn validate_profile(profile: &FanProfile, configured_floor: u8) -> Result<()
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_header_status_without_available_parses_as_available() {
+        // Issue #128: payloads from before the field must still parse, as available headers.
+        let old = r#"{"id":"sys_fan1","label":"System fan 1","rpm":null,"pwm_percent":null,"mode":{"mode":"bios"},"on_bios":true,"override_reason":null}"#;
+        let status: FanHeaderStatus = serde_json::from_str(old).expect("an old payload parses");
+        assert!(status.available);
+        let back = serde_json::to_value(&status).unwrap();
+        assert_eq!(back["available"], serde_json::json!(true));
+    }
+
     use super::*;
 
     #[test]

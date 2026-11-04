@@ -60,7 +60,7 @@ describe("writeFanMode", () => {
 
 describe("applyBulk against a header another edit is writing", () => {
   const header = (id: string): FanHeaderStatus =>
-    ({ id, label: id, rpm: 900, pwm_percent: 30, mode: { mode: "bios" }, on_bios: false, override_reason: null }) as FanHeaderStatus;
+    ({ id, label: id, rpm: 900, pwm_percent: 30, mode: { mode: "bios" }, on_bios: false, override_reason: null, available: true }) as FanHeaderStatus;
   const fans = { headers: [header("hdr_c"), header("hdr_d")], floor_percent: 20 } as unknown as FansStatus;
 
   it("reports the superseded header skipped, not applied, and the others as they went", async () => {

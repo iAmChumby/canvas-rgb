@@ -669,6 +669,7 @@ mod tests {
                     mode: FanMode::Bios,
                     on_bios: true,
                     override_reason: None,
+                    available: true,
                 })
                 .collect(),
             temps: temps
