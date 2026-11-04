@@ -65,6 +65,7 @@ import {
   MAX_HTML_LAYERS,
   MAX_LAYERS,
   StackSession,
+  layersForServer,
 } from "@/views/effects/stackDraft";
 import { api } from "@/lib/endpoints";
 import { ApiFailure, messageOf } from "@/lib/errors";
@@ -559,7 +560,7 @@ export function StackBuilder({
     const id = isNew
       ? `stack:${nameRef.current.trim() || "New stack"}`
       : baseRef.current?.id ?? (initialName.startsWith("stack:") ? initialName : `stack:${initialName}`);
-    return { id, layers: draftRef.current.layers };
+    return { id, layers: layersForServer(draftRef.current.layers) };
   }
 
   async function sendPreview(retried = false) {
@@ -943,7 +944,7 @@ export function StackBuilder({
     setSaveError(null);
     // A replace writes under the other stack's own id: the daemon overwrites that stack and
     // nothing is deleted first, so a failed write leaves it exactly as it was.
-    const body: Stack = { id: replaceId ?? `stack:${wanted}`, layers: draftRef.current.layers };
+    const body: Stack = { id: replaceId ?? `stack:${wanted}`, layers: layersForServer(draftRef.current.layers) };
     let saved: Stack;
     try {
       saved = await api.putStack(body.id, body);

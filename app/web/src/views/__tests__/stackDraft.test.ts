@@ -21,6 +21,7 @@ import {
   stackNameProblem,
   StackSession,
   toggleLayer,
+  layersForServer,
 } from "@/views/effects/stackDraft";
 
 const color = (value: string) => ({ type: "color" as const, value });
@@ -241,5 +242,30 @@ describe("resizing a rectangle", () => {
 
   it("moves a rectangle whole inside the canvas", () => {
     expect(moveBounds({ x: 10, y: 10, width: 300, height: 190 }, 500, 500)).toEqual({ x: 20, y: 10, width: 300, height: 190 });
+  });
+});
+
+describe("layersForServer (#118)", () => {
+  const layer = (area: StackLayer["area"]): StackLayer =>
+    ({ id: "l1", name: "Base", effect: "solid", props: {}, opacity: 100, blend: "normal", enabled: true, area }) as unknown as StackLayer;
+
+  it("clamps a stored rect that runs off the canvas to its on-canvas box", () => {
+    const [out] = layersForServer([layer({ kind: "rect", x: -3, y: 5, width: 10, height: 10 })]);
+    expect(out!.area).toEqual({ kind: "rect", x: 0, y: 5, width: 7, height: 10 });
+    const [right] = layersForServer([layer({ kind: "rect", x: 315, y: 195, width: 10, height: 10 })]);
+    expect(right!.area).toEqual({ kind: "rect", x: 315, y: 195, width: 5, height: 5 });
+  });
+
+  it("leaves an in-canvas rect and a canvas area untouched (same object)", () => {
+    const inside = layer({ kind: "rect", x: 0, y: 0, width: 320, height: 200 });
+    const whole = layer({ kind: "canvas" } as StackLayer["area"]);
+    const out = layersForServer([inside, whole]);
+    expect(out[0]).toBe(inside);
+    expect(out[1]).toBe(whole);
+  });
+
+  it("turns a rect wholly off the canvas into an empty one", () => {
+    const [out] = layersForServer([layer({ kind: "rect", x: 400, y: 10, width: 10, height: 10 })]);
+    expect(out!.area).toEqual({ kind: "rect", x: 320, y: 10, width: 0, height: 10 });
   });
 });
