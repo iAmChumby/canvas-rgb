@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { ArrowCircleUp, CheckCircle, FolderOpen, WarningCircle, Lightning, SquaresFour, Warning, WarningOctagon } from "@phosphor-icons/react";
 import { Banner } from "@/components/Banner";
 import { Button, ButtonLink } from "@/components/Button";
+import { ACTION_LIFETIME_MS } from "@/components/Toast";
 import { api } from "@/lib/endpoints";
 import { canUpdate, openLogsFolder, tauriHost, updateDismissUpdated, updateInstall, updateLater, updateSkip } from "@/lib/host";
 import { sendUpdate } from "@/lib/updateActions";
@@ -16,6 +17,8 @@ import { patchSnap, useSnap } from "@/lib/store";
 
 /** The service banner appears after this many ms without the fan service (G4). */
 const SERVICE_BANNER_MS = 10_000;
+/** The leaving fade's tail, the same 200 ms the toast host waits before removing a toast. */
+const LEAVE_TAIL_MS = 200;
 
 /**
  * The standing notices: the SignalRGB conflict, no layout yet, and the first-run "size your ARGB
@@ -140,6 +143,39 @@ export function GlobalBanners() {
   // A release is waiting: the banner offers it until the person says Later (hidden until the next
   // automatic check) or Skip this version. The Updates page has the key itself, so it says it once.
   const onUpdates = pathname.endsWith("/updates/");
+  // The "Updated to" banner leaves on its own, like a toast with an action: it stays for the
+  // action-toast timeout, plays the leaving fade, and goes. The first navigation (any page the
+  // person chose) sends it too. Going is this session only: `updated_to` itself is cleared by
+  // the ×, or by opening What's new (UpdatesView dismisses it). Leaving and gone are stamped
+  // with the release they belong to, so a new release is not stamped and the banner is drawn
+  // again for it.
+  const updatedVersion = update?.updated_to?.version ?? null;
+  const [leavingFor, setLeavingFor] = useState<string | null>(null);
+  const [goneFor, setGoneFor] = useState<string | null>(null);
+  const updatedLeaving = updatedVersion !== null && leavingFor === updatedVersion;
+  const updatedGone = updatedVersion !== null && goneFor === updatedVersion;
+  const mountedPath = useRef(pathname);
+
+  // The first navigation away from this session sends the banner.
+  useEffect(() => {
+    if (pathname === mountedPath.current) return;
+    mountedPath.current = pathname;
+    setLeavingFor(updatedVersion);
+  }, [pathname, updatedVersion]);
+
+  useEffect(() => {
+    if (updatedVersion === null) return;
+    const hold = setTimeout(() => setLeavingFor(updatedVersion), ACTION_LIFETIME_MS);
+    return () => clearTimeout(hold);
+  }, [updatedVersion]);
+
+  // Once leaving is stamped for the release on screen, drop the banner when the fade has played.
+  useEffect(() => {
+    if (updatedVersion === null || leavingFor !== updatedVersion) return;
+    const drop = setTimeout(() => setGoneFor(updatedVersion), LEAVE_TAIL_MS);
+    return () => clearTimeout(drop);
+  }, [updatedVersion, leavingFor]);
+
   const offered =
     update !== null &&
     update.available !== null &&
@@ -162,13 +198,14 @@ export function GlobalBanners() {
   return (
     <div className="banners">
       <div className="banners-inner">
-        {update && update.updated_to && (
+        {update && update.updated_to && !onUpdates && !updatedGone && (
           <Banner
             tone="ok"
             icon={<CheckCircle size={20} weight="fill" />}
             title={`Updated to ${update.updated_to.version}`}
             onDismiss={() => void sendUpdate(updateDismissUpdated)}
             dismissLabel="Dismiss"
+            leaving={updatedLeaving}
             actions={
               <ButtonLink href="/updates/" variant="ghost" size="sm">
                 What&rsquo;s new

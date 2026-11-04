@@ -15,6 +15,7 @@ export function Banner({
   actions,
   dismissLabel,
   onDismiss,
+  leaving,
 }: {
   tone: Tone;
   icon: ReactNode;
@@ -23,10 +24,12 @@ export function Banner({
   actions?: ReactNode;
   dismissLabel?: string;
   onDismiss?: () => void;
+  /** Playing the leaving fade; the caller removes the banner once it has played. */
+  leaving?: boolean;
 }) {
   const style = { "--tone": `var(--${tone})` } as CSSProperties;
   return (
-    <div className="banner" style={style} role={tone === "down" ? "alert" : "status"}>
+    <div className="banner" style={style} role={tone === "down" ? "alert" : "status"} data-leaving={leaving ? "true" : undefined}>
       <span aria-hidden="true" className="banner-icon">
         {icon}
       </span>

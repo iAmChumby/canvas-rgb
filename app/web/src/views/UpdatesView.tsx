@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowRight } from "@phosphor-icons/react";
 import { Button, Swap } from "@/components/Button";
 import { Panel, StateDot } from "@/components/Panel";
 import { ErrorPanel, LoadFrame } from "@/components/Loading";
 import { UpdatesShape } from "@/components/LoadShapes";
-import { canUpdate, openLogsFolder, tauriHost, updateCheckNow, updateInstall, updateSkip } from "@/lib/host";
+import { canUpdate, openLogsFolder, tauriHost, updateCheckNow, updateDismissUpdated, updateInstall, updateSkip } from "@/lib/host";
 import { parseInline, parseNotes, type NoteBlock } from "@/lib/releaseNotes";
 import { messageOf } from "@/lib/errors";
 import { refreshUpdate, useSnap } from "@/lib/store";
@@ -124,6 +124,23 @@ export function UpdatesView() {
   // How many times the page has asked the tray. Every ask gets its own deadline: a Try again
   // must end in an answer or in the error again, never in a placeholder that waits for good.
   const [asked, setAsked] = useState(0);
+  // The notes of the release that was installed, captured when the page opened — and again once
+  // the dismiss lands, for the release that filled in late — so they stay readable for the visit
+  // while the visit itself counts as seen.
+  const [seenNotes, setSeenNotes] = useState<UpdateState["updated_to"]>(() => u?.updated_to ?? null);
+  // The tray clones updated_to on every state push; the dismiss is sent once per release.
+  const dismissedFor = useRef<string | null>(null);
+
+  // Opening What's new counts as seen: this page dismisses `updated_to` through the same command
+  // the banner's × sends, so the marker stays gone. The notes stay on screen for the visit.
+  useEffect(() => {
+    const to = u?.updated_to ?? null;
+    if (!to || dismissedFor.current === to.version) return;
+    dismissedFor.current = to.version;
+    void sendUpdate(updateDismissUpdated).then(() => {
+      setSeenNotes((cur) => (cur?.version === to.version ? cur : to));
+    });
+  }, [u?.updated_to]);
 
   useEffect(() => {
     if (u) return;
@@ -158,7 +175,7 @@ export function UpdatesView() {
   }
 
   const avail = u.available;
-  const notesOf = avail ?? u.updated_to;
+  const notesOf = avail ?? u.updated_to ?? seenNotes;
   const blocks = notesOf ? parseNotes(notesOf.notes) : [];
   const acts = canUpdate();
   const busy = isInstalling(u);
