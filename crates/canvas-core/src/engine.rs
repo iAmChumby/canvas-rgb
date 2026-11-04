@@ -192,6 +192,33 @@ impl State {
         let frames = (self.recent.len() - 1) as f32;
         (frames / span.as_secs_f32()).round()
     }
+
+    /// Applies a power change.
+    ///
+    /// The pause asks for one black frame, and the resume asks for the last good
+    /// frame again (#145). A pause and a resume that both land between two ticks
+    /// never reach the render thread, so the black frame of that pause is never
+    /// written: the resume drops the request, because a pause that never happened
+    /// must not black out a device later.
+    fn apply_power(&mut self, power: Power) {
+        if self.power == power {
+            return;
+        }
+        let was_paused = self.power == Power::Paused;
+        self.power = power;
+        if power == Power::Paused {
+            // "Paused writes black once, then stops the render loop."
+            self.pending_black = true;
+        } else if was_paused {
+            // The output came back. The devices need a frame again: the pause wrote
+            // black, and a panicked effect stops the delivery (#99), so the render
+            // thread re-sends the last good frame (#145).
+            self.pending_resume = true;
+            // The black frame of that pause was never written, so the request is
+            // stale: it goes.
+            self.pending_black = false;
+        }
+    }
 }
 
 /// The public handle.
@@ -411,22 +438,7 @@ impl Engine for CoreEngine {
     }
 
     fn set_power(&self, power: Power) {
-        self.mutate(|state| {
-            if state.power == power {
-                return;
-            }
-            let was_paused = state.power == Power::Paused;
-            state.power = power;
-            if power == Power::Paused {
-                // "Paused writes black once, then stops the render loop."
-                state.pending_black = true;
-            } else if was_paused {
-                // The output came back. The devices need a frame again: the pause wrote
-                // black, and a panicked effect stops the delivery (#99), so the render
-                // thread re-sends the last good frame (#145).
-                state.pending_resume = true;
-            }
-        });
+        self.mutate(|state| state.apply_power(power));
         info!(?power, "power changed");
     }
 
@@ -619,6 +631,11 @@ fn render_loop(engine: Arc<CoreEngine>) {
     // previous effect's frame (#99, finding 3), and its first frame is the one that is
     // kept.
     let mut last_good: Vec<Vec<Rgb8>> = Vec::new();
+    // The device every saved frame belongs to, in the same order as `last_good`. The
+    // frames are keyed by the device and not by the position of the device in the
+    // plan, so a plan that lists the same devices in another order keeps every
+    // device's own frame.
+    let mut last_good_ids: Vec<DeviceId> = Vec::new();
 
     loop {
         // ---- read the state --------------------------------------------------
@@ -724,15 +741,12 @@ fn render_loop(engine: Arc<CoreEngine>) {
                     }
                     plan = p;
                 }
-                // The saved frames belong to the old plan (#145): a frame of a device
-                // that changed its LED count is the wrong length, so it goes; a frame
-                // of a device that is still the same stays.
-                last_good.resize(plan.devices.len(), Vec::new());
-                for (i, device) in plan.devices.iter().enumerate() {
-                    if last_good[i].len() != device.led_count as usize {
-                        last_good[i].clear();
-                    }
-                }
+                // The saved frames belong to the old plan (#145): they are keyed by
+                // the device they were drawn for, so a plan that lists the same
+                // devices in another order keeps every device's own frame. A frame
+                // of a device that changed its LED count is the wrong length, so it
+                // goes.
+                remap_last_good(&plan, &mut last_good, &mut last_good_ids);
             }
             // `schema` used to be read here under the lock; it is effect code and
             // runs unguarded below (#99), so it moved below, outside the lock.
@@ -994,6 +1008,39 @@ fn render_loop(engine: Arc<CoreEngine>) {
     info!("render thread exiting");
 }
 
+/// Moves the saved frames onto the new plan (#145).
+///
+/// The frames are keyed by the device they were drawn for, so a plan that lists the
+/// same devices in another order keeps every device's own frame: without this, a
+/// re-layout that swapped two devices of the same LED count sent each device the
+/// other's frame.
+///
+/// A frame whose device left the plan is dropped, and so is one whose device changed
+/// its LED count: it is the wrong length for the device now.
+fn remap_last_good(
+    plan: &LayoutPlan,
+    last_good: &mut Vec<Vec<Rgb8>>,
+    last_good_ids: &mut Vec<DeviceId>,
+) {
+    let mut ids: Vec<DeviceId> = Vec::with_capacity(plan.devices.len());
+    let mut frames: Vec<Vec<Rgb8>> = Vec::with_capacity(plan.devices.len());
+    for device in &plan.devices {
+        let mut frame = Vec::new();
+        let old = last_good_ids.iter().position(|id| id == &device.device_id);
+        if let Some(old) = old {
+            if let Some(saved) = last_good.get(old) {
+                if saved.len() == device.led_count as usize {
+                    frame.clone_from(saved);
+                }
+            }
+        }
+        ids.push(device.device_id.clone());
+        frames.push(frame);
+    }
+    *last_good = frames;
+    *last_good_ids = ids;
+}
+
 /// Writes one black frame to every sink.
 fn write_black(state: &State) {
     for sink in state.sinks.iter().filter(|s| s.led_count > 0) {
@@ -1109,5 +1156,57 @@ mod frame_window_tests {
         }
         let fps = s.measured_fps();
         assert!((29.0..=31.0).contains(&fps), "measured {fps}");
+    }
+}
+
+#[cfg(test)]
+mod power_tests {
+    use super::*;
+
+    fn state() -> State {
+        State::new(&EngineSettings {
+            fps: 60,
+            power: Power::Running,
+            brightness: 100,
+        })
+    }
+
+    /// #145: a pause and a resume that both land between two ticks leave no black
+    /// request behind.
+    ///
+    /// The render thread never saw the pause, so the black frame of that pause was
+    /// never written. The request is stale: it must not black out a device that
+    /// arrives later.
+    #[test]
+    fn a_pause_and_a_resume_between_two_ticks_leave_no_black_request() {
+        let mut s = state();
+        s.apply_power(Power::Paused);
+        assert!(s.pending_black, "the pause asks for one black frame");
+        s.apply_power(Power::Running);
+        assert!(
+            !s.pending_black,
+            "the resume drops the black request of that pause"
+        );
+        assert!(
+            s.pending_resume,
+            "the resume asks for the last good frame again"
+        );
+    }
+
+    /// A pause the render thread did see keeps its black request until the frame is
+    /// written, and the resume after that asks for the last good frame again.
+    #[test]
+    fn a_pause_keeps_its_black_request_until_the_frame_is_written() {
+        let mut s = state();
+        s.apply_power(Power::Paused);
+        assert!(s.pending_black, "the pause asks for one black frame");
+        // The render thread wrote the black frame.
+        s.pending_black = false;
+        s.apply_power(Power::Running);
+        assert!(
+            s.pending_resume,
+            "the resume asks for the last good frame again"
+        );
+        assert!(!s.pending_black, "the resume asks for no black frame");
     }
 }

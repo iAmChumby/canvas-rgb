@@ -41,6 +41,14 @@ impl RecordingSink {
         self.frames.lock().unwrap_or_else(|e| e.into_inner()).last().cloned()
     }
 
+    /// Every frame the sink received, oldest first.
+    fn all_frames(&self) -> Vec<Vec<Rgb8>> {
+        self.frames
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     fn frame_count(&self) -> u32 {
         self.count.load(Ordering::Acquire)
     }
@@ -1960,5 +1968,183 @@ fn a_sink_added_after_a_panic_gets_the_last_good_frame() {
         "the new sink got the last good frame; last = {:?}",
         late.last()
     );
+    engine.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// #145: the last good frame belongs to the device it was drawn for
+//
+// The saved frames were indexed by the position of the device in the plan, so a
+// re-layout that listed the same devices in another order handed every device the
+// other's frame. The frames are keyed by the device they were drawn for.
+// ---------------------------------------------------------------------------
+
+/// The red of the left half of the canvas.
+const RED: Rgb8 = Rgb8 { r: 255, g: 0, b: 0 };
+/// The blue of the right half of the canvas.
+const BLUE: Rgb8 = Rgb8 { r: 0, g: 0, b: 255 };
+
+/// An effect that paints the left half of the canvas red, the right half blue, and
+/// then panics (#145).
+///
+/// The first update paints both halves, so every device has a good frame of its own
+/// colour to keep. The second one panics, and the engine stops delivering (#99).
+struct TwoHalvesThenPanicEffect {
+    updates: Arc<AtomicU32>,
+}
+
+impl Effect for TwoHalvesThenPanicEffect {
+    fn schema(&self) -> PropertySchema {
+        PropertySchema {
+            id: "test_two_halves_then_panic".into(),
+            name: "Test Two Halves Then Panic".into(),
+            description: "Paints two halves, then panics (#145).".into(),
+            needs: InputNeeds::default(),
+            properties: vec![],
+            presets: vec![],
+            thumbnail: None,
+        }
+    }
+
+    fn init(&mut self, _props: &Props) {}
+
+    fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &canvas_proto::traits::Inputs) {
+        let n = self.updates.fetch_add(1, Ordering::AcqRel);
+        if n >= 1 {
+            panic!("update boom after a good frame");
+        }
+        let half = canvas.width / 2;
+        for y in 0..canvas.height {
+            for x in 0..canvas.width {
+                let color = if x < half {
+                    [1.0, 0.0, 0.0]
+                } else {
+                    [0.0, 0.0, 1.0]
+                };
+                canvas.set(x, y, color);
+            }
+        }
+    }
+}
+
+/// Two devices, `a` and `b`, eight LEDs each, side by side: `a` on the left half of
+/// the canvas, `b` on the right half.
+///
+/// The devices are listed in the given order, and the plan lists them in that order
+/// too (`geometry::build_plan` walks the device list), so the order of the list is
+/// the order of the plan.
+fn two_devices_in_order(order: &[&str]) -> (Layout, Vec<DeviceInfo>) {
+    let devices = order
+        .iter()
+        .copied()
+        .map(|id| device(id, vec![zone(0, ZoneKind::Linear, 8)]))
+        .collect();
+    let lay = layout(
+        vec![
+            placed("a", 0, 0.0, 0.0, 160.0, 200.0),
+            placed("b", 0, 160.0, 0.0, 160.0, 200.0),
+        ],
+        SamplingMode::AreaAverage,
+        RenderScale::P100,
+    );
+    (lay, devices)
+}
+
+/// #145: a re-layout that lists the same devices in another order keeps every
+/// device's own last good frame.
+///
+/// The saved frames were indexed by the position of the device in the plan, so a
+/// re-layout that swapped two devices of the same LED count handed each device the
+/// other's frame: the lights showed swapped colours after the resume.
+#[test]
+fn a_re_layout_with_the_devices_in_another_order_keeps_each_device_s_own_frame() {
+    let engine = spawn(settings(30));
+    let (lay, devices) = two_devices_in_order(&["a", "b"]);
+    engine.set_layout(lay, devices);
+
+    let sink_a = RecordingSink::new();
+    let sink_b = RecordingSink::new();
+    engine.add_sink(DeviceId("a".into()), sink_a.clone());
+    engine.add_sink(DeviceId("b".into()), sink_b.clone());
+
+    let updates = Arc::new(AtomicU32::new(0));
+    engine.set_effect(
+        Box::new(TwoHalvesThenPanicEffect {
+            updates: updates.clone(),
+        }),
+        &Props::new(),
+    );
+
+    // The good frame: `a` is red, `b` is blue.
+    assert!(
+        wait_until(FIRST_FRAME_WAIT, || {
+            sink_a.last().is_some_and(|f| f.iter().all(|c| *c == RED))
+                && sink_b.last().is_some_and(|f| f.iter().all(|c| *c == BLUE))
+        }),
+        "the good frames arrived; a = {:?}, b = {:?}",
+        sink_a.last(),
+        sink_b.last()
+    );
+    assert!(
+        wait_until(FIRST_FRAME_WAIT, || updates.load(Ordering::Acquire) >= 2),
+        "the effect panicked"
+    );
+
+    // The same devices, listed in the other order: the plan follows the device list.
+    let (lay, devices) = two_devices_in_order(&["b", "a"]);
+    engine.set_layout(lay, devices);
+    // The render thread picks the new plan up on its next tick, and the frames it
+    // keeps are moved onto it.
+    let rendered = engine.stats().frames_rendered;
+    assert!(wait_until(FIRST_FRAME_WAIT, || engine
+        .stats()
+        .frames_rendered
+        >= rendered + 5));
+
+    // The pause writes black to every device.
+    engine.set_power(Power::Paused);
+    assert!(
+        wait_until(FIRST_FRAME_WAIT, || {
+            sink_a
+                .last()
+                .is_some_and(|f| f.iter().all(|c| *c == Rgb8::BLACK))
+                && sink_b
+                    .last()
+                    .is_some_and(|f| f.iter().all(|c| *c == Rgb8::BLACK))
+        }),
+        "the pause wrote black; a = {:?}, b = {:?}",
+        sink_a.last(),
+        sink_b.last()
+    );
+
+    // The resume sends every device its own last good frame again.
+    let frames_a = sink_a.frame_count();
+    let frames_b = sink_b.frame_count();
+    engine.set_power(Power::Running);
+    assert!(
+        wait_until(FIRST_FRAME_WAIT, || {
+            sink_a.frame_count() > frames_a
+                && sink_b.frame_count() > frames_b
+                && sink_a.last().is_some_and(|f| f.iter().all(|c| *c == RED))
+                && sink_b.last().is_some_and(|f| f.iter().all(|c| *c == BLUE))
+        }),
+        "every device got its own last good frame; a = {:?}, b = {:?}",
+        sink_a.last(),
+        sink_b.last()
+    );
+
+    // And nothing else: no device ever saw the other's colour.
+    for frame in sink_a.all_frames() {
+        assert!(
+            frame.iter().all(|c| *c == RED || *c == Rgb8::BLACK),
+            "device a saw a colour that is not its own: {frame:?}"
+        );
+    }
+    for frame in sink_b.all_frames() {
+        assert!(
+            frame.iter().all(|c| *c == BLUE || *c == Rgb8::BLACK),
+            "device b saw a colour that is not its own: {frame:?}"
+        );
+    }
     engine.shutdown();
 }
