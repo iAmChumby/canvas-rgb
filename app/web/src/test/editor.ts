@@ -19,14 +19,15 @@ export async function editorContent(root: ParentNode = document): Promise<HTMLEl
 }
 
 /** Waits until the editor draws a lint error marker and returns it. */
-export async function lintMarker(): Promise<HTMLElement> {
+export async function lintMarker(root: ParentNode = document): Promise<HTMLElement> {
   await waitFor(() => {
-    if (!document.querySelector(".cm-lint-marker-error")) throw new Error("lint marker not yet drawn");
+    if (!root.querySelector(".cm-lint-marker-error")) throw new Error("lint marker not yet drawn");
   });
-  return document.querySelector(".cm-lint-marker-error") as HTMLElement;
+  return root.querySelector(".cm-lint-marker-error") as HTMLElement;
 }
 
-/** The source as the editor holds it: the `.cm-line` texts, joined. */
+/** The source as the editor holds it right now (the `.cm-line` texts, joined), once it has mounted.
+ *  A one-shot read: to wait for a change, wrap the comparison in `waitFor`. */
 export async function editorSource(root: ParentNode = document): Promise<string> {
   const content = await editorContent(root);
   return Array.from(content.querySelectorAll(".cm-line"))
