@@ -1334,6 +1334,87 @@ impl Effect for PanicInitEffect {
     }
 }
 
+/// An effect whose `update` paints the left half of the canvas red and then panics
+/// mid-draw (#99). `updates` counts update calls.
+struct HalfPanickedEffect {
+    updates: Arc<AtomicU32>,
+}
+
+impl Effect for HalfPanickedEffect {
+    fn schema(&self) -> PropertySchema {
+        PropertySchema {
+            id: "test_half_panicked".into(),
+            name: "Test Half Panicked".into(),
+            description: "Paints half the canvas then panics in update (#99).".into(),
+            needs: InputNeeds::default(),
+            properties: vec![],
+            presets: vec![],
+            thumbnail: None,
+        }
+    }
+
+    fn init(&mut self, _props: &Props) {}
+
+    fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &canvas_proto::traits::Inputs) {
+        self.updates.fetch_add(1, Ordering::AcqRel);
+        for y in 0..canvas.height {
+            for x in 0..canvas.width / 2 {
+                canvas.set(x, y, [1.0, 0.0, 0.0]);
+            }
+        }
+        panic!("half-drawn boom");
+    }
+}
+
+/// An effect whose `Drop` panics (#99). Replacement must not let that panic out.
+struct DropPanicsEffect;
+
+impl Effect for DropPanicsEffect {
+    fn schema(&self) -> PropertySchema {
+        PropertySchema {
+            id: "test_drop_panics".into(),
+            name: "Test Drop Panics".into(),
+            description: "Panics when it is dropped (#99).".into(),
+            needs: InputNeeds::default(),
+            properties: vec![],
+            presets: vec![],
+            thumbnail: None,
+        }
+    }
+
+    fn init(&mut self, _props: &Props) {}
+
+    fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &canvas_proto::traits::Inputs) {
+        canvas.fill([0.0, 0.0, 1.0]);
+    }
+}
+
+impl Drop for DropPanicsEffect {
+    fn drop(&mut self) {
+        panic!("drop boom");
+    }
+}
+
+/// An effect whose `schema` panics every time; its `update` would paint green.
+struct PanicSchemaEffect {
+    schemas: Arc<AtomicU32>,
+    updates: Arc<AtomicU32>,
+}
+
+impl Effect for PanicSchemaEffect {
+    fn schema(&self) -> PropertySchema {
+        self.schemas.fetch_add(1, Ordering::AcqRel);
+        panic!("schema boom");
+    }
+
+    fn init(&mut self, _props: &Props) {}
+
+    fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &canvas_proto::traits::Inputs) {
+        self.updates.fetch_add(1, Ordering::AcqRel);
+        canvas.fill([0.0, 1.0, 0.0]);
+    }
+}
+
 #[test]
 fn a_panicking_update_does_not_kill_the_engine() {
     let engine = spawn(settings(30));
@@ -1439,6 +1520,128 @@ fn a_panicking_effect_logs_once_and_is_never_called_again() {
         updates.load(Ordering::Acquire),
         1,
         "a second panic in a row did not call the effect again"
+    );
+    engine.shutdown();
+}
+
+#[test]
+fn the_lights_never_receive_the_half_drawn_frame_after_an_update_panic() {
+    let engine = spawn(settings(30));
+    let sink = RecordingSink::new();
+    give_d0_a_layout(&engine);
+    engine.add_sink(DeviceId("d0".into()), sink.clone());
+
+    let green = Rgb8::new(0, 255, 0);
+    let initialized = Arc::new(AtomicBool::new(false));
+    engine.set_effect(
+        Box::new(SolidEffect::new([0.0, 1.0, 0.0], initialized.clone())),
+        &Props::new(),
+    );
+    assert!(wait_until(
+        Duration::from_secs(3),
+        || sink.last().is_some_and(|f| f.iter().all(|c| *c == green)),
+    ));
+
+    // The half-panicked effect paints the left half red, then panics. The frame
+    // sampled from that torn canvas must never reach the sink.
+    let updates = Arc::new(AtomicU32::new(0));
+    engine.set_effect(Box::new(HalfPanickedEffect { updates: updates.clone() }), &Props::new());
+    assert!(wait_until(Duration::from_secs(3), || updates.load(Ordering::Acquire) >= 1));
+    let frames_after_panic = sink.frame_count();
+    assert!(
+        wait_until(
+            Duration::from_secs(3),
+            || sink.frame_count() >= frames_after_panic + 10
+        ),
+        "frames keep arriving after the update panic (got {})",
+        sink.frame_count()
+    );
+    assert_eq!(updates.load(Ordering::Acquire), 1, "update ran once, then stopped");
+    {
+        let frames = sink.frames.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            frames.iter().all(|f| f.iter().all(|c| *c == green)),
+            "every frame the sink got stayed the last good green frame"
+        );
+    }
+    assert_eq!(
+        sink.last(),
+        Some(vec![green; 4]),
+        "the last frame is the last good frame, never the half-red one"
+    );
+    engine.shutdown();
+}
+
+#[test]
+fn replacing_an_effect_whose_drop_panics_does_not_panic_the_caller() {
+    let engine = spawn(settings(30));
+    // No sink yet: the loop is parked, so the old effect is still in the state when
+    // the replacement happens and its drop runs on this calling thread (#99).
+    engine.set_effect(Box::new(DropPanicsEffect), &Props::new());
+    engine.set_effect(
+        Box::new(SolidEffect::new(
+            [0.0, 1.0, 0.0],
+            Arc::new(AtomicBool::new(false)),
+        )),
+        &Props::new(),
+    );
+
+    let sink = RecordingSink::new();
+    give_d0_a_layout(&engine);
+    engine.add_sink(DeviceId("d0".into()), sink.clone());
+    let green = Rgb8::new(0, 255, 0);
+    assert!(
+        wait_until(
+            Duration::from_secs(3),
+            || sink.last().is_some_and(|f| f.iter().all(|c| *c == green)),
+        ),
+        "the engine runs the new effect after the drop panic"
+    );
+    engine.shutdown();
+}
+
+#[test]
+fn a_panicking_schema_does_not_kill_the_engine() {
+    let engine = spawn(settings(30));
+    let sink = RecordingSink::new();
+    give_d0_a_layout(&engine);
+    engine.add_sink(DeviceId("d0".into()), sink.clone());
+
+    let schemas = Arc::new(AtomicU32::new(0));
+    let updates = Arc::new(AtomicU32::new(0));
+    engine.set_effect(
+        Box::new(PanicSchemaEffect { schemas: schemas.clone(), updates: updates.clone() }),
+        &Props::new(),
+    );
+    // No good frame ever: the sink gets black and keeps getting frames.
+    assert!(wait_until(Duration::from_secs(3), || sink.frame_count() > 0));
+    let frames_after_panic = sink.frame_count();
+    assert!(
+        wait_until(
+            Duration::from_secs(3),
+            || sink.frame_count() >= frames_after_panic + 10
+        ),
+        "frames keep arriving after the schema panic (got {})",
+        sink.frame_count()
+    );
+    assert_eq!(updates.load(Ordering::Acquire), 0, "update never ran for the stopped effect");
+    assert!(
+        sink.last().is_some_and(|f| f.iter().all(|c| *c == Rgb8::BLACK)),
+        "black before the first good frame"
+    );
+
+    let initialized = Arc::new(AtomicBool::new(false));
+    engine.set_effect(
+        Box::new(SolidEffect::new([0.0, 0.0, 1.0], initialized.clone())),
+        &Props::new(),
+    );
+    let blue = Rgb8::new(0, 0, 255);
+    assert!(
+        wait_until(
+            Duration::from_secs(3),
+            || sink.last().is_some_and(|f| f.iter().all(|c| *c == blue)),
+        ),
+        "a later effect renders after the schema panic"
     );
     engine.shutdown();
 }

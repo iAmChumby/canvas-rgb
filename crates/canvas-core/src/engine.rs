@@ -28,6 +28,15 @@ use crate::preview;
 use crate::sampling;
 use crate::timer::FrameTimer;
 
+use crate::effect_guard;
+
+/// Runs effect code behind the guard: `catch_unwind` with the marker set, so the
+/// daemon's panic hook knows a panic here is a caught effect panic, never the
+/// daemon's own fatal panic (#99, finding 1).
+fn guarded_call<R>(f: impl FnOnce() -> R) -> Result<R, Box<dyn std::any::Any + Send>> {
+    catch_unwind(AssertUnwindSafe(|| effect_guard::run_guarded(f)))
+}
+
 /// Frame rate limits, from the spine.
 const FPS_MIN: u32 = canvas_proto::consts::FPS_MIN;
 const FPS_MAX: u32 = canvas_proto::consts::FPS_MAX;
@@ -257,7 +266,7 @@ fn panic_text(payload: &Box<dyn std::any::Any + Send>) -> String {
 /// An effect's id, for the panic log (#99), without ever panicking itself: a `schema`
 /// that panics gives `"<unknown>"`.
 fn effect_id_guarded(effect: &dyn Effect) -> String {
-    match catch_unwind(AssertUnwindSafe(|| effect.schema().id)) {
+    match guarded_call(|| effect.schema().id) {
         Ok(id) => id,
         Err(_) => "<unknown effect id>".to_string(),
     }
@@ -307,7 +316,7 @@ impl Engine for CoreEngine {
         // #99: an initialising panic must not take the calling thread (or, when the new
         // effect is handed to the render thread, the render thread) down with it. The
         // effect is installed as stopped, so the loop skips it until it is replaced.
-        let init_panicked = match catch_unwind(AssertUnwindSafe(|| effect.init(props))) {
+        let init_panicked = match guarded_call(|| effect.init(props)) {
             Ok(()) => false,
             Err(payload) => {
                 report_effect_panic(effect.as_ref(), "init", &payload);
@@ -315,7 +324,12 @@ impl Engine for CoreEngine {
                 true
             }
         };
-        self.mutate(|state| {
+        // Finding 3: the replaced effect's `Drop` is effect code too. Take it out
+        // under the lock but drop it after the lock, behind the guard, so a panicking
+        // drop can neither kill this thread nor hold the state lock while it unwinds.
+        let old = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let old = state.effect.take();
             state.effect = Some(effect);
             state.effect_panicked = init_panicked;
             state.effect_generation = state.effect_generation.wrapping_add(1);
@@ -323,7 +337,16 @@ impl Engine for CoreEngine {
             state.props = props.clone();
             state.pending_props = props.clone();
             state.props_dirty = false;
-        });
+            state.wake_generation = state.wake_generation.wrapping_add(1);
+            old
+        };
+        self.wake();
+        if let Some(old) = old {
+            if guarded_call(|| drop(old)).is_err() {
+                let _ = self.effect_panics.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                warn!("a replaced effect panicked in Drop; it was already superseded");
+            }
+        }
         info!("effect activated");
     }
 
@@ -341,7 +364,7 @@ impl Engine for CoreEngine {
                 return;
             }
             if let Some(effect) = state.effect.as_mut() {
-                let outcome = catch_unwind(AssertUnwindSafe(|| effect.init(props)));
+                let outcome = guarded_call(|| effect.init(props));
                 match outcome {
                     Ok(()) => {
                         state.props = props.clone();
@@ -538,6 +561,13 @@ fn render_loop(engine: Arc<CoreEngine>) {
     let mut last_preview_at = Instant::now();
     // The power state the thread last saw, so the resume can be logged.
     let mut last_power = Power::Running;
+    // Finding 2: the last good frame, kept as sampled device colours plus the canvas
+    // pixels for the preview. A caught `update` panic leaves a half-drawn canvas, so a
+    // panicked tick (and later ticks while the effect stays stopped) must deliver this
+    // instead of sampling the torn canvas. Black before the first good frame.
+    let mut last_good_colors: std::collections::HashMap<DeviceId, Vec<Rgb8>> =
+        std::collections::HashMap::new();
+    let mut last_good_pixels: Option<(Vec<[f32; 3]>, u32, u32)> = None;
 
     loop {
         // ---- read the state --------------------------------------------------
@@ -677,7 +707,7 @@ fn render_loop(engine: Arc<CoreEngine>) {
         let mut needs = InputNeeds::default();
         if let Some(e) = effect.as_ref() {
             if !panicked {
-                let outcome = catch_unwind(AssertUnwindSafe(|| e.schema().needs));
+                let outcome = guarded_call(|| e.schema().needs);
                 match outcome {
                     Ok(needs_now) => needs = needs_now,
                     Err(payload) => {
@@ -697,7 +727,7 @@ fn render_loop(engine: Arc<CoreEngine>) {
             if !panicked {
                 let mut step_panicked = false;
                 if let Some(props) = pending_props {
-                    let outcome = catch_unwind(AssertUnwindSafe(|| e.init(&props)));
+                    let outcome = guarded_call(|| e.init(&props));
                     if let Err(payload) = outcome {
                         step_panicked = true;
                         report_effect_panic(e.as_ref(), "init", &payload);
@@ -709,9 +739,9 @@ fn render_loop(engine: Arc<CoreEngine>) {
                 if !step_panicked {
                     let canvas = &mut buffers.canvas;
                     let inputs_ref = &inputs;
-                    let outcome = catch_unwind(AssertUnwindSafe(|| {
+                    let outcome = guarded_call(|| {
                         e.update(dt, &mut *canvas, inputs_ref);
-                    }));
+                    });
                     if let Err(payload) = outcome {
                         step_panicked = true;
                         report_effect_panic(e.as_ref(), "update", &payload);
@@ -732,15 +762,28 @@ fn render_loop(engine: Arc<CoreEngine>) {
                 state.effect_panicked = panicked;
             } else {
                 drop(state);
-                let _ = catch_unwind(AssertUnwindSafe(|| drop(e)));
+                let _ = guarded_call(|| drop(e));
             }
         }
 
         // ---- sample ----------------------------------------------------------
+        // A panicked tick samples nothing: the canvas is half-drawn. It re-delivers
+        // the last good colours per device (black before the first good frame).
         let brightness_factor = f32::from(brightness) / 100.0;
 
         buffers.device_colors.clear();
         buffers.device_colors.resize(plan.devices.len(), Vec::new());
+        if panicked {
+            for (device_index, device) in plan.devices.iter().enumerate() {
+                let colors = last_good_colors.get(&device.device_id).cloned().unwrap_or_else(|| {
+                    vec![Rgb8::BLACK; device.led_count as usize]
+                });
+                let device_colors = &mut buffers.device_colors[device_index];
+                device_colors.clear();
+                device_colors.extend_from_slice(&colors);
+                device_colors.resize(device.led_count as usize, Rgb8::BLACK);
+            }
+        } else {
         for (device_index, device) in plan.devices.iter().enumerate() {
             let device_colors = &mut buffers.device_colors[device_index];
             device_colors.clear();
@@ -776,6 +819,23 @@ fn render_loop(engine: Arc<CoreEngine>) {
                 }
             }
         }
+        // Snapshot the good frame before delivery moves the buffers out.
+        last_good_colors = plan
+            .devices
+            .iter()
+            .zip(buffers.device_colors.iter())
+            .map(|(device, colors)| (device.device_id.clone(), colors.clone()))
+            .collect();
+        // Only the preview needs the pixels; copying the whole canvas every frame
+        // without a viewer would be waste for nothing.
+        if preview_on {
+            last_good_pixels = Some((
+                buffers.canvas.pixels.clone(),
+                buffers.canvas.width,
+                buffers.canvas.height,
+            ));
+        }
+        }
 
         // ---- deliver ---------------------------------------------------------
         {
@@ -809,14 +869,31 @@ fn render_loop(engine: Arc<CoreEngine>) {
                 // Rate-limit the preview to PREVIEW_MAX_FPS.
                 let interval = Duration::from_nanos(1_000_000_000 / u64::from(PREVIEW_MAX_FPS));
                 if frame_start.duration_since(last_preview_at) >= interval {
-                    let (w, h) = preview::downscale_rgb(
-                        &buffers.canvas.pixels,
-                        buffers.canvas.width,
-                        buffers.canvas.height,
-                        &mut buffers.preview_bytes,
-                    );
-                    sink.submit(w, h, buffers.preview_bytes.clone());
-                    last_preview_at = frame_start;
+                    // A panicked tick shows the last good canvas, never the torn
+                    // one; before the first good frame there is nothing to show.
+                    if panicked {
+                        if let Some((pixels, w, h)) = &last_good_pixels {
+                            if *w == buffers.canvas.width && *h == buffers.canvas.height {
+                                let (w, h) = preview::downscale_rgb(
+                                    pixels,
+                                    *w,
+                                    *h,
+                                    &mut buffers.preview_bytes,
+                                );
+                                sink.submit(w, h, buffers.preview_bytes.clone());
+                                last_preview_at = frame_start;
+                            }
+                        }
+                    } else {
+                        let (w, h) = preview::downscale_rgb(
+                            &buffers.canvas.pixels,
+                            buffers.canvas.width,
+                            buffers.canvas.height,
+                            &mut buffers.preview_bytes,
+                        );
+                        sink.submit(w, h, buffers.preview_bytes.clone());
+                        last_preview_at = frame_start;
+                    }
                 }
             }
         }

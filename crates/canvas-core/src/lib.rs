@@ -10,6 +10,7 @@
 //! (`canvas-daemon`'s `stack` module); nothing else is.
 
 mod engine;
+pub mod effect_guard;
 pub mod geometry;
 mod preview;
 pub mod sampling;
