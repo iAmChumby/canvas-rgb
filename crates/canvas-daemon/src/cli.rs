@@ -843,6 +843,19 @@ pub enum Output {
     Text(String),
 }
 
+/// `canvas-rgb fans status`: the fan headers, the temperatures and the active profile.
+///
+/// The JSON answer is the API's own, unchanged: it carries every field, `available`
+/// among them. The text is the table below.
+pub fn fans_status(api: &dyn Api, json: bool) -> Result<Output, CliError> {
+    let answer = api.call("GET", canvas_proto::api::routes::FANS, None)?;
+    Ok(if json {
+        Output::Json(answer.clone())
+    } else {
+        Output::Text(fans_status_text(&answer))
+    })
+}
+
 /// `canvas-rgb peripherals list`: the peripherals the adapters see.
 ///
 /// The enumeration opens nothing: a listed peripheral is not one the daemon may touch.
@@ -1020,6 +1033,135 @@ pub fn peripherals_access_text(id: &str, answer: &serde_json::Value) -> String {
         if reads { "on" } else { "off" },
         if writes { "on" } else { "off" }
     )
+}
+
+/// The text `fans status` prints.
+///
+/// The MODE column says what the chip is doing. A header that is not on this board
+/// (`available: false`, issue #153) says that and nothing else: the asked mode is left
+/// out, because nothing was asked of a header that is not wired up.
+pub fn fans_status_text(answer: &serde_json::Value) -> String {
+    let mut text = String::new();
+    text.push_str(&format!(
+        "chip          {}\n",
+        answer
+            .get("chip")
+            .and_then(|v| v.as_str())
+            .unwrap_or("not detected")
+    ));
+    text.push_str(&format!(
+        "profile       {}\n",
+        answer
+            .get("active_profile")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+    ));
+    text.push_str(&format!(
+        "floor         {}%\n",
+        answer
+            .get("floor_percent")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+    ));
+    let headers = answer
+        .get("headers")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if headers.is_empty() {
+        text.push_str("no fan headers\n");
+    } else {
+        text.push_str(&format!(
+            "{:<14} {:<10} {:<8} MODE\n",
+            "HEADER", "RPM", "DUTY"
+        ));
+        for header in &headers {
+            let id = header.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+            let rpm = header
+                .get("rpm")
+                .and_then(|v| v.as_u64())
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "-".into());
+            let duty = header
+                .get("pwm_percent")
+                .and_then(|v| v.as_u64())
+                .map(|v| format!("{v}%"))
+                .unwrap_or_else(|| "-".into());
+            text.push_str(&format!(
+                "{:<14} {:<10} {:<8} {}\n",
+                id,
+                rpm,
+                duty,
+                header_mode_text(header)
+            ));
+        }
+    }
+    let temps = answer
+        .get("temps")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    for temp in &temps {
+        let label = temp.get("label").and_then(|v| v.as_str()).unwrap_or("?");
+        let celsius = temp
+            .get("celsius")
+            .and_then(|v| v.as_f64())
+            .map(|v| format!("{v:.1} C"))
+            .unwrap_or_else(|| "-".into());
+        text.push_str(&format!("{:<14} {celsius}\n", label));
+    }
+    text
+}
+
+/// The MODE column of one fan header.
+///
+/// A header that is not on this board is read first and says so: it is never written,
+/// so nothing was asked of it and the BIOS is not refusing anything. Every other header
+/// says what the chip is doing; what was asked is shown only when it differs.
+fn header_mode_text(header: &serde_json::Value) -> String {
+    let available = header
+        .get("available")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    if !available {
+        return "not on this board".to_string();
+    }
+    let asked = describe_mode(header.get("mode"));
+    let on_bios = header
+        .get("on_bios")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let reason = header.get("override_reason").and_then(|v| v.as_str());
+    match (on_bios, asked.as_str(), reason) {
+        (true, "BIOS", _) => "BIOS".to_string(),
+        (true, _, Some(reason)) => format!("BIOS (asked {asked}; {reason})"),
+        (true, _, None) => format!("BIOS (asked {asked})"),
+        (false, _, Some(reason)) => format!("{asked} ({reason})"),
+        (false, _, None) => asked,
+    }
+}
+
+/// A one-line description of a fan mode.
+fn describe_mode(mode: Option<&serde_json::Value>) -> String {
+    let Some(mode) = mode else {
+        return "?".into();
+    };
+    match mode.get("mode").and_then(|v| v.as_str()) {
+        Some("bios") => "BIOS".into(),
+        Some("fixed") => {
+            let percent = mode.get("percent").and_then(|v| v.as_u64()).unwrap_or(0);
+            format!("fixed {percent}%")
+        }
+        Some("curve") => {
+            let points = mode
+                .get("points")
+                .and_then(|v| v.as_array())
+                .map(|p| p.len())
+                .unwrap_or(0);
+            format!("curve ({points} points)")
+        }
+        _ => "?".into(),
+    }
 }
 
 /// A property value, as the CLI shows it.
@@ -1403,5 +1545,186 @@ mod tests {
         // A PNG starts with the eight-byte signature.
         assert_eq!(&bytes[..8], &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]);
         let _ = std::fs::remove_file(&out);
+    }
+
+    /// An API that answers every request with one fixed value.
+    struct FakeApi(serde_json::Value);
+
+    impl Api for FakeApi {
+        fn call(
+            &self,
+            method: &str,
+            path: &str,
+            _body: Option<&str>,
+        ) -> Result<serde_json::Value, CliError> {
+            assert_eq!(method, "GET");
+            assert_eq!(path, canvas_proto::api::routes::FANS);
+            Ok(self.0.clone())
+        }
+    }
+
+    /// A curve of four points, as the API sends a header's mode.
+    fn a_curve() -> serde_json::Value {
+        serde_json::json!({
+            "mode": "curve",
+            "source": { "type": "cpu" },
+            "points": [
+                { "temp_c": 30.0, "percent": 30 },
+                { "temp_c": 60.0, "percent": 50 },
+                { "temp_c": 80.0, "percent": 70 },
+                { "temp_c": 90.0, "percent": 100 }
+            ]
+        })
+    }
+
+    /// One fan header of a fans status answer.
+    fn a_header(
+        id: &str,
+        mode: serde_json::Value,
+        on_bios: bool,
+        available: bool,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "label": id,
+            "rpm": 1200,
+            "pwm_percent": 40,
+            "mode": mode,
+            "on_bios": on_bios,
+            "override_reason": null,
+            "available": available
+        })
+    }
+
+    /// A fans status answer with the given headers.
+    fn a_fans_answer(headers: Vec<serde_json::Value>) -> serde_json::Value {
+        serde_json::json!({
+            "chip": "NCT6687D-R @ 0xA20",
+            "active_profile": "quiet",
+            "floor_percent": 20,
+            "headers": headers,
+            "temps": [{ "label": "CPU Tctl", "celsius": 42.0, "source": { "type": "cpu" } }],
+            "profiles": ["quiet"]
+        })
+    }
+
+    /// The MODE column of the row of one header.
+    fn the_mode_cell(text: &str, id: &str) -> String {
+        let row = text
+            .lines()
+            .find(|line| line.starts_with(id))
+            .unwrap_or_else(|| panic!("no row for {id} in:\n{text}"));
+        row.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// A header that is not on this board (issue #153): the chip has the channel, the
+    /// board has no connector for it. The service never writes it, so nothing was asked
+    /// of it and the BIOS is not refusing anything.
+    #[test]
+    fn a_header_that_is_not_on_this_board_says_so_and_asks_for_nothing() {
+        let answer = a_fans_answer(vec![a_header("sys_fan5", a_curve(), true, false)]);
+        let text = fans_status_text(&answer);
+        assert!(
+            text.contains("not on this board"),
+            "the mode column must say the header is not on this board:\n{text}"
+        );
+        assert!(
+            !text.contains("asked"),
+            "nothing was asked of a header that is not on this board:\n{text}"
+        );
+    }
+
+    /// The JSON answer is the API's own, so it carries `available` as it is.
+    #[test]
+    fn the_json_answer_of_the_fans_is_the_api_s_own() {
+        let answer = a_fans_answer(vec![a_header("sys_fan5", a_curve(), true, false)]);
+        let output = fans_status(&FakeApi(answer.clone()), true).expect("the fans answer");
+        match output {
+            Output::Json(value) => {
+                assert_eq!(value, answer);
+                assert_eq!(value["headers"][0]["available"], serde_json::json!(false));
+            }
+            Output::Text(text) => panic!("the JSON answer is the API's own, not a table:\n{text}"),
+        }
+    }
+
+    /// A header that is on the board reads as before: the BIOS on its own, the BIOS with
+    /// what was asked, and the asked mode when the chip is doing it.
+    #[test]
+    fn the_rows_of_the_headers_that_are_on_the_board_do_not_change() {
+        let bios = a_header("cpu_fan", serde_json::json!({ "mode": "bios" }), true, true);
+        let asked = a_header("sys_fan1", a_curve(), true, true);
+        let curve = a_header("sys_fan2", a_curve(), false, true);
+        let text = fans_status_text(&a_fans_answer(vec![bios, asked, curve]));
+        assert_eq!(the_mode_cell(&text, "cpu_fan"), "cpu_fan 1200 40% BIOS");
+        assert_eq!(
+            the_mode_cell(&text, "sys_fan1"),
+            "sys_fan1 1200 40% BIOS (asked curve (4 points))"
+        );
+        assert_eq!(
+            the_mode_cell(&text, "sys_fan2"),
+            "sys_fan2 1200 40% curve (4 points)"
+        );
+    }
+
+    /// A header that is on the board and was asked for a fixed speed reads as that speed,
+    /// and a header that was handed back says why.
+    #[test]
+    fn a_fixed_mode_and_a_handback_read_as_before() {
+        let fixed = a_header(
+            "pump_fan",
+            serde_json::json!({ "mode": "fixed", "percent": 55 }),
+            false,
+            true,
+        );
+        let mut handback = a_header("sys_fan3", a_curve(), true, true);
+        handback["override_reason"] = serde_json::json!("the sensor was lost");
+        let text = fans_status_text(&a_fans_answer(vec![fixed, handback]));
+        assert_eq!(
+            the_mode_cell(&text, "pump_fan"),
+            "pump_fan 1200 40% fixed 55%"
+        );
+        assert_eq!(
+            the_mode_cell(&text, "sys_fan3"),
+            "sys_fan3 1200 40% BIOS (asked curve (4 points); the sensor was lost)"
+        );
+    }
+
+    /// A header that was on the board before #128 and has no `available` field in the
+    /// answer is on the board: the field's default is `true`.
+    #[test]
+    fn a_header_without_an_availability_field_is_on_the_board() {
+        let mut header = a_header("cpu_fan", serde_json::json!({ "mode": "bios" }), true, true);
+        header
+            .as_object_mut()
+            .expect("an object")
+            .remove("available");
+        let text = fans_status_text(&a_fans_answer(vec![header]));
+        assert_eq!(the_mode_cell(&text, "cpu_fan"), "cpu_fan 1200 40% BIOS");
+    }
+
+    /// The table's header and the chip, the profile and the floor are as they were.
+    #[test]
+    fn the_fans_status_text_still_leads_with_the_chip_and_the_profile() {
+        let answer = a_fans_answer(vec![a_header(
+            "cpu_fan",
+            serde_json::json!({ "mode": "bios" }),
+            true,
+            true,
+        )]);
+        let text = fans_status_text(&answer);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "chip          NCT6687D-R @ 0xA20");
+        assert_eq!(lines[1], "profile       quiet");
+        assert_eq!(lines[2], "floor         20%");
+        assert_eq!(lines[3], "HEADER         RPM        DUTY     MODE");
+        assert_eq!(lines[5], "CPU Tctl       42.0 C");
+    }
+
+    /// An answer with no headers says so, as it did.
+    #[test]
+    fn an_answer_with_no_headers_says_so() {
+        let text = fans_status_text(&a_fans_answer(Vec::new()));
+        assert!(text.contains("no fan headers"), "{text}");
     }
 }
