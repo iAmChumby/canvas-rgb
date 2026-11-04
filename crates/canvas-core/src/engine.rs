@@ -561,13 +561,24 @@ fn render_loop(engine: Arc<CoreEngine>) {
     let mut last_preview_at = Instant::now();
     // The power state the thread last saw, so the resume can be logged.
     let mut last_power = Power::Running;
-    // Finding 2: the last good frame, kept as sampled device colours plus the canvas
-    // pixels for the preview. A caught `update` panic leaves a half-drawn canvas, so a
-    // panicked tick (and later ticks while the effect stays stopped) must deliver this
-    // instead of sampling the torn canvas. Black before the first good frame.
-    let mut last_good_colors: std::collections::HashMap<DeviceId, Vec<Rgb8>> =
-        std::collections::HashMap::new();
-    let mut last_good_pixels: Option<(Vec<[f32; 3]>, u32, u32)> = None;
+    // The effect generation the render thread last ran with, and whether that effect
+    // has delivered a good frame. A panicked tick after a good frame delivers nothing:
+    // `FrameSink` is a one-way channel into a bounded writer task
+    // (`crates/canvas-daemon/src/state.rs` `DeviceSink`), so skipping a submit leaves the
+    // device showing what it was last sent (OpenRGB custom mode persists;
+    // `crates/canvas-adapters/src/openrgb.rs`; Royuan holds `last_color`,
+    // `crates/canvas-adapters/src/royuan.rs`), and the preview's `try_send` leaves the
+    // client showing its last frame (`state.rs` `WebsocketPreview`). That makes the check
+    // free when a panic never happens: no snapshot buffer, no per-tick copy, only a flag
+    // the loop already reads. A panicked tick before this generation's first good frame
+    // delivers black instead (#99, findings 1-3).
+    //
+    // On `set_effect` the generation bumps and this render thread clears the canvas when
+    // it picks up the new generation: a new effect never starts from the previous
+    // effect's frame (trails accumulate, see findings 3), and a new effect that panics
+    // before a good frame shows black, never the previous effect's colours.
+    let mut seen_generation = u64::MAX;
+    let mut delivered_good_frame = false;
 
     loop {
         // ---- read the state --------------------------------------------------
@@ -695,6 +706,18 @@ fn render_loop(engine: Arc<CoreEngine>) {
             )
         };
 
+        // A new effect starts from a black canvas, never the previous effect's frame
+        // or a half-drawn torn canvas (finding 3). The generation only changes in
+        // `set_effect`, which also bumps it for an effect that panics in `init` on the
+        // caller thread, so a replacement that panics before a good frame shows black.
+        if effect_generation != seen_generation {
+            seen_generation = effect_generation;
+            delivered_good_frame = false;
+            for pixel in buffers.canvas.pixels.iter_mut() {
+                *pixel = [0.0, 0.0, 0.0];
+            }
+        }
+
         // ---- draw ------------------------------------------------------------
         let frame_start = Instant::now();
         let dt = frame_start.duration_since(last_frame_at).as_secs_f32();
@@ -774,14 +797,13 @@ fn render_loop(engine: Arc<CoreEngine>) {
         buffers.device_colors.clear();
         buffers.device_colors.resize(plan.devices.len(), Vec::new());
         if panicked {
-            for (device_index, device) in plan.devices.iter().enumerate() {
-                let colors = last_good_colors.get(&device.device_id).cloned().unwrap_or_else(|| {
-                    vec![Rgb8::BLACK; device.led_count as usize]
-                });
-                let device_colors = &mut buffers.device_colors[device_index];
-                device_colors.clear();
-                device_colors.extend_from_slice(&colors);
-                device_colors.resize(device.led_count as usize, Rgb8::BLACK);
+            if !delivered_good_frame {
+                // No good frame yet for this generation: black, never a leftover.
+                for (device_index, device) in plan.devices.iter().enumerate() {
+                    let device_colors = &mut buffers.device_colors[device_index];
+                    device_colors.clear();
+                    device_colors.resize(device.led_count as usize, Rgb8::BLACK);
+                }
             }
         } else {
         for (device_index, device) in plan.devices.iter().enumerate() {
@@ -819,24 +841,17 @@ fn render_loop(engine: Arc<CoreEngine>) {
                 }
             }
         }
-        // Snapshot the good frame before delivery moves the buffers out.
-        last_good_colors = plan
-            .devices
-            .iter()
-            .zip(buffers.device_colors.iter())
-            .map(|(device, colors)| (device.device_id.clone(), colors.clone()))
-            .collect();
-        // Only the preview needs the pixels; copying the whole canvas every frame
-        // without a viewer would be waste for nothing.
-        if preview_on {
-            last_good_pixels = Some((
-                buffers.canvas.pixels.clone(),
-                buffers.canvas.width,
-                buffers.canvas.height,
-            ));
-        }
+        delivered_good_frame = true;
         }
 
+        // A panicked tick after a good frame delivers nothing (see `delivered_good_frame`
+        // at the top of the loop): the lights keep the last frame they were sent, and the
+        // preview client keeps the last frame it received. Black before a good frame is
+        // the only panicked delivery.
+        let deliver = !panicked || !delivered_good_frame;
+        if !deliver {
+            // Skip to bookkeeping: no sink submit, no preview submit.
+        } else {
         // ---- deliver ---------------------------------------------------------
         {
             let state = engine.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -869,22 +884,10 @@ fn render_loop(engine: Arc<CoreEngine>) {
                 // Rate-limit the preview to PREVIEW_MAX_FPS.
                 let interval = Duration::from_nanos(1_000_000_000 / u64::from(PREVIEW_MAX_FPS));
                 if frame_start.duration_since(last_preview_at) >= interval {
-                    // A panicked tick shows the last good canvas, never the torn
-                    // one; before the first good frame there is nothing to show.
-                    if panicked {
-                        if let Some((pixels, w, h)) = &last_good_pixels {
-                            if *w == buffers.canvas.width && *h == buffers.canvas.height {
-                                let (w, h) = preview::downscale_rgb(
-                                    pixels,
-                                    *w,
-                                    *h,
-                                    &mut buffers.preview_bytes,
-                                );
-                                sink.submit(w, h, buffers.preview_bytes.clone());
-                                last_preview_at = frame_start;
-                            }
-                        }
-                    } else {
+                    // A panicked tick reaches here only before a good frame, and then
+                    // there is nothing to show: skip the preview rather than post a
+                    // black downscale.
+                    if !panicked {
                         let (w, h) = preview::downscale_rgb(
                             &buffers.canvas.pixels,
                             buffers.canvas.width,
@@ -896,6 +899,7 @@ fn render_loop(engine: Arc<CoreEngine>) {
                     }
                 }
             }
+        }
         }
 
         // ---- bookkeeping -----------------------------------------------------
