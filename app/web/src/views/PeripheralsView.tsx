@@ -152,6 +152,11 @@ export function PeripheralsView() {
   // A Read again that is out: a second press while it runs is the same read, not another one.
   const rereading = useRef(false);
 
+  // The number of writes that failed. A read that was already out when the write failed must
+  // not clear that failure's message: a read knows what the device holds, not how the write
+  // ended. A read that starts after the failure may clear it.
+  const failedWrites = useRef(0);
+
   // Asks for one device's detail again: after a write, or after the access changed (the daemon
   // answers those from the values it keeps), or on the Read again key (`forceRead`: the daemon
   // reads the device). `landed` says that the change is already on the device, so a failed
@@ -162,6 +167,9 @@ export function PeripheralsView() {
       rereading.current = true;
     }
     const n = ++detailRequest.current;
+    // The failures this read started after: it may clear the message of those, and of no
+    // older one.
+    const failures = failedWrites.current;
     setReloadingId(id);
     try {
       const d = forceRead ? await api.peripheral(id, { fresh: true }) : await api.peripheral(id);
@@ -169,7 +177,9 @@ export function PeripheralsView() {
       lastRead.set(id, d);
       setLoaded({ id, detail: d });
       setStaged({});
-      setSaveError(null);
+      // A read that was already out when a write failed does not clear that failure's
+      // message: it knows what the device holds, not how the write ended.
+      if (failedWrites.current === failures) setSaveError(null);
       setDetailError(null);
       setChangeSaved(false);
     } catch (e) {
@@ -227,6 +237,9 @@ export function PeripheralsView() {
     // a device that is no longer the one on screen: a slow reload of one device must not put
     // its error on another.
     const n = ++detailRequest.current;
+    // The failures this read started after: it may clear the message of those, and of no
+    // older one.
+    const failures = failedWrites.current;
     let stop = false;
     api
       .peripheral(selectedId)
@@ -238,7 +251,9 @@ export function PeripheralsView() {
         lastRead.set(selectedId, d);
         setLoaded({ id: selectedId, detail: d });
         setStaged({});
-        setSaveError(null);
+        // A read that was already out when a write failed does not clear that failure's
+        // message: it knows what the device holds, not how the write ended.
+        if (failedWrites.current === failures) setSaveError(null);
         setDetailError(null);
         setChangeSaved(false);
       })
@@ -283,7 +298,9 @@ export function PeripheralsView() {
     try {
       await api.patchPeripheral(detail.info.id, changed);
     } catch (e) {
-      // The change itself failed: nothing was changed.
+      // The change itself failed: nothing was changed. The count says that a read which is
+      // already out may not clear this message.
+      failedWrites.current += 1;
       setSaveError(messageOf(e));
       toast(messageOf(e), "down");
       setSaving(false);
@@ -308,7 +325,9 @@ export function PeripheralsView() {
     try {
       await api.putPeripheralAccess(detail.info.id, { reads, writes });
     } catch (e) {
-      // The change itself failed: nothing was changed.
+      // The change itself failed: nothing was changed. The count says that a read which is
+      // already out may not clear this message.
+      failedWrites.current += 1;
       setSaveError(messageOf(e));
       toast(messageOf(e), "down");
       return;
