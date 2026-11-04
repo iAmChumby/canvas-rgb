@@ -102,7 +102,7 @@ jobs:
         shell: pwsh
         env:
           BASE_REF: ${{ github.base_ref }}
-        run: git fetch --no-tags origin "+refs/heads/$env:BASE_REF:refs/remotes/origin/$env:BASE_REF"
+        run: git fetch --no-tags origin "+refs/heads/${env:BASE_REF}:refs/remotes/origin/${env:BASE_REF}"
 
       - name: Changelog lines land under Unreleased
         shell: pwsh
