@@ -41,6 +41,15 @@ import type { PropValue } from "@/proto/PropValue";
 /** Sent this long after the last keystroke (D2.4). */
 const PREVIEW_DEBOUNCE_MS = 400;
 
+/**
+ * The longest the editor waits for the daemon's own "try again later" before it tries again
+ * (issue #97). The daemon's contract is one second, and a render takes at most thirty: a cap
+ * that keeps the retry inside one render cycle. Without it a wrong, an abusive or a future
+ * `Retry-After` header would leave the user in "busy" for an hour, and **Try again** already
+ * offers a way out.
+ */
+const MAX_PREVIEW_RETRY_MS = 30_000;
+
 /** Used when the daemon's own status leaves the timings out. */
 const HEARTBEAT_FALLBACK_MS = 5_000;
 const LEASE_FALLBACK_MS = 15_000;
@@ -133,6 +142,9 @@ export function EffectEditor({
   const lastBeatAt = useRef(0);
   const previewTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The preview that is out now, so a newer one can end it: a render nobody waits for any more
+  // is work the daemon should not do (issue #97).
+  const previewAbort = useRef<AbortController | null>(null);
   const requestSeq = useRef(0);
   const firstPreview = useRef(true);
   const restoreStarted = useRef(false);
@@ -206,15 +218,29 @@ export function EffectEditor({
   // ---- preview (D2.4) ----------------------------------------------------------------
 
   const runPreview = useCallback(async (retried = false) => {
+    // One retry waits at a time (issue #97): a run that starts now takes the place of the retry
+    // that was waiting, instead of leaving it to fire as well.
+    if (retryTimer.current) {
+      clearTimeout(retryTimer.current);
+      retryTimer.current = null;
+    }
+    // A preview that is still out when a new one starts is no longer wanted: it is let go of, so
+    // the daemon stops rendering a draft nobody is waiting for.
+    previewAbort.current?.abort();
+    const ctl = new AbortController();
+    previewAbort.current = ctl;
     const seq = ++requestSeq.current;
     setPreviewState("rendering");
     setPreviewError(null);
     const sent = sourceRef.current;
     try {
-      const answer = await api.previewEffect({
-        html: sent,
-        props: { ...valuesRef.current },
-      });
+      const answer = await api.previewEffect(
+        {
+          html: sent,
+          props: { ...valuesRef.current },
+        },
+        { signal: ctl.signal },
+      );
       if (!mounted.current || seq !== requestSeq.current) return;
       setPreview(answer);
       if (answer.errors.length === 0) {
@@ -237,12 +263,18 @@ export function EffectEditor({
       }
     } catch (e) {
       if (!mounted.current || seq !== requestSeq.current) return;
+      // An abort is not an error: the request was let go of on purpose, and nothing is wrong.
+      if (ctl.signal.aborted || (e instanceof DOMException && e.name === "AbortError")) return;
       if (e instanceof ApiFailure && e.status === 503) {
         setPreviewState("busy");
         // The daemon is rendering two previews: wait what it asks for and try once. A second
-        // busy answer leaves the state up with Try again; a busy daemon is never polled.
+        // busy answer leaves the state up with Try again; a busy daemon is never polled. The wait
+        // has a ceiling, so a wrong header cannot strand the user in "busy" (issue #97).
         if (!retried) {
-          retryTimer.current = setTimeout(() => void previewRef.current(true), e.retryAfterMs ?? 1_000);
+          retryTimer.current = setTimeout(
+            () => void previewRef.current(true),
+            Math.min(e.retryAfterMs ?? 1_000, MAX_PREVIEW_RETRY_MS),
+          );
         }
         return;
       }
@@ -275,6 +307,8 @@ export function EffectEditor({
       mounted.current = false;
       if (previewTimer.current) clearTimeout(previewTimer.current);
       if (retryTimer.current) clearTimeout(retryTimer.current);
+      // A preview that is out is let go of: the editor is gone, and nobody waits for the answer.
+      previewAbort.current?.abort();
       // An editor that goes away without the prompt being answered leaves no held page change.
       setNavigationGuard(null);
       cancelNavigation();

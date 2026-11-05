@@ -1,7 +1,7 @@
 // Typed calls for every route the editor uses. Paths come from the spine's routes.ts and the
 // shapes from the generated proto types; nothing here re-declares an API type.
 
-import { request, requestBinary } from "@/lib/api";
+import { request, requestBinary, type RequestOptions } from "@/lib/api";
 import { routes } from "@/proto/routes";
 import type { Status } from "@/proto/Status";
 import type { RenderState } from "@/proto/RenderState";
@@ -95,9 +95,10 @@ export const api = {
 
   /** The HTML the editor opens and the file name Save writes. A Rust built-in is a 404. */
   effectSource: (id: string) => request<EffectSource>("GET", routes.effectSource(id)),
-  /** Renders a draft headless: its schema, the runtime's errors and its loop. */
-  previewEffect: (body: EffectPreviewRequest) =>
-    request<EffectPreviewResponse>("POST", routes.effectPreview, body),
+  /** Renders a draft headless: its schema, the runtime's errors and its loop.
+   *  `opts.signal` ends the render when the editor no longer wants the answer. */
+  previewEffect: (body: EffectPreviewRequest, opts?: RequestOptions) =>
+    request<EffectPreviewResponse>("POST", routes.effectPreview, body, opts),
   /** The draft on the lights now, for the banner a reload opens with. */
   draft: () => request<DraftStatus>("GET", routes.effectsDraft),
   /** Starts the draft, or renews its lease with the current source and props. */
