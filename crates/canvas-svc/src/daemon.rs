@@ -7,6 +7,9 @@
 //! A daemon that was just launched has 30 s to send its first heartbeat (#163): a slow start (a
 //! busy logon, a cold disk) is not a crash, so it must not cost the daemon its life. After that
 //! first beat the 5 s budget applies again, and a grace that runs out is a crash like any other.
+//! The grace belongs to that decision only: a daemon that has not beaten yet is not connected
+//! ([`DaemonSupervisor::is_connected`]), so the OpenRGB supervisor paints the boot color while
+//! it starts instead of leaving the lights dark.
 //!
 //! A daemon that ended with its session (its user logged off, Windows tore the session down) is
 //! not a crash (#6). Those exits count against a separate budget of [`SESSION_END_LIMIT`] per
@@ -317,6 +320,15 @@ impl HeartbeatClock {
         );
     }
 
+    /// The machine woke: the clock starts again from here (#163).
+    ///
+    /// A resume is not a heartbeat. The daemon has not said it is up, so nothing is measured and
+    /// `first_beat_seen` stays as it is; only the beat time moves, so the budget the daemon is on
+    /// is counted from the wake.
+    fn refresh(&mut self, now: Instant) {
+        self.at = Some(now);
+    }
+
     /// The clock's current beat time, for tests.
     #[cfg(test)]
     pub(crate) fn at(&self) -> Option<Instant> {
@@ -576,8 +588,22 @@ impl DaemonSupervisor {
         }
     }
 
+    /// The machine woke: the daemon's clock starts again from here (#163).
+    ///
+    /// This is not a heartbeat. The daemon has not said it is up, so nothing is measured and the
+    /// daemon keeps the grace it had; only the beat time moves, so the budget it is on is counted
+    /// from the wake.
+    pub fn refresh_heartbeat(&mut self, now: Instant) {
+        let mut hb = self.heartbeat_clock();
+        if !hb.stopped {
+            hb.refresh(now);
+        }
+    }
+
     /// The heartbeat budget the running daemon is on (#163): the first heartbeat of a launch has
-    /// the longer grace, every beat after it the short budget.
+    /// the longer grace, every beat after it the short budget. It belongs to the stale-kill
+    /// decision in [`DaemonSupervisor::tick`]; being on the grace does not make a daemon
+    /// connected.
     fn beat_budget(&self) -> BeatBudget {
         if self.heartbeat_clock().first_beat_seen {
             BeatBudget::Steady
@@ -646,15 +672,22 @@ impl DaemonSupervisor {
         self.child.as_ref().map(|c| c.id())
     }
 
-    /// True while a daemon process is running and its heartbeat is fresh. A daemon that is still
-    /// starting up has the grace, so it is not reported as gone (#163).
+    /// True while a daemon process is running and its heartbeat is fresh (#163).
+    ///
+    /// Connected means the daemon has beaten at least once in this launch and its last beat is
+    /// inside [`HEARTBEAT_TIMEOUT`]. Before the first beat it is not connected: a daemon that is
+    /// still starting up has said nothing, and the OpenRGB supervisor paints the boot color
+    /// instead of leaving the lights dark. The 30 s grace belongs to the stale-kill decision, not
+    /// to this.
     pub fn is_connected(&self, now: Instant) -> bool {
         if self.child.is_none() {
             return false;
         }
-        let budget = self.beat_budget();
-        self.last_heartbeat()
-            .is_some_and(|hb| !budget.expired(now.saturating_duration_since(hb)))
+        let hb = self.heartbeat_clock();
+        if !hb.first_beat_seen {
+            return false;
+        }
+        hb.at.is_some_and(|at| now.saturating_duration_since(at) < HEARTBEAT_TIMEOUT)
     }
 
     /// Whether the restart limit has been reached and restarts have stopped.
@@ -1424,15 +1457,25 @@ mod tests {
         );
     }
 
-    /// The grace applies to `is_connected` too (#163): a daemon that is still starting up is not
-    /// reported as gone.
+    /// Connected means the daemon has beaten at least once in this launch and its last beat is
+    /// inside the 5 s budget (#163). The 30 s grace belongs to the stale-kill decision, not to
+    /// this: a daemon that has not said it is up yet is not connected, so the OpenRGB supervisor
+    /// paints the boot color while it starts.
     #[test]
-    fn is_connected_uses_the_grace_until_the_first_beat() {
+    fn is_connected_means_the_daemon_has_beaten_and_its_beat_is_fresh() {
         let (mut sup, _processes) = supervisor();
         let t0 = Instant::now();
         sup.start(t0);
-        // No beat yet: the grace holds.
-        assert!(sup.is_connected(t0 + Duration::from_secs(10)));
+        // No beat yet: the daemon has said nothing, so it is not connected.
+        assert!(!sup.is_connected(t0), "a daemon that has not beaten is not connected");
+        assert!(
+            !sup.is_connected(t0 + Duration::from_secs(10)),
+            "the grace made a daemon that has not beaten connected"
+        );
+        assert!(
+            !sup.is_connected(t0 + Duration::from_secs(29)),
+            "the grace made a daemon that has not beaten connected"
+        );
         // The first beat.
         sup.on_heartbeat(t0 + Duration::from_secs(10));
         // The 5 s budget applies from then on.
@@ -1442,6 +1485,54 @@ mod tests {
             "the 5 s budget did not apply after the first beat"
         );
         assert!(!sup.is_connected(t0 + Duration::from_secs(16)));
+    }
+
+    /// A resume is not a heartbeat (#163): it refreshes the clock without claiming the daemon has
+    /// beaten, and the grace the daemon is on is counted from the wake.
+    #[test]
+    fn a_resume_is_not_a_first_heartbeat() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        sup.start(t0);
+        let pid = sup.daemon_pid().expect("a daemon is running");
+        // The machine slept and woke: the service refreshes the daemon's clock.
+        let text = logged(|| sup.refresh_heartbeat(t0 + Duration::from_secs(10)));
+        assert!(
+            !text.contains("first heartbeat arrived"),
+            "the resume logged a first-heartbeat measurement: {text}"
+        );
+        assert!(
+            !sup.is_connected(t0 + Duration::from_secs(10)),
+            "the resume claimed the daemon has beaten"
+        );
+        // The grace is counted from the wake, so the daemon survives the deadline it had at launch.
+        assert_eq!(sup.tick(t0 + Duration::from_secs(31)), DaemonAction::None);
+        assert_eq!(sup.daemon_pid(), Some(pid), "the daemon was killed after the resume");
+        assert_eq!(processes.spawns().len(), 1);
+        // The grace that counts from the wake runs out 30 s later.
+        assert_eq!(sup.tick(t0 + Duration::from_secs(41)), DaemonAction::None);
+        assert_eq!(
+            processes.spawns().len(),
+            2,
+            "the grace counted from the wake did not run out"
+        );
+    }
+
+    /// The first real beat after a resume is measured once, from the launch (#163).
+    #[test]
+    fn the_first_beat_after_a_resume_is_measured_once() {
+        let (mut sup, _processes) = supervisor();
+        let t0 = Instant::now();
+        sup.start(t0);
+        sup.refresh_heartbeat(t0 + Duration::from_secs(10));
+        let text = logged(|| sup.on_heartbeat(t0 + Duration::from_secs(12)));
+        assert!(
+            text.contains("the daemon's first heartbeat arrived 12000 ms after launch"),
+            "{text}"
+        );
+        // The next beat says nothing more: the line is logged once.
+        let text = logged(|| sup.on_heartbeat(t0 + Duration::from_secs(13)));
+        assert!(!text.contains("first heartbeat arrived"), "{text}");
     }
 
     /// The first heartbeat is measured and logged once per launch (#163): the line says how
