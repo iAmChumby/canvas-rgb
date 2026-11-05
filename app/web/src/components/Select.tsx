@@ -38,7 +38,26 @@ export function Select({
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
   const [style, setStyle] = useState<CSSProperties | undefined>(undefined);
+  // The exit (issue #187, rule 2): the list stays for --dur-exit under its
+  // exit animation, closing back into the trigger, then goes.
+  const [rendered, setRendered] = useState(false);
+  const [closing, setClosing] = useState(false);
   const typed = useRef({ text: "", at: 0 });
+
+  useEffect(() => {
+    if (open) {
+      setRendered(true);
+      setClosing(false);
+      return;
+    }
+    if (!rendered) return;
+    setClosing(true);
+    const t = setTimeout(() => {
+      setRendered(false);
+      setClosing(false);
+    }, 90);
+    return () => clearTimeout(t);
+  }, [open, rendered]);
 
   const chosen = Math.max(0, options.findIndex((o) => o.value === value));
 
@@ -67,11 +86,14 @@ export function Select({
       const left = Math.max(EDGE, Math.min(r.left, vw - width - EDGE));
       const below = r.bottom + GAP;
       const up = below + height > vh - EDGE && r.top - GAP - height >= EDGE;
+      // The origin (issue #187, rule 1): the list grows out of the trigger's
+      // side — toward the window's middle from the edge the trigger sits on.
+      const side = r.left + r.width / 2 < vw / 2 ? "left" : "right";
       setStyle({
         left: `${Math.round(left)}px`,
         top: `${Math.round(up ? r.top - GAP - height : below)}px`,
         minWidth: `${Math.round(r.width)}px`,
-        transformOrigin: up ? "bottom" : "top",
+        transformOrigin: `${up ? "bottom" : "top"} ${side}`,
       });
     };
     place();
@@ -160,10 +182,10 @@ export function Select({
         </span>
         <CaretDown className="select-caret" size={14} weight="bold" aria-hidden="true" />
       </button>
-      {open &&
+      {rendered &&
         typeof document !== "undefined" &&
         createPortal(
-          <ul ref={listRef} id={`${id}-list`} role="listbox" aria-label={label} className="listbox" style={style}>
+          <ul ref={listRef} id={`${id}-list`} role="listbox" aria-label={label} className="listbox" data-closing={closing ? "true" : undefined} style={style}>
             {options.map((o, i) => (
               <li
                 key={o.value}

@@ -46,7 +46,8 @@ export function Button({
  * and only the current one shows, so the button keeps the width of its longest label. `shown`
  * replaces the text of the current label while the wider placeholder still reserves the width
  * (a label that carries a live figure, "Downloading 42%"); the cells are keyed by position, so a
- * figure that ticks does not replay the swap.
+ * figure that ticks does not replay the swap. Old and new overlap in one cell and cross-fade, so
+ * the swap has no blank beat (issue #187, rule 7).
  */
 export function Swap({ labels, at, shown }: { labels: string[]; at: number; shown?: string }) {
   return (

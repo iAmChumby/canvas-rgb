@@ -40,6 +40,26 @@ export function Popover({
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
   const [style, setStyle] = useState<CSSProperties | undefined>(undefined);
+  // The exit (issue #187, rule 2): when `open` drops, the panel stays for
+  // --dur-exit under its exit animation, then goes. It closes back into the
+  // trigger, toward the same origin it grew from.
+  const [rendered, setRendered] = useState(open);
+  const [closing, setClosing] = useState(false);
+
+  useEffect(() => {
+    if (open) {
+      setRendered(true);
+      setClosing(false);
+      return;
+    }
+    if (!rendered) return;
+    setClosing(true);
+    const t = setTimeout(() => {
+      setRendered(false);
+      setClosing(false);
+    }, 90);
+    return () => clearTimeout(t);
+  }, [open, rendered]);
 
   useLayoutEffect(() => {
     if (!open) return;
@@ -66,15 +86,19 @@ export function Popover({
       // not and there is room above, and inside the window either way.
       const below = r.bottom + GAP;
       const above = r.top - GAP - height;
-      const top =
-        height > 0 && below + height > vh - EDGE && above >= EDGE
-          ? above
-          : Math.max(EDGE, Math.min(below, vh - EDGE - height));
+      const up = height > 0 && below + height > vh - EDGE && above >= EDGE;
+      const top = up ? above : Math.max(EDGE, Math.min(below, vh - EDGE - height));
+
+      // The origin (issue #187, rule 1): the panel grows out of the trigger's
+      // side — toward the window's middle from the edge it sits on — so the
+      // exit can close back into the same point.
+      const side = r.left + r.width / 2 < vw / 2 ? "left" : "right";
 
       setStyle({
         left: `${Math.round(left)}px`,
         top: `${Math.round(top)}px`,
         maxHeight: `${Math.max(MIN_H, vh - EDGE * 2)}px`,
+        transformOrigin: `${up ? "bottom" : "top"} ${side}`,
       });
     };
     place();
@@ -112,13 +136,14 @@ export function Popover({
     };
   }, [open, onClose, anchor]);
 
-  if (!open || typeof document === "undefined") return null;
+  if (!rendered || typeof document === "undefined") return null;
   return createPortal(
     <div
       ref={panelRef}
       className={className ? `popover ${className}` : "popover"}
       role="dialog"
       aria-label={label}
+      data-closing={closing ? "true" : undefined}
       style={style}
     >
       {children}
