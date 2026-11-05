@@ -288,10 +288,25 @@ line. Three mechanisms, and one bug the timing only exposed.
   "overdue" whenever the wall clock crossed a second during the test (`crates/canvas-svc/src/update_install.rs`).
   Reproduced locally: 1 failure in 60 runs. A product bug as well: a sub-second limit rounded to nothing.
 - [#45](https://github.com/iAmChumby/canvas-rgb/issues/45), [#55](https://github.com/iAmChumby/canvas-rgb/issues/55)
-  (a third sighting on #39): `every_daemon_kill_is_preceded_by_a_line_naming_the_reason` was missing a
-  "terminating the daemon" WARN line in the capture. Same test, same symptom: duplicates by symptom only.
-  In #55 the neighbouring lines of the same capture arrived. The clock-mix idea in #55 is FALSE (reaching
-  that branch means the WARN ran).
+  (a third sighting on #39): `every_daemon_kill_is_preceded_by_a_line_naming_the_reason` failed with a
+  line missing from the capture. The line was not always the same one: the "terminating the daemon" INFO
+  (`crates/canvas-svc/src/daemon.rs`), the "daemon crashed; restarting it" WARN next to it, or the
+  "no user is logged on yet; waiting for a session" INFO in the logon test. Same test, same symptom:
+  duplicates by symptom only. In #55 the neighbouring lines of the same capture arrived. The clock-mix
+  idea in #55 is FALSE (reaching that branch means the WARN ran).
+  - **Mechanism (measured, #45):** tracing-core keeps one `Interest` per callsite for the whole process
+    and computes it from the dispatcher of the thread that reached the callsite first
+    (`tracing_core::callsite::register` -> `rebuild_callsite_interest`; `Dispatchers::rebuilder` answers
+    with the *current thread's* dispatcher while only one dispatcher is alive). A thread with no
+    subscriber in sight caches `Interest::never()` for that callsite, and `tracing`'s macro then drops
+    every later event on it (`!interest.is_never()`), on every thread. The capture's subscriber was
+    installed and enabled throughout: in a failing run the same capture held the "terminating the
+    daemon" line and missed the "daemon crashed" line, microseconds apart on the same thread, so the
+    subscriber was not the reason and the clock was not the reason. The cache is only recomputed when a
+    dispatcher is created, so a capture that starts after the bad registration gets the line back and a
+    capture that runs across it does not. The flake needs a test that logs the same line outside a
+    capture to run in parallel: the daemon tests do (`a_daemon_the_service_ended_is_recorded_as_stopped`
+    and the logon test log the same lines with no capture around them).
 - [#36](https://github.com/iAmChumby/canvas-rgb/issues/36): not a test bug. The panic hook queued its line
   behind a deep log backlog, gave up draining after 250 ms and ignored the result
   (`crates/canvas-daemon/src/exit_log.rs`, `logging.rs`); the test was right to fail.
@@ -327,8 +342,25 @@ line. Three mechanisms, and one bug the timing only exposed.
     the production writer it is installed with at startup has no test that fails on the old hook (open).
   - #45/#55: every daemon kill goes through `terminate_daemon(process, reason)`, which logs the pid and
     reason first; the service tests share one log buffer (`crates/canvas-svc/src/test_logs.rs`; its
-    `captured()` runs one capture at a time, though some OpenRGB tests still install the subscriber
-    themselves); the kill test asserts the full announcement for the pid on all four kill paths.
+    `captured()` runs one capture at a time); the kill test asserts the full announcement for the pid on
+    all four kill paths. The capture no longer depends on tracing's callsite interest cache: the shared
+    helper installs one permissive global subscriber (`InterestKeeper`) the first time a capture runs, so
+    no callsite can be cached as `Interest::never()` by a thread that has no subscriber in sight, and the
+    capture's own thread-local subscriber still decides what the capture collects. The rule a new capture
+    must keep: a capture reads lines through `test_logs::captured` (or `captured_async`), never through a
+    subscriber it installs itself, and a test that logs the same line as a capture must not run beside it
+    without the shared helper.
+  - #45/#55, **the class fix in every crate that captures logs:** the keeper is now in the three crates
+    whose tests capture logs, each with its own copy (a test module is not shared across crates, and every
+    integration test binary compiles `tests/common/mod.rs` into itself, so each process installs its own):
+    `canvas-svc` (`crates/canvas-svc/src/test_logs.rs`), `canvas-daemon`
+    (`crates/canvas-daemon/src/test_logs.rs`, and the integration tests' shared helper
+    `crates/canvas-daemon/tests/common/mod.rs`) and `canvas-adapters`
+    (`crates/canvas-adapters/src/test_logs.rs`). The daemon's own hand-rolled `with_default` captures
+    (`logging.rs`, `exit_log.rs`) now go through the crate's helper, or install the keeper before their own
+    subscriber. Each crate carries the same deterministic regression test: a call site first reached on
+    another thread, then logged on the capture's thread, is captured
+    (`test_logs::a_capture_sees_a_line_whose_callsite_was_first_reached_on_another_thread`).
 - **The guard:** `crates/canvas-svc/tests/timing_class.rs` (part of `cargo test --workspace`, so CI) scans
   the test code under `crates/` (files in `tests/`, `tests.rs`, `*_tests.rs`, files that a `lib.rs` or
   `main.rs` declares as a `#[cfg(test)]` module such as `canvas-core/src/cpu.rs`, and a source file from
@@ -344,21 +376,33 @@ line. Three mechanisms, and one bug the timing only exposed.
   `recv_timeout` that is too short (a `while t.elapsed() < limit {` line is not flagged); a second
   identical line in a file whose text already has an entry; a ratio or percentage bound (`percent <
   0.05`, the original #39 shape: no distinctive word to match); web tests (#59 is held by the setup file
-  and its test, not by the scan); hand-made log subscribers (no rule); a missing log line (#45/#55).
+  and its test, not by the scan); hand-made log subscribers (no rule); a missing log line (#45/#55: the
+  cause is now known and it is not the clock, it is tracing's callsite interest cache; the helper holds
+  the line, the scan cannot see a subscriber).
 - **Sibling search:** the allow-list entries marked "open" are the siblings: `timer.rs` upper bounds
   (3 tests), `effects_import.rs` and `quit.rs` ceilings, the `canvas-core/src/tests.rs` "sleep 300 ms
   then expect parked" tests and `wave1.rs`, and the `api.rs` onboarding timers (60-350 ms sleeps against
-  100 ms timers on a compressed time scale, `transient.rs`), the riskiest. Also open: canvas-daemon's
-  own hand-rolled `with_default` log captures (`logging.rs` tests `captured` and
-  `close_flushes_the_last_line_to_the_file` at `logging.rs:373`, `exit_log.rs` tests `capture` at `exit_log.rs:252`), not on the shared
-  helper, which lives in canvas-svc. Delete an entry when its test is fixed.
-- **What stays UNKNOWN:** the mechanism behind the vanished log line in #45/#55. The shared capture
-  helper and the stricter assertion are mitigations, not a diagnosis; a 50-run loop of the canvas-svc
-  library tests passed every run (PR #69). Settler: a longer loop under CPU load that
-  fails once, then bisected.
+  100 ms timers on a compressed time scale, `transient.rs`), the riskiest. Also open: a log capture that
+  is still not on a shared helper that carries the keeper. Delete an entry when its test is fixed.
+- **The same mistake in another crate:** canvas-daemon has its own shared capture helper
+  (`crates/canvas-daemon/src/test_logs.rs`) with the same shape as the service's: a thread-local
+  subscriber installed with `with_default`. It carried the same hole (a callsite first reached on a thread
+  with no subscriber in sight is cached as `Interest::never()` and its line is dropped for every thread),
+  so it now carries the same `InterestKeeper`; the daemon's unit tests had not been seen to fail on it
+  (the hole was a shape, not a sighting). canvas-adapters had the same shape
+  (`crates/canvas-adapters/src/test_logs.rs`, a thread-local subscriber installed with `set_default`) and
+  now carries the keeper too.
+- **What stays UNKNOWN:** nothing for #45/#55: the mechanism is measured (the callsite interest cache),
+  the fix is in the shared helper, and the loop counts are in the issue's report. What is still UNKNOWN is
+  how often the daemon's own captures lose a line: no daemon test has failed on it, so the sibling above
+  is a shape, not a sighting; the regression test reproduces the shape on purpose, it does not measure a
+  flake.
 - **How to check a new test:** if it compares `elapsed`, `took` or `waited` with `<`, or sleeps and
   then asserts, expect the scan to flag it; use `wait_until`, a count, a driven clock, or (for log
-  lines in canvas-svc) `test_logs::captured`. Run `cargo test -p canvas-svc --test timing_class`.
+  lines in canvas-svc, canvas-daemon or canvas-adapters) the crate's shared capture helper
+  (`test_logs::captured`, `test_logs::captured_async`, or the crate's `LogBuf::install`). A capture that
+  installs its own subscriber is the #45/#55 shape: go through the shared helper instead. Run
+  `cargo test -p canvas-svc --test timing_class`.
 
 ### `cause:state-token`: a state token taken before an await and given back only on the happy path
 

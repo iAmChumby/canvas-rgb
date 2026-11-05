@@ -78,8 +78,59 @@ function Get-StepBlock {
     return ($run -join "`n")
 }
 
+# The step's run, as one line: the first line of its run: block, or the scalar that follows run:.
+# A step that runs a script is named by that script's first line, which is how the guard knows
+# which step needs a working-directory.
+function Get-StepRunText {
+    param([string]$Step)
+    foreach ($line in ((Get-StepRun $Step) -split "`n")) {
+        if ($line.Trim() -ne '') { return $line.Trim() }
+    }
+    foreach ($line in ($Step -split "`n")) {
+        if ($line -match '^\s*-\s*run:\s*(.+)$') { return $Matches[1].Trim() }
+    }
+    return ''
+}
+
+# The whole run text of a step: the text of its run: | block, or the scalar that follows run:.
+# The version pin reads the whole text, so a step that runs one line is read as well as a step
+# that runs a block. A step with no run at all holds no text.
+function Get-StepRunAll {
+    param([string]$Step)
+    $block = Get-StepBlock -Step $Step -Key 'run'
+    if ($block.Trim() -ne '') { return $block }
+    foreach ($line in ($Step -split "`n")) {
+        if ($line -match '^\s*(?:-\s+)?run:\s*(.+)$') {
+            $value = $Matches[1].Trim()
+            if ($value -ne '|' -and $value -ne '>') { return $value }
+        }
+    }
+    return ''
+}
+
+# A step's identity: its name, else the action it uses (with the artifact it fetches), else its
+# run. The commit SHA of an action is not part of the identity: what a step does is.
+function Get-StepId {
+    param([string]$Step)
+    $name = ''
+    $uses = ''
+    foreach ($line in ($Step -split "`n")) {
+        if ($name -eq '' -and $line -match '^\s*-\s+name:\s*(.+)$') { $name = $Matches[1].Trim() }
+        if ($uses -eq '' -and $line -match '^\s*-\s+uses:\s*(\S+)') { $uses = $Matches[1] }
+    }
+    if ($name) { return "name:$name" }
+    if ($uses) {
+        $action = ($uses -replace '@[0-9a-f]{40}$', '')
+        $with = Get-StepWith $Step
+        if ($with.ContainsKey('name')) { return "$action[$($with['name'])]" }
+        return $action
+    }
+    return "run:$(Get-StepRunText $Step)"
+}
+
 # The keys of a step's with: block, by indentation: a key of the block has the with: line's indent plus
-# two. The same text under env: or anywhere else in the step is not a key of with:.
+# two. The same text under env: or anywhere else in the step is not a key of with:. A value in
+# quotes is the value it names, so the quotes are taken off, the way they are off a key.
 function Get-StepWith {
     param([string]$Step)
     $keys = @{}
@@ -93,7 +144,7 @@ function Get-StepWith {
         if ($lines[$i].Trim() -eq '') { continue }
         $indent = $lines[$i].Length - $lines[$i].TrimStart().Length
         if ($indent -le $w) { break }
-        if ($indent -eq $w + 2 -and $lines[$i] -match '^\s*([A-Za-z_-]+):\s*(.*)$') { $keys[$Matches[1]] = $Matches[2].Trim() }
+        if ($indent -eq $w + 2 -and $lines[$i] -match '^\s*([A-Za-z_-]+):\s*(.*)$') { $keys[$Matches[1]] = Unquote-Value $Matches[2] }
     }
     return $keys
 }
@@ -127,6 +178,15 @@ function Get-WorkflowKey {
     return @{ Key = $k; Value = $value }
 }
 
+# A value with one pair of matching quotes taken off, the way a key's quotes are taken off. A value
+# in quotes is the value it names: "true" is true, and a path in quotes is that path.
+function Unquote-Value {
+    param([string]$Text)
+    $v = $Text.Trim()
+    if ($v -match '^(["''])(.*)\1$') { return $Matches[2] }
+    return $v
+}
+
 # A step's label for messages: its name, else its uses, else its first line.
 function Get-StepLabel {
     param([string]$Step)
@@ -138,13 +198,23 @@ function Get-StepLabel {
     return (($Step -split "`n")[0]).Trim()
 }
 
-# Every key line of a job, by indent (spaces only): 4 is a job key, 6 with "- " the start of a step (its first
-# key follows the dash), 6 without it a child of permissions:, 8 a key of the step. Deeper lines are values
-# (run: blocks, with:, env:) and are not keys. Any other indent is an entry of Level 'indent'.
+# Every key line of a job, by indent (spaces only): 4 is a job key, 6 with "- " the start of a step
+# (its first key follows the dash), 6 without it a child of permissions:. A step's own keys sit at
+# the indent the dash line sets: 8 for "- name:", 10 for "-   name:". The keys of a with:/env: map
+# sit two spaces deeper than the map, and the lines of a run: or files: block are its text, not keys.
+# A map may hold a map of its own, so the maps that are open are a stack: a key with no value opens
+# one, and a line at or left of the key that opened a map ends it.
+# Any other indent is an entry of Level 'indent', so a key the guard cannot read is reported
+# instead of being skipped.
 function Get-WorkflowEntries {
     param([string]$Job)
     $entries = New-Object System.Collections.ArrayList
     $stepNo = 0
+    $keyIndent = 8      # the indent of the current step's own keys
+    # The indent of the key that opened each open with:/env: map: the keys of that map sit two
+    # spaces deeper, and a map of its own opens another one.
+    $blockStack = New-Object System.Collections.ArrayList
+    $scalarIndent = -1  # the indent of the key that opened the open run:/files: block
     $inStep = $false
     $first = $true
     foreach ($raw in ($Job -split "`n")) {
@@ -153,29 +223,63 @@ function Get-WorkflowEntries {
         $indent = $raw.Length - $rest.Length
         if ($first) { $first = $false; continue }
         if ($rest.StartsWith("`t")) { [void]$entries.Add(@{ Level = 'indent'; Key = '(tab indent)'; Value = ''; Line = $raw; Step = $stepNo }); continue }
-        if ($indent -in 0, 1, 2, 3, 5, 7) { [void]$entries.Add(@{ Level = 'indent'; Key = "(indent $indent)"; Value = ''; Line = $raw; Step = $stepNo }); continue }
+        # The text of a block scalar: every line deeper than the key that opened it.
+        if ($scalarIndent -ge 0 -and $indent -gt $scalarIndent) { continue }
+        $scalarIndent = -1
+        # Close every map the line stands outside of: a line at or left of the key that opened a map
+        # ends that map.
+        while ($blockStack.Count -gt 0 -and $indent -le $blockStack[$blockStack.Count - 1]) { $blockStack.RemoveAt($blockStack.Count - 1) }
         if ($indent -eq 4) {
+            # A job key. The job's steps follow it.
             $inStep = $false
+            $keyIndent = 8
+            $blockStack.Clear()
             $kv = Get-WorkflowKey $rest
             [void]$entries.Add(@{ Level = 'job'; Key = $kv.Key; Value = $kv.Value; Line = $raw; Step = 0 })
-        } elseif ($indent -eq 6) {
-            if ($rest -match '^-(\s|$)') {
-                $inStep = $true
-                $stepNo++
-                $after = $rest.Substring(1).Trim()
-                if ($after) { $kv = Get-WorkflowKey $after; [void]$entries.Add(@{ Level = 'step'; Key = $kv.Key; Value = $kv.Value; Line = $raw; Step = $stepNo }) }
-            } else {
-                $kv = Get-WorkflowKey $rest
-                [void]$entries.Add(@{ Level = 'perm'; Key = $kv.Key; Value = $kv.Value; Line = $raw; Step = 0 })
-            }
-        } elseif ($indent -eq 8) {
-            if ($inStep) {
-                $kv = Get-WorkflowKey $rest
-                [void]$entries.Add(@{ Level = 'step'; Key = $kv.Key; Value = $kv.Value; Line = $raw; Step = $stepNo })
-            } else {
-                [void]$entries.Add(@{ Level = 'indent'; Key = '(indent 8 outside a step)'; Value = ''; Line = $raw; Step = 0 })
-            }
+            continue
         }
+        if ($indent -eq 6) {
+            if ($rest -match '^-(\s|$)') {
+                # A step starts here: the dash and the spaces after it set the indent of its keys.
+                $stepNo++
+                $inStep = $true
+                $blockStack.Clear()
+                $dash = [regex]::Match($rest, '^-(\s*)')
+                $keyIndent = 6 + 1 + $dash.Groups[1].Value.Length
+                $after = $rest.Substring($dash.Length)
+                if ($after.Trim() -ne '') {
+                    $kv = Get-WorkflowKey $after
+                    [void]$entries.Add(@{ Level = 'step'; Key = $kv.Key; Value = $kv.Value; Line = $raw; Step = $stepNo })
+                    if ($kv.Value -eq '|' -or $kv.Value -eq '>') { $scalarIndent = $keyIndent }
+                    elseif ($kv.Key -ceq 'with' -or $kv.Key -ceq 'env') { [void]$blockStack.Add($keyIndent) }
+                }
+                continue
+            }
+            # A key at six spaces that is not a step: a child of permissions:.
+            $inStep = $false
+            $blockStack.Clear()
+            $kv = Get-WorkflowKey $rest
+            [void]$entries.Add(@{ Level = 'perm'; Key = $kv.Key; Value = $kv.Value; Line = $raw; Step = 0 })
+            continue
+        }
+        if ($inStep -and $indent -eq $keyIndent) {
+            # A key of the step itself.
+            $kv = Get-WorkflowKey $rest
+            [void]$entries.Add(@{ Level = 'step'; Key = $kv.Key; Value = $kv.Value; Line = $raw; Step = $stepNo })
+            if ($kv.Value -eq '|' -or $kv.Value -eq '>') { $scalarIndent = $keyIndent }
+            elseif ($kv.Key -ceq 'with' -or $kv.Key -ceq 'env') { [void]$blockStack.Add($keyIndent) }
+            else { $blockStack.Clear() }
+            continue
+        }
+        if ($inStep -and $blockStack.Count -gt 0 -and $indent -eq ($blockStack[$blockStack.Count - 1] + 2)) {
+            # A key of the with:/env: map: an input of the step, not a key of the step.
+            $kv = Get-WorkflowKey $rest
+            if ($kv.Value -eq '|' -or $kv.Value -eq '>') { $scalarIndent = $indent }
+            elseif ($kv.Value -eq '') { [void]$blockStack.Add($indent) }
+            continue
+        }
+        # Any other indent: one the guard does not read.
+        [void]$entries.Add(@{ Level = 'indent'; Key = "(indent $indent)"; Value = ''; Line = $raw; Step = $stepNo })
     }
     return $entries
 }
@@ -410,6 +514,37 @@ $workflowAllowed = @{
     publish = @{ Job = @('needs', 'runs-on', 'permissions', 'steps'); Step = @('name', 'uses', 'with', 'run', 'shell', 'env'); Perm = @('contents', 'actions'); PermValue = @('read', 'write', 'none') }
 }
 
+# The steps that may run in another folder, and the folder each runs in: the build job's npm ci
+# step, and no other. The key allowlist above allows a working-directory on any build step, so this
+# is the rule that says where one may stand.
+$workflowWorkingDir = @{
+    build   = @('npm ci|app/web')
+    sign    = @()
+    publish = @()
+}
+
+# The publish job's steps, in the order they must run. The order is a rule, not a style: a step
+# between the notes check and the release could rewrite dist/release-notes.md after the check read
+# it, and the release body would be text nobody checked.
+$publishStepOrder = @(
+    'actions/download-artifact[installer]',
+    'actions/download-artifact[signature]',
+    'name:Checksum still matches',
+    'name:The release notes are there',
+    'softprops/action-gh-release',
+    'name:Build the site'
+)
+
+# The release step's with: block: the inputs it may hold, and the value each may hold. The files
+# are the four the release must carry, in that order; the body is the notes file the sign job
+# wrote; the generated list of merged pull requests goes after it. Any other input (draft: true
+# makes a draft release that the updater never sees) is a violation.
+$releaseInputAllow = [ordered]@{
+    'files'                  = @('dist/canvas-rgb-setup-*.exe', 'dist/canvas-rgb-setup-*.exe.sha256', 'dist/canvas-rgb-setup-*.exe.sig', 'dist/latest.json')
+    'body_path'              = @('dist/release-notes.md')
+    'generate_release_notes' = @('true')
+}
+
 # The violations in a workflow's text: each names the job, the step and the line.
 function Get-WorkflowViolations {
     param([string]$Text)
@@ -445,25 +580,168 @@ function Get-WorkflowViolations {
     # above, from the lines of the block; they are read here now, so that the values are read from
     # the same place.
     foreach ($v in (Get-PermissionViolations $Text)) { $found += $v }
+    # The rest of the rules about the workflow: the version the sign job signs, the order of the
+    # publish job's steps, the inputs of the release step, the secrets context and the
+    # working-directory.
+    foreach ($v in @(Get-SecretViolations $Text)) { $found += $v }
+    foreach ($v in @(Get-SignVersionViolations $Text)) { $found += $v }
+    foreach ($v in @(Get-PublishOrderViolations $Text)) { $found += $v }
+    foreach ($v in @(Get-ReleaseInputViolations $Text)) { $found += $v }
+    foreach ($v in @(Get-WorkingDirectoryViolations $Text)) { $found += $v }
+    return $found
+}
+
+# The version the sign job signs and writes: the version of the tag, never a hard-coded one. The
+# signature carries the version (--app-version) and the manifest carries it too, so a hard-coded
+# one would sign an old installer with a new version number, and the updater would offer it.
+#
+# The flag may be followed by a space, by an equals sign or by a quote attached to it, so a
+# hard-coded version in any of those spellings is read. The whole run text of the step is read, so
+# a step that runs one line is read as well as a step that runs a block.
+function Get-SignVersionViolations {
+    param([string]$Text)
+    $info = Get-WorkflowJobsFromText $Text
+    $found = @()
+    if (-not $info.Jobs.ContainsKey('sign')) { return $found }   # a missing job is the job allowlist's business
+    foreach ($step in @(Get-WorkflowSteps $info.Jobs['sign'])) {
+        $run = Get-StepRunAll $step
+        if ($run.Trim() -eq '') { continue }
+        $label = Get-StepLabel $step
+        $args = [regex]::Matches($run, '(?m)(?:^|\s)(?:-Version|--app-version)(?:[= \t]+|(?=[''"]))(''|")?([^\s''"]+)')
+        if ($args.Count -eq 0) { continue }
+        if ($run -notmatch '\$v\s*=\s*\$env:GITHUB_REF_NAME\.TrimStart\(') {
+            $found += "job [sign], step [$label]: the step passes a version but does not set `$v from the tag"
+        }
+        foreach ($one in $args) {
+            $arg = $one.Groups[2].Value
+            if ($arg -cne '$v') { $found += "job [sign], step [$label]: the version [$arg] is not [`$v], the version of the tag" }
+        }
+    }
+    return $found
+}
+
+# The publish job's steps, in the order they must run. The notes check and the release step are
+# neighbours on purpose: a step between them could rewrite dist/release-notes.md after the check
+# read it, so the release body would be text nobody checked.
+function Get-PublishOrderViolations {
+    param([string]$Text)
+    $info = Get-WorkflowJobsFromText $Text
+    $found = @()
+    if (-not $info.Jobs.ContainsKey('publish')) { return $found }
+    $ids = @(Get-WorkflowSteps $info.Jobs['publish'] | ForEach-Object { Get-StepId $_ })
+    for ($i = 0; $i -lt $ids.Count; $i++) {
+        $want = if ($i -lt $publishStepOrder.Count) { $publishStepOrder[$i] } else { '(no step)' }
+        if ($ids[$i] -cne $want) {
+            $found += "job [publish], step $($i + 1): [$($ids[$i])] is not the step this job runs at that place [$want]"
+        }
+    }
+    if ($ids.Count -ne $publishStepOrder.Count) {
+        $found += "job [publish]: $($ids.Count) steps, the job runs $($publishStepOrder.Count)"
+    }
+    $notesAt = -1
+    $releaseAt = -1
+    for ($i = 0; $i -lt $ids.Count; $i++) {
+        if ($ids[$i] -ceq 'name:The release notes are there') { $notesAt = $i }
+        if ($ids[$i] -ceq 'softprops/action-gh-release') { $releaseAt = $i }
+    }
+    if ($notesAt -ge 0 -and $releaseAt -ge 0 -and $releaseAt -ne ($notesAt + 1)) {
+        $found += "job [publish]: a step runs between the notes check and the release step: it could rewrite dist/release-notes.md after the check read it"
+    }
+    return $found
+}
+
+# The release step's with: block: the inputs it may hold and the value each may hold. An input
+# nobody checked (draft: true makes a draft release that the updater never sees) is a violation,
+# and so is a file the release does not attach.
+function Get-ReleaseInputViolations {
+    param([string]$Text)
+    $info = Get-WorkflowJobsFromText $Text
+    $found = @()
+    if (-not $info.Jobs.ContainsKey('publish')) { return $found }
+    $steps = @(Get-WorkflowSteps $info.Jobs['publish'] | Where-Object { $_ -match 'uses:\s*softprops/action-gh-release' })
+    if ($steps.Count -ne 1) { return $found }
+    $step = $steps[0]
+    $with = Get-StepWith $step
+    foreach ($key in @($with.Keys)) {
+        if (-not $releaseInputAllow.Contains($key)) {
+            $found += "job [publish], step [softprops/action-gh-release]: the input [$key] is not one the release step takes [$($releaseInputAllow.Keys -join ', ')]"
+            continue
+        }
+        $allowed = @($releaseInputAllow[$key])
+        if ($key -ceq 'files') {
+            $lines = @((Get-StepBlock -Step $step -Key 'files') -split "`n" | ForEach-Object { Unquote-Value $_ } | Where-Object { $_ -ne '' })
+            for ($i = 0; $i -lt $lines.Count; $i++) {
+                $want = if ($i -lt $allowed.Count) { $allowed[$i] } else { '(no file)' }
+                if ($lines[$i] -cne $want) {
+                    $found += "job [publish], step [softprops/action-gh-release]: the file [$($lines[$i])] is not the file the release attaches at that place [$want]"
+                }
+            }
+            if ($lines.Count -ne $allowed.Count) {
+                $found += "job [publish], step [softprops/action-gh-release]: $($lines.Count) files, the release attaches $($allowed.Count)"
+            }
+            continue
+        }
+        if ($allowed -cnotcontains $with[$key]) {
+            $found += "job [publish], step [softprops/action-gh-release]: the input [$key] holds [$($with[$key])], not one of [$($allowed -join ', ')]"
+        }
+    }
+    foreach ($key in $releaseInputAllow.Keys) {
+        if (-not $with.ContainsKey($key)) {
+            $found += "job [publish], step [softprops/action-gh-release]: the input [$key] is missing"
+        }
+    }
+    return $found
+}
+
+# A working-directory, and the step that may hold it. Only the build job's npm ci step runs in
+# another folder; a working-directory on any other step could point a build at the wrong tree.
+# The step's whole run must be the npm ci the rule names: a second line would ride along with it.
+function Get-WorkingDirectoryViolations {
+    param([string]$Text)
+    $info = Get-WorkflowJobsFromText $Text
+    $found = @()
+    foreach ($name in $info.Jobs.Keys) {
+        if (-not $workflowAllowed.ContainsKey($name)) { continue }
+        $steps = @(Get-WorkflowSteps $info.Jobs[$name])
+        foreach ($e in (Get-WorkflowEntries $info.Jobs[$name])) {
+            if ($e.Level -ne 'step' -or $e.Key -cne 'working-directory') { continue }
+            $step = $steps[$e.Step - 1]
+            $label = Get-StepLabel $step
+            $run = (Get-StepRunAll $step).Trim()
+            $ok = $false
+            foreach ($a in @($workflowWorkingDir[$name])) {
+                $parts = $a -split '\|'
+                if ($run -ceq $parts[0] -and $e.Value -ceq $parts[1]) { $ok = $true; break }
+            }
+            if (-not $ok) {
+                $want = if (@($workflowWorkingDir[$name]).Count -gt 0) { "the step that needs it [$(@($workflowWorkingDir[$name]) -join ', ')]" } else { 'no step of this job' }
+                $found += "job [$name], step [$label], line [$($e.Line)]: a working-directory is allowed only on $want, not here"
+            }
+        }
+    }
     return $found
 }
 
 # The secret violations in a workflow's raw text: every line, comments and shell text inside a
 # run: block included, that writes the word secrets (any case: secrets., secrets[, toJSON(secrets))
-# plainly outside the sign job. A "#" line inside a run: | block is shell text, so it is scanned
+# plainly outside the sign step. A "#" line inside a run: | block is shell text, so it is scanned
 # like the rest of the block.
 #
-# The sign job is found on the raw lines: the jobs: block at column 0, then the sign: key at two
-# spaces inside that block (a "  sign:" anywhere else is some other key), to the line before the
-# next line indented two spaces or fewer. Finding jobs:, or the sign key, other than exactly once
-# is a violation: the guard fails closed instead of passing by finding nothing.
+# The sign step is found on the raw lines: the jobs: block at column 0, then the sign: key at two
+# spaces inside that block (a "  sign:" anywhere else is some other key), then the step of that job
+# named "Sign the installer for the updater". Finding jobs:, the sign job, or the sign step other
+# than exactly once is a violation: the guard fails closed instead of passing by finding nothing.
 #
 # The sign job's range runs to the next YAML key at two spaces or less; a comment or blank line
-# never ends it.
+# never ends it. The sign step's range runs to the next step of that job.
+#
+# The one secret the sign step may name is the one it signs with, written as a dotted name
+# (secrets.UPDATE_SIGNING_KEY). Every other spelling is a violation, inside that step too:
+# toJSON(secrets) hands over every secret there is, and secrets['X'] reads one.
 #
 # This guard reads lines and does not decode YAML: an escape, an alias, or a folded line can
 # hide the word from it. It catches the secrets context written plainly on a line outside
-# the sign job. The boundary that holds whatever the file says is an environment-scoped secret
+# the sign step. The boundary that holds whatever the file says is an environment-scoped secret
 # (issue #90).
 function Get-SecretViolations {
     param([string]$Text)
@@ -474,7 +752,7 @@ function Get-SecretViolations {
         if ($lines[$i] -match '^jobs:\s*(#.*)?$') { $jobsAt += $i }
     }
     if ($jobsAt.Count -ne 1) {
-        return @("the jobs: block was found $($jobsAt.Count) times at column 0, not exactly once: the guard does not know which lines hold the sign job")
+        return @("the jobs: block was found $($jobsAt.Count) times at column 0, not exactly once: the guard does not know which lines hold the sign step")
     }
     $jobsFirst = $jobsAt[0]
     $jobsLast = $lines.Count - 1
@@ -487,7 +765,7 @@ function Get-SecretViolations {
         if ($lines[$i] -match '^  [''"]?sign[''"]?\s*:\s*(#.*)?$') { $starts += $i }
     }
     if ($starts.Count -ne 1) {
-        return @("the sign job was found $($starts.Count) times at two spaces inside the jobs: block, not exactly once: the guard does not know where the one job allowed to hold the key is")
+        return @("the sign job was found $($starts.Count) times at two spaces inside the jobs: block, not exactly once: the guard does not know where the one step allowed to hold the key is")
     }
     $first = $starts[0]
     $last = $lines.Count - 1
@@ -496,9 +774,32 @@ function Get-SecretViolations {
         # spaces or less ends it.
         if ($lines[$i] -match '^\s{0,2}[^\s#]') { $last = $i - 1; break }
     }
+    # The sign step inside the sign job: the step that signs the installer. The dash line may be
+    # written with more than one space after it ("-   name:"), the way a re-indented step reads.
+    $stepStarts = @()
+    for ($i = $first; $i -le $last; $i++) {
+        if ($lines[$i] -match '^ {6}-\s+name: Sign the installer for the updater\s*$') { $stepStarts += $i }
+    }
+    if ($stepStarts.Count -ne 1) {
+        return @("the sign step was found $($stepStarts.Count) times in the sign job, not exactly once: the guard does not know which step may name the secret")
+    }
+    $stepFirst = $stepStarts[0]
+    $stepLast = $last
+    for ($i = $stepFirst + 1; $i -le $last; $i++) {
+        # The step runs to the next step of the job.
+        if ($lines[$i] -match '^ {6}- ') { $stepLast = $i - 1; break }
+    }
     for ($i = 0; $i -lt $lines.Count; $i++) {
-        if ($i -ge $first -and $i -le $last) { continue }
-        if ($lines[$i] -match '(?i)secrets') { $found += "line $($i + 1) writes the secrets context outside the sign job: [$($lines[$i].Trim())]" }
+        if ($i -ge $stepFirst -and $i -le $stepLast) {
+            # Inside the sign step: only a dotted name is allowed.
+            if ($lines[$i] -match '(?i)secrets(?!\s*\.[A-Za-z_])') {
+                $found += "line $($i + 1) writes the secrets context without a name inside the sign step: [$($lines[$i].Trim())]"
+            }
+            continue
+        }
+        if ($lines[$i] -match '(?i)secrets') {
+            $found += "line $($i + 1) writes the secrets context outside the sign step: [$($lines[$i].Trim())]"
+        }
     }
     return $found
 }
@@ -519,6 +820,30 @@ function Set-TopPermissions {
     $anchor = "permissions:`n  contents: read`n"
     if (-not $Text.Contains($anchor)) { throw 'the workflow has no top-level permissions block' }
     return $Text.Replace($anchor, $Block)
+}
+
+# A copy of a workflow's text with one step re-indented: the "- " of its dash line becomes "-   "
+# and every line of the step moves two spaces right. A step written that way holds its keys at
+# column 10, and the guard has to read the step there.
+function Set-StepIndent {
+    param([string]$Text, [string]$Marker)
+    $out = @()
+    $inStep = $false
+    foreach ($line in ($Text -split "`n")) {
+        if ((-not $inStep) -and $line -match '^ {6}- (.+)$' -and $Matches[1] -like "*$Marker*") {
+            $inStep = $true
+            $out += "      -   $($Matches[1])"
+            continue
+        }
+        if ($inStep) {
+            if ($line -match '^ {6}- ') { $inStep = $false; $out += $line; continue }
+            if ($line.Trim() -eq '') { $out += $line; continue }
+            $out += "  $line"
+            continue
+        }
+        $out += $line
+    }
+    return ($out -join "`n")
 }
 
 # Runs a shell script with Git for Windows' bash, the way GitHub runs a bash step by default:
@@ -1192,10 +1517,10 @@ try {
         Assert-True ($twice.Count -gt 0) "the violation says the job is defined twice:`n$($v -join "`n")"
         Assert-Equal @(Get-WorkflowViolations $base).Count 0 'the unmutated workflow has none'
     }
-    Test-Case 'release workflow: only the sign job may name a secret' {
+    Test-Case 'release workflow: only the sign step may name a secret' {
         # The key is the one secret the release signs with. The raw file is scanned, every line
-        # (comments and shell text included): a secret named anywhere outside the sign job's lines,
-        # under any key or none, is a failure. toJSON(secrets) hands over every secret there is, and a
+        # (comments and shell text included): a secret named anywhere outside the sign step, under
+        # any key or none, is a failure. toJSON(secrets) hands over every secret there is, and a
         # "#" line inside a run: | block is shell text, not a YAML comment.
         $raw = Get-Content -LiteralPath $workflowPath -Raw
         $violations = @(Get-SecretViolations $raw)
@@ -1203,10 +1528,10 @@ try {
         $info = Get-WorkflowJobs $workflowPath
         Assert-True ($info.Jobs['sign'] -match '(?i)secrets\.') 'the sign job still reads its secret'
     }
-    Test-Case 'release workflow: the secrets check catches the secrets context written plainly on a line outside the sign job' {
+    Test-Case 'release workflow: the secrets check catches the secrets context written plainly on a line outside the sign step' {
         # Each mutant is built from the raw text (LF line ends), the text the guard reads, and must
         # differ from it. The guard scans lines: it catches the word secrets written plainly outside
-        # the sign job's lines. It does not decode YAML (escapes, aliases, folded lines), so the
+        # the sign step's lines. It does not decode YAML (escapes, aliases, folded lines), so the
         # boundary that holds whatever the file says is an environment-scoped secret (issue #90).
         $base = (Get-Content -LiteralPath $workflowPath -Raw) -replace "`r`n", "`n"
         $all = '${{ toJSON(secrets) }}'
@@ -1253,6 +1578,259 @@ try {
             Assert-True ($mutated -ne $base) "clean variant [$k] changed the workflow text"
             Assert-Equal @(Get-SecretViolations $mutated).Count 0 "clean variant [$k] has no violation"
         }
+    }
+    # ---- #52: guards against future edits to release.yml ----
+
+    Test-Case 'release workflow: the sign step signs the version of the tag, never a hard-coded one' {
+        # The signature and the manifest must carry the version of the tag. A hard-coded version
+        # signs an old installer with a new version number, and the updater would offer it.
+        $base = (Get-WorkflowJobsFromText (Get-Content -LiteralPath $workflowPath -Raw)).Text
+        $cases = [ordered]@{
+            'a hard-coded -Version'              = { param($t) $t.Replace('-Version $v', '-Version 0.1.0') }
+            'a hard-coded --app-version'         = { param($t) $t.Replace('--app-version $v', '--app-version 0.1.0') }
+            'a version that is not the tag''s'   = { param($t) $t.Replace("`$v = `$env:GITHUB_REF_NAME.TrimStart('v')", "`$v = '0.1.0'") }
+        }
+        foreach ($k in $cases.Keys) {
+            $mutated = & $cases[$k] $base
+            Assert-True ($mutated -ne $base) "case [$k] changed the workflow text"
+            $v = @(Get-WorkflowViolations $mutated)
+            Assert-True ($v.Count -gt 0) "case [$k] is a violation:`n$($v -join "`n")"
+        }
+        Assert-Equal @(Get-WorkflowViolations $base).Count 0 'the unmutated workflow has none'
+    }
+    Test-Case 'release workflow: the publish job runs the release right after the notes check' {
+        # A step between the check and the release could rewrite dist/release-notes.md after the
+        # check read it, so the release body would be text nobody checked.
+        $base = (Get-WorkflowJobsFromText (Get-Content -LiteralPath $workflowPath -Raw)).Text
+        $notes = '      - name: The release notes are there'
+        $mutated = $base.Replace($notes, "$notes`n      - name: Rewrite the notes`n        shell: bash`n        run: printf tampered > dist/release-notes.md")
+        Assert-True ($mutated -ne $base) 'the mutation changed the workflow text'
+        $v = @(Get-WorkflowViolations $mutated)
+        Assert-True ($v.Count -gt 0) "a step between the notes check and the release is a violation:`n$($v -join "`n")"
+        Assert-Equal @(Get-WorkflowViolations $base).Count 0 'the unmutated workflow has none'
+    }
+    Test-Case 'release workflow: the release step takes only the inputs it takes today' {
+        # The release step's with: block is the whole contract with the release: the files, the body
+        # and the generated list of merged pull requests. An input nobody checked (draft: true makes
+        # a draft release the updater never sees) passes the suite today.
+        $base = (Get-WorkflowJobsFromText (Get-Content -LiteralPath $workflowPath -Raw)).Text
+        $body = "          body_path: dist/release-notes.md`n"
+        $cases = [ordered]@{
+            'draft: true'                   = { param($t) $t.Replace($body, "$body          draft: true`n") }
+            'prerelease: true'              = { param($t) $t.Replace($body, "$body          prerelease: true`n") }
+            'another body_path'             = { param($t) $t.Replace($body, "          body_path: dist/other.md`n") }
+            'generate_release_notes: false' = { param($t) $t.Replace("          generate_release_notes: true`n", "          generate_release_notes: false`n") }
+            'no body_path at all'           = { param($t) $t.Replace($body, '') }
+            'a file that is not attached'   = { param($t) $t.Replace("            dist/latest.json`n", "            dist/latest.json`n            dist/other.txt`n") }
+        }
+        foreach ($k in $cases.Keys) {
+            $mutated = & $cases[$k] $base
+            Assert-True ($mutated -ne $base) "case [$k] changed the workflow text"
+            $v = @(Get-WorkflowViolations $mutated)
+            Assert-True ($v.Count -gt 0) "case [$k] is a violation:`n$($v -join "`n")"
+        }
+        Assert-Equal @(Get-WorkflowViolations $base).Count 0 'the unmutated workflow has none'
+    }
+    Test-Case 'release workflow: the build job may not hold a write' {
+        # The permission values are pinned (#160). This names the case from #52: the build job runs
+        # the project's own build code, so a write there is a write with the release key in reach.
+        $base = (Get-WorkflowJobsFromText (Get-Content -LiteralPath $workflowPath -Raw)).Text
+        $mutated = $base.Replace("  build:`n    runs-on: windows-latest`n    permissions:`n      contents: read`n", "  build:`n    runs-on: windows-latest`n    permissions:`n      contents: write`n")
+        Assert-True ($mutated -ne $base) 'the mutation changed the workflow text'
+        $v = @(Get-WorkflowViolations $mutated)
+        Assert-True ($v.Count -gt 0) "a write in the build job is a violation:`n$($v -join "`n")"
+        $named = @($v | Where-Object { $_ -match '\[build\]' })
+        Assert-True ($named.Count -gt 0) "the violation names the build job:`n$($v -join "`n")"
+        Assert-Equal @(Get-WorkflowViolations $base).Count 0 'the unmutated workflow has none'
+    }
+    Test-Case 'release workflow: the secrets context is caught outside the sign step' {
+        # The one step that signs may name the one secret it signs with. Anywhere else, and with no
+        # dot (toJSON(secrets) hands over every secret there is, secrets['X'] reads one), the guard
+        # must see it: the other steps of the sign job are its neighbours.
+        $base = (Get-Content -LiteralPath $workflowPath -Raw) -replace "`r`n", "`n"
+        $all = '${{ toJSON(secrets) }}'
+        $cases = [ordered]@{
+            'toJSON(secrets) in the sign job, outside the sign step' = { param($t) $t.Replace("      - name: Write latest.json`n        shell: pwsh`n", "      - name: Write latest.json`n        shell: pwsh`n        env:`n          ALL: $all`n") }
+            'secrets[ in the sign job, outside the sign step'         = { param($t) $t.Replace("        run: |`n          `$v = `$env:GITHUB_REF_NAME.TrimStart('v')`n", "        run: |`n          echo `${{ secrets['UPDATE_SIGNING_KEY'] }}`n          `$v = `$env:GITHUB_REF_NAME.TrimStart('v')`n") }
+            'toJSON(secrets) inside the sign step'                    = { param($t) $t.Replace("          TAURI_SIGNING_PRIVATE_KEY: `${{ secrets.UPDATE_SIGNING_KEY }}`n", "          TAURI_SIGNING_PRIVATE_KEY: `${{ secrets.UPDATE_SIGNING_KEY }}`n          ALL_SECRETS: $all`n") }
+        }
+        foreach ($k in $cases.Keys) {
+            $mutated = & $cases[$k] $base
+            Assert-True ($mutated -ne $base) "case [$k] changed the workflow text"
+            $v = @(Get-SecretViolations $mutated)
+            Assert-True ($v.Count -gt 0) "case [$k] is a violation of the secrets guard:`n$($v -join "`n")"
+        }
+        Assert-Equal @(Get-SecretViolations $base).Count 0 'the unmutated workflow has none'
+    }
+    Test-Case 'release workflow: a step key at an indent the guard cannot read is flagged, not skipped' {
+        # The allowlist reads a step's keys at the indent the dash line sets. A step written as
+        # "-   name:" puts its keys at column 10: the guard must read them there, or say the indent
+        # is not one it reads. Skipping them would hide an "if:" that skips the build.
+        $base = (Get-WorkflowJobsFromText (Get-Content -LiteralPath $workflowPath -Raw)).Text
+        $step = "      - run: npm ci`n        working-directory: app/web"
+        $moved = "      -   run: npm ci`n          working-directory: app/web"
+        Assert-True ($base.Contains($step)) 'the npm ci step is in the workflow'
+        # The re-indented step, read at its own indent: nothing to report.
+        $mutated = $base.Replace($step, $moved)
+        Assert-True ($mutated -ne $base) 'the mutation changed the workflow text'
+        Assert-Equal @(Get-WorkflowViolations $mutated).Count 0 "the re-indented step is read, not skipped:`n$(@(Get-WorkflowViolations $mutated) -join "`n")"
+        # A key the allowlist forbids, hidden at that indent.
+        $mutated = $base.Replace($step, "$moved`n          if: `${{ false }}")
+        Assert-True ($mutated -ne $base) 'the second mutation changed the workflow text'
+        $v = @(Get-WorkflowViolations $mutated)
+        Assert-True ($v.Count -gt 0) "a key at column 10 is read:`n$($v -join "`n")"
+        Assert-Equal @(Get-WorkflowViolations $base).Count 0 'the unmutated workflow has none'
+    }
+    Test-Case 'release workflow: a working-directory is allowed only on the step that needs it' {
+        # Only the npm ci step runs in another folder. A working-directory on any other step could
+        # point a build at the wrong tree, and the allowlist used to allow it on every build step.
+        $base = (Get-WorkflowJobsFromText (Get-Content -LiteralPath $workflowPath -Raw)).Text
+        $cases = [ordered]@{
+            'on the installer tests step' = { param($t) $t.Replace("      - name: Installer tests`n        shell: pwsh`n", "      - name: Installer tests`n        shell: pwsh`n        working-directory: app/web`n") }
+            'on the build the installer step' = { param($t) $t.Replace("      - name: Build the installer`n        shell: pwsh`n", "      - name: Build the installer`n        shell: pwsh`n        working-directory: app/web`n") }
+            'on a publish step'           = { param($t) $t.Replace("      - name: The release notes are there`n        shell: bash`n", "      - name: The release notes are there`n        shell: bash`n        working-directory: dist`n") }
+        }
+        foreach ($k in $cases.Keys) {
+            $mutated = & $cases[$k] $base
+            Assert-True ($mutated -ne $base) "case [$k] changed the workflow text"
+            $v = @(Get-WorkflowViolations $mutated)
+            Assert-True ($v.Count -gt 0) "case [$k] is a violation:`n$($v -join "`n")"
+        }
+        # The npm ci step keeps its own working-directory.
+        Assert-True ($base.Contains("      - run: npm ci`n        working-directory: app/web")) 'the npm ci step runs in app/web'
+        Assert-Equal @(Get-WorkflowViolations $base).Count 0 'the unmutated workflow has none'
+    }
+    Test-Case 'release workflow: the sign step signs the version of the tag, whatever spelling the flag has' {
+        # The version the sign step signs must be the version of the tag. The flag may be written
+        # with a space, with an equals sign or with a quote attached to it: a hard-coded version in
+        # any of those spellings is a violation, and the version of the tag is not.
+        $base = (Get-WorkflowJobsFromText (Get-Content -LiteralPath $workflowPath -Raw)).Text
+        $signHead = "          if (-not `$env:TAURI_SIGNING_PRIVATE_KEY) { throw 'the UPDATE_SIGNING_KEY secret is not set' }`n          `$v = `$env:GITHUB_REF_NAME.TrimStart('v')`n"
+        $cases = [ordered]@{
+            'a hard-coded --app-version=0.1.0'  = { param($t) $t.Replace('--app-version $v', '--app-version=0.1.0') }
+            'a hard-coded -Version=0.1.0'        = { param($t) $t.Replace('-Version $v', '-Version=0.1.0') }
+            'a hard-coded --app-version"0.1.0"' = { param($t) $t.Replace('--app-version $v', '--app-version"0.1.0"') }
+            'a hard-coded -Version"0.1.0"'       = { param($t) $t.Replace('-Version $v', '-Version"0.1.0"') }
+            'a quoted --app-version with no $v from the tag' = { param($t) $t.Replace('--app-version $v', '--app-version"$v"').Replace($signHead, "          if (-not `$env:TAURI_SIGNING_PRIVATE_KEY) { throw 'the UPDATE_SIGNING_KEY secret is not set' }`n") }
+        }
+        foreach ($k in $cases.Keys) {
+            $mutated = & $cases[$k] $base
+            Assert-True ($mutated -ne $base) "case [$k] changed the workflow text"
+            $v = @(Get-WorkflowViolations $mutated)
+            Assert-True ($v.Count -gt 0) "case [$k] is a violation:`n$($v -join "`n")"
+        }
+        # The version of the tag, in every spelling, is not a violation.
+        $clean = [ordered]@{
+            'the version of the tag, quoted'            = { param($t) $t.Replace('-Version $v', '-Version "$v"') }
+            'the version of the tag, quoted with ='     = { param($t) $t.Replace('-Version $v', '-Version="$v"') }
+            'the version of the tag, quoted for the signer' = { param($t) $t.Replace('--app-version $v', '--app-version "$v"') }
+        }
+        foreach ($k in $clean.Keys) {
+            $mutated = & $clean[$k] $base
+            Assert-True ($mutated -ne $base) "clean variant [$k] changed the workflow text"
+            Assert-Equal @(Get-WorkflowViolations $mutated).Count 0 "clean variant [$k] has no violation:`n$(@(Get-WorkflowViolations $mutated) -join "`n")"
+        }
+        Assert-Equal @(Get-WorkflowViolations $base).Count 0 'the unmutated workflow has none'
+    }
+    Test-Case 'release workflow: the version pin reads a step that runs one line as well as a step that runs a block' {
+        # The version the sign job signs was read from the run: | block only, so a step that passed
+        # the version on one line was not read at all.
+        $base = (Get-WorkflowJobsFromText (Get-Content -LiteralPath $workflowPath -Raw)).Text
+        $runBlock = "        run: |`n          `$v = `$env:GITHUB_REF_NAME.TrimStart('v')`n          pwsh -NoProfile -File tools/make-update-manifest.ps1 -Version `$v -SigFile `"dist/canvas-rgb-setup-`$v.exe.sig`" -OutFile dist/latest.json -NotesFile dist/release-notes.md`n          if (`$LASTEXITCODE -ne 0) { throw 'make-update-manifest.ps1 failed' }`n          Get-Content dist/latest.json"
+        $runOne = "        run: `$v = `$env:GITHUB_REF_NAME.TrimStart('v'); pwsh -NoProfile -File tools/make-update-manifest.ps1 -Version 0.1.0 -SigFile `"dist/canvas-rgb-setup-0.1.0.exe.sig`" -OutFile dist/latest.json -NotesFile dist/release-notes.md; if (`$LASTEXITCODE -ne 0) { throw 'make-update-manifest.ps1 failed' }; Get-Content dist/latest.json"
+        Assert-True ($base.Contains($runBlock)) 'the manifest step runs a block'
+        $mutated = $base.Replace($runBlock, $runOne)
+        Assert-True ($mutated -ne $base) 'the mutation changed the workflow text'
+        $v = @(Get-WorkflowViolations $mutated)
+        Assert-True ($v.Count -gt 0) "a one-line run with a hard-coded version is a violation:`n$($v -join "`n")"
+        Assert-Equal @(Get-WorkflowViolations $base).Count 0 'the unmutated workflow has none'
+    }
+    Test-Case 'release workflow: a map in with: may hold a map of its own, and the key after it is read' {
+        # The guard read the keys of a with: map with one indent, so a key after a nested map looked
+        # like an indent the guard cannot read, and the whole step was reported.
+        $base = (Get-WorkflowJobsFromText (Get-Content -LiteralPath $workflowPath -Raw)).Text
+        $checkout = "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4`n        with:`n          persist-credentials: false`n`n      - name: Tag matches the workspace version"
+        $nested = "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4`n        with:`n          persist-credentials: false`n          nested:`n            deep: value`n          fetch-depth: 1`n`n      - name: Tag matches the workspace version"
+        Assert-True ($base.Contains($checkout)) 'the build job checks out with persist-credentials: false'
+        $mutated = $base.Replace($checkout, $nested)
+        Assert-True ($mutated -ne $base) 'the mutation changed the workflow text'
+        $v = @(Get-WorkflowViolations $mutated)
+        Assert-Equal $v.Count 0 "the nested map and the key after it are read:`n$($v -join "`n")"
+        Assert-Equal @(Get-WorkflowViolations $base).Count 0 'the unmutated workflow has none'
+    }
+    Test-Case 'release workflow: the working-directory is allowed only on a step that runs npm ci and nothing else' {
+        # The rule was checked against the first line of the step's run, so a second line rode along
+        # with the npm ci the rule named.
+        $base = (Get-WorkflowJobsFromText (Get-Content -LiteralPath $workflowPath -Raw)).Text
+        $step = "      - run: npm ci`n        working-directory: app/web"
+        $more = "      - run: |`n          npm ci`n          evil-command`n        working-directory: app/web"
+        Assert-True ($base.Contains($step)) 'the npm ci step is in the workflow'
+        $mutated = $base.Replace($step, $more)
+        Assert-True ($mutated -ne $base) 'the mutation changed the workflow text'
+        $v = @(Get-WorkflowViolations $mutated)
+        Assert-True ($v.Count -gt 0) "a step that runs more than npm ci is a violation:`n$($v -join "`n")"
+        Assert-Equal @(Get-WorkflowViolations $base).Count 0 'the unmutated workflow has none'
+    }
+    Test-Case 'release workflow: a quoted value in the release step is the value it names' {
+        # The release step's inputs and its files may be written in quotes: the value is the same.
+        $base = (Get-WorkflowJobsFromText (Get-Content -LiteralPath $workflowPath -Raw)).Text
+        $mutated = $base.Replace("          body_path: dist/release-notes.md`n", "          body_path: `"dist/release-notes.md`"`n")
+        $mutated = $mutated.Replace("          generate_release_notes: true`n", "          generate_release_notes: `"true`"`n")
+        $mutated = $mutated.Replace("            dist/canvas-rgb-setup-*.exe`n", "            `"dist/canvas-rgb-setup-*.exe`"`n")
+        $mutated = $mutated.Replace("            dist/canvas-rgb-setup-*.exe.sha256`n", "            `"dist/canvas-rgb-setup-*.exe.sha256`"`n")
+        $mutated = $mutated.Replace("            dist/canvas-rgb-setup-*.exe.sig`n", "            `"dist/canvas-rgb-setup-*.exe.sig`"`n")
+        $mutated = $mutated.Replace("            dist/latest.json`n", "            `"dist/latest.json`"`n")
+        Assert-True ($mutated -ne $base) 'the mutation changed the workflow text'
+        $v = @(Get-WorkflowViolations $mutated)
+        Assert-Equal $v.Count 0 "the quoted values are the values the release step takes:`n$($v -join "`n")"
+        Assert-Equal @(Get-WorkflowViolations $base).Count 0 'the unmutated workflow has none'
+    }
+    Test-Case 'release workflow: the sign step is found whatever the indent of its dash line' {
+        # The secrets guard found the sign step by its exact spelling, so a clean re-indent of the
+        # step ("-   name:") was reported as a step that was not there.
+        $base = (Get-WorkflowJobsFromText (Get-Content -LiteralPath $workflowPath -Raw)).Text
+        $mutated = Set-StepIndent -Text $base -Marker 'name: Sign the installer for the updater'
+        Assert-True ($mutated -ne $base) 'the mutation changed the workflow text'
+        Assert-Equal @(Get-SecretViolations $mutated).Count 0 "the re-indented sign step is found:`n$(@(Get-SecretViolations $mutated) -join "`n")"
+        $v = @(Get-WorkflowViolations $mutated)
+        Assert-Equal $v.Count 0 "the re-indented step is read, not skipped:`n$($v -join "`n")"
+        Assert-Equal @(Get-WorkflowViolations $base).Count 0 'the unmutated workflow has none'
+    }
+    Test-Case 'notes: the docs and the script agree on the heading with a bracketed version' {
+        # The script refuses a heading whose text starts with a bracketed version ("### [0.1.0]").
+        # A version later in the heading ("### Fixed [0.1.0]") is notes text, and the docs used to
+        # promise the script refuses that too. The docs must name the rule the script runs, in a
+        # paragraph of about a hundred words.
+        $r = Invoke-Changelog -Name 'fixedver' -Version '0.2.0' -Lines @('# Changelog', '', '## [0.2.0] - 2026-11-03', '', '### Fixed [0.1.0]', '', '- A.', '', '## [0.1.1] - 2026-11-02', '', '- Old.', '', '[0.2.0]: https://example.invalid/tag')
+        Assert-Equal $r.Exit 0 "a heading whose version is not right after the hashes is notes text: $($r.Err)"
+        Assert-True ($r.NotesText.Contains('### Fixed [0.1.0]')) 'the heading is in the notes'
+        $docs = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\..\docs\releasing.md') -Raw
+        $docParagraph = [regex]::Match($docs, '(?s)The script fails the release.*?Indents of 1-3 spaces are allowed\.').Value
+        Assert-True ($docParagraph -ne '') 'the rule paragraph is in the docs'
+        $scriptText = Get-Content -LiteralPath $script -Raw
+        $descParagraph = [regex]::Match($scriptText, '(?s)The changelog is read as UTF-8.*?\(it ends the section\)\.').Value
+        Assert-True ($descParagraph -ne '') 'the rule paragraph is in the script'
+        foreach ($p in @(@{ Name = 'docs/releasing.md'; Text = $docParagraph }, @{ Name = 'tools/make-update-manifest.ps1'; Text = $descParagraph })) {
+            # The paragraph as one line: the line breaks of the file are not part of the rule.
+            $text = ($p.Text -replace "`r?`n\s*", ' ')
+            Assert-True ($text -match 'that starts with a bracketed version') "$($p.Name) names the rule the script runs: $text"
+            Assert-True ($text -notmatch 'any level with a bracketed version') "$($p.Name) does not promise more than the script does: $text"
+            $words = @($text -split '\s+' | Where-Object { $_ -ne '' })
+            Assert-True ($words.Count -le 100) "$($p.Name) keeps the rule paragraph at 100 words or fewer: $($words.Count)"
+        }
+    }
+    Test-Case 'release workflow: the sign job''s echo of latest.json cannot carry a workflow command' {
+        # The sign job prints dist/latest.json, and the notes text is inside it. The runner reads a
+        # workflow command from a log line that starts with "::", and the manifest holds the whole
+        # notes text on one line (JSON escapes its newlines), so no line it prints starts with "::".
+        # The echo stays: the notes file itself holds such a line, and the publish job prints only
+        # the size of that file.
+        $r = Invoke-Changelog -Name 'cmd' -Version '0.2.0' -Lines @('# Changelog', '', '## [0.2.0] - 2026-11-03', '', '### Added', '', '- A change.', '', '::error::injected', '', '## [0.1.1] - 2026-11-02', '', '- Old.', '', '[0.2.0]: https://example.invalid/tag')
+        Assert-Equal $r.Exit 0 "exit: $($r.Err)"
+        Assert-Equal @($r.NotesText -split "`r?`n" | Where-Object { $_.StartsWith('::') }).Count 1 'the notes file holds a line that starts with ::'
+        $manifest = Get-Content -LiteralPath (Join-Path $dir 'cmd.json') -Raw
+        $commands = @($manifest -split "`r?`n" | Where-Object { $_.TrimStart().StartsWith('::') })
+        Assert-Equal $commands.Count 0 "no line of the manifest starts with :: : $($commands -join ' | ')"
     }
     Test-Case 'release workflow: the notes check step runs under bash, in the repository root' {
         $info = Get-WorkflowJobs $workflowPath

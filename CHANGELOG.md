@@ -18,6 +18,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - Stacks: the daemon's memory no longer grows with every editor page load. The stack preview and the stack draft now remember only the pages that are still talking, and a page that fell out of that memory still loses the lights to a newer page instead of taking them: it keeps losing for up to 9216 more page loads, and is treated as a new page after that. (#102)
 - After an effect crashes, the lights get their frame back when they need one: turning the output off and on again, waking the PC from sleep, or plugging a device in now sends the last frame the effect drew (black if it never drew one) instead of leaving the lights black or on a stale frame. (#145)
 - Fans: `canvas-rgb fans status` now says "not on this board" for a header that is not wired up, instead of showing it as a BIOS header that refused the asked curve. The other rows read as before, and `--json` still carries the availability of every header. (#153)
+- Effects: importing a config while the editor's draft is on the lights now ends that draft and puts the effect that was in force back, so the draft cannot end later and bring back an effect the import replaced. (#94)
+- Effects: the editor's source route now refuses an effect file over 1 MiB, the same limit the preview and the draft use, instead of reading a broken file of any size into memory. (#94)
 
 ## [0.8.2] - 2026-11-04
 

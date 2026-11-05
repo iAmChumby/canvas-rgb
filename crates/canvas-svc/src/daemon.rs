@@ -1386,7 +1386,9 @@ mod tests {
         });
         assert!(announces_kill(&text, pid, "it missed heartbeats for 5 s"), "{text}");
         let announced = text.find("terminating the daemon").expect("announced");
-        let crashed = text.find("daemon crashed").expect("the crash is logged after the kill");
+        let crashed = text
+            .find("daemon crashed")
+            .unwrap_or_else(|| panic!("the crash is logged after the kill: {text}"));
         assert!(announced < crashed, "the reason comes before the crash line: {text}");
         assert_eq!(processes.spawns().len(), 2);
 

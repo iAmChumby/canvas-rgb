@@ -143,7 +143,7 @@ pub fn create_effect_for_tile(
 
 /// A panic payload as text. Same rule as the engine's `panic_text`
 /// (`crates/canvas-core/src/engine.rs`).
-fn panic_payload_text(payload: &Box<dyn std::any::Any + Send>) -> String {
+pub(crate) fn panic_payload_text(payload: &Box<dyn std::any::Any + Send>) -> String {
     if let Some(text) = payload.downcast_ref::<&str>() {
         (*text).to_string()
     } else if let Some(text) = payload.downcast_ref::<String>() {
