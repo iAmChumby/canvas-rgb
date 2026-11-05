@@ -14,29 +14,158 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# The jobs, and what each one checks:
+#
+#   changes      which areas a pull request touches (dorny/paths-filter)
+#   versions     every copy of the version matches Cargo.toml
+#   editor       the editor builds, the phone nav measures right, the editor's tests pass
+#   rust         clippy is clean, the workspace's tests pass
+#   rust-release the paint effects and the stock tiles meet their frame budget
+#   installer    the installer's own tests pass
+#   dependencies the dependency gate (unchanged)
+#   changelog    a new CHANGELOG.md line lands under ## [Unreleased] (unchanged)
+#   ci-ok        one status for the whole run
+#
+# The jobs run in parallel, so a run takes as long as its slowest job and not the sum of them.
+# A job whose area a pull request does not touch is skipped: a skipped job reports as skipped,
+# it does not fail and it does not block the run. A push to main runs every job, whatever it
+# touches, and a change to this file runs every job too.
+
 jobs:
-  check:
-    # The app is Windows-only (named pipes, Win32, hidapi).
+  changes:
+    # Which areas a pull request touches. One job, so every other job reads the same verdict.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # dorny/paths-filter lists a pull request's changed files through the API, which needs this.
+      pull-requests: read
+    outputs:
+      # true when every job must run: a push to main, a change to this workflow, or a filter that
+      # did not answer (a failed filter must not silently skip every check).
+      all: ${{ steps.flags.outputs.all }}
+      editor: ${{ steps.flags.outputs.editor }}
+      rust: ${{ steps.flags.outputs.rust }}
+      rust_release: ${{ steps.flags.outputs.rust_release }}
+      installer: ${{ steps.flags.outputs.installer }}
+      versions: ${{ steps.flags.outputs.versions }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0 # the filter diffs against the base branch, so it needs the history
+
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        # A filter that fails must not turn into a green run with every check skipped, so the
+        # step is allowed to fail and the flags step below then runs every job.
+        continue-on-error: true
+        with:
+          filters: |
+            editor:
+              # The editor's own files, the TypeScript types generated from the protocol crate,
+              # the nav check's script and the Playwright package the nav check starts with.
+              - 'app/web/**'
+              - 'crates/canvas-proto/**'
+              - 'tools/nav-check.mjs'
+              - 'tools/poison-compare/js/**'
+            rust:
+              # Every crate, the Tauri shell, the workspace's manifests and lock file, the
+              # advisory and licence policy and the workspace member under tools/.
+              - 'crates/**'
+              - 'app/src-tauri/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.cargo/**'
+              - 'deny.toml'
+              - 'tools/poison-compare/**'
+            rust-release:
+              # What the release-mode tests build: canvas-daemon (the tile quality test) depends on
+              # every crate except canvas-svc, so any crate change can move a frame time. The
+              # workspace manifest holds the release profile, and .cargo/ the build config. The
+              # stock effects live in crates/canvas-daemon/stock-effects.
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.cargo/**'
+            installer:
+              - 'installer/**'
+              - 'tools/*.ps1'
+              - '.github/workflows/release.yml'
+              - '.github/workflows/test-build.yml'
+            versions:
+              # Every file that carries a copy of the version (tools/set-version.ps1 lists them):
+              # the manifests, the lock file, the editor's and the site's packages, the Tauri
+              # config, the installer script and the two files that print the version.
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'app/web/**'
+              - 'app/src-tauri/**'
+              - 'site/**'
+              - 'installer/**'
+              - 'tools/set-version.ps1'
+            ci:
+              # A change to this workflow changes what runs, so every job runs.
+              - '.github/workflows/ci.yml'
+
+      # The one flag every job reads: a push to main, a change to this workflow, or a filter
+      # that did not answer runs every job. The per-area flags are written here too, so every
+      # output is exactly "true" or "false".
+      - name: Every job runs on a push, on a change to this file, or on a filter that failed
+        id: flags
+        env:
+          EVENT: ${{ github.event_name }}
+          FILTER_OUTCOME: ${{ steps.filter.outcome }}
+          CI_FILE: ${{ steps.filter.outputs.ci }}
+          EDITOR: ${{ steps.filter.outputs.editor }}
+          RUST: ${{ steps.filter.outputs.rust }}
+          RUST_RELEASE: ${{ steps.filter.outputs.rust-release }}
+          INSTALLER: ${{ steps.filter.outputs.installer }}
+          VERSIONS: ${{ steps.filter.outputs.versions }}
+        run: |
+          all=false
+          if [ "$EVENT" = "push" ] || [ "$FILTER_OUTCOME" != "success" ] || [ "$CI_FILE" = "true" ]; then
+            all=true
+          fi
+          echo "all=$all" >> "$GITHUB_OUTPUT"
+          for pair in "editor:$EDITOR" "rust:$RUST" "rust_release:$RUST_RELEASE" "installer:$INSTALLER" "versions:$VERSIONS"; do
+            name="${pair%%:*}"
+            value="${pair#*:}"
+            if [ "$value" != "true" ]; then value=false; fi
+            echo "$name=$value" >> "$GITHUB_OUTPUT"
+          done
+
+  versions:
+    # Every copy of the version matches Cargo.toml (docs/releasing.md).
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.versions == 'true'
     runs-on: windows-latest
-    # A run takes about 10 minutes. A test that hangs would otherwise hold the runner for the
-    # six hours GitHub allows; 30 minutes is three times the usual run.
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      # Every copy of the version matches Cargo.toml (docs/releasing.md).
       - name: Versions agree
         shell: pwsh
         run: pwsh -NoProfile -File tools/set-version.ps1 -Check
 
-      # The editor goes first: tauri-build needs app/web/out (frontendDist) to exist before the
-      # Rust crates compile. next.config.ts sets output: "export", so `next build` writes it.
+  editor:
+    # The editor's build, the phone's bottom nav and the editor's own tests.
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.editor == 'true'
+    # The app is Windows-only, and the nav check measures a real browser's layout: it has always
+    # run on the Windows runner, and moving it would change the browser the measurement is taken
+    # in. The runner choice does not shorten the run either: the Rust job is the longest one.
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22 # no "engines" field in app/web/package.json; 22 matches pages.yml
           cache: npm
           cache-dependency-path: app/web/package-lock.json
 
+      # next.config.ts sets output: "export", so `next build` writes app/web/out.
       - name: Build the editor
         working-directory: app/web
         run: npm ci && npm run build # build runs typecheck, lint and next build
@@ -57,12 +186,32 @@ jobs:
         working-directory: app/web
         run: npm test # vitest, jsdom
 
+  rust:
+    # Clippy and the workspace's tests.
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.rust == 'true'
+    # windows-latest: the workspace has Windows-only crates (canvas-svc drives the Windows
+    # service API, canvas-core's cpu module is #![cfg(windows)]).
+    runs-on: windows-latest
+    # A ceiling, not a target: the job takes about six minutes with a warm cache. A test that
+    # hangs would otherwise hold the runner for the six hours GitHub allows.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
+          # Its own cache, so this job and the release job do not evict each other's build.
+          # The key is v0-rust-<shared-key>-<os>-<arch>-<hash of the lock file and the
+          # toolchain>, and a shared-key replaces the automatic job-based key. The release job
+          # keeps the key the old single job used, so the release artifacts that are already in
+          # that cache are found; this one is a new key, so the debug build starts cold once and
+          # is warm from the second run on.
+          shared-key: check-debug
           # Save the build cache even when a later step fails, so one red run does not leave the
           # next run to compile every crate from scratch again.
           cache-on-failure: true
@@ -72,19 +221,55 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
+      # cargo test, not cargo nextest: nextest runs every test in its own process and every
+      # test binary at once, and this suite has real-time tests that do not hold up under that
+      # load (the boot colour watch window, the resume guard, the stack preview). Measured on
+      # this tree, nextest failed ten tests that cargo test passes. The doctests run here too,
+      # as part of the workspace build.
       - name: Tests
         run: cargo test --locked --workspace
 
-      # The paint effects fit their 100 ms frame budget in release (5-10 ms); a debug build on a
-      # shared runner is too slow, so their tests run here in release.
+  rust-release:
+    # The paint effects fit their 100 ms frame budget in release (5-10 ms); a debug build on a
+    # shared runner is too slow, so their tests run here in release. The tile bar over the stock
+    # paint effects runs for the same reason.
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.rust_release == 'true'
+    # windows-latest: canvas-daemon (the tile quality test) builds the Windows-only crates, and
+    # the frame budget is measured on the same platform as it always was.
+    runs-on: windows-latest
+    # A ceiling, not a target: about three minutes with a warm release cache, more on a cold one.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          # Its own cache, so the release build and the debug build do not evict each other.
+          # 'check' is the key the old single job used, and the cache under it already holds the
+          # release build, so this job starts warm; a cold release build of the whole workspace
+          # is the one thing that would not fit in the timeout.
+          shared-key: check
+          cache-on-failure: true
+
       - name: Paint effect tests (release)
         run: cargo test --locked --release -p canvas-html --test effects
 
-      # The tile bar over the stock paint effects, for the same reason.
       - name: Stock tile quality (release)
         run: cargo test --locked --release -p canvas-daemon --test tile_quality -- --include-ignored
 
-      # Plain PowerShell scripts with their own asserts, not Pester (see installer/tests/_assert.ps1).
+  installer:
+    # Plain PowerShell scripts with their own asserts, not Pester (see installer/tests/_assert.ps1).
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.installer == 'true'
+    # windows-latest: the installer drives the Windows service and the registry.
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
       - name: Installer tests
         shell: pwsh
         run: pwsh -NoProfile -File installer/tests/run-all.ps1
@@ -159,3 +344,24 @@ jobs:
       - name: Changelog check tests
         shell: pwsh
         run: pwsh -NoProfile -File tools/tests/run-all.ps1
+
+  # One status for the whole run: the job every pull request's checks are read from. It fails
+  # when a job it needs failed or was cancelled. A job that was skipped is not a failure: a
+  # pull request that touches one area skips the jobs for the others, and that is a green run.
+  ci-ok:
+    needs: [changes, versions, editor, rust, rust-release, installer, dependencies, changelog]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every job passed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | jq -r 'to_entries[] | "  \(.key): \(.value.result)"'
+          bad=$(echo "$RESULTS" | jq -r '[to_entries[] | select(.value.result != "success" and .value.result != "skipped") | .key] | join(", ")')
+          if [ -n "$bad" ]; then
+            echo "fail: $bad"
+            exit 1
+          fi
+          echo "ok: every job passed or was skipped"
