@@ -218,28 +218,12 @@ fn install_hook(write_direct: DirectWrite) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
-    #[derive(Clone, Default)]
-    struct LogBuf(Arc<Mutex<Vec<u8>>>);
-
-    impl std::io::Write for LogBuf {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
+    /// Runs `run` under a subscriber that collects its lines: the crate's own helper, so that
+    /// the callsite interest cache stays permissive (class `cause:timing-test`, #45).
     fn capture<R>(run: impl FnOnce() -> R) -> (R, String) {
-        let buf = LogBuf::default();
-        let sink = buf.clone();
-        let subscriber = tracing_subscriber::fmt().with_ansi(false).with_writer(move || sink.clone()).finish();
-        let result = tracing::subscriber::with_default(subscriber, run);
-        let text = String::from_utf8_lossy(&buf.0.lock().unwrap()).into_owned();
-        (result, text)
+        crate::test_logs::captured(run)
     }
 
     #[test]
@@ -285,6 +269,9 @@ mod tests {
         let (stuck, stuck_guard) = tracing_appender::non_blocking(StuckWriter(release.clone()));
         let subscriber = tracing_subscriber::fmt().with_ansi(false).with_writer(stuck).finish();
         let (d, n) = (dir.clone(), "canvas-rgbd".to_string());
+        // The keeper first: this capture has a subscriber of its own, so the interest cache must
+        // not answer `never` for a callsite another thread reached (class `cause:timing-test`).
+        crate::test_logs::keep_the_interest_cache_permissive();
         let caught = tracing::subscriber::with_default(subscriber, || {
             install_hook(std::sync::Arc::new(move |line| {
                 let (d, n) = (d.clone(), n.clone());

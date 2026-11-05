@@ -9,8 +9,8 @@ use canvas_daemon::api;
 use canvas_daemon::state::App;
 use canvas_proto::api::routes;
 use canvas_proto::layout::ActiveEffect;
-use common::{FakeAdapter, FakeEngine};
-use std::sync::{Arc, Mutex};
+use common::{FakeAdapter, FakeEngine, LogBuf};
+use std::sync::Arc;
 use tower::ServiceExt;
 
 const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -60,31 +60,6 @@ fn request(method: &str, path: &str, body: Option<&str>) -> Request<Body> {
         .header("content-type", "application/json")
         .body(body.map_or_else(Body::empty, |b| Body::from(b.to_string())))
         .expect("the request builds")
-}
-
-#[derive(Clone, Default)]
-struct LogBuf(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for LogBuf {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl LogBuf {
-    fn install(&self) -> tracing::subscriber::DefaultGuard {
-        let sink = self.clone();
-        tracing::subscriber::set_default(
-            tracing_subscriber::fmt().with_ansi(false).with_writer(move || sink.clone()).finish(),
-        )
-    }
-    fn text(&self) -> String {
-        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
-    }
 }
 
 /// A quit request that cannot reach the main task (its receiver is gone) used to be dropped with
