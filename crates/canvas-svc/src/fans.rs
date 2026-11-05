@@ -1039,6 +1039,7 @@ impl FanController {
             active_profile: self.config.active_profile.clone(),
             profiles: self.config.profiles.iter().map(|p| p.name.clone()).collect(),
             floor_percent: self.config.floor_percent,
+            hot: Vec::new(),
         }
     }
 }

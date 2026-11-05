@@ -1789,6 +1789,7 @@ fn fans(temps: Vec<(TempSource, f32)>, headers: Vec<(&str, u32)>) -> FansStatus 
         active_profile: "Default".into(),
         profiles: vec!["Default".into()],
         floor_percent: 30,
+        hot: Vec::new(),
     }
 }
 

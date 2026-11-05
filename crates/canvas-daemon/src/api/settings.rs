@@ -158,6 +158,7 @@ fn fans_file_from_status(status: &FansStatus) -> canvas_proto::config::FansFile 
         active_profile: status.active_profile.clone(),
         profiles: Vec::new(),
         boot_color: None,
+        hot_limits: Default::default(),
     };
     for name in &status.profiles {
         let headers = status
