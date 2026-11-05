@@ -494,92 +494,11 @@ fn output(cli: &Cli, power: &str) -> Result<(), CliError> {
 /// `canvas-rgb fans status`.
 fn fans_status(cli: &Cli) -> Result<(), CliError> {
     let client = client(cli)?;
-    let answer = client.request("GET", canvas_proto::api::routes::FANS, None)?;
-    if cli.json {
-        print_json(cli, &answer);
-        return Ok(());
-    }
-    println!(
-        "chip          {}",
-        answer.get("chip").and_then(|v| v.as_str()).unwrap_or("not detected")
-    );
-    println!(
-        "profile       {}",
-        answer.get("active_profile").and_then(|v| v.as_str()).unwrap_or("?")
-    );
-    println!(
-        "floor         {}%",
-        answer.get("floor_percent").and_then(|v| v.as_u64()).unwrap_or(0)
-    );
-    let headers = answer
-        .get("headers")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    if headers.is_empty() {
-        println!("no fan headers");
-    } else {
-        println!("{:<14} {:<10} {:<8} MODE", "HEADER", "RPM", "DUTY");
-        for header in &headers {
-            let id = header.get("id").and_then(|v| v.as_str()).unwrap_or("?");
-            let rpm = header
-                .get("rpm")
-                .and_then(|v| v.as_u64())
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "-".into());
-            let duty = header
-                .get("pwm_percent")
-                .and_then(|v| v.as_u64())
-                .map(|v| format!("{v}%"))
-                .unwrap_or_else(|| "-".into());
-            let asked = describe_mode(header.get("mode"));
-            let on_bios = header.get("on_bios").and_then(|v| v.as_bool()).unwrap_or(false);
-            let reason = header.get("override_reason").and_then(|v| v.as_str());
-            // What the chip is doing comes first; what was asked is shown only when it differs.
-            let mode = match (on_bios, asked.as_str(), reason) {
-                (true, "BIOS", _) => "BIOS".to_string(),
-                (true, _, Some(reason)) => format!("BIOS (asked {asked}; {reason})"),
-                (true, _, None) => format!("BIOS (asked {asked})"),
-                (false, _, Some(reason)) => format!("{asked} ({reason})"),
-                (false, _, None) => asked,
-            };
-            println!("{:<14} {:<10} {:<8} {}", id, rpm, duty, mode);
-        }
-    }
-    let temps = answer
-        .get("temps")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    for temp in &temps {
-        let label = temp.get("label").and_then(|v| v.as_str()).unwrap_or("?");
-        let celsius = temp
-            .get("celsius")
-            .and_then(|v| v.as_f64())
-            .map(|v| format!("{v:.1} C"))
-            .unwrap_or_else(|| "-".into());
-        println!("{:<14} {celsius}", label);
+    match canvas_daemon::cli::fans_status(&client, cli.json)? {
+        canvas_daemon::cli::Output::Json(value) => print_json(cli, &value),
+        canvas_daemon::cli::Output::Text(text) => print!("{text}"),
     }
     Ok(())
-}
-
-/// A one-line description of a fan mode.
-fn describe_mode(mode: Option<&serde_json::Value>) -> String {
-    let Some(mode) = mode else {
-        return "?".into();
-    };
-    match mode.get("mode").and_then(|v| v.as_str()) {
-        Some("bios") => "BIOS".into(),
-        Some("fixed") => {
-            let percent = mode.get("percent").and_then(|v| v.as_u64()).unwrap_or(0);
-            format!("fixed {percent}%")
-        }
-        Some("curve") => {
-            let points = mode.get("points").and_then(|v| v.as_array()).map(|p| p.len()).unwrap_or(0);
-            format!("curve ({points} points)")
-        }
-        _ => "?".into(),
-    }
 }
 
 /// `canvas-rgb fans profile <name>`.

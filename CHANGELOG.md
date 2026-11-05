@@ -8,8 +8,11 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
+- Peripherals: the message that a change did not reach the device now stays on screen. A device read that lands after the failed change no longer hides it, so the change is not left looking as if it went through. (#151)
 - Stacks: the daemon now refuses a layer area that runs off the canvas, naming the layer and the edge. A stack saved before this still loads and looks the same, and the editor fits such an area to the canvas the next time it saves, so the stack saves again. (#118)
 - Stacks: the daemon's memory no longer grows with every editor page load. The stack preview and the stack draft now remember only the pages that are still talking, and a page that fell out of that memory still loses the lights to a newer page instead of taking them: it keeps losing for up to 9216 more page loads, and is treated as a new page after that. (#102)
+- After an effect crashes, the lights get their frame back when they need one: turning the output off and on again, waking the PC from sleep, or plugging a device in now sends the last frame the effect drew (black if it never drew one) instead of leaving the lights black or on a stale frame. (#145)
+- Fans: `canvas-rgb fans status` now says "not on this board" for a header that is not wired up, instead of showing it as a BIOS header that refused the asked curve. The other rows read as before, and `--json` still carries the availability of every header. (#153)
 
 ## [0.8.2] - 2026-11-04
 
