@@ -334,19 +334,37 @@ async fn a_controller_announced_after_the_boot_write_is_painted_too() {
 #[tokio::test]
 async fn an_unsettled_nonzero_count_at_the_cap_is_logged_with_the_count() {
     let (_, text) = crate::test_logs::captured_async(async {
-        // A device is announced every second, so the count differs at every tick and never settles.
-        let devices: Vec<_> = (0..9).map(|i| device(i, 2)).collect();
-        let fake = FakeOpenRgbServer::start_detecting(devices, Duration::from_millis(500), Duration::from_secs(1))
-            .await
-            .unwrap();
+        // The test announces the devices and steps the clock the supervisor reads, so the count
+        // differs at every tick and the 5 s cap falls on the same tick whatever the machine's
+        // speed (class `cause:timing-test`, #178). The old test let the fake server announce a
+        // device a second and the supervisor read `Instant::now()`, so the verdict depended on
+        // how long the ticks were late.
+        let fake = FakeOpenRgbServer::start(Vec::new()).await.unwrap();
         let processes = FakeProcesses::new();
         let (root, exe) = install();
         let mut sup = supervisor(&processes, &root, &exe, fake.port(), None);
 
-        let mut ticker = tokio::time::interval(Duration::from_secs(1));
-        for _ in 0..7 {
-            ticker.tick().await;
-            sup.tick(Instant::now(), false, Some(Rgb8::new(1, 2, 3))).await;
+        // The supervisor connects on a tick of its own, and a busy machine can make that
+        // handshake miss the adapter's 5 s reply timeout and take a tick or two. The job counts
+        // its 5 s cap from the tick it starts on, so the connection is made first and the ticks
+        // under test follow it: the cap then falls on the same tick every time.
+        let mut now = Instant::now();
+        let mut connected = false;
+        for _ in 0..30 {
+            sup.tick(now, false, Some(Rgb8::new(1, 2, 3))).await;
+            if sup.state() == OpenRgbServerState::Running {
+                connected = true;
+                break;
+            }
+            now += Duration::from_secs(1);
+        }
+        assert!(connected, "the supervisor never reached the fake server");
+
+        for index in 0..8u32 {
+            // A device is announced every tick: the count differs at every tick and never settles.
+            fake.announce(device(index, 2));
+            now += Duration::from_secs(1);
+            sup.tick(now, false, Some(Rgb8::new(1, 2, 3))).await;
         }
         assert!(!sup.boot_written(), "the count never held still, so nothing was painted");
     })

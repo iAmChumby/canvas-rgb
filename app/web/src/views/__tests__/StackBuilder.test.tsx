@@ -332,14 +332,33 @@ describe("the stack builder", () => {
   });
 
   it("sends every 400 ms while changes keep coming", async () => {
-    await openBuilder();
-    await waitFor(() => expect(layerNames()).toContain("Sparkles"));
-    // The first draft's own send has to be recorded before the clock is faked and the list cleared.
-    await waitFor(() => expect(previewCalls().length).toBeGreaterThan(0));
-    previewCalls().length = 0;
+    // The fake clock goes in before the builder opens, so the editor and this test read the
+    // same clock (#170). The old test faked the clock after the first preview had been sent:
+    // the editor's "last send" was then a wall-clock reading and the drag's first send came
+    // 400 ms after it minus the wall-clock gap between that send and the fake clock's
+    // install, so the verdict depended on how long the machine took.
     vi.useFakeTimers();
     try {
-      const start = Date.now();
+      // The demo's calls are a global list, and the tests before this one left theirs in it.
+      previewCalls().length = 0;
+      const opening = renderEffects("?stack=Sunset%20glow&state=complete,stack");
+      // The builder's own load waits on timers, and so does every request the demo answers:
+      // the fake clock drives them all. The builder is open when its rows are on the screen
+      // and its first preview has been sent.
+      for (let step = 0; step < 400; step++) {
+        const rows = screen.queryAllByRole("button", { name: /(Hide|Show) Sparkles/ });
+        if (rows.length > 0 && previewCalls().length > 0) break;
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(5);
+        });
+      }
+      await opening;
+      expect(screen.getByTestId("stack-builder")).toBeTruthy();
+      expect(previewCalls().length).toBeGreaterThan(0);
+      // The last send before the drag is the baseline: a drag waits 400 ms after the last send
+      // (D95.4.4), so that is what the drag's sends are measured from. It is on the fake clock.
+      const baseline = previewCalls().at(-1)!.at;
+      previewCalls().length = 0;
       const toggle = () => screen.getByRole("button", { name: /(Hide|Show) Sparkles/ });
       for (let at = 0; at < 900; at += 100) {
         act(() => {
@@ -350,7 +369,7 @@ describe("the stack builder", () => {
           await Promise.resolve();
         });
       }
-      const sent = previewCalls().map((call) => call.at - start);
+      const sent = previewCalls().map((call) => call.at - baseline);
       expect(sent.length).toBeGreaterThanOrEqual(2);
       // One send about every 400 ms of the drag, not one per change and not one only at the end.
       expect(sent[0]).toBeGreaterThanOrEqual(350);
