@@ -315,6 +315,18 @@ line. Three mechanisms, and one bug the timing only exposed.
   builds `.cm-content` in an effect, so under load the node was not there yet (`null.focus()`). Fixed with waiting
   helpers in `app/web/src/test/editor.ts`, and `app/web/src/test/editorGuard.test.ts` fails on any direct
   `.cm-*` query in a test file.
+- [#170](https://github.com/iAmChumby/canvas-rgb/issues/170): the stack builder's "sends every 400 ms while changes
+  keep coming" failed with `expected 300 to be greater than or equal to 350`
+  (`app/web/src/views/__tests__/StackBuilder.test.tsx`). The test faked the clock *after* the builder had already
+  sent its first preview, so the editor's "last send" was a wall-clock reading, and the drag's first wait came due
+  400 ms after that send minus the wall-clock gap between the send and the fake clock's install: the machine's
+  speed shortened the drag's wait. Measured: the gap was 60-130 ms when the test ran alone (the first send landed
+  one 100 ms window early, the exact failure above) and 4 ms after the file's other tests had run.
+- [#178](https://github.com/iAmChumby/canvas-rgb/issues/178):
+  `an_unsettled_nonzero_count_at_the_cap_is_logged_with_the_count`
+  (`crates/canvas-svc/src/openrgb_tests.rs`) pitted a 1 s tokio ticker and `Instant::now()` against the 5 s
+  detection cap: the count the fake server reported, the moment the cap fell on, and whether the count looked
+  settled were all read off the wall clock, so a late tick moved the verdict.
 - **Class fix:** partial. Each test named below is fixed, and a guard stops new instances of two shapes; siblings remain open (listed below). The rule: a test never decides on how long
   something took. It waits for an event (`wait_until`, `findBy*`), counts (wake-ups, frames), injects the
   clock, sizes its work by a warm-up and the best of several samples, or is an `#[ignore]`d measurement.
@@ -361,6 +373,19 @@ line. Three mechanisms, and one bug the timing only exposed.
     subscriber. Each crate carries the same deterministic regression test: a call site first reached on
     another thread, then logged on the capture's thread, is captured
     (`test_logs::a_capture_sees_a_line_whose_callsite_was_first_reached_on_another_thread`).
+  - #170: the editor's test installs the fake clock *before* the builder opens and drives every timer
+    with it, so the editor and the test read one clock and the drag's sends are measured against the
+    last send before the drag, which is on that clock (`app/web/src/views/__tests__/StackBuilder.test.tsx`).
+    The rule this test broke: a fake clock installed after the code under test has already read the
+    wall clock leaves two clocks in the same calculation.
+  - #178: the service's test announces the devices itself, through the fake server's `announce`, which
+    takes no clock, and steps the `Instant` it hands the supervisor (`crates/canvas-svc/src/openrgb_tests.rs`).
+    The count then differs at every tick and the 5 s cap falls on the same tick whatever the machine's
+    speed, and the test waits 0.01 s instead of 6 s of ticker. The supervisor's connection is made
+    before the ticks under test: a handshake that misses the adapter's 5 s reply timeout takes a tick
+    of its own, and the job counts its cap from the tick it starts on. The rule this test broke: a
+    ticker that paces the ticks and a clock that reads the ticks are two clocks, and the gap between
+    them is the machine's speed.
 - **The guard:** `crates/canvas-svc/tests/timing_class.rs` (part of `cargo test --workspace`, so CI) scans
   the test code under `crates/` (files in `tests/`, `tests.rs`, `*_tests.rs`, files that a `lib.rs` or
   `main.rs` declares as a `#[cfg(test)]` module such as `canvas-core/src/cpu.rs`, and a source file from
@@ -384,6 +409,14 @@ line. Three mechanisms, and one bug the timing only exposed.
   then expect parked" tests and `wave1.rs`, and the `api.rs` onboarding timers (60-350 ms sleeps against
   100 ms timers on a compressed time scale, `transient.rs`), the riskiest. Also open: a log capture that
   is still not on a shared helper that carries the keeper. Delete an entry when its test is fixed.
+  - **The siblings of #170 and #178 (same shape, not yet fixed):** the other tests in
+    `crates/canvas-svc/src/openrgb_tests.rs` that pair a `tokio::time::interval` with
+    `Instant::now()` (`a_controller_announced_after_the_boot_write_is_painted_too`,
+    `the_restart_limit_black_waits_for_detection_and_paints_late_devices`) read the fake server's
+    detection schedule and the supervisor's clocks off the wall clock the same way #178 did. In the
+    editor, `drag()` in `app/web/src/views/__tests__/StackBuilder.test.tsx` still fakes the clock after
+    the builder's first send, so the baseline it measures from is a wall-clock reading; its assertions
+    are loose enough that the gap has not moved them, and it is a shape, not a sighting.
 - **The same mistake in another crate:** canvas-daemon has its own shared capture helper
   (`crates/canvas-daemon/src/test_logs.rs`) with the same shape as the service's: a thread-local
   subscriber installed with `with_default`. It carried the same hole (a callsite first reached on a thread
