@@ -91,6 +91,13 @@ import type { StackLayerStatus } from "@/proto/StackLayerStatus";
 
 /** Sent this long after the last change, and no later than this after the first. */
 const PREVIEW_DEBOUNCE_MS = 400;
+/**
+ * The longest the builder waits for the daemon's own "try again later" before it tries again
+ * (issue #97). The daemon's contract is one second, and a render takes at most thirty: a cap
+ * that keeps the retry inside one render cycle. Without it a wrong, an abusive or a future
+ * `Retry-After` header would leave the preview on its last frame for an hour.
+ */
+const MAX_PREVIEW_RETRY_MS = 30_000;
 const HEARTBEAT_FALLBACK_MS = 5_000;
 const LEASE_FALLBACK_MS = 15_000;
 /** What Tab reaches inside a dialog, in document order. */
@@ -568,6 +575,13 @@ export function StackBuilder({
   }
 
   async function sendPreview(retried = false) {
+    // One retry waits at a time (issue #97): a send that starts now takes the place of the retry
+    // that was waiting, instead of leaving it to fire as well. A change that sends again while a
+    // retry waits would otherwise cost two requests for one busy answer.
+    if (previewRetry.current) {
+      clearTimeout(previewRetry.current);
+      previewRetry.current = null;
+    }
     previewSentAt.current = Date.now();
     const current = session.current;
     if (!current) return;
@@ -587,9 +601,14 @@ export function StackBuilder({
       if (!mounted.current) return;
       // A busy daemon says when to ask again. Anything else is a transport failure or a server
       // error, and one more try 400 ms later is the difference between a preview that catches up
-      // and one that stays on the last frame until the next change.
+      // and one that stays on the last frame until the next change. The daemon's wait has a
+      // ceiling, so a wrong header cannot strand the preview (issue #97).
       const wait =
-        e instanceof ApiFailure ? (e.status === 503 ? (e.retryAfterMs ?? 1_000) : null) : PREVIEW_DEBOUNCE_MS;
+        e instanceof ApiFailure
+          ? e.status === 503
+            ? Math.min(e.retryAfterMs ?? 1_000, MAX_PREVIEW_RETRY_MS)
+            : null
+          : PREVIEW_DEBOUNCE_MS;
       if (!retried && wait !== null) {
         previewRetry.current = setTimeout(() => void sendPreview(true), wait);
         return;

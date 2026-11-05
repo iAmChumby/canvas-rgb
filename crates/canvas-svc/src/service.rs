@@ -56,7 +56,9 @@ impl Core {
     pub async fn tick(&mut self, now: Instant) {
         self.fans.tick(now);
         if self.fans.take_resumed() {
-            self.daemon.on_heartbeat(now);
+            // The wake is not a heartbeat: the daemon has not said it is up, so this only moves
+            // its clock (#163).
+            self.daemon.refresh_heartbeat(now);
         }
         if self.daemon.tick(now) == DaemonAction::WriteBlack {
             // Not "whoever is listed right now": the same wait for detection as the boot color.
@@ -68,14 +70,16 @@ impl Core {
     }
 
     /// A suspend or resume from the SCM. A resume also gives the daemon a fresh heartbeat clock:
-    /// `Instant` may have counted the sleep, and a heartbeat hours old is not a crash. The
-    /// OpenRGB supervisor's watch window starts again too, so a sleep does not end it early.
+    /// `Instant` may have counted the sleep, and a heartbeat hours old is not a crash. That clock
+    /// is a refresh, not a heartbeat: the daemon has not beaten, so it keeps the grace it had and
+    /// nothing is measured (#163). The OpenRGB supervisor's watch window starts again too, so a
+    /// sleep does not end it early.
     pub fn on_power(&mut self, event: PowerEvent, now: Instant) {
         match event {
             PowerEvent::Suspend => self.fans.on_suspend(),
             PowerEvent::Resume => {
                 self.fans.on_resume(now, "power event");
-                self.daemon.on_heartbeat(now);
+                self.daemon.refresh_heartbeat(now);
                 self.openrgb.on_resume(now);
             }
         }

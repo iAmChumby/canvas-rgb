@@ -4,6 +4,7 @@ description = "canvas-rgb-svc.exe: Windows service for fans (PawnIO, NCT6687D-R)
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [lib]
 name = "canvas_svc"

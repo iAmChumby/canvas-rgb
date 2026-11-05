@@ -27,6 +27,8 @@ pub struct Shared {
 pub struct Inner {
     pub frame: Mutex<Option<Arc<ScreenFrame>>>,
     pub running: AtomicBool,
+    /// Whether the first frame of this capture has been logged.
+    pub first_frame: AtomicBool,
 }
 
 impl Shared {
@@ -35,6 +37,7 @@ impl Shared {
             inner: Arc::new(Inner {
                 frame: Mutex::new(None),
                 running: AtomicBool::new(false),
+                first_frame: AtomicBool::new(false),
             }),
         }
     }
@@ -46,6 +49,8 @@ impl Shared {
 
     pub fn stop(&self) {
         self.inner.running.store(false, Ordering::SeqCst);
+        // The next capture is a new run, so it says again that its first frame arrived.
+        self.inner.first_frame.store(false, Ordering::SeqCst);
         if let Ok(mut f) = self.inner.frame.lock() {
             *f = None;
         }
@@ -96,6 +101,49 @@ pub fn mean_rgb(frame: &ScreenFrame) -> [f32; 3] {
     }
     let n = frame.pixels.len() as f32;
     [sum[0] / n, sum[1] / n, sum[2] / n]
+}
+
+/// The output the capture reads: which screen, where it sits and in what format.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputInfo {
+    /// The output's device name, as Windows names it (`\\.\DISPLAY1`).
+    pub device_name: String,
+    /// Where the output sits on the virtual desktop.
+    pub left: i32,
+    pub top: i32,
+    /// The output's own size.
+    pub width: u32,
+    pub height: u32,
+    /// The desktop's pixel format.
+    pub format: i32,
+}
+
+impl OutputInfo {
+    /// The format's name, when it is one the daemon knows.
+    pub fn format_name(&self) -> &'static str {
+        match self.format {
+            87 => "B8G8R8A8_UNORM",
+            28 => "R8G8B8A8_UNORM",
+            _ => "unknown",
+        }
+    }
+}
+
+/// The line the daemon logs when it opens the desktop.
+///
+/// The output's name, its place on the desktop and its format are what a reader needs to
+/// tell a dark screen from a screen the capture never reached (#1).
+pub fn output_line(output: &OutputInfo) -> String {
+    format!(
+        "the screen capture opened {name} at {left},{top} ({width}x{height}), format {format} ({kind})",
+        name = output.device_name,
+        left = output.left,
+        top = output.top,
+        width = output.width,
+        height = output.height,
+        format = output.format,
+        kind = output.format_name(),
+    )
 }
 
 /// Starts the Desktop Duplication capture on the primary output.
@@ -200,14 +248,21 @@ fn create_session() -> Result<Session, String> {
         D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
         D3D11_SDK_VERSION,
     };
-    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIAdapter, IDXGIFactory1, IDXGIOutput1};
+    use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_UNKNOWN, DXGI_MODE_DESC};
+    use windows::Win32::Graphics::Dxgi::{
+        CreateDXGIFactory1, IDXGIAdapter, IDXGIFactory1, IDXGIOutput1, DXGI_ENUM_MODES,
+        DXGI_OUTPUT_DESC,
+    };
+    /// The output the capture reads: the adapter it is on, the output, its description
+    /// and its current mode.
+    type Chosen = (IDXGIAdapter, IDXGIOutput1, DXGI_OUTPUT_DESC, DXGI_MODE_DESC);
 
     // SAFETY: plain COM calls; every out-pointer is a local that outlives the call.
     unsafe {
         let factory: IDXGIFactory1 = CreateDXGIFactory1().map_err(|e| e.to_string())?;
 
         // The primary output is the first adapter's first output that sits at the desktop's origin.
-        let mut chosen: Option<(IDXGIAdapter, IDXGIOutput1)> = None;
+        let mut chosen: Option<Chosen> = None;
         for adapter_index in 0.. {
             let Ok(adapter) = factory.EnumAdapters(adapter_index) else {
                 break;
@@ -220,7 +275,18 @@ fn create_session() -> Result<Session, String> {
                 if desc.DesktopCoordinates.left == 0 && desc.DesktopCoordinates.top == 0 {
                     // `DuplicateOutput` lives on IDXGIOutput1.
                     let output1: IDXGIOutput1 = output.cast().map_err(|e| e.to_string())?;
-                    chosen = Some((adapter.clone(), output1));
+                    // The output's current mode: its size and the desktop's pixel format.
+                    let mut mode = DXGI_MODE_DESC::default();
+                    let mut count = 1u32;
+                    output
+                        .GetDisplayModeList(
+                            DXGI_FORMAT_UNKNOWN,
+                            DXGI_ENUM_MODES(1),
+                            &mut count,
+                            Some(&mut mode),
+                        )
+                        .ok();
+                    chosen = Some((adapter.clone(), output1, desc, mode));
                     break;
                 }
             }
@@ -228,7 +294,7 @@ fn create_session() -> Result<Session, String> {
                 break;
             }
         }
-        let Some((adapter, output)) = chosen else {
+        let Some((adapter, output, desc, mode)) = chosen else {
             return Err("no primary output found".into());
         };
 
@@ -254,8 +320,26 @@ fn create_session() -> Result<Session, String> {
         let duplication = output
             .DuplicateOutput(&device)
             .map_err(|e| format!("could not duplicate the output: {e}"))?;
+        // Which screen this is, and in what format: without it the log cannot tell a
+        // dark desktop from a desktop the capture never reached (#1).
+        let info = OutputInfo {
+            device_name: device_name(&desc.DeviceName),
+            left: desc.DesktopCoordinates.left,
+            top: desc.DesktopCoordinates.top,
+            width: mode.Width,
+            height: mode.Height,
+            format: mode.Format.0,
+        };
+        tracing::info!("{}", output_line(&info));
         Ok(Session { device, context, duplication, staging: None })
     }
+}
+
+/// A DXGI device name, as text. The name is a fixed array with a null at the end.
+#[cfg(windows)]
+fn device_name(name: &[u16]) -> String {
+    let end = name.iter().position(|c| *c == 0).unwrap_or(name.len());
+    String::from_utf16_lossy(&name[..end])
 }
 
 /// How one pass over the live session ended.
@@ -337,6 +421,11 @@ fn publish_frame(
         let frame = frame.ok_or("the mapped surface was empty")?;
         if let Ok(mut slot) = shared.inner.frame.lock() {
             *slot = Some(Arc::new(frame));
+        }
+        // A frame arrived: say so once, so the log shows that the capture is not just
+        // running but delivering the desktop (#1).
+        if !shared.inner.first_frame.swap(true, Ordering::SeqCst) {
+            tracing::info!("the first desktop frame arrived");
         }
         Ok(())
     }
@@ -458,6 +547,37 @@ mod tests {
         assert!((mean[0] - 1.0).abs() < 0.001);
         assert!(mean[1].abs() < 0.001);
         assert!(mean[2].abs() < 0.001);
+    }
+
+    #[test]
+    fn the_output_line_names_the_screen_and_its_format() {
+        let output = OutputInfo {
+            device_name: r"\\.\DISPLAY1".into(),
+            left: 0,
+            top: 0,
+            width: 1920,
+            height: 1080,
+            format: 87,
+        };
+        assert_eq!(
+            output_line(&output),
+            r"the screen capture opened \\.\DISPLAY1 at 0,0 (1920x1080), format 87 (B8G8R8A8_UNORM)"
+        );
+        assert_eq!(output.format_name(), "B8G8R8A8_UNORM");
+    }
+
+    #[test]
+    fn an_unknown_desktop_format_says_so() {
+        let output = OutputInfo {
+            device_name: r"\\.\DISPLAY2".into(),
+            left: 1920,
+            top: 0,
+            width: 2560,
+            height: 1440,
+            format: 10,
+        };
+        assert_eq!(output.format_name(), "unknown");
+        assert!(output_line(&output).contains("format 10 (unknown)"));
     }
 
     #[test]

@@ -3,6 +3,26 @@
 //! The service restarts a crashed daemon at most `DAEMON_RESTART_LIMIT` times in
 //! `DAEMON_RESTART_WINDOW_S`, then writes black through OpenRGB and stops restarting it.
 //! A daemon that sent `DaemonQuitting` is not restarted.
+//!
+//! A daemon that was just launched has 30 s to send its first heartbeat (#163): a slow start (a
+//! busy logon, a cold disk) is not a crash, so it must not cost the daemon its life. After that
+//! first beat the 5 s budget applies again, and a grace that runs out is a crash like any other.
+//! The grace belongs to that decision only: a daemon that has not beaten yet is not connected
+//! ([`DaemonSupervisor::is_connected`]), so the OpenRGB supervisor paints the boot color while
+//! it starts instead of leaving the lights dark.
+//!
+//! A daemon that ended with its session (its user logged off, Windows tore the session down) is
+//! not a crash (#6). Those exits count against a separate budget of [`SESSION_END_LIMIT`] per
+//! console session, and the relaunch is held until the session is gone, the console id changes
+//! or [`SESSION_END_HOLD`] passes. A hold is not armed when the console has already settled on
+//! another session: the daemon starts in that session at once (#173). Past that budget they
+//! count as crashes again. A new console session (a logon) clears the crash stop and both
+//! budgets, so a crash stop does not strand the user until the service restarts. A new session
+//! is one that has settled: a console id that changed, or a token that came back after a logoff,
+//! must hold for [`SESSION_SETTLE`] and have a user in it, so a flickering console id or a token
+//! query that failed once does not clear the crash limit. A new session also ends a quit: the
+//! daemon that quit belonged to the session that is gone, and the next user gets a daemon of
+//! their own.
 
 use crate::process::ChildProcess;
 use canvas_proto::consts::{DAEMON_RESTART_LIMIT, DAEMON_RESTART_WINDOW_S};
@@ -14,6 +34,84 @@ use std::time::{Duration, Instant};
 
 /// A missed-heartbeat run this long counts as a crash.
 pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a daemon that was just launched has to send its first heartbeat (#163). A slow start
+/// (a busy logon, a cold disk, a slow OpenRGB enumeration) is not a crash, so the daemon must not
+/// be killed for missing its first beat: until that beat arrives the longer budget applies, and
+/// a grace that runs out counts as a crash like any other.
+pub const FIRST_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Which heartbeat budget a running daemon is on (#163): the first heartbeat of a launch has the
+/// longer grace, every beat after it the short budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BeatBudget {
+    /// The daemon has not said it is up yet.
+    First,
+    /// The daemon has said it is up.
+    Steady,
+}
+
+impl BeatBudget {
+    /// Whether a daemon whose last beat is `elapsed` old has missed its budget.
+    fn expired(self, elapsed: Duration) -> bool {
+        match self {
+            // The grace is a window: a beat that arrives at the 30 s mark still counts, and the
+            // kill lands on the tick after it.
+            Self::First => elapsed > FIRST_HEARTBEAT_TIMEOUT,
+            // The steady budget is a deadline: 5 s after the last beat is a crash.
+            Self::Steady => elapsed >= HEARTBEAT_TIMEOUT,
+        }
+    }
+
+    /// The reason in the kill line, which completes "terminating the daemon (pid N): ...". It
+    /// names the budget the daemon was on, so the log says which one ran out.
+    fn kill_reason(self) -> String {
+        match self {
+            Self::First => format!(
+                "it missed its first heartbeat for {} s",
+                FIRST_HEARTBEAT_TIMEOUT.as_secs()
+            ),
+            Self::Steady => format!("it missed heartbeats for {} s", HEARTBEAT_TIMEOUT.as_secs()),
+        }
+    }
+
+    /// The reason in the crash line ("daemon crashed; restarting it").
+    fn crash_reason(self) -> String {
+        match self {
+            Self::First => format!(
+                "missed its first heartbeat for {} s",
+                FIRST_HEARTBEAT_TIMEOUT.as_secs()
+            ),
+            Self::Steady => format!("missed heartbeats for {} s", HEARTBEAT_TIMEOUT.as_secs()),
+        }
+    }
+}
+
+/// How many exits that mean "the daemon ended with its session" one console session gets before
+/// they count as crashes again (#6).
+pub const SESSION_END_LIMIT: u32 = 3;
+
+/// How long the relaunch is held after such an exit (#6). The hold ends earlier when the session
+/// is gone or the console id changes; this is the bound for a session that stays alive.
+pub const SESSION_END_HOLD: Duration = Duration::from_secs(60);
+
+/// The exit codes that mean the daemon ended with its session, not with a crash (#6):
+/// `0x40010004` (`DBG_TERMINATE_PROCESS`: the session was torn down) and `0xC000026B`
+/// (`STATUS_DLL_INIT_FAILED_LOGOFF`: the window station is shutting down).
+fn is_session_end_code(code: i32) -> bool {
+    matches!(code as u32, 0x4001_0004 | 0xC000_026B)
+}
+
+/// The relaunch held after an exit that ended with the session (#6).
+#[derive(Debug, Clone, Copy)]
+struct SessionHold {
+    /// When the hold started.
+    since: Instant,
+    /// The session the daemon ended in.
+    session: Option<u32>,
+    /// The console session id when the hold started.
+    console: Option<u32>,
+}
 
 /// Starts the daemon in the active user session.
 pub trait SessionLauncher: Send {
@@ -174,6 +272,11 @@ pub struct HeartbeatClock {
     pid: Option<u32>,
     /// True once the supervisor is stopped; beats are ignored from then on.
     stopped: bool,
+    /// When the daemon was launched (#163): its first heartbeat is measured from here.
+    launched: Option<Instant>,
+    /// True once the daemon has sent its first heartbeat since the launch (#163). Until then it
+    /// has the longer grace.
+    first_beat_seen: bool,
 }
 
 /// What the pipe server does with one heartbeat.
@@ -194,10 +297,38 @@ impl HeartbeatClock {
             return Stamp::Stopped;
         }
         if self.pid == Some(pid) {
-            self.at = Some(now);
+            self.record_beat(pid, now);
             return Stamp::Stamped;
         }
         Stamp::Foreign
+    }
+
+    /// Records a beat from the launched daemon. The first one of a launch is measured (#163): the
+    /// line says how long the daemon took to say it is up.
+    fn record_beat(&mut self, pid: u32, now: Instant) {
+        self.at = Some(now);
+        if self.first_beat_seen {
+            return;
+        }
+        self.first_beat_seen = true;
+        let Some(launched) = self.launched else {
+            return;
+        };
+        let ms = now.saturating_duration_since(launched).as_millis() as u64;
+        tracing::info!(
+            pid,
+            ms,
+            "the daemon's first heartbeat arrived {ms} ms after launch"
+        );
+    }
+
+    /// The machine woke: the clock starts again from here (#163).
+    ///
+    /// A resume is not a heartbeat. The daemon has not said it is up, so nothing is measured and
+    /// `first_beat_seen` stays as it is; only the beat time moves, so the budget the daemon is on
+    /// is counted from the wake.
+    fn refresh(&mut self, now: Instant) {
+        self.at = Some(now);
     }
 
     /// The clock's current beat time, for tests.
@@ -210,6 +341,8 @@ impl HeartbeatClock {
     fn clear(&mut self) {
         self.at = None;
         self.pid = None;
+        self.launched = None;
+        self.first_beat_seen = false;
     }
 
     /// The supervisor is stopped: beats are ignored from then on, and the clock is cleared.
@@ -217,6 +350,14 @@ impl HeartbeatClock {
         self.stopped = true;
         self.at = None;
         self.pid = None;
+        self.launched = None;
+        self.first_beat_seen = false;
+    }
+
+    /// The supervisor starts again (a new console session cleared the crash stop): beats count
+    /// again (#6).
+    fn unmark_stopped(&mut self) {
+        self.stopped = false;
     }
 }
 
@@ -228,8 +369,29 @@ pub struct DaemonSupervisor {
     /// Shared with the pipe server (see [`HeartbeatClock`]).
     last_heartbeat: Arc<Mutex<HeartbeatClock>>,
     restarts: VecDeque<Instant>,
+    /// The daemon announced a quit: the service does not supervise a daemon any more. A new
+    /// console session ends it (#6): the daemon that quit belonged to the session that is gone.
     quitting: bool,
-    stopped: bool,
+    /// The service is stopping: the daemon is not started again, and a new console session does
+    /// not change that.
+    service_stopped: bool,
+    /// The crash limit tripped: the daemon is not started again until a new console session
+    /// clears it (#6).
+    crash_stopped: bool,
+    /// The console session the supervisor last saw.
+    console: Option<u32>,
+    /// The last seen console session has no user in it: a logoff was seen.
+    logged_off: bool,
+    /// The token of the console session came back at this time. A logon is a new session only
+    /// once the token has been there for `SESSION_SETTLE` (#6): one tick without a token is a
+    /// query that failed, not a logoff.
+    pending_logon: Option<Instant>,
+    /// The exits that ended with the session, in the console session of `budget_session` (#6).
+    session_ends: u32,
+    /// The console session the session-end budget belongs to.
+    budget_session: Option<u32>,
+    /// The relaunch is held after an exit that ended with the session (#6).
+    hold: Option<SessionHold>,
     /// The last launch found no user session. Not a crash: the next ticks launch again until a user
     /// is logged on (#6).
     waiting_for_session: bool,
@@ -237,6 +399,9 @@ pub struct DaemonSupervisor {
     child_session: Option<u32>,
     /// A different console session seen while the daemon runs, and since when (see `SESSION_SETTLE`).
     pending_move: Option<(u32, Instant)>,
+    /// A console session the console moved to, and since when. It is a new session only once it
+    /// has held for `SESSION_SETTLE` and has a user in it (#6).
+    pending_console: Option<(u32, Instant)>,
     /// The daemon `stop()` ended, and when (#81): the OpenRGB stop line reports the gap.
     stopped_daemon: Option<(u32, Instant)>,
     /// The daemon `stop()` could not end (#81): the OpenRGB stop line says that instead of
@@ -254,10 +419,18 @@ impl DaemonSupervisor {
             last_heartbeat: Arc::new(Mutex::new(HeartbeatClock::default())),
             restarts: VecDeque::new(),
             quitting: false,
-            stopped: false,
+            service_stopped: false,
+            crash_stopped: false,
+            console: None,
+            logged_off: false,
+            pending_logon: None,
+            session_ends: 0,
+            budget_session: None,
+            hold: None,
             waiting_for_session: false,
             child_session: None,
             pending_move: None,
+            pending_console: None,
             stopped_daemon: None,
             unended_daemon: None,
         }
@@ -364,6 +537,10 @@ impl DaemonSupervisor {
                     let mut hb = self.heartbeat_clock();
                     hb.at = Some(now);
                     hb.pid = Some(pid);
+                    // The first heartbeat of this daemon is measured from the launch (#163), and
+                    // the grace starts again for it.
+                    hb.launched = Some(now);
+                    hb.first_beat_seen = false;
                 }
                 tracing::info!(exe = %self.exe.display(), "daemon started in the user session");
             }
@@ -406,7 +583,34 @@ impl DaemonSupervisor {
     pub fn on_heartbeat(&mut self, now: Instant) {
         let mut hb = self.heartbeat_clock();
         if !hb.stopped {
-            hb.at = Some(now);
+            match hb.pid {
+                Some(pid) => hb.record_beat(pid, now),
+                None => hb.at = Some(now),
+            }
+        }
+    }
+
+    /// The machine woke: the daemon's clock starts again from here (#163).
+    ///
+    /// This is not a heartbeat. The daemon has not said it is up, so nothing is measured and the
+    /// daemon keeps the grace it had; only the beat time moves, so the budget it is on is counted
+    /// from the wake.
+    pub fn refresh_heartbeat(&mut self, now: Instant) {
+        let mut hb = self.heartbeat_clock();
+        if !hb.stopped {
+            hb.refresh(now);
+        }
+    }
+
+    /// The heartbeat budget the running daemon is on (#163): the first heartbeat of a launch has
+    /// the longer grace, every beat after it the short budget. It belongs to the stale-kill
+    /// decision in [`DaemonSupervisor::tick`]; being on the grace does not make a daemon
+    /// connected.
+    fn beat_budget(&self) -> BeatBudget {
+        if self.heartbeat_clock().first_beat_seen {
+            BeatBudget::Steady
+        } else {
+            BeatBudget::First
         }
     }
 
@@ -414,7 +618,7 @@ impl DaemonSupervisor {
     /// Without this a service restart leaves the old daemon holding the API port, so the new
     /// service's daemon cannot bind and crash-loops (lighting session 2).
     pub fn stop(&mut self) {
-        self.stopped = true;
+        self.service_stopped = true;
         self.heartbeat_clock().mark_stopped();
         if let Some(mut child) = self.child.take() {
             let pid = child.id();
@@ -457,7 +661,8 @@ impl DaemonSupervisor {
         }
     }
 
-    /// The daemon is quitting on purpose; its exit is not a crash.
+    /// The daemon is quitting on purpose; its exit is not a crash. A new console session ends
+    /// the quit (#6): the daemon that quit belonged to the session that is gone.
     pub fn on_quitting(&mut self) {
         tracing::info!("daemon announced a quit; it will not be restarted");
         self.quitting = true;
@@ -469,22 +674,185 @@ impl DaemonSupervisor {
         self.child.as_ref().map(|c| c.id())
     }
 
-    /// True while a daemon process is running and its heartbeat is fresh.
+    /// True while a daemon process is running and its heartbeat is fresh (#163).
+    ///
+    /// Connected means the daemon has beaten at least once in this launch and its last beat is
+    /// inside [`HEARTBEAT_TIMEOUT`]. Before the first beat it is not connected: a daemon that is
+    /// still starting up has said nothing, and the OpenRGB supervisor paints the boot color
+    /// instead of leaving the lights dark. The 30 s grace belongs to the stale-kill decision, not
+    /// to this.
     pub fn is_connected(&self, now: Instant) -> bool {
-        self.child.is_some()
-            && self
-                .last_heartbeat()
-                .is_some_and(|hb| now.saturating_duration_since(hb) < HEARTBEAT_TIMEOUT)
+        if self.child.is_none() {
+            return false;
+        }
+        let hb = self.heartbeat_clock();
+        if !hb.first_beat_seen {
+            return false;
+        }
+        hb.at.is_some_and(|at| now.saturating_duration_since(at) < HEARTBEAT_TIMEOUT)
     }
 
     /// Whether the restart limit has been reached and restarts have stopped.
     pub fn stopped(&self) -> bool {
-        self.stopped
+        self.service_stopped || self.crash_stopped
+    }
+
+    /// A new console session (a logon) clears the crash stop and both budgets, so a crash stop
+    /// does not strand the user until the service restarts (#6). It also ends a quit: the daemon
+    /// that quit belonged to the session that is gone, and the new one gets a daemon of its own.
+    fn on_new_session(&mut self, session: u32) {
+        if self.crash_stopped {
+            tracing::info!(
+                session,
+                "a new console session started; the daemon is started again"
+            );
+        }
+        if self.quitting {
+            tracing::info!(
+                session,
+                "a new console session started; the daemon that quit is replaced"
+            );
+            self.quitting = false;
+            self.forget_quitting_daemon();
+        }
+        self.crash_stopped = false;
+        self.heartbeat_clock().unmark_stopped();
+        self.restarts.clear();
+        self.session_ends = 0;
+        self.budget_session = Some(session);
+        self.hold = None;
+    }
+
+    /// The daemon that quit on purpose is on its way out, and the new session gets a daemon of
+    /// its own. The old one is ended and waited for, the way a move does it, so the next daemon
+    /// does not lose the API port to it. The quit is not a crash.
+    fn forget_quitting_daemon(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        let pid = child.id();
+        match child.try_wait() {
+            // It is already gone: there is nothing to end.
+            Ok(Some(_)) => {}
+            // It is still running: end it, so the next daemon can bind the port.
+            Ok(None) | Err(_) => {
+                let _ = terminate_daemon(
+                    child.as_mut(),
+                    "the daemon quit and a new console session started",
+                );
+                wait_for_exit(child.as_mut(), pid);
+            }
+        }
+        self.clear_heartbeat_clock();
+    }
+
+    /// Watches the console session for a new one. A logoff shows up as a session with no user in
+    /// it; the logon after it as one with a user again. A different console id is a different
+    /// session, but only once it has held for [`SESSION_SETTLE`] and has a user in it (#6). A
+    /// logon in the same console session settles the same way: the token must be there for
+    /// [`SESSION_SETTLE`] before it is a new session.
+    /// Says whether a new console session was found.
+    ///
+    /// The first console session this supervisor sees is not a new one: it is the one the service
+    /// started in.
+    fn watch_for_new_session(&mut self, now: Instant) -> bool {
+        let console = self.launcher.console_session();
+        match (self.console, console) {
+            (Some(seen), Some(current)) if seen != current => {
+                // The console moved to another session. It is a new console session once it has
+                // held for the settle time and has a user in it: a flip (1 -> 2 -> 1) and the
+                // logon screen (a session with no token) must not clear the crash stop (#6).
+                // The token of the session left behind says nothing about this one.
+                self.pending_logon = None;
+                if !self.launcher.session_alive(current) {
+                    // The logon screen: no user in that session, so it is not a new one yet.
+                    self.pending_console = None;
+                    return false;
+                }
+                match self.pending_console {
+                    Some((target, since)) if target == current => {
+                        if now.saturating_duration_since(since) >= SESSION_SETTLE {
+                            self.pending_console = None;
+                            self.console = Some(current);
+                            self.logged_off = false;
+                            self.on_new_session(current);
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    _ => {
+                        // The move starts now: it must hold for the settle time.
+                        self.pending_console = Some((current, now));
+                        false
+                    }
+                }
+            }
+            (Some(_), Some(current)) => {
+                // The same session: its user comes and goes in it.
+                self.pending_console = None;
+                if !self.launcher.session_alive(current) {
+                    // No user in the session: a logoff was seen.
+                    self.logged_off = true;
+                    self.pending_logon = None;
+                    false
+                } else if self.logged_off {
+                    // The token is back. It must stay for `SESSION_SETTLE` before the logon
+                    // counts as a new session (#6): a tick without a token is a query that
+                    // failed, not a logoff, and must not clear the crash stop, the budgets or a
+                    // quit. A token that goes away again starts the settle over.
+                    match self.pending_logon {
+                        Some(since) => {
+                            if now.saturating_duration_since(since) >= SESSION_SETTLE {
+                                self.pending_logon = None;
+                                self.logged_off = false;
+                                self.on_new_session(current);
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                        None => {
+                            // The settle starts now: the token must stay for the settle time.
+                            self.pending_logon = Some(now);
+                            false
+                        }
+                    }
+                } else {
+                    false
+                }
+            }
+            (Some(_), None) => {
+                // The console reports no session: unknown, not a move and not a logoff.
+                self.pending_console = None;
+                false
+            }
+            (None, Some(current)) => {
+                self.console = Some(current);
+                self.logged_off = !self.launcher.session_alive(current);
+                false
+            }
+            (None, None) => false,
+        }
     }
 
     /// One supervision pass per second.
     pub fn tick(&mut self, now: Instant) -> DaemonAction {
-        if !self.started || self.stopped || self.quitting {
+        if !self.started || self.service_stopped {
+            return DaemonAction::None;
+        }
+        // A new console session (a logon) clears the crash stop and both budgets (#6), and ends a
+        // quit. It is watched even while the supervisor is crash-stopped or quitting: neither
+        // must strand the next user until the service restarts.
+        if self.watch_for_new_session(now) && self.child.is_none() {
+            // The daemon is started again in the new session.
+            self.launch(now);
+            return DaemonAction::None;
+        }
+        if self.quitting {
+            return DaemonAction::None;
+        }
+        if self.crash_stopped {
             return DaemonAction::None;
         }
         if let Some(child) = self.child.as_mut() {
@@ -493,6 +861,9 @@ impl DaemonSupervisor {
                     self.child = None;
                     self.clear_heartbeat_clock();
                     let was = self.child_session;
+                    if is_session_end_code(code) {
+                        return self.session_end(now, code, was);
+                    }
                     if self.session_ended(was) {
                         // Its session logged off or lost the console: the exit is not a crash.
                         tracing::info!(code, "the daemon ended with its session; starting one in the active session");
@@ -515,18 +886,40 @@ impl DaemonSupervisor {
                 self.launch(now);
                 return DaemonAction::None;
             }
+            // A daemon that has not said it is up yet has the grace (#163); after its first beat
+            // the 5 s budget applies again.
+            let budget = self.beat_budget();
             let stale = self
                 .last_heartbeat()
-                .is_some_and(|hb| now.saturating_duration_since(hb) >= HEARTBEAT_TIMEOUT);
+                .is_some_and(|hb| budget.expired(now.saturating_duration_since(hb)));
             if stale {
                 if let Some(mut child) = self.child.take() {
-                    let _ = terminate_daemon(child.as_mut(), "it missed heartbeats for 5 s");
+                    let _ = terminate_daemon(child.as_mut(), &budget.kill_reason());
                     let pid = child.id();
                     wait_for_exit(child.as_mut(), pid);
                     self.clear_heartbeat_clock();
                 }
-                return self.crashed(now, "missed heartbeats for 5 s");
+                return self.crashed(now, &budget.crash_reason());
             }
+            return DaemonAction::None;
+        }
+        // No process: the relaunch is held after an exit that ended with the session (#6).
+        if let Some(hold) = self.hold {
+            let gone = hold
+                .session
+                .is_some_and(|s| !self.launcher.session_alive(s));
+            let moved = self
+                .launcher
+                .console_session()
+                .is_some_and(|c| Some(c) != hold.console);
+            let timed_out = now.saturating_duration_since(hold.since) >= SESSION_END_HOLD;
+            if !(gone || moved || timed_out) {
+                // The session is on its way out: no daemon runs, and nothing is written black.
+                return DaemonAction::None;
+            }
+            self.hold = None;
+            tracing::info!("the session-end hold is over; starting the daemon again");
+            self.launch(now);
             return DaemonAction::None;
         }
         // No process because no user was logged on: launch again, no crash counted (#6).
@@ -536,6 +929,61 @@ impl DaemonSupervisor {
         }
         // No process: the last launch failed, so count it as a crash and try again.
         self.crashed(now, "not running after a failed launch")
+    }
+
+    /// The daemon exited with a code that says its session ended. That is not a crash (#6): it
+    /// counts against the session-end budget, and the relaunch is held until the session is
+    /// gone, the console id changes, or the hold times out.
+    fn session_end(&mut self, now: Instant, code: i32, was: Option<u32>) -> DaemonAction {
+        let described = crate::process::describe_exit_code(code);
+        let console = self.launcher.console_session();
+        // The budget belongs to one console session: a new one starts a new budget. It is the
+        // session that settled, not the id the console happens to report at this moment: an exit
+        // while the console is flipping belongs to the session the daemon was running in (#6).
+        let session = self.console.or(was);
+        if session != self.budget_session {
+            self.budget_session = session;
+            self.session_ends = 0;
+        }
+        if self.session_ends >= SESSION_END_LIMIT {
+            // The budget is used up: this exit counts as a crash again, so a daemon that keeps
+            // ending with its session still trips the crash limit.
+            tracing::warn!(
+                code = %described,
+                limit = SESSION_END_LIMIT,
+                "the daemon ended with its session too often; counting it as a crash"
+            );
+            return self.crashed(now, &exited_reason(code));
+        }
+        self.session_ends += 1;
+        tracing::info!(code = %described, "the daemon ended with its session ({described}); not a crash");
+        // The console settled on another session than the one the daemon ran in: that session is
+        // over and the new one wants a daemon of its own. A hold would wait for a session that is
+        // already gone, so the new user would sit without lights for the length of the hold
+        // (#173).
+        // The launch reads the live console, so start at once only while the live console is the
+        // settled one; if it moved again in this tick, the hold below waits for it to settle.
+        if let (Some(settled), Some(launched)) = (self.console, was) {
+            if settled != launched && console == Some(settled) {
+                tracing::info!(
+                    daemon_session = launched,
+                    console_session = settled,
+                    "the console settled on another session; the daemon starts there at once"
+                );
+                self.launch(now);
+                return DaemonAction::None;
+            }
+        }
+        // The relaunch waits: the session is on its way out, and a daemon started into a dying
+        // session ends with it again. While the hold is on, `daemon_pid()` is `None`, so the
+        // pipe admits any client in the console session: the admission rule is unchanged, and
+        // the pipe still wants a `Hello` first.
+        self.hold = Some(SessionHold {
+            since: now,
+            session: was,
+            console,
+        });
+        DaemonAction::None
     }
 
     fn crashed(&mut self, now: Instant, reason: &str) -> DaemonAction {
@@ -548,7 +996,7 @@ impl DaemonSupervisor {
             }
         }
         if self.restarts.len() as u32 >= DAEMON_RESTART_LIMIT {
-            self.stopped = true;
+            self.crash_stopped = true;
             self.heartbeat_clock().mark_stopped();
             tracing::error!(
                 reason,
@@ -862,6 +1310,294 @@ mod tests {
         assert_eq!(processes.spawns().len(), 2);
     }
 
+    /// A daemon that was just launched has 30 s to send its first heartbeat (#163): a slow start
+    /// (a busy logon, a cold disk) is not a crash.
+    #[test]
+    fn a_first_beat_at_6s_after_launch_is_not_a_crash() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        sup.start(t0);
+        let pid = sup.daemon_pid().expect("a daemon is running");
+        // Six seconds without a beat: the grace holds.
+        let mut now = t0;
+        for _ in 0..6 {
+            now += Duration::from_secs(1);
+            assert_eq!(sup.tick(now), DaemonAction::None);
+            assert_eq!(
+                processes.spawns().len(),
+                1,
+                "the daemon was killed inside the grace"
+            );
+            assert_eq!(
+                sup.daemon_pid(),
+                Some(pid),
+                "the daemon was killed inside the grace"
+            );
+        }
+        // The first beat arrives, and the daemon keeps running.
+        sup.on_heartbeat(now);
+        assert_eq!(sup.tick(now + Duration::from_secs(1)), DaemonAction::None);
+        assert_eq!(
+            processes.spawns().len(),
+            1,
+            "the daemon was killed after its first beat"
+        );
+    }
+
+    /// The same, close to the end of the grace (#163).
+    #[test]
+    fn a_first_beat_at_29s_after_launch_is_not_a_crash() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        sup.start(t0);
+        let pid = sup.daemon_pid().expect("a daemon is running");
+        // 29 s without a beat: the grace still holds.
+        let mut now = t0;
+        for _ in 0..29 {
+            now += Duration::from_secs(1);
+            assert_eq!(sup.tick(now), DaemonAction::None);
+            assert_eq!(
+                processes.spawns().len(),
+                1,
+                "the daemon was killed inside the grace"
+            );
+            assert_eq!(
+                sup.daemon_pid(),
+                Some(pid),
+                "the daemon was killed inside the grace"
+            );
+        }
+        // The first beat arrives, and the daemon keeps running.
+        sup.on_heartbeat(now);
+        assert_eq!(sup.tick(now + Duration::from_secs(1)), DaemonAction::None);
+        assert_eq!(
+            processes.spawns().len(),
+            1,
+            "the daemon was killed after its first beat"
+        );
+    }
+
+    /// A daemon that never says it is up is killed when the grace is over, and that counts as a
+    /// crash like any other (#163).
+    #[test]
+    fn a_missing_first_beat_after_30s_is_a_crash() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        sup.start(t0);
+        let pid = sup.daemon_pid().expect("a daemon is running");
+        // 30 s: the grace is still open.
+        let mut now = t0 + Duration::from_secs(30);
+        assert_eq!(sup.tick(now), DaemonAction::None);
+        assert_eq!(
+            processes.spawns().len(),
+            1,
+            "the daemon was killed inside the grace"
+        );
+        assert_eq!(
+            sup.daemon_pid(),
+            Some(pid),
+            "the daemon was killed inside the grace"
+        );
+        // The grace is over: the daemon is killed, and the miss counts as a crash.
+        now += Duration::from_secs(1);
+        let text = logged(|| {
+            sup.tick(now);
+        });
+        assert!(
+            announces_kill(&text, pid, "it missed its first heartbeat for 30 s"),
+            "{text}"
+        );
+        assert!(
+            text.contains("daemon crashed"),
+            "the miss did not count as a crash: {text}"
+        );
+        assert_eq!(processes.spawns().len(), 2, "the daemon was not restarted");
+    }
+
+    /// Four daemons that never say they are up trip the crash limit (#163): the grace changes
+    /// when the kill happens, not how it is counted.
+    #[test]
+    fn four_missing_first_beats_stop_the_supervisor() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        sup.start(t0);
+        let mut now = t0;
+        let mut action = DaemonAction::None;
+        for round in 1..=DAEMON_RESTART_LIMIT as usize + 1 {
+            // 31 s without a first beat: the grace ends and the daemon is killed.
+            for _ in 0..31 {
+                now += Duration::from_secs(1);
+                action = sup.tick(now);
+            }
+            if round <= DAEMON_RESTART_LIMIT as usize {
+                assert_eq!(action, DaemonAction::None, "round {round}");
+                assert_eq!(processes.spawns().len(), round + 1, "round {round}");
+            }
+        }
+        assert_eq!(action, DaemonAction::WriteBlack);
+        assert!(sup.stopped());
+        assert_eq!(
+            processes.spawns().len(),
+            DAEMON_RESTART_LIMIT as usize + 1,
+            "the daemon was started again after the crash stop"
+        );
+    }
+
+    /// The grace is for the first beat only: after it the 5 s budget applies again (#163).
+    #[test]
+    fn after_the_first_beat_the_5s_budget_applies_again() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        sup.start(t0);
+        let pid = sup.daemon_pid().expect("a daemon is running");
+        // Six seconds without a beat: the grace holds.
+        let mut now = t0;
+        for _ in 0..6 {
+            now += Duration::from_secs(1);
+            assert_eq!(sup.tick(now), DaemonAction::None);
+        }
+        assert_eq!(processes.spawns().len(), 1);
+        // The first beat.
+        sup.on_heartbeat(now);
+        // Four seconds later the daemon is still fresh.
+        assert_eq!(sup.tick(now + Duration::from_secs(4)), DaemonAction::None);
+        assert_eq!(
+            sup.daemon_pid(),
+            Some(pid),
+            "the daemon was killed inside the 5 s budget"
+        );
+        assert_eq!(processes.spawns().len(), 1);
+        // Five seconds after the beat the short budget is over.
+        assert_eq!(sup.tick(now + Duration::from_secs(5)), DaemonAction::None);
+        assert_eq!(
+            processes.spawns().len(),
+            2,
+            "the 5 s budget did not apply after the first beat"
+        );
+    }
+
+    /// Connected means the daemon has beaten at least once in this launch and its last beat is
+    /// inside the 5 s budget (#163). The 30 s grace belongs to the stale-kill decision, not to
+    /// this: a daemon that has not said it is up yet is not connected, so the OpenRGB supervisor
+    /// paints the boot color while it starts.
+    #[test]
+    fn is_connected_means_the_daemon_has_beaten_and_its_beat_is_fresh() {
+        let (mut sup, _processes) = supervisor();
+        let t0 = Instant::now();
+        sup.start(t0);
+        // No beat yet: the daemon has said nothing, so it is not connected.
+        assert!(!sup.is_connected(t0), "a daemon that has not beaten is not connected");
+        assert!(
+            !sup.is_connected(t0 + Duration::from_secs(10)),
+            "the grace made a daemon that has not beaten connected"
+        );
+        assert!(
+            !sup.is_connected(t0 + Duration::from_secs(29)),
+            "the grace made a daemon that has not beaten connected"
+        );
+        // The first beat.
+        sup.on_heartbeat(t0 + Duration::from_secs(10));
+        // The 5 s budget applies from then on.
+        assert!(sup.is_connected(t0 + Duration::from_secs(14)));
+        assert!(
+            !sup.is_connected(t0 + Duration::from_secs(15)),
+            "the 5 s budget did not apply after the first beat"
+        );
+        assert!(!sup.is_connected(t0 + Duration::from_secs(16)));
+    }
+
+    /// A resume is not a heartbeat (#163): it refreshes the clock without claiming the daemon has
+    /// beaten, and the grace the daemon is on is counted from the wake.
+    #[test]
+    fn a_resume_is_not_a_first_heartbeat() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        sup.start(t0);
+        let pid = sup.daemon_pid().expect("a daemon is running");
+        // The machine slept and woke: the service refreshes the daemon's clock.
+        let text = logged(|| sup.refresh_heartbeat(t0 + Duration::from_secs(10)));
+        assert!(
+            !text.contains("first heartbeat arrived"),
+            "the resume logged a first-heartbeat measurement: {text}"
+        );
+        assert!(
+            !sup.is_connected(t0 + Duration::from_secs(10)),
+            "the resume claimed the daemon has beaten"
+        );
+        // The grace is counted from the wake, so the daemon survives the deadline it had at launch.
+        assert_eq!(sup.tick(t0 + Duration::from_secs(31)), DaemonAction::None);
+        assert_eq!(sup.daemon_pid(), Some(pid), "the daemon was killed after the resume");
+        assert_eq!(processes.spawns().len(), 1);
+        // The grace that counts from the wake runs out 30 s later.
+        assert_eq!(sup.tick(t0 + Duration::from_secs(41)), DaemonAction::None);
+        assert_eq!(
+            processes.spawns().len(),
+            2,
+            "the grace counted from the wake did not run out"
+        );
+    }
+
+    /// The first real beat after a resume is measured once, from the launch (#163).
+    #[test]
+    fn the_first_beat_after_a_resume_is_measured_once() {
+        let (mut sup, _processes) = supervisor();
+        let t0 = Instant::now();
+        sup.start(t0);
+        sup.refresh_heartbeat(t0 + Duration::from_secs(10));
+        let text = logged(|| sup.on_heartbeat(t0 + Duration::from_secs(12)));
+        assert!(
+            text.contains("the daemon's first heartbeat arrived 12000 ms after launch"),
+            "{text}"
+        );
+        // The next beat says nothing more: the line is logged once.
+        let text = logged(|| sup.on_heartbeat(t0 + Duration::from_secs(13)));
+        assert!(!text.contains("first heartbeat arrived"), "{text}");
+    }
+
+    /// The first heartbeat is measured and logged once per launch (#163): the line says how
+    /// long the daemon took to say it is up.
+    #[test]
+    fn the_first_heartbeat_is_measured_and_logged_once_per_launch() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        sup.start(t0);
+        let pid = sup.daemon_pid().expect("a daemon is running");
+        // The daemon's beat over the pipe: the path the daemon really uses.
+        let text = logged(|| {
+            let mut hb = sup.heartbeat_clock();
+            assert_eq!(hb.stamp(pid, t0 + Duration::from_secs(3)), Stamp::Stamped);
+        });
+        assert!(
+            text.contains("the daemon's first heartbeat arrived 3000 ms after launch"),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("pid={pid}")),
+            "the line names the daemon: {text}"
+        );
+        // The next beat says nothing more: the line is logged once.
+        let text = logged(|| {
+            let mut hb = sup.heartbeat_clock();
+            assert_eq!(hb.stamp(pid, t0 + Duration::from_secs(4)), Stamp::Stamped);
+        });
+        assert!(!text.contains("first heartbeat arrived"), "{text}");
+        // A new daemon measures its own first heartbeat.
+        processes.exit_last();
+        let now = t0 + Duration::from_secs(10);
+        logged(|| {
+            sup.tick(now);
+        });
+        let pid = sup.daemon_pid().expect("the daemon started again");
+        let text = logged(|| {
+            let mut hb = sup.heartbeat_clock();
+            assert_eq!(hb.stamp(pid, now + Duration::from_secs(2)), Stamp::Stamped);
+        });
+        assert!(
+            text.contains("the daemon's first heartbeat arrived 2000 ms after launch"),
+            "{text}"
+        );
+    }
+
     #[test]
     fn a_daemon_that_announced_quitting_is_not_restarted() {
         let (mut sup, processes) = supervisor();
@@ -1067,6 +1803,7 @@ mod tests {
         let (mut sup, _processes) = supervisor();
         let t0 = Instant::now();
         sup.start(t0);
+        sup.on_heartbeat(t0 + Duration::from_secs(1));
         assert!(sup.is_connected(t0 + Duration::from_secs(2)));
         assert!(!sup.is_connected(t0 + Duration::from_secs(6)));
     }
@@ -1114,14 +1851,17 @@ mod tests {
     /// Each path asserts the log line itself: a fake's kill record alone would pass with the line
     /// removed. The reason is matched as the full announcement for that pid, so the crash line
     /// that follows a missed heartbeat ("daemon crashed", reason "missed heartbeats for 5 s")
-    /// cannot satisfy it by accident (class `cause:timing-test`, #45 and #55).
+    /// cannot satisfy it by accident (class `cause:timing-test`, #45 and #55). A missed heartbeat
+    /// names the budget the daemon was on: the 5 s one after its first beat, the 30 s grace while
+    /// it is still starting up (#163).
     #[test]
     fn every_daemon_kill_is_preceded_by_a_line_naming_the_reason() {
-        // 1. Missed heartbeats.
+        // 1. Missed heartbeats: the 5 s budget, after the daemon's first beat.
         let (mut sup, processes) = supervisor();
         let t0 = Instant::now();
         sup.start(t0);
         let pid = sup.daemon_pid().expect("a daemon is running");
+        sup.on_heartbeat(t0 + Duration::from_secs(1));
         let text = logged(|| {
             sup.tick(t0 + Duration::from_secs(6));
         });
@@ -1131,6 +1871,20 @@ mod tests {
             .find("daemon crashed")
             .unwrap_or_else(|| panic!("the crash is logged after the kill: {text}"));
         assert!(announced < crashed, "the reason comes before the crash line: {text}");
+        assert_eq!(processes.spawns().len(), 2);
+
+        // 1b. The first heartbeat never came: the 30 s grace, named as such.
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        sup.start(t0);
+        let pid = sup.daemon_pid().expect("a daemon is running");
+        let text = logged(|| {
+            sup.tick(t0 + Duration::from_secs(31));
+        });
+        assert!(
+            announces_kill(&text, pid, "it missed its first heartbeat for 30 s"),
+            "{text}"
+        );
         assert_eq!(processes.spawns().len(), 2);
 
         // 2. The service stops.
@@ -1160,6 +1914,36 @@ mod tests {
         });
         assert!(announces_kill(&text, pid, "the active console session changed"), "{text}");
         assert_eq!(processes.spawns().len(), 2);
+
+        // 5. The daemon quit and a new console session started.
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        sup.start(t0);
+        let pid = sup.daemon_pid().expect("a daemon is running");
+        sup.on_quitting();
+        // The user logs off and a new one logs on: the daemon that quit is ended.
+        processes.log_off(1);
+        logged(|| {
+            sup.tick(t0 + Duration::from_secs(1));
+        });
+        processes.log_on(1);
+        // The logon settles first: the daemon that quit is ended once it has.
+        logged(|| {
+            sup.tick(t0 + Duration::from_secs(2));
+        });
+        let text = logged(|| {
+            sup.tick(t0 + Duration::from_secs(2) + SESSION_SETTLE);
+        });
+        assert!(
+            announces_kill(
+                &text,
+                pid,
+                "the daemon quit and a new console session started"
+            ),
+            "{text}"
+        );
+        assert_eq!(processes.spawns().len(), 2, "the new session got no daemon");
     }
 
     #[test]
@@ -1244,5 +2028,727 @@ mod tests {
         assert_eq!(sup.unended_daemon, None, "the record is gone");
         let before = sup.before_openrgb_stop();
         assert_ne!(before, DaemonBeforeStop::NotEnded { pid });
+    }
+
+    /// The exit codes of the shutdown of 2026-11-01 (#6), as the service saw them.
+    const DBG_TERMINATE_PROCESS: i32 = 0x4001_0004u32 as i32;
+    const STATUS_DLL_INIT_FAILED_LOGOFF: i32 = 0xC000_026Bu32 as i32;
+    const STATUS_ACCESS_VIOLATION: i32 = 0xC000_0005u32 as i32;
+
+    /// The shutdown of 2026-11-01: the daemon exited with `0x40010004`, the service restarted
+    /// it, and the next two exits were `0xC000026B`. The third hit the crash limit, wrote black
+    /// and stopped the daemon (#6). The session was alive for all of them (the token query kept
+    /// working), so none of them is a crash.
+    #[test]
+    fn the_shutdown_sequence_of_2026_11_01_never_reaches_the_crash_limit() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        sup.start(t0);
+        let mut now = t0;
+        let mut text = String::new();
+        for code in [
+            DBG_TERMINATE_PROCESS,
+            STATUS_DLL_INIT_FAILED_LOGOFF,
+            STATUS_DLL_INIT_FAILED_LOGOFF,
+        ] {
+            processes.exit_last_with(code);
+            now += Duration::from_secs(1);
+            text.push_str(&logged(|| assert_eq!(sup.tick(now), DaemonAction::None)));
+            // The relaunch is held: no daemon is started while the session is on its way out.
+            for _ in 0..5 {
+                now += Duration::from_secs(1);
+                text.push_str(&logged(|| assert_eq!(sup.tick(now), DaemonAction::None)));
+            }
+            assert!(!sup.stopped(), "the crash limit was reached: {text}");
+            // The hold ends when its 60 s are up: the daemon starts again.
+            now += Duration::from_secs(SESSION_END_HOLD.as_secs());
+            text.push_str(&logged(|| assert_eq!(sup.tick(now), DaemonAction::None)));
+            assert!(!sup.stopped(), "the crash limit was reached: {text}");
+        }
+        assert_eq!(
+            processes.spawns().len(),
+            4,
+            "one start and one after each hold"
+        );
+        assert!(
+            !text.contains("writing black"),
+            "nothing was written black: {text}"
+        );
+        assert!(
+            !text.contains("daemon crashed"),
+            "no exit was counted as a crash: {text}"
+        );
+    }
+
+    /// The session-end budget is three per console session. The fourth exit counts as a crash
+    /// again, so a daemon that keeps ending with its session still trips the crash limit.
+    #[test]
+    fn a_fourth_session_end_exit_in_one_session_counts_as_a_crash() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        sup.start(t0);
+        let mut now = t0;
+        // Three session ends fit in the budget.
+        for round in 1..=SESSION_END_LIMIT {
+            processes.exit_last_with(STATUS_DLL_INIT_FAILED_LOGOFF);
+            now += Duration::from_secs(1);
+            assert_eq!(sup.tick(now), DaemonAction::None);
+            now += Duration::from_secs(SESSION_END_HOLD.as_secs());
+            assert_eq!(sup.tick(now), DaemonAction::None);
+            assert_eq!(
+                processes.spawns().len(),
+                round as usize + 1,
+                "the daemon started again after the hold"
+            );
+            assert!(!sup.stopped());
+        }
+        // The fourth is a crash: it takes the crash budget, and the daemon starts again at once.
+        processes.exit_last_with(STATUS_DLL_INIT_FAILED_LOGOFF);
+        now += Duration::from_secs(1);
+        let text = logged(|| assert_eq!(sup.tick(now), DaemonAction::None));
+        assert!(text.contains("counting it as a crash"), "{text}");
+        // Three more, and the crash limit trips: a session end that keeps happening is a crash.
+        let mut action = DaemonAction::None;
+        for _ in 0..3 {
+            processes.exit_last_with(STATUS_DLL_INIT_FAILED_LOGOFF);
+            now += Duration::from_secs(1);
+            action = sup.tick(now);
+        }
+        assert_eq!(action, DaemonAction::WriteBlack);
+        assert!(sup.stopped());
+    }
+
+    /// A real crash still trips the limit: the session-end codes do not make the supervisor
+    /// lenient with a daemon that crashes (#6).
+    #[test]
+    fn four_access_violations_still_trip_the_crash_limit() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        sup.start(t0);
+        let mut now = t0;
+        let mut action = DaemonAction::None;
+        for _ in 0..4 {
+            processes.exit_last_with(STATUS_ACCESS_VIOLATION);
+            now += Duration::from_secs(1);
+            action = sup.tick(now);
+        }
+        assert_eq!(action, DaemonAction::WriteBlack);
+        assert!(sup.stopped());
+        assert_eq!(processes.spawns().len(), 4);
+    }
+
+    /// A crash stop does not strand the user until the service restarts: the next console
+    /// session (a logon) clears it (#6).
+    #[test]
+    fn a_logon_after_a_crash_stop_starts_the_daemon_again() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        sup.start(t0);
+        let mut now = t0;
+        // Four crashes: the limit trips, and the daemon stays off.
+        for _ in 0..4 {
+            processes.exit_last_with(STATUS_ACCESS_VIOLATION);
+            now += Duration::from_secs(1);
+            sup.tick(now);
+        }
+        assert!(sup.stopped());
+        assert_eq!(processes.spawns().len(), 4);
+        // The user logs off: no daemon starts while there is no session.
+        processes.log_off(1);
+        now += Duration::from_secs(1);
+        assert_eq!(sup.tick(now), DaemonAction::None);
+        assert_eq!(processes.spawns().len(), 4);
+        // The user logs on again: the token must be there for the settle time before the logon
+        // counts as a new session (#6).
+        processes.log_on(1);
+        now += Duration::from_secs(1);
+        assert_eq!(sup.tick(now), DaemonAction::None);
+        assert!(
+            sup.stopped(),
+            "the crash stop ended before the logon settled"
+        );
+        assert_eq!(processes.spawns().len(), 4, "the daemon was started again");
+        now += SESSION_SETTLE;
+        assert_eq!(sup.tick(now), DaemonAction::None);
+        assert!(!sup.stopped(), "the crash stop did not end at the logon");
+        assert_eq!(processes.spawns().len(), 5);
+        assert!(sup.daemon_pid().is_some());
+    }
+
+    /// One tick without a token is a query that failed, not a logoff: it must not clear the
+    /// crash stop, the budgets or the crash limit (#6).
+    #[test]
+    fn a_one_tick_token_blip_clears_nothing() {
+        let (mut sup, processes, mut now) = crashed_supervisor_with_a_used_budget();
+        let spawns = processes.spawns().len();
+        // One tick without a token, then the token is there again.
+        processes.log_off(1);
+        now += Duration::from_secs(1);
+        sup.tick(now);
+        processes.log_on(1);
+        now += Duration::from_secs(1);
+        sup.tick(now);
+        assert!(sup.stopped(), "the blip cleared the crash stop");
+        assert_eq!(
+            sup.restarts.len(),
+            DAEMON_RESTART_LIMIT as usize,
+            "the blip cleared the crash budget"
+        );
+        assert_eq!(
+            sup.session_ends, SESSION_END_LIMIT,
+            "the blip cleared the session-end budget"
+        );
+        assert_eq!(
+            processes.spawns().len(),
+            spawns,
+            "the daemon was started again"
+        );
+    }
+
+    /// The hold ends when its 60 s are up, even with the session still alive (#6).
+    #[test]
+    fn the_hold_after_a_session_end_ends_after_sixty_seconds() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        sup.start(t0);
+        processes.exit_last_with(STATUS_DLL_INIT_FAILED_LOGOFF);
+        let exited = t0 + Duration::from_secs(1);
+        assert_eq!(sup.tick(exited), DaemonAction::None);
+        // While the hold is on, no daemon runs and nothing is written black.
+        let hold_end = exited + SESSION_END_HOLD;
+        let mut now = exited;
+        while now + Duration::from_secs(1) < hold_end {
+            now += Duration::from_secs(1);
+            assert_eq!(sup.tick(now), DaemonAction::None);
+            assert_eq!(processes.spawns().len(), 1, "the relaunch is held");
+            assert_eq!(sup.daemon_pid(), None);
+        }
+        // 60 s after the exit the hold is over: the daemon starts again.
+        assert_eq!(sup.tick(hold_end), DaemonAction::None);
+        assert_eq!(
+            processes.spawns().len(),
+            2,
+            "the hold ended and the daemon started"
+        );
+        assert!(sup.daemon_pid().is_some());
+    }
+
+    /// A supervisor whose crash limit tripped: the daemon is off and the crash stop is on.
+    fn crashed_supervisor() -> (DaemonSupervisor, FakeProcesses, Instant) {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        sup.start(t0);
+        let mut now = t0;
+        for _ in 0..4 {
+            processes.exit_last_with(STATUS_ACCESS_VIOLATION);
+            now += Duration::from_secs(1);
+            sup.tick(now);
+        }
+        assert!(sup.stopped(), "the crash limit tripped");
+        assert_eq!(
+            processes.spawns().len(),
+            4,
+            "the daemon is off after the crash stop"
+        );
+        (sup, processes, now)
+    }
+
+    /// A supervisor whose crash limit tripped and whose session-end budget is spent: the daemon
+    /// is off, the crash stop is on, and both budgets are used up.
+    fn crashed_supervisor_with_a_used_budget() -> (DaemonSupervisor, FakeProcesses, Instant) {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        sup.start(t0);
+        let mut now = t0;
+        // Three session ends: the session-end budget is spent and no crash is counted.
+        for _ in 0..SESSION_END_LIMIT {
+            processes.exit_last_with(STATUS_DLL_INIT_FAILED_LOGOFF);
+            now += Duration::from_secs(1);
+            sup.tick(now);
+            now += Duration::from_secs(SESSION_END_HOLD.as_secs());
+            sup.tick(now);
+        }
+        assert_eq!(
+            sup.session_ends, SESSION_END_LIMIT,
+            "the session-end budget is not spent"
+        );
+        // Four crashes: the crash limit trips and the daemon stays off.
+        for _ in 0..4 {
+            processes.exit_last_with(STATUS_ACCESS_VIOLATION);
+            now += Duration::from_secs(1);
+            sup.tick(now);
+        }
+        assert!(sup.stopped(), "the crash limit tripped");
+        (sup, processes, now)
+    }
+
+    /// A console id that flips (1 -> 2 -> 1) inside the settle time is not a new session: the
+    /// crash stop stays, or a flickering console would clear the limit on every flip (#6).
+    #[test]
+    fn a_console_that_flips_does_not_clear_the_crash_stop() {
+        let (mut sup, processes, mut now) = crashed_supervisor();
+        processes.set_console(2);
+        now += Duration::from_secs(1);
+        sup.tick(now);
+        processes.set_console(1);
+        now += Duration::from_secs(1);
+        sup.tick(now);
+        assert!(sup.stopped(), "the flap cleared the crash stop");
+        assert_eq!(processes.spawns().len(), 4, "the daemon was started again");
+    }
+
+    /// The logon screen: the console is on a session with no user in it. That is not a new
+    /// session, so the crash stop stays (#6).
+    #[test]
+    fn a_move_to_a_session_with_no_user_does_not_clear_the_crash_stop() {
+        let (mut sup, processes, mut now) = crashed_supervisor();
+        processes.log_off(2);
+        processes.set_console(2);
+        // Well past the settle time: the session still has no user in it.
+        for _ in 0..5 {
+            now += Duration::from_secs(1);
+            sup.tick(now);
+        }
+        assert!(
+            sup.stopped(),
+            "the move to a session with no user cleared the crash stop"
+        );
+        assert_eq!(processes.spawns().len(), 4, "the daemon was started again");
+    }
+
+    /// A console session that has settled and has a user in it is a new session: the crash stop
+    /// ends and the daemon starts again (#6).
+    #[test]
+    fn a_settled_move_to_a_live_session_clears_the_crash_stop() {
+        let (mut sup, processes, mut now) = crashed_supervisor();
+        processes.set_console(2);
+        // Inside the settle time: nothing yet.
+        now += Duration::from_secs(1);
+        sup.tick(now);
+        assert!(
+            sup.stopped(),
+            "the crash stop ended before the session settled"
+        );
+        // After the settle time: the new session starts the daemon again.
+        now += SESSION_SETTLE;
+        sup.tick(now);
+        assert!(
+            !sup.stopped(),
+            "the settled move did not end the crash stop"
+        );
+        assert_eq!(
+            processes.spawns().len(),
+            5,
+            "the daemon was not started again"
+        );
+        assert!(sup.daemon_pid().is_some());
+    }
+
+    /// A daemon that quit on purpose stops the supervision, but the next user is not stranded by
+    /// it: a new console session gets a daemon of its own (#6).
+    #[test]
+    fn a_new_session_after_a_quit_starts_the_daemon_again() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        sup.start(t0);
+        sup.on_quitting();
+        processes.exit_last();
+        let mut now = t0;
+        // The daemon that quit is not replaced.
+        now += Duration::from_secs(1);
+        sup.tick(now);
+        assert_eq!(
+            processes.spawns().len(),
+            1,
+            "the daemon that quit was started again"
+        );
+        // The user logs off: still no daemon.
+        processes.log_off(1);
+        now += Duration::from_secs(1);
+        sup.tick(now);
+        assert_eq!(
+            processes.spawns().len(),
+            1,
+            "a daemon was started with no user logged on"
+        );
+        // A new user logs on: the logon must settle before it counts as a new session, and only
+        // then does the new session get a daemon.
+        processes.log_on(1);
+        now += Duration::from_secs(1);
+        sup.tick(now);
+        assert_eq!(
+            processes.spawns().len(),
+            1,
+            "the daemon that quit was started again before the logon settled"
+        );
+        now += SESSION_SETTLE;
+        sup.tick(now);
+        assert_eq!(processes.spawns().len(), 2, "the new session got no daemon");
+        assert!(sup.daemon_pid().is_some());
+    }
+
+    /// The line that says the daemon ended with its session names the code (#6).
+    #[test]
+    fn the_session_end_line_names_the_code() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        sup.start(t0);
+        processes.exit_last_with(STATUS_DLL_INIT_FAILED_LOGOFF);
+        let text = logged(|| {
+            sup.tick(t0 + Duration::from_secs(1));
+        });
+        assert!(
+            text.contains("the daemon ended with its session (0xC000026B STATUS_DLL_INIT_FAILED_LOGOFF); not a crash"),
+            "{text}"
+        );
+
+        let (mut sup, processes) = supervisor();
+        processes.set_console(1);
+        sup.start(t0);
+        processes.exit_last_with(DBG_TERMINATE_PROCESS);
+        let text = logged(|| {
+            sup.tick(t0 + Duration::from_secs(1));
+        });
+        assert!(
+            text.contains(
+                "the daemon ended with its session (0x40010004 DBG_TERMINATE_PROCESS); not a crash"
+            ),
+            "{text}"
+        );
+    }
+
+    /// The session-end budget belongs to the console session that settled, not to the id the
+    /// console happens to report at the moment of the exit: an exit while the console is
+    /// flipping must not hand the daemon a fresh budget (#6).
+    #[test]
+    fn a_session_end_during_a_console_flip_keeps_the_budget() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        sup.start(t0);
+        // One session end: the budget of session 1 is used.
+        processes.exit_last_with(STATUS_DLL_INIT_FAILED_LOGOFF);
+        let mut now = t0 + Duration::from_secs(1);
+        sup.tick(now);
+        assert_eq!(sup.session_ends, 1, "the session end did not count");
+        assert_eq!(sup.budget_session, Some(1), "the budget is not session 1");
+        // The hold ends and the daemon starts again.
+        now += Duration::from_secs(SESSION_END_HOLD.as_secs());
+        sup.tick(now);
+        assert_eq!(
+            processes.spawns().len(),
+            2,
+            "the daemon did not start again"
+        );
+        // The console flips to another session. The move has not settled, so the session the
+        // supervisor settled on is still 1, and the exit belongs to that session.
+        processes.set_console(2);
+        processes.exit_last_with(STATUS_DLL_INIT_FAILED_LOGOFF);
+        now += Duration::from_secs(1);
+        sup.tick(now);
+        assert_eq!(
+            sup.budget_session,
+            Some(1),
+            "the budget moved to the session that was flipping"
+        );
+        assert_eq!(sup.session_ends, 2, "the budget was reset by the flip");
+    }
+
+    /// The hold after a session end ends when the session is gone, long before its 60 s are up
+    /// (#6).
+    #[test]
+    fn the_hold_ends_when_the_session_is_gone() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        sup.start(t0);
+        processes.exit_last_with(STATUS_DLL_INIT_FAILED_LOGOFF);
+        let exited = t0 + Duration::from_secs(1);
+        assert_eq!(sup.tick(exited), DaemonAction::None);
+        assert_eq!(sup.daemon_pid(), None, "the relaunch is held");
+        // The user logs off: the session is gone, so the hold is over.
+        processes.log_off(1);
+        let text = logged(|| {
+            sup.tick(exited + Duration::from_secs(2));
+        });
+        assert!(text.contains("the session-end hold is over"), "{text}");
+        // Nobody is logged on, so there is no daemon yet.
+        assert_eq!(
+            sup.daemon_pid(),
+            None,
+            "a daemon ran with no user logged on"
+        );
+        assert_eq!(
+            processes.spawns().len(),
+            1,
+            "a daemon was started with no user logged on"
+        );
+        // The next user logs on: the daemon starts.
+        processes.log_on(1);
+        sup.tick(exited + Duration::from_secs(3));
+        assert!(
+            sup.daemon_pid().is_some(),
+            "the daemon did not start at the logon"
+        );
+    }
+
+    /// A session-end exit in the same tick as the console settle must not hold the relaunch
+    /// (#173). The console settled on another session and the daemon of the old session ended
+    /// with its session in that same tick: the hold would wait for a session that is already
+    /// gone, so the new user would sit without lights for up to a minute.
+    /// The immediate start reads the live console: when it has already moved off the settled
+    /// session, the daemon must not start there; the exit holds like any other session end
+    /// (review of PR #179).
+    #[test]
+    fn a_session_end_while_the_live_console_left_the_settled_session_holds() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        sup.start(t0);
+        let spawned = processes.spawns().len();
+        // The console settled on session 2, but at the moment of the exit it reads 3.
+        sup.console = Some(2);
+        processes.set_console(3);
+        let action = sup.session_end(t0 + Duration::from_secs(1), 0x4001_0004u32 as i32, Some(1));
+        assert_eq!(action, DaemonAction::None);
+        assert_eq!(processes.spawns().len(), spawned, "a daemon started in a session that is not the settled one");
+        assert!(sup.hold.is_some(), "the exit did not hold");
+    }
+
+    #[test]
+    fn a_session_end_on_the_settle_tick_starts_the_daemon_at_once() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        sup.start(t0);
+        // The supervisor sees console session 1 first.
+        let mut now = t0 + Duration::from_secs(1);
+        sup.on_heartbeat(now);
+        assert_eq!(sup.tick(now), DaemonAction::None);
+        assert_eq!(sup.console, Some(1), "the console session was not seen");
+        // The console moves to another session, where a user is logged on.
+        processes.set_console(2);
+        now += Duration::from_secs(1);
+        sup.on_heartbeat(now);
+        assert_eq!(sup.tick(now), DaemonAction::None);
+        assert_eq!(sup.console, Some(1), "the console moved before it settled");
+        // The settle time is up. In this tick the new session settles and the daemon of session 1
+        // ends with its session.
+        processes.exit_last_with(STATUS_DLL_INIT_FAILED_LOGOFF);
+        now += SESSION_SETTLE;
+        sup.on_heartbeat(now);
+        let text = logged(|| assert_eq!(sup.tick(now), DaemonAction::None));
+        assert_eq!(sup.console, Some(2), "the new session did not settle");
+        assert!(
+            text.contains("the daemon ended with its session"),
+            "the session end was not logged: {text}"
+        );
+        assert_eq!(sup.session_ends, 1, "the session end was not counted");
+        assert_eq!(
+            processes.spawns().len(),
+            2,
+            "the daemon was not started in the new session"
+        );
+        assert_eq!(
+            sup.child_session,
+            Some(2),
+            "the daemon did not start in the new session"
+        );
+        assert!(sup.daemon_pid().is_some(), "no daemon is running");
+        // The daemon runs in the new session: no second launch, and the exit was no crash.
+        for _ in 0..5 {
+            now += Duration::from_secs(1);
+            sup.on_heartbeat(now);
+            assert_eq!(sup.tick(now), DaemonAction::None);
+        }
+        assert_eq!(processes.spawns().len(), 2, "the daemon was started again");
+        assert!(!sup.stopped(), "the session end was counted as a crash");
+    }
+
+    /// A token that keeps flapping (the query succeeds, then fails, then succeeds again) never
+    /// settles: a logon that does not stay for the settle time is not a new session (#6). The
+    /// supervisor keeps waiting: the crash stop, the budgets and the daemon all stay as they were.
+    #[test]
+    fn a_token_that_keeps_flapping_never_settles() {
+        let (mut sup, processes, mut now) = crashed_supervisor_with_a_used_budget();
+        let spawns = processes.spawns().len();
+        // The token flaps every second: it is never there for the settle time.
+        for _ in 0..6 {
+            processes.log_off(1);
+            now += Duration::from_secs(1);
+            sup.tick(now);
+            processes.log_on(1);
+            now += Duration::from_secs(1);
+            sup.tick(now);
+        }
+        assert!(
+            sup.stopped(),
+            "the flapping token settled and cleared the crash stop"
+        );
+        assert_eq!(
+            sup.restarts.len(),
+            DAEMON_RESTART_LIMIT as usize,
+            "the flapping token cleared the crash budget"
+        );
+        assert_eq!(
+            sup.session_ends, SESSION_END_LIMIT,
+            "the flapping token cleared the session-end budget"
+        );
+        assert_eq!(
+            processes.spawns().len(),
+            spawns,
+            "the flapping token started the daemon again"
+        );
+        assert_eq!(
+            sup.console,
+            Some(1),
+            "the flapping token changed the session"
+        );
+        // The token stays now: the logon settles, the crash stop ends and the daemon starts.
+        now += SESSION_SETTLE;
+        sup.tick(now);
+        assert!(
+            !sup.stopped(),
+            "the settled logon did not end the crash stop"
+        );
+        assert_eq!(
+            processes.spawns().len(),
+            spawns + 1,
+            "the settled logon did not start the daemon"
+        );
+    }
+
+    /// The hold after a session end ends when the console moves to another session (#6).
+    #[test]
+    fn the_hold_ends_when_the_console_moves() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        sup.start(t0);
+        processes.exit_last_with(STATUS_DLL_INIT_FAILED_LOGOFF);
+        let exited = t0 + Duration::from_secs(1);
+        assert_eq!(sup.tick(exited), DaemonAction::None);
+        assert_eq!(sup.daemon_pid(), None, "the relaunch is held");
+        // The console moves to another session: the hold is over and the daemon starts there.
+        processes.set_console(2);
+        let text = logged(|| {
+            sup.tick(exited + Duration::from_secs(2));
+        });
+        assert!(text.contains("the session-end hold is over"), "{text}");
+        assert!(
+            sup.daemon_pid().is_some(),
+            "the daemon did not start in the new session"
+        );
+        assert_eq!(processes.spawns().len(), 2, "the new session got no daemon");
+    }
+
+    /// A new console session starts a new session-end budget (#6).
+    #[test]
+    fn a_new_console_session_resets_the_session_end_budget() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        sup.start(t0);
+        let mut now = t0;
+        // The budget of session 1 is spent: three session ends and no crash.
+        for _ in 0..SESSION_END_LIMIT {
+            processes.exit_last_with(STATUS_DLL_INIT_FAILED_LOGOFF);
+            now += Duration::from_secs(1);
+            sup.tick(now);
+            now += Duration::from_secs(SESSION_END_HOLD.as_secs());
+            sup.tick(now);
+        }
+        assert_eq!(
+            sup.session_ends, SESSION_END_LIMIT,
+            "the budget of session 1 is not spent"
+        );
+        // The console moves to another session and settles: the new session starts a new budget.
+        processes.set_console(2);
+        now += Duration::from_secs(1);
+        sup.tick(now);
+        now += SESSION_SETTLE;
+        sup.tick(now);
+        assert_eq!(sup.session_ends, 0, "the new session kept the old budget");
+        assert_eq!(
+            sup.budget_session,
+            Some(2),
+            "the budget still belongs to the old session"
+        );
+        assert_eq!(
+            sup.child_session,
+            Some(2),
+            "the daemon did not move to the new session"
+        );
+        // The next session end is inside the fresh budget of the new session.
+        processes.exit_last_with(STATUS_DLL_INIT_FAILED_LOGOFF);
+        now += Duration::from_secs(1);
+        let text = logged(|| {
+            sup.tick(now);
+        });
+        assert!(
+            !text.contains("counting it as a crash"),
+            "the new session had no fresh budget: {text}"
+        );
+        assert_eq!(
+            sup.session_ends, 1,
+            "the session end did not count in the new session"
+        );
+    }
+
+    /// The daemon that quit does not go away: the wait for it is bounded, and the new session
+    /// still gets a daemon (#6).
+    #[test]
+    fn a_quitting_daemon_that_never_exits_does_not_stall_the_new_session() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        // The daemon never ends: the kill leaves it running, so the wait has to give up.
+        processes.set_slow_kill(u32::MAX);
+        sup.start(t0);
+        let pid = sup.daemon_pid().expect("a daemon is running");
+        sup.on_quitting();
+        // The user logs off and a new one logs on: the daemon that quit is ended and waited for.
+        processes.log_off(1);
+        let mut text = logged(|| {
+            sup.tick(t0 + Duration::from_secs(1));
+        });
+        processes.log_on(1);
+        text.push_str(&logged(|| {
+            sup.tick(t0 + Duration::from_secs(2));
+        }));
+        text.push_str(&logged(|| {
+            sup.tick(t0 + Duration::from_secs(2) + SESSION_SETTLE);
+        }));
+        assert!(
+            announces_kill(
+                &text,
+                pid,
+                "the daemon quit and a new console session started"
+            ),
+            "{text}"
+        );
+        // The wait was bounded: it gave up instead of polling forever.
+        assert!(
+            text.contains("the old daemon did not exit within 5 s"),
+            "the wait did not give up: {text}"
+        );
+        assert!(processes.polls() > 0, "the wait did not poll at all");
+        assert!(
+            processes.polls() <= 1000,
+            "the wait polled {} times",
+            processes.polls()
+        );
+        // The new session got a daemon anyway, and nothing panicked on the way.
+        assert_eq!(processes.spawns().len(), 2, "the new session got no daemon");
+        assert!(sup.daemon_pid().is_some());
     }
 }

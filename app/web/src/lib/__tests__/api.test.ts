@@ -57,6 +57,24 @@ function hangingBodyFetch() {
   });
 }
 
+/** A fetch that never answers, and fails when the request is given up on. It keeps the signal. */
+function recordedHangingFetch(seen: { signal?: AbortSignal | null }) {
+  return vi.fn(
+    (_url: string, init?: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        const signal = init?.signal ?? null;
+        seen.signal = signal;
+        const fail = () => reject(new DOMException("The operation was aborted.", "AbortError"));
+        // A request that is handed an ended signal fails at once, as the browser does.
+        if (signal?.aborted) {
+          fail();
+          return;
+        }
+        signal?.addEventListener("abort", fail);
+      }),
+  );
+}
+
 /** The tray: it hands out the address and the token. */
 function trayThatAnswers() {
   return {
@@ -258,6 +276,99 @@ describe("the request deadline", () => {
   });
 });
 
+describe("a request the caller lets go of", () => {
+  // The caller may end a request it no longer needs (issue #97). That end is the caller's own
+  // doing: it is not the daemon being slow, and it is not an error either.
+
+  beforeEach(() => {
+    (window as unknown as { __TAURI__?: unknown }).__TAURI__ = trayThatAnswers();
+    dropApiConfig();
+  });
+
+  afterEach(() => {
+    delete (window as unknown as { __TAURI__?: unknown }).__TAURI__;
+    dropApiConfig();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("surfaces an external abort as an AbortError, not as the deadline", async () => {
+    vi.useFakeTimers();
+    const seen: { signal?: AbortSignal | null } = {};
+    vi.stubGlobal("fetch", recordedHangingFetch(seen));
+    const ctl = new AbortController();
+    const call = request("GET", "/api/v1/effects", undefined, { signal: ctl.signal });
+    const settled = call.then(
+      () => null,
+      (e: unknown) => e,
+    );
+    // The request is out: the tray answered and the call is on the wire.
+    await vi.advanceTimersByTimeAsync(10);
+    expect(seen.signal).toBeTruthy();
+    // The caller does not want the answer any more, and ends the request.
+    ctl.abort();
+    await vi.advanceTimersByTimeAsync(10);
+    const error = (await settled) as { name?: string; message?: string } | null;
+    expect(error?.name).toBe("AbortError");
+    // The deadline did not pass: this is not a timeout, and the daemon is not blamed.
+    expect(error?.message ?? "").not.toMatch(/did not answer within/);
+    // The request really was ended: the transport carries the abort.
+    expect(seen.signal?.aborted).toBe(true);
+  });
+
+  it("still gives up on the deadline when the caller did not abort", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", hangingFetch());
+    const ctl = new AbortController();
+    const call = request("GET", "/api/v1/effects", undefined, { signal: ctl.signal });
+    const settled = expect(call).rejects.toThrow(/did not answer within/);
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 50);
+    await settled;
+  });
+
+  it("does not send a request the caller has already let go of", async () => {
+    vi.useFakeTimers();
+    const seen: { signal?: AbortSignal | null } = {};
+    const fetchMock = recordedHangingFetch(seen);
+    vi.stubGlobal("fetch", fetchMock);
+    const ctl = new AbortController();
+    ctl.abort();
+    const call = request("GET", "/api/v1/effects", undefined, { signal: ctl.signal });
+    const settled = call.then(
+      () => null,
+      (e: unknown) => e,
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    const error = (await settled) as { name?: string } | null;
+    expect(error?.name).toBe("AbortError");
+    // The request was never sent: the daemon was never asked.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("surfaces an abort during the tray's lookup as an AbortError", async () => {
+    vi.useFakeTimers();
+    // The tray's own lookup never finishes: the request is waiting before it even starts.
+    (window as unknown as { __TAURI__?: unknown }).__TAURI__ = trayThatNeverAnswers();
+    dropApiConfig();
+    const ctl = new AbortController();
+    const call = request("GET", "/api/v1/effects", undefined, { signal: ctl.signal });
+    const settled = call.then(
+      () => null,
+      (e: unknown) => e,
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    // The caller does not want the answer any more, and ends the request while the lookup is
+    // still running.
+    ctl.abort();
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 50);
+    const error = (await settled) as { name?: string; message?: string } | null;
+    // The caller's own end is not the deadline: the lookup that hangs must not turn the caller's
+    // abort into a timeout, and the daemon is not blamed for it.
+    expect(error?.name).toBe("AbortError");
+    expect(error?.message ?? "").not.toMatch(/did not answer within/);
+  });
+});
+
 describe("the deadlines of the routes", () => {
   it("pins the default deadline", () => {
     expect(REQUEST_TIMEOUT_MS).toBe(10_000);
@@ -289,5 +400,36 @@ describe("the deadlines of the routes", () => {
     expect(deadlineFor("/api/v1/status")).toBe(REQUEST_TIMEOUT_MS);
     expect(deadlineFor("/api/v1/effects")).toBe(REQUEST_TIMEOUT_MS);
     expect(deadlineFor("/api/v1/devices")).toBe(REQUEST_TIMEOUT_MS);
+  });
+});
+
+describe("the demo backend and a request the caller lets go of", () => {
+  // The demo answers from memory: there is no request to let go of, and the answer is dropped
+  // anyway. A caller that has already let go of the request still gets the same answer it gets
+  // on a real daemon: an abort is not an error, and it is not the deadline either (issue #97).
+
+  beforeEach(() => {
+    // No Tauri host: the app runs on the demo backend.
+    delete (window as unknown as { __TAURI__?: unknown }).__TAURI__;
+    dropApiConfig();
+  });
+
+  afterEach(() => {
+    delete (window as unknown as { __TAURI__?: unknown }).__TAURI__;
+    dropApiConfig();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("surfaces an already-aborted signal as an AbortError", async () => {
+    const ctl = new AbortController();
+    ctl.abort();
+    const call = request("GET", "/api/v1/effects", undefined, { signal: ctl.signal });
+    const settled = call.then(
+      () => null,
+      (e: unknown) => e,
+    );
+    const error = (await settled) as { name?: string } | null;
+    expect(error?.name).toBe("AbortError");
   });
 });

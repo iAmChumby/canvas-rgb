@@ -13,6 +13,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
+- A slow start (a busy logon, a cold disk) no longer gets the daemon killed and counted as a crash: it now has 30 s to say it is up. The boot color is painted while it starts, so the lights are not left dark. (#163)
+- Effects: the code editor's preview no longer waits up to an hour when the daemon is busy, and no longer sends a request it no longer needs. A busy answer now waits at most 30 seconds, a second busy answer replaces the retry that was waiting instead of adding to it, and a preview that a newer one has superseded is no longer rendered. (#97)
+- Audio Spectrum and Screen Ambience now receive the audio and the screen: the daemon never connected its capture to the lights, so both effects stayed dark. (#1)
+- Service: shutting down or restarting Windows no longer logs the daemon as crashed or stops it from restarting. A daemon that ended with its session (the user logged off, or Windows tore the session down) is not a crash: nothing is written black, the restart waits for the session to end, and the next logon starts the daemon again. A console session that changes, or a logon after a logoff, counts as a new session only once it has settled and has a user in it, so a session id that flickers or a user token that failed to be read once no longer clears the crash limit, and a daemon that quit on purpose is replaced when the next user logs on. (#6)
 - Peripherals: the message that a change did not reach the device now stays on screen. A device read that lands after the failed change no longer hides it, so the change is not left looking as if it went through. (#151)
 - Stacks: the daemon now refuses a layer area that runs off the canvas, naming the layer and the edge. A stack saved before this still loads and looks the same, and the editor fits such an area to the canvas the next time it saves, so the stack saves again. (#118)
 - Stacks: the daemon's memory no longer grows with every editor page load. The stack preview and the stack draft now remember only the pages that are still talking, and a page that fell out of that memory still loses the lights to a newer page instead of taking them: it keeps losing for up to 9216 more page loads, and is treated as a new page after that. (#102)
@@ -20,6 +24,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - Fans: `canvas-rgb fans status` now says "not on this board" for a header that is not wired up, instead of showing it as a BIOS header that refused the asked curve. The other rows read as before, and `--json` still carries the availability of every header. (#153)
 - Effects: importing a config while the editor's draft is on the lights now ends that draft and puts the effect that was in force back, so the draft cannot end later and bring back an effect the import replaced. (#94)
 - Effects: the editor's source route now refuses an effect file over 1 MiB, the same limit the preview and the draft use, instead of reading a broken file of any size into memory. (#94)
+- Service: a user switch that happens at the moment the daemon ends no longer leaves the lights unmanaged for up to a minute: the daemon starts in the new session at once. (#173)
 
 ## [0.8.2] - 2026-11-04
 

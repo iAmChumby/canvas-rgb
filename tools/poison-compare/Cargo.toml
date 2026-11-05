@@ -4,6 +4,7 @@ description = "Statistical comparison of the HTML runtime's rendering of Poison 
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [dependencies]
 canvas-proto.workspace = true
