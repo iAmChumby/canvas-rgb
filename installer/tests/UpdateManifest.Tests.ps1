@@ -6,7 +6,8 @@ $ErrorActionPreference = 'Stop'
 $workflowPath = if ($env:CANVAS_RGB_RELEASE_WORKFLOW) { $env:CANVAS_RGB_RELEASE_WORKFLOW } else { Join-Path $PSScriptRoot '..\..\.github\workflows\release.yml' }
 
 # The release workflow's jobs, with the comment lines dropped (comments say where the key is; only
-# code counts). Returns the whole text and the text of each job.
+# code counts). Returns the whole text, the text of each job and the names of the jobs that are
+# defined more than once (the last copy of such a job is the one the text of the job holds).
 function Get-WorkflowJobs {
     param([string]$Path)
     return Get-WorkflowJobsFromText (Get-Content -LiteralPath $Path -Raw)
@@ -16,15 +17,20 @@ function Get-WorkflowJobsFromText {
     $text = (($Text -split '\r?\n') | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
     # Split into jobs at the two-space-indented keys under jobs: a job runs from its key to the next such key, or to the end.
     $jobs = @{}
+    $duplicates = @()
     $at = [regex]::Match($text, '(?m)^jobs:\s*$')
     if (-not $at.Success) { throw 'the workflow has no jobs: key' }
     $body = $text.Substring($at.Index)
     $names = [regex]::Matches($body, '(?m)^  ([A-Za-z0-9_-]+):\s*$')
     for ($i = 0; $i -lt $names.Count; $i++) {
         $end = if ($i + 1 -lt $names.Count) { $names[$i + 1].Index } else { $body.Length }
-        $jobs[$names[$i].Groups[1].Value] = $body.Substring($names[$i].Index, $end - $names[$i].Index)
+        $name = $names[$i].Groups[1].Value
+        # A second job with the same name: the text of the job holds the last copy, so the guard
+        # would read that one and never see the other. The name is kept, to be reported.
+        if ($jobs.ContainsKey($name)) { $duplicates += $name }
+        $jobs[$name] = $body.Substring($names[$i].Index, $end - $names[$i].Index)
     }
-    return @{ Text = $text; Jobs = $jobs }
+    return @{ Text = $text; Jobs = $jobs; Duplicates = $duplicates }
 }
 
 # One step of a job: from the line holding the marker up to the line before the next step. The marker is
@@ -174,17 +180,234 @@ function Get-WorkflowEntries {
     return $entries
 }
 
+# The value of a "key: value" line: the text after the colon, without a trailing comment and
+# without quotes. In YAML a "#" that follows a space starts a comment, so "contents: write # why"
+# holds the value write.
+function Get-PermissionValue {
+    param([string]$Value)
+    $v = $Value.Trim()
+    $m = [regex]::Match($v, '(^|\s)#')
+    if ($m.Success) { $v = $v.Substring(0, $m.Index).Trim() }
+    if ($v -match '^(["''])(.*)\1$') { $v = $Matches[2].Trim() }
+    return $v
+}
+
+# One permissions block, read as text. $Lines are the lines of the scope the block stands in (the
+# whole file for the top level, the job's own lines for a job), $Index the line of the
+# "permissions:" key, $KeyIndent the indent of that key and $EntryIndent the indent of a key
+# inside the block.
+#
+# The block is one of four kinds:
+#   map        - a list of keys with their values, in block style (one key per line) or in flow
+#                style (the map in braces, on one line or over several);
+#   scalar     - write-all or read-all: no key at all, so there is nothing to read;
+#   unreadable - a shape the guard does not read, which the guard reports instead of skipping;
+#   duplicate  - a second permissions key in the same scope, which GitHub would refuse.
+function Get-PermissionBlock {
+    param([string[]]$Lines, [int]$Index, [int]$KeyIndent, [int]$EntryIndent)
+    $kv = Get-WorkflowKey $Lines[$Index]
+    $value = Get-PermissionValue $kv.Value
+    $lineText = $Lines[$Index]
+    # The lines of the block: the ones after the key, up to the line that ends the scope.
+    $body = @()
+    for ($i = $Index + 1; $i -lt $Lines.Count; $i++) {
+        if ($Lines[$i].Trim() -eq '') { continue }
+        $indent = $Lines[$i].Length - $Lines[$i].TrimStart(' ').Length
+        if ($indent -le $KeyIndent) { break }
+        $body += ,@{ Text = $Lines[$i]; Indent = $indent }
+    }
+    if ($value -eq '') {
+        # Block style: one key per line, each at the block's own indent.
+        $entries = @()
+        foreach ($b in $body) {
+            $rest = $b.Text.TrimStart(' ')
+            if ($b.Indent -ne $EntryIndent) { return @{ Kind = 'unreadable'; Style = 'block'; Entries = @(); Value = ''; Used = 0; Line = $lineText } }
+            $e = Get-WorkflowKey $rest
+            $entries += ,@{ Key = $e.Key; Value = (Get-PermissionValue $e.Value); Line = $b.Text }
+        }
+        return @{ Kind = 'map'; Style = 'block'; Entries = $entries; Value = ''; Used = $entries.Count; Line = $lineText }
+    }
+    if ($value.StartsWith('{')) {
+        # Flow style: the map in braces. It may run over several lines, so the lines of the block
+        # are read on until the braces balance.
+        $map = $value
+        $used = 0
+        foreach ($b in $body) {
+            if ($map.Contains('}')) { break }
+            $map += ' ' + $b.Text.Trim()
+            if ($b.Indent -eq $EntryIndent) { $used++ }
+        }
+        $open = $map.IndexOf('{')
+        $close = $map.LastIndexOf('}')
+        if ($close -lt $open) { return @{ Kind = 'unreadable'; Style = 'flow'; Entries = @(); Value = $value; Used = $used; Line = $lineText } }
+        $inner = $map.Substring($open + 1, $close - $open - 1)
+        $entries = @()
+        foreach ($part in ($inner -split ',')) {
+            if ($part.Trim() -eq '') { continue }
+            $e = Get-WorkflowKey $part
+            $entries += ,@{ Key = $e.Key; Value = (Get-PermissionValue $e.Value); Line = $lineText }
+        }
+        return @{ Kind = 'map'; Style = 'flow'; Entries = $entries; Value = ''; Used = $used; Line = $lineText }
+    }
+    # A scalar: write-all, read-all, or anything else that is not a map of keys.
+    return @{ Kind = 'scalar'; Style = 'scalar'; Entries = @(); Value = $value; Used = 0; Line = $lineText }
+}
+
+# The permissions blocks of a workflow: the top-level one and each job's own. Each block names the
+# scope it stands in ('top-level' or the job's name), its kind, its value and its entries.
+#
+# It also says where the blocks stand: HasTop is whether the file holds a top-level permissions
+# key, Own the jobs that hold a permissions key of their own, and Jobs the names of the jobs the
+# workflow holds. A job with neither its own block nor a top-level block to inherit gets the
+# repository's default token permissions, which the file does not show.
+function Get-PermissionBlocks {
+    param([string]$Text)
+    $info = Get-WorkflowJobsFromText $Text
+    $blocks = @()
+    # The top-level block: a "permissions:" key at column 0.
+    $lines = @($info.Text -split "`n")
+    $tops = @()
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '^["'']?permissions["'']?\s*:') { $tops += $i }
+    }
+    for ($n = 0; $n -lt $tops.Count; $n++) {
+        $i = $tops[$n]
+        $blocks += ,@{ Scope = 'top-level'; Block = (Get-PermissionBlock -Lines $lines -Index $i -KeyIndent 0 -EntryIndent 2) }
+        if ($n -gt 0) { $blocks += ,@{ Scope = 'top-level'; Block = @{ Kind = 'duplicate'; Style = ''; Entries = @(); Value = ''; Used = 0; Line = $lines[$i] } } }
+    }
+    $own = @{}
+    foreach ($name in $info.Jobs.Keys) {
+        $jobLines = @($info.Jobs[$name] -split "`n")
+        $keys = @()
+        for ($i = 0; $i -lt $jobLines.Count; $i++) {
+            if ($jobLines[$i] -match '^ {4}["'']?permissions["'']?\s*:') { $keys += $i }
+        }
+        if ($keys.Count -gt 0) { $own[$name] = $true }
+        # The permission keys of the job: the lines at six spaces that do not start a step. The
+        # ones the block does not hold stand outside any permissions block.
+        $permLines = @()
+        for ($i = 0; $i -lt $jobLines.Count; $i++) {
+            if ($jobLines[$i] -match '^ {6}(?!-)\S') { $permLines += $i }
+        }
+        for ($n = 0; $n -lt $keys.Count; $n++) {
+            $i = $keys[$n]
+            $block = Get-PermissionBlock -Lines $jobLines -Index $i -KeyIndent 4 -EntryIndent 6
+            $blocks += ,@{ Scope = $name; Block = $block }
+            if ($n -gt 0) { $blocks += ,@{ Scope = $name; Block = @{ Kind = 'duplicate'; Style = ''; Entries = @(); Value = ''; Used = 0; Line = $jobLines[$i] } } }
+            elseif ($permLines.Count -gt $block.Used) {
+                # A permission key that stands outside the block: the guard does not know what it
+                # grants, so it reports it, on the line it stands on.
+                $strayLine = $jobLines[$i]
+                $after = @($permLines | Where-Object { $_ -gt $i })
+                $before = @($permLines | Where-Object { $_ -lt $i })
+                if ($after.Count -gt $block.Used) { $strayLine = $jobLines[$after[$block.Used]] }
+                elseif ($before.Count -gt 0) { $strayLine = $jobLines[$before[0]] }
+                $blocks += ,@{ Scope = $name; Block = @{ Kind = 'stray'; Style = ''; Entries = @(); Value = ''; Used = 0; Line = $strayLine } }
+            }
+        }
+        if ($keys.Count -eq 0 -and $permLines.Count -gt 0) {
+            # A permission key with no permissions block at all.
+            $blocks += ,@{ Scope = $name; Block = @{ Kind = 'stray'; Style = ''; Entries = @(); Value = ''; Used = 0; Line = $jobLines[$permLines[0]] } }
+        }
+    }
+    return @{ Blocks = $blocks; HasTop = ($tops.Count -gt 0); Own = $own; Jobs = @($info.Jobs.Keys) }
+}
+
+# The keys and the values a top-level permissions block may hold: what every job may hold,
+# because a top-level block applies to every job. The sign job may never hold a write, so the top
+# level may not either, and the only key all three jobs allow is contents.
+function Get-TopPermissionAllowlist {
+    $keys = $null
+    $values = $null
+    foreach ($name in $workflowAllowed.Keys) {
+        $k = @($workflowAllowed[$name].Perm)
+        $v = @($workflowAllowed[$name].PermValue)
+        if ($null -eq $keys) { $keys = $k; $values = $v; continue }
+        $keys = @($keys | Where-Object { $k -ccontains $_ })
+        $values = @($values | Where-Object { $v -ccontains $_ })
+    }
+    return @{ Keys = @($keys); Values = @($values) }
+}
+
+# The permission violations of a workflow's text: the keys of every permissions block and their
+# values, and the blocks themselves.
+#
+# The values are read, write or none. write-all and read-all are not the values of a key, they
+# are every key at once, so a guard that reads only the keys never sees them. The sign job holds
+# the update signing key, so it may never hold a write; the build job is read-only; the publish
+# job is the only one that writes the release. A top-level block applies to every job, so it is
+# checked like a job's own block and may hold only what every job may hold.
+#
+# Two more rules: a job the guard does not know is reported, because the guard cannot say what
+# its permissions block may hold; and a job with no permissions block of its own and no top-level
+# block to inherit is reported, because it would get the repository's default token permissions,
+# which the file does not show.
+function Get-PermissionViolations {
+    param([string]$Text)
+    $found = @()
+    $top = Get-TopPermissionAllowlist
+    $layout = Get-PermissionBlocks $Text
+    foreach ($b in $layout.Blocks) {
+        $scope = $b.Scope
+        $block = $b.Block
+        $isTop = $scope -eq 'top-level'
+        $where = if ($isTop) { "top level, line [$($block.Line)]" } else { "job [$scope], line [$($block.Line)]" }
+        if ($block.Kind -eq 'duplicate') {
+            $found += "${where}: a second permissions key: the guard does not know which one GitHub would use"
+            continue
+        }
+        if ($block.Kind -eq 'stray') {
+            $found += "${where}: a permissions key stands outside the block: the guard does not know what it grants"
+            continue
+        }
+        if ($block.Kind -eq 'scalar') {
+            $found += "${where}: permissions [$($block.Value)] is not a map of keys: write-all and read-all give every key at once"
+            continue
+        }
+        if ($block.Kind -eq 'unreadable') {
+            $found += "${where}: the permissions block is not a map of keys the guard can read"
+            continue
+        }
+        if ($scope -ne 'top-level' -and -not $workflowAllowed.ContainsKey($scope)) {
+            # A job the guard does not know: there is no allowlist to check its block against, so
+            # the guard says so instead of passing the block unread.
+            $found += "${where}: the job is not one of the allowlisted jobs, so the guard does not know what its permissions block may hold"
+            continue
+        }
+        $keys = if ($isTop) { $top.Keys } else { @($workflowAllowed[$scope].Perm) }
+        $values = if ($isTop) { $top.Values } else { @($workflowAllowed[$scope].PermValue) }
+        foreach ($e in $block.Entries) {
+            $at = if ($isTop) { $where } else { "job [$scope], line [$($e.Line)]" }
+            if ($keys -cnotcontains $e.Key) { $found += "${at}: permissions key [$($e.Key)] is not in the allowlist [$($keys -join ', ')]" }
+            if ($values -cnotcontains $e.Value) { $found += "${at}: permissions value [$($e.Value)] for key [$($e.Key)] is not in the allowlist [$($values -join ', ')]" }
+        }
+    }
+    # The rule: a job may hold its own permissions block, or inherit the top-level one, but it may
+    # hold neither. With no block anywhere, the job gets the repository's default token
+    # permissions, which the file does not show, so the guard cannot see what the job holds. The
+    # job is named, so the file that has to be fixed is the one the message points at.
+    foreach ($name in (@($layout.Jobs) | Sort-Object)) {
+        if (-not $workflowAllowed.ContainsKey($name)) { continue }   # a job the guard does not know is the job allowlist's business
+        if ($layout.Own.ContainsKey($name)) { continue }              # the job holds its own block
+        if ($layout.HasTop) { continue }                             # the job inherits the top-level block
+        $found += "job [$name] holds no permissions block of its own, and there is no top-level block to inherit: it would get the repository's default token permissions"
+    }
+    return $found
+}
+
 # The exact keys release.yml uses today, written out. A key outside these sets, in any spelling, is a
 # violation: the test reads what a line IS (its text before the first colon, quotes off), so it needs no
 # list of forbidden spellings. `if`, `continue-on-error`, `"\x69f"` and a working-directory on a step that has none today all fail.
 # Perm is the keys a job's permissions may hold, and it is per job: only the publish job may hold
 # `actions`, because the publish job starts the site's build and a dispatch needs that permission. The
 # publish job's steps may hold `env` for the same step, which carries the token it dispatches with.
+# PermValue is the values those keys may hold: read, write or none. The sign job holds the update
+# signing key, so it never holds a write; the build job is read-only; only the publish job writes.
 $workflowTopKeys = @('name', 'on', 'permissions', 'jobs')
 $workflowAllowed = @{
-    build   = @{ Job = @('runs-on', 'permissions', 'steps'); Step = @('name', 'uses', 'with', 'run', 'shell', 'working-directory'); Perm = @('contents') }
-    sign    = @{ Job = @('needs', 'runs-on', 'timeout-minutes', 'permissions', 'steps'); Step = @('name', 'uses', 'with', 'run', 'shell', 'env', 'timeout-minutes'); Perm = @('contents') }
-    publish = @{ Job = @('needs', 'runs-on', 'permissions', 'steps'); Step = @('name', 'uses', 'with', 'run', 'shell', 'env'); Perm = @('contents', 'actions') }
+    build   = @{ Job = @('runs-on', 'permissions', 'steps'); Step = @('name', 'uses', 'with', 'run', 'shell', 'working-directory'); Perm = @('contents'); PermValue = @('read', 'none') }
+    sign    = @{ Job = @('needs', 'runs-on', 'timeout-minutes', 'permissions', 'steps'); Step = @('name', 'uses', 'with', 'run', 'shell', 'env', 'timeout-minutes'); Perm = @('contents'); PermValue = @('read', 'none') }
+    publish = @{ Job = @('needs', 'runs-on', 'permissions', 'steps'); Step = @('name', 'uses', 'with', 'run', 'shell', 'env'); Perm = @('contents', 'actions'); PermValue = @('read', 'write', 'none') }
 }
 
 # The violations in a workflow's text: each names the job, the step and the line.
@@ -201,6 +424,11 @@ function Get-WorkflowViolations {
     foreach ($name in $info.Jobs.Keys) {
         if (-not $workflowAllowed.ContainsKey($name)) { $found += "job [$name] is not one of [$($workflowAllowed.Keys -join ', ')]" }
     }
+    # A job defined twice: the splitter keeps the last copy, so the guard would read that one and
+    # never see the other. It is a violation, the way a second permissions key in one job is.
+    foreach ($name in @($info.Duplicates | Select-Object -Unique)) {
+        $found += "job [$name] is defined twice: the guard does not know which one GitHub would run"
+    }
     foreach ($name in $workflowAllowed.Keys) {
         if (-not $info.Jobs.ContainsKey($name)) { $found += "job [$name] is missing"; continue }
         $job = $info.Jobs[$name]
@@ -210,10 +438,13 @@ function Get-WorkflowViolations {
             $where = "job [$name], step [$label], line [$($e.Line)]"
             if ($e.Level -eq 'indent') { $found += "${where}: unexpected indent $($e.Key)" }
             elseif ($e.Level -eq 'job' -and $workflowAllowed[$name].Job -cnotcontains $e.Key) { $found += "${where}: job key [$($e.Key)] is not in the allowlist [$($workflowAllowed[$name].Job -join ', ')]" }
-            elseif ($e.Level -eq 'perm' -and $workflowAllowed[$name].Perm -cnotcontains $e.Key) { $found += "${where}: permissions key [$($e.Key)] is not in the allowlist [$($workflowAllowed[$name].Perm -join ', ')]" }
             elseif ($e.Level -eq 'step' -and $workflowAllowed[$name].Step -cnotcontains $e.Key) { $found += "${where}: step key [$($e.Key)] is not in the allowlist [$($workflowAllowed[$name].Step -join ', ')]" }
         }
     }
+    # The permissions blocks: their keys and their values. The keys of a job's block used to be read
+    # above, from the lines of the block; they are read here now, so that the values are read from
+    # the same place.
+    foreach ($v in (Get-PermissionViolations $Text)) { $found += $v }
     return $found
 }
 
@@ -270,6 +501,24 @@ function Get-SecretViolations {
         if ($lines[$i] -match '(?i)secrets') { $found += "line $($i + 1) writes the secrets context outside the sign job: [$($lines[$i].Trim())]" }
     }
     return $found
+}
+
+# A copy of a workflow's text with the sign job's permissions block replaced. The block is found by
+# the lines that name the job, so the build job's own block is not touched. An empty block removes
+# the key and everything under it.
+function Set-SignPermissions {
+    param([string]$Text, [string]$Block)
+    $anchor = "  sign:`n    needs: build`n    runs-on: windows-latest`n    timeout-minutes: 10`n    permissions:`n      contents: read`n"
+    if (-not $Text.Contains($anchor)) { throw 'the sign job has no permissions block to replace' }
+    return $Text.Replace($anchor, "  sign:`n    needs: build`n    runs-on: windows-latest`n    timeout-minutes: 10`n" + $Block)
+}
+
+# A copy of a workflow's text with the top-level permissions block replaced.
+function Set-TopPermissions {
+    param([string]$Text, [string]$Block)
+    $anchor = "permissions:`n  contents: read`n"
+    if (-not $Text.Contains($anchor)) { throw 'the workflow has no top-level permissions block' }
+    return $Text.Replace($anchor, $Block)
 }
 
 # Runs a shell script with Git for Windows' bash, the way GitHub runs a bash step by default:
@@ -823,6 +1072,124 @@ try {
             Assert-True ($mutated -ne $base) "variant [$k] changed the workflow text"
             Assert-True (@(Get-WorkflowViolations $mutated).Count -gt 0) "variant [$k] is a violation"
         }
+        Assert-Equal @(Get-WorkflowViolations $base).Count 0 'the unmutated workflow has none'
+    }
+    Test-Case 'release workflow: the shape guard checks the permission values, not only the keys' {
+        # The shape guard used to read the keys of a permissions block and nothing else. A block
+        # that holds no key at all (write-all, read-all) held no key to read, so it passed, and so
+        # did a key with a value nobody wanted (admin). The sign job holds the update signing key:
+        # it may never hold a write.
+        $base = (Get-WorkflowJobsFromText (Get-Content -LiteralPath $workflowPath -Raw)).Text
+        $cases = [ordered]@{
+            'write-all on the sign job'             = { param($t) Set-SignPermissions -Text $t -Block "    permissions: write-all`n" }
+            'read-all on the build job'             = { param($t) $t.Replace("  build:`n    runs-on: windows-latest`n    permissions:`n      contents: read`n", "  build:`n    runs-on: windows-latest`n    permissions: read-all`n") }
+            'contents: admin on the publish job'    = { param($t) $t.Replace("      contents: write # the only job that can write to the release", "      contents: admin") }
+            'contents: write on the sign job'       = { param($t) Set-SignPermissions -Text $t -Block "    permissions:`n      contents: write`n" }
+            'a flow map with write on the sign job' = { param($t) Set-SignPermissions -Text $t -Block "    permissions: { contents: write }`n" }
+            'a flow map with admin on the build job' = { param($t) $t.Replace("  build:`n    runs-on: windows-latest`n    permissions:`n      contents: read`n", "  build:`n    runs-on: windows-latest`n    permissions: { contents: admin }`n") }
+            'a quoted permissions key on the sign job' = { param($t) Set-SignPermissions -Text $t -Block "    `"permissions`":`n      contents: write`n" }
+            'a space before the colon on the sign job' = { param($t) Set-SignPermissions -Text $t -Block "    permissions :`n      contents: write`n" }
+        }
+        foreach ($k in $cases.Keys) {
+            $mutated = & $cases[$k] $base
+            Assert-True ($mutated -ne $base) "case [$k] changed the workflow text"
+            $v = @(Get-WorkflowViolations $mutated)
+            Assert-True ($v.Count -gt 0) "case [$k] is a violation of the shape guard"
+        }
+        Assert-Equal @(Get-WorkflowViolations $base).Count 0 'the unmutated workflow has none'
+    }
+    Test-Case 'release workflow: the shape guard checks the top-level permissions block' {
+        # The rule: a top-level permissions block applies to every job, so it is checked like a
+        # job's own block and may hold only what every job may hold: the key contents, and the
+        # values read and none. The case from the issue: the block moved to the top level with
+        # actions: write, and the sign job's own block gone.
+        $base = (Get-WorkflowJobsFromText (Get-Content -LiteralPath $workflowPath -Raw)).Text
+        $cases = [ordered]@{
+            'the issue case: { actions: write } at the top level, the sign job left with none' = { param($t) Set-SignPermissions -Text (Set-TopPermissions -Text $t -Block "permissions: { actions: write }`n") -Block '' }
+            'write-all at the top level'             = { param($t) Set-TopPermissions -Text $t -Block "permissions: write-all`n" }
+            '{ contents: write } at the top level'    = { param($t) Set-TopPermissions -Text $t -Block "permissions: { contents: write }`n" }
+            '{ actions: read } at the top level'      = { param($t) Set-TopPermissions -Text $t -Block "permissions: { actions: read }`n" }
+            'a block at the top level with contents: write' = { param($t) Set-TopPermissions -Text $t -Block "permissions:`n  contents: write`n" }
+        }
+        foreach ($k in $cases.Keys) {
+            $mutated = & $cases[$k] $base
+            Assert-True ($mutated -ne $base) "case [$k] changed the workflow text"
+            $v = @(Get-WorkflowViolations $mutated)
+            Assert-True ($v.Count -gt 0) "case [$k] is a violation of the shape guard"
+        }
+        Assert-Equal @(Get-WorkflowViolations $base).Count 0 'the unmutated workflow has none'
+    }
+    Test-Case 'release workflow: the real release.yml passes the permission rules and the guard reads its blocks' {
+        $raw = (Get-Content -LiteralPath $workflowPath -Raw) -replace "`r`n", "`n"
+        Assert-Equal @(Get-WorkflowViolations $raw).Count 0 'the real release.yml has no violation'
+        # The guard is not passing because it reads nothing: each of the file's own blocks, with
+        # one value changed, is a violation.
+        $mutated = $raw.Replace("      contents: write # the only job that can write to the release", "      contents: admin")
+        Assert-True ($mutated -ne $raw) 'the publish job block changed'
+        Assert-True (@(Get-WorkflowViolations $mutated).Count -gt 0) 'the guard reads the publish job block'
+        $mutated = $raw.Replace("permissions:`n  contents: read`n", "permissions:`n  contents: admin`n")
+        Assert-True ($mutated -ne $raw) 'the top-level block changed'
+        Assert-True (@(Get-WorkflowViolations $mutated).Count -gt 0) 'the guard reads the top-level block'
+        $mutated = $raw.Replace("    timeout-minutes: 10`n    permissions:`n      contents: read`n", "    timeout-minutes: 10`n    permissions:`n      contents: admin`n")
+        Assert-True ($mutated -ne $raw) 'the sign job block changed'
+        Assert-True (@(Get-WorkflowViolations $mutated).Count -gt 0) 'the guard reads the sign job block'
+    }
+    Test-Case 'release workflow: the shape guard needs a permissions block for every job' {
+        # The rule: a job may hold its own permissions block, or inherit the top-level one, but it
+        # may hold neither. With no block anywhere, the job gets the repository's default token
+        # permissions, which the file does not show, so the guard cannot see what the job holds.
+        # The sign job holds the update signing key, so its missing block is the dangerous case.
+        $base = (Get-WorkflowJobsFromText (Get-Content -LiteralPath $workflowPath -Raw)).Text
+        # The sign job's own block, gone.
+        $noSignBlock = Set-SignPermissions -Text $base -Block ''
+        # The top-level block, gone.
+        $noTopBlock = Set-TopPermissions -Text $base -Block ''
+        # Neither: the sign job has nothing of its own and nothing to inherit.
+        $neither = Set-SignPermissions -Text $noTopBlock -Block ''
+        Assert-True ($neither -ne $base) 'the workflow text changed'
+        $v = @(Get-WorkflowViolations $neither)
+        Assert-True ($v.Count -gt 0) 'the sign job with no permissions block at all is a violation'
+        $named = @($v | Where-Object { $_ -match '\[sign\]' })
+        Assert-True ($named.Count -gt 0) "the violation names the sign job:`n$($v -join "`n")"
+        # The sign job's own block gone, the top-level block there: the job inherits it, so it passes.
+        Assert-Equal @(Get-WorkflowViolations $noSignBlock).Count 0 "the sign job inherits the top-level block:`n$(@(Get-WorkflowViolations $noSignBlock) -join "`n")"
+        # The top-level block gone, every job holding its own: every job is explicit, so it passes.
+        Assert-Equal @(Get-WorkflowViolations $noTopBlock).Count 0 "every job holds its own block:`n$(@(Get-WorkflowViolations $noTopBlock) -join "`n")"
+        # The real file passes.
+        Assert-Equal @(Get-WorkflowViolations $base).Count 0 'the real release.yml has none'
+    }
+    Test-Case 'release workflow: the permission guard reports the block of a job that is not on the allowlist' {
+        # The permission guard used to skip a job it did not know, so a job outside the allowlist
+        # could hold any permissions at all and the guard said nothing about it. The job allowlist
+        # in the workflow guard catches the job itself; this makes the permission function correct
+        # on its own, so it is called directly here.
+        $base = (Get-WorkflowJobsFromText (Get-Content -LiteralPath $workflowPath -Raw)).Text
+        $mutated = $base.Replace("  publish:`n", "  deploy:`n    runs-on: ubuntu-latest`n    permissions:`n      contents: write`n`n  publish:`n")
+        Assert-True ($mutated -ne $base) 'the workflow text changed'
+        $v = @(Get-PermissionViolations $mutated)
+        Assert-True ($v.Count -gt 0) 'the permissions block of a job outside the allowlist is a violation'
+        $named = @($v | Where-Object { $_ -match '\[deploy\]' })
+        Assert-True ($named.Count -gt 0) "the violation names the job:`n$($v -join "`n")"
+        # The workflow guard sees it too.
+        Assert-True (@(Get-WorkflowViolations $mutated).Count -gt 0) 'the workflow guard sees it too'
+        # The real file holds no such job.
+        Assert-Equal @(Get-PermissionViolations $base).Count 0 'the real release.yml has none'
+    }
+    Test-Case 'release workflow: the shape guard reports a job that is defined twice' {
+        # The splitter kept the last copy of a job, so a second job with the same name was
+        # invisible: the guard read one copy and said nothing about the other. A duplicate job is a
+        # violation, the way a second permissions key in one job is.
+        $base = (Get-WorkflowJobsFromText (Get-Content -LiteralPath $workflowPath -Raw)).Text
+        # Two sign jobs: the first holds a write, the second the read the file has today. The
+        # splitter keeps the last copy, so only the duplicate tells the two apart.
+        $mutated = $base.Replace("  sign:`n", "  sign:`n    runs-on: ubuntu-latest`n    permissions:`n      contents: write`n`n  sign:`n")
+        Assert-True ($mutated -ne $base) 'the workflow text changed'
+        $v = @(Get-WorkflowViolations $mutated)
+        Assert-True ($v.Count -gt 0) 'a job defined twice is a violation'
+        $named = @($v | Where-Object { $_ -match '\[sign\]' })
+        Assert-True ($named.Count -gt 0) "the violation names the job:`n$($v -join "`n")"
+        $twice = @($v | Where-Object { $_ -match 'twice' })
+        Assert-True ($twice.Count -gt 0) "the violation says the job is defined twice:`n$($v -join "`n")"
         Assert-Equal @(Get-WorkflowViolations $base).Count 0 'the unmutated workflow has none'
     }
     Test-Case 'release workflow: only the sign job may name a secret' {
