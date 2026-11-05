@@ -47,7 +47,12 @@ export function useIdentifyWalker(
   const [own, setOwn] = useState(0);
   const at = options?.led ?? own;
   const set = options?.setLed ?? setOwn;
-  const [error, setError] = useState<string | null>(null);
+  // The identify light's error and the length write's error are separate: a successful
+  // identify must not hide a failed length write's message (#156 sibling).
+  const [identifyError, setIdentifyError] = useState<string | null>(null);
+  const [lengthError, setLengthError] = useState<string | null>(null);
+  const error = identifyError ?? lengthError;
+  const setError = setLengthError;
   const [note, setNote] = useState<string | null>(null);
   const stopped = useRef(false);
   /** The request that lights what the walker is on now. */
@@ -79,10 +84,10 @@ export function useIdentifyWalker(
     let cancelled = false;
     light()
       .then(() => {
-        if (!cancelled) setError(null);
+        if (!cancelled) setIdentifyError(null);
       })
       .catch((e: unknown) => {
-        if (!cancelled) setError(messageOf(e));
+        if (!cancelled) setIdentifyError(messageOf(e));
       });
     return () => {
       cancelled = true;
@@ -155,7 +160,7 @@ export function useIdentifyWalker(
     } catch (e) {
       setError(messageOf(e));
     }
-  }, [at, device.id, zone.index, zone.name, options, stop]);
+  }, [at, device.id, zone.index, zone.name, options, stop, setError]);
 
   return { led: at, setLed: set, maxIndex, error, note, setLength, stop, setNote, setError, relight };
 }

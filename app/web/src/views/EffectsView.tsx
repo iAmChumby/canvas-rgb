@@ -79,7 +79,10 @@ export function EffectsView() {
   const setSelectedId = setPicked;
   const [loaded, setLoaded] = useState<{ id: string; detail: EffectDetail } | null>(null);
   const [values, setValues] = useState<Values>({});
-  const [error, setError] = useState<string | null>(null);
+  // The detail read's error and a write's error are separate: a successful read clears
+  // only the read error, so it cannot hide a failed write's message (#156).
+  const [readError, setReadError] = useState<string | null>(null);
+  const [writeError, setWriteError] = useState<string | null>(null);
   // Asks the detail to load again for the same effect: a preset was applied or changed, so the
   // sliders and the preset list are read back from the daemon.
   const [reloadTick, setReloadTick] = useState(0);
@@ -156,9 +159,9 @@ export function EffectsView() {
         await refreshAll();
       }
       if (selectedRef.current === id) saved.current = { ...saved.current, ...batch };
-      setError(null);
+      setWriteError(null);
     } catch (e) {
-      setError(messageOf(e));
+      setWriteError(messageOf(e));
       // The control goes back to the value the daemon has: nothing fails silently.
       if (selectedRef.current === id) setValues(saved.current);
     }
@@ -175,10 +178,10 @@ export function EffectsView() {
         setLoaded({ id: selectedId, detail: d });
         setValues(d.props);
         saved.current = d.props;
-        setError(null);
+        setReadError(null);
       })
       .catch((e: unknown) => {
-        if (!stop) setError(messageOf(e));
+        if (!stop) setReadError(messageOf(e));
       });
     return () => {
       stop = true;
@@ -209,12 +212,12 @@ export function EffectsView() {
 
   const activate = async (preset: string | null) => {
     if (!selectedId) return;
-    setError(null);
+    setWriteError(null);
     try {
       await api.activateEffect(selectedId, { props: {}, preset });
       await refreshAll();
     } catch (e) {
-      setError(messageOf(e));
+      setWriteError(messageOf(e));
     }
   };
 
@@ -358,7 +361,7 @@ export function EffectsView() {
       await api.setFavorite(id, { favorite });
       await refreshAll();
     } catch (e) {
-      setError(messageOf(e));
+      setWriteError(messageOf(e));
     }
   };
 
@@ -400,7 +403,7 @@ export function EffectsView() {
       await api.deleteEffect(id, keepPresets);
       await refreshAll();
     } catch (e) {
-      setError(messageOf(e));
+      setWriteError(messageOf(e));
     }
   };
 
@@ -750,16 +753,16 @@ export function EffectsView() {
       {!(noLayout && !detail) && (
       <LoadFrame
         className="stack"
-        state={detail ? "ready" : error ? "error" : "loading"}
+        state={detail ? "ready" : readError ? "error" : "loading"}
         shape={<EffectDetailShape />}
         label="Loading the effect"
         error={
           <ErrorPanel
             title="The effect could not be read"
             summary="canvas-rgb could not read that effect. The others are still here."
-            message={error}
+            message={readError}
             onRetry={() => {
-              setError(null);
+              setReadError(null);
               setReloadTick((t) => t + 1);
             }}
           />
@@ -933,7 +936,9 @@ export function EffectsView() {
                 onChange={onChange}
               />
             )}
-            {error && <p className="error-line" style={{ marginTop: 8 }}>{error}</p>}
+            {(writeError ?? readError) && (
+              <p className="error-line" style={{ marginTop: 8 }}>{writeError ?? readError}</p>
+            )}
           </Panel>
         </>
       )}

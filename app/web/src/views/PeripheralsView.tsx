@@ -126,12 +126,24 @@ export function PeripheralsView() {
   // The edits that are not on the device yet.
   const [staged, setStaged] = useState<Props>({});
   const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
+  // A failed write's message, per device key: one device's read must not clear another
+  // device's failure (#156). Only the selected device's own message is shown.
+  const [saveErrors, setSaveErrors] = useState<Record<string, string>>({});
+  const setDeviceSaveError = useCallback((id: string, message: string | null) => {
+    setSaveErrors((prev) => {
+      const next = { ...prev };
+      if (message) next[id] = message;
+      else delete next[id];
+      return next;
+    });
+  }, []);
   const [pickedStage, setPickedStage] = useState<number | null>(null);
   const [pickedButton, setPickedButton] = useState<string | null>(null);
 
   // The first device is open already: the keys are the way to the others.
   const selectedId = pickedId ?? (list?.[0]?.id ?? null);
+  // This device's own failed write's message, if any.
+  const saveError = selectedId ? (saveErrors[selectedId] ?? null) : null;
 
   // What this device held when it was read: from this page, or from an earlier visit. While the
   // device is read again these stay on screen, marked as refreshing.
@@ -156,6 +168,10 @@ export function PeripheralsView() {
   // ended. A read that starts after the failure may clear it.
   const failedWrites = useRef(0);
 
+  // The number of edits the user has made. A read started before the latest edit must not
+  // drop the staged edits made while it was out (#156).
+  const editCount = useRef(0);
+
   // Asks for one device's detail again: after a write, or after the access changed (the daemon
   // answers those from the values it keeps), or on the Read again key (`forceRead`: the daemon
   // reads the device). `landed` says that the change is already on the device, so a failed
@@ -169,16 +185,20 @@ export function PeripheralsView() {
     // The failures this read started after: it may clear the message of those, and of no
     // older one.
     const failures = failedWrites.current;
+    // The edits this read started before: one made while it is out stays staged, unless a
+    // write was attempted after the read started (then the read's values are the truth).
+    const edits = editCount.current;
     setReloadingId(id);
     try {
       const d = forceRead ? await api.peripheral(id, { fresh: true }) : await api.peripheral(id);
       if (n !== detailRequest.current) return;
       lastRead.set(id, d);
       setLoaded({ id, detail: d });
-      setStaged({});
+      if (!(editCount.current !== edits && failedWrites.current === failures)) setStaged({});
       // A read that was already out when a write failed does not clear that failure's
-      // message: it knows what the device holds, not how the write ended.
-      if (failedWrites.current === failures) setSaveError(null);
+      // message: it knows what the device holds, not how the write ended. And it clears
+      // only its own device's message, never another device's.
+      if (failedWrites.current === failures) setDeviceSaveError(id, null);
       setDetailError(null);
       setChangeSaved(false);
     } catch (e) {
@@ -190,7 +210,7 @@ export function PeripheralsView() {
       if (forceRead) rereading.current = false;
       if (n === detailRequest.current) setReloadingId(null);
     }
-  }, []);
+  }, [setDeviceSaveError]);
 
   // Lists the devices. The first run and "Try again" both come through here. The stop handle is
   // kept, so a retry that is still running when the page goes away is dropped with it.
@@ -236,9 +256,11 @@ export function PeripheralsView() {
     // a device that is no longer the one on screen: a slow reload of one device must not put
     // its error on another.
     const n = ++detailRequest.current;
-    // The failures this read started after: it may clear the message of those, and of no
-    // older one.
+    // The failures and edits this read started before: an edit made while it is out stays
+    // staged, unless a write was attempted after the read started (then the read's values
+    // are the truth).
     const failures = failedWrites.current;
+    const edits = editCount.current;
     let stop = false;
     api
       .peripheral(selectedId)
@@ -249,10 +271,10 @@ export function PeripheralsView() {
         setReloadingId(null);
         lastRead.set(selectedId, d);
         setLoaded({ id: selectedId, detail: d });
-        setStaged({});
-        // A read that was already out when a write failed does not clear that failure's
-        // message: it knows what the device holds, not how the write ended.
-        if (failedWrites.current === failures) setSaveError(null);
+        if (!(editCount.current !== edits && failedWrites.current === failures)) setStaged({});
+        // A selection read never clears a write's message, not even its own device's:
+        // picking a device back is not a new attempt at the write, and the message must
+        // still be there when the user returns to the device that failed (#156).
         setDetailError(null);
         setChangeSaved(false);
       })
@@ -286,21 +308,22 @@ export function PeripheralsView() {
   const changedCount = Object.keys(changed).length;
 
   const onChange = (key: string, value: PropValue) => {
+    editCount.current += 1;
     setStaged((prev) => ({ ...prev, [key]: value }));
-    setSaveError(null);
+    if (selectedId) setDeviceSaveError(selectedId, null);
   };
 
   const apply = async () => {
     if (!detail) return;
     setSaving(true);
-    setSaveError(null);
+    setDeviceSaveError(detail.info.id, null);
     try {
       await api.patchPeripheral(detail.info.id, changed);
     } catch (e) {
       // The change itself failed: nothing was changed. The count says that a read which is
       // already out may not clear this message.
       failedWrites.current += 1;
-      setSaveError(messageOf(e));
+      setDeviceSaveError(detail.info.id, messageOf(e));
       setSaving(false);
       return;
     }
@@ -313,7 +336,7 @@ export function PeripheralsView() {
 
   const revert = () => {
     setStaged({});
-    setSaveError(null);
+    if (selectedId) setDeviceSaveError(selectedId, null);
   };
 
   const setAccess = async (next: { reads?: boolean; writes?: boolean }) => {
@@ -326,7 +349,7 @@ export function PeripheralsView() {
       // The change itself failed: nothing was changed. The count says that a read which is
       // already out may not clear this message.
       failedWrites.current += 1;
-      setSaveError(messageOf(e));
+      setDeviceSaveError(detail.info.id, messageOf(e));
       return;
     }
     // The access is saved. The read that follows only refreshes the page.
