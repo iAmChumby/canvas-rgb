@@ -12,27 +12,6 @@
 use std::io;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-/// Installs a subscriber that discards everything, once per test process.
-///
-/// `tracing` decides for every log statement whether it is worth building the event, and it
-/// caches that decision per call site. The decision is made from the dispatchers that exist at
-/// that moment: a call site that a thread outside a capture reaches first is registered with
-/// "no dispatcher to ask", and its line is then missing from the capture that wanted it (the
-/// line never appears, and the test fails on a line that was logged). With one subscriber
-/// installed for the whole process there is always a dispatcher to ask, so every call site is
-/// registered as "log it" (class `cause:timing-test`, #45 and #55).
-fn install_discarding_subscriber() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        let _ = tracing::subscriber::set_global_default(
-            tracing_subscriber::fmt()
-                .with_max_level(tracing::Level::TRACE)
-                .with_writer(std::io::sink)
-                .finish(),
-        );
-    });
-}
-
 /// A log sink the tests read back.
 #[derive(Clone, Default)]
 pub(crate) struct LogBuf(Arc<Mutex<Vec<u8>>>);
@@ -74,13 +53,11 @@ fn one_capture_at_a_time() -> MutexGuard<'static, ()> {
 /// returned and the text it logged.
 pub(crate) fn captured<T>(run: impl FnOnce() -> T) -> (T, String) {
     let _turn = one_capture_at_a_time();
-    install_discarding_subscriber();
     let logs = LogBuf::default();
     let out = tracing::subscriber::with_default(logs.subscriber(), || {
         // No `rebuild_interest_cache()` here: tracing-core already rebuilds callsite
         // interest whenever a dispatcher is created (`Dispatch::new` ->
-        // `callsite::register_dispatch`), and the discarding subscriber above makes sure
-        // there is always a dispatcher to ask.
+        // `callsite::register_dispatch`), so a stale interest cache is not #45's cause.
         run()
     });
     (out, logs.text())
@@ -98,7 +75,6 @@ where
     // Held across `.await` on purpose: the lock must serialize every capture for its
     // whole duration, including when a task sleeps inside the run.
     let _turn = one_capture_at_a_time();
-    install_discarding_subscriber();
     let logs = LogBuf::default();
     let _default = tracing::subscriber::set_default(logs.subscriber());
     let out = run.await;
