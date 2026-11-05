@@ -4,6 +4,7 @@ description = "canvas-rgbd.exe (API, render, OpenRGB, capture) and canvas-rgb-cl
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [[bin]]
 name = "canvas-rgbd"

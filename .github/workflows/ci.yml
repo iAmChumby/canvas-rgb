@@ -67,25 +67,68 @@ jobs:
           # next run to compile every crate from scratch again.
           cache-on-failure: true
 
+      # --locked everywhere: the build uses the versions in Cargo.lock and fails when the
+      # lock file and the manifests disagree, instead of quietly moving the lock file (#167).
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: Tests
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
 
       # The paint effects fit their 100 ms frame budget in release (5-10 ms); a debug build on a
       # shared runner is too slow, so their tests run here in release.
       - name: Paint effect tests (release)
-        run: cargo test --release -p canvas-html --test effects
+        run: cargo test --locked --release -p canvas-html --test effects
 
       # The tile bar over the stock paint effects, for the same reason.
       - name: Stock tile quality (release)
-        run: cargo test --release -p canvas-daemon --test tile_quality -- --include-ignored
+        run: cargo test --locked --release -p canvas-daemon --test tile_quality -- --include-ignored
 
       # Plain PowerShell scripts with their own asserts, not Pester (see installer/tests/_assert.ps1).
       - name: Installer tests
         shell: pwsh
         run: pwsh -NoProfile -File installer/tests/run-all.ps1
+
+  dependencies:
+    # The dependency gate (#167): the advisories, the licences, the npm audit floor, the
+    # install scripts and the approval ledger. It runs on every pull request and on every
+    # push to main.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # cargo-deny reads the graph with cargo, so cargo has to be here.
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+
+      # cargo-deny, pinned to the version deny.toml is written for.
+      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2
+        with:
+          tool: cargo-deny@0.20.2
+
+      # Advisories, licences, duplicate versions and sources. deny.toml lists the advisories
+      # that are known today, each with its reason; a new one fails this step.
+      - name: cargo deny check
+        run: cargo deny check
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      # The npm half: the audit floor, the packages with an install script and the licences.
+      - name: npm dependencies
+        shell: pwsh
+        run: pwsh -NoProfile -File tools/check-npm-deps.ps1
+
+      # A manifest with a direct dependency that has no row in docs/dependencies.md fails.
+      - name: Dependency ledger
+        shell: pwsh
+        run: pwsh -NoProfile -File tools/check-dependency-ledger.ps1
+
+      # The checks' own tests: throwaway trees, so the check logic is covered.
+      - name: Tool tests
+        shell: pwsh
+        run: pwsh -NoProfile -File tools/tests/run-all.ps1
 
   changelog:
     # PRs only: a new CHANGELOG.md line must land under ## [Unreleased] (#149).

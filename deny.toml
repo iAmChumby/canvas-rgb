@@ -1,0 +1,89 @@
+# cargo-deny policy for canvas-rgb (issue #167).
+#
+# The licence stance is Luke's decision (2026-11-05, issue #167): a short allow list of
+# permissive licences, everything else denied (GPL, AGPL, SSPL and anything unknown).
+# The advisory list is today's known set, each one ignored with the reason it cannot be fixed
+# from here, so a NEW advisory fails `cargo deny check` instead of joining this file silently.
+#
+# `cargo deny check` runs in CI (the "dependencies" job) and on this machine with:
+#   cargo deny check
+
+[graph]
+# The lock file is the whole graph: no target filtering, so a Linux-only crate is judged too.
+all-features = false
+no-default-features = false
+
+[advisories]
+version = 2
+# Every vulnerability is denied (cargo-deny 0.20 has no key for that: it is always on).
+# The ignores below are the ones known on 2026-11-05, each with the reason
+# it stays. Anything new fails.
+# "all" means every crate in the graph, not only the workspace's own crates.
+unmaintained = "all"
+unsound = "all"
+yanked = "warn"
+# The RustSec advisory database is fetched from GitHub; the CI job caches it.
+db-urls = ["https://github.com/rustsec/advisory-db"]
+
+ignore = [
+    # glib: the GTK binding Tauri's Linux backend pulls in. Windows builds never compile it
+    # (it is behind the Linux target of tauri's gtk feature), and the fixed version (0.20.0)
+    # cannot be forced here: tauri 2.12.5 pins glib 0.18.
+    { id = "RUSTSEC-2024-0429", reason = "glib is Linux-only via Tauri's GTK backend; Windows builds never compile it and Tauri's pin leaves no fixed version to take." },
+    # The four unmaintained crates below are transitive (glib-macros -> proc-macro-error and
+    # zbus -> zvariant/zbus_names/zvariant_derive). None of them is a direct dependency and
+    # none has a fixed version: the RustSec entries carry no fix, and the parent crates
+    # (tauri 2.12.5, tauri-plugin-opener 2.7.2, tauri-plugin-single-instance 2.5.4) pin them.
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error is unmaintained; transitive via glib-macros (Tauri's GTK backend) with no fixed version." },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant is unmaintained; transitive via zbus (Tauri's opener and single-instance plugins) with no fixed version." },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names is unmaintained; transitive via zbus (Tauri's opener and single-instance plugins) with no fixed version." },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive is unmaintained; transitive via zbus (Tauri's opener and single-instance plugins) with no fixed version." },
+]
+
+[licenses]
+version = 2
+# Luke's allow list, 2026-11-05. Everything else is denied, including GPL, AGPL, SSPL and
+# every licence this list does not name.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    "BSL-1.0",
+    "0BSD",
+    "CC0-1.0",
+    "MIT-0",
+]
+# No crate in the lock needs a licence exception: every crate's licence expression is satisfied
+# by the allow list above (an "OR" is satisfied by one allowed branch, an "AND" by all of them).
+exceptions = []
+
+[bans]
+# Today's lock file has 34 crate names with more than one version. They are transitive version
+# pairs forced by different upstreams, so they are a warning, not a failure: fixing them is a
+# separate piece of work. (cargo deny check bans reports 33 of them; the 34th, schemars, is
+# only reachable through a dev-dependency, which the check leaves out by default.)
+# A wildcard version requirement is denied.
+multiple-versions = "warn"
+wildcards = "deny"
+# The workspace's own crates are path dependencies, and a path dependency has no version
+# requirement, which cargo-deny reads as a wildcard. The workspace crates are not published
+# (publish = false), so this is the switch that keeps the wildcard rule on for everything
+# that comes from a registry.
+allow-wildcard-paths = true
+
+[sources]
+# Only crates.io, and no git dependencies: a dependency from anywhere else has to be approved
+# first (and then added here with the reason).
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
+
