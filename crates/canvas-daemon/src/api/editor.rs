@@ -60,24 +60,25 @@ pub async fn effect_source(
 ///
 /// A file that does not parse is still a file the editor has to open, so the fallback reads
 /// it. The read is capped like the other two routes' HTML is: a file over the cap is
-/// refused with the same shape (a validation error that names the size and the limit)
-/// instead of being read into memory (#94).
+/// refused with the same shape (a validation error that names the limit) instead of being
+/// read into memory (#94).
 fn read_effect_source(path: &std::path::Path) -> ApiResult<String> {
     use std::io::Read;
     let limit = canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES;
     let file = std::fs::File::open(path)
         .map_err(|e| ApiFailure::internal(format!("could not read the effect file: {e}")))?;
-    // The size is read from the file itself, so the answer names it.
-    let size = file.metadata().map(|meta| meta.len()).unwrap_or(0);
-    // The read stops one byte over the cap, so a file that grew after the size was read is
+    // The read stops one byte over the cap, so a file that grew after it was opened is
     // caught too.
     let mut bytes = Vec::new();
     std::io::Read::take(file, limit as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| ApiFailure::internal(format!("could not read the effect file: {e}")))?;
     if bytes.len() > limit {
+        // The size the file had when it was opened can differ from the size the read
+        // found, so the answer names the limit and not a size that could contradict the
+        // refusal.
         return Err(ApiFailure::validation(format!(
-            "the effect file is {size} bytes; the limit is {limit}"
+            "the effect file is over the limit; the limit is {limit} bytes"
         )));
     }
     String::from_utf8(bytes)

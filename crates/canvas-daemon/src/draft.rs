@@ -744,6 +744,16 @@ pub struct StopOutcome {
 /// black goes on the lights and [`Ended::note`] says so; the answer is still a success.
 pub async fn stop(app: &Arc<App>, epoch: Option<&str>) -> StopOutcome {
     let _gate = app.draft.gate.lock().await;
+    stop_locked(app, epoch).await
+}
+
+/// [`stop`] with the gate already held.
+///
+/// The caller holds the gate across the whole replace: the end of the draft and whatever
+/// takes the lights after it. A PUT that starts in between would read the prior from the
+/// store that is about to be replaced, and its later restore would put the old effect back
+/// over the new one (#94).
+pub(crate) async fn stop_locked(app: &Arc<App>, epoch: Option<&str>) -> StopOutcome {
     if let Some(epoch) = epoch {
         if !app.draft.epochs.holds(epoch) {
             return StopOutcome { applied: false, ended: None };

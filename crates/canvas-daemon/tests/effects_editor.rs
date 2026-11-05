@@ -1329,7 +1329,7 @@ async fn the_sweepers_ending_keeps_its_note_for_a_later_get() {
 
 // ---------------------------------------------------------------- #94
 
-/// Waits until `check` is true, for at most a few seconds. The test waits for the daemon's
+/// Waits until `check` is true, for at most ten seconds. The test waits for the daemon's
 /// task; it does not measure how long it took.
 async fn wait_until(mut check: impl FnMut() -> bool) {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -1340,6 +1340,12 @@ async fn wait_until(mut check: impl FnMut() -> bool) {
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
     panic!("the condition did not come true");
+}
+
+/// Waits until the engine runs the draft of `source`, and says so when it does not come.
+async fn wait_for_draft(engine: &FakeEngine, source: &str) {
+    let id = format!("draft:{}", canvas_daemon::user_effects::source_hash(source));
+    wait_until(|| running(engine).0.as_deref() == Some(id.as_str())).await;
 }
 
 /// The moving effect padded with a comment to exactly `size` bytes: the same effect, with
@@ -1404,6 +1410,94 @@ async fn an_import_ends_the_draft_on_the_lights() {
     let (id, props) = running(&engine);
     assert_eq!(id.as_deref(), Some("solid"), "the prior effect is back");
     assert_eq!(props, prior, "with the props it had");
+}
+
+#[tokio::test]
+async fn a_draft_put_in_the_gap_of_an_import_reads_the_imported_layout() {
+    let (router, app, engine, _home, _folder, _clock) = build_with_clock();
+    // The layout in force before the import names "solid".
+    prior_effect(&app, "solid", color("#112233")).await;
+    // A draft is on the lights when the import starts: the import ends it and puts "solid"
+    // back, the normal way.
+    assert_eq!(
+        put_draft(router.clone(), MOVING, serde_json::json!({}))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+
+    // The bundle brings an active layout with an effect of its own.
+    let mut bundle = json(
+        router
+            .clone()
+            .oneshot(request("GET", routes::CONFIG_EXPORT))
+            .await
+            .expect("the router answers"),
+    )
+    .await;
+    bundle["layouts"]["layouts"][0]["effect"] =
+        serde_json::json!({ "id": "gradient", "props": {} });
+
+    // The seam: the import waits between the end of the draft and the swap of the store.
+    let seam = Arc::new(canvas_daemon::api::settings::ImportSeam::new());
+    app.set_import_seam(seam.clone());
+
+    let import = tokio::spawn({
+        let router = router.clone();
+        let body = bundle.to_string();
+        async move {
+            router
+                .oneshot(request_with_body("POST", routes::CONFIG_IMPORT, &body))
+                .await
+                .expect("the router answers")
+        }
+    });
+    // The import is at the seam: between the end of the draft and the swap of the store.
+    seam.wait_until_reached().await;
+
+    // Does the import hold the draft gate there? It does when the end of the draft, the
+    // swap of the store and the layout that goes with it are one step (#94). A PUT that
+    // goes in the gap then waits for the import to finish and reads the layout the import
+    // brought in. When the import does not hold the gate, the PUT in the gap reads the
+    // layout that is in force now, and its later restore puts that effect back over the
+    // imported one.
+    let gate_held = app.draft.gate().try_lock().is_err();
+
+    // The PUT goes in the gap, with a source of its own, so the draft it leaves is that
+    // one and not the draft the import ended.
+    let put = tokio::spawn({
+        let router = router.clone();
+        async move { put_draft(router, FLAT, serde_json::json!({})).await }
+    });
+    if !gate_held {
+        // Nothing holds the PUT off, so its draft lands, with the prior the layout in
+        // force now names.
+        wait_for_draft(&engine, FLAT).await;
+    }
+
+    // The import goes on.
+    seam.go();
+    let response = import.await.expect("the import task ends");
+    assert_eq!(response.status(), StatusCode::OK, "the bundle imports");
+    let response = put.await.expect("the put task ends");
+    assert_eq!(response.status(), StatusCode::OK, "the draft in the gap is accepted");
+
+    // The draft ends: its prior goes back on the lights.
+    let response = router
+        .clone()
+        .oneshot(request("DELETE", routes::EFFECT_DRAFT))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK, "the draft stops");
+
+    // The lights show the effect the imported layout names, not the one from before the
+    // import (#94).
+    let (id, _props) = running(&engine);
+    assert_eq!(
+        id.as_deref(),
+        Some("gradient"),
+        "the imported layout's effect is on the lights"
+    );
 }
 
 #[tokio::test]

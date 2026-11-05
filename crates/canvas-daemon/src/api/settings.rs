@@ -171,6 +171,47 @@ fn fans_file_from_status(status: &FansStatus) -> canvas_proto::config::FansFile 
     fans
 }
 
+/// A seam in the config import, for the tests.
+///
+/// The import stops here, between the end of the draft and the swap of the store, so a test
+/// can put a draft PUT in that gap and see what the import does with it (#94).
+///
+/// The daemon never sets one: [`crate::state::App::set_import_seam`] is how a test does.
+#[derive(Clone, Default)]
+pub struct ImportSeam {
+    /// The import is at the seam.
+    reached: Arc<tokio::sync::Notify>,
+    /// The test lets the import go on.
+    go: Arc<tokio::sync::Notify>,
+}
+
+impl ImportSeam {
+    /// A seam nobody watches yet.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Says the import is at the seam.
+    pub fn reached(&self) {
+        self.reached.notify_one();
+    }
+
+    /// Waits until the import is at the seam.
+    pub async fn wait_until_reached(&self) {
+        self.reached.notified().await;
+    }
+
+    /// Lets the import go on.
+    pub fn go(&self) {
+        self.go.notify_one();
+    }
+
+    /// Waits until the test lets the import go on.
+    pub async fn wait_for_go(&self) {
+        self.go.notified().await;
+    }
+}
+
 /// `POST /api/v1/config/import`.
 ///
 /// Validates the bundle and refuses fan values below the floors with 422.
@@ -204,34 +245,54 @@ pub async fn config_import(
     // force now still names it), and the draft's slot, lease and epoch are gone, so the
     // draft cannot end later and put the pre-import effect back over the imported one
     // (#94).
-    let ended = crate::draft::stop(&app, None).await;
-    if ended.ended.is_some() {
-        tracing::info!("the config import ended the draft on the lights");
-    }
-
-    // Reload the store from disk and apply it.
-    let store = crate::storage::Store::load_from(&home);
+    //
+    // The draft gate is held from here across the swap of the store and the layout that
+    // goes with it. A PUT that starts in the gap between the end of the draft and the swap
+    // would read its prior from the store that is about to go, and its later restore would
+    // put the pre-import effect back over the imported one (#94). Holding the gate makes
+    // the end of the draft, the swap and the layout one step: the PUT waits for the import
+    // and reads the layout the import brought in.
+    //
+    // The order is the gate, then the store, the order `put` uses (the gate, then
+    // `store.read()`), so nothing inverts.
     {
-        let mut guard = app
-            .store
-            .write()
-            .await;
-        *guard = store;
-    }
-    // The stacks are read again from the file the import wrote, so the library shows them at
-    // once and the next frame resolves them against the new layout.
-    app.stacks.reload_with(&known);
-    // The display task reads the saved configs on its next pass; wake it so it does not wait.
-    app.displays.changed();
-    let settings = app.store.read().await.config.settings.clone();
-    app.engine.set_fps(settings.fps);
-    app.engine.set_brightness(settings.brightness);
-    app.engine.set_power(settings.power);
-    app.stacks.set_fps(settings.fps);
-    if let Some(layout) = app.active_layout().await {
-        let devices = app.devices.read().await.clone();
-        app.set_layout(&layout, &devices);
-        app.stacks.publish_areas(&layout, &devices);
+        let _gate = app.draft.gate().lock().await;
+        let ended = crate::draft::stop_locked(&app, None).await;
+        if ended.ended.is_some() {
+            tracing::info!("the config import ended the draft on the lights");
+        }
+
+        // The seam: the import waits here, between the end of the draft and the swap of the
+        // store, so a test can put a draft PUT in that gap (#94).
+        if let Some(seam) = app.import_seam() {
+            seam.reached();
+            seam.wait_for_go().await;
+        }
+
+        // Reload the store from disk and apply it.
+        let store = crate::storage::Store::load_from(&home);
+        {
+            let mut guard = app
+                .store
+                .write()
+                .await;
+            *guard = store;
+        }
+        // The stacks are read again from the file the import wrote, so the library shows them at
+        // once and the next frame resolves them against the new layout.
+        app.stacks.reload_with(&known);
+        // The display task reads the saved configs on its next pass; wake it so it does not wait.
+        app.displays.changed();
+        let settings = app.store.read().await.config.settings.clone();
+        app.engine.set_fps(settings.fps);
+        app.engine.set_brightness(settings.brightness);
+        app.engine.set_power(settings.power);
+        app.stacks.set_fps(settings.fps);
+        if let Some(layout) = app.active_layout().await {
+            let devices = app.devices.read().await.clone();
+            app.set_layout(&layout, &devices);
+            app.stacks.publish_areas(&layout, &devices);
+        }
     }
 
     tracing::info!("the config was imported");
