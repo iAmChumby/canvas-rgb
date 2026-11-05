@@ -272,24 +272,10 @@ pub fn over_budget(dir: &std::path::Path, prefix: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// Runs `run` under a subscriber that collects its lines.
+    /// Runs `run` under a subscriber that collects its lines: the crate's own helper, so that
+    /// the callsite interest cache stays permissive (class `cause:timing-test`, #45).
     fn captured(run: impl FnOnce()) -> String {
-        #[derive(Clone, Default)]
-        struct Buf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-        impl std::io::Write for Buf {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(bytes);
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let buf = Buf::default();
-        let sink = buf.clone();
-        let subscriber = tracing_subscriber::fmt().with_ansi(false).with_writer(move || sink.clone()).finish();
-        tracing::subscriber::with_default(subscriber, run);
-        let text = String::from_utf8_lossy(&buf.0.lock().unwrap()).into_owned();
+        let (_, text) = crate::test_logs::captured(run);
         text
     }
 
@@ -313,6 +299,9 @@ mod tests {
         let (writer, guard) = file_writer(&dir, "canvas-rgbd").unwrap();
         hold(guard);
         let subscriber = tracing_subscriber::fmt().with_ansi(false).with_writer(writer).finish();
+        // The keeper first: this capture has a subscriber of its own, so the interest cache must
+        // not answer `never` for a callsite another thread reached (class `cause:timing-test`).
+        crate::test_logs::keep_the_interest_cache_permissive();
         tracing::subscriber::with_default(subscriber, || {
             for i in 0..200 {
                 tracing::info!("filler line {i}");
@@ -370,6 +359,9 @@ mod tests {
         let release = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (stuck, stuck_guard) = tracing_appender::non_blocking(StuckWriter(release.clone()));
         let subscriber = tracing_subscriber::fmt().with_ansi(false).with_writer(stuck).finish();
+        // The keeper first: this capture has a subscriber of its own, so the interest cache must
+        // not answer `never` for a callsite another thread reached (class `cause:timing-test`).
+        crate::test_logs::keep_the_interest_cache_permissive();
         tracing::subscriber::with_default(subscriber, || {
             for i in 0..100 {
                 tracing::error!("queued behind the backlog {i}");

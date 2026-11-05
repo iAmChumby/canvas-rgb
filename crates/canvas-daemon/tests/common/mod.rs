@@ -18,7 +18,7 @@ use canvas_proto::traits::{
 };
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 
 /// A log sink the tests read back (#81). `install` makes it the log of this thread until the guard
 /// drops; a `#[tokio::test]` runs on one thread, so a router driven with `oneshot` logs into it.
@@ -35,8 +35,66 @@ impl std::io::Write for LogBuf {
     }
 }
 
+/// A subscriber that keeps tracing's callsite interest cache permissive, and records nothing.
+///
+/// tracing-core keeps one `Interest` per callsite for the whole process (`callsite::register` ->
+/// `rebuild_callsite_interest`). It ANDs the answer of every live dispatcher; with exactly one
+/// scoped dispatcher live it asks the registering thread's default, and with none it is `never`. A
+/// thread with no subscriber in sight caches `Interest::never()` for that callsite, and `tracing`
+/// then drops every later event on it -- including the one a capture on another thread is waiting
+/// for (class `cause:timing-test`, #45). The cache is only recomputed when a dispatcher is
+/// created, so a capture that starts after the bad registration gets the line back, and one that
+/// runs across it does not.
+///
+/// This subscriber is installed once, as the global default, so the cache can never hold `never`:
+/// it answers `Interest::sometimes()` for every callsite and `enabled()` is false, so it records
+/// nothing and builds no event. A capture's own thread-local subscriber still decides what a
+/// capture collects, and lines from other threads still go nowhere.
+struct InterestKeeper;
+
+impl tracing::Subscriber for InterestKeeper {
+    fn register_callsite(
+        &self,
+        _metadata: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        // `Subscriber`'s default would ask `enabled()`, which is false, and answer `never`; the
+        // cache would then hold `never` whenever no capture is running. `sometimes` keeps it
+        // permissive for good.
+        tracing::subscriber::Interest::sometimes()
+    }
+    fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+        false
+    }
+    fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+    fn event(&self, _event: &tracing::Event<'_>) {}
+    fn enter(&self, _span: &tracing::span::Id) {}
+    fn exit(&self, _span: &tracing::span::Id) {}
+}
+
+static KEEPER: Once = Once::new();
+
+/// Installs the keeper, once per process.
+///
+/// A global subscriber can be set once, and nothing else in these test binaries sets one (the
+/// daemon's own `logging::init` runs in the binary, and in `tests/panic_log.rs`, which does not
+/// use this helper). If some other subscriber got there first, the keeper is skipped: that
+/// subscriber's own interest decides the cache from then on.
+fn keep_the_interest_cache_permissive() {
+    KEEPER.call_once(|| {
+        let _ = tracing::subscriber::set_global_default(InterestKeeper);
+    });
+}
+
 impl LogBuf {
     pub fn install(&self) -> tracing::subscriber::DefaultGuard {
+        // The keeper first: the capture's own subscriber decides what the capture collects, and
+        // the keeper keeps the interest cache from answering `never` for a callsite another thread
+        // reached (class `cause:timing-test`, #45).
+        keep_the_interest_cache_permissive();
         let sink = self.clone();
         tracing::subscriber::set_default(
             tracing_subscriber::fmt()
