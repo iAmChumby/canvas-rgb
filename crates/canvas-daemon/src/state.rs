@@ -63,7 +63,10 @@ pub struct App {
     /// The stack preview engine and the stack it runs (D95.4.4).
     pub stack_preview: crate::preview::StackPreview,
     /// The screen and audio captures. They only run while an effect needs them.
-    pub inputs: Mutex<crate::capture::DaemonInputs>,
+    ///
+    /// The capture is shared: the engines hold it as their input source, so the screen
+    /// and the audio reach the lights (#1).
+    pub inputs: Arc<crate::capture::DaemonInputs>,
     /// The API token every request must carry.
     pub token: String,
     /// The daemon's version, as reported by `/status`.
@@ -204,7 +207,7 @@ impl App {
             preview_subs: PreviewRegistry::default(),
             stack_subs: PreviewRegistry::default(),
             stack_preview: crate::preview::StackPreview::new(),
-            inputs: Mutex::new(crate::capture::DaemonInputs::empty()),
+            inputs: Arc::new(crate::capture::DaemonInputs::empty()),
             token,
             version,
             service_down_ms: AtomicU64::new(0),
@@ -262,14 +265,26 @@ impl App {
         self.stack_preview.set_layout(layout, devices);
     }
 
-    /// The input source reaches both engines at the same call sites. On this commit the daemon
-    /// never calls this, so neither engine has one; the app keeps the last source so an engine
-    /// made later (the preview) starts from the same one (D95.4.4).
+    /// The input source reaches both engines at the same call sites. The daemon's startup
+    /// gives both engines the daemon's own capture (see [`App::capture_source`]), so an
+    /// effect that needs the screen or the audio reads a live source from its first
+    /// frame; the app keeps the last source so an engine made later (the preview) starts
+    /// from the same one (D95.4.4).
     pub fn set_input_source(&self, source: Option<Arc<dyn canvas_proto::traits::InputSource>>) {
         *self.input_source.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
             source.clone();
         self.engine.set_input_source(source.clone());
         self.stack_preview.set_input_source(source);
+    }
+
+    /// The daemon's capture, as the engines read it.
+    ///
+    /// This is the source both engines are given: the screen and the audio the daemon
+    /// captures reach the lights and the stack preview through it (#1).
+    pub fn capture_source(&self) -> Arc<dyn canvas_proto::traits::InputSource> {
+        let inputs: Arc<crate::capture::DaemonInputs> = Arc::clone(&self.inputs);
+        let source: Arc<dyn canvas_proto::traits::InputSource> = inputs;
+        source
     }
 
     /// The input source the lights' engine has.
