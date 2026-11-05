@@ -10,8 +10,9 @@
 //! async ones), so every capture takes that one lock.
 //!
 //! The lock is not what keeps a capture whole. Tracing decides whether a call site is worth
-//! recording once per process, and it decides it from the thread that reached the call site
-//! first; a thread with no subscriber in sight makes it "never", and the line is then dropped for
+//! recording once per process. While exactly one scoped dispatcher is live (a capture), it asks
+//! that from the thread that reached the call site first, and with none live it answers "never";
+//! a thread with no subscriber in sight makes it "never", and the line is then dropped for
 //! every thread. [`InterestKeeper`] is installed once, as the global default, so that cannot
 //! happen (class `cause:timing-test`, #45 and #55).
 
@@ -57,9 +58,9 @@ fn one_capture_at_a_time() -> MutexGuard<'static, ()> {
 
 /// A subscriber that keeps tracing's callsite interest cache permissive, and records nothing.
 ///
-/// tracing-core keeps one `Interest` per callsite for the whole process, and computes it from the
-/// dispatcher of the thread that reached the callsite first (`callsite::register` ->
-/// `rebuild_callsite_interest`). A thread with no subscriber in sight caches
+/// tracing-core keeps one `Interest` per callsite for the whole process (`callsite::register` ->
+/// `rebuild_callsite_interest`). It ANDs the answer of every live dispatcher; with exactly one
+/// scoped dispatcher live it asks the registering thread's default, and with none it is `never`. A thread with no subscriber in sight caches
 /// `Interest::never()` for that callsite, and `tracing` then drops every later event on it --
 /// including the one a capture on another thread is waiting for (#45, #55). The cache is only
 /// recomputed when a dispatcher is created, so a capture that starts after the bad registration
@@ -85,7 +86,7 @@ impl tracing::Subscriber for InterestKeeper {
         false
     }
     fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(0)
+        tracing::span::Id::from_u64(1)
     }
     fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
     fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
@@ -155,8 +156,8 @@ mod tests {
 
     /// A capture must see a line whose callsite was first reached on another thread.
     ///
-    /// tracing-core keeps one `Interest` per callsite for the whole process and computes it from
-    /// the dispatcher of the thread that reached the callsite first. A thread with no subscriber
+    /// tracing-core keeps one `Interest` per callsite for the whole process; with exactly one
+    /// scoped dispatcher live it computes it from the thread that reached the callsite first. A thread with no subscriber
     /// in sight caches `Interest::never()` for that callsite, and tracing then drops every later
     /// event on it -- including the one a capture on another thread is waiting for (#45, #55).
     #[test]
