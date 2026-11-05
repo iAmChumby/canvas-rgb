@@ -14,11 +14,16 @@
 //! know the daemon has seen it before, and it never takes the lights from a newer page. Only a
 //! page the daemon has never seen at all is a new page.
 //!
+//! The fingerprint tier is first in, first out: when it is full the oldest fingerprint goes, so
+//! the page that fell out of the book most recently keeps losing the longest. A page that has
+//! fallen out of both tiers is a new page again, and it takes the route from the live owner;
+//! that takes 9216 distinct later page loads at the most (see [`EPOCH_BOOK_FORGOTTEN`]).
+//!
 //! The order is by when the daemon first saw a page, not by when the page loaded: a page whose
 //! first PUT arrives after a newer page's takes the route, because the newest user action wins.
 //! Only a page that has been superseded is stale.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::Mutex;
 
@@ -27,8 +32,9 @@ use std::sync::Mutex;
 ///
 /// The cap is safe because the entry that can still win is never dropped. The owner (the newest
 /// epoch the daemon has seen) is always in the book, so the newest page keeps the route and
-/// every older page keeps losing to it. The entries that fall out are the ones that have been
-/// superseded by this many other page loads, and the daemon still recognises them (see
+/// every older page keeps losing to it. The entries that fall out are the ones that can no
+/// longer win: a page that stops talking is the first to go once the book is full, at the
+/// latest 1024 page loads after it was last heard from. The daemon still recognises it (see
 /// [`EPOCH_BOOK_FORGOTTEN`]), so a page that falls out never takes the lights from a newer one.
 /// The pages that are still talking are kept longer than the quiet ones: the book drops the
 /// least recently used entry that can no longer win, so a stale tab that keeps sending beats
@@ -37,8 +43,15 @@ pub const EPOCH_BOOK_CAPACITY: usize = 1024;
 
 /// How many forgotten epochs the book still refuses, as a fingerprint each.
 ///
-/// A fingerprint is eight bytes, so the daemon can remember a good many of them: a page that
-/// fell out of the book keeps losing for thousands of page loads after it did.
+/// A fingerprint is eight bytes, so the daemon can remember a good many of them. The tier is
+/// first in, first out: when it is full the oldest fingerprint goes, so the page that fell out
+/// of the book most recently keeps losing the longest.
+///
+/// A page that has fallen out of both tiers is treated as a new page, and a new page takes the
+/// route from the live owner. That takes 9216 distinct later page loads at the most: 1024 until
+/// the page falls out of the exact entries, then 8192 more until its fingerprint is dropped. A
+/// page that fell out of the exact entries at once (it was the quietest when the book was
+/// already full) keeps losing for 8193 later page loads.
 pub const EPOCH_BOOK_FORGOTTEN: usize = 8192;
 
 /// True for a session epoch: exactly 16 hexadecimal characters, as the page makes it.
@@ -66,9 +79,12 @@ struct Inner {
     owner: Option<String>,
     /// The epoch and the highest sequence accepted from it, while one owns the route.
     live: Option<(String, u64)>,
-    /// The fingerprints of the epochs that fell out of `seen`. One of them goes when the set
-    /// is full.
+    /// The fingerprints of the epochs that fell out of `seen`. The oldest one goes when the
+    /// set is full.
     forgotten: HashSet<u64>,
+    /// The same fingerprints in the order they fell out. The front is the oldest one, and it
+    /// is the one that goes when the set is full.
+    forgotten_order: VecDeque<u64>,
     /// The clock the book stamps its entries with. The least recently used entry has the
     /// smallest stamp.
     used: u64,
@@ -172,6 +188,20 @@ impl EpochBook {
         self.lock().seen.len()
     }
 
+    /// True when the book still remembers this epoch exactly, with the generation it gave it.
+    /// The tests watch what falls out of the exact entries.
+    #[cfg(test)]
+    fn holds_exactly(&self, epoch: &str) -> bool {
+        self.lock().seen.contains_key(epoch)
+    }
+
+    /// True when the book still refuses this epoch as one it has seen and forgotten. The tests
+    /// watch what falls out of the fingerprint tier.
+    #[cfg(test)]
+    fn holds_a_fingerprint(&self, epoch: &str) -> bool {
+        self.lock().is_forgotten(fingerprint(epoch))
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -208,15 +238,21 @@ impl Inner {
 
     /// Remembers a fingerprint of an epoch the book drops, so a page that comes back is refused
     /// rather than treated as a new page.
+    ///
+    /// The tier is first in, first out: the oldest fingerprint goes when it is full, so the
+    /// page that fell out of the book most recently keeps losing the longest, and a page that
+    /// fell out is refused for [`EPOCH_BOOK_FORGOTTEN`] later distinct page loads.
     fn forget(&mut self, epoch: &str) {
-        self.forgotten.insert(fingerprint(epoch));
+        let fingerprint = fingerprint(epoch);
+        if self.forgotten.insert(fingerprint) {
+            self.forgotten_order.push_back(fingerprint);
+        }
         while self.forgotten.len() > EPOCH_BOOK_FORGOTTEN {
-            // Any fingerprint will do: the set holds thousands of them, so a page that fell
-            // out keeps losing for thousands of page loads after it did.
-            let Some(dropped) = self.forgotten.iter().next().copied() else {
+            // First in, first out: the oldest fingerprint goes.
+            let Some(oldest) = self.forgotten_order.pop_front() else {
                 return;
             };
-            self.forgotten.remove(&dropped);
+            self.forgotten.remove(&oldest);
         }
     }
 
@@ -365,22 +401,111 @@ mod tests {
     }
 
     #[test]
-    fn the_page_that_owns_the_route_is_never_dropped_from_the_book() {
+    fn a_page_that_lost_the_route_keeps_losing_after_the_book_rolled_over() {
         let book = EpochBook::default();
-        let owner = "1111111111111111";
-        assert!(book.offer(owner, 1), "the page owns the route");
+        let stale = "1111111111111111";
+        assert!(book.offer(stale, 1), "the page owns the route");
         let loads = EPOCH_BOOK_CAPACITY as u64 * 3;
         for page in 0..loads {
             let epoch = format!("{page:016x}");
             assert!(book.offer(&epoch, 1), "a new page always wins");
         }
         assert!(
-            !book.offer(owner, 2),
+            !book.offer(stale, 2),
             "the page that owned the route keeps losing to the newer pages"
         );
         assert!(
             book.holds(&format!("{:016x}", loads - 1)),
             "the newest page owns the route"
         );
+    }
+
+    #[test]
+    fn the_page_that_owns_the_route_is_never_dropped_from_the_book() {
+        let book = EpochBook::default();
+        // The newest load is the owner, and the owner is never dropped from the book.
+        let loads = 20_000u64;
+        for page in 0..loads {
+            let epoch = format!("{page:016x}");
+            assert!(book.offer(&epoch, 1), "a new page always wins");
+        }
+        let owner = format!("{:016x}", loads - 1);
+        assert_eq!(book.owner(), Some(owner.clone()));
+        assert!(book.holds(&owner), "the owner holds the route");
+        assert!(
+            book.offer(&owner, 2),
+            "the owner wins its next PUT after 20000 loads"
+        );
+        assert_eq!(book.live(), Some((owner.clone(), 2)));
+    }
+
+    #[test]
+    fn a_stale_tab_that_keeps_beating_stays_in_the_exact_entries() {
+        let book = EpochBook::default();
+        let stale = "0000000000000000";
+        assert!(book.offer(stale, 1), "the page owns the route");
+        assert!(
+            book.offer("1111111111111111", 1),
+            "a newer page takes the route"
+        );
+        // The stale tab beats every 100 loads, so the book keeps it exactly.
+        for page in 0..5000u64 {
+            let epoch = format!("{:016x}", page + 2);
+            assert!(book.offer(&epoch, 1), "a new page always wins");
+            if (page + 1) % 100 == 0 {
+                assert!(!book.offer(stale, 2), "the stale tab keeps losing");
+                assert!(
+                    book.holds_exactly(stale),
+                    "the stale tab that keeps beating stays in the exact entries"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_fingerprint_tier_drops_the_oldest_page_first() {
+        let book = EpochBook::default();
+        // Both tiers full: the exact entries hold the newest pages, the fingerprint tier holds
+        // the pages that fell out of them.
+        let loads = (EPOCH_BOOK_CAPACITY + EPOCH_BOOK_FORGOTTEN) as u64;
+        for page in 0..loads - 1 {
+            let epoch = format!("{page:016x}");
+            assert!(book.offer(&epoch, 1), "a new page always wins");
+        }
+        // One more load pushes the oldest exact entry into the fingerprint tier.
+        let stale = format!("{:016x}", loads - EPOCH_BOOK_CAPACITY as u64 - 1);
+        assert!(
+            book.offer(&format!("{:016x}", loads - 1), 1),
+            "a new page always wins"
+        );
+        assert!(
+            book.holds_a_fingerprint(&stale),
+            "the page fell out of the exact entries"
+        );
+        // The tier is first in, first out: the page that fell out most recently keeps losing
+        // the longest, and the oldest forgotten page is the first to lose its refusal.
+        for step in 1..=EPOCH_BOOK_FORGOTTEN as u64 - 1 {
+            let epoch = format!("{:016x}", loads + step - 1);
+            assert!(
+                book.offer(&epoch, 1),
+                "a new page always wins (step {step}, epoch {epoch})"
+            );
+            assert!(
+                !book.offer(&stale, 2),
+                "the page that fell out of the exact entries keeps losing after {step} more loads"
+            );
+            if step <= 3 {
+                let dropped = format!("{:016x}", step - 1);
+                let kept = format!("{:016x}", step);
+                assert!(
+                    !book.holds_a_fingerprint(&dropped),
+                    "the oldest forgotten page is the first one dropped"
+                );
+                assert!(
+                    book.holds_a_fingerprint(&kept),
+                    "the next oldest forgotten page is still refused"
+                );
+            }
+        }
     }
 }
