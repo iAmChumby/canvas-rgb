@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { ToastHost, ToastProvider } from "@/components/Toast";
+import { NotifyHost } from "@/components/Notify";
 import { fixtureState } from "@/lib/demoUpdate";
 import { SAMPLE_SOURCE } from "@/lib/demoEffects";
 import { patchSnap, refreshAll } from "@/lib/store";
@@ -86,8 +86,8 @@ afterEach(() => {
 async function mount() {
   await refreshAll();
   const view = render(
-    <ToastProvider>
-      <ToastHost />
+    <>
+      <NotifyHost />
       <GlobalBanners />
       <Rail pathname="/effects/" />
       <StripSlotsProvider>
@@ -95,7 +95,7 @@ async function mount() {
         <StripSlot kind="actions" />
         <EffectsView />
       </StripSlotsProvider>
-    </ToastProvider>,
+    </>,
   );
   fireEvent.click(await screen.findByRole("button", { name: "Open Sample HTML" }));
   await screen.findByRole("heading", { name: "Sample HTML" });

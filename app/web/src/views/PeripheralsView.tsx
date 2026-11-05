@@ -18,7 +18,7 @@ import { Toggle } from "@/components/Toggle";
 import { Select } from "@/components/Select";
 import { ControllerOutline, type PadButton } from "@/components/ControllerOutline";
 import { PropertyControls, type Values } from "@/views/PropertyControls";
-import { useToast } from "@/components/Toast";
+import { notify } from "@/components/Notify";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
 import { choiceWord, kindWord, nounOf, readStage, type PeripheralRow } from "@/lib/peripherals";
@@ -129,7 +129,6 @@ export function PeripheralsView() {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [pickedStage, setPickedStage] = useState<number | null>(null);
   const [pickedButton, setPickedButton] = useState<string | null>(null);
-  const toast = useToast();
 
   // The first device is open already: the keys are the way to the others.
   const selectedId = pickedId ?? (list?.[0]?.id ?? null);
@@ -302,14 +301,13 @@ export function PeripheralsView() {
       // already out may not clear this message.
       failedWrites.current += 1;
       setSaveError(messageOf(e));
-      toast(messageOf(e), "down");
       setSaving(false);
       return;
     }
     // The change is on the device. The read that follows only refreshes the page: when it
     // fails, the change is still saved.
     await loadDetail(detail.info.id, true);
-    toast("The settings are on the device");
+    notify("The settings are on the device");
     setSaving(false);
   };
 
@@ -329,7 +327,6 @@ export function PeripheralsView() {
       // already out may not clear this message.
       failedWrites.current += 1;
       setSaveError(messageOf(e));
-      toast(messageOf(e), "down");
       return;
     }
     // The access is saved. The read that follows only refreshes the page.

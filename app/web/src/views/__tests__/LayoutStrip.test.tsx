@@ -1,6 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { ToastProvider } from "@/components/Toast";
 import { INITIAL_SETTINGS, LAYOUT_DESK } from "@/lib/fixtures";
 import { patchSnap } from "@/lib/store";
 import { LayoutView } from "@/views/LayoutView";
@@ -55,7 +54,7 @@ describe("undo and redo in the strip", () => {
       settings: INITIAL_SETTINGS,
     });
     render(
-      <ToastProvider>
+      <>
         <StripSlotsProvider>
           <header data-testid="strip">
             <StripSlot kind="title" />
@@ -63,7 +62,7 @@ describe("undo and redo in the strip", () => {
           </header>
           <LayoutView />
         </StripSlotsProvider>
-      </ToastProvider>,
+      </>,
     );
     const strip = screen.getByTestId("strip");
     // The desk has its own pair of keys for a phone (hidden by css), so the strip's are asked for

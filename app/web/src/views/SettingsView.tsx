@@ -18,7 +18,6 @@ import { openLogsFolder, tauriHost } from "@/lib/host";
 import { requestNavigation } from "@/lib/navigationGuard";
 import { getSnap, patchSnap, refreshAll, refreshRender, refreshSettings, retrySettings, useSnap } from "@/lib/store";
 import { fmt1 } from "@/lib/format";
-import { useToast } from "@/components/Toast";
 import { ErrorPanel, Details, LoadFrame } from "@/components/Loading";
 import { SettingsShape } from "@/components/LoadShapes";
 import {
@@ -49,7 +48,6 @@ export function SettingsView() {
   const [motion, setMotion] = useState<MotionPref>(() => readMotion());
   const [bootDraft, setBootDraft] = useState<string | null>(null);
   const inTray = tauriHost() !== null;
-  const toast = useToast();
   const router = useRouter();
 
   if (!settings) {
@@ -102,7 +100,6 @@ export function SettingsView() {
       // The control goes back to the value the daemon has: nothing fails silently.
       setFps(null);
       setRenderErr(messageOf(e));
-      toast(messageOf(e), "down");
     }
   };
 
@@ -117,7 +114,6 @@ export function SettingsView() {
     } catch (e) {
       setBrightness(null);
       setRenderErr(messageOf(e));
-      toast(messageOf(e), "down");
     }
   };
 
@@ -127,10 +123,8 @@ export function SettingsView() {
     try {
       const name = await exportConfig();
       setNote(`Downloaded ${name}`);
-      toast(`Downloaded ${name}`);
     } catch (e) {
       setErr(messageOf(e));
-      toast(messageOf(e), "down");
     }
   };
 
@@ -140,11 +134,9 @@ export function SettingsView() {
     try {
       await importConfigFile(file);
       setNote(`Imported ${file.name}`);
-      toast(`Imported ${file.name}`);
       await refreshAll();
     } catch (e) {
       setErr(messageOf(e));
-      toast(messageOf(e), "down");
     }
   };
 
@@ -211,7 +203,6 @@ export function SettingsView() {
                 onChange={(t) => {
                   setTheme(t);
                   applyTheme(t);
-                  toast(`Theme: ${t}`);
                 }}
               />
             </Field>
@@ -226,7 +217,6 @@ export function SettingsView() {
                 onChange={(m) => {
                   setMotion(m);
                   applyMotion(m);
-                  toast(m === "reduced" ? "Motion reduced" : "Motion on");
                 }}
               />
             </Field>

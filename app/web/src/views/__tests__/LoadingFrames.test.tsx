@@ -1,6 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { ToastProvider } from "@/components/Toast";
 import { getSnap, patchSnap, refreshDevices, refreshDisplays, refreshEffects } from "@/lib/store";
 import { DevicesView } from "@/views/DevicesView";
 import { DisplaysView } from "@/views/DisplaysView";
@@ -113,13 +112,13 @@ describe("the error frame", () => {
       await refreshEffects();
     });
     render(
-      <ToastProvider>
+      <>
         {/* The page's name lives in the status strip, so a page on its own needs a strip. */}
         <StripSlotsProvider>
           <StripSlot kind="title" />
           <EffectsView />
         </StripSlotsProvider>
-      </ToastProvider>,
+      </>,
     );
     await screen.findByText("The effects could not be read");
     expectGoodErrorFrame("The effects could not be read", "could not read the effects: the request came back with an error");
@@ -153,13 +152,13 @@ describe("the retry", () => {
       await refreshEffects();
     });
     render(
-      <ToastProvider>
+      <>
         {/* The page's name lives in the status strip, so a page on its own needs a strip. */}
         <StripSlotsProvider>
           <StripSlot kind="title" />
           <EffectsView />
         </StripSlotsProvider>
-      </ToastProvider>,
+      </>,
     );
     await screen.findByText("The effects could not be read");
     // The daemon is slow this time: the frame waits.
@@ -179,13 +178,13 @@ describe("the retry", () => {
       await refreshEffects();
     });
     render(
-      <ToastProvider>
+      <>
         {/* The page's name lives in the status strip, so a page on its own needs a strip. */}
         <StripSlotsProvider>
           <StripSlot kind="title" />
           <EffectsView />
         </StripSlotsProvider>
-      </ToastProvider>,
+      </>,
     );
     await screen.findAllByText(/Aurora/);
     // A refresh fails: the cards stay, and the page says they may be old.
@@ -207,13 +206,13 @@ describe("the gallery's cards", () => {
       await refreshEffects();
     });
     render(
-      <ToastProvider>
+      <>
         {/* The page's name lives in the status strip, so a page on its own needs a strip. */}
         <StripSlotsProvider>
           <StripSlot kind="title" />
           <EffectsView />
         </StripSlotsProvider>
-      </ToastProvider>,
+      </>,
     );
     await screen.findAllByText(/Aurora/);
     const key = document.querySelector(".rd-failed-chip");
@@ -234,13 +233,13 @@ describe("the gallery's cards", () => {
     // The list came back empty: the filter is not the reason.
     patchSnap({ effects: [], effectsError: null });
     render(
-      <ToastProvider>
+      <>
         {/* The page's name lives in the status strip, so a page on its own needs a strip. */}
         <StripSlotsProvider>
           <StripSlot kind="title" />
           <EffectsView />
         </StripSlotsProvider>
-      </ToastProvider>,
+      </>,
     );
     expect(screen.getByText("No effects yet")).toBeTruthy();
     expect(screen.queryByText("No effect matches that")).toBeNull();

@@ -8,6 +8,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Changed
 
+- Notifications no longer cover the page or vanish before you can read an error: at most three at a time, errors stay until dismissed, and messages already shown next to a control are no longer repeated as a pop-up. (#168)
 - Log: the identify line now says "1 other device" in the singular and names the zone and the LED it lit instead of a flat LED number. The service's OpenRGB stop line now says the daemon was told to stop (its exit is not waited on), and says when the daemon had already exited. (#86, #87)
 
 ### Fixed

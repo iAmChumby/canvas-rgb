@@ -6,7 +6,7 @@ import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { Button, IconButton, Swap } from "@/components/Button";
 import { Segmented } from "@/components/Segmented";
 import { Slider } from "@/components/Slider";
-import { useToast } from "@/components/Toast";
+import { notify } from "@/components/Notify";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
 import { getSnap, patchSnap, refreshAll, refreshStatus, useSnap } from "@/lib/store";
@@ -32,7 +32,6 @@ export function RailDeck() {
   const effects = useSnap((s) => s.effects);
   const fans = useSnap((s) => s.fans);
   const render = useSnap((s) => s.render);
-  const toast = useToast();
 
   const paused = status?.power === "paused";
   const activeId = status?.active_effect ?? null;
@@ -51,12 +50,11 @@ export function RailDeck() {
       try {
         await api.activateEffect(next.id, { props: {}, preset: null });
         await refreshAll();
-        toast(`${next.name} is running`);
       } catch (e) {
-        toast(messageOf(e), "down");
+        notify(messageOf(e), "down");
       }
     },
-    [toast],
+    [],
   );
 
   // The pause: the output's own power, the same route the strip uses.
@@ -68,11 +66,10 @@ export function RailDeck() {
       await api.patchOutput({ power: wasPaused ? "running" : "paused", brightness: null });
       patchSnap({ status: { ...snap, power: wasPaused ? "running" : "paused" } });
       await refreshStatus();
-      toast(wasPaused ? "Lights resumed" : "Lights paused");
     } catch (e) {
-      toast(messageOf(e), "down");
+      notify(messageOf(e), "down");
     }
-  }, [toast]);
+  }, []);
 
   return (
     <section className="rail-deck" aria-label="The deck">
@@ -130,7 +127,6 @@ function LightsPanel({
   onToggle: () => Promise<void>;
 }) {
   const status = useSnap((s) => s.status);
-  const toast = useToast();
   // The brightness while the fader is being dragged, and the value the daemon has.
   const [draft, setDraft] = useState<number | null>(null);
   const brightness = status?.brightness ?? null;
@@ -146,11 +142,11 @@ function LightsPanel({
         await refreshStatus();
       } catch (e) {
         setDraft(null);
-        toast(messageOf(e), "down");
+        notify(messageOf(e), "down");
         await refreshStatus();
       }
     },
-    [toast],
+    [],
   );
 
   return (

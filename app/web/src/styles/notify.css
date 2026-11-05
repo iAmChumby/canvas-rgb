@@ -1,0 +1,126 @@
+/* ==========================================================================
+   The notification lane (#168)
+   ========================================================================== */
+
+/* The library writes its offsets as inline custom properties, so these have to be
+   important to win. The lane sits at the bottom right on a wide screen, and clear of
+   the phone's bottom dock on a small one, so it never covers a control. */
+.notify-lane[data-sonner-toaster] {
+  --offset-top: 24px !important;
+  --offset-right: 24px !important;
+  --offset-bottom: 24px !important;
+  --offset-left: 24px !important;
+  --mobile-offset-top: 12px !important;
+  --mobile-offset-right: 12px !important;
+  --mobile-offset-left: 12px !important;
+  --mobile-offset-bottom: 12px !important;
+  /* Above the app's own chrome, below the modal layers (the palette, a scrim). */
+  z-index: 65;
+}
+
+@media (max-width: 720px) {
+  .notify-lane[data-sonner-toaster] {
+    /* The phone's dock is 65 px tall: the lane clears it, so no control is covered. */
+    --offset-bottom: calc(var(--dock-h) + 12px) !important;
+    --mobile-offset-bottom: calc(var(--dock-h) + 12px) !important;
+  }
+}
+
+/* The card. The library's own bubble is not used: the app draws the message itself, so the
+   card is the app's own panel, with the editor's line, radius and shadow. */
+.notify-lane[data-sonner-toaster] [data-sonner-toast] {
+  width: min(380px, calc(100vw - 32px));
+  padding: 0;
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  box-shadow: var(--pop);
+  /* The editor's motion: 180 ms, one curve. */
+  transition:
+    transform var(--dur) var(--ease),
+    opacity var(--dur) var(--ease);
+}
+
+.notify-lane[data-sonner-toaster] [data-sonner-toast] > * {
+  transition: opacity var(--dur) var(--ease);
+}
+
+/* A message that is past the three the lane shows is not on screen. Hiding it with
+   visibility (and not with opacity alone) takes it out of the page for the keyboard and
+   for a screen reader too, so the reader hears the three and no more. */
+.notify-lane[data-sonner-toaster] [data-sonner-toast][data-visible="false"] {
+  visibility: hidden;
+}
+
+/* The message: the mark for its tone, the words, and the answers it carries. */
+.notify-body {
+  --tone: var(--work);
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s2) var(--s3);
+  color: var(--ink);
+  font-size: var(--t14);
+  line-height: 1.4;
+}
+
+.notify-body[data-tone="ok"] {
+  --tone: var(--ok);
+}
+
+.notify-body[data-tone="warn"] {
+  --tone: var(--warn);
+}
+
+.notify-body[data-tone="down"] {
+  --tone: var(--down);
+}
+
+.notify-body[data-tone="info"] {
+  --tone: var(--work);
+}
+
+.notify-icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--tone);
+}
+
+.notify-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* The answer a notification offers: the app's own key, in the tone's colour. */
+.notify-action {
+  flex: none;
+  margin: -4px -6px -4px var(--s1);
+  color: var(--tone);
+  font-weight: 600;
+}
+
+.notify-action:hover {
+  color: var(--tone);
+}
+
+.notify-close {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  margin: -4px -6px -4px 0;
+}
+
+/* Reduced motion: the message arrives and leaves without moving. */
+@media (prefers-reduced-motion: reduce) {
+  .notify-lane[data-sonner-toaster] [data-sonner-toast],
+  .notify-lane[data-sonner-toaster] [data-sonner-toast] > * {
+    transition: none !important;
+    animation: none !important;
+  }
+}
+
+html[data-motion="reduced"] .notify-lane[data-sonner-toaster] [data-sonner-toast],
+html[data-motion="reduced"] .notify-lane[data-sonner-toaster] [data-sonner-toast] > * {
+  transition: none !important;
+  animation: none !important;
+}

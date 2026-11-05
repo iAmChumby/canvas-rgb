@@ -18,7 +18,7 @@ import { usePageNarrow } from "@/components/MediaQuery";
 import { PageActions } from "@/shell/PageHeader";
 import { Details, LoadFrame } from "@/components/Loading";
 import { FansShape } from "@/components/LoadShapes";
-import { useToast } from "@/components/Toast";
+import { notify } from "@/components/Notify";
 import { FanCurveEditor } from "@/views/FanCurveEditor";
 import { FanBulkBar } from "@/views/FanBulk";
 import { TACH_ONLY_WHY, UNAVAILABLE_WHY, canDrive, isHandedBack, isUnavailable, plainLabel } from "@/lib/fanBulk";
@@ -588,7 +588,6 @@ function FanProfileActions({ fans }: { fans: FansStatus }) {
   const [confirming, setConfirming] = useState<string | null>(null);
   const [moreOpen, setMoreOpen] = useState(false);
   const moreRef = useRef<HTMLSpanElement>(null);
-  const toast = useToast();
 
   const current = (): Record<string, FanMode> =>
     Object.fromEntries(fans.headers.map((h) => [h.id, h.mode]));
@@ -598,10 +597,11 @@ function FanProfileActions({ fans }: { fans: FansStatus }) {
     try {
       await fn();
       await refreshFans();
-      if (done) toast(done);
+      // Only a message that the page cannot show is said here: the profile the reader picks is
+      // on the keys, the copy is in the list and the deleted one is gone from it.
+      if (done) notify(done);
     } catch (e) {
       setErr(messageOf(e));
-      toast(messageOf(e), "down");
     }
   };
 
@@ -618,7 +618,7 @@ function FanProfileActions({ fans }: { fans: FansStatus }) {
         label="The fan profile"
         value={fans.active_profile}
         options={fans.profiles.map((p) => ({ value: p, label: p }))}
-        onChange={(p) => void run(() => api.switchFanProfile(p), `${p} is the active profile`)}
+        onChange={(p) => void run(() => api.switchFanProfile(p))}
       />
       <Button
         variant="primary"
@@ -653,13 +653,11 @@ function FanProfileActions({ fans }: { fans: FansStatus }) {
             size="sm"
             icon={<CopySimple size={14} />}
             onClick={() =>
-              void run(
-                () =>
-                  api.putFanProfile(nextName(fans.active_profile), {
-                    name: nextName(fans.active_profile),
-                    headers: current(),
-                  }),
-                "Profile duplicated",
+              void run(() =>
+                api.putFanProfile(nextName(fans.active_profile), {
+                  name: nextName(fans.active_profile),
+                  headers: current(),
+                }),
               )
             }
           >
@@ -676,7 +674,7 @@ function FanProfileActions({ fans }: { fans: FansStatus }) {
                   await api.putFanProfile(name, { name, headers: current() });
                   await api.switchFanProfile(name);
                   if (old !== name) await api.deleteFanProfile(old);
-                }, `Profile renamed to ${name}`)
+                })
               }
             />
           </Field>
@@ -694,7 +692,7 @@ function FanProfileActions({ fans }: { fans: FansStatus }) {
                     void run(async () => {
                       await api.deleteFanProfile(confirming);
                       setConfirming(null);
-                    }, `${confirming} deleted`)
+                    })
                   }
                 >
                   Delete
@@ -831,7 +829,6 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
   const [points, setPoints] = useState<CurvePoint[]>(mode.mode === "curve" ? mode.points : defaultCurve(base));
   const [source, setSource] = useState<TempSource>(mode.mode === "curve" ? mode.source : { type: "cpu" });
   const pointsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const toast = useToast();
 
   useEffect(
     () => () => {
@@ -852,7 +849,6 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
     try {
       await writeFanMode(header.id, next, (e) => {
         setErr(messageOf(e));
-        toast(messageOf(e), "down");
       });
       await refreshFans();
     } finally {

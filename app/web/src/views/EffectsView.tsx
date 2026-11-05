@@ -31,7 +31,7 @@ import { Highlighted, matchEffect } from "@/components/Search";
 import { useMediaQuery } from "@/components/MediaQuery";
 import { ErrorPanel, Details, LoadFrame, type LoadState } from "@/components/Loading";
 import { EffectDetailShape, EffectGalleryShape } from "@/components/LoadShapes";
-import { useToast } from "@/components/Toast";
+import { notify } from "@/components/Notify";
 import { PropertyControls, type Values } from "@/views/PropertyControls";
 import { PresetStrip } from "@/views/PresetStrip";
 import { EffectEditor, type EffectEditorHandle, type EditorTarget, type SavedEffect } from "@/views/effects/EffectEditor";
@@ -122,7 +122,6 @@ export function EffectsView() {
   const [settled, setSettled] = useState(false);
   // The height of the status strip when the sheet opened.
   const [sheetTop, setSheetTop] = useState<string | null>(null);
-  const toast = useToast();
 
   const pending = useRef<Values>({});
   /** The effect the waiting values were edited on. */
@@ -160,7 +159,6 @@ export function EffectsView() {
       setError(null);
     } catch (e) {
       setError(messageOf(e));
-      toast(messageOf(e), "down");
       // The control goes back to the value the daemon has: nothing fails silently.
       if (selectedRef.current === id) setValues(saved.current);
     }
@@ -189,7 +187,6 @@ export function EffectsView() {
       void flush();
     };
     // flush reads refs and stable setters only
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId, activeId, reloadTick]);
 
   useEffect(
@@ -216,10 +213,8 @@ export function EffectsView() {
     try {
       await api.activateEffect(selectedId, { props: {}, preset });
       await refreshAll();
-      toast(preset ? `${detail?.schema.name ?? "Effect"}: ${preset}` : `${detail?.schema.name ?? "Effect"} is running`);
     } catch (e) {
       setError(messageOf(e));
-      toast(messageOf(e), "down");
     }
   };
 
@@ -243,7 +238,7 @@ export function EffectsView() {
 
   /** A preset another window removed or changed: say so and read the list again. */
   const gone = (message: string) => {
-    toast(message, "warn");
+    notify(message, "warn");
     setReloadTick((t) => t + 1);
   };
 
@@ -259,7 +254,6 @@ export function EffectsView() {
     setApplied(d.schema.id, name);
     await refreshAll();
     setReloadTick((t) => t + 1);
-    toast(`${d.schema.name}: ${name}`);
   };
 
   const savePreset = async (name: string) => {
@@ -271,7 +265,6 @@ export function EffectsView() {
     });
     setUserPresets(d.schema.id, r.user_presets);
     setApplied(d.schema.id, name);
-    toast(`Saved ${name}`);
   };
 
   const updatePreset = async (name: string) => {
@@ -286,7 +279,6 @@ export function EffectsView() {
       });
       setUserPresets(d.schema.id, r.user_presets);
       setApplied(d.schema.id, name);
-      toast(`Updated ${name}`);
     } catch (e) {
       if (e instanceof ApiFailure && e.status === 404) return gone("That preset was removed in another window");
       if (e instanceof ApiFailure && e.status === 409) return gone("Changed in another window");
@@ -306,7 +298,6 @@ export function EffectsView() {
       });
       setUserPresets(d.schema.id, r.user_presets);
       if (appliedName(d.schema.id) === name) setApplied(d.schema.id, to);
-      toast(`Renamed to ${to}`);
     } catch (e) {
       if (e instanceof ApiFailure && e.status === 404) return gone("That preset was removed in another window");
       throw e;
@@ -320,7 +311,6 @@ export function EffectsView() {
     const copy = nextFreeName(name, [d.schema.presets, d.user_presets]);
     const r = await api.createPreset(d.schema.id, { name: copy, props: preset.props });
     setUserPresets(d.schema.id, r.user_presets);
-    toast(`Duplicated as ${copy}`);
   };
 
   const deletePreset = async (name: string) => {
@@ -338,7 +328,7 @@ export function EffectsView() {
     }
     // The live values stay as they are; they just no longer belong to a preset.
     if (wasApplied) setApplied(id, null);
-    // One way back, shared by the toast and the strip: it works once, then both go.
+    // One way back, shared by the notification and the strip: it works once, then both go.
     let used = false;
     const putBack = async () => {
       if (used) return;
@@ -349,29 +339,26 @@ export function EffectsView() {
         setUserPresets(id, r.user_presets);
         if (wasApplied) setApplied(id, name);
         // The store appends, so the preset comes back at the end of the list.
-        toast(`Put back ${name} at the end of the list`);
       } catch (e) {
         used = false;
         throw e;
       }
     };
     setUndo({ name, run: putBack });
-    toast(`Deleted ${name}`, "info", {
+    notify(`Deleted ${name}`, "info", {
       label: "Undo",
-      onClick: () => void putBack().catch((e: unknown) => toast(messageOf(e), "down")),
+      onClick: () => void putBack().catch((e: unknown) => notify(messageOf(e), "down")),
     });
   };
 
-  const toggleFavorite = async (id: string, favorite: boolean, name: string) => {
+  const toggleFavorite = async (id: string, favorite: boolean) => {
     setFavPop(id);
     setTimeout(() => setFavPop(null), 260);
     try {
       await api.setFavorite(id, { favorite });
       await refreshAll();
-      toast(favorite ? `${name} added to favourites` : `${name} removed from favourites`, "info");
     } catch (e) {
       setError(messageOf(e));
-      toast(messageOf(e), "down");
     }
   };
 
@@ -387,17 +374,12 @@ export function EffectsView() {
       setImportError(null);
       // When the load took too long the reply carries its own sentence (saved, will be
       // tried again) in place of the effect's description, so the library entry, if any, does
-      // not match it. Say that sentence; it names the effect.
+      // not match it. That sentence is in no list anywhere, so it is said; an effect that
+      // did land is in the library on screen, and the list says it.
       const inLibrary = (getSnap().effects ?? []).some(
         (e) => e.id === r.effect.id && e.description === r.effect.description,
       );
-      toast(
-        inLibrary
-          ? r.replaced
-            ? `${r.effect.name} is replaced`
-            : `${r.effect.name} is added`
-          : r.effect.description,
-      );
+      if (!inLibrary) notify(r.effect.description);
     } catch (e) {
       if (e instanceof ApiFailure && e.status === 409) {
         setReplaceWith({ fileName: file.name, html: await file.text() });
@@ -412,15 +394,13 @@ export function EffectsView() {
   };
 
   /** Removes a user effect. The one that is playing asks first. */
-  const deleteEffect = async (id: string, name: string, keepPresets = false) => {
+  const deleteEffect = async (id: string, keepPresets = false) => {
     setDeleting(null);
     try {
       await api.deleteEffect(id, keepPresets);
       await refreshAll();
-      toast(`${name} is removed`);
     } catch (e) {
       setError(messageOf(e));
-      toast(messageOf(e), "down");
     }
   };
 
@@ -557,9 +537,7 @@ export function EffectsView() {
     setPicked(saved.id);
     void refreshAll();
     if (saved.startError) {
-      toast(`${saved.name} is saved, but it did not start: ${saved.startError}`, "warn");
-    } else {
-      toast(`${saved.name} is running`);
+      notify(`${saved.name} is saved, but it did not start: ${saved.startError}`, "warn");
     }
   };
 
@@ -741,7 +719,7 @@ export function EffectsView() {
                   pressed={e.favorite}
                   className={favPop === e.id ? "effect-card-fav pop" : "effect-card-fav"}
                   icon={<Star size={16} weight={e.favorite ? "fill" : "regular"} />}
-                  onClick={() => void toggleFavorite(e.id, !e.favorite, e.name)}
+                  onClick={() => void toggleFavorite(e.id, !e.favorite)}
                 />
               </span>
             </div>
@@ -824,7 +802,7 @@ export function EffectsView() {
                 className="rd-eff-fav"
                 pressed={detail.favorite}
                 label={detail.favorite ? `Unfavorite ${detail.schema.name}` : `Favorite ${detail.schema.name}`}
-                onClick={() => void toggleFavorite(detail.schema.id, !detail.favorite, detail.schema.name)}
+                onClick={() => void toggleFavorite(detail.schema.id, !detail.favorite)}
               >
                 <Star size={16} weight={detail.favorite ? "fill" : "regular"} aria-hidden="true" />
               </Chip>
@@ -850,14 +828,14 @@ export function EffectsView() {
                         <Button
                           variant="danger"
                           size="sm"
-                          onClick={() => void deleteEffect(selectedId, detail.schema.name)}
+                          onClick={() => void deleteEffect(selectedId)}
                         >
                           {detail.user_presets.length > 0 ? "Delete with presets" : "Delete"}
                         </Button>
                         {detail.user_presets.length > 0 && (
                           <Button
                             size="sm"
-                            onClick={() => void deleteEffect(selectedId, detail.schema.name, true)}
+                            onClick={() => void deleteEffect(selectedId, true)}
                           >
                             Keep presets
                           </Button>

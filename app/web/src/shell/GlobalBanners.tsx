@@ -5,7 +5,6 @@ import { useEffect, useRef, useState } from "react";
 import { ArrowCircleUp, CheckCircle, FolderOpen, WarningCircle, Lightning, SquaresFour, Warning, WarningOctagon } from "@phosphor-icons/react";
 import { Banner } from "@/components/Banner";
 import { Button, ButtonLink } from "@/components/Button";
-import { ACTION_LIFETIME_MS } from "@/components/Toast";
 import { api } from "@/lib/endpoints";
 import { canUpdate, openLogsFolder, tauriHost, updateDismissUpdated, updateInstall, updateLater, updateSkip } from "@/lib/host";
 import { sendUpdate } from "@/lib/updateActions";
@@ -17,8 +16,10 @@ import { patchSnap, useSnap } from "@/lib/store";
 
 /** The service banner appears after this many ms without the fan service (G4). */
 const SERVICE_BANNER_MS = 10_000;
-/** The leaving fade's tail, the same 200 ms the toast host waits before removing a toast. */
+/** The leaving fade's tail: how long the banner plays its fade before it is taken away. */
 const LEAVE_TAIL_MS = 200;
+/** How long the "Updated to" banner stays before it leaves on its own. */
+const UPDATED_BANNER_MS = 7000;
 
 /**
  * The standing notices: the SignalRGB conflict, no layout yet, and the first-run "size your ARGB
@@ -31,24 +32,6 @@ export function StandingNotices() {
   const status = useSnap((s) => s.status);
   const devices = useSnap((s) => s.devices);
   const [err, setErr] = useState<string | null>(null);
-  const flowRef = useRef<HTMLDivElement>(null);
-
-  // The toast hangs over the page head's title row, so it has to know how tall the notices
-  // above the page are.
-  useEffect(() => {
-    const el = flowRef.current;
-    if (!el) return;
-    const measure = () => {
-      document.documentElement.style.setProperty("--standing-h", `${el.offsetHeight}px`);
-    };
-    measure();
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    return () => {
-      ro.disconnect();
-      document.documentElement.style.removeProperty("--standing-h");
-    };
-  }, []);
 
   const conflict = status?.conflicts.find((c) => c.kind === "signal_rgb");
   // Nothing can run until the desk canvas has a zone in it. The Layout page is where the layout is
@@ -74,7 +57,7 @@ export function StandingNotices() {
   if (!conflict && !noLayout && !status?.show_zone_panel) return null;
 
   return (
-    <div className="banners-flow" ref={flowRef}>
+    <div className="banners-flow">
       {conflict && (
         <Banner
           tone="warn"
@@ -165,7 +148,7 @@ export function GlobalBanners() {
 
   useEffect(() => {
     if (updatedVersion === null) return;
-    const hold = setTimeout(() => setLeavingFor(updatedVersion), ACTION_LIFETIME_MS);
+    const hold = setTimeout(() => setLeavingFor(updatedVersion), UPDATED_BANNER_MS);
     return () => clearTimeout(hold);
   }, [updatedVersion]);
 

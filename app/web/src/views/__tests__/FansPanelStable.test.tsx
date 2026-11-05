@@ -1,6 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { ToastProvider } from "@/components/Toast";
 import { getSnap, patchSnap, refreshFans } from "@/lib/store";
 import { FansView } from "@/views/FansView";
 import { StripSlotsProvider } from "@/shell/PageHeader";
@@ -60,13 +59,13 @@ async function page(state: string) {
     await refreshFans();
   });
   const view = render(
-    <ToastProvider>
+    <>
       <StripSlotsProvider>
         <main className="content">
           <FansView />
         </main>
       </StripSlotsProvider>
-    </ToastProvider>,
+    </>,
   );
   await screen.findByRole("radiogroup", { name: "CPU fan mode" });
   await waitFor(() => expect(document.querySelectorAll(".curve-row").length).toBeGreaterThan(0));

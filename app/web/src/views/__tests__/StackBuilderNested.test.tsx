@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { ToastHost, ToastProvider } from "@/components/Toast";
+import { NotifyHost } from "@/components/Notify";
 import { refreshAll } from "@/lib/store";
 import { EffectsView } from "@/views/EffectsView";
 import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
@@ -54,8 +54,8 @@ describe("a stack inside a stack", () => {
     window.history.replaceState({}, "", "/effects/?stack=Nested%20demo&state=complete,stack,stack-nested");
     await refreshAll();
     render(
-      <ToastProvider>
-        <ToastHost />
+      <>
+        <NotifyHost />
         <StripSlotsProvider>
           <div className="strip-slots">
             <StripSlot kind="title" />
@@ -63,7 +63,7 @@ describe("a stack inside a stack", () => {
           </div>
           <EffectsView />
         </StripSlotsProvider>
-      </ToastProvider>,
+      </>,
     );
     await screen.findByTestId("stack-builder");
     await waitFor(() => expect(layerNames()).toEqual(["Sparkles", "Twin", "Base"]));

@@ -1,6 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { ToastProvider } from "@/components/Toast";
 import { PeripheralsView } from "@/views/PeripheralsView";
 import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
 import type { PeripheralDetail } from "@/proto/PeripheralDetail";
@@ -90,7 +89,7 @@ function mouse(id: string, name: string): PeripheralDetail {
 /** The page, with the strip it draws its actions into. */
 function page() {
   return render(
-    <ToastProvider>
+    <>
       <StripSlotsProvider>
         <header data-testid="strip">
           <StripSlot kind="title" />
@@ -98,7 +97,7 @@ function page() {
         </header>
         <PeripheralsView />
       </StripSlotsProvider>
-    </ToastProvider>,
+    </>,
   );
 }
 

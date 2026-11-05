@@ -1,6 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { ToastProvider } from "@/components/Toast";
 import { refreshEffects } from "@/lib/store";
 import { EffectsView } from "@/views/EffectsView";
 import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
@@ -39,13 +38,13 @@ afterEach(cleanup);
 const setState = (tokens: string) => window.history.replaceState({}, "", `/effects/?state=${tokens}`);
 const mount = () =>
   render(
-    <ToastProvider>
+    <>
       {/* The page's name lives in the status strip, so a page on its own needs a strip. */}
       <StripSlotsProvider>
         <StripSlot kind="title" />
         <EffectsView />
       </StripSlotsProvider>
-    </ToastProvider>,
+    </>,
   );
 const count = () => screen.getByTestId("effect-count").textContent ?? "";
 

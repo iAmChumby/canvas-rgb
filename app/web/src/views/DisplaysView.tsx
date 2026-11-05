@@ -11,7 +11,6 @@ import { Field, Panel, StateDot } from "@/components/Panel";
 import { Segmented } from "@/components/Segmented";
 import { Select } from "@/components/Select";
 import { Toggle } from "@/components/Toggle";
-import { useToast } from "@/components/Toast";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
 import { refreshDisplays, retryDisplays, useSnap } from "@/lib/store";
@@ -170,7 +169,6 @@ function previewValue(
 
 /** One display: what it shows now, and the source it is driven from. */
 function DisplayCard({ row, fans }: { row: DisplayStatus; fans: FansStatus | null }) {
-  const toast = useToast();
   const [draft, setDraft] = useState<DisplayConfig>(row.config);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -214,10 +212,8 @@ function DisplayCard({ row, fans }: { row: DisplayStatus; fans: FansStatus | nul
     try {
       await api.putDisplay(row.info.id, draft);
       await refreshDisplays();
-      toast(`${row.info.name}: source saved`);
     } catch (e) {
       setError(messageOf(e));
-      toast(messageOf(e), "down");
     } finally {
       setBusy(false);
     }
@@ -229,10 +225,8 @@ function DisplayCard({ row, fans }: { row: DisplayStatus; fans: FansStatus | nul
     try {
       await api.deleteDisplay(row.info.id);
       await refreshDisplays();
-      toast(`${row.info.name}: no longer driven`);
     } catch (e) {
       setError(messageOf(e));
-      toast(messageOf(e), "down");
     } finally {
       setBusy(false);
     }

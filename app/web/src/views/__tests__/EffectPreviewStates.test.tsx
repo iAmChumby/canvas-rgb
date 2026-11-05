@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { ToastHost, ToastProvider } from "@/components/Toast";
+import { NotifyHost } from "@/components/Notify";
 import { demoHash } from "@/lib/demo";
 import { SAMPLE_SOURCE } from "@/lib/demoEffects";
 import { refreshAll } from "@/lib/store";
@@ -50,10 +50,10 @@ const setState = (tokens: string) =>
 async function openEditor() {
   await refreshAll();
   render(
-    <ToastProvider>
-      <ToastHost />
+    <>
+      <NotifyHost />
       <EffectsView />
-    </ToastProvider>,
+    </>,
   );
   fireEvent.click(await screen.findByRole("button", { name: "Open Sample HTML" }));
   await screen.findByRole("heading", { name: "Sample HTML" });
