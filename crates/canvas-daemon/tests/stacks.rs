@@ -2451,7 +2451,9 @@ async fn the_stack_preview_runs_on_its_own_double_sinkless_engine() {
     assert_eq!(harness.preview_engine.fps.load(Ordering::SeqCst), 15);
     // The layout reached it as it reached the main engine.
     assert!(harness.preview_engine.layout.lock().unwrap().is_some());
-    // Neither engine has an input source on this commit; the preview has the main engine's.
+    // This harness does not run the daemon's startup, so it does not wire the capture
+    // into the engines: neither engine has an input source here. The daemon's startup
+    // does wire it (#1); see `tests/capture_wiring.rs`.
     assert!(harness.preview_engine.input_source.lock().unwrap().is_none());
     assert!(harness.engine.input_source.lock().unwrap().is_none());
     // The main engine was not touched by a preview.

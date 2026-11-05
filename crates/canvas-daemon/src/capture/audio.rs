@@ -113,6 +113,140 @@ pub fn spectrum_from_samples(samples: &[f32]) -> AudioSpectrum {
     AudioSpectrum { centers_hz: centers, magnitudes }
 }
 
+/// The endpoint the capture listens to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndpointInfo {
+    /// The endpoint's friendly name, as Windows shows it ("Speakers (Realtek Audio)").
+    pub name: String,
+    /// The endpoint's id, as Windows names it.
+    pub id: String,
+}
+
+/// What the samples in the mix are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SampleFormat {
+    /// Integer samples.
+    Pcm,
+    /// 32-bit float samples.
+    Float,
+    /// Something else: the format tag names it.
+    Other,
+}
+
+impl SampleFormat {
+    /// The name the log uses.
+    pub fn name(&self) -> &'static str {
+        match self {
+            SampleFormat::Pcm => "PCM",
+            SampleFormat::Float => "IEEE float",
+            SampleFormat::Other => "unknown",
+        }
+    }
+}
+
+/// The mix format the endpoint gave the client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MixFormat {
+    /// Frames a second.
+    pub sample_rate: u32,
+    /// Channels in the mix.
+    pub channels: u16,
+    /// Bits a sample.
+    pub bits_per_sample: u16,
+    /// The format tag (`1` is PCM, `3` is IEEE float, `0xFFFE` is extensible).
+    pub format_tag: u16,
+    /// What the samples are.
+    pub sample_format: SampleFormat,
+}
+
+/// The line the daemon logs when it opens the audio endpoint.
+///
+/// The endpoint's name and its mix format are the two things a reader needs to know
+/// which device the audio comes from and how its samples are shaped (#1).
+pub fn mix_format_line(endpoint: &EndpointInfo, format: &MixFormat) -> String {
+    format!(
+        "the audio capture opened {name} ({id}): {rate} Hz, {channels} channels, {bits} bits, {kind} (format tag {tag})",
+        name = endpoint.name,
+        id = endpoint.id,
+        rate = format.sample_rate,
+        channels = format.channels,
+        bits = format.bits_per_sample,
+        kind = format.sample_format.name(),
+        tag = format.format_tag,
+    )
+}
+
+/// How long the capture may hear nothing before it warns.
+pub const SILENCE_WARN_AFTER: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The warning the daemon logs when the capture heard no packet at all.
+pub const NO_PACKET_WARNING: &str = "the audio capture has heard no packets";
+
+/// The warning the daemon logs when the capture heard packets, but only silence.
+pub const SILENT_WARNING: &str = "the audio capture has heard only silence";
+
+/// The loudest sample that still counts as silence (-80 dBFS).
+pub const SILENCE_FLOOR: f32 = 0.0001;
+
+/// What the capture has heard, and whether it should warn that it has heard nothing.
+///
+/// The clock is handed in, so the warning is decided by the samples and not by the wall
+/// clock, and a test can move it.
+#[derive(Debug, Clone)]
+pub struct SilenceWatch {
+    /// When the quiet stretch started: the last sound, or the capture's own start.
+    quiet_since: std::time::Instant,
+    /// How many packets arrived since the quiet stretch started.
+    quiet_packets: u64,
+    /// When the last warning was logged.
+    warned_at: Option<std::time::Instant>,
+}
+
+impl SilenceWatch {
+    /// A watch for a capture that started at `now`.
+    pub fn new(now: std::time::Instant) -> Self {
+        Self {
+            quiet_since: now,
+            quiet_packets: 0,
+            warned_at: None,
+        }
+    }
+
+    /// A packet arrived at `now`; `peak` is the loudest sample in it.
+    pub fn packet(&mut self, now: std::time::Instant, peak: f32) {
+        if peak > SILENCE_FLOOR {
+            // A sound: the quiet stretch starts again here.
+            self.quiet_since = now;
+            self.quiet_packets = 0;
+        } else {
+            self.quiet_packets += 1;
+        }
+    }
+
+    /// The warning to log now, if one is due.
+    ///
+    /// It is rate limited: one warning per [`SILENCE_WARN_AFTER`], so a capture that
+    /// hears nothing says so every ten seconds and not every frame.
+    pub fn warning(&mut self, now: std::time::Instant) -> Option<&'static str> {
+        let quiet = now.duration_since(self.quiet_since);
+        if quiet < SILENCE_WARN_AFTER {
+            return None;
+        }
+        if let Some(at) = self.warned_at {
+            if now.duration_since(at) < SILENCE_WARN_AFTER {
+                return None;
+            }
+        }
+        let warning = if self.quiet_packets == 0 {
+            NO_PACKET_WARNING
+        } else {
+            SILENT_WARNING
+        };
+        self.warned_at = Some(now);
+        Some(warning)
+    }
+}
+
 /// The capture's shared state: the latest spectrum and whether the capture runs.
 ///
 /// This lives outside the Windows-only module so the daemon's state can be built on any
@@ -126,6 +260,8 @@ pub struct Shared {
 pub struct Inner {
     pub spectrum: std::sync::Mutex<Option<Arc<AudioSpectrum>>>,
     pub running: std::sync::atomic::AtomicBool,
+    /// Whether the first packet of this capture has been logged.
+    pub first_packet: std::sync::atomic::AtomicBool,
 }
 
 impl Shared {
@@ -134,6 +270,7 @@ impl Shared {
             inner: Arc::new(Inner {
                 spectrum: std::sync::Mutex::new(None),
                 running: std::sync::atomic::AtomicBool::new(false),
+                first_packet: std::sync::atomic::AtomicBool::new(false),
             }),
         }
     }
@@ -145,6 +282,8 @@ impl Shared {
 
     pub fn stop(&self) {
         self.inner.running.store(false, std::sync::atomic::Ordering::SeqCst);
+        // The next capture is a new run, so it says again that its first packet arrived.
+        self.inner.first_packet.store(false, std::sync::atomic::Ordering::SeqCst);
         if let Ok(mut s) = self.inner.spectrum.lock() {
             *s = None;
         }
@@ -172,11 +311,91 @@ pub mod wasapi {
     use windows::Win32::Media::Audio::{
         eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDevice, IMMDeviceEnumerator,
         AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
-        WAVEFORMATEX,
+        WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
     };
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
     };
+
+    /// `WAVE_FORMAT_PCM`: integer samples.
+    const WAVE_FORMAT_PCM: u16 = 1;
+    /// `WAVE_FORMAT_IEEE_FLOAT`: float samples.
+    const WAVE_FORMAT_IEEE_FLOAT: u16 = 3;
+    /// `WAVE_FORMAT_EXTENSIBLE`: the real format is in the extension.
+    const WAVE_FORMAT_EXTENSIBLE: u16 = 0xFFFE;
+    /// `KSDATAFORMAT_SUBTYPE_PCM`.
+    const KSDATAFORMAT_SUBTYPE_PCM: windows::core::GUID =
+        windows::core::GUID::from_u128(0x0000_0001_0000_0010_8000_00aa_0038_9b71);
+    /// `KSDATAFORMAT_SUBTYPE_IEEE_FLOAT`.
+    const KSDATAFORMAT_SUBTYPE_IEEE_FLOAT: windows::core::GUID =
+        windows::core::GUID::from_u128(0x0000_0003_0000_0010_8000_00aa_0038_9b71);
+    /// The name the log uses when the endpoint has no friendly name.
+    const DEFAULT_ENDPOINT: &str = "the default render endpoint";
+
+    /// The endpoint's friendly name, as Windows shows it ("Speakers (Realtek Audio)").
+    ///
+    /// The name comes from the device's property store. An endpoint without one has no
+    /// name to give.
+    fn friendly_name(device: &IMMDevice) -> Option<String> {
+        use windows::Win32::Foundation::PROPERTYKEY;
+        use windows::Win32::System::Com::STGM_READ;
+        use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
+        // `PKEY_Device_FriendlyName`: the device's name as the user sees it.
+        let key = PROPERTYKEY {
+            fmtid: windows::core::GUID::from_u128(0xa45c_255e_fd1c_4efd_8020_67d1_46a8_50e0),
+            pid: 14,
+        };
+        // SAFETY: the property store is opened for reading only, and the value it gives
+        // is read before it is dropped.
+        unsafe {
+            let store: IPropertyStore = device.OpenPropertyStore(STGM_READ).ok()?;
+            let value = store.GetValue(&key).ok()?;
+            let name = value.to_string();
+            if name.is_empty() {
+                None
+            } else {
+                Some(name)
+            }
+        }
+    }
+
+    /// The endpoint's id, as Windows names it.
+    fn device_id(device: &IMMDevice) -> String {
+        // SAFETY: the id is a string the endpoint owns; it is copied out here.
+        unsafe {
+            match device.GetId() {
+                Ok(id) => id.to_string().unwrap_or_default(),
+                Err(_) => String::new(),
+            }
+        }
+    }
+
+    /// The mix format the endpoint gave, read from the format it published.
+    ///
+    /// The extension is only there when the format is `WAVEFORMATEXTENSIBLE`, which is
+    /// what most endpoints publish.
+    fn mix_format_of(
+        format: &WAVEFORMATEX,
+        extensible: Option<&WAVEFORMATEXTENSIBLE>,
+    ) -> MixFormat {
+        let sample_format = match format.wFormatTag {
+            WAVE_FORMAT_PCM => SampleFormat::Pcm,
+            WAVE_FORMAT_IEEE_FLOAT => SampleFormat::Float,
+            WAVE_FORMAT_EXTENSIBLE => match extensible.map(|e| e.SubFormat) {
+                Some(sub) if sub == KSDATAFORMAT_SUBTYPE_PCM => SampleFormat::Pcm,
+                Some(sub) if sub == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT => SampleFormat::Float,
+                _ => SampleFormat::Other,
+            },
+            _ => SampleFormat::Other,
+        };
+        MixFormat {
+            sample_rate: format.nSamplesPerSec,
+            channels: format.nChannels,
+            bits_per_sample: format.wBitsPerSample,
+            format_tag: format.wFormatTag,
+            sample_format,
+        }
+    }
 
     /// Starts a loopback capture on the default render endpoint.
     ///
@@ -217,6 +436,15 @@ pub mod wasapi {
                 .GetDefaultAudioEndpoint(eRender, eConsole)
                 .map_err(|e| format!("no default render endpoint: {e}"))?;
 
+            // Which device this is, read before the client is opened: the log has to name
+            // the endpoint the audio comes from, or a reader cannot tell a silent mix
+            // from the wrong device (#1).
+            let name = friendly_name(&device);
+            let endpoint = EndpointInfo {
+                name: name.unwrap_or_else(|| DEFAULT_ENDPOINT.into()),
+                id: device_id(&device),
+            };
+
             let audio_client: IAudioClient = device
                 .Activate(CLSCTX_ALL, None)
                 .map_err(|e| format!("could not open the audio client: {e}"))?;
@@ -228,6 +456,21 @@ pub mod wasapi {
             }
             let mix_format: WAVEFORMATEX = *mix_format_ptr;
             let channels = mix_format.nChannels.max(1) as usize;
+
+            // The mix format, as the endpoint published it. The extension is only there
+            // when the format is extensible, and it is read from the endpoint's own
+            // pointer: the copy above drops it.
+            let extensible = if mix_format.wFormatTag == WAVE_FORMAT_EXTENSIBLE
+                && mix_format.cbSize >= std::mem::size_of::<WAVEFORMATEXTENSIBLE>() as u16
+            {
+                // The endpoint published an extensible format, so the pointer is a
+                // WAVEFORMATEXTENSIBLE.
+                Some(&*(mix_format_ptr as *const WAVEFORMATEXTENSIBLE))
+            } else {
+                None
+            };
+            let mix = mix_format_of(&mix_format, extensible);
+            tracing::info!("{}", mix_format_line(&endpoint, &mix));
 
             audio_client
                 .Initialize(
@@ -250,6 +493,9 @@ pub mod wasapi {
 
             let mut samples: Vec<f32> = Vec::with_capacity(FFT_SIZE);
             let mut last_publish = std::time::Instant::now();
+            // What the capture has heard. It warns when the effect that needs the audio
+            // gets nothing from it (#1).
+            let mut watch = SilenceWatch::new(std::time::Instant::now());
 
             while shared.inner.running.load(Ordering::SeqCst) {
                 let available = match capture.GetNextPacketSize() {
@@ -260,6 +506,11 @@ pub mod wasapi {
                     }
                 };
                 if available == 0 {
+                    // No packet at all. The capture may be hearing nothing, and the
+                    // effect that needs the audio is drawing black because of it.
+                    if let Some(warning) = watch.warning(std::time::Instant::now()) {
+                        tracing::warn!("{warning}");
+                    }
                     std::thread::sleep(std::time::Duration::from_millis(5));
                     continue;
                 }
@@ -271,6 +522,7 @@ pub mod wasapi {
                     .GetBuffer(&mut data, &mut frames, &mut flags, None, None)
                     .map_err(|e| e.to_string())?;
 
+                let mut peak = 0.0f32;
                 if flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 || data.is_null() {
                     samples.clear();
                 } else {
@@ -283,12 +535,24 @@ pub mod wasapi {
                         for ch in 0..channels as usize {
                             sum += slice[i * channels as usize + ch];
                         }
-                        mono.push(sum / channels as f32);
+                        let value = sum / channels as f32;
+                        peak = peak.max(value.abs());
+                        mono.push(value);
                     }
                     samples.clear();
                     samples.extend_from_slice(&mono);
                 }
                 let _ = capture.ReleaseBuffer(frames);
+
+                // A packet arrived: say so once, so the log shows that the capture is
+                // not just running but hearing something (#1).
+                watch.packet(std::time::Instant::now(), peak);
+                if !shared.inner.first_packet.swap(true, Ordering::SeqCst) {
+                    tracing::info!("the first audio packet arrived");
+                }
+                if let Some(warning) = watch.warning(std::time::Instant::now()) {
+                    tracing::warn!("{warning}");
+                }
 
                 // Publish at most 30 times a second.
                 if last_publish.elapsed() >= std::time::Duration::from_millis(33) && !samples.is_empty() {
@@ -382,5 +646,91 @@ mod tests {
         let spectrum = spectrum_from_samples(&vec![0.0; 128]);
         assert_eq!(spectrum.centers_hz.len(), BAND_COUNT);
         assert_eq!(spectrum.magnitudes.len(), BAND_COUNT);
+    }
+
+    #[test]
+    fn the_mix_format_line_names_the_endpoint_and_its_format() {
+        let endpoint = EndpointInfo {
+            name: "Speakers (Realtek Audio)".into(),
+            id: "{0.0.0.00000000}.{4d1e55b2}".into(),
+        };
+        let format = MixFormat {
+            sample_rate: 48000,
+            channels: 2,
+            bits_per_sample: 32,
+            format_tag: 3,
+            sample_format: SampleFormat::Float,
+        };
+        assert_eq!(
+            mix_format_line(&endpoint, &format),
+            "the audio capture opened Speakers (Realtek Audio) ({0.0.0.00000000}.{4d1e55b2}): \
+             48000 Hz, 2 channels, 32 bits, IEEE float (format tag 3)"
+        );
+    }
+
+    #[test]
+    fn the_sample_formats_have_names() {
+        assert_eq!(SampleFormat::Pcm.name(), "PCM");
+        assert_eq!(SampleFormat::Float.name(), "IEEE float");
+        assert_eq!(SampleFormat::Other.name(), "unknown");
+    }
+
+    /// The time `seconds` after `start`.
+    fn at(start: std::time::Instant, seconds: u64) -> std::time::Instant {
+        start + std::time::Duration::from_secs(seconds)
+    }
+
+    #[test]
+    fn the_watch_warns_when_no_packet_arrives() {
+        let start = std::time::Instant::now();
+        let mut watch = SilenceWatch::new(start);
+        assert!(
+            watch.warning(at(start, 9)).is_none(),
+            "the warning waits for the full ten seconds"
+        );
+        assert_eq!(watch.warning(at(start, 10)), Some(NO_PACKET_WARNING));
+    }
+
+    #[test]
+    fn the_watch_warns_when_only_silent_packets_arrive() {
+        let start = std::time::Instant::now();
+        let mut watch = SilenceWatch::new(start);
+        // A silent packet every second: the capture hears something, but no sound.
+        for second in 1..=5 {
+            watch.packet(at(start, second), 0.0);
+        }
+        assert!(
+            watch.warning(at(start, 5)).is_none(),
+            "the packets are still arriving"
+        );
+        assert_eq!(watch.warning(at(start, 10)), Some(SILENT_WARNING));
+    }
+
+    #[test]
+    fn the_watch_is_rate_limited() {
+        let start = std::time::Instant::now();
+        let mut watch = SilenceWatch::new(start);
+        assert_eq!(watch.warning(at(start, 10)), Some(NO_PACKET_WARNING));
+        assert!(
+            watch.warning(at(start, 15)).is_none(),
+            "the warning waits for the next window"
+        );
+        assert_eq!(watch.warning(at(start, 20)), Some(NO_PACKET_WARNING));
+    }
+
+    #[test]
+    fn a_sound_starts_the_quiet_window_again() {
+        let start = std::time::Instant::now();
+        let mut watch = SilenceWatch::new(start);
+        // Nine seconds of nothing: the warning is not due yet.
+        assert!(watch.warning(at(start, 9)).is_none());
+        // A sound at the ninth second: the quiet window starts again there.
+        watch.packet(at(start, 9), 0.5);
+        assert!(
+            watch.warning(at(start, 18)).is_none(),
+            "the sound reset the quiet window"
+        );
+        // Ten seconds after the sound the window is over again.
+        assert_eq!(watch.warning(at(start, 19)), Some(NO_PACKET_WARNING));
     }
 }
