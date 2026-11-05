@@ -1,0 +1,77 @@
+# Dependabot keeps the dependencies moving (#167).
+#
+# Dependabot proposes version bumps; it approves nothing. A bump of a dependency that is
+# already in docs/dependencies.md needs no new row (the ledger check looks at the names, not
+# the versions), and a new dependency still needs the audit summary and Luke's yes.
+#
+# One group per ecosystem, so a week of bumps arrives as one pull request instead of a dozen.
+version: 2
+updates:
+  # The Rust workspace: the root Cargo.toml holds the workspace, so "/" covers every crate.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      cargo:
+        patterns:
+          - "*"
+
+  # The npm projects. They do not depend on each other, so each has its own entry.
+  - package-ecosystem: npm
+    directory: "/app/web"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      npm:
+        patterns:
+          - "*"
+
+  - package-ecosystem: npm
+    directory: "/site"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      npm:
+        patterns:
+          - "*"
+
+  - package-ecosystem: npm
+    directory: "/tools/signer"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      npm:
+        patterns:
+          - "*"
+
+  - package-ecosystem: npm
+    directory: "/tools/poison-compare/js"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      npm:
+        patterns:
+          - "*"
+
+  # The GitHub Actions, in the workflows.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      github-actions:
+        patterns:
+          - "*"

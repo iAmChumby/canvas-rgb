@@ -47,7 +47,9 @@ try {
     if (-not $SkipBuild) {
         # Web first: the tray embeds app/web/out.
         Invoke-Locked @('npm', '--prefix', 'app/web', 'run', 'build')
-        Invoke-Locked @('cargo', 'build', '--release', '-p', 'canvas-daemon', '-p', 'canvas-svc', '-p', 'canvas-rgb-tray')
+        # --locked: the release builds the versions in Cargo.lock and fails when the lock file
+        # and the manifests disagree, instead of quietly moving the lock file (#167).
+        Invoke-Locked @('cargo', 'build', '--locked', '--release', '-p', 'canvas-daemon', '-p', 'canvas-svc', '-p', 'canvas-rgb-tray')
     }
 } finally { Pop-Location }
 

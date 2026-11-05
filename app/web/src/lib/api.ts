@@ -56,6 +56,15 @@ export function dropApiConfig(): void {
 export type Method = "GET" | "PUT" | "PATCH" | "POST" | "DELETE";
 
 /**
+ * What a caller may say about a request of its own.
+ *
+ * `signal` ends the request when the caller no longer wants the answer (issue #97). That end
+ * is the caller's own doing: it is not the deadline, and it is not the daemon being slow, so it
+ * surfaces as an `AbortError` and not as a timeout.
+ */
+export type RequestOptions = { signal?: AbortSignal };
+
+/**
  * The deadline of a request that answers in a moment. A request that never answers would
  * leave the area pending for good: no error, no button, and nothing to try again. The daemon
  * answers in well under a second, so this is only the ceiling for a daemon that has stopped
@@ -182,15 +191,26 @@ export function deadlineFor(path: string): number {
  * The deadline covers the whole request: the tray's lookup of the address and the token, the
  * call itself, and the body that comes with it. A request that hangs anywhere in that chain
  * is given up on, so the area is never left pending with no error and no way to try again.
+ *
+ * The caller may also end the request itself (`opts.signal`): it does not want the answer any
+ * more, and the daemon should stop working on it.
  */
 async function send<T>(
   method: Method,
   path: string,
   body: unknown | undefined,
   read: (res: Response) => Promise<T>,
+  opts?: RequestOptions,
 ): Promise<T> {
+  const external = opts?.signal;
+  // A request the caller has already let go of is not sent at all.
+  if (external?.aborted) throw aborted();
+
   const budget = deadlineFor(path);
   const controller = new AbortController();
+  // The caller's own end reaches the request as well, so the daemon stops working on it.
+  const onExternalAbort = () => controller.abort();
+  external?.addEventListener("abort", onExternalAbort);
   // The deadline: it ends the request, and it is what the frame says when it passes.
   let stopTimer: () => void = () => {};
   const deadline = new Promise<never>((_resolve, reject) => {
@@ -214,8 +234,15 @@ async function send<T>(
     const work = (async () => {
       let config: ApiConfig;
       try {
-        config = await apiConfig();
+        // The tray's lookup is raced against the caller's own end: a lookup that hangs must not
+        // turn the caller's abort into the deadline's timeout, and the daemon is not blamed for an
+        // answer the caller did not want (issue #97).
+        config = await racedAgainstAbort(apiConfig(), external);
       } catch (e) {
+        if (external?.aborted) {
+          // The caller let go of this request: it is not an error, and the tray is not blamed.
+          throw aborted();
+        }
         throw new ApiFailure(0, "unreachable", `The tray app did not provide the API address: ${messageOf(e)}`);
       }
 
@@ -232,6 +259,10 @@ async function send<T>(
           signal: controller.signal,
         });
       } catch {
+        if (external?.aborted) {
+          // The caller let go of this request: it is not an error, and the deadline did not pass.
+          throw aborted();
+        }
         if (controller.signal.aborted) {
           // The deadline passed. The daemon may be busy or gone: either way the editor waits no
           // longer for this answer.
@@ -279,19 +310,72 @@ async function send<T>(
     return await Promise.race([work, deadline]);
   } finally {
     stopTimer();
+    external?.removeEventListener("abort", onExternalAbort);
   }
 }
 
-export async function request<T>(method: Method, path: string, body?: unknown): Promise<T> {
+/** The error a request that was let go of carries: an abort, and not a failure. */
+function aborted(): DOMException {
+  return new DOMException("The request was aborted.", "AbortError");
+}
+
+/**
+ * Waits for work that the caller may end at any time.
+ *
+ * The caller's end is its own doing: it is not the deadline, and it is not the daemon being slow,
+ * so it surfaces as an `AbortError` and not as a timeout (issue #97). Work that is already running
+ * is left to finish on its own: the tray's lookup cannot be called back, and the daemon stops
+ * working on a request when the request's signal ends.
+ */
+function racedAgainstAbort<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return work;
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(aborted());
+    if (signal.aborted) {
+      reject(aborted());
+      return;
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+export async function request<T>(
+  method: Method,
+  path: string,
+  body?: unknown,
+  opts?: RequestOptions,
+): Promise<T> {
   if (isDemo()) {
+    // A request the caller has already let go of is not made at all. The demo backend answers
+    // from memory and there is no request to let go of, but the caller's end is its own doing,
+    // and it surfaces as an `AbortError` on the demo backend as well (issue #97).
+    if (opts?.signal?.aborted) throw aborted();
+    // The demo backend answers from memory: there is no request to let go of, and the signal is
+    // ignored there. The caller drops the answer anyway.
     return (await demoRequest(method, path, body)) as T;
   }
-  return send(method, path, body, async (res) => {
-    if (res.status === 204) return undefined as T;
-    const text = await res.text();
-    if (text.length === 0) return undefined as T;
-    return JSON.parse(text) as T;
-  });
+  return send(
+    method,
+    path,
+    body,
+    async (res) => {
+      if (res.status === 204) return undefined as T;
+      const text = await res.text();
+      if (text.length === 0) return undefined as T;
+      return JSON.parse(text) as T;
+    },
+    opts,
+  );
 }
 
 /** A GET whose answer is binary (the effect thumbnails). */
