@@ -41,6 +41,14 @@ impl RecordingSink {
         self.frames.lock().unwrap_or_else(|e| e.into_inner()).last().cloned()
     }
 
+    /// Every frame the sink received, oldest first.
+    fn all_frames(&self) -> Vec<Vec<Rgb8>> {
+        self.frames
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     fn frame_count(&self) -> u32 {
         self.count.load(Ordering::Acquire)
     }
@@ -1785,3 +1793,358 @@ fn a_replacement_effect_starts_from_a_cleared_canvas_not_a_torn_one() {
     engine.shutdown();
 }
 
+// ---------------------------------------------------------------------------
+// #145: after a panicked effect is skipped, the last good frame goes out again
+//
+// The skipped effect stops the delivery (#99), so a device that needs a frame again
+// kept the frame it was last sent (or the black frame the pause wrote) until another
+// effect was picked. The three cases: a resume from a pause, a resume from sleep
+// (the daemon's power path, `crates/canvas-daemon/tests/power_resume_panic.rs`) and a
+// device that arrives while the effect is stopped.
+// ---------------------------------------------------------------------------
+
+/// The green of the good frame the tests below keep and re-send.
+const GOOD: Rgb8 = Rgb8 { r: 0, g: 255, b: 0 };
+
+/// An effect that paints one good frame and then panics (#145).
+///
+/// The first update paints the canvas, so the engine has a good frame to keep. The
+/// second one panics, and the engine stops delivering (#99).
+struct PanicAfterGoodFrameEffect {
+    updates: Arc<AtomicU32>,
+}
+
+impl Effect for PanicAfterGoodFrameEffect {
+    fn schema(&self) -> PropertySchema {
+        PropertySchema {
+            id: "test_panic_after_good_frame".into(),
+            name: "Test Panic After Good Frame".into(),
+            description: "Paints one frame, then panics (#145).".into(),
+            needs: InputNeeds::default(),
+            properties: vec![],
+            presets: vec![],
+            thumbnail: None,
+        }
+    }
+
+    fn init(&mut self, _props: &Props) {}
+
+    fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &canvas_proto::traits::Inputs) {
+        let n = self.updates.fetch_add(1, Ordering::AcqRel);
+        if n >= 1 {
+            panic!("update boom after a good frame");
+        }
+        canvas.fill([0.0, 1.0, 0.0]);
+    }
+}
+
+/// An engine whose effect painted one good frame and then panicked.
+///
+/// The green frame is the last good frame: it is what a resume, a new sink and the
+/// adapter's keepalive have to get again (#145).
+fn engine_stopped_after_a_good_frame() -> (Arc<dyn canvas_proto::traits::Engine>, Arc<RecordingSink>)
+{
+    let engine = spawn(settings(30));
+    let sink = RecordingSink::new();
+    give_d0_a_layout(&engine);
+    engine.add_sink(DeviceId("d0".into()), sink.clone());
+
+    let updates = Arc::new(AtomicU32::new(0));
+    engine.set_effect(
+        Box::new(PanicAfterGoodFrameEffect {
+            updates: updates.clone(),
+        }),
+        &Props::new(),
+    );
+    assert!(
+        wait_until(FIRST_FRAME_WAIT, || sink
+            .last()
+            .is_some_and(|f| f.iter().all(|c| *c == GOOD))),
+        "the good frame arrived"
+    );
+    assert!(
+        wait_until(FIRST_FRAME_WAIT, || updates.load(Ordering::Acquire) >= 2),
+        "the effect panicked"
+    );
+    // The loop keeps ticking and nothing is delivered while the effect is stopped.
+    let frames_at_panic = sink.frame_count();
+    let rendered = engine.stats().frames_rendered;
+    assert!(wait_until(FIRST_FRAME_WAIT, || engine
+        .stats()
+        .frames_rendered
+        >= rendered + 10));
+    assert_eq!(
+        sink.frame_count(),
+        frames_at_panic,
+        "nothing is delivered while the effect is stopped"
+    );
+    (engine, sink)
+}
+
+/// #145: a pause writes black, and the resume must send the last good frame again.
+///
+/// Without the fix the lights stay black until another effect is picked: the panicked
+/// effect is skipped, so nothing is delivered on the ticks after the resume.
+#[test]
+fn a_resume_after_a_panic_sends_the_last_good_frame_again() {
+    let (engine, sink) = engine_stopped_after_a_good_frame();
+
+    // The pause writes one black frame.
+    engine.set_power(Power::Paused);
+    assert!(
+        wait_until(FIRST_FRAME_WAIT, || sink
+            .last()
+            .is_some_and(|f| f.iter().all(|c| *c == Rgb8::BLACK))),
+        "the pause wrote a black frame"
+    );
+
+    // The resume sends the last good frame again.
+    let frames_at_pause = sink.frame_count();
+    engine.set_power(Power::Running);
+    assert!(
+        wait_until(FIRST_FRAME_WAIT, || {
+            sink.frame_count() > frames_at_pause
+                && sink.last().is_some_and(|f| f.iter().all(|c| *c == GOOD))
+        }),
+        "the last good frame went out again after the resume; last = {:?}",
+        sink.last()
+    );
+    engine.shutdown();
+}
+
+/// A layout with two devices, `d0` and `d1`, four LEDs each.
+fn give_d0_and_d1_a_layout(engine: &Arc<dyn canvas_proto::traits::Engine>) {
+    let devices = vec![
+        device("d0", vec![zone(0, ZoneKind::Linear, 4)]),
+        device("d1", vec![zone(0, ZoneKind::Linear, 4)]),
+    ];
+    let lay = layout(
+        vec![
+            placed("d0", 0, 0.0, 0.0, 160.0, 200.0),
+            placed("d1", 0, 160.0, 0.0, 160.0, 200.0),
+        ],
+        SamplingMode::AreaAverage,
+        RenderScale::P100,
+    );
+    engine.set_layout(lay, devices);
+}
+
+/// #145: a device that arrives while the effect is stopped gets the last good frame.
+///
+/// The device is in the layout, so the engine has a frame for it; the sink arrives
+/// later. Without the fix the new sink gets nothing until another effect is picked.
+#[test]
+fn a_sink_added_after_a_panic_gets_the_last_good_frame() {
+    let engine = spawn(settings(30));
+    let sink = RecordingSink::new();
+    give_d0_and_d1_a_layout(&engine);
+    engine.add_sink(DeviceId("d0".into()), sink.clone());
+
+    let updates = Arc::new(AtomicU32::new(0));
+    engine.set_effect(
+        Box::new(PanicAfterGoodFrameEffect {
+            updates: updates.clone(),
+        }),
+        &Props::new(),
+    );
+    assert!(
+        wait_until(FIRST_FRAME_WAIT, || sink
+            .last()
+            .is_some_and(|f| f.iter().all(|c| *c == GOOD))),
+        "the good frame arrived"
+    );
+    assert!(
+        wait_until(FIRST_FRAME_WAIT, || updates.load(Ordering::Acquire) >= 2),
+        "the effect panicked"
+    );
+
+    // A device arrives while the effect is stopped.
+    let late = RecordingSink::new();
+    engine.add_sink(DeviceId("d1".into()), late.clone());
+    assert!(
+        wait_until(FIRST_FRAME_WAIT, || late
+            .last()
+            .is_some_and(|f| f.iter().all(|c| *c == GOOD))),
+        "the new sink got the last good frame; last = {:?}",
+        late.last()
+    );
+    engine.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// #145: the last good frame belongs to the device it was drawn for
+//
+// The saved frames were indexed by the position of the device in the plan, so a
+// re-layout that listed the same devices in another order handed every device the
+// other's frame. The frames are keyed by the device they were drawn for.
+// ---------------------------------------------------------------------------
+
+/// The red of the left half of the canvas.
+const RED: Rgb8 = Rgb8 { r: 255, g: 0, b: 0 };
+/// The blue of the right half of the canvas.
+const BLUE: Rgb8 = Rgb8 { r: 0, g: 0, b: 255 };
+
+/// An effect that paints the left half of the canvas red, the right half blue, and
+/// then panics (#145).
+///
+/// The first update paints both halves, so every device has a good frame of its own
+/// colour to keep. The second one panics, and the engine stops delivering (#99).
+struct TwoHalvesThenPanicEffect {
+    updates: Arc<AtomicU32>,
+}
+
+impl Effect for TwoHalvesThenPanicEffect {
+    fn schema(&self) -> PropertySchema {
+        PropertySchema {
+            id: "test_two_halves_then_panic".into(),
+            name: "Test Two Halves Then Panic".into(),
+            description: "Paints two halves, then panics (#145).".into(),
+            needs: InputNeeds::default(),
+            properties: vec![],
+            presets: vec![],
+            thumbnail: None,
+        }
+    }
+
+    fn init(&mut self, _props: &Props) {}
+
+    fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &canvas_proto::traits::Inputs) {
+        let n = self.updates.fetch_add(1, Ordering::AcqRel);
+        if n >= 1 {
+            panic!("update boom after a good frame");
+        }
+        let half = canvas.width / 2;
+        for y in 0..canvas.height {
+            for x in 0..canvas.width {
+                let color = if x < half {
+                    [1.0, 0.0, 0.0]
+                } else {
+                    [0.0, 0.0, 1.0]
+                };
+                canvas.set(x, y, color);
+            }
+        }
+    }
+}
+
+/// Two devices, `a` and `b`, eight LEDs each, side by side: `a` on the left half of
+/// the canvas, `b` on the right half.
+///
+/// The devices are listed in the given order, and the plan lists them in that order
+/// too (`geometry::build_plan` walks the device list), so the order of the list is
+/// the order of the plan.
+fn two_devices_in_order(order: &[&str]) -> (Layout, Vec<DeviceInfo>) {
+    let devices = order
+        .iter()
+        .copied()
+        .map(|id| device(id, vec![zone(0, ZoneKind::Linear, 8)]))
+        .collect();
+    let lay = layout(
+        vec![
+            placed("a", 0, 0.0, 0.0, 160.0, 200.0),
+            placed("b", 0, 160.0, 0.0, 160.0, 200.0),
+        ],
+        SamplingMode::AreaAverage,
+        RenderScale::P100,
+    );
+    (lay, devices)
+}
+
+/// #145: a re-layout that lists the same devices in another order keeps every
+/// device's own last good frame.
+///
+/// The saved frames were indexed by the position of the device in the plan, so a
+/// re-layout that swapped two devices of the same LED count handed each device the
+/// other's frame: the lights showed swapped colours after the resume.
+#[test]
+fn a_re_layout_with_the_devices_in_another_order_keeps_each_device_s_own_frame() {
+    let engine = spawn(settings(30));
+    let (lay, devices) = two_devices_in_order(&["a", "b"]);
+    engine.set_layout(lay, devices);
+
+    let sink_a = RecordingSink::new();
+    let sink_b = RecordingSink::new();
+    engine.add_sink(DeviceId("a".into()), sink_a.clone());
+    engine.add_sink(DeviceId("b".into()), sink_b.clone());
+
+    let updates = Arc::new(AtomicU32::new(0));
+    engine.set_effect(
+        Box::new(TwoHalvesThenPanicEffect {
+            updates: updates.clone(),
+        }),
+        &Props::new(),
+    );
+
+    // The good frame: `a` is red, `b` is blue.
+    assert!(
+        wait_until(FIRST_FRAME_WAIT, || {
+            sink_a.last().is_some_and(|f| f.iter().all(|c| *c == RED))
+                && sink_b.last().is_some_and(|f| f.iter().all(|c| *c == BLUE))
+        }),
+        "the good frames arrived; a = {:?}, b = {:?}",
+        sink_a.last(),
+        sink_b.last()
+    );
+    assert!(
+        wait_until(FIRST_FRAME_WAIT, || updates.load(Ordering::Acquire) >= 2),
+        "the effect panicked"
+    );
+
+    // The same devices, listed in the other order: the plan follows the device list.
+    let (lay, devices) = two_devices_in_order(&["b", "a"]);
+    engine.set_layout(lay, devices);
+    // The render thread picks the new plan up on its next tick, and the frames it
+    // keeps are moved onto it.
+    let rendered = engine.stats().frames_rendered;
+    assert!(wait_until(FIRST_FRAME_WAIT, || engine
+        .stats()
+        .frames_rendered
+        >= rendered + 5));
+
+    // The pause writes black to every device.
+    engine.set_power(Power::Paused);
+    assert!(
+        wait_until(FIRST_FRAME_WAIT, || {
+            sink_a
+                .last()
+                .is_some_and(|f| f.iter().all(|c| *c == Rgb8::BLACK))
+                && sink_b
+                    .last()
+                    .is_some_and(|f| f.iter().all(|c| *c == Rgb8::BLACK))
+        }),
+        "the pause wrote black; a = {:?}, b = {:?}",
+        sink_a.last(),
+        sink_b.last()
+    );
+
+    // The resume sends every device its own last good frame again.
+    let frames_a = sink_a.frame_count();
+    let frames_b = sink_b.frame_count();
+    engine.set_power(Power::Running);
+    assert!(
+        wait_until(FIRST_FRAME_WAIT, || {
+            sink_a.frame_count() > frames_a
+                && sink_b.frame_count() > frames_b
+                && sink_a.last().is_some_and(|f| f.iter().all(|c| *c == RED))
+                && sink_b.last().is_some_and(|f| f.iter().all(|c| *c == BLUE))
+        }),
+        "every device got its own last good frame; a = {:?}, b = {:?}",
+        sink_a.last(),
+        sink_b.last()
+    );
+
+    // And nothing else: no device ever saw the other's colour.
+    for frame in sink_a.all_frames() {
+        assert!(
+            frame.iter().all(|c| *c == RED || *c == Rgb8::BLACK),
+            "device a saw a colour that is not its own: {frame:?}"
+        );
+    }
+    for frame in sink_b.all_frames() {
+        assert!(
+            frame.iter().all(|c| *c == BLUE || *c == Rgb8::BLACK),
+            "device b saw a colour that is not its own: {frame:?}"
+        );
+    }
+    engine.shutdown();
+}
