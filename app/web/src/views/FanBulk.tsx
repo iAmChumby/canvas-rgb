@@ -6,7 +6,7 @@ import { Button } from "@/components/Button";
 import { NumberField } from "@/components/NumberField";
 import { Popover } from "@/components/Popover";
 import { Select } from "@/components/Select";
-import { useToast } from "@/components/Toast";
+import { notify } from "@/components/Notify";
 import { refreshFans } from "@/lib/store";
 import { baseFloor } from "@/lib/fan-rules";
 import {
@@ -44,7 +44,6 @@ export function FanBulkBar({
   onBusy: (busy: boolean) => void;
   write: Write;
 }) {
-  const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [percent, setPercent] = useState(50);
   const [pickedFrom, setPickedFrom] = useState<string | null>(null);
@@ -91,9 +90,10 @@ export function FanBulkBar({
       if (alive.current) {
         setResult({ words, outcomes });
       } else {
-        // The bar is gone, so the report has nowhere to stand: the toast is all that is left of it.
+        // The bar is gone, so the report has nowhere to stand: the notification is all that is
+        // left of it.
         const bad = outcomes.some((o) => o.state === "failed") || outcomes.length < checked.length;
-        toast(summaryOf(outcomes, words, checked.length), bad ? "down" : undefined);
+        notify(summaryOf(outcomes, words, checked.length), bad ? "down" : "ok");
       }
     } finally {
       stop.current = null;

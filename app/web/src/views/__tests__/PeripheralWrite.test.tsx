@@ -1,6 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { ToastProvider } from "@/components/Toast";
 import { PeripheralsView } from "@/views/PeripheralsView";
 import type { PeripheralDetail } from "@/proto/PeripheralDetail";
 import type { PeripheralInfo } from "@/proto/PeripheralInfo";
@@ -92,9 +91,9 @@ describe("a change that landed", () => {
     api.putPeripheralAccess.mockResolvedValue({ reads: true, writes: false });
 
     render(
-      <ToastProvider>
+      <>
         <PeripheralsView />
-      </ToastProvider>,
+      </>,
     );
     // The device is on screen and its settings are there.
     const reads = await screen.findByRole("switch", { name: "Read settings from this device" });
@@ -115,9 +114,9 @@ describe("a change that landed", () => {
     api.putPeripheralAccess.mockRejectedValue(new Error("the device did not take the change"));
 
     render(
-      <ToastProvider>
+      <>
         <PeripheralsView />
-      </ToastProvider>,
+      </>,
     );
     const reads = await screen.findByRole("switch", { name: "Read settings from this device" });
     // The switch can stand on the cached read (`lastRead`, PeripheralsView.tsx:82,140)
@@ -156,9 +155,9 @@ describe("two devices at once", () => {
     });
 
     render(
-      <ToastProvider>
+      <>
         <PeripheralsView />
-      </ToastProvider>,
+      </>,
     );
     // The slow device is picked first (the first row of the list).
     await screen.findByText("Slow Mouse");
@@ -199,9 +198,9 @@ describe("a reload that is still out when another device is picked", () => {
       });
     });
     render(
-      <ToastProvider>
+      <>
         <PeripheralsView />
-      </ToastProvider>,
+      </>,
     );
     const reads = await screen.findByRole("switch", { name: "Read settings from this device" });
     // The write lands, and the reload of the first device starts.

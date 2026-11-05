@@ -12,7 +12,7 @@ import { Rail, NAV } from "@/shell/Rail";
 import { StatusStrip } from "@/shell/StatusStrip";
 import { GlobalBanners, StandingNotices } from "@/shell/GlobalBanners";
 import { applyMotion, applyTheme, nextTheme, readMotion, readTheme } from "@/shell/prefs";
-import { ToastProvider, ToastHost, useToast } from "@/components/Toast";
+import { NotifyHost, notify } from "@/components/Notify";
 import { CommandPalette, type Command } from "@/components/CommandPalette";
 import { DaemonDown } from "@/components/DaemonDown";
 import { RailResizeHandle } from "@/components/RailResizeHandle";
@@ -36,11 +36,9 @@ const PAGE_PATHS: Record<string, string> = {
  */
 export function Shell({ children }: { children: ReactNode }) {
   return (
-    <ToastProvider>
-      <StripSlotsProvider>
-        <Frame>{children}</Frame>
-      </StripSlotsProvider>
-    </ToastProvider>
+    <StripSlotsProvider>
+      <Frame>{children}</Frame>
+    </StripSlotsProvider>
   );
 }
 
@@ -50,7 +48,6 @@ function Frame({ children }: { children: ReactNode }) {
   const status = useSnap((s) => s.status);
   const statusError = useSnap((s) => s.statusError);
   const effects = useSnap((s) => s.effects);
-  const toast = useToast();
   /** The onboarding has the whole window: the rail, the strip and the banners are hidden. */
   const takeover = useTakeover();
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -117,23 +114,21 @@ function Frame({ children }: { children: ReactNode }) {
       await api.patchOutput({ power: paused ? "running" : "paused", brightness: null });
       patchSnap({ status: { ...snap, power: paused ? "running" : "paused" } });
       await refreshStatus();
-      toast(paused ? "Lights resumed" : "Lights paused");
     } catch (e) {
-      toast(messageOf(e), "down");
+      notify(messageOf(e), "down");
     }
-  }, [toast]);
+  }, []);
 
   const runEffect = useCallback(
-    async (id: string, name: string) => {
+    async (id: string) => {
       try {
         await api.activateEffect(id, { props: {}, preset: null });
         await refreshAll();
-        toast(`${name} is running`);
       } catch (e) {
-        toast(messageOf(e), "down");
+        notify(messageOf(e), "down");
       }
     },
-    [toast],
+    [],
   );
 
   const commands = useMemo<Command[]>(() => {
@@ -182,7 +177,6 @@ function Frame({ children }: { children: ReactNode }) {
       run: () => {
         const next = nextTheme(readTheme());
         applyTheme(next);
-        toast(`Theme: ${next}`);
       },
     });
     list.push({
@@ -193,7 +187,7 @@ function Frame({ children }: { children: ReactNode }) {
       run: () => {
         const next = readMotion() === "reduced" ? "full" : "reduced";
         applyMotion(next);
-        toast(next === "reduced" ? "Motion reduced" : "Motion on");
+        notify(next === "reduced" ? "Motion reduced" : "Motion on");
       },
     });
     list.push({
@@ -207,11 +201,11 @@ function Frame({ children }: { children: ReactNode }) {
         id: `run-${e.id}`,
         group: "Effects",
         label: `Run ${e.name}`,
-        run: () => void runEffect(e.id, e.name),
+        run: () => void runEffect(e.id),
       });
     }
     return list;
-  }, [router, status, statusError, effects, togglePower, runEffect, toast]);
+  }, [router, status, statusError, effects, togglePower, runEffect]);
 
   // A phone opens the palette with what is going on, the pages, the lights and the effects
   // you would switch to. Typing still searches the whole list.
@@ -229,7 +223,7 @@ function Frame({ children }: { children: ReactNode }) {
         id: `run-${e.id}`,
         group: "Effects",
         label: `Run ${e.name}`,
-        run: () => void runEffect(e.id, e.name),
+        run: () => void runEffect(e.id),
       });
     }
     // The status comes first: it is what the reader wants to know before they pick anything.
@@ -266,10 +260,12 @@ function Frame({ children }: { children: ReactNode }) {
             <GlobalBanners />
           </>
         )}
+        {/* The lane floats: it takes no room in the page, so the page's first content does not
+            move when a message appears. It sits beside the page and not inside it: the page is
+            a size container, and a size container is the containing block of a fixed box, which
+            would pull the lane up under the status strip. */}
+        <NotifyHost />
         <main className="content">
-          {/* The toast floats: it takes no room in the page, so the page's first content does not
-              move when one appears. */}
-          <ToastHost />
           {daemonDown ? (
             <DaemonDown
               onRetry={retryDaemon}

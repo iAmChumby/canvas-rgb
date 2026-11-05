@@ -151,6 +151,7 @@ started, `approved (YYYY-MM-DD)` for a dependency Luke approved later, and
 | playwright | npm, dev | 1.64.1 | Apache-2.0 | approved (baseline 2026-11-05) |
 | react | npm, prod | 19.3.1 | MIT | approved (baseline 2026-11-05) |
 | react-dom | npm, prod | 19.3.1 | MIT | approved (baseline 2026-11-05) |
+| sonner | npm, prod | 2.0.8 | MIT | approved (2026-11-05) |
 | typescript | npm, dev | 5.9.3 | Apache-2.0 | approved (baseline 2026-11-05) |
 | vitest | npm, dev | 4.1.11 | MIT | approved (baseline 2026-11-05) |
 

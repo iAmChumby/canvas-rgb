@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { ToastHost, ToastProvider } from "@/components/Toast";
+import { NotifyHost } from "@/components/Notify";
 import { refreshAll } from "@/lib/store";
 import { EffectsView } from "@/views/EffectsView";
 
@@ -46,10 +46,10 @@ const setState = (tokens: string) =>
 async function mount() {
   await refreshAll();
   render(
-    <ToastProvider>
-      <ToastHost />
+    <>
+      <NotifyHost />
       <EffectsView />
-    </ToastProvider>,
+    </>,
   );
   await screen.findByRole("button", { name: "Open Solid" });
 }

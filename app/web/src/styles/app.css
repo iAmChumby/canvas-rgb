@@ -121,10 +121,8 @@ html[data-motion="reduced"] *::after {
 /* ---------- shell ---------- */
 
 :root {
-  /* The height of the phone's bottom dock, and the band a toast takes in it. The dock grows by
-     the band while a toast is up. */
+  /* The height of the phone's bottom dock. */
   --dock-h: 65px;
-  --toast-band-h: 46px;
 }
 
 .app {
@@ -649,7 +647,6 @@ html[data-motion="reduced"] *::after {
 }
 
 .content {
-  /* The toast floats over the page, so the content is the anchor it hangs from. */
   position: relative;
   /* R1: the content box is the page. It is the size container every screen lays out against
      (R5), and it holds the page's own height: the document never scrolls, a long list scrolls
@@ -4950,13 +4947,6 @@ button.chip:hover {
     background: var(--panel);
   }
 
-  /* A toast takes a band of the dock's own surface, so it hides nothing the reader could reach:
-     the dock grows by exactly the toast's height. */
-  .rail[data-toast="on"] {
-    height: calc(var(--dock-h) + var(--toast-band-h));
-    padding-top: var(--toast-band-h);
-  }
-
   .rail-brand {
     display: none;
   }
@@ -5038,7 +5028,7 @@ button.chip:hover {
   }
 
   .content {
-    /* The bottom dock, plus the band a toast takes in it, so the page's end is clear of both. */
+    /* The bottom dock, so the page's end is clear of it. */
     padding: var(--s4) var(--s4) 120px;
   }
 

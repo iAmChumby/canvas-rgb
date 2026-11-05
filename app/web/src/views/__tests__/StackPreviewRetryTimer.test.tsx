@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { ToastHost, ToastProvider } from "@/components/Toast";
+import { NotifyHost } from "@/components/Notify";
 import { api } from "@/lib/endpoints";
 import { ApiFailure } from "@/lib/errors";
 import { refreshAll } from "@/lib/store";
@@ -82,8 +82,8 @@ describe("the stack builder's busy answer", () => {
 
     try {
       render(
-        <ToastProvider>
-          <ToastHost />
+        <>
+          <NotifyHost />
           <StripSlotsProvider>
             <div className="strip-slots">
               <StripSlot kind="title" />
@@ -91,7 +91,7 @@ describe("the stack builder's busy answer", () => {
             </div>
             <EffectsView />
           </StripSlotsProvider>
-        </ToastProvider>,
+        </>,
       );
       // The builder reads the stack and sends its first preview.
       expect(await advanceUntil(() => sentAt.length > 0)).toBe(true);

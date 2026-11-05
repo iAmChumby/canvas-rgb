@@ -2,7 +2,6 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { ToastProvider } from "@/components/Toast";
 import { patchSnap, refreshFans } from "@/lib/store";
 import { FansView } from "@/views/FansView";
 import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
@@ -66,7 +65,7 @@ describe("a handed-back header's name cell (#114)", () => {
       await refreshFans();
     });
     const { container } = render(
-      <ToastProvider>
+      <>
         <StripSlotsProvider>
           <header>
             <StripSlot kind="title" />
@@ -76,7 +75,7 @@ describe("a handed-back header's name cell (#114)", () => {
             <FansView />
           </main>
         </StripSlotsProvider>
-      </ToastProvider>,
+      </>,
     );
     await waitFor(() => expect(container.querySelectorAll("td.name-col .fan-handoff").length).toBe(2));
     for (const cell of container.querySelectorAll("td.name-col")) {

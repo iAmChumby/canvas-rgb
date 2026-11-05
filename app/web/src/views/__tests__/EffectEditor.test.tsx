@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { ToastHost, ToastProvider } from "@/components/Toast";
+import { NotifyHost } from "@/components/Notify";
 import { refreshAll } from "@/lib/store";
 import { editorContent, editorSource, lintMarker } from "@/test/editor";
 import { EffectsView } from "@/views/EffectsView";
@@ -47,10 +47,10 @@ afterEach(cleanup);
 async function mount() {
   await refreshAll();
   render(
-    <ToastProvider>
-      <ToastHost />
+    <>
+      <NotifyHost />
       <EffectsView />
-    </ToastProvider>,
+    </>,
   );
   fireEvent.click(await screen.findByRole("button", { name: "Open Sample HTML" }));
   // The pane keeps the previous effect's detail until the new one lands; its Edit code is

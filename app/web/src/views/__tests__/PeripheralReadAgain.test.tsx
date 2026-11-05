@@ -1,6 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { ToastProvider } from "@/components/Toast";
 import { PeripheralsView } from "@/views/PeripheralsView";
 import type { PeripheralDetail } from "@/proto/PeripheralDetail";
 import type { PeripheralInfo } from "@/proto/PeripheralInfo";
@@ -79,9 +78,9 @@ beforeEach(() => {
 
 function open() {
   return render(
-    <ToastProvider>
+    <>
       <PeripheralsView />
-    </ToastProvider>,
+    </>,
   );
 }
 

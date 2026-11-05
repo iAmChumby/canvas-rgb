@@ -7,7 +7,7 @@ import { Crossfade } from "@/components/Crossfade";
 import { useMediaQuery } from "@/components/MediaQuery";
 import { BrandMark, Wordmark } from "@/components/BrandMark";
 import { Popover } from "@/components/Popover";
-import { useToast } from "@/components/Toast";
+import { notify } from "@/components/Notify";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
 import { links, playing, problems, type Tone } from "@/lib/status";
@@ -58,7 +58,6 @@ export function StatusStrip({
   const statusError = useSnap((s) => s.statusError);
   const effects = useSnap((s) => s.effects);
   const [busy, setBusy] = useState(false);
-  const toast = useToast();
   const stripRef = useRef<HTMLDivElement>(null);
   const markRef = useRef<HTMLButtonElement>(null);
 
@@ -104,9 +103,8 @@ export function StatusStrip({
       await api.patchOutput({ power: paused ? "running" : "paused", brightness: null });
       patchSnap({ status: { ...status, power: paused ? "running" : "paused" } });
       await refreshStatus();
-      toast(paused ? "Lights resumed" : "Lights paused");
     } catch (e) {
-      toast(messageOf(e), "down");
+      notify(messageOf(e), "down");
     } finally {
       setBusy(false);
     }

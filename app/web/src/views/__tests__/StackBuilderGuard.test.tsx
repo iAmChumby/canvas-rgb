@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { ToastHost, ToastProvider } from "@/components/Toast";
+import { NotifyHost } from "@/components/Notify";
 import { refreshAll } from "@/lib/store";
 import { waitForStackGuard } from "@/test/historyGuard";
 import { Rail } from "@/shell/Rail";
@@ -80,15 +80,15 @@ afterEach(() => {
 async function mount() {
   await refreshAll();
   return render(
-    <ToastProvider>
-      <ToastHost />
+    <>
+      <NotifyHost />
       <Rail pathname="/effects/" />
       <StripSlotsProvider>
         <StripSlot kind="title" />
         <StripSlot kind="actions" />
         <EffectsView />
       </StripSlotsProvider>
-    </ToastProvider>,
+    </>,
   );
 }
 
