@@ -203,7 +203,7 @@ pub async fn apply_built(
         }
     };
     // The captures follow the effect's `needs`.
-    app.inputs.lock().map_err(|_| "the capture state is poisoned")?.apply_needs(schema.needs);
+    app.inputs.apply_needs(schema.needs);
 
     // Anything that is not a stack means no stack is on the engine: whatever was running is
     // gone, and a later activation of it must build again.

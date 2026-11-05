@@ -160,6 +160,13 @@ async fn daemon_main() -> Exit {
         .with_peripherals(peripherals),
     );
 
+    // The capture reaches both engines: the lights' engine and the stack preview engine
+    // read the screen and the audio through it. Without this the effects that need them
+    // render black, because the capture threads ran but fed nobody (#1). It is done
+    // before the saved effect is restored, so that effect reads the capture from its
+    // first frame.
+    app.set_input_source(Some(app.capture_source()));
+
     // The peripherals the owner allowed are opened; the others stay closed.
     canvas_daemon::peripherals::apply_saved(&app).await;
 
