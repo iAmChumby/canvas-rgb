@@ -75,18 +75,18 @@ jobs:
               - 'app/src-tauri/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.cargo/**'
               - 'deny.toml'
               - 'tools/poison-compare/**'
             rust-release:
-              # The crates the release-mode tests measure: the HTML effect engine, the effects
-              # themselves, the daemon that draws them and the engine behind them. The stock
-              # effects live in crates/canvas-daemon/stock-effects (there is no top-level
-              # effects/ directory).
-              - 'crates/canvas-html/**'
-              - 'crates/canvas-effects/**'
-              - 'crates/canvas-daemon/**'
-              - 'crates/canvas-core/**'
+              # What the release-mode tests build: canvas-daemon (the tile quality test) depends on
+              # every crate except canvas-svc, so any crate change can move a frame time. The
+              # workspace manifest holds the release profile, and .cargo/ the build config. The
+              # stock effects live in crates/canvas-daemon/stock-effects.
+              - 'crates/**'
+              - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.cargo/**'
             installer:
               - 'installer/**'
               - 'tools/*.ps1'
