@@ -9,7 +9,10 @@
 //! console session, and the relaunch is held until the session is gone, the console id changes
 //! or [`SESSION_END_HOLD`] passes. Past that budget they count as crashes again. A new console
 //! session (a logon) clears the crash stop and both budgets, so a crash stop does not strand the
-//! user until the service restarts.
+//! user until the service restarts. A console id that changed is a new session only once it has
+//! held for [`SESSION_SETTLE`] and has a user in it, so a flickering console id does not clear
+//! the crash limit. A new session also ends a quit: the daemon that quit belonged to the session
+//! that is gone, and the next user gets a daemon of their own.
 
 use crate::process::ChildProcess;
 use canvas_proto::consts::{DAEMON_RESTART_LIMIT, DAEMON_RESTART_WINDOW_S};
@@ -267,6 +270,8 @@ pub struct DaemonSupervisor {
     /// Shared with the pipe server (see [`HeartbeatClock`]).
     last_heartbeat: Arc<Mutex<HeartbeatClock>>,
     restarts: VecDeque<Instant>,
+    /// The daemon announced a quit: the service does not supervise a daemon any more. A new
+    /// console session ends it (#6): the daemon that quit belonged to the session that is gone.
     quitting: bool,
     /// The service is stopping: the daemon is not started again, and a new console session does
     /// not change that.
@@ -291,6 +296,9 @@ pub struct DaemonSupervisor {
     child_session: Option<u32>,
     /// A different console session seen while the daemon runs, and since when (see `SESSION_SETTLE`).
     pending_move: Option<(u32, Instant)>,
+    /// A console session the console moved to, and since when. It is a new session only once it
+    /// has held for `SESSION_SETTLE` and has a user in it (#6).
+    pending_console: Option<(u32, Instant)>,
     /// The daemon `stop()` ended, and when (#81): the OpenRGB stop line reports the gap.
     stopped_daemon: Option<(u32, Instant)>,
     /// The daemon `stop()` could not end (#81): the OpenRGB stop line says that instead of
@@ -318,6 +326,7 @@ impl DaemonSupervisor {
             waiting_for_session: false,
             child_session: None,
             pending_move: None,
+            pending_console: None,
             stopped_daemon: None,
             unended_daemon: None,
         }
@@ -517,7 +526,8 @@ impl DaemonSupervisor {
         }
     }
 
-    /// The daemon is quitting on purpose; its exit is not a crash.
+    /// The daemon is quitting on purpose; its exit is not a crash. A new console session ends
+    /// the quit (#6): the daemon that quit belonged to the session that is gone.
     pub fn on_quitting(&mut self) {
         tracing::info!("daemon announced a quit; it will not be restarted");
         self.quitting = true;
@@ -543,13 +553,22 @@ impl DaemonSupervisor {
     }
 
     /// A new console session (a logon) clears the crash stop and both budgets, so a crash stop
-    /// does not strand the user until the service restarts (#6).
+    /// does not strand the user until the service restarts (#6). It also ends a quit: the daemon
+    /// that quit belonged to the session that is gone, and the new one gets a daemon of its own.
     fn on_new_session(&mut self, session: u32) {
         if self.crash_stopped {
             tracing::info!(
                 session,
                 "a new console session started; the daemon is started again"
             );
+        }
+        if self.quitting {
+            tracing::info!(
+                session,
+                "a new console session started; the daemon that quit is replaced"
+            );
+            self.quitting = false;
+            self.forget_quitting_daemon();
         }
         self.crash_stopped = false;
         self.heartbeat_clock().unmark_stopped();
@@ -559,28 +578,74 @@ impl DaemonSupervisor {
         self.hold = None;
     }
 
+    /// The daemon that quit on purpose is on its way out, and the new session gets a daemon of
+    /// its own. The old one is ended and waited for, the way a move does it, so the next daemon
+    /// does not lose the API port to it. The quit is not a crash.
+    fn forget_quitting_daemon(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        let pid = child.id();
+        match child.try_wait() {
+            // It is already gone: there is nothing to end.
+            Ok(Some(_)) => {}
+            // It is still running: end it, so the next daemon can bind the port.
+            Ok(None) | Err(_) => {
+                let _ = terminate_daemon(
+                    child.as_mut(),
+                    "the daemon quit and a new console session started",
+                );
+                wait_for_exit(child.as_mut(), pid);
+            }
+        }
+        self.clear_heartbeat_clock();
+    }
+
     /// Watches the console session for a new one. A logoff shows up as a session with no user in
     /// it; the logon after it as one with a user again. A different console id is a different
-    /// session right away. Says whether a new console session was found.
+    /// session, but only once it has held for [`SESSION_SETTLE`] and has a user in it (#6).
+    /// Says whether a new console session was found.
     ///
     /// The first console session this supervisor sees is not a new one: it is the one the service
     /// started in.
-    fn watch_for_new_session(&mut self) -> bool {
+    fn watch_for_new_session(&mut self, now: Instant) -> bool {
         let console = self.launcher.console_session();
         match (self.console, console) {
-            (Some(seen), Some(now)) if seen != now => {
-                // The console moved to another session: that is a new console session.
-                self.console = Some(now);
-                self.logged_off = false;
-                self.on_new_session(now);
-                true
+            (Some(seen), Some(current)) if seen != current => {
+                // The console moved to another session. It is a new console session once it has
+                // held for the settle time and has a user in it: a flip (1 -> 2 -> 1) and the
+                // logon screen (a session with no token) must not clear the crash stop (#6).
+                if !self.launcher.session_alive(current) {
+                    // The logon screen: no user in that session, so it is not a new one yet.
+                    self.pending_console = None;
+                    return false;
+                }
+                match self.pending_console {
+                    Some((target, since)) if target == current => {
+                        if now.saturating_duration_since(since) >= SESSION_SETTLE {
+                            self.pending_console = None;
+                            self.console = Some(current);
+                            self.logged_off = false;
+                            self.on_new_session(current);
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    _ => {
+                        // The move starts now: it must hold for the settle time.
+                        self.pending_console = Some((current, now));
+                        false
+                    }
+                }
             }
-            (Some(_), Some(now)) => {
+            (Some(_), Some(current)) => {
                 // The same session: its user comes and goes in it.
-                if self.launcher.session_alive(now) {
+                self.pending_console = None;
+                if self.launcher.session_alive(current) {
                     if self.logged_off {
                         self.logged_off = false;
-                        self.on_new_session(now);
+                        self.on_new_session(current);
                         true
                     } else {
                         false
@@ -592,11 +657,12 @@ impl DaemonSupervisor {
             }
             (Some(_), None) => {
                 // The console reports no session: unknown, not a move and not a logoff.
+                self.pending_console = None;
                 false
             }
-            (None, Some(now)) => {
-                self.console = Some(now);
-                self.logged_off = !self.launcher.session_alive(now);
+            (None, Some(current)) => {
+                self.console = Some(current);
+                self.logged_off = !self.launcher.session_alive(current);
                 false
             }
             (None, None) => false,
@@ -605,15 +671,18 @@ impl DaemonSupervisor {
 
     /// One supervision pass per second.
     pub fn tick(&mut self, now: Instant) -> DaemonAction {
-        if !self.started || self.service_stopped || self.quitting {
+        if !self.started || self.service_stopped {
             return DaemonAction::None;
         }
-        // A new console session (a logon) clears the crash stop and both budgets (#6). It is
-        // watched even while the supervisor is crash-stopped: that stop must not strand the
-        // user until the service restarts.
-        if self.watch_for_new_session() && self.child.is_none() {
+        // A new console session (a logon) clears the crash stop and both budgets (#6), and ends a
+        // quit. It is watched even while the supervisor is crash-stopped or quitting: neither
+        // must strand the next user until the service restarts.
+        if self.watch_for_new_session(now) && self.child.is_none() {
             // The daemon is started again in the new session.
             self.launch(now);
+            return DaemonAction::None;
+        }
+        if self.quitting {
             return DaemonAction::None;
         }
         if self.crash_stopped {
@@ -1348,6 +1417,32 @@ mod tests {
         });
         assert!(announces_kill(&text, pid, "the active console session changed"), "{text}");
         assert_eq!(processes.spawns().len(), 2);
+
+        // 5. The daemon quit and a new console session started.
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        sup.start(t0);
+        let pid = sup.daemon_pid().expect("a daemon is running");
+        sup.on_quitting();
+        // The user logs off and a new one logs on: the daemon that quit is ended.
+        processes.log_off(1);
+        logged(|| {
+            sup.tick(t0 + Duration::from_secs(1));
+        });
+        processes.log_on(1);
+        let text = logged(|| {
+            sup.tick(t0 + Duration::from_secs(2));
+        });
+        assert!(
+            announces_kill(
+                &text,
+                pid,
+                "the daemon quit and a new console session started"
+            ),
+            "{text}"
+        );
+        assert_eq!(processes.spawns().len(), 2, "the new session got no daemon");
     }
 
     #[test]
@@ -1601,6 +1696,125 @@ mod tests {
             2,
             "the hold ended and the daemon started"
         );
+        assert!(sup.daemon_pid().is_some());
+    }
+
+    /// A supervisor whose crash limit tripped: the daemon is off and the crash stop is on.
+    fn crashed_supervisor() -> (DaemonSupervisor, FakeProcesses, Instant) {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        sup.start(t0);
+        let mut now = t0;
+        for _ in 0..4 {
+            processes.exit_last_with(STATUS_ACCESS_VIOLATION);
+            now += Duration::from_secs(1);
+            sup.tick(now);
+        }
+        assert!(sup.stopped(), "the crash limit tripped");
+        assert_eq!(
+            processes.spawns().len(),
+            4,
+            "the daemon is off after the crash stop"
+        );
+        (sup, processes, now)
+    }
+
+    /// A console id that flips (1 -> 2 -> 1) inside the settle time is not a new session: the
+    /// crash stop stays, or a flickering console would clear the limit on every flip (#6).
+    #[test]
+    fn a_console_that_flips_does_not_clear_the_crash_stop() {
+        let (mut sup, processes, mut now) = crashed_supervisor();
+        processes.set_console(2);
+        now += Duration::from_secs(1);
+        sup.tick(now);
+        processes.set_console(1);
+        now += Duration::from_secs(1);
+        sup.tick(now);
+        assert!(sup.stopped(), "the flap cleared the crash stop");
+        assert_eq!(processes.spawns().len(), 4, "the daemon was started again");
+    }
+
+    /// The logon screen: the console is on a session with no user in it. That is not a new
+    /// session, so the crash stop stays (#6).
+    #[test]
+    fn a_move_to_a_session_with_no_user_does_not_clear_the_crash_stop() {
+        let (mut sup, processes, mut now) = crashed_supervisor();
+        processes.log_off(2);
+        processes.set_console(2);
+        // Well past the settle time: the session still has no user in it.
+        for _ in 0..5 {
+            now += Duration::from_secs(1);
+            sup.tick(now);
+        }
+        assert!(
+            sup.stopped(),
+            "the move to a session with no user cleared the crash stop"
+        );
+        assert_eq!(processes.spawns().len(), 4, "the daemon was started again");
+    }
+
+    /// A console session that has settled and has a user in it is a new session: the crash stop
+    /// ends and the daemon starts again (#6).
+    #[test]
+    fn a_settled_move_to_a_live_session_clears_the_crash_stop() {
+        let (mut sup, processes, mut now) = crashed_supervisor();
+        processes.set_console(2);
+        // Inside the settle time: nothing yet.
+        now += Duration::from_secs(1);
+        sup.tick(now);
+        assert!(
+            sup.stopped(),
+            "the crash stop ended before the session settled"
+        );
+        // After the settle time: the new session starts the daemon again.
+        now += SESSION_SETTLE;
+        sup.tick(now);
+        assert!(
+            !sup.stopped(),
+            "the settled move did not end the crash stop"
+        );
+        assert_eq!(
+            processes.spawns().len(),
+            5,
+            "the daemon was not started again"
+        );
+        assert!(sup.daemon_pid().is_some());
+    }
+
+    /// A daemon that quit on purpose stops the supervision, but the next user is not stranded by
+    /// it: a new console session gets a daemon of its own (#6).
+    #[test]
+    fn a_new_session_after_a_quit_starts_the_daemon_again() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        sup.start(t0);
+        sup.on_quitting();
+        processes.exit_last();
+        let mut now = t0;
+        // The daemon that quit is not replaced.
+        now += Duration::from_secs(1);
+        sup.tick(now);
+        assert_eq!(
+            processes.spawns().len(),
+            1,
+            "the daemon that quit was started again"
+        );
+        // The user logs off: still no daemon.
+        processes.log_off(1);
+        now += Duration::from_secs(1);
+        sup.tick(now);
+        assert_eq!(
+            processes.spawns().len(),
+            1,
+            "a daemon was started with no user logged on"
+        );
+        // A new user logs on: the new session gets a daemon.
+        processes.log_on(1);
+        now += Duration::from_secs(1);
+        sup.tick(now);
+        assert_eq!(processes.spawns().len(), 2, "the new session got no daemon");
         assert!(sup.daemon_pid().is_some());
     }
 

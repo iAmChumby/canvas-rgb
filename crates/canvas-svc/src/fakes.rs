@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::time::Duration;
 
 const CHIP_ID_HI: u8 = 0xD5;
@@ -583,13 +583,24 @@ impl GpuFanApi for FakeGpuFans {
     }
 }
 
-/// The exit code a fake child carries while it has not exited. No Windows exit code is this one,
-/// so it can be told apart from a real code.
-const NOT_EXITED: i32 = i32::MIN;
+/// The exit code a fake child carries: `None` while it has not exited, `Some(code)` once it has.
+/// An explicit flag, not a sentinel code: every `i32` is a possible exit code, `0x80000000`
+/// included, so no code can stand for "still running".
+type FakeExit = Arc<Mutex<Option<i32>>>;
+
+/// The exit code of a fake child; `None` while it runs.
+fn exit_code(exit: &FakeExit) -> Option<i32> {
+    *exit.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Records that a fake child ended with `code`.
+fn set_exit_code(exit: &FakeExit, code: i32) {
+    *exit.lock().unwrap_or_else(|p| p.into_inner()) = Some(code);
+}
 
 /// Records spawns and lets a test make a spawned process exit.
 /// One recorded spawn: the exe, its arguments, and the exit code the child reports when it ends.
-type SpawnRecord = (PathBuf, Vec<String>, Arc<AtomicI32>);
+type SpawnRecord = (PathBuf, Vec<String>, FakeExit);
 
 #[derive(Clone, Default)]
 pub struct FakeProcesses {
@@ -611,7 +622,7 @@ pub struct FakeProcesses {
     fail_kills: Arc<AtomicUsize>,
 }
 
-type RunningRecord = (u32, PathBuf, u32, Arc<AtomicI32>);
+type RunningRecord = (u32, PathBuf, u32, FakeExit);
 
 impl FakeProcesses {
     pub fn new() -> Self {
@@ -638,7 +649,7 @@ impl FakeProcesses {
     /// crashed, and the supervisor tells them apart.
     pub fn exit_last_with(&self, code: i32) {
         if let Some((_, _, exit)) = self.spawns.lock().unwrap_or_else(|p| p.into_inner()).last() {
-            exit.store(code, Ordering::SeqCst);
+            set_exit_code(exit, code);
         }
     }
 
@@ -651,7 +662,7 @@ impl FakeProcesses {
                 pid,
                 PathBuf::from(image),
                 session,
-                Arc::new(AtomicI32::new(NOT_EXITED)),
+                Arc::new(Mutex::new(None)),
             ));
     }
 
@@ -661,7 +672,7 @@ impl FakeProcesses {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .iter()
-            .any(|(p, _, _, exit)| *p == pid && exit.load(Ordering::SeqCst) != NOT_EXITED)
+            .any(|(p, _, _, exit)| *p == pid && exit_code(exit).is_some())
     }
 
     pub fn set_console(&self, session: u32) {
@@ -721,13 +732,10 @@ impl FakeProcesses {
             self.fail_spawns.store(pending - 1, Ordering::SeqCst);
             return Err(io::Error::other("fake spawn failure"));
         }
-        let exit = Arc::new(AtomicI32::new(NOT_EXITED));
+        let exit = Arc::new(Mutex::new(None));
         let pid = {
             let mut spawns = self.spawns.lock().unwrap_or_else(|p| p.into_inner());
-            if spawns
-                .iter()
-                .any(|s| s.2.load(Ordering::SeqCst) == NOT_EXITED)
-            {
+            if spawns.iter().any(|s| exit_code(&s.2).is_none()) {
                 self.overlaps.fetch_add(1, Ordering::SeqCst);
             }
             let pid = 4000 + spawns.len() as u32;
@@ -745,8 +753,8 @@ impl FakeProcesses {
 }
 
 struct FakeChild {
-    /// The exit code the child reports once it has ended; [`NOT_EXITED`] while it runs.
-    exit: Arc<AtomicI32>,
+    /// The exit code the child reports once it has ended; `None` while it runs.
+    exit: FakeExit,
     pid: u32,
     /// Polls a killed process needs before it has exited (0 = at once).
     slow_kill: u32,
@@ -761,14 +769,13 @@ impl ChildProcess for FakeChild {
         if let Some(left) = self.dying {
             if left == 0 {
                 // The supervisor's kill code is 1, as it is on Windows.
-                self.exit.store(1, Ordering::SeqCst);
+                set_exit_code(&self.exit, 1);
                 self.dying = None;
             } else {
                 self.dying = Some(left - 1);
             }
         }
-        let code = self.exit.load(Ordering::SeqCst);
-        Ok((code != NOT_EXITED).then_some(code))
+        Ok(exit_code(&self.exit))
     }
 
     fn kill(&mut self) -> io::Result<()> {
@@ -779,7 +786,7 @@ impl ChildProcess for FakeChild {
         if self.slow_kill > 0 {
             self.dying = Some(self.slow_kill);
         } else {
-            self.exit.store(1, Ordering::SeqCst);
+            set_exit_code(&self.exit, 1);
         }
         Ok(())
     }
