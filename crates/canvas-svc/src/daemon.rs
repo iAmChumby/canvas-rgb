@@ -4,6 +4,10 @@
 //! `DAEMON_RESTART_WINDOW_S`, then writes black through OpenRGB and stops restarting it.
 //! A daemon that sent `DaemonQuitting` is not restarted.
 //!
+//! A daemon that was just launched has 30 s to send its first heartbeat (#163): a slow start (a
+//! busy logon, a cold disk) is not a crash, so it must not cost the daemon its life. After that
+//! first beat the 5 s budget applies again, and a grace that runs out is a crash like any other.
+//!
 //! A daemon that ended with its session (its user logged off, Windows tore the session down) is
 //! not a crash (#6). Those exits count against a separate budget of [`SESSION_END_LIMIT`] per
 //! console session, and the relaunch is held until the session is gone, the console id changes
@@ -25,6 +29,58 @@ use std::time::{Duration, Instant};
 
 /// A missed-heartbeat run this long counts as a crash.
 pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a daemon that was just launched has to send its first heartbeat (#163). A slow start
+/// (a busy logon, a cold disk, a slow OpenRGB enumeration) is not a crash, so the daemon must not
+/// be killed for missing its first beat: until that beat arrives the longer budget applies, and
+/// a grace that runs out counts as a crash like any other.
+pub const FIRST_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Which heartbeat budget a running daemon is on (#163): the first heartbeat of a launch has the
+/// longer grace, every beat after it the short budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BeatBudget {
+    /// The daemon has not said it is up yet.
+    First,
+    /// The daemon has said it is up.
+    Steady,
+}
+
+impl BeatBudget {
+    /// Whether a daemon whose last beat is `elapsed` old has missed its budget.
+    fn expired(self, elapsed: Duration) -> bool {
+        match self {
+            // The grace is a window: a beat that arrives at the 30 s mark still counts, and the
+            // kill lands on the tick after it.
+            Self::First => elapsed > FIRST_HEARTBEAT_TIMEOUT,
+            // The steady budget is a deadline: 5 s after the last beat is a crash.
+            Self::Steady => elapsed >= HEARTBEAT_TIMEOUT,
+        }
+    }
+
+    /// The reason in the kill line, which completes "terminating the daemon (pid N): ...". It
+    /// names the budget the daemon was on, so the log says which one ran out.
+    fn kill_reason(self) -> String {
+        match self {
+            Self::First => format!(
+                "it missed its first heartbeat for {} s",
+                FIRST_HEARTBEAT_TIMEOUT.as_secs()
+            ),
+            Self::Steady => format!("it missed heartbeats for {} s", HEARTBEAT_TIMEOUT.as_secs()),
+        }
+    }
+
+    /// The reason in the crash line ("daemon crashed; restarting it").
+    fn crash_reason(self) -> String {
+        match self {
+            Self::First => format!(
+                "missed its first heartbeat for {} s",
+                FIRST_HEARTBEAT_TIMEOUT.as_secs()
+            ),
+            Self::Steady => format!("missed heartbeats for {} s", HEARTBEAT_TIMEOUT.as_secs()),
+        }
+    }
+}
 
 /// How many exits that mean "the daemon ended with its session" one console session gets before
 /// they count as crashes again (#6).
@@ -211,6 +267,11 @@ pub struct HeartbeatClock {
     pid: Option<u32>,
     /// True once the supervisor is stopped; beats are ignored from then on.
     stopped: bool,
+    /// When the daemon was launched (#163): its first heartbeat is measured from here.
+    launched: Option<Instant>,
+    /// True once the daemon has sent its first heartbeat since the launch (#163). Until then it
+    /// has the longer grace.
+    first_beat_seen: bool,
 }
 
 /// What the pipe server does with one heartbeat.
@@ -231,10 +292,29 @@ impl HeartbeatClock {
             return Stamp::Stopped;
         }
         if self.pid == Some(pid) {
-            self.at = Some(now);
+            self.record_beat(pid, now);
             return Stamp::Stamped;
         }
         Stamp::Foreign
+    }
+
+    /// Records a beat from the launched daemon. The first one of a launch is measured (#163): the
+    /// line says how long the daemon took to say it is up.
+    fn record_beat(&mut self, pid: u32, now: Instant) {
+        self.at = Some(now);
+        if self.first_beat_seen {
+            return;
+        }
+        self.first_beat_seen = true;
+        let Some(launched) = self.launched else {
+            return;
+        };
+        let ms = now.saturating_duration_since(launched).as_millis() as u64;
+        tracing::info!(
+            pid,
+            ms,
+            "the daemon's first heartbeat arrived {ms} ms after launch"
+        );
     }
 
     /// The clock's current beat time, for tests.
@@ -247,6 +327,8 @@ impl HeartbeatClock {
     fn clear(&mut self) {
         self.at = None;
         self.pid = None;
+        self.launched = None;
+        self.first_beat_seen = false;
     }
 
     /// The supervisor is stopped: beats are ignored from then on, and the clock is cleared.
@@ -254,6 +336,8 @@ impl HeartbeatClock {
         self.stopped = true;
         self.at = None;
         self.pid = None;
+        self.launched = None;
+        self.first_beat_seen = false;
     }
 
     /// The supervisor starts again (a new console session cleared the crash stop): beats count
@@ -439,6 +523,10 @@ impl DaemonSupervisor {
                     let mut hb = self.heartbeat_clock();
                     hb.at = Some(now);
                     hb.pid = Some(pid);
+                    // The first heartbeat of this daemon is measured from the launch (#163), and
+                    // the grace starts again for it.
+                    hb.launched = Some(now);
+                    hb.first_beat_seen = false;
                 }
                 tracing::info!(exe = %self.exe.display(), "daemon started in the user session");
             }
@@ -481,7 +569,20 @@ impl DaemonSupervisor {
     pub fn on_heartbeat(&mut self, now: Instant) {
         let mut hb = self.heartbeat_clock();
         if !hb.stopped {
-            hb.at = Some(now);
+            match hb.pid {
+                Some(pid) => hb.record_beat(pid, now),
+                None => hb.at = Some(now),
+            }
+        }
+    }
+
+    /// The heartbeat budget the running daemon is on (#163): the first heartbeat of a launch has
+    /// the longer grace, every beat after it the short budget.
+    fn beat_budget(&self) -> BeatBudget {
+        if self.heartbeat_clock().first_beat_seen {
+            BeatBudget::Steady
+        } else {
+            BeatBudget::First
         }
     }
 
@@ -545,12 +646,15 @@ impl DaemonSupervisor {
         self.child.as_ref().map(|c| c.id())
     }
 
-    /// True while a daemon process is running and its heartbeat is fresh.
+    /// True while a daemon process is running and its heartbeat is fresh. A daemon that is still
+    /// starting up has the grace, so it is not reported as gone (#163).
     pub fn is_connected(&self, now: Instant) -> bool {
-        self.child.is_some()
-            && self
-                .last_heartbeat()
-                .is_some_and(|hb| now.saturating_duration_since(hb) < HEARTBEAT_TIMEOUT)
+        if self.child.is_none() {
+            return false;
+        }
+        let budget = self.beat_budget();
+        self.last_heartbeat()
+            .is_some_and(|hb| !budget.expired(now.saturating_duration_since(hb)))
     }
 
     /// Whether the restart limit has been reached and restarts have stopped.
@@ -747,17 +851,20 @@ impl DaemonSupervisor {
                 self.launch(now);
                 return DaemonAction::None;
             }
+            // A daemon that has not said it is up yet has the grace (#163); after its first beat
+            // the 5 s budget applies again.
+            let budget = self.beat_budget();
             let stale = self
                 .last_heartbeat()
-                .is_some_and(|hb| now.saturating_duration_since(hb) >= HEARTBEAT_TIMEOUT);
+                .is_some_and(|hb| budget.expired(now.saturating_duration_since(hb)));
             if stale {
                 if let Some(mut child) = self.child.take() {
-                    let _ = terminate_daemon(child.as_mut(), "it missed heartbeats for 5 s");
+                    let _ = terminate_daemon(child.as_mut(), &budget.kill_reason());
                     let pid = child.id();
                     wait_for_exit(child.as_mut(), pid);
                     self.clear_heartbeat_clock();
                 }
-                return self.crashed(now, "missed heartbeats for 5 s");
+                return self.crashed(now, &budget.crash_reason());
             }
             return DaemonAction::None;
         }
@@ -1151,6 +1258,236 @@ mod tests {
         assert_eq!(processes.spawns().len(), 2);
     }
 
+    /// A daemon that was just launched has 30 s to send its first heartbeat (#163): a slow start
+    /// (a busy logon, a cold disk) is not a crash.
+    #[test]
+    fn a_first_beat_at_6s_after_launch_is_not_a_crash() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        sup.start(t0);
+        let pid = sup.daemon_pid().expect("a daemon is running");
+        // Six seconds without a beat: the grace holds.
+        let mut now = t0;
+        for _ in 0..6 {
+            now += Duration::from_secs(1);
+            assert_eq!(sup.tick(now), DaemonAction::None);
+            assert_eq!(
+                processes.spawns().len(),
+                1,
+                "the daemon was killed inside the grace"
+            );
+            assert_eq!(
+                sup.daemon_pid(),
+                Some(pid),
+                "the daemon was killed inside the grace"
+            );
+        }
+        // The first beat arrives, and the daemon keeps running.
+        sup.on_heartbeat(now);
+        assert_eq!(sup.tick(now + Duration::from_secs(1)), DaemonAction::None);
+        assert_eq!(
+            processes.spawns().len(),
+            1,
+            "the daemon was killed after its first beat"
+        );
+    }
+
+    /// The same, close to the end of the grace (#163).
+    #[test]
+    fn a_first_beat_at_29s_after_launch_is_not_a_crash() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        sup.start(t0);
+        let pid = sup.daemon_pid().expect("a daemon is running");
+        // 29 s without a beat: the grace still holds.
+        let mut now = t0;
+        for _ in 0..29 {
+            now += Duration::from_secs(1);
+            assert_eq!(sup.tick(now), DaemonAction::None);
+            assert_eq!(
+                processes.spawns().len(),
+                1,
+                "the daemon was killed inside the grace"
+            );
+            assert_eq!(
+                sup.daemon_pid(),
+                Some(pid),
+                "the daemon was killed inside the grace"
+            );
+        }
+        // The first beat arrives, and the daemon keeps running.
+        sup.on_heartbeat(now);
+        assert_eq!(sup.tick(now + Duration::from_secs(1)), DaemonAction::None);
+        assert_eq!(
+            processes.spawns().len(),
+            1,
+            "the daemon was killed after its first beat"
+        );
+    }
+
+    /// A daemon that never says it is up is killed when the grace is over, and that counts as a
+    /// crash like any other (#163).
+    #[test]
+    fn a_missing_first_beat_after_30s_is_a_crash() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        sup.start(t0);
+        let pid = sup.daemon_pid().expect("a daemon is running");
+        // 30 s: the grace is still open.
+        let mut now = t0 + Duration::from_secs(30);
+        assert_eq!(sup.tick(now), DaemonAction::None);
+        assert_eq!(
+            processes.spawns().len(),
+            1,
+            "the daemon was killed inside the grace"
+        );
+        assert_eq!(
+            sup.daemon_pid(),
+            Some(pid),
+            "the daemon was killed inside the grace"
+        );
+        // The grace is over: the daemon is killed, and the miss counts as a crash.
+        now += Duration::from_secs(1);
+        let text = logged(|| {
+            sup.tick(now);
+        });
+        assert!(
+            announces_kill(&text, pid, "it missed its first heartbeat for 30 s"),
+            "{text}"
+        );
+        assert!(
+            text.contains("daemon crashed"),
+            "the miss did not count as a crash: {text}"
+        );
+        assert_eq!(processes.spawns().len(), 2, "the daemon was not restarted");
+    }
+
+    /// Four daemons that never say they are up trip the crash limit (#163): the grace changes
+    /// when the kill happens, not how it is counted.
+    #[test]
+    fn four_missing_first_beats_stop_the_supervisor() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        sup.start(t0);
+        let mut now = t0;
+        let mut action = DaemonAction::None;
+        for round in 1..=DAEMON_RESTART_LIMIT as usize + 1 {
+            // 31 s without a first beat: the grace ends and the daemon is killed.
+            for _ in 0..31 {
+                now += Duration::from_secs(1);
+                action = sup.tick(now);
+            }
+            if round <= DAEMON_RESTART_LIMIT as usize {
+                assert_eq!(action, DaemonAction::None, "round {round}");
+                assert_eq!(processes.spawns().len(), round + 1, "round {round}");
+            }
+        }
+        assert_eq!(action, DaemonAction::WriteBlack);
+        assert!(sup.stopped());
+        assert_eq!(
+            processes.spawns().len(),
+            DAEMON_RESTART_LIMIT as usize + 1,
+            "the daemon was started again after the crash stop"
+        );
+    }
+
+    /// The grace is for the first beat only: after it the 5 s budget applies again (#163).
+    #[test]
+    fn after_the_first_beat_the_5s_budget_applies_again() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        sup.start(t0);
+        let pid = sup.daemon_pid().expect("a daemon is running");
+        // Six seconds without a beat: the grace holds.
+        let mut now = t0;
+        for _ in 0..6 {
+            now += Duration::from_secs(1);
+            assert_eq!(sup.tick(now), DaemonAction::None);
+        }
+        assert_eq!(processes.spawns().len(), 1);
+        // The first beat.
+        sup.on_heartbeat(now);
+        // Four seconds later the daemon is still fresh.
+        assert_eq!(sup.tick(now + Duration::from_secs(4)), DaemonAction::None);
+        assert_eq!(
+            sup.daemon_pid(),
+            Some(pid),
+            "the daemon was killed inside the 5 s budget"
+        );
+        assert_eq!(processes.spawns().len(), 1);
+        // Five seconds after the beat the short budget is over.
+        assert_eq!(sup.tick(now + Duration::from_secs(5)), DaemonAction::None);
+        assert_eq!(
+            processes.spawns().len(),
+            2,
+            "the 5 s budget did not apply after the first beat"
+        );
+    }
+
+    /// The grace applies to `is_connected` too (#163): a daemon that is still starting up is not
+    /// reported as gone.
+    #[test]
+    fn is_connected_uses_the_grace_until_the_first_beat() {
+        let (mut sup, _processes) = supervisor();
+        let t0 = Instant::now();
+        sup.start(t0);
+        // No beat yet: the grace holds.
+        assert!(sup.is_connected(t0 + Duration::from_secs(10)));
+        // The first beat.
+        sup.on_heartbeat(t0 + Duration::from_secs(10));
+        // The 5 s budget applies from then on.
+        assert!(sup.is_connected(t0 + Duration::from_secs(14)));
+        assert!(
+            !sup.is_connected(t0 + Duration::from_secs(15)),
+            "the 5 s budget did not apply after the first beat"
+        );
+        assert!(!sup.is_connected(t0 + Duration::from_secs(16)));
+    }
+
+    /// The first heartbeat is measured and logged once per launch (#163): the line says how
+    /// long the daemon took to say it is up.
+    #[test]
+    fn the_first_heartbeat_is_measured_and_logged_once_per_launch() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        sup.start(t0);
+        let pid = sup.daemon_pid().expect("a daemon is running");
+        // The daemon's beat over the pipe: the path the daemon really uses.
+        let text = logged(|| {
+            let mut hb = sup.heartbeat_clock();
+            assert_eq!(hb.stamp(pid, t0 + Duration::from_secs(3)), Stamp::Stamped);
+        });
+        assert!(
+            text.contains("the daemon's first heartbeat arrived 3000 ms after launch"),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("pid={pid}")),
+            "the line names the daemon: {text}"
+        );
+        // The next beat says nothing more: the line is logged once.
+        let text = logged(|| {
+            let mut hb = sup.heartbeat_clock();
+            assert_eq!(hb.stamp(pid, t0 + Duration::from_secs(4)), Stamp::Stamped);
+        });
+        assert!(!text.contains("first heartbeat arrived"), "{text}");
+        // A new daemon measures its own first heartbeat.
+        processes.exit_last();
+        let now = t0 + Duration::from_secs(10);
+        logged(|| {
+            sup.tick(now);
+        });
+        let pid = sup.daemon_pid().expect("the daemon started again");
+        let text = logged(|| {
+            let mut hb = sup.heartbeat_clock();
+            assert_eq!(hb.stamp(pid, now + Duration::from_secs(2)), Stamp::Stamped);
+        });
+        assert!(
+            text.contains("the daemon's first heartbeat arrived 2000 ms after launch"),
+            "{text}"
+        );
+    }
+
     #[test]
     fn a_daemon_that_announced_quitting_is_not_restarted() {
         let (mut sup, processes) = supervisor();
@@ -1356,6 +1693,7 @@ mod tests {
         let (mut sup, _processes) = supervisor();
         let t0 = Instant::now();
         sup.start(t0);
+        sup.on_heartbeat(t0 + Duration::from_secs(1));
         assert!(sup.is_connected(t0 + Duration::from_secs(2)));
         assert!(!sup.is_connected(t0 + Duration::from_secs(6)));
     }
@@ -1403,14 +1741,17 @@ mod tests {
     /// Each path asserts the log line itself: a fake's kill record alone would pass with the line
     /// removed. The reason is matched as the full announcement for that pid, so the crash line
     /// that follows a missed heartbeat ("daemon crashed", reason "missed heartbeats for 5 s")
-    /// cannot satisfy it by accident (class `cause:timing-test`, #45 and #55).
+    /// cannot satisfy it by accident (class `cause:timing-test`, #45 and #55). A missed heartbeat
+    /// names the budget the daemon was on: the 5 s one after its first beat, the 30 s grace while
+    /// it is still starting up (#163).
     #[test]
     fn every_daemon_kill_is_preceded_by_a_line_naming_the_reason() {
-        // 1. Missed heartbeats.
+        // 1. Missed heartbeats: the 5 s budget, after the daemon's first beat.
         let (mut sup, processes) = supervisor();
         let t0 = Instant::now();
         sup.start(t0);
         let pid = sup.daemon_pid().expect("a daemon is running");
+        sup.on_heartbeat(t0 + Duration::from_secs(1));
         let text = logged(|| {
             sup.tick(t0 + Duration::from_secs(6));
         });
@@ -1420,6 +1761,20 @@ mod tests {
             .find("daemon crashed")
             .unwrap_or_else(|| panic!("the crash is logged after the kill: {text}"));
         assert!(announced < crashed, "the reason comes before the crash line: {text}");
+        assert_eq!(processes.spawns().len(), 2);
+
+        // 1b. The first heartbeat never came: the 30 s grace, named as such.
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        sup.start(t0);
+        let pid = sup.daemon_pid().expect("a daemon is running");
+        let text = logged(|| {
+            sup.tick(t0 + Duration::from_secs(31));
+        });
+        assert!(
+            announces_kill(&text, pid, "it missed its first heartbeat for 30 s"),
+            "{text}"
+        );
         assert_eq!(processes.spawns().len(), 2);
 
         // 2. The service stops.
