@@ -8,10 +8,10 @@
   the bottom of the file (link definitions whose labels name versions, then only blank lines to the end).
   The changelog is read as UTF-8; headings and links may be indented 1-3 spaces. The script throws (exit
   1), naming the line, on: a "#" or "##" heading that is not a version heading (a bare one too), a heading
-  of any level with a bracketed version ("### [0.1.0]"), a second heading for the same version, a link
-  definition inside the section, and a compare-link label at the end of the file that names no version.
-  Fences are not tracked: a "#" or "##" line in a code block is refused too. Not detected: setext
-  headings, tab or 4-space indents, a mid-section "## [Unreleased]" (it ends the section).
+  that starts with a bracketed version ("### [0.1.0]"), a second heading for the same version, a link
+  definition inside the section, and a compare-link label naming no version. Fences are not tracked: a
+  "#" or "##" line in a code block is refused too. Not detected: setext headings, tab or 4-space indents,
+  a mid-section "## [Unreleased]" (it ends the section).
   signature is the contents of the installer's .sig file, as `tauri signer sign` wrote it.
   url is the release asset's address; the tray refuses anything that is not https on github.com or
   GitHub's asset hosts, so a wrong address here makes the update unusable, not unsafe.
