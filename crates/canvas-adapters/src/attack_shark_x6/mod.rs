@@ -296,10 +296,18 @@ impl Default for Pace {
 struct Cache {
     dpi: Option<Vec<u8>>,
     light: Option<Vec<u8>>,
-    /// The DPI button was pressed after the DPI frame was read: that frame's active stage is out
-    /// of date. The event has not been seen live (research 3.4), so it is announced and never
-    /// written into the frame; the next DPI write waits for a fresh read.
+    /// The DPI button was pressed after the DPI frame was read. The frame's active stage is kept
+    /// current by the status report (see `dpi_stage`), so the stage itself is not out of date any
+    /// more; the flag records that the mouse moved on its own since the settings were read, and a
+    /// DPI write reads the report again before it plans.
     dpi_stale: bool,
+    /// The stage the mouse reported through its status report: its own statement of the stage its
+    /// DPI button moved it to. `None` until it reports one.
+    dpi_stage: Option<u8>,
+    /// The stage the last device read showed. The report the device sends in answer to a read
+    /// request can still show that stage, which is how a report that lags the button press is
+    /// told from a mouse that moved on again.
+    dpi_stage_read: Option<u8>,
 }
 
 fn refuse(message: impl Into<String>) -> AdapterError {
@@ -1134,7 +1142,7 @@ impl AttackSharkX6 {
         };
         let (events, out, dpi_stage) = tokio::task::spawn_blocking(move || {
             let mut out = Vec::new();
-            let mut dpi_stage = false;
+            let mut dpi_stage = None;
             loop {
                 let mut buf = [0u8; EVENT_REPORT_LEN];
                 match events.read_input(&mut buf, timeout_ms) {
@@ -1156,11 +1164,12 @@ impl AttackSharkX6 {
                             }
                         }
                         Ok(Event::DpiStage(stage)) => {
-                            // Announce only. The cached frame is not touched: this event has not
-                            // been seen live, so its stage number is not trusted into a frame a
-                            // later write would persist. The frame is marked stale instead, so the
-                            // next DPI write waits for a fresh read.
-                            dpi_stage = true;
+                            // The mouse moved to this stage with its own button. Its own
+                            // statement of where it is: the cached frame's active stage is
+                            // brought up to date below, so a write built from the cache
+                            // carries the stage the mouse is on and not the one it was on
+                            // when the settings were read.
+                            dpi_stage = Some(stage);
                             out.push(PeripheralEvent::Notice {
                                 message: format!("active-dpi-stage={stage}"),
                             });
@@ -1179,7 +1188,14 @@ impl AttackSharkX6 {
         .await
         .map_err(join_error)?;
         self.events = Some(events);
-        if dpi_stage {
+        if let Some(stage) = dpi_stage {
+            // The cache update goes where the report is parsed: the cached frame's active stage
+            // is the stage the mouse reported, so a write built from the cache carries the stage
+            // the mouse is on.
+            self.cache.dpi_stage = Some(stage);
+            if let Some(frame) = self.cache.dpi.as_mut() {
+                codec::set_active_stage(frame, stage);
+            }
             self.cache.dpi_stale = true;
         }
         Ok(out)
@@ -1325,6 +1341,8 @@ impl AttackSharkX6 {
             Kind::Dpi => {
                 self.cache.dpi_stale = false;
                 self.cache.dpi = Some(codec::write_frame_from_reply(kind, frame));
+                // The stage this report holds: the stage the device was on when it answered.
+                self.cache.dpi_stage_read = codec::active_stage_of(frame);
             }
             Kind::Light => self.cache.light = Some(codec::write_frame_from_reply(kind, frame)),
             Kind::Poll | Kind::Buttons | Kind::Profile => {}
@@ -1499,7 +1517,22 @@ impl AttackSharkX6 {
         .map_err(join_error)?;
         self.config = Some(config);
         let frame = frame.map_err(|f| refuse(format!("the DPI settings could not be read before the write: {}", f.message())))?;
+        // The stage the last read saw, before this report replaces it.
+        let read_stage = self.cache.dpi_stage_read;
         self.store(Kind::Dpi, &frame);
+        // The mouse's own button moves it to another stage and says so in its status report. The
+        // report the device sends here can still show the stage the last read saw; where it does,
+        // the stage the mouse reported is the newer fact and the cached frame keeps it: a write
+        // that carried the old stage would put the mouse back where the button moved it from. A
+        // report that names another stage is a mouse that moved on again, and that report is the
+        // newer fact.
+        if let (Some(reported), Some(read)) = (self.cache.dpi_stage, read_stage) {
+            if codec::active_stage_of(&frame) == Some(read) {
+                if let Some(cached) = self.cache.dpi.as_mut() {
+                    codec::set_active_stage(cached, reported);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -2469,6 +2502,54 @@ mod tests {
             effective.get("dpi-active-stage"),
             Some(&PropValue::Choice(now.to_string())),
             "the values to keep show the device's stage"
+        );
+    }
+
+    /// The mouse moved to another stage with its own button and the status report says so. A
+    /// write that follows must carry the stage the mouse is on, not the one it was on when the
+    /// settings were read.
+    #[tokio::test]
+    async fn a_write_after_the_dpi_button_carries_the_stage_the_mouse_moved_to() {
+        let (mut a, s) = rig();
+        a.connect().await.unwrap();
+        a.read_settings(&a.device_id()).await.unwrap();
+        // The mouse's DPI button moves it to stage 3; the status report says so.
+        s.lock().unwrap().events.push_back(vec![0x03, 0x10, 0x10, 0x03, 0x00]);
+        a.read_events(10).await.unwrap();
+        a.set_writes_enabled(true);
+        let before = s.lock().unwrap().sent.len();
+        a.write_settings(&a.device_id(), &number(&[("dpi-stage-1", 800.0)])).await.unwrap();
+        let sent = s.lock().unwrap().sent[before..].to_vec();
+        let frame = sent.last().unwrap();
+        assert_eq!(
+            codec::active_stage_of(frame),
+            Some(3),
+            "the write carries the stage the mouse is on"
+        );
+    }
+
+    /// A mouse that moved on again after the status report was read keeps the stage its own
+    /// report names: the report the device sends is read after the status report, so it is the
+    /// newer fact.
+    #[tokio::test]
+    async fn a_mouse_that_moved_on_again_keeps_the_stage_its_own_report_names() {
+        let (mut a, s) = rig();
+        a.connect().await.unwrap();
+        a.read_settings(&a.device_id()).await.unwrap();
+        // The mouse's DPI button moves it to stage 3; the status report says so.
+        s.lock().unwrap().events.push_back(vec![0x03, 0x10, 0x10, 0x03, 0x00]);
+        a.read_events(10).await.unwrap();
+        // The mouse moved on to stage 4 before the write: its report names that stage.
+        s.lock().unwrap().replies.insert(0x04, dpi_reply_with_active_stage(4));
+        a.set_writes_enabled(true);
+        let before = s.lock().unwrap().sent.len();
+        a.write_settings(&a.device_id(), &number(&[("dpi-stage-1", 800.0)])).await.unwrap();
+        let sent = s.lock().unwrap().sent[before..].to_vec();
+        let frame = sent.last().unwrap();
+        assert_eq!(
+            codec::active_stage_of(frame),
+            Some(4),
+            "the write carries the stage the mouse's own report names"
         );
     }
 

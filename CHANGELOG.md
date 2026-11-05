@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- Peripherals: the Attack Shark X6 keeps the DPI stage its own button picked when another setting is changed: the write no longer puts the stage the mouse was on before the button press back. (#174)
+
 ## [0.8.3] - 2026-11-05
 
 ### Changed
