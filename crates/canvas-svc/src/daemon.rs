@@ -821,8 +821,10 @@ impl DaemonSupervisor {
         // over and the new one wants a daemon of its own. A hold would wait for a session that is
         // already gone, so the new user would sit without lights for the length of the hold
         // (#173).
+        // The launch reads the live console, so start at once only while the live console is the
+        // settled one; if it moved again in this tick, the hold below waits for it to settle.
         if let (Some(settled), Some(launched)) = (self.console, was) {
-            if settled != launched {
+            if settled != launched && console == Some(settled) {
                 tracing::info!(
                     daemon_session = launched,
                     console_session = settled,
@@ -2057,6 +2059,25 @@ mod tests {
     /// (#173). The console settled on another session and the daemon of the old session ended
     /// with its session in that same tick: the hold would wait for a session that is already
     /// gone, so the new user would sit without lights for up to a minute.
+    /// The immediate start reads the live console: when it has already moved off the settled
+    /// session, the daemon must not start there; the exit holds like any other session end
+    /// (review of PR #179).
+    #[test]
+    fn a_session_end_while_the_live_console_left_the_settled_session_holds() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        sup.start(t0);
+        let spawned = processes.spawns().len();
+        // The console settled on session 2, but at the moment of the exit it reads 3.
+        sup.console = Some(2);
+        processes.set_console(3);
+        let action = sup.session_end(t0 + Duration::from_secs(1), 0x4001_0004u32 as i32, Some(1));
+        assert_eq!(action, DaemonAction::None);
+        assert_eq!(processes.spawns().len(), spawned, "a daemon started in a session that is not the settled one");
+        assert!(sup.hold.is_some(), "the exit did not hold");
+    }
+
     #[test]
     fn a_session_end_on_the_settle_tick_starts_the_daemon_at_once() {
         let (mut sup, processes) = supervisor();
