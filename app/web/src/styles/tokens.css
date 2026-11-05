@@ -133,6 +133,8 @@
   --dur: 180ms;
   --dur-slow: 240ms;
   --dur-enter: 220ms;
+  /* The exit run: shorter than every entrance, on --ease-exit (issue #187). */
+  --dur-exit: 90ms;
 
   /* how far a panel travels as it enters, and the gap between two cards entering */
   --rise: 6px;
