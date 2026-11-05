@@ -409,3 +409,38 @@ scroll, so the content was clipped and unreachable.
   Chromium script at 390, 720, 721, 736, 752, 760, 900, 961 and 1440 px (`.build/updates-scroll.mjs`,
   in the main checkout). Left: Displays, Devices and Fans may clip long real content with no pane of
   their own (UNKNOWN, not measured).
+
+### `cause:changelog-drift`: a pull request's changelog line lands in an already-released section
+
+A branch that was opened before a release still names `## [Unreleased]` where it was written, but a
+rebase or merge over the release moves that text under the newly dated `## [X.Y.Z]` heading. The line
+then reads as if it shipped in an old release, or lands in a section whose tag is already cut.
+
+- [#99](https://github.com/iAmChumby/canvas-rgb/issues/99) (PR #141): the branch started before
+  v0.8.0, and its `## [Unreleased]` line landed under `## [0.8.0]` when it merged after that release.
+- [#118](https://github.com/iAmChumby/canvas-rgb/issues/118) (PR #148): a rebase over the 0.8.2
+  release put its line under `## [0.8.2]`, an already-tagged section.
+- **Class fix:** done (#149). `tools/check-changelog-unreleased.ps1` is a pull_request CI check that
+  diffs `CHANGELOG.md` against the merge base with the base branch and fails when any added non-blank
+  line sits under anything but `## [Unreleased]`, naming the line, its line number and its section.
+  A pure deletion of a non-blank line under a released `## [X.Y.Z]` section also fails (naming the
+  old line number from the base file), and so does a removed `## [Unreleased]` heading line (a real
+  release keeps that heading). The one pass for a removed released line is the hand fix for
+  drift: removing it from the released section and adding the same text under `## [Unreleased]` in
+  the same diff. A release commit is the one exception for added lines, scoped narrowly: when the
+  workspace version in `Cargo.toml` (the file `docs/releasing.md` makes the version's source of
+  truth) changed to a semver strictly greater than the old one, added lines under `## [<newVersion>]`
+  (with or without a date suffix) are allowed. Version ordering follows semver section 11, with
+  pre-release identifiers compared dot by dot (numeric identifiers as integers, numeric below
+  alphanumeric, alphanumeric by ordinal, shorter list below longer), so `0.9.0-rc.2` to
+  `0.9.0-rc.10` is an upgrade and the reverse is a downgrade. A line under any other dated
+  section still fails, release or not; an equal or lower version earns no exemption, so a downgrade
+  with a dated-section line fails too, including a new heading for the downgraded version. The footer
+  compare-link definitions (`[Unreleased]:` and `[<newVersion>]:`) that a release updates are allowed
+  only for lines in the trailing link-definition block at the end of the file (the contiguous run of
+  `[label]: https://...` lines, blank lines allowed, after the last `## [` heading's content, taken
+  from the head version for added lines and the base version for removed lines, destination starting
+  with `https://`); a link-looking line anywhere else (for example inside a dated section) fails. A
+  release renames `## [Unreleased]` to `## [<new>]` and adds a fresh `## [Unreleased]` above it, so the
+  released content stays as context and the shape passes.
+  The check's own tests build throwaway git repos (`tools/tests/`).
