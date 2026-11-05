@@ -58,11 +58,16 @@ interface Hold {
 
 const holds = new Map<string, Hold>();
 
-/** The notification goes: the library plays the leave motion. */
-function go(id: string): void {
+/** Forgets a notification's clock. The library calls it however the message went (swipe too). */
+function forget(id: string): void {
   const hold = holds.get(id);
   if (hold?.timer !== null && hold?.timer !== undefined) clearTimeout(hold.timer);
   holds.delete(id);
+}
+
+/** The notification goes: the library plays the leave motion. */
+function go(id: string): void {
+  forget(id);
   sonnerToast.dismiss(id);
 }
 
@@ -82,6 +87,9 @@ function sync(id: string): void {
     return;
   }
   if (hold.timer !== null) return;
+  // A message that waits for the reader has no clock to restart. setTimeout turns Infinity into
+  // 0, so restarting one would take an error away the moment the pointer left it.
+  if (!Number.isFinite(hold.left)) return;
   if (hold.left <= 0) {
     go(id);
     return;
@@ -111,7 +119,7 @@ export function notify(text: string, tone: NotifyTone = "ok", action?: NotifyAct
   sonnerToast.custom(
     () => <NotifyBody id={id} text={text} tone={tone} action={action} keeps={keeps} />,
     // The library's own timer never runs: this file's clock owns the life of every message.
-    { id, duration: Infinity, testId: id },
+    { id, duration: Infinity, testId: id, onDismiss: () => forget(id) },
   );
   const before = holds.get(id);
   if (before?.timer !== null && before?.timer !== undefined) clearTimeout(before.timer);

@@ -14,11 +14,10 @@ import { UpdatesView } from "@/views/UpdatesView";
 // is the same command the banner's × sends through lib/host.ts; the test reads the result out of
 // the store, not out of the fixture, so it exercises the whole path.
 
-// The action-toast timeout (components/Toast.tsx, ACTION_LIFETIME_MS). The banner carries an
-// action ("What's new"), so it reuses the action toast's timeout. Kept as a local constant so this
-// file also loads against the old code, which had neither the timer nor the export.
+// The banner's own timeout (shell/GlobalBanners.tsx, UPDATED_BANNER_MS). Kept as a local constant
+// so this file also loads against the old code, which had neither the timer nor the export.
 const TOAST_ACTION_MS = 7000;
-// The leaving transition's tail, the same one Toast.tsx waits before removing the toast.
+// The leaving transition's tail (shell/GlobalBanners.tsx, LEAVE_TAIL_MS).
 const LEAVE_TAIL_MS = 200;
 
 const nav = vi.hoisted(() => ({ pathname: "/", push: vi.fn() }));

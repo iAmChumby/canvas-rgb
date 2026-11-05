@@ -128,6 +128,27 @@ describe("the notification lane", () => {
     expect(screen.queryByText("Lights paused")).toBeNull();
   });
 
+  it("keeps an error after the pointer has been on it and left", () => {
+    mount();
+    act(() => {
+      notify("The daemon did not answer", "down");
+    });
+    settle();
+    const error = screen.getByText("The daemon did not answer");
+
+    act(() => {
+      fireEvent.mouseOver(error);
+    });
+    act(() => {
+      fireEvent.mouseOut(error);
+    });
+    settleDismissal();
+    act(() => {
+      vi.advanceTimersByTime(120_000);
+    });
+    expect(screen.getByText("The daemon did not answer")).toBeTruthy();
+  });
+
   it("holds a message while the keyboard is on it", () => {
     mount();
     act(() => {
