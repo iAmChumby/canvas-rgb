@@ -20,7 +20,8 @@ use canvas_proto::{DeviceId, DeviceInfo, Rgb8};
 
 use crate::state::App;
 
-/// How long after the last request the override ends by itself. The web resends every ~2 s.
+/// How long after the last request the override ends by itself. The page asks again every ~2 s,
+/// and every 125 ms while it chases a part.
 pub const WATCHDOG: Duration = Duration::from_secs(4);
 /// How often the ticker re-sends the override frames (the device may drop one).
 pub const TICK: Duration = Duration::from_millis(100);
@@ -91,6 +92,24 @@ impl DropReason {
             Self::Closed => "the device's writer is gone",
         }
     }
+}
+
+/// One frame of the override and what happened to it (#87).
+///
+/// The frame itself is not kept: it went to the writer's channel. What the log needs is how
+/// many LEDs it had, how many of them were white, and where the white run starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pushed {
+    /// The device the frame was for.
+    pub device: DeviceId,
+    /// What the writer's channel did with the frame.
+    pub outcome: PushOutcome,
+    /// The LEDs the frame had.
+    pub leds: usize,
+    /// The LEDs of the frame that were not black.
+    pub lit: usize,
+    /// The index of the first LED that was not black, in the device's frame.
+    pub first: Option<usize>,
 }
 
 /// The override state, shared by the API handler, the sinks and the ticker.
@@ -173,14 +192,19 @@ impl IdentifyGate {
     /// tick sends it again.
     ///
     /// Returns what happened to every frame (#81): a frame that the writer's channel did not
-    /// take was not sent, and the log may not say it was.
-    pub fn push(&self, frames: &[(DeviceId, Vec<Rgb8>)]) -> Vec<(DeviceId, PushOutcome)> {
+    /// take was not sent, and the log may not say it was. Every frame comes back with its
+    /// own outcome, so a frame and its outcome can never disagree (#87). The frames are
+    /// moved into the writers' channels, not copied.
+    pub fn push(&self, frames: Vec<(DeviceId, Vec<Rgb8>)>) -> Vec<Pushed> {
         let mut inner = self.lock();
-        let mut outcomes = Vec::with_capacity(frames.len());
+        let mut pushed = Vec::with_capacity(frames.len());
         for (device, colors) in frames {
+            let leds = colors.len();
+            let lit = colors.iter().filter(|c| **c != Rgb8::BLACK).count();
+            let first = colors.iter().position(|c| *c != Rgb8::BLACK);
             let mut closed = false;
-            let outcome = match inner.sinks.get(device) {
-                Some(tx) => match tx.try_send(colors.clone()) {
+            let outcome = match inner.sinks.get(&device) {
+                Some(tx) => match tx.try_send(colors) {
                     Ok(()) => PushOutcome::Queued,
                     Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                         PushOutcome::Dropped(DropReason::Full)
@@ -193,11 +217,17 @@ impl IdentifyGate {
                 None => PushOutcome::Dropped(DropReason::NoSink),
             };
             if closed {
-                inner.sinks.remove(device);
+                inner.sinks.remove(&device);
             }
-            outcomes.push((device.clone(), outcome));
+            pushed.push(Pushed {
+                device,
+                outcome,
+                leds,
+                lit,
+                first,
+            });
         }
-        outcomes
+        pushed
     }
 }
 
@@ -241,30 +271,38 @@ fn run_of(device: &DeviceInfo, target: &Target) -> Option<std::ops::Range<usize>
 ///
 /// The line says the frame was queued only when the writer's channel took it. A frame that was
 /// dropped (no writer, or a writer that is behind) gets its own line saying so and why. One line
-/// per request (the page resends about every 2 s), not per tick.
-pub fn log_sent(device: &DeviceInfo, frames: &[(DeviceId, Vec<Rgb8>)], outcomes: &[(DeviceId, PushOutcome)]) {
-    let Some((_, frame)) = frames.iter().find(|(id, _)| id == &device.id) else {
+/// per request (the page chases a part every 125 ms and lights a whole part every 2 s), not per
+/// tick.
+///
+/// Every pushed frame carries its own outcome, so a frame that was made is always a frame that
+/// was pushed: there is no third case to report (#87).
+pub fn log_sent(device: &DeviceInfo, pushed: &[Pushed]) {
+    let Some(frame) = pushed.iter().find(|frame| frame.device == device.id) else {
         tracing::warn!(device = %device.id, "identify: no frame was made for {}; it is not connected", device.id);
         return;
     };
-    let outcome = outcomes.iter().find(|(id, _)| id == &device.id).map(|(_, outcome)| *outcome);
-    match outcome {
-        Some(PushOutcome::Queued) => {
-            let lit: Vec<usize> = frame.iter().enumerate().filter(|(_, c)| **c != Rgb8::BLACK).map(|(i, _)| i).collect();
-            let others = queued_others(device, outcomes);
-            let (first, count) = (lit.first().copied(), lit.len());
-            let run = match first {
-                Some(first) => format!("{count} of {} LEDs white from LED {first}", frame.len()),
-                None => format!("no LED white of {}", frame.len()),
+    match frame.outcome {
+        PushOutcome::Queued => {
+            let others = queued_others(device, pushed);
+            let others_text = others_text(others);
+            let run = match frame.first {
+                Some(index) => {
+                    let (zone, led) = zone_and_led(device, index);
+                    format!(
+                        "{} of {} LEDs white from zone {zone} LED {led}",
+                        frame.lit, frame.leds
+                    )
+                }
+                None => format!("no LED white of {}", frame.leds),
             };
             tracing::info!(
                 device = %device.id, adapter = %device.adapter, controller = device.adapter_index,
-                name = %device.name, location = %device.location, leds = frame.len(), lit = count, others,
-                "identify queued for {} controller {} ({}; {}, {}): {run}; {others} other devices get an all-black frame",
+                name = %device.name, location = %device.location, leds = frame.leds, lit = frame.lit, others,
+                "identify queued for {} controller {} ({}; {}, {}): {run}; {others_text}",
                 device.adapter, device.adapter_index, device.id, device.name, device.location
             );
         }
-        Some(PushOutcome::Dropped(reason)) => {
+        PushOutcome::Dropped(reason) => {
             tracing::info!(
                 device = %device.id, adapter = %device.adapter, controller = device.adapter_index,
                 name = %device.name, location = %device.location, reason = %reason.describe(),
@@ -272,23 +310,39 @@ pub fn log_sent(device: &DeviceInfo, frames: &[(DeviceId, Vec<Rgb8>)], outcomes:
                 device.adapter, device.adapter_index, device.id, device.name, device.location, reason.describe()
             );
         }
-        None => {
-            tracing::warn!(
-                device = %device.id,
-                "identify: the frame for {} was not pushed; nothing was sent",
-                device.id
-            );
-        }
     }
 }
 
 /// How many of the other devices' frames were queued for their writers: only those really got
 /// an all-black frame.
-fn queued_others(device: &DeviceInfo, outcomes: &[(DeviceId, PushOutcome)]) -> usize {
-    outcomes
+fn queued_others(device: &DeviceInfo, pushed: &[Pushed]) -> usize {
+    pushed
         .iter()
-        .filter(|(id, outcome)| id != &device.id && *outcome == PushOutcome::Queued)
+        .filter(|pushed| pushed.device != device.id && pushed.outcome == PushOutcome::Queued)
         .count()
+}
+
+/// The sentence about the other devices, in the singular when there is one.
+fn others_text(count: usize) -> String {
+    match count {
+        0 => "no other device gets an all-black frame".to_string(),
+        1 => "1 other device gets an all-black frame".to_string(),
+        many => format!("{many} other devices get an all-black frame"),
+    }
+}
+
+/// The zone and the LED inside it of an index in the device's frame. The frame is the zones in
+/// order, so the index says which zone it is in.
+fn zone_and_led(device: &DeviceInfo, index: usize) -> (u32, u32) {
+    let mut offset = 0usize;
+    for zone in &device.zones {
+        let end = offset + zone.led_count as usize;
+        if index < end {
+            return (zone.index, (index - offset) as u32);
+        }
+        offset = end;
+    }
+    (0, index as u32)
 }
 
 /// Starts the ticker task for the app.
@@ -300,7 +354,7 @@ pub fn spawn_ticker(app: Arc<App>) {
             match app.identify.tick(Instant::now(), &devices) {
                 Tick::Idle => return,
                 Tick::Frames(frames) => {
-                    app.identify.push(&frames);
+                    app.identify.push(frames);
                 }
                 Tick::Expired => {
                     tracing::info!("identify or onboarding session ended by timeout (identify {WATCHDOG:?}, session {SESSION_TIMEOUT:?})");
@@ -488,8 +542,8 @@ mod tests {
         gate.start(DeviceId("openrgb:ram".into()), 0, 5, 2, t0);
         let frames = frames_of(gate.tick(t0, &devices));
         // No writer is registered, so the frames go nowhere: the line must not say they were sent.
-        let outcomes = gate.push(&frames);
-        let (_, text) = crate::test_logs::captured(|| log_sent(&devices[1], &frames, &outcomes));
+        let pushed = gate.push(frames);
+        let (_, text) = crate::test_logs::captured(|| log_sent(&devices[1], &pushed));
         assert!(text.contains("INFO"), "{text}");
         assert!(text.contains("identify dropped for openrgb controller 4 (openrgb:ram; openrgb:ram, SMBus 0x71)"), "{text}");
         assert!(text.contains("the device has no writer"), "{text}");
@@ -497,12 +551,12 @@ mod tests {
         assert!(!text.contains("identify queued"), "nothing was queued: {text}");
 
         // A device with no frame (not connected) is a warning, not a silent line.
-        let (_, text) = crate::test_logs::captured(|| log_sent(&devices[1], &[], &outcomes));
+        let (_, text) = crate::test_logs::captured(|| log_sent(&devices[1], &[]));
         assert!(text.contains("WARN") && text.contains("no frame was made for openrgb:ram"), "{text}");
     }
 
     /// An identify that the writer took is logged as queued, with the controller and the lit run
-    /// (#81).
+    /// (#81). The run is named the way the request named it: the zone and the LED in it (#86).
     #[test]
     fn an_identify_that_reached_its_writer_is_logged_as_queued() {
         let (gate, mut devices, t0) = setup();
@@ -517,13 +571,13 @@ mod tests {
         gate.start(DeviceId("openrgb:ram".into()), 0, 5, 2, t0);
 
         let frames = frames_of(gate.tick(t0, &devices));
-        let outcomes = gate.push(&frames);
-        assert!(outcomes.iter().all(|(_, outcome)| *outcome == PushOutcome::Queued), "{outcomes:?}");
-        let (_, text) = crate::test_logs::captured(|| log_sent(&devices[1], &frames, &outcomes));
+        let pushed = gate.push(frames);
+        assert!(pushed.iter().all(|pushed| pushed.outcome == PushOutcome::Queued), "{pushed:?}");
+        let (_, text) = crate::test_logs::captured(|| log_sent(&devices[1], &pushed));
         assert!(text.contains("INFO"), "{text}");
         assert!(text.contains("identify queued for openrgb controller 4 (openrgb:ram; openrgb:ram, SMBus 0x71)"), "{text}");
-        assert!(text.contains("2 of 8 LEDs white from LED 5"), "{text}");
-        assert!(text.contains("1 other devices get an all-black frame"), "{text}");
+        assert!(text.contains("2 of 8 LEDs white from zone 0 LED 5"), "{text}");
+        assert!(text.contains("1 other device gets an all-black frame"), "{text}");
         assert!(!text.contains("nothing was sent"), "the frame was queued: {text}");
         // The frame really went to the writer.
         let frame = ram_rx.try_recv().expect("the writer got the frame");
@@ -559,7 +613,7 @@ mod tests {
         gate.start(id.clone(), 0, 2, 3, t0);
         sink.submit(vec![Rgb8::new(9, 9, 9); 8]);
         assert!(rx.try_recv().is_err(), "the engine's frame was dropped");
-        gate.push(&frames_of(gate.tick(t0, &devices)));
+        gate.push(frames_of(gate.tick(t0, &devices)));
         let frame = rx.try_recv().expect("the override frame reached the writer");
         assert_eq!(lit(&frame), vec![2, 3, 4]);
 
@@ -567,5 +621,41 @@ mod tests {
         gate.stop();
         sink.submit(vec![Rgb8::new(9, 9, 9); 8]);
         assert_eq!(rx.try_recv().unwrap()[0], Rgb8::new(9, 9, 9));
+    }
+
+    /// A writer that is behind drops the frame, and the log may not say it went out (#87).
+    #[test]
+    fn a_full_channel_drops_the_frame() {
+        let gate = IdentifyGate::default();
+        let id = DeviceId("openrgb:ram".into());
+        // A channel that holds one frame.
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        gate.register(id.clone(), tx);
+
+        let pushed = gate.push(vec![(id.clone(), vec![Rgb8::WHITE; 8])]);
+        assert_eq!(pushed[0].outcome, PushOutcome::Queued);
+
+        // The channel is full now: the frame is dropped and the next tick sends it again.
+        let pushed = gate.push(vec![(id.clone(), vec![Rgb8::WHITE; 8])]);
+        assert_eq!(pushed[0].outcome, PushOutcome::Dropped(DropReason::Full));
+        assert_eq!(pushed[0].device, id);
+    }
+
+    /// A writer that is gone drops the frame, and its sink is removed (#87): the device is
+    /// gone, so the next tick must not keep asking for it.
+    #[test]
+    fn a_closed_channel_drops_the_frame_and_removes_the_sink() {
+        let gate = IdentifyGate::default();
+        let id = DeviceId("openrgb:ram".into());
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        gate.register(id.clone(), tx);
+        drop(rx);
+
+        let pushed = gate.push(vec![(id.clone(), vec![Rgb8::WHITE; 8])]);
+        assert_eq!(pushed[0].outcome, PushOutcome::Dropped(DropReason::Closed));
+
+        // The sink is gone: the next frame finds no writer at all.
+        let pushed = gate.push(vec![(id.clone(), vec![Rgb8::WHITE; 8])]);
+        assert_eq!(pushed[0].outcome, PushOutcome::Dropped(DropReason::NoSink));
     }
 }

@@ -419,24 +419,39 @@ impl OpenRgbAdapter {
     /// INFO; the keepalive and the re-sends after a reset are DEBUG, so a stream of frames adds
     /// no INFO line.
     fn log_mode_sent(&self, index: u32, reason: ModeReason, first_on_connection: bool) {
-        let (name, location) = guard(&self.link.session)
-            .controllers
-            .iter()
-            .find(|controller| controller.index == index)
-            .map(|controller| (controller.wire.name.clone(), controller.wire.location.clone()))
-            .unwrap_or_default();
         let why = reason.text();
         if first_on_connection {
+            // The level is checked before the name and the location are copied (#86).
+            if !tracing::enabled!(tracing::Level::INFO) {
+                return;
+            }
+            let (name, location) = self.controller_wire(index);
             tracing::info!(
                 controller = index, name, location, reason = why,
                 "SET_CUSTOM_MODE sent to OpenRGB controller {index} ({name}, {location}): {why}"
             );
         } else {
+            // The keepalive sends this line every 10 s per controller. The level is off in a
+            // normal run, so nothing is copied for a line that goes nowhere (#86).
+            if !tracing::enabled!(tracing::Level::DEBUG) {
+                return;
+            }
+            let (name, location) = self.controller_wire(index);
             tracing::debug!(
                 controller = index, name, location, reason = why,
                 "SET_CUSTOM_MODE sent to OpenRGB controller {index} ({name}, {location}): {why}"
             );
         }
+    }
+
+    /// The controller's name and location, as the SDK reports them.
+    fn controller_wire(&self, index: u32) -> (String, String) {
+        guard(&self.link.session)
+            .controllers
+            .iter()
+            .find(|controller| controller.index == index)
+            .map(|controller| (controller.wire.name.clone(), controller.wire.location.clone()))
+            .unwrap_or_default()
     }
 
     /// Why a controller's mode has to be sent again, or `None` when it does not.

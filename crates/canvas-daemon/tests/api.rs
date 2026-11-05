@@ -2559,8 +2559,8 @@ async fn an_identify_request_logs_the_controller_and_whether_the_frame_was_queue
 {text}"));
     assert!(line.contains("INFO"), "{line}");
     assert!(line.contains("openrgb controller 3 (fake:Ram; Ram, SMBus 0x73)"), "{line}");
-    assert!(line.contains("3 of 8 LEDs white from LED 2"), "{line}");
-    assert!(line.contains("1 other devices get an all-black frame"), "{line}");
+    assert!(line.contains("3 of 8 LEDs white from zone 0 LED 2"), "{line}");
+    assert!(line.contains("1 other device gets an all-black frame"), "{line}");
     assert_eq!(text.lines().filter(|l| l.contains("identify queued for")).count(), 1, "one line per request: {text}");
 
     // A device with no writer: the frame goes nowhere, and the line says so.

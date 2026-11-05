@@ -123,4 +123,97 @@ mod tests {
         let (_, text) = crate::test_logs::captured(|| last_frame.log("the test"));
         assert!(text.contains("1 frames since the daemon started"), "{text}");
     }
+
+    /// An adapter whose writes always fail.
+    struct FailingAdapter;
+
+    #[async_trait::async_trait]
+    impl DeviceAdapter for FailingAdapter {
+        fn name(&self) -> &'static str {
+            "failing"
+        }
+
+        fn capabilities(&self) -> AdapterCapabilities {
+            AdapterCapabilities::default()
+        }
+
+        async fn connect(&mut self) -> Result<(), AdapterError> {
+            Ok(())
+        }
+
+        async fn disconnect(&mut self) -> Result<(), AdapterError> {
+            Ok(())
+        }
+
+        fn is_connected(&self) -> bool {
+            true
+        }
+
+        async fn discover(&mut self) -> Result<Vec<DeviceInfo>, AdapterError> {
+            Ok(Vec::new())
+        }
+
+        async fn write_frame(
+            &mut self,
+            _device: &DeviceId,
+            _colors: &[Rgb8],
+        ) -> Result<(), AdapterError> {
+            Err(AdapterError::Io(std::io::Error::other("the write failed")))
+        }
+
+        async fn set_zone_size(
+            &mut self,
+            _device: &DeviceId,
+            _zone: u32,
+            _leds: u32,
+        ) -> Result<(), AdapterError> {
+            Ok(())
+        }
+
+        async fn identify(
+            &mut self,
+            _device: &DeviceId,
+            _zone: u32,
+            _led: u32,
+        ) -> Result<(), AdapterError> {
+            Ok(())
+        }
+
+        async fn read_back(&mut self, _device: &DeviceId) -> Result<Vec<Rgb8>, AdapterError> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// A frame that failed to be written is not recorded (#87): the last frame is the last one
+    /// that reached the device, not the last one that was tried. The failure is logged.
+    #[test]
+    fn a_failed_write_is_logged_and_the_frame_is_not_recorded() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let failing: Box<dyn DeviceAdapter> = Box::new(FailingAdapter);
+        let adapter = Arc::new(tokio::sync::Mutex::new(failing));
+        let last_frame = Arc::new(LastFrame::default());
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let device = DeviceId("fake:ram".into());
+        // The writer runs on this thread, so its warning goes into this capture.
+        let (_, text) = crate::test_logs::captured(|| {
+            runtime.block_on(async {
+                let frame = vec![Rgb8::WHITE; 8];
+                tx.send(frame).await.expect("the writer takes the frame");
+                // Closing the channel ends the writer.
+                drop(tx);
+                writer_loop(adapter, device, rx, Arc::clone(&last_frame)).await;
+            });
+        });
+        let warned = text.contains("WARN") && text.contains("frame write failed");
+        assert!(warned, "{text}");
+
+        let (_, text) = crate::test_logs::captured(|| last_frame.log("the test"));
+        assert!(
+            text.contains("no frame was sent to any device"),
+            "the failed frame is not the last frame: {text}"
+        );
+    }
 }
