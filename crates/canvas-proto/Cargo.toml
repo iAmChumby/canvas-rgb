@@ -4,6 +4,7 @@ description = "Every name and shape that crosses an area boundary in canvas-rgb.
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [dependencies]
 serde.workspace = true
