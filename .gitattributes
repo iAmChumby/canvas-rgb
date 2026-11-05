@@ -1,2 +1,8 @@
 # Signed test fixtures: their bytes are covered by signatures, so no line-ending conversion.
 app/src-tauri/tests/fixtures/update/** -text
+
+# The changelog is a list of lines, not prose: two branches that each add a line under
+# '## [Unreleased]' are merged, not a conflict. The union driver keeps every line from both
+# sides. GitHub's own mergeability check does not read this file, so the pull request page can
+# still say CONFLICTING; the merge itself is clean.
+CHANGELOG.md merge=union

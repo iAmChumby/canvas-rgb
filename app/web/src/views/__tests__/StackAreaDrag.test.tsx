@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { rectFromDrag } from "@/views/effects/stackDraft";
-import { ToastHost, ToastProvider } from "@/components/Toast";
+import { NotifyHost } from "@/components/Notify";
 import { refreshAll } from "@/lib/store";
 import { EffectsView } from "@/views/EffectsView";
 import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
@@ -70,8 +70,8 @@ async function openBuilderWith(layerName: string) {
   window.history.replaceState({}, "", "/effects/?stack=Sunset%20glow&state=complete,stack");
   await refreshAll();
   render(
-    <ToastProvider>
-      <ToastHost />
+    <>
+      <NotifyHost />
       <StripSlotsProvider>
         <div className="strip-slots">
           <StripSlot kind="title" />
@@ -79,7 +79,7 @@ async function openBuilderWith(layerName: string) {
         </div>
         <EffectsView />
       </StripSlotsProvider>
-    </ToastProvider>,
+    </>,
   );
   await screen.findByTestId("stack-builder");
   await screen.findByRole("heading", { name: "Sunset glow" });

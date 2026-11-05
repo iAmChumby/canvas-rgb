@@ -1,6 +1,5 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { ToastProvider } from "@/components/Toast";
 import { REQUEST_TIMEOUT_MS } from "@/lib/api";
 import { INITIAL_SETTINGS, LAYOUT_DESK } from "@/lib/fixtures";
 import { patchSnap } from "@/lib/store";
@@ -83,9 +82,9 @@ describe("a retry that never answers", () => {
     // The list was never read: the frame shows the error and the way to ask again.
     patchSnap({ effects: null, effectsError: "could not read the effects: the request came back with an error", pending: [] });
     render(
-      <ToastProvider>
+      <>
         <EffectsView />
-      </ToastProvider>,
+      </>,
     );
     expect(screen.getByText("The effects could not be read")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
@@ -127,9 +126,9 @@ describe("a refresh that fails after the content is on screen", () => {
       fansError: "could not read the fans: the request came back with an error",
     });
     render(
-      <ToastProvider>
+      <>
         <FansView />
-      </ToastProvider>,
+      </>,
     );
     // The readings stay on screen and the page says they may be old.
     expect(screen.getByText("The fan readings may be out of date.")).toBeTruthy();
@@ -150,9 +149,9 @@ describe("a refresh that fails after the content is on screen", () => {
       settingsError: "could not read the settings: the request came back with an error",
     });
     render(
-      <ToastProvider>
+      <>
         <SettingsView />
-      </ToastProvider>,
+      </>,
     );
     expect(screen.getByText("The settings may be out of date.")).toBeTruthy();
     // The settings are still there: the frame rate is still on the page.

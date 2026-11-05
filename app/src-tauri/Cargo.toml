@@ -4,6 +4,7 @@ description = "canvas-rgb.exe: Tauri 2 tray app that hosts the editor and fronts
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [[bin]]
 name = "canvas-rgb"

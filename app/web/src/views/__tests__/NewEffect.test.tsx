@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { ToastHost, ToastProvider } from "@/components/Toast";
+import { NotifyHost } from "@/components/Notify";
 import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
 import { refreshAll } from "@/lib/store";
 import { editorSource } from "@/test/editor";
@@ -50,15 +50,15 @@ async function source() {
 async function mount() {
   await refreshAll();
   render(
-    <ToastProvider>
-      <ToastHost />
+    <>
+      <NotifyHost />
       {/* More is a page action: it lives in the status strip, so the strip is here. */}
       <StripSlotsProvider>
         <StripSlot kind="title" />
         <StripSlot kind="actions" />
         <EffectsView />
       </StripSlotsProvider>
-    </ToastProvider>,
+    </>,
   );
   await screen.findByRole("button", { name: "Open Solid" });
 }
@@ -89,7 +89,7 @@ describe("a new effect", () => {
     expect(await source()).toContain("<title>Ink Drop copy</title>");
     // Saving reads the file name, imports it, and the library shows the copy.
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    expect(await screen.findByText("Ink Drop copy is running", {}, { timeout: 3000 })).toBeTruthy();
+    // The library says the copy is there: the page does not repeat it as a pop-up (#168).
     expect(await screen.findByRole("button", { name: "Open Ink Drop copy" })).toBeTruthy();
   });
 
@@ -103,7 +103,6 @@ describe("a new effect", () => {
     expect(await source()).toContain("<title>My effect</title>");
     expect(await source()).toContain("<canvas id=\"stage\"");
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    expect(await screen.findByText("My effect is running", {}, { timeout: 3000 })).toBeTruthy();
     expect(await screen.findByRole("button", { name: "Open My effect" })).toBeTruthy();
   });
 
@@ -141,7 +140,8 @@ describe("a new effect", () => {
     expect(await screen.findByText("file exists")).toBeTruthy();
     expect(imports.map((call) => call.replace)).toEqual([false]);
     fireEvent.click(screen.getByRole("button", { name: "Replace" }));
-    expect(await screen.findByText("My effect is running", {}, { timeout: 3000 })).toBeTruthy();
+    // The library says the effect is there: the page does not repeat it as a pop-up (#168).
+    expect(await screen.findByRole("button", { name: "Open My effect" })).toBeTruthy();
     expect(imports.map((call) => call.replace)).toEqual([false, true]);
     expect(imports.at(-1)?.file_name).toBe("race.html");
     setState("html,stock");

@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation";
 import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import type { Icon } from "@phosphor-icons/react";
 import { Fan, GameController, Gear, Monitor, Circuitry, SquaresFour, Sparkle } from "@phosphor-icons/react";
-import { useToasts } from "@/components/Toast";
 import { BrandMark, Wordmark } from "@/components/BrandMark";
 import { useSnap } from "@/lib/store";
 import { useRailData, type RailValues } from "@/shell/RailData";
@@ -61,9 +60,6 @@ interface MarkerBox {
 export function Rail({ pathname }: { pathname: string }) {
   const navRef = useRef<HTMLElement>(null);
   const [marker, setMarker] = useState<MarkerBox | null>(null);
-  // A toast on a phone takes a band of the bottom dock: the dock grows by exactly that much, so
-  // the toast is over the app's own chrome and hides no control.
-  const toast = useToasts();
   const values = useRailData();
   const status = useSnap((s) => s.status);
   const statusError = useSnap((s) => s.statusError);
@@ -130,7 +126,7 @@ export function Rail({ pathname }: { pathname: string }) {
   const fps = status ? Math.round(status.fps_measured) : null;
 
   return (
-    <nav className="rail" aria-label="Pages" ref={navRef} data-toast={toast.items.length > 0 ? "on" : "off"}>
+    <nav className="rail" aria-label="Pages" ref={navRef}>
       <span className="rail-marker" data-on={marker ? "true" : "false"} style={markerStyle} aria-hidden="true" />
 
       <div className="rail-brand">

@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { ToastHost, ToastProvider } from "@/components/Toast";
+import { NotifyHost } from "@/components/Notify";
 import { api } from "@/lib/endpoints";
 import { refreshAll } from "@/lib/store";
 import { EffectsView } from "@/views/EffectsView";
@@ -49,8 +49,8 @@ const previewCalls = () => ((globalThis as { __stackPreview?: PreviewCall[] })._
 async function renderBuilder() {
   await refreshAll();
   return render(
-    <ToastProvider>
-      <ToastHost />
+    <>
+      <NotifyHost />
       <StripSlotsProvider>
         <div className="strip-slots">
           <StripSlot kind="title" />
@@ -58,7 +58,7 @@ async function renderBuilder() {
         </div>
         <EffectsView />
       </StripSlotsProvider>
-    </ToastProvider>,
+    </>,
   );
 }
 

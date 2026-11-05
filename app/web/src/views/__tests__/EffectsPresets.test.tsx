@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { ToastHost, ToastProvider } from "@/components/Toast";
+import { NotifyHost } from "@/components/Notify";
 import { api } from "@/lib/endpoints";
 import type { EffectDetail } from "@/proto/EffectDetail";
 import { refreshAll } from "@/lib/store";
@@ -42,10 +42,10 @@ afterEach(cleanup);
 async function mount() {
   await refreshAll();
   render(
-    <ToastProvider>
-      <ToastHost />
+    <>
+      <NotifyHost />
       <EffectsView />
-    </ToastProvider>,
+    </>,
   );
   // The strip appears when the effect's detail has loaded.
   await screen.findByRole("button", { name: /^Apply preset Slow dusk/ });

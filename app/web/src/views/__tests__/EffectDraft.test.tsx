@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { ToastHost, ToastProvider } from "@/components/Toast";
+import { NotifyHost } from "@/components/Notify";
 import { api } from "@/lib/endpoints";
 import { getSnap, refreshAll } from "@/lib/store";
 import { editorContent } from "@/test/editor";
@@ -52,10 +52,10 @@ const draftCalls = () => ((globalThis as { __draft?: DraftCall[] }).__draft ??= 
 async function openEditor(name = "Sample HTML") {
   await refreshAll();
   const view = render(
-    <ToastProvider>
-      <ToastHost />
+    <>
+      <NotifyHost />
       <EffectsView />
-    </ToastProvider>,
+    </>,
   );
   fireEvent.click(await screen.findByRole("button", { name: `Open ${name}` }));
   await screen.findByRole("heading", { name });
@@ -293,7 +293,6 @@ describe("the draft on the lights", () => {
     // Save from the banner, as the banner offers.
     const banner = screen.getByText("Draft on the lights.").closest(".eff-draft") as HTMLElement;
     fireEvent.click(banner.querySelector(".eff-draft-actions button:last-of-type") as HTMLElement);
-    expect(await screen.findByText("Edited sample is running", {}, { timeout: 3000 })).toBeTruthy();
     await waitFor(() => expect(screen.queryByTestId("effect-editor")).toBeNull(), { timeout: 3000 });
     // The library has it, under the title the file declares.
     expect(await screen.findByRole("button", { name: "Open Edited sample" })).toBeTruthy();

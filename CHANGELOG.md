@@ -6,12 +6,17 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-11-05
+
 ### Changed
 
+- Notifications no longer cover the page or vanish before you can read an error: at most three at a time, errors stay until dismissed, and messages already shown next to a control are no longer repeated as a pop-up. (#168)
 - Log: the identify line now says "1 other device" in the singular and names the zone and the LED it lit instead of a flat LED number. The service's OpenRGB stop line now says the daemon was told to stop (its exit is not waited on), and says when the daemon had already exited. (#86, #87)
 
 ### Fixed
 
+- A slow start (a busy logon, a cold disk) no longer gets the daemon killed and counted as a crash: it now has 30 s to say it is up. The boot color is painted while it starts, so the lights are not left dark. (#163)
+- Effects: the code editor's preview no longer waits up to an hour when the daemon is busy, and no longer sends a request it no longer needs. A busy answer now waits at most 30 seconds, a second busy answer replaces the retry that was waiting instead of adding to it, and a preview that a newer one has superseded is no longer rendered. (#97)
 - Audio Spectrum and Screen Ambience now receive the audio and the screen: the daemon never connected its capture to the lights, so both effects stayed dark. (#1)
 - Service: shutting down or restarting Windows no longer logs the daemon as crashed or stops it from restarting. A daemon that ended with its session (the user logged off, or Windows tore the session down) is not a crash: nothing is written black, the restart waits for the session to end, and the next logon starts the daemon again. A console session that changes, or a logon after a logoff, counts as a new session only once it has settled and has a user in it, so a session id that flickers or a user token that failed to be read once no longer clears the crash limit, and a daemon that quit on purpose is replaced when the next user logs on. (#6)
 - Peripherals: the message that a change did not reach the device now stays on screen. A device read that lands after the failed change no longer hides it, so the change is not left looking as if it went through. (#151)
@@ -21,6 +26,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - Fans: `canvas-rgb fans status` now says "not on this board" for a header that is not wired up, instead of showing it as a BIOS header that refused the asked curve. The other rows read as before, and `--json` still carries the availability of every header. (#153)
 - Effects: importing a config while the editor's draft is on the lights now ends that draft and puts the effect that was in force back, so the draft cannot end later and bring back an effect the import replaced. (#94)
 - Effects: the editor's source route now refuses an effect file over 1 MiB, the same limit the preview and the draft use, instead of reading a broken file of any size into memory. (#94)
+- Service: a user switch that happens at the moment the daemon ends no longer leaves the lights unmanaged for up to a minute: the daemon starts in the new session at once. (#173)
 
 ## [0.8.2] - 2026-11-04
 
@@ -195,7 +201,8 @@ The first release.
 - Settings for the Attack Shark X6 mouse and the 8BitDo Ultimate 2 controller.
 - The editor, the tray app, the `canvas-rgb` CLI and the Windows installer.
 
-[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.2...HEAD
+[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.3...HEAD
+[0.8.3]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.7.0...v0.8.0

@@ -35,7 +35,7 @@ import { Slider } from "@/components/Slider";
 import { NumberField } from "@/components/NumberField";
 import { Thumb } from "@/components/Thumb";
 import { Toggle } from "@/components/Toggle";
-import { useToast } from "@/components/Toast";
+import { notify } from "@/components/Notify";
 import { useMediaQuery } from "@/components/MediaQuery";
 import { Highlighted, matchEffect } from "@/components/Search";
 import { PropertyControls } from "@/views/PropertyControls";
@@ -91,6 +91,13 @@ import type { StackLayerStatus } from "@/proto/StackLayerStatus";
 
 /** Sent this long after the last change, and no later than this after the first. */
 const PREVIEW_DEBOUNCE_MS = 400;
+/**
+ * The longest the builder waits for the daemon's own "try again later" before it tries again
+ * (issue #97). The daemon's contract is one second, and a render takes at most thirty: a cap
+ * that keeps the retry inside one render cycle. Without it a wrong, an abusive or a future
+ * `Retry-After` header would leave the preview on its last frame for an hour.
+ */
+const MAX_PREVIEW_RETRY_MS = 30_000;
 const HEARTBEAT_FALLBACK_MS = 5_000;
 const LEASE_FALLBACK_MS = 15_000;
 /** What Tab reaches inside a dialog, in document order. */
@@ -155,7 +162,6 @@ export function StackBuilder({
   const status = useSnap((s) => s.status);
   const effects = useSnap((s) => s.effects);
   const layout = layouts?.find((entry) => entry.id === activeLayout) ?? layouts?.[0] ?? null;
-  const toast = useToast();
 
   const [phase, setPhase] = useState<LoadState>(isNew ? "ready" : "loading");
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -190,6 +196,11 @@ export function StackBuilder({
   const [draftNote, setDraftNote] = useState<string | null>(null);
   const [expiresIn, setExpiresIn] = useState(0);
   const [presetName, setPresetName] = useState<string | null>(null);
+  /** The message a control refuses with, shown next to the control itself. */
+  const [layerProblem, setLayerProblem] = useState<string | null>(null);
+  const [addProblem, setAddProblem] = useState<string | null>(null);
+  const [renameProblem, setRenameProblem] = useState<string | null>(null);
+  const [presetProblem, setPresetProblem] = useState<string | null>(null);
   const [otherStacks, setOtherStacks] = useState<{ id: string; name: string }[]>([]);
   const narrow = useMediaQuery("(max-width: 720px)");
   // The phone's layer sheet: Tune pushes it over the builder (D95.5.7).
@@ -564,6 +575,13 @@ export function StackBuilder({
   }
 
   async function sendPreview(retried = false) {
+    // One retry waits at a time (issue #97): a send that starts now takes the place of the retry
+    // that was waiting, instead of leaving it to fire as well. A change that sends again while a
+    // retry waits would otherwise cost two requests for one busy answer.
+    if (previewRetry.current) {
+      clearTimeout(previewRetry.current);
+      previewRetry.current = null;
+    }
     previewSentAt.current = Date.now();
     const current = session.current;
     if (!current) return;
@@ -583,9 +601,14 @@ export function StackBuilder({
       if (!mounted.current) return;
       // A busy daemon says when to ask again. Anything else is a transport failure or a server
       // error, and one more try 400 ms later is the difference between a preview that catches up
-      // and one that stays on the last frame until the next change.
+      // and one that stays on the last frame until the next change. The daemon's wait has a
+      // ceiling, so a wrong header cannot strand the preview (issue #97).
       const wait =
-        e instanceof ApiFailure ? (e.status === 503 ? (e.retryAfterMs ?? 1_000) : null) : PREVIEW_DEBOUNCE_MS;
+        e instanceof ApiFailure
+          ? e.status === 503
+            ? Math.min(e.retryAfterMs ?? 1_000, MAX_PREVIEW_RETRY_MS)
+            : null
+          : PREVIEW_DEBOUNCE_MS;
       if (!retried && wait !== null) {
         previewRetry.current = setTimeout(() => void sendPreview(true), wait);
         return;
@@ -984,16 +1007,15 @@ export function StackBuilder({
     );
     void refreshAll();
     loadPresets(saved.id);
-    toast(`${nameOf(saved.id)} is saved`);
-    let startError: string | null = null;
+    // The stack is saved. Nothing on screen says so on a phone (the Unsaved mark is a desktop
+    // key), so the note is the confirmation there.
+    notify(`${nameOf(saved.id)} is saved`);
     try {
       await api.activateEffect(saved.id, { props: {}, preset: null });
       await refreshAll();
     } catch (e) {
-      startError = messageOf(e);
-      setSaveError(`Saved, but it did not start: ${startError}`);
+      setSaveError(`Saved, but it did not start: ${messageOf(e)}`);
     }
-    if (!startError) toast(`${nameOf(saved.id)} is running`);
     then?.();
   };
 
@@ -1120,9 +1142,10 @@ export function StackBuilder({
     const layer = draftRef.current.layers.find((entry) => entry.id === id);
     if (!layer || effect === layer.effect) return;
     if (isHtmlEffect(effect) && !isHtmlEffect(layer.effect) && htmlLayers(draftRef.current.layers) >= MAX_HTML_LAYERS) {
-      toast(`A stack holds ${MAX_HTML_LAYERS} HTML layers`, "warn");
+      setLayerProblem(`A stack holds ${MAX_HTML_LAYERS} HTML layers`);
       return;
     }
+    setLayerProblem(null);
     choosing.current = true;
     try {
       let detail = null;
@@ -1138,7 +1161,7 @@ export function StackBuilder({
       const latest = draftRef.current.layers.find((entry) => entry.id === id);
       if (!latest || effect === latest.effect) return;
       if (isHtmlEffect(effect) && !isHtmlEffect(latest.effect) && htmlLayers(draftRef.current.layers) >= MAX_HTML_LAYERS) {
-        toast(`A stack holds ${MAX_HTML_LAYERS} HTML layers`, "warn");
+        setLayerProblem(`A stack holds ${MAX_HTML_LAYERS} HTML layers`);
         return;
       }
       patch(id, { effect, props: detail ? layerValues(detail.schema, detail.props) : {} });
@@ -1150,9 +1173,10 @@ export function StackBuilder({
   const addOne = async (effect: string) => {
     const refusal = addLayerRefusal(draftRef.current.layers, effect);
     if (refusal) {
-      toast(refusal, "warn");
+      setAddProblem(refusal);
       return;
     }
+    setAddProblem(null);
     let schema: PropertySchema | null = null;
     let props: Record<string, PropValue> = {};
     try {
@@ -1169,7 +1193,7 @@ export function StackBuilder({
     const layers = draftRef.current.layers;
     const lateRefusal = addLayerRefusal(layers, effect);
     if (lateRefusal) {
-      toast(lateRefusal, "warn");
+      setAddProblem(lateRefusal);
       return;
     }
     const id = nextLayerId(layers);
@@ -1216,14 +1240,15 @@ export function StackBuilder({
 
   const duplicate = (id: string) => {
     if (draft.layers.length >= MAX_LAYERS) {
-      toast(`A stack holds ${MAX_LAYERS} layers`, "warn");
+      setLayerProblem(`A stack holds ${MAX_LAYERS} layers`);
       return;
     }
     const answer = duplicateLayer(draft.layers, id);
     if (!answer.id) {
-      toast(`A stack holds ${MAX_HTML_LAYERS} HTML layers`, "warn");
+      setLayerProblem(`A stack holds ${MAX_HTML_LAYERS} HTML layers`);
       return;
     }
+    setLayerProblem(null);
     setDraft((current) => ({ ...current, layers: answer.layers }));
     setPicked(answer.id);
   };
@@ -1235,15 +1260,17 @@ export function StackBuilder({
   const beginRename = (layer: StackLayer) => {
     setRenaming(layer.id);
     setRenameText(layer.name);
+    setRenameProblem(null);
   };
 
   const commitRename = () => {
     if (!renaming) return;
     const problem = layerNameProblem(renameText.trim());
     if (problem) {
-      toast(problem, "warn");
+      setRenameProblem(problem);
       return;
     }
+    setRenameProblem(null);
     patch(renaming, { name: renameText.trim() });
     setRenaming(null);
   };
@@ -1311,9 +1338,8 @@ export function StackBuilder({
       const answer = await api.createPreset(base.id, { name: wanted, props: merged });
       setPresets((current) => ({ ...current, user: answer.user_presets }));
       setPresetName(null);
-      toast(`Saved ${wanted}`);
     } catch (e) {
-      toast(messageOf(e), "down");
+      notify(messageOf(e), "down");
     }
   };
 
@@ -1683,16 +1709,26 @@ export function StackBuilder({
                           <Thumb id={layer.effect} size="sm" label={layerLabel(schemas, effects, layer.effect)} />
                           <span className="layer-text">
                             {renaming === layer.id ? (
-                              <span onClick={(event) => event.stopPropagation()}>
+                              <div onClick={(event) => event.stopPropagation()}>
                                 <NameField
                                   value={renameText}
                                   label={`Rename ${layer.name}`}
                                   maxLength={40}
-                                  onChange={setRenameText}
+                                  invalid={renameProblem !== null}
+                                  describedBy="layer-name-error"
+                                  onChange={(value) => {
+                                    setRenameText(value);
+                                    setRenameProblem(null);
+                                  }}
                                   onEnter={commitRename}
                                   onEscape={() => setRenaming(null)}
                                 />
-                              </span>
+                                {renameProblem && (
+                                  <p className="error-line" id="layer-name-error" role="alert">
+                                    {renameProblem}
+                                  </p>
+                                )}
+                              </div>
                             ) : (
                               <span
                                 className="layer-name"
@@ -1919,6 +1955,11 @@ export function StackBuilder({
                       A stack cannot contain a stack. This layer does not run; the rest of the stack does.
                     </p>
                   )}
+                  {layerProblem && (
+                    <p className="error-line" role="alert">
+                      {layerProblem}
+                    </p>
+                  )}
                 </Panel>
               ) : (
                 <Panel className="rd-layer-edit rd-layer-none" title="No layer picked">
@@ -1954,15 +1995,21 @@ export function StackBuilder({
                     label="Save the current values as a preset"
                     onClick={() => {
                       if (!base) {
-                        toast("Save the stack before saving a preset", "warn");
+                        setPresetProblem("Save the stack before saving a preset");
                         return;
                       }
+                      setPresetProblem(null);
                       setPresetName("");
                     }}
                   >
                     + Save current
                   </Chip>
                 </div>
+                {presetProblem && (
+                  <p className="error-line" role="alert">
+                    {presetProblem}
+                  </p>
+                )}
                 {presetName !== null && (
                   <div className="preset-save">
                     <NameField
@@ -2007,6 +2054,11 @@ export function StackBuilder({
               <li className="dim rd-add-empty">No effect matches that.</li>
             )}
           </ul>
+          {addProblem && (
+            <p className="error-line" role="alert">
+              {addProblem}
+            </p>
+          )}
         </div>
       </Popover>
 

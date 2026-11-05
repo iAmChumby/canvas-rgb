@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { ToastHost, ToastProvider } from "@/components/Toast";
+import { NotifyHost } from "@/components/Notify";
 import { api } from "@/lib/endpoints";
 import { ApiFailure } from "@/lib/errors";
 import { refreshAll } from "@/lib/store";
@@ -57,8 +57,8 @@ async function renderEffects(query: string) {
   window.history.replaceState({}, "", `/effects/${query}`);
   await refreshAll();
   return render(
-    <ToastProvider>
-      <ToastHost />
+    <>
+      <NotifyHost />
       <StripSlotsProvider>
         <div className="strip-slots">
           <StripSlot kind="title" />
@@ -66,7 +66,7 @@ async function renderEffects(query: string) {
         </div>
         <EffectsView />
       </StripSlotsProvider>
-    </ToastProvider>,
+    </>,
   );
 }
 

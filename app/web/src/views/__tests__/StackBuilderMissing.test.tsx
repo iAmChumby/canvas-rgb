@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { ToastHost, ToastProvider } from "@/components/Toast";
+import { NotifyHost } from "@/components/Notify";
 import { refreshAll } from "@/lib/store";
 import { EffectsView } from "@/views/EffectsView";
 import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
@@ -46,8 +46,8 @@ async function open() {
   window.history.replaceState({}, "", "/effects/?stack=Sunset%20glow&state=complete,stack,stack-missing");
   await refreshAll();
   render(
-    <ToastProvider>
-      <ToastHost />
+    <>
+      <NotifyHost />
       <StripSlotsProvider>
         <div className="strip-slots">
           <StripSlot kind="title" />
@@ -55,7 +55,7 @@ async function open() {
         </div>
         <EffectsView />
       </StripSlotsProvider>
-    </ToastProvider>,
+    </>,
   );
   await screen.findByTestId("stack-builder");
   await waitFor(() => expect(screen.getAllByRole("listitem").length).toBeGreaterThan(0));

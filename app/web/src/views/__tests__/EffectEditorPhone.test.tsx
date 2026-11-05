@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { ToastHost, ToastProvider } from "@/components/Toast";
+import { NotifyHost } from "@/components/Notify";
 import { refreshAll } from "@/lib/store";
 import { editorContent } from "@/test/editor";
 import { waitForEditorGuard } from "@/test/historyGuard";
@@ -49,10 +49,10 @@ const setState = (tokens: string) =>
 async function openSheet() {
   await refreshAll();
   render(
-    <ToastProvider>
-      <ToastHost />
+    <>
+      <NotifyHost />
       <EffectsView />
-    </ToastProvider>,
+    </>,
   );
   fireEvent.click(await screen.findByRole("button", { name: "Open Sample HTML" }));
   await screen.findByRole("heading", { name: "Sample HTML" });

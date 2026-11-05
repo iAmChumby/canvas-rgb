@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { ToastHost, ToastProvider } from "@/components/Toast";
+import { NotifyHost } from "@/components/Notify";
 import { api } from "@/lib/endpoints";
 import { patchSnap, refreshFans } from "@/lib/store";
 import { FansView } from "@/views/FansView";
@@ -64,7 +64,7 @@ async function page() {
     await refreshFans();
   });
   return render(
-    <ToastProvider>
+    <>
       <StripSlotsProvider>
         <header>
           <StripSlot kind="title" />
@@ -74,7 +74,7 @@ async function page() {
           <FansView />
         </main>
       </StripSlotsProvider>
-    </ToastProvider>,
+    </>,
   );
 }
 
@@ -327,8 +327,8 @@ describe("the run belongs to the bar", () => {
     function Host() {
       const [shown, setShown] = useState(true);
       return (
-        <ToastProvider>
-          <ToastHost />
+        <>
+          <NotifyHost />
           <button onClick={() => setShown(false)}>leave</button>
           <StripSlotsProvider>
             <header>
@@ -337,7 +337,7 @@ describe("the run belongs to the bar", () => {
             </header>
             <main className="content">{shown && <FansView />}</main>
           </StripSlotsProvider>
-        </ToastProvider>
+        </>
       );
     }
     await act(async () => {
