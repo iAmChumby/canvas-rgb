@@ -6,6 +6,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-11-05
+
 ### Changed
 
 - Notifications no longer cover the page or vanish before you can read an error: at most three at a time, errors stay until dismissed, and messages already shown next to a control are no longer repeated as a pop-up. (#168)
@@ -199,7 +201,8 @@ The first release.
 - Settings for the Attack Shark X6 mouse and the 8BitDo Ultimate 2 controller.
 - The editor, the tray app, the `canvas-rgb` CLI and the Windows installer.
 
-[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.2...HEAD
+[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.3...HEAD
+[0.8.3]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.7.0...v0.8.0
