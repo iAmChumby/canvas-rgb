@@ -200,9 +200,18 @@ function Get-CargoManifestDependencies {
         $rel = $path.Substring($Repo.Length).TrimStart('\', '/').Replace('\', '/')
         $section = ''
         $info = $null
+        # Open braces/brackets of a value that spans lines (a multi-line inline table or
+        # array): its inner lines are fields of one dependency, not dependencies.
+        $depth = 0
         foreach ($line in [System.IO.File]::ReadAllLines($path)) {
             $t = $line.Trim()
             if ($t -eq '' -or $t.StartsWith('#')) { continue }
+            if ($depth -gt 0) {
+                $body = Remove-TomlComment -Line $t
+                $depth += ([regex]::Matches($body, '[\{\[]').Count - [regex]::Matches($body, '[\}\]]').Count)
+                if ($depth -lt 0) { $depth = 0 }
+                continue
+            }
             # A header may carry a trailing comment ("[dependencies] # the deps") and may
             # have spaces inside the brackets ("[ dependencies ]").
             $header = (Remove-TomlComment -Line $t).Trim()
@@ -230,6 +239,10 @@ function Get-CargoManifestDependencies {
             [void]$out.Add([pscustomobject]@{
                     Name = $name; Kind = $info.Kind; Manifest = $rel; Source = $source
                 })
+            # A value left open on this line continues on the next ones.
+            $value = Remove-TomlComment -Line ($t.Substring($t.IndexOf('=') + 1))
+            $depth = [regex]::Matches($value, '[\{\[]').Count - [regex]::Matches($value, '[\}\]]').Count
+            if ($depth -lt 0) { $depth = 0 }
         }
     }
     return @($out)
@@ -355,7 +368,9 @@ function Test-LedgerStatusApproved {
     #>
     param([string]$Status)
     if ([string]::IsNullOrWhiteSpace($Status)) { return $false }
-    return $Status.Trim().ToLowerInvariant().StartsWith('approved')
+    # Exactly "approved", optionally followed by a bracketed note: "approved-pending" and
+    # "approved?" are not approvals.
+    return $Status.Trim().ToLowerInvariant() -match '^approved(\s*\(.*\))?$'
 }
 
 function ConvertTo-SpdxTokens {

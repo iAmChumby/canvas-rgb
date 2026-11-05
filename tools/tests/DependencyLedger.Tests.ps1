@@ -226,6 +226,31 @@ try {
         Assert-True ($result.Output.Contains('react-dom')) "names the dependency: $($result.Output)"
     }
 
+    foreach ($status in @('approved-pending', 'approved?', 'not approved')) {
+        Test-Case "a ledger row whose status is '$status' is not an approval" {
+            Assert-True (-not (Test-LedgerStatusApproved -Status $status)) "'$status' is refused"
+        }
+    }
+
+    Test-Case 'the approved statuses the generator and Luke write are approvals' {
+        foreach ($status in @('approved', 'approved (baseline 2026-11-05)', ' Approved (2026-11-07) ')) {
+            Assert-True (Test-LedgerStatusApproved -Status $status) "'$status' is an approval"
+        }
+    }
+
+    Test-Case 'the Cargo reader does not read the lines of a multi-line inline table as dependencies' {
+        $r = New-ThrowawayRepo; [void]$repos.Add($r)
+        Write-File -Root $r -Name 'crates/thing/Cargo.toml' -Text (@(
+            '[package]', 'name = "thing"', 'version = "0.1.0"', '', '[lib]', 'path = "src/lib.rs"', '',
+            '[dependencies]', 'multi = { version = "1", features = [', '  "a",', '  "b",', '] }', 'after = "2"', ''
+        ) -join "`n")
+        Write-File -Root $r -Name 'crates/thing/src/lib.rs' -Text 'pub fn thing() {}'
+        $names = @((Get-CargoManifestDependencies -Repo $r) | ForEach-Object { $_.Name })
+        Assert-True ($names -contains 'multi') "finds the dependency (found: $($names -join ', '))"
+        Assert-True ($names -contains 'after') "finds the next dependency (found: $($names -join ', '))"
+        Assert-True (-not ($names -contains 'version') -and -not ($names -contains 'features')) "no field read as a dependency (found: $($names -join ', '))"
+    }
+
     Test-Case 'the Cargo reader reads a quoted dependency name' {
         $r = New-ThrowawayRepo; [void]$repos.Add($r)
         Write-File -Root $r -Name 'crates/thing/Cargo.toml' -Text (@(
