@@ -489,7 +489,8 @@ async fn a_service_stop_logs_the_openrgb_kill_with_its_pid_reason_and_the_gap_af
     let line = openrgb_stop_line(&text, 4001).unwrap_or_else(|| panic!("no OpenRGB stop line:\n{text}"));
     assert!(line.contains("service stop"), "the reason: {line}");
     assert!(line.contains("how: kill"), "the how: {line}");
-    assert!(line.contains("the daemon (pid 4000) was terminated") && line.contains(" ms earlier"), "the gap: {line}");
+    assert!(line.contains("the daemon (pid 4000) was told to stop") && line.contains(" ms earlier"), "the gap: {line}");
+    assert!(line.contains("its exit was not waited on"), "the kill is a request, not the exit: {line}");
     let daemon_at = text.find("terminating the daemon (pid 4000)").expect("the daemon's own line");
     let openrgb_at = text.find("stopping the OpenRGB server (pid 4001)").expect("the OpenRGB line");
     assert!(daemon_at < openrgb_at, "the daemon stop comes first: {text}");
@@ -500,7 +501,7 @@ async fn a_service_stop_logs_the_openrgb_kill_with_its_pid_reason_and_the_gap_af
 #[tokio::test]
 async fn a_restart_logs_the_openrgb_kill_with_its_pid_and_that_the_daemon_still_runs() {
     let (root, exe) = install();
-    let (daemon, mut sup, _processes) = running_pair(&root, &exe).await;
+    let (mut daemon, mut sup, _processes) = running_pair(&root, &exe).await;
 
     let ((), text) = crate::test_logs::captured(|| sup.restart("requested over the pipe", daemon.before_openrgb_stop()));
 
@@ -554,7 +555,7 @@ async fn a_daemon_the_service_could_not_end_is_not_logged_as_terminated() {
     let ((), text) = crate::test_logs::captured(|| core.shutdown("service stop"));
 
     let line = openrgb_stop_line(&text, 4001).unwrap_or_else(|| panic!("no OpenRGB stop line:\n{text}"));
-    assert!(!line.contains("was terminated"), "the daemon was not terminated: {line}");
+    assert!(!line.contains("was told to stop"), "the daemon was not told to stop: {line}");
     assert!(!line.contains("ms earlier"), "there is no gap to report: {line}");
     assert!(line.contains("the daemon (pid 4000) could not be ended"), "the line says what happened: {line}");
     assert!(text.contains("could not end the daemon"), "the failed kill is logged: {text}");

@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Changed
+
+- Log: the identify line now says "1 other device" in the singular and names the zone and the LED it lit instead of a flat LED number. The service's OpenRGB stop line now says the daemon was told to stop (its exit is not waited on), and says when the daemon had already exited. (#86, #87)
+
 ### Fixed
 
 - Peripherals: the message that a change did not reach the device now stays on screen. A device read that lands after the failed change no longer hides it, so the change is not left looking as if it went through. (#151)

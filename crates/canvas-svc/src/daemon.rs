@@ -107,6 +107,8 @@ pub enum DaemonBeforeStop {
     Stopped { pid: u32, at: Instant },
     /// The daemon runs and was not told: it keeps sending frames.
     Running { pid: u32 },
+    /// The daemon had already exited when the question was asked (#86).
+    Exited { pid: u32, code: i32 },
     /// The service tried to end the daemon and the kill failed: it may still be running.
     NotEnded { pid: u32 },
     /// No daemon process.
@@ -119,9 +121,17 @@ impl DaemonBeforeStop {
         match *self {
             Self::Stopped { pid, at } => {
                 let gap_ms = now.saturating_duration_since(at).as_secs_f64() * 1000.0;
-                format!("the daemon (pid {pid}) was terminated {gap_ms:.3} ms earlier")
+                // The kill asks the daemon to die; it is not waited on, so the daemon exits
+                // later than this moment and the gap is an upper bound (#86).
+                format!(
+                    "the daemon (pid {pid}) was told to stop {gap_ms:.3} ms earlier (its exit was not waited on)"
+                )
             }
             Self::Running { pid } => format!("the daemon (pid {pid}) is still running and was not told; it keeps sending frames"),
+            Self::Exited { pid, code } => format!(
+                "the daemon (pid {pid}) had already exited ({})",
+                crate::process::describe_exit_code(code)
+            ),
             Self::NotEnded { pid } => {
                 format!("the daemon (pid {pid}) could not be ended; it may still be running")
             }
@@ -346,6 +356,10 @@ impl DaemonSupervisor {
                 self.child = Some(child);
                 self.child_session = session;
                 self.waiting_for_session = false;
+                // The records of the daemon before this one belong to that daemon: a new one
+                // replaces them, or the OpenRGB line names a pid that is long gone (#87).
+                self.stopped_daemon = None;
+                self.unended_daemon = None;
                 {
                     let mut hb = self.heartbeat_clock();
                     hb.at = Some(now);
@@ -415,9 +429,24 @@ impl DaemonSupervisor {
     }
 
     /// What the daemon's state is right now, for the line that logs an OpenRGB stop (#81).
-    pub fn before_openrgb_stop(&self) -> DaemonBeforeStop {
-        if let Some(child) = self.child.as_ref() {
-            return DaemonBeforeStop::Running { pid: child.id() };
+    ///
+    /// A daemon that has exited but has not been reaped is not running, so the process is asked
+    /// (#86).
+    pub fn before_openrgb_stop(&mut self) -> DaemonBeforeStop {
+        if let Some(child) = self.child.as_mut() {
+            match child.try_wait() {
+                Ok(Some(code)) => {
+                    let pid = child.id();
+                    return DaemonBeforeStop::Exited { pid, code };
+                }
+                Ok(None) => return DaemonBeforeStop::Running { pid: child.id() },
+                Err(e) => {
+                    // The process could not be asked. The daemon was not told to stop, so the
+                    // line says it runs, and the failure is logged.
+                    tracing::warn!(pid = child.id(), error = %e, "could not query the daemon process");
+                    return DaemonBeforeStop::Running { pid: child.id() };
+                }
+            }
         }
         if let Some(pid) = self.unended_daemon {
             return DaemonBeforeStop::NotEnded { pid };
@@ -1155,7 +1184,8 @@ mod tests {
         assert!(!text.contains("ms earlier"), "there is no gap to report: {text}");
     }
 
-    /// A kill that worked is recorded, and the OpenRGB line says how long before.
+    /// A kill that worked is recorded, and the OpenRGB line says how long before. The kill is a
+    /// request, not the exit: the line says the daemon was told to stop (#86).
     #[test]
     fn a_daemon_the_service_ended_is_recorded_as_stopped() {
         let (mut sup, _processes) = supervisor();
@@ -1166,6 +1196,51 @@ mod tests {
         sup.stop();
 
         assert!(matches!(sup.before_openrgb_stop(), DaemonBeforeStop::Stopped { pid: p, .. } if p == pid));
-        assert!(sup.before_openrgb_stop().describe(t0).contains("was terminated"));
+        let text = sup.before_openrgb_stop().describe(t0);
+        assert!(text.contains("was told to stop"), "{text}");
+        assert!(!text.contains("was terminated"), "the exit was not waited on: {text}");
+    }
+
+    /// A daemon that exited but has not been reaped is not running (#86): the line must not say it
+    /// is still running and was not told.
+    #[test]
+    fn a_daemon_that_had_already_exited_is_not_logged_as_running() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        sup.start(t0);
+        let pid = sup.daemon_pid().expect("a daemon is running");
+        // The daemon is gone, but the service has not asked about it yet.
+        processes.exit_last();
+
+        match sup.before_openrgb_stop() {
+            DaemonBeforeStop::Exited { pid: exited, .. } => assert_eq!(exited, pid),
+            other => panic!("the daemon had exited: {other:?}"),
+        }
+        let text = sup.before_openrgb_stop().describe(t0);
+        let running = text.contains("is still running");
+        assert!(!running, "the daemon had exited: {text}");
+        assert!(text.contains("had already exited"), "{text}");
+    }
+
+    /// The record of a daemon the service could not end belongs to that daemon (#87): a new one
+    /// replaces it, or the OpenRGB line names a pid that is long gone.
+    #[test]
+    fn a_new_daemon_clears_the_record_of_the_one_that_could_not_be_ended() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        sup.start(t0);
+        let pid = sup.daemon_pid().expect("a daemon is running");
+        processes.fail_kills(1);
+
+        sup.stop();
+
+        assert_eq!(sup.unended_daemon, Some(pid), "the record is there");
+
+        // A new daemon replaces the one that could not be ended.
+        sup.launch(t0);
+
+        assert_eq!(sup.unended_daemon, None, "the record is gone");
+        let before = sup.before_openrgb_stop();
+        assert_ne!(before, DaemonBeforeStop::NotEnded { pid });
     }
 }
