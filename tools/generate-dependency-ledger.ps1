@@ -123,7 +123,7 @@ $npmSeen = @{}
 foreach ($dep in (Get-NpmManifestDependencies -Repo $Repo)) {
     if ($npmSeen.ContainsKey($dep.Name)) {
         $row = $npmSeen[$dep.Name]
-        if ($dep.Kind -eq 'prod' -and $row.Kind -eq 'npm, dev') { $row.Kind = 'npm, prod' }
+        if ($dep.Kind -eq 'prod' -and ($row.Kind -eq 'npm, dev' -or $row.Kind -eq 'npm, peer')) { $row.Kind = 'npm, prod' }
         continue
     }
     $version = ''
@@ -141,7 +141,11 @@ foreach ($dep in (Get-NpmManifestDependencies -Repo $Repo)) {
         $licence = 'unknown'
         Write-Host "warning: $($dep.Name) is not in $($dep.Project)/package-lock.json."
     }
-    $kind = if ($dep.Kind -eq 'dev') { 'npm, dev' } else { 'npm, prod' }
+    $kind = switch ($dep.Kind) {
+        'dev' { 'npm, dev' }
+        'peer' { 'npm, peer' }
+        default { 'npm, prod' }
+    }
     $row = [pscustomobject]@{
         Name = $dep.Name; Kind = $kind; Version = $version; Licence = $licence
         Status = $(if ($known.ContainsKey($dep.Name)) { $known[$dep.Name] } else { $Status })

@@ -20,11 +20,14 @@ function Write-File {
 }
 
 function New-ThrowawayRepo {
-    param([string[]]$LedgerNames = @())
+    param(
+        [string[]]$LedgerNames = @(),
+        [string]$LedgerStatus = 'approved (baseline 2026-11-05)'
+    )
     $d = Join-Path ([System.IO.Path]::GetTempPath()) ("canvas-rgb-npm-" + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $d | Out-Null
     $rows = @('| Dependency | Kind | Version | Licence | Status |', '| --- | --- | --- | --- | --- |')
-    foreach ($n in $LedgerNames) { $rows += "| $n | npm, prod | 1.0.0 | MIT | approved (baseline 2026-11-05) |" }
+    foreach ($n in $LedgerNames) { $rows += "| $n | npm, prod | 1.0.0 | MIT | $LedgerStatus |" }
     Write-File -Root $d -Name 'docs/dependencies.md' -Text ($rows -join "`n")
     Write-File -Root $d -Name 'app/web/package.json' -Text ('{' + "`n" + '  "name": "web",' + "`n" + '  "version": "1.0.0"' + "`n" + '}' + "`n")
     return $d
@@ -92,6 +95,24 @@ try {
     Test-Case 'an AND expression needs every part to be allowed' {
         Assert-True (Test-NpmLicence -Licence 'MIT AND Apache-2.0' -BuildTimeOnly $false) 'MIT AND Apache-2.0'
         Assert-True (-not (Test-NpmLicence -Licence 'MIT AND GPL-3.0' -BuildTimeOnly $false)) 'MIT AND GPL-3.0 is not allowed'
+    }
+
+    Test-Case 'a licence expression with parentheses is read with the SPDX precedence' {
+        # AND binds tighter than OR and the parentheses group, so both of these are one
+        # GPL term and an allowed branch: neither is allowed.
+        Assert-True (-not (Test-NpmLicence -Licence 'GPL-3.0 AND (MIT OR Apache-2.0)' -BuildTimeOnly $false)) 'GPL-3.0 AND (MIT OR Apache-2.0) is refused'
+        Assert-True (-not (Test-NpmLicence -Licence '(MIT OR Apache-2.0) AND GPL-3.0' -BuildTimeOnly $false)) '(MIT OR Apache-2.0) AND GPL-3.0 is refused'
+        Assert-True (Test-NpmLicence -Licence 'MIT OR GPL-3.0' -BuildTimeOnly $false) 'MIT OR GPL-3.0 is allowed through MIT'
+        Assert-True (Test-NpmLicence -Licence '(MIT OR Apache-2.0)' -BuildTimeOnly $false) '(MIT OR Apache-2.0) is allowed'
+        Assert-True (Test-NpmLicence -Licence 'Apache-2.0 WITH LLVM-exception' -BuildTimeOnly $false) 'Apache-2.0 WITH LLVM-exception is allowed'
+        Assert-True (-not (Test-NpmLicence -Licence 'GPL-3.0 WITH Classpath-exception-2.0' -BuildTimeOnly $false)) 'GPL-3.0 WITH Classpath-exception-2.0 is refused'
+    }
+
+    Test-Case 'a licence expression that cannot be read is refused' {
+        foreach ($l in 'MIT AND', 'AND MIT', '(MIT', 'MIT)', 'MIT OR OR MIT', 'MIT WITH') {
+            Assert-True (-not (Test-NpmLicence -Licence $l -BuildTimeOnly $false)) "$l is refused"
+            Assert-True (-not (Test-NpmLicence -Licence $l -BuildTimeOnly $true)) "$l is refused for a build-time package too"
+        }
     }
 
     Test-Case 'the build-time licences are allowed only for a package that never ships' {
@@ -162,6 +183,21 @@ try {
         ) -join "`n")
         $result = Invoke-Check -Repo $r
         Assert-Equal $result.Exit 0 "exit: $($result.Output)"
+    }
+
+    Test-Case 'a package with an install script whose ledger row is not approved fails and names the package and the status' {
+        $r = New-ThrowawayRepo -LedgerNames @('left-pad') -LedgerStatus 'pending approval'; [void]$repos.Add($r)
+        New-Lockfile -Root $r -Body (@(
+            '"node_modules/left-pad": {',
+            '  "version": "1.3.0",',
+            '  "license": "MIT",',
+            '  "hasInstallScript": true',
+            '}'
+        ) -join "`n")
+        $result = Invoke-Check -Repo $r
+        Assert-True ($result.Exit -ne 0) 'non-zero exit'
+        Assert-True ($result.Output.Contains('left-pad')) "names the package: $($result.Output)"
+        Assert-True ($result.Output.Contains('pending approval')) "names the status: $($result.Output)"
     }
 
     Test-Case 'a package with a licence that is not allowed fails and names it' {

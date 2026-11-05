@@ -15,9 +15,14 @@ goes in the pull request. The yes goes in this file: the row for that dependency
 status changed to `approved (YYYY-MM-DD)`.
 
 CI checks the names, not the versions: `tools/check-dependency-ledger.ps1` fails when a
-manifest has a direct dependency with no row here (the `dependencies` job in
-`.github/workflows/ci.yml`). A version bump therefore needs no new row: Dependabot moves
-versions every week, and the version column of a row is the version at the time of approval.
+manifest has a direct dependency with no row here, and when the row it has is not approved
+(the `dependencies` job in `.github/workflows/ci.yml`). A version bump therefore needs no
+new row: Dependabot moves versions every week, and the version column of a row is the
+version at the time of approval.
+
+Approval is by name, across ecosystems: a row for the npm package `react` also satisfies a
+Rust crate called `react`. The row is the decision to have that name; cargo-deny and the npm
+checks still gate the real package's licence, its advisories and its source.
 
 ## How to add a row
 
@@ -29,7 +34,7 @@ versions every week, and the version column of a row is the version at the time 
    files. A dependency that is not in the ledger yet comes out with the status
    `pending approval`; edit that status to `approved (YYYY-MM-DD)` and commit the file
    together with the dependency.
-4. Run the checks: `cargo deny check`,
+4. Run the checks: `cargo deny --locked check`,
    `powershell -NoProfile -File tools/check-npm-deps.ps1` and
    `powershell -NoProfile -File tools/check-dependency-ledger.ps1`.
 
@@ -57,11 +62,13 @@ For a new npm package:
 
 `Kind` says where the dependency is declared: `prod` means a `[dependencies]`,
 `[build-dependencies]` or `dependencies` section (a workspace path dependency counts as
-`prod`), `dev` means a `[dev-dependencies]` section only. `Version` is the version the lock
-file pins today, `Licence` the licence that crate or package declares, and `Status` the
-decision: `approved (baseline 2026-11-05)` for everything that was in the tree when this
-ledger started, `approved (YYYY-MM-DD)` for a dependency Luke approved later, and
-`pending approval` for one that has not been approved yet.
+`prod`), `dev` means a `[dev-dependencies]` section only, and `peer` means a
+`peerDependencies` section only. `Version` is the version the lock file pins today,
+`Licence` the licence that crate or package declares, and `Status` the decision:
+`approved (baseline 2026-11-05)` for everything that was in the tree when this ledger
+started, `approved (YYYY-MM-DD)` for a dependency Luke approved later, and
+`pending approval` for one that has not been approved yet. Only a status that starts with
+`approved` is an approval: `pending approval` is a request, and the checks fail on it.
 
 <!-- ledger:begin -->
 

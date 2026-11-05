@@ -108,8 +108,10 @@ jobs:
 
       # Advisories, licences, duplicate versions and sources. deny.toml lists the advisories
       # that are known today, each with its reason; a new one fails this step.
+      # --locked: the graph is the one in Cargo.lock. Without it cargo may re-resolve and
+      # rewrite the lock file, and the check would then judge a graph nobody committed.
       - name: cargo deny check
-        run: cargo deny check
+        run: cargo deny --locked check
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:

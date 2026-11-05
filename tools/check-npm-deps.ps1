@@ -9,16 +9,18 @@
      check. Today the tree has 12 moderate advisories (all in the eslint chain, through
      minimatch) and no high or critical one.
   2. The install scripts. Every package in the lock file that has one (the lock file's
-     hasInstallScript) must have a row in docs/dependencies.md: a package that runs code at
-     install time is approved on the record, not by accident. Today there are two, both dev
-     dependencies: fsevents and unrs-resolver.
+     hasInstallScript) must have a row in docs/dependencies.md, and that row must be
+     approved: a package that runs code at install time is approved on the record, not by
+     accident. Today there are two, both dev dependencies: fsevents and unrs-resolver.
   3. The licences. Every package in the lock file must have a licence from the allow list.
      The allow list is the Rust one from deny.toml plus OFL-1.1 (the fonts) and BlueOak-1.0.0.
      CC-BY-4.0 and LGPL-3.0-or-later are allowed for packages that never ship: the lock file
      marks them dev or optional, or they are the build-time names listed in
      tools/dependency-common.ps1. The editor is a static export (output: "export",
      images.unoptimized), so sharp, caniuse-lite and the like are build-time tools. A missing
-     or unknown licence fails.
+     or unknown licence fails. A licence expression is read the way SPDX reads it (AND binds
+     tighter than OR, the parentheses group, WITH attaches to the licence in front of it), and
+     an expression that cannot be read fails.
 
   The checks read the lock file only: nothing is installed and no file is written.
 .PARAMETER Repo
@@ -96,6 +98,11 @@ foreach ($project in $projects) {
             $scriptCount++
             if (-not $ledger.ContainsKey($p.Name)) {
                 [void]$failures.Add("${project}: $($p.Name) has an install script and no row in docs/dependencies.md.")
+            } else {
+                $status = [string]$ledger[$p.Name].Status
+                if (-not (Test-LedgerStatusApproved -Status $status)) {
+                    [void]$failures.Add("${project}: $($p.Name) has an install script and its row in docs/dependencies.md is not approved: the status is '$status'.")
+                }
             }
         }
         $ships = Test-PackageShips -Name $p.Name -Dev $p.Dev -Optional $p.Optional

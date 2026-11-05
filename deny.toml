@@ -6,7 +6,7 @@
 # from here, so a NEW advisory fails `cargo deny check` instead of joining this file silently.
 #
 # `cargo deny check` runs in CI (the "dependencies" job) and on this machine with:
-#   cargo deny check
+#   cargo deny --locked check
 
 [graph]
 # The lock file is the whole graph: no target filtering, so a Linux-only crate is judged too.
@@ -73,9 +73,9 @@ exceptions = []
 multiple-versions = "warn"
 wildcards = "deny"
 # The workspace's own crates are path dependencies, and a path dependency has no version
-# requirement, which cargo-deny reads as a wildcard. The workspace crates are not published
-# (publish = false), so this is the switch that keeps the wildcard rule on for everything
-# that comes from a registry.
+# requirement, which cargo-deny reads as a wildcard. allow-wildcard-paths is the switch that
+# keeps the wildcard rule on for everything that comes from a registry. The crates under
+# crates/ are also not published (publish = false in each of their Cargo.toml files).
 allow-wildcard-paths = true
 
 [sources]

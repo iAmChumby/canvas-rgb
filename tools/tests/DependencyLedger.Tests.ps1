@@ -21,13 +21,37 @@ function Write-File {
 }
 
 function New-ThrowawayRepo {
-    param([string[]]$LedgerNames = @('serde'))
+    param(
+        [string[]]$LedgerNames = @('serde'),
+        [string]$LedgerStatus = 'approved (baseline 2026-11-05)'
+    )
     $d = Join-Path ([System.IO.Path]::GetTempPath()) ("canvas-rgb-ledger-" + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $d | Out-Null
     $rows = @('| Dependency | Kind | Version | Licence | Status |', '| --- | --- | --- | --- | --- |')
-    foreach ($n in $LedgerNames) { $rows += "| $n | rust, prod | 1.0.0 | MIT | approved (baseline 2026-11-05) |" }
+    foreach ($n in $LedgerNames) { $rows += "| $n | rust, prod | 1.0.0 | MIT | $LedgerStatus |" }
     Write-File -Root $d -Name 'docs/dependencies.md' -Text ($rows -join "`n")
     return $d
+}
+
+function Assert-ValidCargoToml {
+    <#
+    .SYNOPSIS
+      The fixture is valid TOML, checked with cargo's own parser.
+    .DESCRIPTION
+      A fixture that is not valid TOML would make the reader's answer meaningless, so the
+      manifest is handed to cargo first: `cargo metadata --no-deps` parses it and says so.
+      Cargo is on every machine that builds this repository and in CI; when it is missing the
+      check is unknown, and the case says so instead of pretending the fixture is valid.
+    #>
+    param([string]$Root, [string]$Manifest)
+    $cargo = Get-Command cargo -ErrorAction SilentlyContinue
+    if (-not $cargo) {
+        Write-Host '      note: cargo is not installed, so the fixture was not checked as valid TOML.'
+        return
+    }
+    $path = Join-Path $Root ($Manifest.Replace('/', '\'))
+    $out = & cargo metadata --no-deps --format-version 1 --manifest-path $path 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "the fixture is not valid TOML: cargo says: $($out -join ' ')" }
 }
 
 function Invoke-Check {
@@ -92,6 +116,38 @@ try {
         Assert-True ($result.Exit -ne 0) 'non-zero exit'
     }
 
+    Test-Case 'a Cargo.toml dependency whose ledger row is not approved fails and names the dependency and the status' {
+        $r = New-ThrowawayRepo -LedgerStatus 'pending approval'; [void]$repos.Add($r)
+        Write-File -Root $r -Name 'crates/thing/Cargo.toml' -Text (@(
+            '[package]', 'name = "thing"', 'version = "0.1.0"', '', '[dependencies]', 'serde = "1"', ''
+        ) -join "`n")
+        $result = Invoke-Check -Repo $r
+        Assert-True ($result.Exit -ne 0) 'non-zero exit'
+        Assert-True ($result.Output.Contains('serde')) "names the dependency: $($result.Output)"
+        Assert-True ($result.Output.Contains('pending approval')) "names the status: $($result.Output)"
+    }
+
+    Test-Case 'a package.json dependency whose ledger row is not approved fails and names the dependency and the status' {
+        $r = New-ThrowawayRepo -LedgerNames @('react') -LedgerStatus 'pending approval'; [void]$repos.Add($r)
+        Write-File -Root $r -Name 'app/web/package.json' -Text (@(
+            '{', '  "name": "web",', '  "dependencies": {', '    "react": "19.3.1"', '  }', '}', ''
+        ) -join "`n")
+        $result = Invoke-Check -Repo $r
+        Assert-True ($result.Exit -ne 0) 'non-zero exit'
+        Assert-True ($result.Output.Contains('react')) "names the dependency: $($result.Output)"
+        Assert-True ($result.Output.Contains('pending approval')) "names the status: $($result.Output)"
+    }
+
+    Test-Case 'a Cargo.toml dependency whose ledger row says approved passes' {
+        $r = New-ThrowawayRepo -LedgerStatus 'approved (2026-11-07)'; [void]$repos.Add($r)
+        Write-File -Root $r -Name 'crates/thing/Cargo.toml' -Text (@(
+            '[package]', 'name = "thing"', 'version = "0.1.0"', '', '[dependencies]', 'serde = "1"', ''
+        ) -join "`n")
+        $result = Invoke-Check -Repo $r
+        Assert-Equal $result.Exit 0 "exit: $($result.Output)"
+        Assert-True ($result.Output -match 'ok:') 'says it passed'
+    }
+
     Test-Case 'the Cargo reader finds every kind of dependency' {
         $r = New-ThrowawayRepo; [void]$repos.Add($r)
         Write-File -Root $r -Name 'Cargo.toml' -Text (@(
@@ -133,6 +189,74 @@ try {
         Assert-Equal $byName['vitest'].Kind 'dev' 'a devDependency is dev'
         Assert-Equal $byName['react'].Project 'app/web' 'the project is the folder that holds the package.json'
         Assert-Equal $byName['react'].Source '19.3.1' 'the version requirement is read'
+    }
+
+    Test-Case 'the npm reader finds the optional dependencies and the peer dependencies' {
+        $r = New-ThrowawayRepo; [void]$repos.Add($r)
+        Write-File -Root $r -Name 'app/web/package.json' -Text (@(
+            '{', '  "name": "web",', '  "dependencies": {', '    "react": "19.3.1"', '  },', '  "optionalDependencies": {', '    "fsevents": "2.3.3"', '  },', '  "peerDependencies": {', '    "react-dom": "19.3.1"', '  }', '}', ''
+        ) -join "`n")
+        $deps = @(Get-NpmManifestDependencies -Repo $r)
+        $byName = @{}
+        foreach ($d in $deps) { $byName[$d.Name] = $d }
+        Assert-True ($byName.ContainsKey('fsevents')) "finds the optional dependency (found: $((@($deps | ForEach-Object { $_.Name })) -join ', '))"
+        Assert-True ($byName.ContainsKey('react-dom')) "finds the peer dependency (found: $((@($deps | ForEach-Object { $_.Name })) -join ', '))"
+        Assert-Equal $byName['fsevents'].Kind 'prod' 'an optional dependency is prod'
+        Assert-Equal $byName['react-dom'].Kind 'peer' 'a peer dependency is peer'
+        Assert-Equal $byName['fsevents'].Source '2.3.3' 'the optional dependency carries its requirement'
+    }
+
+    Test-Case 'an optional dependency with no ledger row fails and names it' {
+        $r = New-ThrowawayRepo -LedgerNames @('react'); [void]$repos.Add($r)
+        Write-File -Root $r -Name 'app/web/package.json' -Text (@(
+            '{', '  "name": "web",', '  "dependencies": {', '    "react": "19.3.1"', '  },', '  "optionalDependencies": {', '    "fsevents": "2.3.3"', '  }', '}', ''
+        ) -join "`n")
+        $result = Invoke-Check -Repo $r
+        Assert-True ($result.Exit -ne 0) 'non-zero exit'
+        Assert-True ($result.Output.Contains('fsevents')) "names the dependency: $($result.Output)"
+    }
+
+    Test-Case 'a peer dependency with no ledger row fails and names it' {
+        $r = New-ThrowawayRepo -LedgerNames @('react'); [void]$repos.Add($r)
+        Write-File -Root $r -Name 'app/web/package.json' -Text (@(
+            '{', '  "name": "web",', '  "dependencies": {', '    "react": "19.3.1"', '  },', '  "peerDependencies": {', '    "react-dom": "19.3.1"', '  }', '}', ''
+        ) -join "`n")
+        $result = Invoke-Check -Repo $r
+        Assert-True ($result.Exit -ne 0) 'non-zero exit'
+        Assert-True ($result.Output.Contains('react-dom')) "names the dependency: $($result.Output)"
+    }
+
+    Test-Case 'the Cargo reader reads a quoted dependency name' {
+        $r = New-ThrowawayRepo; [void]$repos.Add($r)
+        Write-File -Root $r -Name 'crates/thing/Cargo.toml' -Text (@(
+            '[package]', 'name = "thing"', 'version = "0.1.0"', '', '[lib]', 'path = "src/lib.rs"', '', '[dependencies]', '"quoted-new" = "1"', ''
+        ) -join "`n")
+        Write-File -Root $r -Name 'crates/thing/src/lib.rs' -Text 'pub fn thing() {}'
+        Assert-ValidCargoToml -Root $r -Manifest 'crates/thing/Cargo.toml'
+        $names = @((Get-CargoManifestDependencies -Repo $r) | ForEach-Object { $_.Name })
+        Assert-True ($names -contains 'quoted-new') "finds the quoted name (found: $($names -join ', '))"
+    }
+
+    Test-Case 'the Cargo reader reads a section header with a trailing comment' {
+        $r = New-ThrowawayRepo; [void]$repos.Add($r)
+        Write-File -Root $r -Name 'crates/thing/Cargo.toml' -Text (@(
+            '[package]', 'name = "thing"', 'version = "0.1.0"', '', '[lib]', 'path = "src/lib.rs"', '', '[dependencies] # the dependencies', 'serde = "1"', ''
+        ) -join "`n")
+        Write-File -Root $r -Name 'crates/thing/src/lib.rs' -Text 'pub fn thing() {}'
+        Assert-ValidCargoToml -Root $r -Manifest 'crates/thing/Cargo.toml'
+        $names = @((Get-CargoManifestDependencies -Repo $r) | ForEach-Object { $_.Name })
+        Assert-True ($names -contains 'serde') "finds the dependency under the commented header (found: $($names -join ', '))"
+    }
+
+    Test-Case 'the Cargo reader reads a section header with spaces inside the brackets' {
+        $r = New-ThrowawayRepo; [void]$repos.Add($r)
+        Write-File -Root $r -Name 'crates/thing/Cargo.toml' -Text (@(
+            '[package]', 'name = "thing"', 'version = "0.1.0"', '', '[lib]', 'path = "src/lib.rs"', '', '[ dependencies ]', 'serde = "1"', ''
+        ) -join "`n")
+        Write-File -Root $r -Name 'crates/thing/src/lib.rs' -Text 'pub fn thing() {}'
+        Assert-ValidCargoToml -Root $r -Manifest 'crates/thing/Cargo.toml'
+        $names = @((Get-CargoManifestDependencies -Repo $r) | ForEach-Object { $_.Name })
+        Assert-True ($names -contains 'serde') "finds the dependency under the spaced header (found: $($names -join ', '))"
     }
 
     Test-Case 'the ledger reader reads the rows of both tables' {
