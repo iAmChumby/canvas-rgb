@@ -9,9 +9,10 @@
 //! console session, and the relaunch is held until the session is gone, the console id changes
 //! or [`SESSION_END_HOLD`] passes. Past that budget they count as crashes again. A new console
 //! session (a logon) clears the crash stop and both budgets, so a crash stop does not strand the
-//! user until the service restarts. A console id that changed is a new session only once it has
-//! held for [`SESSION_SETTLE`] and has a user in it, so a flickering console id does not clear
-//! the crash limit. A new session also ends a quit: the daemon that quit belonged to the session
+//! user until the service restarts. A new session is one that has settled: a console id that
+//! changed, or a token that came back after a logoff, must hold for [`SESSION_SETTLE`] and have
+//! a user in it, so a flickering console id or a token query that failed once does not clear the
+//! crash limit. A new session also ends a quit: the daemon that quit belonged to the session
 //! that is gone, and the next user gets a daemon of their own.
 
 use crate::process::ChildProcess;
@@ -283,6 +284,10 @@ pub struct DaemonSupervisor {
     console: Option<u32>,
     /// The last seen console session has no user in it: a logoff was seen.
     logged_off: bool,
+    /// The token of the console session came back at this time. A logon is a new session only
+    /// once the token has been there for `SESSION_SETTLE` (#6): one tick without a token is a
+    /// query that failed, not a logoff.
+    pending_logon: Option<Instant>,
     /// The exits that ended with the session, in the console session of `budget_session` (#6).
     session_ends: u32,
     /// The console session the session-end budget belongs to.
@@ -320,6 +325,7 @@ impl DaemonSupervisor {
             crash_stopped: false,
             console: None,
             logged_off: false,
+            pending_logon: None,
             session_ends: 0,
             budget_session: None,
             hold: None,
@@ -603,7 +609,9 @@ impl DaemonSupervisor {
 
     /// Watches the console session for a new one. A logoff shows up as a session with no user in
     /// it; the logon after it as one with a user again. A different console id is a different
-    /// session, but only once it has held for [`SESSION_SETTLE`] and has a user in it (#6).
+    /// session, but only once it has held for [`SESSION_SETTLE`] and has a user in it (#6). A
+    /// logon in the same console session settles the same way: the token must be there for
+    /// [`SESSION_SETTLE`] before it is a new session.
     /// Says whether a new console session was found.
     ///
     /// The first console session this supervisor sees is not a new one: it is the one the service
@@ -615,6 +623,8 @@ impl DaemonSupervisor {
                 // The console moved to another session. It is a new console session once it has
                 // held for the settle time and has a user in it: a flip (1 -> 2 -> 1) and the
                 // logon screen (a session with no token) must not clear the crash stop (#6).
+                // The token of the session left behind says nothing about this one.
+                self.pending_logon = None;
                 if !self.launcher.session_alive(current) {
                     // The logon screen: no user in that session, so it is not a new one yet.
                     self.pending_console = None;
@@ -642,16 +652,34 @@ impl DaemonSupervisor {
             (Some(_), Some(current)) => {
                 // The same session: its user comes and goes in it.
                 self.pending_console = None;
-                if self.launcher.session_alive(current) {
-                    if self.logged_off {
-                        self.logged_off = false;
-                        self.on_new_session(current);
-                        true
-                    } else {
-                        false
+                if !self.launcher.session_alive(current) {
+                    // No user in the session: a logoff was seen.
+                    self.logged_off = true;
+                    self.pending_logon = None;
+                    false
+                } else if self.logged_off {
+                    // The token is back. It must stay for `SESSION_SETTLE` before the logon
+                    // counts as a new session (#6): a tick without a token is a query that
+                    // failed, not a logoff, and must not clear the crash stop, the budgets or a
+                    // quit. A token that goes away again starts the settle over.
+                    match self.pending_logon {
+                        Some(since) => {
+                            if now.saturating_duration_since(since) >= SESSION_SETTLE {
+                                self.pending_logon = None;
+                                self.logged_off = false;
+                                self.on_new_session(current);
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                        None => {
+                            // The settle starts now: the token must stay for the settle time.
+                            self.pending_logon = Some(now);
+                            false
+                        }
                     }
                 } else {
-                    self.logged_off = true;
                     false
                 }
             }
@@ -767,8 +795,10 @@ impl DaemonSupervisor {
     fn session_end(&mut self, now: Instant, code: i32, was: Option<u32>) -> DaemonAction {
         let described = crate::process::describe_exit_code(code);
         let console = self.launcher.console_session();
-        // The budget belongs to one console session: a new one starts a new budget.
-        let session = console.or(was);
+        // The budget belongs to one console session: a new one starts a new budget. It is the
+        // session that settled, not the id the console happens to report at this moment: an exit
+        // while the console is flipping belongs to the session the daemon was running in (#6).
+        let session = self.console.or(was);
         if session != self.budget_session {
             self.budget_session = session;
             self.session_ends = 0;
@@ -1433,8 +1463,12 @@ mod tests {
             sup.tick(t0 + Duration::from_secs(1));
         });
         processes.log_on(1);
-        let text = logged(|| {
+        // The logon settles first: the daemon that quit is ended once it has.
+        logged(|| {
             sup.tick(t0 + Duration::from_secs(2));
+        });
+        let text = logged(|| {
+            sup.tick(t0 + Duration::from_secs(2) + SESSION_SETTLE);
         });
         assert!(
             announces_kill(
@@ -1663,13 +1697,51 @@ mod tests {
         now += Duration::from_secs(1);
         assert_eq!(sup.tick(now), DaemonAction::None);
         assert_eq!(processes.spawns().len(), 4);
-        // The user logs on again: the daemon starts.
+        // The user logs on again: the token must be there for the settle time before the logon
+        // counts as a new session (#6).
         processes.log_on(1);
         now += Duration::from_secs(1);
+        assert_eq!(sup.tick(now), DaemonAction::None);
+        assert!(
+            sup.stopped(),
+            "the crash stop ended before the logon settled"
+        );
+        assert_eq!(processes.spawns().len(), 4, "the daemon was started again");
+        now += SESSION_SETTLE;
         assert_eq!(sup.tick(now), DaemonAction::None);
         assert!(!sup.stopped(), "the crash stop did not end at the logon");
         assert_eq!(processes.spawns().len(), 5);
         assert!(sup.daemon_pid().is_some());
+    }
+
+    /// One tick without a token is a query that failed, not a logoff: it must not clear the
+    /// crash stop, the budgets or the crash limit (#6).
+    #[test]
+    fn a_one_tick_token_blip_clears_nothing() {
+        let (mut sup, processes, mut now) = crashed_supervisor_with_a_used_budget();
+        let spawns = processes.spawns().len();
+        // One tick without a token, then the token is there again.
+        processes.log_off(1);
+        now += Duration::from_secs(1);
+        sup.tick(now);
+        processes.log_on(1);
+        now += Duration::from_secs(1);
+        sup.tick(now);
+        assert!(sup.stopped(), "the blip cleared the crash stop");
+        assert_eq!(
+            sup.restarts.len(),
+            DAEMON_RESTART_LIMIT as usize,
+            "the blip cleared the crash budget"
+        );
+        assert_eq!(
+            sup.session_ends, SESSION_END_LIMIT,
+            "the blip cleared the session-end budget"
+        );
+        assert_eq!(
+            processes.spawns().len(),
+            spawns,
+            "the daemon was started again"
+        );
     }
 
     /// The hold ends when its 60 s are up, even with the session still alive (#6).
@@ -1719,6 +1791,36 @@ mod tests {
             4,
             "the daemon is off after the crash stop"
         );
+        (sup, processes, now)
+    }
+
+    /// A supervisor whose crash limit tripped and whose session-end budget is spent: the daemon
+    /// is off, the crash stop is on, and both budgets are used up.
+    fn crashed_supervisor_with_a_used_budget() -> (DaemonSupervisor, FakeProcesses, Instant) {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        sup.start(t0);
+        let mut now = t0;
+        // Three session ends: the session-end budget is spent and no crash is counted.
+        for _ in 0..SESSION_END_LIMIT {
+            processes.exit_last_with(STATUS_DLL_INIT_FAILED_LOGOFF);
+            now += Duration::from_secs(1);
+            sup.tick(now);
+            now += Duration::from_secs(SESSION_END_HOLD.as_secs());
+            sup.tick(now);
+        }
+        assert_eq!(
+            sup.session_ends, SESSION_END_LIMIT,
+            "the session-end budget is not spent"
+        );
+        // Four crashes: the crash limit trips and the daemon stays off.
+        for _ in 0..4 {
+            processes.exit_last_with(STATUS_ACCESS_VIOLATION);
+            now += Duration::from_secs(1);
+            sup.tick(now);
+        }
+        assert!(sup.stopped(), "the crash limit tripped");
         (sup, processes, now)
     }
 
@@ -1812,9 +1914,17 @@ mod tests {
             1,
             "a daemon was started with no user logged on"
         );
-        // A new user logs on: the new session gets a daemon.
+        // A new user logs on: the logon must settle before it counts as a new session, and only
+        // then does the new session get a daemon.
         processes.log_on(1);
         now += Duration::from_secs(1);
+        sup.tick(now);
+        assert_eq!(
+            processes.spawns().len(),
+            1,
+            "the daemon that quit was started again before the logon settled"
+        );
+        now += SESSION_SETTLE;
         sup.tick(now);
         assert_eq!(processes.spawns().len(), 2, "the new session got no daemon");
         assert!(sup.daemon_pid().is_some());
@@ -1849,5 +1959,205 @@ mod tests {
             ),
             "{text}"
         );
+    }
+
+    /// The session-end budget belongs to the console session that settled, not to the id the
+    /// console happens to report at the moment of the exit: an exit while the console is
+    /// flipping must not hand the daemon a fresh budget (#6).
+    #[test]
+    fn a_session_end_during_a_console_flip_keeps_the_budget() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        sup.start(t0);
+        // One session end: the budget of session 1 is used.
+        processes.exit_last_with(STATUS_DLL_INIT_FAILED_LOGOFF);
+        let mut now = t0 + Duration::from_secs(1);
+        sup.tick(now);
+        assert_eq!(sup.session_ends, 1, "the session end did not count");
+        assert_eq!(sup.budget_session, Some(1), "the budget is not session 1");
+        // The hold ends and the daemon starts again.
+        now += Duration::from_secs(SESSION_END_HOLD.as_secs());
+        sup.tick(now);
+        assert_eq!(
+            processes.spawns().len(),
+            2,
+            "the daemon did not start again"
+        );
+        // The console flips to another session. The move has not settled, so the session the
+        // supervisor settled on is still 1, and the exit belongs to that session.
+        processes.set_console(2);
+        processes.exit_last_with(STATUS_DLL_INIT_FAILED_LOGOFF);
+        now += Duration::from_secs(1);
+        sup.tick(now);
+        assert_eq!(
+            sup.budget_session,
+            Some(1),
+            "the budget moved to the session that was flipping"
+        );
+        assert_eq!(sup.session_ends, 2, "the budget was reset by the flip");
+    }
+
+    /// The hold after a session end ends when the session is gone, long before its 60 s are up
+    /// (#6).
+    #[test]
+    fn the_hold_ends_when_the_session_is_gone() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        sup.start(t0);
+        processes.exit_last_with(STATUS_DLL_INIT_FAILED_LOGOFF);
+        let exited = t0 + Duration::from_secs(1);
+        assert_eq!(sup.tick(exited), DaemonAction::None);
+        assert_eq!(sup.daemon_pid(), None, "the relaunch is held");
+        // The user logs off: the session is gone, so the hold is over.
+        processes.log_off(1);
+        let text = logged(|| {
+            sup.tick(exited + Duration::from_secs(2));
+        });
+        assert!(text.contains("the session-end hold is over"), "{text}");
+        // Nobody is logged on, so there is no daemon yet.
+        assert_eq!(
+            sup.daemon_pid(),
+            None,
+            "a daemon ran with no user logged on"
+        );
+        assert_eq!(
+            processes.spawns().len(),
+            1,
+            "a daemon was started with no user logged on"
+        );
+        // The next user logs on: the daemon starts.
+        processes.log_on(1);
+        sup.tick(exited + Duration::from_secs(3));
+        assert!(
+            sup.daemon_pid().is_some(),
+            "the daemon did not start at the logon"
+        );
+    }
+
+    /// The hold after a session end ends when the console moves to another session (#6).
+    #[test]
+    fn the_hold_ends_when_the_console_moves() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        sup.start(t0);
+        processes.exit_last_with(STATUS_DLL_INIT_FAILED_LOGOFF);
+        let exited = t0 + Duration::from_secs(1);
+        assert_eq!(sup.tick(exited), DaemonAction::None);
+        assert_eq!(sup.daemon_pid(), None, "the relaunch is held");
+        // The console moves to another session: the hold is over and the daemon starts there.
+        processes.set_console(2);
+        let text = logged(|| {
+            sup.tick(exited + Duration::from_secs(2));
+        });
+        assert!(text.contains("the session-end hold is over"), "{text}");
+        assert!(
+            sup.daemon_pid().is_some(),
+            "the daemon did not start in the new session"
+        );
+        assert_eq!(processes.spawns().len(), 2, "the new session got no daemon");
+    }
+
+    /// A new console session starts a new session-end budget (#6).
+    #[test]
+    fn a_new_console_session_resets_the_session_end_budget() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        sup.start(t0);
+        let mut now = t0;
+        // The budget of session 1 is spent: three session ends and no crash.
+        for _ in 0..SESSION_END_LIMIT {
+            processes.exit_last_with(STATUS_DLL_INIT_FAILED_LOGOFF);
+            now += Duration::from_secs(1);
+            sup.tick(now);
+            now += Duration::from_secs(SESSION_END_HOLD.as_secs());
+            sup.tick(now);
+        }
+        assert_eq!(
+            sup.session_ends, SESSION_END_LIMIT,
+            "the budget of session 1 is not spent"
+        );
+        // The console moves to another session and settles: the new session starts a new budget.
+        processes.set_console(2);
+        now += Duration::from_secs(1);
+        sup.tick(now);
+        now += SESSION_SETTLE;
+        sup.tick(now);
+        assert_eq!(sup.session_ends, 0, "the new session kept the old budget");
+        assert_eq!(
+            sup.budget_session,
+            Some(2),
+            "the budget still belongs to the old session"
+        );
+        assert_eq!(
+            sup.child_session,
+            Some(2),
+            "the daemon did not move to the new session"
+        );
+        // The next session end is inside the fresh budget of the new session.
+        processes.exit_last_with(STATUS_DLL_INIT_FAILED_LOGOFF);
+        now += Duration::from_secs(1);
+        let text = logged(|| {
+            sup.tick(now);
+        });
+        assert!(
+            !text.contains("counting it as a crash"),
+            "the new session had no fresh budget: {text}"
+        );
+        assert_eq!(
+            sup.session_ends, 1,
+            "the session end did not count in the new session"
+        );
+    }
+
+    /// The daemon that quit does not go away: the wait for it is bounded, and the new session
+    /// still gets a daemon (#6).
+    #[test]
+    fn a_quitting_daemon_that_never_exits_does_not_stall_the_new_session() {
+        let (mut sup, processes) = supervisor();
+        let t0 = Instant::now();
+        processes.set_console(1);
+        // The daemon never ends: the kill leaves it running, so the wait has to give up.
+        processes.set_slow_kill(u32::MAX);
+        sup.start(t0);
+        let pid = sup.daemon_pid().expect("a daemon is running");
+        sup.on_quitting();
+        // The user logs off and a new one logs on: the daemon that quit is ended and waited for.
+        processes.log_off(1);
+        let mut text = logged(|| {
+            sup.tick(t0 + Duration::from_secs(1));
+        });
+        processes.log_on(1);
+        text.push_str(&logged(|| {
+            sup.tick(t0 + Duration::from_secs(2));
+        }));
+        text.push_str(&logged(|| {
+            sup.tick(t0 + Duration::from_secs(2) + SESSION_SETTLE);
+        }));
+        assert!(
+            announces_kill(
+                &text,
+                pid,
+                "the daemon quit and a new console session started"
+            ),
+            "{text}"
+        );
+        // The wait was bounded: it gave up instead of polling forever.
+        assert!(
+            text.contains("the old daemon did not exit within 5 s"),
+            "the wait did not give up: {text}"
+        );
+        assert!(processes.polls() > 0, "the wait did not poll at all");
+        assert!(
+            processes.polls() <= 1000,
+            "the wait polled {} times",
+            processes.polls()
+        );
+        // The new session got a daemon anyway, and nothing panicked on the way.
+        assert_eq!(processes.spawns().len(), 2, "the new session got no daemon");
+        assert!(sup.daemon_pid().is_some());
     }
 }

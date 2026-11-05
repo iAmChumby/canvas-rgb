@@ -620,6 +620,8 @@ pub struct FakeProcesses {
     overlaps: Arc<AtomicU32>,
     /// Kills that fail with an error.
     fail_kills: Arc<AtomicUsize>,
+    /// How many times a fake child was asked whether it had exited.
+    polls: Arc<AtomicU32>,
 }
 
 type RunningRecord = (u32, PathBuf, u32, FakeExit);
@@ -714,6 +716,12 @@ impl FakeProcesses {
         self.overlaps.load(Ordering::SeqCst)
     }
 
+    /// How many times the fake children were asked whether they had exited. A wait that polls
+    /// forever shows up here, so a test can bound it without reading a clock.
+    pub fn polls(&self) -> u32 {
+        self.polls.load(Ordering::SeqCst)
+    }
+
     /// While `true`, spawns fail as "no user session yet" (`ErrorKind::NotConnected`).
     pub fn set_no_session(&self, none: bool) {
         self.no_session.store(none, Ordering::SeqCst);
@@ -748,6 +756,7 @@ impl FakeProcesses {
             slow_kill: self.slow_kill_polls.load(Ordering::SeqCst),
             dying: None,
             fail_kills: Arc::clone(&self.fail_kills),
+            polls: Arc::clone(&self.polls),
         }))
     }
 }
@@ -762,10 +771,13 @@ struct FakeChild {
     dying: Option<u32>,
     /// Kills that fail with an error.
     fail_kills: Arc<AtomicUsize>,
+    /// How many times this child was asked whether it had exited.
+    polls: Arc<AtomicU32>,
 }
 
 impl ChildProcess for FakeChild {
     fn try_wait(&mut self) -> io::Result<Option<i32>> {
+        self.polls.fetch_add(1, Ordering::SeqCst);
         if let Some(left) = self.dying {
             if left == 0 {
                 // The supervisor's kill code is 1, as it is on Windows.
@@ -828,6 +840,7 @@ impl crate::daemon::SessionLauncher for FakeLauncher {
                     slow_kill: 0,
                     dying: None,
                     fail_kills: Arc::clone(&self.0.fail_kills),
+                    polls: Arc::clone(&self.0.polls),
                 }),
             })
             .collect()
