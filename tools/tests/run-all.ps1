@@ -7,9 +7,12 @@ $failed = 0
 $totalPass = 0
 $totalFail = 0
 $totalSkip = 0
+# Each suite runs in the same kind of PowerShell as this runner: Windows PowerShell where it
+# exists, pwsh elsewhere (the CI dependencies job runs on Linux).
+$shell = if (Get-Command powershell.exe -ErrorAction SilentlyContinue) { 'powershell.exe' } else { 'pwsh' }
 foreach ($t in (Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.Tests.ps1' | Sort-Object Name)) {
     Write-Host "=== $($t.Name)"
-    $out = & powershell.exe -NoProfile -File $t.FullName 2>&1 | Out-String
+    $out = & $shell -NoProfile -File $t.FullName 2>&1 | Out-String
     $code = $LASTEXITCODE
     $sum = $null
     foreach ($line in @($out -split "`r?`n")) {
