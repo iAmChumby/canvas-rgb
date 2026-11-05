@@ -111,6 +111,11 @@ pub struct App {
     pub transient: crate::transient::Transient,
     /// The draft on the lights: an editor's unsaved effect, with its lease (see [`crate::draft`]).
     pub draft: crate::draft::Draft,
+    /// A seam in the config import, for the tests: the import stops between the end of the
+    /// draft and the swap of the store, so a test can put a draft PUT in that gap (#94).
+    ///
+    /// `None` in the daemon.
+    import_seam: Mutex<Option<Arc<crate::api::settings::ImportSeam>>>,
     /// The input source the lights' engine was last given. An engine made later (the stack
     /// preview) starts from the same one (D95.4.4).
     pub input_source: Mutex<Option<Arc<dyn canvas_proto::traits::InputSource>>>,
@@ -188,6 +193,7 @@ impl App {
             last_frame: Arc::default(),
             transient: Default::default(),
             draft: Default::default(),
+            import_seam: Mutex::new(None),
             input_source: Mutex::new(None),
             preview_slots: Arc::new(tokio::sync::Semaphore::new(crate::api::editor::PREVIEW_CONCURRENT)),
             store: tokio::sync::RwLock::new(store),
@@ -234,6 +240,19 @@ impl App {
     /// The active layout, if any.
     pub async fn active_layout(&self) -> Option<Layout> {
         self.store.read().await.active_layout().cloned()
+    }
+
+    /// Sets the seam in the config import (tests only).
+    ///
+    /// The import stops at the seam, between the end of the draft and the swap of the
+    /// store, until the seam lets it go. The daemon never sets one.
+    pub fn set_import_seam(&self, seam: Arc<crate::api::settings::ImportSeam>) {
+        *self.import_seam.lock().unwrap_or_else(|e| e.into_inner()) = Some(seam);
+    }
+
+    /// The seam in the config import, if a test set one.
+    pub fn import_seam(&self) -> Option<Arc<crate::api::settings::ImportSeam>> {
+        self.import_seam.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// The layout reaches both engines at the same call sites: the lights' engine and, when
