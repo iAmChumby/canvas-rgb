@@ -234,8 +234,15 @@ async function send<T>(
     const work = (async () => {
       let config: ApiConfig;
       try {
-        config = await apiConfig();
+        // The tray's lookup is raced against the caller's own end: a lookup that hangs must not
+        // turn the caller's abort into the deadline's timeout, and the daemon is not blamed for an
+        // answer the caller did not want (issue #97).
+        config = await racedAgainstAbort(apiConfig(), external);
       } catch (e) {
+        if (external?.aborted) {
+          // The caller let go of this request: it is not an error, and the tray is not blamed.
+          throw aborted();
+        }
         throw new ApiFailure(0, "unreachable", `The tray app did not provide the API address: ${messageOf(e)}`);
       }
 
@@ -312,6 +319,36 @@ function aborted(): DOMException {
   return new DOMException("The request was aborted.", "AbortError");
 }
 
+/**
+ * Waits for work that the caller may end at any time.
+ *
+ * The caller's end is its own doing: it is not the deadline, and it is not the daemon being slow,
+ * so it surfaces as an `AbortError` and not as a timeout (issue #97). Work that is already running
+ * is left to finish on its own: the tray's lookup cannot be called back, and the daemon stops
+ * working on a request when the request's signal ends.
+ */
+function racedAgainstAbort<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return work;
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(aborted());
+    if (signal.aborted) {
+      reject(aborted());
+      return;
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
 export async function request<T>(
   method: Method,
   path: string,
@@ -319,6 +356,10 @@ export async function request<T>(
   opts?: RequestOptions,
 ): Promise<T> {
   if (isDemo()) {
+    // A request the caller has already let go of is not made at all. The demo backend answers
+    // from memory and there is no request to let go of, but the caller's end is its own doing,
+    // and it surfaces as an `AbortError` on the demo backend as well (issue #97).
+    if (opts?.signal?.aborted) throw aborted();
     // The demo backend answers from memory: there is no request to let go of, and the signal is
     // ignored there. The caller drops the answer anyway.
     return (await demoRequest(method, path, body)) as T;

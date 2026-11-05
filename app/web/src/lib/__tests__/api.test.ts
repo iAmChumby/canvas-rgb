@@ -344,6 +344,29 @@ describe("a request the caller lets go of", () => {
     // The request was never sent: the daemon was never asked.
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it("surfaces an abort during the tray's lookup as an AbortError", async () => {
+    vi.useFakeTimers();
+    // The tray's own lookup never finishes: the request is waiting before it even starts.
+    (window as unknown as { __TAURI__?: unknown }).__TAURI__ = trayThatNeverAnswers();
+    dropApiConfig();
+    const ctl = new AbortController();
+    const call = request("GET", "/api/v1/effects", undefined, { signal: ctl.signal });
+    const settled = call.then(
+      () => null,
+      (e: unknown) => e,
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    // The caller does not want the answer any more, and ends the request while the lookup is
+    // still running.
+    ctl.abort();
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 50);
+    const error = (await settled) as { name?: string; message?: string } | null;
+    // The caller's own end is not the deadline: the lookup that hangs must not turn the caller's
+    // abort into a timeout, and the daemon is not blamed for it.
+    expect(error?.name).toBe("AbortError");
+    expect(error?.message ?? "").not.toMatch(/did not answer within/);
+  });
 });
 
 describe("the deadlines of the routes", () => {
@@ -377,5 +400,36 @@ describe("the deadlines of the routes", () => {
     expect(deadlineFor("/api/v1/status")).toBe(REQUEST_TIMEOUT_MS);
     expect(deadlineFor("/api/v1/effects")).toBe(REQUEST_TIMEOUT_MS);
     expect(deadlineFor("/api/v1/devices")).toBe(REQUEST_TIMEOUT_MS);
+  });
+});
+
+describe("the demo backend and a request the caller lets go of", () => {
+  // The demo answers from memory: there is no request to let go of, and the answer is dropped
+  // anyway. A caller that has already let go of the request still gets the same answer it gets
+  // on a real daemon: an abort is not an error, and it is not the deadline either (issue #97).
+
+  beforeEach(() => {
+    // No Tauri host: the app runs on the demo backend.
+    delete (window as unknown as { __TAURI__?: unknown }).__TAURI__;
+    dropApiConfig();
+  });
+
+  afterEach(() => {
+    delete (window as unknown as { __TAURI__?: unknown }).__TAURI__;
+    dropApiConfig();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("surfaces an already-aborted signal as an AbortError", async () => {
+    const ctl = new AbortController();
+    ctl.abort();
+    const call = request("GET", "/api/v1/effects", undefined, { signal: ctl.signal });
+    const settled = call.then(
+      () => null,
+      (e: unknown) => e,
+    );
+    const error = (await settled) as { name?: string } | null;
+    expect(error?.name).toBe("AbortError");
   });
 });

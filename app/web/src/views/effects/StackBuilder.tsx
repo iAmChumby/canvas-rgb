@@ -571,6 +571,13 @@ export function StackBuilder({
   }
 
   async function sendPreview(retried = false) {
+    // One retry waits at a time (issue #97): a send that starts now takes the place of the retry
+    // that was waiting, instead of leaving it to fire as well. A change that sends again while a
+    // retry waits would otherwise cost two requests for one busy answer.
+    if (previewRetry.current) {
+      clearTimeout(previewRetry.current);
+      previewRetry.current = null;
+    }
     previewSentAt.current = Date.now();
     const current = session.current;
     if (!current) return;
