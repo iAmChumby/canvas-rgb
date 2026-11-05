@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- Audio Spectrum now reaches full brightness across the canvas at normal music volume: band levels are mapped on a -60 dBFS dB scale (so -20 dBFS fills about two thirds of the bar instead of a tenth) and the default Sensitivity is now 100, and the audio capture log names the extensible sub-format instead of saying "unknown". (#188)
+
 ## [0.8.3] - 2026-11-05
 
 ### Changed
