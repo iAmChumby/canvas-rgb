@@ -22,6 +22,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - Fans: `canvas-rgb fans status` now says "not on this board" for a header that is not wired up, instead of showing it as a BIOS header that refused the asked curve. The other rows read as before, and `--json` still carries the availability of every header. (#153)
 - Effects: importing a config while the editor's draft is on the lights now ends that draft and puts the effect that was in force back, so the draft cannot end later and bring back an effect the import replaced. (#94)
 - Effects: the editor's source route now refuses an effect file over 1 MiB, the same limit the preview and the draft use, instead of reading a broken file of any size into memory. (#94)
+- Service: a user switch that happens at the moment the daemon ends no longer leaves the lights unmanaged for up to a minute: the daemon starts in the new session at once. (#173)
 
 ## [0.8.2] - 2026-11-04
 
