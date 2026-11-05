@@ -583,9 +583,24 @@ impl GpuFanApi for FakeGpuFans {
     }
 }
 
+/// The exit code a fake child carries: `None` while it has not exited, `Some(code)` once it has.
+/// An explicit flag, not a sentinel code: every `i32` is a possible exit code, `0x80000000`
+/// included, so no code can stand for "still running".
+type FakeExit = Arc<Mutex<Option<i32>>>;
+
+/// The exit code of a fake child; `None` while it runs.
+fn exit_code(exit: &FakeExit) -> Option<i32> {
+    *exit.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Records that a fake child ended with `code`.
+fn set_exit_code(exit: &FakeExit, code: i32) {
+    *exit.lock().unwrap_or_else(|p| p.into_inner()) = Some(code);
+}
+
 /// Records spawns and lets a test make a spawned process exit.
-/// One recorded spawn: the exe, its arguments, and the flag that makes it report an exit.
-type SpawnRecord = (PathBuf, Vec<String>, Arc<AtomicBool>);
+/// One recorded spawn: the exe, its arguments, and the exit code the child reports when it ends.
+type SpawnRecord = (PathBuf, Vec<String>, FakeExit);
 
 #[derive(Clone, Default)]
 pub struct FakeProcesses {
@@ -605,9 +620,11 @@ pub struct FakeProcesses {
     overlaps: Arc<AtomicU32>,
     /// Kills that fail with an error.
     fail_kills: Arc<AtomicUsize>,
+    /// How many times a fake child was asked whether it had exited.
+    polls: Arc<AtomicU32>,
 }
 
-type RunningRecord = (u32, PathBuf, u32, Arc<AtomicBool>);
+type RunningRecord = (u32, PathBuf, u32, FakeExit);
 
 impl FakeProcesses {
     pub fn new() -> Self {
@@ -626,8 +643,15 @@ impl FakeProcesses {
 
     /// Makes the most recent spawn exit with code 1.
     pub fn exit_last(&self) {
-        if let Some((_, _, flag)) = self.spawns.lock().unwrap_or_else(|p| p.into_inner()).last() {
-            flag.store(true, Ordering::SeqCst);
+        self.exit_last_with(1);
+    }
+
+    /// Makes the most recent spawn exit with `code` (#6): a session-end code (`0x40010004`,
+    /// `0xC000026B`) says the daemon ended with its session, a crash code (`0xC0000005`) says it
+    /// crashed, and the supervisor tells them apart.
+    pub fn exit_last_with(&self, code: i32) {
+        if let Some((_, _, exit)) = self.spawns.lock().unwrap_or_else(|p| p.into_inner()).last() {
+            set_exit_code(exit, code);
         }
     }
 
@@ -636,7 +660,12 @@ impl FakeProcesses {
         self.running
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .push((pid, PathBuf::from(image), session, Arc::new(AtomicBool::new(false))));
+            .push((
+                pid,
+                PathBuf::from(image),
+                session,
+                Arc::new(Mutex::new(None)),
+            ));
     }
 
     /// Whether the service ended the pre-existing daemon `pid`.
@@ -645,7 +674,7 @@ impl FakeProcesses {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .iter()
-            .any(|(p, _, _, flag)| *p == pid && flag.load(Ordering::SeqCst))
+            .any(|(p, _, _, exit)| *p == pid && exit_code(exit).is_some())
     }
 
     pub fn set_console(&self, session: u32) {
@@ -687,6 +716,12 @@ impl FakeProcesses {
         self.overlaps.load(Ordering::SeqCst)
     }
 
+    /// How many times the fake children were asked whether they had exited. A wait that polls
+    /// forever shows up here, so a test can bound it without reading a clock.
+    pub fn polls(&self) -> u32 {
+        self.polls.load(Ordering::SeqCst)
+    }
+
     /// While `true`, spawns fail as "no user session yet" (`ErrorKind::NotConnected`).
     pub fn set_no_session(&self, none: bool) {
         self.no_session.store(none, Ordering::SeqCst);
@@ -705,28 +740,30 @@ impl FakeProcesses {
             self.fail_spawns.store(pending - 1, Ordering::SeqCst);
             return Err(io::Error::other("fake spawn failure"));
         }
-        let exited = Arc::new(AtomicBool::new(false));
+        let exit = Arc::new(Mutex::new(None));
         let pid = {
             let mut spawns = self.spawns.lock().unwrap_or_else(|p| p.into_inner());
-            if spawns.iter().any(|s| !s.2.load(Ordering::SeqCst)) {
+            if spawns.iter().any(|s| exit_code(&s.2).is_none()) {
                 self.overlaps.fetch_add(1, Ordering::SeqCst);
             }
             let pid = 4000 + spawns.len() as u32;
-            spawns.push((exe.to_path_buf(), args.to_vec(), Arc::clone(&exited)));
+            spawns.push((exe.to_path_buf(), args.to_vec(), Arc::clone(&exit)));
             pid
         };
         Ok(Box::new(FakeChild {
-            exited,
+            exit,
             pid,
             slow_kill: self.slow_kill_polls.load(Ordering::SeqCst),
             dying: None,
             fail_kills: Arc::clone(&self.fail_kills),
+            polls: Arc::clone(&self.polls),
         }))
     }
 }
 
 struct FakeChild {
-    exited: Arc<AtomicBool>,
+    /// The exit code the child reports once it has ended; `None` while it runs.
+    exit: FakeExit,
     pid: u32,
     /// Polls a killed process needs before it has exited (0 = at once).
     slow_kill: u32,
@@ -734,19 +771,23 @@ struct FakeChild {
     dying: Option<u32>,
     /// Kills that fail with an error.
     fail_kills: Arc<AtomicUsize>,
+    /// How many times this child was asked whether it had exited.
+    polls: Arc<AtomicU32>,
 }
 
 impl ChildProcess for FakeChild {
     fn try_wait(&mut self) -> io::Result<Option<i32>> {
+        self.polls.fetch_add(1, Ordering::SeqCst);
         if let Some(left) = self.dying {
             if left == 0 {
-                self.exited.store(true, Ordering::SeqCst);
+                // The supervisor's kill code is 1, as it is on Windows.
+                set_exit_code(&self.exit, 1);
                 self.dying = None;
             } else {
                 self.dying = Some(left - 1);
             }
         }
-        Ok(self.exited.load(Ordering::SeqCst).then_some(1))
+        Ok(exit_code(&self.exit))
     }
 
     fn kill(&mut self) -> io::Result<()> {
@@ -757,7 +798,7 @@ impl ChildProcess for FakeChild {
         if self.slow_kill > 0 {
             self.dying = Some(self.slow_kill);
         } else {
-            self.exited.store(true, Ordering::SeqCst);
+            set_exit_code(&self.exit, 1);
         }
         Ok(())
     }
@@ -790,15 +831,16 @@ impl crate::daemon::SessionLauncher for FakeLauncher {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .iter()
-            .map(|(pid, image, session, flag)| crate::daemon::RunningDaemon {
+            .map(|(pid, image, session, exit)| crate::daemon::RunningDaemon {
                 image: image.clone(),
                 session: *session,
                 process: Box::new(FakeChild {
-                    exited: Arc::clone(flag),
+                    exit: Arc::clone(exit),
                     pid: *pid,
                     slow_kill: 0,
                     dying: None,
                     fail_kills: Arc::clone(&self.0.fail_kills),
+                    polls: Arc::clone(&self.0.polls),
                 }),
             })
             .collect()

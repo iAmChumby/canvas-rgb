@@ -13,6 +13,11 @@
 //!    connection closes.
 //! 3. Every rejection is logged with the client's PID and session.
 //!
+//! Two requests are stricter than the rest: `InstallUpdate` and `DaemonQuitting` are accepted
+//! only from the daemon this service launched, and are refused while no daemon runs (see
+//! [`admit_daemon`]). `DaemonQuitting` says the daemon is leaving on purpose, so the service
+//! stops supervising it; a client that is not that daemon must not be able to say it (#6).
+//!
 //! Framing is `canvas_proto::pipe`: a u32 little-endian length, then JSON. One request gets
 //! one response, in order. Frames over `MAX_FRAME` get an error and the connection closes.
 //! The OS calls for step 1 sit behind [`PeerProbe`], so tests use a fake.
@@ -110,24 +115,36 @@ pub fn admit(peer: &dyn PeerProbe, launched_daemon: Option<u32>) -> Result<Admit
     Ok(Admitted { pid, session })
 }
 
-/// `InstallUpdate` is stricter than every other operation: it skips the daemon's API token and the
-/// 9430-owner check, so it is accepted only from the daemon this service launched. With no launched
-/// daemon, or a client that is not that daemon's process, it is refused.
-pub fn admit_install(peer: &dyn PeerProbe, launched_daemon: Option<u32>) -> Result<Admitted, Rejected> {
+/// A request that only the daemon this service launched may make. The client is admitted as
+/// usual first (it must be in the console session), and then it must be that daemon's process:
+/// with no launched daemon, or with a client that is not it, the request is refused. `what`
+/// names the request in the refusal, so the log says which one was refused.
+pub fn admit_daemon(
+    peer: &dyn PeerProbe,
+    launched_daemon: Option<u32>,
+    what: &str,
+) -> Result<Admitted, Rejected> {
     let who = admit(peer, launched_daemon)?;
     match launched_daemon {
         Some(daemon) if daemon == who.pid => Ok(who),
         Some(daemon) => Err(Rejected {
             pid: Some(who.pid),
             session: Some(who.session),
-            reason: format!("InstallUpdate is only accepted from the launched daemon (pid {daemon}), not pid {}", who.pid),
+            reason: format!("{what} is only accepted from the launched daemon (pid {daemon}), not pid {}", who.pid),
         }),
         None => Err(Rejected {
             pid: Some(who.pid),
             session: Some(who.session),
-            reason: "InstallUpdate is only accepted from the daemon this service launched, and none is running".into(),
+            reason: format!("{what} is only accepted from the daemon this service launched, and none is running"),
         }),
     }
+}
+
+/// `InstallUpdate` is stricter than every other operation: it skips the daemon's API token and the
+/// 9430-owner check, so it is accepted only from the daemon this service launched. With no launched
+/// daemon, or a client that is not that daemon's process, it is refused.
+pub fn admit_install(peer: &dyn PeerProbe, launched_daemon: Option<u32>) -> Result<Admitted, Rejected> {
+    admit_daemon(peer, launched_daemon, "InstallUpdate")
 }
 
 /// The production probe: the Win32 calls on one connected pipe instance.
@@ -367,6 +384,29 @@ pub async fn handle_client(
                 }
                 PipeResponse::Ok
             }
+            Ok(PipeRequest::DaemonQuitting) => {
+                // Only the daemon this service launched may say it is quitting (#6). While no
+                // daemon runs (the relaunch is held after a session end), every client in the
+                // console session is admitted, and one of them saying "it is quitting" would
+                // stop the supervision for good.
+                let launched = core.lock().await.daemon.daemon_pid();
+                let readmit = admit_daemon(peer.as_ref(), launched, "DaemonQuitting");
+                match readmit {
+                    Ok(_) => core
+                        .lock()
+                        .await
+                        .handle(PipeRequest::DaemonQuitting, Instant::now()),
+                    Err(rejected) => {
+                        tracing::warn!(
+                            pid = ?rejected.pid,
+                            session = ?rejected.session,
+                            reason = %rejected.reason,
+                            "refused DaemonQuitting: the client is not the launched daemon in the console session"
+                        );
+                        error(error_codes::UNAUTHORIZED, rejected.reason)
+                    }
+                }
+            }
             Ok(request) => core.lock().await.handle(request, Instant::now()),
             Err(e) => error(error_codes::VALIDATION, format!("invalid request: {e}")),
         };
@@ -429,6 +469,12 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn test_core(home: PathBuf) -> Core {
+        test_core_with_processes(home).0
+    }
+
+    /// The core of [`test_core`], with the fakes of its daemon supervisor, so a test can make
+    /// that daemon end with its session (#6).
+    fn test_core_with_processes(home: PathBuf) -> (Core, FakeProcesses) {
         let chip = FakeChip::new(MSI_ALT1_MAP);
         let chip_box: Box<dyn crate::chip::FanChip> =
             Box::new(crate::chip::Nct6687::detect(chip, MSI_ALT1_MAP).unwrap());
@@ -449,8 +495,12 @@ pub(crate) mod tests {
             Box::new(FakeSpawner(FakeProcesses::new())),
             Box::new(|| Box::new(canvas_adapters::openrgb::OpenRgbAdapter::new("127.0.0.1", 1))),
         );
-        let daemon = DaemonSupervisor::new(PathBuf::from("canvas-rgbd.exe"), Box::new(FakeLauncher(FakeProcesses::new())));
-        Core::new(fans, openrgb, daemon)
+        let processes = FakeProcesses::new();
+        let daemon = DaemonSupervisor::new(
+            PathBuf::from("canvas-rgbd.exe"),
+            Box::new(FakeLauncher(processes.clone())),
+        );
+        (Core::new(fans, openrgb, daemon), processes)
     }
 
     async fn round_trip(client: &mut NamedPipeClient, request: &PipeRequest) -> PipeResponse {
@@ -556,8 +606,20 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let name = unique_name("every-op");
         let first = create_instance(&name, true).unwrap();
-        let core = Arc::new(Mutex::new(test_core(dir.path().to_path_buf())));
-        tokio::spawn(serve(Arc::clone(&core), name.clone(), first, peers(peer(CONSOLE, 77))));
+        let (mut core, _processes) = test_core_with_processes(dir.path().to_path_buf());
+        // The service launched a daemon: only that daemon may say it is quitting.
+        core.daemon.start(Instant::now());
+        let daemon = core
+            .daemon
+            .daemon_pid()
+            .expect("the launched daemon has a pid");
+        let core = Arc::new(Mutex::new(core));
+        tokio::spawn(serve(
+            Arc::clone(&core),
+            name.clone(),
+            first,
+            peers(peer(CONSOLE, daemon)),
+        ));
 
         let mut client = connect(&name).await;
         let curve = FanMode::Curve {
@@ -862,6 +924,115 @@ pub(crate) mod tests {
         assert!(wrong.reason.contains("launched daemon"), "{}", wrong.reason);
         assert_eq!(admit_install(&peer(CONSOLE, 78), Some(78)).unwrap(), Admitted { pid: 78, session: CONSOLE });
         assert!(admit_install(&peer(CONSOLE + 1, 78), Some(78)).is_err(), "the console rule still applies");
+    }
+
+    // ---- DaemonQuitting over a real pipe (#6) ----
+
+    /// The exit code that says the daemon ended with its session (#6).
+    const SESSION_END_CODE: i32 = 0xC000_026Bu32 as i32;
+
+    /// While no daemon runs (the relaunch is held after a session end), every client in the
+    /// console session is admitted. Such a client must not be able to say the daemon is
+    /// quitting: that would stop the supervision for good (#6).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_daemon_quitting_from_another_client_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, processes) = test_core_with_processes(dir.path().to_path_buf());
+        core.daemon.start(Instant::now());
+        // The daemon ends with its session: the relaunch is held, so no daemon is running.
+        processes.exit_last_with(SESSION_END_CODE);
+        core.daemon.tick(Instant::now());
+        assert_eq!(
+            core.daemon.daemon_pid(),
+            None,
+            "the daemon is gone and the relaunch is held"
+        );
+        let core = Arc::new(Mutex::new(core));
+        let name = unique_name("quit-refused");
+        let first = create_instance(&name, true).unwrap();
+        tokio::spawn(serve(
+            Arc::clone(&core),
+            name.clone(),
+            first,
+            peers(peer(CONSOLE, 77)),
+        ));
+        let mut client = connect(&name).await;
+        greet(&mut client).await;
+        let response = round_trip(&mut client, &PipeRequest::DaemonQuitting).await;
+        assert!(
+            matches!(&response, PipeResponse::Error { code, .. } if code == error_codes::UNAUTHORIZED),
+            "{response:?}"
+        );
+        // The supervision did not stop: after the hold the daemon starts again.
+        core.lock()
+            .await
+            .daemon
+            .tick(Instant::now() + Duration::from_secs(61));
+        assert!(
+            core.lock().await.daemon.daemon_pid().is_some(),
+            "the supervision stopped for good"
+        );
+    }
+
+    /// The daemon this service launched may say it is quitting: the service does not restart it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_launched_daemon_may_say_it_is_quitting() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut core, processes) = test_core_with_processes(dir.path().to_path_buf());
+        core.daemon.start(Instant::now());
+        let daemon = core
+            .daemon
+            .daemon_pid()
+            .expect("the launched daemon has a pid");
+        let core = Arc::new(Mutex::new(core));
+        let name = unique_name("quit-ok");
+        let first = create_instance(&name, true).unwrap();
+        tokio::spawn(serve(
+            Arc::clone(&core),
+            name.clone(),
+            first,
+            peers(peer(CONSOLE, daemon)),
+        ));
+        let mut client = connect(&name).await;
+        greet(&mut client).await;
+        let response = round_trip(&mut client, &PipeRequest::DaemonQuitting).await;
+        assert_eq!(response, PipeResponse::Ok, "{response:?}");
+        // The daemon that quit is not started again.
+        processes.exit_last();
+        core.lock()
+            .await
+            .daemon
+            .tick(Instant::now() + Duration::from_secs(1));
+        assert_eq!(
+            processes.spawns().len(),
+            1,
+            "the daemon that quit was started again"
+        );
+    }
+
+    #[test]
+    fn admit_daemon_needs_the_launched_daemon_and_says_which_request_it_was() {
+        let none = admit_daemon(&peer(CONSOLE, 77), None, "DaemonQuitting").unwrap_err();
+        assert_eq!(
+            (none.pid, none.session),
+            (Some(77), Some(CONSOLE)),
+            "the refusal carries pid and session for the log"
+        );
+        assert!(none.reason.contains("none is running"), "{}", none.reason);
+        assert!(none.reason.contains("DaemonQuitting"), "{}", none.reason);
+        let wrong = admit_daemon(&peer(CONSOLE, 77), Some(78), "DaemonQuitting").unwrap_err();
+        assert!(wrong.reason.contains("launched daemon"), "{}", wrong.reason);
+        assert_eq!(
+            admit_daemon(&peer(CONSOLE, 78), Some(78), "DaemonQuitting").unwrap(),
+            Admitted {
+                pid: 78,
+                session: CONSOLE
+            }
+        );
+        assert!(
+            admit_daemon(&peer(CONSOLE + 1, 78), Some(78), "DaemonQuitting").is_err(),
+            "the console rule still applies"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
