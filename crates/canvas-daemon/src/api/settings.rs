@@ -198,6 +198,17 @@ pub async fn config_import(
     crate::stacks::write_file(&home, &stacks)
         .map_err(|e| ApiFailure::internal(format!("could not save the stacks: {e}")))?;
 
+    // A draft on the lights holds the layout's effect from before the import as its prior,
+    // and the import brings a layout of its own. The draft ends here, before the store is
+    // swapped: its prior effect goes back on the lights the normal way (the layout in
+    // force now still names it), and the draft's slot, lease and epoch are gone, so the
+    // draft cannot end later and put the pre-import effect back over the imported one
+    // (#94).
+    let ended = crate::draft::stop(&app, None).await;
+    if ended.ended.is_some() {
+        tracing::info!("the config import ended the draft on the lights");
+    }
+
     // Reload the store from disk and apply it.
     let store = crate::storage::Store::load_from(&home);
     {

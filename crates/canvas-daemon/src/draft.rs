@@ -99,6 +99,23 @@ impl Slot {
         }
     }
 
+    /// The source hash the daemon stored for this draft, for an HTML draft.
+    fn stored_source_hash(&self) -> Option<&str> {
+        match &self.kind {
+            SlotKind::Html { source_hash, .. } => Some(source_hash),
+            SlotKind::Stack { .. } => None,
+        }
+    }
+
+    /// True when this slot holds the draft of `html`, whose hash is `source_hash`.
+    ///
+    /// The hash is a short label the editor shows, and a hash can collide: the source itself
+    /// is compared as well, so a different file that happens to hash the same is a different
+    /// draft and takes the lights (#94).
+    pub fn is_same_html(&self, html: &str, source_hash: &str) -> bool {
+        self.stored_source_hash() == Some(source_hash) && self.html_source() == Some(html)
+    }
+
     /// The structure hash, for a stack draft.
     pub fn structure(&self) -> Option<&str> {
         match &self.kind {
@@ -441,7 +458,7 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<bool, PutE
         // engine's instance is re-initialised rather than rebuilt, so a beat does not reload
         // the file's scripts.
         if let Some(slot) = &existing {
-            if slot.html_source() == Some(html) {
+            if slot.is_same_html(html, &source_hash) {
                 let props_changed = slot.props != *props;
                 let lease_until = app.draft.now() + canvas_proto::consts::DRAFT_LEASE;
                 {
@@ -948,7 +965,93 @@ pub fn spawn_sweeper(app: Arc<App>) {
             if app.shutting_down.load(std::sync::atomic::Ordering::SeqCst) != 0 {
                 return;
             }
-            expire_if_due(&app).await;
+            sweep_once(&app).await;
         }
     });
+}
+
+/// One sweep: the draft whose lease ran out ends.
+///
+/// The sweep runs in a task of its own, so a panic in the expiry is a failed join and not
+/// the end of the sweeper: the panic is logged and the next sweep runs. Without this, one
+/// panic in [`expire_if_due`] would stop the draft expiry for the rest of the daemon's life
+/// (#94).
+async fn sweep_once(app: &Arc<App>) {
+    let sweep_app = Arc::clone(app);
+    match tokio::spawn(async move { expire_if_due(&sweep_app).await }).await {
+        Ok(_) => {}
+        Err(error) if error.is_panic() => {
+            let payload = error.into_panic();
+            tracing::error!(
+                panic = %crate::panic_payload_text(&payload),
+                "the draft sweeper panicked; the sweep continues"
+            );
+        }
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "the draft sweeper's sweep did not finish; the sweep continues"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A slot holding `source`, with the hash the daemon stores beside it.
+    fn html_slot(source: &str, source_hash: &str) -> Slot {
+        Slot {
+            id: format!("{}{source_hash}", canvas_proto::consts::DRAFT_ID_PREFIX),
+            props: Props::new(),
+            prior: None,
+            lease_until: Duration::ZERO,
+            kind: SlotKind::Html {
+                source: Arc::from(source),
+                source_hash: source_hash.to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn a_slot_with_the_same_hash_but_another_source_is_not_the_same_draft() {
+        // The hash is a label and two files can hash the same, so the source decides: a
+        // file that collides with the one on the lights is a new draft (#94).
+        let slot = html_slot("the first file", "0123456789abcdef");
+        assert!(
+            slot.is_same_html("the first file", "0123456789abcdef"),
+            "the same source with the same hash is the same draft"
+        );
+        assert!(
+            !slot.is_same_html("another file", "0123456789abcdef"),
+            "the same hash with another source is another draft"
+        );
+        assert!(
+            !slot.is_same_html("the first file", "fedcba9876543210"),
+            "another hash is another draft"
+        );
+    }
+
+    #[test]
+    fn a_stack_draft_is_never_the_same_html_draft() {
+        let slot = Slot {
+            id: "stack:one".to_string(),
+            props: Props::new(),
+            prior: None,
+            lease_until: Duration::ZERO,
+            kind: SlotKind::Stack {
+                stack_id: "one".to_string(),
+                structure: "0123456789abcdef".to_string(),
+                live: Arc::new(RwLock::new(LiveMap {
+                    version: 0,
+                    layers: std::collections::BTreeMap::new(),
+                })),
+            },
+        };
+        assert!(
+            !slot.is_same_html("any source", "0123456789abcdef"),
+            "a stack draft is not an HTML draft"
+        );
+    }
 }

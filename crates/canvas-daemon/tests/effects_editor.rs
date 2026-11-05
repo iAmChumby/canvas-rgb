@@ -435,7 +435,7 @@ async fn a_runaway_draft_is_stopped_and_the_api_keeps_answering() {
 #[tokio::test]
 async fn a_preview_body_over_the_limit_is_refused() {
     let (router, _app, _home, _folder) = build();
-    // One byte over the import's body cap.
+    // The html is exactly the body's cap; the JSON wrapper around it puts the body over.
     let html = "a".repeat(canvas_daemon::api::effects::IMPORT_BODY_LIMIT);
     let body = preview_body(&html, serde_json::json!({}));
     let response = post_preview(router, body).await;
@@ -878,6 +878,7 @@ async fn a_draft_writes_nothing_to_the_saved_files_or_the_effects_folder() {
 #[tokio::test]
 async fn a_draft_body_over_the_limit_is_refused() {
     let (router, _app, _engine, _home, _folder, _clock) = build_with_clock();
+    // The html is exactly the body's cap; the JSON wrapper around it puts the body over.
     let html = "a".repeat(canvas_daemon::api::effects::IMPORT_BODY_LIMIT);
     let response = put_draft(router, &html, serde_json::json!({})).await;
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
@@ -1324,4 +1325,228 @@ async fn the_sweepers_ending_keeps_its_note_for_a_later_get() {
         "the GET after the sweeper still says the lights fell back: {note:?}"
     );
     assert_eq!(running(&engine).0.as_deref(), Some("solid"));
+}
+
+// ---------------------------------------------------------------- #94
+
+/// Waits until `check` is true, for at most a few seconds. The test waits for the daemon's
+/// task; it does not measure how long it took.
+async fn wait_until(mut check: impl FnMut() -> bool) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline {
+        if check() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    panic!("the condition did not come true");
+}
+
+/// The moving effect padded with a comment to exactly `size` bytes: the same effect, with
+/// the room the HTML cap allows.
+fn padded_effect(size: usize) -> String {
+    let mut html = MOVING.to_string();
+    let overhead = "<!--".len() + "-->".len();
+    assert!(html.len() + overhead <= size, "the effect fits in the size");
+    let filler = size - html.len() - overhead;
+    html.push_str("<!--");
+    html.push_str(&"x".repeat(filler));
+    html.push_str("-->");
+    assert_eq!(html.len(), size, "the padded effect is exactly the size");
+    html
+}
+
+#[tokio::test]
+async fn an_import_ends_the_draft_on_the_lights() {
+    let (router, app, engine, _home, _folder, _clock) = build_with_clock();
+    let prior = color("#112233");
+    prior_effect(&app, "solid", prior.clone()).await;
+    assert_eq!(
+        put_draft(router.clone(), MOVING, serde_json::json!({}))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert!(
+        draft_state(router.clone()).await.active,
+        "the draft is on the lights"
+    );
+
+    // A bundle that brings an effect of its own in the active layout.
+    let mut bundle = json(
+        router
+            .clone()
+            .oneshot(request("GET", routes::CONFIG_EXPORT))
+            .await
+            .expect("the router answers"),
+    )
+    .await;
+    bundle["layouts"]["layouts"][0]["effect"] =
+        serde_json::json!({ "id": "gradient", "props": {} });
+    let response = router
+        .clone()
+        .oneshot(request_with_body(
+            "POST",
+            routes::CONFIG_IMPORT,
+            &bundle.to_string(),
+        ))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK, "the bundle imports");
+
+    // The import swapped the layout under the draft, so the draft is over: it must not end
+    // later and put the effect from before the import back over the imported one (#94).
+    assert!(
+        !draft_state(router.clone()).await.active,
+        "the import ended the draft"
+    );
+    // The ending went the normal way: the effect the draft took over from is back.
+    let (id, props) = running(&engine);
+    assert_eq!(id.as_deref(), Some("solid"), "the prior effect is back");
+    assert_eq!(props, prior, "with the props it had");
+}
+
+#[tokio::test]
+async fn a_broken_effect_file_over_the_cap_is_refused() {
+    let (router, app, _home, folder) = build();
+    // A file that does not parse (so it is not in the library and the source route falls
+    // back to the file) and is over the cap the preview and the draft use.
+    let big = "a".repeat(canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES + 1);
+    std::fs::write(folder.join("big.html"), &big).expect("the file is written");
+    app.user_effects.rescan(&folder);
+    assert!(
+        app.user_effects
+            .schemas()
+            .iter()
+            .all(|s| s.id != "html:big"),
+        "the file does not parse, so the route reads the file itself"
+    );
+
+    let response = router
+        .oneshot(request("GET", "/api/v1/effects/html:big/source"))
+        .await
+        .expect("the router answers");
+    assert_eq!(
+        response.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a file over the cap is refused, not read"
+    );
+    let message = json(response).await["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        message.contains("the limit is"),
+        "the answer names the limit: {message}"
+    );
+}
+
+#[tokio::test]
+async fn a_preview_at_the_html_cap_is_rendered() {
+    let (router, _app, _home, _folder) = build();
+    let html = padded_effect(canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES);
+    let response = post_preview(router, preview_body(&html, serde_json::json!({}))).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "the cap itself is allowed"
+    );
+}
+
+#[tokio::test]
+async fn a_preview_one_byte_over_the_html_cap_is_refused() {
+    let (router, _app, _home, _folder) = build();
+    let html = padded_effect(canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES + 1);
+    let response = post_preview(router, preview_body(&html, serde_json::json!({}))).await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let message = json(response).await["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        message.contains("the limit is"),
+        "the answer names the limit: {message}"
+    );
+}
+
+#[tokio::test]
+async fn a_draft_at_the_html_cap_runs() {
+    let (router, _app, engine, _home, _folder, _clock) = build_with_clock();
+    let html = padded_effect(canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES);
+    let response = put_draft(router, &html, serde_json::json!({})).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "the cap itself is allowed"
+    );
+    assert!(
+        running(&engine).0.is_some(),
+        "the draft at the cap is on the lights"
+    );
+}
+
+#[tokio::test]
+async fn a_draft_one_byte_over_the_html_cap_is_refused() {
+    let (router, _app, _engine, _home, _folder, _clock) = build_with_clock();
+    let html = padded_effect(canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES + 1);
+    let response = put_draft(router, &html, serde_json::json!({})).await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let message = json(response).await["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        message.contains("the limit is"),
+        "the answer names the limit: {message}"
+    );
+}
+
+#[tokio::test]
+async fn a_panic_in_the_sweeper_does_not_stop_the_next_sweep() {
+    let (router, app, engine, _home, _folder, clock) = build_with_clock();
+    let prior = color("#112233");
+    prior_effect(&app, "solid", prior.clone()).await;
+    assert_eq!(
+        put_draft(router.clone(), MOVING, serde_json::json!({}))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    clock.advance(canvas_proto::consts::DRAFT_LEASE);
+
+    // The restore that ends the draft panics: the sweep that runs into it dies with it.
+    engine
+        .panic_on_set_effect
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    canvas_daemon::draft::spawn_sweeper(app.clone());
+
+    // The first sweep takes the draft and dies in the restore.
+    wait_until(|| !app.draft.is_active()).await;
+    assert_eq!(
+        running(&engine).0,
+        Some(format!(
+            "draft:{}",
+            canvas_daemon::user_effects::source_hash(MOVING)
+        )),
+        "the restore that panicked did not finish"
+    );
+
+    // The sweeper is still there: the next draft ends the same way, without a panic.
+    engine
+        .panic_on_set_effect
+        .store(0, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        put_draft(router.clone(), MOVING, serde_json::json!({}))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    clock.advance(canvas_proto::consts::DRAFT_LEASE);
+    wait_until(|| !app.draft.is_active()).await;
+    let (id, props) = running(&engine);
+    assert_eq!(id.as_deref(), Some("solid"), "the second draft ended too");
+    assert_eq!(props, prior, "with the props the prior effect had");
+
+    app.shutting_down
+        .store(1, std::sync::atomic::Ordering::SeqCst);
 }

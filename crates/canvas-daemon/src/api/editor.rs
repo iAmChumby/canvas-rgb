@@ -35,9 +35,7 @@ pub async fn effect_source(
         // folder and no `..` reaches the read.
         if crate::user_effects::check_file_name(&file_name).is_ok() {
             if let Some(path) = crate::user_effects::existing_file(&app.effects_dir, &file_name) {
-                let source = std::fs::read_to_string(&path).map_err(|e| {
-                    ApiFailure::internal(format!("could not read the effect file: {e}"))
-                })?;
+                let source = read_effect_source(&path)?;
                 let file_name = path
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned())
@@ -56,6 +54,34 @@ pub async fn effect_source(
         }
         _ => Err(ApiFailure::not_found(format!("no effect with the id or name {id}"))),
     }
+}
+
+/// Reads an effect file for the source route, with the cap the preview and the draft use.
+///
+/// A file that does not parse is still a file the editor has to open, so the fallback reads
+/// it. The read is capped like the other two routes' HTML is: a file over the cap is
+/// refused with the same shape (a validation error that names the size and the limit)
+/// instead of being read into memory (#94).
+fn read_effect_source(path: &std::path::Path) -> ApiResult<String> {
+    use std::io::Read;
+    let limit = canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES;
+    let file = std::fs::File::open(path)
+        .map_err(|e| ApiFailure::internal(format!("could not read the effect file: {e}")))?;
+    // The size is read from the file itself, so the answer names it.
+    let size = file.metadata().map(|meta| meta.len()).unwrap_or(0);
+    // The read stops one byte over the cap, so a file that grew after the size was read is
+    // caught too.
+    let mut bytes = Vec::new();
+    std::io::Read::take(file, limit as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| ApiFailure::internal(format!("could not read the effect file: {e}")))?;
+    if bytes.len() > limit {
+        return Err(ApiFailure::validation(format!(
+            "the effect file is {size} bytes; the limit is {limit}"
+        )));
+    }
+    String::from_utf8(bytes)
+        .map_err(|e| ApiFailure::internal(format!("could not read the effect file: {e}")))
 }
 
 /// How many previews may render at once. Each one can hold a blocking thread for up to the
