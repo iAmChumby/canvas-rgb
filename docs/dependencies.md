@@ -90,6 +90,7 @@ started, `approved (YYYY-MM-DD)` for a dependency Luke approved later, and
 | clap | rust, prod | 4.6.7 | MIT OR Apache-2.0 | approved (baseline 2026-11-05) |
 | futures-util | rust, prod | 0.3.34 | MIT OR Apache-2.0 | approved (baseline 2026-11-05) |
 | gif | rust, prod | 0.13.3 | MIT OR Apache-2.0 | approved (baseline 2026-11-05) |
+| gpui | rust, prod | 0.2.2 | Apache-2.0 | approved (2026-11-05) |
 | hidapi | rust, prod | 2.6.7 | MIT | approved (baseline 2026-11-05) |
 | libloading | rust, prod | 0.8.9 | ISC | approved (baseline 2026-11-05) |
 | minisign-verify | rust, prod | 0.3.0 | MIT | approved (baseline 2026-11-05) |

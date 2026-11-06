@@ -11,6 +11,7 @@ members = [
     "crates/canvas-svc",
     "tools/poison-compare",
     "app/src-tauri",
+    "app/gpui",
 ]
 
 [workspace.package]
