@@ -476,11 +476,15 @@ impl FanController {
     /// is `PipeRequest::SetHeaderAvailability` (issue #146).
     pub fn set_header_override(&mut self, header: &str, available: bool) -> Result<(), FanError> {
         self.check_known_header(header)?;
-        self.header_overrides.insert(header.to_string(), available);
-        self.save_header_overrides()?;
+        // Build the new map and save it first: a failed save changes nothing in memory
+        // and writes nothing to the chip (issue #146 review S1).
+        let mut next = self.header_overrides.clone();
+        next.insert(header.to_string(), available);
+        self.save_header_overrides_with(&next)?;
+        self.header_overrides = next;
         tracing::info!(header, available, "header availability override saved");
         if !available {
-            if let Some(ch) = self.chip.as_ref().and_then(|c| c.channels().iter().position(|s| s.id == header)) {
+            if let Some(ch) = self.channel_of(header) {
                 self.release(ch, "header marked not on this board");
             }
         }
@@ -488,32 +492,48 @@ impl FanController {
     }
 
     /// Takes the owner's word off a header (issue #146): the key leaves `header_overrides`,
-    /// `chip.toml` is saved and the per-board table decides again. A header that was marked
-    /// "not on my board" is not written here either; the next tick applies the table's answer.
-    pub fn clear_header_override(&mut self, header: &str) -> Result<(), FanError> {
+    /// `chip.toml` is saved and the per-board table decides again, as if no word had ever
+    /// been given. If the board table hides the header it is released to BIOS; if the
+    /// board routes it the active profile's mode for it resumes (or BIOS if the profile
+    /// says BIOS), via `apply_header`.
+    pub fn clear_header_override(&mut self, header: &str, now: Instant) -> Result<(), FanError> {
         self.check_known_header(header)?;
-        self.header_overrides.remove(header);
-        self.save_header_overrides()?;
+        // Save first, mutate after: a failed save changes nothing in memory.
+        let mut next = self.header_overrides.clone();
+        next.remove(header);
+        self.save_header_overrides_with(&next)?;
+        self.header_overrides = next;
         tracing::info!(header, "the header availability override was cleared");
-        Ok(())
-    }
-
-    /// Refuses a header the chip does not have. A header the chip reads is known, whatever
-    /// the board routes: the table decides that, the owner does not.
-    fn check_known_header(&self, header: &str) -> Result<(), FanError> {
-        if let Some(chip) = self.chip.as_ref() {
-            if !chip.channels().iter().any(|c| c.id == header) {
-                return Err(FanError::Validation(format!("unknown header {header}")));
+        if self.header_available(header) {
+            if let Some(ch) = self.channel_of(header) {
+                self.apply_header(ch, now);
             }
+        } else if let Some(ch) = self.channel_of(header) {
+            self.release(ch, "header cleared to a board-hidden header");
         }
         Ok(())
     }
 
+    /// The chip channel index for a header id, when the chip has it.
+    fn channel_of(&self, header: &str) -> Option<usize> {
+        self.chip.as_ref().and_then(|c| c.channels().iter().position(|s| s.id == header))
+    }
+
+    /// Refuses a header the chip does not have. A header the chip reads is known, whatever
+    /// the board routes: the table decides that, the owner does not. With no chip every
+    /// header is refused: there is no channel list to know it from.
+    fn check_known_header(&self, header: &str) -> Result<(), FanError> {
+        match self.chip.as_ref() {
+            Some(chip) if chip.channels().iter().any(|c| c.id == header) => Ok(()),
+            _ => Err(FanError::Validation(format!("unknown header {header}"))),
+        }
+    }
+
     /// Writes the per-header overrides back to `chip.toml`.
-    fn save_header_overrides(&self) -> Result<(), FanError> {
+    fn save_header_overrides_with(&self, overrides: &BTreeMap<String, bool>) -> Result<(), FanError> {
         let path = paths::chip_path(&self.home);
         let mut state = store::load_chip_state(&path)?;
-        state.header_overrides = self.header_overrides.clone();
+        state.header_overrides = overrides.clone();
         store::save_chip_state(&path, &state)?;
         Ok(())
     }

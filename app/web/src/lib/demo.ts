@@ -1553,9 +1553,13 @@ export async function demoRequest(method: string, path: string, body: unknown): 
     if (seg[1] === "headers" && seg[3] === "availability" && method === "PUT") {
       if (!s.serviceUp) fail(503, "service_unavailable", "the fan service is not reachable");
       const header = seg[2] ?? "";
-      if (!FAN_HEADERS.some((h) => h.id === header)) fail(404, "not_found", `no header ${header}`);
+      if (!FAN_HEADERS.some((h) => h.id === header)) fail(422, "validation", `unknown header ${header}`);
+      // The real API refuses a body without `available`; only `null` takes the word off.
+      if (body === null || typeof body !== "object" || !("available" in body)) {
+        fail(422, "validation", "the body must carry available: true, false, or null");
+      }
       const available = (body as { available: boolean | null }).available;
-      if (available === null || available === undefined) delete s.fanOverrides[header];
+      if (available === null) delete s.fanOverrides[header];
       else s.fanOverrides[header] = available;
       return applyFanScenarios(fansStatus());
     }

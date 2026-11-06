@@ -9,7 +9,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Added
 
 - Experimental builds can switch the editor: the tray menu and Settings then offer the React editor or the GPUI editor, and the tray opens the one you picked. A stable build always opens the React editor. (#202)
-- Fans: mark a header Not on my board, or Show anyway one the board list hides. The word is kept per header, so "Use the board list" gives the decision back to the board. (#146)
+- Fans: mark a header Not on my board, or Show anyway on a header the board list hides. The word is kept per header, so "Use the board list" gives the decision back to the board. (#146)
 
 ## [0.9.0] - 2026-11-06
 

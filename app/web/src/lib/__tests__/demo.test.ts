@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { checkPeripheralValue, demoRequest } from "@/lib/demo";
 import type { DemoPeripheral } from "@/lib/peripheralFixtures";
-import { messageOf } from "@/lib/errors";
+import { ApiFailure, messageOf } from "@/lib/errors";
 
 // The demo backend's own words. The editor shows them behind a disclosure, and they are the
 // only words a person reads when nothing answers: they say canvas-rgb, not "the daemon".
@@ -17,6 +17,30 @@ describe("the demo backend's words", () => {
     }
     expect(message).toMatch(/canvas-rgb/);
     expect(message).not.toMatch(/daemon/i);
+  });
+});
+
+describe("the demo's header availability answer (#146)", () => {
+  it("answers an unknown header with 422 validation, like the daemon", async () => {
+    window.history.replaceState({}, "", "/");
+    const err = await demoRequest("PUT", "/api/v1/fans/headers/not_a_header/availability", { available: false }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(ApiFailure);
+    expect((err as ApiFailure).status).toBe(422);
+    expect((err as ApiFailure).code).toBe("validation");
+  });
+
+  it("refuses a body without available, like the real API", async () => {
+    window.history.replaceState({}, "", "/");
+    const err = await demoRequest("PUT", "/api/v1/fans/headers/sys_fan1/availability", {}).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(ApiFailure);
+    expect((err as ApiFailure).status).toBe(422);
+    expect((err as ApiFailure).code).toBe("validation");
   });
 });
 
