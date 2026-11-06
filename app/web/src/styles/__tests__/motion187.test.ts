@@ -10,6 +10,28 @@ const tokens = read("src/styles/tokens.css");
 const app = read("src/styles/app.css");
 const motion = read("src/styles/motion.css");
 const desk = read("src/views/desk.module.css");
+const effectsView = read("src/views/EffectsView.tsx");
+const presetStrip = read("src/views/PresetStrip.tsx");
+const statusStrip = read("src/shell/StatusStrip.tsx");
+
+/** The exact `{ ... }` block of one selector (no surrounding rules). */
+function blockOf(css: string, selector: string): string {
+  const esc = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`${esc}[^\\{]*\\{[^}]*\\}`, "s").exec(css)?.[0] ?? "";
+}
+
+/** The exact `@keyframes name { ... }` block, closing brace included. */
+function keyframesOf(css: string, name: string): string {
+  return new RegExp(`@keyframes ${name}\\s*\\{[\\s\\S]*?\\n\\}`).exec(css)?.[0] ?? "";
+}
+
+/** Asserts an exact rule block never smuggles a raw millisecond value. */
+function expectTokenDriven(block: string, what: string): void {
+  expect(block, `${what} is found`).not.toBe("");
+  expect(block, `${what} names a duration token`).toMatch(/var\(--dur/);
+  expect(block, `${what} uses no raw ms`).not.toMatch(/\d+ms/);
+  expect(block, `${what} uses no raw curve`).not.toMatch(/cubic-bezier\(/);
+}
 
 describe("motion tokens (#187)", () => {
   it("an exit duration token exists, shorter than the entrance tokens", () => {
@@ -23,16 +45,17 @@ describe("motion tokens (#187)", () => {
     expect(Number(exit)).toBeLessThan(Number(fast));
   });
 
-  it("every new animation in the motion layer uses a token duration", () => {
-    // The rules this issue adds must not smuggle a raw millisecond or a raw curve.
-    for (const name of ["popover-out", "listbox-out", "success-pulse", "icon-swap", "swatch-wipe", "settle"]) {
-      for (const [file, css] of [["app.css", app], ["motion.css", motion], ["desk.module.css", desk]] as const) {
-        const at = css.indexOf(name);
-        if (at === -1) continue;
-        const snippet = css.slice(Math.max(0, at - 400), at + 900);
-        expect(snippet, `${name} in ${file} uses no token duration`).toMatch(/var\(--dur/);
-      }
-    }
+  it("every new animation's exact rule block uses a token duration, never a raw millisecond", () => {
+    // Each animation's own declaration block is checked in isolation — not a
+    // 400-char window around a name — so a raw value anywhere in it fails.
+    expectTokenDriven(blockOf(app, ".popover[data-closing=\"true\"]"), ".popover[data-closing]");
+    expectTokenDriven(blockOf(app, ".listbox[data-closing=\"true\"]"), ".listbox[data-closing]");
+    expectTokenDriven(blockOf(app, ".success-pulse"), ".success-pulse");
+    expectTokenDriven(blockOf(motion, ".icon-swap-in"), ".icon-swap-in");
+    expectTokenDriven(blockOf(motion, ".icon-swap-out"), ".icon-swap-out");
+    expectTokenDriven(blockOf(app, ".color-wipe"), ".color-wipe");
+    expectTokenDriven(blockOf(app, ".picker-preview"), ".picker-preview");
+    expectTokenDriven(blockOf(desk, ".desk .zone[data-settling=\"true\"]"), ".desk .zone[data-settling]");
   });
 });
 
@@ -48,12 +71,24 @@ describe("rules 1 + 2: popovers grow from and close into their trigger (#187)", 
     expect(app).toMatch(/\.popover\[data-closing="true"\][^}]*animation:\s*popover-out var\(--dur-exit\) var\(--ease-exit\)/s);
   });
 
-  it("the listbox exit is the entrance in reverse", () => {
-    const inKf = /@keyframes listbox-in\s*\{([\s\S]*?)\n\}/.exec(app)?.[1] ?? "";
-    const outKf = /@keyframes listbox-out\s*\{([\s\S]*?)\n\}/.exec(app)?.[1] ?? "";
-    expect(inKf).toContain("scale(0.98)");
-    expect(outKf).toContain("scale(0.98)");
-    expect(outKf).toContain("opacity: 0");
+  it("the exit keyframes carry the entrance's end frames (the entrance in reverse)", () => {
+    expect(keyframesOf(motion, "icon-swap-in")).toContain("blur(2px)");
+    expect(keyframesOf(motion, "icon-swap-out")).toContain("scale(0.82)");
+    expect(keyframesOf(app, "swatch-wipe")).toContain("clip-path: circle(0% at 50% 50%)");
+    expect(keyframesOf(app, "swatch-wipe")).toContain("clip-path: circle(75% at 50% 50%)");
+    expect(keyframesOf(app, "success-pulse")).not.toBe("");
+    expect(keyframesOf(app, "popover-out")).toContain("opacity: 0");
+    expect(keyframesOf(app, "listbox-out")).toContain("scale(0.98)");
+  });
+
+  it("icon swap layers have static on/off states, so first mount never animates", () => {
+    expect(blockOf(motion, ".icon-swap-layer[data-on=\"true\"]")).toContain("opacity: 1");
+    expect(blockOf(motion, ".icon-swap-layer[data-on=\"false\"]")).toContain("opacity: 0");
+  });
+
+  it("closing panels take no pointer for the exit (pointer-events none under data-closing)", () => {
+    expect(blockOf(app, ".popover[data-closing=\"true\"]")).toContain("pointer-events: none");
+    expect(blockOf(app, ".listbox[data-closing=\"true\"]")).toContain("pointer-events: none");
   });
 });
 
@@ -132,5 +167,31 @@ describe("reduced motion covers every new motion (#187)", () => {
         }
       }
     }
+  });
+});
+
+describe("rule 6 wiring: the pulse fires on the success path only (#187)", () => {
+  it("EffectsView never pulses declaratively from `running`, and fires the pulse after a successful activate()", () => {
+    expect(effectsView, "no declarative success-pulse className wired to running").not.toMatch(/className=\{running \? "success-pulse"/);
+    expect(effectsView).toMatch(/useSuccessPulse/);
+    const activate = /const activate = async[\s\S]*?\n  \};/.exec(effectsView)?.[0] ?? "";
+    expect(activate).not.toBe("");
+    expect(activate).toMatch(/refreshAll\(\)[\s\S]*?\.fire\(\)/);
+    expect(activate).not.toMatch(/catch[\s\S]*?\.fire\(\)/);
+  });
+
+  it("PresetStrip pulses the Save chip on save only, not on rename", () => {
+    const submit = /const submit = async[\s\S]*?\n  \};/.exec(presetStrip)?.[0] ?? "";
+    expect(submit).not.toBe("");
+    expect(submit).toMatch(/kind === "save"[\s\S]*?pulseSave|pulseSave[\s\S]*?kind === "save"/);
+    expect(submit).not.toMatch(/if \(ok\) \{\s*\n\s*pulseSave/);
+  });
+
+  it("StatusStrip does not give the play/pause IconSwap its own img label (the button's label wins)", () => {
+    const swapAt = statusStrip.indexOf("<IconSwap");
+    expect(swapAt, "the StatusStrip IconSwap is found").toBeGreaterThanOrEqual(0);
+    const end = statusStrip.indexOf("/>", statusStrip.indexOf("at={paused", swapAt));
+    const swap = statusStrip.slice(swapAt, end);
+    expect(swap).not.toContain("label=");
   });
 });
