@@ -34,9 +34,17 @@ impl std::error::Error for TokenError {}
 /// The token is only handed out when the daemon really holds the port: it is a bearer
 /// secret and must not reach another process.
 pub fn read_token() -> Result<String, TokenError> {
-    peer::check(consts::API_PORT).map_err(|refusal| TokenError::NotTrusted(refusal.message()))?;
-    let path = consts::token_path();
-    let text = std::fs::read_to_string(&path)
+    read_token_with(|| peer::check(consts::API_PORT), &consts::token_path())
+}
+
+/// [`read_token`] with the owner check and the token path passed in, so tests can prove the
+/// check runs first and a refusal never reads the file.
+fn read_token_with(
+    check: impl FnOnce() -> Result<(), peer::Refusal>,
+    path: &std::path::Path,
+) -> Result<String, TokenError> {
+    check().map_err(|refusal| TokenError::NotTrusted(refusal.message()))?;
+    let text = std::fs::read_to_string(path)
         .map_err(|e| TokenError::Token(format!("{}: {e}", path.display())))?;
     let token = text.trim().to_string();
     if token.is_empty() {
@@ -75,10 +83,46 @@ mod tests {
             refusal.message(),
             "canvas-rgb daemon not running (port 9430 is held by evil.exe)"
         );
-        // The token read surfaces this exact refusal, so the token is never handed out.
-        assert_eq!(
-            TokenError::NotTrusted(refusal.message()).to_string(),
-            refusal.message()
-        );
+    }
+
+    /// A token file in the temp folder, removed when dropped.
+    struct TempToken(std::path::PathBuf);
+    impl TempToken {
+        fn new(name: &str, text: &str) -> Self {
+            let path = std::env::temp_dir().join(format!("canvas-client-{}-{name}", std::process::id()));
+            std::fs::write(&path, text).expect("write the temp token file");
+            TempToken(path)
+        }
+    }
+    impl Drop for TempToken {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    /// A refused owner check stops the token read before the file is touched: the token
+    /// file holds a real-looking token, and it is never returned.
+    #[test]
+    fn a_refused_check_never_reads_the_token() {
+        let file = TempToken::new("refused", "secret-token");
+        let refusal = Refusal::HeldBy {
+            name: "evil.exe".to_string(),
+            port: consts::API_PORT,
+        };
+        let expected = refusal.message();
+        let err = read_token_with(|| Err(refusal), &file.0).expect_err("refused listener");
+        match err {
+            TokenError::NotTrusted(message) => assert_eq!(message, expected),
+            other => panic!("expected NotTrusted, got {other:?}"),
+        }
+    }
+
+    /// With the check passed, the token is read and trimmed; an empty file is refused.
+    #[test]
+    fn a_trusted_check_reads_and_trims_the_token() {
+        let file = TempToken::new("ok", "  abc123\r\n");
+        assert_eq!(read_token_with(|| Ok(()), &file.0).expect("token"), "abc123");
+        let empty = TempToken::new("empty", " \n");
+        assert!(matches!(read_token_with(|| Ok(()), &empty.0), Err(TokenError::Token(_))));
     }
 }
