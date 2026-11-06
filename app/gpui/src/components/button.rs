@@ -8,9 +8,9 @@
 //! border; ghost is transparent with dim text. Small is 28 px tall with
 //! 10 px side padding; default is the 32 px control height.
 
-use gpui::{BoxShadow, ClickEvent, IntoElement, Rgba, Window, div, point, prelude::*, px};
+use gpui::{ClickEvent, IntoElement, Rgba, Window, div, prelude::*, px};
 
-use crate::theme::Theme;
+use crate::theme::{Theme, TokenRadius};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Variant {
@@ -53,22 +53,20 @@ fn colors(t: &Theme, variant: Variant, disabled: bool) -> (Rgba, Rgba, Rgba) {
     }
 }
 
-fn skirt_shadow(t: &Theme, variant: Variant) -> Vec<BoxShadow> {
-    // hardware.css: `.btn`/`select-trigger` sit on a 2 px skirt; a primary
-    // key's skirt is the darker live (`live_skirt`), a ghost has none, and a
-    // disabled key's skirt folds away. The shadow is clipped by the parent
-    // in GPUI? No: box-shadows paint outside the border box, as in CSS.
-    let color = match variant {
-        Variant::Primary => t.live_skirt(),
-        Variant::Default => t.skirt(),
-        Variant::Ghost => return Vec::new(),
-    };
-    vec![BoxShadow {
-        color: gpui::Hsla::from(color),
-        offset: point(px(0.0), px(2.0)),
-        blur_radius: px(0.0),
-        spread_radius: px(0.0),
-    }]
+/// The hardware skirt as a solid 2 px strip below a key: GPUI 0.2.2's
+/// box-shadow paints nothing on this build (measured in #204: the strip under
+/// Pause lights is panel colour in GPUI, ink-at-0.22 in React), so the band
+/// is drawn instead. `bottom: -2` hangs it below the face exactly like the
+/// shadow did; it is clipped to the face's bottom corners' curve by the
+/// radius clamp.
+pub fn skirt_strip(color: Rgba) -> impl IntoElement {
+    div()
+        .absolute()
+        .left_0()
+        .right_0()
+        .bottom(px(-2.0))
+        .h(px(3.0))
+        .bg(color)
 }
 
 fn base(
@@ -79,24 +77,26 @@ fn base(
     small: bool,
 ) -> gpui::Stateful<gpui::Div> {
     let (bg, fg, border) = colors(t, variant, disabled);
+    let skirt_color = match variant {
+        Variant::Primary => t.live_skirt(),
+        _ => t.skirt(),
+    };
     let el = div()
         .id(gpui::SharedString::from(id.to_string()))
+        .relative()
         .flex()
         .items_center()
         .justify_center()
         .gap(px(6.0))
-        .rounded_md()
+        .r_md()
         .border_1()
         .border_color(border)
         .bg(bg)
         .text_color(fg)
         .text_sm()
+        .font_weight(gpui::FontWeight::MEDIUM)
         .font_family(crate::fonts::UI_FAMILY);
-    let el = if disabled {
-        el
-    } else {
-        el.shadow(skirt_shadow(t, variant))
-    };
+    let el = if disabled { el } else { el.child(skirt_strip(skirt_color)) };
     if small {
         el.h(px(28.0)).px(px(10.0))
     } else {
@@ -159,12 +159,16 @@ pub fn button_icon(
     } else {
         format!("icons/{icon}-{weight}.svg")
     };
-    let _ = icon_px;
     let (_, fg, _) = colors(t, variant, disabled);
-    let glyph = gpui::svg().path(path).size_4().text_color(fg);
-    let el = base(t, id, variant, disabled, small)
-        .child(glyph)
-        .child(label.to_string());
+    let glyph = gpui::svg().path(path).size(px(icon_px)).text_color(fg);
+    let base_el = base(t, id, variant, disabled, small);
+    // An empty label draws no gap after the icon (the phone strip pause is
+    // the row's button with its words hidden).
+    let el = if label.is_empty() {
+        base_el.child(glyph)
+    } else {
+        base_el.child(glyph).child(label.to_string())
+    };
     // The icon takes the button's text colour, except primary where it is
     // on-accent; both are the same token here, so set it after building.
     if disabled {
@@ -195,28 +199,24 @@ pub fn icon_button(
     let size = if small { 28.0 } else { 32.0 };
     let el = div()
         .id(gpui::SharedString::from(id.to_string()))
+        .relative()
         .flex()
         .items_center()
         .justify_center()
         .size(px(size))
-        .rounded_md()
+        .r_md()
         .text_color(Theme::color(t.dim))
         .child(
             gpui::svg()
                 .path(path)
-                .size_4()
+                .size(px(16.0))
                 .text_color(Theme::color(t.dim)),
         );
     let el = if bordered {
         el.border_1()
             .border_color(Theme::color(t.line_2))
             .bg(Theme::color(t.raised))
-            .shadow(vec![BoxShadow {
-                color: gpui::Hsla::from(t.skirt()),
-                offset: point(px(0.0), px(2.0)),
-                blur_radius: px(0.0),
-                spread_radius: px(0.0),
-            }])
+            .child(skirt_strip(t.skirt()))
     } else {
         el
     };

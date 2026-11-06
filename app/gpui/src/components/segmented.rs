@@ -7,9 +7,9 @@
 //! its column: the well is sunk with a line border, the checked option is
 //! a raised thumb, and every option carries its dot.
 
-use gpui::{BoxShadow, IntoElement, Window, div, point, prelude::*, px};
+use gpui::{IntoElement, Window, div, prelude::*, px};
 
-use crate::theme::Theme;
+use crate::theme::{Theme, TokenRadius};
 
 /// One segmented control: `options` are (value, label) pairs, `selected` the
 /// current value. Clicking an option calls `on_change` with its value.
@@ -26,7 +26,7 @@ pub fn segmented(
         .flex()
         .gap(px(2.0))
         .p(px(2.0))
-        .rounded_md()
+        .r_md()
         .border_1()
         .border_color(Theme::color(t.line))
         .bg(Theme::color(t.sunk))
@@ -55,12 +55,13 @@ pub fn segmented(
         let dot = div().size(px(5.0)).rounded_full().bg(dot_color);
         let cell = div()
             .id(gpui::SharedString::from(format!("{id}-{value}")))
+            .relative()
             .flex()
             .items_center()
-            .gap(px(6.0))
+            .gap(px(4.0))
             .h(px(26.0))
             .px(px(10.0))
-            .rounded_md()
+            .r_sm()
             .text_sm()
             .font_family(crate::fonts::UI_FAMILY)
             .font_weight(gpui::FontWeight::MEDIUM)
@@ -73,12 +74,7 @@ pub fn segmented(
                 .text_color(Theme::color(t.ink))
                 .border_1()
                 .border_color(Theme::color(t.line_2))
-                .shadow(vec![BoxShadow {
-                    color: gpui::Hsla::from(t.skirt()),
-                    offset: point(px(0.0), px(2.0)),
-                    blur_radius: px(0.0),
-                    spread_radius: px(0.0),
-                }])
+                .child(crate::components::button::skirt_strip(t.skirt()))
         } else {
             cell.text_color(Theme::color(t.dim))
         };

@@ -29,7 +29,7 @@ use crate::components::panel::{field, field_stack, state_dot};
 use crate::components::select::select;
 use crate::components::segmented::segmented;
 use crate::components::toggle::toggle;
-use crate::theme::Theme;
+use crate::theme::{Theme, TokenRadius};
 
 // ---------------------------------------------------------------------------
 // Logic, ported from DisplaysView.tsx and covered by the tests below.
@@ -498,7 +498,7 @@ impl DisplaysView {
                         .child("The number does not fit"),
                 )
         } else {
-            let mut row_cells = div().flex().items_center().gap_2().min_h(px(48.0));
+            let mut row_cells = div().flex().items_end().gap_2().min_h(px(48.0));
             for (i, cell) in cells.iter().enumerate() {
                 let blank = cell.is_none();
                 let tile = div()
@@ -507,7 +507,7 @@ impl DisplaysView {
                     .justify_center()
                     .w(px(34.0))
                     .h(px(48.0))
-                    .rounded_md()
+                    .r_sm()
                     .text_size(px(28.0))
                     .font_family(crate::fonts::MONO_FAMILY)
                     .text_color(Theme::color(t.ink))
@@ -537,6 +537,7 @@ impl DisplaysView {
             row_cells.child(
                 div()
                     .pb_2()
+                    .text_size(px(16.0))
                     .font_family(crate::fonts::MONO_FAMILY)
                     .text_color(Theme::color(t.mute))
                     .child(mark.to_string()),
@@ -855,13 +856,16 @@ impl DisplaysView {
                 .child(title)
                 .child(actions)
         };
+        // The displays page un-reserves the notice slot (`.rd-displays
+        // .display-notice-slot { min-height: 0 }`), so the idle slot holds no
+        // height here; only a blocked notice takes room.
         let blocked_notice = if blocked_by.is_some() {
             let by = blocked_by.clone().unwrap();
             div()
                 .flex()
                 .gap_2()
                 .p_2()
-                .rounded_md()
+                .r_md()
                 .border_1()
                 .border_color(Theme::color(t.warn))
                 .bg(Theme::color(t.warn_wash))
@@ -878,8 +882,6 @@ impl DisplaysView {
                     "{by} is running, so canvas-rgb leaves the display alone until it closes."
                 ))
         } else {
-            // Idle: no notice, no reserved height in this view (React's
-            // displays override zeroes the slot's min-height).
             div()
         };
         // React `.display-readout` rhythm: caption with margin-bottom s2
@@ -933,7 +935,7 @@ impl DisplaysView {
             .flex()
             .flex_col()
             .p_4()
-            .rounded_lg()
+            .r_lg()
             .border_1()
             .border_color(Theme::color(t.line))
             .bg(Theme::color(t.panel))
@@ -956,7 +958,7 @@ impl Render for DisplaysView {
         } else {
             200.0
         };
-        let content_w = win_w - rail_w - if win_w <= 720.0 { 24.0 } else { 48.0 };
+        let content_w = win_w - rail_w - if win_w <= 720.0 { 32.0 } else { 48.0 };
         // The page title lives in the strip (Shell), not here.
         let mut page = div().flex().flex_col().gap_4();
         if let Some(stale) = &self.stale_error {
@@ -965,7 +967,7 @@ impl Render for DisplaysView {
                     .flex()
                     .gap_2()
                     .p_2()
-                    .rounded_md()
+                    .r_md()
                     .border_1()
                     .border_color(Theme::color(t.warn))
                     .bg(Theme::color(t.warn_wash))
@@ -987,7 +989,7 @@ impl Render for DisplaysView {
                 page = page.child(
                     div()
                         .p_4()
-                        .rounded_lg()
+                        .r_lg()
                         .border_1()
                         .border_color(Theme::color(t.line))
                         .bg(Theme::color(t.panel))
@@ -1055,7 +1057,7 @@ impl Render for DisplaysView {
                         .items_center()
                         .gap_3()
                         .p_8()
-                        .rounded_lg()
+                        .r_lg()
                         .border_1()
                         .border_color(Theme::color(t.line))
                         .bg(Theme::color(t.panel))

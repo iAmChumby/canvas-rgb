@@ -9,9 +9,9 @@
 //! pick). Keyboard, type-ahead and ARIA items in the Displays checklist stay
 //! unticked for that reason.
 
-use gpui::{BoxShadow, IntoElement, div, point, prelude::*, px};
+use gpui::{IntoElement, div, prelude::*, px};
 
-use crate::theme::Theme;
+use crate::theme::{Theme, TokenRadius};
 
 /// The source trigger and (when `open`) its option list.
 #[allow(clippy::too_many_arguments)]
@@ -57,6 +57,7 @@ pub fn select(
     let _ = chosen;
     let trigger = div()
         .id(gpui::SharedString::from(id.to_string()))
+        .relative()
         .flex()
         .items_center()
         .justify_between()
@@ -65,7 +66,7 @@ pub fn select(
         .h(px(32.0))
         .pl_3()
         .pr(px(10.0))
-        .rounded_md()
+        .r_md()
         .border_1()
         .border_color(if open {
             t.live()
@@ -79,12 +80,7 @@ pub fn select(
         .font_family(crate::fonts::UI_FAMILY)
         .cursor_pointer()
         // hardware.css `.select-trigger`: a key on its 2 px skirt.
-        .shadow(vec![BoxShadow {
-            color: gpui::Hsla::from(t.skirt()),
-            offset: point(px(0.0), px(2.0)),
-            blur_radius: px(0.0),
-            spread_radius: px(0.0),
-        }])
+        .child(crate::components::button::skirt_strip(t.skirt()))
         .child(value_grid)
         .child(
             gpui::svg()
@@ -108,7 +104,7 @@ pub fn select(
             .mt(px(38.0))
             .min_w(px(160.0))
             .p(px(4.0))
-            .rounded_lg()
+            .r_lg()
             .border_1()
             .border_color(Theme::color(t.line_2))
             .bg(Theme::color(t.panel));
@@ -123,7 +119,7 @@ pub fn select(
                 .justify_between()
                 .h(px(32.0))
                 .px(px(10.0))
-                .rounded_md()
+                .r_sm()
                 .text_sm()
                 .font_family(crate::fonts::UI_FAMILY)
                 .text_color(Theme::color(t.ink))

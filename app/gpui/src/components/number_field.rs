@@ -9,7 +9,7 @@
 
 use gpui::{IntoElement, div, prelude::*, px};
 
-use crate::theme::Theme;
+use crate::theme::{Theme, TokenRadius};
 
 /// Clamp a draft value to the field's range, matching `NumberField`'s commit.
 pub fn clamp(value: f32, min: f32, max: f32) -> f32 {
@@ -41,7 +41,7 @@ pub fn number_field(
         .gap_2()
         .h(px(32.0))
         .px_2()
-        .rounded_md()
+        .r_md()
         .border_1()
         .border_color(Theme::color(t.line_2))
         // The sunk well the preview frame and input tracks use.
@@ -60,7 +60,7 @@ pub fn number_field(
         .justify_center()
         .w(px(22.0))
         .h(px(22.0))
-        .rounded_sm()
+        .r_sm()
         .bg(Theme::color(t.raised))
         .text_color(Theme::color(t.ink))
         .cursor_pointer()
@@ -73,7 +73,7 @@ pub fn number_field(
         .justify_center()
         .w(px(22.0))
         .h(px(22.0))
-        .rounded_sm()
+        .r_sm()
         .bg(Theme::color(t.raised))
         .text_color(Theme::color(t.ink))
         .cursor_pointer()

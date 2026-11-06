@@ -31,7 +31,7 @@ use crate::client::DaemonClient;
 use crate::components::button::{Variant, button_icon, icon_button};
 use crate::components::daemon_down::daemon_down;
 use crate::components::slider::slider;
-use crate::theme::Theme;
+use crate::theme::{Theme, TokenRadius};
 use crate::views::displays::DisplaysView;
 
 /// Measure a single line of text in the UI/mono face at `size` px, using
@@ -475,15 +475,18 @@ impl Shell {
 
     fn wordmark(&self) -> impl IntoElement {
         let t = &self.theme;
+        // React `.wordmark` (15 px, 650, −0.01em) with the "a" as the easel
+        // (0.62em wide ≈ 9.3 px). The −0.01em is −0.15px per character, below
+        // a pixel and left out.
         div()
             .flex()
             .items_center()
-            .text_base()
-            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_size(px(15.0))
+            .font_weight(gpui::FontWeight(650.0))
             .font_family(crate::fonts::UI_FAMILY)
             .text_color(Theme::color(t.ink))
             .child("c")
-            .child(self.easel(10.0))
+            .child(self.easel(9.3))
             .child("nvas")
             .child(
                 div()
@@ -552,12 +555,12 @@ impl Shell {
             .gap_3()
             .h(px(36.0))
             .px(px(10.0))
-            .rounded_md()
+            .r_md()
             .text_sm()
             .font_weight(gpui::FontWeight::MEDIUM)
             .font_family(crate::fonts::UI_FAMILY)
             .text_color(Theme::color(t.ink))
-            .child(gpui::svg().path(glyph_name).size_4().text_color(glyph_color))
+            .child(gpui::svg().path(glyph_name).size(px(18.0)).text_color(glyph_color))
             .child(
                 div()
                     .text_color(if active { Theme::color(t.ink) } else { Theme::color(t.dim) })
@@ -644,7 +647,7 @@ impl Shell {
                 .justify_center()
                 .gap(px(6.0))
                 .h(px(26.0))
-                .rounded_md()
+                .r_sm()
                 .text_sm()
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .font_family(crate::fonts::UI_FAMILY)
@@ -666,7 +669,7 @@ impl Shell {
             .flex()
             .gap(px(2.0))
             .p(px(2.0))
-            .rounded_md()
+            .r_md()
             .border_1()
             .border_color(Theme::color(t.line))
             .bg(Theme::color(t.sunk))
@@ -680,10 +683,10 @@ impl Shell {
                 .gap(px(3.0))
                 .h(px(48.0))
                 .p(px(6.0))
-                .rounded_md()
+                .r_md()
                 .bg(Theme::color(t.sunk));
             for _ in 0..12 {
-                strip = strip.child(div().flex_1().rounded_sm().bg(gpui::black()));
+                strip = strip.child(div().flex_1().r_sm().bg(gpui::black()));
             }
             let strip = if paused { strip.opacity(0.25) } else { strip };
             div()
@@ -751,7 +754,7 @@ impl Shell {
                                 .justify_center()
                                 .gap(px(6.0))
                                 .h(px(32.0))
-                                .rounded_md()
+                                .r_md()
                                 .border_1()
                                 .border_color(Theme::color(t.line_2))
                                 .bg(Theme::color(t.raised))
@@ -840,7 +843,7 @@ impl Shell {
                 };
                 let mut bar = div().flex().gap(px(2.0));
                 for i in 0..10 {
-                    bar = bar.child(div().flex_1().h(px(4.0)).rounded_sm().bg(if i < filled { tone_color } else { Theme::color(t.line) }));
+                    bar = bar.child(div().flex_1().h(px(4.0)).r_sm().bg(if i < filled { tone_color } else { Theme::color(t.line) }));
                 }
                 grid = grid.child(
                     div()
@@ -874,7 +877,7 @@ impl Shell {
             .px(px(10.0))
             .pt_2()
             .pb_3()
-            .rounded_lg()
+            .r_lg()
             .border_1()
             .border_color(Theme::color(t.line))
             .bg(Theme::color(t.g1))
@@ -925,6 +928,7 @@ impl Shell {
                         div()
                             .flex_1()
                             .text_sm()
+                            .text_right()
                             .font_family(crate::fonts::MONO_FAMILY)
                             .text_color(Theme::color(t.mute))
                             .child(
@@ -966,6 +970,7 @@ impl Shell {
             col = col.items_center().child(
                 div()
                     .flex()
+                    .items_center()
                     .justify_center()
                     .w(px(40.0))
                     .h(px(40.0))
@@ -976,21 +981,24 @@ impl Shell {
                 let _ = label;
                 let active = self.page == *page;
                 let glyph_name = if active { format!("icons/{icon}-fill.svg") } else { format!("icons/{icon}.svg") };
+                // React `.rail-link` in the icon rail: 40 wide, 36 tall (the
+                // base height), 38 px pitch with the 2 px gap.
                 let tile = div()
                     .id(gpui::SharedString::from(format!("rail-{page}")))
                     .relative()
                     .flex()
                     .items_center()
                     .justify_center()
-                    .size(px(40.0))
-                    .rounded_md()
-                    .child(gpui::svg().path(glyph_name).size_4().text_color(if active { t.live() } else { Theme::color(t.dim) }));
+                    .w(px(40.0))
+                    .h(px(36.0))
+                    .r_md()
+                    .child(gpui::svg().path(glyph_name).size(px(18.0)).text_color(if active { t.live() } else { Theme::color(t.dim) }));
                 let tile = if active {
                     tile.bg(t.live_soft()).child(
                         div()
                             .absolute()
                             .left(px(-6.0))
-                            .top(px(10.0))
+                            .top(px(8.0))
                             .w(px(3.0))
                             .h(px(20.0))
                             .rounded_full()
@@ -1012,15 +1020,16 @@ impl Shell {
                 .flex()
                 .items_center()
                 .justify_center()
-                .size(px(40.0))
-                .rounded_md()
-                .child(gpui::svg().path(glyph_name).size_4().text_color(if active { t.live() } else { Theme::color(t.dim) }));
+                .w(px(40.0))
+                .h(px(36.0))
+                .r_md()
+                .child(gpui::svg().path(glyph_name).size(px(18.0)).text_color(if active { t.live() } else { Theme::color(t.dim) }));
             let tile = if active {
                 tile.bg(t.live_soft()).child(
                     div()
                         .absolute()
                         .left(px(-6.0))
-                        .top(px(10.0))
+                        .top(px(8.0))
                         .w(px(3.0))
                         .h(px(20.0))
                         .rounded_full()
@@ -1036,6 +1045,10 @@ impl Shell {
 
     fn dock(&self) -> impl IntoElement {
         let t = &self.theme;
+        // React `.rail` at ≤720: padding s1/s2 (4/8), links 56 tall with the
+        // icon row (18) then the name row (16) at the bottom after a 20 px
+        // top offset; the active tile covers the icon+name rows and its top
+        // carries the 3 px marker bar.
         let mut row = div()
             .flex()
             .items_center()
@@ -1049,46 +1062,57 @@ impl Shell {
         for (label, page, icon) in NAV {
             let active = self.page == *page;
             let glyph_name = if active { format!("icons/{icon}-fill.svg") } else { format!("icons/{icon}.svg") };
-            let cell = div()
+            let mut cell = div()
                 .id(gpui::SharedString::from(format!("dock-{page}")))
                 .relative()
                 .flex()
                 .flex_col()
                 .items_center()
-                .justify_end()
+                .justify_start()
                 .flex_1()
                 .h(px(56.0))
-                .py_1()
-                .px_1()
+                .pt(px(20.0))
+                .gap(px(2.0))
                 .text_sm()
+                .font_weight(gpui::FontWeight::MEDIUM)
                 .font_family(crate::fonts::UI_FAMILY)
-                .text_color(Theme::color(t.ink))
-                .child(gpui::svg().path(glyph_name).size_4().text_color(if active { t.live() } else { Theme::color(t.dim) }));
-            let cell = if active {
-                cell
-                    .bg(t.live_soft())
-                    .rounded_md()
-                    .px_2()
+                .text_color(Theme::color(t.ink));
+            if active {
+                // The active tile sits behind the icon and name (React
+                // `::before` at z-index −1).
+                cell = cell
                     .child(
                         div()
-                            .text_sm()
-                            .font_family(crate::fonts::UI_FAMILY)
-                            .text_color(Theme::color(t.ink))
-                            .child(label.to_string()),
+                            .absolute()
+                            .top(px(20.0))
+                            .bottom(px(0.0))
+                            .left_0()
+                            .right_0()
+                            .r_md()
+                            .bg(t.live_soft()),
                     )
                     .child(
                         div()
                             .absolute()
-                            .top(px(-5.0))
-                            .left_0()
-                            .right_0()
+                            .top(px(20.0))
+                            .left(px(4.0))
+                            .right(px(4.0))
                             .h(px(3.0))
                             .rounded_full()
                             .bg(t.live()),
-                    )
-            } else {
-                cell
-            };
+                    );
+            }
+            cell = cell.child(gpui::svg().path(glyph_name).size(px(18.0)).text_color(if active { t.live() } else { Theme::color(t.dim) }));
+            if active {
+                cell = cell.child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .font_family(crate::fonts::UI_FAMILY)
+                        .text_color(Theme::color(t.ink))
+                        .child(label.to_string()),
+                );
+            }
             row = row.child(cell);
         }
         row
@@ -1142,35 +1166,37 @@ impl Shell {
         if phone {
             inner = inner.child(self.easel(16.0));
         }
-        inner = inner.child(
-            div()
-                .flex()
-                .items_baseline()
-                .gap_3()
-                .mr_2()
-                .child(
-                    div()
-                        .text_xl()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .font_family(crate::fonts::UI_FAMILY)
-                        .text_color(Theme::color(t.ink))
-                        .child(title_text.to_string()),
-                ),
-        );
+        // React `.rd-title`: the h1 and the mono context share one flex row
+        // with a 12 px gap (the context sits inside the title slot).
+        let mut title_row = div()
+            .flex()
+            .items_baseline()
+            .gap_3()
+            .child(
+                div()
+                    .text_xl()
+                    .line_height(gpui::relative(1.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .font_family(crate::fonts::UI_FAMILY)
+                    .text_color(Theme::color(t.ink))
+                    .child(title_text.to_string()),
+            );
         if !context_text.is_empty() && !phone {
-            inner = inner.child(
+            title_row = title_row.child(
                 div()
                     .text_sm()
+                    .line_height(gpui::relative(1.0))
                     .font_family(crate::fonts::MONO_FAMILY)
                     .text_color(Theme::color(t.mute))
                     .child(context_text),
             );
         }
+        inner = inner.child(title_row);
         // Now playing: hidden at 1280 px and up (the deck carries it there).
         if self.width < 1280.0 {
             let swatch = div()
                 .size(px(12.0))
-                .rounded_md()
+                .r_sm()
                 .bg(t.live());
             let swatch = if paused { swatch.opacity(0.4) } else { swatch };
             inner = inner.child(
@@ -1186,6 +1212,7 @@ impl Shell {
                             .gap_2()
                             .child(
                                 div()
+                                    .text_sm()
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .font_family(crate::fonts::UI_FAMILY)
                                     .text_color(Theme::color(t.ink))
@@ -1201,12 +1228,12 @@ impl Shell {
                     ),
             );
         }
-        // The mark: icon always, words at 1280 px and up.
+        // The mark: icon always, words at 1280 px and up. React `.strip-mark`
+        // has no gap between the icon and the words (`font: inherit`, 14 px).
         let mark_row = div()
             .flex()
             .items_center()
-            .gap_2()
-            .child(gpui::svg().path(mark_icon).size_4().text_color(tone_color));
+            .child(gpui::svg().path(mark_icon).size(px(14.0)).text_color(tone_color));
         let mark_row = if self.width >= 1280.0 {
             mark_row.child(
                 div()
@@ -1222,15 +1249,20 @@ impl Shell {
         // Controls at the right: Pause lights, search.
         if known {
             if phone {
+                // The same sm button as the row's (Pause lights), with the
+                // words hidden (`.strip-power-text`): icon 14, 10 px padding
+                // — 36 wide, 28 tall.
                 let entity = cx.entity();
-                inner = inner.child(icon_button(
+                inner = inner.child(button_icon(
                     t,
                     "strip-power",
+                    "",
+                    if paused { Variant::Primary } else { Variant::Default },
+                    false,
+                    true,
                     if paused { "Play" } else { "Pause" },
                     "fill",
-                    true,
-                    true,
-                    false,
+                    14.0,
                     move |_, _, cx| {
                         entity.update(cx, |this, cx| this.toggle_power(cx));
                     },
@@ -1317,7 +1349,7 @@ impl Shell {
     }
 
     fn spectrum_line(&self) -> impl IntoElement {
-        let t = &self.theme;
+        let t = self.theme;
         let offline = self.status.is_none() && self.status_error.is_some();
         if offline {
             div()
@@ -1327,23 +1359,58 @@ impl Shell {
                 .right_0()
                 .h(px(2.0))
                 .bg(Theme::color(t.down))
+                .into_any_element()
         } else {
-            // The spectrum (`--spectrum`): the six RGB stops across the top.
-            // GPUI gradients take two stops, so the sweep is six 2 px bands,
-            // which reads as the same sweep at this height.
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .right_0()
-                .flex()
-                .h(px(2.0))
-                .child(div().flex_1().bg(Theme::color(t.rgb_1)))
-                .child(div().flex_1().bg(Theme::color(t.rgb_2)))
-                .child(div().flex_1().bg(Theme::color(t.rgb_3)))
-                .child(div().flex_1().bg(Theme::color(t.rgb_4)))
-                .child(div().flex_1().bg(Theme::color(t.rgb_5)))
-                .child(div().flex_1().bg(Theme::color(t.rgb_6)))
+            // The spectrum (`--spectrum`: `linear-gradient(90deg, rgb-1, …
+            // rgb-6)`). GPUI gradients take two stops, so paint one 1.5 px
+            // quad per column, interpolating the six stops linearly — the
+            // same sweep at this height.
+            let stops = [
+                Theme::color(t.rgb_1),
+                Theme::color(t.rgb_2),
+                Theme::color(t.rgb_3),
+                Theme::color(t.rgb_4),
+                Theme::color(t.rgb_5),
+                Theme::color(t.rgb_6),
+            ];
+            canvas(
+                move |_, _, _| {},
+                move |bounds, _, window, _| {
+                    let w: f32 = bounds.size.width.into();
+                    let h: f32 = bounds.size.height.into();
+                    let step = 1.5f32;
+                    let mut x = 0.0f32;
+                    while x < w {
+                        let u = if w <= 1.0 { 0.0 } else { (x + step / 2.0) / w };
+                        // Six stops at 0, .2, .4, .6, .8, 1 (CSS default).
+                        let pos = (u * 5.0).clamp(0.0, 4.999_9);
+                        let i = pos.floor() as usize;
+                        let f = pos - i as f32;
+                        let a = stops[i];
+                        let b = stops[i + 1];
+                        let color = gpui::Rgba {
+                            r: a.r + (b.r - a.r) * f,
+                            g: a.g + (b.g - a.g) * f,
+                            b: a.b + (b.b - a.b) * f,
+                            a: 1.0,
+                        };
+                        window.paint_quad(gpui::fill(
+                            Bounds {
+                                origin: point(px(x), px(0.0)),
+                                size: size(px(step.min(w - x)), px(h)),
+                            },
+                            color,
+                        ));
+                        x += step;
+                    }
+                },
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .h(px(2.0))
+            .into_any_element()
         }
     }
 
@@ -1359,9 +1426,12 @@ impl Shell {
                     move |bounds, _, window, _| {
                         let w = bounds.size.width;
                         let h = bounds.size.height;
-                        let mut x = px(11.0);
+                        // React `body`: 1px-radius dots centred on the 22 px
+                        // tile, so the first dot is centred at (11, 11); the
+                        // 2 px square below spans the same box, centred too.
+                        let mut x = px(10.0);
                         while x < w {
-                            let mut y = px(11.0);
+                            let mut y = px(10.0);
                             while y < h {
                                 window.paint_quad(gpui::fill(
                                     Bounds { origin: point(x, y), size: size(px(2.0), px(2.0)) },
@@ -1390,8 +1460,8 @@ impl Render for Shell {
             .p_4()
             .child(self.page_content());
         let content = if phone {
-            // React phone `.content`: padding s3 (12) on the sides.
-            content.px(px(12.0)).pb(px(120.0)).pt(phone_pad_top)
+            // React phone `.content`: padding s4 (16) on the sides.
+            content.px(px(16.0)).pb(px(120.0)).pt(phone_pad_top)
         } else {
             content.px(px(24.0)).pb(px(24.0)).pt(px(16.0))
         };
@@ -1425,6 +1495,7 @@ impl Render for Shell {
             .relative()
             .size_full()
             .bg(Theme::color(t.g1))
+            .line_height(gpui::relative(crate::theme::LINE_HEIGHT))
             .child(self.background())
             .child(body)
             .child(self.spectrum_line())

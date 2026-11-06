@@ -9,7 +9,43 @@
 //! missing or its value differs, so a token added to the CSS breaks the
 //! build until it is ported here.
 
-use gpui::{Rgba, rgb};
+use gpui::{Rgba, Styled, rgb};
+
+/// The body line-height (`body { line-height: 1.45 }`, `app.css`). GPUI
+/// defaults to 1.618, so stacking text without this lands a few px low on
+/// every line.
+pub const LINE_HEIGHT: f32 = 1.45;
+
+/// The React radius tokens (`--r-sm` 8, `--r-md` 10, `--r-lg` 16, `--r-xl` 20).
+/// GPUI's generated `rounded_*` suffixes sit at 4/6/8/12/16 instead, so every
+/// corner goes through these names — the same names as the CSS tokens — and
+/// nowhere uses a generated suffix.
+pub trait TokenRadius: Styled {
+    fn r_sm(self) -> Self {
+        token_radius(self, 8.0)
+    }
+    fn r_md(self) -> Self {
+        token_radius(self, 10.0)
+    }
+    fn r_lg(self) -> Self {
+        token_radius(self, 16.0)
+    }
+    #[allow(dead_code)]
+    fn r_xl(self) -> Self {
+        token_radius(self, 20.0)
+    }
+}
+
+fn token_radius<T: Styled>(mut el: T, r: f32) -> T {
+    let corner = gpui::AbsoluteLength::Pixels(gpui::px(r));
+    el.style().corner_radii.top_left = Some(corner);
+    el.style().corner_radii.top_right = Some(corner);
+    el.style().corner_radii.bottom_right = Some(corner);
+    el.style().corner_radii.bottom_left = Some(corner);
+    el
+}
+
+impl<T: Styled> TokenRadius for T {}
 
 /// Every custom property in `tokens.css`, for one theme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

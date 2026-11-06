@@ -10,7 +10,7 @@
 
 use gpui::{FontWeight, IntoElement, Rgba, div, prelude::*, px};
 
-use crate::theme::Theme;
+use crate::theme::{Theme, TokenRadius};
 
 /// A text with CSS `letter-spacing` (GPUI text has no tracking), drawn as
 /// words of per-character cells: each word is a row of characters separated
@@ -26,7 +26,9 @@ pub fn tracked_text(
     color: Rgba,
 ) -> gpui::AnyElement {
     let tracking = px(font_size * tracking_em);
-    let space_w = px(font_size * 0.25) + tracking;
+    // A mono space advances a full 0.6em, like the browser's (plus the
+    // tracking after it); a quarter-em made spaced titles fall short.
+    let space_w = px(font_size * 0.6) + tracking;
     let mut row = div()
         .flex()
         .flex_wrap()
@@ -68,7 +70,7 @@ pub fn panel(
         .flex()
         .flex_col()
         .p_4()
-        .rounded_lg()
+        .r_lg()
         .border_1()
         .border_color(Theme::color(t.line))
         .bg(Theme::color(t.panel))
@@ -175,6 +177,7 @@ pub fn field_stack(
                 .flex()
                 .items_center()
                 .gap_2()
+                .w_full()
                 .child(control),
         )
 }
