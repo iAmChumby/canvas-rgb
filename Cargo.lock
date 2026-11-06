@@ -1091,7 +1091,7 @@ dependencies = [
 
 [[package]]
 name = "canvas-rgb-editor"
-version = "0.8.4"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "canvas-client",

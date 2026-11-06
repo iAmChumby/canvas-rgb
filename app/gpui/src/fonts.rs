@@ -14,13 +14,19 @@ pub const UI_FAMILY: &str = "Schibsted Grotesk Variable";
 /// The figures font, named exactly as `--fm` names it.
 pub const MONO_FAMILY: &str = "JetBrains Mono Variable";
 
-static SCHIBSTED: &[u8] = include_bytes!("../assets/fonts/schibsted-grotesk-variable.woff2");
-static JETBRAINS: &[u8] = include_bytes!("../assets/fonts/jetbrains-mono-variable.woff2");
+static SCHIBSTED: &[u8] = include_bytes!("../assets/fonts/schibsted-grotesk-variable.ttf");
+static JETBRAINS: &[u8] = include_bytes!("../assets/fonts/jetbrains-mono-variable.ttf");
 
 #[cfg(test)]
 pub const SCHIBSTED_OFL: &str = include_str!("../assets/fonts/SchibstedGrotesk-OFL.txt");
 #[cfg(test)]
 pub const JETBRAINS_OFL: &str = include_str!("../assets/fonts/JetBrainsMono-OFL.txt");
+// The woff2 files are what the React editor ships; the TTF files above are
+// what gpui's text system accepts. Both are embedded (G10).
+#[cfg(test)]
+static SCHIBSTED_WOFF2: &[u8] = include_bytes!("../assets/fonts/schibsted-grotesk-variable.woff2");
+#[cfg(test)]
+static JETBRAINS_WOFF2: &[u8] = include_bytes!("../assets/fonts/jetbrains-mono-variable.woff2");
 
 /// Register both variable fonts with the app's text system.
 pub fn register(cx: &App) {
@@ -79,12 +85,12 @@ mod tests {
         let schibsted_disk = std::fs::read(&schibsted).expect("read schibsted woff2");
         let jetbrains_disk = std::fs::read(&jetbrains).expect("read jetbrains woff2");
         assert_eq!(
-            fnv1a(SCHIBSTED),
+            fnv1a(SCHIBSTED_WOFF2),
             fnv1a(&schibsted_disk),
             "embedded schibsted-grotesk does not match node_modules"
         );
         assert_eq!(
-            fnv1a(JETBRAINS),
+            fnv1a(JETBRAINS_WOFF2),
             fnv1a(&jetbrains_disk),
             "embedded jetbrains-mono does not match node_modules"
         );

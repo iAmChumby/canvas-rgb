@@ -52,6 +52,8 @@ public static class Win32Capture {
 
 $SWP_NOACTIVATE = 0x0010
 $PW_RENDERFULLCONTENT = 0x00000002
+# The editor reads the token from CANVAS_RGB_HOME in debug (the fakes' home).
+if (-not $env:CANVAS_RGB_HOME) { $env:CANVAS_RGB_HOME = Join-Path $root '.build\fake-home' }
 
 $saved = 0
 foreach ($theme in $Themes) {

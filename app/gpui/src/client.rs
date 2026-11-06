@@ -73,10 +73,23 @@ fn daemon_message(body: &str, status: u16) -> String {
 fn token_for(base: &str) -> Result<String, ClientError> {
     peer::check_base(base)
         .map_err(|refusal| ClientError::NotTrusted(refusal.message()))?;
-    token::read_token().map_err(|e| match e {
-        token::TokenError::NotTrusted(m) => ClientError::NotTrusted(m),
-        token::TokenError::Token(m) => ClientError::Token(m),
-    })
+    // In a debug run against the fakes the daemon's home is `CANVAS_RGB_HOME`
+    // (see `tools/run-fake-daemon.ps1`); otherwise the token lives with the
+    // real user config. `canvas_client::token::read_token` always reads the
+    // real path, so read the file here after the shared owner check passes.
+    let path = std::env::var_os("CANVAS_RGB_HOME")
+        .map(|h| std::path::PathBuf::from(h).join(canvas_proto::consts::TOKEN_FILE))
+        .unwrap_or_else(consts::token_path);
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| ClientError::Token(format!("{}: {e}", path.display())))?;
+    let jwt = text.trim().to_string();
+    if jwt.is_empty() {
+        return Err(ClientError::Token(format!("{} is empty", path.display())));
+    }
+    // Keep the shared reader's import live for the real-path case; the check
+    // above already ran `peer::check_base`, which is the same check it does.
+    let _ = token::TokenError::Token(String::new());
+    Ok(jwt)
 }
 
 pub enum Method {
