@@ -540,6 +540,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "canvas-client"
+version = "0.8.4"
+dependencies = [
+ "canvas-proto",
+ "windows",
+]
+
+[[package]]
 name = "canvas-core"
 version = "0.8.4"
 dependencies = [
@@ -620,6 +628,7 @@ dependencies = [
 name = "canvas-rgb-tray"
 version = "0.8.4"
 dependencies = [
+ "canvas-client",
  "canvas-proto",
  "reqwest",
  "semver",

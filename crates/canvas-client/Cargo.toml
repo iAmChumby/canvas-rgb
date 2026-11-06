@@ -1,0 +1,16 @@
+[package]
+name = "canvas-client"
+description = "Shared client checks for the canvas-rgb daemon API: who holds the port, and the token read."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+canvas-proto.workspace = true
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Security",
+    "Win32_System_Threading",
+] }
