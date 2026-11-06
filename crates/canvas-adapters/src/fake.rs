@@ -74,6 +74,13 @@ impl FakeOpenRgbServer {
         Self::start_inner(devices, None).await
     }
 
+    /// Like [`start`](Self::start), but binds `port` on 127.0.0.1 instead of an
+    /// ephemeral port. For the standalone fake server (`fake_openrgb` example)
+    /// that a fakes-mode daemon connects to on a known, non-real port.
+    pub async fn start_on_port(devices: Vec<DeviceInfo>, port: u16) -> std::io::Result<Self> {
+        Self::start_inner_on(devices, None, Some(port)).await
+    }
+
     /// Like [`start`](Self::start), but the devices appear over time, as in a real OpenRGB
     /// that is still detecting: the controller count is 0 until `first` has passed, and device
     /// `i` is announced `first + i * step` after the server started.
@@ -87,7 +94,15 @@ impl FakeOpenRgbServer {
     }
 
     async fn start_inner(devices: Vec<DeviceInfo>, detection: Option<Detection>) -> std::io::Result<Self> {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        Self::start_inner_on(devices, detection, None).await
+    }
+
+    async fn start_inner_on(
+        devices: Vec<DeviceInfo>,
+        detection: Option<Detection>,
+        port: Option<u16>,
+    ) -> std::io::Result<Self> {
+        let listener = TcpListener::bind(("127.0.0.1", port.unwrap_or(0))).await?;
         let port = listener.local_addr()?.port();
         let devices = devices.into_iter().map(FakeDevice::new).collect();
         let state = Arc::new(Mutex::new(FakeState { devices, detection }));

@@ -65,9 +65,11 @@ fn origin_allowed(origin: &str) -> bool {
     consts::API_ALLOWED_ORIGINS.iter().any(|allowed| allowed.eq_ignore_ascii_case(origin))
 }
 
-/// True when the request's `Host` is one of ours.
+/// True when the request's `Host` is one of ours. The spine's guard: the real
+/// 9430 loopback hosts always, plus the debug test port's loopback hosts when
+/// one is set (see `consts::api_host_allowed`). A release build is 9430-only.
 fn host_allowed(host: &str) -> bool {
-    consts::API_ALLOWED_HOSTS.iter().any(|allowed| allowed.eq_ignore_ascii_case(host))
+    consts::api_host_allowed(host)
 }
 
 /// The guard middleware. Runs on every request.
