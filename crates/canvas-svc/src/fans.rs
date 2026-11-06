@@ -471,26 +471,50 @@ impl FanController {
     /// it in `chip.toml` (issue #128, decision 3). A header marked absent is returned to
     /// BIOS here, and never written afterwards.
     ///
-    /// This is the service half of the override. The Fans-page control that calls it needs a
-    /// pipe request of its own, and `crates/canvas-proto` is the spine the main agent owns:
-    /// until that route exists the override is set from `chip.toml` only (see the report).
+    /// "Show anyway" only says the header is on this board: it is not written here, and the
+    /// header is written when the owner gives it a mode. The pipe request that reaches this
+    /// is `PipeRequest::SetHeaderAvailability` (issue #146).
     pub fn set_header_override(&mut self, header: &str, available: bool) -> Result<(), FanError> {
-        if let Some(chip) = self.chip.as_ref() {
-            if !chip.channels().iter().any(|c| c.id == header) {
-                return Err(FanError::Validation(format!("unknown header {header}")));
-            }
-        }
+        self.check_known_header(header)?;
         self.header_overrides.insert(header.to_string(), available);
-        let path = paths::chip_path(&self.home);
-        let mut state = store::load_chip_state(&path)?;
-        state.header_overrides = self.header_overrides.clone();
-        store::save_chip_state(&path, &state)?;
+        self.save_header_overrides()?;
         tracing::info!(header, available, "header availability override saved");
         if !available {
             if let Some(ch) = self.chip.as_ref().and_then(|c| c.channels().iter().position(|s| s.id == header)) {
                 self.release(ch, "header marked not on this board");
             }
         }
+        Ok(())
+    }
+
+    /// Takes the owner's word off a header (issue #146): the key leaves `header_overrides`,
+    /// `chip.toml` is saved and the per-board table decides again. A header that was marked
+    /// "not on my board" is not written here either; the next tick applies the table's answer.
+    pub fn clear_header_override(&mut self, header: &str) -> Result<(), FanError> {
+        self.check_known_header(header)?;
+        self.header_overrides.remove(header);
+        self.save_header_overrides()?;
+        tracing::info!(header, "the header availability override was cleared");
+        Ok(())
+    }
+
+    /// Refuses a header the chip does not have. A header the chip reads is known, whatever
+    /// the board routes: the table decides that, the owner does not.
+    fn check_known_header(&self, header: &str) -> Result<(), FanError> {
+        if let Some(chip) = self.chip.as_ref() {
+            if !chip.channels().iter().any(|c| c.id == header) {
+                return Err(FanError::Validation(format!("unknown header {header}")));
+            }
+        }
+        Ok(())
+    }
+
+    /// Writes the per-header overrides back to `chip.toml`.
+    fn save_header_overrides(&self) -> Result<(), FanError> {
+        let path = paths::chip_path(&self.home);
+        let mut state = store::load_chip_state(&path)?;
+        state.header_overrides = self.header_overrides.clone();
+        store::save_chip_state(&path, &state)?;
         Ok(())
     }
 
