@@ -3690,6 +3690,8 @@ async fn issue146_the_route_needs_the_token() {
         .await
         .expect("the router answers");
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
 /// The audio test lease, through the routes: take, read (200), expire, read
 /// again (410) (S9). No socket, no device.
 #[tokio::test]
