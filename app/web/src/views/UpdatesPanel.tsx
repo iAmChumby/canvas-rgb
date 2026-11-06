@@ -101,7 +101,7 @@ export function UpdatesPanel() {
         />
       </Field>
       {experimental && (
-        <Field label="Editor" hint="GPUI is the experimental editor">
+        <Field label="Editor" hint="GPUI is experimental">
           <Segmented<EditorChoice>
             label="Editor"
             options={EDITORS}

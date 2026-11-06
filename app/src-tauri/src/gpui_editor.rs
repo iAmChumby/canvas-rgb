@@ -354,6 +354,8 @@ impl GpuiEditor {
     /// Starts the child and the thread that reads it.
     fn start(&self, page: Option<&str>) -> Result<(), String> {
         let exe = self.exe();
+        // token: the tray's own, non-elevated (the person's). The editor runs as the person who
+        // opened it, never elevated; it is not the daemon.
         let mut command = Command::new(&exe);
         command.args(page_args(page));
         {

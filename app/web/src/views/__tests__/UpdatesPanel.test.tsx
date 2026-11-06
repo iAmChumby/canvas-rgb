@@ -114,7 +114,7 @@ describe("the Editor choice", () => {
     patchSnap({ update: updateState("0.8.5-dev.12") });
     render(<UpdatesPanel />);
     await screen.findByRole("radiogroup", { name: "Editor" });
-    expect(screen.getByText("GPUI is the experimental editor")).toBeTruthy();
+    expect(screen.getByText("GPUI is experimental")).toBeTruthy();
   });
 
   it("asks the tray for the other editor", async () => {
