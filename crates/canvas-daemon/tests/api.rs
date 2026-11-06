@@ -1098,7 +1098,9 @@ impl canvas_daemon::pipe_client::PipeLink for LogPipe {
         &self,
         request: &canvas_proto::pipe::PipeRequest,
     ) -> Result<canvas_proto::pipe::PipeResponse, canvas_daemon::pipe_client::PipeError> {
-        if !self.delay.is_zero() {
+        // `delay` holds only a whole-config push in flight, so a second PUT
+        // overlaps the first's read-modify-send-save window without the fix.
+        if matches!(request, canvas_proto::pipe::PipeRequest::PutFanConfig { .. }) && !self.delay.is_zero() {
             tokio::time::sleep(self.delay).await;
         }
         self.sent.lock().unwrap().push(request.clone());
@@ -1260,7 +1262,7 @@ async fn two_concurrent_puts_keep_both_changes() {
     app.pipe = Arc::new(LogPipe {
         sent: Arc::clone(&sent),
         status: Some(fans_with_hot()),
-        delay: std::time::Duration::from_millis(80),
+        delay: std::time::Duration::from_millis(300),
     });
     let app = Arc::new(app);
     *app.fans.write().await = Some(fans_with_hot());
