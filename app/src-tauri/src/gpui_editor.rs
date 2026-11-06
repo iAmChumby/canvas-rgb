@@ -13,7 +13,15 @@
 //!
 //! When the GPUI editor cannot be used, React opens instead (G3, G4): the pref stays as it is,
 //! the log says why, and after two failed starts in a minute the tray stops trying for the rest
-//! of its session.
+//! of its session. That giving up is sticky: it is never taken back, so a child that falls over
+//! once a minute does not keep the tray busy for ever.
+//!
+//! The end of the editor is seen by a watcher that polls the child itself, not by the end of
+//! its pipe: a grandchild of the editor can hold the pipe open long after the editor has
+//! ended, and the tray has to see the end anyway.
+//!
+//! A chatty editor cannot fill the log: the first few lines are logged on their own, the rest
+//! are counted and come as one summary line per window.
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -40,8 +48,26 @@ const STDERR_TAIL: usize = 20;
 const EXIT_WAIT: Duration = Duration::from_secs(5);
 /// How long the tray waits between two looks at whether the editor has ended.
 const EXIT_POLL: Duration = Duration::from_millis(20);
+/// How often the watcher looks at whether the editor has ended. The end of the editor is seen
+/// here, not at the end of its pipe: a grandchild of the editor can hold the pipe open.
+const EXIT_WATCH_POLL: Duration = Duration::from_millis(200);
+/// How long the exit path waits for the stderr reader. It is a bounded wait: a grandchild of
+/// the editor can hold the stderr pipe open too.
+const STDERR_WAIT: Duration = Duration::from_millis(500);
+/// How long the tray waits for a child that is closing to end before it ends it itself.
+const CLOSING_WAIT: Duration = Duration::from_secs(2);
 /// The longest a dropped line is shown in the log.
 const LOGGED_LINE: usize = 120;
+/// How many lines from the editor the log takes on their own. The rest is counted.
+pub const LOG_LINE_CAP: u32 = 5;
+/// How long the counted lines wait before they come as one summary line.
+pub const LOG_SUMMARY_WINDOW: Duration = Duration::from_secs(30);
+/// The line the log takes for a line that is over the cap.
+fn too_long_line() -> String {
+    format!(
+        "editor: a line from the GPUI editor was longer than {EDITOR_IPC_LINE_MAX} bytes and was dropped"
+    )
+}
 
 /// The GPUI editor's exe, beside the tray's: `<the tray's folder>\canvas-rgb-editor.exe`.
 pub fn exe_path_in(dir: &Path) -> PathBuf {
@@ -125,6 +151,8 @@ pub enum Dropped {
     TooLong,
     /// The line was not a message the tray knows.
     Unknown,
+    /// The line was not valid UTF-8.
+    NotUtf8,
     /// The stream ended or failed.
     Io,
 }
@@ -135,6 +163,8 @@ pub fn read_line(line: &str) -> Result<EditorEvent, Dropped> {
     if line.len() > EDITOR_IPC_LINE_MAX {
         return Err(Dropped::TooLong);
     }
+    // A line that ends with CRLF keeps its carriage return here: it is not part of the message.
+    let line = line.trim_end_matches(['\r', '\n']);
     match serde_json::from_str::<EditorToTray>(line) {
         Ok(EditorToTray::Ready) => Ok(EditorEvent::Ready),
         Ok(EditorToTray::SwitchEditor { to }) => Ok(EditorEvent::SwitchEditor(to)),
@@ -145,7 +175,9 @@ pub fn read_line(line: &str) -> Result<EditorEvent, Dropped> {
 /// Reads one line from `reader`, at most `max` bytes long.
 ///
 /// A longer line is dropped: the rest of it is thrown away and [`Dropped::TooLong`] comes back,
-/// so the reader never holds more than the cap in memory. `Ok(None)` is the end of the stream.
+/// so the reader never holds more than the cap in memory. A line that is not valid UTF-8 is
+/// dropped too ([`Dropped::NotUtf8`]): it is never repaired into a message that is acted on.
+/// `Ok(None)` is the end of the stream.
 fn read_capped_line<R: BufRead>(reader: &mut R, max: usize) -> Result<Option<String>, Dropped> {
     let mut buf: Vec<u8> = Vec::new();
     let mut over = false;
@@ -184,7 +216,15 @@ fn read_capped_line<R: BufRead>(reader: &mut R, max: usize) -> Result<Option<Str
     if over {
         return Err(Dropped::TooLong);
     }
-    Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
+    // A line that ends with CRLF keeps its carriage return: it is not part of the message.
+    let buf = match buf.last() {
+        Some(b'\r') => &buf[..buf.len() - 1],
+        _ => &buf[..],
+    };
+    match String::from_utf8(buf.to_vec()) {
+        Ok(line) => Ok(Some(line)),
+        Err(_) => Err(Dropped::NotUtf8),
+    }
 }
 
 /// The GPUI editor child: started by the tray, talked to over its stdio.
@@ -193,6 +233,13 @@ pub struct GpuiEditor {
     on_event: Arc<dyn Fn(EditorEvent) + Send + Sync>,
 }
 
+/// The log lines the tray writes, collected by the tests.
+#[cfg(test)]
+type LogLines = Arc<Mutex<Vec<String>>>;
+/// A sink that keeps the log lines. The tests use it.
+#[cfg(test)]
+type LogSink = Box<dyn Fn(&str) + Send + Sync>;
+
 struct Inner {
     /// The exe's absolute path.
     exe: PathBuf,
@@ -200,12 +247,18 @@ struct Inner {
     running: Option<Running>,
     /// The ms of the failed starts that are still inside the window.
     failures: Vec<u64>,
+    /// Set when the limit of failed starts was reached. It is never taken back: the tray gives
+    /// up on the GPUI editor for the rest of its session.
+    gave_up: bool,
     /// How many times the missing editor has been reported in this session.
     missing_reports: u32,
     /// The clock the failed starts are counted on. The tests move it.
     clock: Box<dyn Fn() -> u64 + Send + Sync>,
     /// Extra environment for the child. The production child inherits the tray's.
     env: Vec<(String, String)>,
+    /// Where the tray's log lines go. The production tray writes them to its log file; the
+    /// tests collect them, so a test can see what a chatty editor did to the log.
+    log_sink: Arc<dyn Fn(&str) + Send + Sync>,
 }
 
 /// The running child. Cloned into the reader thread, so it can end the child and say how it
@@ -216,6 +269,11 @@ struct Running {
     stdin: Arc<Mutex<ChildStdin>>,
     /// Set when the tray asked the editor to close: its end is not a failure.
     closing: Arc<AtomicBool>,
+    /// Set when the child's end has been handled. Only one of the threads that watch the child
+    /// does it.
+    ended: Arc<AtomicBool>,
+    /// Set when this child asked for the other editor: one switch per child life.
+    switched: Arc<AtomicBool>,
 }
 
 /// What happened when the tray asked for the editor.
@@ -247,9 +305,11 @@ impl GpuiEditor {
                 exe,
                 running: None,
                 failures: Vec::new(),
+                gave_up: false,
                 missing_reports: 0,
                 clock,
                 env: Vec::new(),
+                log_sink: Arc::new(log::append),
             })),
             on_event: Arc::from(on_event),
         }
@@ -266,6 +326,17 @@ impl GpuiEditor {
         self
     }
 
+    /// Where the log lines go. The production tray writes them to its log file; the tests
+    /// collect them.
+    #[cfg(test)]
+    pub fn with_log_sink(self, sink: LogSink) -> Self {
+        {
+            let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+            inner.log_sink = Arc::from(sink);
+        }
+        self
+    }
+
     /// The exe's path.
     pub fn exe(&self) -> PathBuf {
         self.inner.lock().unwrap_or_else(|p| p.into_inner()).exe.clone()
@@ -277,16 +348,37 @@ impl GpuiEditor {
         self.inner.lock().unwrap_or_else(|p| p.into_inner()).running.is_some()
     }
 
-    /// True when two starts failed inside the window: React is used for the rest of this session.
+    /// Ends the running child. The tests use it when the stand-in editor does not go.
+    #[cfg(test)]
+    pub fn kill_running(&self) {
+        if let Some(running) = self.running() {
+            let mut child = running.child.lock().unwrap_or_else(|p| p.into_inner());
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    /// True when the tray has given up on the GPUI editor: React is used for the rest of this
+    /// session.
+    ///
+    /// Two failed starts inside the window set a flag that is never taken back, so an editor
+    /// that falls over once a minute does not keep the tray busy for ever.
     pub fn given_up(&self) -> bool {
-        let inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if inner.gave_up {
+            return true;
+        }
         let now = (inner.clock)();
-        inner
+        let inside = inner
             .failures
             .iter()
             .filter(|at| now.saturating_sub(**at) < FAILURE_WINDOW_MS)
-            .count()
-            >= FAILURE_LIMIT
+            .count();
+        if inside >= FAILURE_LIMIT {
+            inner.gave_up = true;
+            return true;
+        }
+        false
     }
 
     /// Opens the editor on `page`, or tells the running one to go there.
@@ -300,12 +392,18 @@ impl GpuiEditor {
             };
         }
         if let Some(running) = self.running() {
-            if let Some(page) = page {
-                send(&running, &TrayToEditor::Navigate { page: page.to_string() });
+            if running.closing.load(Ordering::SeqCst) {
+                // The child that is closing is not reused: a child on its way out gets no
+                // message, and the new one starts under it.
+                self.end_closing(&running);
+            } else {
+                if let Some(page) = page {
+                    send(&running, &TrayToEditor::Navigate { page: page.to_string() });
+                }
+                // The tray has no handle to another process's window, so it cannot focus it.
+                log::append("editor: the GPUI editor is already open; focusing its window is UNKNOWN");
+                return OpenOutcome::Started;
             }
-            // The tray has no handle to another process's window, so it cannot focus it.
-            log::append("editor: the GPUI editor is already open; focusing its window is UNKNOWN");
-            return OpenOutcome::Started;
         }
         let exe = self.exe();
         if !exe.is_file() {
@@ -351,7 +449,7 @@ impl GpuiEditor {
         self.inner.lock().unwrap_or_else(|p| p.into_inner()).running.clone()
     }
 
-    /// Starts the child and the thread that reads it.
+    /// Starts the child and the threads that watch it.
     fn start(&self, page: Option<&str>) -> Result<(), String> {
         let exe = self.exe();
         // token: the tray's own, non-elevated (the person's). The editor runs as the person who
@@ -370,124 +468,350 @@ impl GpuiEditor {
         let stdin = child.stdin.take().ok_or("the GPUI editor has no stdin")?;
         let stdout = child.stdout.take().ok_or("the GPUI editor has no stdout")?;
         let stderr = child.stderr.take().ok_or("the GPUI editor has no stderr")?;
-        let child = Arc::new(Mutex::new(child));
-        let closing = Arc::new(AtomicBool::new(false));
+        let running = Running {
+            child: Arc::new(Mutex::new(child)),
+            stdin: Arc::new(Mutex::new(stdin)),
+            closing: Arc::new(AtomicBool::new(false)),
+            ended: Arc::new(AtomicBool::new(false)),
+            switched: Arc::new(AtomicBool::new(false)),
+        };
         {
             let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-            inner.running = Some(Running {
-                child: child.clone(),
-                stdin: Arc::new(Mutex::new(stdin)),
-                closing: closing.clone(),
-            });
+            inner.running = Some(running.clone());
         }
         log::append(&format!("editor: the GPUI editor was started ({})", exe.display()));
-        self.read_until_the_end(child, stdout, stderr, closing);
+        self.watch(running, stdout, stderr);
         Ok(())
     }
 
-    /// Reads the child until it ends, and says how it ended.
-    fn read_until_the_end(
+    /// Watches the child: the reader of its messages, the reader of its last words, and the
+    /// watcher that sees it end.
+    ///
+    /// The end of the child is seen by the watcher, not by the end of its pipe: a grandchild of
+    /// the editor can hold the pipe open long after the editor itself has ended, and the tray
+    /// has to see the end anyway (G4).
+    fn watch(
         &self,
-        child: Arc<Mutex<Child>>,
+        running: Running,
         stdout: impl Read + Send + 'static,
         stderr: impl Read + Send + 'static,
-        closing: Arc<AtomicBool>,
     ) {
         let on_event = self.on_event.clone();
         let inner = self.inner.clone();
         let tail: Arc<Mutex<VecDeque<String>>> = Arc::default();
-        // The stderr reader keeps the last lines: they are the log of a crash.
-        let stderr_thread = {
-            let tail = tail.clone();
-            std::thread::spawn(move || {
-                let mut reader = BufReader::new(stderr);
-                while let Ok(Some(line)) = read_capped_line(&mut reader, EDITOR_IPC_LINE_MAX) {
-                    let mut lines = tail.lock().unwrap_or_else(|p| p.into_inner());
-                    lines.push_back(line);
-                    while lines.len() > STDERR_TAIL {
-                        lines.pop_front();
-                    }
-                }
-            })
-        };
+        // The stderr reader keeps the last lines: they are the log of a crash. It says when it
+        // is done, so the exit path can wait for it without waiting for ever.
+        let (stderr_done, stderr_finished) = std::sync::mpsc::channel::<()>();
+        let stderr_finished: Arc<Mutex<std::sync::mpsc::Receiver<()>>> =
+            Arc::new(Mutex::new(stderr_finished));
+        let stderr_tail = tail.clone();
         std::thread::spawn(move || {
-            let mut reader = BufReader::new(stdout);
+            let mut reader = BufReader::new(stderr);
             loop {
                 match read_capped_line(&mut reader, EDITOR_IPC_LINE_MAX) {
-                    Ok(Some(line)) => match read_line(&line) {
-                        Ok(event) => on_event(event),
-                        Err(Dropped::TooLong) => log::append(&format!(
-                            "editor: a line from the GPUI editor was longer than {EDITOR_IPC_LINE_MAX} bytes and was dropped"
-                        )),
-                        Err(Dropped::Unknown) => log::append(&format!(
-                            "editor: a line from the GPUI editor was not a message the tray knows and was dropped: {}",
-                            logged(&line)
-                        )),
-                        Err(Dropped::Io) => {}
-                    },
+                    Ok(Some(line)) => {
+                        let mut lines = stderr_tail.lock().unwrap_or_else(|p| p.into_inner());
+                        lines.push_back(line);
+                        while lines.len() > STDERR_TAIL {
+                            lines.pop_front();
+                        }
+                    }
+                    // The end of the stream.
                     Ok(None) => break,
-                    Err(Dropped::TooLong) => log::append(&format!(
-                        "editor: a line from the GPUI editor was longer than {EDITOR_IPC_LINE_MAX} bytes and was dropped"
-                    )),
+                    // A line that is too long or not valid UTF-8 is dropped, and the reader
+                    // goes on with the next one.
+                    Err(Dropped::TooLong) | Err(Dropped::NotUtf8) => continue,
                     Err(Dropped::Unknown) | Err(Dropped::Io) => break,
                 }
             }
-            // The editor ended: the code it ended with, and its last words on stderr.
-            let code = wait_for_exit(&child);
-            // The child is gone, so its stderr is closed: the reader has what is left of it.
-            let _ = stderr_thread.join();
-            let stderr_tail = tail
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(" | ");
-            let asked_to_close = closing.load(Ordering::SeqCst);
-            {
-                let mut guard = inner.lock().unwrap_or_else(|p| p.into_inner());
-                let same = guard
-                    .running
-                    .as_ref()
-                    .is_some_and(|r| Arc::ptr_eq(&r.child, &child));
-                if same {
-                    guard.running = None;
-                }
-            }
-            if asked_to_close {
-                log::append("editor: the GPUI editor closed");
-                return;
-            }
-            match code {
-                Some(0) => log::append("editor: the GPUI editor ended"),
-                Some(code) => {
-                    let reason = format!(
-                        "the GPUI editor ended with code {code}{}",
-                        if stderr_tail.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" ({stderr_tail})")
-                        }
-                    );
-                    log::append(&format!("editor: {reason}; the React editor opens instead"));
-                    note_failure(&inner);
-                    on_event(EditorEvent::Unusable { reason });
-                }
-                None => {
-                    let reason = format!(
-                        "the GPUI editor did not end{}",
-                        if stderr_tail.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" ({stderr_tail})")
-                        }
-                    );
-                    log::append(&format!("editor: {reason}; the React editor opens instead"));
-                    note_failure(&inner);
-                    on_event(EditorEvent::Unusable { reason });
-                }
-            }
+            let _ = stderr_done.send(());
         });
+
+        // The reader of the editor's messages.
+        {
+            let running = running.clone();
+            let inner = inner.clone();
+            let tail = tail.clone();
+            let on_event = on_event.clone();
+            let stderr_finished = stderr_finished.clone();
+            std::thread::spawn(move || {
+                let mut limiter = LogLimiter::new();
+                let mut reader = BufReader::new(stdout);
+                loop {
+                    if running.ended.load(Ordering::SeqCst) {
+                        // The child is gone: nothing more of it is acted on.
+                        break;
+                    }
+                    match read_capped_line(&mut reader, EDITOR_IPC_LINE_MAX) {
+                        Ok(Some(line)) => match read_line(&line) {
+                            Ok(EditorEvent::Ready) => {
+                                log_line_to(
+                                    &mut limiter,
+                                    &inner,
+                                    "editor: the GPUI editor is ready",
+                                );
+                                on_event(EditorEvent::Ready);
+                            }
+                            Ok(EditorEvent::SwitchEditor(to)) => {
+                                if running.closing.load(Ordering::SeqCst) {
+                                    log::append("editor: the editor asked for the other editor while it was closing; the ask was ignored");
+                                } else if running.switched.swap(true, Ordering::SeqCst) {
+                                    // One switch per child life: the child cannot flip the
+                                    // editor over and over.
+                                    log::append("editor: the editor asked for the other editor again; the second ask was ignored");
+                                } else {
+                                    on_event(EditorEvent::SwitchEditor(to));
+                                }
+                            }
+                            Err(Dropped::TooLong) => {
+                                log_line_to(&mut limiter, &inner, &too_long_line())
+                            }
+                            Err(Dropped::Unknown) => {
+                                let text = format!(
+                                    "editor: a line from the GPUI editor was not a message the tray knows and was dropped: {}",
+                                    logged(&line)
+                                );
+                                log_line_to(&mut limiter, &inner, &text);
+                            }
+                            Err(Dropped::NotUtf8) => log_line_to(
+                                &mut limiter,
+                                &inner,
+                                "editor: a line from the GPUI editor was not valid UTF-8 and was dropped",
+                            ),
+                            Err(Dropped::Io) => {}
+                            Ok(EditorEvent::Unusable { .. }) => {
+                                // The editor never says this: it is the tray's own event.
+                            }
+                        },
+                        Ok(None) => break,
+                        Err(Dropped::TooLong) => {
+                            log_line_to(&mut limiter, &inner, &too_long_line())
+                        }
+                        Err(Dropped::Unknown) | Err(Dropped::NotUtf8) | Err(Dropped::Io) => break,
+                    }
+                }
+                // The pipe ended: the code the child ended with, and its last words on stderr.
+                let code = wait_for_exit(&running.child);
+                end_child(
+                    &inner,
+                    &on_event,
+                    &running,
+                    &tail,
+                    &stderr_finished,
+                    code,
+                );
+            });
+        }
+
+        // The watcher: the child's end is seen here, not at the end of its pipe.
+        {
+            let running = running.clone();
+            let inner = inner.clone();
+            let tail = tail.clone();
+            let on_event = on_event.clone();
+            let stderr_finished = stderr_finished.clone();
+            std::thread::spawn(move || loop {
+                let ended = {
+                    let mut child = running.child.lock().unwrap_or_else(|p| p.into_inner());
+                    match child.try_wait() {
+                        Ok(Some(status)) => Some(Some(status.code().unwrap_or(-1))),
+                        Ok(None) => None,
+                        Err(_) => Some(None),
+                    }
+                };
+                match ended {
+                    Some(code) => {
+                        end_child(
+                            &inner,
+                            &on_event,
+                            &running,
+                            &tail,
+                            &stderr_finished,
+                            code,
+                        );
+                        return;
+                    }
+                    None => std::thread::sleep(EXIT_WATCH_POLL),
+                }
+            });
+        }
+    }
+
+    /// Waits for a child that is closing to end, and ends it when it does not. A child that is
+    /// on its way out holds the editor's place, so the new one cannot start until it is gone.
+    fn end_closing(&self, running: &Running) {
+        let deadline = Instant::now() + CLOSING_WAIT;
+        loop {
+            {
+                let mut child = running.child.lock().unwrap_or_else(|p| p.into_inner());
+                match child.try_wait() {
+                    Ok(Some(_)) => return,
+                    Ok(None) => {}
+                    Err(_) => return,
+                }
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(EXIT_POLL);
+        }
+        // It did not go: the tray ends it, so the next child starts with free pipes.
+        let mut child = running.child.lock().unwrap_or_else(|p| p.into_inner());
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+/// The child has ended: the tray's state is cleared, the log says how it ended, and the tray is
+/// told when the editor cannot be used.
+///
+/// Only the first caller does it: the reader and the watcher can both see the end.
+fn end_child(
+    inner: &Arc<Mutex<Inner>>,
+    on_event: &Arc<dyn Fn(EditorEvent) + Send + Sync>,
+    running: &Running,
+    tail: &Arc<Mutex<VecDeque<String>>>,
+    stderr_finished: &Arc<Mutex<std::sync::mpsc::Receiver<()>>>,
+    code: Option<i32>,
+) {
+    if running.ended.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    // The stderr reader gets a bounded time to finish: a grandchild of the editor can hold the
+    // stderr pipe open too, and the exit path must not wait for it.
+    {
+        let finished = stderr_finished.lock().unwrap_or_else(|p| p.into_inner());
+        let _ = finished.recv_timeout(STDERR_WAIT);
+    }
+    let stderr_tail = tail
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" | ");
+    // The child is gone: the tray has no editor to talk to.
+    {
+        let mut guard = inner.lock().unwrap_or_else(|p| p.into_inner());
+        let same = guard
+            .running
+            .as_ref()
+            .is_some_and(|r| Arc::ptr_eq(&r.child, &running.child));
+        if same {
+            guard.running = None;
+        }
+    }
+    if running.closing.load(Ordering::SeqCst) {
+        log_to(inner, "editor: the GPUI editor closed");
+        return;
+    }
+    match code {
+        Some(0) => log_to(inner, "editor: the GPUI editor ended"),
+        Some(code) => {
+            let reason = format!(
+                "the GPUI editor ended with code {code}{}",
+                tail_in_reason(&stderr_tail)
+            );
+            log_to(inner, &format!("editor: {reason}; the React editor opens instead"));
+            note_failure(inner);
+            on_event(EditorEvent::Unusable { reason });
+        }
+        None => {
+            let reason = format!("the GPUI editor did not end{}", tail_in_reason(&stderr_tail));
+            log_to(inner, &format!("editor: {reason}; the React editor opens instead"));
+            note_failure(inner);
+            on_event(EditorEvent::Unusable { reason });
+        }
+    }
+}
+
+/// The stderr tail as it goes into the reason for the crash.
+fn tail_in_reason(tail: &str) -> String {
+    if tail.is_empty() {
+        String::new()
+    } else {
+        format!(" ({tail})")
+    }
+}
+
+/// Writes one line to the tray's log: the sink the tests collect, or the log file.
+fn log_to(inner: &Arc<Mutex<Inner>>, line: &str) {
+    let guard = inner.lock().unwrap_or_else(|p| p.into_inner());
+    (guard.log_sink)(line);
+}
+
+/// What the tray does with one line from the editor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LineLog {
+    /// The line is logged on its own.
+    Line,
+    /// The line is counted; nothing is logged now.
+    Counted,
+    /// The counted lines are logged as one summary line, with the count.
+    Summary(u32),
+}
+
+/// The tray's log keeps the first [`LOG_LINE_CAP`] lines from the editor and counts the rest,
+/// so a chatty editor cannot fill the log. The counted lines come as one summary line per
+/// [`LOG_SUMMARY_WINDOW`].
+#[derive(Debug)]
+pub struct LogLimiter {
+    /// The lines logged on their own so far.
+    logged: u32,
+    /// The lines counted since the last summary.
+    counted: u32,
+    /// When the last summary was logged.
+    last: Instant,
+}
+
+impl LogLimiter {
+    /// A limiter that starts empty.
+    pub fn new() -> Self {
+        LogLimiter {
+            logged: 0,
+            counted: 0,
+            last: Instant::now(),
+        }
+    }
+
+    /// What to do with one more line from the editor, at `now`.
+    pub fn next(&mut self, now: Instant) -> LineLog {
+        if self.logged < LOG_LINE_CAP {
+            self.logged += 1;
+            return LineLog::Line;
+        }
+        self.counted += 1;
+        if now.duration_since(self.last) >= LOG_SUMMARY_WINDOW {
+            let count = self.counted;
+            self.counted = 0;
+            self.last = now;
+            return LineLog::Summary(count);
+        }
+        LineLog::Counted
+    }
+}
+
+impl Default for LogLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The line to log about one message from the editor, or `None` when it is only counted.
+fn log_line(limiter: &mut LogLimiter, now: Instant, message: &str) -> Option<String> {
+    match limiter.next(now) {
+        LineLog::Line => Some(message.to_string()),
+        LineLog::Counted => None,
+        LineLog::Summary(count) => Some(format!(
+            "editor: {count} more lines from the GPUI editor were not logged on their own"
+        )),
+    }
+}
+
+/// Logs the line about one message from the editor, when the limiter lets it through.
+fn log_line_to(limiter: &mut LogLimiter, inner: &Arc<Mutex<Inner>>, message: &str) {
+    if let Some(text) = log_line(limiter, Instant::now(), message) {
+        log_to(inner, &text);
     }
 }
 
@@ -498,12 +822,17 @@ fn now_ms() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
-/// Records a failed start, and forgets the ones that are outside the window.
+/// Records a failed start, forgets the ones that are outside the window, and gives up for the
+/// rest of the session when the limit is reached.
 fn note_failure(inner: &Mutex<Inner>) {
     let mut guard = inner.lock().unwrap_or_else(|p| p.into_inner());
     let now = (guard.clock)();
     guard.failures.retain(|at| now.saturating_sub(*at) < FAILURE_WINDOW_MS);
     guard.failures.push(now);
+    if guard.failures.len() >= FAILURE_LIMIT {
+        // The giving up is sticky: the window moves, the giving up does not.
+        guard.gave_up = true;
+    }
 }
 
 /// Waits for the child to end, and says how it ended. A child that does not stop is ended by
@@ -612,7 +941,8 @@ pub fn on_event<R: Runtime>(app: &AppHandle<R>, event: EditorEvent) {
     let page = editor::last_page();
     match &event {
         EditorEvent::Ready => {
-            log::append("editor: the GPUI editor is ready");
+            // The reader of the editor's messages logged it, rate-limited: a chatty editor
+            // cannot fill the log.
             return;
         }
         EditorEvent::Unusable { reason } => {
@@ -704,6 +1034,25 @@ mod tests {
     /// The events the editor sends, collected.
     fn sink() -> (std::sync::mpsc::Sender<EditorEvent>, std::sync::mpsc::Receiver<EditorEvent>) {
         std::sync::mpsc::channel()
+    }
+
+    /// An editor whose clock the test moves, and the clock itself.
+    fn editor_with_clock(name: &str) -> (GpuiEditor, Arc<AtomicU64>) {
+        let dir = TempDir::new(name);
+        let now = Arc::new(AtomicU64::new(0));
+        let clock = {
+            let now = now.clone();
+            Box::new(move || now.load(Ordering::SeqCst))
+        };
+        let (tx, _rx) = sink();
+        let gpui = GpuiEditor::new(
+            dir.path().join(GPUI_EDITOR_EXE),
+            clock,
+            Box::new(move |event| {
+                let _ = tx.send(event);
+            }),
+        );
+        (gpui, now)
     }
 
     #[test]
@@ -821,28 +1170,46 @@ mod tests {
 
     #[test]
     fn two_failed_starts_in_a_minute_stop_the_trying() {
-        let dir = TempDir::new("guard");
-        let now = Arc::new(AtomicU64::new(0));
-        let clock = {
-            let now = now.clone();
-            Box::new(move || now.load(Ordering::SeqCst))
-        };
-        let (tx, _rx) = sink();
-        let gpui = GpuiEditor::new(
-            dir.path().join(GPUI_EDITOR_EXE),
-            clock,
-            Box::new(move |event| {
-                let _ = tx.send(event);
-            }),
-        );
+        let (gpui, now) = editor_with_clock("guard");
         note_failure(&gpui.inner);
         assert!(!gpui.given_up(), "one failure is not enough");
         now.store(30_000, Ordering::SeqCst);
         note_failure(&gpui.inner);
         assert!(gpui.given_up(), "two failures inside the window stop the trying");
-        // The window moves with the clock: an old failure does not count for ever.
+        // The window moves with the clock, and the giving up does not: it is for the rest of
+        // the session.
         now.store(30_000 + FAILURE_WINDOW_MS + 1, Ordering::SeqCst);
-        assert!(!gpui.given_up());
+        assert!(gpui.given_up(), "the giving up is not taken back");
+    }
+
+    #[test]
+    fn a_failure_exactly_a_window_old_does_not_count() {
+        // A failure that is exactly at the edge of the window is outside it.
+        let (gpui, now) = editor_with_clock("edge");
+        note_failure(&gpui.inner);
+        now.store(FAILURE_WINDOW_MS, Ordering::SeqCst);
+        note_failure(&gpui.inner);
+        assert!(!gpui.given_up(), "a failure exactly a window old does not count");
+        // A millisecond inside the window does count.
+        let (gpui, now) = editor_with_clock("inside");
+        note_failure(&gpui.inner);
+        now.store(FAILURE_WINDOW_MS - 1, Ordering::SeqCst);
+        note_failure(&gpui.inner);
+        assert!(gpui.given_up(), "two failures inside the window stop the trying");
+    }
+
+    #[test]
+    fn the_giving_up_sticks_after_the_window_has_passed() {
+        let (gpui, now) = editor_with_clock("sticky");
+        note_failure(&gpui.inner);
+        now.store(30_000, Ordering::SeqCst);
+        note_failure(&gpui.inner);
+        assert!(gpui.given_up());
+        // The clock moves on: an editor that falls over once a minute does not keep the tray
+        // busy for ever.
+        now.store(30_000 + FAILURE_WINDOW_MS + 1, Ordering::SeqCst);
+        assert!(gpui.given_up(), "the giving up sticks for the rest of the session");
+        assert!(matches!(gpui.open(None), OpenOutcome::React { .. }));
     }
 
     #[test]
@@ -890,6 +1257,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_prefs_file_is_not_rewritten_when_the_editor_does_not_change() {
+        let (app, dir) = app_with("0.8.5-dev.12", EditorChoice::Gpui);
+        let handle = app.handle().clone();
+        let prefs_path = dir.path().join("prefs.json");
+        let ctl = update::try_controller(&handle).unwrap();
+        let before = std::fs::metadata(&prefs_path).unwrap().modified().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        // The same choice again: the file is not written again.
+        ctl.set_editor(EditorChoice::Gpui).unwrap();
+        let after = std::fs::metadata(&prefs_path).unwrap().modified().unwrap();
+        assert_eq!(before, after, "the prefs file was written again for the same choice");
+        // A different choice is kept in the file.
+        std::thread::sleep(Duration::from_millis(100));
+        ctl.set_editor(EditorChoice::React).unwrap();
+        let changed = std::fs::metadata(&prefs_path).unwrap().modified().unwrap();
+        assert_ne!(before, changed, "the new choice is kept in the file");
+    }
+
     // ---- the live child: the stand-in editor ----
 
     /// The exe suffix of this platform.
@@ -911,6 +1297,15 @@ mod tests {
 
     /// The stand-in editor, with the environment the test gives it.
     fn stand_in(env: Vec<(&str, String)>) -> (GpuiEditor, std::sync::mpsc::Receiver<EditorEvent>) {
+        stand_in_with_log(env, Box::new(|_| {}))
+    }
+
+    /// The stand-in editor, with the environment the test gives it and a sink that keeps the
+    /// log lines.
+    fn stand_in_with_log(
+        env: Vec<(&str, String)>,
+        log_sink: LogSink,
+    ) -> (GpuiEditor, std::sync::mpsc::Receiver<EditorEvent>) {
         let (tx, rx) = sink();
         let gpui = GpuiEditor::new(
             fake_editor(),
@@ -923,8 +1318,21 @@ mod tests {
             env.into_iter()
                 .map(|(k, v)| (k.to_string(), v))
                 .collect::<Vec<(String, String)>>(),
-        );
+        )
+        .with_log_sink(log_sink);
         (gpui, rx)
+    }
+
+    /// The log lines the tray writes, and a sink that keeps them.
+    fn log_lines() -> (LogLines, LogSink) {
+        let lines: LogLines = Arc::default();
+        let kept = lines.clone();
+        let sink: LogSink = Box::new(move |line| {
+            kept.lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(line.to_string());
+        });
+        (lines, sink)
     }
 
     /// How long a test waits for the child to say something.
@@ -1025,5 +1433,204 @@ mod tests {
         // The failed start is counted, so the second one in a minute stops the trying.
         let failures = gpui.inner.lock().unwrap_or_else(|p| p.into_inner()).failures.len();
         assert_eq!(failures, 1);
+    }
+
+    #[test]
+    fn a_grandchild_that_holds_the_pipes_does_not_hide_the_editors_end() {
+        let dir = TempDir::new("grandchild");
+        let pid_file = dir.path().join("grandchild.pid");
+        let (gpui, rx) = stand_in(vec![
+            ("FAKE_GPUI_EDITOR_EXIT", "3".to_string()),
+            ("FAKE_GPUI_EDITOR_GRANDCHILD", "1".to_string()),
+            ("FAKE_GPUI_EDITOR_PID_FILE", pid_file.display().to_string()),
+        ]);
+        assert!(matches!(gpui.open(None), OpenOutcome::Started));
+        // The editor ended, but its pipe is still open: the tray has to see the end anyway.
+        let event = rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("the end of the editor was seen");
+        let EditorEvent::Unusable { reason } = event else {
+            panic!("the crash was not reported: {event:?}");
+        };
+        assert!(reason.contains('3'), "{reason}");
+        assert!(!gpui.is_running(), "the editor is not running any more");
+        // The child that holds the pipes open is ended, so it does not stay behind.
+        kill_the_grandchild(&pid_file);
+    }
+
+    #[test]
+    fn a_child_that_asks_to_switch_twice_switches_once() {
+        let ask = r#"{"type":"switch-editor","to":"react"}"#;
+        let (gpui, rx) = stand_in(vec![(
+            "FAKE_GPUI_EDITOR_EMIT",
+            format!("{ask}\n{ask}"),
+        )]);
+        assert!(matches!(gpui.open(None), OpenOutcome::Started));
+        // The first ask is acted on.
+        assert_eq!(
+            rx.recv_timeout(PATIENCE).unwrap(),
+            EditorEvent::SwitchEditor(EditorChoice::React)
+        );
+        // The second one is not: one switch per child life.
+        let mut switches = 0;
+        while let Ok(event) = rx.recv_timeout(Duration::from_millis(500)) {
+            if event == EditorEvent::SwitchEditor(EditorChoice::React) {
+                switches += 1;
+            }
+        }
+        assert_eq!(switches, 0, "the child asked to switch twice; it switched once");
+        gpui.close();
+    }
+
+    #[test]
+    fn an_open_while_the_child_is_closing_starts_a_new_child() {
+        // The stand-in editor keeps running after a close: the tray has to start a new child
+        // under the one that is going away.
+        let (gpui, rx) = stand_in(vec![("FAKE_GPUI_EDITOR_IGNORE_CLOSE", "1".to_string())]);
+        assert!(matches!(gpui.open(None), OpenOutcome::Started));
+        assert_eq!(rx.recv_timeout(PATIENCE).unwrap(), EditorEvent::Ready);
+        // The child is told to close, and it does not go.
+        gpui.close();
+        // A click in that moment must not talk to the dying child: a new one starts.
+        assert!(matches!(gpui.open(None), OpenOutcome::Started));
+        assert_eq!(
+            rx.recv_timeout(PATIENCE).unwrap(),
+            EditorEvent::Ready,
+            "the new child is the one that answers"
+        );
+        assert!(gpui.is_running(), "a live child is running");
+        gpui.kill_running();
+    }
+
+    #[test]
+    fn close_tells_the_editor_to_close() {
+        let dir = TempDir::new("close");
+        let close_file = dir.path().join("closed.txt");
+        let (gpui, _rx) = stand_in(vec![(
+            "FAKE_GPUI_EDITOR_CLOSE_FILE",
+            close_file.display().to_string(),
+        )]);
+        assert!(matches!(gpui.open(None), OpenOutcome::Started));
+        gpui.close();
+        let deadline = Instant::now() + PATIENCE;
+        while !close_file.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(close_file.exists(), "the editor was told to close");
+    }
+
+    #[test]
+    fn a_chatty_editor_does_not_fill_the_log() {
+        const FLOOD: usize = 200;
+        let (lines, log_sink) = log_lines();
+        let flood = (0..FLOOD)
+            .map(|_| r#"{"type":"ready"}"#.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (gpui, rx) = stand_in_with_log(vec![("FAKE_GPUI_EDITOR_EMIT", flood)], log_sink);
+        assert!(matches!(gpui.open(None), OpenOutcome::Started));
+        // Every line the editor sent has been read: the flood, and the ready the stand-in
+        // editor says at the end.
+        let mut seen = 0u32;
+        let deadline = Instant::now() + PATIENCE;
+        while seen < (FLOOD + 1) as u32 && Instant::now() < deadline {
+            seen += rx.try_iter().count() as u32;
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(seen, (FLOOD + 1) as u32, "every line was read");
+        // The log took the first few lines and counted the rest.
+        let logged = lines
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .filter(|line| line.contains("is ready"))
+            .count();
+        assert_eq!(
+            logged,
+            LOG_LINE_CAP as usize,
+            "the log took only the first lines"
+        );
+        gpui.close();
+    }
+
+    #[test]
+    fn the_limiter_counts_the_lines_it_did_not_log() {
+        let mut limiter = LogLimiter::new();
+        let now = Instant::now();
+        for _ in 0..LOG_LINE_CAP {
+            assert_eq!(limiter.next(now), LineLog::Line);
+        }
+        assert_eq!(limiter.next(now), LineLog::Counted);
+        assert_eq!(limiter.next(now), LineLog::Counted);
+        // The window passes: the counted lines come as one summary line.
+        let later = now + LOG_SUMMARY_WINDOW;
+        assert_eq!(limiter.next(later), LineLog::Summary(3));
+        // The count starts again.
+        assert_eq!(limiter.next(later), LineLog::Counted);
+    }
+
+    #[test]
+    fn a_line_that_ends_with_crlf_parses() {
+        let mut reader = std::io::Cursor::new(
+            b"{\"type\":\"ready\"}\r\n{\"type\":\"switch-editor\",\"to\":\"react\"}\r\n".to_vec(),
+        );
+        let first = read_capped_line(&mut reader, EDITOR_IPC_LINE_MAX).unwrap().unwrap();
+        assert_eq!(
+            first, "{\"type\":\"ready\"}",
+            "the carriage return is not part of the message"
+        );
+        assert_eq!(read_line(&first), Ok(EditorEvent::Ready));
+        let second = read_capped_line(&mut reader, EDITOR_IPC_LINE_MAX).unwrap().unwrap();
+        assert_eq!(second, "{\"type\":\"switch-editor\",\"to\":\"react\"}");
+        assert_eq!(
+            read_line(&second),
+            Ok(EditorEvent::SwitchEditor(EditorChoice::React))
+        );
+        // A line that is handed over with its carriage return is read the same way.
+        assert_eq!(read_line("{\"type\":\"ready\"}\r"), Ok(EditorEvent::Ready));
+    }
+
+    #[test]
+    fn a_line_that_is_not_utf8_is_dropped() {
+        let mut bytes = b"{\"type\":\"ready\"}".to_vec();
+        bytes.push(0xff);
+        bytes.push(b'\n');
+        let mut reader = std::io::Cursor::new(bytes);
+        assert_eq!(
+            read_capped_line(&mut reader, EDITOR_IPC_LINE_MAX),
+            Err(Dropped::NotUtf8),
+            "a line that is not valid UTF-8 is dropped"
+        );
+        // A message with a broken byte in it is dropped too, and nothing is acted on.
+        let mut broken = b"{\"type\":\"switch-editor\",\"to\":\"re".to_vec();
+        broken.push(0xff);
+        broken.extend_from_slice(b"ct\"}\n");
+        let mut reader = std::io::Cursor::new(broken);
+        assert_eq!(
+            read_capped_line(&mut reader, EDITOR_IPC_LINE_MAX),
+            Err(Dropped::NotUtf8)
+        );
+    }
+
+    /// Ends the child the stand-in editor left behind. It holds the editor's pipes open, and
+    /// the test does not leave it running.
+    fn kill_the_grandchild(pid_file: &Path) {
+        let deadline = Instant::now() + PATIENCE;
+        while !pid_file.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let Ok(text) = std::fs::read_to_string(pid_file) else {
+            return;
+        };
+        let Ok(pid) = text.trim().parse::<u32>() else {
+            return;
+        };
+        // token: the person's own session, non-elevated; it ends the test's own stand-in
+        // child, not the daemon.
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/PID", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
     }
 }

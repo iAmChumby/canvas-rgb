@@ -312,13 +312,19 @@ impl Controller {
     /// Sets the editor the tray opens, keeps it in the prefs file and returns the new prefs.
     ///
     /// Only an experimental build has the choice (#202): a stable build refuses it, and the
-    /// pref it has is ignored.
+    /// pref it has is ignored. The same choice again is not written again: the file is only
+    /// rewritten when the choice really changes.
     pub fn set_editor(&self, editor: EditorChoice) -> Result<TrayPrefs, String> {
         if !self.is_experimental() {
             return Err("the editor choice is only there on experimental builds".to_string());
         }
-        let prefs = TrayPrefs { editor, ..self.lock().prefs.clone() };
-        self.write_prefs(&prefs, "the editor");
+        let (current, prefs) = {
+            let inner = self.lock();
+            (inner.prefs.editor, TrayPrefs { editor, ..inner.prefs.clone() })
+        };
+        if current != editor {
+            self.write_prefs(&prefs, "the editor");
+        }
         self.change(|i| i.prefs = prefs.clone());
         Ok(prefs)
     }
