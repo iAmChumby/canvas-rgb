@@ -117,6 +117,8 @@ describe("the hot line on the fan curve chart", () => {
   it("a fixed header shows the same don't exceed control on the cpu kind", async () => {
     await page();
     fireEvent.click(await screen.findByRole("radio", { name: "Fixed %" }));
+    // The mode really changed: the Fixed duty control is on.
+    expect(await screen.findByLabelText("CPU fan duty")).toBeTruthy();
     const input = await screen.findByLabelText("Don't exceed temperature");
     expect(input).toBeTruthy();
     expect(screen.getByRole("button", { name: "Reset to automatic" })).toBeTruthy();
