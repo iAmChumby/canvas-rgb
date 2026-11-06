@@ -826,9 +826,10 @@ impl DisplaysView {
         // spaced), the head row (state + Save/Stop/Unsaved), the vendor
         // notice when blocked, and the readout beside the controls.
         // hardware.css `.panel-title`: mono 13px, weight 500, 0.08em
-        // tracking, uppercase. The tracking is what makes the title wrap
-        // onto two lines on a phone.
-        let title = crate::components::panel::tracked_text(
+        // tracking, uppercase; an h2, so 1.25 line-height (`tracked_title`).
+        // The tracking is what makes the title wrap onto two lines on a
+        // phone.
+        let title = crate::components::panel::tracked_title(
             &row.info.name.to_uppercase(),
             13.0,
             0.08,

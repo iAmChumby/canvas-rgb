@@ -25,6 +25,35 @@ pub fn tracked_text(
     family: &'static str,
     color: Rgba,
 ) -> gpui::AnyElement {
+    tracked_text_lh(text, font_size, tracking_em, weight, family, color, 1.45)
+}
+
+/// A tracked title in the `h2.panel-title` metrics: React's `Panel.tsx`
+/// renders the title as an `h2`, whose `line-height: 1.25` overrides the
+/// body 1.45 that `.panel-title` (hardware.css) inherits — 13 px font in a
+/// 16.25 px box, not 18.85. A title that wraps therefore grows the head by
+/// 2.6 px less per wrapped line in React, which put the 390 head 6 px high
+/// in GPUI at 1.45 (#204).
+pub fn tracked_title(
+    text: &str,
+    font_size: f32,
+    tracking_em: f32,
+    weight: FontWeight,
+    family: &'static str,
+    color: Rgba,
+) -> gpui::AnyElement {
+    tracked_text_lh(text, font_size, tracking_em, weight, family, color, 1.25)
+}
+
+fn tracked_text_lh(
+    text: &str,
+    font_size: f32,
+    tracking_em: f32,
+    weight: FontWeight,
+    family: &'static str,
+    color: Rgba,
+    line_height: f32,
+) -> gpui::AnyElement {
     let tracking = px(font_size * tracking_em);
     // A mono space advances a full 0.6em, like the browser's (plus the
     // tracking after it); a quarter-em made spaced titles fall short.
@@ -34,10 +63,10 @@ pub fn tracked_text(
         .flex_wrap()
         .items_center()
         .text_size(px(font_size))
-        // React titles/captions inherit the body 1.45; without this GPUI
-        // lays the tracked lines out at its 1.618 default, which put the
-        // 390 head 6 px high (#204 G8, measured).
-        .line_height(gpui::relative(1.45))
+        // React captions inherit the body 1.45; titles take the h2 1.25
+        // (see `tracked_title`); without this GPUI lays the tracked lines
+        // out at its 1.618 default.
+        .line_height(gpui::relative(line_height))
         .font_weight(weight)
         .font_family(family)
         .text_color(color);
@@ -86,7 +115,7 @@ pub fn panel(
                 .justify_between()
                 .gap_2()
                 .mb_2()
-                .child(tracked_text(
+                .child(tracked_title(
                     &title.to_uppercase(),
                     13.0,
                     0.08,
@@ -136,6 +165,8 @@ pub fn field(
                 // React's label box measures ~22 px at 14 px, GPUI's ~20
                 // with the 1.45 cascade; the drift is what put the 1440
                 // card bottom 3 px up and the wells 4 px high (#204 G8).
+                // (In the row form the control still sets the 48 min-height,
+                // so this is height-neutral there.)
                 .line_height(gpui::relative(1.6))
                 .child(label.to_string()),
         )
@@ -174,17 +205,21 @@ pub fn field_stack(
     } else {
         el.border_b_1().border_color(Theme::color(t.line))
     };
-    el
-        .child(
-            // The stacked label is the same `.field-label`: ink, not dim.
-            div()
-                .text_sm()
-                .font_family(crate::fonts::UI_FAMILY)
-                .text_color(Theme::color(t.ink))
-                // Same line-height as the row form (see above).
-                .line_height(gpui::relative(1.6))
-                .child(label.to_string()),
-        )
+    // The stacked label is the same `.field-label`: ink, not dim. Its
+    // line-height is the G8 1.6 in the wide grid only: in React the label
+    // inherits the body 15 px × 1.45 = 21.75 px box, and the G8 22.4 px box
+    // grows every phone field by 0.65 px, which — on top of the 1.45 title
+    // (see `tracked_title`) — put the 390 card bottom 8 px low (#204).
+    let label_el = div()
+        .text_sm()
+        .font_family(crate::fonts::UI_FAMILY)
+        .text_color(Theme::color(t.ink));
+    let label_el = if wide {
+        label_el.line_height(gpui::relative(1.6))
+    } else {
+        label_el.line_height(px(21.75))
+    };
+    el.child(label_el.child(label.to_string()))
         .child(
             div()
                 .flex()
