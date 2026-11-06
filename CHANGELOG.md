@@ -6,6 +6,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-06
+
 ### Added
 
 - Settings has an Audio source panel: pick which output or input the audio-reactive effects read (Follow the Windows default, a loopback output, or an input — audio effects read the picked input whenever an audio effect is active, and Listen tests it live), and see a live test of what the device is delivering — a level meter, a dB figure and the spectrum bands — so you can tell at a glance whether sound is reaching the lights. (#166)
@@ -222,7 +224,8 @@ The first release.
 - Settings for the Attack Shark X6 mouse and the 8BitDo Ultimate 2 controller.
 - The editor, the tray app, the `canvas-rgb` CLI and the Windows installer.
 
-[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.4...HEAD
+[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.4...v0.9.0
 [0.8.4]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.1...v0.8.2
