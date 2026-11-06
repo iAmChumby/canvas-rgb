@@ -11,4 +11,5 @@ pub mod panel;
 pub mod select;
 pub mod segmented;
 pub mod slider;
+pub mod text_input;
 pub mod toggle;

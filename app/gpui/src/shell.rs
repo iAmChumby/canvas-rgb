@@ -287,20 +287,14 @@ impl Shell {
     /// React; one fetch here keeps the capture honest — the value shown is
     /// the daemon's, not a constant).
     fn poll_all(&mut self, cx: &mut Context<Self>) {
+        // Every answer is asked for on its own, so the strip and the rail do
+        // not wait for the slowest of them.
         let bg = cx.background_executor().spawn(async move {
             let client = DaemonClient::new();
-            let status = client.get("/api/v1/status");
-            let devices = client.get("/api/v1/devices");
-            let displays = client.get("/api/v1/displays");
-            let layouts = client.get("/api/v1/layouts");
-            let effects = client.get("/api/v1/effects");
-            let fans = client.get("/api/v1/fans");
-            let peripherals = client.get("/api/v1/peripherals");
-            let render = client.get("/api/v1/render");
-            (status, devices, displays, layouts, effects, fans, peripherals, render)
+            client.get("/api/v1/status")
         });
         cx.spawn(async move |view, cx| {
-            let (status, devices, displays, layouts, effects, fans, peripherals, render) = bg.await;
+            let status = bg.await;
             let _ = view.update(cx, |this, cx| {
                 match status {
                     Ok(body) => {
@@ -318,40 +312,54 @@ impl Shell {
                         }
                     }
                 }
-                if let Ok(body) = devices {
-                    if let Ok(parsed) = serde_json::from_str::<DevicesResponse>(&body) {
-                        this.devices = Some(parsed);
-                    }
-                }
-                if let Ok(body) = displays {
-                    if let Ok(rows) = serde_json::from_str::<Vec<canvas_proto::api::DisplayStatus>>(&body) {
-                        this.displays_connected = rows.iter().filter(|r| r.info.connected).count();
-                        this.displays_count = Some(rows.len());
-                    }
-                }
-                if let Ok(body) = layouts {
-                    if let Ok(parsed) = serde_json::from_str::<LayoutsResponse>(&body) {
-                        this.layouts = Some(parsed);
-                    }
-                }
-                if let Ok(body) = effects {
-                    if let Ok(parsed) = serde_json::from_str::<EffectsResponse>(&body) {
-                        this.effects = Some(parsed);
-                    }
-                }
-                if let Ok(body) = fans {
-                    if let Ok(parsed) = serde_json::from_str::<FansStatus>(&body) {
-                        this.fans = Some(parsed);
-                    }
-                }
-                if let Ok(body) = peripherals {
-                    if let Ok(parsed) = serde_json::from_str::<PeripheralsResponse>(&body) {
-                        this.peripherals = Some(parsed.peripherals.len());
-                    }
-                }
-                if let Ok(body) = render {
-                    if let Ok(parsed) = serde_json::from_str::<RenderState>(&body) {
-                        this.render = Some(parsed);
+                cx.notify();
+            });
+        })
+        .detach();
+        Self::poll_json::<DevicesResponse>(cx, "/api/v1/devices", |this, parsed| {
+            this.devices = Some(parsed);
+        });
+        Self::poll_json::<Vec<canvas_proto::api::DisplayStatus>>(
+            cx,
+            "/api/v1/displays",
+            |this, rows| {
+                this.displays_connected = rows.iter().filter(|r| r.info.connected).count();
+                this.displays_count = Some(rows.len());
+            },
+        );
+        Self::poll_json::<LayoutsResponse>(cx, "/api/v1/layouts", |this, parsed| {
+            this.layouts = Some(parsed);
+        });
+        Self::poll_json::<EffectsResponse>(cx, "/api/v1/effects", |this, parsed| {
+            this.effects = Some(parsed);
+        });
+        Self::poll_json::<FansStatus>(cx, "/api/v1/fans", |this, parsed| {
+            this.fans = Some(parsed);
+        });
+        Self::poll_json::<PeripheralsResponse>(cx, "/api/v1/peripherals", |this, parsed| {
+            this.peripherals = Some(parsed.peripherals.len());
+        });
+        Self::poll_json::<RenderState>(cx, "/api/v1/render", |this, parsed| {
+            this.render = Some(parsed);
+        });
+    }
+
+    /// One answer, asked for on its own and put in the shell when it lands.
+    fn poll_json<T: serde::de::DeserializeOwned + 'static>(
+        cx: &mut Context<Self>,
+        path: &'static str,
+        apply: impl Fn(&mut Self, T) + 'static,
+    ) {
+        let bg = cx.background_executor().spawn(async move {
+            let client = DaemonClient::new();
+            client.get(path).ok()
+        });
+        cx.spawn(async move |view, cx| {
+            let body = bg.await;
+            let _ = view.update(cx, |this, cx| {
+                if let Some(body) = body {
+                    if let Ok(value) = serde_json::from_str::<T>(&body) {
+                        apply(this, value);
                     }
                 }
                 cx.notify();
@@ -1143,7 +1151,7 @@ impl Shell {
         };
         let (now_name, now_detail, _now_count) = playing(self.status.as_ref(), self.effects.as_ref());
         // Page title and context (React PageTitle in the strip).
-        let title_text = match self.page.as_str() {
+        let mut title_text = match self.page.as_str() {
             "layout" => "Layout",
             "effects" => "Effects",
             "devices" => "Devices",
@@ -1153,12 +1161,26 @@ impl Shell {
             "settings" => "Settings",
             "updates" => "Updates",
             _ => "Layout",
-        };
-        let context_text = if self.page == "displays" {
+        }
+        .to_string();
+        let mut context_text = if self.page == "displays" {
             format!("{} connected", self.displays_connected)
         } else {
             String::new()
         };
+        // The page's own actions (React PageActions), on the strip's right.
+        let mut page_actions: Option<gpui::AnyElement> = None;
+        if self.page == "fans" {
+            let fans_view = self.fans_view.clone();
+            let (title, context, actions) = fans_view.update(cx, |view, cx| {
+                let (title, context) = view.strip_title();
+                let actions = view.strip_actions(cx);
+                (title, context, actions)
+            });
+            title_text = title;
+            context_text = context.unwrap_or_default();
+            page_actions = Some(actions);
+        }
         let mut inner = div()
             .flex()
             .items_center()
@@ -1184,8 +1206,14 @@ impl Shell {
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .font_family(crate::fonts::UI_FAMILY)
                     .text_color(Theme::color(t.ink))
-                    .child(title_text.to_string()),
+                    .child(title_text),
             );
+        if !phone {
+            // React `.rd-title { margin-right: var(--s2); }`: the title never
+            // touches the state mark beside it. A phone's strip gives the
+            // margin up (React's phone rule).
+            title_row = title_row.mr_2();
+        }
         if !context_text.is_empty() && !phone {
             title_row = title_row.child(
                 div()
@@ -1251,6 +1279,26 @@ impl Shell {
             mark_row
         };
         inner = inner.child(mark_row).child(div().flex_1());
+        // The page's own actions, on the strip's right, before Pause and
+        // Search (React `.rd-actions`).
+        if let Some(actions) = page_actions {
+            let mut box_ = div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .pr_3()
+                .mr_1()
+                .border_r_1()
+                .border_color(Theme::color(t.line))
+                .child(actions);
+            if phone {
+                // React's phone strip: the actions lose their edge and their
+                // room (`.rd-actions { border-right: 0; padding-right: 0;
+                // margin-right: 0; gap: var(--s1); }`).
+                box_ = box_.pr_0().mr_0().gap_1().border_r_0();
+            }
+            inner = inner.child(box_);
+        }
         // Controls at the right: Pause lights, search.
         if known {
             if phone {
@@ -1471,7 +1519,15 @@ impl Render for Shell {
             // React phone `.content`: padding s4 (16) on the sides.
             content.px(px(16.0)).pb(px(120.0)).pt(phone_pad_top)
         } else {
-            content.px(px(24.0)).pb(px(24.0)).pt(px(16.0))
+            // React `.content { flex: 1 1 auto; min-height: 0; overflow:
+            // hidden; }`: the content box holds the page's own height, so a
+            // long list scrolls inside its own pane.
+            content
+                .px(px(24.0))
+                .pb(px(24.0))
+                .pt(px(16.0))
+                .min_h_0()
+                .overflow_hidden()
         };
         let main_col = div()
             .flex()

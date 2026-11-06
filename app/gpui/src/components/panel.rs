@@ -57,6 +57,9 @@ pub fn tracked_text(
 }
 
 /// A panel with a title. `actions` render beside the title, on the right.
+///
+/// The panel is returned as a styled div, so a caller that needs it to fill
+/// its cell (React's `.rd-headers`, `.rd-fans-right > .panel`) can say so.
 #[allow(dead_code)]
 pub fn panel(
     t: &Theme,
@@ -64,7 +67,7 @@ pub fn panel(
     title: &str,
     actions: impl IntoElement,
     body: impl IntoElement,
-) -> impl IntoElement {
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(gpui::SharedString::from(id.to_string()))
         .flex()
@@ -82,6 +85,9 @@ pub fn panel(
                 .justify_between()
                 .gap_2()
                 .mb_2()
+                // React `.panel-head { flex: 0 0 auto; }`: the head keeps its
+                // height when the panel's body scrolls.
+                .flex_shrink_0()
                 .child(tracked_text(
                     &title.to_uppercase(),
                     13.0,

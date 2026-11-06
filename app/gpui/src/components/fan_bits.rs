@@ -257,23 +257,23 @@ pub fn fans_button(
 
 /// An icon-only button, after `IconButton`: a square key whose label is its
 /// accessible name.
+///
+/// React `.ibtn`: a transparent face and a transparent edge, so the glyph
+/// stands on its own; the box is only there to be a target.
 pub fn fans_icon_button(
     t: &Theme,
     id: &str,
     label: &str,
     icon: &str,
     size_px: f32,
+    icon_px: f32,
     disabled: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
     let _ = label;
-    let face = if disabled {
-        Rgba {
-            a: 0.5,
-            ..Theme::color(t.raised)
-        }
-    } else {
-        Theme::color(t.raised)
+    let face = Rgba {
+        a: 0.0,
+        ..Theme::color(t.ink)
     };
     let row = div()
         .id(gpui::SharedString::from(id.to_string()))
@@ -283,14 +283,20 @@ pub fn fans_icon_button(
         .size(px(size_px))
         .rounded_md()
         .border_1()
-        .border_color(Theme::color(t.line_2))
+        .border_color(face)
         .bg(face)
-        .shadow(skirt_shadow(t))
         .child(
             gpui::svg()
                 .path(format!("icons/{icon}.svg"))
-                .size_5()
-                .text_color(Theme::color(t.ink)),
+                .size(px(icon_px))
+                .text_color(if disabled {
+                    Rgba {
+                        a: 0.4,
+                        ..Theme::color(t.dim)
+                    }
+                } else {
+                    Theme::color(t.dim)
+                }),
         );
     if disabled {
         row
