@@ -586,6 +586,9 @@ html[data-motion="reduced"] *::after {
 
 .popover[data-closing="true"] {
   animation: popover-out var(--dur-exit) var(--ease-exit) both;
+  /* While closing the panel cannot act (it is inert as well): no pointer
+     reaches anything inside it mid-exit. */
+  pointer-events: none;
 }
 
 .strip-details-head {
@@ -1490,6 +1493,9 @@ button.chip:hover {
 
 .listbox[data-closing="true"] {
   animation: listbox-out var(--dur-exit) var(--ease-exit) both;
+  /* While closing the list cannot act (its rows carry no action mid-exit,
+     and it is inert as well): no pointer reaches a row mid-exit. */
+  pointer-events: none;
 }
 
 .listbox-opt {

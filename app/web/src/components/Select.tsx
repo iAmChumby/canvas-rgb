@@ -3,6 +3,8 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import { CaretDown, Check } from "@phosphor-icons/react";
+import { panelOriginSide } from "@/components/Popover";
+import { motionOffNow, readCssMs } from "@/lib/motion";
 
 export interface SelectOption {
   value: string;
@@ -41,9 +43,13 @@ export function Select({
   // The exit (issue #187, rule 2): the list stays for --dur-exit under its
   // exit animation, closing back into the trigger, then goes. Render-phase
   // adjustment (the Crossfade pattern), so the list is placed as it mounts.
+  // Reopening during the exit cancels it at once: `closing` drops and the
+  // timer's cleanup clears it, so the same list node stays in the tree.
   const [rendered, setRendered] = useState(false);
   const [closing, setClosing] = useState(false);
-  if (open && !rendered) {
+  if (open && closing) {
+    setClosing(false);
+  } else if (open && !rendered) {
     setRendered(true);
     setClosing(false);
   } else if (!open && rendered && !closing) {
@@ -51,10 +57,11 @@ export function Select({
   }
   useEffect(() => {
     if (!closing) return;
+    const ms = motionOffNow() ? 0 : readCssMs("--dur-exit", 90);
     const t = setTimeout(() => {
       setRendered(false);
       setClosing(false);
-    }, 90);
+    }, ms);
     return () => clearTimeout(t);
   }, [closing]);
   const typed = useRef({ text: "", at: 0 });
@@ -67,6 +74,9 @@ export function Select({
     setOpen(true);
   };
   const pick = (at: number) => {
+    // A list that is closing cannot act: a click on a row mid-exit changes
+    // nothing (the value only changes from an open, fully interactive list).
+    if (!open) return;
     const o = options[at];
     setOpen(false);
     if (o && o.value !== value) onChange(o.value);
@@ -86,9 +96,12 @@ export function Select({
       const left = Math.max(EDGE, Math.min(r.left, vw - width - EDGE));
       const below = r.bottom + GAP;
       const up = below + height > vh - EDGE && r.top - GAP - height >= EDGE;
-      // The origin (issue #187, rule 1): the list grows out of the trigger's
-      // side — toward the window's middle from the edge the trigger sits on.
-      const side = r.left + r.width / 2 < vw / 2 ? "left" : "right";
+      // The origin (issue #187, rule 1): the list corner nearest the trigger.
+      // The list hangs from the trigger's left edge (pulled inside the window
+      // at its right edge), so which corner is nearest is read off the placed
+      // geometry — an anchor left of the list's centre is nearest the left
+      // corner, an anchor right of it nearest the right corner.
+      const side = panelOriginSide(r.left, r.width, left, width, vw);
       setStyle({
         left: `${Math.round(left)}px`,
         top: `${Math.round(up ? r.top - GAP - height : below)}px`,
@@ -185,7 +198,21 @@ export function Select({
       {rendered &&
         typeof document !== "undefined" &&
         createPortal(
-          <ul ref={listRef} id={`${id}-list`} role="listbox" aria-label={label} className="listbox" data-closing={closing ? "true" : undefined} style={style}>
+          <ul
+            ref={listRef}
+            id={`${id}-list`}
+            role="listbox"
+            aria-label={label}
+            className="listbox"
+            // While closing the list cannot act and is out of the tab order:
+            // inert takes it out, aria-hidden takes it from assistive tech;
+            // the trigger already says aria-expanded=false and names no
+            // active descendant.
+            inert={closing || undefined}
+            aria-hidden={closing || undefined}
+            data-closing={closing ? "true" : undefined}
+            style={style}
+          >
             {options.map((o, i) => (
               <li
                 key={o.value}

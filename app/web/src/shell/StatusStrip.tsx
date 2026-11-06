@@ -175,13 +175,14 @@ export function StatusStrip({
               disabled={busy}
               onClick={togglePower}
               aria-label={paused ? "Resume lights" : "Pause lights"}
-              // The Play/Pause swap cross-fades with scale and blur (issue #187, rule 8).
+              // The Play/Pause swap cross-fades with scale and blur (issue #187, rule 8). No
+              // label here: the button's own aria-label already says it, so the swap
+              // carries no duplicate role="img" landmark.
               icon={
                 <IconSwap
                   a={<Pause size={14} weight="fill" aria-hidden="true" />}
                   b={<Play size={14} weight="fill" aria-hidden="true" />}
                   at={paused ? 1 : 0}
-                  label={paused ? "Resume lights" : "Pause lights"}
                 />
               }
             >

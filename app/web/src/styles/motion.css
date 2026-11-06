@@ -92,6 +92,17 @@
   place-items: center;
 }
 
+/* The static states, so a first mount shows the right icon with no animation:
+   the on-layer is visible, the off-layer is not. The animation classes below
+   take over from the first real swap onwards. */
+.icon-swap-layer[data-on="true"] {
+  opacity: 1;
+}
+
+.icon-swap-layer[data-on="false"] {
+  opacity: 0;
+}
+
 .icon-swap-in {
   animation: icon-swap-in var(--dur) var(--ease) both;
 }

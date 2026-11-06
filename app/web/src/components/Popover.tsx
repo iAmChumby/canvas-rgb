@@ -2,6 +2,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { motionOffNow, readCssMs } from "@/lib/motion";
 
 /** The space between the control and the panel, in css pixels. */
 const GAP = 6;
@@ -9,6 +10,28 @@ const GAP = 6;
 const EDGE = 8;
 /** The least height a panel may have, in css pixels: below this it is a sliver. */
 const MIN_H = 96;
+
+/**
+ * Which horizontal side of a panel the growth origin sits on: the panel corner
+ * nearest the anchor (issue #187, rule 1). The panel's centre against the
+ * anchor's centre decides it: an anchor left of the panel's centre is nearest
+ * the panel's left edge; an anchor right of it is nearest the right edge. An
+ * exact tie (the panel exactly under its anchor) falls back to the window's
+ * middle side: a panel that covers its anchor grows toward the middle.
+ */
+export function panelOriginSide(
+  anchorLeft: number,
+  anchorWidth: number,
+  left: number,
+  width: number,
+  viewportW: number,
+): "left" | "right" {
+  const anchorCentre = anchorLeft + anchorWidth / 2;
+  const panelCentre = left + width / 2;
+  if (anchorCentre < panelCentre) return "left";
+  if (anchorCentre > panelCentre) return "right";
+  return anchorCentre < viewportW / 2 ? "left" : "right";
+}
 
 /**
  * A panel that hangs under a control.
@@ -44,10 +67,14 @@ export function Popover({
   // --dur-exit under its exit animation, then goes. It closes back into the
   // trigger, toward the same origin it grew from. The state adjustment runs
   // while rendering (the Crossfade pattern), so the panel is in the tree
-  // before the placement effect measures it.
+  // before the placement effect measures it. Reopening during the exit
+  // cancels the exit at once: `closing` drops and the timer's cleanup clears
+  // it, so the same panel node stays in the tree.
   const [rendered, setRendered] = useState(open);
   const [closing, setClosing] = useState(false);
-  if (open && !rendered) {
+  if (open && closing) {
+    setClosing(false);
+  } else if (open && !rendered) {
     setRendered(true);
     setClosing(false);
   } else if (!open && rendered && !closing) {
@@ -55,10 +82,11 @@ export function Popover({
   }
   useEffect(() => {
     if (!closing) return;
+    const ms = motionOffNow() ? 0 : readCssMs("--dur-exit", 90);
     const t = setTimeout(() => {
       setRendered(false);
       setClosing(false);
-    }, 90);
+    }, ms);
     return () => clearTimeout(t);
   }, [closing]);
 
@@ -90,10 +118,12 @@ export function Popover({
       const up = height > 0 && below + height > vh - EDGE && above >= EDGE;
       const top = up ? above : Math.max(EDGE, Math.min(below, vh - EDGE - height));
 
-      // The origin (issue #187, rule 1): the panel grows out of the trigger's
-      // side — toward the window's middle from the edge it sits on — so the
-      // exit can close back into the same point.
-      const side = r.left + r.width / 2 < vw / 2 ? "left" : "right";
+      // The origin (issue #187, rule 1): the panel corner nearest the anchor.
+      // The panel hangs from the anchor's right edge (pulled inside the window
+      // at its left edge), so which corner is nearest is read off the placed
+      // geometry — an anchor left of the panel's centre is nearest the left
+      // corner, an anchor right of it nearest the right corner.
+      const side = panelOriginSide(r.left, r.width, left, width, vw);
 
       setStyle({
         left: `${Math.round(left)}px`,
@@ -144,6 +174,11 @@ export function Popover({
       className={className ? `popover ${className}` : "popover"}
       role="dialog"
       aria-label={label}
+      // While closing the panel cannot act: it is inert (out of the tab order
+      // and unfocusable) and hidden from assistive tech; the trigger's own
+      // expanded state already says it is closed.
+      inert={closing || undefined}
+      aria-hidden={closing || undefined}
       data-closing={closing ? "true" : undefined}
       style={style}
     >

@@ -26,7 +26,7 @@ import { Segmented } from "@/components/Segmented";
 import { StateDot } from "@/components/Panel";
 import { EffectPreview } from "@/components/EffectPreview";
 import { EmptyState } from "@/components/EmptyState";
-import { Enter } from "@/components/Motion";
+import { Enter, useSuccessPulse } from "@/components/Motion";
 import { Highlighted, matchEffect } from "@/components/Search";
 import { useMediaQuery } from "@/components/MediaQuery";
 import { ErrorPanel, Details, LoadFrame, type LoadState } from "@/components/Loading";
@@ -207,12 +207,22 @@ export function EffectsView() {
     timer.current = setTimeout(() => void flush(), PATCH_DEBOUNCE_MS);
   };
 
+  // One pulse on each Activate button (desktop and sheet) once the effect is
+  // on the lights (issue #187, rule 6).
+  const { el: applyPulseEl, fire: pulseApply } = useSuccessPulse();
+  const { el: applyPulseSheetEl, fire: pulseApplySheet } = useSuccessPulse();
+
   const activate = async (preset: string | null) => {
     if (!selectedId) return;
     setError(null);
     try {
       await api.activateEffect(selectedId, { props: {}, preset });
       await refreshAll();
+      // One pulse once the effect is on the lights (issue #187, rule 6): it
+      // fires only here, after the daemon confirmed — never from `running`,
+      // so it cannot pulse on mount or when `activeId` changes.
+      pulseApply.fire();
+      pulseApplySheet.fire();
     } catch (e) {
       setError(messageOf(e));
     }
@@ -790,9 +800,8 @@ export function EffectsView() {
                   </div>
                 </div>
                 <Button
+                  ref={applyPulseEl}
                   variant={running ? "default" : "primary"}
-                  // One pulse once the effect is on the lights (issue #187, rule 6).
-                  className={running ? "success-pulse" : undefined}
                   disabled={running || stale}
                   onClick={() => void activate(null)}
                   icon={<Play size={14} weight="fill" />}
@@ -918,10 +927,9 @@ export function EffectsView() {
                     Edit stack
                   </Button>
                   <Button
+                    ref={applyPulseSheetEl}
                     variant="default"
                     size="sm"
-                    // One pulse once the effect is on the lights (issue #187, rule 6).
-                    className={running ? "success-pulse" : undefined}
                     disabled={running || stale}
                     onClick={() => void activate(null)}
                     icon={<Play size={14} weight="fill" />}

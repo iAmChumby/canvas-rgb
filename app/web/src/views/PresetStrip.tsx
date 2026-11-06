@@ -191,10 +191,10 @@ export function PresetStrip({
       naming.kind === "rename"
         ? await attempt("rename", () => onRename(naming.name, name))
         : await attempt("save", () => onSave(name), name);
-    if (ok) {
-      pulseSave();
-      close();
-    }
+    // One pulse on the Save chip when a preset lands (issue #187, rule 6):
+    // a rename is not a save, so it never pulses.
+    if (ok && naming.kind === "save") pulseSave();
+    if (ok) close();
   };
 
   const doUpdate = async () => {
