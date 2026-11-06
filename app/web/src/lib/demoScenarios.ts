@@ -212,7 +212,9 @@ export function applyFanScenarios(status: FansStatus): FansStatus {
     next = {
       ...status,
       headers: status.headers.map((h) => {
-        if (unavailable.includes(h.id)) {
+        // Issue #146: the owner's word on a header wins over the table: a header the owner
+        // marked "show anyway" is on the board, whatever the table says.
+        if (unavailable.includes(h.id) && h.override_available === null) {
           // Issue #128: the read register stays 0 for an unrouted channel, rpm 0, on BIOS.
           return { ...h, available: false, on_bios: true, override_reason: null, rpm: 0, pwm_percent: 0 };
         }

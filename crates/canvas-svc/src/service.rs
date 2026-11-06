@@ -110,6 +110,13 @@ impl Core {
             }
             PipeRequest::FanStatus => PipeResponse::FanStatus { status: self.fans.status() },
             PipeRequest::SetHeaderMode { header, mode } => ok_or(self.fans.set_header_mode(&header, mode, now)),
+            // Issue #146: the owner's word on whether a header is on this board. `Some(false)`
+            // releases the header to BIOS, `Some(true)` says "show anyway", and `None` takes
+            // the word off, so the board table decides again.
+            PipeRequest::SetHeaderAvailability { header, available } => match available {
+                Some(available) => ok_or(self.fans.set_header_override(&header, available)),
+                None => ok_or(self.fans.clear_header_override(&header, now)),
+            },
             PipeRequest::SetProfile { name } => ok_or(self.fans.set_profile(&name, now)),
             PipeRequest::PutProfile { profile } => ok_or(self.fans.put_profile(profile, now)),
             PipeRequest::DeleteProfile { name } => ok_or(self.fans.delete_profile(&name)),

@@ -1013,13 +1013,15 @@ enum FakeReply {
     Down,
     /// The pipe opened and then broke: the request may have been acted on.
     Broke,
+    /// Answers Ok to everything except FanStatus, which fails like a dropped pipe.
+    OkButFanStatusDown,
 }
 
 #[async_trait::async_trait]
 impl canvas_daemon::pipe_client::PipeLink for FakePipe {
     async fn exchange(
         &self,
-        _request: &canvas_proto::pipe::PipeRequest,
+        request: &canvas_proto::pipe::PipeRequest,
     ) -> Result<canvas_proto::pipe::PipeResponse, canvas_daemon::pipe_client::PipeError> {
         match self.reply {
             FakeReply::Ok => Ok(canvas_proto::pipe::PipeResponse::Ok),
@@ -1036,6 +1038,12 @@ impl canvas_daemon::pipe_client::PipeLink for FakePipe {
             FakeReply::Broke => Err(canvas_daemon::pipe_client::PipeError::Io(
                 std::io::Error::new(std::io::ErrorKind::BrokenPipe, "the pipe broke"),
             )),
+            FakeReply::OkButFanStatusDown => match request {
+                canvas_proto::pipe::PipeRequest::FanStatus => Err(canvas_daemon::pipe_client::PipeError::Io(
+                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, "the pipe broke on FanStatus"),
+                )),
+                _ => Ok(canvas_proto::pipe::PipeResponse::Ok),
+            },
         }
     }
 }
@@ -2065,6 +2073,7 @@ fn fans(temps: Vec<(TempSource, f32)>, headers: Vec<(&str, u32)>) -> FansStatus 
                 on_bios: true,
                 override_reason: None,
                 available: true,
+                override_available: None,
             })
             .collect(),
         temps: temps
@@ -3589,6 +3598,186 @@ async fn deleting_a_user_effect_removes_its_presets_unless_they_are_kept() {
     app.user_effects.rescan(&folder);
     let (_, detail) = send(&router, "GET", "/api/v1/effects/html:fancy", serde_json::json!({})).await;
     assert_eq!(preset_names(&detail), ["Fast"], "the kept preset is back");
+}
+
+// ---- Issue #146: PUT /api/v1/fans/headers/{h}/availability ----
+
+/// The route for one header's availability.
+fn availability_path(header: &str) -> String {
+    routes::FAN_HEADER_AVAILABILITY.replace("{h}", header)
+}
+
+/// A status with one header on it.
+fn status_with_header() -> FansStatus {
+    fans(vec![(TempSource::Cpu, 40.0)], vec![("sys_fan1", 900)])
+}
+
+/// The owner's word goes to the service as one pipe request, and the answer is the new status.
+#[tokio::test]
+async fn issue146_put_header_availability_sends_the_word_to_the_service() {
+    let status = status_with_header();
+    let (router, app, _home, sent) = build_with_recording_pipe(status.clone());
+    *app.fans.write().await = Some(status);
+    let response = router
+        .oneshot(request_with_body("PUT", &availability_path("sys_fan1"), r#"{"available":false}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json(response).await;
+    assert!(
+        body.get("headers").and_then(|v| v.as_array()).is_some(),
+        "the answer carries the new status: {body}"
+    );
+
+    let sent = sent.lock().unwrap();
+    let request = sent
+        .iter()
+        .find(|r| matches!(r, canvas_proto::pipe::PipeRequest::SetHeaderAvailability { .. }))
+        .expect("the word went to the service");
+    match request {
+        canvas_proto::pipe::PipeRequest::SetHeaderAvailability { header, available } => {
+            assert_eq!(header, "sys_fan1");
+            assert_eq!(*available, Some(false), "the word is 'not on my board'");
+        }
+        other => panic!("expected SetHeaderAvailability, got {other:?}"),
+    }
+}
+
+/// Clearing the word sends null: the board table decides again.
+#[tokio::test]
+async fn issue146_clearing_the_word_sends_null() {
+    let status = status_with_header();
+    let (router, app, _home, sent) = build_with_recording_pipe(status.clone());
+    *app.fans.write().await = Some(status);
+    let response = router
+        .oneshot(request_with_body("PUT", &availability_path("sys_fan1"), r#"{"available":null}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let sent = sent.lock().unwrap();
+    let request = sent
+        .iter()
+        .find(|r| matches!(r, canvas_proto::pipe::PipeRequest::SetHeaderAvailability { .. }))
+        .expect("the word went to the service");
+    match request {
+        canvas_proto::pipe::PipeRequest::SetHeaderAvailability { available, .. } => {
+            assert_eq!(*available, None, "the word is off");
+        }
+        other => panic!("expected SetHeaderAvailability, got {other:?}"),
+    }
+}
+
+/// The service refuses an unknown header, and that refusal is a 422.
+#[tokio::test]
+async fn issue146_a_validation_refusal_from_the_service_is_a_422() {
+    let (router, _app, _home) = build_with_pipe(FakeReply::Error("validation"));
+    let response = router
+        .oneshot(request_with_body("PUT", &availability_path("sys_fan9"), r#"{"available":false}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = json(response).await;
+    assert_eq!(body.get("error").and_then(|v| v.as_str()), Some("validation"));
+}
+
+/// The route is behind the same guard as the other fan routes.
+#[tokio::test]
+async fn issue146_the_route_needs_the_token() {
+    let (router, _app, _home) = build();
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(availability_path("sys_fan1"))
+                .header("host", "127.0.0.1:9430")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"available":false}"#.to_string()))
+                .expect("the request builds"),
+        )
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// When the service took the word but FanStatus fails, the daemon does not claim
+/// failure: it answers 200 with the cached status patched for that header.
+#[tokio::test]
+async fn issue146_when_fan_status_fails_after_the_word_the_cached_status_is_patched() {
+    let status = status_with_header();
+    let (router, app, _home) = build_with_pipe(FakeReply::OkButFanStatusDown);
+    *app.fans.write().await = Some(status.clone());
+    let response = router
+        .oneshot(request_with_body("PUT", &availability_path("sys_fan1"), r#"{"available":false}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK, "the word was taken: the answer is not 503");
+    let body = json(response).await;
+    let headers = body.get("headers").and_then(|v| v.as_array()).expect("the answer carries headers");
+    let header = headers.iter().find(|h| h.get("id").and_then(|v| v.as_str()) == Some("sys_fan1")).expect("sys_fan1");
+    assert_eq!(header.get("available"), Some(&serde_json::json!(false)), "available follows the word: {header}");
+    assert_eq!(header.get("override_available"), Some(&serde_json::json!(false)), "the word is carried: {header}");
+    let cached = app.fans.read().await.clone().expect("a cached status remains");
+    let cached_header = cached.headers.iter().find(|h| h.id == "sys_fan1").expect("sys_fan1 in cache");
+    assert!(!cached_header.available, "the cache is patched too");
+    assert_eq!(cached_header.override_available, Some(false));
+}
+
+/// When the service took the word, FanStatus fails and there is no cached status,
+/// the daemon answers 200 {"ok":true} rather than claiming the change failed.
+#[tokio::test]
+async fn issue146_when_fan_status_fails_and_nothing_is_cached_the_answer_is_ok_true() {
+    let (router, _app, _home) = build_with_pipe(FakeReply::OkButFanStatusDown);
+    let response = router
+        .oneshot(request_with_body("PUT", &availability_path("sys_fan1"), r#"{"available":false}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json(response).await;
+    assert_eq!(body.get("ok"), Some(&serde_json::json!(true)), "the answer is ok:true: {body}");
+}
+
+/// The daemon validates the header id before sending: an unknown id (against the
+/// cached status) and an over-long id are 422 and never reach the service.
+#[tokio::test]
+async fn issue146_an_unknown_or_over_long_header_is_a_422_before_the_service() {
+    let status = status_with_header();
+    let (router, app, _home, sent) = build_with_recording_pipe(status.clone());
+    *app.fans.write().await = Some(status);
+    let response = router
+        .clone()
+        .oneshot(request_with_body("PUT", &availability_path("sys_fan9"), r#"{"available":false}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY, "an unknown header is 422");
+    let long = "x".repeat(100);
+    let response = router
+        .oneshot(request_with_body("PUT", &availability_path(&long), r#"{"available":false}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY, "an over-long header is 422");
+    let sent = sent.lock().unwrap();
+    assert!(
+        !sent.iter().any(|r| matches!(r, canvas_proto::pipe::PipeRequest::SetHeaderAvailability { .. })),
+        "a refused header never reaches the service"
+    );
+}
+
+/// A body without `available` and a body with an unknown field are both refused.
+#[tokio::test]
+async fn issue146_a_body_without_available_or_with_an_unknown_field_is_a_422() {
+    let (router, _app, _home) = build_with_pipe(FakeReply::Ok);
+    let response = router
+        .clone()
+        .oneshot(request_with_body("PUT", &availability_path("sys_fan1"), r#"{}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY, "a missing available is 422");
+    let response = router
+        .oneshot(request_with_body("PUT", &availability_path("sys_fan1"), r#"{"available":true,"x":1}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY, "an unknown field is 422");
 }
 
 /// The audio test lease, through the routes: take, read (200), expire, read

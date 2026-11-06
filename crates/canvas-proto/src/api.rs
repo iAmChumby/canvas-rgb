@@ -95,6 +95,8 @@ pub mod routes {
     /// `PUT` a [`crate::fans::HotLimits`] (issue #130): the user's "don't exceed" temperatures.
     /// 422 outside `HOT_LIMIT_MIN_C..=max_settable_c`; answers the new [`FansStatus`].
     pub const FAN_HOT: &str = "/api/v1/fans/hot";
+    /// `PUT`: [`PutFanHeaderAvailability`] (issue #146).
+    pub const FAN_HEADER_AVAILABILITY: &str = "/api/v1/fans/headers/{h}/availability";
     /// `PUT` a [`crate::fans::FanProfile`] to create or replace it. `DELETE` removes it
     /// (409 `conflict` for the active profile or the last remaining one).
     pub const FAN_PROFILES: &str = "/api/v1/fans/profiles/{name}";
@@ -790,6 +792,15 @@ pub type PutFanProfile = FanProfile;
 
 /// `PUT /fans/hot` body (issue #130). A `null` kind is automatic.
 pub type PutFanHot = crate::fans::HotLimits;
+
+/// `PUT /fans/headers/{h}/availability` body (issue #146): `false` "Not on my board",
+/// `true` "Show anyway", `null` back to the board table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+#[ts(export)]
+pub struct PutFanHeaderAvailability {
+    pub available: Option<bool>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]

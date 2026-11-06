@@ -1238,6 +1238,118 @@ fn a_stuck_zero_header_is_handed_back_on_an_unknown_board_and_left_alone_on_ms7e
 }
 
 #[test]
+fn issue146_clearing_a_shown_anyway_header_on_a_board_hidden_header_releases_it_to_bios() {
+    let t0 = Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let chip = FakeChip::new(MSI_ALT1_MAP);
+    let cpu = FakeTemp::new(40.0);
+    let mut fans = board_controller(&dir, &chip, &cpu, FansFile::default(), t0, Some(MS7E56));
+    // MS-7E56 hides sys_fan5; show anyway, then give it a mode so it is manual.
+    fans.set_header_override("sys_fan5", true).unwrap();
+    fans.set_header_mode("sys_fan5", FanMode::Fixed { percent: 50 }, t0).unwrap();
+    assert!(chip.manual(6), "sys_fan5 is manual after the mode is set");
+    let saved = store::load_bios_state(&paths::bios_state_path(dir.path())).unwrap();
+    assert!(saved.headers.contains_key("sys_fan5"), "bios-state.json names sys_fan5 while it is manual");
+    fans.clear_header_override("sys_fan5", t0).unwrap();
+    fans.tick(t0 + Duration::from_secs(1));
+    assert!(!chip.manual(6), "clearing to a board-hidden header releases it to BIOS");
+    let saved = store::load_bios_state(&paths::bios_state_path(dir.path())).unwrap();
+    assert!(!saved.headers.contains_key("sys_fan5"), "bios-state.json no longer names sys_fan5");
+}
+
+#[test]
+fn issue146_clearing_not_on_my_board_resumes_the_profile_mode() {
+    let t0 = Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let chip = FakeChip::new(MSI_ALT1_MAP);
+    let cpu = FakeTemp::new(40.0);
+    let mut fans = board_controller(&dir, &chip, &cpu, FansFile::default(), t0, Some(MS7E56));
+    fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 50 }, t0).unwrap();
+    assert!(chip.manual(SYS_FAN1), "sys_fan1 is running Fixed 50%");
+    fans.set_header_override("sys_fan1", false).unwrap();
+    assert!(!chip.manual(SYS_FAN1), "not on my board releases sys_fan1");
+    fans.clear_header_override("sys_fan1", t0).unwrap();
+    assert!(chip.manual(SYS_FAN1), "clearing resumes the profile mode: sys_fan1 is manual again");
+    assert_eq!(header(&fans.status(), "sys_fan1").pwm_percent, Some(50), "sys_fan1 drives Fixed 50% again");
+}
+
+#[test]
+fn issue146_a_shown_anyway_header_gets_the_safety_ceiling() {
+    let t0 = Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let chip = FakeChip::new(MSI_ALT1_MAP);
+    let cpu = FakeTemp::new(40.0);
+    let mut fans = board_controller(&dir, &chip, &cpu, FansFile::default(), t0, Some(MS7E56));
+    cpu.set(Some(90.0));
+    fans.tick(t0);
+    fans.set_header_override("sys_fan5", true).unwrap();
+    fans.set_header_mode("sys_fan5", FanMode::Fixed { percent: 50 }, t0).unwrap();
+    assert_eq!(chip.duty_raw(6), 255, "90 C is above the ceiling: the shown-anyway header runs at 100%");
+    assert_eq!(header(&fans.status(), "sys_fan5").pwm_percent, Some(100));
+}
+
+#[test]
+fn issue146_a_failed_save_on_set_false_changes_nothing() {
+    let t0 = Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let chip = FakeChip::new(MSI_ALT1_MAP);
+    let cpu = FakeTemp::new(40.0);
+    let mut fans = board_controller(&dir, &chip, &cpu, FansFile::default(), t0, Some(MS7E56));
+    fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 50 }, t0).unwrap();
+    assert!(chip.manual(SYS_FAN1));
+    std::fs::create_dir(paths::chip_path(dir.path())).unwrap();
+    let writes_before = chip.writes();
+    let err = fans.set_header_override("sys_fan1", false).unwrap_err();
+    assert!(matches!(err, FanError::Store(_)), "the save failure is the error: {err}");
+    assert_eq!(chip.writes(), writes_before, "a failed save writes nothing to the chip");
+    assert!(chip.manual(SYS_FAN1), "the header is still manual: the release never ran");
+    assert!(fans.header_available("sys_fan1"), "the in-memory word is unchanged after a failed save");
+    assert_eq!(header(&fans.status(), "sys_fan1").override_available, None, "no word is in memory");
+}
+
+#[test]
+fn issue146_a_failed_save_on_clear_changes_nothing() {
+    let t0 = Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let chip = FakeChip::new(MSI_ALT1_MAP);
+    let cpu = FakeTemp::new(40.0);
+    let mut fans = board_controller(&dir, &chip, &cpu, FansFile::default(), t0, Some(MS7E56));
+    fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 50 }, t0).unwrap();
+    fans.set_header_override("sys_fan1", false).unwrap();
+    assert!(!chip.manual(SYS_FAN1));
+    std::fs::remove_file(paths::chip_path(dir.path())).unwrap();
+    std::fs::create_dir(paths::chip_path(dir.path())).unwrap();
+    let writes_before = chip.writes();
+    let err = fans.clear_header_override("sys_fan1", t0).unwrap_err();
+    assert!(matches!(err, FanError::Store(_)), "the save failure is the error: {err}");
+    assert_eq!(chip.writes(), writes_before, "a failed save writes nothing to the chip");
+    assert!(!fans.header_available("sys_fan1"), "the in-memory word is unchanged after a failed clear");
+    assert_eq!(header(&fans.status(), "sys_fan1").override_available, Some(false), "the word is still in memory");
+}
+
+#[test]
+fn issue146_with_no_chip_every_header_is_refused() {
+    let t0 = Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let cpu = FakeTemp::new(40.0);
+    let temps: BTreeMap<TempSource, Box<dyn TempReader>> =
+        BTreeMap::from([(TempSource::Cpu, Box::new(cpu.clone()) as Box<dyn TempReader>)]);
+    let mut fans = FanController::new(dir.path().to_path_buf(), None, None, temps, FansFile::default(), None);
+    fans.startup(t0);
+    for available in [Some(false), Some(true)] {
+        let err = match available {
+            Some(v) => fans.set_header_override("sys_fan1", v).unwrap_err(),
+            None => fans.clear_header_override("sys_fan1", t0).unwrap_err(),
+        };
+        assert!(matches!(err, FanError::Validation(_)), "no chip: every header is refused: {err}");
+        assert!(err.to_string().contains("sys_fan1"), "the error names the header: {err}");
+    }
+    let err = fans.clear_header_override("sys_fan1", t0).unwrap_err();
+    assert!(matches!(err, FanError::Validation(_)), "clear with no chip is refused: {err}");
+    assert!(err.to_string().contains("sys_fan1"), "the error names the header: {err}");
+}
+
+#[test]
 fn reconfirming_the_channel_map_keeps_the_header_overrides() {
     let mut old = store::ChipState::confirmed("msi_alt1");
     old.header_overrides.insert("sys_fan5".into(), true);

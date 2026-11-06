@@ -21,6 +21,11 @@ pub enum PipeRequest {
     Heartbeat,
     FanStatus,
     SetHeaderMode { header: HeaderId, mode: FanMode },
+    /// Issue #146: the owner's word on whether a header is on this board. `Some(false)` is
+    /// "Not on my board" (the header is released to BIOS and never written), `Some(true)` is
+    /// "Show anyway", `None` clears the override so the board table decides again. Saved in
+    /// `chip.toml` `header_overrides`; an unknown header is a validation error.
+    SetHeaderAvailability { header: HeaderId, available: Option<bool> },
     SetProfile { name: String },
     PutProfile { profile: FanProfile },
     /// Refused with `conflict` for the active profile or the last one.
@@ -122,6 +127,29 @@ mod tests {
         assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize, bytes.len() - 4);
         assert_eq!(decode::<PipeRequest>(&bytes).unwrap(), req);
         assert!(matches!(decode::<PipeRequest>(&bytes[..6]), Err(FrameError::Truncated)));
+    }
+
+    #[test]
+    fn header_availability_wire_shape() {
+        let set = PipeRequest::SetHeaderAvailability { header: "sys_fan5".into(), available: Some(false) };
+        assert_eq!(
+            serde_json::to_value(&set).unwrap(),
+            serde_json::json!({ "op": "set_header_availability", "header": "sys_fan5", "available": false })
+        );
+        let clear = PipeRequest::SetHeaderAvailability { header: "sys_fan5".into(), available: None };
+        assert_eq!(
+            serde_json::to_value(&clear).unwrap(),
+            serde_json::json!({ "op": "set_header_availability", "header": "sys_fan5", "available": null })
+        );
+        assert_eq!(decode::<PipeRequest>(&encode(&clear).unwrap()).unwrap(), clear);
+        // The API body is strict, and an old status without the field reads as no override.
+        assert!(serde_json::from_str::<crate::api::PutFanHeaderAvailability>(r#"{"available":true,"x":1}"#).is_err());
+        let old: crate::fans::FanHeaderStatus = serde_json::from_str(
+            r#"{"id":"sys_fan5","label":"System fan 5","rpm":null,"pwm_percent":null,"mode":{"mode":"bios"},"on_bios":true,"override_reason":null}"#,
+        )
+        .unwrap();
+        assert_eq!(old.override_available, None);
+        assert!(old.available);
     }
 
     #[test]

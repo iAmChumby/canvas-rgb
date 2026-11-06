@@ -432,6 +432,7 @@ pub fn fake_fans_status() -> FansStatus {
         on_bios: false,
         override_reason: None,
         available: true,
+        override_available: None,
     };
     FansStatus {
         chip: Some("NCT6687D-R @ 0xA20 (fake)".into()),

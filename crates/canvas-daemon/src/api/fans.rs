@@ -65,6 +65,94 @@ pub async fn patch_header(
     Ok(Json(serde_json::json!({ "ok": true, "header": header, "mode": mode })))
 }
 
+/// `PUT /api/v1/fans/headers/{h}/availability` (issue #146).
+///
+/// The owner's word on whether a header is on this board: `false` is "Not on my board",
+/// `true` is "Show anyway" and `null` takes the word off, so the board table decides again.
+/// The service knows the headers, so it refuses an unknown one; that refusal is a 422 here,
+/// mapped through the same `service_failure` the other fan routes use.
+///
+/// The answer is the new fan status: the word changes which headers the page shows, and the
+/// daemon's cached status is refreshed so the next read says the same. When the service
+/// took the word but the follow-up FanStatus fails, the daemon does not claim failure: it
+/// answers 200 with the cached status patched for that header, or 200 `{"ok":true}` when
+/// nothing is cached (issue #146 review S2).
+pub async fn put_header_availability(
+    State(app): State<Arc<App>>,
+    Path(header): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<Json<serde_json::Value>> {
+    // Validate the header id in the daemon, as the other fans write route does: a
+    // non-empty, bounded id, and a known one when the cached status has headers.
+    if header.is_empty() || header.len() > 64 {
+        return Err(ApiFailure::validation(format!("unknown header {header}")));
+    }
+    {
+        let cached = app.fans.read().await.clone();
+        if let Some(status) = cached.as_ref() {
+            if !status.headers.is_empty() && !status.headers.iter().any(|h| h.id == header) {
+                return Err(ApiFailure::validation(format!("unknown header {header}")));
+            }
+        }
+    }
+    // The body is strict: exactly `available`, a bool or null. A missing field, an
+    // unknown field, or any other shape is a 422 before anything reaches the service.
+    let available = match body {
+        serde_json::Value::Object(ref map) if map.len() == 1 => match map.get("available") {
+            Some(serde_json::Value::Bool(v)) => Some(*v),
+            Some(serde_json::Value::Null) => None,
+            _ => return Err(ApiFailure::validation("the body must be {\"available\": true, false, or null}".to_string())),
+        },
+        _ => return Err(ApiFailure::validation("the body must be {\"available\": true, false, or null}".to_string())),
+    };
+    let response = crate::pipe_client::send(
+        &app,
+        &canvas_proto::pipe::PipeRequest::SetHeaderAvailability {
+            header: header.clone(),
+            available,
+        },
+    )
+    .await
+    .map_err(|e| ApiFailure::service_unavailable(format!("the fan service is not reachable: {e}")))?;
+
+    match response {
+        canvas_proto::pipe::PipeResponse::Ok => {}
+        canvas_proto::pipe::PipeResponse::Error { code, message } => {
+            return Err(service_failure(&code, message));
+        }
+        _ => {
+            return Err(ApiFailure::internal("the fan service gave an unexpected answer"));
+        }
+    }
+
+    // The word changed what the service reports, so ask it again and keep that copy.
+    match crate::pipe_client::send(&app, &canvas_proto::pipe::PipeRequest::FanStatus).await {
+        Ok(canvas_proto::pipe::PipeResponse::FanStatus { status }) => {
+            *app.fans.write().await = Some(status.clone());
+            tracing::info!(header = %header, available = ?available, "the header availability changed");
+            Ok(Json(serde_json::to_value(&status).unwrap_or(serde_json::json!({ "ok": true }))))
+        }
+        _ => {
+            // The word is already taken and saved in the service: do not answer 503.
+            tracing::warn!(header = %header, available = ?available, "the fan status could not be read after the header availability changed; answering with the cached status patched for this header");
+            let cached = app.fans.read().await.clone();
+            match cached {
+                Some(mut status) => {
+                    if let Some(h) = status.headers.iter_mut().find(|h| h.id == header) {
+                        if let Some(v) = available {
+                            h.available = v;
+                        }
+                        h.override_available = available;
+                    }
+                    *app.fans.write().await = Some(status.clone());
+                    Ok(Json(serde_json::to_value(&status).unwrap_or(serde_json::json!({ "ok": true }))))
+                }
+                None => Ok(Json(serde_json::json!({ "ok": true }))),
+            }
+        }
+    }
+}
+
 /// `GET /api/v1/fans/profile`.
 pub async fn get_profile(State(app): State<Arc<App>>) -> ApiResult<Json<FanProfileName>> {
     let status = app

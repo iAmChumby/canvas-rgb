@@ -670,6 +670,7 @@ mod tests {
                     on_bios: true,
                     override_reason: None,
                     available: true,
+                    override_available: None,
                 })
                 .collect(),
             temps: temps
