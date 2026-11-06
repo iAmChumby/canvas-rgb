@@ -73,7 +73,7 @@ export function UpdatesPanel() {
           <Swap labels={["Check now", "Checking"]} at={checking ? 1 : 0} />
         </Button>
       </Field>
-      <Field label="Experimental builds">
+      <Field label="Experimental builds" hint="Unstable test builds, offered early">
         <Toggle
           label="Experimental builds"
           checked={prefs?.channel === "experimental"}
@@ -81,10 +81,6 @@ export function UpdatesPanel() {
           onChange={setChannel}
         />
       </Field>
-      <p className="mute upd-note">
-        Experimental builds are unstable test builds; turning it off keeps the build you have
-        until a newer stable release comes out.
-      </p>
       <div className="upd-status">
         {status && u ? (
           <>

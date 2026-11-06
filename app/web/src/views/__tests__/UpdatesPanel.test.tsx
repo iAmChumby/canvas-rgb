@@ -23,12 +23,10 @@ afterEach(() => {
 });
 
 describe("the Experimental builds switch", () => {
-  it("says what it is and what turning it off does", async () => {
+  it("says what it is in one line under its label", async () => {
     render(<UpdatesPanel />);
     await screen.findByRole("switch", { name: SWITCH });
-    const note = document.querySelector(".upd-note");
-    expect(note?.textContent ?? "").toContain("unstable test builds");
-    expect(note?.textContent ?? "").toContain("newer stable release");
+    expect(screen.getByText("Unstable test builds, offered early")).toBeTruthy();
   });
 
   it("works on the demo stub in a browser, with no tray behind it", async () => {
