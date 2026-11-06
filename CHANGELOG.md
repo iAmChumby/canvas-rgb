@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- Audio Spectrum is no longer dim and stuck at the bottom of your layout: at normal music volume the bars now rise about two thirds of the way up, so every light joins in, not just the keyboard. The default Sensitivity is now 100; an effect you saved with a higher Sensitivity keeps it and will reach the top on loud music. The log now names the audio format instead of saying "unknown". (#188)
+
 ## [0.8.3] - 2026-11-05
 
 ### Changed
