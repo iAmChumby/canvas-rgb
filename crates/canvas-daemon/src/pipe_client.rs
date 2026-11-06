@@ -110,22 +110,10 @@ pub async fn send(
 ///
 /// The pipe being absent is normal: the service may not exist yet.
 pub async fn notify_quitting(app: &std::sync::Arc<crate::state::App>) {
-    let _ = app;
-    match PipeClient::connect().await {
-        Ok(mut client) => {
-            let hello = PipeRequest::Hello {
-                protocol: canvas_proto::pipe::PROTOCOL_VERSION,
-                daemon_pid: std::process::id(),
-            };
-            if client.request(&hello).await.is_ok() {
-                if let Err(e) = client.request(&PipeRequest::DaemonQuitting).await {
-                    tracing::debug!(error = %e, "the service did not acknowledge the quit");
-                }
-            }
-        }
-        Err(e) => {
-            tracing::debug!(error = %e, "the service pipe is not up; nothing to tell");
-        }
+    // Through the app's pipe like every other request, never a direct connection: a fakes-mode
+    // daemon has an in-process fake there and must never reach the real service (#199).
+    if let Err(e) = app.pipe.exchange(&PipeRequest::DaemonQuitting).await {
+        tracing::debug!(error = %e, "the service pipe is not up or did not acknowledge the quit; nothing to tell");
     }
 }
 
