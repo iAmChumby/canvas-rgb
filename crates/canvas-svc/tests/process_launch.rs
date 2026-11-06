@@ -140,8 +140,8 @@ const DAEMON_FILE_STARTS_ALLOWED: &[(&str, &str, &str)] = &[(
 ),
 (
     "tools/run-fake-daemon.ps1",
-    "$fake = Start-Process -FilePath $fakeExe",
-    "starts the fake OpenRGB server example, not the daemon",
+    "`\"$fakeExe`\" > `\"$fakeLog`\" 2>&1",
+    "starts cmd.exe, which starts the fake OpenRGB server example, not the daemon",
 )];
 
 /// Rule 1 allow-list, one entry per line: (path suffix, text the line must contain, why). A start of
@@ -149,7 +149,7 @@ const DAEMON_FILE_STARTS_ALLOWED: &[(&str, &str, &str)] = &[(
 /// matches no line, so this list cannot collect dead entries.
 const DAEMON_STARTS_ALLOWED: &[(&str, &str, &str)] = &[(
     "tools/run-fake-daemon.ps1",
-    "$daemon = Start-Process -FilePath $daemonExe -ArgumentList '--fakes'",
+    "`\"$daemonExe`\" --fakes > `\"$daemonLog`\" 2>&1",
     "developer tool (#199): this checkout's own debug build in fakes mode, on a test port and a test home; \
      the daemon refuses --fakes in release, without a test port, or with a real data folder",
 )];
@@ -391,6 +391,18 @@ fn only_the_service_starts_the_daemon_and_every_launch_names_its_token() {
         }
     }
     assert!(stale.is_empty(), "allow-list entries that matched no line (delete them):\n{}", stale.join("\n"));
+    // One entry allows one line: an entry that matches a second line would let a new launch through
+    // unreviewed, because the match is on a part of the line.
+    let mut broad = Vec::new();
+    for (id, list) in [(1u8, ELEVATION_ALLOWED), (2u8, DAEMON_FILE_STARTS_ALLOWED), (3u8, DAEMON_STARTS_ALLOWED)] {
+        for (i, (suffix, text, why)) in list.iter().enumerate() {
+            let n = used.iter().filter(|u| **u == (id, i)).count();
+            if n > 1 {
+                broad.push(format!("{suffix}: `{text}` ({why}) matched {n} lines"));
+            }
+        }
+    }
+    assert!(broad.is_empty(), "allow-list entries that matched more than one line (make each match one):\n{}", broad.join("\n"));
 }
 
 // ---- the scanner itself: each rule fires on the shape of the bug it exists for ----

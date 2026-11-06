@@ -56,6 +56,10 @@ export const routes = {
   // PUT a FanProfile; DELETE removes it (409 for the active or last profile).
   fanProfiles: (name: string) => `/api/v1/fans/profiles/${encodeURIComponent(name)}`,
   settings: "/api/v1/settings",
+  audioSources: "/api/v1/audio/sources",
+  audioSource: "/api/v1/audio/source",
+  // PUT takes a lease; GET ?lease=<id> reads and renews it (410 when expired).
+  audioTest: "/api/v1/audio/test",
   dismissZonePanel: "/api/v1/first-run/dismiss-zone-panel",
   // POST, no body: the owner reached the end of the onboarding (Status.onboarding_complete).
   onboardingComplete: "/api/v1/onboarding/complete",

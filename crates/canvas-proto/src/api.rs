@@ -124,6 +124,16 @@ pub mod routes {
     pub const PERIPHERAL_READ: &str = "/api/v1/peripherals/{id}/read";
     /// `GET` / `PUT` a [`crate::config::Settings`].
     pub const SETTINGS: &str = "/api/v1/settings";
+    /// `GET` [`crate::audio::AudioSources`] (issue #166): the endpoints to pick from and what
+    /// the current choice resolved to. Enumerates on demand.
+    pub const AUDIO_SOURCES: &str = "/api/v1/audio/sources";
+    /// `PUT` an [`crate::audio::AudioSource`]; answers the [`crate::audio::ResolvedAudioSource`].
+    /// The only writer of the choice; reopens the capture if it runs.
+    pub const AUDIO_SOURCE: &str = "/api/v1/audio/source";
+    /// `PUT` an [`crate::audio::AudioTestRequest`] to take a test lease
+    /// ([`crate::audio::AudioTestLease`]); `GET ?lease=<id>` reads and renews it
+    /// ([`crate::audio::AudioTestState`]); an unknown or expired lease answers 410.
+    pub const AUDIO_TEST: &str = "/api/v1/audio/test";
     /// `POST`, no body: dismisses G7's "size your ARGB headers" panel.
     pub const DISMISS_ZONE_PANEL: &str = "/api/v1/first-run/dismiss-zone-panel";
     /// `POST`, no body: the owner reached the end of the onboarding. Sets

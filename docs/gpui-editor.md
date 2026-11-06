@@ -24,6 +24,11 @@ Stop it with:
 powershell -NoProfile -File tools/run-fake-daemon.ps1 -Stop
 ```
 
+Two checkouts can each run one at the same time on different ports:
+`-ApiPort 19431 -OpenRgbPort 16743` (never 0, 9430 or 6742). Each run keeps only the PIDs of its own
+checkout's builds, and `-Stop` stops nothing else. Fakes mode also has one in-memory numeric display,
+"GAMDIAS CHIONE Digital Display (fake)", so the Displays view has a display to show.
+
 Devices: `GET /api/v1/devices`, fans: `GET /api/v1/fans` (both need
 `Authorization: Bearer <test token>`), status: `GET /api/v1/status`.
 

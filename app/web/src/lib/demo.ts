@@ -69,6 +69,10 @@ import type { DisplayValue } from "@/proto/DisplayValue";
 import type { PeripheralAccess } from "@/proto/PeripheralAccess";
 import type { PeripheralDetail } from "@/proto/PeripheralDetail";
 import type { ReadProgress } from "@/proto/ReadProgress";
+import type { AudioSource } from "@/proto/AudioSource";
+import type { AudioSources } from "@/proto/AudioSources";
+import type { AudioTestState } from "@/proto/AudioTestState";
+import type { ResolvedAudioSource } from "@/proto/ResolvedAudioSource";
 import type { ImportEffect } from "@/proto/ImportEffect";
 import type { ImportEffectResponse } from "@/proto/ImportEffectResponse";
 import type { FailedEffect } from "@/proto/FailedEffect";
@@ -94,7 +98,7 @@ import { stackThumbnailBytes } from "@/lib/stackFrame";
 const BASE = "/api/v1";
 const DEMO_LAYOUTS_KEY = "canvas-rgb.demo-layouts";
 const DEMO_ONBOARDED_KEY = "canvas-rgb.demo-onboarded";
-const APP_VERSION = "0.8.4";
+const APP_VERSION = "0.9.0";
 const SCHEMA_VERSION = 1;
 
 function scenario(): Set<string> {
@@ -168,6 +172,12 @@ interface DemoState {
   stackPreviewCalls: { at: number; epoch: string; seq: number; applied: boolean }[];
   /** `?state=stack-dropped` has dropped one PUT already. */
   stackPreviewDropped: boolean;
+  /** The audio-source pick, as saved on the daemon's config (#166). */
+  audioSource: AudioSource;
+  /** The live audio test leases, by id; a DELETE ends one at once. */
+  audioLeases: Record<string, { listen: boolean }>;
+  /** The next audio lease counter. */
+  audioLeaseCounter: number;
 }
 
 /**
@@ -313,6 +323,9 @@ function initialState(): DemoState {
     stackPreviewOwner: null,
     stackPreviewCalls: [],
     stackPreviewDropped: false,
+    audioSource: { kind: "follow_default" },
+    audioLeases: {},
+    audioLeaseCounter: 0,
   };
 }
 
@@ -894,6 +907,72 @@ function checkFileName(fileName: string): string {
     fail(422, "validation", `"${fileName}" is a name Windows keeps for itself`);
   }
   return trimmed;
+}
+
+// ---- the audio source (#166): the picker list, the pick, and the live test ----
+//
+// The demo answers the three routes from the pick in state: an endpoint list
+// (Speakers, Voicemeeter Input as the default output, a Microphone input), a
+// resolved current source, and a live test state with a moving peak and bands,
+// so the panel can be seen and screenshotted outside the host.
+
+const DEMO_AUDIO_ENDPOINTS = [
+  { id: "demo-speakers", flow: "render" as const, name: "Speakers (Realtek Audio)", is_default: false, state: "active" as const },
+  { id: "demo-voicemeeter", flow: "render" as const, name: "Voicemeeter Input", is_default: true, state: "active" as const },
+  { id: "demo-mic", flow: "capture" as const, name: "Microphone", is_default: true, state: "active" as const },
+];
+
+function demoResolvedSource(source: AudioSource): ResolvedAudioSource {
+  if (source.kind === "endpoint") {
+    const ep = DEMO_AUDIO_ENDPOINTS.find((e) => e.id === source.id);
+    const def = DEMO_AUDIO_ENDPOINTS.find((e) => e.flow === "render" && e.is_default);
+    if (ep) return { requested: source, endpoint_id: ep.id, name: ep.name, flow: ep.flow, fallback: null };
+    return {
+      requested: source,
+      endpoint_id: def?.id ?? null,
+      name: def?.name ?? null,
+      flow: def?.flow ?? source.flow,
+      fallback: def ? { reason: "picked_missing" } : null,
+    };
+  }
+  const def = DEMO_AUDIO_ENDPOINTS.find((e) => e.flow === "render" && e.is_default);
+  return {
+    requested: source,
+    endpoint_id: def?.id ?? null,
+    name: def?.name ?? null,
+    flow: def?.flow ?? null,
+    fallback: null,
+  };
+}
+
+function demoAudioSources(s: DemoState): AudioSources {
+  return { endpoints: DEMO_AUDIO_ENDPOINTS.map((e) => ({ ...e })), current: demoResolvedSource(s.audioSource) };
+}
+
+/** A moving peak and bands, so the meter visibly moves between polls. */
+function demoAudioTestState(s: DemoState, lease: { listen: boolean }): AudioTestState {
+  const current = demoResolvedSource(s.audioSource);
+  const t = Date.now() / 400;
+  const peak = 0.35 + 0.3 * Math.sin(t);
+  const bands = Array.from({ length: 32 }, (_, i) => {
+    const base = 0.15 + 0.45 * Math.max(0, Math.sin(t + i * 0.35));
+    return Math.min(1, base * (1 + 0.2 * Math.sin(t * 1.7 + i * 0.11)));
+  });
+  const isInput = current.requested.kind === "endpoint" && current.requested.flow === "capture";
+  const status = isInput && !lease.listen ? "not_listening" : "live";
+  return {
+    status,
+    source: current,
+    sample_rate: 48000,
+    channels: 2,
+    bits_per_sample: 32,
+    format_tag: 3,
+    peak: status === "live" ? peak : null,
+    peak_db: status === "live" ? 20 * Math.log10(Math.max(peak, 1e-6)) : null,
+    bands: status === "live" ? bands : [],
+    packets: 10n,
+    silent_packets: 0n,
+  };
 }
 
 // ---- router ----
@@ -1549,6 +1628,31 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       if (idx < 0) s.fanProfiles.push(profile);
       else s.fanProfiles[idx] = profile;
       return profile;
+    }
+    return bad();
+  }
+
+  if (head === "audio") {
+    if (seg[1] === "sources" && method === "GET") return demoAudioSources(s);
+    if (seg[1] === "source" && method === "PUT") {
+      s.audioSource = body as AudioSource;
+      return demoResolvedSource(s.audioSource);
+    }
+    if (seg[1] === "test") {
+      if (method === "PUT") {
+        s.audioLeaseCounter += 1;
+        const lease_id = `demo-lease-${s.audioLeaseCounter}`;
+        s.audioLeases[lease_id] = { listen: (body as { listen?: boolean }).listen === true };
+        return { lease_id };
+      }
+      const lease_id = url.searchParams.get("lease") ?? "";
+      const lease = s.audioLeases[lease_id];
+      if (!lease) fail(410, "gone", "the audio test lease is unknown or expired; take a new one");
+      if (method === "GET") return demoAudioTestState(s, lease);
+      if (method === "DELETE") {
+        delete s.audioLeases[lease_id];
+        return { ok: true };
+      }
     }
     return bad();
   }

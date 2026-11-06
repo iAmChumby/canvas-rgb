@@ -1,11 +1,12 @@
 //! Commands the editor invokes (G9) and the tray's "Open logs folder" item.
 
 use canvas_proto::consts;
-use canvas_proto::tauri::ApiConfig;
+use canvas_proto::tauri::{ApiConfig, EditorChoice, TrayPrefs};
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_opener::OpenerExt;
 
 use crate::api;
+use crate::{gpui_editor, update};
 
 /// `get_api_config`: the token is read from the file at call time, so the editor never
 /// bundles it. The token is returned to the WebView only; it is not logged.
@@ -25,6 +26,25 @@ pub fn get_api_config() -> Result<ApiConfig, String> {
 #[tauri::command]
 pub fn open_logs_folder<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     open_logs(&app)
+}
+
+/// `set_editor`: chooses the editor the tray opens (#202).
+///
+/// Only an experimental build has the choice: a stable build refuses it, and the pref it has is
+/// ignored (React always opens there). The tray keeps the choice, and the open editor closes
+/// and the other one opens on the same page.
+#[tauri::command]
+pub fn set_editor<R: Runtime>(app: AppHandle<R>, editor: EditorChoice) -> Result<TrayPrefs, String> {
+    let Some(ctl) = update::try_controller(&app) else {
+        return Err("the tray is not ready yet".to_string());
+    };
+    // The editor that is open now, before the pref changes.
+    let previous = gpui_editor::effective_editor(&app);
+    let prefs = ctl.set_editor(editor)?;
+    if previous != editor {
+        crate::editor::switch_editor(&app, editor, crate::editor::last_page().as_deref());
+    }
+    Ok(prefs)
 }
 
 /// Shared by the command and the tray item.

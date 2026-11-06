@@ -28,6 +28,7 @@ use canvas_adapters::resume::{OnResume, ResumeBehavior};
 use canvas_adapters::royuan::{direct_mode_report, Opener, RoyuanAdapter, Transport, PRODUCT_ID, VENDOR_ID};
 use canvas_daemon::composite::CompositeAdapter;
 use canvas_daemon::displays::NoDisplays;
+use canvas_daemon::fakes::FakeNumericDisplay;
 use canvas_proto::device::{DeviceInfo, DeviceKind, ZoneInfo, ZoneKind};
 use canvas_proto::{DeviceAdapter, DeviceId, Rgb8};
 
@@ -45,6 +46,7 @@ const GUARDED: &[&str] = &[
     "EightBitDoUltimate2",
     "CompositeAdapter",
     "NoDisplays",
+    "FakeNumericDisplay",
 ];
 
 /// The traits an adapter of the daemon can implement.
@@ -171,6 +173,11 @@ async fn every_adapter_the_daemon_can_build_says_what_it_does_on_a_resume() {
     assert_eq!(AttackSharkX6::new().on_resume(), OnResume::NothingToRestore, "the X6 mouse");
     assert_eq!(EightBitDoUltimate2::new().on_resume(), OnResume::NothingToRestore, "the 8BitDo pad");
     assert_eq!(NoDisplays.on_resume(), OnResume::NothingToRestore, "no display at all");
+    assert_eq!(
+        FakeNumericDisplay::default().on_resume(),
+        OnResume::NothingToRestore,
+        "the fakes-mode display (in memory)"
+    );
 }
 
 // ---- the scan over the repo's source

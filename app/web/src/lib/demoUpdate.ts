@@ -4,13 +4,14 @@
 //
 // Names: idle, checking, up-to-date, available, snoozed, skipped, downloading, downloading-unknown,
 // verifying, verify-failed, uac, declined, installing, offline, rate-limited, check-failed,
-// install-failed, install-failed-text, updated. With a fixture the controls work on this in-memory state, so the
+// install-failed, install-failed-text, updated, dev. With a fixture the controls work on this in-memory state, so the
 // flow can be clicked through: Update now walks the install phases.
 
 import type { UpdateState } from "@/proto/UpdateState";
 import type { UpdatePhase } from "@/proto/UpdatePhase";
 import type { TrayPrefs } from "@/proto/TrayPrefs";
 import type { UpdateChannel } from "@/proto/UpdateChannel";
+import type { EditorChoice } from "@/proto/EditorChoice";
 import {
   CMD_UPDATE_CHECK_NOW,
   CMD_UPDATE_DISMISS_UPDATED,
@@ -24,6 +25,8 @@ import {
 
 const CURRENT = "0.1.0";
 const NEXT = "0.1.1";
+/** An experimental build's version: it carries a pre-release part, so the editor choice shows. */
+const DEV = "0.8.5-dev.12";
 const MB = 1024 * 1024;
 
 export const DEMO_NOTES = [
@@ -100,6 +103,10 @@ export function fixtureState(name: string): UpdateState | null {
       return avail({ kind: "install_failed", message: "Setup could not replace canvas-rgb.exe because it is in use" });
     case "updated":
       return { ...s, current_version: NEXT, updated_to: info(), phase: { kind: "up_to_date" } };
+    case "dev":
+      // An experimental build: the version carries a pre-release part, so the editor choice
+      // (#202) shows and can be pressed.
+      return { ...s, current_version: DEV };
     default:
       return null;
   }
@@ -134,6 +141,12 @@ export function demoTrayPrefs(): TrayPrefs {
 /** The demo stub's answer to a channel change. */
 export function demoSetChannel(channel: UpdateChannel): TrayPrefs {
   prefs = { ...prefs, channel };
+  return prefs;
+}
+
+/** The demo stub's answer to an editor change (#202). */
+export function demoSetEditor(editor: EditorChoice): TrayPrefs {
+  prefs = { ...prefs, editor };
   return prefs;
 }
 

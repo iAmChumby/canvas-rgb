@@ -68,6 +68,82 @@ pub fn fakes_supported() -> bool {
     cfg!(debug_assertions)
 }
 
+/// The environment variable that names the UI-capture server port (#200). The
+/// capture tool serves `app/web/out` on 127.0.0.1 and the daemon accepts that
+/// origin only in fakes mode on the debug test port (see
+/// [`capture_origin_allowed`]).
+pub const CAPTURE_PORT_ENV: &str = "CANVAS_RGB_CAPTURE_PORT";
+
+/// The default capture port: the static server the Playwright capture runs on.
+/// The real API port (9430), the test API port (19430), the real OpenRGB port
+/// (6742) and the fake OpenRGB port (16742) are never accepted.
+pub const CAPTURE_PORT_DEFAULT: u16 = 4310;
+
+/// The default capture origin.
+pub fn capture_origin_from(port: u16) -> String {
+    format!("http://127.0.0.1:{port}")
+}
+
+/// The capture origin for this process.
+pub fn capture_origin() -> String {
+    capture_origin_from(capture_port())
+}
+
+/// The capture port from an environment value, or [`CAPTURE_PORT_DEFAULT`]
+/// when it is missing/invalid. Pure, so both build kinds are testable. The
+/// real ports are never accepted: a capture must never sit on a real port.
+pub fn capture_port_from(value: Option<&str>) -> u16 {
+    value
+        .and_then(|v| v.trim().parse::<u16>().ok())
+        .filter(|p| {
+            *p != 0
+                && *p != canvas_proto::consts::OPENRGB_PORT
+                && *p != canvas_proto::consts::API_PORT
+                && *p != 19430
+                && *p != FAKE_OPENRGB_PORT
+        })
+        .unwrap_or(CAPTURE_PORT_DEFAULT)
+}
+
+/// The capture port for this process.
+pub fn capture_port() -> u16 {
+    capture_port_from(std::env::var(CAPTURE_PORT_ENV).ok().as_deref())
+}
+
+/// Whether `origin` is the capture server's origin, for the capture tool
+/// (#200). True only when all of these hold:
+///
+/// - the build is debug (release builds never),
+/// - the daemon runs in fakes mode,
+/// - the daemon binds the debug test port, and
+/// - `origin` is exactly the capture origin.
+///
+/// Pure over its inputs (`on_debug_test_port` and `is_debug_build` are
+/// computed by [`capture_origin_allowed`]), so all three cases are unit
+/// testable in both build kinds. Release builds and non-fakes debug runs are
+/// unchanged: the spine's `API_ALLOWED_ORIGINS` list still applies and this
+/// adds nothing for them.
+pub fn capture_origin_allowed_with(
+    fakes: bool,
+    on_debug_test_port: bool,
+    is_debug_build: bool,
+    capture_port: u16,
+    origin: &str,
+) -> bool {
+    if !(is_debug_build && fakes && on_debug_test_port) {
+        return false;
+    }
+    capture_origin_from(capture_port).eq_ignore_ascii_case(origin)
+}
+
+/// [`capture_origin_allowed_with`] for this process: the test port and the
+/// capture port come from the spine and the environment.
+pub fn capture_origin_allowed(fakes: bool, origin: &str) -> bool {
+    let on_debug_test_port = canvas_proto::consts::debug_test_port()
+        == Some(canvas_proto::consts::api_port());
+    capture_origin_allowed_with(fakes, on_debug_test_port, cfg!(debug_assertions), capture_port(), origin)
+}
+
 /// The fake OpenRGB port from an environment value, or [`FAKE_OPENRGB_PORT`]
 /// when it is missing/invalid. Pure, so both build kinds are testable. The
 /// real OpenRGB port (6742), the real API port (9430) and the test API port
@@ -215,6 +291,78 @@ pub fn validate_process_home() -> Result<PathBuf, String> {
         &canvas_proto::consts::user_config_dir(),
         &canvas_proto::consts::machine_data_dir(),
     )
+}
+
+// --- Fake numeric display ---------------------------------------------------
+
+/// A numeric display that exists only in memory, shaped like the CHIONE, so the Displays view
+/// has a display to show and drive in fakes mode (#200, #204). It opens no device: connect,
+/// discover and every write succeed without touching anything.
+#[derive(Default)]
+pub struct FakeNumericDisplay {
+    connected: bool,
+}
+
+/// The one display [`FakeNumericDisplay`] reports.
+pub fn fake_display_info(connected: bool) -> canvas_proto::display::DisplayInfo {
+    canvas_proto::display::DisplayInfo {
+        id: canvas_proto::device::DeviceId("fake:chione".into()),
+        name: "GAMDIAS CHIONE Digital Display (fake)".into(),
+        digits: 4,
+        max_decimals: 1,
+        modes: vec![
+            canvas_proto::display::DisplayMode::Temperature,
+            canvas_proto::display::DisplayMode::FanRpm,
+        ],
+        connected,
+        blocked_by: None,
+    }
+}
+
+#[async_trait::async_trait]
+impl canvas_proto::traits::NumericDisplayAdapter for FakeNumericDisplay {
+    fn name(&self) -> &'static str {
+        "fake-display"
+    }
+
+    async fn connect(&mut self) -> Result<(), canvas_proto::traits::AdapterError> {
+        self.connected = true;
+        Ok(())
+    }
+
+    async fn disconnect(&mut self) -> Result<(), canvas_proto::traits::AdapterError> {
+        self.connected = false;
+        Ok(())
+    }
+
+    fn is_connected(&self) -> bool {
+        self.connected
+    }
+
+    async fn discover(
+        &mut self,
+    ) -> Result<Vec<canvas_proto::display::DisplayInfo>, canvas_proto::traits::AdapterError> {
+        Ok(vec![fake_display_info(self.connected)])
+    }
+
+    async fn write_value(
+        &mut self,
+        _device: &canvas_proto::device::DeviceId,
+        _value: &canvas_proto::display::DisplayValue,
+    ) -> Result<(), canvas_proto::traits::AdapterError> {
+        Ok(())
+    }
+
+    fn write_interval_ms(&self) -> u32 {
+        250
+    }
+}
+
+impl canvas_adapters::resume::ResumeBehavior for FakeNumericDisplay {
+    fn on_resume(&self) -> canvas_adapters::resume::OnResume {
+        // In memory: a sleep resets nothing.
+        canvas_adapters::resume::OnResume::NothingToRestore
+    }
 }
 
 // --- Gates -----------------------------------------------------------------
@@ -408,6 +556,44 @@ mod tests {
     }
 
     #[test]
+    fn a_capture_port_is_never_a_real_port() {
+        assert_eq!(capture_port_from(None), CAPTURE_PORT_DEFAULT);
+        assert_eq!(capture_port_from(Some("4310")), 4310);
+        assert_eq!(capture_port_from(Some("6742")), CAPTURE_PORT_DEFAULT, "never the real OpenRGB port");
+        assert_eq!(capture_port_from(Some("9430")), CAPTURE_PORT_DEFAULT, "never the real API port");
+        assert_eq!(capture_port_from(Some("19430")), CAPTURE_PORT_DEFAULT, "never the test API port");
+        assert_eq!(capture_port_from(Some("16742")), CAPTURE_PORT_DEFAULT, "never the fake OpenRGB port");
+        assert_eq!(capture_port_from(Some("0")), CAPTURE_PORT_DEFAULT);
+        assert_eq!(capture_port_from(Some("abc")), CAPTURE_PORT_DEFAULT);
+        assert_ne!(CAPTURE_PORT_DEFAULT, canvas_proto::consts::API_PORT);
+        assert_ne!(CAPTURE_PORT_DEFAULT, canvas_proto::consts::OPENRGB_PORT);
+    }
+
+    #[test]
+    fn the_capture_origin_is_the_loopback_capture_port() {
+        assert_eq!(capture_origin_from(4310), "http://127.0.0.1:4310");
+    }
+
+    #[test]
+    fn the_capture_origin_is_accepted_only_in_fakes_on_the_test_port_in_debug() {
+        let origin = capture_origin_from(CAPTURE_PORT_DEFAULT);
+        // The allowed case: fakes mode, debug build, on the debug test port.
+        assert!(capture_origin_allowed_with(true, true, true, CAPTURE_PORT_DEFAULT, &origin));
+        assert!(capture_origin_allowed_with(true, true, true, CAPTURE_PORT_DEFAULT, "HTTP://127.0.0.1:4310"));
+        // Release builds: never (first of the three cases).
+        assert!(!capture_origin_allowed_with(true, true, false, CAPTURE_PORT_DEFAULT, &origin), "a release build never accepts the capture origin");
+        // Non-fakes debug runs: never (second case).
+        assert!(!capture_origin_allowed_with(false, true, true, CAPTURE_PORT_DEFAULT, &origin), "a non-fakes debug run never accepts the capture origin");
+        // Fakes mode off the test port: never (third case).
+        assert!(!capture_origin_allowed_with(true, false, true, CAPTURE_PORT_DEFAULT, &origin), "off the debug test port the capture origin is refused");
+        // A different origin or port: never.
+        assert!(!capture_origin_allowed_with(true, true, true, CAPTURE_PORT_DEFAULT, "https://evil.example"));
+        assert!(!capture_origin_allowed_with(true, true, true, CAPTURE_PORT_DEFAULT, "http://127.0.0.1:9999"));
+        assert!(!capture_origin_allowed_with(true, true, true, CAPTURE_PORT_DEFAULT, "http://localhost:4310"));
+        assert!(!capture_origin_allowed_with(true, true, true, CAPTURE_PORT_DEFAULT, ""));
+    }
+
+    #[test]
     fn the_real_home_is_refused_and_a_test_home_is_accepted() {
         let real = PathBuf::from(r"C:\test-user\AppData\Roaming\canvas-rgb");
         let machine = PathBuf::from(r"C:\ProgramData\canvas-rgb");
@@ -422,6 +608,30 @@ mod tests {
         assert!(validate_fakes_home(Some(&machine), &real, &machine).is_err(), "the real machine dir: refuse");
         let test = PathBuf::from(r"C:\work\canvas-rgb\.build\fake-home");
         assert_eq!(validate_fakes_home(Some(&test), &real, &machine), Ok(test));
+    }
+
+    /// Fakes mode has one in-memory display to show and drive, shaped like the CHIONE.
+    #[tokio::test]
+    async fn the_fake_display_is_found_connects_and_takes_writes() {
+        use canvas_proto::traits::NumericDisplayAdapter;
+        let mut display = FakeNumericDisplay::default();
+        assert!(!display.is_connected());
+        let found = display.discover().await.expect("discover");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "GAMDIAS CHIONE Digital Display (fake)");
+        assert!(found[0].name.contains("(fake)"), "never mistaken for the real device");
+        display.connect().await.expect("connect");
+        assert!(display.is_connected());
+        let value = canvas_proto::display::DisplayValue {
+            value: Some(42.5),
+            decimals: 1,
+            unit: canvas_proto::display::DisplayUnit::Celsius,
+            mode: canvas_proto::display::DisplayMode::Temperature,
+            blink: false,
+        };
+        display.write_value(&found[0].id, &value).await.expect("write");
+        display.disconnect().await.expect("disconnect");
+        assert!(!display.is_connected());
     }
 
     #[test]

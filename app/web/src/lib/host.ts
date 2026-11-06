@@ -6,6 +6,7 @@ import {
   CMD_GET_API_CONFIG,
   CMD_OPEN_LOGS_FOLDER,
   CMD_SET_CHANNEL,
+  CMD_SET_EDITOR,
   CMD_TRAY_PREFS,
   CMD_UPDATE_CHECK_NOW,
   CMD_UPDATE_DISMISS_UPDATED,
@@ -20,10 +21,11 @@ import {
   EVT_UPDATE_STATE,
 } from "@/proto/tauri";
 import type { ApiConfig } from "@/proto/ApiConfig";
+import type { EditorChoice } from "@/proto/EditorChoice";
 import type { TrayPrefs } from "@/proto/TrayPrefs";
 import type { UpdateChannel } from "@/proto/UpdateChannel";
 import type { UpdateState } from "@/proto/UpdateState";
-import { demoSetChannel, demoTrayPrefs, demoUpdateActive, demoUpdateCommand } from "@/lib/demoUpdate";
+import { demoSetChannel, demoSetEditor, demoTrayPrefs, demoUpdateActive, demoUpdateCommand } from "@/lib/demoUpdate";
 
 type Unlisten = () => void;
 
@@ -136,4 +138,14 @@ export async function setUpdateChannel(channel: UpdateChannel): Promise<TrayPref
   const host = tauriHost();
   if (!host) return demoSetChannel(channel);
   return (await host.core.invoke(CMD_SET_CHANNEL, { channel })) as TrayPrefs;
+}
+
+/**
+ * Sets the editor the tray opens (#202). The tray keeps it and swaps the open editor for the
+ * other one, on the same page. Only an experimental build has the choice: a stable tray refuses.
+ */
+export async function setEditor(editor: EditorChoice): Promise<TrayPrefs> {
+  const host = tauriHost();
+  if (!host) return demoSetEditor(editor);
+  return (await host.core.invoke(CMD_SET_EDITOR, { editor })) as TrayPrefs;
 }
