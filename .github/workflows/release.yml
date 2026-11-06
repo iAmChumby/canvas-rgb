@@ -22,7 +22,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -44,7 +44,7 @@ jobs:
           $v = $env:GITHUB_REF_NAME.TrimStart('v')
           if ((Get-Content CHANGELOG.md -Raw) -notmatch "(?m)^ {0,3}## \[$([regex]::Escape($v))\] - \d{4}-\d{2}-\d{2}\s*$") { throw "CHANGELOG.md has no '## [$v] - YYYY-MM-DD' section" }
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: npm
@@ -80,7 +80,7 @@ jobs:
           "### SHA-256`n`n``$h  $($exe.Name)``" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
           Set-Content -Path "dist/$($exe.Name).sha256" -Value "$h  $($exe.Name)" -Encoding ascii
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: installer
           path: |
@@ -104,7 +104,7 @@ jobs:
       contents: read
     steps:
       # Only the signer pin, the changelog and the manifest script: nothing that builds the project.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           sparse-checkout: |
@@ -113,7 +113,7 @@ jobs:
             CHANGELOG.md
           sparse-checkout-cone-mode: false
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: installer
           path: dist
@@ -128,7 +128,7 @@ jobs:
           $got = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path dist $Matches[2])).Hash.ToLowerInvariant()
           if ($got -ne $Matches[1]) { throw "SHA-256 mismatch for $($Matches[2]): $got" }
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
 
@@ -163,7 +163,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'make-update-manifest.ps1 failed' }
           Get-Content dist/latest.json
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: signature
           path: |
@@ -179,12 +179,12 @@ jobs:
       contents: write # the only job that can write to the release
       actions: write # it starts the site's build, so the site can show the new hash
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: installer
           path: dist
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: signature
           path: dist
@@ -202,7 +202,7 @@ jobs:
           # Only the size is printed: the runner reads workflow commands (::) from any log line, so no notes text is echoed.
           echo "dist/release-notes.md: $(wc -l < dist/release-notes.md) lines, $(wc -c < dist/release-notes.md) bytes"
 
-      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           files: |
             dist/canvas-rgb-setup-*.exe
