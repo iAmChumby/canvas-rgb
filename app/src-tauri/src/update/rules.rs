@@ -7,6 +7,11 @@ use url::Url;
 /// GitHub's `latest` never points at a pre-release, so this feed carries stable releases only.
 pub const ENDPOINT: &str = "https://github.com/iAmChumby/canvas-rgb/releases/latest/download/latest.json";
 
+/// The experimental feed (#203): a rolling pre-release of the next build, read only when the
+/// person turns the experimental channel on. It carries the same signature and the same
+/// download rules as the stable one; only the version rule differs.
+pub const EXPERIMENTAL_ENDPOINT: &str = canvas_proto::consts::EXPERIMENTAL_FEED_URL;
+
 /// The release signing key (minisign public key, as `tauri signer generate` writes it). The
 /// private half is the `UPDATE_SIGNING_KEY` Actions secret. The service checks installers against
 /// the same constant. `plugins.updater.pubkey` in `tauri.conf.json` repeats it for the plugin's own
@@ -27,6 +32,18 @@ pub const ALLOWED_HOSTS: &[&str] = &[
 /// pre-release. Build metadata (`+abc`) never counts toward the order.
 pub fn is_update(current: &Version, release: &Version) -> bool {
     release.pre.is_empty() && core(release) > core(current)
+}
+
+/// The same rule for the experimental feed, where a pre-release is a real offer: `0.8.4-dev.12`
+/// is newer than `0.8.3`, and `0.8.4` is newer than `0.8.4-dev.12`. A pre-release is only ever
+/// accepted from this feed; the stable one keeps refusing them.
+pub fn is_update_experimental(current: &Version, release: &Version) -> bool {
+    core(release) > core(current)
+}
+
+/// Is `a` newer than `b`? Build metadata (`+abc`) never counts toward the order.
+pub fn is_newer(a: &Version, b: &Version) -> bool {
+    core(a) > core(b)
 }
 
 fn core(v: &Version) -> Version {

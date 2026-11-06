@@ -1,13 +1,22 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button, ButtonLink, Swap } from "@/components/Button";
 import { Field, StateDot } from "@/components/Panel";
 import { Toggle } from "@/components/Toggle";
-import { canUpdate, updateCheckNow, updateSetAuto, updateUnskip } from "@/lib/host";
+import { messageOf } from "@/lib/errors";
+import {
+  canUpdate,
+  getTrayPrefs,
+  setUpdateChannel,
+  updateCheckNow,
+  updateSetAuto,
+  updateUnskip,
+} from "@/lib/host";
 import { useSnap } from "@/lib/store";
 import { sendUpdate } from "@/lib/updateActions";
 import { fmtChecked, isInstalling, isSkipped, settingsStatus } from "@/lib/updateWords";
+import type { TrayPrefs } from "@/proto/TrayPrefs";
 
 /**
  * Settings > Updates: the automatic check, when it last ran, Check now, and the status. It is the
@@ -17,11 +26,27 @@ import { fmtChecked, isInstalling, isSkipped, settingsStatus } from "@/lib/updat
 export function UpdatesPanel() {
   const u = useSnap((s) => s.update);
   const [err, setErr] = useState<string | null>(null);
+  // The tray's own preferences: which feed it reads (#203).
+  const [prefs, setPrefs] = useState<TrayPrefs | null>(null);
   const acts = canUpdate();
+
+  useEffect(() => {
+    // A tray without the command (an older tray, a newer editor) leaves the switch off and
+    // disabled: there is nothing to ask.
+    void getTrayPrefs().then(setPrefs).catch(() => undefined);
+  }, []);
 
   const run = (call: () => Promise<import("@/proto/UpdateState").UpdateState | null>) => {
     setErr(null);
     void sendUpdate(call).then(setErr);
+  };
+
+  // The channel decides which feed the tray reads; the tray checks again by itself.
+  const setChannel = (experimental: boolean) => {
+    setErr(null);
+    void setUpdateChannel(experimental ? "experimental" : "stable")
+      .then(setPrefs)
+      .catch((e: unknown) => setErr(messageOf(e)));
   };
 
   const status = u ? settingsStatus(u) : null;
@@ -47,6 +72,14 @@ export function UpdatesPanel() {
         >
           <Swap labels={["Check now", "Checking"]} at={checking ? 1 : 0} />
         </Button>
+      </Field>
+      <Field label="Experimental builds" hint="Unstable test builds, offered early">
+        <Toggle
+          label="Experimental builds"
+          checked={prefs?.channel === "experimental"}
+          disabled={!prefs}
+          onChange={setChannel}
+        />
       </Field>
       <div className="upd-status">
         {status && u ? (

@@ -5,6 +5,8 @@
 import {
   CMD_GET_API_CONFIG,
   CMD_OPEN_LOGS_FOLDER,
+  CMD_SET_CHANNEL,
+  CMD_TRAY_PREFS,
   CMD_UPDATE_CHECK_NOW,
   CMD_UPDATE_DISMISS_UPDATED,
   CMD_UPDATE_INSTALL,
@@ -18,8 +20,10 @@ import {
   EVT_UPDATE_STATE,
 } from "@/proto/tauri";
 import type { ApiConfig } from "@/proto/ApiConfig";
+import type { TrayPrefs } from "@/proto/TrayPrefs";
+import type { UpdateChannel } from "@/proto/UpdateChannel";
 import type { UpdateState } from "@/proto/UpdateState";
-import { demoUpdateActive, demoUpdateCommand } from "@/lib/demoUpdate";
+import { demoSetChannel, demoTrayPrefs, demoUpdateActive, demoUpdateCommand } from "@/lib/demoUpdate";
 
 type Unlisten = () => void;
 
@@ -114,4 +118,22 @@ export async function onUpdateState(handler: (state: UpdateState) => void): Prom
   return host.event.listen(EVT_UPDATE_STATE, (e) => {
     if (isUpdateState(e.payload)) handler(e.payload);
   });
+}
+
+// ---- the tray's preferences (#203) ----
+// The tray keeps them in its own file and is their only writer. In a plain browser there is no
+// tray, so the demo stub answers and the switch can still be seen and pressed.
+
+/** The tray's preferences: which editor it opens and which update feed it reads. */
+export async function getTrayPrefs(): Promise<TrayPrefs> {
+  const host = tauriHost();
+  if (!host) return demoTrayPrefs();
+  return (await host.core.invoke(CMD_TRAY_PREFS)) as TrayPrefs;
+}
+
+/** Sets the update channel. The tray keeps it and checks the feeds again. */
+export async function setUpdateChannel(channel: UpdateChannel): Promise<TrayPrefs> {
+  const host = tauriHost();
+  if (!host) return demoSetChannel(channel);
+  return (await host.core.invoke(CMD_SET_CHANNEL, { channel })) as TrayPrefs;
 }
