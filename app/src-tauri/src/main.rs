@@ -10,12 +10,14 @@ mod commands;
 mod config_tests;
 mod editor;
 mod elevation;
+mod gpui_editor;
 mod log;
 mod onboard;
 mod prefs;
 mod tray;
 mod update;
 
+use tauri::Manager;
 use tauri::RunEvent;
 
 fn main() {
@@ -45,6 +47,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::get_api_config,
             commands::open_logs_folder,
+            commands::set_editor,
             update::update_state,
             update::update_check_now,
             update::update_install,
@@ -60,6 +63,12 @@ fn main() {
             let handle = app.handle().clone();
             let args: Vec<String> = std::env::args().collect();
             update::init(&handle, &args);
+            // The GPUI editor is the tray's child (#202): it sits beside the tray's exe and is
+            // talked to over its own stdio.
+            let events = handle.clone();
+            app.manage(gpui_editor::GpuiEditor::production(Box::new(move |event| {
+                gpui_editor::on_event(&events, event);
+            })));
             tray::build(&handle)?;
             if update::has_after_update_arg(&args) {
                 // `--after-update` (the installer's /UPDATE relaunch) opens no window, not even the onboarding.
