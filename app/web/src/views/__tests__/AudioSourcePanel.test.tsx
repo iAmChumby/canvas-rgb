@@ -7,9 +7,24 @@ import type { AudioTestState } from "@/proto/AudioTestState";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-window.matchMedia ??= ((query: string) =>
-  ({ matches: false, media: query, addEventListener() {}, removeEventListener() {} }) as unknown as MediaQueryList);
-
+// The compact (popover) form is controlled per test through `compact`.
+const compact = vi.hoisted(() => ({ value: false }));
+Object.defineProperty(window, "matchMedia", {
+  configurable: true,
+  value: (query: string) =>
+    ({
+      matches: compact.value,
+      media: query,
+      onchange: null,
+      addListener() {},
+      removeListener() {},
+      addEventListener() {},
+      removeEventListener() {},
+      dispatchEvent() {
+        return false;
+      },
+    }) as unknown as MediaQueryList,
+});
 // jsdom has no scrollIntoView; the Select asks the active row to scroll in.
 if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = function () {};
@@ -20,6 +35,7 @@ const mocks = vi.hoisted(() => ({
   putAudioSource: vi.fn(),
   putAudioTest: vi.fn(),
   getAudioTest: vi.fn(),
+  releaseAudioTest: vi.fn(),
 }));
 
 vi.mock("@/lib/endpoints", () => ({
@@ -28,6 +44,7 @@ vi.mock("@/lib/endpoints", () => ({
     putAudioSource: mocks.putAudioSource,
     putAudioTest: mocks.putAudioTest,
     getAudioTest: mocks.getAudioTest,
+    releaseAudioTest: mocks.releaseAudioTest,
   },
 }));
 
@@ -67,14 +84,17 @@ function state(overrides: Partial<AudioTestState> = {}): AudioTestState {
 }
 
 beforeEach(() => {
+  compact.value = false;
   mocks.audioSources.mockReset();
   mocks.putAudioSource.mockReset();
   mocks.putAudioTest.mockReset();
   mocks.getAudioTest.mockReset();
+  mocks.releaseAudioTest.mockReset();
   mocks.audioSources.mockResolvedValue(sources());
   mocks.putAudioSource.mockResolvedValue(sources().current);
   mocks.putAudioTest.mockResolvedValue({ lease_id: "lease-1" });
   mocks.getAudioTest.mockResolvedValue(state());
+  mocks.releaseAudioTest.mockResolvedValue({ ok: true });
 });
 
 afterEach(() => {
@@ -174,6 +194,101 @@ describe("AudioSourcePanel (#166)", () => {
     // The new reading is there at once: no intermediate values, no animation.
     expect(el.textContent).toBe("-20.5");
     expect(el.querySelectorAll("*")).toHaveLength(0);
+  });
+
+  it("shows Listen for a saved input that is missing from the endpoint list (S8)", async () => {
+    // GONE (an unplugged mic) is not listed; the request still names a capture
+    // endpoint, so it is an input selection and Listen belongs on screen.
+    mocks.audioSources.mockResolvedValue(
+      sources({
+        endpoints: [SPEAKERS],
+        current: {
+          requested: { kind: "endpoint", id: "gone-mic-id", flow: "capture", name_hint: "Old Microphone" },
+          endpoint_id: "speakers-id",
+          name: "Speakers (Realtek Audio)",
+          flow: "render",
+          fallback: { reason: "picked_missing" },
+        },
+      }),
+    );
+    render(<AudioSourcePanel />);
+    expect(await screen.findByRole("switch", { name: "Listen to this input" })).toBeTruthy();
+  });
+
+  it("states that audio effects read the picked input whenever one is active (S3)", async () => {
+    mocks.audioSources.mockResolvedValue(
+      sources({
+        current: {
+          requested: { kind: "endpoint", id: "mic-id", flow: "capture", name_hint: "Microphone" },
+          endpoint_id: "mic-id",
+          name: "Microphone",
+          flow: "capture",
+          fallback: null,
+        },
+      }),
+    );
+    render(<AudioSourcePanel />);
+    await screen.findByRole("combobox", { name: "Audio source" });
+    expect(screen.getByText(/Audio effects read this input whenever an audio effect is active/)).toBeTruthy();
+  });
+
+  it("says 'Follow Windows default output' alone before the resolved name is known (UI 3)", async () => {
+    mocks.audioSources.mockResolvedValue(
+      sources({
+        current: { requested: { kind: "follow_default" }, endpoint_id: null, name: null, flow: null, fallback: null },
+      }),
+    );
+    render(<AudioSourcePanel />);
+    const trigger = await screen.findByRole("combobox", { name: "Audio source" });
+    const visible = trigger.querySelector('[data-on="true"]');
+    expect(visible?.textContent).toBe("Follow Windows default output");
+  });
+
+  it("releases the old lease when Listen turns off, so the mic closes at once (S2)", async () => {
+    mocks.audioSources.mockResolvedValue(
+      sources({
+        current: {
+          requested: { kind: "endpoint", id: "mic-id", flow: "capture", name_hint: "Microphone" },
+          endpoint_id: "mic-id",
+          name: "Microphone",
+          flow: "capture",
+          fallback: null,
+        },
+      }),
+    );
+    render(<AudioSourcePanel />);
+    const toggle = await screen.findByRole("switch", { name: "Listen to this input" });
+    fireEvent.click(toggle);
+    await waitFor(() => expect(mocks.putAudioTest).toHaveBeenCalledWith({ listen: true }));
+    fireEvent.click(toggle);
+    // The old lease is released before the new (listen: false) one is taken.
+    await waitFor(() => expect(mocks.releaseAudioTest).toHaveBeenCalledWith("lease-1"));
+    await waitFor(() => expect(mocks.putAudioTest).toHaveBeenCalledWith({ listen: false }));
+  });
+
+  it("compact form: select in the head, state and a Button 'Show readings' on one row (UI 2, 4)", async () => {
+    compact.value = true;
+    render(<AudioSourcePanel />);
+    const trigger = await screen.findByRole("combobox", { name: "Audio source" });
+    // The select sits in the panel head's action slot.
+    expect(trigger.closest(".panel-head")).toBeTruthy();
+    const button = screen.getByRole("button", { name: "Show readings" });
+    // The component layer's Button, not a raw HTML button.
+    expect(button.classList.contains("btn")).toBe(true);
+    expect(button.classList.contains("btn-ghost")).toBe(true);
+    // State words and the button share one row.
+    expect(button.closest(".audio-compact-row")).toBeTruthy();
+  });
+
+  it("group headings reach assistive tech as groups (S10)", async () => {
+    render(<AudioSourcePanel />);
+    const trigger = await screen.findByRole("combobox", { name: "Audio source" });
+    fireEvent.click(trigger);
+    const outputs = await screen.findByRole("group", { name: "Outputs (loopback)" });
+    expect(outputs).toBeTruthy();
+    expect(await screen.findByRole("group", { name: "Inputs" })).toBeTruthy();
+    const mic = screen.getByRole("option", { name: /Microphone/ });
+    expect(mic.getAttribute("aria-describedby")).toBeTruthy();
   });
 });
 

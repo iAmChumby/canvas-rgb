@@ -1563,6 +1563,41 @@ button.chip:hover {
   font-size: var(--t14);
 }
 
+/* The compact form (UI finding 4): the Source select sits in the panel head's
+   action slot, and one row under it carries the state words, the Listen
+   toggle and the "Show readings" button. The panel is about 90 px tall and
+   its height does not change between states: the state line is one line,
+   ellipsised, in a fixed-height row. */
+.audio-compact {
+  padding-block: var(--s2);
+}
+
+.audio-compact .panel-head {
+  margin-bottom: var(--s2);
+}
+
+.audio-picker-head {
+  display: block;
+  width: min(100%, 300px);
+  min-width: 0;
+}
+
+.audio-compact-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  min-height: 28px;
+}
+
+.audio-state-compact {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-top: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .audio-readings {
   margin-top: var(--s3);
   height: var(--audio-readings-h);
@@ -1625,9 +1660,8 @@ button.chip:hover {
 }
 
 .audio-readings-button {
-  margin-top: var(--s2);
-  color: var(--dim);
-  font-size: var(--t14);
+  flex: none;
+  white-space: nowrap;
 }
 
 .color {

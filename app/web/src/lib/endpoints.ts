@@ -180,6 +180,9 @@ export const api = {
   /** Reads and renews a lease (410 when it is unknown or expired). */
   getAudioTest: (lease: string) =>
     request<AudioTestState>("GET", `${routes.audioTest}?lease=${encodeURIComponent(lease)}`),
+  /** Ends a lease now, so turning Listen off closes the microphone at once. */
+  releaseAudioTest: (lease: string) =>
+    request<unknown>("DELETE", `${routes.audioTest}?lease=${encodeURIComponent(lease)}`),
   dismissZonePanel: () => request<unknown>("POST", routes.dismissZonePanel),
   /** The owner reached the end of the onboarding: the window stops opening by itself. */
   completeOnboarding: () => request<unknown>("POST", routes.onboardingComplete),

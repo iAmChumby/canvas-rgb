@@ -44,16 +44,20 @@ export function Select({
   disabled?: boolean;
 }) {
   const flat: SelectOption[] = groups ? groups.flatMap((g) => g.options) : options;
+  const id = useId();
   // Index of each option in the flat list, for the group headings.
   const groupStarts = new Map<number, string>();
+  const describedBy = new Map<number, string>();
   if (groups) {
     let at = 0;
-    for (const g of groups) {
-      if (g.label) groupStarts.set(at, g.label);
+    for (const [groupIndex, g] of groups.entries()) {
+      if (g.label) {
+        groupStarts.set(at, g.label);
+        for (let i = 0; i < g.options.length; i++) describedBy.set(at + i, `${id}-group-${groupIndex}`);
+      }
       at += g.options.length;
     }
   }
-  const id = useId();
   const triggerRef = useRef<HTMLButtonElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const [open, setOpen] = useState(false);
@@ -235,8 +239,8 @@ export function Select({
             {flat.map((o, i) => (
               <Fragment key={o.value}>
                 {groupStarts.has(i) && (
-                  <li className="listbox-group" role="presentation" aria-hidden="true">
-                    {groupStarts.get(i)}
+                  <li className="listbox-group" role="group" aria-label={groupStarts.get(i)}>
+                    <span id={`${describedBy.get(i)}`}>{groupStarts.get(i)}</span>
                   </li>
                 )}
                 <li
@@ -244,6 +248,7 @@ export function Select({
                   data-i={i}
                   role="option"
                   aria-selected={i === chosen}
+                  aria-describedby={describedBy.get(i)}
                   data-active={i === active ? "true" : undefined}
                   className="listbox-opt"
                   onPointerMove={() => setActive(i)}

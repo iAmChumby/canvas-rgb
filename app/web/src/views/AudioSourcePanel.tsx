@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { SpeakerHigh } from "@phosphor-icons/react";
+import { Button } from "@/components/Button";
 import { Field, Panel } from "@/components/Panel";
 import { Select, type SelectGroup, type SelectOption } from "@/components/Select";
 import { Toggle } from "@/components/Toggle";
@@ -16,6 +17,9 @@ import type { AudioTestState } from "@/proto/AudioTestState";
 const FOLLOW_VALUE = "follow-default";
 const LED_CELLS = 24;
 const BAND_CELLS = 32;
+/** S3: the disclosure the reviewer asked for — an input feeds the audio
+ *  effects whenever one runs, not only while this panel is open. */
+const EFFECT_NOTE = "Audio effects read this input whenever an audio effect is active (not only while this panel is open).";
 
 /** The words for one honest state: never a blank bar (#166). */
 export function audioStatusWords(state: AudioTestState | null): string {
@@ -99,21 +103,25 @@ export function AudioReadings({ state }: { state: AudioTestState | null }) {
   );
 }
 
-function isInputSelection(sources: AudioSources | null, value: string): boolean {
+/** Whether the current pick resolves to an input (S8): from the requested
+ *  pick itself, so a saved microphone that is unplugged (and so absent from
+ *  the endpoint list) still counts as an input selection. */
+export function isInputSelection(sources: AudioSources | null): boolean {
   if (!sources) return false;
-  if (value === FOLLOW_VALUE) return sources.current.flow === "capture";
-  const ep = sources.endpoints.find((e) => e.id === value);
-  return ep?.flow === "capture";
+  const requested = sources.current.requested;
+  if (requested.kind === "endpoint") return requested.flow === "capture";
+  return sources.current.flow === "capture";
 }
 
 /**
  * The audio-source picker with its live test (#166).
  *
- * Inline vs popover: a media query on window height (and phone width). The
- * left column's free space is vertical, so a short window (1024x768) and a
- * phone (< 640 px) move the readings into a Popover; a tall window
- * (1920x1040, 1440x900, 1280x860, 960x1032) keeps them inline. 960x1032 is
- * narrow but tall, which is why height, not width, decides.
+ * Inline vs popover: the readings go inline only where the column has room —
+ * 1920x1040, 1440x900 and 960x1032; at 1280x860, 1024x768 and phone width
+ * they open in a Popover instead (UI finding 4). In the compact form the
+ * panel is about 90 px: the Source select sits in the panel head's action
+ * slot, with the state words and the "Show readings" control on one row
+ * under it, and the panel's height does not change between states.
  */
 export function AudioSourcePanel() {
   const [sources, setSources] = useState<AudioSources | null>(null);
@@ -127,7 +135,8 @@ export function AudioSourcePanel() {
   const triggerRef = useRef<HTMLDivElement>(null);
   const popoverFocusRef = useRef<HTMLDivElement>(null);
   const lastPopoverOpen = useRef(false);
-  const usePopover = useMediaQuery("(max-height: 819px), (max-width: 639px)");
+  const leaseRef = useRef<string | null>(null);
+  const usePopover = useMediaQuery("(max-height: 899px), (max-width: 639px)");
 
   useEffect(() => {
     let cancelled = false;
@@ -170,14 +179,19 @@ export function AudioSourcePanel() {
 
   // The lease: taken only while the readings are on screen and the document
   // is visible; polled every AUDIO_TEST_POLL_MS (100 ms); a 410 takes a new
-  // one; leaving the screen or unmounting stops the poll and the lease
-  // expires on the daemon.
+  // one; leaving the screen or unmounting ends the lease at once (S2), so
+  // turning Listen off closes the microphone immediately.
   useEffect(() => {
     if (!active) return;
     let cancelled = false;
-    let lease: string | null = null;
     let timer: ReturnType<typeof setInterval> | null = null;
+    const release = () => {
+      const id = leaseRef.current;
+      leaseRef.current = null;
+      if (id) void api.releaseAudioTest(id).catch(() => {});
+    };
     const poll = async () => {
+      const lease = leaseRef.current;
       if (!lease) return;
       try {
         const next = await api.getAudioTest(lease);
@@ -185,16 +199,22 @@ export function AudioSourcePanel() {
       } catch (e) {
         if (cancelled) return;
         if (e instanceof ApiFailure && e.status === 410) {
-          lease = null;
+          leaseRef.current = null;
           void take();
         }
       }
     };
     const take = async () => {
+      // S2: the previous lease (with the old Listen value) ends now, so the
+      // microphone closes at once instead of after the daemon's expiry.
+      release();
       try {
         const taken = await api.putAudioTest({ listen });
-        if (cancelled) return;
-        lease = taken.lease_id;
+        if (cancelled) {
+          void api.releaseAudioTest(taken.lease_id).catch(() => {});
+          return;
+        }
+        leaseRef.current = taken.lease_id;
         await poll();
         if (!cancelled && !timer) {
           timer = setInterval(() => void poll(), 100);
@@ -208,6 +228,7 @@ export function AudioSourcePanel() {
     return () => {
       cancelled = true;
       if (timer) clearInterval(timer);
+      release();
     };
   }, [active, listen]);
 
@@ -224,7 +245,7 @@ export function AudioSourcePanel() {
 
   const value =
     sources?.current.requested.kind === "endpoint" ? sources.current.requested.id : FOLLOW_VALUE;
-  const resolvedName = sources?.current.name ?? "the default output";
+  const resolvedName = sources?.current.name ?? null;
   const outputs: SelectOption[] = (sources?.endpoints ?? [])
     .filter((e) => e.flow === "render")
     .map((e) => ({
@@ -237,13 +258,15 @@ export function AudioSourcePanel() {
       value: e.id,
       label: e.state === "not_connected" ? `${e.name} (not connected)` : e.name,
     }));
+  // UI finding 3: the resolved name appears only once it is known.
+  const followLabel = resolvedName ? `Follow Windows default output: ${resolvedName}` : "Follow Windows default output";
   const groups: SelectGroup[] = [
-    { label: "", options: [{ value: FOLLOW_VALUE, label: `Follow Windows default output: ${resolvedName}` }] },
+    { label: "", options: [{ value: FOLLOW_VALUE, label: followLabel }] },
     { label: "Outputs (loopback)", options: outputs },
     { label: "Inputs", options: inputs },
   ];
   const flatOptions = groups.flatMap((g) => g.options);
-  const inputSelected = isInputSelection(sources, value);
+  const inputSelected = isInputSelection(sources);
 
   const pick = async (next: string) => {
     if (!sources) return;
@@ -276,48 +299,81 @@ export function AudioSourcePanel() {
     </div>
   );
 
+  const select = (
+    <span className="audio-picker" ref={triggerRef}>
+      <Select
+        label="Audio source"
+        value={value}
+        options={flatOptions}
+        groups={groups}
+        onChange={(v) => void pick(v)}
+        disabled={!sources}
+      />
+    </span>
+  );
+
+  const words = audioStatusWords(state);
+  // S3 in the compact form: the disclosure rides on the state line itself, so
+  // the compact panel stays one row under the head.
+  const compactWords = inputSelected ? `${words} · audio effects read this input when active` : words;
+
   return (
-    <Panel title="Audio source" actions={<SpeakerHigh size={16} aria-hidden="true" />}>
-      <Field label="Source">
-        <span className="audio-picker-row">
-          <span className="audio-picker" ref={triggerRef}>
-            <Select
-              label="Audio source"
-              value={value}
-              options={flatOptions}
-              groups={groups}
-              onChange={(v) => void pick(v)}
-              disabled={!sources}
-            />
+    <Panel
+      title="Audio source"
+      className={usePopover ? "audio-panel audio-compact" : "audio-panel"}
+      actions={usePopover ? <span className="audio-picker-head">{select}</span> : <SpeakerHigh size={16} aria-hidden="true" />}
+    >
+      {!usePopover && (
+        <Field label="Source" hint={inputSelected ? EFFECT_NOTE : undefined}>
+          <span className="audio-picker-row">
+            {select}
+            {inputSelected && (
+              <Toggle label="Listen to this input" checked={listen} onChange={setListen} />
+            )}
           </span>
-          {inputSelected && (
-            <Toggle label="Listen to this input" checked={listen} onChange={setListen} />
-          )}
-        </span>
-      </Field>
-      <p className="audio-state" role="status">
-        {audioStatusWords(state)}
-      </p>
-      {err && <p className="error-line">{err}</p>}
-      {usePopover ? (
-        <Popover
-          anchor={triggerRef as unknown as RefObject<HTMLElement | null>}
-          open={popoverOpen}
-          onClose={() => setPopoverOpen(false)}
-          label="Audio readings"
-          className="audio-popover"
-        >
-          <div ref={popoverFocusRef} tabIndex={-1}>
-            {readings}
-          </div>
-        </Popover>
-      ) : (
-        readings
+        </Field>
       )}
-      {usePopover && (
-        <button type="button" className="audio-readings-button" onClick={() => setPopoverOpen((o) => !o)} aria-expanded={popoverOpen}>
-          {popoverOpen ? "Hide readings" : "Show readings"}
-        </button>
+      {usePopover ? (
+        <>
+          <span className="audio-compact-row">
+            <span className="audio-state audio-state-compact" role="status">
+              {compactWords}
+            </span>
+            {inputSelected && (
+              <Toggle label="Listen to this input" checked={listen} onChange={setListen} />
+            )}
+            <Button
+              variant="ghost"
+              size="sm"
+              className="audio-readings-button"
+              onClick={() => setPopoverOpen((o) => !o)}
+              aria-expanded={popoverOpen}
+            >
+              {popoverOpen ? "Hide readings" : "Show readings"}
+            </Button>
+          </span>
+          {err && <p className="error-line">{err}</p>}
+          <Popover
+            anchor={triggerRef as unknown as RefObject<HTMLElement | null>}
+            open={popoverOpen}
+            onClose={() => setPopoverOpen(false)}
+            label="Audio readings"
+            className="audio-popover"
+          >
+            <div ref={popoverFocusRef} tabIndex={-1}>
+              {readings}
+              {inputSelected && <p className="audio-state">{EFFECT_NOTE}</p>}
+            </div>
+          </Popover>
+        </>
+      ) : (
+        <>
+          <p className="audio-state" role="status">
+            {words}
+          </p>
+          {err && <p className="error-line">{err}</p>}
+          {readings}
+        </>
       )}
     </Panel>
   );
