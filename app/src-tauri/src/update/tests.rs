@@ -2090,6 +2090,21 @@ fn turning_the_experimental_channel_off_offers_nothing_older() {
     assert_eq!(h.server.hits("/experimental.json"), 1, "the experimental feed is not read again");
 }
 
+/// The dev offer on screen is withdrawn the moment the channel goes back to stable, before any
+/// new check: an Install click after the switch can never install it (review of #221).
+#[test]
+fn turning_the_experimental_channel_off_withdraws_the_dev_offer_at_once() {
+    let h = harness_on("0.1.0", "test.key.pub", Launch::Starts, UpdateChannel::Experimental);
+    h.server.experimental_release("0.1.3-dev.1", &fixture_text("payload.dev.sig"), fixture("payload.bin"));
+    let offered = h.check(true);
+    assert_eq!(offered.phase, UpdatePhase::Available);
+    assert_eq!(offered.available.map(|a| a.version).as_deref(), Some("0.1.3-dev.1"));
+    h.ctl.set_channel(UpdateChannel::Stable);
+    let s = h.ctl.state();
+    assert!(s.available.is_none(), "no dev offer is left on the stable channel");
+    assert_ne!(s.phase, UpdatePhase::Available);
+}
+
 #[test]
 fn a_stable_release_newer_than_the_dev_build_running_is_offered() {
     let h = harness_on(DEV, "test.key.pub", Launch::Starts, UpdateChannel::Stable);

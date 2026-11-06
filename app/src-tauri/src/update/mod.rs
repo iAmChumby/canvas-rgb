@@ -301,7 +301,20 @@ impl Controller {
             }
             Err(why) => log::append(&format!("prefs: not saving the channel: {why}")),
         }
-        self.change(|i| i.prefs = prefs.clone());
+        self.change(|i| {
+            let changed = i.prefs.channel != prefs.channel;
+            i.prefs = prefs.clone();
+            // An offer found on the other channel is stale: it is withdrawn at once, so a dev build
+            // offered before the switch can never be installed after it. A download or an install
+            // already running is left alone; the check that follows the switch brings the new offer.
+            if changed && !in_flight(&i.phase) {
+                i.available = None;
+                i.update = None;
+                if i.phase == UpdatePhase::Available {
+                    i.phase = UpdatePhase::Idle;
+                }
+            }
+        });
         prefs
     }
 
@@ -625,11 +638,19 @@ impl Controller {
     /// there. The experimental channel reads both feeds and takes the newer of what they offer;
     /// a pre-release is acceptable only from the experimental feed.
     async fn fetch_manifest<R: Runtime>(&self, app: &AppHandle<R>) -> Result<Option<(Update, UpdateInfo)>, CheckFailReason> {
+        // The channel when the check starts decides which feeds are read.
+        let channel = self.channel();
         let stable = self.fetch_feed(app, &self.settings.endpoint, false).await;
-        if self.channel() != UpdateChannel::Experimental {
+        if channel != UpdateChannel::Experimental {
             return stable;
         }
         let experimental = self.fetch_feed(app, &self.settings.experimental_endpoint, true).await;
+        if self.channel() != UpdateChannel::Experimental {
+            // Turned off while the feeds were read: the experimental answer is dropped, so a dev
+            // build is never offered on the stable channel.
+            log::append("update: the channel changed to stable during the check; the experimental feed's answer is dropped");
+            return stable;
+        }
         match (stable, experimental) {
             (Ok(stable), Ok(experimental)) => Ok(newest(stable, experimental)),
             (Ok(stable), Err(why)) => {
