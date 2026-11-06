@@ -7,7 +7,7 @@
 //! its column: the well is sunk with a line border, the checked option is
 //! a raised thumb, and every option carries its dot.
 
-use gpui::{IntoElement, Window, div, prelude::*, px};
+use gpui::{BoxShadow, IntoElement, Window, div, point, prelude::*, px};
 
 use crate::theme::Theme;
 
@@ -22,13 +22,25 @@ pub fn segmented(
 ) -> impl IntoElement {
     let mut row = div()
         .id(gpui::SharedString::from(id.to_string()))
+        .relative()
         .flex()
         .gap(px(2.0))
         .p(px(2.0))
         .rounded_md()
         .border_1()
         .border_color(Theme::color(t.line))
-        .bg(Theme::color(t.sunk));
+        .bg(Theme::color(t.sunk))
+        // hardware.css `--well`: `inset 0 1px 0 …`, the recess's top line.
+        // GPUI has no inset shadow, so the line is drawn inside the top edge.
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .right_0()
+                .h(px(1.0))
+                .bg(t.well()),
+        );
     for (value, label) in options {
         let is_selected = *value == selected;
         let value = value.to_string();
@@ -55,8 +67,18 @@ pub fn segmented(
             .child(dot)
             .child(label.to_string());
         let cell = if is_selected {
+            // hardware.css `.seg-thumb`: a raised key in the well, inset
+            // `line-2` edge plus the 2 px skirt under it.
             cell.bg(Theme::color(t.raised))
                 .text_color(Theme::color(t.ink))
+                .border_1()
+                .border_color(Theme::color(t.line_2))
+                .shadow(vec![BoxShadow {
+                    color: gpui::Hsla::from(t.skirt()),
+                    offset: point(px(0.0), px(2.0)),
+                    blur_radius: px(0.0),
+                    spread_radius: px(0.0),
+                }])
         } else {
             cell.text_color(Theme::color(t.dim))
         };

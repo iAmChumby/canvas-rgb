@@ -2,7 +2,7 @@
 //! rules in `app.css` re-skinned by `hardware.css`: a 40x22 slot, a 16 px
 //! knob, sunk when off and live when on, the knob travelling 18 px.
 
-use gpui::{IntoElement, Window, div, prelude::*, px};
+use gpui::{BoxShadow, IntoElement, Window, div, point, prelude::*, px};
 
 use crate::theme::Theme;
 
@@ -23,10 +23,17 @@ pub fn toggle(
     } else {
         Theme::color(t.dim)
     };
+    // hardware.css `.switch::after`: `0 1px 0 var(--skirt)` under the knob.
     let knob = div()
         .size(px(16.0))
         .rounded_full()
-        .bg(knob_color);
+        .bg(knob_color)
+        .shadow(vec![BoxShadow {
+            color: gpui::Hsla::from(t.skirt()),
+            offset: point(px(0.0), px(1.0)),
+            blur_radius: px(0.0),
+            spread_radius: px(0.0),
+        }]);
     let row = div()
         .id(gpui::SharedString::from(id.to_string()))
         .flex()

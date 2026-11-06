@@ -242,6 +242,58 @@ impl Theme {
     pub fn live_soft(&self) -> Rgba {
         parse_color(self.live_soft)
     }
+
+    /// The hardware skirt (`hardware.css` `--skirt`): the 2 px band a key's
+    /// face sits on. Dark: black at 0.55; light: ink at 0.22.
+    pub fn skirt(&self) -> Rgba {
+        if self.is_dark() {
+            Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.55,
+            }
+        } else {
+            Rgba {
+                r: 15.0 / 255.0,
+                g: 18.0 / 255.0,
+                b: 24.0 / 255.0,
+                a: 0.22,
+            }
+        }
+    }
+
+    /// A primary key's skirt: `--live` mixed 55% with black (`hardware.css`
+    /// `.btn-primary`). The mix is computed in RGB; the CSS computes it in
+    /// oklab, which is close enough at this size.
+    pub fn live_skirt(&self) -> Rgba {
+        let live = self.live();
+        Rgba {
+            r: live.r * 0.55,
+            g: live.g * 0.55,
+            b: live.b * 0.55,
+            a: live.a,
+        }
+    }
+
+    /// The well's top line (`hardware.css` `--well`, `inset 0 1px 0 …`).
+    pub fn well(&self) -> Rgba {
+        if self.is_dark() {
+            Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.6,
+            }
+        } else {
+            Rgba {
+                r: 15.0 / 255.0,
+                g: 18.0 / 255.0,
+                b: 24.0 / 255.0,
+                a: 0.14,
+            }
+        }
+    }
 }
 
 fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {

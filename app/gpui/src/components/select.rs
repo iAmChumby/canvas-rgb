@@ -9,7 +9,7 @@
 //! pick). Keyboard, type-ahead and ARIA items in the Displays checklist stay
 //! unticked for that reason.
 
-use gpui::{IntoElement, div, prelude::*, px};
+use gpui::{BoxShadow, IntoElement, div, point, prelude::*, px};
 
 use crate::theme::Theme;
 
@@ -33,6 +33,28 @@ pub fn select(
         .map(|(_, l)| *l)
         .unwrap_or("CPU temperature");
     let toggle = on_toggle.clone();
+    // React `.select-value`: every option is laid out in the trigger and
+    // only the chosen one is visible, so the trigger is as wide as its
+    // widest option and picking one never resizes it. GPUI has no
+    // `visibility: hidden` that keeps layout, so the labels are stacked in
+    // one grid cell (all at row/column 1): the cell takes the widest label,
+    // and the non-chosen labels are `invisible` (visibility hidden), exactly
+    // as in React. The chosen label is drawn last, on top.
+    let mut value_grid = div().grid().flex_1().min_w(px(0.0)).text_left();
+    for (v, l) in options {
+        let label = div()
+            .col_start(1)
+            .row_start(1)
+            .whitespace_nowrap()
+            .child(l.to_string());
+        let label = if *v == value {
+            label
+        } else {
+            label.invisible()
+        };
+        value_grid = value_grid.child(label);
+    }
+    let _ = chosen;
     let trigger = div()
         .id(gpui::SharedString::from(id.to_string()))
         .flex()
@@ -56,7 +78,14 @@ pub fn select(
         .font_weight(gpui::FontWeight::MEDIUM)
         .font_family(crate::fonts::UI_FAMILY)
         .cursor_pointer()
-        .child(chosen.to_string())
+        // hardware.css `.select-trigger`: a key on its 2 px skirt.
+        .shadow(vec![BoxShadow {
+            color: gpui::Hsla::from(t.skirt()),
+            offset: point(px(0.0), px(2.0)),
+            blur_radius: px(0.0),
+            spread_radius: px(0.0),
+        }])
+        .child(value_grid)
         .child(
             gpui::svg()
                 .path("icons/CaretDown-bold.svg")

@@ -22,6 +22,8 @@ pub fn slider(
     let live = t.live();
     let raised = Theme::color(t.raised);
     let line_2 = Theme::color(t.line_2);
+    let skirt = t.skirt();
+    let well = t.well();
     let el = canvas(
         move |_, _, _| {},
         move |bounds, _, window, _| {
@@ -36,6 +38,12 @@ pub fn slider(
                 line_color,
                 gpui::BorderStyle::default(),
             ));
+            // `--well` on the track: the recess's top line inside it.
+            let well_line = Bounds {
+                origin: point(bounds.origin.x, bounds.origin.y + px(14.0)),
+                size: size(w, px(1.0)),
+            };
+            window.paint_quad(gpui::fill(well_line, well));
             let fill_w = (w * p) - px(7.0);
             if fill_w > px(0.0) {
                 let fill = Bounds {
@@ -44,15 +52,24 @@ pub fn slider(
                 };
                 window.paint_quad(gpui::fill(fill, live));
             }
-            let cap_x = bounds.origin.x + px(7.0) + (w - px(14.0)) * p;
+            // The cap is centred on its travel point (hardware.css
+            // `translate(-50%, -50%)`), so at 100% its right edge is the
+            // slider's right edge and it never reaches the value beside it.
+            let cap_cx = bounds.origin.x + px(7.0) + (w - px(14.0)) * p;
             let cap = Bounds {
-                origin: point(cap_x, bounds.origin.y + px(4.0)),
+                origin: point(cap_cx - px(7.0), bounds.origin.y + px(4.0)),
                 size: size(px(14.0), px(24.0)),
             };
+            // The cap's skirt (2 px under it), drawn before the cap.
+            let skirt_rect = Bounds {
+                origin: point(cap_cx - px(7.0), bounds.origin.y + px(28.0)),
+                size: size(px(14.0), px(2.0)),
+            };
+            window.paint_quad(gpui::fill(skirt_rect, skirt));
             window.paint_quad(gpui::fill(cap, raised));
             window.paint_quad(gpui::outline(cap, line_2, gpui::BorderStyle::default()));
             let line = Bounds {
-                origin: point(cap_x + px(2.0), bounds.origin.y + px(14.0)),
+                origin: point(cap_cx - px(5.0), bounds.origin.y + px(14.0)),
                 size: size(px(10.0), px(2.0)),
             };
             window.paint_quad(gpui::fill(line, live));

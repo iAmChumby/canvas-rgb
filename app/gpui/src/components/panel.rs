@@ -8,9 +8,51 @@
 //! field is label-left / control-right with a divider, or (in the wide and
 //! phone layouts, via [`field_stack`]) label over control.
 
-use gpui::{IntoElement, div, prelude::*, px};
+use gpui::{FontWeight, IntoElement, Rgba, div, prelude::*, px};
 
 use crate::theme::Theme;
+
+/// A text with CSS `letter-spacing` (GPUI text has no tracking), drawn as
+/// words of per-character cells: each word is a row of characters separated
+/// by `tracking_em` of the font size, and words wrap at word boundaries as
+/// in CSS. Used for the panel title (0.08em) and the readout captions
+/// (0.07em).
+pub fn tracked_text(
+    text: &str,
+    font_size: f32,
+    tracking_em: f32,
+    weight: FontWeight,
+    family: &'static str,
+    color: Rgba,
+) -> gpui::AnyElement {
+    let tracking = px(font_size * tracking_em);
+    let space_w = px(font_size * 0.25) + tracking;
+    let mut row = div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .text_size(px(font_size))
+        .font_weight(weight)
+        .font_family(family)
+        .text_color(color);
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let n = words.len();
+    for (wi, word) in words.iter().enumerate() {
+        let mut cell = div()
+            .flex()
+            .items_center()
+            .gap(tracking)
+            .whitespace_nowrap();
+        for ch in word.chars() {
+            cell = cell.child(ch.to_string());
+        }
+        row = row.child(cell);
+        if wi + 1 < n {
+            row = row.child(div().w(space_w).h(px(1.0)));
+        }
+    }
+    row.into_any_element()
+}
 
 /// A panel with a title. `actions` render beside the title, on the right.
 #[allow(dead_code)]
@@ -38,23 +80,31 @@ pub fn panel(
                 .justify_between()
                 .gap_2()
                 .mb_2()
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .font_family(crate::fonts::MONO_FAMILY)
-                        .text_color(Theme::color(t.mute))
-                        .child(title.to_uppercase()),
-                )
+                .child(tracked_text(
+                    &title.to_uppercase(),
+                    13.0,
+                    0.08,
+                    gpui::FontWeight::MEDIUM,
+                    crate::fonts::MONO_FAMILY,
+                    Theme::color(t.mute),
+                ))
                 .child(actions),
         )
         .child(body)
 }
 
 /// A labelled field in row form (the intermediate width): label left,
-/// control right, divider under the row.
-pub fn field(t: &Theme, id: &str, label: &str, control: impl IntoElement) -> gpui::Stateful<gpui::Div> {
-    div()
+/// control right, divider under the row. React `.field`: min-height 48,
+/// vertical padding s2 (8), border-bottom, except the last field which has
+/// none (`.field:last-child`).
+pub fn field(
+    t: &Theme,
+    id: &str,
+    label: &str,
+    control: impl IntoElement,
+    last: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let el = div()
         .id(gpui::SharedString::from(id.to_string()))
         .flex()
         .flex_wrap()
@@ -62,9 +112,13 @@ pub fn field(t: &Theme, id: &str, label: &str, control: impl IntoElement) -> gpu
         .justify_between()
         .gap_2()
         .min_h(px(48.0))
-        .py_2()
-        .border_b_1()
-        .border_color(Theme::color(t.line))
+        .py_2();
+    let el = if last {
+        el
+    } else {
+        el.border_b_1().border_color(Theme::color(t.line))
+    };
+    el
         .child(
             div()
                 .flex_1()
@@ -84,13 +138,31 @@ pub fn field(t: &Theme, id: &str, label: &str, control: impl IntoElement) -> gpu
 }
 
 /// A labelled field in stacked form (wide two-column controls and the
-/// phone): label over control, control justified to the start, no divider.
-pub fn field_stack(t: &Theme, id: &str, label: &str, control: impl IntoElement) -> gpui::Stateful<gpui::Div> {
-    div()
+/// phone): label over control, control justified to the start. React
+/// `.field` keeps its 48 min-height and s2 vertical padding in both stacked
+/// forms; the wide form drops the divider (`border-bottom: 0`), the phone
+/// keeps it except on the last field.
+pub fn field_stack(
+    t: &Theme,
+    id: &str,
+    label: &str,
+    control: impl IntoElement,
+    wide: bool,
+    last: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let el = div()
         .id(gpui::SharedString::from(id.to_string()))
         .flex()
         .flex_col()
         .gap_1()
+        .min_h(px(48.0))
+        .py_2();
+    let el = if wide || last {
+        el
+    } else {
+        el.border_b_1().border_color(Theme::color(t.line))
+    };
+    el
         .child(
             div()
                 .text_sm()

@@ -508,7 +508,7 @@ impl DisplaysView {
                     .w(px(34.0))
                     .h(px(48.0))
                     .rounded_md()
-                    .text_xl()
+                    .text_size(px(28.0))
                     .font_family(crate::fonts::MONO_FAMILY)
                     .text_color(Theme::color(t.ink))
                     .child(cell.unwrap_or(' ').to_string());
@@ -572,14 +572,14 @@ impl DisplaysView {
             .items_baseline()
             .gap_1()
             .mt_3()
-            .child(
-                div()
-                    .text_sm()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .font_family(crate::fonts::UI_FAMILY)
-                    .text_color(Theme::color(t.mute))
-                    .child("NOW"),
-            )
+            .child(crate::components::panel::tracked_text(
+                "NOW",
+                14.0,
+                0.07,
+                gpui::FontWeight::SEMIBOLD,
+                crate::fonts::UI_FAMILY,
+                Theme::color(t.mute),
+            ))
             .child(
                 div()
                     .text_sm()
@@ -642,10 +642,11 @@ impl DisplaysView {
         // (>= 1000) is the two-column grid, phone (< 640) stacks label over
         // control, and between the fields are rows with a divider.
         let stacked = content_w >= 1000.0 || content_w < 640.0;
+        let wide = content_w >= 1000.0;
         let source_field = if stacked {
-            field_stack(t, &format!("{id}-source-field"), "Source", source_select)
+            field_stack(t, &format!("{id}-source-field"), "Source", source_select, wide, false)
         } else {
-            field(t, &format!("{id}-source-field"), "Source", source_select)
+            field(t, &format!("{id}-source-field"), "Source", source_select, false)
         };
         let value_field: Option<gpui::Stateful<gpui::Div>> = if matches!(draft.source, DisplaySource::Fixed { .. }) {
             let fixed_value = match draft.source {
@@ -674,9 +675,9 @@ impl DisplaysView {
                 },
             );
             Some(if stacked {
-                field_stack(t, &format!("{id}-value-field"), "Value", control)
+                field_stack(t, &format!("{id}-value-field"), "Value", control, wide, false)
             } else {
-                field(t, &format!("{id}-value-field"), "Value", control)
+                field(t, &format!("{id}-value-field"), "Value", control, false)
             })
         } else {
             None
@@ -705,9 +706,9 @@ impl DisplaysView {
                 },
             );
         let unit = if stacked {
-            field_stack(t, &format!("{id}-unit-field"), "Unit", unit_control)
+            field_stack(t, &format!("{id}-unit-field"), "Unit", unit_control, wide, false)
         } else {
-            field(t, &format!("{id}-unit-field"), "Unit", unit_control)
+            field(t, &format!("{id}-unit-field"), "Unit", unit_control, false)
         };
 
         let dec_entity = view_entity.clone();
@@ -729,9 +730,9 @@ impl DisplaysView {
                 },
             );
         let decimals = if stacked {
-            field_stack(t, &format!("{id}-decimals-field"), "Decimals", decimals_control)
+            field_stack(t, &format!("{id}-decimals-field"), "Decimals", decimals_control, wide, false)
         } else {
-            field(t, &format!("{id}-decimals-field"), "Decimals", decimals_control)
+            field(t, &format!("{id}-decimals-field"), "Decimals", decimals_control, false)
         };
 
         let blink_entity = view_entity.clone();
@@ -748,24 +749,32 @@ impl DisplaysView {
                     });
             });
         let blink = if stacked {
-            field_stack(t, &format!("{id}-blink-field"), "Blink at", blink_control)
+            // Blink is the last field: no divider under it (`.field:last-child`).
+            field_stack(t, &format!("{id}-blink-field"), "Blink at", blink_control, wide, true)
         } else {
-            field(t, &format!("{id}-blink-field"), "Blink at", blink_control)
+            field(t, &format!("{id}-blink-field"), "Blink at", blink_control, true)
         };
         // Assemble the controls: wide is two columns (Source | Unit,
-        // Decimals | Blink), otherwise one column.
+        // Decimals | Blink), otherwise one column. React `.display-controls`
+        // is a flex column with gap s2 (8) between fields, and in the wide
+        // grid the fields are separate grid rows (row gap 0): the fields'
+        // own 48/72 heights carry the rhythm, so the wide columns carry no
+        // extra gap and the single column carries s2.
         let controls = if content_w >= 1000.0 {
-            let mut left = div().flex().flex_col().flex_1().gap_1().child(source_field).child(decimals);
+            // The wide grid's row gap stays s2 (8) from `.display-controls`
+            // `gap: var(--s2)` — only the column gap becomes s6 — so the
+            // stacked fields carry an 8 px gap between rows.
+            let mut left = div().flex().flex_col().flex_1().gap_2().child(source_field).child(decimals);
             if let Some(v) = value_field {
                 left = left.child(v);
             }
-            let mut right = div().flex().flex_col().flex_1().gap_1().child(unit).child(blink);
+            let mut right = div().flex().flex_col().flex_1().gap_2().child(unit).child(blink);
             if blink_on {
                 right = right.child(div().w(px(160.0)));
             }
             div().flex().gap_6().child(left).child(right)
         } else {
-            let mut col = div().flex().flex_col().child(source_field);
+            let mut col = div().flex().flex_col().gap_2().child(source_field);
             if let Some(v) = value_field {
                 col = col.child(v);
             }
@@ -815,12 +824,17 @@ impl DisplaysView {
         // The card: panel chrome with the hardware title (mono, uppercase,
         // spaced), the head row (state + Save/Stop/Unsaved), the vendor
         // notice when blocked, and the readout beside the controls.
-        let title = div()
-            .text_sm()
-            .font_weight(gpui::FontWeight::MEDIUM)
-            .font_family(crate::fonts::MONO_FAMILY)
-            .text_color(Theme::color(t.mute))
-            .child(row.info.name.to_uppercase());
+        // hardware.css `.panel-title`: mono 13px, weight 500, 0.08em
+        // tracking, uppercase. The tracking is what makes the title wrap
+        // onto two lines on a phone.
+        let title = crate::components::panel::tracked_text(
+            &row.info.name.to_uppercase(),
+            13.0,
+            0.08,
+            gpui::FontWeight::MEDIUM,
+            crate::fonts::MONO_FAMILY,
+            Theme::color(t.mute),
+        );
         let head = if content_w < 640.0 {
             // Phone: the title takes its own line, the state and keys below.
             div()
@@ -868,17 +882,23 @@ impl DisplaysView {
             // displays override zeroes the slot's min-height).
             div()
         };
+        // React `.display-readout` rhythm: caption with margin-bottom s2
+        // (8), the digits, NOW with margin-top s3 (12), the digit-count
+        // note with margin-top s3 (12). No uniform gap between all four.
         let readout_col = div()
             .flex()
             .flex_col()
-            .gap_2()
             .child(
                 div()
-                    .text_sm()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .font_family(crate::fonts::UI_FAMILY)
-                    .text_color(Theme::color(t.mute))
-                    .child("PREVIEW"),
+                    .mb_2()
+                    .child(crate::components::panel::tracked_text(
+                        "PREVIEW",
+                        14.0,
+                        0.07,
+                        gpui::FontWeight::SEMIBOLD,
+                        crate::fonts::UI_FAMILY,
+                        Theme::color(t.mute),
+                    )),
             )
             .child(readout)
             .child(now)
@@ -936,7 +956,7 @@ impl Render for DisplaysView {
         } else {
             200.0
         };
-        let content_w = win_w - rail_w - if win_w <= 720.0 { 32.0 } else { 48.0 };
+        let content_w = win_w - rail_w - if win_w <= 720.0 { 24.0 } else { 48.0 };
         // The page title lives in the strip (Shell), not here.
         let mut page = div().flex().flex_col().gap_4();
         if let Some(stale) = &self.stale_error {

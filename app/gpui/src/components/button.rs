@@ -8,7 +8,7 @@
 //! border; ghost is transparent with dim text. Small is 28 px tall with
 //! 10 px side padding; default is the 32 px control height.
 
-use gpui::{ClickEvent, IntoElement, Rgba, Window, div, prelude::*, px};
+use gpui::{BoxShadow, ClickEvent, IntoElement, Rgba, Window, div, point, prelude::*, px};
 
 use crate::theme::Theme;
 
@@ -53,6 +53,24 @@ fn colors(t: &Theme, variant: Variant, disabled: bool) -> (Rgba, Rgba, Rgba) {
     }
 }
 
+fn skirt_shadow(t: &Theme, variant: Variant) -> Vec<BoxShadow> {
+    // hardware.css: `.btn`/`select-trigger` sit on a 2 px skirt; a primary
+    // key's skirt is the darker live (`live_skirt`), a ghost has none, and a
+    // disabled key's skirt folds away. The shadow is clipped by the parent
+    // in GPUI? No: box-shadows paint outside the border box, as in CSS.
+    let color = match variant {
+        Variant::Primary => t.live_skirt(),
+        Variant::Default => t.skirt(),
+        Variant::Ghost => return Vec::new(),
+    };
+    vec![BoxShadow {
+        color: gpui::Hsla::from(color),
+        offset: point(px(0.0), px(2.0)),
+        blur_radius: px(0.0),
+        spread_radius: px(0.0),
+    }]
+}
+
 fn base(
     t: &Theme,
     id: &str,
@@ -74,6 +92,11 @@ fn base(
         .text_color(fg)
         .text_sm()
         .font_family(crate::fonts::UI_FAMILY);
+    let el = if disabled {
+        el
+    } else {
+        el.shadow(skirt_shadow(t, variant))
+    };
     if small {
         el.h(px(28.0)).px(px(10.0))
     } else {
@@ -188,6 +211,12 @@ pub fn icon_button(
         el.border_1()
             .border_color(Theme::color(t.line_2))
             .bg(Theme::color(t.raised))
+            .shadow(vec![BoxShadow {
+                color: gpui::Hsla::from(t.skirt()),
+                offset: point(px(0.0), px(2.0)),
+                blur_radius: px(0.0),
+                spread_radius: px(0.0),
+            }])
     } else {
         el
     };

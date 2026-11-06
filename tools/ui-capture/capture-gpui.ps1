@@ -42,6 +42,12 @@ public static class Win32Capture {
     [DllImport("user32.dll")]
     public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
     [DllImport("user32.dll")]
+    public static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
+    [DllImport("user32.dll")]
+    public static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
+    [DllImport("user32.dll")]
+    public static extern bool AdjustWindowRect(ref RECT lpRect, uint dwStyle, bool bMenu);
+    [DllImport("user32.dll")]
     public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint nFlags);
     [DllImport("user32.dll", SetLastError=true)]
     public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
@@ -49,6 +55,8 @@ public static class Win32Capture {
     public static extern bool IsWindow(IntPtr hWnd);
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct POINT { public int X; public int Y; }
     public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
 }
 "@
@@ -86,14 +94,34 @@ foreach ($theme in $Themes) {
           Write-Host "capture-gpui: no window for $page ${size} $theme (exited: $($proc.HasExited))"
           continue
         }
-        # Resize without activating (never steal focus from the person at the PC).
-        [void][Win32Capture]::SetWindowPos($handle, [IntPtr]::Zero, 0, 0, $w, $h, $SWP_NOACTIVATE)
+        # Resize so the CLIENT area is exactly WxH: SetWindowPos sizes the
+        # outer window (frame included), and the shell's breakpoints
+        # (1280/720) measure the client/viewport like the browser does.
+        # Sizing the outer window to WxH made the client ~16 px narrower
+        # (1280 showed the icon rail) and the 390 shot came out 406 wide.
+        # AdjustWindowRect grows the outer rect by the frame; WS_OVERLAPPEDWINDOW.
+        $want = New-Object Win32Capture+RECT
+        $want.Left = 0; $want.Top = 0; $want.Right = $w; $want.Bottom = $h
+        [void][Win32Capture]::AdjustWindowRect([ref]$want, 0x00CF0000, $false)
+        $outerW = $want.Right - $want.Left
+        $outerH = $want.Bottom - $want.Top
+        [void][Win32Capture]::SetWindowPos($handle, [IntPtr]::Zero, 0, 0, $outerW, $outerH, $SWP_NOACTIVATE)
         Start-Sleep -Milliseconds 1500
         $rect = New-Object Win32Capture+RECT
         [void][Win32Capture]::GetWindowRect($handle, [ref]$rect)
         $cw = $rect.Right - $rect.Left
         $ch = $rect.Bottom - $rect.Top
         if ($cw -le 0 -or $ch -le 0) { Write-Host "capture-gpui: zero-size window for $page"; continue }
+        $client = New-Object Win32Capture+RECT
+        [void][Win32Capture]::GetClientRect($handle, [ref]$client)
+        $origin = New-Object Win32Capture+POINT
+        $origin.X = 0; $origin.Y = 0
+        [void][Win32Capture]::ClientToScreen($handle, [ref]$origin)
+        $ox = $origin.X - $rect.Left
+        $oy = $origin.Y - $rect.Top
+        $clientW = $client.Right - $client.Left
+        $clientH = $client.Bottom - $client.Top
+        Write-Host "capture-gpui: client ${clientW}x${clientH} (want ${w}x${h}) at offset ${ox},${oy}"
         $bmp = New-Object System.Drawing.Bitmap($cw, $ch)
         $gfx = [System.Drawing.Graphics]::FromImage($bmp)
         $hdc = $gfx.GetHdc()
@@ -101,9 +129,13 @@ foreach ($theme in $Themes) {
           $ok = [Win32Capture]::PrintWindow($handle, $hdc, $PW_RENDERFULLCONTENT)
         } finally { $gfx.ReleaseHdc($hdc) }
         $gfx.Dispose()
-        $file = Join-Path $outDir "$page-gpui-${size}-$theme.png"
-        $bmp.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
+        # Crop to the client area so the PNG is exactly WxH like the React
+        # viewport shot.
+        $shot = $bmp.Clone((New-Object System.Drawing.Rectangle($ox, $oy, $clientW, $clientH)), $bmp.PixelFormat)
         $bmp.Dispose()
+        $file = Join-Path $outDir "$page-gpui-${size}-$theme.png"
+        $shot.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
+        $shot.Dispose()
         Write-Host "capture-gpui: $file ($ok)"
         $saved++
       } finally {

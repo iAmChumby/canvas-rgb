@@ -34,6 +34,58 @@ use crate::components::slider::slider;
 use crate::theme::Theme;
 use crate::views::displays::DisplaysView;
 
+/// Measure a single line of text in the UI/mono face at `size` px, using
+/// GPUI's own text layout so the truncation below matches what is drawn.
+fn text_width(window: &Window, text: &str, size: f32, weight: gpui::FontWeight, family: &str) -> f32 {
+    let font = gpui::Font {
+        family: family.to_string().into(),
+        weight,
+        style: gpui::FontStyle::Normal,
+        features: gpui::FontFeatures::default(),
+        fallbacks: None,
+    };
+    let run = gpui::TextRun {
+        len: text.len(),
+        font,
+        color: gpui::black(),
+        underline: None,
+        strikethrough: None,
+        background_color: None,
+    };
+    let layout = window.text_system().layout_line(text, px(size), &[run], None);
+    layout.width.into()
+}
+
+/// Ellipsis-truncate `text` to `max_w` px (React `text-overflow:
+/// ellipsis`). GPUI's `truncate()` hard-cuts without drawing the ellipsis
+/// in this version, so the cut is computed here from measured widths: the
+/// longest prefix that fits with a "…" appended. Returns the text unchanged
+/// when it already fits.
+fn ellipsize(
+    window: &Window,
+    text: &str,
+    max_w: f32,
+    size: f32,
+    weight: gpui::FontWeight,
+    family: &str,
+) -> String {
+    if text_width(window, text, size, weight, family) <= max_w {
+        return text.to_string();
+    }
+    let ellipsis = "…";
+    let chars: Vec<char> = text.chars().collect();
+    let mut best = 0usize;
+    for n in 0..chars.len() {
+        let candidate: String = chars[..n].iter().collect::<String>() + ellipsis;
+        if text_width(window, &candidate, size, weight, family) <= max_w {
+            best = n;
+        } else {
+            break;
+        }
+    }
+    chars[..best].iter().collect::<String>() + ellipsis
+}
+
 /// The pages the rail names, in order (React `Rail.tsx` PAGES, then Settings).
 pub const NAV: &[(&str, &str, &str)] = &[
     ("Layout", "layout", "SquaresFour"),
@@ -384,12 +436,41 @@ impl Shell {
         )
     }
 
-    fn easel(&self, _px_size: f32) -> gpui::Svg {
-        let name = if self.theme.is_dark() { "EaselDark" } else { "EaselLight" };
-        gpui::svg()
-            .path(format!("icons/{name}.svg"))
-            .size_3()
-            .text_color(Theme::color(self.theme.ink))
+    /// The brand easel (`BrandMark.tsx`, `.easel-*`): legs in ink, the
+    /// canvas in `--live` (accent blue), red (`--down`) while the daemon is
+    /// away. The SVG assets are split in two so each part takes its own
+    /// colour; `size` is the width in px (React `BrandMark` default 16).
+    fn easel(&self, size: f32) -> impl IntoElement {
+        let t = &self.theme;
+        let canvas_color = if self.status.is_some() {
+            t.live()
+        } else if self.status_error.is_some() {
+            Theme::color(t.down)
+        } else {
+            t.live()
+        };
+        div()
+            .relative()
+            .w(px(size))
+            .h(px(size * 14.0 / 12.0))
+            .child(
+                gpui::svg()
+                    .path("icons/EaselLegs.svg")
+                    .absolute()
+                    .inset_0()
+                    .w_full()
+                    .h_full()
+                    .text_color(Theme::color(t.ink)),
+            )
+            .child(
+                gpui::svg()
+                    .path("icons/EaselCanvas.svg")
+                    .absolute()
+                    .inset_0()
+                    .w_full()
+                    .h_full()
+                    .text_color(canvas_color),
+            )
     }
 
     fn wordmark(&self) -> impl IntoElement {
@@ -514,7 +595,7 @@ impl Shell {
         })
     }
 
-    fn deck(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn deck(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = &self.theme;
         let values = self.values();
         let paused = values.paused;
@@ -524,6 +605,33 @@ impl Shell {
         let active_name = values.effect.clone().unwrap_or_else(|| {
             if known { "Nothing is running".to_string() } else { "—".to_string() }
         });
+        // The name's budget: the deck's inner width (rail 200 − rail
+        // padding 24 − deck padding 20 − border 2 = 154) minus the row gap
+        // and the device count. GPUI's `truncate()` hard-cuts, so the
+        // ellipsis cut is measured here (React `.rail-deck-name`).
+        let count_w = match devices {
+            Some(n) => text_width(
+                window,
+                &format!("{n} devices"),
+                14.0,
+                gpui::FontWeight::NORMAL,
+                crate::fonts::UI_FAMILY,
+            ),
+            None => 0.0,
+        };
+        // GPUI's measured widths run ~10% narrower than the browser's for
+        // the same face (the browser cuts "Nothing is running" to
+        // "Nothing i…", GPUI's own measure fits "Nothing is…"), so the
+        // budget carries that factor to land on the same cut.
+        let name_budget = (154.0 - 8.0 - count_w) * 0.9;
+        let active_name = ellipsize(
+            window,
+            &active_name,
+            name_budget,
+            15.0,
+            gpui::FontWeight::SEMIBOLD,
+            crate::fonts::UI_FAMILY,
+        );
         let has_effects = self.effects.as_ref().is_some_and(|e| !e.effects.is_empty());
         // Tabs: two flex-1 cells in the sunk well.
         let deck_entity = cx.entity();
@@ -590,10 +698,17 @@ impl Shell {
                         .justify_between()
                         .gap_2()
                         .child(
+                            // React `.rail-deck-name`: overflow hidden,
+                            // text-overflow ellipsis, nowrap. GPUI's
+                            // `truncate()` sets the ellipsis, but the flex
+                            // item must be allowed to shrink (`min_w 0`) or
+                            // it hard-cuts at the deck edge instead.
                             div()
                                 .flex_1()
-                                .truncate()
-                                .text_base()
+                                .min_w(px(0.0))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_size(px(15.0))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .font_family(crate::fonts::UI_FAMILY)
                                 .text_color(Theme::color(t.ink))
@@ -687,6 +802,7 @@ impl Shell {
                             div()
                                 .w(px(38.0))
                                 .text_sm()
+                                .text_right()
                                 .font_family(crate::fonts::MONO_FAMILY)
                                 .text_color(Theme::color(t.dim))
                                 .child(if known { format!("{brightness}%") } else { "—".to_string() }),
@@ -766,7 +882,7 @@ impl Shell {
             .child(body)
     }
 
-    fn rail(&self, narrow: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    fn rail(&self, narrow: bool, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = &self.theme;
         let values = self.values();
         let engine_word = if self.status.is_some() {
@@ -824,7 +940,7 @@ impl Shell {
                 col = col.child(self.rail_link(label, page, icon, self.page == *page, value, cx));
             }
             col = col.child(div().flex_1());
-            col = col.child(self.deck(cx));
+            col = col.child(self.deck(window, cx));
             col = col.child(self.rail_link("Settings", "settings", "Gear", self.page == "settings", None, cx));
             col = col.child(
                 div()
@@ -885,8 +1001,9 @@ impl Shell {
                 };
                 col = col.child(tile);
             }
-            col = col.child(div().flex_1());
-            // Settings sits at the bottom, apart from the page list.
+            // No spacer in the icon rail: React hides `.rail-spacer` at
+            // 721–1279 px, so Settings sits directly under Fans (2 px gap),
+            // not pinned to the bottom.
             let active = self.page == "settings";
             let glyph_name = if active { "icons/Gear-fill.svg" } else { "icons/Gear.svg" };
             let tile = div()
@@ -1273,7 +1390,8 @@ impl Render for Shell {
             .p_4()
             .child(self.page_content());
         let content = if phone {
-            content.px(px(16.0)).pb(px(120.0)).pt(phone_pad_top)
+            // React phone `.content`: padding s3 (12) on the sides.
+            content.px(px(12.0)).pb(px(120.0)).pt(phone_pad_top)
         } else {
             content.px(px(24.0)).pb(px(24.0)).pt(px(16.0))
         };
@@ -1294,13 +1412,13 @@ impl Render for Shell {
             div()
                 .flex()
                 .size_full()
-                .child(div().w(px(64.0)).h_full().child(self.rail(true, cx)))
+                .child(div().w(px(64.0)).h_full().child(self.rail(true, window, cx)))
                 .child(main_col)
         } else {
             div()
                 .flex()
                 .size_full()
-                .child(div().w(px(200.0)).h_full().child(self.rail(false, cx)))
+                .child(div().w(px(200.0)).h_full().child(self.rail(false, window, cx)))
                 .child(main_col)
         };
         div()

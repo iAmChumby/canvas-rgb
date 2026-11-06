@@ -35,6 +35,8 @@ pub const ICONS: &[&str] = &[
     "CaretDown",
     "EaselDark",
     "EaselLight",
+    "EaselLegs",
+    "EaselCanvas",
 ];
 
 fn icon_svg(name: &str) -> Option<&'static str> {
@@ -62,6 +64,8 @@ fn icon_svg(name: &str) -> Option<&'static str> {
         "CaretDown" => include_str!("../assets/icons/CaretDown.svg"),
         "EaselDark" => include_str!("../assets/icons/EaselDark.svg"),
         "EaselLight" => include_str!("../assets/icons/EaselLight.svg"),
+        "EaselLegs" => include_str!("../assets/icons/EaselLegs.svg"),
+        "EaselCanvas" => include_str!("../assets/icons/EaselCanvas.svg"),
         _ => return None,
     })
 }
