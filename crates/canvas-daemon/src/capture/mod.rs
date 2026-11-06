@@ -280,6 +280,9 @@ impl DaemonInputs {
             let is_input = matches!(&requested, AudioSource::Endpoint { flow: canvas_proto::audio::AudioFlow::Capture, .. });
             let effect = *self.effect_audio.lock().unwrap_or_else(|e| e.into_inner());
             if is_input && !effect && !self.any_listen() {
+                // An input that is no longer listened to closes first: a microphone
+                // that was opened for Listen must not stay open once Listen is off.
+                self.stop_audio();
                 let mut snap = self.snapshot.lock().unwrap_or_else(|e| e.into_inner());
                 *snap = audio::CaptureSnapshot { status: AudioTestStatus::NotListening, ..snap.clone() };
             } else {
@@ -435,6 +438,7 @@ impl InputSource for DaemonInputs {
 mod tests {
     use super::*;
     use canvas_proto::audio::{AudioEndpoint, AudioEndpointState, AudioFlow};
+    use std::time::Duration;
 
     fn fake_with(endpoints: Vec<AudioEndpoint>) -> (DaemonInputs, Arc<audio::FakeBackend>) {
         let fake = Arc::new(audio::FakeBackend::with_endpoints(endpoints));
@@ -466,6 +470,23 @@ mod tests {
         let source: Arc<dyn InputSource> = Arc::new(inputs);
         assert!(source.screen().is_none());
         assert!(source.audio().is_none());
+    }
+
+    /// An input opened for Listen closes when the last Listen lease ends, even while a
+    /// lease without Listen is still live: the microphone must not stay open.
+    #[test]
+    fn an_input_closes_when_listen_ends_while_another_lease_lives() {
+        let (inputs, _fake) = fake_with(vec![speakers(), mic()]);
+        inputs.set_requested(AudioSource::Endpoint { id: "mic-id".into(), flow: AudioFlow::Capture, name_hint: "Microphone".into() });
+        let t0 = Instant::now();
+        inputs.take_lease_at(t0, true);
+        assert!(!inputs.idle(), "Listen opens the input");
+        inputs.take_lease_at(t0 + Duration::from_secs(2), false);
+        assert!(inputs.expire_leases_at(t0 + canvas_proto::consts::AUDIO_TEST_LEASE + Duration::from_millis(500)));
+        inputs.refresh_audio();
+        assert_eq!(inputs.lease_count(), 1, "the lease without Listen is still live");
+        assert!(inputs.idle(), "the input is closed once nothing listens to it");
+        assert_eq!(inputs.test_state().status, AudioTestStatus::NotListening);
     }
 
     /// Every honest state is reachable on the fake.
