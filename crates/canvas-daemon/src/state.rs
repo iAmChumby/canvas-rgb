@@ -207,7 +207,7 @@ impl App {
             preview_subs: PreviewRegistry::default(),
             stack_subs: PreviewRegistry::default(),
             stack_preview: crate::preview::StackPreview::new(),
-            inputs: Arc::new(crate::capture::DaemonInputs::empty()),
+            inputs: Arc::new(crate::capture::DaemonInputs::production()),
             token,
             version,
             service_down_ms: AtomicU64::new(0),

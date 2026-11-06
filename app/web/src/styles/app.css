@@ -1467,6 +1467,106 @@ button.chip:hover {
   visibility: visible;
 }
 
+/* A group heading inside a grouped listbox (#166): not selectable. */
+.listbox-group {
+  padding: 6px 10px 2px;
+  color: var(--mute);
+  font-size: var(--t14);
+  font-weight: 600;
+}
+
+/* The audio-source panel (#166): the picker row, the state words, and the
+   readings. The readings keep a fixed height in every state, so the panel
+   never grows or shrinks under the pointer. */
+.audio-picker-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  min-width: 0;
+}
+
+.audio-picker {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.audio-picker .select-trigger {
+  width: 100%;
+}
+
+.audio-state {
+  margin-top: var(--s2);
+  color: var(--dim);
+  font-size: var(--t14);
+}
+
+.audio-readings {
+  margin-top: var(--s3);
+  height: var(--audio-readings-h);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.audio-reading-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+}
+
+.audio-meter {
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: repeat(24, 1fr);
+  gap: 2px;
+  height: var(--audio-meter-h);
+}
+
+.audio-cell {
+  border-radius: var(--r-sm);
+  background: var(--line-2);
+}
+
+.audio-cell[data-on="true"][data-level="ok"] {
+  background: var(--ok);
+}
+
+.audio-cell[data-on="true"][data-level="work"] {
+  background: var(--work);
+}
+
+.audio-cell[data-on="true"][data-level="warn"] {
+  background: var(--warn);
+}
+
+.audio-db {
+  min-width: 5ch;
+  text-align: right;
+  color: var(--ink);
+  font-size: var(--t16);
+}
+
+.audio-bands {
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: repeat(32, 1fr);
+  align-items: end;
+  gap: 2px;
+  min-height: 0;
+}
+
+.audio-band {
+  border-radius: var(--r-sm);
+  background: var(--line-2);
+  min-height: 2px;
+}
+
+.audio-readings-button {
+  margin-top: var(--s2);
+  color: var(--dim);
+  font-size: var(--t14);
+}
+
 .color {
   position: relative;
   display: inline-flex;

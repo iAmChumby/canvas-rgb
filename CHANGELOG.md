@@ -6,9 +6,14 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Added
+
+- Settings has an Audio source panel: pick which output or input the audio-reactive effects read (Follow the Windows default, a loopback output, or an input with Listen), and see a live test of what the device is delivering — a level meter, a dB figure and the spectrum bands — so you can tell at a glance whether sound is reaching the lights. (#166)
+
 ### Fixed
 
 - Audio Spectrum is no longer dim and stuck at the bottom of your layout: at normal music volume the bars now rise about two thirds of the way up, so every light joins in, not just the keyboard. The default Sensitivity is now 100; an effect you saved with a higher Sensitivity keeps it and will reach the top on loud music. The log now names the audio format instead of saying "unknown". (#188)
+- Integer audio (16/24/32-bit PCM) is now decoded correctly instead of being read as float, so an endpoint that delivers PCM no longer sounds like garbage to the lights. (#193)
 
 ## [0.8.3] - 2026-11-05
 

@@ -216,6 +216,7 @@ async fn daemon_main() -> Exit {
     spawn_first_run(app.clone());
     spawn_user_effects_watch(app.clone());
     canvas_daemon::draft::spawn_sweeper(app.clone());
+    canvas_daemon::api::audio::spawn_sweeper(app.clone());
 
     // The API.
     let router = canvas_daemon::api::router(app.clone());

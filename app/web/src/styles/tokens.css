@@ -116,6 +116,9 @@
   --rail-w: 200px;
   --rail-w-icon: 64px;
   --control-h: 32px;
+  /* the audio readings (#166): fixed heights, so the panel keeps its shape */
+  --audio-meter-h: 16px;
+  --audio-readings-h: 96px;
   /* the fader's cap: it travels in the slot, and the fill ends under it */
   --cap-w: 14px;
 
