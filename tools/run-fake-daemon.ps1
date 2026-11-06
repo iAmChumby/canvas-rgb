@@ -36,8 +36,8 @@ $root = Split-Path -Parent $PSScriptRoot
 $homeDir = Join-Path $root '.build\fake-home'
 $fakeOpenRgbPort = $OpenRgbPort
 $testApiPort = $ApiPort
-if ($testApiPort -in 0, 9430, 6742 -or $fakeOpenRgbPort -in 0, 9430, 6742 -or $testApiPort -eq $fakeOpenRgbPort) {
-    Write-Error "run-fake-daemon: -ApiPort ${testApiPort} / -OpenRgbPort ${fakeOpenRgbPort}: never 0, the real API port 9430 or the real OpenRGB port 6742, and never the same port twice."
+if ($testApiPort -lt 1 -or $testApiPort -gt 65535 -or $fakeOpenRgbPort -lt 1 -or $fakeOpenRgbPort -gt 65535 -or $testApiPort -in 9430, 6742 -or $fakeOpenRgbPort -in 9430, 6742 -or $testApiPort -eq $fakeOpenRgbPort) {
+    Write-Error "run-fake-daemon: -ApiPort ${testApiPort} / -OpenRgbPort ${fakeOpenRgbPort}: between 1 and 65535, never the real API port 9430 or the real OpenRGB port 6742, and never the same port twice."
     exit 2
 }
 $pidFile = Join-Path $homeDir 'pids.json'

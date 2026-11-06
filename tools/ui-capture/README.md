@@ -30,8 +30,11 @@ powershell -NoProfile -File tools/with-build-lock.ps1 npm --prefix app/web run b
 
 `.build/ui-capture/<view>-react-<w>x<h>-<theme>.png` for every view x viewport
 x theme, plus `report.json` with page errors, console errors and failed API
-requests per shot. The capture exits non-zero when any shot has a page error or
-an API 4xx/5xx. One exception is listed instead of failed: an effect thumbnail
+requests per shot. The capture exits non-zero when any shot has a page error, an
+API 4xx/5xx, a failed request to the daemon, a page that did not load, a view that
+never showed the daemon's data (`data-live="on"`), or a console error, and when the
+daemon never answers the thumbnail prewarm. `UI_CAPTURE_API_BASE` must be a
+loopback URL, because the token is sent there. One exception is listed instead of failed: an effect thumbnail
 that answers 503 because it went over the daemon's render budget (a debug build
 renders Wet Smear in just over 30 s). The editor shows a blank tile for it, and
 both editors see the same daemon, so those go in `slowThumbnails`.

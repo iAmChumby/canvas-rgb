@@ -40,6 +40,9 @@ const CAPTURE_PORT = Number(process.env.UI_CAPTURE_PORT ?? process.env.CANVAS_RG
 const OUT_DIR = path.resolve(root, process.env.UI_CAPTURE_OUT ?? ".build/ui-capture");
 const WEB_OUT = path.resolve(root, "app/web/out");
 const DAEMON_BASE = process.env.UI_CAPTURE_API_BASE ?? "http://127.0.0.1:19430";
+if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(DAEMON_BASE)) {
+  throw new Error(`UI_CAPTURE_API_BASE must be http://127.0.0.1:<port> (the token is sent there), not ${DAEMON_BASE}`);
+}
 
 const VIEWS = [
   { name: "layout", path: "/" },
@@ -131,6 +134,7 @@ async function prewarmThumbnails(daemonBase, token) {
   for (const id of ids) {
     const url = `${daemonBase}/api/v1/effects/${encodeURIComponent(id)}/thumbnail`;
     // A slow render may take the renderer's budget; retry 503s a few times.
+    let settled = false;
     for (let attempt = 0; attempt < 12; attempt++) {
       let res;
       try {
@@ -142,6 +146,7 @@ async function prewarmThumbnails(daemonBase, token) {
       }
       if (res.ok) {
         console.log(`ui-capture: prewarm ${id} ok`);
+        settled = true;
         break;
       }
       if (res.status !== 503) throw new Error(`prewarm: thumbnail ${id} answered ${res.status}`);
@@ -149,10 +154,12 @@ async function prewarmThumbnails(daemonBase, token) {
         // Over the render budget even after retries (a debug build on a busy machine). The shots
         // list it under slowThumbnails, so the run goes on.
         console.log(`ui-capture: prewarm ${id} still 503 after retries; listed as a slow thumbnail`);
+        settled = true;
         break;
       }
       await new Promise((r) => setTimeout(r, 2000));
     }
+    if (!settled) throw new Error(`prewarm: the daemon never answered for thumbnail ${id}`);
   }
 }
 
@@ -262,6 +269,11 @@ async function shootPage(page, base, view, viewport, theme, daemonBase, token) {
   // A thumbnail that went over the daemon's render budget (a debug build renders slowly) answers
   // 503 and the editor shows a blank tile. Both editors see the same daemon, so it is listed, not failed.
   const slowThumbnails = [];
+  const requestFailures = [];
+  const notLoaded = [];
+  const onRequestFailed = (req) => {
+    if (req.url().startsWith(daemonBase)) requestFailures.push({ url: req.url(), error: req.failure()?.errorText ?? "failed" });
+  };
   const onPageError = (err) => pageErrors.push(String(err?.stack ?? err));
   const onConsole = (msg) => {
     if (msg.type() === "error") consoleErrors.push(msg.text());
@@ -278,11 +290,13 @@ async function shootPage(page, base, view, viewport, theme, daemonBase, token) {
   page.on("pageerror", onPageError);
   page.on("console", onConsole);
   page.on("response", onResponse);
+  page.on("requestfailed", onRequestFailed);
   // The theme lives in localStorage before load (like the existing scripts)
   // and the __TAURI__ stand-in is injected on every navigation.
   await page.addInitScript(tauriInit, { daemonBase, token, theme });
   const url = base + view.path;
-  await page.goto(url, { waitUntil: "load", timeout: 30000 });
+  const loaded = await page.goto(url, { waitUntil: "load", timeout: 30000 });
+  if (!loaded || !loaded.ok()) notLoaded.push(`page ${url} answered ${loaded ? loaded.status() : "nothing"}`);
   // The shell draws the page once the daemon has answered (data-live="on").
   // Wait for that; if the daemon is down the shot still records the screen.
   try {
@@ -291,7 +305,8 @@ async function shootPage(page, base, view, viewport, theme, daemonBase, token) {
       { timeout: 8000 },
     );
   } catch {
-    // record the shot anyway; the report shows the error counts
+    // Recorded and counted as a failure: the view never showed the daemon's data.
+    notLoaded.push(`no live data after 8 s (data-live="on" never appeared)`);
   }
   // Let the view settle (fonts, thumbnails, one preview frame).
   await page.waitForTimeout(400);
@@ -301,6 +316,7 @@ async function shootPage(page, base, view, viewport, theme, daemonBase, token) {
   page.off("pageerror", onPageError);
   page.off("console", onConsole);
   page.off("response", onResponse);
+  page.off("requestfailed", onRequestFailed);
   return {
     view: view.name,
     path: view.path,
@@ -311,6 +327,8 @@ async function shootPage(page, base, view, viewport, theme, daemonBase, token) {
     consoleErrors,
     apiFailures,
     slowThumbnails,
+    requestFailures,
+    notLoaded,
   };
 }
 
@@ -346,7 +364,18 @@ async function main() {
     await browser.close();
     await new Promise((r) => server.close(r));
   }
-  const failed = shots.filter((s) => s.pageErrors.length > 0 || s.apiFailures.length > 0);
+  const unexplainedConsole = (s) =>
+    s.consoleErrors.filter(
+      (m) => !(s.slowThumbnails.length > 0 && /status of 503 \(Service Unavailable\)/.test(m)),
+    ).length;
+  const failed = shots.filter(
+    (s) =>
+      s.pageErrors.length > 0 ||
+      s.apiFailures.length > 0 ||
+      s.requestFailures.length > 0 ||
+      s.notLoaded.length > 0 ||
+      unexplainedConsole(s) > 0,
+  );
   const report = {
     generatedAt: new Date().toISOString(),
     base,
@@ -361,11 +390,14 @@ async function main() {
     consoleErrors: shots.reduce((n, s) => n + s.consoleErrors.length, 0),
     apiFailures: shots.reduce((n, s) => n + s.apiFailures.length, 0),
     slowThumbnails: shots.reduce((n, s) => n + s.slowThumbnails.length, 0),
+    requestFailures: shots.reduce((n, s) => n + s.requestFailures.length, 0),
+    notLoaded: shots.reduce((n, s) => n + s.notLoaded.length, 0),
+    unexplainedConsoleErrors: shots.reduce((n, s) => n + unexplainedConsole(s), 0),
     shots,
   };
   fs.writeFileSync(path.join(OUT_DIR, "report.json"), JSON.stringify(report, null, 2));
   console.log(
-    `ui-capture: ${shots.length} shots, pageErrors=${report.pageErrors} consoleErrors=${report.consoleErrors} apiFailures=${report.apiFailures} slowThumbnails=${report.slowThumbnails} failedShots=${failed.length}`,
+    `ui-capture: ${shots.length} shots, pageErrors=${report.pageErrors} consoleErrors=${report.consoleErrors} apiFailures=${report.apiFailures} slowThumbnails=${report.slowThumbnails} requestFailures=${report.requestFailures} notLoaded=${report.notLoaded} unexplainedConsoleErrors=${report.unexplainedConsoleErrors} failedShots=${failed.length}`,
   );
   console.log(`ui-capture: report ${path.join(OUT_DIR, "report.json")}`);
   if (failed.length > 0) process.exitCode = 1;
