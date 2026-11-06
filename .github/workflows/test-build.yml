@@ -6,9 +6,10 @@ name: Test build
 # are a workflow artifact, kept for 14 days. Run `canvas-rgb update --file <installer> --sig <installer.sig>`
 # on a PC that runs an older build to install it through the service with no permission prompt.
 #
-# Its version is <major>.<minor>.<patch+1>-dev.<run number> from Cargo.toml: newer than the release it
-# follows (the service refuses anything not strictly newer), older than the next release (a dev build
-# sorts before its own release in semver). The version is set in the runner only and never committed.
+# Its version is <major>.<minor>.<patch+1>-dev.<UTC timestamp> from Cargo.toml: newer than the release
+# it follows (the service refuses anything not strictly newer), older than the next release (a dev
+# build sorts before its own release in semver). The version is set in the runner only and never
+# committed.
 #
 # The shape is release.yml's: every third-party action pinned to a full commit SHA, a read-only build job,
 # and the update signing key in one step of the sign job, which builds no project code.
@@ -19,11 +20,23 @@ name: Test build
 # The experimental publisher (#203) calls this workflow, so a signed test build is built and signed in
 # one place. The caller passes the signing key in; it is read in the sign step only, as it is here, and
 # the build job never sees it. The github context belongs to the caller, so the guards below (main
-# only) and the run number are the caller's: a publish from main builds and signs exactly what a
-# manual test build would.
+# only) are the caller's: a publish from main builds and signs exactly what a manual test build would.
+#
+# The dev version is one source for both paths: the UTC clock at the moment the build job runs. The
+# run number counts up in every workflow on its own, so a manual test build (-dev.50) and a publish
+# (-dev.3) each counted from one, and a PC on the higher one ignored the lower. The timestamp is
+# yyyyMMddHHmmss, a number with no leading zero, so semver compares it as a number: a later build is
+# a newer version, whichever workflow made it.
 on:
   workflow_dispatch:
   workflow_call:
+    inputs:
+      # The experimental publisher (#203) sets this. A manual dispatch of this workflow never sets
+      # it, so a manual test build writes no feed and its artifact is the three files it always was.
+      experimental:
+        description: Write latest.json for the experimental feed (#203). A manual test build never sets it.
+        type: boolean
+        default: false
     secrets:
       UPDATE_SIGNING_KEY:
         required: true
@@ -66,7 +79,12 @@ jobs:
         run: |
           $cargo = Get-Content Cargo.toml -Raw
           if ($cargo -notmatch '(?ms)\[workspace\.package\].*?^\s*version\s*=\s*"(\d+)\.(\d+)\.(\d+)"') { throw 'Cargo.toml has no plain x.y.z workspace version' }
-          $v = "$($Matches[1]).$($Matches[2]).$([int]$Matches[3] + 1)-dev.$env:GITHUB_RUN_NUMBER"
+          # The UTC clock, not the run number: the run number restarts in every workflow, so a
+          # manual test build and a publish each counted from one and a PC on the higher number
+          # ignored the lower. The timestamp is one number for both, with no leading zero, so
+          # semver compares it as a number and a later build is a newer version.
+          $stamp = [DateTime]::UtcNow.ToString('yyyyMMddHHmmss')
+          $v = "$($Matches[1]).$($Matches[2]).$([int]$Matches[3] + 1)-dev.$stamp"
           pwsh -NoProfile -File tools/set-version.ps1 $v
           if ($LASTEXITCODE -ne 0) { throw 'set-version.ps1 failed' }
           pwsh -NoProfile -File tools/set-version.ps1 -Check
@@ -132,12 +150,16 @@ jobs:
     permissions:
       contents: read
     steps:
-      # Only the signer pin: nothing that builds the project.
+      # Only the signer pin, the manifest script and the changelog: nothing that builds the
+      # project. The manifest script and the changelog are what release.yml's sign job checks out
+      # too, and they are read only when the caller asked for an experimental publish.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
           sparse-checkout: |
             tools/signer
+            tools/make-update-manifest.ps1
+            CHANGELOG.md
           sparse-checkout-cone-mode: false
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -184,7 +206,39 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "signer sign failed ($LASTEXITCODE)" }
           if (-not (Test-Path "$($exe.FullName).sig")) { throw 'no .sig file was written' }
 
+      # The feed of the experimental publisher (#203): the manifest the rolling pre-release
+      # carries. It is written here, in the job that holds the key and knows what it signed, and
+      # only when the caller asked for an experimental publish. A manual test build writes no feed,
+      # so its artifact is the three files it has always been.
+      - name: Write latest.json
+        if: inputs.experimental == true
+        shell: pwsh
+        timeout-minutes: 5
+        env:
+          DEV_VERSION: ${{ needs.build.outputs.version }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $v = $env:DEV_VERSION
+          if ($v -notmatch '^\d+\.\d+\.\d+-dev\.\d+$') { throw "not a dev version: $v" }
+          $exe = "canvas-rgb-setup-$v.exe"
+          if (-not (Test-Path "dist/$exe.sig")) { throw "the signed build is missing dist/$exe.sig" }
+          # The address of the asset on the rolling pre-release. The tray refuses anything that is
+          # not https on github.com or GitHub's asset hosts.
+          $url = "https://github.com/$env:GH_REPO/releases/download/experimental/$exe"
+          pwsh -NoProfile -File tools/make-update-manifest.ps1 -Version $v -SigFile "dist/$exe.sig" -OutFile dist/latest.json -NotesFile dist/release-notes.md -Url $url -Experimental
+          if ($LASTEXITCODE -ne 0) { throw 'make-update-manifest.ps1 failed' }
+          Get-Content dist/latest.json
+          # The body of the rolling release: what this build is, and what is in it (the changelog's
+          # Unreleased section, which is what the feed's notes are too). It is written here, so the
+          # publish job runs no project code beside the write token.
+          $notes = [System.IO.File]::ReadAllText('dist/release-notes.md')
+          $header = "Experimental build $v, built from main at $env:GITHUB_SHA.`n`nSigned with the release key, like a release. The tray offers it to the PCs that turned the Experimental builds switch on, and the service installs it as SYSTEM, with no prompt.`n`n"
+          [System.IO.File]::WriteAllText('dist/body.md', $header + $notes, (New-Object System.Text.UTF8Encoding($false)))
+
       # The one artifact to download: installer, checksum and signature, named for the dev version.
+      # The feed and the release body ride along when the caller asked for an experimental publish;
+      # a manual test build has neither, so its artifact holds the three files it always did.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: canvas-rgb-test-build-${{ needs.build.outputs.version }}
@@ -192,5 +246,8 @@ jobs:
             dist/canvas-rgb-setup-*.exe
             dist/canvas-rgb-setup-*.exe.sha256
             dist/canvas-rgb-setup-*.exe.sig
+            dist/latest.json
+            dist/release-notes.md
+            dist/body.md
           retention-days: 14
           if-no-files-found: error

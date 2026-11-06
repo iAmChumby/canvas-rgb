@@ -11,7 +11,7 @@ name: Experimental build
 #
 # The build is test-build.yml's, called as a reusable workflow: one build, one signer, one place
 # that decides what a signed test build is. This workflow only publishes what that build signed.
-# The version is the one test-build.yml signed: <major>.<minor>.<patch+1>-dev.<run number>.
+# The version is the one test-build.yml signed: <major>.<minor>.<patch+1>-dev.<UTC timestamp>.
 on:
   workflow_dispatch:
 
@@ -32,7 +32,11 @@ jobs:
       contents: read
     # The signing key goes to the called workflow, which reads it in its sign step only. The build
     # job of that workflow runs the project's own code and never sees the key.
+    # experimental: the called workflow writes the feed (latest.json) and the release body into the
+    # signed artifact. A manual test build of that workflow never sets it, so it writes neither.
     uses: ./.github/workflows/test-build.yml
+    with:
+      experimental: true
     secrets:
       UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
 
@@ -42,6 +46,10 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: windows-latest
     timeout-minutes: 15
+    # The write token lives behind this environment, and the environment's deployment branch policy
+    # allows main alone. A dispatch from any other branch is refused by GitHub itself, whatever
+    # this file says.
+    environment: experimental
     permissions:
       contents: write # the only job that can write to the release
     steps:
@@ -51,51 +59,32 @@ jobs:
           name: canvas-rgb-test-build-${{ needs.build.outputs.version }}
           path: dist
 
-      # The manifest script and the changelog, at the commit that was built, and nothing else: this
-      # job runs no project code.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-          sparse-checkout: |
-            tools/make-update-manifest.ps1
-            CHANGELOG.md
-          sparse-checkout-cone-mode: false
-
-      - name: Write latest.json
+      # The four files the release carries, and the version they carry. This job holds the write
+      # token, so it checks out nothing and runs no project script: it reads what the signing job
+      # made, and nothing else.
+      - name: The four files are there
         shell: pwsh
         env:
           VERSION: ${{ needs.build.outputs.version }}
-          GH_REPO: ${{ github.repository }}
         run: |
           $ErrorActionPreference = 'Continue'
           if ($env:VERSION -notmatch '^\d+\.\d+\.\d+-dev\.\d+$') { throw "not a dev version: $env:VERSION" }
           $exe = "canvas-rgb-setup-$env:VERSION.exe"
-          foreach ($f in @($exe, "$exe.sha256", "$exe.sig")) {
+          foreach ($f in @($exe, "$exe.sha256", "$exe.sig", 'latest.json')) {
             if (-not (Test-Path "dist/$f")) { throw "the signed build is missing dist/$f" }
           }
-          # The address of the asset on the rolling pre-release. The tray refuses anything that is
-          # not https on github.com or GitHub's asset hosts.
-          $url = "https://github.com/$env:GH_REPO/releases/download/experimental/$exe"
-          pwsh -NoProfile -File tools/make-update-manifest.ps1 -Version $env:VERSION -SigFile "dist/$exe.sig" -OutFile dist/latest.json -NotesFile dist/release-notes.md -Url $url -Experimental
-          if ($LASTEXITCODE -ne 0) { throw 'make-update-manifest.ps1 failed' }
-          Get-Content dist/latest.json
+          $m = Get-Content dist/latest.json -Raw | ConvertFrom-Json
+          if ($m.version -cne $env:VERSION) { throw "latest.json names [$($m.version)], not [$env:VERSION]" }
 
       - name: The experimental release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          VERSION: ${{ needs.build.outputs.version }}
         run: |
           $ErrorActionPreference = 'Continue'
-          # The body of the release: what this build is, and what is in it (the changelog's
-          # Unreleased section, which is what the feed's notes are too).
-          $notes = ''
-          if (Test-Path dist/release-notes.md) { $notes = [System.IO.File]::ReadAllText('dist/release-notes.md') }
-          $header = "Experimental build $env:VERSION (workflow run $env:GITHUB_RUN_NUMBER), built from main at $env:GITHUB_SHA.`n`nSigned with the release key, like a release. The tray offers it to the PCs that turned the Experimental builds switch on, and the service installs it as SYSTEM, with no prompt.`n`n"
-          [System.IO.File]::WriteAllText('dist/body.md', $header + $notes, (New-Object System.Text.UTF8Encoding($false)))
-          # The release is a pre-release and never the latest one: GitHub's `latest` is the stable
-          # feed, and a dev build there would be offered to every PC.
+          # The body of the release is the body file the signing job wrote: what this build is, the
+          # commit it was built from, and the changelog's Unreleased section.
           $null = gh release view experimental --json tagName,isPrerelease 2>&1
           if ($LASTEXITCODE -eq 0) {
             gh release edit experimental --prerelease --latest=false --title 'Experimental build' --notes-file dist/body.md

@@ -151,13 +151,18 @@ its `sign` job runs only for `main`. The experimental publisher below calls the 
 build and one signing path: the caller passes the key in, and the sign step reads it exactly as it does here.
 Trust boundary: anything the `build` job runs (npm lifecycle scripts, cargo build scripts) can end up signed with the
 release key, and a signed build installs as SYSTEM with no prompt, so dispatch test builds only from `main`. A dev
-version is newer than the release it follows, so the service accepts it once. It builds the installer at `<major>.<minor>.<patch+1>-dev.<run number>` (set in the
+version is newer than the release it follows, so the service accepts it once. It builds the installer at `<major>.<minor>.<patch+1>-dev.<UTC timestamp>` (set in the
 runner only, never committed), signs it in a separate job with the same key, and uploads
 `canvas-rgb-setup-<version>.exe`, its `.sha256` and its `.sig` as the workflow artifact
 `canvas-rgb-test-build-<version>` (kept 14 days). It makes no tag and no release, and no job has
 `contents: write`. The stable feed never offers it (GitHub's `latest` skips pre-releases and the tray ignores
 them on that feed); install it with the `update` command above on a PC running an older build, or publish it to
 the experimental feed below.
+
+The dev part is the UTC time the build ran, `yyyyMMddHHmmss`, so it is one number for every workflow and a build
+made later is a newer version whichever workflow made it. It was the run number before, and that counted up in
+each workflow on its own: a manual test build at `-dev.50` was newer than a publish at `-dev.3`, so a PC on the
+first ignored the second.
 
 **Experimental builds (#203).** Settings has an **Experimental builds** switch (the Version panel). With it on,
 the tray reads a second feed beside the stable one, `releases/download/experimental/latest.json`
@@ -179,13 +184,20 @@ pre-release. It runs by hand only (Actions, Experimental build, Run workflow), f
 publishes nothing. There is no push, schedule or pull request trigger, and two publishes never overlap: the
 group is `experimental` and a newer one waits for the older one.
 
+The publish job runs in the `experimental` environment, and that environment's deployment branch policy allows
+`main` alone. GitHub refuses a deployment from any other branch itself, whatever the workflow file says, so the
+token that can write the release is behind a door only `main` opens.
+
 Who may dispatch it: a person, or the agent grind Luke approved for #215 (2026-11-05). Only `main`'s code is
 signed, because the build job runs the project's own code and the sign job signs what it made.
 
 What it publishes: it calls `test-build.yml` as a reusable workflow, so the build and the signing are the ones a
-test build uses, at `<major>.<minor>.<patch+1>-dev.<run number>`. The publish job then writes `latest.json` with
-`tools/make-update-manifest.ps1 -Experimental` (the dev version, the changelog's Unreleased section as the notes,
-and the installer's address on the `experimental` release) and uploads the assets, in this order:
+test build uses, at `<major>.<minor>.<patch+1>-dev.<UTC timestamp>`. The `sign` job of that workflow writes
+`latest.json` with `tools/make-update-manifest.ps1 -Experimental` (the dev version, the changelog's Unreleased
+section as the notes, and the installer's address on the `experimental` release) and puts it in the signed
+artifact, but only when the caller passed the `experimental` input: a manual test build writes no feed. The
+publish job then runs no project code at all (it checks out nothing), reads the four files out of that artifact,
+and uploads them, in this order:
 
 1. `canvas-rgb-setup-<version>.exe`, the installer;
 2. `canvas-rgb-setup-<version>.exe.sha256`, its checksum;
