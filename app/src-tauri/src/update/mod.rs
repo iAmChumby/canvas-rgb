@@ -24,8 +24,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use canvas_proto::tauri::{
-    CheckFailReason, TrayPrefs, UpdateChannel, UpdateInfo, UpdatePhase, UpdateState, AFTER_UPDATE_ARG,
-    EVT_UPDATE_STATE,
+    CheckFailReason, EditorChoice, TrayPrefs, UpdateChannel, UpdateInfo, UpdatePhase, UpdateState,
+    AFTER_UPDATE_ARG, EVT_UPDATE_STATE,
 };
 use semver::Version;
 use serde::Deserialize;
@@ -291,16 +291,7 @@ impl Controller {
     /// decides what may be offered.
     pub fn set_channel(&self, channel: UpdateChannel) -> TrayPrefs {
         let prefs = TrayPrefs { channel, ..self.lock().prefs.clone() };
-        // Never write through a junction or a symlink, and never over a file the tray cannot
-        // replace. A refusal leaves the channel in memory only; it is logged.
-        match state::refuse_reparse(&self.settings.guard_root, &self.settings.prefs_path) {
-            Ok(()) => {
-                if let Err(e) = crate::prefs::save(&self.settings.prefs_path, &prefs) {
-                    log::append(&format!("prefs: could not save {}: {e}", self.settings.prefs_path.display()));
-                }
-            }
-            Err(why) => log::append(&format!("prefs: not saving the channel: {why}")),
-        }
+        self.write_prefs(&prefs, "the channel");
         self.change(|i| {
             let changed = i.prefs.channel != prefs.channel;
             i.prefs = prefs.clone();
@@ -316,6 +307,39 @@ impl Controller {
             }
         });
         prefs
+    }
+
+    /// Sets the editor the tray opens, keeps it in the prefs file and returns the new prefs.
+    ///
+    /// Only an experimental build has the choice (#202): a stable build refuses it, and the
+    /// pref it has is ignored.
+    pub fn set_editor(&self, editor: EditorChoice) -> Result<TrayPrefs, String> {
+        if !self.is_experimental() {
+            return Err("the editor choice is only there on experimental builds".to_string());
+        }
+        let prefs = TrayPrefs { editor, ..self.lock().prefs.clone() };
+        self.write_prefs(&prefs, "the editor");
+        self.change(|i| i.prefs = prefs.clone());
+        Ok(prefs)
+    }
+
+    /// True when this build is an experimental one: its version carries a pre-release part
+    /// (`0.8.5-dev.12`). A stable build has no editor choice.
+    pub fn is_experimental(&self) -> bool {
+        !self.current.pre.is_empty()
+    }
+
+    /// Writes the prefs file. Never through a junction or a symlink, and never over a file the
+    /// tray cannot replace. A refusal leaves the change in memory only; it is logged.
+    fn write_prefs(&self, prefs: &TrayPrefs, what: &str) {
+        match state::refuse_reparse(&self.settings.guard_root, &self.settings.prefs_path) {
+            Ok(()) => {
+                if let Err(e) = crate::prefs::save(&self.settings.prefs_path, prefs) {
+                    log::append(&format!("prefs: could not save {}: {e}", self.settings.prefs_path.display()));
+                }
+            }
+            Err(why) => log::append(&format!("prefs: not saving {what}: {why}")),
+        }
     }
 
     /// Runs `f` on the inner state, saves the stored part, and tells the listeners.
@@ -1131,6 +1155,11 @@ pub fn forwarded_after_update<R: Runtime>(app: &AppHandle<R>) {
 /// The controller. Panics before `init`, like any missing managed state.
 pub fn controller<R: Runtime>(app: &AppHandle<R>) -> Arc<Controller> {
     app.state::<Arc<Controller>>().inner().clone()
+}
+
+/// The controller, when the tray has one. `None` before `init`.
+pub fn try_controller<R: Runtime>(app: &AppHandle<R>) -> Option<Arc<Controller>> {
+    app.try_state::<Arc<Controller>>().map(|c| c.inner().clone())
 }
 
 /// The tray's "Check for updates": a Check now on a worker thread. No window opens; the result

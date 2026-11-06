@@ -3,11 +3,13 @@
 import { useEffect, useState } from "react";
 import { Button, ButtonLink, Swap } from "@/components/Button";
 import { Field, StateDot } from "@/components/Panel";
+import { Segmented } from "@/components/Segmented";
 import { Toggle } from "@/components/Toggle";
 import { messageOf } from "@/lib/errors";
 import {
   canUpdate,
   getTrayPrefs,
+  setEditor,
   setUpdateChannel,
   updateCheckNow,
   updateSetAuto,
@@ -15,8 +17,15 @@ import {
 } from "@/lib/host";
 import { useSnap } from "@/lib/store";
 import { sendUpdate } from "@/lib/updateActions";
-import { fmtChecked, isInstalling, isSkipped, settingsStatus } from "@/lib/updateWords";
+import { fmtChecked, isExperimentalVersion, isInstalling, isSkipped, settingsStatus } from "@/lib/updateWords";
+import type { EditorChoice } from "@/proto/EditorChoice";
 import type { TrayPrefs } from "@/proto/TrayPrefs";
+
+/** The editors the tray can open (#202). */
+const EDITORS: { value: EditorChoice; label: string }[] = [
+  { value: "react", label: "React" },
+  { value: "gpui", label: "GPUI" },
+];
 
 /**
  * Settings > Updates: the automatic check, when it last ran, Check now, and the status. It is the
@@ -45,6 +54,16 @@ export function UpdatesPanel() {
   const setChannel = (experimental: boolean) => {
     setErr(null);
     void setUpdateChannel(experimental ? "experimental" : "stable")
+      .then(setPrefs)
+      .catch((e: unknown) => setErr(messageOf(e)));
+  };
+
+  // The editor the tray opens (#202). Only an experimental build has the choice: the running
+  // version is the one that says so.
+  const experimental = u ? isExperimentalVersion(u.current_version) : false;
+  const chooseEditor = (editor: EditorChoice) => {
+    setErr(null);
+    void setEditor(editor)
       .then(setPrefs)
       .catch((e: unknown) => setErr(messageOf(e)));
   };
@@ -81,6 +100,17 @@ export function UpdatesPanel() {
           onChange={setChannel}
         />
       </Field>
+      {experimental && (
+        <Field label="Editor" hint="GPUI is the experimental editor">
+          <Segmented<EditorChoice>
+            label="Editor"
+            options={EDITORS}
+            value={prefs?.editor ?? "react"}
+            disabled={!prefs}
+            onChange={chooseEditor}
+          />
+        </Field>
+      )}
       <div className="upd-status">
         {status && u ? (
           <>

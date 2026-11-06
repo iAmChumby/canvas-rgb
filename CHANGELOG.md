@@ -14,6 +14,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Changed
 
 - Menus, popovers and drags now move the way the finger expects: panels grow out of the button that opened them and fold back into it, a part dragged past the edge of the desk stretches with growing resistance and settles back on release, and picking a new item in a list or a tab slides one marker across instead of blinking it off and on. Saved and applied controls pulse once to say it went through, word and icon swaps cross-fade instead of jumping, and a new colour wipes in over the old one. All of it stops when your system asks for less motion. (#187)
+### Added
+
+- Settings gains an Experimental builds switch: the tray then also offers the unstable test builds. Turning it off keeps the build you have until a newer stable release comes out. (#203)
+- Experimental builds can switch the editor: the tray menu and Settings then offer the React editor or the GPUI editor, and the tray opens the one you picked. A stable build always opens the React editor. (#202)
 
 ## [0.8.4] - 2026-11-06
 
