@@ -181,17 +181,16 @@ export function PeripheralsView() {
   const rereading = useRef(false);
 
   // Per device: the number of edits the user has made, and that number when a write to the
-  // device last failed. A read that lands keeps the staged edits only when an edit was made
-  // after both the read started and the last failed write: an edit made while the read was out
-  // stays, and the edit a failed write carried goes, so the controls show what the device holds
-  // (#151, #156). A read the page makes never clears a write's message: it knows what the
+  // device last failed. A read that lands keeps the device's unsent edits unless a write failed
+  // after the last of them: then the edit the failed write carried goes, so the controls show
+  // what the device holds (#151). Unsent edits otherwise survive reads and device switches
+  // (#156); a write that lands takes off only the values it sent. A read the page makes never clears a write's message: it knows what the
   // device holds, not how the write ended. The next attempt, an edit, Revert or the user's own
   // Read again clears it.
   const editCount = useRef<Record<string, number>>({});
   const editsAtFailure = useRef<Record<string, number>>({});
   const editsOf = (id: string) => editCount.current[id] ?? 0;
-  const keepsStaged = (id: string, editsAtStart: number) =>
-    editsOf(id) > Math.max(editsAtStart, editsAtFailure.current[id] ?? 0);
+  const keepsStaged = (id: string) => editsOf(id) > (editsAtFailure.current[id] ?? 0);
   // Per device: the number of writes that failed. A Read again clears the message only when it
   // started after the last failure (#151).
   const failures = useRef<Record<string, number>>({});
@@ -211,7 +210,6 @@ export function PeripheralsView() {
       rereading.current = true;
     }
     const n = ++detailRequest.current;
-    const edits = editsOf(id);
     const failed = failuresOf(id);
     setReloadingId(id);
     try {
@@ -219,7 +217,7 @@ export function PeripheralsView() {
       if (n !== detailRequest.current) return;
       lastRead.set(id, d);
       setLoaded({ id, detail: d });
-      if (!keepsStaged(id, edits)) setStagedFor(id, {});
+      if (!keepsStaged(id)) setStagedFor(id, {});
       // Read again is the user's own new action on this device: it clears the device's failed
       // write's message, when it started after that failure (#151). No other read does.
       if (forceRead && failuresOf(id) === failed) setDeviceSaveError(id, null);
@@ -289,7 +287,6 @@ export function PeripheralsView() {
     // its error on another.
     const n = ++detailRequest.current;
     const id = selectedId;
-    const edits = editsOf(id);
     let stop = false;
     api
       .peripheral(id)
@@ -300,7 +297,7 @@ export function PeripheralsView() {
         setReloadingId(null);
         lastRead.set(id, d);
         setLoaded({ id, detail: d });
-        if (!keepsStaged(id, edits)) setStagedFor(id, {});
+        if (!keepsStaged(id)) setStagedFor(id, {});
         setDetailError(null);
         setChangeSaved(false);
       })
@@ -346,9 +343,11 @@ export function PeripheralsView() {
   const apply = async () => {
     if (!detail) return;
     setSaving(true);
-    setDeviceSaveError(detail.info.id, null);
+    const id = detail.info.id;
+    const sent = changed;
+    setDeviceSaveError(id, null);
     try {
-      await api.patchPeripheral(detail.info.id, changed);
+      await api.patchPeripheral(id, sent);
     } catch (e) {
       // The change itself failed: nothing was changed.
       noteFailure(detail.info.id);
@@ -356,9 +355,17 @@ export function PeripheralsView() {
       setSaving(false);
       return;
     }
-    // The change is on the device. The read that follows only refreshes the page: when it
-    // fails, the change is still saved.
-    await loadDetail(detail.info.id, true);
+    // The change is on the device: the values it sent are no longer staged. An edit made while
+    // it was out (a new value, or another setting) stays staged.
+    setStagedFor(id, (prev) => {
+      const out: Props = {};
+      for (const [key, value] of Object.entries(prev)) {
+        if (!(key in sent) || !sameValue(sent[key], value)) out[key] = value;
+      }
+      return out;
+    });
+    // The read that follows only refreshes the page: when it fails, the change is still saved.
+    await loadDetail(id, true);
     notify("The settings are on the device");
     setSaving(false);
   };

@@ -272,6 +272,8 @@ export function EffectsView() {
       throw e;
     }
     setApplied(d.schema.id, name);
+    // A preset that went on is a new attempt at the effect's values: its last failure goes.
+    clearWrite(d.schema.id);
     await refreshAll();
     setReloadTick((t) => t + 1);
   };
@@ -614,6 +616,8 @@ export function EffectsView() {
     // A read that failed belongs to the effect it was for: picking anything else drops it.
     setEditError(null);
     setEditFailed(null);
+    // A failed favourite or delete was said on the page the user has now moved on from.
+    clearWrite(null);
     if (narrow) {
       setPushed(true);
       setSettled(false);

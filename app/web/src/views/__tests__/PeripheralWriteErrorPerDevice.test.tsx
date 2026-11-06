@@ -283,3 +283,61 @@ describe("a read that was out when a write failed", () => {
   });
 });
 
+
+describe("unsent edits", () => {
+  it("survive a switch to another device and back", async () => {
+    const a = mouse("x6:keep-a", "Keep A");
+    const b = mouse("x6:keep-b", "Keep B");
+    api.peripherals.mockResolvedValue({ peripherals: [a.info, b.info] });
+    api.peripheral.mockImplementation((id: string) => Promise.resolve(id === a.info.id ? a : b));
+    page();
+    fireEvent.click(await screen.findByRole("switch", { name: "LED on" }));
+    await screen.findByRole("button", { name: "Apply" });
+
+    fireEvent.click(screen.getByText("Keep B"));
+    await screen.findByRole("heading", { level: 2, name: "Keep B" });
+    await settle();
+    fireEvent.click(screen.getByText("Keep A"));
+    await screen.findByRole("heading", { level: 2, name: "Keep A" });
+    await settle();
+
+    // A's read landed again; the edit made before it is still staged.
+    expect(screen.queryByRole("button", { name: "Apply" })).toBeTruthy();
+    expect(screen.getByRole("switch", { name: "LED on" }).getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("made while Apply is sending stay staged when it lands", async () => {
+    const device = mouse("x6:inflight", "In Flight");
+    api.peripherals.mockResolvedValue({ peripherals: [device.info] });
+    api.peripheral.mockResolvedValue(device);
+    let landPatch!: () => void;
+    api.patchPeripheral.mockImplementationOnce(
+      () =>
+        new Promise<void>((r) => {
+          landPatch = () => r();
+        }),
+    );
+    page();
+    fireEvent.click(await screen.findByRole("switch", { name: "LED on" }));
+    await settle();
+    fireEvent.click(await screen.findByRole("button", { name: "Apply" }));
+    await waitFor(() => expect(api.patchPeripheral).toHaveBeenCalledTimes(1));
+
+    // While the change is on its way, the user changes another setting.
+    fireEvent.click(screen.getByRole("switch", { name: "Breathe" }));
+    // The first change lands; the device now holds LED on.
+    api.peripheral.mockResolvedValue({
+      ...device,
+      values: { ...device.values, "led-on": { type: "bool", value: true } },
+    });
+    await act(async () => {
+      landPatch();
+      await Promise.resolve();
+    });
+    await settle();
+
+    // The edit made while it was out is still staged.
+    expect(screen.getByRole("switch", { name: "Breathe" }).getAttribute("aria-checked")).toBe("true");
+    expect(screen.queryByText(/1 change not sent/)).toBeTruthy();
+  });
+});

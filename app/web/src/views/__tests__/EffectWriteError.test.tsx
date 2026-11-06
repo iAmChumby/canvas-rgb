@@ -70,7 +70,7 @@ function detail(id: string): EffectDetail {
       description: "",
       needs: { screen: false, audio: false },
       properties: [{ key: "speed", label: "Speed", kind: { type: "number", min: 0, max: 100, step: 1, default: 30 } }],
-      presets: [],
+      presets: [{ name: "Fast", props: { speed: { type: "number", value: 80 } } }],
     },
     favorite: false,
     user_presets: [],
@@ -167,5 +167,34 @@ describe("an edit after a failed write", () => {
     fireEvent.change(speed, { target: { value: "60" } });
     fireEvent.blur(speed);
     await waitFor(() => expect(screen.queryByText("the effect did not take the change")).toBeNull());
+  });
+});
+
+describe("other ways a failure is left behind", () => {
+  it("a preset that goes on clears the effect's failed change", async () => {
+    api.patchActiveProps.mockRejectedValueOnce(new Error("the effect did not take the change"));
+    api.activateEffect.mockResolvedValue(undefined);
+    page();
+    const speed = await screen.findByLabelText("Speed value");
+    fireEvent.focus(speed);
+    fireEvent.change(speed, { target: { value: "55" } });
+    fireEvent.blur(speed);
+    await screen.findByText("the effect did not take the change");
+
+    fireEvent.click(screen.getByRole("button", { name: /^Apply preset Fast/ }));
+    await waitFor(() => expect(api.activateEffect).toHaveBeenCalled());
+    await waitFor(() => expect(screen.queryByText("the effect did not take the change")).toBeNull());
+  });
+
+  it("a failed favourite goes when the user opens another effect", async () => {
+    api.setFavorite.mockRejectedValue(new Error("the favourite was not saved"));
+    page();
+    await screen.findByLabelText("Speed value");
+    fireEvent.click(screen.getByRole("button", { name: "Favorite Other" }));
+    await screen.findByText("the favourite was not saved");
+
+    fireEvent.click(screen.getByRole("button", { name: "Open Other" }));
+    await screen.findByRole("heading", { name: "Other" });
+    expect(screen.queryByText("the favourite was not saved")).toBeNull();
   });
 });
