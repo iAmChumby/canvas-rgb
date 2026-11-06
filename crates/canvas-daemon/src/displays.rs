@@ -679,6 +679,7 @@ mod tests {
             active_profile: "Default".into(),
             profiles: vec![],
             floor_percent: 30,
+            hot: Vec::new(),
         }
     }
 

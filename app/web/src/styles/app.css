@@ -4348,6 +4348,15 @@ button.chip:hover {
   outline: none;
 }
 
+/* The hot line's drag handle (issue #130): an invisible strip over the dashed line. */
+.curve-hot-handle {
+  cursor: ew-resize;
+}
+
+.curve-hot-handle:focus-visible {
+  outline: none;
+}
+
 .curve-point-ring {
   transition: r var(--dur-fast) var(--ease);
 }
@@ -4378,6 +4387,21 @@ button.chip:hover {
   background: color-mix(in srgb, var(--a2) 8%, var(--sunk));
   color: var(--dim);
   font-size: var(--t14);
+}
+
+/* The compact "don't exceed" control (#130): the words, the figure and its state
+   wrap as one group, never apart. In the Fixed header's floor note it takes its
+   own line under the note, inside the same box, so it adds no new row. */
+.hot-controls {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: var(--s2);
+  white-space: nowrap;
+}
+
+.rule > .hot-controls {
+  display: flex;
 }
 
 .rule-warn {

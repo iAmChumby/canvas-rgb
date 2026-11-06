@@ -9,6 +9,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Added
 
 - Settings has an Audio source panel: pick which output or input the audio-reactive effects read (Follow the Windows default, a loopback output, or an input — audio effects read the picked input whenever an audio effect is active, and Listen tests it live), and see a live test of what the device is delivering — a level meter, a dB figure and the spectrum bands — so you can tell at a glance whether sound is reaching the lights. (#166)
+- Fans: set how hot is too hot for your CPU, GPU and board sensors. The curve chart draws a "Don't exceed" line (74 °C for a 7800X3D, worked out from the part's rated maximum), which you can drag or type; "Reset to automatic" puts it back. Past the fixed safety ceiling (84 °C on the 7800X3D) every manual header on that sensor runs at full speed, whatever the curve says. (#130)
 - Settings gains an Experimental builds switch: the tray then also offers the unstable test builds. Turning it off keeps the build you have until a newer stable release comes out. (#203)
 
 ### Changed

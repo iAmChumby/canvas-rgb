@@ -120,6 +120,10 @@ pub struct FansStatus {
     pub active_profile: String,
     pub profiles: Vec<String>,
     pub floor_percent: u8,
+    /// Issue #130: the hot line in force per kind of source (CPU, GPU, board), for the curve
+    /// chart. Old payloads without it parse as empty.
+    #[serde(default)]
+    pub hot: Vec<HotLimitStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -197,6 +201,235 @@ pub fn validate_profile(profile: &FanProfile, configured_floor: u8) -> Result<()
         .headers
         .iter()
         .try_for_each(|(h, m)| validate_mode(h, m, configured_floor))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Issue #130: the user says what "hot" is ("don't exceed"), per kind of temperature source,
+// instead of the fixed `HOT_TEMP_C`. At or above a source's hot limit, the hot floors above
+// apply to every manual header whose curve reads that source (today's G4 shape, with the line
+// movable). At or above the source's ceiling, no setting can stop those headers going to 100 %.
+// ---------------------------------------------------------------------------------------------
+
+/// The kind of temperature source a hot limit is set for. Every board sensor shares one limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum HotKind {
+    Cpu,
+    Gpu,
+    Board,
+}
+
+impl TempSource {
+    pub fn hot_kind(&self) -> HotKind {
+        match self {
+            TempSource::Cpu => HotKind::Cpu,
+            TempSource::Gpu => HotKind::Gpu,
+            TempSource::Board(_) => HotKind::Board,
+        }
+    }
+}
+
+/// The automatic hot limit sits this far under the part's rated maximum.
+pub const HOT_MARGIN_C: f32 = 15.0;
+/// The safety ceiling sits this far under the part's rated maximum. Fixed: no setting moves it.
+pub const CEILING_MARGIN_C: f32 = 5.0;
+/// A hot limit may be set no closer to the ceiling than this.
+pub const HOT_LIMIT_CEILING_GAP_C: f32 = 2.0;
+/// No hot limit may be set below this.
+pub const HOT_LIMIT_MIN_C: f32 = 40.0;
+/// The rated maximum used for a CPU that is not in [`rated_cpu_max_c`]'s table. The lowest
+/// Tjmax among the listed parts (7800X3D), so an unknown CPU gets the most cautious line.
+pub const FALLBACK_CPU_MAX_C: f32 = 89.0;
+/// The rated maximum used for a GPU whose driver does not report a slowdown threshold.
+pub const FALLBACK_GPU_MAX_C: f32 = 88.0;
+/// The band a reported rated maximum must fall in to be believed (°C). Outside it, the
+/// fallback is used. Every listed part is inside it (89..=95).
+pub const RATED_MAX_SANE_MIN_C: f32 = 60.0;
+pub const RATED_MAX_SANE_MAX_C: f32 = 115.0;
+/// Board sensors have no rated part maximum: the automatic limit stays today's `HOT_TEMP_C`,
+/// and the ceiling is this fixed value.
+pub const BOARD_CEILING_C: f32 = 90.0;
+
+/// Rated maximum operating temperature (Tjmax) of a CPU, from its brand string, when it is
+/// one we have the vendor's figure for. Source: AMD's product pages (checked 2026-11-05).
+pub fn rated_cpu_max_c(brand: &str) -> Option<f32> {
+    let b = brand.to_ascii_uppercase();
+    const TABLE: &[(&str, f32)] = &[("7800X3D", 89.0), ("9800X3D", 95.0), ("5800X3D", 90.0)];
+    TABLE.iter().find(|(model, _)| b.contains(model)).map(|(_, c)| *c)
+}
+
+/// What the user set. `None` for a kind means automatic: the part's rated maximum minus
+/// [`HOT_MARGIN_C`] (board sensors: `HOT_TEMP_C`). Old `fans.toml` files without it read as
+/// all automatic.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct HotLimits {
+    #[serde(default)]
+    pub cpu_c: Option<f32>,
+    #[serde(default)]
+    pub gpu_c: Option<f32>,
+    #[serde(default)]
+    pub board_c: Option<f32>,
+}
+
+impl HotLimits {
+    pub fn get(&self, kind: HotKind) -> Option<f32> {
+        match kind {
+            HotKind::Cpu => self.cpu_c,
+            HotKind::Gpu => self.gpu_c,
+            HotKind::Board => self.board_c,
+        }
+    }
+}
+
+/// The hot limit in force for one kind, as the editor draws it on the curve chart.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct HotLimitStatus {
+    pub kind: HotKind,
+    /// The line in force: the user's value, or the automatic one.
+    pub limit_c: f32,
+    /// `true` when the user set it; `false` when it is automatic.
+    pub user_set: bool,
+    /// The automatic value (what "Reset to automatic" gives).
+    pub auto_c: f32,
+    /// The part's rated maximum, when known (`None` for board sensors).
+    pub rated_max_c: Option<f32>,
+    /// At or above this, every manual header on this source goes to 100 %. Fixed.
+    pub ceiling_c: f32,
+    /// The highest value the user may set.
+    pub max_settable_c: f32,
+}
+
+/// The status of one kind, given what the user set and the part's rated maximum
+/// (`rated_max_c` is ignored for [`HotKind::Board`]).
+pub fn hot_limit_status(kind: HotKind, limits: &HotLimits, rated_max_c: Option<f32>) -> HotLimitStatus {
+    let (auto_c, rated, ceiling_c) = match kind {
+        HotKind::Board => (HOT_TEMP_C, None, BOARD_CEILING_C),
+        HotKind::Cpu | HotKind::Gpu => {
+            let fallback = if kind == HotKind::Cpu { FALLBACK_CPU_MAX_C } else { FALLBACK_GPU_MAX_C };
+            // A rated maximum outside a sane band (a driver that reports 0, or 200) is not
+            // believed: the cautious fallback stands, so the ceiling can never move up past a
+            // real part's limit and the settable range is never empty.
+            let sane = rated_max_c.filter(|r| r.is_finite() && (RATED_MAX_SANE_MIN_C..=RATED_MAX_SANE_MAX_C).contains(r));
+            let rated = sane.unwrap_or(fallback);
+            (rated - HOT_MARGIN_C, sane, rated - CEILING_MARGIN_C)
+        }
+    };
+    let max_settable_c = ceiling_c - HOT_LIMIT_CEILING_GAP_C;
+    let user = limits.get(kind);
+    HotLimitStatus {
+        kind,
+        limit_c: user.map(|c| c.clamp(HOT_LIMIT_MIN_C, max_settable_c)).unwrap_or(auto_c),
+        user_set: user.is_some(),
+        auto_c,
+        rated_max_c: rated,
+        ceiling_c,
+        max_settable_c,
+    }
+}
+
+/// Rejects a hot limit outside `HOT_LIMIT_MIN_C..=max_settable_c` (or not a finite number).
+/// Used by the API (422), the service and config import.
+pub fn validate_hot_limits(
+    limits: &HotLimits,
+    rated_cpu_max_c: Option<f32>,
+    rated_gpu_max_c: Option<f32>,
+) -> Result<(), HotLimitError> {
+    for (kind, rated) in [(HotKind::Cpu, rated_cpu_max_c), (HotKind::Gpu, rated_gpu_max_c), (HotKind::Board, None)] {
+        if let Some(c) = limits.get(kind) {
+            let max = hot_limit_status(kind, limits, rated).max_settable_c;
+            if !c.is_finite() || c < HOT_LIMIT_MIN_C || c > max {
+                return Err(HotLimitError::OutOfRange { kind, celsius: c, min: HOT_LIMIT_MIN_C, max });
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum HotLimitError {
+    #[error("the {kind:?} hot limit of {celsius} °C is outside {min} to {max} °C")]
+    OutOfRange { kind: HotKind, celsius: f32, min: f32, max: f32 },
+}
+
+/// [`runtime_floor`] with the hot line at `hot_c` instead of the fixed `HOT_TEMP_C`.
+pub fn runtime_floor_at(header: &str, configured_floor: u8, temp_c: Option<f32>, hot_c: f32) -> u8 {
+    let base = floor_for(header, configured_floor);
+    match temp_c {
+        Some(t) if t >= hot_c => {
+            let hot = if header == CPU_FAN_HEADER { HOT_CPU_FAN_FLOOR_PERCENT } else { HOT_FLOOR_PERCENT };
+            base.max(hot)
+        }
+        _ => base,
+    }
+}
+
+#[cfg(test)]
+mod hot_limit_tests {
+    use super::*;
+
+    #[test]
+    fn the_7800x3d_gets_74_automatic_and_an_84_ceiling() {
+        let rated = rated_cpu_max_c("AMD Ryzen 7 7800X3D 8-Core Processor");
+        assert_eq!(rated, Some(89.0));
+        let s = hot_limit_status(HotKind::Cpu, &HotLimits::default(), rated);
+        assert_eq!((s.limit_c, s.auto_c, s.ceiling_c, s.max_settable_c, s.user_set), (74.0, 74.0, 84.0, 82.0, false));
+    }
+
+    #[test]
+    fn an_unknown_cpu_uses_the_cautious_fallback() {
+        assert_eq!(rated_cpu_max_c("Some Future CPU"), None);
+        let s = hot_limit_status(HotKind::Cpu, &HotLimits::default(), None);
+        assert_eq!((s.limit_c, s.ceiling_c, s.rated_max_c), (FALLBACK_CPU_MAX_C - HOT_MARGIN_C, FALLBACK_CPU_MAX_C - CEILING_MARGIN_C, None));
+    }
+
+    #[test]
+    fn board_sensors_keep_todays_line_by_default() {
+        let s = hot_limit_status(HotKind::Board, &HotLimits::default(), Some(200.0));
+        assert_eq!((s.limit_c, s.ceiling_c, s.rated_max_c), (HOT_TEMP_C, BOARD_CEILING_C, None));
+    }
+
+    #[test]
+    fn a_user_value_wins_and_a_value_past_the_ceiling_is_refused() {
+        let limits = HotLimits { cpu_c: Some(70.0), ..Default::default() };
+        let s = hot_limit_status(HotKind::Cpu, &limits, Some(89.0));
+        assert_eq!((s.limit_c, s.user_set), (70.0, true));
+        assert!(validate_hot_limits(&limits, Some(89.0), None).is_ok());
+        let too_hot = HotLimits { cpu_c: Some(83.0), ..Default::default() };
+        assert!(validate_hot_limits(&too_hot, Some(89.0), None).is_err());
+        let too_cold = HotLimits { gpu_c: Some(30.0), ..Default::default() };
+        assert!(validate_hot_limits(&too_cold, None, None).is_err());
+        let nan = HotLimits { board_c: Some(f32::NAN), ..Default::default() };
+        assert!(validate_hot_limits(&nan, None, None).is_err());
+    }
+
+    #[test]
+    fn the_floor_follows_the_movable_line() {
+        assert_eq!(runtime_floor_at(CPU_FAN_HEADER, 20, Some(60.0), 74.0), CPU_FAN_MIN_PERCENT);
+        assert_eq!(runtime_floor_at(CPU_FAN_HEADER, 20, Some(74.0), 74.0), HOT_CPU_FAN_FLOOR_PERCENT);
+        assert_eq!(runtime_floor_at("sys_fan1", 20, Some(74.0), 74.0), HOT_FLOOR_PERCENT);
+        // The fixed-line function is unchanged.
+        assert_eq!(runtime_floor(CPU_FAN_HEADER, 20, Some(50.0)), runtime_floor_at(CPU_FAN_HEADER, 20, Some(50.0), HOT_TEMP_C));
+    }
+
+    #[test]
+    fn a_nonsense_rated_maximum_falls_back_and_never_panics() {
+        for bad in [0.0, -5.0, 200.0, f32::NAN, f32::INFINITY, 59.0, 116.0] {
+            let s = hot_limit_status(HotKind::Gpu, &HotLimits { gpu_c: Some(70.0), ..Default::default() }, Some(bad));
+            assert_eq!(s.rated_max_c, None, "{bad} is not believed");
+            assert_eq!(s.ceiling_c, FALLBACK_GPU_MAX_C - CEILING_MARGIN_C);
+            assert!(s.max_settable_c >= HOT_LIMIT_MIN_C);
+            assert!(validate_hot_limits(&HotLimits { gpu_c: Some(70.0), ..Default::default() }, None, Some(bad)).is_ok());
+        }
+    }
+
+    #[test]
+    fn old_files_without_hot_limits_read_as_automatic() {
+        let parsed: HotLimits = serde_json::from_str("{}").unwrap();
+        assert_eq!(parsed, HotLimits::default());
+    }
 }
 
 #[cfg(test)]

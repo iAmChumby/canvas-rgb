@@ -92,6 +92,9 @@ pub mod routes {
     pub const FANS: &str = "/api/v1/fans";
     pub const FAN_HEADER: &str = "/api/v1/fans/headers/{h}";
     pub const FAN_PROFILE: &str = "/api/v1/fans/profile";
+    /// `PUT` a [`crate::fans::HotLimits`] (issue #130): the user's "don't exceed" temperatures.
+    /// 422 outside `HOT_LIMIT_MIN_C..=max_settable_c`; answers the new [`FansStatus`].
+    pub const FAN_HOT: &str = "/api/v1/fans/hot";
     /// `PUT` a [`crate::fans::FanProfile`] to create or replace it. `DELETE` removes it
     /// (409 `conflict` for the active profile or the last remaining one).
     pub const FAN_PROFILES: &str = "/api/v1/fans/profiles/{name}";
@@ -784,6 +787,9 @@ pub struct FanProfileName {
 pub type FansResponse = FansStatus;
 
 pub type PutFanProfile = FanProfile;
+
+/// `PUT /fans/hot` body (issue #130). A `null` kind is automatic.
+pub type PutFanHot = crate::fans::HotLimits;
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]

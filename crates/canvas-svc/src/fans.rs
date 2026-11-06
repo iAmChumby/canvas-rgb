@@ -18,8 +18,9 @@ use crate::store::{self, BiosState, SavedHeader, StoreError};
 use crate::temps::TempReader;
 use canvas_proto::config::{FansFile, FANS_SCHEMA};
 use canvas_proto::fans::{
-    floor_for, runtime_floor, validate_mode, validate_profile, CurvePoint, FanHeaderStatus, FanMode, FanProfile,
-    FanValidationError, FansStatus, TempReading, TempSource, HOT_TEMP_C, SENSOR_LOSS_TIMEOUT_MS,
+    floor_for, hot_limit_status, rated_cpu_max_c, runtime_floor_at, validate_hot_limits, validate_mode,
+    validate_profile, CurvePoint, FanHeaderStatus, FanMode, FanProfile, FanValidationError, FansStatus, HotKind,
+    HotLimitStatus, TempReading, TempSource, SENSOR_LOSS_TIMEOUT_MS,
 };
 use canvas_proto::Rgb8;
 use std::collections::{BTreeMap, BTreeSet};
@@ -114,12 +115,19 @@ struct CurveState {
     /// When the smoothed temperature first fell `CURVE_STEP_DOWN_DROP_C` below `peak`,
     /// while that fall lasts.
     below_since: Option<Instant>,
-    /// Whether the hot floor (`runtime_floor`) is latched for this header. It engages on the
-    /// first reading at or above `HOT_TEMP_C` and releases only after the temperature has
-    /// stayed below it continuously for `CURVE_STEP_DOWN_HOLD`.
+    /// Whether the hot floor (`runtime_floor`) is latched for this header. Issue #130: it engages
+    /// on the first reading at or above the source's hot limit (not the fixed `HOT_TEMP_C` any
+    /// more) and releases only after the temperature stays below the limit continuously for
+    /// `CURVE_STEP_DOWN_HOLD`.
     hot_latched: bool,
-    /// When the temperature first fell below `HOT_TEMP_C` while latched.
+    /// When the temperature first fell below the hot limit while the hot floor is latched.
     hot_below_since: Option<Instant>,
+    /// Whether the fixed safety ceiling is latched: at or above the ceiling the header runs at
+    /// 100 %, whatever the curve asks for. It releases with the same hold-time rule as the hot
+    /// floor (issue #130).
+    ceiling_latched: bool,
+    /// When the temperature first fell below the ceiling while it is latched.
+    ceiling_below_since: Option<Instant>,
 }
 
 impl CurveState {
@@ -183,22 +191,49 @@ impl CurveState {
         self.below_since = None;
     }
 
-    /// Latches the hot floor: engages on every reading at or above `HOT_TEMP_C`, and releases
-    /// only after the temperature stays below it for the curve's hold time. It is a floor
+    /// Latches the hot floor: engages on every reading at or above `limit_c`, and releases only
+    /// after the temperature stays below the limit for the curve's hold time. It is a floor
     /// under the curve, never a cap. A missing reading changes nothing.
-    fn note_temp(&mut self, temp_c: Option<f32>, now: Instant) {
-        let Some(temp) = temp_c else { return };
-        if temp >= HOT_TEMP_C {
-            self.hot_latched = true;
-            self.hot_below_since = None;
-        } else if self.hot_latched {
-            let since = *self.hot_below_since.get_or_insert(now);
-            if now.saturating_duration_since(since) >= CURVE_STEP_DOWN_HOLD {
-                self.hot_latched = false;
-                self.hot_below_since = None;
-            }
+    fn note_temp(&mut self, temp_c: Option<f32>, limit_c: f32, now: Instant) {
+        note_latch(&mut self.hot_latched, &mut self.hot_below_since, temp_c, limit_c, now);
+    }
+
+    /// Latches the safety ceiling: engages on every reading at or above `ceiling_c`, and releases
+    /// after the temperature stays below the ceiling for the same hold time as the hot floor
+    /// (issue #130). A missing reading changes nothing.
+    fn note_ceiling(&mut self, temp_c: Option<f32>, ceiling_c: f32, now: Instant) {
+        note_latch(&mut self.ceiling_latched, &mut self.ceiling_below_since, temp_c, ceiling_c, now);
+    }
+}
+
+/// One latched-over-a-line bookkeeping step, shared by the hot floor and the safety ceiling:
+/// engage at once at or above `line_c`; release only after `CURVE_STEP_DOWN_HOLD` continuously
+/// below `line_c`. The two add nothing the other lacks, so the rule lives in one place.
+fn note_latch(latched: &mut bool, below_since: &mut Option<Instant>, temp_c: Option<f32>, line_c: f32, now: Instant) {
+    let Some(temp) = temp_c else { return };
+    if temp >= line_c {
+        *latched = true;
+        *below_since = None;
+    } else if *latched {
+        let since = *below_since.get_or_insert(now);
+        if now.saturating_duration_since(since) >= CURVE_STEP_DOWN_HOLD {
+            *latched = false;
+            *below_since = None;
         }
     }
+}
+
+/// The hot-limit kind a mode reads, for latch preservation across an edit: Fixed reads
+/// the CPU reference (as `drive` treats it), a curve reads its source's kind, BIOS none.
+fn same_hot_kind(a: &FanMode, b: &FanMode) -> bool {
+    fn kind_of(mode: &FanMode) -> Option<HotKind> {
+        match mode {
+            FanMode::Bios => None,
+            FanMode::Fixed { .. } => Some(HotKind::Cpu),
+            FanMode::Curve { source, .. } => Some(source.hot_kind()),
+        }
+    }
+    kind_of(a) == kind_of(b)
 }
 
 #[derive(Default)]
@@ -209,6 +244,9 @@ struct Slot {
     /// Set by a safety or failure handback. Sticky until the user applies the header again.
     handed_back: bool,
     override_reason: Option<String>,
+    /// The last duty this service wrote to the header, so a latched header with a
+    /// missing reference temperature can hold it instead of writing a lower duty.
+    last_written: Option<u8>,
 }
 
 /// Sleep and resume bookkeeping. Rust's `Instant` on Windows reads QueryPerformanceCounter, and the
@@ -292,6 +330,15 @@ pub struct FanController {
     /// Per-header `available` overrides in `chip.toml` (issue #128): `true` says "show
     /// anyway", `false` says "not on my board". No entry means the table decides.
     header_overrides: BTreeMap<String, bool>,
+    /// Issue #130: the rated maximum temperatures the hot lines are measured from. The CPU one
+    /// is read from the CPU brand string; the GPU one is NVML's slowdown threshold. `None`
+    /// means unknown: the spine's fallback takes over.
+    cpu_rated_max_c: Option<f32>,
+    gpu_rated_max_c: Option<f32>,
+    /// The CPU brand string the rated maximum came from, for the startup hot-limits log.
+    cpu_brand: Option<String>,
+    /// Whether the one-time hot-limit line has been logged yet.
+    hot_logged: bool,
 }
 
 impl FanController {
@@ -329,6 +376,10 @@ impl FanController {
             board_product: None,
             absent_headers: BTreeSet::new(),
             header_overrides: BTreeMap::new(),
+            cpu_rated_max_c: None,
+            gpu_rated_max_c: None,
+            cpu_brand: None,
+            hot_logged: false,
         }
     }
 
@@ -345,6 +396,66 @@ impl FanController {
     /// Loads the per-header `available` overrides saved in `chip.toml` (issue #128).
     pub fn set_header_overrides(&mut self, overrides: BTreeMap<String, bool>) {
         self.header_overrides = overrides;
+    }
+
+    /// Sets the rated maximum temperatures (issue #130). `cpu_brand` is the CPU brand string the
+    /// service read from the hardware; `gpu_max_c` is NVML's slowdown threshold. Tests set
+    /// either through the same setters with fake values.
+    pub fn set_rated(&mut self, cpu_brand: Option<&str>, gpu_max_c: Option<f32>) {
+        self.cpu_rated_max_c = cpu_brand.and_then(rated_cpu_max_c);
+        self.cpu_brand = cpu_brand.map(str::to_string);
+        self.gpu_rated_max_c = gpu_max_c;
+        self.hot_logged = false;
+    }
+
+    /// Sets the GPU rated maximum (NVML slowdown). Tests go through the fake that carries the
+    /// value: `FakeGpuFans::slowdown_threshold_c`.
+    pub fn set_gpu_rated_max_c(&mut self, gpu_max_c: Option<f32>) {
+        self.gpu_rated_max_c = gpu_max_c;
+        self.hot_logged = false;
+    }
+
+    /// Sets the CPU rated maximum from a brand string (tests can set the brand directly).
+    pub fn set_cpu_brand(&mut self, cpu_brand: Option<&str>) {
+        self.cpu_rated_max_c = cpu_brand.and_then(rated_cpu_max_c);
+        self.cpu_brand = cpu_brand.map(str::to_string);
+        self.hot_logged = false;
+    }
+
+    /// The rated maximum for a hot kind, when known. Board sensors have no part maximum.
+    fn rated_for(&self, kind: HotKind) -> Option<f32> {
+        match kind {
+            HotKind::Cpu => self.cpu_rated_max_c,
+            HotKind::Gpu => self.gpu_rated_max_c,
+            HotKind::Board => None,
+        }
+    }
+
+    /// The hot line in force per kind, for [`FanController::status`]. Logs the lines once, at
+    /// the first call after the rated maxima are known (issue #130).
+    pub fn hot_statuses(&mut self) -> Vec<HotLimitStatus> {
+        if !self.hot_logged {
+            let cpu = hot_limit_status(HotKind::Cpu, &self.config.hot_limits, self.rated_for(HotKind::Cpu));
+            let gpu = hot_limit_status(HotKind::Gpu, &self.config.hot_limits, self.rated_for(HotKind::Gpu));
+            let board = hot_limit_status(HotKind::Board, &self.config.hot_limits, None);
+            let rated = |s: &HotLimitStatus| {
+                let origin = if s.user_set { "set by you" } else { "automatic" };
+                match s.rated_max_c {
+                    Some(r) => format!("{origin}, rated {r:.0} °C"),
+                    None => origin.to_string(),
+                }
+            };
+            tracing::info!(
+                "the hot limits are CPU {} °C ({}) [{}], GPU {} °C ({}), board {} °C",
+                cpu.limit_c, rated(&cpu), self.cpu_brand.as_deref().unwrap_or("unknown CPU"),
+                gpu.limit_c, rated(&gpu), board.limit_c,
+            );
+            self.hot_logged = true;
+        }
+        [HotKind::Cpu, HotKind::Gpu, HotKind::Board]
+            .iter()
+            .map(|kind| hot_limit_status(*kind, &self.config.hot_limits, self.rated_for(*kind)))
+            .collect()
     }
 
     /// Whether `header` is routed on this board: a `chip.toml` override wins both ways,
@@ -752,23 +863,45 @@ impl FanController {
         if !self.header_available(spec.id) {
             return;
         }
-        let (target, reference) = match &mode {
+        let (target, reference, kind) = match &mode {
             FanMode::Bios => return,
             FanMode::Fixed { percent } => {
                 let reference = self.temp_cache.get(&TempSource::Cpu).copied();
-                (*percent, reference)
+                // A Fixed header has no curve source: its reference temperature is the CPU
+                // reading (see the report on #130), so it takes the CPU hot limit and the CPU
+                // ceiling.
+                (*percent, reference, HotKind::Cpu)
             }
             FanMode::Curve { source, points } => {
                 if let Some(temp) = self.temp_cache.get(source).copied() {
                     let curve = &mut self.slots[ch].curve;
                     if curve.mode.as_ref() != Some(&mode) {
+                        // A mode or points change restarts the curve's smoothing, but the
+                        // safety latches (hot floor and ceiling) survive it for the same
+                        // source kind: clearing them on an edit would drop a latched 100 %
+                        // to the edited curve's lower duty. Only a kind change resets them.
+                        let kept = match curve.mode.as_ref() {
+                            Some(previous) if same_hot_kind(previous, &mode) => Some((
+                                curve.hot_latched,
+                                curve.hot_below_since,
+                                curve.ceiling_latched,
+                                curve.ceiling_below_since,
+                            )),
+                            _ => None,
+                        };
                         *curve = CurveState { mode: Some(mode.clone()), ..CurveState::default() };
+                        if let Some((hot, hot_since, ceiling, ceiling_since)) = kept {
+                            curve.hot_latched = hot;
+                            curve.hot_below_since = hot_since;
+                            curve.ceiling_latched = ceiling;
+                            curve.ceiling_below_since = ceiling_since;
+                        }
                     }
                     // The curve keeps stepping while the hot floor is latched: the latch is a
                     // floor under it (`target.max(floor)` below), never a cap, so a CPU that
                     // keeps heating still gets the curve's higher duty at once.
                     let target = curve.step(points, temp, now);
-                    (target, Some(temp))
+                    (target, Some(temp), source.hot_kind())
                 } else {
                     let since = self.slots[ch].manual_since.unwrap_or(now);
                     let last = self.last_good.get(source).copied().unwrap_or(since);
@@ -784,23 +917,59 @@ impl FanController {
         };
         let base = floor_for(spec.id, self.config.floor_percent);
         // The hot floor is latched per header, in the same state as the curve: it engages on
-        // the first reading at or above HOT_TEMP_C and stays a floor until the temperature has
-        // stayed below HOT_TEMP_C for the curve's hold time, so a temperature hovering at the
-        // line cannot flip the duty every tick (issue #17). It is only ever a floor: a higher
-        // curve or Fixed duty always wins (`target.max(floor)`).
-        let hot = runtime_floor(spec.id, self.config.floor_percent, Some(HOT_TEMP_C));
-        self.slots[ch].curve.note_temp(reference, now);
+        // the first reading at or above the source's hot limit (issue #130: the user's line,
+        // not the fixed 50 °C) and stays a floor until the temperature has stayed below the
+        // limit for the curve's hold time, so a temperature hovering at the line cannot flip
+        // the duty every tick (issue #17). It is only ever a floor: a higher curve or Fixed
+        // duty always wins (`target.max(floor)`).
+        let limit_status = hot_limit_status(kind, &self.config.hot_limits, self.rated_for(kind));
+        let limit_c = limit_status.limit_c;
+        let ceiling_c = limit_status.ceiling_c;
+        let hot = runtime_floor_at(spec.id, self.config.floor_percent, Some(limit_c), limit_c);
+        self.slots[ch].curve.note_temp(reference, limit_c, now);
+        self.slots[ch].curve.note_ceiling(reference, ceiling_c, now);
         let latched = self.slots[ch].curve.hot_latched;
+        let ceiling_latched = self.slots[ch].curve.ceiling_latched;
+        // A Fixed header with no reference reading while a safety latch is set must not
+        // write its lower Fixed duty over the latched 100 %. Hold the last written duty
+        // (write nothing) and hand back after the sensor-loss timeout, exactly as the
+        // Curve path above does for a missing source.
+        if reference.is_none() && (latched || ceiling_latched) {
+            let since = self.slots[ch].manual_since.unwrap_or(now);
+            let last = self.last_good.get(&TempSource::Cpu).copied().unwrap_or(since);
+            if now.saturating_duration_since(last) >= Duration::from_millis(SENSOR_LOSS_TIMEOUT_MS) {
+                self.hand_back(
+                    ch,
+                    format!("CPU unavailable for over {} ms", SENSOR_LOSS_TIMEOUT_MS),
+                );
+            }
+            return;
+        }
         let floor = if latched && reference.is_some() {
             hot
         } else {
-            runtime_floor(spec.id, self.config.floor_percent, reference)
+            runtime_floor_at(spec.id, self.config.floor_percent, reference, limit_c)
         };
         let mut percent = target.max(floor);
         let mut reason = None;
-        if floor > base && percent == floor {
+        if ceiling_latched && reference.is_some() {
+            // The fixed safety ceiling (issue #130): whatever the curve or the setting asks
+            // for, the header runs at full speed.
+            percent = 100;
             if let Some(t) = reference {
-                reason = Some(format!("hot floor {floor}% while CPU is {t:.0} °C"));
+                let name = match &mode {
+                    FanMode::Curve { source, .. } => source_label(source),
+                    _ => "CPU".to_string(),
+                };
+                reason = Some(format!("at the safety ceiling: {} is {:.0} °C", ceiling_name(&name), t));
+            }
+        } else if floor > base && percent == floor {
+            if let Some(t) = reference {
+                let name = match &mode {
+                    FanMode::Curve { source, .. } => source_label(source),
+                    _ => "CPU".to_string(),
+                };
+                reason = Some(format!("hot floor {floor}% while {} is {:.0} °C", hot_name(&name), t));
             }
         }
         if percent > 100 {
@@ -810,6 +979,7 @@ impl FanController {
             Ok(()) => {
                 if let Some(slot) = self.slots.get_mut(ch) {
                     slot.override_reason = reason;
+                    slot.last_written = Some(percent);
                 }
             }
             Err(e) => self.hand_back(ch, format!("write failed: {e}")),
@@ -957,6 +1127,12 @@ impl FanController {
             validate_profile(profile, file.floor_percent)?;
             self.check_headers(&profile.headers)?;
         }
+        // Issue #130: the service validates the hot limits again on receipt; a value
+        // outside 40..=max_settable_c is refused here even if the daemon let it through.
+        if let Err(e) = validate_hot_limits(&file.hot_limits, self.cpu_rated_max_c, self.gpu_rated_max_c) {
+            tracing::warn!(error = %e, "refused a fans config with an invalid hot limit");
+            return Err(FanError::Validation(e.to_string()));
+        }
         if !file.profiles.iter().any(|p| p.name == file.active_profile) {
             return Err(FanError::NotFound(format!("no profile named {}", file.active_profile)));
         }
@@ -1039,6 +1215,7 @@ impl FanController {
             active_profile: self.config.active_profile.clone(),
             profiles: self.config.profiles.iter().map(|p| p.name.clone()).collect(),
             floor_percent: self.config.floor_percent,
+            hot: self.hot_statuses(),
         }
     }
 }
@@ -1049,4 +1226,62 @@ fn source_label(source: &TempSource) -> String {
         TempSource::Gpu => "GPU (NVML)".into(),
         TempSource::Board(name) => name.clone(),
     }
+}
+
+/// The short name a reason sentence uses for a source: "CPU (Tctl)" reads as "CPU" in a
+/// reason; a board sensor keeps its own name.
+fn hot_name(label: &str) -> &str {
+    match label {
+        "CPU (Tctl)" => "CPU",
+        "GPU (NVML)" => "GPU",
+        other => other,
+    }
+}
+
+/// Same short name for the ceiling reason; the ceiling's is the safety one.
+fn ceiling_name(label: &str) -> &str {
+    hot_name(label)
+}
+
+/// Assembles the CPU brand string from the three extended CPUID leaves
+/// 0x80000002..4, each given as (EAX, EBX, ECX, EDX) in that order — the register
+/// order Intel and AMD document for the brand string (EAX, EBX, ECX, EDX per leaf).
+/// Pure, so tests can drive it with the registers of a known brand string.
+/// `None` when the leaves carry no string.
+pub fn brand_string_from_leaves(leaves: [(u32, u32, u32, u32); 3]) -> Option<String> {
+    let mut bytes = [0u8; 48];
+    for (i, (eax, ebx, ecx, edx)) in leaves.iter().enumerate() {
+        for (j, reg) in [eax, ebx, ecx, edx].iter().enumerate() {
+            bytes[i * 16 + j * 4..i * 16 + j * 4 + 4].copy_from_slice(&reg.to_le_bytes());
+        }
+    }
+    let end = bytes.iter().position(|b| *b == 0).unwrap_or(48);
+    let brand = String::from_utf8_lossy(&bytes[..end]).trim().to_string();
+    if brand.is_empty() {
+        None
+    } else {
+        Some(brand)
+    }
+}
+
+/// The CPU brand string from CPUID leaves 0x80000002..4 (x86_64), for the rated-maximum
+/// table in the spine. `None` on any other architecture or when the leaf reports nothing.
+#[cfg(target_arch = "x86_64")]
+pub fn cpu_brand_string() -> Option<String> {
+    // __cpuid is a safe function; the extended leaves are only read after the max-leaf
+    // check below, and the string is NUL-padded by the CPU.
+    let leaf = |id: u32| {
+        let r = std::arch::x86_64::__cpuid(id);
+        (r.eax, r.ebx, r.ecx, r.edx)
+    };
+    let max = std::arch::x86_64::__cpuid(0x8000_0000).eax;
+    if max < 0x8000_0004 {
+        return None;
+    }
+    brand_string_from_leaves([leaf(0x8000_0002), leaf(0x8000_0003), leaf(0x8000_0004)])
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+pub fn cpu_brand_string() -> Option<String> {
+    None
 }
