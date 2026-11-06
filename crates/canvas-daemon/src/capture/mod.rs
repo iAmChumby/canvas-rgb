@@ -51,6 +51,9 @@ pub struct DaemonInputs {
     lease_counter: std::sync::atomic::AtomicU64,
     /// Stops the real WASAPI capture thread.
     stop: Arc<std::sync::atomic::AtomicBool>,
+    /// False in fakes mode (#199): captures never start, so the screen and
+    /// audio are never touched.
+    enabled: bool,
 }
 
 impl DaemonInputs {
@@ -78,6 +81,7 @@ impl DaemonInputs {
             leases: Mutex::new(HashMap::new()),
             lease_counter: std::sync::atomic::AtomicU64::new(0),
             stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            enabled: true,
         }
     }
 
@@ -142,8 +146,21 @@ impl DaemonInputs {
         }
     }
 
+    /// An input source that never captures: fakes mode (#199).
+    pub fn disabled() -> Self {
+        Self { enabled: false, ..Self::empty() }
+    }
+
+    /// Whether this input source may start a capture.
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
     /// Starts the screen capture.
     pub fn start_screen(&self) {
+        if !self.enabled {
+            return;
+        }
         let mut slot = self.screen.lock().unwrap_or_else(|e| e.into_inner());
         if slot.is_some() {
             return;
@@ -186,6 +203,9 @@ impl DaemonInputs {
 
     /// Starts the audio capture on the resolved source.
     pub fn start_audio(&self) {
+        if !self.enabled {
+            return;
+        }
         // B3: a capture whose thread died clears the slot so this need
         // reopens it, instead of believing the dead thread is live.
         self.reap_if_dead();
@@ -504,6 +524,17 @@ mod tests {
         assert!(inputs.idle());
     }
 
+    #[test]
+    fn a_disabled_input_source_never_captures() {
+        let inputs = DaemonInputs::disabled();
+        assert!(!inputs.enabled());
+        inputs.apply_needs(InputNeeds { screen: true, audio: true });
+        assert!(inputs.idle(), "fakes mode must not start the screen or audio capture");
+        assert!(DaemonInputs::empty().enabled());
+    }
+
+    /// The capture is the daemon's input source: the engines read the screen and the
+    /// audio through it (#1).
     #[test]
     fn the_capture_is_an_input_source() {
         let inputs = DaemonInputs::empty();

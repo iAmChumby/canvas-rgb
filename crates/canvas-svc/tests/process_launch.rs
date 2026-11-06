@@ -132,6 +132,26 @@ const DAEMON_FILE_STARTS_ALLOWED: &[(&str, &str, &str)] = &[(
     "crates/canvas-daemon/src/logging.rs",
     "let made = std::process::Command::new(\"cmd\")",
     "a unit test makes a junction with `cmd /C mklink /J` to check the log writer refuses a reparse point; not the daemon",
+),
+(
+    "crates/canvas-daemon/src/fakes.rs",
+    "let made = std::process::Command::new(\"cmd\")",
+    "a unit test makes a junction with `cmd /C mklink /J` to check fakes mode refuses a link to the real home; not the daemon",
+),
+(
+    "tools/run-fake-daemon.ps1",
+    "$fake = Start-Process -FilePath $fakeExe",
+    "starts the fake OpenRGB server example, not the daemon",
+)];
+
+/// Rule 1 allow-list, one entry per line: (path suffix, text the line must contain, why). A start of
+/// `canvas-rgbd` outside the service that is not the installed daemon. The scan fails on an entry that
+/// matches no line, so this list cannot collect dead entries.
+const DAEMON_STARTS_ALLOWED: &[(&str, &str, &str)] = &[(
+    "tools/run-fake-daemon.ps1",
+    "$daemon = Start-Process -FilePath $daemonExe -ArgumentList '--fakes'",
+    "developer tool (#199): this checkout's own debug build in fakes mode, on a test port and a test home; \
+     the daemon refuses --fakes in release, without a test port, or with a real data folder",
 )];
 
 /// Rule 3 lines that look like a launch but are text, not a call: the installer's printed plan
@@ -176,7 +196,8 @@ fn says_token(line: &str, ext: &str) -> bool {
     comment_part(line, ext).is_some_and(|c| c.contains("token:"))
 }
 
-/// Which allow-list entries suppressed a finding: (list id, index). 1 = elevation, 2 = daemon file.
+/// Which allow-list entries suppressed a finding: (list id, index). 1 = elevation, 2 = daemon file,
+/// 3 = daemon start.
 type Used = Vec<(u8, usize)>;
 
 fn allowed(list: &[(&str, &str, &str)], id: u8, rel: &str, line: &str, used: &mut Used) -> bool {
@@ -240,7 +261,9 @@ fn scan_text_used(rel: &str, text: &str, used: &mut Used) -> Vec<Finding> {
             let launches = LAUNCHES.iter().any(|l| raw.contains(l));
             let run_entry = ext == "iss" && section == "[Run]";
             if launches || run_entry {
-                found.push(at(1));
+                if !allowed(DAEMON_STARTS_ALLOWED, 3, rel, raw, used) {
+                    found.push(at(1));
+                }
                 rule1 = true;
             }
         }
@@ -360,7 +383,7 @@ fn only_the_service_starts_the_daemon_and_every_launch_names_its_token() {
     );
     // An allow-list entry that suppressed nothing is a hole waiting for the next line that matches it.
     let mut stale = Vec::new();
-    for (id, list) in [(1u8, ELEVATION_ALLOWED), (2u8, DAEMON_FILE_STARTS_ALLOWED)] {
+    for (id, list) in [(1u8, ELEVATION_ALLOWED), (2u8, DAEMON_FILE_STARTS_ALLOWED), (3u8, DAEMON_STARTS_ALLOWED)] {
         for (i, (suffix, text, why)) in list.iter().enumerate() {
             if !used.contains(&(id, i)) {
                 stale.push(format!("{suffix}: `{text}` ({why})"));

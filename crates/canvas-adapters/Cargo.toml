@@ -44,3 +44,7 @@ test = true
 [[example]]
 name = "pad_probe"
 test = true
+
+[[example]]
+name = "fake_openrgb"
+test = false

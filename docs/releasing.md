@@ -154,8 +154,24 @@ version is newer than the release it follows, so the service accepts it once. It
 runner only, never committed), signs it in a separate job with the same key, and uploads
 `canvas-rgb-setup-<version>.exe`, its `.sha256` and its `.sig` as the workflow artifact
 `canvas-rgb-test-build-<version>` (kept 14 days). It makes no tag and no release, and no job has
-`contents: write`. The tray's feed never offers it (GitHub's `latest` skips pre-releases and the tray ignores
-them); install it with the `update` command above on a PC running an older build.
+`contents: write`. The stable feed never offers it (GitHub's `latest` skips pre-releases and the tray ignores
+them on that feed); install it with the `update` command above on a PC running an older build, or publish it to
+the experimental feed below.
+
+**Experimental builds (#203).** Settings has an **Experimental builds** switch (the Version panel). With it on,
+the tray reads a second feed beside the stable one, `releases/download/experimental/latest.json`
+(`consts::EXPERIMENTAL_FEED_URL`): a rolling GitHub pre-release tagged `experimental`, not `v*`, so it never runs
+`release.yml`. The tray offers the newest release from either feed that is strictly newer than the running one.
+A pre-release is accepted only from the experimental feed; the stable feed refuses one on both settings. Both feeds
+go through everything above: the same signature key, the same download hosts, the same redirect refusal, the same
+two signature checks and the same install through the service. Turning the switch off withdraws any experimental
+offer at once and never downgrades: a dev build stays until a stable release newer than it comes out.
+
+Who may publish: experimental builds are signed with the release key and install as SYSTEM with no prompt on every
+PC that turned the switch on, so the trust boundary of test builds applies to every publish. A build is published
+only from `main`, by a person or the agent grind Luke approved (2026-11-05, tracking #215), never by a push
+trigger. Until the publishing workflow lands (the second half of #203), nothing writes to the `experimental`
+release, and the experimental feed answers with nothing.
 
 **If the key is lost or leaks.** Installed copies trust only that key, so a new key cannot reach
 them through the updater:
