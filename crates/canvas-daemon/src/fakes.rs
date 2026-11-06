@@ -293,6 +293,78 @@ pub fn validate_process_home() -> Result<PathBuf, String> {
     )
 }
 
+// --- Fake numeric display ---------------------------------------------------
+
+/// A numeric display that exists only in memory, shaped like the CHIONE, so the Displays view
+/// has a display to show and drive in fakes mode (#200, #204). It opens no device: connect,
+/// discover and every write succeed without touching anything.
+#[derive(Default)]
+pub struct FakeNumericDisplay {
+    connected: bool,
+}
+
+/// The one display [`FakeNumericDisplay`] reports.
+pub fn fake_display_info(connected: bool) -> canvas_proto::display::DisplayInfo {
+    canvas_proto::display::DisplayInfo {
+        id: canvas_proto::device::DeviceId("fake:chione".into()),
+        name: "GAMDIAS CHIONE Digital Display (fake)".into(),
+        digits: 4,
+        max_decimals: 1,
+        modes: vec![
+            canvas_proto::display::DisplayMode::Temperature,
+            canvas_proto::display::DisplayMode::FanRpm,
+        ],
+        connected,
+        blocked_by: None,
+    }
+}
+
+#[async_trait::async_trait]
+impl canvas_proto::traits::NumericDisplayAdapter for FakeNumericDisplay {
+    fn name(&self) -> &'static str {
+        "fake-display"
+    }
+
+    async fn connect(&mut self) -> Result<(), canvas_proto::traits::AdapterError> {
+        self.connected = true;
+        Ok(())
+    }
+
+    async fn disconnect(&mut self) -> Result<(), canvas_proto::traits::AdapterError> {
+        self.connected = false;
+        Ok(())
+    }
+
+    fn is_connected(&self) -> bool {
+        self.connected
+    }
+
+    async fn discover(
+        &mut self,
+    ) -> Result<Vec<canvas_proto::display::DisplayInfo>, canvas_proto::traits::AdapterError> {
+        Ok(vec![fake_display_info(self.connected)])
+    }
+
+    async fn write_value(
+        &mut self,
+        _device: &canvas_proto::device::DeviceId,
+        _value: &canvas_proto::display::DisplayValue,
+    ) -> Result<(), canvas_proto::traits::AdapterError> {
+        Ok(())
+    }
+
+    fn write_interval_ms(&self) -> u32 {
+        250
+    }
+}
+
+impl canvas_adapters::resume::ResumeBehavior for FakeNumericDisplay {
+    fn on_resume(&self) -> canvas_adapters::resume::OnResume {
+        // In memory: a sleep resets nothing.
+        canvas_adapters::resume::OnResume::NothingToRestore
+    }
+}
+
 // --- Gates -----------------------------------------------------------------
 //
 // Each predicate answers "may fakes mode touch the real thing?". Every one is
@@ -527,6 +599,30 @@ mod tests {
         assert!(validate_fakes_home(Some(&machine), &real, &machine).is_err(), "the real machine dir: refuse");
         let test = PathBuf::from(r"C:\work\canvas-rgb\.build\fake-home");
         assert_eq!(validate_fakes_home(Some(&test), &real, &machine), Ok(test));
+    }
+
+    /// Fakes mode has one in-memory display to show and drive, shaped like the CHIONE.
+    #[tokio::test]
+    async fn the_fake_display_is_found_connects_and_takes_writes() {
+        use canvas_proto::traits::NumericDisplayAdapter;
+        let mut display = FakeNumericDisplay::default();
+        assert!(!display.is_connected());
+        let found = display.discover().await.expect("discover");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "GAMDIAS CHIONE Digital Display (fake)");
+        assert!(found[0].name.contains("(fake)"), "never mistaken for the real device");
+        display.connect().await.expect("connect");
+        assert!(display.is_connected());
+        let value = canvas_proto::display::DisplayValue {
+            value: Some(42.5),
+            decimals: 1,
+            unit: canvas_proto::display::DisplayUnit::Celsius,
+            mode: canvas_proto::display::DisplayMode::Temperature,
+            blink: false,
+        };
+        display.write_value(&found[0].id, &value).await.expect("write");
+        display.disconnect().await.expect("disconnect");
+        assert!(!display.is_connected());
     }
 
     #[test]

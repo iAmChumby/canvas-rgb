@@ -140,12 +140,19 @@ async function prewarmThumbnails(daemonBase, token) {
         await new Promise((r) => setTimeout(r, 5000));
         continue;
       }
-      if (res.ok) break;
+      if (res.ok) {
+        console.log(`ui-capture: prewarm ${id} ok`);
+        break;
+      }
       if (res.status !== 503) throw new Error(`prewarm: thumbnail ${id} answered ${res.status}`);
+      if (attempt === 11) {
+        // Over the render budget even after retries (a debug build on a busy machine). The shots
+        // list it under slowThumbnails, so the run goes on.
+        console.log(`ui-capture: prewarm ${id} still 503 after retries; listed as a slow thumbnail`);
+        break;
+      }
       await new Promise((r) => setTimeout(r, 2000));
-      if (attempt === 11) throw new Error(`prewarm: thumbnail ${id} still 503 after retries`);
     }
-    console.log(`ui-capture: prewarm ${id} ok`);
   }
 }
 
@@ -252,6 +259,9 @@ async function shootPage(page, base, view, viewport, theme, daemonBase, token) {
   const pageErrors = [];
   const consoleErrors = [];
   const apiFailures = [];
+  // A thumbnail that went over the daemon's render budget (a debug build renders slowly) answers
+  // 503 and the editor shows a blank tile. Both editors see the same daemon, so it is listed, not failed.
+  const slowThumbnails = [];
   const onPageError = (err) => pageErrors.push(String(err?.stack ?? err));
   const onConsole = (msg) => {
     if (msg.type() === "error") consoleErrors.push(msg.text());
@@ -260,7 +270,9 @@ async function shootPage(page, base, view, viewport, theme, daemonBase, token) {
     const url = res.url();
     const status = res.status();
     if (status >= 400 && url.startsWith(daemonBase)) {
-      apiFailures.push({ url, status });
+      const thumbnail = /\/api\/v1\/effects\/[^/]+\/thumbnail(\?|$)/.test(url.slice(daemonBase.length));
+      if (status === 503 && thumbnail) slowThumbnails.push({ url, status });
+      else apiFailures.push({ url, status });
     }
   };
   page.on("pageerror", onPageError);
@@ -298,6 +310,7 @@ async function shootPage(page, base, view, viewport, theme, daemonBase, token) {
     pageErrors,
     consoleErrors,
     apiFailures,
+    slowThumbnails,
   };
 }
 
@@ -347,11 +360,12 @@ async function main() {
     pageErrors: shots.reduce((n, s) => n + s.pageErrors.length, 0),
     consoleErrors: shots.reduce((n, s) => n + s.consoleErrors.length, 0),
     apiFailures: shots.reduce((n, s) => n + s.apiFailures.length, 0),
+    slowThumbnails: shots.reduce((n, s) => n + s.slowThumbnails.length, 0),
     shots,
   };
   fs.writeFileSync(path.join(OUT_DIR, "report.json"), JSON.stringify(report, null, 2));
   console.log(
-    `ui-capture: ${shots.length} shots, pageErrors=${report.pageErrors} consoleErrors=${report.consoleErrors} apiFailures=${report.apiFailures} failedShots=${failed.length}`,
+    `ui-capture: ${shots.length} shots, pageErrors=${report.pageErrors} consoleErrors=${report.consoleErrors} apiFailures=${report.apiFailures} slowThumbnails=${report.slowThumbnails} failedShots=${failed.length}`,
   );
   console.log(`ui-capture: report ${path.join(OUT_DIR, "report.json")}`);
   if (failed.length > 0) process.exitCode = 1;

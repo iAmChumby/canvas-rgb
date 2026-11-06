@@ -25,14 +25,21 @@
 #>
 param(
     [switch]$Stop,
-    [switch]$Rebuild
+    [switch]$Rebuild,
+    # Ports for this run. Two checkouts can each run a fake daemon at once on different ports.
+    [int]$ApiPort = 19430,
+    [int]$OpenRgbPort = 16742
 )
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $homeDir = Join-Path $root '.build\fake-home'
-$fakeOpenRgbPort = 16742
-$testApiPort = 19430
+$fakeOpenRgbPort = $OpenRgbPort
+$testApiPort = $ApiPort
+if ($testApiPort -in 0, 9430, 6742 -or $fakeOpenRgbPort -in 0, 9430, 6742 -or $testApiPort -eq $fakeOpenRgbPort) {
+    Write-Error "run-fake-daemon: -ApiPort ${testApiPort} / -OpenRgbPort ${fakeOpenRgbPort}: never 0, the real API port 9430 or the real OpenRGB port 6742, and never the same port twice."
+    exit 2
+}
 $pidFile = Join-Path $homeDir 'pids.json'
 
 function Get-OwnedProcesses {
@@ -111,34 +118,43 @@ if ($Rebuild -or -not (Test-Path $daemonExe) -or -not (Test-Path $fakeExe)) {
 # --- start the fake OpenRGB server ------------------------------------------
 $env:CANVAS_RGB_FAKE_OPENRGB_PORT = "$fakeOpenRgbPort"
 $fakeLog = Join-Path $homeDir 'fake-openrgb.log'
-# token: the developer's own, non-elevated (the shell running this script).
-$fake = Start-Process -FilePath $fakeExe -PassThru -RedirectStandardOutput $fakeLog -RedirectStandardError (Join-Path $homeDir 'fake-openrgb.err.log')
-Write-Host "run-fake-daemon: fake OpenRGB server on 127.0.0.1:$fakeOpenRgbPort (pid $($fake.Id))"
+$daemonLog = Join-Path $homeDir 'canvas-rgbd.console.log'
+
+# Each child starts through `cmd /c`, which writes its output to a file. Start-Process with its own
+# -Redirect* options makes the child inherit this script's handles, so a caller capturing this
+# script's output would wait for the test daemon to exit, forever. The PIDs kept for -Stop are then
+# read from the listening sockets, and must be this checkout's own builds.
+function Wait-Listener([int]$port, [int]$seconds) {
+    for ($i = 0; $i -lt ($seconds * 2); $i++) {
+        $c = Get-NetTCPConnection -State Listen -LocalAddress 127.0.0.1 -LocalPort $port -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($c) { return [int]$c.OwningProcess }
+        Start-Sleep -Milliseconds 500
+    }
+    return 0
+}
+
+# token: the developer's own, non-elevated (the shell running this script); cmd.exe, then the fake OpenRGB server.
+$null = Start-Process -FilePath 'cmd.exe' -ArgumentList '/d', '/c', "`"`"$fakeExe`" > `"$fakeLog`" 2>&1`"" -WindowStyle Hidden
+$fakePid = Wait-Listener $fakeOpenRgbPort 30
+if (-not $fakePid -or -not (Test-OwnProcess $fakePid)) {
+    Write-Error "run-fake-daemon: the fake OpenRGB server did not listen on $fakeOpenRgbPort within 30 s (or another process holds it). See $fakeLog."
+    exit 1
+}
+Write-Host "run-fake-daemon: fake OpenRGB server on 127.0.0.1:$fakeOpenRgbPort (pid $fakePid)"
 
 # --- start the daemon in fakes mode ------------------------------------------
 $env:CANVAS_RGB_HOME = $homeDir
 $env:CANVAS_RGB_TEST_API_PORT = "$testApiPort"
-# token: the developer's own, non-elevated; a debug build in fakes mode, never the installed daemon.
-$daemon = Start-Process -FilePath $daemonExe -ArgumentList '--fakes' -PassThru -RedirectStandardOutput (Join-Path $homeDir 'canvas-rgbd.stdout.log') -RedirectStandardError (Join-Path $homeDir 'canvas-rgbd.stderr.log')
-Write-Host "run-fake-daemon: test daemon pid $($daemon.Id) in fakes mode"
-
-@{ daemon = $daemon.Id; fakeOpenRgb = $fake.Id } | ConvertTo-Json | Set-Content -Path $pidFile -Encoding UTF8
-
-# --- wait for the API ---------------------------------------------------------
-$ready = $false
-for ($i = 0; $i -lt 60; $i++) {
-    try {
-        $client = New-Object System.Net.Sockets.TcpClient
-        $client.Connect('127.0.0.1', $testApiPort)
-        $client.Close()
-        $ready = $true
-        break
-    } catch { Start-Sleep -Milliseconds 500 }
-}
-if (-not $ready) {
-    Write-Error "run-fake-daemon: the test daemon did not listen on $testApiPort within 30 s. See $(Join-Path $homeDir 'logs') and canvas-rgbd.stderr.log."
+# token: the developer's own, non-elevated; cmd.exe, then this checkout's debug build in fakes mode (never the installed daemon).
+$null = Start-Process -FilePath 'cmd.exe' -ArgumentList '/d', '/c', "`"`"$daemonExe`" --fakes > `"$daemonLog`" 2>&1`"" -WindowStyle Hidden
+$daemonPid = Wait-Listener $testApiPort 30
+if (-not $daemonPid -or -not (Test-OwnProcess $daemonPid)) {
+    @{ daemon = 0; fakeOpenRgb = $fakePid } | ConvertTo-Json | Set-Content -Path $pidFile -Encoding UTF8
+    Write-Error "run-fake-daemon: the test daemon did not listen on $testApiPort within 30 s (or another process holds it). See $daemonLog and $(Join-Path $homeDir 'logs'). Run -Stop to stop the fake OpenRGB server."
     exit 1
 }
+Write-Host "run-fake-daemon: test daemon pid $daemonPid in fakes mode"
+@{ daemon = $daemonPid; fakeOpenRgb = $fakePid } | ConvertTo-Json | Set-Content -Path $pidFile -Encoding UTF8
 
 Write-Host ''
 Write-Host "API base URL:  http://127.0.0.1:$testApiPort"

@@ -140,8 +140,8 @@ const DAEMON_FILE_STARTS_ALLOWED: &[(&str, &str, &str)] = &[(
 ),
 (
     "tools/run-fake-daemon.ps1",
-    "$fake = Start-Process -FilePath $fakeExe",
-    "starts the fake OpenRGB server example, not the daemon",
+    "`\"$fakeExe`\" > `\"$fakeLog`\" 2>&1",
+    "starts cmd.exe, which starts the fake OpenRGB server example, not the daemon",
 )];
 
 /// Rule 1 allow-list, one entry per line: (path suffix, text the line must contain, why). A start of
@@ -149,7 +149,7 @@ const DAEMON_FILE_STARTS_ALLOWED: &[(&str, &str, &str)] = &[(
 /// matches no line, so this list cannot collect dead entries.
 const DAEMON_STARTS_ALLOWED: &[(&str, &str, &str)] = &[(
     "tools/run-fake-daemon.ps1",
-    "$daemon = Start-Process -FilePath $daemonExe -ArgumentList '--fakes'",
+    "`\"$daemonExe`\" --fakes > `\"$daemonLog`\" 2>&1",
     "developer tool (#199): this checkout's own debug build in fakes mode, on a test port and a test home; \
      the daemon refuses --fakes in release, without a test port, or with a real data folder",
 )];

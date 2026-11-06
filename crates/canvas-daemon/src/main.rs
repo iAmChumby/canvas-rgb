@@ -206,7 +206,9 @@ async fn daemon_main(fakes: bool) -> Exit {
             token,
             canvas_daemon::version(),
             quit_tx,
-            Box::new(canvas_daemon::displays::NoDisplays),
+            // Only fakes mode reaches this branch (the real display is used otherwise): an
+            // in-memory display, so the Displays view has one to show (#200).
+            Box::new(canvas_daemon::fakes::FakeNumericDisplay::default()),
         )
         .with_peripherals(peripherals)
     };
