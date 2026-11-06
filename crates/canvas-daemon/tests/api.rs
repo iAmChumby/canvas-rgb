@@ -2065,6 +2065,7 @@ fn fans(temps: Vec<(TempSource, f32)>, headers: Vec<(&str, u32)>) -> FansStatus 
                 on_bios: true,
                 override_reason: None,
                 available: true,
+                override_available: None,
             })
             .collect(),
         temps: temps

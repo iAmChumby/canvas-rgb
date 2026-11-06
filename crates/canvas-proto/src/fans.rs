@@ -93,6 +93,10 @@ pub struct FanHeaderStatus {
     /// available.
     #[serde(default = "available_by_default")]
     pub available: bool,
+    /// Issue #146: the owner's override behind `available`, when there is one (`Some(false)`
+    /// "Not on my board", `Some(true)` "Show anyway"); `None` when the board table decides.
+    #[serde(default)]
+    pub override_available: Option<bool>,
 }
 
 fn available_by_default() -> bool {

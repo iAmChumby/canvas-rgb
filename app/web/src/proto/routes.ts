@@ -51,6 +51,7 @@ export const routes = {
   // PUT a HotLimits: the user's "don't exceed" temperatures, one per kind of source.
   fanHot: "/api/v1/fans/hot",
   fanHeader: (h: string) => `/api/v1/fans/headers/${h}`,
+  fanHeaderAvailability: (h: string) => `/api/v1/fans/headers/${h}/availability`,
   fanProfile: "/api/v1/fans/profile",
   // PUT a FanProfile; DELETE removes it (409 for the active or last profile).
   fanProfiles: (name: string) => `/api/v1/fans/profiles/${encodeURIComponent(name)}`,

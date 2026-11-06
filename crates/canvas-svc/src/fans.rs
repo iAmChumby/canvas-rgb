@@ -1193,6 +1193,7 @@ impl FanController {
                 on_bios,
                 override_reason,
                 available,
+                override_available: self.header_overrides.get(spec.id).copied(),
             });
         }
         let mut temps: Vec<TempReading> = Vec::new();

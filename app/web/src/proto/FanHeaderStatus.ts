@@ -25,4 +25,9 @@ override_reason: string | null,
  * is never written, and cannot be ticked in bulk. Old payloads without it parse as
  * available.
  */
-available: boolean, };
+available: boolean, 
+/**
+ * Issue #146: the owner's override behind `available`, when there is one (`Some(false)`
+ * "Not on my board", `Some(true)` "Show anyway"); `None` when the board table decides.
+ */
+override_available: boolean | null, };
