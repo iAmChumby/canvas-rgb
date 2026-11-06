@@ -195,8 +195,10 @@ export function PeripheralsView() {
   // started after the last failure (#151).
   const failures = useRef<Record<string, number>>({});
   const failuresOf = (id: string) => failures.current[id] ?? 0;
-  const noteFailure = (id: string) => {
-    editsAtFailure.current[id] = editsOf(id);
+  // `carriedEdits`: the failed write sent the staged edits (Apply). An access change that
+  // fails carried none of them, so it leaves them staged.
+  const noteFailure = (id: string, carriedEdits: boolean) => {
+    if (carriedEdits) editsAtFailure.current[id] = editsOf(id);
     failures.current[id] = failuresOf(id) + 1;
   };
 
@@ -350,7 +352,7 @@ export function PeripheralsView() {
       await api.patchPeripheral(id, sent);
     } catch (e) {
       // The change itself failed: nothing was changed.
-      noteFailure(detail.info.id);
+      noteFailure(detail.info.id, true);
       setDeviceSaveError(detail.info.id, messageOf(e));
       setSaving(false);
       return;
@@ -386,7 +388,7 @@ export function PeripheralsView() {
       await api.putPeripheralAccess(detail.info.id, { reads, writes });
     } catch (e) {
       // The change itself failed: nothing was changed.
-      noteFailure(detail.info.id);
+      noteFailure(detail.info.id, false);
       setDeviceSaveError(detail.info.id, messageOf(e));
       return;
     }

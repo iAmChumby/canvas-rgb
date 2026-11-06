@@ -341,3 +341,25 @@ describe("unsent edits", () => {
     expect(screen.queryByText(/1 change not sent/)).toBeTruthy();
   });
 });
+
+describe("a failed access change", () => {
+  it("leaves the unsent edits it did not carry", async () => {
+    const device = mouse("x6:access", "Access Mouse");
+    api.peripherals.mockResolvedValue({ peripherals: [device.info] });
+    api.peripheral.mockResolvedValue(device);
+    api.putPeripheralAccess.mockRejectedValue(new Error("the access was not saved"));
+    page();
+    fireEvent.click(await screen.findByRole("switch", { name: "LED on" }));
+    await settle();
+    await screen.findByRole("button", { name: "Apply" });
+
+    fireEvent.click(screen.getByRole("switch", { name: "Change settings on the device" }));
+    await screen.findByText("the access was not saved");
+
+    // The next read of the device lands: the LED edit is still staged.
+    fireEvent.click(screen.getByRole("button", { name: /Read again/ }));
+    await settle();
+    await settle();
+    expect(screen.getByRole("switch", { name: "LED on" }).getAttribute("aria-checked")).toBe("true");
+  });
+});
