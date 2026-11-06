@@ -29,7 +29,7 @@
 
 use std::path::{Path, PathBuf};
 
-use canvas_proto::fans::{FanHeaderStatus, FanMode, FansStatus, TempReading, TempSource};
+use canvas_proto::fans::{FanHeaderStatus, FanMode, FansStatus, HotKind, TempReading, TempSource};
 use canvas_proto::pipe::{PipeRequest, PipeResponse};
 
 /// The flag that turns fakes mode on. Debug builds only.
@@ -316,6 +316,14 @@ pub fn fake_fans_status() -> FansStatus {
         active_profile: "Default".into(),
         profiles: vec!["Default".into(), "Quiet".into()],
         floor_percent: canvas_proto::fans::DEFAULT_FLOOR_PERCENT,
+        // The automatic limits a 7800X3D would get (#130), so the editor draws its hot line.
+        hot: [HotKind::Cpu, HotKind::Gpu, HotKind::Board]
+            .into_iter()
+            .map(|k| {
+                let rated = (k == HotKind::Cpu).then_some(89.0);
+                canvas_proto::fans::hot_limit_status(k, &canvas_proto::fans::HotLimits::default(), rated)
+            })
+            .collect(),
     }
 }
 

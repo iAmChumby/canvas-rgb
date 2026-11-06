@@ -23,5 +23,5 @@ export function hotFloor(header: string, configured: number): number {
 /** G4's rule, with the numbers filled in. Issue #130: the line is the source's hot limit now. */
 export function hotRuleText(limitC?: number): string {
   const line = limitC === undefined ? "its hot limit" : `its hot limit of ${limitC} °C`;
-  return `Below ${HOT_FLOOR}% (CPU_FAN ${HOT_CPU_FAN_FLOOR}%) is raised while the curve's temperature is at or above ${line}`;
+  return `Below ${HOT_FLOOR}% (CPU_FAN ${HOT_CPU_FAN_FLOOR}%) is raised at or above ${line}`;
 }

@@ -960,10 +960,13 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
   );
 
   // The compact "don't exceed" control, shared by Fixed (the CPU kind, as the
-  // service treats it) and Curve. It lives inside an existing row, never in a new
-  // Field, so it adds no height to the panel.
+  // service treats it) and Curve. It sits in the floor note, under the sentence it
+  // sets, never in a Field of its own, so it adds the least height to the panel.
+  // The words, the figure and its state stay together on one line (they wrap as one group);
+  // Reset shows only once the user has set a limit, as a settings reset usually does.
   const hotControls = hotRow && (
-    <span className="row-wrap" style={{ gap: 8 }}>
+    <span className="hot-controls">
+      <span className="mute">Don&apos;t exceed</span>
       <NumberField
         label="Don't exceed temperature"
         min={40}
@@ -973,21 +976,24 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
         disabled={hotBusy}
         onCommit={(v) => void commitHot(v)}
       />
-      <span className="mute">{hotRow.user_set ? "set by you" : "automatic"}</span>
-      <Button
-        size="sm"
-        variant="ghost"
-        icon={<ArrowClockwise size={14} />}
-        disabled={hotBusy}
-        onClick={() => void commitHot(null)}
-      >
-        Reset to automatic
-      </Button>
-      {hotErr && (
-        <span className="error-line" role="alert">
-          {hotErr}
-        </span>
+      {hotRow.user_set ? (
+        <Button
+          size="sm"
+          variant="ghost"
+          icon={<ArrowClockwise size={14} />}
+          disabled={hotBusy}
+          onClick={() => void commitHot(null)}
+        >
+          Reset to automatic
+        </Button>
+      ) : (
+        <span className="mute">automatic</span>
       )}
+    </span>
+  );
+  const hotError = hotErr && (
+    <span className="error-line" role="alert">
+      {hotErr}
     </span>
   );
 
@@ -1027,7 +1033,8 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
             <span>
               Floor <span className="fig" style={{ color: "var(--ink)" }}><AnimatedNumber value={base} />%</span>. {hotRuleText(hotRow?.limit_c)}.
             </span>
-            {mode.mode === "fixed" && (hotControls ? <span className="hot-inline"> Don&apos;t exceed {hotControls}</span> : null)}
+            {hotControls}
+            {hotError}
           </div>
         )}
 
@@ -1072,8 +1079,6 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
                     void apply({ mode: "curve", source: s, points });
                   }}
                 />
-                <span className="mute">Don&apos;t exceed</span>
-                {hotControls}
               </div>
             </Field>
             <FanCurveEditor

@@ -66,15 +66,21 @@ async function page() {
   await waitFor(() => expect(document.querySelectorAll(".curve-row").length).toBeGreaterThan(0));
 }
 
+const hotText = () =>
+  screen.getByRole("slider", { name: "Don't exceed temperature line" }).getAttribute("aria-valuetext");
+
 describe("the hot line on the fan curve chart", () => {
   it("renders at the status value with its origin and the safety ceiling band", async () => {
     await page();
     const line = await screen.findByRole("slider", { name: "Don't exceed temperature line" });
     expect(line.getAttribute("aria-valuenow")).toBe("74");
-    expect(screen.getByText("Don't exceed 74 °C · automatic")).toBeTruthy();
-    expect(screen.getByText("Safety: full speed")).toBeTruthy();
+    expect(line.getAttribute("aria-valuetext")).toBe("Don't exceed 74 °C · automatic");
+    expect(screen.getByText("74 °C")).toBeTruthy();
+    expect(screen.getByText("Full speed")).toBeTruthy();
     expect(screen.getByLabelText("Don't exceed temperature")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Reset to automatic" })).toBeTruthy();
+    // Nothing to reset while the limit is automatic: the state word stands in for the button.
+    expect(screen.queryByRole("button", { name: "Reset to automatic" })).toBeNull();
+    expect(screen.getByText("automatic")).toBeTruthy();
   });
 
   it("typing 70 sends cpu_c 70 and the line follows", async () => {
@@ -84,7 +90,7 @@ describe("the hot line on the fan curve chart", () => {
     fireEvent.change(input, { target: { value: "70" } });
     fireEvent.blur(input);
     await waitFor(() => expect(spy).toHaveBeenCalledWith({ cpu_c: 70, gpu_c: null, board_c: null }));
-    await waitFor(() => expect(screen.getByText("Don't exceed 70 °C · set by you")).toBeTruthy());
+    await waitFor(() => expect(hotText()).toBe("Don't exceed 70 °C · set by you"));
     expect(screen.getByRole("slider", { name: "Don't exceed temperature line" }).getAttribute("aria-valuenow")).toBe("70");
   });
 
@@ -94,11 +100,12 @@ describe("the hot line on the fan curve chart", () => {
     const input = await screen.findByLabelText("Don't exceed temperature");
     fireEvent.change(input, { target: { value: "70" } });
     fireEvent.blur(input);
-    await waitFor(() => expect(screen.getByText("Don't exceed 70 °C · set by you")).toBeTruthy());
+    await waitFor(() => expect(hotText()).toBe("Don't exceed 70 °C · set by you"));
 
     fireEvent.click(screen.getByRole("button", { name: "Reset to automatic" }));
     await waitFor(() => expect(spy).toHaveBeenLastCalledWith({ cpu_c: null, gpu_c: null, board_c: null }));
-    await waitFor(() => expect(screen.getByText("Don't exceed 74 °C · automatic")).toBeTruthy());
+    await waitFor(() => expect(hotText()).toBe("Don't exceed 74 °C · automatic"));
+    expect(screen.queryByRole("button", { name: "Reset to automatic" })).toBeNull();
   });
 
   it("a 422 from the PUT shows inline next to the control", async () => {
@@ -121,7 +128,7 @@ describe("the hot line on the fan curve chart", () => {
     expect(await screen.findByLabelText("CPU fan duty")).toBeTruthy();
     const input = await screen.findByLabelText("Don't exceed temperature");
     expect(input).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Reset to automatic" })).toBeTruthy();
+    expect(screen.getByText("automatic")).toBeTruthy();
   });
 });
 

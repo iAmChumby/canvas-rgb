@@ -253,10 +253,23 @@ export function FanCurveEditor({
   const hotTop = yOf(hotFloor);
   const hotLeft = xOf(hotValue);
   const hotLabel = `Don't exceed ${hotValue} °C${hot ? (hot.user_set ? " · set by you" : " · automatic") : ""}`;
-  // A label near the right edge sits left of its line, right-aligned, inside the plot:
-  // the plot edge is at MARGIN.left + plotW, never beyond it.
+  // The chart shows the figure only; the full words are on the handle (aria-valuetext) and in
+  // the controls above the chart. The label sits at the top, left of its line when it fits (a
+  // fan curve rises, so the top-left of any point is clear), else right of it, else against
+  // the plot's right edge: never past either edge.
+  const hotShort = `${hotValue} °C`;
   const plotRight = MARGIN.left + plotW;
-  const nearRight = (x: number) => x > plotRight - 170;
+  const CHAR_W = 8.5; // 14 px var(--fm), a monospace face: about 0.6 em a character
+  const placeLabel = (x: number, text: string) => {
+    const w = text.length * CHAR_W;
+    if (x - 6 - w >= MARGIN.left) return { x: x - 6, anchor: "end" as const };
+    if (x + 6 + w <= plotRight) return { x: x + 6, anchor: "start" as const };
+    return { x: plotRight, anchor: "end" as const };
+  };
+  const hotPlace = placeLabel(hotLeft, hotShort);
+  const ceilX = hot ? xOf(clamp(hot.ceiling_c, TEMP_MIN, TEMP_MAX)) : 0;
+  // The ceiling's words read up its line, inside the hatch, so they fit at every chart width.
+  const ceilLabelX = ceilX + 16 <= plotRight ? ceilX + 16 : ceilX - 6;
   const floorTop = yOf(floor);
   const grid = [20, 40, 60, 80, 100];
   const pctGrid = [0, 20, 40, 60, 80, 100];
@@ -317,14 +330,18 @@ export function FanCurveEditor({
               strokeDasharray="2 3"
             />
             <text
-              x={nearRight(xOf(clamp(hot.ceiling_c, TEMP_MIN, TEMP_MAX))) ? xOf(clamp(hot.ceiling_c, TEMP_MIN, TEMP_MAX)) - 6 : xOf(clamp(hot.ceiling_c, TEMP_MIN, TEMP_MAX)) + 6}
+              x={ceilLabelX}
               y={MARGIN.top + plotH - 8}
-              textAnchor={nearRight(xOf(clamp(hot.ceiling_c, TEMP_MIN, TEMP_MAX))) ? "end" : "start"}
+              transform={`rotate(-90 ${ceilLabelX} ${MARGIN.top + plotH - 8})`}
+              textAnchor="start"
               fill="var(--down)"
+              stroke="var(--panel)"
+              strokeWidth={4}
+              paintOrder="stroke"
               fontSize={14}
               fontFamily="var(--fm)"
             >
-              Safety: full speed
+              Full speed
             </text>
           </>
         )}
@@ -337,16 +354,6 @@ export function FanCurveEditor({
           fill="color-mix(in srgb, var(--warn) 16%, transparent)"
         />
         <line x1={hotLeft} x2={hotLeft} y1={MARGIN.top} y2={MARGIN.top + plotH} stroke="var(--warn)" strokeDasharray="4 4" />
-        <text
-          x={nearRight(hotLeft) ? hotLeft - 6 : hotLeft + 6}
-          y={MARGIN.top + 16}
-          textAnchor={nearRight(hotLeft) ? "end" : "start"}
-          fill="var(--warn)"
-          fontSize={14}
-          fontFamily="var(--fm)"
-        >
-          {hotLabel}
-        </text>
         {/* The hot line's handle: drag it, or use the arrow keys. */}
         <rect
           x={hotLeft - 7}
@@ -433,6 +440,21 @@ export function FanCurveEditor({
             />
           );
         })}
+        {/* Drawn last, over the curve, with a halo; it never takes the pointer. */}
+        <text
+          x={hotPlace.x}
+          y={MARGIN.top + 16}
+          textAnchor={hotPlace.anchor}
+          fill="var(--warn)"
+          stroke="var(--panel)"
+          strokeWidth={4}
+          paintOrder="stroke"
+          fontSize={14}
+          fontFamily="var(--fm)"
+          pointerEvents="none"
+        >
+          {hotShort}
+        </text>
       </svg>
     </div>
   );

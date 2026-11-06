@@ -4242,15 +4242,19 @@ button.chip:hover {
   font-size: var(--t14);
 }
 
-/* The Fixed header's compact "don't exceed" control inside the floor note, on its
-   own line under the note inside the same box, so it adds no new row. */
-.hot-inline {
+/* The compact "don't exceed" control (#130): the words, the figure and its state
+   wrap as one group, never apart. In the Fixed header's floor note it takes its
+   own line under the note, inside the same box, so it adds no new row. */
+.hot-controls {
   display: inline-flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   gap: var(--s2);
-  margin-top: var(--s1);
-  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.rule > .hot-controls {
+  display: flex;
 }
 
 .rule-warn {
