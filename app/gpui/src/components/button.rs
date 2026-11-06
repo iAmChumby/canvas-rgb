@@ -53,33 +53,52 @@ fn colors(t: &Theme, variant: Variant, disabled: bool) -> (Rgba, Rgba, Rgba) {
     }
 }
 
-/// The hardware skirt (`hardware.css` `box-shadow: 0 2px 0 var(--skirt)`):
-/// a 2 px band below the key's face that follows the key's own bottom
-/// corners. GPUI 0.2.2's box-shadow paints nothing on this build (measured
-/// in #204), so the band is drawn: a rect from the face's bottom edge to
-/// 2 px below it, with only the bottom corners rounded, at the key's
-/// radius. #204 G8: the old flat full-width 3 px strip ignored the radius
-/// (square corners on every key, measured at 1440/390).
-pub fn skirt_strip_r(color: Rgba, radius: f32) -> impl IntoElement {
+/// A key drawn as two stacked rounded rectangles (#204 G8-r3): an outer
+/// skirt-coloured rect with the full radius, 2 px taller than the key, and
+/// the key's face on top, 2 px shorter at the bottom. The skirt then follows
+/// the curve exactly. A 2 px tall strip cannot: GPUI clamps a radius to
+/// half the rect's height, so the corners came out square and the band
+/// measured wider than the key body (Save skirt 1189-1267 against the body
+/// 1192-1264, 1 px high, at 1440).
+pub fn skirt_layers(
+    skirt_color: Rgba,
+    radius: f32,
+    height: f32,
+    face_bg: Rgba,
+    face_border: Rgba,
+) -> impl IntoElement {
     let corner = gpui::AbsoluteLength::Pixels(px(radius));
-    let zero = gpui::AbsoluteLength::Pixels(px(0.0));
-    let mut el = div()
+    let skirt = div()
+        .w_full()
+        .h(px(height + 2.0))
+        .bg(skirt_color);
+    let mut skirt = skirt;
+    skirt.style().corner_radii.top_left = Some(corner);
+    skirt.style().corner_radii.top_right = Some(corner);
+    skirt.style().corner_radii.bottom_right = Some(corner);
+    skirt.style().corner_radii.bottom_left = Some(corner);
+    let face = div()
         .absolute()
+        .top_0()
         .left_0()
         .right_0()
-        .bottom(px(-2.0))
-        .h(px(2.0))
-        .bg(color);
-    el.style().corner_radii.top_left = Some(zero);
-    el.style().corner_radii.top_right = Some(zero);
-    el.style().corner_radii.bottom_right = Some(corner);
-    el.style().corner_radii.bottom_left = Some(corner);
-    el
-}
-
-/// The skirt at the button radius (`--r-md`, 10 px).
-pub fn skirt_strip(color: Rgba) -> impl IntoElement {
-    skirt_strip_r(color, 10.0)
+        .h(px(height))
+        .border_1()
+        .border_color(face_border)
+        .bg(face_bg);
+    let mut face = face;
+    face.style().corner_radii.top_left = Some(corner);
+    face.style().corner_radii.top_right = Some(corner);
+    face.style().corner_radii.bottom_right = Some(corner);
+    face.style().corner_radii.bottom_left = Some(corner);
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .right_0()
+        .h(px(height + 2.0))
+        .child(skirt)
+        .child(face)
 }
 
 fn base(
@@ -94,6 +113,7 @@ fn base(
         Variant::Primary => t.live_skirt(),
         _ => t.skirt(),
     };
+    let key_h = if small { 28.0 } else { 32.0 };
     let el = div()
         .id(gpui::SharedString::from(id.to_string()))
         .relative()
@@ -101,20 +121,19 @@ fn base(
         .items_center()
         .justify_center()
         .gap(px(6.0))
-        .r_md()
-        .border_1()
-        .border_color(border)
-        .bg(bg)
         .text_color(fg)
         .text_sm()
         .font_weight(gpui::FontWeight::MEDIUM)
         .font_family(crate::fonts::UI_FAMILY);
     // React `hardware.css`: `.btn-ghost{box-shadow:none}` — a ghost key has no
     // skirt; a disabled key loses it too (`.btn:disabled{box-shadow:none}`).
+    // A skirted key carries no bg/border of its own: the face layer in
+    // `skirt_layers` draws both, so the parent stays transparent over the
+    // skirt's bottom 2 px.
     let el = if disabled || variant == Variant::Ghost {
-        el
+        el.r_md().border_1().border_color(border).bg(bg)
     } else {
-        el.child(skirt_strip(skirt_color))
+        el.child(skirt_layers(skirt_color, 10.0, key_h, bg, border))
     };
     if small {
         el.h(px(28.0)).px(px(10.0))
@@ -262,22 +281,24 @@ pub fn icon_button(
         .items_center()
         .justify_center()
         .size(px(size))
-        .r_md()
-        .text_color(Theme::color(t.dim))
-        .child(
-            gpui::svg()
-                .path(path)
-                .size(px(16.0))
-                .text_color(Theme::color(t.dim)),
-        );
+        .text_color(Theme::color(t.dim));
     let el = if bordered {
-        el.border_1()
-            .border_color(Theme::color(t.line_2))
-            .bg(Theme::color(t.raised))
-            .child(skirt_strip(t.skirt()))
+        el.child(skirt_layers(
+            t.skirt(),
+            10.0,
+            size,
+            Theme::color(t.raised),
+            Theme::color(t.line_2),
+        ))
     } else {
-        el
+        el.r_md()
     };
+    let el = el.child(
+        gpui::svg()
+            .path(path)
+            .size(px(16.0))
+            .text_color(Theme::color(t.dim)),
+    );
     if disabled {
         el.opacity(0.4)
     } else {

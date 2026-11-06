@@ -66,21 +66,23 @@ pub fn select(
         .h(px(32.0))
         .pl_3()
         .pr(px(10.0))
-        .r_md()
-        .border_1()
-        .border_color(if open {
-            t.live()
-        } else {
-            Theme::color(t.line_2)
-        })
-        .bg(Theme::color(t.raised))
         .text_color(Theme::color(t.ink))
         .text_sm()
         .font_weight(gpui::FontWeight::MEDIUM)
         .font_family(crate::fonts::UI_FAMILY)
         .cursor_pointer()
         // hardware.css `.select-trigger`: a key on its 2 px skirt.
-        .child(crate::components::button::skirt_strip(t.skirt()))
+        .child(crate::components::button::skirt_layers(
+            t.skirt(),
+            10.0,
+            32.0,
+            Theme::color(t.raised),
+            if open {
+                t.live()
+            } else {
+                Theme::color(t.line_2)
+            },
+        ))
         .child(value_grid)
         .child(
             // React Select.tsx:219: CaretDown size 14 bold.

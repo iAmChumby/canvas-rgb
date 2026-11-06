@@ -65,28 +65,30 @@ pub fn segmented(
             .relative()
             .flex()
             .items_center()
-            .gap(px(4.0))
+            .gap(px(6.0))
             .h(px(26.0))
             .px(px(10.0))
-            .r_sm()
             .text_sm()
             .font_family(family)
-            .font_weight(gpui::FontWeight::MEDIUM)
-            .child(dot)
-            .child(label.to_string());
+            .font_weight(gpui::FontWeight::MEDIUM);
         let cell = if is_selected {
             // hardware.css `.seg-thumb`: a raised key in the well, inset
-            // `line-2` edge plus the 2 px skirt under it.
-            cell.bg(Theme::color(t.raised))
-                .text_color(Theme::color(t.ink))
-                .border_1()
-                .border_color(Theme::color(t.line_2))
-                // The skirt follows the thumb's radius: hardware.css
-                // `.seg-thumb{border-radius:calc(var(--r-md) - 3px)}` = 7 px.
-                .child(crate::components::button::skirt_strip_r(t.skirt(), 7.0))
+            // `line-2` edge plus the 2 px skirt under it. The skirt follows
+            // the thumb's radius: `.seg-thumb{border-radius:calc(var(--r-md)
+            // - 3px)}` = 7 px.
+            cell.text_color(Theme::color(t.ink)).child(
+                crate::components::button::skirt_layers(
+                    t.skirt(),
+                    7.0,
+                    26.0,
+                    Theme::color(t.raised),
+                    Theme::color(t.line_2),
+                ),
+            )
         } else {
-            cell.text_color(Theme::color(t.dim))
+            cell.r_sm().text_color(Theme::color(t.dim))
         };
+        let cell = cell.child(dot).child(label.to_string());
         row = row.child(
             cell
                 .cursor_pointer()

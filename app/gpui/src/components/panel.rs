@@ -159,15 +159,16 @@ pub fn field(
             // (`--ink`), not dim (#204 G8, measured in both themes).
             div()
                 .flex_1()
-                .text_sm()
+                // React `.field-label` inherits the body 15 px (`--t15`,
+                // `app.css:23`); `text_sm()` (14 px) drew Source 46 against
+                // 50 and Decimals 58 against 65 (#204 G8-r3).
+                .text_size(px(15.0))
                 .font_family(crate::fonts::UI_FAMILY)
                 .text_color(Theme::color(t.ink))
-                // React's label box measures ~22 px at 14 px, GPUI's ~20
-                // with the 1.45 cascade; the drift is what put the 1440
-                // card bottom 3 px up and the wells 4 px high (#204 G8).
-                // (In the row form the control still sets the 48 min-height,
-                // so this is height-neutral there.)
-                .line_height(gpui::relative(1.6))
+                // The 15 px body at line-height 1.45 is a 21.75 px box, the
+                // same box React's label takes (the G8 1.6 at 14 px was
+                // 22.4 and grew every wide field by 0.65 px).
+                .line_height(gpui::relative(1.45))
                 .child(label.to_string()),
         )
         .child(
@@ -205,20 +206,15 @@ pub fn field_stack(
     } else {
         el.border_b_1().border_color(Theme::color(t.line))
     };
-    // The stacked label is the same `.field-label`: ink, not dim. Its
-    // line-height is the G8 1.6 in the wide grid only: in React the label
-    // inherits the body 15 px × 1.45 = 21.75 px box, and the G8 22.4 px box
-    // grows every phone field by 0.65 px, which — on top of the 1.45 title
-    // (see `tracked_title`) — put the 390 card bottom 8 px low (#204).
+    // The stacked label is the same `.field-label`: ink, not dim, 15 px at
+    // the body line-height 1.45 (a 21.75 px box in both the wide grid and
+    // the phone).
+    let _ = wide;
     let label_el = div()
-        .text_sm()
+        .text_size(px(15.0))
         .font_family(crate::fonts::UI_FAMILY)
-        .text_color(Theme::color(t.ink));
-    let label_el = if wide {
-        label_el.line_height(gpui::relative(1.6))
-    } else {
-        label_el.line_height(px(21.75))
-    };
+        .text_color(Theme::color(t.ink))
+        .line_height(gpui::relative(1.45));
     el.child(label_el.child(label.to_string()))
         .child(
             div()

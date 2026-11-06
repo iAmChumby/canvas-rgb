@@ -8,7 +8,7 @@
 
   - checks both images are exactly WxH (a pair that is not is a FAIL),
   - computes the per-pixel difference (a pixel differs when any channel
-    differs by more than -Threshold, default 12; -Strict uses 6 and lets
+    differs by more than -Threshold, default 6; -Strict uses 6 and lets
     1 px hot cells form boxes),
   - writes .build/ui-capture/diff/<view>-<w>x<h>-<theme>.png: the React shot
     dimmed, with differing pixels painted magenta and the bounding boxes of
@@ -48,8 +48,8 @@ param(
     # Print edge positions along this row of -OnlyPair.
     [int]$Row = -1,
     # A pixel differs when any channel differs by more than this. Default
-    # 12 (#204 G8: the old 24 missed the 1 px rail border, 16 apart).
-    [int]$Threshold = 12,
+    # 6 (#204 G8-r3: the old 12 missed the dark rail border, off by 6-8).
+    [int]$Threshold = 6,
     # Strict: threshold 6, and a 12 px cell with any differing pixel is
     # hot (1 px hot cells allowed), so low-contrast structure still boxes.
     [switch]$Strict
@@ -71,7 +71,7 @@ using System.Drawing;
 using System.Drawing.Imaging;
 
 public static class PairDiff {
-    public static int Threshold = 12;
+    public static int Threshold = 6;
     public static bool Strict = false;
     public const int Grid = 12;
 

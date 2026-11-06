@@ -440,28 +440,35 @@ impl DisplaysView {
         } else {
             "not connected".to_string()
         };
+        // `.rd-display-head` (gap s3 = 12) holds the state and the keys;
+        // `.rd-display-actions` inside it takes s2 (8) between its own keys.
         let actions = div()
             .flex()
             .items_center()
-            .gap_2()
+            .gap_3()
             .child(state_dot(
                 t,
                 if blocked_by.is_some() { "warn" } else if row.info.connected { "ok" } else { "down" },
                 &dot_words,
             ))
-            .child(save_btn)
-            .child(stop_btn);
-        let actions = if dirty {
-            actions.child(
+            .child(
                 div()
-                    .text_sm()
-                    .font_family(crate::fonts::UI_FAMILY)
-                    .text_color(Theme::color(t.mute))
-                    .child("Unsaved"),
-            )
-        } else {
-            actions
-        };
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(save_btn)
+                    .child(stop_btn)
+                    .child(if dirty {
+                        div()
+                            .text_sm()
+                            .font_family(crate::fonts::UI_FAMILY)
+                            .text_color(Theme::color(t.mute))
+                            .child("Unsaved")
+                            .into_any_element()
+                    } else {
+                        div().into_any_element()
+                    }),
+            );
 
         // The digit readout.
         let (cells, dot, fits) = display_digits(preview, row.info.digits, draft.decimals, temperature);
@@ -571,7 +578,10 @@ impl DisplaysView {
         let now = div()
             .flex()
             .items_baseline()
-            .gap_1()
+            // `.readout-now-label` carries `margin-right: var(--s1)` (4) on
+            // top of its tracked width; the measured NOW-to-text gap is
+            // 10 px in React against 6 in GPUI (#204 G8-r3).
+            .gap_2()
             .mt_3()
             .child(crate::components::panel::tracked_text(
                 "NOW",

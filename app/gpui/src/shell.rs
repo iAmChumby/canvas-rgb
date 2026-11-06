@@ -762,16 +762,18 @@ impl Shell {
                                 .justify_center()
                                 .gap(px(6.0))
                                 .h(px(32.0))
-                                .r_md()
-                                .border_1()
-                                .border_color(Theme::color(t.line_2))
-                                .bg(Theme::color(t.raised))
                                 .text_sm()
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .font_family(crate::fonts::UI_FAMILY)
                                 .text_color(Theme::color(t.ink))
-                                // A plain `.btn` key: the hardware skirt (#204 G8).
-                                .child(crate::components::button::skirt_strip(t.skirt()))
+                                // A plain `.btn` key: the hardware skirt (#204 G8-r3).
+                                .child(crate::components::button::skirt_layers(
+                                    t.skirt(),
+                                    10.0,
+                                    32.0,
+                                    Theme::color(t.raised),
+                                    Theme::color(t.line_2),
+                                ))
                                 .child(div().size(px(5.0)).rounded_full().bg(if paused { Theme::color(t.warn) } else { Theme::color(t.dot) }))
                                 // React's label is a Swap of "Pause"/"Resume":
                                 // the cell keeps "Resume"'s width and the
@@ -1113,12 +1115,14 @@ impl Shell {
             };
             if active {
                 // The active tile sits behind the icon and name (React
-                // `::before` at z-index −1).
+                // `::before` at z-index −1): its top is 56 − 18 − 2 − 16 =
+                // 20 px from the link top (#204 G8-r3: at 11 it touched the
+                // marker and measured 6 px high at 390).
                 cell = cell
                     .child(
                         div()
                             .absolute()
-                            .top(px(11.0))
+                            .top(px(20.0))
                             .bottom(px(0.0))
                             .left_0()
                             .right_0()
@@ -1141,6 +1145,7 @@ impl Shell {
                 cell = cell.child(
                     div()
                         .text_sm()
+                        .line_height(px(16.0))
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .font_family(crate::fonts::UI_FAMILY)
                         .text_color(Theme::color(t.ink))
@@ -1206,10 +1211,14 @@ impl Shell {
         }
         // React `.rd-title`: the h1 and the mono context share one flex row
         // with a 12 px gap (the context sits inside the title slot).
+        // `.rd-title` carries `margin-right: var(--s2)` (8 px) so the title
+        // never touches the mark (#204 G8-r3: without it the check icon sat
+        // 10 px left at 1440).
         let mut title_row = div()
             .flex()
             .items_baseline()
             .gap_3()
+            .mr_2()
             .child(
                 div()
                     .text_xl()
@@ -1267,10 +1276,13 @@ impl Shell {
             );
         }
         // The mark: icon always, words at 1280 px and up. React `.strip-mark`
-        // has no gap between the icon and the words (`font: inherit`, 14 px).
+        // has no flex gap (`font: inherit`, 14 px); the measured glyph-to-word
+        // gap is 6 px in React against 2 in GPUI (#204 G8-r3), so the row
+        // carries the 4 px difference.
         let mark_row = div()
             .flex()
             .items_center()
+            .gap(px(4.0))
             .child(gpui::svg().path(mark_icon).size(px(14.0)).text_color(tone_color));
         let mark_row = if self.width >= 1280.0 {
             mark_row.child(
@@ -1538,14 +1550,18 @@ impl Render for Shell {
             div()
                 .flex()
                 .size_full()
-                // React `.rail{border-right:1px solid var(--line)}` (the 1 px
-                // at x199, dark 34,36,39 / light 216,217,218 at 1280+).
+                // React `.rail-col{border-right:1px solid var(--line);
+                // background:var(--panel)}`: the 1 px line sits over the
+                // panel, dark 34,36,39 / light 216,217,218. The wrapper
+                // carries the panel background too, or the line composits
+                // over the g1 ground (28,29,31 / 197,199,204) (#204 G8-r3).
                 .child(
                     div()
                         .w(px(64.0))
                         .h_full()
                         .border_r_1()
                         .border_color(Theme::color(t.line))
+                        .bg(Theme::color(t.panel))
                         .child(self.rail(true, window, cx)),
                 )
                 .child(main_col)
@@ -1559,6 +1575,7 @@ impl Render for Shell {
                         .h_full()
                         .border_r_1()
                         .border_color(Theme::color(t.line))
+                        .bg(Theme::color(t.panel))
                         .child(self.rail(false, window, cx)),
                 )
                 .child(main_col)

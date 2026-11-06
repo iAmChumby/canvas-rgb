@@ -130,6 +130,7 @@ impl AssetSource for IconAssets {
                         "Pause" => include_str!("../assets/icons/Pause-fill.svg"),
                         "Play" => include_str!("../assets/icons/Play-fill.svg"),
                         "Warning" => include_str!("../assets/icons/Warning-fill.svg"),
+                        "CaretDown" => include_str!("../assets/icons/CaretDown-fill.svg"),
                         _ => icon_svg(base).unwrap_or(""),
                     };
                     Some(Cow::Borrowed(svg.as_bytes()))
@@ -164,6 +165,10 @@ impl AssetSource for IconAssets {
                         "Pause" => include_str!("../assets/icons/Pause-bold.svg"),
                         "Play" => include_str!("../assets/icons/Play-bold.svg"),
                         "Warning" => include_str!("../assets/icons/Warning-bold.svg"),
+                        // #204 G8-r3: CaretDown was missing here, so the
+                        // source trigger drew the regular caret instead of
+                        // the bold one React uses (`Select.tsx:219`).
+                        "CaretDown" => include_str!("../assets/icons/CaretDown-bold.svg"),
                         _ => icon_svg(base).unwrap_or(""),
                     };
                     Some(Cow::Borrowed(svg.as_bytes()))
