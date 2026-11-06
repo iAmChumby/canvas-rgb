@@ -302,8 +302,9 @@ export function EffectEditor({
     };
   }, [source, valuesKey, runPreview]);
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
       mounted.current = false;
       if (previewTimer.current) clearTimeout(previewTimer.current);
       if (retryTimer.current) clearTimeout(retryTimer.current);
@@ -312,9 +313,8 @@ export function EffectEditor({
       // An editor that goes away without the prompt being answered leaves no held page change.
       setNavigationGuard(null);
       cancelNavigation();
-    },
-    [],
-  );
+    };
+  }, []);
 
   const responseThumb = useMemo(
     () => (preview ? thumbFromBase64(preview.thumbnail) : null),

@@ -94,7 +94,7 @@ import { stackThumbnailBytes } from "@/lib/stackFrame";
 const BASE = "/api/v1";
 const DEMO_LAYOUTS_KEY = "canvas-rgb.demo-layouts";
 const DEMO_ONBOARDED_KEY = "canvas-rgb.demo-onboarded";
-const APP_VERSION = "0.8.3";
+const APP_VERSION = "0.8.4";
 const SCHEMA_VERSION = 1;
 
 function scenario(): Set<string> {

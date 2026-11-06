@@ -216,7 +216,7 @@ export const EFFECTS: DemoEffect[] = [
     [
       { key: "color_low", label: "Low Color", kind: colorKind("#6000fc") },
       { key: "color_high", label: "High Color", kind: colorKind("#00ff9c") },
-      { key: "sensitivity", label: "Sensitivity", kind: numberKind(0, 500, 1, 150) },
+      { key: "sensitivity", label: "Sensitivity", kind: numberKind(0, 500, 1, 100) },
       { key: "decay", label: "Decay", kind: numberKind(0, 100, 1, 40) },
       { key: "peak_hold", label: "Peak Hold", kind: numberKind(0, 100, 1, 30) },
     ],

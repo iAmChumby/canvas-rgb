@@ -125,8 +125,64 @@ pub fn token_path() -> PathBuf {
 }
 
 pub fn api_base_url() -> String {
-    format!("http://{API_HOST}:{API_PORT}")
+    format!("http://{API_HOST}:{}", api_port())
 }
+
+/// Debug builds only: a test API port for a daemon on the fakes (#199), so it never collides
+/// with the owner's real daemon on [`API_PORT`]. Release builds ignore it.
+pub const TEST_API_PORT_ENV: &str = "CANVAS_RGB_TEST_API_PORT";
+
+/// The test port from [`TEST_API_PORT_ENV`], in debug builds only, when it is a valid non-zero
+/// port other than [`API_PORT`]. Always `None` in a release build.
+pub fn debug_test_port() -> Option<u16> {
+    #[cfg(debug_assertions)]
+    {
+        parse_test_port(std::env::var(TEST_API_PORT_ENV).ok().as_deref())
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        None
+    }
+}
+
+/// Reads a test port value: a non-zero `u16` other than [`API_PORT`].
+pub fn parse_test_port(value: Option<&str>) -> Option<u16> {
+    value
+        .and_then(|v| v.trim().parse::<u16>().ok())
+        .filter(|p| *p != 0 && *p != API_PORT)
+}
+
+/// The port clients connect to: [`API_PORT`], or the debug test port when one is set.
+pub fn api_port() -> u16 {
+    port_with(debug_test_port())
+}
+
+/// [`api_port`] for a given test port (pure, so both build kinds are testable).
+pub fn port_with(test_port: Option<u16>) -> u16 {
+    test_port.unwrap_or(API_PORT)
+}
+
+/// The Host-header guard (G9, DNS rebinding): [`API_ALLOWED_HOSTS`], plus `127.0.0.1:<p>` and
+/// `localhost:<p>` for the debug test port only. A release build accepts 9430 only.
+pub fn api_host_allowed(host: &str) -> bool {
+    host_allowed_with(host, debug_test_port())
+}
+
+/// [`api_host_allowed`] for a given test port (pure, so both build kinds are testable).
+pub fn host_allowed_with(host: &str, test_port: Option<u16>) -> bool {
+    if API_ALLOWED_HOSTS.contains(&host) {
+        return true;
+    }
+    match test_port {
+        Some(p) => host == format!("127.0.0.1:{p}") || host == format!("localhost:{p}"),
+        None => false,
+    }
+}
+
+/// The experimental update channel's feed (#203).
+pub const EXPERIMENTAL_FEED_URL: &str =
+    "https://github.com/iAmChumby/canvas-rgb/releases/download/experimental/latest.json";
+
 
 /// The 11 native effects, by stable id (spec, effects line 1).
 pub const EFFECT_IDS: [&str; 11] = [
@@ -142,3 +198,49 @@ pub const EFFECT_IDS: [&str; 11] = [
     "screen_ambience",
     "audio_spectrum",
 ];
+
+#[cfg(test)]
+mod api_port_tests {
+    use super::*;
+
+    #[test]
+    fn without_a_test_port_only_9430_is_allowed() {
+        assert_eq!(port_with(None), 9430);
+        assert!(host_allowed_with("127.0.0.1:9430", None));
+        assert!(host_allowed_with("localhost:9430", None));
+        assert!(!host_allowed_with("127.0.0.1:19430", None));
+        assert!(!host_allowed_with("evil.example:9430", None));
+    }
+
+    #[test]
+    fn a_test_port_adds_only_its_own_loopback_hosts() {
+        assert_eq!(port_with(Some(19430)), 19430);
+        assert!(host_allowed_with("127.0.0.1:19430", Some(19430)));
+        assert!(host_allowed_with("localhost:19430", Some(19430)));
+        assert!(host_allowed_with("127.0.0.1:9430", Some(19430)));
+        assert!(!host_allowed_with("127.0.0.1:19431", Some(19430)));
+        assert!(!host_allowed_with("evil.example:19430", Some(19430)));
+    }
+
+    #[test]
+    fn a_bad_test_port_value_is_ignored() {
+        assert_eq!(parse_test_port(None), None);
+        assert_eq!(parse_test_port(Some("")), None);
+        assert_eq!(parse_test_port(Some("0")), None);
+        assert_eq!(parse_test_port(Some("9430")), None);
+        assert_eq!(parse_test_port(Some("70000")), None);
+        assert_eq!(parse_test_port(Some("abc")), None);
+        assert_eq!(parse_test_port(Some(" 19430 ")), Some(19430));
+    }
+
+    /// Runs in release test builds (the `rust-release` CI job): the env var is ignored.
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn a_release_build_ignores_the_test_port() {
+        std::env::set_var(TEST_API_PORT_ENV, "19430");
+        assert_eq!(debug_test_port(), None);
+        assert_eq!(api_port(), 9430);
+        assert!(!api_host_allowed("127.0.0.1:19430"));
+        std::env::remove_var(TEST_API_PORT_ENV);
+    }
+}

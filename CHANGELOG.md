@@ -9,6 +9,12 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Added
 
 - Fans: set how hot is too hot for your CPU, GPU and board sensors. The curve chart draws a "Don't exceed" line (74 °C for a 7800X3D, worked out from the part's rated maximum), which you can drag or type; "Reset to automatic" puts it back. Past the fixed safety ceiling (84 °C on the 7800X3D) every manual header on that sensor runs at full speed, whatever the curve says. (#130)
+## [0.8.4] - 2026-11-06
+
+### Fixed
+
+- Effects and Peripherals: a failed change no longer disappears when a later read succeeds. The message that the change did not reach the effect or the device stays on screen until the next attempt, and each peripheral keeps its own message, so one device's read cannot hide another device's failure. Edits made while a device is being read are no longer dropped when that read lands, and a change you started on one device can no longer be sent to another device you switched to. (#156)
+- Audio Spectrum is no longer dim and stuck at the bottom of your layout: at normal music volume the bars now rise about two thirds of the way up, so every light joins in, not just the keyboard. The default Sensitivity is now 100; an effect you saved with a higher Sensitivity keeps it and will reach the top on loud music. The log now names the audio format instead of saying "unknown". (#188)
 
 ## [0.8.3] - 2026-11-05
 
@@ -205,7 +211,8 @@ The first release.
 - Settings for the Attack Shark X6 mouse and the 8BitDo Ultimate 2 controller.
 - The editor, the tray app, the `canvas-rgb` CLI and the Windows installer.
 
-[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.3...HEAD
+[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.4...HEAD
+[0.8.4]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.0...v0.8.1
