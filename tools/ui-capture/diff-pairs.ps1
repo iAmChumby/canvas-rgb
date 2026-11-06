@@ -8,7 +8,8 @@
 
   - checks both images are exactly WxH (a pair that is not is a FAIL),
   - computes the per-pixel difference (a pixel differs when any channel
-    differs by more than 24),
+    differs by more than -Threshold, default 12; -Strict uses 6 and lets
+    1 px hot cells form boxes),
   - writes .build/ui-capture/diff/<view>-<w>x<h>-<theme>.png: the React shot
     dimmed, with differing pixels painted magenta and the bounding boxes of
     differing clusters outlined,
@@ -45,7 +46,13 @@ param(
     # Print edge positions along this column of -OnlyPair.
     [int]$Column = -1,
     # Print edge positions along this row of -OnlyPair.
-    [int]$Row = -1
+    [int]$Row = -1,
+    # A pixel differs when any channel differs by more than this. Default
+    # 12 (#204 G8: the old 24 missed the 1 px rail border, 16 apart).
+    [int]$Threshold = 12,
+    # Strict: threshold 6, and a 12 px cell with any differing pixel is
+    # hot (1 px hot cells allowed), so low-contrast structure still boxes.
+    [switch]$Strict
 )
 
 $ErrorActionPreference = 'Stop'
@@ -55,6 +62,7 @@ $diffDir = Join-Path $capDir 'diff'
 if (-not (Test-Path $capDir)) { throw "no captures in $capDir" }
 New-Item -ItemType Directory -Force -Path $diffDir | Out-Null
 
+if ($Strict) { $Threshold = 6 }
 Add-Type -AssemblyName System.Drawing
 Add-Type -ReferencedAssemblies System.Drawing @"
 using System;
@@ -63,7 +71,8 @@ using System.Drawing;
 using System.Drawing.Imaging;
 
 public static class PairDiff {
-    public const int Threshold = 24;
+    public static int Threshold = 12;
+    public static bool Strict = false;
     public const int Grid = 12;
 
     static bool Differs(Color a, Color b) {
@@ -122,10 +131,10 @@ public static class PairDiff {
                     }
                 }
             }
-            // Hot cells (>3% differ), merged by 4-adjacency flood fill.
+            // Hot cells (>3% differ; strict: any differing pixel), merged by 4-adjacency flood fill.
             bool[] hot = new bool[cols * rows];
             for (int i = 0; i < hot.Length; i++)
-                hot[i] = cellTotal[i] > 0 && (double)cellDiff[i] / cellTotal[i] > 0.03;
+                hot[i] = cellTotal[i] > 0 && (Strict ? cellDiff[i] > 0 : (double)cellDiff[i] / cellTotal[i] > 0.03);
             bool[] seen = new bool[hot.Length];
             var queue = new Queue<int>();
             for (int i = 0; i < hot.Length; i++) {
@@ -244,6 +253,7 @@ foreach ($rf in $reactFiles) {
     }
 
     if ($Region -or $Column -ge 0 -or $Row -ge 0) {
+        [PairDiff]::Threshold = $Threshold; [PairDiff]::Strict = [bool]$Strict
         if ($Region) {
             $p = $Region -split ','
             if ($p.Count -ne 4) { throw "-Region must be x,y,w,h" }
@@ -256,6 +266,7 @@ foreach ($rf in $reactFiles) {
 
     $outFile = Join-Path $diffDir "$pairName.png"
     $differing = 0; $total = 0; $boxes = $null; $err = $null
+    [PairDiff]::Threshold = $Threshold; [PairDiff]::Strict = [bool]$Strict
     [PairDiff]::DiffPair($rf.FullName, $gpuiFile, $outFile, [ref]$differing, [ref]$total, [ref]$boxes, [ref]$err)
     if ($err) {
         $line = "$pairName FAIL $err"

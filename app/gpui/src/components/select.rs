@@ -83,9 +83,11 @@ pub fn select(
         .child(crate::components::button::skirt_strip(t.skirt()))
         .child(value_grid)
         .child(
+            // React Select.tsx:219: CaretDown size 14 bold.
             gpui::svg()
                 .path("icons/CaretDown-bold.svg")
-                .size_4()
+                .size(px(14.0))
+                .flex_none()
                 .text_color(Theme::color(t.mute)),
         )
         .on_click(move |_, window, cx| toggle(window, cx));

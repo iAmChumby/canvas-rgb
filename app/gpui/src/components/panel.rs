@@ -34,6 +34,10 @@ pub fn tracked_text(
         .flex_wrap()
         .items_center()
         .text_size(px(font_size))
+        // React titles/captions inherit the body 1.45; without this GPUI
+        // lays the tracked lines out at its 1.618 default, which put the
+        // 390 head 6 px high (#204 G8, measured).
+        .line_height(gpui::relative(1.45))
         .font_weight(weight)
         .font_family(family)
         .text_color(color);
@@ -122,11 +126,17 @@ pub fn field(
     };
     el
         .child(
+            // React `.field-label` sets no colour: it inherits the body ink
+            // (`--ink`), not dim (#204 G8, measured in both themes).
             div()
                 .flex_1()
                 .text_sm()
                 .font_family(crate::fonts::UI_FAMILY)
-                .text_color(Theme::color(t.dim))
+                .text_color(Theme::color(t.ink))
+                // React's label box measures ~22 px at 14 px, GPUI's ~20
+                // with the 1.45 cascade; the drift is what put the 1440
+                // card bottom 3 px up and the wells 4 px high (#204 G8).
+                .line_height(gpui::relative(1.6))
                 .child(label.to_string()),
         )
         .child(
@@ -166,10 +176,13 @@ pub fn field_stack(
     };
     el
         .child(
+            // The stacked label is the same `.field-label`: ink, not dim.
             div()
                 .text_sm()
                 .font_family(crate::fonts::UI_FAMILY)
-                .text_color(Theme::color(t.dim))
+                .text_color(Theme::color(t.ink))
+                // Same line-height as the row form (see above).
+                .line_height(gpui::relative(1.6))
                 .child(label.to_string()),
         )
         .child(

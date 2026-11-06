@@ -53,6 +53,13 @@ pub fn segmented(
             Theme::color(t.dot)
         };
         let dot = div().size(px(5.0)).rounded_full().bg(dot_color);
+        // React Segmented.tsx:129 wraps a label holding a digit in `.fig`
+        // (the mono figures face, tabular-nums): the Decimals "0"/"1".
+        let family = if label.chars().any(|c| c.is_ascii_digit()) {
+            crate::fonts::MONO_FAMILY
+        } else {
+            crate::fonts::UI_FAMILY
+        };
         let cell = div()
             .id(gpui::SharedString::from(format!("{id}-{value}")))
             .relative()
@@ -63,7 +70,7 @@ pub fn segmented(
             .px(px(10.0))
             .r_sm()
             .text_sm()
-            .font_family(crate::fonts::UI_FAMILY)
+            .font_family(family)
             .font_weight(gpui::FontWeight::MEDIUM)
             .child(dot)
             .child(label.to_string());
@@ -74,7 +81,9 @@ pub fn segmented(
                 .text_color(Theme::color(t.ink))
                 .border_1()
                 .border_color(Theme::color(t.line_2))
-                .child(crate::components::button::skirt_strip(t.skirt()))
+                // The skirt follows the thumb's radius: hardware.css
+                // `.seg-thumb{border-radius:calc(var(--r-md) - 3px)}` = 7 px.
+                .child(crate::components::button::skirt_strip_r(t.skirt(), 7.0))
         } else {
             cell.text_color(Theme::color(t.dim))
         };

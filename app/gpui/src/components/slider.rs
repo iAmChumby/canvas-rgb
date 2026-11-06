@@ -68,9 +68,11 @@ pub fn slider(
             window.paint_quad(gpui::fill(skirt_rect, skirt));
             window.paint_quad(gpui::fill(cap, raised));
             window.paint_quad(gpui::outline(cap, line_2, gpui::BorderStyle::default()));
+            // React `.slider-cap`: the live line is an 8x2 background image
+            // (`background-size: 8px 2px`), centred in the 14px cap.
             let line = Bounds {
-                origin: point(cap_cx - px(5.0), bounds.origin.y + px(14.0)),
-                size: size(px(10.0), px(2.0)),
+                origin: point(cap_cx - px(4.0), bounds.origin.y + px(14.0)),
+                size: size(px(8.0), px(2.0)),
             };
             window.paint_quad(gpui::fill(line, live));
         },

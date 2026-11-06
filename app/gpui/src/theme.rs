@@ -21,6 +21,10 @@ pub const LINE_HEIGHT: f32 = 1.45;
 /// corner goes through these names — the same names as the CSS tokens — and
 /// nowhere uses a generated suffix.
 pub trait TokenRadius: Styled {
+    /// The rail meter segment's 1 px radius (`app.css .rail-meter-seg`).
+    fn r_xs(self) -> Self {
+        token_radius(self, 1.0)
+    }
     fn r_sm(self) -> Self {
         token_radius(self, 8.0)
     }

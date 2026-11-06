@@ -53,20 +53,33 @@ fn colors(t: &Theme, variant: Variant, disabled: bool) -> (Rgba, Rgba, Rgba) {
     }
 }
 
-/// The hardware skirt as a solid 2 px strip below a key: GPUI 0.2.2's
-/// box-shadow paints nothing on this build (measured in #204: the strip under
-/// Pause lights is panel colour in GPUI, ink-at-0.22 in React), so the band
-/// is drawn instead. `bottom: -2` hangs it below the face exactly like the
-/// shadow did; it is clipped to the face's bottom corners' curve by the
-/// radius clamp.
-pub fn skirt_strip(color: Rgba) -> impl IntoElement {
-    div()
+/// The hardware skirt (`hardware.css` `box-shadow: 0 2px 0 var(--skirt)`):
+/// a 2 px band below the key's face that follows the key's own bottom
+/// corners. GPUI 0.2.2's box-shadow paints nothing on this build (measured
+/// in #204), so the band is drawn: a rect from the face's bottom edge to
+/// 2 px below it, with only the bottom corners rounded, at the key's
+/// radius. #204 G8: the old flat full-width 3 px strip ignored the radius
+/// (square corners on every key, measured at 1440/390).
+pub fn skirt_strip_r(color: Rgba, radius: f32) -> impl IntoElement {
+    let corner = gpui::AbsoluteLength::Pixels(px(radius));
+    let zero = gpui::AbsoluteLength::Pixels(px(0.0));
+    let mut el = div()
         .absolute()
         .left_0()
         .right_0()
         .bottom(px(-2.0))
-        .h(px(3.0))
-        .bg(color)
+        .h(px(2.0))
+        .bg(color);
+    el.style().corner_radii.top_left = Some(zero);
+    el.style().corner_radii.top_right = Some(zero);
+    el.style().corner_radii.bottom_right = Some(corner);
+    el.style().corner_radii.bottom_left = Some(corner);
+    el
+}
+
+/// The skirt at the button radius (`--r-md`, 10 px).
+pub fn skirt_strip(color: Rgba) -> impl IntoElement {
+    skirt_strip_r(color, 10.0)
 }
 
 fn base(
@@ -96,7 +109,13 @@ fn base(
         .text_sm()
         .font_weight(gpui::FontWeight::MEDIUM)
         .font_family(crate::fonts::UI_FAMILY);
-    let el = if disabled { el } else { el.child(skirt_strip(skirt_color)) };
+    // React `hardware.css`: `.btn-ghost{box-shadow:none}` — a ghost key has no
+    // skirt; a disabled key loses it too (`.btn:disabled{box-shadow:none}`).
+    let el = if disabled || variant == Variant::Ghost {
+        el
+    } else {
+        el.child(skirt_strip(skirt_color))
+    };
     if small {
         el.h(px(28.0)).px(px(10.0))
     } else {
@@ -160,7 +179,9 @@ pub fn button_icon(
         format!("icons/{icon}-{weight}.svg")
     };
     let (_, fg, _) = colors(t, variant, disabled);
-    let glyph = gpui::svg().path(path).size(px(icon_px)).text_color(fg);
+    // The glyph keeps its px size inside a flex row (React's svg has an
+    // intrinsic size and never shrinks under flex overflow).
+    let glyph = gpui::svg().path(path).size(px(icon_px)).flex_none().text_color(fg);
     let base_el = base(t, id, variant, disabled, small);
     // An empty label draws no gap after the icon (the phone strip pause is
     // the row's button with its words hidden).
@@ -171,6 +192,43 @@ pub fn button_icon(
     };
     // The icon takes the button's text colour, except primary where it is
     // on-accent; both are the same token here, so set it after building.
+    if disabled {
+        el
+    } else {
+        el.cursor_pointer().on_click(on_click)
+    }
+}
+
+/// A button with an icon and a label whose cell reserves `text_w` px for
+/// the text: React's `Swap` lays every label variant in one grid cell, so
+/// the key keeps the widest label's width and the visible label is centred
+/// in it (the strip's Pause lights / Resume lights). `text_w` is the widest
+/// label's measured width, so the key never resizes under the pointer.
+#[allow(clippy::too_many_arguments)]
+pub fn button_icon_wide(
+    t: &Theme,
+    id: &str,
+    label: &str,
+    text_w: f32,
+    variant: Variant,
+    disabled: bool,
+    small: bool,
+    icon: &str,
+    weight: &str,
+    icon_px: f32,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    let path = if weight.is_empty() {
+        format!("icons/{icon}.svg")
+    } else {
+        format!("icons/{icon}-{weight}.svg")
+    };
+    let (_, fg, _) = colors(t, variant, disabled);
+    let glyph = gpui::svg().path(path).size(px(icon_px)).flex_none().text_color(fg);
+    let base_el = base(t, id, variant, disabled, small);
+    let el = base_el
+        .child(glyph)
+        .child(div().w(px(text_w)).text_center().child(label.to_string()));
     if disabled {
         el
     } else {
