@@ -176,8 +176,8 @@ describe("rule 6 wiring: the pulse fires on the success path only (#187)", () =>
     expect(effectsView).toMatch(/useSuccessPulse/);
     const activate = /const activate = async[\s\S]*?\n  \};/.exec(effectsView)?.[0] ?? "";
     expect(activate).not.toBe("");
-    expect(activate).toMatch(/refreshAll\(\)[\s\S]*?\.fire\(\)/);
-    expect(activate).not.toMatch(/catch[\s\S]*?\.fire\(\)/);
+    expect(activate).toMatch(/refreshAll\(\)[\s\S]*?pulseApply/);
+    expect(activate).not.toMatch(/catch[\s\S]*?pulseApply/);
   });
 
   it("PresetStrip pulses the Save chip on save only, not on rename", () => {

@@ -317,7 +317,7 @@ describe("rule 2: a listbox closes back into its trigger (#187)", () => {
     vi.useFakeTimers();
     const realMM = window.matchMedia;
     const reducedMM = (query: string): MediaQueryList =>
-      ({ matches: true, media: query, addEventListener: () => {}, removeEventListener: () => {} }) as MediaQueryList;
+      ({ matches: true, media: query, addEventListener: () => {}, removeEventListener: () => {} }) as unknown as MediaQueryList;
     window.matchMedia = reducedMM;
     try {
       const { container } = render(

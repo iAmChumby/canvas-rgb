@@ -221,8 +221,8 @@ export function EffectsView() {
       // One pulse once the effect is on the lights (issue #187, rule 6): it
       // fires only here, after the daemon confirmed — never from `running`,
       // so it cannot pulse on mount or when `activeId` changes.
-      pulseApply.fire();
-      pulseApplySheet.fire();
+      pulseApply();
+      pulseApplySheet();
     } catch (e) {
       setError(messageOf(e));
     }

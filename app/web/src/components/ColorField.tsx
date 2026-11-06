@@ -41,32 +41,27 @@ export function ColorField({
   // static), and it is keyed by a wipe generation, not by the colour: while
   // a wipe runs, further changes update its target without remounting it, so
   // dragging in the picker does not replay the reveal on every intermediate
-  // hex. When the wipe ends the incoming colour is promoted to the base.
-  const [base, setBase] = useState(hex);
-  const [wiping, setWiping] = useState(false);
-  const [wipeId, setWipeId] = useState(0);
+  // hex. When the wipe ends the incoming colour is promoted to the base. The
+  // change bookkeeping runs while rendering (the Crossfade pattern, as in
+  // Popover/Select); only the promotion waits, in an effect.
+  const [wipe, setWipe] = useState({ base: hex, target: hex, wiping: false, wipeId: 0, lastHex: hex });
+  if (hex !== wipe.lastHex) {
+    if (hex === wipe.base) {
+      setWipe({ ...wipe, lastHex: hex, wiping: false });
+    } else if (!wipe.wiping) {
+      setWipe({ base: wipe.base, target: hex, lastHex: hex, wiping: true, wipeId: wipe.wipeId + 1 });
+    } else {
+      setWipe({ ...wipe, target: hex, lastHex: hex });
+    }
+  }
   useEffect(() => {
-    if (hex === base) {
-      if (wiping) {
-        setWiping(false);
-      }
-      return;
-    }
-    if (!wiping) {
-      setWipeId((id) => id + 1);
-      setWiping(true);
-    }
+    if (!wipe.wiping) return;
     const ms = motionOffNow() ? 0 : readCssMs("--dur", 180);
     const t = setTimeout(() => {
-      setBase(hex);
-      setWiping(false);
+      setWipe((s) => (s.wiping ? { ...s, base: s.target, wiping: false } : s));
     }, ms);
     return () => clearTimeout(t);
-    // `wiping` above only gates starting a new wipe generation; re-running
-    // the timer on a further change is the point (the target moves, the
-    // promotion waits for the newest colour).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hex]);
+  }, [wipe.wiping, wipe.target]);
 
   // The colour that is on screen now: what the picker commits when it closes.
   useEffect(() => {
@@ -98,7 +93,7 @@ export function ColorField({
         ref={swatchRef}
         type="button"
         className="color-swatch"
-        style={{ "--c": base } as CSSProperties}
+        style={{ "--c": wipe.base } as CSSProperties}
         aria-label={label}
         aria-haspopup="dialog"
         aria-expanded={open}
@@ -109,7 +104,7 @@ export function ColorField({
             overlay is keyed by the wipe generation, so a change replays the
             mask reveal from the swatch's centre — the base beneath is the
             previous colour until the wipe ends. */}
-        {wiping && <span key={wipeId} className="color-wipe" style={{ "--c": hex } as CSSProperties} data-hex={hex} aria-hidden="true" />}
+        {wipe.wiping && <span key={wipe.wipeId} className="color-wipe" style={{ "--c": hex } as CSSProperties} data-hex={hex} aria-hidden="true" />}
       </button>
       <span className="color-hex">{hex}</span>
       <Popover anchor={swatchRef} open={open} onClose={close} label={label} className="picker-pop">
