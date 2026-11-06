@@ -48,6 +48,8 @@ export const routes = {
   layout: (id: string) => `/api/v1/layouts/${encodeURIComponent(id)}`,
   layoutActive: "/api/v1/layouts/active",
   fans: "/api/v1/fans",
+  // PUT a HotLimits: the user's "don't exceed" temperatures, one per kind of source.
+  fanHot: "/api/v1/fans/hot",
   fanHeader: (h: string) => `/api/v1/fans/headers/${h}`,
   fanProfile: "/api/v1/fans/profile",
   // PUT a FanProfile; DELETE removes it (409 for the active or last profile).

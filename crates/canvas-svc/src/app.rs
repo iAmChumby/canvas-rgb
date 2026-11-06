@@ -113,7 +113,7 @@ pub fn install_dir() -> PathBuf {
 pub fn build_core(boot: &Boot, deps: Deps) -> Core {
     let home = boot.home();
     let now = Instant::now();
-    let (chip, chip_error, temps, file, confirmed) = if boot.secured() {
+    let (chip, chip_error, temps, file, confirmed, gpu_rated_max_c) = if boot.secured() {
         let hardware = hardware::open();
         let chip_path = paths::chip_path(home);
         let chip_state = if trusted_file(boot, &chip_path) {
@@ -140,7 +140,7 @@ pub fn build_core(boot: &Boot, deps: Deps) -> Core {
         } else {
             FansFile::default()
         };
-        (hardware.chip, hardware.chip_error, hardware.temps, file, chip_state.confirmed_map)
+        (hardware.chip, hardware.chip_error, hardware.temps, file, chip_state.confirmed_map, hardware.gpu_rated_max_c)
     } else {
         let reason = boot.secure_error().unwrap_or("unknown").to_string();
         tracing::error!(
@@ -148,10 +148,13 @@ pub fn build_core(boot: &Boot, deps: Deps) -> Core {
             "machine home could not be secured: no config read, no chip access, no OpenRGB; every header stays on BIOS"
         );
         let chip: Option<Box<dyn FanChip>> = None;
-        (chip, Some(format!("machine home not secured: {reason}")), std::collections::BTreeMap::new(), FansFile::default(), None)
+        (chip, Some(format!("machine home not secured: {reason}")), std::collections::BTreeMap::new(), FansFile::default(), None, None)
     };
 
     let mut fans = FanController::new(home.to_path_buf(), chip, chip_error, temps, file, confirmed);
+    // Issue #130: the rated maxima the hot lines are measured from. The CPU one comes
+    // from the CPUID brand string, the GPU one from NVML's slowdown threshold.
+    fans.set_rated(crate::fans::cpu_brand_string().as_deref(), gpu_rated_max_c);
     // Issue #128: read the board name once, and load the per-header overrides from chip.toml.
     fans.set_board_product(crate::board::RealBoardProbe.base_board_product());
     if boot.secured() {

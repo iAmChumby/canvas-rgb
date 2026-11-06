@@ -122,6 +122,7 @@ describe("a refresh that fails after the content is on screen", () => {
         active_profile: "Default",
         profiles: ["Default"],
         floor_percent: 20,
+        hot: [],
       },
       fansError: "could not read the fans: the request came back with an error",
     });

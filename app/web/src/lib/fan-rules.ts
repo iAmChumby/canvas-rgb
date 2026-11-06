@@ -20,7 +20,8 @@ export function hotFloor(header: string, configured: number): number {
   return Math.max(baseFloor(header, configured), header === CPU_FAN ? HOT_CPU_FAN_FLOOR : HOT_FLOOR);
 }
 
-/** G4's rule, with the numbers filled in. */
-export function hotRuleText(): string {
-  return `Below ${HOT_FLOOR}% (CPU_FAN ${HOT_CPU_FAN_FLOOR}%) is raised while the curve's temperature is ≥ ${HOT_TEMP_C} °C`;
+/** G4's rule, with the numbers filled in. Issue #130: the line is the source's hot limit now. */
+export function hotRuleText(limitC?: number): string {
+  const line = limitC === undefined ? "its hot limit" : `its hot limit of ${limitC} °C`;
+  return `Below ${HOT_FLOOR}% (CPU_FAN ${HOT_CPU_FAN_FLOOR}%) is raised at or above ${line}`;
 }

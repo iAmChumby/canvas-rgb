@@ -4,7 +4,7 @@ use axum::extract::State;
 use axum::Json;
 use canvas_proto::api::OutputState;
 use canvas_proto::config::{ConfigFile, ExportBundle, Settings};
-use canvas_proto::fans::{FanProfile, FansStatus};
+use canvas_proto::fans::{FanProfile, FansStatus, HotKind, HotLimits};
 use std::sync::Arc;
 
 use crate::api::{ApiFailure, ApiResult};
@@ -152,12 +152,24 @@ async fn last_fans(app: &Arc<App>) -> canvas_proto::config::FansFile {
 
 /// Turns a fan status into the config file shape.
 fn fans_file_from_status(status: &FansStatus) -> canvas_proto::config::FansFile {
+    // Issue #130: the user's hot limits travel with the export. A row the user set
+    // carries its value; an automatic row carries nothing.
+    let mut hot_limits = HotLimits::default();
+    for row in &status.hot {
+        let value = row.user_set.then_some(row.limit_c);
+        match row.kind {
+            HotKind::Cpu => hot_limits.cpu_c = value,
+            HotKind::Gpu => hot_limits.gpu_c = value,
+            HotKind::Board => hot_limits.board_c = value,
+        }
+    }
     let mut fans = canvas_proto::config::FansFile {
         schema_version: canvas_proto::config::FANS_SCHEMA,
         floor_percent: status.floor_percent,
         active_profile: status.active_profile.clone(),
         profiles: Vec::new(),
         boot_color: None,
+        hot_limits,
     };
     for name in &status.profiles {
         let headers = status
@@ -219,7 +231,17 @@ pub async fn config_import(
     State(app): State<Arc<App>>,
     Json(bundle): Json<ExportBundle>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    crate::storage::validate_bundle(&bundle)
+    // Issue #130: the hot limits are validated against the rated maxima from the
+    // last fans status when it is known (as `put_fan_hot` does); without a status
+    // the fallbacks apply and the service validates again on receipt.
+    let status = app.fans.read().await.clone();
+    let rated_of = |kind: HotKind| {
+        status
+            .as_ref()
+            .and_then(|s| s.hot.iter().find(|h| h.kind == kind).and_then(|h| h.rated_max_c))
+    };
+    let (rated_cpu, rated_gpu) = (rated_of(HotKind::Cpu), rated_of(HotKind::Gpu));
+    crate::storage::validate_bundle_rated(&bundle, rated_cpu, rated_gpu)
         .map_err(|e| ApiFailure::validation(e.to_string()))?;
 
     // The stacks in the bundle go through the rules a PUT does (D95.1.2). A bundle from before
@@ -234,7 +256,7 @@ pub async fn config_import(
     }
 
     let home = app.store.read().await.home.clone();
-    crate::storage::import_bundle(&home, &bundle)
+    crate::storage::import_bundle_rated(&home, &bundle, rated_cpu, rated_gpu)
         .map_err(|e| ApiFailure::internal(format!("could not import the config: {e}")))?;
     crate::stacks::write_file(&home, &stacks)
         .map_err(|e| ApiFailure::internal(format!("could not save the stacks: {e}")))?;

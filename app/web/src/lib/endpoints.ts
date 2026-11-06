@@ -35,6 +35,7 @@ import type { LayoutsResponse } from "@/proto/LayoutsResponse";
 import type { Layout } from "@/proto/Layout";
 import type { SetActiveLayout } from "@/proto/SetActiveLayout";
 import type { FansStatus } from "@/proto/FansStatus";
+import type { HotLimits } from "@/proto/HotLimits";
 import type { FanMode } from "@/proto/FanMode";
 import type { FanProfile } from "@/proto/FanProfile";
 import type { FanProfileName } from "@/proto/FanProfileName";
@@ -153,6 +154,8 @@ export const api = {
     request<LayoutsResponse>("PUT", routes.layoutActive, body),
 
   fans: () => request<FansStatus>("GET", routes.fans),
+  /** The user's "don't exceed" temperatures, one per kind of source (`null` = automatic). */
+  putFanHot: (body: HotLimits) => request<FansStatus>("PUT", routes.fanHot, body),
   patchFanHeader: (header: string, mode: FanMode) =>
     request<unknown>("PATCH", routes.fanHeader(header), mode),
   fanProfile: () => request<FanProfileName>("GET", routes.fanProfile),

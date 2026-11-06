@@ -6,8 +6,11 @@
 
 use axum::extract::{Path, State};
 use axum::Json;
-use canvas_proto::api::FanProfileName;
-use canvas_proto::fans::{validate_mode, validate_profile, FanMode, FanProfile, FansStatus};
+use canvas_proto::api::{FanProfileName, PutFanHot};
+use canvas_proto::fans::{
+    hot_limit_status, validate_hot_limits, validate_mode, validate_profile, FanMode, FanProfile, FansStatus,
+    HotKind,
+};
 use std::sync::Arc;
 
 use crate::api::{ApiFailure, ApiResult};
@@ -142,7 +145,7 @@ pub async fn delete_profile(
 }
 
 /// Maps a service error code to the API's status: `conflict` 409, `not_found` 404,
-/// `service_unavailable` 503. Any other code is an internal error.
+/// `service_unavailable` 503, `validation` 422. Any other code is an internal error.
 fn service_failure(code: &str, message: String) -> ApiFailure {
     use canvas_proto::api::error_codes;
     match code {
@@ -152,6 +155,7 @@ fn service_failure(code: &str, message: String) -> ApiFailure {
             message,
         ),
         error_codes::NOT_FOUND => ApiFailure::not_found(message),
+        error_codes::VALIDATION => ApiFailure::validation(message),
         error_codes::SERVICE_UNAVAILABLE => ApiFailure::service_unavailable(message),
         _ => ApiFailure::internal(message),
     }
@@ -174,34 +178,129 @@ pub async fn put_profile(
     let floor = configured_floor(&app).await;
     validate_profile(&profile, floor).map_err(|e| ApiFailure::validation(e.to_string()))?;
 
-    crate::pipe_client::send(&app, &canvas_proto::pipe::PipeRequest::PutProfile {
+    let put_response = crate::pipe_client::send(&app, &canvas_proto::pipe::PipeRequest::PutProfile {
         profile: profile.clone(),
     })
     .await
     .map_err(|e| ApiFailure::service_unavailable(format!("the fan service is not reachable: {e}")))?;
+    match put_response {
+        canvas_proto::pipe::PipeResponse::Ok => {}
+        canvas_proto::pipe::PipeResponse::Error { code, message } => {
+            return Err(service_failure(&code, message));
+        }
+        _ => {
+            return Err(ApiFailure::internal("the fan service gave an unexpected answer"));
+        }
+    }
 
     // Mirror the profiles into the daemon's copy of the fans file and push the whole
-    // config, so the service and the daemon agree.
-    let (home, fans) = {
+    // config, so the service and the daemon agree. One fans-config lock is held across
+    // the whole read-modify-send-save, so two PUTs cannot lose each other's change.
+    let fans = {
         let home = app.store.read().await.home.clone();
         let mut guard = app.fans_last.write().await;
-        let mut fans = guard.clone().unwrap_or_default();
-        fans.floor_percent = floor;
-        match fans.profiles.iter_mut().find(|p| p.name == profile.name) {
+        let mut next = guard
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| canvas_proto::config::FansFile { floor_percent: floor, ..Default::default() });
+        next.floor_percent = floor;
+        match next.profiles.iter_mut().find(|p| p.name == profile.name) {
             Some(existing) => *existing = profile.clone(),
-            None => fans.profiles.push(profile.clone()),
+            None => next.profiles.push(profile.clone()),
         }
-        crate::logging::warn_if_err("could not save the daemon's copy of the fans file", crate::storage::save_fans_last(&home, &fans));
-        *guard = Some(fans.clone());
-        (home, fans)
+        // Send first: the daemon's copy is updated below only after the service said Ok.
+        // The guard is held across the send, so a concurrent hot-limit PUT waits.
+        let response = crate::pipe_client::send(&app, &canvas_proto::pipe::PipeRequest::PutFanConfig { config: next.clone() })
+            .await
+            .map_err(|e| ApiFailure::service_unavailable(format!("the fan service is not reachable: {e}")))?;
+        match response {
+            canvas_proto::pipe::PipeResponse::Ok => {}
+            canvas_proto::pipe::PipeResponse::Error { code, message } => {
+                return Err(service_failure(&code, message));
+            }
+            _ => {
+                return Err(ApiFailure::internal("the fan service gave an unexpected answer"));
+            }
+        }
+        crate::logging::warn_if_err("could not save the daemon's copy of the fans file", crate::storage::save_fans_last(&home, &next));
+        *guard = Some(next.clone());
+        next
     };
-    let _ = home;
-    crate::pipe_client::send(&app, &canvas_proto::pipe::PipeRequest::PutFanConfig { config: fans })
-        .await
-        .map_err(|e| {
-            ApiFailure::service_unavailable(format!("the fan service is not reachable: {e}"))
-        })?;
+    let _ = fans;
 
     tracing::info!(profile = %profile.name, "the fan profile was saved");
     Ok(Json(profile))
+}
+
+/// `PUT /api/v1/fans/hot` (issue #130).
+///
+/// The user's "don't exceed" temperatures, one per kind of source. Validated first
+/// against the rated maxima in the last status the service reported, so a value past
+/// the ceiling gap is refused with 422 before anything reaches the service. The
+/// service validates again on receipt.
+pub async fn put_fan_hot(
+    State(app): State<Arc<App>>,
+    Json(limits): Json<PutFanHot>,
+) -> ApiResult<Json<FansStatus>> {
+    let status = app.fans.read().await.clone();
+    let rated_of = |s: &FansStatus, kind: HotKind| {
+        s.hot.iter().find(|h| h.kind == kind).and_then(|h| h.rated_max_c)
+    };
+    let (rated_cpu, rated_gpu) = match &status {
+        Some(s) => (rated_of(s, HotKind::Cpu), rated_of(s, HotKind::Gpu)),
+        None => (None, None),
+    };
+    validate_hot_limits(&limits, rated_cpu, rated_gpu)
+        .map_err(|e| ApiFailure::validation(e.to_string()))?;
+
+    // Mirror the limits into the daemon's copy of the fans file and push the whole
+    // config, so the service and the daemon agree (as `put_profile` does). One
+    // fans-config lock (`fans_last`) is held across the whole read-modify-send-save,
+    // so two PUTs cannot lose each other's change. Send first: the daemon's copy is
+    // saved only after the service said Ok; a refusal (a pipe `Error`, like
+    // `delete_profile` maps) saves nothing.
+    {
+        let home = app.store.read().await.home.clone();
+        let mut guard = app.fans_last.write().await;
+        let mut next = guard.clone().unwrap_or_default();
+        next.hot_limits = limits;
+        let response = crate::pipe_client::send(&app, &canvas_proto::pipe::PipeRequest::PutFanConfig { config: next.clone() })
+            .await
+            .map_err(|e| ApiFailure::service_unavailable(format!("the fan service is not reachable: {e}")))?;
+        match response {
+            canvas_proto::pipe::PipeResponse::Ok => {}
+            canvas_proto::pipe::PipeResponse::Error { code, message } => {
+                return Err(service_failure(&code, message));
+            }
+            _ => {
+                return Err(ApiFailure::internal("the fan service gave an unexpected answer"));
+            }
+        }
+        crate::logging::warn_if_err("could not save the daemon's copy of the fans file", crate::storage::save_fans_last(&home, &next));
+        *guard = Some(next.clone());
+    }
+
+    tracing::info!(?limits, "the fan hot limits changed");
+
+    // Answer the new status: the last one the service reported, with its hot rows
+    // recomputed for the limits just saved. With no status cached, ask the service.
+    let mut new_status = match status {
+        Some(status) => status,
+        None => match crate::pipe_client::send(&app, &canvas_proto::pipe::PipeRequest::FanStatus).await {
+            Ok(canvas_proto::pipe::PipeResponse::FanStatus { status }) => status,
+            _ => return Err(ApiFailure::service_unavailable("the fan service is not reachable")),
+        },
+    };
+    new_status.hot = [HotKind::Cpu, HotKind::Gpu, HotKind::Board]
+        .iter()
+        .map(|kind| {
+            let rated = match kind {
+                HotKind::Cpu => rated_cpu,
+                HotKind::Gpu => rated_gpu,
+                HotKind::Board => None,
+            };
+            hot_limit_status(*kind, &limits, rated)
+        })
+        .collect();
+    Ok(Json(new_status))
 }
