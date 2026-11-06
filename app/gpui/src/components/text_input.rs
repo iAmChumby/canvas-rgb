@@ -18,7 +18,7 @@ use gpui::{
     App, Bounds, Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, FocusHandle, Focusable, GlobalElementId, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, SharedString,
-    Style, Subscription, TextRun, UTF16Selection, Window, div, fill, point, px, prelude::*, relative,
+    Style, Subscription, UTF16Selection, Window, div, fill, point, px, prelude::*, relative,
     rgba, size,
 };
 
@@ -62,11 +62,15 @@ pub fn format_value(value: f32, decimals: usize) -> String {
     }
 }
 
+/// Told the committed number.
+pub type OnCommit = Rc<dyn Fn(f32, &mut Window, &mut App)>;
+
 /// A text input: the field's own entity.
 ///
 /// The field owns the draft (what is typed) and the value (what the model
 /// says). It commits the draft on Enter and when it loses the focus, and it
 /// tells its owner the committed number.
+#[allow(clippy::too_many_arguments)]
 pub struct TextInput {
     focus_handle: FocusHandle,
     /// What is typed and not yet committed.
@@ -88,13 +92,14 @@ pub struct TextInput {
     decimals: usize,
     theme: Theme,
     /// Told the committed number.
-    on_commit: Rc<dyn Fn(f32, &mut Window, &mut App)>,
+    on_commit: OnCommit,
     /// Keeps the blur listener alive.
     blur: Option<Subscription>,
 }
 
 impl TextInput {
     /// A field that shows `value` and commits a number in `min..=max`.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         value: &str,
         numeric: bool,
@@ -102,7 +107,7 @@ impl TextInput {
         max: f32,
         decimals: usize,
         theme: Theme,
-        on_commit: Rc<dyn Fn(f32, &mut Window, &mut App)>,
+        on_commit: OnCommit,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
@@ -432,7 +437,7 @@ impl EntityInputHandler for TextInput {
     ) -> Option<usize> {
         let line_point = self.last_bounds?.localize(&point)?;
         let last_layout = self.last_layout.as_ref()?;
-        Some(last_layout.index_for_x(point.x - line_point.x)?)
+        last_layout.index_for_x(point.x - line_point.x)
     }
 }
 
@@ -498,14 +503,12 @@ impl Element for TextElement {
         let caret = Theme::color(input.theme.live);
         let style = window.text_style();
 
-        let run = TextRun {
-            len: content.len(),
-            font: style.font(),
-            color: style.color,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
+        // The run comes from the text style the field's own box carries, so
+        // the field's family, size and weight are the ones it was given.
+        let mut run = style.to_run(content.len());
+        run.background_color = None;
+        run.underline = None;
+        run.strikethrough = None;
         let font_size = style.font_size.to_pixels(window.rem_size());
         let line = window
             .text_system()

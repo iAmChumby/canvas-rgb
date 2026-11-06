@@ -260,6 +260,7 @@ pub fn fans_button(
 ///
 /// React `.ibtn`: a transparent face and a transparent edge, so the glyph
 /// stands on its own; the box is only there to be a target.
+#[allow(clippy::too_many_arguments)]
 pub fn fans_icon_button(
     t: &Theme,
     id: &str,

@@ -812,10 +812,25 @@ mod tests {
 
     #[test]
     fn the_hatch_line_is_clipped_to_the_band() {
-        // The line y = x crosses a square band from corner to corner.
-        let seg = hatch_segment(0.0, 0.0, 20.0, 20.0, 0.0).expect("a segment");
-        assert_eq!(seg, (0.0, 0.0, 20.0, 20.0));
+        // The line x + y = c crosses a square band from corner to corner.
+        let seg = hatch_segment(0.0, 0.0, 20.0, 20.0, 20.0).expect("a segment");
+        assert_eq!(seg, (0.0, 20.0, 20.0, 0.0));
         // A line far below the band has no segment in it.
         assert!(hatch_segment(10.0, 0.0, 20.0, 10.0, 100.0).is_none());
+    }
+
+    #[test]
+    fn the_caption_is_turned_the_way_react_turns_it() {
+        // The caption reads up its line: the first glyph's baseline starts at
+        // the anchor and the text runs up from it.
+        let outlines = caption_outlines("Fu", 14.0);
+        // "F" and "u" each have one contour.
+        assert_eq!(outlines.len(), 2);
+        // The first glyph starts at the anchor's left edge.
+        let first = outlines[0][0];
+        assert!(first.0.abs() < 0.01, "the text runs up: {first:?}");
+        // The second glyph sits one advance up the line.
+        let second = outlines[1][0];
+        assert!(second.1 < -1.0, "the text runs up: {second:?}");
     }
 }

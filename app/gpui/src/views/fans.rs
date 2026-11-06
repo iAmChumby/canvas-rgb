@@ -595,6 +595,7 @@ impl FansView {
     /// The field is an entity of its own, so it keeps its own draft, its
     /// caret and its focus. It is made once and kept; the model only tells
     /// it what to show.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn text_field(
         &mut self,
         id: &str,
