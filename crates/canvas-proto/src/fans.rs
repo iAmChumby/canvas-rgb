@@ -243,6 +243,10 @@ pub const HOT_LIMIT_MIN_C: f32 = 40.0;
 pub const FALLBACK_CPU_MAX_C: f32 = 89.0;
 /// The rated maximum used for a GPU whose driver does not report a slowdown threshold.
 pub const FALLBACK_GPU_MAX_C: f32 = 88.0;
+/// The band a reported rated maximum must fall in to be believed (°C). Outside it, the
+/// fallback is used. Every listed part is inside it (89..=95).
+pub const RATED_MAX_SANE_MIN_C: f32 = 60.0;
+pub const RATED_MAX_SANE_MAX_C: f32 = 115.0;
 /// Board sensors have no rated part maximum: the automatic limit stays today's `HOT_TEMP_C`,
 /// and the ceiling is this fixed value.
 pub const BOARD_CEILING_C: f32 = 90.0;
@@ -305,8 +309,12 @@ pub fn hot_limit_status(kind: HotKind, limits: &HotLimits, rated_max_c: Option<f
         HotKind::Board => (HOT_TEMP_C, None, BOARD_CEILING_C),
         HotKind::Cpu | HotKind::Gpu => {
             let fallback = if kind == HotKind::Cpu { FALLBACK_CPU_MAX_C } else { FALLBACK_GPU_MAX_C };
-            let rated = rated_max_c.unwrap_or(fallback);
-            (rated - HOT_MARGIN_C, rated_max_c, rated - CEILING_MARGIN_C)
+            // A rated maximum outside a sane band (a driver that reports 0, or 200) is not
+            // believed: the cautious fallback stands, so the ceiling can never move up past a
+            // real part's limit and the settable range is never empty.
+            let sane = rated_max_c.filter(|r| r.is_finite() && (RATED_MAX_SANE_MIN_C..=RATED_MAX_SANE_MAX_C).contains(r));
+            let rated = sane.unwrap_or(fallback);
+            (rated - HOT_MARGIN_C, sane, rated - CEILING_MARGIN_C)
         }
     };
     let max_settable_c = ceiling_c - HOT_LIMIT_CEILING_GAP_C;
@@ -404,6 +412,17 @@ mod hot_limit_tests {
         assert_eq!(runtime_floor_at("sys_fan1", 20, Some(74.0), 74.0), HOT_FLOOR_PERCENT);
         // The fixed-line function is unchanged.
         assert_eq!(runtime_floor(CPU_FAN_HEADER, 20, Some(50.0)), runtime_floor_at(CPU_FAN_HEADER, 20, Some(50.0), HOT_TEMP_C));
+    }
+
+    #[test]
+    fn a_nonsense_rated_maximum_falls_back_and_never_panics() {
+        for bad in [0.0, -5.0, 200.0, f32::NAN, f32::INFINITY, 59.0, 116.0] {
+            let s = hot_limit_status(HotKind::Gpu, &HotLimits { gpu_c: Some(70.0), ..Default::default() }, Some(bad));
+            assert_eq!(s.rated_max_c, None, "{bad} is not believed");
+            assert_eq!(s.ceiling_c, FALLBACK_GPU_MAX_C - CEILING_MARGIN_C);
+            assert!(s.max_settable_c >= HOT_LIMIT_MIN_C);
+            assert!(validate_hot_limits(&HotLimits { gpu_c: Some(70.0), ..Default::default() }, None, Some(bad)).is_ok());
+        }
     }
 
     #[test]
