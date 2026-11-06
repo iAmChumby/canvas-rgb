@@ -147,16 +147,22 @@ recorded. The same path is a command:
 non-zero on any refusal.
 
 **Test builds.** `.github/workflows/test-build.yml` runs by hand only (Actions, Test build, Run workflow);
-its `sign` job runs only for `main`.
+its `sign` job runs only for `main`. The experimental publisher below calls the same workflow, so there is one
+build and one signing path: the caller passes the key in, and the sign step reads it exactly as it does here.
 Trust boundary: anything the `build` job runs (npm lifecycle scripts, cargo build scripts) can end up signed with the
 release key, and a signed build installs as SYSTEM with no prompt, so dispatch test builds only from `main`. A dev
-version is newer than the release it follows, so the service accepts it once. It builds the installer at `<major>.<minor>.<patch+1>-dev.<run number>` (set in the
+version is newer than the release it follows, so the service accepts it once. It builds the installer at `<major>.<minor>.<patch+1>-dev.<UTC timestamp>` (set in the
 runner only, never committed), signs it in a separate job with the same key, and uploads
 `canvas-rgb-setup-<version>.exe`, its `.sha256` and its `.sig` as the workflow artifact
 `canvas-rgb-test-build-<version>` (kept 14 days). It makes no tag and no release, and no job has
 `contents: write`. The stable feed never offers it (GitHub's `latest` skips pre-releases and the tray ignores
 them on that feed); install it with the `update` command above on a PC running an older build, or publish it to
 the experimental feed below.
+
+The dev part is the UTC time the build ran, `yyyyMMddHHmmss`, so it is one number for every workflow and a build
+made later is a newer version whichever workflow made it. It was the run number before, and that counted up in
+each workflow on its own: a manual test build at `-dev.50` was newer than a publish at `-dev.3`, so a PC on the
+first ignored the second.
 
 **Experimental builds (#203).** Settings has an **Experimental builds** switch (the Version panel). With it on,
 the tray reads a second feed beside the stable one, `releases/download/experimental/latest.json`
@@ -170,8 +176,58 @@ offer at once and never downgrades: a dev build stays until a stable release new
 Who may publish: experimental builds are signed with the release key and install as SYSTEM with no prompt on every
 PC that turned the switch on, so the trust boundary of test builds applies to every publish. A build is published
 only from `main`, by a person or the agent grind Luke approved (2026-11-05, tracking #215), never by a push
-trigger. Until the publishing workflow lands (the second half of #203), nothing writes to the `experimental`
-release, and the experimental feed answers with nothing.
+trigger.
+
+**Publishing an experimental build.** `.github/workflows/experimental.yml` writes to the `experimental`
+pre-release. It runs by hand only (Actions, Experimental build, Run workflow), from `main` only: every job checks
+`github.ref == 'refs/heads/main'`, so a dispatch from any other branch builds nothing, signs nothing and
+publishes nothing. There is no push, schedule or pull request trigger, and two publishes never overlap: the
+group is `experimental` and a newer one waits for the older one.
+
+The publish job runs in the `experimental` environment, and that environment's deployment branch policy allows
+`main` alone. GitHub refuses a deployment from any other branch itself, whatever the workflow file says, so the
+token that can write the release is behind a door only `main` opens.
+
+Who may dispatch it: a person, or the agent grind Luke approved for #215 (2026-11-05). Only `main`'s code is
+signed, because the build job runs the project's own code and the sign job signs what it made.
+
+What it publishes: it calls `test-build.yml` as a reusable workflow, so the build and the signing are the ones a
+test build uses, at `<major>.<minor>.<patch+1>-dev.<UTC timestamp>`. The `sign` job of that workflow writes
+`latest.json` with `tools/make-update-manifest.ps1 -Experimental` (the dev version, the changelog's Unreleased
+section as the notes, and the installer's address on the `experimental` release) and puts it in the signed
+artifact, but only when the caller passed the `experimental` input: a manual test build writes no feed. The
+publish job then runs no project code at all (it checks out nothing), reads the four files out of that artifact,
+and uploads them, in this order:
+
+1. `canvas-rgb-setup-<version>.exe`, the installer;
+2. `canvas-rgb-setup-<version>.exe.sha256`, its checksum;
+3. `canvas-rgb-setup-<version>.exe.sig`, its signature;
+4. `latest.json`, the feed.
+
+`latest.json` goes last on purpose: the tray reads it, and it must never name a file that is not up yet. The
+assets carry the version, so one publish's feed names its own files and never another's, and a publish that stops
+halfway leaves the previous feed and its files in place. The assets of the publish before it are deleted
+afterwards, so the release holds one build.
+
+The release is a pre-release and never the latest one: GitHub's `latest` is the stable feed, and a dev build
+there would be offered to every PC. The tag is `experimental`, not `v*`, so `release.yml` never runs on it. The
+tag is the rolling handle: it is created at the first publish and stays; each publish's release body names the
+version and the commit it was built from.
+
+Checking that it worked:
+
+```
+gh release view experimental --json assets,isPrerelease
+gh release download experimental --pattern latest.json --dir . --clobber
+```
+
+The first names the assets and says `isPrerelease: true`. The second writes the feed the tray reads to
+`latest.json` in the current folder: its `version` is the dev version that was signed, and its `url` points at the
+installer on the release. A PC with the **Experimental builds** switch on offers that version on its next check.
+
+Rolling back: delete the release (`gh release delete experimental`) and the feed answers with nothing, so the tray
+offers nothing from it. Installed copies stay as they are: the switch never downgrades. Publish again to put a
+build back.
 
 **If the key is lost or leaks.** Installed copies trust only that key, so a new key cannot reach
 them through the updater:

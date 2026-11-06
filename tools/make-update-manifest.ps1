@@ -17,12 +17,23 @@
   GitHub's asset hosts, so a wrong address here makes the update unusable, not unsafe.
   -NotesFile writes that same section to a file: the release notes are the section, followed by
   GitHub's list of merged pull requests. One extractor, so the two never drift.
+  -Experimental writes the manifest of the experimental feed (#203), the rolling pre-release the tray
+  reads when the person turned the Experimental builds switch on. There the version is a dev version
+  (X.Y.Z-dev.N), the notes are the changelog's "## [Unreleased]" section (what has not been released
+  yet) and the address is the asset of the `experimental` release. Without the switch the script is
+  unchanged: a stable version, its own dated section, and the address of a v* release.
+.PARAMETER Experimental
+  The manifest is the experimental feed's: a dev version, the Unreleased section as the notes, and the
+  `experimental` release as the default address.
 .EXAMPLE
   powershell -NoProfile -File tools/make-update-manifest.ps1 -Version 0.1.1 -SigFile dist/canvas-rgb-setup-0.1.1.exe.sig `
     -OutFile dist/latest.json
 .EXAMPLE
   powershell -NoProfile -File tools/make-update-manifest.ps1 -Version 0.1.1 -SigFile dist/canvas-rgb-setup-0.1.1.exe.sig `
     -OutFile dist/latest.json -NotesFile dist/release-notes.md
+.EXAMPLE
+  powershell -NoProfile -File tools/make-update-manifest.ps1 -Version 0.9.1-dev.42 -SigFile dist/canvas-rgb-setup-0.9.1-dev.42.exe.sig `
+    -OutFile dist/latest.json -Experimental
 #>
 param(
     [Parameter(Mandatory)][string]$Version,
@@ -32,14 +43,25 @@ param(
     [string]$NotesFile = '',
     [string]$Repo = 'iAmChumby/canvas-rgb',
     [string]$Url = '',
-    [string]$PubDate = ''
+    [string]$PubDate = '',
+    [switch]$Experimental
 )
 $ErrorActionPreference = 'Stop'
 
 # The default is resolved here, not in the param block: Windows PowerShell 5.1 leaves $PSScriptRoot empty there.
 if (-not $ChangelogFile) { $ChangelogFile = Join-Path (Split-Path -Parent $PSScriptRoot) 'CHANGELOG.md' }
-if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "Version [$Version] is not X.Y.Z (a pre-release is never published as an update)." }
-if (-not $Url) { $Url = "https://github.com/$Repo/releases/download/v$Version/canvas-rgb-setup-$Version.exe" }
+if ($Experimental) {
+    # The experimental feed (#203): a dev version, X.Y.Z-dev.N, and the rolling `experimental`
+    # release. The stable feed never carries a pre-release, so the two are separate paths here and
+    # the stable one refuses a dev version, as it always did.
+    if ($Version -notmatch '^\d+\.\d+\.\d+-dev\.\d+$') { throw "Version [$Version] is not a dev version (X.Y.Z-dev.N)." }
+    if (-not $Url) { $Url = "https://github.com/$Repo/releases/download/experimental/canvas-rgb-setup-$Version.exe" }
+    $sectionName = 'Unreleased'
+} else {
+    if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "Version [$Version] is not X.Y.Z (a pre-release is never published as an update)." }
+    if (-not $Url) { $Url = "https://github.com/$Repo/releases/download/v$Version/canvas-rgb-setup-$Version.exe" }
+    $sectionName = $Version
+}
 if ($Url -notmatch '^https://') { throw "Url [$Url] is not https." }
 if (-not $PubDate) { $PubDate = [DateTime]::UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'") }
 
@@ -49,10 +71,19 @@ if (-not $signature) { throw "$SigFile is empty." }
 # The version's changelog section, without its heading.
 $lines = Get-Content -LiteralPath $ChangelogFile -Encoding UTF8
 $start = -1
-for ($i = 0; $i -lt $lines.Count; $i++) {
-    if ($lines[$i] -match "^ {0,3}## \[$([regex]::Escape($Version))\] - \d{4}-\d{2}-\d{2}\s*$") { $start = $i; break }
+if ($Experimental) {
+    # A dev build's notes are what the changelog has not released yet: the Unreleased section. Its
+    # heading names no date, so it is found on its own.
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '^ {0,3}## \[Unreleased\]\s*$') { $start = $i; break }
+    }
+    if ($start -lt 0) { throw 'CHANGELOG.md has no "## [Unreleased]" section.' }
+} else {
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match "^ {0,3}## \[$([regex]::Escape($Version))\] - \d{4}-\d{2}-\d{2}\s*$") { $start = $i; break }
+    }
+    if ($start -lt 0) { throw "CHANGELOG.md has no '## [$Version] - YYYY-MM-DD' section." }
 }
-if ($start -lt 0) { throw "CHANGELOG.md has no '## [$Version] - YYYY-MM-DD' section." }
 
 # The section ends at the next version heading, or at the compare links at the bottom of the file.
 # Anything else that would end it early is a mistake in the changelog, and ending there would cut the
@@ -82,20 +113,31 @@ for ($i = $start + 1; $i -lt $lines.Count; $i++) {
         if ($Matches[1] -ceq $Version) {
             throw "CHANGELOG.md line $($i + 1): '$line' is a second heading for $Version. Each version has one section."
         }
+        if ($Experimental -and $Matches[1] -ceq 'Unreleased') {
+            throw "CHANGELOG.md line $($i + 1): '$line' is a second heading for Unreleased. Each section has one heading."
+        }
         $end = $i; break
     }
     if ($line -match '^ {0,3}#{1,2}(\s|$)' -or $line -match '^ {0,3}## \[' -or $line -cmatch "^ {0,3}#{1,6}\s+\[$labelPattern\]") {
-        throw "CHANGELOG.md line $($i + 1): '$line' is not a version heading. The section for $Version ends at a '## [X.Y.Z]' heading, and holds only '###' subheadings that name no version."
+        throw "CHANGELOG.md line $($i + 1): '$line' is not a version heading. The section for $sectionName ends at a '## [X.Y.Z]' heading, and holds only '###' subheadings that name no version."
     }
     if ($line -match $linkDef) {
         if ($i -ge $tail) { $end = $i; break }
-        throw "CHANGELOG.md line $($i + 1): '$line' is a link definition inside the section for $Version. The compare links belong at the end of the file."
+        throw "CHANGELOG.md line $($i + 1): '$line' is a link definition inside the section for $sectionName. The compare links belong at the end of the file."
     }
 }
 if ($end -lt 0) { $end = $lines.Count }
-if ($end -le $start + 1) { throw "The CHANGELOG.md section for $Version is empty." }
-$notes = (($lines[($start + 1)..($end - 1)]) -join "`n").Trim()
-if (-not $notes) { throw "The CHANGELOG.md section for $Version is empty." }
+$notes = ''
+if ($end -gt $start + 1) { $notes = (($lines[($start + 1)..($end - 1)]) -join "`n").Trim() }
+if (-not $notes) {
+    if ($Experimental) {
+        # A dev build with nothing new in the changelog still says what it is: the tray shows the
+        # notes, and an empty line there reads like a broken feed.
+        $notes = "Experimental build $Version."
+    } else {
+        throw "The CHANGELOG.md section for $Version is empty."
+    }
+}
 
 # The same notes, for the release page. Written only once the section is known to be there, so a
 # missing section leaves no notes file behind.
