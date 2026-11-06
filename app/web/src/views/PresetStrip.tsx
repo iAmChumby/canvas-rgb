@@ -113,7 +113,7 @@ export function PresetStrip({
   const [menu, setMenu] = useState<{ name: string; confirm: boolean } | null>(null);
   const menuAnchor = useRef<HTMLElement | null>(null);
   // One pulse on the Save chip when a preset lands (issue #187, rule 6).
-  const savePulse = useSuccessPulse();
+  const { el: savePulseEl, fire: pulseSave } = useSuccessPulse();
   const scroller = useRef<HTMLDivElement>(null);
   const busy = working !== null;
 
@@ -192,7 +192,7 @@ export function PresetStrip({
         ? await attempt("rename", () => onRename(naming.name, name))
         : await attempt("save", () => onSave(name), name);
     if (ok) {
-      savePulse.fire();
+      pulseSave();
       close();
     }
   };
@@ -370,7 +370,7 @@ export function PresetStrip({
             </Chip>
           )}
           <Chip
-            ref={savePulse.ref}
+            ref={savePulseEl}
             className="chip-add"
             icon={<Plus size={14} weight="bold" />}
             pressed={naming?.kind === "save"}

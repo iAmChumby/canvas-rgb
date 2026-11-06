@@ -125,8 +125,10 @@ describe("reduced motion covers every new motion (#187)", () => {
     // reduce block zeroes through animation-duration.
     for (const css of [app, motion, desk]) {
       for (const m of css.matchAll(/animation:\s*([a-z-]+)\s+(\S+)\s+(\S+)/g)) {
-        if (["popover-out", "listbox-out", "success-pulse", "icon-swap-in", "icon-swap-out", "swatch-wipe"].includes(m[1])) {
-          expect(m[2], `${m[1]} uses a raw duration`).toMatch(/^var\(--dur/);
+        const name = m[1] ?? "";
+        const dur = m[2] ?? "";
+        if (["popover-out", "listbox-out", "success-pulse", "icon-swap-in", "icon-swap-out", "swatch-wipe"].includes(name)) {
+          expect(dur, `${name} uses a raw duration`).toMatch(/^var\(--dur/);
         }
       }
     }

@@ -187,10 +187,10 @@ describe("rule 8: icon swaps cross-fade both icons (#187)", () => {
 
 describe("rule 6: one pulse on success, none on failure (#187)", () => {
   function Host({ ok }: { ok: boolean }) {
-    const { ref, fire } = useSuccessPulse();
+    const { el, fire } = useSuccessPulse();
     return (
       <button
-        ref={ref as never}
+        ref={el as never}
         type="button"
         onClick={() => {
           if (ok) fire();

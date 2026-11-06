@@ -134,12 +134,12 @@ export function useTweenNumber(value: number, duration?: number, decimals = 0): 
  * clears when it is over: one pulse, no loop. With motion off the stylesheet
  * zeroes the animation, so the ring never shows.
  */
-export function useSuccessPulse(): { ref: (el: HTMLElement | null) => void; fire: () => void } {
+export function useSuccessPulse(): { el: (el: HTMLElement | null) => void; fire: () => void } {
   const [count, setCount] = useState(0);
   const elRef = useRef<HTMLElement | null>(null);
 
-  const ref = useCallback((el: HTMLElement | null) => {
-    elRef.current = el;
+  const el = useCallback((node: HTMLElement | null) => {
+    elRef.current = node;
   }, []);
 
   const fire = useCallback(() => {
@@ -148,17 +148,17 @@ export function useSuccessPulse(): { ref: (el: HTMLElement | null) => void; fire
 
   useEffect(() => {
     if (count === 0) return;
-    const el = elRef.current;
-    if (!el) return;
-    el.classList.add("success-pulse");
-    el.dataset.pulse = String(count);
+    const node = elRef.current;
+    if (!node) return;
+    node.classList.add("success-pulse");
+    node.dataset.pulse = String(count);
     // The token duration the animation runs for (--dur-slow, 240 ms).
     const t = setTimeout(() => {
-      el.classList.remove("success-pulse");
-      delete el.dataset.pulse;
+      node.classList.remove("success-pulse");
+      delete node.dataset.pulse;
     }, 240);
     return () => clearTimeout(t);
   }, [count]);
 
-  return { ref, fire };
+  return { el, fire };
 }

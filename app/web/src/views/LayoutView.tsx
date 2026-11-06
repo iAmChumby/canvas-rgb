@@ -196,7 +196,7 @@ export function LayoutView() {
   const [selection, setSelection] = useState<Sel[]>([]);
   const [saving, setSaving] = useState(false);
   // One pulse on the Save button when a save lands (issue #187, rule 6).
-  const savePulse = useSuccessPulse();
+  const { el: savePulseEl, fire: pulseSave } = useSuccessPulse();
   const [saveError, setSaveError] = useState<string | null>(null);
   /** The pane below the desk on a phone: one of them at a time. */
   const [phonePane, setPhonePane] = useState<PhonePane>("parts");
@@ -680,7 +680,7 @@ export function LayoutView() {
       setBase(body);
       setEdit((e) => ({ ...e, draft: body }));
       await refreshLayouts();
-      savePulse.fire();
+      pulseSave();
     } catch (e) {
       setSaveError(messageOf(e));
     } finally {
@@ -1037,7 +1037,7 @@ export function LayoutView() {
             <span className="rd-lay-text">Revert</span>
           </Button>
           <Button
-            ref={savePulse.ref}
+            ref={savePulseEl}
             variant="primary"
             size="sm"
             icon={<FloppyDisk size={16} weight="bold" />}
