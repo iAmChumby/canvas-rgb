@@ -12,21 +12,39 @@ pub struct Hardware {
     pub chip: Option<Box<dyn FanChip>>,
     pub chip_error: Option<String>,
     pub temps: BTreeMap<TempSource, Box<dyn TempReader>>,
+    /// The GPU's slowdown threshold in °C (issue #130), read through the same NVML
+    /// loader as the fans. `None` when there is no GPU or the driver reports none.
+    pub gpu_rated_max_c: Option<f32>,
 }
 
 /// Opens the fan headers: the NCT6687D-R's, then the GPU's through NVML, as one chip. Either
 /// half may be missing; both missing is the NCT error. Used by service startup and by
 /// `--restore-bios`, so the GPU handback runs in both.
 pub fn open_chip() -> Result<Box<dyn FanChip>, String> {
+    open_chip_and_threshold().0
+}
+
+/// Like [`open_chip`], with the GPU's slowdown threshold (issue #130) read from the
+/// NVML instance before it is boxed into the composite chip.
+fn open_chip_and_threshold() -> (Result<Box<dyn FanChip>, String>, Option<f32>) {
     let nct = open_nct();
-    let gpu: Option<Box<dyn GpuFanApi>> = match NvmlFans::open() {
-        Ok(fans) => Some(Box::new(fans)),
+    let (gpu, threshold): (Option<Box<dyn GpuFanApi>>, Option<f32>) = match NvmlFans::open() {
+        Ok(mut fans) => {
+            let threshold = match fans.slowdown_threshold_c() {
+                Ok(value) => value,
+                Err(e) => {
+                    tracing::warn!(error = %e, "the GPU slowdown threshold is unknown; the hot limit falls back");
+                    None
+                }
+            };
+            (Some(Box::new(fans)), threshold)
+        }
         Err(e) => {
             tracing::warn!(error = %e, "GPU fans unavailable; only the motherboard headers will be driven");
-            None
+            (None, None)
         }
     };
-    match (nct, gpu) {
+    let chip: Result<Box<dyn FanChip>, String> = match (nct, gpu) {
         (Err(e), None) => Err(e),
         (nct, gpu) => {
             let nct = match nct {
@@ -38,7 +56,8 @@ pub fn open_chip() -> Result<Box<dyn FanChip>, String> {
             };
             Ok(Box::new(CompositeChip::new(nct, gpu)))
         }
-    }
+    };
+    (chip, threshold)
 }
 
 /// Opens the NCT6687D-R through PawnIO's LpcIO module and checks it with the detect path.
@@ -64,7 +83,8 @@ fn open_nct() -> Result<Box<dyn FanChip>, String> {
 
 /// Opens every source the service can read. Nothing here panics on a missing driver.
 pub fn open() -> Hardware {
-    let (chip, chip_error) = match open_chip() {
+    let (opened, gpu_rated_max_c) = open_chip_and_threshold();
+    let (chip, chip_error) = match opened {
         Ok(chip) => {
             tracing::info!(chip = %chip.chip_name(), map = MSI_ALT1_MAP.name, confirmed = MSI_ALT1_MAP.confirmed, "fan chip detected");
             (Some(chip), None)
@@ -87,5 +107,5 @@ pub fn open() -> Hardware {
         }
         Err(e) => tracing::warn!(error = %e, "GPU temperature unavailable"),
     }
-    Hardware { chip, chip_error, temps }
+    Hardware { chip, chip_error, temps, gpu_rated_max_c }
 }

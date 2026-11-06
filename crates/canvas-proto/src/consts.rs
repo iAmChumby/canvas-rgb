@@ -31,6 +31,12 @@ pub const DRAFT_HEARTBEAT: Duration = Duration::from_secs(5);
 /// and the previous effect comes back, so a closed, crashed or throttled editor can leave
 /// the lights on a draft for at most this long.
 pub const DRAFT_LEASE: Duration = Duration::from_secs(15);
+/// Issue #166: an audio test lease ends this long after its last renewal (each poll renews it).
+pub const AUDIO_TEST_LEASE: Duration = Duration::from_secs(3);
+/// Issue #166: how often the editor polls the audio test (10 Hz).
+pub const AUDIO_TEST_POLL_MS: u64 = 100;
+/// Issue #166 / #188: the dB floor for audio levels; a level at or below it reads 0.
+pub const AUDIO_DB_FLOOR: f32 = -60.0;
 /// The id prefix of a draft effect (`draft:` + its source hash). A draft is never a saved
 /// effect: no route that saves an effect or a layout stores one, and `find_schema` has no id
 /// that starts with this.

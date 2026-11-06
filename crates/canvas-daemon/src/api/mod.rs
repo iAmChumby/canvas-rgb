@@ -3,6 +3,7 @@
 //! Every route is under `/api/v1`. The G9 guards (bearer token, Origin, Host) run as
 //! middleware on the whole router.
 
+pub mod audio;
 pub mod diag;
 pub mod devices;
 pub mod displays;
@@ -104,10 +105,15 @@ pub fn router(app: Arc<App>) -> Router {
         .route(routes::PERIPHERAL_ACCESS, put(peripherals::put_peripheral_access))
         .route(routes::PERIPHERAL_READ, get(peripherals::get_peripheral_read))
         .route(routes::FANS, get(fans::get_fans))
+        .route(routes::FAN_HOT, put(fans::put_fan_hot))
         .route(routes::FAN_HEADER, patch(fans::patch_header))
+        .route(routes::FAN_HEADER_AVAILABILITY, put(fans::put_header_availability))
         .route(routes::FAN_PROFILE, get(fans::get_profile).patch(fans::patch_profile))
         .route(routes::FAN_PROFILES, put(fans::put_profile).delete(fans::delete_profile))
         .route(routes::SETTINGS, get(settings::get_settings).put(settings::put_settings))
+        .route(routes::AUDIO_SOURCES, get(audio::get_sources))
+        .route(routes::AUDIO_SOURCE, put(audio::put_source))
+        .route(routes::AUDIO_TEST, put(audio::put_test).get(audio::get_test).delete(audio::delete_test))
         .route(routes::DISMISS_ZONE_PANEL, post(settings::dismiss_zone_panel))
         .route(routes::ONBOARDING_COMPLETE, post(settings::complete_onboarding))
         .route(routes::ONBOARDING_SESSION, post(devices::onboarding_session))

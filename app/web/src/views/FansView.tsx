@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
-import { ArrowClockwise, Check, CopySimple, DotsThreeOutline, Fan, FloppyDisk, ListChecks, Minus, Plus, Trash, X } from "@phosphor-icons/react";
+import { ArrowClockwise, Check, CopySimple, DotsThreeOutline, Eye, EyeSlash, Fan, FloppyDisk, ListChecks, Minus, Plus, Trash, X } from "@phosphor-icons/react";
 import { Button, IconButton } from "@/components/Button";
 import { Checkbox } from "@/components/Checkbox";
 import { Chip } from "@/components/Chip";
@@ -32,6 +32,8 @@ import type { CurvePoint } from "@/proto/CurvePoint";
 import type { FanHeaderStatus } from "@/proto/FanHeaderStatus";
 import type { FanMode } from "@/proto/FanMode";
 import type { FansStatus } from "@/proto/FansStatus";
+import type { HotKind } from "@/proto/HotKind";
+import type { HotLimits } from "@/proto/HotLimits";
 import type { TempSource } from "@/proto/TempSource";
 import type { TempReading } from "@/proto/TempReading";
 import { PageTitle } from "@/shell/PageHeader";
@@ -820,6 +822,77 @@ function MoreKey({ open, onToggle, fallback }: { open: boolean; onToggle: () => 
   );
 }
 
+/**
+ * Issue #146: the owner's word on whether a header is on this board. A header the board does
+ * not route can be shown anyway; a header on the board can be taken off it. While the word is
+ * there, the way back to the board list stands beside it.
+ *
+ * The key is a ghost button, so it reads as an aside of the header and not as a second mode
+ * control. A refusal is said next to the key, in the panel's own error colour.
+ */
+function HeaderAvailability({ header }: { header: FanHeaderStatus }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const unavailable = isUnavailable(header);
+  // The owner's word, when there is one: `false` "not on my board", `true` "show anyway".
+  const override = header.override_available ?? null;
+
+  const send = async (available: boolean | null) => {
+    setErr(null);
+    setBusy(true);
+    try {
+      await api.putFanHeaderAvailability(header.id, { available });
+      await refreshFans();
+    } catch (e) {
+      setErr(messageOf(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <span className="fan-hdr-availability" data-slot="fan-header-availability">
+      {unavailable ? (
+        <Button
+          size="sm"
+          variant="ghost"
+          icon={<Eye size={14} />}
+          disabled={busy}
+          onClick={() => void send(true)}
+        >
+          Show anyway
+        </Button>
+      ) : (
+        <Button
+          size="sm"
+          variant="ghost"
+          icon={<EyeSlash size={14} />}
+          disabled={busy}
+          onClick={() => void send(false)}
+        >
+          Not on my board
+        </Button>
+      )}
+      {override !== null && (
+        <Button
+          size="sm"
+          variant="ghost"
+          icon={<ListChecks size={14} />}
+          disabled={busy}
+          onClick={() => void send(null)}
+        >
+          Use the board list
+        </Button>
+      )}
+      {err && (
+        <span className="error-line fan-hdr-availability-error" role="alert" title={err}>
+          {err}
+        </span>
+      )}
+    </span>
+  );
+}
+
 function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansStatus }) {
   const base = baseFloor(header.id, fans.floor_percent);
   const [err, setErr] = useState<string | null>(null);
@@ -890,6 +963,40 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
   const currentTemp = tempFor({ mode: "curve", source, points }, fans.temps);
   const currentDuty = dutyFor(points, currentTemp);
 
+  // Issue #130: the hot line for this curve's source kind. A Fixed header has no curve
+  // source: its reference temperature is the CPU reading, as the service treats it.
+  const [hotErr, setHotErr] = useState<string | null>(null);
+  const [hotBusy, setHotBusy] = useState(false);
+  const hotKind: HotKind = mode.mode === "curve" ? source.type : "cpu";
+  const hotRow = (fans.hot ?? []).find((h) => h.kind === hotKind) ?? null;
+
+  /** Sends the whole set of hot limits with one kind changed (`null` = automatic).
+   * Resolves true when the service accepted it, false when the PUT failed (422). */
+  const commitHot = async (value: number | null): Promise<boolean> => {
+    setHotBusy(true);
+    setHotErr(null);
+    const limits: HotLimits = { cpu_c: null, gpu_c: null, board_c: null };
+    for (const row of fans.hot ?? []) {
+      const v = row.user_set ? row.limit_c : null;
+      if (row.kind === "cpu") limits.cpu_c = v;
+      if (row.kind === "gpu") limits.gpu_c = v;
+      if (row.kind === "board") limits.board_c = v;
+    }
+    if (hotKind === "cpu") limits.cpu_c = value;
+    if (hotKind === "gpu") limits.gpu_c = value;
+    if (hotKind === "board") limits.board_c = value;
+    try {
+      await api.putFanHot(limits);
+      await refreshFans();
+      return true;
+    } catch (e) {
+      setHotErr(messageOf(e));
+      return false;
+    } finally {
+      setHotBusy(false);
+    }
+  };
+
   const manual = mode.mode !== "bios";
   const current = mode.mode;
   // The chip is doing something else than what was asked for: the daemon handed it back.
@@ -923,21 +1030,71 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
     </div>
   );
 
+  // The compact "don't exceed" control, shared by Fixed (the CPU kind, as the
+  // service treats it) and Curve. It sits in the floor note, under the sentence it
+  // sets, never in a Field of its own, so it adds the least height to the panel.
+  // The words, the figure and its state stay together on one line (they wrap as one group);
+  // Reset shows only once the user has set a limit, as a settings reset usually does.
+  const hotControls = hotRow && (
+    <span className="hot-controls">
+      <span className="mute">Don&apos;t exceed</span>
+      <NumberField
+        label="Don't exceed temperature"
+        min={40}
+        max={hotRow.max_settable_c}
+        value={hotRow.limit_c}
+        unit="°C"
+        disabled={hotBusy}
+        onCommit={(v) => void commitHot(v)}
+      />
+      {hotRow.user_set ? (
+        <Button
+          size="sm"
+          variant="ghost"
+          icon={<ArrowClockwise size={14} />}
+          disabled={hotBusy}
+          onClick={() => void commitHot(null)}
+        >
+          Reset to automatic
+        </Button>
+      ) : (
+        <span className="mute">automatic</span>
+      )}
+    </span>
+  );
+  const hotError = hotErr && (
+    <span className="error-line" role="alert">
+      {hotErr}
+    </span>
+  );
+
   return (
     <Panel
       title={header.label}
       className={isUnavailable(header) ? "fan-unavailable" : undefined}
       actions={
-        <span className="rpm-readout">
-          <AnimatedNumber value={header.rpm ?? 0} />
-          <span className="unit">RPM</span>
+        <span className="fan-hdr-actions">
+          {/* Issue #146: the key that takes a header off this board. A header the board does not
+              route says its own thing in the panel's body instead, so it is not here twice. */}
+          {!isUnavailable(header) && <HeaderAvailability header={header} />}
+          <span className="rpm-readout">
+            <AnimatedNumber value={header.rpm ?? 0} />
+            <span className="unit">RPM</span>
+          </span>
         </span>
       }
     >
       {isUnavailable(header) ? (
-        <p className="mute">Not on this board: this header is not fitted on your board, so there is no mode to set.</p>
+        <div className="stack" style={{ gap: 8 }}>
+          <p className="mute">
+            {header.override_available === false
+              ? "You marked this header as not on your board, so there is no mode to set."
+              : "Not on this board: this header is not fitted on your board, so there is no mode to set."}
+          </p>
+          <HeaderAvailability header={header} />
+        </div>
       ) : (
-      <div className="stack" style={{ gap: 14 }}>
+      <div className="stack" style={{ gap: 8 }}>
         <Segmented<"bios" | "fixed" | "curve">
           label={`${header.label} mode`}
           value={current}
@@ -956,7 +1113,11 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
 
         {manual && (
           <div className="rule">
-            Floor <span className="fig" style={{ color: "var(--ink)" }}><AnimatedNumber value={base} />%</span>. {hotRuleText()}.
+            <span>
+              Floor <span className="fig" style={{ color: "var(--ink)" }}><AnimatedNumber value={base} />%</span>. {hotRuleText(hotRow?.limit_c)}.
+            </span>
+            {hotControls}
+            {hotError}
           </div>
         )}
 
@@ -989,17 +1150,19 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
         {mode.mode === "curve" && (
           <>
             <Field label="Temperature source">
-              <Select
-                label={`${header.label} temperature source`}
-                value={sourceKey(source)}
-                options={sourceOptions}
-                onChange={(k) => {
-                  const s = sourceFromKey(k);
-                  cancelCurve();
-                  setSource(s);
-                  void apply({ mode: "curve", source: s, points });
-                }}
-              />
+              <div className="row-wrap">
+                <Select
+                  label={`${header.label} temperature source`}
+                  value={sourceKey(source)}
+                  options={sourceOptions}
+                  onChange={(k) => {
+                    const s = sourceFromKey(k);
+                    cancelCurve();
+                    setSource(s);
+                    void apply({ mode: "curve", source: s, points });
+                  }}
+                />
+              </div>
             </Field>
             <FanCurveEditor
               header={header.id}
@@ -1007,8 +1170,10 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
               floor={base}
               currentTemp={currentTemp}
               currentDuty={currentDuty}
+              hot={hotRow}
               onChange={setPoints}
               onCommit={commitCurve}
+              onHotCommit={(v) => commitHot(v)}
             />
             {status}
             <div className="curve-rows">

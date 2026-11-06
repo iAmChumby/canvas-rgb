@@ -35,7 +35,9 @@ import type { LayoutsResponse } from "@/proto/LayoutsResponse";
 import type { Layout } from "@/proto/Layout";
 import type { SetActiveLayout } from "@/proto/SetActiveLayout";
 import type { FansStatus } from "@/proto/FansStatus";
+import type { HotLimits } from "@/proto/HotLimits";
 import type { FanMode } from "@/proto/FanMode";
+import type { PutFanHeaderAvailability } from "@/proto/PutFanHeaderAvailability";
 import type { FanProfile } from "@/proto/FanProfile";
 import type { FanProfileName } from "@/proto/FanProfileName";
 import type { Settings } from "@/proto/Settings";
@@ -49,6 +51,12 @@ import type { StacksResponse } from "@/proto/StacksResponse";
 import type { DeleteStackResponse } from "@/proto/DeleteStackResponse";
 import type { StackPreviewRequest } from "@/proto/StackPreviewRequest";
 import type { StackPreviewResponse } from "@/proto/StackPreviewResponse";
+import type { AudioSource } from "@/proto/AudioSource";
+import type { AudioSources } from "@/proto/AudioSources";
+import type { ResolvedAudioSource } from "@/proto/ResolvedAudioSource";
+import type { AudioTestLease } from "@/proto/AudioTestLease";
+import type { AudioTestRequest } from "@/proto/AudioTestRequest";
+import type { AudioTestState } from "@/proto/AudioTestState";
 
 /** POST /api/v1/onboarding/session (canvas-proto `ONBOARDING_SESSION`). */
 const ONBOARDING_SESSION = "/api/v1/onboarding/session";
@@ -153,8 +161,14 @@ export const api = {
     request<LayoutsResponse>("PUT", routes.layoutActive, body),
 
   fans: () => request<FansStatus>("GET", routes.fans),
+  /** The user's "don't exceed" temperatures, one per kind of source (`null` = automatic). */
+  putFanHot: (body: HotLimits) => request<FansStatus>("PUT", routes.fanHot, body),
   patchFanHeader: (header: string, mode: FanMode) =>
     request<unknown>("PATCH", routes.fanHeader(header), mode),
+  /** The owner's word on whether a header is on this board (#146): `false` "Not on my board",
+   *  `true` "Show anyway", `null` back to the board table. The answer is the new fan status. */
+  putFanHeaderAvailability: (header: string, body: PutFanHeaderAvailability) =>
+    request<FansStatus>("PUT", routes.fanHeaderAvailability(header), body),
   fanProfile: () => request<FanProfileName>("GET", routes.fanProfile),
   switchFanProfile: (name: string) =>
     request<FanProfileName>("PATCH", routes.fanProfile, { name }),
@@ -164,6 +178,19 @@ export const api = {
 
   settings: () => request<Settings>("GET", routes.settings),
   putSettings: (body: Settings) => request<Settings>("PUT", routes.settings, body),
+
+  /** The endpoints to pick from and what the current choice resolved to (#166). */
+  audioSources: () => request<AudioSources>("GET", routes.audioSources),
+  /** The only writer of the pick; answers what it resolved to. */
+  putAudioSource: (body: AudioSource) => request<ResolvedAudioSource>("PUT", routes.audioSource, body),
+  /** Takes a live-test lease; the readings poll renews it. */
+  putAudioTest: (body: AudioTestRequest) => request<AudioTestLease>("PUT", routes.audioTest, body),
+  /** Reads and renews a lease (410 when it is unknown or expired). */
+  getAudioTest: (lease: string) =>
+    request<AudioTestState>("GET", `${routes.audioTest}?lease=${encodeURIComponent(lease)}`),
+  /** Ends a lease now, so turning Listen off closes the microphone at once. */
+  releaseAudioTest: (lease: string) =>
+    request<unknown>("DELETE", `${routes.audioTest}?lease=${encodeURIComponent(lease)}`),
   dismissZonePanel: () => request<unknown>("POST", routes.dismissZonePanel),
   /** The owner reached the end of the onboarding: the window stops opening by itself. */
   completeOnboarding: () => request<unknown>("POST", routes.onboardingComplete),

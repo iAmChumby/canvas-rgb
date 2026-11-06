@@ -17,10 +17,11 @@ use canvas_proto::api::{
     routes, ActivateEffect, Conflict, EffectsResponse, FanProfileName, PatchOutput, Power, Status,
 };
 use canvas_proto::fans::{FansStatus, PIPE_LOST_WARN_MS};
+use canvas_proto::tauri::EditorChoice;
 
 use canvas_proto::consts;
 
-use crate::{api, commands, editor, log, onboard, update};
+use crate::{api, commands, editor, gpui_editor, log, onboard, update};
 
 pub const TRAY_ID: &str = "main";
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -52,6 +53,10 @@ pub struct Snapshot {
     pub update: Option<String>,
     /// An update whose install did not finish (shown until the next check or install).
     pub update_failed: Option<String>,
+    /// The running build is an experimental one (#202): only then is there an editor choice.
+    pub experimental: bool,
+    /// The editor the tray opens now (#202).
+    pub editor: EditorChoice,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +79,8 @@ impl Snapshot {
             onboarding_complete: true,
             update: None,
             update_failed: None,
+            experimental: false,
+            editor: EditorChoice::React,
         }
     }
 }
@@ -146,6 +153,10 @@ pub fn refresh<R: Runtime>(app: &AppHandle<R>) -> bool {
     let mut snap = poll();
     snap.update = update::offered_version(app);
     snap.update_failed = update::failed_version(app);
+    // The editor choice belongs to an experimental build (#202); a stable build always opens
+    // the React editor.
+    snap.experimental = gpui_editor::is_experimental_build(app);
+    snap.editor = gpui_editor::effective_editor(app);
     let state = app.state::<TrayState>();
     let changed = {
         let mut last = state.last.lock().unwrap_or_else(|p| p.into_inner());
@@ -252,6 +263,8 @@ fn poll() -> Snapshot {
         onboarding_complete: status.onboarding_complete,
         update: None,
         update_failed: None,
+        experimental: false,
+        editor: EditorChoice::React,
     }
 }
 
@@ -346,7 +359,13 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, snap: &Snapshot) -> tauri::Result<
         Box::new(fans_submenu(app, snap)?),
         Box::new(MenuItem::with_id(app, "fans", "Fans…", true, None::<&str>)?),
         Box::new(PredefinedMenuItem::separator(app)?),
-        Box::new(MenuItem::with_id(app, "editor", "Open editor", true, None::<&str>)?),
+    ]);
+    items.push(Box::new(MenuItem::with_id(app, "editor", "Open editor", true, None::<&str>)?));
+    if snap.experimental {
+        // The editor choice, right after "Open editor". Only an experimental build has it.
+        items.push(Box::new(editor_submenu(app, snap.editor)?));
+    }
+    items.extend::<Vec<Box<dyn IsMenuItem<R>>>>(vec![
         Box::new(MenuItem::with_id(app, "logs", "Open logs folder", true, None::<&str>)?),
         Box::new(MenuItem::with_id(app, "update-check", "Check for updates", true, None::<&str>)?),
         Box::new(PredefinedMenuItem::separator(app)?),
@@ -354,6 +373,28 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, snap: &Snapshot) -> tauri::Result<
     ]);
     let refs: Vec<&dyn IsMenuItem<R>> = items.iter().map(|item| item.as_ref()).collect();
     Menu::with_items(app, &refs)
+}
+
+/// The editor choice: a checked pair, on experimental builds only (#202).
+fn editor_submenu<R: Runtime>(app: &AppHandle<R>, current: EditorChoice) -> tauri::Result<Submenu<R>> {
+    let react = CheckMenuItem::with_id(
+        app,
+        "editor:react",
+        "React",
+        true,
+        current == EditorChoice::React,
+        None::<&str>,
+    )?;
+    let gpui = CheckMenuItem::with_id(
+        app,
+        "editor:gpui",
+        "GPUI",
+        true,
+        current == EditorChoice::Gpui,
+        None::<&str>,
+    )?;
+    let refs: Vec<&dyn IsMenuItem<R>> = vec![&react, &gpui];
+    Submenu::with_id_and_items(app, "editor-choice", "Editor", true, &refs)
 }
 
 fn effects_submenu<R: Runtime>(app: &AppHandle<R>, snap: &Snapshot) -> tauri::Result<Submenu<R>> {
@@ -443,11 +484,24 @@ fn on_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
                 .patch::<_, serde_json::Value>(routes::FAN_PROFILE, &body)
                 .map(drop)
         });
+    } else if let Some(choice) = id.strip_prefix("editor:") {
+        let choice = match choice {
+            "react" => EditorChoice::React,
+            "gpui" => EditorChoice::Gpui,
+            _ => return,
+        };
+        set_editor(app, choice);
     } else {
         match id {
-            "editor" => editor::open(app, None),
-            "fans" => editor::open(app, Some("fans")),
-            "update" => editor::open(app, Some("updates")),
+            "editor" => {
+                editor::open(app, None);
+            }
+            "fans" => {
+                editor::open(app, Some("fans"));
+            }
+            "update" => {
+                editor::open(app, Some("updates"));
+            }
             "update-check" => update::check_in_background(app),
             "logs" => {
                 if let Err(e) = commands::open_logs(app) {
@@ -457,6 +511,43 @@ fn on_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
             "quit" => quit(app),
             _ => {}
         }
+    }
+}
+
+/// The editor choice from the tray menu (#202): the tray keeps it, and the open editor closes
+/// and the other one opens on the same page.
+fn set_editor<R: Runtime>(app: &AppHandle<R>, choice: EditorChoice) {
+    if !gpui_editor::is_experimental_build(app) {
+        log::append("editor: the editor choice is only there on experimental builds");
+        return;
+    }
+    let Some(ctl) = update::try_controller(app) else {
+        log::append("editor: the editor choice was not kept: the tray is not ready");
+        return;
+    };
+    // The editor that is open now, before the pref changes.
+    let previous = gpui_editor::effective_editor(app);
+    if let Err(e) = ctl.set_editor(choice) {
+        log::append(&format!("editor: the editor choice was not kept: {e}"));
+        return;
+    }
+    if previous != choice {
+        editor::switch_editor(app, choice, editor::last_page().as_deref());
+    }
+    // The check marks follow the choice.
+    rebuild(app);
+}
+
+/// Rebuilds the menu from the last snapshot: the editor's check marks follow the choice.
+fn rebuild<R: Runtime>(app: &AppHandle<R>) {
+    let state = app.state::<TrayState>();
+    let last = state.last.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    let Some(snap) = last else {
+        return;
+    };
+    let handle = app.clone();
+    if let Err(e) = app.run_on_main_thread(move || apply(&handle, &snap)) {
+        log::append(&format!("could not update the tray: {e}"));
     }
 }
 
@@ -492,6 +583,7 @@ fn quit<R: Runtime>(app: &AppHandle<R>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tauri::menu::MenuItemKind;
 
     fn snap() -> Snapshot {
         Snapshot { daemon: true, running: true, onboarding_complete: true, ..Snapshot::offline() }
@@ -549,6 +641,60 @@ mod tests {
         let app = tauri::test::mock_app();
         let menu = build_menu(app.handle(), snap).unwrap();
         menu.items().unwrap().iter().map(|item| item.id().as_ref().to_string()).collect()
+    }
+
+    /// The check items of the submenu with this id: their ids and whether they are ticked.
+    fn submenu_checks(snap: &Snapshot, id: &str) -> Vec<(String, bool)> {
+        let app = tauri::test::mock_app();
+        let menu = build_menu(app.handle(), snap).unwrap();
+        for item in menu.items().unwrap() {
+            let MenuItemKind::Submenu(sub) = item else { continue };
+            if sub.id().as_ref() != id {
+                continue;
+            }
+            return sub
+                .items()
+                .unwrap()
+                .iter()
+                .filter_map(|item| match item {
+                    MenuItemKind::Check(check) => {
+                        Some((check.id().as_ref().to_string(), check.is_checked().unwrap_or(false)))
+                    }
+                    _ => None,
+                })
+                .collect();
+        }
+        Vec::new()
+    }
+
+    #[test]
+    fn the_editor_choice_is_only_on_an_experimental_build() {
+        let stable = menu_ids(&snap());
+        assert!(!stable.contains(&"editor-choice".to_string()), "{stable:?}");
+        let experimental = menu_ids(&Snapshot { experimental: true, ..snap() });
+        assert!(experimental.contains(&"editor-choice".to_string()), "{experimental:?}");
+        // The pair, with the editor that is open now ticked.
+        let pair = submenu_checks(&Snapshot { experimental: true, ..snap() }, "editor-choice");
+        assert_eq!(
+            pair,
+            vec![
+                ("editor:react".to_string(), true),
+                ("editor:gpui".to_string(), false)
+            ],
+            "{pair:?}"
+        );
+        let gpui = submenu_checks(
+            &Snapshot { experimental: true, editor: EditorChoice::Gpui, ..snap() },
+            "editor-choice",
+        );
+        assert_eq!(
+            gpui,
+            vec![
+                ("editor:react".to_string(), false),
+                ("editor:gpui".to_string(), true)
+            ],
+            "{gpui:?}"
+        );
     }
 
     #[test]

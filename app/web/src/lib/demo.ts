@@ -51,6 +51,8 @@ import type { FanMode } from "@/proto/FanMode";
 import type { FanProfile } from "@/proto/FanProfile";
 import type { FanHeaderStatus } from "@/proto/FanHeaderStatus";
 import type { FansStatus } from "@/proto/FansStatus";
+import type { HotLimitStatus } from "@/proto/HotLimitStatus";
+import type { HotLimits } from "@/proto/HotLimits";
 import type { TempReading } from "@/proto/TempReading";
 import type { Settings } from "@/proto/Settings";
 import type { ExportBundle } from "@/proto/ExportBundle";
@@ -67,6 +69,10 @@ import type { DisplayValue } from "@/proto/DisplayValue";
 import type { PeripheralAccess } from "@/proto/PeripheralAccess";
 import type { PeripheralDetail } from "@/proto/PeripheralDetail";
 import type { ReadProgress } from "@/proto/ReadProgress";
+import type { AudioSource } from "@/proto/AudioSource";
+import type { AudioSources } from "@/proto/AudioSources";
+import type { AudioTestState } from "@/proto/AudioTestState";
+import type { ResolvedAudioSource } from "@/proto/ResolvedAudioSource";
 import type { ImportEffect } from "@/proto/ImportEffect";
 import type { ImportEffectResponse } from "@/proto/ImportEffectResponse";
 import type { FailedEffect } from "@/proto/FailedEffect";
@@ -92,7 +98,7 @@ import { stackThumbnailBytes } from "@/lib/stackFrame";
 const BASE = "/api/v1";
 const DEMO_LAYOUTS_KEY = "canvas-rgb.demo-layouts";
 const DEMO_ONBOARDED_KEY = "canvas-rgb.demo-onboarded";
-const APP_VERSION = "0.8.4";
+const APP_VERSION = "0.9.0";
 const SCHEMA_VERSION = 1;
 
 function scenario(): Set<string> {
@@ -116,8 +122,12 @@ interface DemoState {
   activeLayout: string;
   fanModes: Record<string, FanMode>;
   fanFloor: number;
+  fanHotLimits: HotLimits;
   fanProfiles: FanProfile[];
   activeProfile: string;
+  /** Issue #146: the owner's word per header: `true` "show anyway", `false` "not on my board".
+   *  A header with no word is the board table's business. */
+  fanOverrides: Record<string, boolean>;
   zonePanel: boolean;
   /** The owner reached the end of the onboarding. */
   onboardingComplete: boolean;
@@ -162,6 +172,12 @@ interface DemoState {
   stackPreviewCalls: { at: number; epoch: string; seq: number; applied: boolean }[];
   /** `?state=stack-dropped` has dropped one PUT already. */
   stackPreviewDropped: boolean;
+  /** The audio-source pick, as saved on the daemon's config (#166). */
+  audioSource: AudioSource;
+  /** The live audio test leases, by id; a DELETE ends one at once. */
+  audioLeases: Record<string, { listen: boolean }>;
+  /** The next audio lease counter. */
+  audioLeaseCounter: number;
 }
 
 /**
@@ -267,8 +283,10 @@ function initialState(): DemoState {
     activeLayout: layouts.active,
     fanModes,
     fanFloor: 20,
+    fanHotLimits: { cpu_c: null, gpu_c: null, board_c: null },
     fanProfiles: FAN_PROFILES.map((p) => ({ ...p, headers: { ...p.headers } })),
     activeProfile: profile?.name ?? "Default",
+    fanOverrides: {},
     zonePanel: s.has("first-run"),
     serviceUp: !s.has("service-down"),
     conflicts: s.has("conflict") || s.has("conflict-clears") ? [{ kind: "signal_rgb", process: true, service: false }] : [],
@@ -305,6 +323,9 @@ function initialState(): DemoState {
     stackPreviewOwner: null,
     stackPreviewCalls: [],
     stackPreviewDropped: false,
+    audioSource: { kind: "follow_default" },
+    audioLeases: {},
+    audioLeaseCounter: 0,
   };
 }
 
@@ -549,6 +570,9 @@ function fansStatus(): FansStatus {
   const s = st();
   const r = temps();
   const jitter = (i: number) => Math.sin(r.t * 1.7 + i * 2.1) * 9;
+  // Issue #146: the owner's word on a header wins over the board table. With no word the
+  // table decides, and the demo's table is the `unavailable:<id>` scenario.
+  const table = unavailableHeaders();
   const headers: FanHeaderStatus[] = FAN_HEADERS.map((h, i) => {
     const mode = s.fanModes[h.id] ?? { mode: "bios" as const };
     let percent: number;
@@ -556,15 +580,18 @@ function fansStatus(): FansStatus {
     else if (mode.mode === "curve") percent = interpolate(mode.points, tempFor(mode.source));
     else percent = 34 + (i % 3) * 4;
     const rpm = mode.mode === "bios" ? 980 + i * 60 + Math.round(jitter(i) * 4) : Math.round(percent * 17.5 + jitter(i));
+    const override = s.fanOverrides[h.id];
+    const available = override ?? !table.includes(h.id);
     return {
       id: h.id,
       label: h.label,
-      rpm,
-      pwm_percent: Math.round(percent),
+      rpm: available ? rpm : 0,
+      pwm_percent: available ? Math.round(percent) : 0,
       mode,
-      on_bios: mode.mode === "bios",
+      on_bios: available ? mode.mode === "bios" : true,
       override_reason: null,
-      available: true,
+      available,
+      override_available: override ?? null,
     };
   }).map((h) => (TACH_ONLY.includes(h.id) ? { ...h, pwm_percent: null } : h));
   const temperatures: TempReading[] = [
@@ -572,6 +599,23 @@ function fansStatus(): FansStatus {
     { source: { type: "gpu" }, label: "GPU", celsius: Math.round(r.gpu * 10) / 10 },
     { source: { type: "board", name: "SYSTIN" }, label: "Board SYSTIN", celsius: Math.round(r.board * 10) / 10 },
   ];
+  // Issue #130: the demo answers with the spine's defaults (7800X3D rated 89 °C,
+  // GPU on the 88 °C fallback, board at 50 °C) and whatever the user set.
+  const hotRow = (
+    kind: HotLimitStatus["kind"],
+    auto: number,
+    rated: number | null,
+    ceiling: number,
+    user: number | null,
+  ): HotLimitStatus => ({
+    kind,
+    limit_c: user ?? auto,
+    user_set: user !== null,
+    auto_c: auto,
+    rated_max_c: rated,
+    ceiling_c: ceiling,
+    max_settable_c: ceiling - 2,
+  });
   return {
     chip: "NCT6687D-R @ 0xA20",
     hardware_watchdog: null,
@@ -580,6 +624,11 @@ function fansStatus(): FansStatus {
     active_profile: s.activeProfile,
     profiles: s.fanProfiles.map((p) => p.name),
     floor_percent: s.fanFloor,
+    hot: [
+      hotRow("cpu", 74, 89, 84, s.fanHotLimits.cpu_c),
+      hotRow("gpu", 73, null, 83, s.fanHotLimits.gpu_c),
+      hotRow("board", 50, null, 90, s.fanHotLimits.board_c),
+    ],
   };
 }
 
@@ -858,6 +907,72 @@ function checkFileName(fileName: string): string {
     fail(422, "validation", `"${fileName}" is a name Windows keeps for itself`);
   }
   return trimmed;
+}
+
+// ---- the audio source (#166): the picker list, the pick, and the live test ----
+//
+// The demo answers the three routes from the pick in state: an endpoint list
+// (Speakers, Voicemeeter Input as the default output, a Microphone input), a
+// resolved current source, and a live test state with a moving peak and bands,
+// so the panel can be seen and screenshotted outside the host.
+
+const DEMO_AUDIO_ENDPOINTS = [
+  { id: "demo-speakers", flow: "render" as const, name: "Speakers (Realtek Audio)", is_default: false, state: "active" as const },
+  { id: "demo-voicemeeter", flow: "render" as const, name: "Voicemeeter Input", is_default: true, state: "active" as const },
+  { id: "demo-mic", flow: "capture" as const, name: "Microphone", is_default: true, state: "active" as const },
+];
+
+function demoResolvedSource(source: AudioSource): ResolvedAudioSource {
+  if (source.kind === "endpoint") {
+    const ep = DEMO_AUDIO_ENDPOINTS.find((e) => e.id === source.id);
+    const def = DEMO_AUDIO_ENDPOINTS.find((e) => e.flow === "render" && e.is_default);
+    if (ep) return { requested: source, endpoint_id: ep.id, name: ep.name, flow: ep.flow, fallback: null };
+    return {
+      requested: source,
+      endpoint_id: def?.id ?? null,
+      name: def?.name ?? null,
+      flow: def?.flow ?? source.flow,
+      fallback: def ? { reason: "picked_missing" } : null,
+    };
+  }
+  const def = DEMO_AUDIO_ENDPOINTS.find((e) => e.flow === "render" && e.is_default);
+  return {
+    requested: source,
+    endpoint_id: def?.id ?? null,
+    name: def?.name ?? null,
+    flow: def?.flow ?? null,
+    fallback: null,
+  };
+}
+
+function demoAudioSources(s: DemoState): AudioSources {
+  return { endpoints: DEMO_AUDIO_ENDPOINTS.map((e) => ({ ...e })), current: demoResolvedSource(s.audioSource) };
+}
+
+/** A moving peak and bands, so the meter visibly moves between polls. */
+function demoAudioTestState(s: DemoState, lease: { listen: boolean }): AudioTestState {
+  const current = demoResolvedSource(s.audioSource);
+  const t = Date.now() / 400;
+  const peak = 0.35 + 0.3 * Math.sin(t);
+  const bands = Array.from({ length: 32 }, (_, i) => {
+    const base = 0.15 + 0.45 * Math.max(0, Math.sin(t + i * 0.35));
+    return Math.min(1, base * (1 + 0.2 * Math.sin(t * 1.7 + i * 0.11)));
+  });
+  const isInput = current.requested.kind === "endpoint" && current.requested.flow === "capture";
+  const status = isInput && !lease.listen ? "not_listening" : "live";
+  return {
+    status,
+    source: current,
+    sample_rate: 48000,
+    channels: 2,
+    bits_per_sample: 32,
+    format_tag: 3,
+    peak: status === "live" ? peak : null,
+    peak_db: status === "live" ? 20 * Math.log10(Math.max(peak, 1e-6)) : null,
+    bands: status === "live" ? bands : [],
+    packets: 10n,
+    silent_packets: 0n,
+  };
 }
 
 // ---- router ----
@@ -1435,6 +1550,19 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       if (!s.serviceUp) fail(503, "service_unavailable", "the fan service is not reachable");
       return applyFanScenarios(fansStatus());
     }
+    if (seg[1] === "headers" && seg[3] === "availability" && method === "PUT") {
+      if (!s.serviceUp) fail(503, "service_unavailable", "the fan service is not reachable");
+      const header = seg[2] ?? "";
+      if (!FAN_HEADERS.some((h) => h.id === header)) fail(422, "validation", `unknown header ${header}`);
+      // The real API refuses a body without `available`; only `null` takes the word off.
+      if (body === null || typeof body !== "object" || !("available" in body)) {
+        fail(422, "validation", "the body must carry available: true, false, or null");
+      }
+      const available = (body as { available: boolean | null }).available;
+      if (available === null) delete s.fanOverrides[header];
+      else s.fanOverrides[header] = available;
+      return applyFanScenarios(fansStatus());
+    }
     if (seg[1] === "headers" && method === "PATCH") {
       if (!s.serviceUp) fail(503, "service_unavailable", "the fan service is not reachable");
       const header = seg[2] ?? "";
@@ -1442,12 +1570,32 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       const mode = body as FanMode;
       if (TACH_ONLY.includes(header) && mode.mode !== "bios") fail(422, "validation", `${header} is tach-only and cannot take a mode`);
       // Issue #128: a header the board does not route answers 503, like the service's Unavailable.
-      if (unavailableHeaders().includes(header) && mode.mode !== "bios") {
+      // Issue #146: the owner's word wins over the board table, so a header the owner showed
+      // anyway takes a mode like any other.
+      const onBoard = s.fanOverrides[header] ?? !unavailableHeaders().includes(header);
+      if (!onBoard && mode.mode !== "bios") {
         fail(503, "service_unavailable", `${header} is not on this board: the chip has the channel, the board has no connector`);
       }
       validateMode(header, mode, s.fanFloor);
       s.fanModes[header] = mode;
       return { ok: true, header, mode };
+    }
+    if (seg[1] === "hot" && method === "PUT") {
+      if (!s.serviceUp) fail(503, "service_unavailable", "the fan service is not reachable");
+      const limits = body as HotLimits;
+      // The spine's ranges for the demo's rated maxima, in the spine's words.
+      const maxes: Array<[string, number | null, number]> = [
+        ["cpu", limits.cpu_c, 82],
+        ["gpu", limits.gpu_c, 81],
+        ["board", limits.board_c, 88],
+      ];
+      for (const [kind, v, max] of maxes) {
+        if (v !== null && (Number.isNaN(v) || v < 40 || v > max)) {
+          fail(422, "validation", `the ${kind} hot limit of ${v} °C is outside 40 to ${max} °C`);
+        }
+      }
+      s.fanHotLimits = { cpu_c: limits.cpu_c, gpu_c: limits.gpu_c, board_c: limits.board_c };
+      return fansStatus();
     }
     if (seg[1] === "profile" && method === "GET") {
       return { name: s.activeProfile };
@@ -1484,6 +1632,31 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       if (idx < 0) s.fanProfiles.push(profile);
       else s.fanProfiles[idx] = profile;
       return profile;
+    }
+    return bad();
+  }
+
+  if (head === "audio") {
+    if (seg[1] === "sources" && method === "GET") return demoAudioSources(s);
+    if (seg[1] === "source" && method === "PUT") {
+      s.audioSource = body as AudioSource;
+      return demoResolvedSource(s.audioSource);
+    }
+    if (seg[1] === "test") {
+      if (method === "PUT") {
+        s.audioLeaseCounter += 1;
+        const lease_id = `demo-lease-${s.audioLeaseCounter}`;
+        s.audioLeases[lease_id] = { listen: (body as { listen?: boolean }).listen === true };
+        return { lease_id };
+      }
+      const lease_id = url.searchParams.get("lease") ?? "";
+      const lease = s.audioLeases[lease_id];
+      if (!lease) fail(410, "gone", "the audio test lease is unknown or expired; take a new one");
+      if (method === "GET") return demoAudioTestState(s, lease);
+      if (method === "DELETE") {
+        delete s.audioLeases[lease_id];
+        return { ok: true };
+      }
     }
     return bad();
   }
@@ -1576,6 +1749,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
           active_profile: s.activeProfile,
           profiles: s.fanProfiles,
           boot_color: s.settings.boot_color,
+          hot_limits: s.fanHotLimits,
         },
         displays: s.displayConfig ? [{ ...s.displayConfig }] : [],
         stacks: [],

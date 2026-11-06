@@ -92,6 +92,7 @@ jobs:
               - 'tools/*.ps1'
               - '.github/workflows/release.yml'
               - '.github/workflows/test-build.yml'
+              - '.github/workflows/experimental.yml'
             versions:
               # Every file that carries a copy of the version (tools/set-version.ps1 lists them):
               # the manifests, the lock file, the editor's and the site's packages, the Tauri

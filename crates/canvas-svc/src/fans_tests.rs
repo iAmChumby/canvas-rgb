@@ -218,7 +218,10 @@ fn a_curve_drives_the_header_and_reads_back() {
 #[test]
 fn the_hot_floor_overrides_a_lower_fixed_value_and_says_why() {
     let t0 = Instant::now();
-    let mut r = rig(FansFile::default(), t0);
+    // Issue #130: the latch mechanics run here at a user-set 50 °C CPU line; the
+    // automatic line is covered by the issue130 tests below.
+    let config = FansFile { hot_limits: HotLimits { cpu_c: Some(50.0), gpu_c: None, board_c: None }, ..Default::default() };
+    let mut r = rig(config, t0);
     r.cpu.set(Some(55.0));
     r.fans.tick(t0);
     r.fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 20 }, t0).unwrap();
@@ -1031,7 +1034,9 @@ fn a_spike_train_on_cpu_fan_does_not_staircase() {
 #[test]
 fn a_step_from_40_to_51_raises_cpu_fan_to_the_hot_floor_on_the_same_tick() {
     let t0 = Instant::now();
-    let mut r = rig(FansFile::default(), t0);
+    // Issue #130: at a user-set 50 °C CPU line (see the note above).
+    let config = FansFile { hot_limits: HotLimits { cpu_c: Some(50.0), gpu_c: None, board_c: None }, ..Default::default() };
+    let mut r = rig(config, t0);
     r.cpu.set(Some(40.0));
     r.fans.set_header_mode("cpu_fan", cpu_curve(), t0).unwrap();
     for s in 1..=3 {
@@ -1046,7 +1051,9 @@ fn a_step_from_40_to_51_raises_cpu_fan_to_the_hot_floor_on_the_same_tick() {
 #[test]
 fn the_hot_floor_releases_after_a_hold_continuously_below_50() {
     let t0 = Instant::now();
-    let mut r = rig(FansFile::default(), t0);
+    // Issue #130: at a user-set 50 °C CPU line (see the note above).
+    let config = FansFile { hot_limits: HotLimits { cpu_c: Some(50.0), gpu_c: None, board_c: None }, ..Default::default() };
+    let mut r = rig(config, t0);
     r.cpu.set(Some(51.0));
     r.fans.set_header_mode("cpu_fan", cpu_curve(), t0).unwrap();
     for s in 1..=3 {
@@ -1066,13 +1073,17 @@ fn the_hot_floor_releases_after_a_hold_continuously_below_50() {
 
 #[test]
 fn a_latched_hot_floor_never_caps_a_rising_curve() {
-    // Review of PR #142: the latch must be a floor, not a cap. Latch at 51 C, then heat to 90 C:
-    // the curve's 100 % must be written on that same tick.
+    // Review of PR #142: the latch must be a floor, not a cap. Latch at 51 C, then heat to
+    // 85 C: the curve's 100 % must be written on that same tick. (Issue #130: at a user-set
+    // 50 °C CPU line with a 9800X3D's 95 °C rated maximum, so the 90 °C ceiling stays above
+    // the 85 °C top temperature and only the curve answers.)
     let t0 = Instant::now();
-    let mut r = rig(FansFile::default(), t0);
+    let config = FansFile { hot_limits: HotLimits { cpu_c: Some(50.0), gpu_c: None, board_c: None }, ..Default::default() };
+    let mut r = rig(config, t0);
+    r.fans.set_cpu_brand(Some("AMD Ryzen 9 9800X3D 8-Core Processor"));
     let curve = FanMode::Curve {
         source: TempSource::Cpu,
-        points: vec![point(30.0, 30), point(50.0, 44), point(90.0, 100)],
+        points: vec![point(30.0, 30), point(50.0, 44), point(85.0, 100)],
     };
     r.cpu.set(Some(51.0));
     r.fans.set_header_mode("cpu_fan", curve, t0).unwrap();
@@ -1080,8 +1091,8 @@ fn a_latched_hot_floor_never_caps_a_rising_curve() {
         tick_cpu_at_temp(&mut r, t0, s, 51.0);
     }
     assert_eq!(r.chip.duty_raw(CPU_FAN), 128, "latched at the 50 % hot floor at 51 C");
-    let duty = tick_cpu_at_temp(&mut r, t0, 4, 90.0);
-    assert_eq!(duty, 255, "90 C takes the curve's 100 % on the same tick: {duty}");
+    let duty = tick_cpu_at_temp(&mut r, t0, 4, 85.0);
+    assert_eq!(duty, 255, "85 C takes the curve's 100 % on the same tick: {duty}");
 }
 
 #[test]
@@ -1227,6 +1238,118 @@ fn a_stuck_zero_header_is_handed_back_on_an_unknown_board_and_left_alone_on_ms7e
 }
 
 #[test]
+fn issue146_clearing_a_shown_anyway_header_on_a_board_hidden_header_releases_it_to_bios() {
+    let t0 = Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let chip = FakeChip::new(MSI_ALT1_MAP);
+    let cpu = FakeTemp::new(40.0);
+    let mut fans = board_controller(&dir, &chip, &cpu, FansFile::default(), t0, Some(MS7E56));
+    // MS-7E56 hides sys_fan5; show anyway, then give it a mode so it is manual.
+    fans.set_header_override("sys_fan5", true).unwrap();
+    fans.set_header_mode("sys_fan5", FanMode::Fixed { percent: 50 }, t0).unwrap();
+    assert!(chip.manual(6), "sys_fan5 is manual after the mode is set");
+    let saved = store::load_bios_state(&paths::bios_state_path(dir.path())).unwrap();
+    assert!(saved.headers.contains_key("sys_fan5"), "bios-state.json names sys_fan5 while it is manual");
+    fans.clear_header_override("sys_fan5", t0).unwrap();
+    fans.tick(t0 + Duration::from_secs(1));
+    assert!(!chip.manual(6), "clearing to a board-hidden header releases it to BIOS");
+    let saved = store::load_bios_state(&paths::bios_state_path(dir.path())).unwrap();
+    assert!(!saved.headers.contains_key("sys_fan5"), "bios-state.json no longer names sys_fan5");
+}
+
+#[test]
+fn issue146_clearing_not_on_my_board_resumes_the_profile_mode() {
+    let t0 = Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let chip = FakeChip::new(MSI_ALT1_MAP);
+    let cpu = FakeTemp::new(40.0);
+    let mut fans = board_controller(&dir, &chip, &cpu, FansFile::default(), t0, Some(MS7E56));
+    fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 50 }, t0).unwrap();
+    assert!(chip.manual(SYS_FAN1), "sys_fan1 is running Fixed 50%");
+    fans.set_header_override("sys_fan1", false).unwrap();
+    assert!(!chip.manual(SYS_FAN1), "not on my board releases sys_fan1");
+    fans.clear_header_override("sys_fan1", t0).unwrap();
+    assert!(chip.manual(SYS_FAN1), "clearing resumes the profile mode: sys_fan1 is manual again");
+    assert_eq!(header(&fans.status(), "sys_fan1").pwm_percent, Some(50), "sys_fan1 drives Fixed 50% again");
+}
+
+#[test]
+fn issue146_a_shown_anyway_header_gets_the_safety_ceiling() {
+    let t0 = Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let chip = FakeChip::new(MSI_ALT1_MAP);
+    let cpu = FakeTemp::new(40.0);
+    let mut fans = board_controller(&dir, &chip, &cpu, FansFile::default(), t0, Some(MS7E56));
+    cpu.set(Some(90.0));
+    fans.tick(t0);
+    fans.set_header_override("sys_fan5", true).unwrap();
+    fans.set_header_mode("sys_fan5", FanMode::Fixed { percent: 50 }, t0).unwrap();
+    assert_eq!(chip.duty_raw(6), 255, "90 C is above the ceiling: the shown-anyway header runs at 100%");
+    assert_eq!(header(&fans.status(), "sys_fan5").pwm_percent, Some(100));
+}
+
+#[test]
+fn issue146_a_failed_save_on_set_false_changes_nothing() {
+    let t0 = Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let chip = FakeChip::new(MSI_ALT1_MAP);
+    let cpu = FakeTemp::new(40.0);
+    let mut fans = board_controller(&dir, &chip, &cpu, FansFile::default(), t0, Some(MS7E56));
+    fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 50 }, t0).unwrap();
+    assert!(chip.manual(SYS_FAN1));
+    std::fs::create_dir(paths::chip_path(dir.path())).unwrap();
+    let writes_before = chip.writes();
+    let err = fans.set_header_override("sys_fan1", false).unwrap_err();
+    assert!(matches!(err, FanError::Store(_)), "the save failure is the error: {err}");
+    assert_eq!(chip.writes(), writes_before, "a failed save writes nothing to the chip");
+    assert!(chip.manual(SYS_FAN1), "the header is still manual: the release never ran");
+    assert!(fans.header_available("sys_fan1"), "the in-memory word is unchanged after a failed save");
+    assert_eq!(header(&fans.status(), "sys_fan1").override_available, None, "no word is in memory");
+}
+
+#[test]
+fn issue146_a_failed_save_on_clear_changes_nothing() {
+    let t0 = Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let chip = FakeChip::new(MSI_ALT1_MAP);
+    let cpu = FakeTemp::new(40.0);
+    let mut fans = board_controller(&dir, &chip, &cpu, FansFile::default(), t0, Some(MS7E56));
+    fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 50 }, t0).unwrap();
+    fans.set_header_override("sys_fan1", false).unwrap();
+    assert!(!chip.manual(SYS_FAN1));
+    std::fs::remove_file(paths::chip_path(dir.path())).unwrap();
+    std::fs::create_dir(paths::chip_path(dir.path())).unwrap();
+    let writes_before = chip.writes();
+    let err = fans.clear_header_override("sys_fan1", t0).unwrap_err();
+    assert!(matches!(err, FanError::Store(_)), "the save failure is the error: {err}");
+    assert_eq!(chip.writes(), writes_before, "a failed save writes nothing to the chip");
+    assert!(!fans.header_available("sys_fan1"), "the in-memory word is unchanged after a failed clear");
+    assert_eq!(header(&fans.status(), "sys_fan1").override_available, Some(false), "the word is still in memory");
+}
+
+#[test]
+fn issue146_with_no_chip_every_header_is_refused() {
+    let t0 = Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let cpu = FakeTemp::new(40.0);
+    let temps: BTreeMap<TempSource, Box<dyn TempReader>> =
+        BTreeMap::from([(TempSource::Cpu, Box::new(cpu.clone()) as Box<dyn TempReader>)]);
+    let mut fans = FanController::new(dir.path().to_path_buf(), None, None, temps, FansFile::default(), None);
+    fans.startup(t0);
+    for available in [Some(false), Some(true)] {
+        let err = match available {
+            Some(v) => fans.set_header_override("sys_fan1", v).unwrap_err(),
+            None => fans.clear_header_override("sys_fan1", t0).unwrap_err(),
+        };
+        assert!(matches!(err, FanError::Validation(_)), "no chip: every header is refused: {err}");
+        assert!(err.to_string().contains("sys_fan1"), "the error names the header: {err}");
+    }
+    let err = fans.clear_header_override("sys_fan1", t0).unwrap_err();
+    assert!(matches!(err, FanError::Validation(_)), "clear with no chip is refused: {err}");
+    assert!(err.to_string().contains("sys_fan1"), "the error names the header: {err}");
+}
+
+#[test]
 fn reconfirming_the_channel_map_keeps_the_header_overrides() {
     let mut old = store::ChipState::confirmed("msi_alt1");
     old.header_overrides.insert("sys_fan5".into(), true);
@@ -1236,4 +1359,266 @@ fn reconfirming_the_channel_map_keeps_the_header_overrides() {
     assert_eq!(state.header_overrides.get("sys_fan5"), Some(&true));
     assert_eq!(state.header_overrides.get("sys_fan3"), Some(&false));
     assert!(crate::app::confirmed_state(None, "msi_alt1").header_overrides.is_empty());
+}
+
+// ---- Issue #130: movable hot limits and the fixed safety ceiling ----
+
+use canvas_proto::fans::{HotKind, HotLimits};
+
+fn hot_of(r: &mut Rig, kind: HotKind) -> canvas_proto::fans::HotLimitStatus {
+    let status = r.fans.status();
+    status
+        .hot
+        .iter()
+        .find(|s| s.kind == kind)
+        .copied()
+        .expect("status reports a hot line for every kind")
+}
+
+#[test]
+fn issue130_cpu_at_60_with_the_automatic_74_has_no_hot_floor() {
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    r.cpu.set(Some(60.0));
+    r.fans.tick(t0);
+    r.fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 20 }, t0).unwrap();
+    let status = r.fans.status();
+    let h = header(&status, "sys_fan1");
+    assert_eq!(h.pwm_percent, Some(20), "60 C is below the 74 C automatic line: nothing raises the duty");
+    assert_eq!(h.override_reason, None, "no override is said: the hot latched floor (latch) must stay off");
+}
+
+#[test]
+fn issue130_a_user_limit_of_55_engages_at_55_and_not_at_52() {
+    let t0 = Instant::now();
+    let config = FansFile { hot_limits: HotLimits { cpu_c: Some(55.0), gpu_c: None, board_c: None }, ..Default::default() };
+    let mut r = rig(config, t0);
+    r.cpu.set(Some(52.0));
+    r.fans.tick(t0);
+    r.fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 20 }, t0).unwrap();
+    let status = r.fans.status();
+    assert_eq!(header(&status, "sys_fan1").pwm_percent, Some(20), "52 C is below the user line of 55 C: no floor");
+    assert_eq!(header(&status, "sys_fan1").override_reason, None);
+
+    r.cpu.set(Some(56.0));
+    r.fans.tick(t0 + Duration::from_secs(1));
+    let status = r.fans.status();
+    assert_eq!(header(&status, "sys_fan1").pwm_percent, Some(35), "56 C is at the user line: the hot floor applies");
+    assert!(header(&status, "sys_fan1").override_reason.as_deref().unwrap_or_default().starts_with("hot floor 35%"));
+}
+
+#[test]
+fn issue130_the_safety_ceiling_takes_100_and_releases_after_the_hold() {
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    r.cpu.set(Some(84.0));
+    r.fans.tick(t0);
+    r.fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 40 }, t0).unwrap();
+    let status = r.fans.status();
+    let h = header(&status, "sys_fan1");
+    assert_eq!(h.pwm_percent, Some(100), "84 C is the 7800X3D ceiling: the safety ceiling (rule) writes 100 %");
+    assert!(
+        h.override_reason.as_deref().unwrap_or_default().starts_with("at the safety ceiling"),
+        "the ceiling is said out loud: {:?}",
+        h.override_reason
+    );
+
+    // The release carries the same hold-time rule as the hot latch (CURS hold).
+    r.cpu.set(Some(60.0));
+    for s in 1..=65 {
+        r.fans.tick(t0 + Duration::from_secs(s));
+    }
+    let status = r.fans.status();
+    let h = header(&status, "sys_fan1");
+    assert_eq!(h.pwm_percent, Some(40), "after the hold below the ceiling the Fixed duty returns: {:?}", h.pwm_percent);
+    assert!(h.override_reason.is_none(), "the ceiling reason clears with the latch: {:?}", h.override_reason);
+}
+
+#[test]
+fn issue130_a_board_curve_still_reads_its_own_board_line() {
+    let t0 = Instant::now();
+    // Board at 55 C with a user board line of 60 C: no floor, where the old 50 C would have engaged one.
+    let config = FansFile { hot_limits: HotLimits { cpu_c: None, gpu_c: None, board_c: Some(60.0) }, ..Default::default() };
+    let mut r = rig(config, t0);
+    r.chip.set_board_temp(0, 55.0);
+    r.fans.tick(t0);
+    let flat = FanMode::Curve {
+        source: TempSource::Board("board_temp0".into()),
+        points: vec![point(30.0, 20), point(70.0, 20)],
+    };
+    r.fans.set_header_mode("sys_fan1", flat, t0).unwrap();
+    let status = r.fans.status();
+    assert_eq!(header(&status, "sys_fan1").pwm_percent, Some(20), "55 C is below the board user line of 60 C: no floor");
+    assert_eq!(header(&status, "sys_fan1").override_reason, None);
+}
+
+#[test]
+fn issue130_board_sensors_keep_the_50_degree_line_by_default() {
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    r.chip.set_board_temp(0, 55.0);
+    r.fans.tick(t0);
+    let flat = FanMode::Curve {
+        source: TempSource::Board("board_temp0".into()),
+        points: vec![point(30.0, 20), point(70.0, 20)],
+    };
+    r.fans.set_header_mode("sys_fan1", flat, t0).unwrap();
+    let status = r.fans.status();
+    assert_eq!(header(&status, "sys_fan1").pwm_percent, Some(35), "the board automatic line stays 50 C: the hot floor applies at 55 C");
+    let board = hot_of(&mut r, HotKind::Board);
+    assert_eq!(board.limit_c, 50.0);
+    assert_eq!(board.ceiling_c, 90.0);
+}
+
+#[test]
+fn issue130_an_invalid_limit_in_a_received_config_is_refused() {
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    let bad = FansFile { hot_limits: HotLimits { cpu_c: Some(99.0), gpu_c: None, board_c: None }, ..Default::default() };
+    let err = r.fans.put_config(bad, t0).err().unwrap();
+    assert!(matches!(err, FanError::Validation(_)), "a limit past the ceiling gap is refused: {err}");
+    // The running config is unchanged.
+    let status = r.fans.status();
+    assert_eq!(status.active_profile, "Default");
+    let cpu = hot_of(&mut r, HotKind::Cpu);
+    assert_eq!(cpu.limit_c, 74.0, "the refused write left the automatic line in force");
+}
+
+#[test]
+fn issue130_an_unknown_cpu_brand_gets_the_74_degree_automatic_line() {
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    let cpu = hot_of(&mut r, HotKind::Cpu);
+    assert_eq!(cpu.limit_c, 74.0, "89 fallback minus the 15 C margin");
+    assert_eq!(cpu.auto_c, 74.0);
+    assert_eq!(cpu.ceiling_c, 84.0, "89 minus the 5 C ceiling margin");
+    assert_eq!(cpu.max_settable_c, 82.0);
+    assert_eq!(cpu.rated_max_c, None, "an unknown CPU reports no rated maximum");
+    assert!(!cpu.user_set);
+}
+
+#[test]
+fn issue130_the_gpu_slowdown_threshold_from_the_fake_nvml_sets_the_gpu_line() {
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    // The fake NVML reports a 91 C slowdown threshold: that becomes the GPU's rated
+    // maximum, so the automatic line is 76 C and the ceiling 86 C.
+    let gpu_fake = crate::fakes::FakeGpuFans::new(1);
+    gpu_fake.set_slowdown_threshold_c(Some(91.0));
+    r.fans.set_gpu_rated_max_c(gpu_fake.slowdown_threshold_c());
+    let gpu = hot_of(&mut r, HotKind::Gpu);
+    assert_eq!(gpu.limit_c, 76.0, "91 rated minus the 15 C margin");
+    assert_eq!(gpu.auto_c, 76.0);
+    assert_eq!(gpu.ceiling_c, 86.0, "91 minus the 5 C ceiling margin");
+    assert_eq!(gpu.max_settable_c, 84.0);
+    assert_eq!(gpu.rated_max_c, Some(91.0));
+    assert!(!gpu.user_set);
+}
+
+#[test]
+fn issue130_the_gpu_defaults_to_the_88_fallback_when_no_slowdown_is_reported() {
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    let gpu = hot_of(&mut r, HotKind::Gpu);
+    assert_eq!(gpu.limit_c, 73.0, "88 fallback minus the 15 C margin");
+    assert_eq!(gpu.ceiling_c, 83.0);
+    assert_eq!(gpu.rated_max_c, None);
+    assert_eq!(r.fans.status().hot.len(), 3, "one status row per kind");
+}
+
+#[test]
+fn the_brand_string_assembles_eax_ebx_ecx_edx_per_leaf() {
+    use canvas_proto::fans::rated_cpu_max_c;
+    use crate::fans::brand_string_from_leaves;
+    // The registers of a known brand string: the string's bytes, NUL-padded to 48,
+    // split into twelve little-endian u32s and grouped into three leaves as
+    // (EAX, EBX, ECX, EDX) — the order the CPU documents for leaves 0x80000002..4.
+    let mut bytes = [0u8; 48];
+    let brand = "AMD Ryzen 7 7800X3D 8-Core Processor";
+    bytes[..brand.len()].copy_from_slice(brand.as_bytes());
+    let mut words = [0u32; 12];
+    for (i, word) in words.iter_mut().enumerate() {
+        *word = u32::from_le_bytes([bytes[i * 4], bytes[i * 4 + 1], bytes[i * 4 + 2], bytes[i * 4 + 3]]);
+    }
+    let leaves = [
+        (words[0], words[1], words[2], words[3]),
+        (words[4], words[5], words[6], words[7]),
+        (words[8], words[9], words[10], words[11]),
+    ];
+    let assembled = brand_string_from_leaves(leaves).expect("the brand string assembles");
+    assert_eq!(assembled, brand, "the round trip through EAX EBX ECX EDX returns the brand");
+    assert_eq!(rated_cpu_max_c(&assembled), Some(89.0), "the 7800X3D's rated maximum is 89 °C");
+    assert_eq!(brand_string_from_leaves([(0, 0, 0, 0); 3]), None, "no string is None");
+}
+
+#[test]
+fn the_startup_hot_limits_log_names_the_cpu_brand() {
+    // The brand is set through the same path the service uses at startup.
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    r.fans.set_cpu_brand(Some("AMD Ryzen 7 7800X3D 8-Core Processor"));
+    let cpu = hot_of(&mut r, HotKind::Cpu);
+    assert_eq!(cpu.rated_max_c, Some(89.0), "the brand from the setter rates the CPU at 89 °C");
+}
+
+#[test]
+fn a_fixed_header_holds_the_ceiling_duty_through_a_missing_reading_then_hands_back() {
+    // Fixed 20 % with the CPU at 90 °C (above the 84 °C ceiling) writes 100 %. The
+    // next tick has no CPU reading: while the ceiling is latched the service must hold
+    // 100 % and never write the 20 % Fixed duty. After the 3 s sensor-loss timeout it
+    // hands the header back to BIOS.
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    r.cpu.set(Some(90.0));
+    r.fans.tick(t0);
+    r.fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 20 }, t0).unwrap();
+    assert_eq!(r.chip.duty_raw(SYS_FAN1), 255, "90 °C takes the ceiling's 100 %");
+    r.cpu.set(None);
+    r.fans.tick(t0 + Duration::from_secs(1));
+    assert_eq!(r.chip.duty_raw(SYS_FAN1), 255, "no reading while latched: 100 % is held, not the 20 % Fixed duty");
+    assert!(r.chip.manual(SYS_FAN1), "inside the sensor-loss window the header stays manual");
+    r.fans.tick(t0 + Duration::from_secs(3));
+    assert!(!r.chip.manual(SYS_FAN1), "after the sensor-loss timeout the header hands back to BIOS");
+}
+
+#[test]
+fn an_edited_curve_keeps_the_ceiling_latch_until_the_hold_ends() {
+    // Latched at 90 °C (ceiling 84 °C), cooled to 80 °C, then the points are edited:
+    // the latch must survive the edit and the header stays at 100 % for the hold,
+    // instead of dropping to the edited curve's lower duty.
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    let curve = FanMode::Curve {
+        source: TempSource::Cpu,
+        points: vec![point(30.0, 20), point(70.0, 40)],
+    };
+    r.cpu.set(Some(90.0));
+    r.fans.tick(t0);
+    r.fans.set_header_mode("sys_fan1", curve, t0).unwrap();
+    assert_eq!(r.chip.duty_raw(SYS_FAN1), 255, "90 °C latches the ceiling at 100 %");
+    for s in 1..=3 {
+        r.cpu.set(Some(90.0));
+        r.fans.tick(t0 + Duration::from_secs(s));
+    }
+    r.cpu.set(Some(80.0));
+    r.fans.tick(t0 + Duration::from_secs(4));
+    assert_eq!(r.chip.duty_raw(SYS_FAN1), 255, "80 °C inside the hold still holds 100 %");
+    // Edit the points for the same header and source.
+    let edited = FanMode::Curve {
+        source: TempSource::Cpu,
+        points: vec![point(30.0, 20), point(80.0, 30)],
+    };
+    r.fans.set_header_mode("sys_fan1", edited, t0 + Duration::from_secs(4)).unwrap();
+    r.cpu.set(Some(80.0));
+    r.fans.tick(t0 + Duration::from_secs(5));
+    let duty = r.chip.duty_raw(SYS_FAN1);
+    assert_eq!(duty, 255, "the points edit kept the ceiling latch: {duty}");
+    // After the hold below the ceiling the latch releases.
+    let mut last = duty;
+    for s in 6..=70 {
+        r.cpu.set(Some(80.0));
+        r.fans.tick(t0 + Duration::from_secs(s));
+        last = r.chip.duty_raw(SYS_FAN1);
+    }
+    assert_ne!(last, 255, "after 60 s below the ceiling the latch released: {last}");
 }

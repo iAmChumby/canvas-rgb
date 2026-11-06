@@ -10,7 +10,7 @@ use canvas_proto::config::{
     EFFECTS_FILE, EFFECTS_SCHEMA, EXPORT_SCHEMA, LAYOUTS_FILE, LAYOUTS_SCHEMA, ZONES_FILE,
     ZONES_SCHEMA, CONFIG_SCHEMA,
 };
-use canvas_proto::fans::{validate_profile, FanValidationError};
+use canvas_proto::fans::{validate_hot_limits, validate_profile, FanValidationError, HotLimitError};
 use canvas_proto::layout::Layout;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -446,6 +446,8 @@ pub enum ImportError {
     Schema { found: u32, expected: u32 },
     #[error("fan values are not allowed: {0}")]
     Fans(#[from] FanValidationError),
+    #[error("hot limits are not allowed: {0}")]
+    HotLimits(#[from] HotLimitError),
     #[error("display config refused: {0}")]
     Displays(String),
     #[error("io: {0}")]
@@ -454,12 +456,26 @@ pub enum ImportError {
 
 /// Validates an export bundle. Fan values below the floors are refused.
 pub fn validate_bundle(bundle: &ExportBundle) -> Result<(), ImportError> {
+    validate_bundle_rated(bundle, None, None)
+}
+
+/// Validates an export bundle, with the rated maxima the service last reported
+/// (issue #130: the hot limits are checked against the real parts' ceilings when
+/// the daemon knows them, exactly as `put_fan_hot` does). With no status known,
+/// the spine's fallback ceilings apply and the service validates again with the
+/// real ones on receipt.
+pub fn validate_bundle_rated(
+    bundle: &ExportBundle,
+    rated_cpu_max_c: Option<f32>,
+    rated_gpu_max_c: Option<f32>,
+) -> Result<(), ImportError> {
     if bundle.schema_version != EXPORT_SCHEMA {
         return Err(ImportError::Schema { found: bundle.schema_version, expected: EXPORT_SCHEMA });
     }
     for profile in &bundle.fans.profiles {
         validate_profile(profile, bundle.fans.floor_percent).map_err(ImportError::Fans)?;
     }
+    validate_hot_limits(&bundle.fans.hot_limits, rated_cpu_max_c, rated_gpu_max_c).map_err(ImportError::HotLimits)?;
     // The same checks as a PUT to the display route, and one config per device.
     for (i, display) in bundle.displays.iter().enumerate() {
         crate::displays::validate(&display.device.0, display).map_err(ImportError::Displays)?;
@@ -472,13 +488,32 @@ pub fn validate_bundle(bundle: &ExportBundle) -> Result<(), ImportError> {
 
 /// Writes a validated bundle over the daemon's own files.
 pub fn import_bundle(home: &Path, bundle: &ExportBundle) -> Result<(), ImportError> {
-    validate_bundle(bundle)?;
+    import_bundle_rated(home, bundle, None, None)
+}
+
+/// Like [`import_bundle`], with the rated maxima the service last reported for the
+/// hot-limit check. The import route passes them from the last fans status when known.
+pub fn import_bundle_rated(
+    home: &Path,
+    bundle: &ExportBundle,
+    rated_cpu_max_c: Option<f32>,
+    rated_gpu_max_c: Option<f32>,
+) -> Result<(), ImportError> {
+    validate_bundle_rated(bundle, rated_cpu_max_c, rated_gpu_max_c)?;
     // A snapshot before the import so a bad import is recoverable (G10).
     crate::logging::warn_if_err("the pre-import snapshot could not be taken; the import goes on without one", snapshot(home, "pre-import"));
+
+    // Endpoint ids are machine-specific: an import keeps this machine's
+    // current audio_source, whatever the bundle came from (#166).
+    let current_audio_source = read_parsed::<ConfigFile>(&home.join(CONFIG_FILE), CONFIG_SCHEMA, "config.toml")
+        .unwrap_or(None)
+        .map(|config| config.audio_source)
+        .unwrap_or_default();
 
     let config = ConfigFile {
         schema_version: CONFIG_SCHEMA,
         settings: bundle.settings.clone(),
+        audio_source: current_audio_source,
         ..ConfigFile::default()
     };
 
@@ -618,5 +653,144 @@ mod tests {
         let ts = timestamp();
         assert_eq!(ts.len(), 15, "{ts}");
         assert!(ts.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+    }
+
+    /// #166: `ConfigFile.audio_source` round-trips through TOML, both ways.
+    #[test]
+    fn config_file_audio_source_round_trips_through_toml() {
+        use canvas_proto::audio::{AudioFlow, AudioSource};
+        // FollowDefault.
+        let mut config = ConfigFile::default();
+        let text = toml::to_string_pretty(&config).unwrap();
+        let back: ConfigFile = toml::from_str(&text).unwrap();
+        assert_eq!(back.audio_source, AudioSource::FollowDefault);
+        assert_eq!(back, config);
+        // A pinned endpoint.
+        config.audio_source = AudioSource::Endpoint {
+            id: "{0.0.0.00000000}.{abc}".into(),
+            flow: AudioFlow::Capture,
+            name_hint: "Microphone".into(),
+        };
+        let text = toml::to_string_pretty(&config).unwrap();
+        let back: ConfigFile = toml::from_str(&text).unwrap();
+        assert_eq!(back.audio_source, config.audio_source);
+        assert_eq!(back, config);
+    }
+
+    /// #166: a config saved before `audio_source` existed loads as FollowDefault.
+    #[test]
+    fn an_old_config_without_audio_source_loads_as_follow_default() {
+        use canvas_proto::audio::AudioSource;
+        let text = r#"
+schema_version = 1
+api_port = 9430
+openrgb_port = 6742
+first_run_done = false
+zone_panel_dismissed = false
+
+[settings]
+fps = 30
+black_on_lock = false
+on_quit = "black"
+brightness = 100
+power = "running"
+"#;
+        let config: ConfigFile = toml::from_str(text).unwrap();
+        assert_eq!(config.audio_source, AudioSource::FollowDefault);
+    }
+
+    /// #166: `PUT /settings` replaces only `Settings`, so it can never undo a
+    /// pick: the store's audio_source survives a whole-object settings write.
+    #[test]
+    fn a_settings_write_leaves_the_audio_source_alone() {
+        use canvas_proto::audio::{AudioFlow, AudioSource};
+        let mut config = ConfigFile {
+            audio_source: AudioSource::Endpoint {
+                id: "pinned-id".into(),
+                flow: AudioFlow::Render,
+                name_hint: "Speakers".into(),
+            },
+            ..ConfigFile::default()
+        };
+        // This is what `PUT /settings` does: it replaces config.settings only.
+        let mut next_settings = config.settings.clone();
+        next_settings.brightness = 42;
+        config.settings = next_settings;
+        assert_eq!(
+            config.audio_source,
+            AudioSource::Endpoint { id: "pinned-id".into(), flow: AudioFlow::Render, name_hint: "Speakers".into() }
+        );
+        // And `Settings` itself carries no audio_source field to write.
+        let settings_json = serde_json::to_string(&config.settings).unwrap();
+        assert!(!settings_json.contains("audio_source"), "{settings_json}");
+    }
+
+    /// #166: a config import keeps this machine's current audio_source.
+    #[test]
+    fn a_config_import_keeps_this_machines_audio_source() {
+        use canvas_proto::audio::{AudioFlow, AudioSource};
+        let dir = std::env::temp_dir().join(format!("canvas-rgb-import-audio-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // This machine's current pick.
+        let current = ConfigFile {
+            audio_source: AudioSource::Endpoint {
+                id: "this-machines-id".into(),
+                flow: AudioFlow::Render,
+                name_hint: "This machine".into(),
+            },
+            ..ConfigFile::default()
+        };
+        write_toml(&dir.join(CONFIG_FILE), &current).unwrap();
+        // A bundle from another machine (its settings, no audio_source at all).
+        let bundle = ExportBundle {
+            schema_version: EXPORT_SCHEMA,
+            exported_at: "2026-11-05T00:00:00Z".into(),
+            app_version: "0.0.0".into(),
+            settings: Settings { brightness: 7, ..Settings::default() },
+            layouts: default_layouts(),
+            zones: ZonesFile { schema_version: ZONES_SCHEMA, sizes: BTreeMap::new() },
+            effects: EffectsFile { schema_version: EFFECTS_SCHEMA, ..Default::default() },
+            fans: canvas_proto::config::FansFile::default(),
+            displays: Vec::new(),
+            stacks: Vec::new(),
+        };
+        import_bundle(&dir, &bundle).unwrap();
+        let loaded = Store::load_from(&dir);
+        assert_eq!(loaded.config.settings.brightness, 7, "the import's settings land");
+        assert_eq!(
+            loaded.config.audio_source,
+            AudioSource::Endpoint { id: "this-machines-id".into(), flow: AudioFlow::Render, name_hint: "This machine".into() },
+            "the import keeps this machine's pick"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_import_hot_limit_is_checked_against_the_known_rated_maximum() {
+        use canvas_proto::config::EXPORT_SCHEMA;
+        // A 9800X3D's 95 °C maximum allows a 85 °C CPU limit (max settable 88 °C);
+        // the 89 °C fallback ceiling (max settable 82 °C) refuses it.
+        let fans = canvas_proto::config::FansFile {
+            hot_limits: canvas_proto::fans::HotLimits { cpu_c: Some(85.0), gpu_c: None, board_c: None },
+            ..Default::default()
+        };
+        let export = export_bundle(
+            &std::env::temp_dir().join(format!("canvas-rgb-import-{}", std::process::id())),
+            fans,
+        );
+        let bundle = ExportBundle { schema_version: EXPORT_SCHEMA, fans: export.fans, ..export };
+        assert!(
+            validate_bundle_rated(&bundle, Some(95.0), None).is_ok(),
+            "85 °C is inside the 95 °C part's settable range"
+        );
+        assert!(
+            validate_bundle_rated(&bundle, None, None).is_err(),
+            "85 °C is past the fallback 89 °C ceiling gap"
+        );
+        assert!(
+            validate_bundle(&bundle).is_err(),
+            "the fallback path refuses 85 °C"
+        );
     }
 }

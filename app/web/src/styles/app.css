@@ -1530,6 +1530,153 @@ button.chip:hover {
   visibility: visible;
 }
 
+/* A group heading inside a grouped listbox (#166): not selectable. */
+.listbox-group {
+  padding: 6px 10px 2px;
+  color: var(--mute);
+  font-size: var(--t14);
+  font-weight: 600;
+}
+
+/* The audio-source panel (#166): the picker row, the state words, and the
+   readings. The readings keep a fixed height in every state, so the panel
+   never grows or shrinks under the pointer. */
+.audio-picker-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  min-width: 0;
+}
+
+.audio-picker {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.audio-picker .select-trigger {
+  width: 100%;
+}
+
+.audio-state {
+  margin-top: var(--s2);
+  color: var(--dim);
+  font-size: var(--t14);
+}
+
+/* The compact form (UI finding 4): the Source select sits in the panel head's
+   action slot, and one row under it carries the state words, the Listen
+   toggle and the "Show readings" button. The panel is about 90 px tall and
+   its height does not change between states: the state line is one line,
+   ellipsised, in a fixed-height row. */
+.audio-compact {
+  padding-block: var(--s2);
+}
+
+.audio-compact .panel-head {
+  margin-bottom: var(--s2);
+}
+
+/* The head stays one line: the select gives up width (down to 160 px) before
+   it wraps under the title, which would cost the panel a row at 1024. */
+.audio-compact .panel-head {
+  flex-wrap: nowrap;
+}
+
+.audio-compact .panel-title {
+  flex: none;
+  white-space: nowrap;
+}
+
+.audio-picker-head {
+  display: block;
+  flex: 0 1 300px;
+  min-width: 160px;
+}
+
+.audio-compact-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  min-height: 28px;
+}
+
+.audio-state-compact {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-top: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* S3/N6: the effect disclosure gets its own line under the compact row and
+   may wrap — it is never part of the ellipsised state line. */
+.audio-readings {
+  margin-top: var(--s3);
+  height: var(--audio-readings-h);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.audio-reading-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+}
+
+.audio-meter {
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: repeat(24, 1fr);
+  gap: 2px;
+  height: var(--audio-meter-h);
+}
+
+.audio-cell {
+  border-radius: var(--r-sm);
+  background: var(--line-2);
+}
+
+.audio-cell[data-on="true"][data-level="ok"] {
+  background: var(--ok);
+}
+
+.audio-cell[data-on="true"][data-level="work"] {
+  background: var(--work);
+}
+
+.audio-cell[data-on="true"][data-level="warn"] {
+  background: var(--warn);
+}
+
+.audio-db {
+  min-width: 5ch;
+  text-align: right;
+  color: var(--ink);
+  font-size: var(--t16);
+}
+
+.audio-bands {
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: repeat(32, 1fr);
+  align-items: end;
+  gap: 2px;
+  min-height: 0;
+}
+
+.audio-band {
+  border-radius: var(--r-sm);
+  background: var(--line-2);
+  min-height: 2px;
+}
+
+.audio-readings-button {
+  flex: none;
+  white-space: nowrap;
+}
+
 .color {
   position: relative;
   display: inline-flex;
@@ -4201,6 +4348,15 @@ button.chip:hover {
   outline: none;
 }
 
+/* The hot line's drag handle (issue #130): an invisible strip over the dashed line. */
+.curve-hot-handle {
+  cursor: ew-resize;
+}
+
+.curve-hot-handle:focus-visible {
+  outline: none;
+}
+
 .curve-point-ring {
   transition: r var(--dur-fast) var(--ease);
 }
@@ -4231,6 +4387,21 @@ button.chip:hover {
   background: color-mix(in srgb, var(--a2) 8%, var(--sunk));
   color: var(--dim);
   font-size: var(--t14);
+}
+
+/* The compact "don't exceed" control (#130): the words, the figure and its state
+   wrap as one group, never apart. In the Fixed header's floor note it takes its
+   own line under the note, inside the same box, so it adds no new row. */
+.hot-controls {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: var(--s2);
+  white-space: nowrap;
+}
+
+.rule > .hot-controls {
+  display: flex;
 }
 
 .rule-warn {
@@ -4318,6 +4489,36 @@ button.chip:hover {
 
 .fan-status-error {
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Issue #146: the owner's word on a header. The key sits in the panel's own head beside the
+   speed, or in the message that says the header is not on this board. The head is narrow on
+   a phone, so the keys wrap onto their own line rather than over the speed. */
+.fan-hdr-actions {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--s2) var(--s3);
+  min-width: 0;
+}
+
+.fan-hdr-availability {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+/* A refusal is said next to the key. It is cut short like the panel's own error line, and
+   the whole of it is in the tooltip. */
+.fan-hdr-availability-error {
+  min-width: 0;
+  max-width: 24ch;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -4639,6 +4840,11 @@ button.chip:hover {
   margin: 0 0 var(--s4);
 }
 
+/* The last panel ends the pane: no gap under it to scroll for. */
+.rd-settings .rd-settings-grid > .panel:last-child {
+  margin-bottom: 0;
+}
+
 /* The version figure sits in the panel's title row. */
 .rd-settings .rd-version {
   margin-left: auto;
@@ -4648,6 +4854,15 @@ button.chip:hover {
 .rd-settings .rd-settings-grid .panel-head {
   display: flex;
   align-items: baseline;
+}
+
+/* A two-column Settings at 1024 gives a panel about 415 px: the slider row
+   keeps its label beside it at 240 px instead of stacking under it, so the
+   panels fit the window (#166 fit). */
+@media (min-width: 721px) {
+  .rd-settings .field-slider {
+    min-width: 240px;
+  }
 }
 
 /* R1 on a desktop window: what is taller than the window scrolls inside its own pane, so

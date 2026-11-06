@@ -125,6 +125,9 @@ pub struct App {
     /// The preview render slots. A preview renders up to 30 s of a blocking thread, so at most
     /// [`crate::api::editor::PREVIEW_CONCURRENT`] run at once and the rest answer 503.
     pub preview_slots: Arc<tokio::sync::Semaphore>,
+    /// Fakes mode (#199, debug builds only): the daemon talks only to fakes. The
+    /// auth guard reads it to accept the UI-capture origin (#200) only here.
+    pub fakes: bool,
 }
 
 /// The fan config the daemon keeps a copy of.
@@ -189,6 +192,11 @@ impl App {
         let stacks = Arc::new(crate::stacks::Stacks::new(store.home.clone()));
         stacks.set_fps(store.config.settings.fps);
         stacks.reload(&user_effects);
+        // B1: the persisted audio-source pick applies at startup, so it
+        // survives a restart (silently — no capture is running yet).
+        let audio_source = store.config.audio_source.clone();
+        let inputs = Arc::new(crate::capture::DaemonInputs::production());
+        inputs.set_requested(audio_source);
         Self {
             displays: crate::displays::DisplayHub::new(display_adapter),
             peripherals: crate::peripherals::PeripheralHub::new(Vec::new()),
@@ -199,6 +207,7 @@ impl App {
             import_seam: Mutex::new(None),
             input_source: Mutex::new(None),
             preview_slots: Arc::new(tokio::sync::Semaphore::new(crate::api::editor::PREVIEW_CONCURRENT)),
+            fakes: false,
             store: tokio::sync::RwLock::new(store),
             engine,
             adapter: Arc::new(tokio::sync::Mutex::new(adapter as Box<dyn DeviceAdapter>)),
@@ -207,7 +216,7 @@ impl App {
             preview_subs: PreviewRegistry::default(),
             stack_subs: PreviewRegistry::default(),
             stack_preview: crate::preview::StackPreview::new(),
-            inputs: Arc::new(crate::capture::DaemonInputs::empty()),
+            inputs,
             token,
             version,
             service_down_ms: AtomicU64::new(0),

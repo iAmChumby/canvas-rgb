@@ -1013,13 +1013,15 @@ enum FakeReply {
     Down,
     /// The pipe opened and then broke: the request may have been acted on.
     Broke,
+    /// Answers Ok to everything except FanStatus, which fails like a dropped pipe.
+    OkButFanStatusDown,
 }
 
 #[async_trait::async_trait]
 impl canvas_daemon::pipe_client::PipeLink for FakePipe {
     async fn exchange(
         &self,
-        _request: &canvas_proto::pipe::PipeRequest,
+        request: &canvas_proto::pipe::PipeRequest,
     ) -> Result<canvas_proto::pipe::PipeResponse, canvas_daemon::pipe_client::PipeError> {
         match self.reply {
             FakeReply::Ok => Ok(canvas_proto::pipe::PipeResponse::Ok),
@@ -1036,6 +1038,12 @@ impl canvas_daemon::pipe_client::PipeLink for FakePipe {
             FakeReply::Broke => Err(canvas_daemon::pipe_client::PipeError::Io(
                 std::io::Error::new(std::io::ErrorKind::BrokenPipe, "the pipe broke"),
             )),
+            FakeReply::OkButFanStatusDown => match request {
+                canvas_proto::pipe::PipeRequest::FanStatus => Err(canvas_daemon::pipe_client::PipeError::Io(
+                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, "the pipe broke on FanStatus"),
+                )),
+                _ => Ok(canvas_proto::pipe::PipeResponse::Ok),
+            },
         }
     }
 }
@@ -1057,6 +1065,291 @@ fn build_with_pipe(reply: FakeReply) -> (axum::Router, Arc<App>, TempHome) {
     app.pipe = Arc::new(FakePipe { reply });
     let app = Arc::new(app);
     (api::router(app.clone()), app, home)
+}
+
+// ---- Issue #130: PUT /api/v1/fans/hot ----
+
+use canvas_proto::fans::{hot_limit_status, HotKind, HotLimits};
+
+/// A fan status with a rated 7800X3D (89 C) and an 88 C GPU fallback behind it.
+fn fans_with_hot() -> canvas_proto::fans::FansStatus {
+    let mut status = canvas_proto::fans::FansStatus {
+        chip: Some("NCT6687D-R @ 0xA20".into()),
+        hardware_watchdog: None,
+        headers: Vec::new(),
+        temps: Vec::new(),
+        active_profile: "Default".into(),
+        profiles: vec!["Default".into()],
+        floor_percent: 20,
+        hot: Vec::new(),
+    };
+    let limits = HotLimits::default();
+    status.hot = vec![
+        hot_limit_status(HotKind::Cpu, &limits, Some(89.0)),
+        hot_limit_status(HotKind::Gpu, &limits, Some(88.0)),
+        hot_limit_status(HotKind::Board, &limits, None),
+    ];
+    status
+}
+
+/// Logs every pipe request the daemon makes.
+struct LogPipe {
+    sent: Arc<std::sync::Mutex<Vec<canvas_proto::pipe::PipeRequest>>>,
+    status: Option<canvas_proto::fans::FansStatus>,
+}
+
+#[async_trait::async_trait]
+impl canvas_daemon::pipe_client::PipeLink for LogPipe {
+    async fn exchange(
+        &self,
+        request: &canvas_proto::pipe::PipeRequest,
+    ) -> Result<canvas_proto::pipe::PipeResponse, canvas_daemon::pipe_client::PipeError> {
+        self.sent.lock().unwrap().push(request.clone());
+        match request {
+            canvas_proto::pipe::PipeRequest::FanStatus => match &self.status {
+                Some(status) => Ok(canvas_proto::pipe::PipeResponse::FanStatus { status: status.clone() }),
+                None => Err(canvas_daemon::pipe_client::PipeError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "the pipe is not up",
+                ))),
+            },
+            _ => Ok(canvas_proto::pipe::PipeResponse::Ok),
+        }
+    }
+}
+
+/// The app with a recording service behind it and a live fan status.
+fn build_with_recording_pipe(
+    status: canvas_proto::fans::FansStatus,
+) -> (axum::Router, Arc<App>, TempHome, Arc<std::sync::Mutex<Vec<canvas_proto::pipe::PipeRequest>>>) {
+    let home = TempHome::new();
+    let store = canvas_daemon::storage::Store::at(&home.path);
+    let engine = Arc::new(FakeEngine::default());
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(
+        store,
+        engine,
+        Box::new(FakeAdapter::default()),
+        TOKEN.to_string(),
+        "0.1.0-test".to_string(),
+        tx,
+    );
+    let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+    app.pipe = Arc::new(LogPipe { sent: Arc::clone(&sent), status: Some(status.clone()) });
+    let app = Arc::new(app);
+    (api::router(app.clone()), app, home, sent)
+}
+
+/// A service whose first whole-config push is held in flight while the second
+/// goes through, for the concurrency proof. `entered` counts the pushes that
+/// started, so the test can launch the second PUT once the first is in flight.
+struct SlowFirstPipe {
+    sent: Arc<std::sync::Mutex<Vec<canvas_proto::pipe::PipeRequest>>>,
+    entered: Arc<std::sync::Mutex<u32>>,
+    status: canvas_proto::fans::FansStatus,
+}
+
+#[async_trait::async_trait]
+impl canvas_daemon::pipe_client::PipeLink for SlowFirstPipe {
+    async fn exchange(
+        &self,
+        request: &canvas_proto::pipe::PipeRequest,
+    ) -> Result<canvas_proto::pipe::PipeResponse, canvas_daemon::pipe_client::PipeError> {
+        if matches!(request, canvas_proto::pipe::PipeRequest::PutFanConfig { .. }) {
+            let n = {
+                let mut entered = self.entered.lock().unwrap();
+                *entered += 1;
+                *entered
+            };
+            // The first push stays in flight 400 ms; a later one 50 ms. Without the
+            // fans-config lock the first (stale) push finishes last and lands on the
+            // service after the second, dropping the second's change.
+            tokio::time::sleep(std::time::Duration::from_millis(if n == 1 { 400 } else { 50 })).await;
+        }
+        self.sent.lock().unwrap().push(request.clone());
+        match request {
+            canvas_proto::pipe::PipeRequest::FanStatus => Ok(canvas_proto::pipe::PipeResponse::FanStatus { status: self.status.clone() }),
+            _ => Ok(canvas_proto::pipe::PipeResponse::Ok),
+        }
+    }
+}
+
+#[tokio::test]
+async fn issue130_put_fans_hot_valid_sends_put_fan_config_with_the_values() {
+    let status = fans_with_hot();
+    let (router, app, _home, sent) = build_with_recording_pipe(status);
+    *app.fans.write().await = Some(fans_with_hot());
+    let response = router
+        .oneshot(request_with_body("PUT", routes::FAN_HOT, r#"{"cpu_c":70.0,"gpu_c":null,"board_c":60.0}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json(response).await;
+    let hot = body.get("hot").and_then(|v| v.as_array()).expect("the new status carries hot");
+    let cpu = hot.iter().find(|s| s.get("kind").and_then(|v| v.as_str()) == Some("cpu")).expect("cpu row");
+    assert_eq!(cpu.get("limit_c").and_then(|v| v.as_f64()), Some(70.0));
+    assert_eq!(cpu.get("user_set").and_then(|v| v.as_bool()), Some(true));
+
+    let sent = sent.lock().unwrap();
+    assert_eq!(sent.len(), 1, "one pipe request: the whole config: {sent:?}");
+    match &sent[0] {
+        canvas_proto::pipe::PipeRequest::PutFanConfig { config } => {
+            assert_eq!(config.hot_limits.cpu_c, Some(70.0));
+            assert_eq!(config.hot_limits.gpu_c, None);
+            assert_eq!(config.hot_limits.board_c, Some(60.0));
+        }
+        other => panic!("expected PutFanConfig, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn issue130_put_fans_hot_out_of_range_is_422_and_sends_nothing() {
+    let (router, app, _home, sent) = build_with_recording_pipe(fans_with_hot());
+    *app.fans.write().await = Some(fans_with_hot());
+    // 83 C is past the 7800X3D max_settable of 82 C.
+    let response = router
+        .oneshot(request_with_body("PUT", routes::FAN_HOT, r#"{"cpu_c":83.0,"gpu_c":null,"board_c":null}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = json(response).await;
+    assert_eq!(body.get("error").and_then(|v| v.as_str()), Some("validation"));
+    assert!(
+        body.get("message").and_then(|v| v.as_str()).unwrap_or_default().contains("Cpu"),
+        "the error names the kind: {body}"
+    );
+    assert!(sent.lock().unwrap().is_empty(), "nothing is sent for a refused value");
+}
+
+#[tokio::test]
+async fn issue130_export_keeps_the_user_hot_limits() {
+    let mut status = fans_with_hot();
+    let limits = HotLimits { cpu_c: Some(70.0), gpu_c: None, board_c: Some(60.0) };
+    status.hot = vec![
+        hot_limit_status(HotKind::Cpu, &limits, Some(89.0)),
+        hot_limit_status(HotKind::Gpu, &limits, Some(88.0)),
+        hot_limit_status(HotKind::Board, &limits, None),
+    ];
+    let (router, app, _home, sent) = build_with_recording_pipe(status);
+    *app.fans.write().await = Some({
+        let mut s = fans_with_hot();
+        s.hot = vec![
+            hot_limit_status(HotKind::Cpu, &limits, Some(89.0)),
+            hot_limit_status(HotKind::Gpu, &limits, Some(88.0)),
+            hot_limit_status(HotKind::Board, &limits, None),
+        ];
+        s
+    });
+    let response = router
+        .oneshot(request("GET", routes::CONFIG_EXPORT))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json(response).await;
+    let fans = body.get("fans").expect("the bundle carries fans");
+    assert_eq!(fans.get("hot_limits").and_then(|v| v.get("cpu_c")).and_then(|v| v.as_f64()), Some(70.0));
+    assert_eq!(fans.get("hot_limits").and_then(|v| v.get("board_c")).and_then(|v| v.as_f64()), Some(60.0));
+    assert!(fans.get("hot_limits").and_then(|v| v.get("gpu_c")).and_then(|v| v.as_f64()).is_none());
+    let _ = sent;
+}
+
+#[tokio::test]
+async fn put_fans_hot_with_the_service_down_is_a_503_and_saves_nothing() {
+    let (router, app, _home) = build_with_pipe(FakeReply::Down);
+    *app.fans_last.write().await = Some(canvas_proto::config::FansFile::default());
+    let response = router
+        .oneshot(request_with_body("PUT", routes::FAN_HOT, r#"{"cpu_c":70.0,"gpu_c":null,"board_c":null}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let saved = app.fans_last.read().await.clone().expect("the fans_last entry stays");
+    assert_eq!(saved.hot_limits.cpu_c, None, "a refused PUT leaves fans_last unchanged");
+}
+
+#[tokio::test]
+async fn put_fans_hot_the_service_refuses_is_mapped_and_saves_nothing() {
+    let (router, app, _home) = build_with_pipe(FakeReply::Error("validation"));
+    *app.fans_last.write().await = Some(canvas_proto::config::FansFile::default());
+    let response = router
+        .oneshot(request_with_body("PUT", routes::FAN_HOT, r#"{"cpu_c":70.0,"gpu_c":null,"board_c":null}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let saved = app.fans_last.read().await.clone().expect("the fans_last entry stays");
+    assert_eq!(saved.hot_limits.cpu_c, None, "a service refusal leaves fans_last unchanged: {saved:?}");
+}
+
+#[tokio::test]
+async fn two_concurrent_puts_keep_both_changes() {
+    let home = TempHome::new();
+    let store = canvas_daemon::storage::Store::at(&home.path);
+    let engine = Arc::new(FakeEngine::default());
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(
+        store,
+        engine,
+        Box::new(FakeAdapter::default()),
+        TOKEN.to_string(),
+        "0.1.0-test".to_string(),
+        tx,
+    );
+    let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let entered = Arc::new(std::sync::Mutex::new(0u32));
+    app.pipe = Arc::new(SlowFirstPipe {
+        sent: Arc::clone(&sent),
+        entered: Arc::clone(&entered),
+        status: fans_with_hot(),
+    });
+    let app = Arc::new(app);
+    *app.fans.write().await = Some(fans_with_hot());
+    *app.fans_last.write().await = Some(canvas_proto::config::FansFile::default());
+    let router = api::router(app.clone());
+    let hot_req = request_with_body("PUT", routes::FAN_HOT, r#"{"cpu_c":70.0,"gpu_c":null,"board_c":null}"#);
+    let profile_body = serde_json::json!({
+        "name": "quiet",
+        "headers": {"cpu_fan": {"mode": "fixed", "percent": 40}}
+    })
+    .to_string();
+    let router_hot = router.clone();
+    let router_profile = router.clone();
+    let hot_task = tokio::spawn(async move { router_hot.oneshot(hot_req).await.expect("the hot router answers") });
+    // Launch the second PUT only once the first is in flight.
+    for _ in 0..100 {
+        if *entered.lock().unwrap() >= 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let profile_task = tokio::spawn(async move {
+        router_profile
+            .oneshot(request_with_body("PUT", "/api/v1/fans/profiles/quiet", &profile_body))
+            .await
+            .expect("the profile router answers")
+    });
+    let hot_resp = hot_task.await.expect("the hot task joins");
+    let profile_resp = profile_task.await.expect("the profile task joins");
+    assert_eq!(hot_resp.status(), StatusCode::OK);
+    assert_eq!(profile_resp.status(), StatusCode::OK);
+    let saved = app.fans_last.read().await.clone().expect("fans_last is saved");
+    assert_eq!(saved.hot_limits.cpu_c, Some(70.0), "the hot change survived: {saved:?}");
+    assert!(saved.profiles.iter().any(|p| p.name == "quiet"), "the profile change survived: {saved:?}");
+    // The service's last whole-config push carries both changes: with the lock
+    // held across read-modify-send-save the second PUT builds from the first's
+    // saved config, so its push is the union.
+    let recorded = sent.lock().unwrap();
+    let pushes: Vec<&canvas_proto::config::FansFile> = recorded
+        .iter()
+        .filter_map(|r| match r {
+            canvas_proto::pipe::PipeRequest::PutFanConfig { config } => Some(config),
+            _ => None,
+        })
+        .collect();
+    let last = pushes.last().expect("at least one whole-config push reached the service");
+    assert_eq!(last.hot_limits.cpu_c, Some(70.0), "the last service push keeps the hot change: {last:?}");
+    assert!(
+        last.profiles.iter().any(|p| p.name == "quiet"),
+        "the last service push keeps the profile change: {last:?}"
+    );
 }
 
 #[tokio::test]
@@ -1780,6 +2073,7 @@ fn fans(temps: Vec<(TempSource, f32)>, headers: Vec<(&str, u32)>) -> FansStatus 
                 on_bios: true,
                 override_reason: None,
                 available: true,
+                override_available: None,
             })
             .collect(),
         temps: temps
@@ -1789,6 +2083,7 @@ fn fans(temps: Vec<(TempSource, f32)>, headers: Vec<(&str, u32)>) -> FansStatus 
         active_profile: "Default".into(),
         profiles: vec!["Default".into()],
         floor_percent: 30,
+        hot: Vec::new(),
     }
 }
 
@@ -3303,4 +3598,296 @@ async fn deleting_a_user_effect_removes_its_presets_unless_they_are_kept() {
     app.user_effects.rescan(&folder);
     let (_, detail) = send(&router, "GET", "/api/v1/effects/html:fancy", serde_json::json!({})).await;
     assert_eq!(preset_names(&detail), ["Fast"], "the kept preset is back");
+}
+
+// ---- Issue #146: PUT /api/v1/fans/headers/{h}/availability ----
+
+/// The route for one header's availability.
+fn availability_path(header: &str) -> String {
+    routes::FAN_HEADER_AVAILABILITY.replace("{h}", header)
+}
+
+/// A status with one header on it.
+fn status_with_header() -> FansStatus {
+    fans(vec![(TempSource::Cpu, 40.0)], vec![("sys_fan1", 900)])
+}
+
+/// The owner's word goes to the service as one pipe request, and the answer is the new status.
+#[tokio::test]
+async fn issue146_put_header_availability_sends_the_word_to_the_service() {
+    let status = status_with_header();
+    let (router, app, _home, sent) = build_with_recording_pipe(status.clone());
+    *app.fans.write().await = Some(status);
+    let response = router
+        .oneshot(request_with_body("PUT", &availability_path("sys_fan1"), r#"{"available":false}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json(response).await;
+    assert!(
+        body.get("headers").and_then(|v| v.as_array()).is_some(),
+        "the answer carries the new status: {body}"
+    );
+
+    let sent = sent.lock().unwrap();
+    let request = sent
+        .iter()
+        .find(|r| matches!(r, canvas_proto::pipe::PipeRequest::SetHeaderAvailability { .. }))
+        .expect("the word went to the service");
+    match request {
+        canvas_proto::pipe::PipeRequest::SetHeaderAvailability { header, available } => {
+            assert_eq!(header, "sys_fan1");
+            assert_eq!(*available, Some(false), "the word is 'not on my board'");
+        }
+        other => panic!("expected SetHeaderAvailability, got {other:?}"),
+    }
+}
+
+/// Clearing the word sends null: the board table decides again.
+#[tokio::test]
+async fn issue146_clearing_the_word_sends_null() {
+    let status = status_with_header();
+    let (router, app, _home, sent) = build_with_recording_pipe(status.clone());
+    *app.fans.write().await = Some(status);
+    let response = router
+        .oneshot(request_with_body("PUT", &availability_path("sys_fan1"), r#"{"available":null}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let sent = sent.lock().unwrap();
+    let request = sent
+        .iter()
+        .find(|r| matches!(r, canvas_proto::pipe::PipeRequest::SetHeaderAvailability { .. }))
+        .expect("the word went to the service");
+    match request {
+        canvas_proto::pipe::PipeRequest::SetHeaderAvailability { available, .. } => {
+            assert_eq!(*available, None, "the word is off");
+        }
+        other => panic!("expected SetHeaderAvailability, got {other:?}"),
+    }
+}
+
+/// The service refuses an unknown header, and that refusal is a 422.
+#[tokio::test]
+async fn issue146_a_validation_refusal_from_the_service_is_a_422() {
+    let (router, _app, _home) = build_with_pipe(FakeReply::Error("validation"));
+    let response = router
+        .oneshot(request_with_body("PUT", &availability_path("sys_fan9"), r#"{"available":false}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = json(response).await;
+    assert_eq!(body.get("error").and_then(|v| v.as_str()), Some("validation"));
+}
+
+/// The route is behind the same guard as the other fan routes.
+#[tokio::test]
+async fn issue146_the_route_needs_the_token() {
+    let (router, _app, _home) = build();
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(availability_path("sys_fan1"))
+                .header("host", "127.0.0.1:9430")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"available":false}"#.to_string()))
+                .expect("the request builds"),
+        )
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// When the service took the word but FanStatus fails, the daemon does not claim
+/// failure: it answers 200 with the cached status patched for that header.
+#[tokio::test]
+async fn issue146_when_fan_status_fails_after_the_word_the_cached_status_is_patched() {
+    let status = status_with_header();
+    let (router, app, _home) = build_with_pipe(FakeReply::OkButFanStatusDown);
+    *app.fans.write().await = Some(status.clone());
+    let response = router
+        .oneshot(request_with_body("PUT", &availability_path("sys_fan1"), r#"{"available":false}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK, "the word was taken: the answer is not 503");
+    let body = json(response).await;
+    let headers = body.get("headers").and_then(|v| v.as_array()).expect("the answer carries headers");
+    let header = headers.iter().find(|h| h.get("id").and_then(|v| v.as_str()) == Some("sys_fan1")).expect("sys_fan1");
+    assert_eq!(header.get("available"), Some(&serde_json::json!(false)), "available follows the word: {header}");
+    assert_eq!(header.get("override_available"), Some(&serde_json::json!(false)), "the word is carried: {header}");
+    let cached = app.fans.read().await.clone().expect("a cached status remains");
+    let cached_header = cached.headers.iter().find(|h| h.id == "sys_fan1").expect("sys_fan1 in cache");
+    assert!(!cached_header.available, "the cache is patched too");
+    assert_eq!(cached_header.override_available, Some(false));
+}
+
+/// When the service took the word, FanStatus fails and there is no cached status,
+/// the daemon answers 200 {"ok":true} rather than claiming the change failed.
+#[tokio::test]
+async fn issue146_when_fan_status_fails_and_nothing_is_cached_the_answer_is_ok_true() {
+    let (router, _app, _home) = build_with_pipe(FakeReply::OkButFanStatusDown);
+    let response = router
+        .oneshot(request_with_body("PUT", &availability_path("sys_fan1"), r#"{"available":false}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json(response).await;
+    assert_eq!(body.get("ok"), Some(&serde_json::json!(true)), "the answer is ok:true: {body}");
+}
+
+/// The daemon validates the header id before sending: an unknown id (against the
+/// cached status) and an over-long id are 422 and never reach the service.
+#[tokio::test]
+async fn issue146_an_unknown_or_over_long_header_is_a_422_before_the_service() {
+    let status = status_with_header();
+    let (router, app, _home, sent) = build_with_recording_pipe(status.clone());
+    *app.fans.write().await = Some(status);
+    let response = router
+        .clone()
+        .oneshot(request_with_body("PUT", &availability_path("sys_fan9"), r#"{"available":false}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY, "an unknown header is 422");
+    let long = "x".repeat(100);
+    let response = router
+        .oneshot(request_with_body("PUT", &availability_path(&long), r#"{"available":false}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY, "an over-long header is 422");
+    let sent = sent.lock().unwrap();
+    assert!(
+        !sent.iter().any(|r| matches!(r, canvas_proto::pipe::PipeRequest::SetHeaderAvailability { .. })),
+        "a refused header never reaches the service"
+    );
+}
+
+/// A body without `available` and a body with an unknown field are both refused.
+#[tokio::test]
+async fn issue146_a_body_without_available_or_with_an_unknown_field_is_a_422() {
+    let (router, _app, _home) = build_with_pipe(FakeReply::Ok);
+    let response = router
+        .clone()
+        .oneshot(request_with_body("PUT", &availability_path("sys_fan1"), r#"{}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY, "a missing available is 422");
+    let response = router
+        .oneshot(request_with_body("PUT", &availability_path("sys_fan1"), r#"{"available":true,"x":1}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY, "an unknown field is 422");
+}
+
+/// The audio test lease, through the routes: take, read (200), expire, read
+/// again (410) (S9). No socket, no device.
+#[tokio::test]
+async fn an_audio_test_lease_answers_200_then_410_after_it_ends() {
+    let (router, app, _home) = build();
+    let response = router
+        .clone()
+        .oneshot(request_with_body("PUT", routes::AUDIO_TEST, r#"{"listen":false}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let lease = json(response).await;
+    let lease_id = lease.get("lease_id").and_then(|v| v.as_str()).expect("a lease id").to_string();
+
+    let response = router
+        .clone()
+        .oneshot(request("GET", &format!("{}?lease={lease_id}", routes::AUDIO_TEST)))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK, "a live lease reads");
+    let body = json(response).await;
+    assert!(body.get("status").is_some());
+
+    // An unknown lease is already 410.
+    let response = router
+        .clone()
+        .oneshot(request("GET", &format!("{}?lease=nope", routes::AUDIO_TEST)))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::GONE);
+
+    // The lease ends: sweep it, and the read answers 410 again.
+    let later = std::time::Instant::now() + canvas_proto::consts::AUDIO_TEST_LEASE + std::time::Duration::from_secs(1);
+    assert!(app.inputs.expire_leases_at(later));
+    app.inputs.sweep_leases().await;
+    let response = router
+        .oneshot(request("GET", &format!("{}?lease={lease_id}", routes::AUDIO_TEST)))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::GONE, "an expired lease answers 410");
+}
+
+/// S2 through the routes: releasing a lease ends it at once (the next read is
+/// 410 without waiting for expiry).
+#[tokio::test]
+async fn releasing_an_audio_test_lease_ends_it_at_once() {
+    let (router, _app, _home) = build();
+    let response = router
+        .clone()
+        .oneshot(request_with_body("PUT", routes::AUDIO_TEST, r#"{"listen":false}"#))
+        .await
+        .expect("the router answers");
+    let lease_id = json(response).await.get("lease_id").and_then(|v| v.as_str()).expect("a lease id").to_string();
+    let response = router
+        .clone()
+        .oneshot(request("DELETE", &format!("{}?lease={lease_id}", routes::AUDIO_TEST)))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = router
+        .oneshot(request("GET", &format!("{}?lease={lease_id}", routes::AUDIO_TEST)))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::GONE);
+}
+
+/// `PUT /settings` never moves the audio-source pick (S9).
+#[tokio::test]
+async fn put_settings_leaves_the_audio_source_pick_alone() {
+    let (router, app, _home) = build();
+    let before = app.inputs.requested();
+    let response = router
+        .clone()
+        .oneshot(request_with_body(
+            "PUT",
+            routes::SETTINGS,
+            r#"{"fps":30,"black_on_lock":false,"on_quit":"black","boot_color":null,"brightness":80,"power":"running"}"#,
+        ))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(app.inputs.requested(), before, "the pick is unchanged");
+    assert_eq!(app.store.read().await.config.audio_source, before);
+}
+
+/// B1: the persisted pick is applied when the app is built.
+#[tokio::test]
+async fn the_persisted_audio_source_pick_is_applied_at_startup() {
+    let home = TempHome::new();
+    let mut store = canvas_daemon::storage::Store::at(&home.path);
+    store.config.audio_source = canvas_proto::audio::AudioSource::Endpoint {
+        id: "mic-id".to_string(),
+        flow: canvas_proto::audio::AudioFlow::Capture,
+        name_hint: "Microphone".to_string(),
+    };
+    let engine = Arc::new(FakeEngine::default());
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let app = App::new(
+        store,
+        engine,
+        Box::new(FakeAdapter::default()),
+        TOKEN.to_string(),
+        "0.1.0-test".to_string(),
+        tx,
+    );
+    assert_eq!(app.inputs.requested(), canvas_proto::audio::AudioSource::Endpoint {
+        id: "mic-id".to_string(),
+        flow: canvas_proto::audio::AudioFlow::Capture,
+        name_hint: "Microphone".to_string(),
+    });
 }

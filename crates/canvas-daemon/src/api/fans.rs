@@ -6,8 +6,11 @@
 
 use axum::extract::{Path, State};
 use axum::Json;
-use canvas_proto::api::FanProfileName;
-use canvas_proto::fans::{validate_mode, validate_profile, FanMode, FanProfile, FansStatus};
+use canvas_proto::api::{FanProfileName, PutFanHot};
+use canvas_proto::fans::{
+    hot_limit_status, validate_hot_limits, validate_mode, validate_profile, FanMode, FanProfile, FansStatus,
+    HotKind,
+};
 use std::sync::Arc;
 
 use crate::api::{ApiFailure, ApiResult};
@@ -60,6 +63,94 @@ pub async fn patch_header(
 
     tracing::info!(header = %header, mode = ?mode, "the fan header mode changed");
     Ok(Json(serde_json::json!({ "ok": true, "header": header, "mode": mode })))
+}
+
+/// `PUT /api/v1/fans/headers/{h}/availability` (issue #146).
+///
+/// The owner's word on whether a header is on this board: `false` is "Not on my board",
+/// `true` is "Show anyway" and `null` takes the word off, so the board table decides again.
+/// The service knows the headers, so it refuses an unknown one; that refusal is a 422 here,
+/// mapped through the same `service_failure` the other fan routes use.
+///
+/// The answer is the new fan status: the word changes which headers the page shows, and the
+/// daemon's cached status is refreshed so the next read says the same. When the service
+/// took the word but the follow-up FanStatus fails, the daemon does not claim failure: it
+/// answers 200 with the cached status patched for that header, or 200 `{"ok":true}` when
+/// nothing is cached (issue #146 review S2).
+pub async fn put_header_availability(
+    State(app): State<Arc<App>>,
+    Path(header): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<Json<serde_json::Value>> {
+    // Validate the header id in the daemon, as the other fans write route does: a
+    // non-empty, bounded id, and a known one when the cached status has headers.
+    if header.is_empty() || header.len() > 64 {
+        return Err(ApiFailure::validation(format!("unknown header {header}")));
+    }
+    {
+        let cached = app.fans.read().await.clone();
+        if let Some(status) = cached.as_ref() {
+            if !status.headers.is_empty() && !status.headers.iter().any(|h| h.id == header) {
+                return Err(ApiFailure::validation(format!("unknown header {header}")));
+            }
+        }
+    }
+    // The body is strict: exactly `available`, a bool or null. A missing field, an
+    // unknown field, or any other shape is a 422 before anything reaches the service.
+    let available = match body {
+        serde_json::Value::Object(ref map) if map.len() == 1 => match map.get("available") {
+            Some(serde_json::Value::Bool(v)) => Some(*v),
+            Some(serde_json::Value::Null) => None,
+            _ => return Err(ApiFailure::validation("the body must be {\"available\": true, false, or null}".to_string())),
+        },
+        _ => return Err(ApiFailure::validation("the body must be {\"available\": true, false, or null}".to_string())),
+    };
+    let response = crate::pipe_client::send(
+        &app,
+        &canvas_proto::pipe::PipeRequest::SetHeaderAvailability {
+            header: header.clone(),
+            available,
+        },
+    )
+    .await
+    .map_err(|e| ApiFailure::service_unavailable(format!("the fan service is not reachable: {e}")))?;
+
+    match response {
+        canvas_proto::pipe::PipeResponse::Ok => {}
+        canvas_proto::pipe::PipeResponse::Error { code, message } => {
+            return Err(service_failure(&code, message));
+        }
+        _ => {
+            return Err(ApiFailure::internal("the fan service gave an unexpected answer"));
+        }
+    }
+
+    // The word changed what the service reports, so ask it again and keep that copy.
+    match crate::pipe_client::send(&app, &canvas_proto::pipe::PipeRequest::FanStatus).await {
+        Ok(canvas_proto::pipe::PipeResponse::FanStatus { status }) => {
+            *app.fans.write().await = Some(status.clone());
+            tracing::info!(header = %header, available = ?available, "the header availability changed");
+            Ok(Json(serde_json::to_value(&status).unwrap_or(serde_json::json!({ "ok": true }))))
+        }
+        _ => {
+            // The word is already taken and saved in the service: do not answer 503.
+            tracing::warn!(header = %header, available = ?available, "the fan status could not be read after the header availability changed; answering with the cached status patched for this header");
+            let cached = app.fans.read().await.clone();
+            match cached {
+                Some(mut status) => {
+                    if let Some(h) = status.headers.iter_mut().find(|h| h.id == header) {
+                        if let Some(v) = available {
+                            h.available = v;
+                        }
+                        h.override_available = available;
+                    }
+                    *app.fans.write().await = Some(status.clone());
+                    Ok(Json(serde_json::to_value(&status).unwrap_or(serde_json::json!({ "ok": true }))))
+                }
+                None => Ok(Json(serde_json::json!({ "ok": true }))),
+            }
+        }
+    }
 }
 
 /// `GET /api/v1/fans/profile`.
@@ -142,7 +233,7 @@ pub async fn delete_profile(
 }
 
 /// Maps a service error code to the API's status: `conflict` 409, `not_found` 404,
-/// `service_unavailable` 503. Any other code is an internal error.
+/// `service_unavailable` 503, `validation` 422. Any other code is an internal error.
 fn service_failure(code: &str, message: String) -> ApiFailure {
     use canvas_proto::api::error_codes;
     match code {
@@ -152,6 +243,7 @@ fn service_failure(code: &str, message: String) -> ApiFailure {
             message,
         ),
         error_codes::NOT_FOUND => ApiFailure::not_found(message),
+        error_codes::VALIDATION => ApiFailure::validation(message),
         error_codes::SERVICE_UNAVAILABLE => ApiFailure::service_unavailable(message),
         _ => ApiFailure::internal(message),
     }
@@ -174,34 +266,129 @@ pub async fn put_profile(
     let floor = configured_floor(&app).await;
     validate_profile(&profile, floor).map_err(|e| ApiFailure::validation(e.to_string()))?;
 
-    crate::pipe_client::send(&app, &canvas_proto::pipe::PipeRequest::PutProfile {
+    let put_response = crate::pipe_client::send(&app, &canvas_proto::pipe::PipeRequest::PutProfile {
         profile: profile.clone(),
     })
     .await
     .map_err(|e| ApiFailure::service_unavailable(format!("the fan service is not reachable: {e}")))?;
+    match put_response {
+        canvas_proto::pipe::PipeResponse::Ok => {}
+        canvas_proto::pipe::PipeResponse::Error { code, message } => {
+            return Err(service_failure(&code, message));
+        }
+        _ => {
+            return Err(ApiFailure::internal("the fan service gave an unexpected answer"));
+        }
+    }
 
     // Mirror the profiles into the daemon's copy of the fans file and push the whole
-    // config, so the service and the daemon agree.
-    let (home, fans) = {
+    // config, so the service and the daemon agree. One fans-config lock is held across
+    // the whole read-modify-send-save, so two PUTs cannot lose each other's change.
+    let fans = {
         let home = app.store.read().await.home.clone();
         let mut guard = app.fans_last.write().await;
-        let mut fans = guard.clone().unwrap_or_default();
-        fans.floor_percent = floor;
-        match fans.profiles.iter_mut().find(|p| p.name == profile.name) {
+        let mut next = guard
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| canvas_proto::config::FansFile { floor_percent: floor, ..Default::default() });
+        next.floor_percent = floor;
+        match next.profiles.iter_mut().find(|p| p.name == profile.name) {
             Some(existing) => *existing = profile.clone(),
-            None => fans.profiles.push(profile.clone()),
+            None => next.profiles.push(profile.clone()),
         }
-        crate::logging::warn_if_err("could not save the daemon's copy of the fans file", crate::storage::save_fans_last(&home, &fans));
-        *guard = Some(fans.clone());
-        (home, fans)
+        // Send first: the daemon's copy is updated below only after the service said Ok.
+        // The guard is held across the send, so a concurrent hot-limit PUT waits.
+        let response = crate::pipe_client::send(&app, &canvas_proto::pipe::PipeRequest::PutFanConfig { config: next.clone() })
+            .await
+            .map_err(|e| ApiFailure::service_unavailable(format!("the fan service is not reachable: {e}")))?;
+        match response {
+            canvas_proto::pipe::PipeResponse::Ok => {}
+            canvas_proto::pipe::PipeResponse::Error { code, message } => {
+                return Err(service_failure(&code, message));
+            }
+            _ => {
+                return Err(ApiFailure::internal("the fan service gave an unexpected answer"));
+            }
+        }
+        crate::logging::warn_if_err("could not save the daemon's copy of the fans file", crate::storage::save_fans_last(&home, &next));
+        *guard = Some(next.clone());
+        next
     };
-    let _ = home;
-    crate::pipe_client::send(&app, &canvas_proto::pipe::PipeRequest::PutFanConfig { config: fans })
-        .await
-        .map_err(|e| {
-            ApiFailure::service_unavailable(format!("the fan service is not reachable: {e}"))
-        })?;
+    let _ = fans;
 
     tracing::info!(profile = %profile.name, "the fan profile was saved");
     Ok(Json(profile))
+}
+
+/// `PUT /api/v1/fans/hot` (issue #130).
+///
+/// The user's "don't exceed" temperatures, one per kind of source. Validated first
+/// against the rated maxima in the last status the service reported, so a value past
+/// the ceiling gap is refused with 422 before anything reaches the service. The
+/// service validates again on receipt.
+pub async fn put_fan_hot(
+    State(app): State<Arc<App>>,
+    Json(limits): Json<PutFanHot>,
+) -> ApiResult<Json<FansStatus>> {
+    let status = app.fans.read().await.clone();
+    let rated_of = |s: &FansStatus, kind: HotKind| {
+        s.hot.iter().find(|h| h.kind == kind).and_then(|h| h.rated_max_c)
+    };
+    let (rated_cpu, rated_gpu) = match &status {
+        Some(s) => (rated_of(s, HotKind::Cpu), rated_of(s, HotKind::Gpu)),
+        None => (None, None),
+    };
+    validate_hot_limits(&limits, rated_cpu, rated_gpu)
+        .map_err(|e| ApiFailure::validation(e.to_string()))?;
+
+    // Mirror the limits into the daemon's copy of the fans file and push the whole
+    // config, so the service and the daemon agree (as `put_profile` does). One
+    // fans-config lock (`fans_last`) is held across the whole read-modify-send-save,
+    // so two PUTs cannot lose each other's change. Send first: the daemon's copy is
+    // saved only after the service said Ok; a refusal (a pipe `Error`, like
+    // `delete_profile` maps) saves nothing.
+    {
+        let home = app.store.read().await.home.clone();
+        let mut guard = app.fans_last.write().await;
+        let mut next = guard.clone().unwrap_or_default();
+        next.hot_limits = limits;
+        let response = crate::pipe_client::send(&app, &canvas_proto::pipe::PipeRequest::PutFanConfig { config: next.clone() })
+            .await
+            .map_err(|e| ApiFailure::service_unavailable(format!("the fan service is not reachable: {e}")))?;
+        match response {
+            canvas_proto::pipe::PipeResponse::Ok => {}
+            canvas_proto::pipe::PipeResponse::Error { code, message } => {
+                return Err(service_failure(&code, message));
+            }
+            _ => {
+                return Err(ApiFailure::internal("the fan service gave an unexpected answer"));
+            }
+        }
+        crate::logging::warn_if_err("could not save the daemon's copy of the fans file", crate::storage::save_fans_last(&home, &next));
+        *guard = Some(next.clone());
+    }
+
+    tracing::info!(?limits, "the fan hot limits changed");
+
+    // Answer the new status: the last one the service reported, with its hot rows
+    // recomputed for the limits just saved. With no status cached, ask the service.
+    let mut new_status = match status {
+        Some(status) => status,
+        None => match crate::pipe_client::send(&app, &canvas_proto::pipe::PipeRequest::FanStatus).await {
+            Ok(canvas_proto::pipe::PipeResponse::FanStatus { status }) => status,
+            _ => return Err(ApiFailure::service_unavailable("the fan service is not reachable")),
+        },
+    };
+    new_status.hot = [HotKind::Cpu, HotKind::Gpu, HotKind::Board]
+        .iter()
+        .map(|kind| {
+            let rated = match kind {
+                HotKind::Cpu => rated_cpu,
+                HotKind::Gpu => rated_gpu,
+                HotKind::Board => None,
+            };
+            hot_limit_status(*kind, &limits, rated)
+        })
+        .collect();
+    Ok(Json(new_status))
 }

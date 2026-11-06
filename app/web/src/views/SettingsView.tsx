@@ -30,6 +30,7 @@ import {
 } from "@/shell/prefs";
 import type { Settings } from "@/proto/Settings";
 import { UpdatesPanel } from "./UpdatesPanel";
+import { AudioSourcePanel } from "./AudioSourcePanel";
 import { PageTitle } from "@/shell/PageHeader";
 
 export function SettingsView() {
@@ -258,6 +259,8 @@ export function SettingsView() {
               </span>
             </Field>
           </Panel>
+
+          <AudioSourcePanel />
 
           <Panel title="Setup">
             <Field label="Map my PC" hint="Walk through every light again">

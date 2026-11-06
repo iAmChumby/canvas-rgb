@@ -4,16 +4,23 @@
 //! Everything runs on the fakes: a fake daemon launcher, a fake OpenRGB server, and a fan
 //! controller with no chip behind it.
 
+use crate::chip::{FanChip, Nct6687, MSI_ALT1_MAP};
 use crate::daemon::DaemonSupervisor;
-use crate::fakes::{FakeLauncher, FakeProcesses, FakeSpawner};
+use crate::fakes::{FakeChip, FakeLauncher, FakeProcesses, FakeSpawner, FakeTemp};
 use crate::fans::FanController;
 use crate::openrgb::{OpenRgbSupervisor, SERVER_HOST};
+use crate::paths;
 use crate::service::{Core, PowerEvent};
+use crate::store;
+use crate::temps::TempReader;
 use crate::test_logs::captured_async;
 use canvas_adapters::fake::FakeOpenRgbServer;
 use canvas_adapters::openrgb::OpenRgbAdapter;
+use canvas_proto::api::error_codes;
 use canvas_proto::config::FansFile;
 use canvas_proto::device::{DeviceId, DeviceInfo, DeviceKind, ZoneInfo, ZoneKind};
+use canvas_proto::fans::{FanMode, TempSource};
+use canvas_proto::pipe::{PipeRequest, PipeResponse};
 use canvas_proto::Rgb8;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -167,4 +174,183 @@ async fn a_resume_is_not_a_first_heartbeat() {
         text.contains("the daemon's first heartbeat arrived 32000 ms after launch"),
         "{text}"
     );
+}
+
+// ---- Issue #146: the owner's word on whether a header is on this board ----
+
+/// The MS-7E56 board: its per-board table says System fan 5 and 6 are not routed.
+const MS7E56: &str = "PRO B850-P WIFI (MS-7E56)";
+
+/// The MSI alt1 channel indices: cpu_fan 0, pump_fan 1, sys_fan1 2, sys_fan5 6.
+const SYS_FAN1: usize = 2;
+const SYS_FAN5: usize = 6;
+
+/// The service core over the fakes, with the simulated NCT chip behind it and the
+/// per-board table loaded. The chip is confirmed, so the headers really are written.
+fn core_with_chip(home: &TempDir, chip: &FakeChip, board: Option<&str>, now: Instant) -> Core {
+    let chip_box: Box<dyn FanChip> = Box::new(Nct6687::detect(chip.clone(), MSI_ALT1_MAP).unwrap());
+    let temps: BTreeMap<TempSource, Box<dyn TempReader>> =
+        BTreeMap::from([(TempSource::Cpu, Box::new(FakeTemp::new(40.0)) as Box<dyn TempReader>)]);
+    let mut fans = FanController::new(
+        home.path().to_path_buf(),
+        Some(chip_box),
+        None,
+        temps,
+        FansFile::default(),
+        Some(MSI_ALT1_MAP.name.to_string()),
+    );
+    fans.set_board_product(board.map(str::to_string));
+    fans.startup(now);
+    core_with_fans(fans, home)
+}
+
+/// The service core over the fakes, with a fan controller the caller built.
+fn core_with_fans(fans: FanController, home: &TempDir) -> Core {
+    let processes = FakeProcesses::new();
+    let daemon = DaemonSupervisor::new(
+        PathBuf::from(r"C:\svc\canvas-rgbd.exe"),
+        Box::new(FakeLauncher(processes.clone())),
+    );
+    let openrgb = OpenRgbSupervisor::new(
+        home.path().join("openrgb").join("OpenRGB.exe"),
+        1,
+        home.path().join("openrgb-config"),
+        home.path().to_path_buf(),
+        Box::new(FakeSpawner(processes.clone())),
+        Box::new(move || Box::new(OpenRgbAdapter::new(SERVER_HOST, 1))),
+    );
+    Core::new(fans, openrgb, daemon)
+}
+
+/// The header's row in the last status the core reported.
+fn header_of(core: &mut Core, id: &str) -> canvas_proto::fans::FanHeaderStatus {
+    core.fans
+        .status()
+        .headers
+        .into_iter()
+        .find(|h| h.id == id)
+        .expect("the status reports the header")
+}
+
+/// The overrides saved in `chip.toml`.
+fn saved_overrides(home: &TempDir) -> BTreeMap<String, bool> {
+    store::load_chip_state(&paths::chip_path(home.path())).unwrap().header_overrides
+}
+
+/// Marking a header "not on my board" releases it to BIOS and saves the word in `chip.toml`.
+#[test]
+fn issue146_marking_a_header_not_on_my_board_releases_it_and_saves_chip_toml() {
+    let t0 = Instant::now();
+    let home = tempfile::tempdir().unwrap();
+    let chip = FakeChip::new(MSI_ALT1_MAP);
+    let mut core = core_with_chip(&home, &chip, Some(MS7E56), t0);
+    // The header is under canvas-rgb's hand first, so the release has something to release.
+    core.handle(
+        PipeRequest::SetHeaderMode { header: "sys_fan1".into(), mode: FanMode::Fixed { percent: 50 } },
+        t0,
+    );
+    assert!(chip.manual(SYS_FAN1), "the header is under canvas-rgb's hand");
+
+    let answer = core.handle(
+        PipeRequest::SetHeaderAvailability { header: "sys_fan1".into(), available: Some(false) },
+        t0,
+    );
+    assert!(matches!(answer, PipeResponse::Ok), "the service took the word: {answer:?}");
+    assert!(!chip.manual(SYS_FAN1), "the header was released to BIOS");
+    assert!(!header_of(&mut core, "sys_fan1").available, "the header reports not available");
+    assert_eq!(
+        header_of(&mut core, "sys_fan1").override_available,
+        Some(false),
+        "the status carries the owner's word"
+    );
+    assert_eq!(
+        saved_overrides(&home).get("sys_fan1"),
+        Some(&false),
+        "the word is saved in chip.toml: {:?}",
+        saved_overrides(&home)
+    );
+}
+
+/// "Show anyway" says the header is on this board; it does not write the header.
+#[test]
+fn issue146_show_anyway_makes_a_hidden_header_available_and_writes_nothing() {
+    let t0 = Instant::now();
+    let home = tempfile::tempdir().unwrap();
+    let chip = FakeChip::new(MSI_ALT1_MAP);
+    let mut core = core_with_chip(&home, &chip, Some(MS7E56), t0);
+    // The board table says System fan 5 is not routed on this board.
+    assert!(!header_of(&mut core, "sys_fan5").available, "the table hides System fan 5");
+
+    let answer = core.handle(
+        PipeRequest::SetHeaderAvailability { header: "sys_fan5".into(), available: Some(true) },
+        t0,
+    );
+    assert!(matches!(answer, PipeResponse::Ok), "the service took the word: {answer:?}");
+    assert!(header_of(&mut core, "sys_fan5").available, "show anyway makes it available");
+    assert_eq!(
+        header_of(&mut core, "sys_fan5").override_available,
+        Some(true),
+        "the status carries the owner's word"
+    );
+    assert_eq!(saved_overrides(&home).get("sys_fan5"), Some(&true), "the word is saved in chip.toml");
+    // The header is not written until the owner gives it a mode.
+    assert!(!chip.manual(SYS_FAN5), "show anyway never takes the header manual");
+}
+
+/// Clearing the word takes the override off, so the board table decides again.
+#[test]
+fn issue146_clearing_the_word_gives_the_board_table_the_decision_back() {
+    let t0 = Instant::now();
+    let home = tempfile::tempdir().unwrap();
+    let chip = FakeChip::new(MSI_ALT1_MAP);
+    let mut core = core_with_chip(&home, &chip, Some(MS7E56), t0);
+    core.handle(
+        PipeRequest::SetHeaderAvailability { header: "sys_fan5".into(), available: Some(false) },
+        t0,
+    );
+    assert!(!header_of(&mut core, "sys_fan5").available, "the word hides the header");
+    assert_eq!(saved_overrides(&home).get("sys_fan5"), Some(&false));
+
+    let answer = core.handle(
+        PipeRequest::SetHeaderAvailability { header: "sys_fan5".into(), available: None },
+        t0,
+    );
+    assert!(matches!(answer, PipeResponse::Ok), "the service took the word off: {answer:?}");
+    assert_eq!(
+        saved_overrides(&home).get("sys_fan5"),
+        None,
+        "the key is gone from chip.toml: {:?}",
+        saved_overrides(&home)
+    );
+    assert_eq!(
+        header_of(&mut core, "sys_fan5").override_available,
+        None,
+        "the status carries no word"
+    );
+    // The board table decides again: System fan 5 is not routed on MS-7E56.
+    assert!(!header_of(&mut core, "sys_fan5").available, "the table hides it again");
+}
+
+/// A header the chip does not have is refused: the word is about a header, not a free text.
+#[test]
+fn issue146_an_unknown_header_is_refused() {
+    let t0 = Instant::now();
+    let home = tempfile::tempdir().unwrap();
+    let chip = FakeChip::new(MSI_ALT1_MAP);
+    let mut core = core_with_chip(&home, &chip, Some(MS7E56), t0);
+
+    for available in [Some(false), Some(true), None] {
+        let answer = core.handle(
+            PipeRequest::SetHeaderAvailability { header: "not_a_header".into(), available },
+            t0,
+        );
+        match answer {
+            PipeResponse::Error { code, message } => {
+                assert_eq!(code, error_codes::VALIDATION, "an unknown header is a validation error");
+                assert!(message.contains("not_a_header"), "the message names the header: {message}");
+            }
+            other => panic!("expected a validation error, got {other:?}"),
+        }
+    }
+    assert!(saved_overrides(&home).is_empty(), "a refused word is not saved");
 }

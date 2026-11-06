@@ -206,7 +206,9 @@ async fn daemon_main(fakes: bool) -> Exit {
             token,
             canvas_daemon::version(),
             quit_tx,
-            Box::new(canvas_daemon::displays::NoDisplays),
+            // Only fakes mode reaches this branch (the real display is used otherwise): an
+            // in-memory display, so the Displays view has one to show (#200).
+            Box::new(canvas_daemon::fakes::FakeNumericDisplay::default()),
         )
         .with_peripherals(peripherals)
     };
@@ -214,7 +216,12 @@ async fn daemon_main(fakes: bool) -> Exit {
         // In-process fake service pipe and a capture that never starts: the
         // real pipe, screen and audio are never touched.
         app_inner.pipe = Arc::new(canvas_daemon::fakes::FakePipeLink);
+        // N7: the swap discards the persisted pick `App::with_displays`
+        // applied, so re-apply it to the disabled inputs after the swap.
+        let persisted_pick = app_inner.inputs.requested();
         app_inner.inputs = Arc::new(canvas_daemon::capture::DaemonInputs::disabled());
+        app_inner.inputs.set_requested(persisted_pick);
+        app_inner.fakes = true;
     }
     let app = Arc::new(app_inner);
     if fakes {
@@ -297,6 +304,7 @@ async fn daemon_main(fakes: bool) -> Exit {
     }
     spawn_user_effects_watch(app.clone());
     canvas_daemon::draft::spawn_sweeper(app.clone());
+    canvas_daemon::api::audio::spawn_sweeper(app.clone());
 
     // The API. Fakes mode binds the spine's test port, never the config port.
     let api_port = if fakes {

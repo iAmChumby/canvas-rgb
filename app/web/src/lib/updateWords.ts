@@ -6,6 +6,18 @@ import type { UpdateState } from "@/proto/UpdateState";
 
 const MB = 1024 * 1024;
 
+/**
+ * True when a version names an experimental build: it carries a pre-release part
+ * (`0.8.5-dev.12`). Build metadata (`0.8.5+abc`) is not a pre-release, and a stable version
+ * (`0.8.5`) is not one either.
+ */
+export function isExperimentalVersion(version: string): boolean {
+  const dash = version.indexOf("-");
+  if (dash < 0) return false;
+  const plus = version.indexOf("+");
+  return plus < 0 || dash < plus;
+}
+
 /** The one sentence the person reads before Windows asks for permission. */
 export function uacLine(version: string): string {
   return `Windows will ask for permission to install ${version}. While it installs, canvas-rgb stops for a moment: the lights pause and the fans run on your motherboard's settings. Choosing No leaves everything as it is.`;

@@ -670,6 +670,7 @@ mod tests {
                     on_bios: true,
                     override_reason: None,
                     available: true,
+                    override_available: None,
                 })
                 .collect(),
             temps: temps
@@ -679,6 +680,7 @@ mod tests {
             active_profile: "Default".into(),
             profiles: vec![],
             floor_percent: 30,
+            hot: Vec::new(),
         }
     }
 
