@@ -216,6 +216,32 @@ describe("rule 2: a listbox closes back into its trigger (#187)", () => {
     }
   });
 
+  it("a popover that closes with focus inside hands focus back to its anchor", () => {
+    function Host() {
+      const anchor = useRef<HTMLButtonElement>(null);
+      const [open, setOpen] = useState(false);
+      return (
+        <>
+          <button ref={anchor} type="button" onClick={() => setOpen((o) => !o)}>
+            Open
+          </button>
+          <Popover anchor={anchor} open={open} onClose={() => setOpen(false)} label="Details">
+            <input aria-label="Inside" />
+          </Popover>
+        </>
+      );
+    }
+    const { container } = render(<Host />);
+    const btn = container.querySelector("button") as HTMLButtonElement;
+    measure(btn, { left: 10, top: 10, right: 90, bottom: 40, width: 80, height: 30, x: 10, y: 10 });
+    fireEvent.click(btn);
+    const inside = document.body.querySelector("input[aria-label='Inside']") as HTMLInputElement;
+    inside.focus();
+    expect(document.activeElement).toBe(inside);
+    fireEvent.click(btn);
+    expect(document.activeElement).toBe(btn);
+  });
+
   it("reopening a popover during its exit keeps the same panel node, with no remount", () => {
     vi.useFakeTimers();
     try {

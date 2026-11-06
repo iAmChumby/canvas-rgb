@@ -46,6 +46,8 @@ export function ColorPicker({
   // down/up handlers below); a committed change (a swatch, the hex field, a
   // key press) is not a drag and replays at once.
   const [prevKey, setPrevKey] = useState(() => hsvToHex(hsv));
+  // The preview wipes only after a real change, never on the picker's first render.
+  const [wiped, setWiped] = useState(false);
   const draggingRef = useRef(false);
   const lastReplayRef = useRef(0);
 
@@ -216,6 +218,7 @@ export function ColorPicker({
       lastReplayRef.current = nowMs;
     }
     setPrevKey(hex);
+    setWiped(true);
   }, [hex, prevKey]);
 
   /**
@@ -305,7 +308,7 @@ export function ColorPicker({
             }
           }}
         />
-        <span key={prevKey} className="picker-preview" style={{ "--c": hex } as CSSProperties} aria-hidden="true" />
+        <span key={prevKey} className={wiped ? "picker-preview wipe" : "picker-preview"} style={{ "--c": hex } as CSSProperties} aria-hidden="true" />
       </div>
 
       {swatches && swatches.length > 0 && (

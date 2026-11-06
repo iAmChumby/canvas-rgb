@@ -9,6 +9,7 @@ const read = (p: string) => readFileSync(resolve(process.cwd(), p), "utf8").repl
 const tokens = read("src/styles/tokens.css");
 const app = read("src/styles/app.css");
 const motion = read("src/styles/motion.css");
+const hardware = read("src/styles/hardware.css");
 const desk = read("src/views/desk.module.css");
 const effectsView = read("src/views/EffectsView.tsx");
 const presetStrip = read("src/views/PresetStrip.tsx");
@@ -54,7 +55,7 @@ describe("motion tokens (#187)", () => {
     expectTokenDriven(blockOf(motion, ".icon-swap-in"), ".icon-swap-in");
     expectTokenDriven(blockOf(motion, ".icon-swap-out"), ".icon-swap-out");
     expectTokenDriven(blockOf(app, ".color-wipe"), ".color-wipe");
-    expectTokenDriven(blockOf(app, ".picker-preview"), ".picker-preview");
+    expectTokenDriven(blockOf(app, ".picker-preview.wipe"), ".picker-preview.wipe");
     expectTokenDriven(blockOf(desk, ".desk .zone[data-settling=\"true\"]"), ".desk .zone[data-settling]");
   });
 });
@@ -180,11 +181,23 @@ describe("rule 6 wiring: the pulse fires on the success path only (#187)", () =>
     expect(activate).not.toMatch(/catch[\s\S]*?pulseApply/);
   });
 
-  it("PresetStrip pulses the Save chip on save only, not on rename", () => {
+  it("PresetStrip pulses the Save chip on save and save-as, not on rename", () => {
     const submit = /const submit = async[\s\S]*?\n  \};/.exec(presetStrip)?.[0] ?? "";
     expect(submit).not.toBe("");
-    expect(submit).toMatch(/kind === "save"[\s\S]*?pulseSave|pulseSave[\s\S]*?kind === "save"/);
-    expect(submit).not.toMatch(/if \(ok\) \{\s*\n\s*pulseSave/);
+    expect(submit).toMatch(/if \(ok && naming\.kind !== "rename"\) pulseSave\(\)/);
+    expect(submit).not.toMatch(/kind === "save"\) pulseSave/);
+  });
+
+  it("the swatch does not tween its background: the wipe is the colour change", () => {
+    for (const css of [app, hardware]) {
+      const re = /(^|\n)\.color-swatch\s*\{[^}]*\}/g;
+      for (const m of css.matchAll(re)) expect(m[0]).not.toMatch(/transition:[^;]*background/);
+    }
+  });
+
+  it("the picker preview wipes only once it has changed, not when the picker opens", () => {
+    expect(blockOf(app, ".picker-preview")).not.toMatch(/animation:/);
+    expect(blockOf(app, ".picker-preview.wipe")).toMatch(/animation:\s*swatch-wipe/);
   });
 
   it("StatusStrip does not give the play/pause IconSwap its own img label (the button's label wins)", () => {

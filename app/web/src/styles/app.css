@@ -1549,15 +1549,15 @@ button.chip:hover {
   border-radius: var(--r-sm);
   background: var(--c);
   cursor: pointer;
-  transition:
-    border-color var(--dur-fast) var(--ease),
-    background-color var(--dur-fast) var(--ease);
+  /* No background transition: a colour change is the wipe below. A tween of the
+     base colour after the wipe ended showed the old colour again (#187). */
+  transition: border-color var(--dur-fast) var(--ease);
 }
 
 /* The colour wipe (issue #187, rule 9): the new colour reveals over the old
    one behind a circular mask opening from the swatch's centre, instead of a
-   flat cross-fade. Remounted (keyed by the colour) on every change, so the
-   reveal replays; with motion off the mask opens at once. */
+   flat cross-fade. The overlay is keyed by the wipe, not the colour; the base
+   takes the new colour when the wipe ends. With motion off it opens at once. */
 @keyframes swatch-wipe {
   from {
     clip-path: circle(0% at 50% 50%);
@@ -1675,6 +1675,10 @@ button.chip:hover {
   background: var(--c);
   /* The same mask reveal as the swatch (issue #187, rule 9): the preview is
      keyed by the colour in ColorPicker, so each change wipes in. */
+}
+
+/* The picker's preview wipes only on a change, never when the picker opens. */
+.picker-preview.wipe {
   animation: swatch-wipe var(--dur) var(--ease) both;
 }
 

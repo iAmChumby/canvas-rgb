@@ -80,6 +80,13 @@ export function Popover({
   } else if (!open && rendered && !closing) {
     setClosing(true);
   }
+  // A panel that closes with focus inside it hands focus back to its anchor, before the
+  // closing panel goes inert, so focus never falls to the page body.
+  useLayoutEffect(() => {
+    if (!closing) return;
+    const panel = panelRef.current;
+    if (panel && panel.contains(document.activeElement)) anchor.current?.focus({ preventScroll: true });
+  }, [closing, anchor]);
   useEffect(() => {
     if (!closing) return;
     const ms = motionOffNow() ? 0 : readCssMs("--dur-exit", 90);
