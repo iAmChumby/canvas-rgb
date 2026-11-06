@@ -7,6 +7,7 @@ pub mod fan_bits;
 pub mod fan_bulk;
 pub mod fan_curve;
 pub mod number_field;
+pub mod outlines;
 pub mod panel;
 pub mod select;
 pub mod segmented;

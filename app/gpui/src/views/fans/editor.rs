@@ -56,13 +56,14 @@ impl FansView {
                 .flex()
                 .items_baseline()
                 .gap_1()
-                .text_size(px(16.0))
+                // React's `.rpm-readout` takes the body's size (15 px).
+                .text_size(px(15.0))
                 .font_family(crate::fonts::MONO_FAMILY)
                 .text_color(Theme::color(t.ink))
                 .child(format!("{}", header.rpm.unwrap_or(0)))
                 .child(
                     div()
-                        .text_sm()
+                        .text_size(px(14.0))
                         .font_family(crate::fonts::UI_FAMILY)
                         .text_color(Theme::color(t.mute))
                         .child("RPM"),
@@ -76,7 +77,7 @@ impl FansView {
                 .gap_2()
                 .child(
                     div()
-                        .text_sm()
+                        .text_size(px(15.0))
                         .font_family(crate::fonts::UI_FAMILY)
                         .text_color(Theme::color(t.mute))
                         .child(super::unavailable_body(header)),
@@ -90,12 +91,14 @@ impl FansView {
 
         // The one live sentence for the editor: it names the kind of reason,
         // never the live temperature. It is one pixel wide, as the React
-        // `.sr-only` node is.
+        // `.sr-only` node is, and it stands out of the flow so it takes no
+        // room in the panel.
         let announce = div()
             .id(gpui::SharedString::from(format!(
                 "fans-announce-{}",
                 header.id
             )))
+            .absolute()
             .w(px(1.0))
             .h(px(1.0))
             .overflow_hidden()
@@ -200,13 +203,17 @@ impl FansView {
             },
         );
 
-        let mut body = div().flex().flex_col().gap_2().child(seg);
+        let mut body = div().flex().flex_col().gap_2().child(
+            // React `.stack > .seg { align-self: flex-start; }`: the
+            // segmented control takes the width it needs, not the column's.
+            div().flex().items_start().child(seg),
+        );
         let manual = !matches!(mode, FanMode::Bios);
 
         if !manual {
             body = body.child(
                 div()
-                    .text_sm()
+                    .text_size(px(15.0))
                     .font_family(crate::fonts::UI_FAMILY)
                     .text_color(Theme::color(t.mute))
                     .child("Chip auto control. Floors off."),
@@ -222,7 +229,9 @@ impl FansView {
             };
             let hot_row = crate::components::fan_curve::hot_row(&fans.hot, hot_kind).copied();
             let rule_text = hot_rule_text(hot_row.map(|h| h.limit_c));
-            let mut rule = div().flex().flex_col().gap_2().child(
+            // React's `.rule` is a block: the "don't exceed" control flows
+            // under the sentence, with no gap of its own.
+            let mut rule = div().flex().flex_col().child(
                 div()
                     .text_sm()
                     .font_family(crate::fonts::UI_FAMILY)
@@ -308,7 +317,7 @@ impl FansView {
                         .gap_2()
                         .child(
                             div()
-                                .text_sm()
+                                .text_size(px(15.0))
                                 .font_family(crate::fonts::UI_FAMILY)
                                 .text_color(Theme::color(t.mute))
                                 .child("Duty"),

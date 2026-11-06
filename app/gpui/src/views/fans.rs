@@ -295,6 +295,70 @@ pub enum FieldWidth {
     Fixed(f32),
 }
 
+/// The table's columns, as React's auto table layout sizes them.
+///
+/// Every column takes the width its widest cell asks for, and the room that
+/// is left over is shared out equally between the columns that can grow.
+/// The tick column has a width of its own, so it takes no share.
+#[derive(Debug, Clone, Copy)]
+pub struct TableColumns {
+    pub tick: f32,
+    pub name: f32,
+    pub rpm: f32,
+    pub duty: f32,
+    pub mode: f32,
+    pub history: f32,
+    /// The cell's own padding (`--s2` at 1000 px and up, `--s3` below).
+    pub padding_x: f32,
+    /// The duty meter's own width.
+    pub duty_meter: f32,
+}
+
+/// The figures face's advance at 14 px and at 20 px (0.6 em).
+const MONO_14: f32 = 8.4;
+const MONO_20: f32 = 12.0;
+
+/// The table's columns for the given page width.
+pub fn table_columns(fans: &FansStatus, page: f32, width: f32) -> TableColumns {
+    let wide = page >= 1000.0;
+    let narrow_table = page <= 999.0;
+    let with_word = page > 1499.0;
+    let padding_x = if wide { 8.0 } else { 12.0 };
+    let duty_meter = if wide { 52.0 } else { 44.0 };
+
+    // The widest cell in each column.
+    let name = fans
+        .headers
+        .iter()
+        .map(|h| plain_label(&h.label).chars().count() as f32 * MONO_14)
+        .fold(0.0, f32::max);
+    let rpm = fans
+        .headers
+        .iter()
+        .map(|h| h.rpm.unwrap_or(0).to_string().len() as f32 * MONO_20)
+        .fold(0.0, f32::max)
+        .max(MONO_20 * 4.0);
+    let duty = duty_meter + 8.0 + 4.0 * MONO_14;
+    // The mode's dot, and its word where the word fits.
+    let mode = if with_word { 50.0 + 15.0 } else { 15.0 };
+    let history = if narrow_table { 0.0 } else { 56.0 };
+    let tick = 36.0;
+
+    let auto = if narrow_table { 4.0 } else { 5.0 };
+    let used = tick + name + rpm + duty + mode + history;
+    let extra = (width - used).max(0.0) / auto;
+    TableColumns {
+        tick,
+        name: name + extra,
+        rpm: rpm + extra,
+        duty: duty + extra,
+        mode: mode + extra,
+        history: history + extra,
+        padding_x,
+        duty_meter,
+    }
+}
+
 pub struct FansView {
     pub theme: Theme,
     pub fans: Option<FansStatus>,
@@ -581,17 +645,17 @@ impl FansView {
             FieldWidth::Fill => div().flex_1().min_w(px(52.0)).max_w(px(92.0)),
             FieldWidth::Fixed(px_wide) => div().w(px(px_wide)).flex_shrink_0(),
         };
-        let field = div()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .min_w_0()
-            .flex_1()
-            .child(well.child(input));
+        let mut field = div().flex().items_center().gap(px(6.0)).min_w_0();
+        if matches!(width, FieldWidth::Fill) {
+            // A field that takes the room its row has left (React's `.num` in
+            // the curve rows); a fixed one keeps its own width.
+            field = field.flex_1();
+        }
+        field = field.child(well.child(input));
         if let Some(unit) = unit {
             field.child(
                 div()
-                    .text_sm()
+                    .text_size(px(14.0))
                     .font_family(crate::fonts::MONO_FAMILY)
                     .text_color(Theme::color(t.mute))
                     .child(unit.to_string()),
@@ -1432,7 +1496,7 @@ impl FansView {
         if with_word {
             row = row.child(
                 div()
-                    .text_sm()
+                    .text_size(px(14.0))
                     .font_family(crate::fonts::UI_FAMILY)
                     .text_color(word_color)
                     .child(mode_label(mode)),
@@ -1550,7 +1614,7 @@ impl FansView {
                 .gap_2()
                 .child(
                     div()
-                        .text_sm()
+                        .text_size(px(15.0))
                         .font_family(crate::fonts::UI_FAMILY)
                         .text_color(Theme::color(t.mute))
                         .child("Rename"),
@@ -1601,7 +1665,7 @@ impl FansView {
                         .p_2()
                         .child(
                             div()
-                                .text_sm()
+                                .text_size(px(15.0))
                                 .font_family(crate::fonts::UI_FAMILY)
                                 .text_color(Theme::color(t.dim))
                                 .child(format!("Delete {name}? Its saved headers are removed.")),
@@ -1636,7 +1700,7 @@ impl FansView {
                             .justify_between()
                             .child(
                                 div()
-                                    .text_sm()
+                                    .text_size(px(15.0))
                                     .font_family(crate::fonts::UI_FAMILY)
                                     .text_color(Theme::color(t.ink))
                                     .child(name.clone()),
@@ -1649,7 +1713,7 @@ impl FansView {
         if let Some(error) = &self.profile_error {
             body = body.child(
                 div()
-                    .text_sm()
+                    .text_size(px(15.0))
                     .font_family(crate::fonts::UI_FAMILY)
                     .text_color(Theme::color(t.down))
                     .child(error.clone()),
@@ -1690,7 +1754,7 @@ impl FansView {
         if fans.temps.is_empty() {
             body = body.child(
                 div()
-                    .text_sm()
+                    .text_size(px(15.0))
                     .font_family(crate::fonts::UI_FAMILY)
                     .text_color(Theme::color(t.mute))
                     .child("No temperature sources reported."),
@@ -1716,12 +1780,12 @@ impl FansView {
             .flex_1()
             .min_w_0()
             .overflow_hidden()
-            .text_sm()
+            .text_size(px(14.0))
             .font_family(crate::fonts::UI_FAMILY)
             .text_color(Theme::color(t.dim))
             .child(temp.label.clone());
         let value = div()
-            .text_sm()
+            .text_size(px(14.0))
             .font_family(crate::fonts::MONO_FAMILY)
             .text_color(Theme::color(t.ink))
             .child(format!("{celsius:.1} {}", "\u{00B0}C"));
@@ -1812,7 +1876,8 @@ impl FansView {
         if narrow {
             body = body.child(self.phone_cards(fans, page, cx));
         } else {
-            body = body.child(self.headers_table(fans, page, cx));
+            let width = self.page_width() * 1.1 / 2.1 - 32.0;
+            body = body.child(self.headers_table(fans, page, width, cx));
         }
         let panel = panel(t, "fans-headers", "Headers", actions, body);
         if narrow {
@@ -1895,25 +1960,23 @@ impl FansView {
         &self,
         fans: &FansStatus,
         page: f32,
+        width: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = &self.theme;
-        let wide = page >= 1000.0;
         let narrow_table = page <= 999.0;
         let with_word = page > 1499.0;
-        let duty_meter_width = if wide { 52.0 } else { 44.0 };
-        let padding_x = if wide || narrow_table { 8.0 } else { 12.0 };
+        let cols = table_columns(fans, page, width);
+        let padding_x = cols.padding_x;
 
         // The head.
         let mut head = div()
             .flex()
             .items_center()
-            .gap_2()
             .py(px(4.0))
-            .px(px(padding_x))
             .border_b_1()
             .border_color(Theme::color(t.line))
-            .text_sm()
+            .text_size(px(14.0))
             .font_weight(gpui::FontWeight::MEDIUM)
             .font_family(crate::fonts::UI_FAMILY)
             .text_color(Theme::color(t.mute));
@@ -1945,38 +2008,63 @@ impl FansView {
             },
         );
         head = head
-            .child(div().w(px(36.0)).child(select_all))
-            .child(div().flex_1().min_w_0().child("Header"))
             .child(
                 div()
-                    .w(px(60.0))
+                    .w(px(cols.tick))
+                    .px(px(padding_x))
+                    .pr_0()
+                    // React's `.tick` is a 24 px target around the 18 px box.
+                    .child(
+                        div()
+                            .size(px(24.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(select_all),
+                    ),
+            )
+            .child(
+                div()
+                    .w(px(cols.name))
+                    .px(px(padding_x))
+                    .min_w_0()
+                    .child("Header"),
+            )
+            .child(
+                div()
+                    .w(px(cols.rpm))
+                    .px(px(padding_x))
                     .text_right()
                     .whitespace_nowrap()
                     .font_family(crate::fonts::MONO_FAMILY)
                     .child("RPM"),
             )
-            .child(div().w(px(duty_meter_width + 48.0)).child("Duty"))
             .child(
                 div()
-                    .w(px(if with_word { 80.0 } else { 56.0 }))
+                    .w(px(cols.duty))
+                    .px(px(padding_x))
+                    .child("Duty"),
+            )
+            .child(
+                div()
+                    .w(px(cols.mode))
+                    .px(px(padding_x))
                     .child("Mode"),
             );
         if !narrow_table {
-            head = head.child(div().w(px(72.0)).whitespace_nowrap().child("Last 60 s"));
+            head = head.child(
+                div()
+                    .w(px(cols.history))
+                    .px(px(padding_x))
+                    .whitespace_nowrap()
+                    .child("Last 60 s"),
+            );
         }
 
         // The rows.
         let mut body = div().flex().flex_col();
         for header in &fans.headers {
-            body = body.child(self.header_row(
-                header,
-                page,
-                with_word,
-                duty_meter_width,
-                padding_x,
-                narrow_table,
-                cx,
-            ));
+            body = body.child(self.header_row(header, page, with_word, &cols, cx));
         }
         div()
             .id(gpui::SharedString::from("fans-table"))
@@ -1992,18 +2080,16 @@ impl FansView {
     }
 
     /// One row of the table.
-    #[allow(clippy::too_many_arguments)]
     fn header_row(
         &self,
         header: &FanHeaderStatus,
         page: f32,
         with_word: bool,
-        duty_meter_width: f32,
-        padding_x: f32,
-        narrow_table: bool,
+        cols: &TableColumns,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = &self.theme;
+        let narrow_table = cols.history == 0.0;
         let unavailable = is_unavailable(header);
         let tach = !unavailable && !can_drive(header);
         let blocked = !can_drive(header);
@@ -2046,7 +2132,7 @@ impl FansView {
             .max_w(px(34.0 * 8.0))
             .child(
                 div()
-                    .text_sm()
+                    .text_size(px(14.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .font_family(crate::fonts::MONO_FAMILY)
                     .text_color(name_color)
@@ -2060,7 +2146,7 @@ impl FansView {
         if let Some(handoff) = handoff_text(header, checked) {
             name = name.child(
                 div()
-                    .text_sm()
+                    .text_size(px(14.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .font_family(crate::fonts::UI_FAMILY)
                     .text_color(Theme::color(t.warn))
@@ -2072,7 +2158,7 @@ impl FansView {
                 div()
                     .flex_1()
                     .w_full()
-                    .text_sm()
+                    .text_size(px(14.0))
                     .font_family(crate::fonts::UI_FAMILY)
                     .text_color(Theme::color(t.mute))
                     .child(reason.clone()),
@@ -2080,7 +2166,8 @@ impl FansView {
         }
 
         let rpm_cell = div()
-            .w(px(60.0))
+            .w(px(cols.rpm))
+            .px(px(cols.padding_x))
             .text_right()
             .text_size(px(20.0))
             .font_weight(gpui::FontWeight::MEDIUM)
@@ -2092,7 +2179,8 @@ impl FansView {
             })
             .child(format!("{}", header.rpm.unwrap_or(0)));
         let duty_cell = div()
-            .w(px(duty_meter_width + 48.0))
+            .w(px(cols.duty))
+            .px(px(cols.padding_x))
             .flex()
             .items_center()
             .justify_end()
@@ -2102,11 +2190,11 @@ impl FansView {
                 &format!("fans-duty-meter-{id}"),
                 duty / 100.0,
                 Theme::color(t.a3),
-                Some(duty_meter_width),
+                Some(cols.duty_meter),
             ))
             .child(
                 div()
-                    .text_sm()
+                    .text_size(px(14.0))
                     .font_family(crate::fonts::MONO_FAMILY)
                     .text_color(if unavailable {
                         Theme::color(t.mute)
@@ -2119,7 +2207,8 @@ impl FansView {
                     }),
             );
         let mode_cell = div()
-            .w(px(if with_word { 80.0 } else { 56.0 }))
+            .w(px(cols.mode))
+            .px(px(cols.padding_x))
             .child(self.mode_state(&header.mode, with_word));
 
         let mut row = div()
@@ -2127,27 +2216,44 @@ impl FansView {
             .relative()
             .flex()
             .items_center()
-            .gap_2()
             .min_h(px(40.0))
             .py(px(4.0))
-            .px(px(padding_x))
             .border_b_1()
             .border_color(Theme::color(t.line))
             .cursor_pointer()
-            .child(div().w(px(36.0)).child(tick))
-            .child(div().flex_1().min_w_0().child(name))
+            .child(
+                div()
+                    .w(px(cols.tick))
+                    .px(px(cols.padding_x))
+                    .pr_0()
+                    // React's `.tick` is a 24 px target around the 18 px box.
+                    .child(
+                        div()
+                            .size(px(24.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(tick),
+                    ),
+            )
+            .child(div().w(px(cols.name)).px(px(cols.padding_x)).min_w_0().child(name))
             .child(rpm_cell)
             .child(duty_cell)
             .child(mode_cell);
         if !narrow_table {
-            row = row.child(div().w(px(56.0)).child(sparkline(
-                t,
-                &format!("fans-spark-{id}"),
-                &history,
-                peak,
-                56.0,
-                16.0,
-            )));
+            row = row.child(
+                div()
+                    .w(px(cols.history))
+                    .px(px(cols.padding_x))
+                    .child(sparkline(
+                        t,
+                        &format!("fans-spark-{id}"),
+                        &history,
+                        peak,
+                        56.0,
+                        16.0,
+                    )),
+            );
         }
         if selected {
             row = row.bg(live_soft(t)).child(
@@ -2201,7 +2307,7 @@ impl FansView {
                 .min_w_0()
                 .child(
                     div()
-                        .text_sm()
+                        .text_size(px(15.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .font_family(crate::fonts::MONO_FAMILY)
                         .text_color(if unavailable {
@@ -2215,7 +2321,7 @@ impl FansView {
             if selected && !self.select_mode {
                 head = head.child(
                     div()
-                        .text_sm()
+                        .text_size(px(14.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .font_family(crate::fonts::UI_FAMILY)
                         .text_color(live(t))
@@ -2225,7 +2331,7 @@ impl FansView {
             if unavailable {
                 head = head.child(
                     div()
-                        .text_sm()
+                        .text_size(px(14.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .font_family(crate::fonts::UI_FAMILY)
                         .text_color(live(t))
@@ -2239,7 +2345,7 @@ impl FansView {
             if self.select_mode && tach {
                 head = head.child(
                     div()
-                        .text_sm()
+                        .text_size(px(14.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .font_family(crate::fonts::UI_FAMILY)
                         .text_color(live(t))
@@ -2249,7 +2355,7 @@ impl FansView {
             if let Some(handoff) = handoff_text(header, self.select_mode && checked) {
                 head = head.child(
                     div()
-                        .text_sm()
+                        .text_size(px(14.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .font_family(crate::fonts::UI_FAMILY)
                         .text_color(Theme::color(t.warn))
@@ -2270,7 +2376,7 @@ impl FansView {
                 .child(format!("{}", header.rpm.unwrap_or(0)))
                 .child(
                     div()
-                        .text_sm()
+                        .text_size(px(14.0))
                         .font_family(crate::fonts::UI_FAMILY)
                         .text_color(Theme::color(t.mute))
                         .child("RPM"),
@@ -2294,7 +2400,7 @@ impl FansView {
                     ))
                     .child(
                         div()
-                            .text_sm()
+                            .text_size(px(14.0))
                             .font_family(crate::fonts::MONO_FAMILY)
                             .text_color(Theme::color(t.ink))
                             .child(match header.pwm_percent {
@@ -2433,7 +2539,7 @@ impl Render for FansView {
                     .border_1()
                     .border_color(Theme::color(t.ok))
                     .bg(mix_srgb(Theme::color(t.ok), Theme::color(t.panel), 0.10))
-                    .text_sm()
+                    .text_size(px(15.0))
                     .font_family(crate::fonts::UI_FAMILY)
                     .text_color(Theme::color(t.ink))
                     .child(notice.clone()),
@@ -2456,13 +2562,13 @@ impl Render for FansView {
                         .border_1()
                         .border_color(tint(Theme::color(t.warn), 0.40))
                         .bg(mix_srgb(Theme::color(t.warn), Theme::color(t.sunk), 0.08))
-                        .text_sm()
+                        .text_size(px(14.0))
                         .font_family(crate::fonts::UI_FAMILY)
                         .text_color(Theme::color(t.dim))
                         .child("The fan readings may be out of date.")
                         .child(
                             div()
-                                .text_sm()
+                                .text_size(px(14.0))
                                 .font_family(crate::fonts::MONO_FAMILY)
                                 .text_color(Theme::color(t.mute))
                                 .child(error.clone()),
@@ -2487,7 +2593,7 @@ impl Render for FansView {
                         .bg(Theme::color(t.panel))
                         .child(
                             div()
-                                .text_sm()
+                                .text_size(px(15.0))
                                 .font_family(crate::fonts::UI_FAMILY)
                                 .text_color(Theme::color(t.mute))
                                 .child("Reading the fans"),
@@ -2632,7 +2738,7 @@ impl FansView {
             )
             .child(
                 div()
-                    .text_sm()
+                    .text_size(px(15.0))
                     .font_family(crate::fonts::UI_FAMILY)
                     .text_color(Theme::color(t.dim))
                     .child(
@@ -2642,7 +2748,7 @@ impl FansView {
             .child(retry)
             .child(
                 div()
-                    .text_sm()
+                    .text_size(px(15.0))
                     .font_family(crate::fonts::MONO_FAMILY)
                     .text_color(Theme::color(t.mute))
                     .child(error.to_string()),

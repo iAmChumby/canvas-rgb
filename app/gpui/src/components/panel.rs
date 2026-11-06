@@ -84,7 +84,8 @@ pub fn panel(
                 .items_center()
                 .justify_between()
                 .gap_2()
-                .mb_2()
+                // React `.panel-head { margin-bottom: var(--s3); }`.
+                .mb_3()
                 // React `.panel-head { flex: 0 0 auto; }`: the head keeps its
                 // height when the panel's body scrolls.
                 .flex_shrink_0()
@@ -130,7 +131,8 @@ pub fn field(
         .child(
             div()
                 .flex_1()
-                .text_sm()
+                // React's `.field-label` takes the body's size (15 px).
+                .text_size(px(15.0))
                 .font_family(crate::fonts::UI_FAMILY)
                 .text_color(Theme::color(t.dim))
                 .child(label.to_string()),

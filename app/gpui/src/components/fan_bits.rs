@@ -487,8 +487,9 @@ pub fn sparkline(
                         raw = vec![(0.0, only.1), only];
                     }
                     let flat = !values.is_empty() && values.iter().all(|v| *v == values[0]);
-                    // The rule the trace sits on.
-                    let mut builder = gpui::PathBuilder::stroke(px(1.0));
+                    // The rule the trace sits on. Its width is the SVG's,
+                    // scaled into the box with the rest of the drawing.
+                    let mut builder = gpui::PathBuilder::stroke(px(1.0 * scale));
                     builder.move_to(at(0.0, h - 0.5));
                     builder.line_to(at(w, h - 0.5));
                     if let Ok(path) = builder.build() {
@@ -509,7 +510,7 @@ pub fn sparkline(
                                 window.paint_path(path, tint(tone, 0.12));
                             }
                         }
-                        let mut line = gpui::PathBuilder::stroke(px(1.75));
+                        let mut line = gpui::PathBuilder::stroke(px(1.75 * scale));
                         line.move_to(at(raw[0].0, raw[0].1));
                         for (x, y) in raw.iter().skip(1) {
                             line.line_to(at(*x, *y));
@@ -583,6 +584,8 @@ pub fn fans_select(
         .gap_2()
         .h(px(32.0))
         .px_3()
+        // React `.select-trigger { min-width: 160px; }`.
+        .min_w(px(160.0))
         .rounded_md()
         .border_1()
         .border_color(Theme::color(t.line_2))

@@ -109,7 +109,7 @@ impl TextInput {
             focus_handle: cx.focus_handle(),
             content: value.to_string().into(),
             value: value.to_string().into(),
-            selected_range: 0..value.len(),
+            selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
             last_layout: None,
@@ -144,7 +144,7 @@ impl TextInput {
         }
         self.value = value.to_string().into();
         self.content = value.to_string().into();
-        self.selected_range = 0..value.len();
+        self.selected_range = 0..0;
         self.marked_range = None;
         cx.notify();
     }
@@ -494,6 +494,7 @@ impl Element for TextElement {
         let content = input.content.clone();
         let selected_range = input.selected_range.clone();
         let cursor = input.cursor_offset();
+        let focused = input.focus_handle.is_focused(window);
         let caret = Theme::color(input.theme.live);
         let style = window.text_style();
 
@@ -526,6 +527,9 @@ impl Element for TextElement {
                     caret,
                 )),
             )
+        } else if !focused {
+            // A field that is not being typed into shows no selection.
+            (None, None)
         } else {
             (
                 Some(fill(

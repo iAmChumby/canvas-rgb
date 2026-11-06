@@ -474,14 +474,13 @@ pub fn fan_bulk_bar(
         .relative()
         .flex()
         .flex_col()
-        .gap_2()
         .mb_2()
         // The idle line and the live bar share one cell, so the cell is as
         // tall as the taller of the two and the list under it does not move
-        // when the first header is ticked.
-        .min_h(px(76.0))
-        .child(idle)
-        .child(live.absolute().top_0().left_0().right_0())
+        // when the first header is ticked. The live bar is in the flow (it
+        // sets the cell's height) and the idle line lies over it.
+        .child(live)
+        .child(idle.absolute().top_0().left_0().right_0().bottom_0())
 }
 
 #[cfg(test)]
