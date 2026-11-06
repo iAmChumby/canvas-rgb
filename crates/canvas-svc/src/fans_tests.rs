@@ -1237,3 +1237,153 @@ fn reconfirming_the_channel_map_keeps_the_header_overrides() {
     assert_eq!(state.header_overrides.get("sys_fan3"), Some(&false));
     assert!(crate::app::confirmed_state(None, "msi_alt1").header_overrides.is_empty());
 }
+
+// ---- Issue #130: movable hot limits and the fixed safety ceiling ----
+
+use canvas_proto::fans::{HotKind, HotLimits};
+
+fn hot_of(r: &mut Rig, kind: HotKind) -> canvas_proto::fans::HotLimitStatus {
+    let status = r.fans.status();
+    status
+        .hot
+        .iter()
+        .find(|s| s.kind == kind)
+        .copied()
+        .expect("status reports a hot line for every kind")
+}
+
+#[test]
+fn issue130_cpu_at_60_with_the_automatic_74_has_no_hot_floor() {
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    r.cpu.set(Some(60.0));
+    r.fans.tick(t0);
+    r.fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 20 }, t0).unwrap();
+    let status = r.fans.status();
+    let h = header(&status, "sys_fan1");
+    assert_eq!(h.pwm_percent, Some(20), "60 C is below the 74 C automatic line: nothing raises the duty");
+    assert_eq!(h.override_reason, None, "no override is said: the hot latched floor (latch) must stay off");
+}
+
+#[test]
+fn issue130_a_user_limit_of_55_engages_at_55_and_not_at_52() {
+    let t0 = Instant::now();
+    let mut config = FansFile::default();
+    config.hot_limits = HotLimits { cpu_c: Some(55.0), gpu_c: None, board_c: None };
+    let mut r = rig(config, t0);
+    r.cpu.set(Some(52.0));
+    r.fans.tick(t0);
+    r.fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 20 }, t0).unwrap();
+    let status = r.fans.status();
+    assert_eq!(header(&status, "sys_fan1").pwm_percent, Some(20), "52 C is below the user line of 55 C: no floor");
+    assert_eq!(header(&status, "sys_fan1").override_reason, None);
+
+    r.cpu.set(Some(56.0));
+    r.fans.tick(t0 + Duration::from_secs(1));
+    let status = r.fans.status();
+    assert_eq!(header(&status, "sys_fan1").pwm_percent, Some(35), "56 C is at the user line: the hot floor applies");
+    assert!(header(&status, "sys_fan1").override_reason.as_deref().unwrap_or_default().starts_with("hot floor 35%"));
+}
+
+#[test]
+fn issue130_the_safety_ceiling_takes_100_and_releases_after_the_hold() {
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    r.cpu.set(Some(84.0));
+    r.fans.tick(t0);
+    r.fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 40 }, t0).unwrap();
+    let status = r.fans.status();
+    let h = header(&status, "sys_fan1");
+    assert_eq!(h.pwm_percent, Some(100), "84 C is the 7800X3D ceiling: the safety ceiling (rule) writes 100 %");
+    assert!(
+        h.override_reason.as_deref().unwrap_or_default().starts_with("at the safety ceiling"),
+        "the ceiling is said out loud: {:?}",
+        h.override_reason
+    );
+
+    // The release carries the same hold-time rule as the hot latch (CURS hold).
+    r.cpu.set(Some(60.0));
+    for s in 1..=65 {
+        r.fans.tick(t0 + Duration::from_secs(s));
+    }
+    let status = r.fans.status();
+    let h = header(&status, "sys_fan1");
+    assert_eq!(h.pwm_percent, Some(40), "after the hold below the ceiling the Fixed duty returns: {:?}", h.pwm_percent);
+    assert!(h.override_reason.is_none(), "the ceiling reason clears with the latch: {:?}", h.override_reason);
+}
+
+#[test]
+fn issue130_a_board_curve_still_reads_its_own_board_line() {
+    let t0 = Instant::now();
+    // Board at 55 C with a user board line of 60 C: no floor, where the old 50 C would have engaged one.
+    let mut config = FansFile::default();
+    config.hot_limits = HotLimits { cpu_c: None, gpu_c: None, board_c: Some(60.0) };
+    let mut r = rig(config, t0);
+    r.chip.set_board_temp(0, 55.0);
+    r.fans.tick(t0);
+    let flat = FanMode::Curve {
+        source: TempSource::Board("board_temp0".into()),
+        points: vec![point(30.0, 20), point(70.0, 20)],
+    };
+    r.fans.set_header_mode("sys_fan1", flat, t0).unwrap();
+    let status = r.fans.status();
+    assert_eq!(header(&status, "sys_fan1").pwm_percent, Some(20), "55 C is below the board user line of 60 C: no floor");
+    assert_eq!(header(&status, "sys_fan1").override_reason, None);
+}
+
+#[test]
+fn issue130_board_sensors_keep_the_50_degree_line_by_default() {
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    r.chip.set_board_temp(0, 55.0);
+    r.fans.tick(t0);
+    let flat = FanMode::Curve {
+        source: TempSource::Board("board_temp0".into()),
+        points: vec![point(30.0, 20), point(70.0, 20)],
+    };
+    r.fans.set_header_mode("sys_fan1", flat, t0).unwrap();
+    let status = r.fans.status();
+    assert_eq!(header(&status, "sys_fan1").pwm_percent, Some(35), "the board automatic line stays 50 C: the hot floor applies at 55 C");
+    let board = hot_of(&mut r, HotKind::Board);
+    assert_eq!(board.limit_c, 50.0);
+    assert_eq!(board.ceiling_c, 90.0);
+}
+
+#[test]
+fn issue130_an_invalid_limit_in_a_received_config_is_refused() {
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    let mut bad = FansFile::default();
+    bad.hot_limits = HotLimits { cpu_c: Some(99.0), gpu_c: None, board_c: None };
+    let err = r.fans.put_config(bad, t0).err().unwrap();
+    assert!(matches!(err, FanError::Validation(_)), "a limit past the ceiling gap is refused: {err}");
+    // The running config is unchanged.
+    let status = r.fans.status();
+    assert_eq!(status.active_profile, "Default");
+    let cpu = hot_of(&mut r, HotKind::Cpu);
+    assert_eq!(cpu.limit_c, 74.0, "the refused write left the automatic line in force");
+}
+
+#[test]
+fn issue130_an_unknown_cpu_brand_gets_the_74_degree_automatic_line() {
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    let cpu = hot_of(&mut r, HotKind::Cpu);
+    assert_eq!(cpu.limit_c, 74.0, "89 fallback minus the 15 C margin");
+    assert_eq!(cpu.auto_c, 74.0);
+    assert_eq!(cpu.ceiling_c, 84.0, "89 minus the 5 C ceiling margin");
+    assert_eq!(cpu.max_settable_c, 82.0);
+    assert_eq!(cpu.rated_max_c, None, "an unknown CPU reports no rated maximum");
+    assert!(!cpu.user_set);
+}
+
+#[test]
+fn issue130_the_gpu_defaults_to_the_88_fallback_when_no_slowdown_is_reported() {
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    let gpu = hot_of(&mut r, HotKind::Gpu);
+    assert_eq!(gpu.limit_c, 73.0, "88 fallback minus the 15 C margin");
+    assert_eq!(gpu.ceiling_c, 83.0);
+    assert_eq!(gpu.rated_max_c, None);
+    assert_eq!(r.fans.status().hot.len(), 3, "one status row per kind");
+}

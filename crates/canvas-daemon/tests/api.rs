@@ -1059,6 +1059,158 @@ fn build_with_pipe(reply: FakeReply) -> (axum::Router, Arc<App>, TempHome) {
     (api::router(app.clone()), app, home)
 }
 
+// ---- Issue #130: PUT /api/v1/fans/hot ----
+
+use canvas_proto::fans::{hot_limit_status, HotKind, HotLimits};
+
+/// A fan status with a rated 7800X3D (89 C) and an 88 C GPU fallback behind it.
+fn fans_with_hot() -> canvas_proto::fans::FansStatus {
+    let mut status = canvas_proto::fans::FansStatus {
+        chip: Some("NCT6687D-R @ 0xA20".into()),
+        hardware_watchdog: None,
+        headers: Vec::new(),
+        temps: Vec::new(),
+        active_profile: "Default".into(),
+        profiles: vec!["Default".into()],
+        floor_percent: 20,
+        hot: Vec::new(),
+    };
+    let limits = HotLimits::default();
+    status.hot = vec![
+        hot_limit_status(HotKind::Cpu, &limits, Some(89.0)),
+        hot_limit_status(HotKind::Gpu, &limits, Some(88.0)),
+        hot_limit_status(HotKind::Board, &limits, None),
+    ];
+    status
+}
+
+/// Logs every pipe request the daemon makes.
+struct LogPipe {
+    sent: Arc<std::sync::Mutex<Vec<canvas_proto::pipe::PipeRequest>>>,
+    status: Option<canvas_proto::fans::FansStatus>,
+}
+
+#[async_trait::async_trait]
+impl canvas_daemon::pipe_client::PipeLink for LogPipe {
+    async fn exchange(
+        &self,
+        request: &canvas_proto::pipe::PipeRequest,
+    ) -> Result<canvas_proto::pipe::PipeResponse, canvas_daemon::pipe_client::PipeError> {
+        self.sent.lock().unwrap().push(request.clone());
+        match request {
+            canvas_proto::pipe::PipeRequest::FanStatus => match &self.status {
+                Some(status) => Ok(canvas_proto::pipe::PipeResponse::FanStatus { status: status.clone() }),
+                None => Err(canvas_daemon::pipe_client::PipeError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "the pipe is not up",
+                ))),
+            },
+            _ => Ok(canvas_proto::pipe::PipeResponse::Ok),
+        }
+    }
+}
+
+/// The app with a recording service behind it and a live fan status.
+fn build_with_recording_pipe(
+    status: canvas_proto::fans::FansStatus,
+) -> (axum::Router, Arc<App>, TempHome, Arc<std::sync::Mutex<Vec<canvas_proto::pipe::PipeRequest>>>) {
+    let home = TempHome::new();
+    let store = canvas_daemon::storage::Store::at(&home.path);
+    let engine = Arc::new(FakeEngine::default());
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(
+        store,
+        engine,
+        Box::new(FakeAdapter::default()),
+        TOKEN.to_string(),
+        "0.1.0-test".to_string(),
+        tx,
+    );
+    let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+    app.pipe = Arc::new(LogPipe { sent: Arc::clone(&sent), status: Some(status.clone()) });
+    let app = Arc::new(app);
+    (api::router(app.clone()), app, home, sent)
+}
+
+#[tokio::test]
+async fn issue130_put_fans_hot_valid_sends_put_fan_config_with_the_values() {
+    let status = fans_with_hot();
+    let (router, app, _home, sent) = build_with_recording_pipe(status);
+    *app.fans.write().await = Some(fans_with_hot());
+    let response = router
+        .oneshot(request_with_body("PUT", routes::FAN_HOT, r#"{"cpu_c":70.0,"gpu_c":null,"board_c":60.0}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json(response).await;
+    let hot = body.get("hot").and_then(|v| v.as_array()).expect("the new status carries hot");
+    let cpu = hot.iter().find(|s| s.get("kind").and_then(|v| v.as_str()) == Some("cpu")).expect("cpu row");
+    assert_eq!(cpu.get("limit_c").and_then(|v| v.as_f64()), Some(70.0));
+    assert_eq!(cpu.get("user_set").and_then(|v| v.as_bool()), Some(true));
+
+    let sent = sent.lock().unwrap();
+    assert_eq!(sent.len(), 1, "one pipe request: the whole config: {sent:?}");
+    match &sent[0] {
+        canvas_proto::pipe::PipeRequest::PutFanConfig { config } => {
+            assert_eq!(config.hot_limits.cpu_c, Some(70.0));
+            assert_eq!(config.hot_limits.gpu_c, None);
+            assert_eq!(config.hot_limits.board_c, Some(60.0));
+        }
+        other => panic!("expected PutFanConfig, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn issue130_put_fans_hot_out_of_range_is_422_and_sends_nothing() {
+    let (router, app, _home, sent) = build_with_recording_pipe(fans_with_hot());
+    *app.fans.write().await = Some(fans_with_hot());
+    // 83 C is past the 7800X3D max_settable of 82 C.
+    let response = router
+        .oneshot(request_with_body("PUT", routes::FAN_HOT, r#"{"cpu_c":83.0,"gpu_c":null,"board_c":null}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = json(response).await;
+    assert_eq!(body.get("error").and_then(|v| v.as_str()), Some("validation"));
+    assert!(
+        body.get("message").and_then(|v| v.as_str()).unwrap_or_default().contains("cpu"),
+        "the error names the kind: {body}"
+    );
+    assert!(sent.lock().unwrap().is_empty(), "nothing is sent for a refused value");
+}
+
+#[tokio::test]
+async fn issue130_export_keeps_the_user_hot_limits() {
+    let mut status = fans_with_hot();
+    let limits = HotLimits { cpu_c: Some(70.0), gpu_c: None, board_c: Some(60.0) };
+    status.hot = vec![
+        hot_limit_status(HotKind::Cpu, &limits, Some(89.0)),
+        hot_limit_status(HotKind::Gpu, &limits, Some(88.0)),
+        hot_limit_status(HotKind::Board, &limits, None),
+    ];
+    let (router, app, _home, sent) = build_with_recording_pipe(status);
+    *app.fans.write().await = Some({
+        let mut s = fans_with_hot();
+        s.hot = vec![
+            hot_limit_status(HotKind::Cpu, &limits, Some(89.0)),
+            hot_limit_status(HotKind::Gpu, &limits, Some(88.0)),
+            hot_limit_status(HotKind::Board, &limits, None),
+        ];
+        s
+    });
+    let response = router
+        .oneshot(request("GET", routes::CONFIG_EXPORT))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json(response).await;
+    let fans = body.get("fans").expect("the bundle carries fans");
+    assert_eq!(fans.get("hot_limits").and_then(|v| v.get("cpu_c")).and_then(|v| v.as_f64()), Some(70.0));
+    assert_eq!(fans.get("hot_limits").and_then(|v| v.get("board_c")).and_then(|v| v.as_f64()), Some(60.0));
+    assert!(fans.get("hot_limits").and_then(|v| v.get("gpu_c")).and_then(|v| v.as_f64()).is_none());
+    let _ = sent;
+}
+
 #[tokio::test]
 async fn deleting_a_fan_profile_the_service_removes_is_200() {
     let (router, _app, _home) = build_with_pipe(FakeReply::Ok);
