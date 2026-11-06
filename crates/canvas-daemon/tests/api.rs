@@ -1084,8 +1084,7 @@ fn fans_with_hot() -> canvas_proto::fans::FansStatus {
     status
 }
 
-/// Logs every pipe request the daemon makes. `delay` holds each exchange long
-/// enough that two PUTs overlap without the lock, for the concurrency proof.
+/// Logs every pipe request the daemon makes.
 struct LogPipe {
     sent: Arc<std::sync::Mutex<Vec<canvas_proto::pipe::PipeRequest>>>,
     status: Option<canvas_proto::fans::FansStatus>,
@@ -1098,11 +1097,6 @@ impl canvas_daemon::pipe_client::PipeLink for LogPipe {
         &self,
         request: &canvas_proto::pipe::PipeRequest,
     ) -> Result<canvas_proto::pipe::PipeResponse, canvas_daemon::pipe_client::PipeError> {
-        // `delay` holds only a whole-config push in flight, so a second PUT
-        // overlaps the first's read-modify-send-save window without the fix.
-        if matches!(request, canvas_proto::pipe::PipeRequest::PutFanConfig { .. }) && !self.delay.is_zero() {
-            tokio::time::sleep(self.delay).await;
-        }
         self.sent.lock().unwrap().push(request.clone());
         match request {
             canvas_proto::pipe::PipeRequest::FanStatus => match &self.status {
@@ -1137,6 +1131,40 @@ fn build_with_recording_pipe(
     app.pipe = Arc::new(LogPipe { sent: Arc::clone(&sent), status: Some(status.clone()), delay: std::time::Duration::ZERO });
     let app = Arc::new(app);
     (api::router(app.clone()), app, home, sent)
+}
+
+/// A service whose first whole-config push is held in flight while the second
+/// goes through, for the concurrency proof. `entered` counts the pushes that
+/// started, so the test can launch the second PUT once the first is in flight.
+struct SlowFirstPipe {
+    sent: Arc<std::sync::Mutex<Vec<canvas_proto::pipe::PipeRequest>>>,
+    entered: Arc<std::sync::Mutex<u32>>,
+    status: canvas_proto::fans::FansStatus,
+}
+
+#[async_trait::async_trait]
+impl canvas_daemon::pipe_client::PipeLink for SlowFirstPipe {
+    async fn exchange(
+        &self,
+        request: &canvas_proto::pipe::PipeRequest,
+    ) -> Result<canvas_proto::pipe::PipeResponse, canvas_daemon::pipe_client::PipeError> {
+        if matches!(request, canvas_proto::pipe::PipeRequest::PutFanConfig { .. }) {
+            let n = {
+                let mut entered = self.entered.lock().unwrap();
+                *entered += 1;
+                *entered
+            };
+            // The first push stays in flight 400 ms; a later one 50 ms. Without the
+            // fans-config lock the first (stale) push finishes last and lands on the
+            // service after the second, dropping the second's change.
+            tokio::time::sleep(std::time::Duration::from_millis(if n == 1 { 400 } else { 50 })).await;
+        }
+        self.sent.lock().unwrap().push(request.clone());
+        match request {
+            canvas_proto::pipe::PipeRequest::FanStatus => Ok(canvas_proto::pipe::PipeResponse::FanStatus { status: self.status.clone() }),
+            _ => Ok(canvas_proto::pipe::PipeResponse::Ok),
+        }
+    }
 }
 
 #[tokio::test]
@@ -1259,10 +1287,11 @@ async fn two_concurrent_puts_keep_both_changes() {
         tx,
     );
     let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
-    app.pipe = Arc::new(LogPipe {
+    let entered = Arc::new(std::sync::Mutex::new(0u32));
+    app.pipe = Arc::new(SlowFirstPipe {
         sent: Arc::clone(&sent),
-        status: Some(fans_with_hot()),
-        delay: std::time::Duration::from_millis(300),
+        entered: Arc::clone(&entered),
+        status: fans_with_hot(),
     });
     let app = Arc::new(app);
     *app.fans.write().await = Some(fans_with_hot());
@@ -1276,16 +1305,44 @@ async fn two_concurrent_puts_keep_both_changes() {
     .to_string();
     let router_hot = router.clone();
     let router_profile = router.clone();
-    let hot_future = async move { router_hot.oneshot(hot_req).await.expect("the hot router answers") };
-    let profile_future = async move { router_profile.oneshot(
-        request_with_body("PUT", "/api/v1/fans/profiles/quiet", &profile_body),
-    ).await.expect("the profile router answers") };
-    let (hot_resp, profile_resp) = tokio::join!(hot_future, profile_future);
+    let hot_task = tokio::spawn(async move { router_hot.oneshot(hot_req).await.expect("the hot router answers") });
+    // Launch the second PUT only once the first is in flight.
+    for _ in 0..100 {
+        if *entered.lock().unwrap() >= 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let profile_task = tokio::spawn(async move {
+        router_profile
+            .oneshot(request_with_body("PUT", "/api/v1/fans/profiles/quiet", &profile_body))
+            .await
+            .expect("the profile router answers")
+    });
+    let hot_resp = hot_task.await.expect("the hot task joins");
+    let profile_resp = profile_task.await.expect("the profile task joins");
     assert_eq!(hot_resp.status(), StatusCode::OK);
     assert_eq!(profile_resp.status(), StatusCode::OK);
     let saved = app.fans_last.read().await.clone().expect("fans_last is saved");
     assert_eq!(saved.hot_limits.cpu_c, Some(70.0), "the hot change survived: {saved:?}");
     assert!(saved.profiles.iter().any(|p| p.name == "quiet"), "the profile change survived: {saved:?}");
+    // The service's last whole-config push carries both changes: with the lock
+    // held across read-modify-send-save the second PUT builds from the first's
+    // saved config, so its push is the union.
+    let recorded = sent.lock().unwrap();
+    let pushes: Vec<&canvas_proto::config::FansFile> = recorded
+        .iter()
+        .filter_map(|r| match r {
+            canvas_proto::pipe::PipeRequest::PutFanConfig { config } => Some(config),
+            _ => None,
+        })
+        .collect();
+    let last = pushes.last().expect("at least one whole-config push reached the service");
+    assert_eq!(last.hot_limits.cpu_c, Some(70.0), "the last service push keeps the hot change: {last:?}");
+    assert!(
+        last.profiles.iter().any(|p| p.name == "quiet"),
+        "the last service push keeps the profile change: {last:?}"
+    );
 }
 
 #[tokio::test]
