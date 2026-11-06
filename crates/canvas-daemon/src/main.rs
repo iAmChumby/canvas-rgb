@@ -29,6 +29,24 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::from(1);
     }
 
+    // Fakes mode (#199, debug builds only). Parsed and validated before the
+    // log, the token and every other touchpoint: a release build rejects the
+    // flag, and a fakes run with the real data folder refuses to start.
+    let args: Vec<String> = std::env::args().collect();
+    let fakes = match canvas_daemon::fakes::parse_fakes_mode(&args) {
+        Ok(fakes) => fakes,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return std::process::ExitCode::from(1);
+        }
+    };
+    if fakes {
+        if let Err(e) = canvas_daemon::fakes::validate_process_home() {
+            eprintln!("error: {e}");
+            return std::process::ExitCode::from(1);
+        }
+    }
+
     // The logs go to a rolling daily file (G8). They start before anything else can fail, so
     // every later refused start leaves a line (#19).
     if let Err(e) = canvas_daemon::logging::init("canvas-rgbd") {
@@ -48,7 +66,7 @@ fn main() -> std::process::ExitCode {
         }
     };
 
-    let exit = runtime.block_on(daemon_main());
+    let exit = runtime.block_on(daemon_main(fakes));
     // A task still blocked must not hold the daemon up (G3): the runtime gets a short
     // grace, then it is dropped without waiting for blocked workers.
     runtime.shutdown_timeout(RUNTIME_GRACE);
@@ -84,7 +102,10 @@ const ENGINE_STOP_LIMIT: std::time::Duration = std::time::Duration::from_millis(
 const RUNTIME_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// The daemon's main loop. Returns the process exit code.
-async fn daemon_main() -> Exit {
+///
+/// `fakes` is the debug-only fakes mode (#199): every real touchpoint is
+/// gated on it (see `canvas_daemon::fakes`); the non-fakes path is unchanged.
+async fn daemon_main(fakes: bool) -> Exit {
     // A snapshot before anything is changed (G10).
     if let Err(e) = canvas_daemon::storage::snapshot(&canvas_daemon::paths::home(), "startup") {
         tracing::warn!(error = %e, "could not take the startup snapshot");
@@ -127,27 +148,42 @@ async fn daemon_main() -> Exit {
     });
 
     // The OpenRGB adapter, on the port the config names, with the native adapters beside it.
-    let adapter = canvas_daemon::composite::CompositeAdapter::new(
-        canvas_adapters::openrgb::OpenRgbAdapter::new(
-            canvas_proto::consts::OPENRGB_HOST,
-            store.config.openrgb_port,
-        ),
+    // In fakes mode it talks to the fake OpenRGB server on the fake port, and
+    // the composite's keyboard is disabled: no HID is ever touched.
+    let openrgb_adapter = canvas_adapters::openrgb::OpenRgbAdapter::new(
+        canvas_proto::consts::OPENRGB_HOST,
+        if fakes {
+            canvas_daemon::fakes::fake_openrgb_port()
+        } else {
+            store.config.openrgb_port
+        },
     );
+    let adapter = if fakes {
+        canvas_daemon::composite::CompositeAdapter::openrgb_only(openrgb_adapter)
+    } else {
+        canvas_daemon::composite::CompositeAdapter::new(openrgb_adapter)
+    };
 
     // The numeric display (the CHIONE pump head). It only enumerates until a display has a saved
-    // config, so starting it opens nothing on a PC without one.
-    let display_adapter = Box::new(canvas_adapters::chione::ChioneDisplay::new());
+    // config, so starting it opens nothing on a PC without one. Fakes mode has no display.
+    let use_real_display = canvas_daemon::fakes::real_display_enabled(fakes);
 
     // The peripherals: the mouse and the controller. They are enumerated, never opened, until
-    // the owner says so in `peripherals.json` (see `canvas_daemon::peripherals`).
-    let peripherals: Vec<Box<dyn canvas_daemon::peripherals::Peripheral>> = vec![
-        Box::new(canvas_adapters::attack_shark_x6::AttackSharkX6::new()),
-        Box::new(canvas_adapters::eightbitdo_ultimate2::EightBitDoUltimate2::new()),
-    ];
+    // the owner says so in `peripherals.json` (see `canvas_daemon::peripherals`). Fakes mode
+    // has no peripherals at all.
+    let peripherals: Vec<Box<dyn canvas_daemon::peripherals::Peripheral>> =
+        if canvas_daemon::fakes::real_peripherals_enabled(fakes) {
+            vec![
+                Box::new(canvas_adapters::attack_shark_x6::AttackSharkX6::new()),
+                Box::new(canvas_adapters::eightbitdo_ultimate2::EightBitDoUltimate2::new()),
+            ]
+        } else {
+            Vec::new()
+        };
 
     let (quit_tx, mut quit_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
 
-    let app = Arc::new(
+    let mut app_inner = if use_real_display {
         App::with_displays(
             store,
             engine.clone(),
@@ -155,10 +191,36 @@ async fn daemon_main() -> Exit {
             token,
             canvas_daemon::version(),
             quit_tx,
-            display_adapter,
+            Box::new(canvas_adapters::chione::ChioneDisplay::new()),
         )
-        .with_peripherals(peripherals),
-    );
+        .with_peripherals(peripherals)
+    } else {
+        App::with_displays(
+            store,
+            engine.clone(),
+            Box::new(adapter),
+            token,
+            canvas_daemon::version(),
+            quit_tx,
+            Box::new(canvas_daemon::displays::NoDisplays),
+        )
+        .with_peripherals(peripherals)
+    };
+    if fakes {
+        // In-process fake service pipe and a capture that never starts: the
+        // real pipe, screen and audio are never touched.
+        app_inner.pipe = Arc::new(canvas_daemon::fakes::FakePipeLink);
+        app_inner.inputs = Arc::new(canvas_daemon::capture::DaemonInputs::disabled());
+    }
+    let app = Arc::new(app_inner);
+    if fakes {
+        *app.fans.write().await = Some(canvas_daemon::fakes::fake_fans_status());
+        tracing::info!(
+            api_port = canvas_proto::consts::api_port(),
+            openrgb_port = canvas_daemon::fakes::fake_openrgb_port(),
+            "fakes mode: talking only to fakes (no service pipe, no real OpenRGB, no HID, no capture)"
+        );
+    }
 
     // The capture reaches both engines: the lights' engine and the stack preview engine
     // read the screen and the audio through it. Without this the effects that need them
@@ -168,7 +230,10 @@ async fn daemon_main() -> Exit {
     app.set_input_source(Some(app.capture_source()));
 
     // The peripherals the owner allowed are opened; the others stay closed.
-    canvas_daemon::peripherals::apply_saved(&app).await;
+    // Fakes mode has no peripherals, so nothing is opened.
+    if canvas_daemon::fakes::real_peripherals_enabled(fakes) {
+        canvas_daemon::peripherals::apply_saved(&app).await;
+    }
 
     // The zone sizes from disk.
     {
@@ -206,28 +271,41 @@ async fn daemon_main() -> Exit {
         }
     }
 
-    // The background tasks.
-    spawn_openrgb_supervisor(app.clone());
-    spawn_pipe_client(app.clone());
-    spawn_fan_poller(app.clone());
-    spawn_display_task(app.clone());
-    spawn_conflict_check(app.clone());
-    spawn_power_watcher(app.clone());
-    spawn_first_run(app.clone());
+    // The background tasks. Fakes mode gates off every task that touches a
+    // real touchpoint (see `canvas_daemon::fakes`); the OpenRGB supervisor
+    // still runs, but only against the fake server on the fake port.
+    spawn_openrgb_supervisor(app.clone(), fakes);
+    if canvas_daemon::fakes::real_pipe_enabled(fakes) {
+        spawn_pipe_client(app.clone());
+        spawn_fan_poller(app.clone());
+    }
+    if canvas_daemon::fakes::real_display_enabled(fakes) {
+        spawn_display_task(app.clone());
+    }
+    if canvas_daemon::fakes::real_conflict_check_enabled(fakes) {
+        spawn_conflict_check(app.clone());
+    }
+    if canvas_daemon::fakes::real_power_watcher_enabled(fakes) {
+        spawn_power_watcher(app.clone());
+    }
+    if canvas_daemon::fakes::real_first_run_enabled(fakes) {
+        spawn_first_run(app.clone());
+    }
     spawn_user_effects_watch(app.clone());
     canvas_daemon::draft::spawn_sweeper(app.clone());
 
-    // The API.
-    let router = canvas_daemon::api::router(app.clone());
-    let address = format!(
-        "{}:{}",
-        canvas_proto::consts::API_HOST,
+    // The API. Fakes mode binds the spine's test port, never the config port.
+    let api_port = if fakes {
+        canvas_proto::consts::api_port()
+    } else {
         app.store.read().await.config.api_port
-    );
+    };
+    let router = canvas_daemon::api::router(app.clone());
+    let address = format!("{}:{}", canvas_proto::consts::API_HOST, api_port);
     let listener = match tokio::net::TcpListener::bind(&address).await {
         Ok(listener) => listener,
         Err(e) => {
-            let holders = port_holders(app.store.read().await.config.api_port);
+            let holders = port_holders(api_port);
             tracing::error!(error = %e, address = %address, holders = %holders, "could not bind the API; exiting");
             return Exit::new(1, format!("could not bind the API on {address} ({e}); {holders}; exiting"));
         }
@@ -252,7 +330,7 @@ async fn daemon_main() -> Exit {
     // watchdog reserves `logging::FLUSH_LIMIT` of it for the final log flush.
     arm_exit_watchdog(QUIT_DEADLINE);
 
-    quit_sequence(&app).await;
+    quit_sequence(&app, fakes).await;
     server.abort();
 
     tracing::info!("canvas-rgbd has stopped");
@@ -280,7 +358,7 @@ fn port_holders(port: u16) -> String {
 }
 
 /// The quit path (G3), in order. Each step has a bound, so no step holds the daemon up.
-async fn quit_sequence(app: &Arc<App>) {
+async fn quit_sequence(app: &Arc<App>, fakes: bool) {
     app.shutting_down.store(1, Ordering::SeqCst);
     // The service log has the moment it ended OpenRGB; this is the moment frames last went out (#81).
     app.last_frame.log("the daemon was told to stop");
@@ -290,10 +368,13 @@ async fn quit_sequence(app: &Arc<App>) {
         tracing::warn!("the on-quit write did not finish in time");
     }
 
-    // 2. Tell the service, if it is up.
-    let notice = canvas_daemon::pipe_client::notify_quitting(app);
-    if tokio::time::timeout(SERVICE_NOTICE_LIMIT, notice).await.is_err() {
-        tracing::warn!("the service was not told about the quit in time");
+    // 2. Tell the service, if it is up. Fakes mode never opens the real pipe,
+    // not even to say goodbye.
+    if canvas_daemon::fakes::real_pipe_enabled(fakes) {
+        let notice = canvas_daemon::pipe_client::notify_quitting(app);
+        if tokio::time::timeout(SERVICE_NOTICE_LIMIT, notice).await.is_err() {
+            tracing::warn!("the service was not told about the quit in time");
+        }
     }
 
     // 3. Stop the render loop. Its thread is joined on a blocking thread, so a stuck
@@ -468,7 +549,7 @@ async fn sync_device_sinks(
 }
 
 /// Keeps the OpenRGB connection alive and re-applies the zone sizes.
-fn spawn_openrgb_supervisor(app: Arc<App>) {
+fn spawn_openrgb_supervisor(app: Arc<App>, fakes: bool) {
     let adapter = app.adapter.clone();
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let app_for_supervisor = app.clone();
@@ -481,9 +562,15 @@ fn spawn_openrgb_supervisor(app: Arc<App>) {
         *app_for_supervisor.openrgb.write().await = LinkState::Connecting;
         // Milestone 1: the daemon starts the OpenRGB server itself when the service does
         // not own it. The app keeps it, and the quit path stops it.
+        // Fakes mode never launches the real OpenRGB and never asks the real
+        // service: the fake server is started by the launcher instead.
         let port = app_for_supervisor.store.read().await.config.openrgb_port;
-        if let Some(server) =
+        let launched = if canvas_daemon::fakes::real_openrgb_launch_enabled(fakes) {
             canvas_daemon::openrgb_supervisor::ensure_openrgb_running(port).await
+        } else {
+            None
+        };
+        if let Some(server) = launched
         {
             *app_for_supervisor
                 .openrgb_child

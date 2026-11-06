@@ -22,6 +22,9 @@ pub struct DaemonInputs {
     screen: Mutex<Option<screen::Shared>>,
     /// The audio capture, while it runs.
     audio: Mutex<Option<audio::Shared>>,
+    /// False in fakes mode (#199): captures never start, so the screen and
+    /// audio are never touched.
+    enabled: bool,
 }
 
 impl DaemonInputs {
@@ -30,11 +33,29 @@ impl DaemonInputs {
         Self {
             screen: Mutex::new(None),
             audio: Mutex::new(None),
+            enabled: true,
         }
+    }
+
+    /// An input source that never captures: fakes mode (#199).
+    pub fn disabled() -> Self {
+        Self {
+            screen: Mutex::new(None),
+            audio: Mutex::new(None),
+            enabled: false,
+        }
+    }
+
+    /// Whether this input source may start a capture.
+    pub fn enabled(&self) -> bool {
+        self.enabled
     }
 
     /// Starts the screen capture.
     pub fn start_screen(&self) {
+        if !self.enabled {
+            return;
+        }
         let mut slot = self.screen.lock().unwrap_or_else(|e| e.into_inner());
         if slot.is_some() {
             return;
@@ -59,6 +80,9 @@ impl DaemonInputs {
 
     /// Starts the audio capture.
     pub fn start_audio(&self) {
+        if !self.enabled {
+            return;
+        }
         let mut slot = self.audio.lock().unwrap_or_else(|e| e.into_inner());
         if slot.is_some() {
             return;
@@ -141,6 +165,15 @@ mod tests {
         assert!(inputs.idle());
         inputs.stop_all();
         assert!(inputs.idle());
+    }
+
+    #[test]
+    fn a_disabled_input_source_never_captures() {
+        let inputs = DaemonInputs::disabled();
+        assert!(!inputs.enabled());
+        inputs.apply_needs(InputNeeds { screen: true, audio: true });
+        assert!(inputs.idle(), "fakes mode must not start the screen or audio capture");
+        assert!(DaemonInputs::empty().enabled());
     }
 
     /// The capture is the daemon's input source: the engines read the screen and the

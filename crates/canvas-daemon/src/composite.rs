@@ -24,6 +24,9 @@ const RETRY: Duration = Duration::from_secs(5);
 pub struct CompositeAdapter {
     openrgb: OpenRgbAdapter,
     royuan: RoyuanAdapter,
+    /// Whether the keyboard may be enumerated/opened over HID. False in fakes
+    /// mode (#199): the keyboard adapter is never touched at all.
+    keyboard_enabled: bool,
     /// When the keyboard was last opened (or tried).
     royuan_attempt: Option<Instant>,
 }
@@ -31,6 +34,17 @@ pub struct CompositeAdapter {
 impl CompositeAdapter {
     pub fn new(openrgb: OpenRgbAdapter) -> Self {
         Self::with_keyboard(openrgb, RoyuanAdapter::new())
+    }
+
+    /// OpenRGB only: the keyboard adapter is held but never enumerated,
+    /// opened or written. This is the fakes-mode adapter (#199).
+    pub fn openrgb_only(openrgb: OpenRgbAdapter) -> Self {
+        Self {
+            openrgb,
+            royuan: RoyuanAdapter::new(),
+            keyboard_enabled: false,
+            royuan_attempt: None,
+        }
     }
 
     /// Like [`new`](Self::new), with a keyboard adapter of the caller's.
@@ -42,6 +56,7 @@ impl CompositeAdapter {
         Self {
             openrgb,
             royuan: keyboard,
+            keyboard_enabled: true,
             royuan_attempt: None,
         }
     }
@@ -52,6 +67,9 @@ impl CompositeAdapter {
 
     /// Opens the keyboard if it is closed and the retry window has passed.
     async fn ensure_royuan(&mut self) -> Result<(), AdapterError> {
+        if !self.keyboard_enabled {
+            return Err(AdapterError::NotConnected);
+        }
         if self.royuan.is_connected() {
             return Ok(());
         }
@@ -103,6 +121,9 @@ impl DeviceAdapter for CompositeAdapter {
             .into_iter()
             .filter(|d| crate::is_driven(&d.id))
             .collect();
+        if !self.keyboard_enabled {
+            return Ok(devices);
+        }
         match self.royuan.discover().await {
             Ok(keyboard) if !keyboard.is_empty() => {
                 if let Err(e) = self.ensure_royuan().await {
@@ -126,6 +147,9 @@ impl DeviceAdapter for CompositeAdapter {
 
     async fn set_zone_size(&mut self, device: &DeviceId, zone: u32, leds: u32) -> Result<(), AdapterError> {
         if Self::is_royuan(device) {
+            if !self.keyboard_enabled {
+                return Err(AdapterError::NotConnected);
+            }
             return self.royuan.set_zone_size(device, zone, leds).await;
         }
         self.openrgb.set_zone_size(device, zone, leds).await
@@ -141,6 +165,9 @@ impl DeviceAdapter for CompositeAdapter {
 
     async fn read_back(&mut self, device: &DeviceId) -> Result<Vec<Rgb8>, AdapterError> {
         if Self::is_royuan(device) {
+            if !self.keyboard_enabled {
+                return Err(AdapterError::NotConnected);
+            }
             return self.royuan.read_back(device).await;
         }
         self.openrgb.read_back(device).await
