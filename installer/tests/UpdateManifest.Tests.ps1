@@ -1923,6 +1923,334 @@ try {
         $r = Invoke-Changelog -Name 'anyver-ok' -Version '0.1.1' -Lines (@('# Changelog', '', '## [0.1.1] - 2026-11-02', '', '- A.', '', '## [0.1.0] - 2026-10-29', '', '- Old.', '', '[Unreleased]: https://example.invalid/compare', '[0.1.1]: https://example.invalid/a', '[0.1.0]: https://example.invalid/tag'))
         Assert-Equal $r.Exit 0 "valid labels at the end: $($r.Err)"
     }
+
+    # ---- #203: the experimental publisher ----
+
+    # The script in its experimental mode: a dev version, the Unreleased notes and the experimental
+    # address. The same script, so the same tests run against an older copy of it
+    # (CANVAS_RGB_MANIFEST_SCRIPT).
+    function Invoke-Experimental {
+        param([string]$Version = '0.9.1-dev.42', [string]$ChangelogPath = '', [string]$Url = '', [string]$Out = '', [string]$Name = 'exp')
+        $ErrorActionPreference = 'Continue'
+        if (-not $ChangelogPath) { $ChangelogPath = $changelog }
+        if (-not $Out) { $Out = Join-Path $dir "$Name.json" }
+        Remove-Item -LiteralPath $Out -ErrorAction SilentlyContinue
+        $cmd = @('-NoProfile', '-File', "`"$script`"", '-Version', $Version, '-SigFile', "`"$sig`"", '-ChangelogFile', "`"$ChangelogPath`"", '-OutFile', "`"$Out`"", '-Experimental')
+        if ($Url) { $cmd += @('-Url', $Url) }
+        $p = Start-Process -FilePath $ps -ArgumentList $cmd -NoNewWindow -Wait -PassThru -RedirectStandardOutput (Join-Path $dir "$Name.out") -RedirectStandardError (Join-Path $dir "$Name.err")
+        $m = $null
+        if (Test-Path -LiteralPath $Out) { $m = Get-Content -LiteralPath $Out -Raw | ConvertFrom-Json }
+        return @{ Exit = $p.ExitCode; Err = (Get-Content -LiteralPath (Join-Path $dir "$Name.err") -Raw); Manifest = $m }
+    }
+
+    # The publisher and the test build it calls.
+    $experimentalPath = Join-Path $PSScriptRoot '..\..\.github\workflows\experimental.yml'
+    $testBuildPath = Join-Path $PSScriptRoot '..\..\.github\workflows\test-build.yml'
+
+    # One scope's permissions block: the block under its own "permissions:" key, or nothing when the
+    # scope has none. The keys of the block are the lines under it, so a job that holds another map
+    # at the same indent (the caller's secrets: mapping) is not mistaken for a permission key.
+    function Get-PermissionsBlock {
+        param([string]$Text, [int]$KeyIndent, [int]$EntryIndent)
+        $lines = @($Text -split "`n")
+        $keys = @()
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match ('^ {' + $KeyIndent + '}["'']?permissions["'']?\s*:')) { $keys += $i }
+        }
+        if ($keys.Count -eq 0) { return @() }
+        if ($keys.Count -gt 1) { return @(@{ Kind = 'duplicate'; Style = ''; Entries = @(); Value = ''; Used = 0; Line = $lines[$keys[1]] }) }
+        return @(Get-PermissionBlock -Lines $lines -Index $keys[0] -KeyIndent $KeyIndent -EntryIndent $EntryIndent)
+    }
+
+    # The rules of experimental.yml, each one a reason a publish would be unsafe, or would not be the
+    # publish it says it is:
+    #   - it runs by hand only (workflow_dispatch): no push, no schedule, no pull request;
+    #   - every job checks that the run is from main, so nothing is signed or published from a branch;
+    #   - every third-party action is pinned to a full commit SHA;
+    #   - the token is read-only everywhere but the publish job, which is the only one that writes;
+    #   - the publish job runs no project code, and checks out only the manifest script and the changelog;
+    #   - the release is the rolling `experimental` pre-release: never a v* tag, never the latest one;
+    #   - the installer and its signature are uploaded before latest.json, so the feed never names a
+    #     file that is not up yet.
+    function Get-ExperimentalViolations {
+        param([string]$Text)
+        $found = @()
+        $info = Get-WorkflowJobsFromText $Text
+        $lines = @($info.Text -split "`n")
+
+        # The triggers: the on: block, at column 0, exactly once.
+        $onAt = @()
+        for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -match '^on:\s*(#.*)?$') { $onAt += $i } }
+        if ($onAt.Count -ne 1) {
+            $found += "the on: block was found $($onAt.Count) times at column 0, not exactly once: the guard does not know what triggers the workflow"
+            return $found
+        }
+        $triggers = @()
+        for ($i = $onAt[0] + 1; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match '^\S') { break }
+            if ($lines[$i] -match '^ {2}([A-Za-z_-]+):') { $triggers += $Matches[1] }
+        }
+        if ($triggers.Count -ne 1 -or $triggers[0] -cne 'workflow_dispatch') {
+            $found += "the workflow triggers on [$($triggers -join ', ')], not on [workflow_dispatch] alone: a push, a schedule or a pull request would publish without a person"
+        }
+
+        # Every job is main only.
+        foreach ($name in $info.Jobs.Keys) {
+            $job = $info.Jobs[$name]
+            if ($job -notmatch '(?m)^ {4}if:.*github\.ref\s*==\s*[''"]refs/heads/main[''"]') {
+                $found += "job [$name] does not check that the run is from main: it needs the guard github.ref == 'refs/heads/main'"
+            }
+        }
+
+        # Every third-party action is pinned to a full commit SHA. A workflow of this repository is
+        # not an action: it names no ref and is read from the commit that runs.
+        foreach ($line in $lines) {
+            if ($line -match '^\s*(?:-\s+)?uses:\s*(\S+)') {
+                $u = $Matches[1]
+                if ($u -like './*') { continue }
+                if ($u -notmatch '^[^@\s]+@[0-9a-f]{40}$') {
+                    $found += "the action [$u] is not pinned to a full commit SHA"
+                }
+            }
+        }
+
+        # The permissions: the top level is read-only, the build job is read-only, and only the
+        # publish job writes the release. A job with no block of its own inherits the top level one.
+        $top = @(Get-PermissionsBlock -Text $info.Text -KeyIndent 0 -EntryIndent 2)
+        if ($top.Count -eq 0) {
+            $found += 'the workflow holds no top-level permissions block'
+        } else {
+            foreach ($blk in $top) {
+                if ($blk.Kind -ne 'map') { $found += 'the top-level permissions block is not a map of keys'; continue }
+                foreach ($e in $blk.Entries) {
+                    if ($e.Key -cne 'contents' -or $e.Value -cne 'read') {
+                        $found += "the top level holds [$($e.Key): $($e.Value)], not [contents: read]: every job may hold the token's write"
+                    }
+                }
+            }
+        }
+        foreach ($name in $info.Jobs.Keys) {
+            $want = if ($name -ceq 'publish') { 'write' } else { 'read' }
+            $own = @(Get-PermissionsBlock -Text $info.Jobs[$name] -KeyIndent 4 -EntryIndent 6)
+            if ($own.Count -eq 0) {
+                if ($name -ceq 'publish') {
+                    $found += 'the publish job holds no permissions block of its own: it could not write the release'
+                } elseif ($top.Count -eq 0) {
+                    $found += "job [$name] holds no permissions block of its own, and there is no top-level block to inherit"
+                }
+                continue
+            }
+            foreach ($blk in $own) {
+                if ($blk.Kind -ne 'map') { $found += "the permissions block of job [$name] is not a map of keys"; continue }
+                foreach ($e in $blk.Entries) {
+                    if ($e.Key -cne 'contents') {
+                        $found += "job [$name] holds the permission [$($e.Key)]: only contents may be held"
+                        continue
+                    }
+                    if ($want -ceq 'write') {
+                        if ($e.Value -cne 'write') { $found += "job [$name] holds [contents: $($e.Value)], not [contents: write]" }
+                    } elseif ($e.Value -cne 'read') {
+                        $found += "job [$name] holds [contents: $($e.Value)], not [contents: read]"
+                    }
+                }
+            }
+        }
+
+        # The release: the rolling `experimental` pre-release, and never a v* tag.
+        foreach ($line in $lines) {
+            if ($line -match 'gh\s+release\s+([a-z-]+)\s+(\S+)') {
+                $tag = $Matches[2].Trim('"', "'")
+                if ($tag -cne 'experimental') {
+                    $found += "the release command names the tag [$tag], not [experimental]: a v* tag would fire release.yml"
+                }
+            }
+        }
+        if ($info.Text -match 'releases/download/v') {
+            $found += 'the workflow points at a v* release: the experimental feed is the `experimental` pre-release'
+        }
+
+        # The publish job: no project code, and only the manifest script and the changelog checked out.
+        if (-not $info.Jobs.ContainsKey('publish')) {
+            $found += 'the workflow has no publish job'
+            return $found
+        }
+        $publish = $info.Jobs['publish']
+        foreach ($step in @(Get-WorkflowSteps $publish)) {
+            $run = Get-StepRunAll $step
+            if ($run -match '(?m)^\s*(npm|npx|cargo|node|yarn|pnpm)\b') {
+                $found += "the publish job runs project code: [$($Matches[1])]"
+            }
+        }
+        $checkouts = @(Get-WorkflowSteps $publish | Where-Object { $_ -match 'uses:\s*actions/checkout' })
+        if ($checkouts.Count -ne 1) {
+            $found += "the publish job has $($checkouts.Count) checkouts, it has one"
+        } else {
+            $with = Get-StepWith $checkouts[0]
+            if (-not $with.ContainsKey('sparse-checkout')) {
+                $found += 'the publish job checks out the whole repository: it needs only the manifest script and the changelog'
+            } else {
+                $paths = @((Get-StepBlock -Step $checkouts[0] -Key 'sparse-checkout') -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+                foreach ($p in $paths) {
+                    if ($p -cnotin @('tools/make-update-manifest.ps1', 'CHANGELOG.md')) {
+                        $found += "the publish job checks out [$p]: it needs only tools/make-update-manifest.ps1 and CHANGELOG.md"
+                    }
+                }
+            }
+        }
+
+        # The release is a pre-release, and never the latest one: GitHub's `latest` is the stable
+        # feed, and a dev build there would be offered to every PC.
+        if ($publish -notmatch 'gh release create[^\r\n]*--prerelease') { $found += 'the release is not created as a pre-release' }
+        if ($publish -notmatch 'gh release edit[^\r\n]*--prerelease') { $found += 'the release is not kept a pre-release' }
+        foreach ($line in ($publish -split "`n")) {
+            if ($line -match '--latest(?!=false)') {
+                $found += "the publish job marks the release as the latest one: [$($line.Trim())]"
+            }
+        }
+
+        # The uploads, in the order they run: the installer and its signature first, the feed last.
+        $uploads = @()
+        foreach ($step in @(Get-WorkflowSteps $publish)) {
+            foreach ($line in ((Get-StepRunAll $step) -split "`n")) {
+                if ($line -match 'gh\s+release\s+upload\s+\S+\s+(\S+)') { $uploads += $Matches[1].Trim('"', "'") }
+            }
+        }
+        $installerAt = -1
+        $sigAt = -1
+        $feedAt = -1
+        for ($i = 0; $i -lt $uploads.Count; $i++) {
+            $u = $uploads[$i]
+            if ($u -match '\.exe$') { if ($installerAt -ge 0) { $found += 'the installer is uploaded twice' }; $installerAt = $i }
+            elseif ($u -match '\.exe\.sig$') { if ($sigAt -ge 0) { $found += 'the signature is uploaded twice' }; $sigAt = $i }
+            elseif ($u -match 'latest\.json$') { if ($feedAt -ge 0) { $found += 'latest.json is uploaded twice' }; $feedAt = $i }
+        }
+        if ($installerAt -lt 0) { $found += 'the installer is not uploaded' }
+        if ($sigAt -lt 0) { $found += 'the signature is not uploaded' }
+        if ($feedAt -lt 0) { $found += 'latest.json is not uploaded' }
+        if ($installerAt -ge 0 -and $feedAt -ge 0 -and $installerAt -gt $feedAt) {
+            $found += 'the installer is uploaded after latest.json: the feed would name a file that is not up yet'
+        }
+        if ($sigAt -ge 0 -and $feedAt -ge 0 -and $sigAt -gt $feedAt) {
+            $found += 'the signature is uploaded after latest.json: the feed would name a file that is not up yet'
+        }
+        if ($feedAt -ge 0 -and $feedAt -ne ($uploads.Count - 1)) {
+            $found += 'latest.json is not the last upload: the feed must be written after the files it names'
+        }
+        return $found
+    }
+
+    Test-Case 'experimental workflow: the real experimental.yml passes every rule' {
+        $raw = (Get-Content -LiteralPath $experimentalPath -Raw) -replace "`r`n", "`n"
+        $v = @(Get-ExperimentalViolations $raw)
+        Assert-Equal $v.Count 0 "the real experimental.yml has no violation:`n$($v -join "`n")"
+        # The guard is not passing because it reads nothing: the workflow it reads is the one that is
+        # there.
+        Assert-True ($raw.Contains('name: Experimental build')) 'the file is the experimental workflow'
+        Assert-True ($raw.Contains('uses: ./.github/workflows/test-build.yml')) 'the build is test-build.yml''s'
+    }
+    # The broken copies: the real workflow with one thing broken each. Every one of them must be a
+    # violation: a rule that reads nothing would pass them all.
+    function Get-ExperimentalBreakages {
+        $cases = [ordered]@{
+            'a push trigger'                = { param($t) $t.Replace("on:`n  workflow_dispatch:", "on:`n  push:`n    branches:`n      - main`n  workflow_dispatch:") }
+            'a schedule trigger'            = { param($t) $t.Replace("on:`n  workflow_dispatch:", "on:`n  schedule:`n    - cron: '0 3 * * *'`n  workflow_dispatch:") }
+            'a pull_request trigger'        = { param($t) $t.Replace("on:`n  workflow_dispatch:", "on:`n  pull_request:`n  workflow_dispatch:") }
+            'no main guard on the publish job' = { param($t) $t.Replace("    needs: build`n    if: github.ref == 'refs/heads/main'`n", "    needs: build`n") }
+            'no main guard on the build job' = { param($t) $t.Replace("    if: github.ref == 'refs/heads/main'`n    permissions:`n      contents: read`n", "    permissions:`n      contents: read`n") }
+            'an action that is not pinned'  = { param($t) $t.Replace('actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093', 'actions/download-artifact@v4') }
+            'a write in the build job'      = { param($t) $t.Replace("    if: github.ref == 'refs/heads/main'`n    permissions:`n      contents: read`n", "    if: github.ref == 'refs/heads/main'`n    permissions:`n      contents: write`n") }
+            'a write at the top level'      = { param($t) $t.Replace("permissions:`n  contents: read`n", "permissions:`n  contents: write`n") }
+            'no write in the publish job'   = { param($t) $t.Replace("      contents: write # the only job that can write to the release", "      contents: read") }
+            'a v* tag'                      = { param($t) $t.Replace('gh release upload experimental', 'gh release upload v0.9.1') }
+            'no --prerelease on the create' = { param($t) $t.Replace('gh release create experimental --prerelease --latest=false', 'gh release create experimental --latest=false') }
+            'no --prerelease on the edit'   = { param($t) $t.Replace('gh release edit experimental --prerelease --latest=false', 'gh release edit experimental --latest=false') }
+            'the release marked as the latest' = { param($t) $t.Replace('--latest=false', '--latest') }
+            'npm in the publish job'        = { param($t) $t.Replace("      - name: Write latest.json`n", "      - name: Install the app`n        shell: pwsh`n        run: npm ci`n`n      - name: Write latest.json`n") }
+            'the whole repository checked out' = { param($t) $t.Replace("          sparse-checkout: |`n            tools/make-update-manifest.ps1`n            CHANGELOG.md`n          sparse-checkout-cone-mode: false`n", '') }
+            'latest.json uploaded first'    = { param($t) $t.Replace("          gh release upload experimental dist/latest.json --clobber`n          if (`$LASTEXITCODE -ne 0) { throw 'latest.json could not be uploaded' }`n", '').Replace("          gh release upload experimental `"dist/canvas-rgb-setup-`$env:VERSION.exe`" --clobber`n", "          gh release upload experimental dist/latest.json --clobber`n          gh release upload experimental `"dist/canvas-rgb-setup-`$env:VERSION.exe`" --clobber`n") }
+            'the signature uploaded last'   = { param($t) $t.Replace("          gh release upload experimental `"dist/canvas-rgb-setup-`$env:VERSION.exe.sig`" --clobber`n          if (`$LASTEXITCODE -ne 0) { throw 'the signature could not be uploaded' }`n", '').Replace("          gh release upload experimental dist/latest.json --clobber`n", "          gh release upload experimental dist/latest.json --clobber`n          gh release upload experimental `"dist/canvas-rgb-setup-`$env:VERSION.exe.sig`" --clobber`n") }
+        }
+        return $cases
+    }
+
+    Test-Case 'experimental workflow: every rule catches a broken copy' {
+        $base = (Get-WorkflowJobsFromText (Get-Content -LiteralPath $experimentalPath -Raw)).Text
+        $cases = Get-ExperimentalBreakages
+        foreach ($k in $cases.Keys) {
+            $mutated = & $cases[$k] $base
+            Assert-True ($mutated -ne $base) "case [$k] changed the workflow text"
+            $v = @(Get-ExperimentalViolations $mutated)
+            Assert-True ($v.Count -gt 0) "case [$k] is a violation:`n$($v -join "`n")"
+        }
+        Assert-Equal @(Get-ExperimentalViolations $base).Count 0 "the unmutated workflow has none:`n$(@(Get-ExperimentalViolations $base) -join "`n")"
+    }
+    Test-Case 'experimental workflow: the build is test-build.yml''s, and the two agree' {
+        $experimental = Get-Content -LiteralPath $experimentalPath -Raw
+        $testBuild = Get-Content -LiteralPath $testBuildPath -Raw
+        # The publisher calls the test build, and passes the key to it.
+        Assert-True ($experimental.Contains('uses: ./.github/workflows/test-build.yml')) 'the publisher calls the test build'
+        Assert-True ($experimental.Contains('UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}')) 'the key is passed to the called workflow'
+        Assert-True ($experimental.Contains('canvas-rgb-test-build-${{ needs.build.outputs.version }}')) 'the signed build is fetched by name'
+        # The test build is callable, and says what the caller may pass and what the caller gets.
+        Assert-True ($testBuild -match '(?m)^on:\s*$') 'the test build has an on: block'
+        Assert-True ($testBuild -match '(?m)^ {2}workflow_dispatch:\s*$') 'the test build still runs by hand'
+        Assert-True ($testBuild -match '(?m)^ {2}workflow_call:\s*$') 'the test build is callable'
+        Assert-True ($testBuild -match '(?ms)^ {4}secrets:\s*\r?\n {6}UPDATE_SIGNING_KEY:\s*\r?\n {8}required: true') 'the called workflow declares the key it needs'
+        Assert-True ($testBuild -match '(?ms)^ {4}outputs:\s*\r?\n {6}version:.*?\r?\n {8}value: \$\{\{ jobs\.build\.outputs\.version \}\}') 'the called workflow gives the caller the version it signed'
+        Assert-True ($testBuild -match '(?m)^ {6}version: \$\{\{ steps\.version\.outputs\.version \}\}') 'the build job outputs the version'
+        # The key is read in the sign step only, in the test build as it is today.
+        Assert-Equal @([regex]::Matches($testBuild, 'secrets\.UPDATE_SIGNING_KEY')).Count 1 'the key is read once'
+        # The two workflows never cancel each other: the called workflow's group names the calling
+        # workflow, and a manual test build and a publish are two different names.
+        Assert-True ($testBuild -match '(?m)^ {2}group: \$\{\{ github\.workflow \}\}-test-build\s*$') 'the test build''s concurrency group names the calling workflow'
+        Assert-True ($experimental -match '(?m)^ {2}group: experimental\s*$') 'the publisher''s own group is experimental'
+        Assert-True ($experimental -match '(?m)^ {2}cancel-in-progress: false\s*$') 'a newer publish waits for the older one'
+    }
+    Test-Case 'manifest: the experimental mode writes the dev version, the Unreleased notes and the experimental address' {
+        $r = Invoke-Experimental
+        Assert-Equal $r.Exit 0 "exit: $($r.Err)"
+        Assert-Equal $r.Manifest.version '0.9.1-dev.42' 'the manifest carries the dev version'
+        Assert-Equal $r.Manifest.platforms.'windows-x86_64'.url 'https://github.com/iAmChumby/canvas-rgb/releases/download/experimental/canvas-rgb-setup-0.9.1-dev.42.exe' 'the address is the asset of the experimental release'
+        Assert-Equal $r.Manifest.platforms.'windows-x86_64'.signature 'dW50cnVzdGVkIGNvbW1lbnQ6IHNpZw==' 'the signature is the .sig contents'
+        # The notes are the changelog's Unreleased section: what has not been released yet.
+        Assert-Equal $r.Manifest.notes "### Added`n`n- Not released yet." 'the notes are the Unreleased section'
+        Assert-True (-not $r.Manifest.notes.Contains('Updates install themselves')) 'no other version''s notes'
+    }
+    Test-Case 'manifest: the experimental mode takes the address it is given' {
+        $r = Invoke-Experimental -Url 'https://github.com/iAmChumby/canvas-rgb/releases/download/experimental/canvas-rgb-setup-0.9.1-dev.42.exe' -Name 'expurl'
+        Assert-Equal $r.Exit 0 "exit: $($r.Err)"
+        Assert-Equal $r.Manifest.platforms.'windows-x86_64'.url 'https://github.com/iAmChumby/canvas-rgb/releases/download/experimental/canvas-rgb-setup-0.9.1-dev.42.exe' 'the address is the one it was given'
+    }
+    Test-Case 'manifest: the experimental mode refuses a version that is not a dev version' {
+        $r = Invoke-Experimental -Version '0.9.1' -Name 'expstable'
+        Assert-True ($r.Exit -ne 0) 'a stable version is refused in the experimental mode'
+        Assert-True ($r.Err -match 'dev version') "the message says why: $($r.Err)"
+    }
+    Test-Case 'manifest: the stable mode still refuses a dev version' {
+        # The stable feed never carries a pre-release: the two modes are separate, and the stable one
+        # is unchanged.
+        $ErrorActionPreference = 'Continue'
+        $out = Join-Path $dir 'dev-stable.json'
+        & $ps -NoProfile -File $script -Version 0.9.1-dev.42 -SigFile $sig -ChangelogFile $changelog -OutFile $out 2>&1 | Out-Null
+        Assert-True ($LASTEXITCODE -ne 0) 'a dev version is refused without -Experimental'
+        Assert-True (-not (Test-Path -LiteralPath $out)) 'no file'
+    }
+    Test-Case 'manifest: the experimental mode says what it is when the changelog has nothing new' {
+        # An empty Unreleased section (right after a release) is not an error: the feed still says
+        # what the build is.
+        $empty = Join-Path $dir 'EMPTYUNRELEASED-CHANGELOG.md'
+        [System.IO.File]::WriteAllText($empty, (@('# Changelog', '', '## [Unreleased]', '', '## [0.1.1] - 2026-11-02', '', '- Released.', '', '[0.1.1]: https://example.invalid/tag') -join "`n"), (New-Object System.Text.UTF8Encoding($false)))
+        $r = Invoke-Experimental -ChangelogPath $empty -Name 'expempty'
+        Assert-Equal $r.Exit 0 "exit: $($r.Err)"
+        Assert-Equal $r.Manifest.notes 'Experimental build 0.9.1-dev.42.' 'the notes say what the build is'
+    }
+    Test-Case 'manifest: the experimental mode refuses a changelog with no Unreleased section' {
+        $noUnreleased = Join-Path $dir 'NOUNRELEASED-CHANGELOG.md'
+        [System.IO.File]::WriteAllText($noUnreleased, (@('# Changelog', '', '## [0.1.1] - 2026-11-02', '', '- Released.', '', '[0.1.1]: https://example.invalid/tag') -join "`n"), (New-Object System.Text.UTF8Encoding($false)))
+        $r = Invoke-Experimental -ChangelogPath $noUnreleased -Name 'expnounreleased'
+        Assert-True ($r.Exit -ne 0) 'a changelog with no Unreleased section is refused'
+        Assert-True ($r.Err -match 'Unreleased') "the message says why: $($r.Err)"
+    }
 }
 finally { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
 

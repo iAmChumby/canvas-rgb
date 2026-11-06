@@ -1,0 +1,152 @@
+name: Experimental build
+
+# Publishes a signed test build to the rolling `experimental` pre-release (#203). The tray reads
+# releases/download/experimental/latest.json when the person turned the Experimental builds switch
+# on, and hands the installer to the service, which installs it as SYSTEM with no prompt.
+#
+# By hand only, from main only. The build is signed with the release key, so the trust boundary of
+# test builds applies to every publish here: anything the build job runs can end up signed and
+# installed on every PC that turned the switch on. Only main's code is signed, and a person (or the
+# agent grind Luke approved for #215) starts it. There is no push, schedule or pull request trigger.
+#
+# The build is test-build.yml's, called as a reusable workflow: one build, one signer, one place
+# that decides what a signed test build is. This workflow only publishes what that build signed.
+# The version is the one test-build.yml signed: <major>.<minor>.<patch+1>-dev.<run number>.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Two publishes never overlap: the second one would write the release while the first one is still
+# writing it. A newer publish waits for the older one, it does not cancel it.
+concurrency:
+  group: experimental
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # A dispatch from any other branch does nothing: nothing is built that could be signed.
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+    # The signing key goes to the called workflow, which reads it in its sign step only. The build
+    # job of that workflow runs the project's own code and never sees the key.
+    uses: ./.github/workflows/test-build.yml
+    secrets:
+      UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+
+  publish:
+    needs: build
+    # The same guard as the build: a publish is a publish only from main.
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # the only job that can write to the release
+    steps:
+      - name: The signed test build
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: canvas-rgb-test-build-${{ needs.build.outputs.version }}
+          path: dist
+
+      # The manifest script and the changelog, at the commit that was built, and nothing else: this
+      # job runs no project code.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            tools/make-update-manifest.ps1
+            CHANGELOG.md
+          sparse-checkout-cone-mode: false
+
+      - name: Write latest.json
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          if ($env:VERSION -notmatch '^\d+\.\d+\.\d+-dev\.\d+$') { throw "not a dev version: $env:VERSION" }
+          $exe = "canvas-rgb-setup-$env:VERSION.exe"
+          foreach ($f in @($exe, "$exe.sha256", "$exe.sig")) {
+            if (-not (Test-Path "dist/$f")) { throw "the signed build is missing dist/$f" }
+          }
+          # The address of the asset on the rolling pre-release. The tray refuses anything that is
+          # not https on github.com or GitHub's asset hosts.
+          $url = "https://github.com/$env:GH_REPO/releases/download/experimental/$exe"
+          pwsh -NoProfile -File tools/make-update-manifest.ps1 -Version $env:VERSION -SigFile "dist/$exe.sig" -OutFile dist/latest.json -NotesFile dist/release-notes.md -Url $url -Experimental
+          if ($LASTEXITCODE -ne 0) { throw 'make-update-manifest.ps1 failed' }
+          Get-Content dist/latest.json
+
+      - name: The experimental release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          # The body of the release: what this build is, and what is in it (the changelog's
+          # Unreleased section, which is what the feed's notes are too).
+          $notes = ''
+          if (Test-Path dist/release-notes.md) { $notes = [System.IO.File]::ReadAllText('dist/release-notes.md') }
+          $header = "Experimental build $env:VERSION (workflow run $env:GITHUB_RUN_NUMBER), built from main at $env:GITHUB_SHA.`n`nSigned with the release key, like a release. The tray offers it to the PCs that turned the Experimental builds switch on, and the service installs it as SYSTEM, with no prompt.`n`n"
+          [System.IO.File]::WriteAllText('dist/body.md', $header + $notes, (New-Object System.Text.UTF8Encoding($false)))
+          # The release is a pre-release and never the latest one: GitHub's `latest` is the stable
+          # feed, and a dev build there would be offered to every PC.
+          $null = gh release view experimental --json tagName,isPrerelease 2>&1
+          if ($LASTEXITCODE -eq 0) {
+            gh release edit experimental --prerelease --latest=false --title 'Experimental build' --notes-file dist/body.md
+          } else {
+            gh release create experimental --prerelease --latest=false --title 'Experimental build' --notes-file dist/body.md --target $env:GITHUB_SHA
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'the experimental release could not be created or updated' }
+
+      # The installer and its signature first, the feed last: the tray reads latest.json, and it must
+      # never name a file that is not up yet. The assets carry the version, so the feed of one
+      # publish names its own files and never another's.
+      - name: Upload the installer and its signature
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          gh release upload experimental "dist/canvas-rgb-setup-$env:VERSION.exe" --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'the installer could not be uploaded' }
+          gh release upload experimental "dist/canvas-rgb-setup-$env:VERSION.exe.sha256" --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'the checksum could not be uploaded' }
+          gh release upload experimental "dist/canvas-rgb-setup-$env:VERSION.exe.sig" --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'the signature could not be uploaded' }
+
+      - name: Upload latest.json last
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          gh release upload experimental dist/latest.json --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'latest.json could not be uploaded' }
+
+      # The release is rolling: the assets of the publish before this one go, so it does not fill up
+      # with every build that was ever signed. The assets of this publish are never touched.
+      - name: The assets of earlier publishes
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $keep = @("canvas-rgb-setup-$env:VERSION.exe", "canvas-rgb-setup-$env:VERSION.exe.sha256", "canvas-rgb-setup-$env:VERSION.exe.sig", "latest.json")
+          $names = @(gh release view experimental --json assets --jq '.assets[].name' 2>$null)
+          foreach ($n in $names) {
+            if ($keep -notcontains $n) {
+              gh release delete-asset experimental $n --yes
+              if ($LASTEXITCODE -ne 0) { Write-Host "warning: the asset $n of an earlier publish could not be deleted" }
+            }
+          }

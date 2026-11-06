@@ -15,15 +15,31 @@ name: Test build
 # Manual only. The build job runs npm lifecycle scripts and cargo build scripts, and the sign job signs what
 # they made with the release key, so a signed build is code that installs as SYSTEM with no prompt. A push
 # trigger would sign every main commit; a person starts this one, from main, when a test build is wanted.
+#
+# The experimental publisher (#203) calls this workflow, so a signed test build is built and signed in
+# one place. The caller passes the signing key in; it is read in the sign step only, as it is here, and
+# the build job never sees it. The github context belongs to the caller, so the guards below (main
+# only) and the run number are the caller's: a publish from main builds and signs exactly what a
+# manual test build would.
 on:
   workflow_dispatch:
+  workflow_call:
+    secrets:
+      UPDATE_SIGNING_KEY:
+        required: true
+    outputs:
+      version:
+        description: The dev version this build signed (X.Y.Z-dev.N).
+        value: ${{ jobs.build.outputs.version }}
 
 permissions:
   contents: read
 
-# A newer run replaces one still running; they would only pile up on the runners.
+# A newer run replaces one still running; they would only pile up on the runners. The group names the
+# workflow that is running, and in a called workflow that is the caller, so a manual test build and an
+# experimental publish (which calls this workflow) never cancel each other.
 concurrency:
-  group: test-build
+  group: ${{ github.workflow }}-test-build
   cancel-in-progress: true
 
 jobs:
