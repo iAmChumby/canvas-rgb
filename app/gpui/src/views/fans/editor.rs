@@ -666,6 +666,9 @@ impl FansView {
         let reason = super::reason_text(header);
         let handed_back = crate::components::fan_bulk::is_handed_back(header);
         let mut block = div().flex().flex_col().gap_1();
+        // React's `.fan-status-reason` keeps the room of two lines, so the
+        // panel does not move when a reason appears.
+        let mut region = div().flex().flex_col().min_h(px(58.6));
         match reason {
             Some(text) => {
                 // The reason box: two lines, with a More key when the text is
@@ -704,7 +707,7 @@ impl FansView {
                             }),
                     );
                 }
-                block = block.child(
+                region = region.child(
                     div()
                         .id(gpui::SharedString::from("fans-reason"))
                         .flex()
@@ -723,7 +726,7 @@ impl FansView {
                 );
             }
             None => {
-                block = block.child(
+                region = region.child(
                     div()
                         .flex()
                         .items_center()
@@ -739,6 +742,7 @@ impl FansView {
                 );
             }
         }
+        block = block.child(region);
         let _ = handed_back;
         let _ = fans;
         block = block.child(
