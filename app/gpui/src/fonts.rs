@@ -9,10 +9,11 @@ use std::borrow::Cow;
 
 use gpui::{App, Font, font};
 
-/// The UI font, named exactly as `--fu` names it.
-pub const UI_FAMILY: &str = "Schibsted Grotesk Variable";
-/// The figures font, named exactly as `--fm` names it.
-pub const MONO_FAMILY: &str = "JetBrains Mono Variable";
+/// The UI font (`--fu`). The family name inside the font file: the "Variable" suffix in
+/// `tokens.css` is the name fontsource gives its `@font-face`, not part of the file.
+pub const UI_FAMILY: &str = "Schibsted Grotesk";
+/// The figures font (`--fm`), by the family name inside the font file.
+pub const MONO_FAMILY: &str = "JetBrains Mono";
 
 static SCHIBSTED: &[u8] = include_bytes!("../assets/fonts/schibsted-grotesk-variable.ttf");
 static JETBRAINS: &[u8] = include_bytes!("../assets/fonts/jetbrains-mono-variable.ttf");
@@ -21,8 +22,10 @@ static JETBRAINS: &[u8] = include_bytes!("../assets/fonts/jetbrains-mono-variabl
 pub const SCHIBSTED_OFL: &str = include_str!("../assets/fonts/SchibstedGrotesk-OFL.txt");
 #[cfg(test)]
 pub const JETBRAINS_OFL: &str = include_str!("../assets/fonts/JetBrainsMono-OFL.txt");
-// The woff2 files are what the React editor ships; the TTF files above are
-// what gpui's text system accepts. Both are embedded (G10).
+// The woff2 files are what the React editor ships (the latin `wght` subsets); gpui's text
+// system (DirectWrite) rejects woff2, so the TTF files above are lossless decompressions of
+// them, every table identical except `head` (checksums): fontTools `TTFont(woff2)`,
+// `flavor = None`, `save(ttf)`. The hash test checks the woff2 copies against node_modules.
 #[cfg(test)]
 static SCHIBSTED_WOFF2: &[u8] = include_bytes!("../assets/fonts/schibsted-grotesk-variable.woff2");
 #[cfg(test)]
@@ -35,7 +38,7 @@ pub fn register(cx: &App) {
             Cow::Borrowed(SCHIBSTED),
             Cow::Borrowed(JETBRAINS),
         ])
-        .expect("embeded variable fonts");
+        .expect("embedded variable fonts");
 }
 
 /// The UI font (`--fu`).
@@ -72,7 +75,7 @@ mod tests {
     fn embedded_fonts_match_node_modules() {
         let origin = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../web/node_modules/@fontsource-variable"
+            "/../web/node_modules/@fontsource-variable"
         );
         let schibsted = std::path::Path::new(origin)
             .join("schibsted-grotesk/files/schibsted-grotesk-latin-wght-normal.woff2");
