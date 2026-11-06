@@ -9,6 +9,12 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Changed
 
 - Menus, popovers and drags now move the way the finger expects: panels grow out of the button that opened them and fold back into it, a part dragged past the edge of the desk stretches with growing resistance and settles back on release, and picking a new item in a list or a tab slides one marker across instead of blinking it off and on. Saved and applied controls pulse once to say it went through, word and icon swaps cross-fade instead of jumping, and a new colour wipes in over the old one. All of it stops when your system asks for less motion. (#187)
+## [0.8.4] - 2026-11-06
+
+### Fixed
+
+- Effects and Peripherals: a failed change no longer disappears when a later read succeeds. The message that the change did not reach the effect or the device stays on screen until the next attempt, and each peripheral keeps its own message, so one device's read cannot hide another device's failure. Edits made while a device is being read are no longer dropped when that read lands, and a change you started on one device can no longer be sent to another device you switched to. (#156)
+- Audio Spectrum is no longer dim and stuck at the bottom of your layout: at normal music volume the bars now rise about two thirds of the way up, so every light joins in, not just the keyboard. The default Sensitivity is now 100; an effect you saved with a higher Sensitivity keeps it and will reach the top on loud music. The log now names the audio format instead of saying "unknown". (#188)
 
 ## [0.8.3] - 2026-11-05
 
@@ -205,7 +211,8 @@ The first release.
 - Settings for the Attack Shark X6 mouse and the 8BitDo Ultimate 2 controller.
 - The editor, the tray app, the `canvas-rgb` CLI and the Windows installer.
 
-[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.3...HEAD
+[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.4...HEAD
+[0.8.4]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.0...v0.8.1

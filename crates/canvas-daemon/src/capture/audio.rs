@@ -19,6 +19,37 @@ pub const BAND_COUNT: usize = 32;
 pub const SAMPLE_RATE: u32 = 48_000;
 /// The FFT size. 2048 bins at 48 kHz gives ~23 Hz per bin.
 pub const FFT_SIZE: usize = 2048;
+/// The dB floor a band level is mapped from. Spectrum visualisers work on a
+/// logarithmic (dB) scale with a floor around -60 dBFS so that typical music
+/// at about -20 dBFS lands at two thirds of the bar instead of a tenth.
+pub const DB_FLOOR: f32 = -60.0;
+/// The dB ceiling a band level is mapped to: full scale.
+pub const DB_CEILING: f32 = 0.0;
+/// Bytes of WAVEFORMATEXTENSIBLE beyond WAVEFORMATEX (40 - 18). The mix
+/// format's `cbSize` counts these bytes, so an extensible mix reports 22,
+/// not the 40 bytes of the whole struct.
+pub const EXTENSIBLE_EXTRA_BYTES: u16 = 22;
+
+/// Whether a mix format with this `cbSize` carries the extensible extension.
+pub fn extensible_has_extension(cb_size: u16) -> bool {
+    cb_size >= EXTENSIBLE_EXTRA_BYTES
+}
+
+/// Maps a linear band magnitude (1.0 is full scale) onto 0..1 on a dB scale
+/// between [`DB_FLOOR`] and [`DB_CEILING`]: -20 dBFS is 2/3, -30 dBFS is 1/2,
+/// a full-scale sine is 1.0, and silence (or anything at or below the floor)
+/// is 0.0. A value that is not a finite positive number (NaN, negative) is 0.0 too, so one bad
+/// sample can never publish a NaN that freezes a bar.
+pub fn db_mapped(linear: f32) -> f32 {
+    if linear.is_nan() || linear <= 0.0 {
+        return 0.0;
+    }
+    if linear.is_infinite() {
+        return 1.0;
+    }
+    let db = 20.0 * linear.log10();
+    ((db - DB_FLOOR) / (DB_CEILING - DB_FLOOR)).clamp(0.0, 1.0)
+}
 
 /// The band centre frequencies, log-spaced from 30 Hz to 16 kHz.
 pub fn band_centers() -> Vec<f32> {
@@ -46,13 +77,17 @@ pub fn nearest_band(centers: &[f32], hz: f32) -> usize {
     best
 }
 
-/// Turns a block of mono samples into band magnitudes in 0..1.
+/// Turns a block of mono samples into band levels in 0..1 on a dB scale.
 ///
 /// `samples` is the most recent FFT window. The window is Hann-windowed to cut the
 /// leakage that would otherwise smear a tone across neighbouring bands.
 ///
 /// Each band owns the bins between the midpoints to its neighbours, so a tone lands in
-/// exactly one band and that band is the largest.
+/// exactly one band and that band is the largest. The FFT peak is normalised so a
+/// full-scale sine reads 1.0 linear, then mapped through [`db_mapped`]: linear
+/// magnitudes are unusable as bar heights because typical music peaks around
+/// -20 dBFS (0.1 linear), which would fill only a tenth of the canvas and light
+/// just the bottom rows. See #188.
 pub fn magnitudes(samples: &[f32], centers: &[f32]) -> Vec<f32> {
     if samples.is_empty() || centers.is_empty() {
         return vec![0.0; centers.len()];
@@ -101,7 +136,7 @@ pub fn magnitudes(samples: &[f32], centers: &[f32]) -> Vec<f32> {
                 peak = peak.max(value.norm());
             }
         }
-        mags.push((peak / gain).clamp(0.0, 1.0));
+        mags.push(db_mapped(peak / gain));
     }
     mags
 }
@@ -461,7 +496,7 @@ pub mod wasapi {
             // when the format is extensible, and it is read from the endpoint's own
             // pointer: the copy above drops it.
             let extensible = if mix_format.wFormatTag == WAVE_FORMAT_EXTENSIBLE
-                && mix_format.cbSize >= std::mem::size_of::<WAVEFORMATEXTENSIBLE>() as u16
+                && extensible_has_extension(mix_format.cbSize)
             {
                 // The endpoint published an extensible format, so the pointer is a
                 // WAVEFORMATEXTENSIBLE.
@@ -620,6 +655,46 @@ mod tests {
         assert!(mags.iter().all(|m| *m < 0.001));
     }
 
+    /// Typical music peaks around -20 dBFS (per-sample amplitude 0.1). A
+    /// visualiser must show that as a clearly visible bar, not as a sliver at
+    /// the bottom of the canvas: -20 dBFS is 2/3 of the way from a -60 dBFS
+    /// floor to 0 dBFS, so the mapped level is at least half of full scale.
+    #[test]
+    fn a_minus_20dbfs_sine_is_a_clearly_visible_band_level() {
+        let centers = band_centers();
+        let samples: Vec<f32> = (0..FFT_SIZE)
+            .map(|i| {
+                let t = i as f32 / SAMPLE_RATE as f32;
+                0.1 * (2.0 * std::f32::consts::PI * 1000.0 * t).sin()
+            })
+            .collect();
+        let mags = magnitudes(&samples, &centers);
+        let expected = nearest_band(&centers, 1000.0);
+        assert!(
+            mags[expected] >= 0.5,
+            "a -20 dBFS sine should map to at least half of full scale, got {}",
+            mags[expected]
+        );
+    }
+
+    #[test]
+    fn a_full_scale_sine_reaches_the_top() {
+        let centers = band_centers();
+        let samples: Vec<f32> = (0..FFT_SIZE)
+            .map(|i| {
+                let t = i as f32 / SAMPLE_RATE as f32;
+                (2.0 * std::f32::consts::PI * 1000.0 * t).sin()
+            })
+            .collect();
+        let mags = magnitudes(&samples, &centers);
+        let expected = nearest_band(&centers, 1000.0);
+        assert!(
+            mags[expected] >= 0.8,
+            "a full-scale sine should reach the top, got {}",
+            mags[expected]
+        );
+    }
+
     #[test]
     fn a_440hz_tone_picks_the_440hz_band() {
         let centers = band_centers();
@@ -673,6 +748,59 @@ mod tests {
         assert_eq!(SampleFormat::Pcm.name(), "PCM");
         assert_eq!(SampleFormat::Float.name(), "IEEE float");
         assert_eq!(SampleFormat::Other.name(), "unknown");
+    }
+
+    #[test]
+    fn an_extensible_mix_is_recognised_by_its_extra_bytes() {
+        // WAVEFORMATEXTENSIBLE is 40 bytes total and WAVEFORMATEX is 18, so an
+        // extensible mix reports cbSize 22. Asking for 40 (the whole struct)
+        // rejected every extensible mix, so the log said "unknown" for them.
+        assert!(extensible_has_extension(22));
+        assert!(extensible_has_extension(40));
+        assert!(!extensible_has_extension(0));
+        assert!(!extensible_has_extension(21));
+    }
+
+    #[test]
+    fn an_extensible_float_mix_is_named_by_its_sub_format() {
+        let endpoint = EndpointInfo {
+            name: "the default render endpoint".into(),
+            id: String::new(),
+        };
+        let format = MixFormat {
+            sample_rate: 48000,
+            channels: 2,
+            bits_per_sample: 32,
+            format_tag: 65534,
+            sample_format: SampleFormat::Float,
+        };
+        assert_eq!(
+            mix_format_line(&endpoint, &format),
+            "the audio capture opened the default render endpoint (): 48000 Hz, \
+             2 channels, 32 bits, IEEE float (format tag 65534)"
+        );
+    }
+
+    #[test]
+    fn db_mapping_is_never_nan() {
+        assert_eq!(db_mapped(f32::NAN), 0.0);
+        assert_eq!(db_mapped(-1.0), 0.0);
+        assert_eq!(db_mapped(0.0), 0.0);
+        assert_eq!(db_mapped(f32::INFINITY), 1.0);
+    }
+
+    #[test]
+    fn db_mapping_puts_music_level_at_two_thirds() {
+        assert_eq!(db_mapped(0.0), 0.0);
+        assert_eq!(db_mapped(1.0), 1.0);
+        // -20 dBFS.
+        let at_music = db_mapped(0.1);
+        assert!((at_music - 2.0 / 3.0).abs() < 0.02, "got {at_music}");
+        // -30 dBFS is half of the -60..0 range.
+        let at_half = db_mapped(10f32.powf(-30.0 / 20.0));
+        assert!((at_half - 0.5).abs() < 0.02, "got {at_half}");
+        // At and below the floor is dark.
+        assert_eq!(db_mapped(10f32.powf(-70.0 / 20.0)), 0.0);
     }
 
     /// The time `seconds` after `start`.

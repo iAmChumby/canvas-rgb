@@ -31,7 +31,7 @@ impl AudioSpectrum {
         .needs_audio()
         .color("color_low", "Low Color", "#6000fc")
         .color("color_high", "High Color", "#00ff9c")
-        .number("sensitivity", "Sensitivity", 0.0, 500.0, 1.0, 150.0)
+        .number("sensitivity", "Sensitivity", 0.0, 500.0, 1.0, 100.0)
         .number("decay", "Decay", 0.0, 100.0, 1.0, 40.0)
         .number("peak_hold", "Peak Hold", 0.0, 100.0, 1.0, 30.0)
         .preset(
@@ -64,7 +64,7 @@ impl AudioSpectrum {
             schema,
             low: [0.0; 3],
             high: [0.0; 3],
-            sensitivity: 1.5,
+            sensitivity: 1.0,
             decay: 0.4,
             peak_hold: 0.3,
             levels: Vec::new(),

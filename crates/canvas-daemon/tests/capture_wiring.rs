@@ -300,6 +300,59 @@ fn layout() -> Layout {
     }
 }
 
+/// A mono sine at `amplitude` (0.1 is -20 dBFS) through the real capture
+/// maths and then the real effect: the lit bar must reach well past the
+/// middle of the canvas, so the lit area is not confined to the bottom rows
+/// (where the keyboard sits) on a typical desk layout (#188).
+#[test]
+fn a_music_level_sine_lights_past_the_middle_of_the_canvas() {
+    use canvas_daemon::capture::audio::{nearest_band, spectrum_from_samples, FFT_SIZE, SAMPLE_RATE};
+    use canvas_proto::traits::{Canvas, Inputs};
+
+    let amplitude = 0.1f32; // -20 dBFS, typical music.
+    let samples: Vec<f32> = (0..FFT_SIZE)
+        .map(|i| {
+            let t = i as f32 / SAMPLE_RATE as f32;
+            amplitude * (2.0 * std::f32::consts::PI * 1000.0 * t).sin()
+        })
+        .collect();
+    let spectrum = spectrum_from_samples(&samples);
+    let loudest = spectrum
+        .magnitudes
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(i, _)| i)
+        .unwrap();
+    assert_eq!(loudest, nearest_band(&spectrum.centers_hz, 1000.0));
+
+    let mut effect = canvas_effects::create("audio_spectrum").expect("the built-in effect exists");
+    effect.init(&effect.schema().defaults());
+    let mut canvas = Canvas::new(160, 100);
+    let inputs = Inputs {
+        audio: Some(std::sync::Arc::new(spectrum)),
+        ..Inputs::default()
+    };
+    for _ in 0..10 {
+        effect.update(1.0 / 30.0, &mut canvas, &inputs);
+    }
+    // The tallest column: bars grow up from the bottom, so its lit height is
+    // the lit pixels at the bottom of the column.
+    let mut best_h = 0u32;
+    for x in 0..canvas.width {
+        let h = (0..canvas.height)
+            .rev()
+            .take_while(|y| canvas.get(x, *y).iter().any(|v| *v > 0.01))
+            .count() as u32;
+        best_h = best_h.max(h);
+    }
+    assert!(
+        best_h >= 50,
+        "a -20 dBFS line should fill at least half the canvas height, got {best_h} of {}",
+        canvas.height
+    );
+}
+
 /// The effect that needs the audio draws a frame that is not black when the engine
 /// reads a spectrum from its input source.
 ///

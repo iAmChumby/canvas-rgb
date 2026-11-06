@@ -81,6 +81,12 @@ const STAGE_POLL_MS = 300;
  */
 const lastRead = new Map<string, PeripheralDetail>();
 
+/** The entries of `prev` whose device key is in `live`; `prev` itself when nothing goes. */
+function keepLive<T>(prev: Record<string, T>, live: Set<string>): Record<string, T> {
+  const kept = Object.entries(prev).filter(([id]) => live.has(id));
+  return kept.length === Object.keys(prev).length ? prev : Object.fromEntries(kept);
+}
+
 /**
  * The stage of the read of `id` that is open now, asked for every `STAGE_POLL_MS` while `active`.
  * The daemon answers at once, also while the read of the device is still waiting for it.
@@ -123,15 +129,38 @@ export function PeripheralsView() {
   // The change that is on the device already, and whose refresh failed: the page says the
   // change was saved, because it was.
   const [changeSaved, setChangeSaved] = useState(false);
-  // The edits that are not on the device yet.
-  const [staged, setStaged] = useState<Props>({});
+  // The edits that are not on the device yet, per device key: an edit made on one device is
+  // never shown on, or sent to, another (#156).
+  const [stagedBy, setStagedBy] = useState<Record<string, Props>>({});
+  const setStagedFor = useCallback((id: string, next: Props | ((prev: Props) => Props)) => {
+    setStagedBy((prev) => {
+      const value = typeof next === "function" ? next(prev[id] ?? {}) : next;
+      const out = { ...prev };
+      if (Object.keys(value).length > 0) out[id] = value;
+      else delete out[id];
+      return out;
+    });
+  }, []);
   const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
+  // A failed write's message, per device key: one device's read must not clear another
+  // device's failure (#156). Only the selected device's own message is shown.
+  const [saveErrors, setSaveErrors] = useState<Record<string, string>>({});
+  const setDeviceSaveError = useCallback((id: string, message: string | null) => {
+    setSaveErrors((prev) => {
+      const next = { ...prev };
+      if (message) next[id] = message;
+      else delete next[id];
+      return next;
+    });
+  }, []);
   const [pickedStage, setPickedStage] = useState<number | null>(null);
   const [pickedButton, setPickedButton] = useState<string | null>(null);
 
   // The first device is open already: the keys are the way to the others.
   const selectedId = pickedId ?? (list?.[0]?.id ?? null);
+  // This device's own failed write's message, if any.
+  const saveError = selectedId ? (saveErrors[selectedId] ?? null) : null;
+  const staged = useMemo(() => (selectedId ? (stagedBy[selectedId] ?? {}) : {}), [stagedBy, selectedId]);
 
   // What this device held when it was read: from this page, or from an earlier visit. While the
   // device is read again these stay on screen, marked as refreshing.
@@ -151,10 +180,27 @@ export function PeripheralsView() {
   // A Read again that is out: a second press while it runs is the same read, not another one.
   const rereading = useRef(false);
 
-  // The number of writes that failed. A read that was already out when the write failed must
-  // not clear that failure's message: a read knows what the device holds, not how the write
-  // ended. A read that starts after the failure may clear it.
-  const failedWrites = useRef(0);
+  // Per device: the number of edits the user has made, and that number when a write to the
+  // device last failed. A read that lands keeps the device's unsent edits unless a write failed
+  // after the last of them: then the edit the failed write carried goes, so the controls show
+  // what the device holds (#151). Unsent edits otherwise survive reads and device switches
+  // (#156); a write that lands takes off only the values it sent. A read the page makes never clears a write's message: it knows what the
+  // device holds, not how the write ended. The next attempt, an edit, Revert or the user's own
+  // Read again clears it.
+  const editCount = useRef<Record<string, number>>({});
+  const editsAtFailure = useRef<Record<string, number>>({});
+  const editsOf = (id: string) => editCount.current[id] ?? 0;
+  const keepsStaged = (id: string) => editsOf(id) > (editsAtFailure.current[id] ?? 0);
+  // Per device: the number of writes that failed. A Read again clears the message only when it
+  // started after the last failure (#151).
+  const failures = useRef<Record<string, number>>({});
+  const failuresOf = (id: string) => failures.current[id] ?? 0;
+  // `carriedEdits`: the failed write sent the staged edits (Apply). An access change that
+  // fails carried none of them, so it leaves them staged.
+  const noteFailure = (id: string, carriedEdits: boolean) => {
+    if (carriedEdits) editsAtFailure.current[id] = editsOf(id);
+    failures.current[id] = failuresOf(id) + 1;
+  };
 
   // Asks for one device's detail again: after a write, or after the access changed (the daemon
   // answers those from the values it keeps), or on the Read again key (`forceRead`: the daemon
@@ -166,19 +212,17 @@ export function PeripheralsView() {
       rereading.current = true;
     }
     const n = ++detailRequest.current;
-    // The failures this read started after: it may clear the message of those, and of no
-    // older one.
-    const failures = failedWrites.current;
+    const failed = failuresOf(id);
     setReloadingId(id);
     try {
       const d = forceRead ? await api.peripheral(id, { fresh: true }) : await api.peripheral(id);
       if (n !== detailRequest.current) return;
       lastRead.set(id, d);
       setLoaded({ id, detail: d });
-      setStaged({});
-      // A read that was already out when a write failed does not clear that failure's
-      // message: it knows what the device holds, not how the write ended.
-      if (failedWrites.current === failures) setSaveError(null);
+      if (!keepsStaged(id)) setStagedFor(id, {});
+      // Read again is the user's own new action on this device: it clears the device's failed
+      // write's message, when it started after that failure (#151). No other read does.
+      if (forceRead && failuresOf(id) === failed) setDeviceSaveError(id, null);
       setDetailError(null);
       setChangeSaved(false);
     } catch (e) {
@@ -190,7 +234,9 @@ export function PeripheralsView() {
       if (forceRead) rereading.current = false;
       if (n === detailRequest.current) setReloadingId(null);
     }
-  }, []);
+    // editsOf / keepsStaged read refs only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [setStagedFor, setDeviceSaveError]);
 
   // Lists the devices. The first run and "Try again" both come through here. The stop handle is
   // kept, so a retry that is still running when the page goes away is dropped with it.
@@ -208,8 +254,14 @@ export function PeripheralsView() {
       .peripherals()
       .then((r) => {
         if (stop) return;
-        setList(r.peripherals as PeripheralRow[]);
+        const rows = r.peripherals as PeripheralRow[];
+        setList(rows);
         setListError(null);
+        // A device that is gone takes its unsent edits and its message with it, so they do not
+        // come back if a device with the same key shows up again.
+        const live = new Set(rows.map((row) => row.id));
+        setStagedBy((prev) => keepLive(prev, live));
+        setSaveErrors((prev) => keepLive(prev, live));
       })
       .catch((e: unknown) => {
         if (!stop) setListError(messageOf(e));
@@ -236,23 +288,18 @@ export function PeripheralsView() {
     // a device that is no longer the one on screen: a slow reload of one device must not put
     // its error on another.
     const n = ++detailRequest.current;
-    // The failures this read started after: it may clear the message of those, and of no
-    // older one.
-    const failures = failedWrites.current;
+    const id = selectedId;
     let stop = false;
     api
-      .peripheral(selectedId)
+      .peripheral(id)
       .then((d) => {
         if (stop || n !== detailRequest.current) return;
         // This read is newer than any reload that was out: that reload is dropped when it
         // lands, so its marker is cleared here, or the device would stay "refreshing" for good.
         setReloadingId(null);
-        lastRead.set(selectedId, d);
-        setLoaded({ id: selectedId, detail: d });
-        setStaged({});
-        // A read that was already out when a write failed does not clear that failure's
-        // message: it knows what the device holds, not how the write ended.
-        if (failedWrites.current === failures) setSaveError(null);
+        lastRead.set(id, d);
+        setLoaded({ id, detail: d });
+        if (!keepsStaged(id)) setStagedFor(id, {});
         setDetailError(null);
         setChangeSaved(false);
       })
@@ -266,6 +313,8 @@ export function PeripheralsView() {
     return () => {
       stop = true;
     };
+    // editsOf / keepsStaged read refs only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId]);
 
   // The values the controls show: what the device holds, with the staged edits on top.
@@ -286,47 +335,61 @@ export function PeripheralsView() {
   const changedCount = Object.keys(changed).length;
 
   const onChange = (key: string, value: PropValue) => {
-    setStaged((prev) => ({ ...prev, [key]: value }));
-    setSaveError(null);
+    if (!selectedId) return;
+    editCount.current[selectedId] = editsOf(selectedId) + 1;
+    setStagedFor(selectedId, (prev) => ({ ...prev, [key]: value }));
+    // An edit replaces what the failed write asked for: its message goes.
+    setDeviceSaveError(selectedId, null);
   };
 
   const apply = async () => {
     if (!detail) return;
     setSaving(true);
-    setSaveError(null);
+    const id = detail.info.id;
+    const sent = changed;
+    setDeviceSaveError(id, null);
     try {
-      await api.patchPeripheral(detail.info.id, changed);
+      await api.patchPeripheral(id, sent);
     } catch (e) {
-      // The change itself failed: nothing was changed. The count says that a read which is
-      // already out may not clear this message.
-      failedWrites.current += 1;
-      setSaveError(messageOf(e));
+      // The change itself failed: nothing was changed.
+      noteFailure(detail.info.id, true);
+      setDeviceSaveError(detail.info.id, messageOf(e));
       setSaving(false);
       return;
     }
-    // The change is on the device. The read that follows only refreshes the page: when it
-    // fails, the change is still saved.
-    await loadDetail(detail.info.id, true);
+    // The change is on the device: the values it sent are no longer staged. An edit made while
+    // it was out (a new value, or another setting) stays staged.
+    setStagedFor(id, (prev) => {
+      const out: Props = {};
+      for (const [key, value] of Object.entries(prev)) {
+        if (!(key in sent) || !sameValue(sent[key], value)) out[key] = value;
+      }
+      return out;
+    });
+    // The read that follows only refreshes the page: when it fails, the change is still saved.
+    await loadDetail(id, true);
     notify("The settings are on the device");
     setSaving(false);
   };
 
   const revert = () => {
-    setStaged({});
-    setSaveError(null);
+    if (!selectedId) return;
+    setStagedFor(selectedId, {});
+    setDeviceSaveError(selectedId, null);
   };
 
   const setAccess = async (next: { reads?: boolean; writes?: boolean }) => {
     if (!detail) return;
     const reads = next.reads ?? detail.access.reads;
     const writes = next.writes ?? detail.access.writes;
+    // A new attempt: the last failure's message goes.
+    setDeviceSaveError(detail.info.id, null);
     try {
       await api.putPeripheralAccess(detail.info.id, { reads, writes });
     } catch (e) {
-      // The change itself failed: nothing was changed. The count says that a read which is
-      // already out may not clear this message.
-      failedWrites.current += 1;
-      setSaveError(messageOf(e));
+      // The change itself failed: nothing was changed.
+      noteFailure(detail.info.id, false);
+      setDeviceSaveError(detail.info.id, messageOf(e));
       return;
     }
     // The access is saved. The read that follows only refreshes the page.
