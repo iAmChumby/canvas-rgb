@@ -1609,6 +1609,14 @@ button.chip:hover {
   white-space: nowrap;
 }
 
+/* S3/N6: the effect disclosure gets its own line under the compact row and
+   may wrap — it is never part of the ellipsised state line. */
+.audio-effect-note {
+  margin-top: var(--s2);
+  color: var(--dim);
+  font-size: var(--t14);
+}
+
 .audio-readings {
   margin-top: var(--s3);
   height: var(--audio-readings-h);

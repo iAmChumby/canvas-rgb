@@ -114,11 +114,15 @@ impl DaemonInputs {
 
     /// Records the resolved value and logs it: one INFO per open, one WARN per fallback.
     pub(crate) fn record_resolved_public(&self, resolved: &ResolvedAudioSource) {
-        self.record_resolved(resolved);
+        // A resolve from the API routes is not an open (N4): it must not log
+        // "opened".
+        self.record_resolved(resolved, false);
     }
 
-    /// Records the resolved value and logs it: one INFO per open, one WARN per fallback.
-    fn record_resolved(&self, resolved: &ResolvedAudioSource) {
+    /// Records the resolved value and logs it: one INFO per open, one WARN per
+    /// fallback. `opened` is true only when the capture actually opened (N4):
+    /// a failed open logs a distinct line, never "opened".
+    fn record_resolved(&self, resolved: &ResolvedAudioSource, opened: bool) {
         *self.resolved.lock().unwrap_or_else(|e| e.into_inner()) = resolved.clone();
         match &resolved.fallback {
             Some(canvas_proto::audio::AudioFallback::PickedMissing) => {
@@ -136,11 +140,19 @@ impl DaemonInputs {
                     "the audio capture fell back: the picked device could not be opened (open_failed)"
                 );
             }
-            None => {
+            None if opened => {
                 tracing::info!(
                     endpoint = resolved.endpoint_id.as_deref().unwrap_or("none"),
                     name = resolved.name.as_deref().unwrap_or("none"),
                     "the audio capture opened the resolved source"
+                );
+            }
+            None => {
+                tracing::warn!(
+                    requested = ?resolved.requested,
+                    endpoint = resolved.endpoint_id.as_deref().unwrap_or("none"),
+                    name = resolved.name.as_deref().unwrap_or("none"),
+                    "the audio capture could not open the resolved source"
                 );
             }
         }
@@ -186,11 +198,17 @@ impl DaemonInputs {
     /// Whether the audio capture is needed: an effect needs it, or a test lease
     /// is live for a source that lease is allowed to open.
     pub fn audio_needed(&self) -> bool {
+        self.audio_needed_at(Instant::now())
+    }
+
+    /// `audio_needed` at `now`: leases at or past their expiry do not count
+    /// (S2/N5), even before the sweeper removes them.
+    fn audio_needed_at(&self, now: Instant) -> bool {
         if *self.effect_audio.lock().unwrap_or_else(|e| e.into_inner()) {
             return true;
         }
         let leases = self.leases.lock().unwrap_or_else(|e| e.into_inner());
-        if leases.is_empty() {
+        if leases.values().all(|lease| now >= lease.expires_at) {
             return false;
         }
         let requested = self.requested();
@@ -198,7 +216,7 @@ impl DaemonInputs {
         if !is_input {
             return true;
         }
-        leases.values().any(|lease| lease.listen)
+        leases.values().any(|lease| lease.listen && now < lease.expires_at)
     }
 
     /// Starts the audio capture on the resolved source.
@@ -219,11 +237,13 @@ impl DaemonInputs {
         let resolved = self.backend.resolve(&requested);
         // An input is never opened just by visiting Settings: with no effect
         // needing it, only a live Listen lease opens an input (S1) — an empty
-        // lease map opens nothing.
+        // lease map opens nothing, and neither does an expired-but-unswept
+        // lease (S2/N5: filter on read, `expires_at <= now` does not count).
         let is_input = matches!(&requested, AudioSource::Endpoint { flow: canvas_proto::audio::AudioFlow::Capture, .. });
         let leases = self.leases.lock().unwrap_or_else(|e| e.into_inner());
         let effect = *self.effect_audio.lock().unwrap_or_else(|e| e.into_inner());
-        if is_input && !effect && !leases.values().any(|l| l.listen) {
+        let now = Instant::now();
+        if is_input && !effect && !leases.values().any(|l| l.listen && now < l.expires_at) {
             let mut snap = self.snapshot.lock().unwrap_or_else(|e| e.into_inner());
             *snap = audio::CaptureSnapshot { status: AudioTestStatus::NotListening, ..snap.clone() };
             return;
@@ -238,11 +258,11 @@ impl DaemonInputs {
                 tracing::info!("the audio capture is running");
                 // Record the resolved value only once the capture opened
                 // (nit): a failed open leaves no false "opened" log line.
-                self.record_resolved(&resolved);
+                self.record_resolved(&resolved, true);
                 *self.audio.lock().unwrap_or_else(|e| e.into_inner()) = Some(shared);
             }
             Err(e) => {
-                self.record_resolved(&resolved);
+                self.record_resolved(&resolved, false);
                 tracing::warn!(error = %e, "the audio capture could not start");
                 // The snapshot already carries the honest status (HeldExclusive,
                 // NoDevice, UnsupportedFormat); keep it so GET /audio/test says so.
@@ -415,19 +435,42 @@ impl DaemonInputs {
         }
     }
 
-    /// How many test leases are live.
+    /// How many test leases are live. Expired-but-unswept leases do not
+    /// count (S2/N5).
     pub fn lease_count(&self) -> usize {
-        self.leases.lock().unwrap_or_else(|e| e.into_inner()).len()
+        self.lease_count_at(Instant::now())
     }
 
-    /// Whether any live lease is listening to an input.
+    /// `lease_count` at `now`.
+    fn lease_count_at(&self, now: Instant) -> usize {
+        self.leases
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .filter(|lease| now < lease.expires_at)
+            .count()
+    }
+
+    /// Whether any live lease is listening to an input. Expired-but-unswept
+    /// leases do not count (S2/N5).
     pub fn any_listen(&self) -> bool {
-        self.leases.lock().unwrap_or_else(|e| e.into_inner()).values().any(|l| l.listen)
+        self.any_listen_at(Instant::now())
+    }
+
+    /// `any_listen` at `now`.
+    fn any_listen_at(&self, now: Instant) -> bool {
+        self.leases
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .any(|l| l.listen && now < l.expires_at)
     }
 
     /// Simulates `OnDefaultDeviceChanged` (eRender + eConsole): FollowDefault
     /// reopens and the snapshot says `DefaultChanged`.
     pub fn handle_default_changed(&self) {
+        // S5/N1: the enumeration cache is stale from here on.
+        self.backend.invalidate_cache();
         let requested = self.requested();
         if matches!(requested, AudioSource::FollowDefault) {
             self.reopen_audio();
@@ -443,6 +486,8 @@ impl DaemonInputs {
 
     /// Simulates the endpoint being invalidated mid-run: `Reopening`, then a reopen.
     pub fn handle_invalidated(&self) {
+        // S5/N1: the enumeration cache is stale from here on.
+        self.backend.invalidate_cache();
         {
             let mut snap = self.snapshot.lock().unwrap_or_else(|e| e.into_inner());
             snap.status = AudioTestStatus::Reopening;
@@ -569,6 +614,40 @@ mod tests {
         inputs.start_audio();
         assert!(inputs.idle(), "no lease and no effect: the microphone stays closed");
         assert_eq!(inputs.test_state().status, AudioTestStatus::NotListening);
+    }
+
+    /// S2/N5: an expired-but-unswept Listen lease authorizes nothing. The
+    /// lease is taken at a clock already past its expiry, so the sweeper
+    /// has not run but `expires_at <= now`: `lease_count`, `any_listen`,
+    /// `audio_needed` and every start path must ignore it.
+    #[test]
+    fn an_expired_but_unswept_listen_lease_never_opens_the_microphone() {
+        let (inputs, _fake) = fake_with(vec![speakers(), mic()]);
+        inputs.set_requested(AudioSource::Endpoint { id: "mic-id".into(), flow: AudioFlow::Capture, name_hint: "Microphone".into() });
+        let past = Instant::now() - canvas_proto::consts::AUDIO_TEST_LEASE - Duration::from_secs(1);
+        let _expired_id = inputs.take_lease_at(past, true);
+        assert_eq!(inputs.lease_count(), 0, "an expired lease is not a live lease");
+        assert!(!inputs.any_listen(), "an expired Listen lease is not listening");
+        assert!(!inputs.audio_needed(), "an expired lease needs no capture");
+        assert!(inputs.idle(), "taking an expired Listen lease opens nothing");
+        inputs.set_requested(AudioSource::Endpoint { id: "mic-id".into(), flow: AudioFlow::Capture, name_hint: "Microphone".into() });
+        assert!(inputs.idle(), "set_requested with only an expired lease opens nothing");
+        inputs.apply_needs(InputNeeds { screen: false, audio: false });
+        assert!(inputs.idle(), "apply_needs with only an expired lease opens nothing");
+        inputs.start_audio();
+        assert!(inputs.idle(), "start_audio with only an expired lease opens nothing");
+    }
+
+    /// N4: a failed open logs "could not open", never "opened".
+    #[test]
+    fn a_failed_open_does_not_log_opened() {
+        let (inputs, fake) = fake_with(vec![speakers()]);
+        fake.set_open(audio::FakeBackend::open_held_exclusive());
+        let (_, logs) = crate::test_logs::captured(|| {
+            inputs.take_lease(false);
+        });
+        assert!(!logs.contains("opened the resolved source"), "a failed open must not log 'opened': {logs}");
+        assert!(logs.contains("could not open the resolved source"), "a failed open logs its own line: {logs}");
     }
 
     /// S2: releasing the last Listen lease closes the microphone at once.

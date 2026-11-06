@@ -313,9 +313,9 @@ export function AudioSourcePanel() {
   );
 
   const words = audioStatusWords(state);
-  // S3 in the compact form: the disclosure rides on the state line itself, so
-  // the compact panel stays one row under the head.
-  const compactWords = inputSelected ? `${words} · audio effects read this input when active` : words;
+  // S3 in the compact form: the disclosure is its own line under the compact
+  // row (see `.audio-effect-note`), never a suffix of the ellipsised state
+  // line; the state line itself keeps the full text in `title`.
 
   return (
     <Panel
@@ -336,8 +336,8 @@ export function AudioSourcePanel() {
       {usePopover ? (
         <>
           <span className="audio-compact-row">
-            <span className="audio-state audio-state-compact" role="status">
-              {compactWords}
+            <span className="audio-state audio-state-compact" role="status" title={words}>
+              {words}
             </span>
             {inputSelected && (
               <Toggle label="Listen to this input" checked={listen} onChange={setListen} />
@@ -352,6 +352,7 @@ export function AudioSourcePanel() {
               {popoverOpen ? "Hide readings" : "Show readings"}
             </Button>
           </span>
+          {inputSelected && <p className="audio-effect-note">{EFFECT_NOTE}</p>}
           {err && <p className="error-line">{err}</p>}
           <Popover
             anchor={triggerRef as unknown as RefObject<HTMLElement | null>}

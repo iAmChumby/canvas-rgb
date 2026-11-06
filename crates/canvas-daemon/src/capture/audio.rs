@@ -586,6 +586,20 @@ pub trait AudioBackend: Send + Sync {
     fn enumerate(&self) -> Vec<canvas_proto::audio::AudioEndpoint>;
     /// Resolves the owner's choice to the endpoint the capture will open.
     fn resolve(&self, requested: &canvas_proto::audio::AudioSource) -> canvas_proto::audio::ResolvedAudioSource;
+    /// Drops any cached enumeration (S5/N1): the next `resolve` must not
+    /// answer from a stale list. No-op for a backend with no cache.
+    fn invalidate_cache(&self) {}
+
+    /// A device notification arrived: drop the cached enumeration so the
+    /// next resolve re-enumerates (default changes and pinned-device
+    /// events, S5/N1).
+    fn note_backend_event(&self, event: &BackendEvent) {
+        match event {
+            BackendEvent::DefaultChanged | BackendEvent::PinnedDeviceChanged { .. }
+            | BackendEvent::DeviceInvalidated { .. } => self.invalidate_cache(),
+        }
+    }
+
     /// Opens the resolved endpoint and fills `snapshot` with what it delivers.
     fn open(
         &self,
@@ -627,10 +641,43 @@ pub fn resolve_from(
     }
 }
 
+/// The endpoint ids the notification callbacks watch for a resolved source
+/// (N3): both the *requested* pick (so the pick's return posts an event and
+/// the capture can switch back from a fallback) and the endpoint it actually
+/// resolved to (so removing the fallback device posts an event instead of
+/// the capture reading a dead endpoint in silence). `run_capture` rewrites
+/// this from every re-resolve.
+pub fn pinned_id_for_resolved(resolved: &canvas_proto::audio::ResolvedAudioSource) -> Option<String> {
+    match &resolved.requested {
+        canvas_proto::audio::AudioSource::Endpoint { id, .. } => Some(id.clone()),
+        _ => None,
+    }
+}
+
+/// The watched ids for a resolved source: the requested pick plus the
+/// resolved endpoint (N3), deduplicated.
+pub fn pinned_ids_for_resolved(resolved: &canvas_proto::audio::ResolvedAudioSource) -> Vec<String> {
+    let mut ids = Vec::new();
+    if let Some(id) = pinned_id_for_resolved(resolved) {
+        ids.push(id);
+    }
+    if let Some(id) = &resolved.endpoint_id {
+        if !ids.contains(id) {
+            ids.push(id.clone());
+        }
+    }
+    ids
+}
+
 /// The fake backend: every `AudioTestStatus` is reachable through it, with no
 /// audio device ever opened.
 pub struct FakeBackend {
     script: std::sync::Mutex<FakeScript>,
+    /// The enumeration cache, mirroring `WasapiInner.cached` (S5/N1): `resolve`
+    /// answers from this, so a changed endpoint list is invisible until
+    /// `enumerate` (a `GET /audio/sources`) or `invalidate_cache` (a device
+    /// event) refreshes it. `None` means no cache yet.
+    cached: std::sync::Mutex<Option<Vec<canvas_proto::audio::AudioEndpoint>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -664,6 +711,7 @@ pub enum FakeOpen {
 impl FakeBackend {
     pub fn new() -> Self {
         Self {
+            cached: std::sync::Mutex::new(Some(Vec::new())),
             script: std::sync::Mutex::new(FakeScript {
                 endpoints: Vec::new(),
                 open: FakeOpen::Ok,
@@ -681,10 +729,14 @@ impl FakeBackend {
 
     pub fn with_endpoints(endpoints: Vec<canvas_proto::audio::AudioEndpoint>) -> Self {
         let backend = Self::new();
-        backend.script.lock().unwrap_or_else(|e| e.into_inner()).endpoints = endpoints;
+        backend.script.lock().unwrap_or_else(|e| e.into_inner()).endpoints = endpoints.clone();
+        *backend.cached.lock().unwrap_or_else(|e| e.into_inner()) = Some(endpoints);
         backend
     }
 
+    /// Changes the OS endpoint list. Like a real unplug, this does not touch
+    /// the enumeration cache: `resolve` keeps answering from the cache until
+    /// `enumerate` or `invalidate_cache` runs (S5/N1).
     pub fn set_endpoints(&self, endpoints: Vec<canvas_proto::audio::AudioEndpoint>) {
         self.script.lock().unwrap_or_else(|e| e.into_inner()).endpoints = endpoints;
     }
@@ -710,11 +762,25 @@ impl FakeBackend {
 
 impl AudioBackend for FakeBackend {
     fn enumerate(&self) -> Vec<canvas_proto::audio::AudioEndpoint> {
-        self.script.lock().unwrap_or_else(|e| e.into_inner()).endpoints.clone()
+        let endpoints = self.script.lock().unwrap_or_else(|e| e.into_inner()).endpoints.clone();
+        *self.cached.lock().unwrap_or_else(|e| e.into_inner()) = Some(endpoints.clone());
+        endpoints
+    }
+
+    fn invalidate_cache(&self) {
+        *self.cached.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     fn resolve(&self, requested: &canvas_proto::audio::AudioSource) -> canvas_proto::audio::ResolvedAudioSource {
-        resolve_from(&self.enumerate(), requested)
+        // Like WASAPI after the S5 fix: answer from the cache; a missing
+        // cache is re-enumerated (the fake's enumeration is cheap — no COM,
+        // no device — so this models the capture thread's fresh enumeration,
+        // not a tokio worker doing COM).
+        let cached = self.cached.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        match cached {
+            Some(endpoints) => resolve_from(&endpoints, requested),
+            None => resolve_from(&self.enumerate(), requested),
+        }
     }
 
     fn open(
@@ -803,7 +869,8 @@ pub mod wasapi {
         WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
     };
     use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
+        CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
+        COINIT_MULTITHREADED,
     };
 
     /// `WAVE_FORMAT_PCM`: integer samples.
@@ -904,8 +971,9 @@ pub mod wasapi {
     pub struct WasapiInner {
         /// Events the notification callbacks posted, drained by the capture thread.
         events: std::sync::Mutex<Vec<BackendEvent>>,
-        /// The pinned endpoint id the callbacks watch for.
-        pinned: std::sync::Mutex<Option<String>>,
+        /// The endpoint ids the callbacks watch for (N3): the requested pick
+        /// and the currently resolved endpoint.
+        pinned: std::sync::Mutex<Vec<String>>,
         /// The last successful enumeration (S5): resolve reads this, so the
         /// lease/effect path does no COM work. `GET /audio/sources` refreshes it.
         cached: std::sync::Mutex<Vec<canvas_proto::audio::AudioEndpoint>>,
@@ -913,6 +981,18 @@ pub mod wasapi {
 
     impl WasapiInner {
         fn post(&self, event: BackendEvent) {
+            // S5/N1: a default or pinned-device change makes the cached
+            // enumeration stale at once, so the next resolve (even on a
+            // tokio worker, with no capture running) cannot answer from it.
+            // Clearing a `Mutex<Vec>` is not a COM call, so this is safe on
+            // the callback thread.
+            match &event {
+                BackendEvent::DefaultChanged
+                | BackendEvent::PinnedDeviceChanged { .. }
+                | BackendEvent::DeviceInvalidated { .. } => {
+                    self.cached.lock().unwrap_or_else(|e| e.into_inner()).clear();
+                }
+            }
             self.events.lock().unwrap_or_else(|e| e.into_inner()).push(event);
         }
 
@@ -932,7 +1012,7 @@ pub mod wasapi {
             Self {
                 inner: std::sync::Arc::new(WasapiInner {
                     events: std::sync::Mutex::new(Vec::new()),
-                    pinned: std::sync::Mutex::new(None),
+                    pinned: std::sync::Mutex::new(Vec::new()),
                     cached: std::sync::Mutex::new(Vec::new()),
                 }),
             }
@@ -991,17 +1071,21 @@ pub mod wasapi {
             endpoints
         }
 
+        fn invalidate_cache(&self) {
+            self.inner.cached.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        }
+
         fn resolve(&self, requested: &canvas_proto::audio::AudioSource) -> canvas_proto::audio::ResolvedAudioSource {
-            // S5: resolve from the last successful enumeration, so the
-            // lease/effect path does no COM work. Only the first resolve
-            // before any enumeration touches COM.
+            // S5/N1: resolve from the last successful enumeration only, so
+            // the lease/effect path never runs COM on a tokio worker — not
+            // even the first resolve with an empty cache. An empty/stale
+            // cache resolves as "not found" here (a pinned pick falls back
+            // to the default render in the cache, or to no endpoint); the
+            // capture thread re-enumerates on its own thread before it
+            // opens anything (see `run_capture` and `open`), and the API
+            // routes enumerate inside `spawn_blocking`.
             let cached = self.inner.cached.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            if cached.is_empty() {
-                let endpoints = self.enumerate();
-                resolve_from(&endpoints, requested)
-            } else {
-                resolve_from(&cached, requested)
-            }
+            resolve_from(&cached, requested)
         }
 
         fn open(
@@ -1011,7 +1095,13 @@ pub mod wasapi {
             snapshot: &std::sync::Arc<std::sync::Mutex<CaptureSnapshot>>,
             stop: &std::sync::Arc<std::sync::atomic::AtomicBool>,
         ) -> Result<(), OpenError> {
-            let Some(id) = resolved.endpoint_id.clone() else { return Err(OpenError::NoDevice) };
+            // S5/N1: the caller resolved from the cache only, so `endpoint_id`
+            // may be `None` merely because the cache was empty/stale. The
+            // capture thread re-enumerates on its own thread and re-resolves
+            // before it opens anything, so spawn it anyway (it returns an
+            // honest `NoDevice` when a fresh enumeration still finds none);
+            // COM never runs on the caller's (tokio worker) thread here.
+            let id = resolved.endpoint_id.clone().unwrap_or_default();
             let flow = resolved.flow.unwrap_or(canvas_proto::audio::AudioFlow::Render);
             // The capture runs on its own thread; COM is initialised there.
             // The inner state is Arc-shared, so it outlives the thread.
@@ -1077,13 +1167,41 @@ pub mod wasapi {
             if let Err(e) = unsafe { enumerator.RegisterEndpointNotificationCallback(&_client) } {
                 tracing::warn!(error = %e, "the audio notification client could not be registered");
             }
-            *inner.pinned.lock().unwrap_or_else(|e| e.into_inner()) = match &resolved.requested {
-                canvas_proto::audio::AudioSource::Endpoint { id, .. } => Some(id.clone()),
-                _ => None,
+            // N2: the notification client is unregistered (and COM
+            // uninitialised) when this function returns, on every path —
+            // including the early `Err` returns below. The guard's `Drop`
+            // runs before the final `CoUninitialize` line is reached on the
+            // normal path, because that line is removed in favour of the
+            // guard (see the end of this function).
+            struct UnregisterOnDrop<'a> {
+                enumerator: &'a IMMDeviceEnumerator,
+                client: &'a windows::Win32::Media::Audio::IMMNotificationClient,
+            }
+            impl Drop for UnregisterOnDrop<'_> {
+                fn drop(&mut self) {
+                    let _ = unsafe { self.enumerator.UnregisterEndpointNotificationCallback(self.client) };
+                    unsafe { CoUninitialize() };
+                }
+            }
+            let _teardown = UnregisterOnDrop { enumerator: &enumerator, client: &_client };
+            *inner.pinned.lock().unwrap_or_else(|e| e.into_inner()) = pinned_ids_for_resolved(resolved);
+            let _ = id;
+            // S5/N1: the caller resolved from the cache only. Re-enumerate
+            // here, on the capture thread, and re-resolve before opening
+            // anything, so an unplugged pinned device falls back to the
+            // default render without anyone calling `GET /audio/sources`,
+            // and a first resolve with an empty cache still opens the
+            // right device.
+            let fresh = self.enumerate();
+            let truth = resolve_from(&fresh, &resolved.requested);
+            let Some(truth_id) = truth.endpoint_id.clone() else {
+                return Err(OpenError::NoDevice);
             };
-            let mut current_id = id.to_string();
-            let mut current_resolved = resolved.clone();
-            let mut current_flow = flow;
+            let mut current_resolved = truth;
+            let mut current_id = truth_id;
+            let mut current_flow = current_resolved.flow.unwrap_or(flow);
+            *inner.pinned.lock().unwrap_or_else(|e| e.into_inner()) =
+                pinned_ids_for_resolved(&current_resolved);
             'open: loop {
                 if stop.load(Ordering::SeqCst) {
                     break;
@@ -1111,6 +1229,9 @@ pub mod wasapi {
                         let mut snap = snapshot.lock().unwrap_or_else(|e| e.into_inner());
                         snap.status = canvas_proto::audio::AudioTestStatus::UnsupportedFormat;
                         snap.format_tag = Some(mix.format_tag);
+                        // N2: `GetMixFormat`'s block is ours to free when we
+                        // return without `Initialize`.
+                        unsafe { CoTaskMemFree(Some(mix_format_ptr as *mut std::ffi::c_void)) };
                         return Err(OpenError::UnsupportedFormat { tag: mix.format_tag });
                     }
                 }
@@ -1120,6 +1241,10 @@ pub mod wasapi {
                 let init = unsafe {
                     audio_client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 0, 0, mix_format_ptr, None)
                 };
+                // N2: `Initialize` copies the format; the `GetMixFormat`
+                // block must be freed by the caller on every reopen,
+                // success or failure, instead of leaking per iteration.
+                unsafe { CoTaskMemFree(Some(mix_format_ptr as *mut std::ffi::c_void)) };
                 if let Err(e) = init {
                     // AUDCLNT_E_DEVICE_IN_USE is 0x8888000A: another app holds it exclusively.
                     if e.code().0 as u32 == 0x8888_000A {
@@ -1161,7 +1286,14 @@ pub mod wasapi {
                         // Stop the current client before re-opening (B2): the
                         // old capture is finished before the new one starts.
                         let _ = unsafe { audio_client.Stop() };
-                        let next = self.resolve(&resolved.requested);
+                        // S5/N1: the event already cleared the cache in
+                        // `post`; re-enumerate here, on the capture thread,
+                        // and re-resolve from the fresh list, so an
+                        // unplugged pinned device falls back without anyone
+                        // calling `GET /audio/sources`.
+                        self.invalidate_cache();
+                        let fresh = self.enumerate();
+                        let next = resolve_from(&fresh, &resolved.requested);
                         let (status, message) = match event {
                             BackendEvent::DefaultChanged => (canvas_proto::audio::AudioTestStatus::DefaultChanged, "the Windows default output changed; reopening the audio capture"),
                             BackendEvent::DeviceInvalidated { .. } | BackendEvent::PinnedDeviceChanged { .. } => (canvas_proto::audio::AudioTestStatus::Reopening, "the audio endpoint was invalidated; reopening the audio capture"),
@@ -1182,6 +1314,10 @@ pub mod wasapi {
                         current_resolved = next;
                         current_id = next_id;
                         current_flow = current_resolved.flow.unwrap_or(current_flow);
+                        // N3: watch the new resolved source from here on, so
+                        // removing the fallback device posts an event too.
+                        *inner.pinned.lock().unwrap_or_else(|e| e.into_inner()) =
+                            pinned_ids_for_resolved(&current_resolved);
                         continue 'open;
                     }
                     let available = match unsafe { capture.GetNextPacketSize() } {
@@ -1231,7 +1367,9 @@ pub mod wasapi {
                     }
                 }
             }
-            unsafe { CoUninitialize() };
+            // `_teardown` unregisters the notification client and calls
+            // `CoUninitialize` as it drops, on this path and every early
+            // `Err` return above (N2).
             Ok(())
         }
     }
@@ -1244,7 +1382,7 @@ pub mod wasapi {
 
     impl NotifyClient {
         fn pinned_matches(&self, id: &str) -> bool {
-            self.shared.pinned.lock().unwrap_or_else(|e| e.into_inner()).as_deref() == Some(id)
+            self.shared.pinned.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|watched| watched == id)
         }
     }
 
@@ -1578,6 +1716,58 @@ mod tests {
         let resolved = resolve_from(&endpoints, &requested);
         assert_eq!(resolved.fallback, Some(canvas_proto::audio::AudioFallback::PickedMissing));
         assert_eq!(resolved.endpoint_id.as_deref(), Some("speakers-id"));
+    }
+
+    /// S5/N1 through the fake (which now models the WASAPI enumeration cache):
+    /// an unplugged pinned device stays resolved from the stale cache until a
+    /// device event invalidates it, after which the same resolve falls back
+    /// to the default render — with no `GET /audio/sources` (no `enumerate`)
+    /// in between.
+    #[test]
+    fn an_unplugged_pinned_device_falls_back_after_the_cache_is_invalidated() {
+        use canvas_proto::audio::{AudioEndpoint, AudioEndpointState, AudioFlow, AudioSource};
+        let speakers = AudioEndpoint { id: "speakers-id".into(), flow: AudioFlow::Render, name: "Speakers".into(), is_default: true, state: AudioEndpointState::Active };
+        let mic = AudioEndpoint { id: "mic-id".into(), flow: AudioFlow::Capture, name: "Microphone".into(), is_default: false, state: AudioEndpointState::Active };
+        let fake = FakeBackend::with_endpoints(vec![speakers.clone(), mic.clone()]);
+        let requested = AudioSource::Endpoint { id: "mic-id".into(), flow: AudioFlow::Capture, name_hint: "Microphone".into() };
+        // Prime the cache, as `GET /audio/sources` does.
+        let listed = fake.enumerate();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(fake.resolve(&requested).endpoint_id.as_deref(), Some("mic-id"));
+        // The mic is unplugged: the OS list changes, the cache does not.
+        fake.set_endpoints(vec![speakers.clone()]);
+        let stale = fake.resolve(&requested);
+        assert_eq!(stale.endpoint_id.as_deref(), Some("mic-id"), "before any event the stale cache still names the mic");
+        assert_eq!(stale.fallback, None);
+        // A pinned-device event invalidates the cache; the next resolve
+        // re-enumerates (here: the fake's cheap enumeration, modelling the
+        // capture thread) and falls back to the default render.
+        fake.note_backend_event(&BackendEvent::PinnedDeviceChanged { id: "mic-id".into() });
+        let fresh = fake.resolve(&requested);
+        assert_eq!(fresh.endpoint_id.as_deref(), Some("speakers-id"), "after invalidation the pinned mic falls back to the default render");
+        assert_eq!(fresh.fallback, Some(canvas_proto::audio::AudioFallback::PickedMissing));
+    }
+
+    /// N3: the watched ids are the requested pick *and* the resolved
+    /// endpoint, so rewriting them from a fallback re-resolve makes the
+    /// fallback device's removal visible (and the pick's return, too).
+    /// With only the requested id watched, removing the fallback render
+    /// would post no event and the capture would read a dead endpoint.
+    #[test]
+    fn the_pinned_id_is_the_requested_pick() {
+        use canvas_proto::audio::{AudioSource, ResolvedAudioSource};
+        let resolved = ResolvedAudioSource {
+            requested: AudioSource::Endpoint { id: "mic-id".into(), flow: canvas_proto::audio::AudioFlow::Capture, name_hint: "Microphone".into() },
+            endpoint_id: Some("speakers-id".into()),
+            name: Some("Speakers".into()),
+            flow: Some(canvas_proto::audio::AudioFlow::Render),
+            fallback: Some(canvas_proto::audio::AudioFallback::PickedMissing),
+        };
+        assert_eq!(pinned_id_for_resolved(&resolved).as_deref(), Some("mic-id"));
+        assert_eq!(pinned_ids_for_resolved(&resolved), vec!["mic-id".to_string(), "speakers-id".to_string()]);
+        let follow = ResolvedAudioSource { requested: AudioSource::FollowDefault, ..resolved };
+        assert_eq!(pinned_id_for_resolved(&follow), None);
+        assert_eq!(pinned_ids_for_resolved(&follow), vec!["speakers-id".to_string()]);
     }
 
     /// The sample rate from the mix format moves the band edges.

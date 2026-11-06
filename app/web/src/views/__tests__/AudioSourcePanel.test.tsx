@@ -280,6 +280,37 @@ describe("AudioSourcePanel (#166)", () => {
     expect(button.closest(".audio-compact-row")).toBeTruthy();
   });
 
+  it("compact form: the effect disclosure is its own line, not the ellipsised state line (S3/N6)", async () => {
+    compact.value = true;
+    mocks.audioSources.mockResolvedValue(
+      sources({
+        current: {
+          requested: { kind: "endpoint", id: "mic-id", flow: "capture", name_hint: "Microphone" },
+          endpoint_id: "mic-id",
+          name: "Microphone",
+          flow: "capture",
+          fallback: null,
+        },
+      }),
+    );
+    const { container } = render(<AudioSourcePanel />);
+    await screen.findByRole("combobox", { name: "Audio source" });
+    const note = container.querySelector(".audio-effect-note");
+    expect(note, "the disclosure is a separate element in the compact form").toBeTruthy();
+    expect(note?.textContent).toContain("Audio effects read this input whenever an audio effect is active");
+    // It is not a suffix of the state line, and the state line carries its
+    // full text in `title` for the ellipsised case.
+    const stateLine = container.querySelector(".audio-state-compact");
+    expect(stateLine?.textContent).not.toContain("audio effects read this input");
+    expect(stateLine?.getAttribute("title")).toBeTruthy();
+    // For an output pick there is no disclosure line at all.
+    cleanup();
+    mocks.audioSources.mockResolvedValue(sources());
+    const out = render(<AudioSourcePanel />);
+    await screen.findByRole("combobox", { name: "Audio source" });
+    expect(out.container.querySelector(".audio-effect-note")).toBeNull();
+  });
+
   it("group headings reach assistive tech as groups (S10)", async () => {
     render(<AudioSourcePanel />);
     const trigger = await screen.findByRole("combobox", { name: "Audio source" });
