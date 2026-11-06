@@ -38,10 +38,14 @@ pub fn extensible_has_extension(cb_size: u16) -> bool {
 /// Maps a linear band magnitude (1.0 is full scale) onto 0..1 on a dB scale
 /// between [`DB_FLOOR`] and [`DB_CEILING`]: -20 dBFS is 2/3, -30 dBFS is 1/2,
 /// a full-scale sine is 1.0, and silence (or anything at or below the floor)
-/// is 0.0.
+/// is 0.0. A value that is not a finite positive number (NaN, negative) is 0.0 too, so one bad
+/// sample can never publish a NaN that freezes a bar.
 pub fn db_mapped(linear: f32) -> f32 {
-    if linear <= 0.0 {
+    if linear.is_nan() || linear <= 0.0 {
         return 0.0;
+    }
+    if linear.is_infinite() {
+        return 1.0;
     }
     let db = 20.0 * linear.log10();
     ((db - DB_FLOOR) / (DB_CEILING - DB_FLOOR)).clamp(0.0, 1.0)
@@ -775,6 +779,14 @@ mod tests {
             "the audio capture opened the default render endpoint (): 48000 Hz, \
              2 channels, 32 bits, IEEE float (format tag 65534)"
         );
+    }
+
+    #[test]
+    fn db_mapping_is_never_nan() {
+        assert_eq!(db_mapped(f32::NAN), 0.0);
+        assert_eq!(db_mapped(-1.0), 0.0);
+        assert_eq!(db_mapped(0.0), 0.0);
+        assert_eq!(db_mapped(f32::INFINITY), 1.0);
     }
 
     #[test]
