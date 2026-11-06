@@ -75,13 +75,16 @@ function mouse(id: string, name: string): PeripheralDetail {
         {
           id: "lighting",
           title: "Lighting",
-          properties: [{ key: "led-on", label: "LED on", kind: { type: "bool", default: false } }],
+          properties: [
+            { key: "led-on", label: "LED on", kind: { type: "bool", default: false } },
+            { key: "breathe", label: "Breathe", kind: { type: "bool", default: false } },
+          ],
         },
       ],
       read_only: [],
       unreported: [],
     },
-    values: { "led-on": { type: "bool", value: false } },
+    values: { "led-on": { type: "bool", value: false }, breathe: { type: "bool", value: false } },
     access: { reads: true, writes: true },
     problem: null,
   };
@@ -182,3 +185,101 @@ describe("a read that lands after an edit", () => {
     expect(screen.queryByText(/1 change not sent/)).toBeTruthy();
   });
 });
+
+/** Lets every pending promise and the renders they cause run. */
+async function settle() {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
+describe("an edit on one device", () => {
+  it("is never shown on, or sent to, another device", async () => {
+    const a = mouse("x6:a", "A Mouse");
+    const b = mouse("x6:b", "B Mouse");
+    api.peripherals.mockResolvedValue({ peripherals: [a.info, b.info] });
+    api.peripheral.mockImplementation((id: string) => Promise.resolve(id === "x6:a" ? a : b));
+    api.patchPeripheral.mockResolvedValue(undefined);
+    page();
+    // Both devices are read once, so each has values on screen at once when picked again.
+    await screen.findByRole("switch", { name: "LED on" });
+    await settle();
+    fireEvent.click(screen.getByText("B Mouse"));
+    await screen.findByRole("heading", { level: 2, name: "B Mouse" });
+    await settle();
+    fireEvent.click(screen.getByText("A Mouse"));
+    await screen.findByRole("heading", { level: 2, name: "A Mouse" });
+    await settle();
+
+    // On A the user stages a change: Apply appears.
+    fireEvent.click(screen.getByRole("switch", { name: "LED on" }));
+    await screen.findByRole("button", { name: "Apply" });
+
+    // B is picked and its read stays out: B's values from the last read are on screen. A's
+    // change is not among them, and there is nothing to Apply on B.
+    let landB!: (d: PeripheralDetail) => void;
+    api.peripheral.mockImplementationOnce(
+      () =>
+        new Promise<PeripheralDetail>((r) => {
+          landB = r;
+        }),
+    );
+    fireEvent.click(screen.getByText("B Mouse"));
+    await screen.findByRole("heading", { level: 2, name: "B Mouse" });
+    expect(screen.queryByRole("button", { name: "Apply" })).toBeNull();
+    expect(screen.getByRole("switch", { name: "LED on" }).getAttribute("aria-checked")).toBe("false");
+    await act(async () => {
+      landB(b);
+      await Promise.resolve();
+    });
+    await settle();
+
+    // An edit on B is B's alone: Apply sends only B's change, to B.
+    fireEvent.click(screen.getByRole("switch", { name: "Breathe" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Apply" }));
+    await waitFor(() => expect(api.patchPeripheral).toHaveBeenCalledTimes(1));
+    const [sentTo, sent] = api.patchPeripheral.mock.calls[0]!;
+    expect(sentTo).toBe("x6:b");
+    expect(Object.keys(sent as object)).toEqual(["breathe"]);
+  });
+});
+
+describe("a read that was out when a write failed", () => {
+  it("keeps an edit made after the failure", async () => {
+    const device = mouse("x6:late", "Late Mouse");
+    api.peripherals.mockResolvedValue({ peripherals: [device.info] });
+    api.peripheral.mockResolvedValue(device);
+    const first = page();
+    await screen.findByRole("switch", { name: "LED on" });
+    await settle();
+    first.unmount();
+
+    // Second visit: cached values on screen, the fresh read is out.
+    let land!: (d: PeripheralDetail) => void;
+    api.peripheral.mockImplementationOnce(
+      () =>
+        new Promise<PeripheralDetail>((r) => {
+          land = r;
+        }),
+    );
+    api.patchPeripheral.mockRejectedValueOnce(new Error("the write failed"));
+    page();
+    fireEvent.click(await screen.findByRole("switch", { name: "LED on" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Apply" }));
+    await screen.findByText("the write failed");
+
+    // After the failure the user makes another edit; then the read that was out lands.
+    fireEvent.click(screen.getByRole("switch", { name: "Breathe" }));
+    await act(async () => {
+      land(device);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // The edit made after the failure is still staged.
+    expect(screen.queryByRole("button", { name: "Apply" })).toBeTruthy();
+    expect(screen.getByRole("switch", { name: "Breathe" }).getAttribute("aria-checked")).toBe("true");
+  });
+});
+

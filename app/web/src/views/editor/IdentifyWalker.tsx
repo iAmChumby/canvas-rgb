@@ -51,7 +51,9 @@ export function useIdentifyWalker(
   // identify must not hide a failed length write's message (#156 sibling).
   const [identifyError, setIdentifyError] = useState<string | null>(null);
   const [lengthError, setLengthError] = useState<string | null>(null);
-  const error = identifyError ?? lengthError;
+  // Both are said when both failed: two failures are never folded into one line.
+  const error = [lengthError, identifyError].filter(Boolean).join(" ") || null;
+  /** Sets the length write's message (the walker's own light sets its message itself). */
   const setError = setLengthError;
   const [note, setNote] = useState<string | null>(null);
   const stopped = useRef(false);

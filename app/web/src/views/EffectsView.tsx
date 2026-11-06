@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CaretLeft,
   Code,
@@ -82,7 +82,20 @@ export function EffectsView() {
   // The detail read's error and a write's error are separate: a successful read clears
   // only the read error, so it cannot hide a failed write's message (#156).
   const [readError, setReadError] = useState<string | null>(null);
-  const [writeError, setWriteError] = useState<string | null>(null);
+  // A failed write's message, with the effect it belongs to (`null`: a page action, a favourite
+  // or a delete). An effect's message shows only on that effect. A read never clears one: the
+  // next attempt at the same write, or an edit of that effect, does (#156).
+  const [writeError, setWriteErrorState] = useState<{ id: string | null; message: string } | null>(null);
+  const failWrite = useCallback(
+    (id: string | null, e: unknown) => setWriteErrorState({ id, message: messageOf(e) }),
+    [],
+  );
+  const clearWrite = useCallback(
+    (id: string | null) => setWriteErrorState((w) => (w && w.id === id ? null : w)),
+    [],
+  );
+  const shownWriteError =
+    writeError && (writeError.id === null || writeError.id === selectedId) ? writeError.message : null;
   // Asks the detail to load again for the same effect: a preset was applied or changed, so the
   // sliders and the preset list are read back from the daemon.
   const [reloadTick, setReloadTick] = useState(0);
@@ -159,9 +172,9 @@ export function EffectsView() {
         await refreshAll();
       }
       if (selectedRef.current === id) saved.current = { ...saved.current, ...batch };
-      setWriteError(null);
+      clearWrite(id);
     } catch (e) {
-      setWriteError(messageOf(e));
+      failWrite(id, e);
       // The control goes back to the value the daemon has: nothing fails silently.
       if (selectedRef.current === id) setValues(saved.current);
     }
@@ -189,7 +202,8 @@ export function EffectsView() {
       // before the next effect's values load.
       void flush();
     };
-    // flush reads refs and stable setters only
+    // flush reads refs and stable setters only (failWrite/clearWrite are stable callbacks).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId, activeId, reloadTick]);
 
   useEffect(
@@ -204,6 +218,8 @@ export function EffectsView() {
     // Values waiting for another effect go to it first; they never mix into this one's batch.
     if (pendingFor.current && pendingFor.current !== id) void flush();
     pendingFor.current = id;
+    // An edit replaces what the failed write asked for: its message goes.
+    clearWrite(id);
     setValues((prev) => ({ ...prev, [key]: value }));
     pending.current = { ...pending.current, [key]: value };
     if (timer.current) clearTimeout(timer.current);
@@ -212,12 +228,13 @@ export function EffectsView() {
 
   const activate = async (preset: string | null) => {
     if (!selectedId) return;
-    setWriteError(null);
+    const id = selectedId;
+    clearWrite(id);
     try {
-      await api.activateEffect(selectedId, { props: {}, preset });
+      await api.activateEffect(id, { props: {}, preset });
       await refreshAll();
     } catch (e) {
-      setWriteError(messageOf(e));
+      failWrite(id, e);
     }
   };
 
@@ -357,11 +374,12 @@ export function EffectsView() {
   const toggleFavorite = async (id: string, favorite: boolean) => {
     setFavPop(id);
     setTimeout(() => setFavPop(null), 260);
+    clearWrite(null);
     try {
       await api.setFavorite(id, { favorite });
       await refreshAll();
     } catch (e) {
-      setWriteError(messageOf(e));
+      failWrite(null, e);
     }
   };
 
@@ -399,11 +417,12 @@ export function EffectsView() {
   /** Removes a user effect. The one that is playing asks first. */
   const deleteEffect = async (id: string, keepPresets = false) => {
     setDeleting(null);
+    clearWrite(null);
     try {
       await api.deleteEffect(id, keepPresets);
       await refreshAll();
     } catch (e) {
-      setWriteError(messageOf(e));
+      failWrite(null, e);
     }
   };
 
@@ -936,8 +955,8 @@ export function EffectsView() {
                 onChange={onChange}
               />
             )}
-            {(writeError ?? readError) && (
-              <p className="error-line" style={{ marginTop: 8 }}>{writeError ?? readError}</p>
+            {(shownWriteError ?? readError) && (
+              <p className="error-line" style={{ marginTop: 8 }}>{shownWriteError ?? readError}</p>
             )}
           </Panel>
         </>

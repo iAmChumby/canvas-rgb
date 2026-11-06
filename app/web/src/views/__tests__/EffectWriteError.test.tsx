@@ -28,6 +28,11 @@ const { api } = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/endpoints", () => ({ api }));
+// The store's refresh asks the daemon for every list; here it only has to succeed.
+vi.mock("@/lib/store", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/store")>()),
+  refreshAll: () => Promise.resolve(),
+}));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -112,9 +117,12 @@ describe("a read that lands after a failed write", () => {
     await waitFor(() => expect(api.patchActiveProps).toHaveBeenCalledTimes(1));
     await screen.findByText("the effect did not take the change");
 
-    // Another effect is opened: its detail read succeeds.
+    // Another effect is opened: its detail read succeeds. Aurora's failure is not said on
+    // Other: it is not Other's change that failed.
     fireEvent.click(screen.getByRole("button", { name: "Open Other" }));
     await screen.findByRole("heading", { name: "Other" });
+    await screen.findByLabelText("Speed value");
+    expect(screen.queryByText("the effect did not take the change")).toBeNull();
 
     // And back to the first: its detail read succeeds too.
     fireEvent.click(screen.getByRole("button", { name: "Open Aurora" }));
@@ -123,5 +131,41 @@ describe("a read that lands after a failed write", () => {
 
     // The write still did not go through: its message is still on screen.
     expect(screen.queryByText("the effect did not take the change")).toBeTruthy();
+  });
+});
+
+describe("a failed favourite", () => {
+  it("is cleared by the next favourite that goes through, not left on screen for good", async () => {
+    api.setFavorite.mockRejectedValueOnce(new Error("the favourite was not saved"));
+    api.setFavorite.mockResolvedValue(undefined);
+    page();
+    await screen.findByLabelText("Speed value");
+
+    fireEvent.click(screen.getByRole("button", { name: "Favorite Other" }));
+    await screen.findByText("the favourite was not saved");
+
+    // The user tries again, and it goes through: the old failure is gone.
+    fireEvent.click(screen.getByRole("button", { name: "Favorite Other" }));
+    await waitFor(() => expect(api.setFavorite).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByText("the favourite was not saved")).toBeNull());
+  });
+});
+
+describe("an edit after a failed write", () => {
+  it("clears that effect's failure: the edit replaces what the failed write asked for", async () => {
+    api.patchActiveProps.mockRejectedValueOnce(new Error("the effect did not take the change"));
+    // The retry stays out, so only the edit itself can have cleared the message.
+    api.patchActiveProps.mockReturnValue(new Promise(() => {}));
+    page();
+    const speed = await screen.findByLabelText("Speed value");
+    fireEvent.focus(speed);
+    fireEvent.change(speed, { target: { value: "55" } });
+    fireEvent.blur(speed);
+    await screen.findByText("the effect did not take the change");
+
+    fireEvent.focus(speed);
+    fireEvent.change(speed, { target: { value: "60" } });
+    fireEvent.blur(speed);
+    await waitFor(() => expect(screen.queryByText("the effect did not take the change")).toBeNull());
   });
 });
