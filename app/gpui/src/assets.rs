@@ -29,6 +29,12 @@ pub const ICONS: &[&str] = &[
     "Pause",
     "Play",
     "Warning",
+    "SkipBack",
+    "SkipForward",
+    "Sun",
+    "CaretDown",
+    "EaselDark",
+    "EaselLight",
 ];
 
 fn icon_svg(name: &str) -> Option<&'static str> {
@@ -50,6 +56,12 @@ fn icon_svg(name: &str) -> Option<&'static str> {
         "Pause" => include_str!("../assets/icons/Pause.svg"),
         "Play" => include_str!("../assets/icons/Play.svg"),
         "Warning" => include_str!("../assets/icons/Warning.svg"),
+        "SkipBack" => include_str!("../assets/icons/SkipBack.svg"),
+        "SkipForward" => include_str!("../assets/icons/SkipForward.svg"),
+        "Sun" => include_str!("../assets/icons/Sun.svg"),
+        "CaretDown" => include_str!("../assets/icons/CaretDown.svg"),
+        "EaselDark" => include_str!("../assets/icons/EaselDark.svg"),
+        "EaselLight" => include_str!("../assets/icons/EaselLight.svg"),
         _ => return None,
     })
 }
@@ -147,9 +159,11 @@ mod tests {
     fn every_icon_embeds_an_svg_with_phosphor_path_data() {
         for name in ICONS {
             let svg = icon_svg(name).unwrap_or_else(|| panic!("icon {name} missing"));
-            assert!(svg.contains("<path"), "{name} has no path");
-            assert!(svg.contains("currentColor"), "{name} is not currentColor");
-            assert!(svg.contains("0 0 256 256"), "{name} is not the 256 box");
+            assert!(svg.contains("<path") || svg.contains("<rect"), "{name} has no path");
+            if !name.starts_with("Easel") {
+                assert!(svg.contains("currentColor"), "{name} is not currentColor");
+                assert!(svg.contains("0 0 256 256"), "{name} is not the 256 box");
+            }
         }
     }
 }

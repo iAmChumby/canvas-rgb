@@ -119,6 +119,8 @@ pub enum Method {
     Get,
     Put,
     Delete,
+    Patch,
+    Post,
 }
 
 /// One small client for the daemon's loopback API.
@@ -156,6 +158,14 @@ impl DaemonClient {
         self.request(Method::Delete, path, None)
     }
 
+    pub fn patch_json(&self, path: &str, body: &str) -> Result<String, ClientError> {
+        self.request(Method::Patch, path, Some(body))
+    }
+
+    pub fn post_json(&self, path: &str, body: &str) -> Result<String, ClientError> {
+        self.request(Method::Post, path, Some(body))
+    }
+
     fn request(&self, method: Method, path: &str, body: Option<&str>) -> Result<String, ClientError> {
         // The owner check runs before the token is read, and therefore before
         // anything is sent: a port held by another process never sees it.
@@ -171,6 +181,18 @@ impl DaemonClient {
                 .content_type("application/json")
                 .send(body.unwrap_or_default().as_bytes()),
             Method::Delete => self.agent.delete(&url).header("Authorization", auth).call(),
+            Method::Patch => self
+                .agent
+                .patch(&url)
+                .header("Authorization", auth)
+                .content_type("application/json")
+                .send(body.unwrap_or_default().as_bytes()),
+            Method::Post => self
+                .agent
+                .post(&url)
+                .header("Authorization", auth)
+                .content_type("application/json")
+                .send(body.unwrap_or_default().as_bytes()),
         };
         let mut response = result.map_err(|e| match e {
             ureq::Error::ConnectionFailed | ureq::Error::HostNotFound => ClientError::Unreachable,

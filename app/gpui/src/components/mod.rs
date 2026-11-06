@@ -7,4 +7,5 @@ pub mod number_field;
 pub mod panel;
 pub mod select;
 pub mod segmented;
+pub mod slider;
 pub mod toggle;

@@ -1,6 +1,11 @@
-//! `Segmented`, after `app/web/src/components/Segmented.tsx`: a radio group
-//! where the chosen option is filled and the rest are quiet. Every option is
-//! a tab stop target in React; GPUI gives each option its own click.
+//! `Segmented`, after `app/web/src/components/Segmented.tsx` and the
+//! `.seg` / `.seg-item` / `.seg-thumb` rules in `app.css` with the
+//! hardware layer's dot (`hardware.css`: a 5 px LED before each label,
+//! lit in `--live` on the checked option).
+//!
+//! A compact pill group that takes the width it needs, not the width of
+//! its column: the well is sunk with a line border, the checked option is
+//! a raised thumb, and every option carries its dot.
 
 use gpui::{IntoElement, Window, div, prelude::*, px};
 
@@ -18,9 +23,9 @@ pub fn segmented(
     let mut row = div()
         .id(gpui::SharedString::from(id.to_string()))
         .flex()
-        .gap_1()
-        .p_1()
-        .rounded_lg()
+        .gap(px(2.0))
+        .p(px(2.0))
+        .rounded_md()
         .border_1()
         .border_color(Theme::color(t.line))
         .bg(Theme::color(t.sunk));
@@ -28,24 +33,32 @@ pub fn segmented(
         let is_selected = *value == selected;
         let value = value.to_string();
         let change = on_change.clone();
+        // The LED dot: unlit (`--led-off`) on the quiet options, live on the
+        // checked one (hardware.css `seg-item::before`).
+        let dot_color = if is_selected {
+            t.live()
+        } else {
+            Theme::color(t.dot)
+        };
+        let dot = div().size(px(5.0)).rounded_full().bg(dot_color);
         let cell = div()
             .id(gpui::SharedString::from(format!("{id}-{value}")))
             .flex()
             .items_center()
-            .justify_center()
-            .px_3()
-            .py_1()
+            .gap(px(6.0))
+            .h(px(26.0))
+            .px(px(10.0))
             .rounded_md()
-            .flex_1()
             .text_sm()
             .font(crate::fonts::font_ui())
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .child(dot)
             .child(label.to_string());
         let cell = if is_selected {
             cell.bg(Theme::color(t.raised))
                 .text_color(Theme::color(t.ink))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
         } else {
-            cell.text_color(Theme::color(t.mute))
+            cell.text_color(Theme::color(t.dim))
         };
         row = row.child(
             cell
@@ -53,7 +66,6 @@ pub fn segmented(
                 .on_click(move |_, window, cx| change(value.clone(), window, cx)),
         );
     }
-    let _ = px(0.0);
     row
 }
 

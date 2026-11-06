@@ -227,10 +227,73 @@ impl Theme {
     pub fn color(css: &str) -> Rgba {
         parse_color(css)
     }
+
+    /// Whether this is the dark theme (`g1` is the dark ground).
+    pub fn is_dark(&self) -> bool {
+        self.g1 == "#0b0c0e"
+    }
+
+    /// `--live`: the running accent (an hsl the CSS computes from `--live-h`).
+    pub fn live(&self) -> Rgba {
+        parse_color(self.live)
+    }
+
+    /// `--live-soft`: the accent at low alpha, for the active rail row.
+    pub fn live_soft(&self) -> Rgba {
+        parse_color(self.live_soft)
+    }
+}
+
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let hp = (h % 360.0) / 60.0;
+    let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
+    let (r, g, b) = if hp < 1.0 {
+        (c, x, 0.0)
+    } else if hp < 2.0 {
+        (x, c, 0.0)
+    } else if hp < 3.0 {
+        (0.0, c, x)
+    } else if hp < 4.0 {
+        (0.0, x, c)
+    } else if hp < 5.0 {
+        (x, 0.0, c)
+    } else {
+        (c, 0.0, x)
+    };
+    let m = l - c / 2.0;
+    (r + m, g + m, b + m)
 }
 
 fn parse_color(css: &str) -> Rgba {
     let css = css.trim();
+    // The two `color-mix` washes the shell draws (warn wash, dark and light):
+    // resolved by hand to the mix the CSS computes, so the wash is not ink.
+    if css == "color-mix(in srgb, var(--warn) 8%, var(--sunk))" {
+        // 8% #e8c02c over #070809.
+        return Rgba { r: 25.0 / 255.0, g: 22.0 / 255.0, b: 11.0 / 255.0, a: 1.0 };
+    }
+    if css == "color-mix(in srgb, var(--warn) 18%, var(--panel))" {
+        // 18% #9a6b00 over #ffffff.
+        return Rgba { r: 236.0 / 255.0, g: 227.0 / 255.0, b: 204.0 / 255.0, a: 1.0 };
+    }
+    if let Some(inner) = css.strip_prefix("hsl(").and_then(|s| s.strip_suffix(')')) {
+        // `hsl(var(--live-h) 78% 72%)` and `hsl(var(--live-h) 55% 55% / 0.16)`:
+        // `--live-h` is 215 in both themes.
+        let inner = inner.replace("var(--live-h)", "215");
+        let (main, alpha) = match inner.split_once('/') {
+            Some((m, a)) => (m, a.trim().parse::<f32>().unwrap_or(1.0)),
+            None => (inner.as_str(), 1.0),
+        };
+        let parts: Vec<&str> = main.split_whitespace().collect();
+        if parts.len() == 3 {
+            let h: f32 = parts[0].parse().unwrap_or(215.0);
+            let s: f32 = parts[1].trim_end_matches('%').parse().unwrap_or(0.0) / 100.0;
+            let l: f32 = parts[2].trim_end_matches('%').parse().unwrap_or(0.0) / 100.0;
+            let (r, g, b) = hsl_to_rgb(h, s, l);
+            return Rgba { r, g, b, a: alpha };
+        }
+    }
     if let Some(hex) = css.strip_prefix('#') {
         if hex.len() == 6 {
             if let Ok(v) = u32::from_str_radix(hex, 16) {

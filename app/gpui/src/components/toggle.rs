@@ -1,5 +1,6 @@
-//! `Toggle`, after `app/web/src/components/Toggle.tsx`: a switch. Clicking
-//! flips `checked`. The knob sits left when off, right when on.
+//! `Toggle`, after `app/web/src/components/Toggle.tsx` and the `.switch`
+//! rules in `app.css` re-skinned by `hardware.css`: a 40x22 slot, a 16 px
+//! knob, sunk when off and live when on, the knob travelling 18 px.
 
 use gpui::{IntoElement, Window, div, prelude::*, px};
 
@@ -13,24 +14,33 @@ pub fn toggle(
     on_change: impl Fn(bool, &mut Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
     let track = if checked {
-        Theme::color(t.a3)
+        t.live()
     } else {
-        Theme::color(t.raised)
+        Theme::color(t.sunk)
+    };
+    let knob_color = if checked {
+        Theme::color(t.on_accent)
+    } else {
+        Theme::color(t.dim)
     };
     let knob = div()
-        .size(px(14.0))
+        .size(px(16.0))
         .rounded_full()
-        .bg(Theme::color(t.knob_ring));
+        .bg(knob_color);
     let row = div()
         .id(gpui::SharedString::from(id.to_string()))
         .flex()
         .items_center()
-        .w(px(36.0))
-        .h(px(20.0))
-        .px_1()
+        .w(px(40.0))
+        .h(px(22.0))
+        .px(px(2.0))
         .rounded_full()
         .border_1()
-        .border_color(Theme::color(t.line_2))
+        .border_color(if checked {
+            Theme::color(t.sunk)
+        } else {
+            Theme::color(t.line)
+        })
         .bg(track)
         .cursor_pointer()
         .on_click(move |_, window, cx| on_change(!checked, window, cx));

@@ -22,10 +22,10 @@ use canvas_proto::fans::FansStatus;
 use gpui::{Context, IntoElement, Window, div, prelude::*, px};
 
 use crate::client::DaemonClient;
-use crate::components::button::{Variant, button};
+use crate::components::button::{Variant, button, button_icon};
 use crate::components::empty_state::empty_state;
 use crate::components::number_field::number_field;
-use crate::components::panel::{field, panel, state_dot};
+use crate::components::panel::{field, field_stack, state_dot};
 use crate::components::select::select;
 use crate::components::segmented::segmented;
 use crate::components::toggle::toggle;
@@ -342,11 +342,12 @@ impl DisplaysView {
         cx.notify();
     }
 
+    #[allow(dead_code)]
     pub fn connected_count(rows: &[DisplayStatus]) -> usize {
         rows.iter().filter(|r| r.info.connected).count()
     }
 
-    fn card(&self, row: &DisplayStatus, cx: &mut Context<Self>) -> impl IntoElement {
+    fn card(&self, row: &DisplayStatus, cx: &mut Context<Self>, content_w: f32) -> impl IntoElement {
         let t = &self.theme;
         let card = self.cards.get(&row.info.id.to_string());
         let draft = card.map(|c| c.draft.clone()).unwrap_or_else(|| row.config.clone());
@@ -406,12 +407,16 @@ impl DisplaysView {
         // Save / Stop in the card head.
         let save_entity = view_entity.clone();
         let save_id = id.clone();
-        let save_btn = button(
+        let save_btn = button_icon(
             t,
             &format!("{id}-save"),
             "Save",
             Variant::Primary,
             !dirty || busy,
+            false,
+            "FloppyDisk",
+            "bold",
+            16.0,
             move |_, _, cx| {
                 save_entity.update(cx, |this, cx| this.save(&save_id, cx));
             },
@@ -465,10 +470,14 @@ impl DisplaysView {
         } else {
             "RPM"
         };
+        // The readout: one 34x48 tile per digit (a blank tile for the unused
+        // leading digit), the decimal point in its own slot, and the unit.
+        // (React `.digit`, `.digit-dot-slot`, `.digit-unit` in app.css.)
         let readout = if preview.is_none() {
             div()
                 .flex()
-                .justify_center()
+                .items_center()
+                .min_h(px(48.0))
                 .child(
                     div()
                         .text_sm()
@@ -479,7 +488,8 @@ impl DisplaysView {
         } else if !fits {
             div()
                 .flex()
-                .justify_center()
+                .items_center()
+                .min_h(px(48.0))
                 .child(
                     div()
                         .text_sm()
@@ -488,43 +498,63 @@ impl DisplaysView {
                         .child("The number does not fit"),
                 )
         } else {
-            let mut row_cells = div()
-                .flex()
-                .items_baseline()
-                .gap_1()
-                .justify_center();
+            let mut row_cells = div().flex().items_center().gap_2().min_h(px(48.0));
             for (i, cell) in cells.iter().enumerate() {
-                row_cells = row_cells.child(
-                    div()
-                        .text_xl()
-                        .font_weight(gpui::FontWeight::BOLD)
-                        .font(crate::fonts::font_mono())
-                        .text_color(Theme::color(t.ink))
-                        .child(cell.unwrap_or(' ').to_string()),
-                );
+                let blank = cell.is_none();
+                let tile = div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(34.0))
+                    .h(px(48.0))
+                    .rounded_md()
+                    .text_xl()
+                    .font(crate::fonts::font_mono())
+                    .text_color(Theme::color(t.ink))
+                    .child(cell.unwrap_or(' ').to_string());
+                let tile = if blank {
+                    tile.border_1()
+                        .border_color(Theme::color(t.line))
+                } else {
+                    tile.border_1()
+                        .border_color(Theme::color(t.line_2))
+                        .bg(Theme::color(t.sunk))
+                };
+                row_cells = row_cells.child(tile);
                 if dot && i == cells.len().saturating_sub(2) {
                     row_cells = row_cells.child(
                         div()
-                            .size(px(4.0))
-                            .rounded_full()
-                            .bg(Theme::color(t.ink)),
+                            .flex()
+                            .items_end()
+                            .justify_center()
+                            .w(px(5.0))
+                            .h(px(48.0))
+                            .pb(px(14.0))
+                            .child(div().size(px(5.0)).rounded_full().bg(Theme::color(t.ink))),
                     );
                 }
             }
             row_cells.child(
                 div()
-                    .text_base()
+                    .pb_2()
                     .font(crate::fonts::font_mono())
                     .text_color(Theme::color(t.mute))
                     .child(mark.to_string()),
             )
         };
 
-        // The "Now" line.
-        let now = match &row.shown {
+        // The "Now" line: the NOW label, then what the display shows now
+        // (React `.readout-now`), or "not driven" when it is blank.
+        let now_text = match &row.shown {
             Some(shown) => {
                 let value = match shown.value {
-                    Some(v) => format!("{v}"),
+                    Some(v) => {
+                        if shown.mode == canvas_proto::display::DisplayMode::Temperature && draft.decimals == 1 {
+                            format!("{v:.1}")
+                        } else {
+                            format!("{v:.0}")
+                        }
+                    }
                     None => "—".to_string(),
                 };
                 let unit = if shown.mode == canvas_proto::display::DisplayMode::Temperature {
@@ -533,10 +563,30 @@ impl DisplaysView {
                     "RPM"
                 };
                 let blink = if shown.blink { " · blinking" } else { "" };
-                format!("Now {value} {unit}{blink}")
+                format!("{value} {unit}{blink}")
             }
-            None => "Now not driven".to_string(),
+            None => "not driven".to_string(),
         };
+        let now = div()
+            .flex()
+            .items_baseline()
+            .gap_1()
+            .mt_3()
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .font(crate::fonts::font_ui())
+                    .text_color(Theme::color(t.mute))
+                    .child("NOW"),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .font(crate::fonts::font_ui())
+                    .text_color(Theme::color(t.dim))
+                    .child(now_text),
+            );
         let note = format!(
             "{} digits · {} decimal{}",
             row.info.digits,
@@ -554,6 +604,7 @@ impl DisplaysView {
             &option_refs,
             &source_key(&draft.source),
             select_open,
+            content_w < 640.0,
             {
                 let entity = sel_entity.clone();
                 let id = sel_id.clone();
@@ -587,54 +638,53 @@ impl DisplaysView {
             },
         );
 
-        let controls_head = div()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .child(field(t, &format!("{id}-source-field"), "Source", source_select));
-
-        let controls = if matches!(draft.source, DisplaySource::Fixed { .. }) {
+        // Layout mode from the content box (React @container page): wide
+        // (>= 1000) is the two-column grid, phone (< 640) stacks label over
+        // control, and between the fields are rows with a divider.
+        let stacked = content_w >= 1000.0 || content_w < 640.0;
+        let source_field = if stacked {
+            field_stack(t, &format!("{id}-source-field"), "Source", source_select)
+        } else {
+            field(t, &format!("{id}-source-field"), "Source", source_select)
+        };
+        let value_field: Option<gpui::Stateful<gpui::Div>> = if matches!(draft.source, DisplaySource::Fixed { .. }) {
             let fixed_value = match draft.source {
                 DisplaySource::Fixed { value } => value,
                 _ => 0.0,
             };
             let entity = view_entity.clone();
-            let id = id.clone();
-            controls_head.child(field(
+            let closure_id = id.clone();
+            let control = number_field(
                 t,
-                &format!("{id}-value-field"),
-                "Value",
-                number_field(
-                    t,
-                    &format!("{id}-fixed"),
-                    fixed_value,
-                    0.0,
-                    9999.0,
-                    1.0,
-                    None,
-                    move |v, _, cx| {
-                        entity
-                            .update(cx, |this, cx| {
-                                if let Some(card) = this.cards.get_mut(&id) {
-                                    card.draft.source = DisplaySource::Fixed { value: v };
-                                    card.error = None;
-                                }
-                                cx.notify();
-                            });
-                    },
-                ),
-            ))
+                &format!("{id}-fixed"),
+                fixed_value,
+                0.0,
+                9999.0,
+                1.0,
+                None,
+                move |v, _, cx| {
+                    entity
+                        .update(cx, |this, cx| {
+                            if let Some(card) = this.cards.get_mut(&closure_id) {
+                                card.draft.source = DisplaySource::Fixed { value: v };
+                                card.error = None;
+                            }
+                            cx.notify();
+                        });
+                },
+            );
+            Some(if stacked {
+                field_stack(t, &format!("{id}-value-field"), "Value", control)
+            } else {
+                field(t, &format!("{id}-value-field"), "Value", control)
+            })
         } else {
-            controls_head
+            None
         };
 
         let unit_entity = view_entity.clone();
         let unit_id = id.clone();
-        let unit = field(
-            t,
-            &format!("{id}-unit-field"),
-            "Unit",
-            segmented(
+        let unit_control = segmented(
                 t,
                 &format!("{id}-unit"),
                 &[("celsius", "°C"), ("fahrenheit", "°F")],
@@ -653,16 +703,16 @@ impl DisplaysView {
                             cx.notify();
                         });
                 },
-            ),
-        );
+            );
+        let unit = if stacked {
+            field_stack(t, &format!("{id}-unit-field"), "Unit", unit_control)
+        } else {
+            field(t, &format!("{id}-unit-field"), "Unit", unit_control)
+        };
 
         let dec_entity = view_entity.clone();
         let dec_id = id.clone();
-        let decimals = field(
-            t,
-            &format!("{id}-decimals-field"),
-            "Decimals",
-            segmented(
+        let decimals_control = segmented(
                 t,
                 &format!("{id}-decimals"),
                 &[("0", "0"), ("1", "1")],
@@ -677,17 +727,17 @@ impl DisplaysView {
                             cx.notify();
                         });
                 },
-            ),
-        );
+            );
+        let decimals = if stacked {
+            field_stack(t, &format!("{id}-decimals-field"), "Decimals", decimals_control)
+        } else {
+            field(t, &format!("{id}-decimals-field"), "Decimals", decimals_control)
+        };
 
         let blink_entity = view_entity.clone();
         let blink_id = id.clone();
         let blink_on = draft.blink_above.is_some();
-        let blink = field(
-            t,
-            &format!("{id}-blink-field"),
-            "Blink at",
-            toggle(t, &format!("{id}-blink"), blink_on, move |on, _, cx| {
+        let blink_control = toggle(t, &format!("{id}-blink"), blink_on, move |on, _, cx| {
                 blink_entity
                     .update(cx, |this, cx| {
                         if let Some(card) = this.cards.get_mut(&blink_id) {
@@ -696,9 +746,31 @@ impl DisplaysView {
                         }
                         cx.notify();
                     });
-            }),
-        );
-        let controls = controls.child(unit).child(decimals).child(blink);
+            });
+        let blink = if stacked {
+            field_stack(t, &format!("{id}-blink-field"), "Blink at", blink_control)
+        } else {
+            field(t, &format!("{id}-blink-field"), "Blink at", blink_control)
+        };
+        // Assemble the controls: wide is two columns (Source | Unit,
+        // Decimals | Blink), otherwise one column.
+        let controls = if content_w >= 1000.0 {
+            let mut left = div().flex().flex_col().flex_1().gap_1().child(source_field).child(decimals);
+            if let Some(v) = value_field {
+                left = left.child(v);
+            }
+            let mut right = div().flex().flex_col().flex_1().gap_1().child(unit).child(blink);
+            if blink_on {
+                right = right.child(div().w(px(160.0)));
+            }
+            div().flex().gap_6().child(left).child(right)
+        } else {
+            let mut col = div().flex().flex_col().child(source_field);
+            if let Some(v) = value_field {
+                col = col.child(v);
+            }
+            col.child(unit).child(decimals).child(blink)
+        };
         let controls = if blink_on {
             let entity = view_entity.clone();
             let id = id.clone();
@@ -740,111 +812,133 @@ impl DisplaysView {
             None => controls,
         };
 
-        panel(
-            t,
-            &format!("display-{id}"),
-            &row.info.name,
-            actions,
+        // The card: panel chrome with the hardware title (mono, uppercase,
+        // spaced), the head row (state + Save/Stop/Unsaved), the vendor
+        // notice when blocked, and the readout beside the controls.
+        let title = div()
+            .text_sm()
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .font(crate::fonts::font_mono())
+            .text_color(Theme::color(t.mute))
+            .child(row.info.name.to_uppercase());
+        let head = if content_w < 640.0 {
+            // Phone: the title takes its own line, the state and keys below.
             div()
                 .flex()
                 .flex_col()
-                .gap_3()
-                .child(if blocked_by.is_some() {
-                    // The slot keeps the notice's height in every state (the
-                    // notice is the full-width warn box when blocked).
-                    let by = blocked_by.clone().unwrap();
-                    div()
-                        .flex()
-                        .gap_2()
-                        .p_2()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(Theme::color(t.warn))
-                        .bg(Theme::color(t.warn_wash))
-                        .text_sm()
-                        .font(crate::fonts::font_ui())
-                        .text_color(Theme::color(t.ink))
-                        .child(
-                            gpui::svg()
-                                .path("icons/WarningOctagon.svg")
-                                .size_4()
-                                .text_color(Theme::color(t.warn)),
-                        )
-                        .child(format!(
-                            "{by} is running, so canvas-rgb leaves the display alone until it closes."
-                        ))
-                } else {
-                    div().w_full().min_h(px(32.0))
-                })
+                .gap_2()
+                .mb_2()
+                .child(title)
+                .child(actions)
+        } else {
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .mb_2()
+                .child(title)
+                .child(actions)
+        };
+        let blocked_notice = if blocked_by.is_some() {
+            let by = blocked_by.clone().unwrap();
+            div()
+                .flex()
+                .gap_2()
+                .p_2()
+                .rounded_md()
+                .border_1()
+                .border_color(Theme::color(t.warn))
+                .bg(Theme::color(t.warn_wash))
+                .text_sm()
+                .font(crate::fonts::font_ui())
+                .text_color(Theme::color(t.ink))
                 .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .font(crate::fonts::font_ui())
-                                        .text_color(Theme::color(t.mute))
-                                        .child("Preview"),
-                                )
-                                .child(readout)
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font(crate::fonts::font_ui())
-                                        .text_color(Theme::color(t.dim))
-                                        .child(now),
-                                )
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font(crate::fonts::font_mono())
-                                        .text_color(Theme::color(t.mute))
-                                        .child(note),
-                                ),
-                        )
+                    gpui::svg()
+                        .path("icons/WarningOctagon-fill.svg")
+                        .size_4()
+                        .text_color(Theme::color(t.warn)),
                 )
-                .child(controls),
-        )
+                .child(format!(
+                    "{by} is running, so canvas-rgb leaves the display alone until it closes."
+                ))
+        } else {
+            // Idle: no notice, no reserved height in this view (React's
+            // displays override zeroes the slot's min-height).
+            div()
+        };
+        let readout_col = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .font(crate::fonts::font_ui())
+                    .text_color(Theme::color(t.mute))
+                    .child("PREVIEW"),
+            )
+            .child(readout)
+            .child(now)
+            .child(
+                div()
+                    .mt_3()
+                    .text_sm()
+                    .font(crate::fonts::font_mono())
+                    .text_color(Theme::color(t.mute))
+                    .child(note),
+            );
+        let body = if content_w < 640.0 {
+            // Phone: one column, readout above controls.
+            div()
+                .flex()
+                .flex_col()
+                .gap_4()
+                .child(readout_col)
+                .child(controls)
+        } else {
+            // The readout keeps the left of the card (240–300 px); the
+            // controls take the rest (React `.display-card`).
+            div()
+                .flex()
+                .gap_5()
+                .items_start()
+                .child(div().w(px(300.0)).child(readout_col))
+                .child(div().flex_1().child(controls))
+        };
+        div()
+            .id(gpui::SharedString::from(format!("display-{id}")))
+            .flex()
+            .flex_col()
+            .p_4()
+            .rounded_lg()
+            .border_1()
+            .border_color(Theme::color(t.line))
+            .bg(Theme::color(t.panel))
+            .child(head)
+            .child(blocked_notice)
+            .child(body)
     }
 }
 
 impl Render for DisplaysView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = &self.theme;
-        let title = div()
-            .flex()
-            .items_baseline()
-            .gap_3()
-            .child(
-                div()
-                    .text_lg()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .font(crate::fonts::font_ui())
-                    .text_color(Theme::color(t.ink))
-                    .child("Displays"),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .font(crate::fonts::font_ui())
-                    .text_color(Theme::color(t.mute))
-                    .child(format!("{} connected", Self::connected_count(&self.rows))),
-            );
-        let mut page = div()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .p_4()
-            .size_full()
-            .bg(Theme::color(t.g1))
-            .child(title);
+        // The content box width (window minus rail and content padding),
+        // which is what React's @container page rules measure.
+        let win_w = f32::from(window.window_bounds().get_bounds().size.width);
+        let rail_w = if win_w <= 720.0 {
+            0.0
+        } else if win_w < 1280.0 {
+            64.0
+        } else {
+            200.0
+        };
+        let content_w = win_w - rail_w - if win_w <= 720.0 { 32.0 } else { 48.0 };
+        // The page title lives in the strip (Shell), not here.
+        let mut page = div().flex().flex_col().gap_4();
         if let Some(stale) = &self.stale_error {
             page = page.child(
                 div()
@@ -974,7 +1068,7 @@ impl Render for DisplaysView {
                 let rows = self.rows.clone();
                 let mut grid = div().flex().flex_col().gap_4();
                 for row in &rows {
-                    grid = grid.child(self.card(row, cx));
+                    grid = grid.child(self.card(row, cx, content_w));
                 }
                 page = page.child(grid);
             }
