@@ -125,6 +125,9 @@ pub struct App {
     /// The preview render slots. A preview renders up to 30 s of a blocking thread, so at most
     /// [`crate::api::editor::PREVIEW_CONCURRENT`] run at once and the rest answer 503.
     pub preview_slots: Arc<tokio::sync::Semaphore>,
+    /// Fakes mode (#199, debug builds only): the daemon talks only to fakes. The
+    /// auth guard reads it to accept the UI-capture origin (#200) only here.
+    pub fakes: bool,
 }
 
 /// The fan config the daemon keeps a copy of.
@@ -204,6 +207,7 @@ impl App {
             import_seam: Mutex::new(None),
             input_source: Mutex::new(None),
             preview_slots: Arc::new(tokio::sync::Semaphore::new(crate::api::editor::PREVIEW_CONCURRENT)),
+            fakes: false,
             store: tokio::sync::RwLock::new(store),
             engine,
             adapter: Arc::new(tokio::sync::Mutex::new(adapter as Box<dyn DeviceAdapter>)),

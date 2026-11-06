@@ -206,7 +206,9 @@ async fn daemon_main(fakes: bool) -> Exit {
             token,
             canvas_daemon::version(),
             quit_tx,
-            Box::new(canvas_daemon::displays::NoDisplays),
+            // Only fakes mode reaches this branch (the real display is used otherwise): an
+            // in-memory display, so the Displays view has one to show (#200).
+            Box::new(canvas_daemon::fakes::FakeNumericDisplay::default()),
         )
         .with_peripherals(peripherals)
     };
@@ -219,6 +221,7 @@ async fn daemon_main(fakes: bool) -> Exit {
         let persisted_pick = app_inner.inputs.requested();
         app_inner.inputs = Arc::new(canvas_daemon::capture::DaemonInputs::disabled());
         app_inner.inputs.set_requested(persisted_pick);
+        app_inner.fakes = true;
     }
     let app = Arc::new(app_inner);
     if fakes {
