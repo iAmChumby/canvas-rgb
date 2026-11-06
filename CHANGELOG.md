@@ -6,6 +6,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-11-06
+
 ### Fixed
 
 - Effects and Peripherals: a failed change no longer disappears when a later read succeeds. The message that the change did not reach the effect or the device stays on screen until the next attempt, and each peripheral keeps its own message, so one device's read cannot hide another device's failure. Edits made while a device is being read are no longer dropped when that read lands, and a change you started on one device can no longer be sent to another device you switched to. (#156)
@@ -206,7 +208,8 @@ The first release.
 - Settings for the Attack Shark X6 mouse and the 8BitDo Ultimate 2 controller.
 - The editor, the tray app, the `canvas-rgb` CLI and the Windows installer.
 
-[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.3...HEAD
+[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.4...HEAD
+[0.8.4]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.0...v0.8.1
