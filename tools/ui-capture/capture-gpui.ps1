@@ -22,8 +22,11 @@ param(
     [string[]]$Pages = @('displays', 'layout'),
     [string[]]$Themes = @('dark', 'light'),
     [string[]]$Sizes = @('1920x1040', '1440x900', '1280x860', '1024x768', '960x1032', '390x844'),
-    [string]$EditorExe = ''
+    [string]$EditorExe = '',
+    # The fake daemon's API port (tools/run-fake-daemon.ps1 -ApiPort; default 19430).
+    [ValidateRange(1, 65535)][int]$ApiPort = 19430
 )
+if ($ApiPort -eq 9430) { throw "-ApiPort 9430 is the real daemon's port; captures run only against the fakes" }
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -52,8 +55,14 @@ public static class Win32Capture {
 
 $SWP_NOACTIVATE = 0x0010
 $PW_RENDERFULLCONTENT = 0x00000002
-# The editor reads the token from CANVAS_RGB_HOME in debug (the fakes' home).
-if (-not $env:CANVAS_RGB_HOME) { $env:CANVAS_RGB_HOME = Join-Path $root '.build\fake-home' }
+# The editor reads the token from CANVAS_RGB_HOME in debug (the fakes' home) and talks to
+# CANVAS_RGB_TEST_API_PORT. Both are set here, always: without the port the editor reached
+# the real daemon on 9430 (#239).
+$env:CANVAS_RGB_HOME = Join-Path $root '.build\fake-home'
+$env:CANVAS_RGB_TEST_API_PORT = "$ApiPort"
+if (-not (Get-NetTCPConnection -State Listen -LocalPort $ApiPort -ErrorAction SilentlyContinue)) {
+  throw "no fake daemon is listening on ${ApiPort}: start it with tools/run-fake-daemon.ps1"
+}
 
 $saved = 0
 foreach ($theme in $Themes) {

@@ -71,6 +71,12 @@ fn daemon_message(body: &str, status: u16) -> String {
 }
 
 fn token_for(base: &str) -> Result<String, ClientError> {
+    #[cfg(debug_assertions)]
+    if test_home_on_real_port(std::env::var_os("CANVAS_RGB_HOME").is_some(), base) {
+        return Err(ClientError::NotTrusted(format!(
+            "CANVAS_RGB_HOME points at a test home but the API base is {base}, the real daemon:              set CANVAS_RGB_TEST_API_PORT to the fake daemon's port"
+        )));
+    }
     peer::check_base(base)
         .map_err(|refusal| ClientError::NotTrusted(refusal.message()))?;
     // `canvas_client::token::read_token` checks the fixed port 9430 and reads the real
@@ -84,6 +90,18 @@ fn token_for(base: &str) -> Result<String, ClientError> {
         return Err(ClientError::Token(format!("{} is empty", path.display())));
     }
     Ok(jwt)
+}
+
+/// A test home (`CANVAS_RGB_HOME`) with the real API port: a debug run meant for the fakes
+/// that would talk to the owner's real daemon. Refused before anything is sent (#239).
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
+fn test_home_on_real_port(home_set: bool, base: &str) -> bool {
+    let port = base
+        .trim_end_matches('/')
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse::<u16>().ok());
+    home_set && port.is_none_or(|p| p == consts::API_PORT)
 }
 
 /// The token file. In debug builds a fakes daemon's home (`CANVAS_RGB_HOME`, see
@@ -183,6 +201,17 @@ impl DaemonClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #239: a capture run set the fakes' home but not the test port, and the editor
+    /// talked to the real daemon on 9430. A test home with the real port is refused.
+    #[test]
+    fn a_test_home_never_talks_to_the_real_port() {
+        assert!(test_home_on_real_port(true, "http://127.0.0.1:9430"));
+        assert!(test_home_on_real_port(true, "http://127.0.0.1:9430/"));
+        assert!(test_home_on_real_port(true, "http://localhost"));
+        assert!(!test_home_on_real_port(true, "http://127.0.0.1:19430"));
+        assert!(!test_home_on_real_port(false, "http://127.0.0.1:9430"));
+    }
 
     #[test]
     fn daemon_message_prefers_the_daemon_text() {
