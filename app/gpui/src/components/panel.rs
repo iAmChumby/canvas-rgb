@@ -42,7 +42,7 @@ pub fn panel(
                     div()
                         .text_sm()
                         .font_weight(gpui::FontWeight::MEDIUM)
-                        .font(crate::fonts::font_mono())
+                        .font_family(crate::fonts::MONO_FAMILY)
                         .text_color(Theme::color(t.mute))
                         .child(title.to_uppercase()),
                 )
@@ -69,7 +69,7 @@ pub fn field(t: &Theme, id: &str, label: &str, control: impl IntoElement) -> gpu
             div()
                 .flex_1()
                 .text_sm()
-                .font(crate::fonts::font_ui())
+                .font_family(crate::fonts::UI_FAMILY)
                 .text_color(Theme::color(t.dim))
                 .child(label.to_string()),
         )
@@ -94,7 +94,7 @@ pub fn field_stack(t: &Theme, id: &str, label: &str, control: impl IntoElement) 
         .child(
             div()
                 .text_sm()
-                .font(crate::fonts::font_ui())
+                .font_family(crate::fonts::UI_FAMILY)
                 .text_color(Theme::color(t.dim))
                 .child(label.to_string()),
         )
@@ -124,7 +124,7 @@ pub fn state_dot(t: &Theme, tone: &str, words: &str) -> impl IntoElement {
         .child(
             div()
                 .text_sm()
-                .font(crate::fonts::font_ui())
+                .font_family(crate::fonts::UI_FAMILY)
                 .text_color(Theme::color(t.dim))
                 .child(words.to_string()),
         )

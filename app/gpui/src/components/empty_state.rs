@@ -30,14 +30,14 @@ pub fn empty_state(
             div()
                 .text_lg()
                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                .font(crate::fonts::font_ui())
+                .font_family(crate::fonts::UI_FAMILY)
                 .text_color(Theme::color(t.ink))
                 .child(title.to_string()),
         )
         .child(
             div()
                 .text_sm()
-                .font(crate::fonts::font_ui())
+                .font_family(crate::fonts::UI_FAMILY)
                 .text_color(Theme::color(t.dim))
                 .child(body.to_string()),
         );

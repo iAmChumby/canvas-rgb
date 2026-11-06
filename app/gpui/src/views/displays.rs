@@ -455,7 +455,7 @@ impl DisplaysView {
             actions.child(
                 div()
                     .text_sm()
-                    .font(crate::fonts::font_ui())
+                    .font_family(crate::fonts::UI_FAMILY)
                     .text_color(Theme::color(t.mute))
                     .child("Unsaved"),
             )
@@ -481,7 +481,7 @@ impl DisplaysView {
                 .child(
                     div()
                         .text_sm()
-                        .font(crate::fonts::font_ui())
+                        .font_family(crate::fonts::UI_FAMILY)
                         .text_color(Theme::color(t.mute))
                         .child("No reading yet"),
                 )
@@ -493,7 +493,7 @@ impl DisplaysView {
                 .child(
                     div()
                         .text_sm()
-                        .font(crate::fonts::font_ui())
+                        .font_family(crate::fonts::UI_FAMILY)
                         .text_color(Theme::color(t.mute))
                         .child("The number does not fit"),
                 )
@@ -509,7 +509,7 @@ impl DisplaysView {
                     .h(px(48.0))
                     .rounded_md()
                     .text_xl()
-                    .font(crate::fonts::font_mono())
+                    .font_family(crate::fonts::MONO_FAMILY)
                     .text_color(Theme::color(t.ink))
                     .child(cell.unwrap_or(' ').to_string());
                 let tile = if blank {
@@ -537,7 +537,7 @@ impl DisplaysView {
             row_cells.child(
                 div()
                     .pb_2()
-                    .font(crate::fonts::font_mono())
+                    .font_family(crate::fonts::MONO_FAMILY)
                     .text_color(Theme::color(t.mute))
                     .child(mark.to_string()),
             )
@@ -576,14 +576,14 @@ impl DisplaysView {
                 div()
                     .text_sm()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .font(crate::fonts::font_ui())
+                    .font_family(crate::fonts::UI_FAMILY)
                     .text_color(Theme::color(t.mute))
                     .child("NOW"),
             )
             .child(
                 div()
                     .text_sm()
-                    .font(crate::fonts::font_ui())
+                    .font_family(crate::fonts::UI_FAMILY)
                     .text_color(Theme::color(t.dim))
                     .child(now_text),
             );
@@ -805,7 +805,7 @@ impl DisplaysView {
             Some(message) => controls.child(
                 div()
                     .text_sm()
-                    .font(crate::fonts::font_ui())
+                    .font_family(crate::fonts::UI_FAMILY)
                     .text_color(Theme::color(t.down))
                     .child(message),
             ),
@@ -818,7 +818,7 @@ impl DisplaysView {
         let title = div()
             .text_sm()
             .font_weight(gpui::FontWeight::MEDIUM)
-            .font(crate::fonts::font_mono())
+            .font_family(crate::fonts::MONO_FAMILY)
             .text_color(Theme::color(t.mute))
             .child(row.info.name.to_uppercase());
         let head = if content_w < 640.0 {
@@ -852,7 +852,7 @@ impl DisplaysView {
                 .border_color(Theme::color(t.warn))
                 .bg(Theme::color(t.warn_wash))
                 .text_sm()
-                .font(crate::fonts::font_ui())
+                .font_family(crate::fonts::UI_FAMILY)
                 .text_color(Theme::color(t.ink))
                 .child(
                     gpui::svg()
@@ -876,7 +876,7 @@ impl DisplaysView {
                 div()
                     .text_sm()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .font(crate::fonts::font_ui())
+                    .font_family(crate::fonts::UI_FAMILY)
                     .text_color(Theme::color(t.mute))
                     .child("PREVIEW"),
             )
@@ -886,7 +886,7 @@ impl DisplaysView {
                 div()
                     .mt_3()
                     .text_sm()
-                    .font(crate::fonts::font_mono())
+                    .font_family(crate::fonts::MONO_FAMILY)
                     .text_color(Theme::color(t.mute))
                     .child(note),
             );
@@ -950,13 +950,13 @@ impl Render for DisplaysView {
                     .border_color(Theme::color(t.warn))
                     .bg(Theme::color(t.warn_wash))
                     .text_sm()
-                    .font(crate::fonts::font_ui())
+                    .font_family(crate::fonts::UI_FAMILY)
                     .text_color(Theme::color(t.ink))
                     .child("The displays may be out of date.")
                     .child(
                         div()
                             .text_sm()
-                            .font(crate::fonts::font_mono())
+                            .font_family(crate::fonts::MONO_FAMILY)
                             .text_color(Theme::color(t.mute))
                             .child(stale.clone()),
                     ),
@@ -974,7 +974,7 @@ impl Render for DisplaysView {
                         .child(
                             div()
                                 .text_sm()
-                                .font(crate::fonts::font_ui())
+                                .font_family(crate::fonts::UI_FAMILY)
                                 .text_color(Theme::color(t.mute))
                                 .child("Reading the displays"),
                         ),
@@ -1043,14 +1043,14 @@ impl Render for DisplaysView {
                             div()
                                 .text_lg()
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .font(crate::fonts::font_ui())
+                                .font_family(crate::fonts::UI_FAMILY)
                                 .text_color(Theme::color(t.ink))
                                 .child("The displays could not be read"),
                         )
                         .child(
                             div()
                                 .text_sm()
-                                .font(crate::fonts::font_ui())
+                                .font_family(crate::fonts::UI_FAMILY)
                                 .text_color(Theme::color(t.dim))
                                 .child("canvas-rgb could not read the displays. The lights are unaffected."),
                         )
@@ -1058,7 +1058,7 @@ impl Render for DisplaysView {
                         .child(
                             div()
                                 .text_sm()
-                                .font(crate::fonts::font_mono())
+                                .font_family(crate::fonts::MONO_FAMILY)
                                 .text_color(Theme::color(t.mute))
                                 .child(message.clone()),
                         ),

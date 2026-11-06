@@ -73,7 +73,7 @@ fn base(
         .bg(bg)
         .text_color(fg)
         .text_sm()
-        .font(crate::fonts::font_ui());
+        .font_family(crate::fonts::UI_FAMILY);
     if small {
         el.h(px(28.0)).px(px(10.0))
     } else {

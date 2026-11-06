@@ -399,14 +399,14 @@ impl Shell {
             .items_center()
             .text_base()
             .font_weight(gpui::FontWeight::SEMIBOLD)
-            .font(crate::fonts::font_ui())
+            .font_family(crate::fonts::UI_FAMILY)
             .text_color(Theme::color(t.ink))
             .child("c")
             .child(self.easel(10.0))
             .child("nvas")
             .child(
                 div()
-                    .font(crate::fonts::font_mono())
+                    .font_family(crate::fonts::MONO_FAMILY)
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(t.live())
                     .child("rgb"),
@@ -417,7 +417,7 @@ impl Shell {
         let t = &self.theme;
         let mono = div()
             .text_sm()
-            .font(crate::fonts::font_mono())
+            .font_family(crate::fonts::MONO_FAMILY)
             .text_color(Theme::color(t.mute));
         match page {
             "layout" => values.layout.clone().map(|v| mono.child(v)),
@@ -433,7 +433,7 @@ impl Shell {
                     .items_center()
                     .gap_1()
                     .text_sm()
-                    .font(crate::fonts::font_ui())
+                    .font_family(crate::fonts::UI_FAMILY)
                     .text_color(Theme::color(t.dim))
                     .child(div().size(px(5.0)).rounded_full().bg(led))
                     .child(v)
@@ -442,11 +442,11 @@ impl Shell {
                 div()
                     .flex()
                     .text_sm()
-                    .font(crate::fonts::font_mono())
+                    .font_family(crate::fonts::MONO_FAMILY)
                     .text_color(Theme::color(t.mute))
                     .child(
                         div()
-                            .font(crate::fonts::font_mono())
+                            .font_family(crate::fonts::MONO_FAMILY)
                             .text_color(Theme::color(t.ok))
                             .child(connected.to_string()),
                     )
@@ -474,7 +474,7 @@ impl Shell {
             .rounded_md()
             .text_sm()
             .font_weight(gpui::FontWeight::MEDIUM)
-            .font(crate::fonts::font_ui())
+            .font_family(crate::fonts::UI_FAMILY)
             .text_color(Theme::color(t.ink))
             .child(gpui::svg().path(glyph_name).size_4().text_color(glyph_color))
             .child(
@@ -539,7 +539,7 @@ impl Shell {
                 .rounded_md()
                 .text_sm()
                 .font_weight(gpui::FontWeight::MEDIUM)
-                .font(crate::fonts::font_ui())
+                .font_family(crate::fonts::UI_FAMILY)
                 .child(div().size(px(5.0)).rounded_full().bg(if selected { t.live() } else { Theme::color(t.dot) }))
                 .child(label.to_string());
             let cell = if selected {
@@ -595,16 +595,16 @@ impl Shell {
                                 .truncate()
                                 .text_base()
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .font(crate::fonts::font_ui())
+                                .font_family(crate::fonts::UI_FAMILY)
                                 .text_color(Theme::color(t.ink))
                                 .child(active_name),
                         )
                         .child(match devices {
                             Some(n) => div()
                                 .text_sm()
-                                .font(crate::fonts::font_ui())
+                                .font_family(crate::fonts::UI_FAMILY)
                                 .text_color(Theme::color(t.mute))
-                                .child(div().flex().child(div().font(crate::fonts::font_mono()).child(n.to_string())).child(" devices")),
+                                .child(div().flex().child(div().font_family(crate::fonts::MONO_FAMILY).child(n.to_string())).child(" devices")),
                             None => div(),
                         }),
                 )
@@ -642,7 +642,7 @@ impl Shell {
                                 .bg(Theme::color(t.raised))
                                 .text_sm()
                                 .font_weight(gpui::FontWeight::MEDIUM)
-                                .font(crate::fonts::font_ui())
+                                .font_family(crate::fonts::UI_FAMILY)
                                 .text_color(Theme::color(t.ink))
                                 .child(div().size(px(5.0)).rounded_full().bg(if paused { Theme::color(t.warn) } else { Theme::color(t.dot) }))
                                 .child(if paused { "Resume".to_string() } else { "Pause".to_string() })
@@ -687,7 +687,7 @@ impl Shell {
                             div()
                                 .w(px(38.0))
                                 .text_sm()
-                                .font(crate::fonts::font_mono())
+                                .font_family(crate::fonts::MONO_FAMILY)
                                 .text_color(Theme::color(t.dim))
                                 .child(if known { format!("{brightness}%") } else { "—".to_string() }),
                         ),
@@ -732,18 +732,18 @@ impl Shell {
                         .flex_col()
                         .gap_1()
                         .w(px(70.0))
-                        .child(div().text_sm().font(crate::fonts::font_ui()).text_color(Theme::color(t.mute)).child(label.to_string()))
+                        .child(div().text_sm().font_family(crate::fonts::UI_FAMILY).text_color(Theme::color(t.mute)).child(label.to_string()))
                         .child(
                             div()
                                 .flex()
                                 .items_baseline()
-                                .font(crate::fonts::font_mono())
+                                .font_family(crate::fonts::MONO_FAMILY)
                                 .text_color(Theme::color(t.ink))
                                 .child(match value {
                                     Some(v) => format!("{v:.0}"),
                                     None => "—".to_string(),
                                 })
-                                .child(div().ml(px(3.0)).text_sm().font(crate::fonts::font_ui()).text_color(Theme::color(t.mute)).child(unit.to_string())),
+                                .child(div().ml(px(3.0)).text_sm().font_family(crate::fonts::UI_FAMILY).text_color(Theme::color(t.mute)).child(unit.to_string())),
                         )
                         .child(bar),
                 );
@@ -809,7 +809,7 @@ impl Shell {
                         div()
                             .flex_1()
                             .text_sm()
-                            .font(crate::fonts::font_mono())
+                            .font_family(crate::fonts::MONO_FAMILY)
                             .text_color(Theme::color(t.mute))
                             .child(
                                 self.status
@@ -834,7 +834,7 @@ impl Shell {
                     .h(px(28.0))
                     .px(px(10.0))
                     .text_sm()
-                    .font(crate::fonts::font_mono())
+                    .font_family(crate::fonts::MONO_FAMILY)
                     .text_color(Theme::color(t.mute))
                     .child(div().size(px(5.0)).rounded_full().bg(engine_color))
                     .child(
@@ -944,7 +944,7 @@ impl Shell {
                 .py_1()
                 .px_1()
                 .text_sm()
-                .font(crate::fonts::font_ui())
+                .font_family(crate::fonts::UI_FAMILY)
                 .text_color(Theme::color(t.ink))
                 .child(gpui::svg().path(glyph_name).size_4().text_color(if active { t.live() } else { Theme::color(t.dim) }));
             let cell = if active {
@@ -955,7 +955,7 @@ impl Shell {
                     .child(
                         div()
                             .text_sm()
-                            .font(crate::fonts::font_ui())
+                            .font_family(crate::fonts::UI_FAMILY)
                             .text_color(Theme::color(t.ink))
                             .child(label.to_string()),
                     )
@@ -1035,7 +1035,7 @@ impl Shell {
                     div()
                         .text_xl()
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .font(crate::fonts::font_ui())
+                        .font_family(crate::fonts::UI_FAMILY)
                         .text_color(Theme::color(t.ink))
                         .child(title_text.to_string()),
                 ),
@@ -1044,7 +1044,7 @@ impl Shell {
             inner = inner.child(
                 div()
                     .text_sm()
-                    .font(crate::fonts::font_mono())
+                    .font_family(crate::fonts::MONO_FAMILY)
                     .text_color(Theme::color(t.mute))
                     .child(context_text),
             );
@@ -1070,14 +1070,14 @@ impl Shell {
                             .child(
                                 div()
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .font(crate::fonts::font_ui())
+                                    .font_family(crate::fonts::UI_FAMILY)
                                     .text_color(Theme::color(t.ink))
                                     .child(now_name.clone()),
                             )
                             .child(
                                 div()
                                     .text_sm()
-                                    .font(crate::fonts::font_ui())
+                                    .font_family(crate::fonts::UI_FAMILY)
                                     .text_color(Theme::color(t.mute))
                                     .child(now_detail.clone()),
                             ),
@@ -1094,7 +1094,7 @@ impl Shell {
             mark_row.child(
                 div()
                     .text_sm()
-                    .font(crate::fonts::font_ui())
+                    .font_family(crate::fonts::UI_FAMILY)
                     .text_color(Theme::color(t.mute))
                     .child(mark),
             )
@@ -1192,7 +1192,7 @@ impl Shell {
             .child(
                 div()
                     .text_base()
-                    .font(crate::fonts::font_ui())
+                    .font_family(crate::fonts::UI_FAMILY)
                     .text_color(Theme::color(t.dim))
                     .child("Not ported yet"),
             )

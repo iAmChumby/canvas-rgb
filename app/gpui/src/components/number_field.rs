@@ -48,7 +48,7 @@ pub fn number_field(
         .bg(Theme::color(t.sunk))
         .text_color(Theme::color(t.ink))
         .text_sm()
-        .font(crate::fonts::font_mono());
+        .font_family(crate::fonts::MONO_FAMILY);
     let text = match unit {
         Some(u) => format!("{value} {u}"),
         None => format!("{value}"),

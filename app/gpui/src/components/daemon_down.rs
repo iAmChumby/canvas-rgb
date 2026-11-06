@@ -21,28 +21,28 @@ pub fn daemon_down(
             div()
                 .text_xl()
                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                .font(crate::fonts::font_ui())
+                .font_family(crate::fonts::UI_FAMILY)
                 .text_color(Theme::color(t.ink))
                 .child("canvas-rgb is not answering"),
         )
         .child(
             div()
                 .text_sm()
-                .font(crate::fonts::font_ui())
+                .font_family(crate::fonts::UI_FAMILY)
                 .text_color(Theme::color(t.dim))
                 .child("canvas-rgb draws the lights on 127.0.0.1:9430. It may still be starting, or it may have stopped."),
         )
         .child(
             div()
                 .text_sm()
-                .font(crate::fonts::font_ui())
+                .font_family(crate::fonts::UI_FAMILY)
                 .text_color(Theme::color(t.dim))
                 .child("The lights keep the frame they had."),
         )
         .child(
             div()
                 .text_sm()
-                .font(crate::fonts::font_ui())
+                .font_family(crate::fonts::UI_FAMILY)
                 .text_color(Theme::color(t.dim))
                 .child("The fans stay under BIOS control."),
         )
@@ -50,7 +50,7 @@ pub fn daemon_down(
         .child(
             div()
                 .text_sm()
-                .font(crate::fonts::font_mono())
+                .font_family(crate::fonts::MONO_FAMILY)
                 .text_color(Theme::color(t.mute))
                 .child(detail.to_string()),
         )

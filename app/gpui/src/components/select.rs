@@ -54,7 +54,7 @@ pub fn select(
         .text_color(Theme::color(t.ink))
         .text_sm()
         .font_weight(gpui::FontWeight::MEDIUM)
-        .font(crate::fonts::font_ui())
+        .font_family(crate::fonts::UI_FAMILY)
         .cursor_pointer()
         .child(chosen.to_string())
         .child(
@@ -96,7 +96,7 @@ pub fn select(
                 .px(px(10.0))
                 .rounded_md()
                 .text_sm()
-                .font(crate::fonts::font_ui())
+                .font_family(crate::fonts::UI_FAMILY)
                 .text_color(Theme::color(t.ink))
                 .cursor_pointer()
                 .child(l.to_string())

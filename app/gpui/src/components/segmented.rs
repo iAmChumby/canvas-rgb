@@ -50,7 +50,7 @@ pub fn segmented(
             .px(px(10.0))
             .rounded_md()
             .text_sm()
-            .font(crate::fonts::font_ui())
+            .font_family(crate::fonts::UI_FAMILY)
             .font_weight(gpui::FontWeight::MEDIUM)
             .child(dot)
             .child(label.to_string());
