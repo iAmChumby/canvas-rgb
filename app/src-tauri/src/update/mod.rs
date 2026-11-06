@@ -24,7 +24,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use canvas_proto::tauri::{
-    CheckFailReason, UpdateInfo, UpdatePhase, UpdateState, AFTER_UPDATE_ARG, EVT_UPDATE_STATE,
+    CheckFailReason, TrayPrefs, UpdateChannel, UpdateInfo, UpdatePhase, UpdateState, AFTER_UPDATE_ARG,
+    EVT_UPDATE_STATE,
 };
 use semver::Version;
 use serde::Deserialize;
@@ -61,10 +62,14 @@ pub fn has_after_update_arg<S: AsRef<str>>(args: &[S]) -> bool {
 #[derive(Debug, Clone)]
 pub struct Settings {
     pub endpoint: Url,
+    /// The experimental feed (#203). Read only when the channel is experimental.
+    pub experimental_endpoint: Url,
     pub pubkey: String,
     pub policy: DownloadPolicy,
     pub updates_dir: PathBuf,
     pub state_path: PathBuf,
+    /// `%LOCALAPPDATA%\canvas-rgb\tray\prefs.json`, beside `update.json`.
+    pub prefs_path: PathBuf,
     /// `<install folder>\update-result.json`, written by the installer.
     pub result_path: PathBuf,
     /// `%LOCALAPPDATA%\canvas-rgb`: nothing from here down to a folder the tray writes in may be a
@@ -83,10 +88,14 @@ impl Settings {
             .unwrap_or_default();
         Settings {
             endpoint: rules::ENDPOINT.parse().expect("the endpoint constant is a URL"),
+            experimental_endpoint: rules::EXPERIMENTAL_ENDPOINT
+                .parse()
+                .expect("the experimental endpoint constant is a URL"),
             pubkey: rules::PUBKEY.to_string(),
             policy: DownloadPolicy::production(),
             updates_dir: tray.join("updates"),
             state_path: tray.join("update.json"),
+            prefs_path: tray.join(canvas_proto::tauri::TRAY_PREFS_FILE),
             result_path: install_dir.join(RESULT_FILE),
             guard_root: tray.parent().map(Path::to_path_buf).unwrap_or(tray),
             progress_every: PROGRESS_EVERY,
@@ -170,6 +179,8 @@ pub type Launcher = Arc<dyn Fn(&Path) -> Result<launch::Started, launch::RunErro
 
 struct Inner {
     stored: Stored,
+    /// What the person chose in the tray's prefs (#203). The tray is the only writer.
+    prefs: TrayPrefs,
     phase: UpdatePhase,
     available: Option<UpdateInfo>,
     update: Option<Update>,
@@ -197,11 +208,13 @@ impl Controller {
         on_change: Box<dyn Fn(&UpdateState) + Send + Sync>,
     ) -> Self {
         let stored = state::load(&settings.state_path);
+        let prefs = crate::prefs::load(&settings.prefs_path);
         Controller {
             settings,
             current,
             inner: Mutex::new(Inner {
                 stored,
+                prefs,
                 phase: UpdatePhase::Idle,
                 available: None,
                 update: None,
@@ -259,6 +272,37 @@ impl Controller {
 
     pub fn state(&self) -> UpdateState {
         self.build_state(&self.lock())
+    }
+
+    // ---- the tray's prefs (#203) ----
+
+    /// What the tray remembers between runs.
+    pub fn prefs(&self) -> TrayPrefs {
+        self.lock().prefs.clone()
+    }
+
+    /// The feed the tray reads: stable, or experimental with the dev feed beside it.
+    pub fn channel(&self) -> UpdateChannel {
+        self.lock().prefs.channel
+    }
+
+    /// Sets the update channel, keeps it in the prefs file and returns the new prefs. The
+    /// channel is not a version rule of its own: it decides which feed is read, and the feed
+    /// decides what may be offered.
+    pub fn set_channel(&self, channel: UpdateChannel) -> TrayPrefs {
+        let prefs = TrayPrefs { channel, ..self.lock().prefs.clone() };
+        // Never write through a junction or a symlink, and never over a file the tray cannot
+        // replace. A refusal leaves the channel in memory only; it is logged.
+        match state::refuse_reparse(&self.settings.guard_root, &self.settings.prefs_path) {
+            Ok(()) => {
+                if let Err(e) = crate::prefs::save(&self.settings.prefs_path, &prefs) {
+                    log::append(&format!("prefs: could not save {}: {e}", self.settings.prefs_path.display()));
+                }
+            }
+            Err(why) => log::append(&format!("prefs: not saving the channel: {why}")),
+        }
+        self.change(|i| i.prefs = prefs.clone());
+        prefs
     }
 
     /// Runs `f` on the inner state, saves the stored part, and tells the listeners.
@@ -519,21 +563,40 @@ impl Controller {
 
     // ---- the check ----
 
-    fn build_updater<R: Runtime>(&self, app: &AppHandle<R>) -> tauri_plugin_updater::Result<Updater> {
+    fn build_updater<R: Runtime>(
+        &self,
+        app: &AppHandle<R>,
+        endpoint: Url,
+        allow_pre: bool,
+    ) -> tauri_plugin_updater::Result<Updater> {
         let policy = self.settings.policy.clone();
         app.updater_builder()
             .pubkey(self.settings.pubkey.clone())
             .target(rules::TARGET)
-            .version_comparator(|current, release| rules::is_update(&current, &release.version))
+            // The stable feed never offers a pre-release; the experimental one may. Which feed
+            // a release came from decides this, not which channel the tray is on.
+            .version_comparator(move |current, release| {
+                if allow_pre {
+                    rules::is_update_experimental(&current, &release.version)
+                } else {
+                    rules::is_update(&current, &release.version)
+                }
+            })
             .timeout(CHECK_TIMEOUT)
             // A redirect may only go to a host the download itself could have come from.
             .configure_client(move |client| client.redirect(redirect_policy(policy.clone())))
-            .endpoints(vec![self.settings.endpoint.clone()])?
+            .endpoints(vec![endpoint])?
             .build()
     }
 
-    async fn fetch_manifest<R: Runtime>(&self, app: &AppHandle<R>) -> Result<Option<(Update, UpdateInfo)>, CheckFailReason> {
-        let updater = self.build_updater(app).map_err(|e| {
+    /// Reads one feed. `allow_pre` says whether that feed may offer a pre-release.
+    async fn fetch_feed<R: Runtime>(
+        &self,
+        app: &AppHandle<R>,
+        endpoint: &Url,
+        allow_pre: bool,
+    ) -> Result<Option<(Update, UpdateInfo)>, CheckFailReason> {
+        let updater = self.build_updater(app, endpoint.clone(), allow_pre).map_err(|e| {
             log::append(&format!("update: could not build the updater: {e}"));
             CheckFailReason::Other
         })?;
@@ -550,8 +613,35 @@ impl Controller {
             }
             Err(e) => {
                 log::append(&format!("update: check failed: {e}"));
-                Err(classify(&e, &self.settings.endpoint).await)
+                Err(classify(&e, endpoint).await)
             }
+        }
+    }
+
+    /// Reads the feeds the channel asks for and offers the newest release that is strictly newer
+    /// than the running one.
+    ///
+    /// The stable channel reads the stable feed and nothing else: no pre-release is ever offered
+    /// there. The experimental channel reads both feeds and takes the newer of what they offer;
+    /// a pre-release is acceptable only from the experimental feed.
+    async fn fetch_manifest<R: Runtime>(&self, app: &AppHandle<R>) -> Result<Option<(Update, UpdateInfo)>, CheckFailReason> {
+        let stable = self.fetch_feed(app, &self.settings.endpoint, false).await;
+        if self.channel() != UpdateChannel::Experimental {
+            return stable;
+        }
+        let experimental = self.fetch_feed(app, &self.settings.experimental_endpoint, true).await;
+        match (stable, experimental) {
+            (Ok(stable), Ok(experimental)) => Ok(newest(stable, experimental)),
+            (Ok(stable), Err(why)) => {
+                // One feed down is not a failed check when the other one answered.
+                log::append(&format!("update: the experimental feed could not be read: {why:?}"));
+                Ok(stable)
+            }
+            (Err(why), Ok(experimental)) => {
+                log::append(&format!("update: the stable feed could not be read: {why:?}"));
+                Ok(experimental)
+            }
+            (Err(why), Err(_)) => Err(why),
         }
     }
 
@@ -842,6 +932,28 @@ fn info_of(update: &Update) -> UpdateInfo {
     }
 }
 
+/// The newer of what two feeds offered, by the version order. The stable release wins a tie: it
+/// is a release, and its signature is a release signature.
+fn newest(
+    stable: Option<(Update, UpdateInfo)>,
+    experimental: Option<(Update, UpdateInfo)>,
+) -> Option<(Update, UpdateInfo)> {
+    match (stable, experimental) {
+        (None, None) => None,
+        (Some(stable), None) => Some(stable),
+        (None, Some(experimental)) => Some(experimental),
+        (Some(stable), Some(experimental)) => {
+            match (
+                stable.1.version.parse::<Version>(),
+                experimental.1.version.parse::<Version>(),
+            ) {
+                (Ok(s), Ok(e)) if rules::is_newer(&e, &s) => Some(experimental),
+                _ => Some(stable),
+            }
+        }
+    }
+}
+
 fn clear_dir(dir: &Path) {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -968,6 +1080,13 @@ pub fn init<R: Runtime>(app: &AppHandle<R>, args: &[String]) {
         Controller::new(Settings::production(), current, launcher, on_change).with_service(Arc::new(service::ask_daemon)),
     );
     app.manage(controller.clone());
+    log::append(&format!(
+        "update: reading the {} feed",
+        match controller.channel() {
+            UpdateChannel::Stable => "stable",
+            UpdateChannel::Experimental => "stable and experimental",
+        }
+    ));
     if has_after_update_arg(args) {
         log::append("update: started by the installer (--after-update)");
         controller.settle_unrecorded_update();
@@ -1074,4 +1193,22 @@ pub fn update_set_auto<R: Runtime>(app: AppHandle<R>, enabled: bool) -> UpdateSt
 #[tauri::command]
 pub fn update_dismiss_updated<R: Runtime>(app: AppHandle<R>) -> UpdateState {
     controller(&app).dismiss_updated()
+}
+
+/// `tray_prefs`: what the tray remembers between runs.
+#[tauri::command]
+pub fn tray_prefs<R: Runtime>(app: AppHandle<R>) -> TrayPrefs {
+    controller(&app).prefs()
+}
+
+/// `set_channel`: chooses the feed, keeps it, and checks the feeds again.
+#[tauri::command]
+pub fn set_channel<R: Runtime>(app: AppHandle<R>, channel: UpdateChannel) -> TrayPrefs {
+    let ctl = controller(&app);
+    let prefs = ctl.set_channel(channel);
+    // The channel decides which feed is read, so the offer on screen is stale: check again.
+    tauri::async_runtime::spawn(async move {
+        ctl.check(&app, true).await;
+    });
+    prefs
 }

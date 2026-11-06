@@ -9,6 +9,8 @@
 
 import type { UpdateState } from "@/proto/UpdateState";
 import type { UpdatePhase } from "@/proto/UpdatePhase";
+import type { TrayPrefs } from "@/proto/TrayPrefs";
+import type { UpdateChannel } from "@/proto/UpdateChannel";
 import {
   CMD_UPDATE_CHECK_NOW,
   CMD_UPDATE_DISMISS_UPDATED,
@@ -118,6 +120,22 @@ export function demoUpdateActive(): boolean {
 let state: UpdateState | null = null;
 let listener: ((s: UpdateState) => void) | null = null;
 let timers: ReturnType<typeof setTimeout>[] = [];
+
+// The tray's preferences in a plain browser: the demo stub (#203). The real ones live in the
+// tray's own file; here they are only in memory, so the Experimental builds switch can be seen
+// and pressed without a tray behind it.
+let prefs: TrayPrefs = { editor: "react", channel: "stable" };
+
+/** The preferences the demo stub holds. */
+export function demoTrayPrefs(): TrayPrefs {
+  return prefs;
+}
+
+/** The demo stub's answer to a channel change. */
+export function demoSetChannel(channel: UpdateChannel): TrayPrefs {
+  prefs = { ...prefs, channel };
+  return prefs;
+}
 
 export function setDemoUpdateListener(fn: ((s: UpdateState) => void) | null): void {
   listener = fn;

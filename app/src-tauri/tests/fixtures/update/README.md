@@ -6,4 +6,5 @@
 
 - `payload.bin` is a stand-in installer.
 - `payload.bin.sig` signs it for version 0.1.1; `payload.v010.sig` for 0.1.0; `payload.nover.sig` carries no version.
+- `payload.dev.sig` signs it for the dev build `0.1.2-dev.3` (the experimental channel's test build).
 - `other.key.pub` is the "wrong key" for the tests.

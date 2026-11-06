@@ -12,6 +12,7 @@ mod editor;
 mod elevation;
 mod log;
 mod onboard;
+mod prefs;
 mod tray;
 mod update;
 
@@ -52,6 +53,8 @@ fn main() {
             update::update_unskip,
             update::update_set_auto,
             update::update_dismiss_updated,
+            update::tray_prefs,
+            update::set_channel,
         ])
         .setup(|app| {
             let handle = app.handle().clone();

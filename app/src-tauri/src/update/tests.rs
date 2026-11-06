@@ -10,7 +10,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::thread::JoinHandle;
 
-use canvas_proto::tauri::{CheckFailReason, UpdateInfo, UpdatePhase, UpdateState};
+use canvas_proto::tauri::{
+    CheckFailReason, EditorChoice, TrayPrefs, UpdateChannel, UpdateInfo, UpdatePhase, UpdateState,
+};
 use semver::Version;
 use tauri::test::{mock_builder, mock_context, noop_assets, MockRuntime};
 use time::OffsetDateTime;
@@ -145,14 +147,24 @@ impl FakeServer {
 
     /// Serves a manifest announcing `version` plus the installer at `/setup.exe`.
     fn release(&self, version: &str, signature: &str, payload: Vec<u8>) {
+        self.release_at("/latest.json", "/setup.exe", version, signature, payload);
+    }
+
+    /// The same on the experimental feed: its manifest at `/experimental.json` and its installer
+    /// at `/experimental-setup.exe`.
+    fn experimental_release(&self, version: &str, signature: &str, payload: Vec<u8>) {
+        self.release_at("/experimental.json", "/experimental-setup.exe", version, signature, payload);
+    }
+
+    fn release_at(&self, manifest_path: &str, asset_path: &str, version: &str, signature: &str, payload: Vec<u8>) {
         let manifest = serde_json::json!({
             "version": version,
             "notes": "### Added\n\n- Something new.",
             "pub_date": "2026-10-29T12:00:00Z",
-            "platforms": { rules::TARGET: { "signature": signature, "url": self.url("/setup.exe") } },
+            "platforms": { rules::TARGET: { "signature": signature, "url": self.url(asset_path) } },
         });
-        self.set("/latest.json", Resp::ok(manifest.to_string()));
-        self.set("/setup.exe", Resp::ok(payload));
+        self.set(manifest_path, Resp::ok(manifest.to_string()));
+        self.set(asset_path, Resp::ok(payload));
     }
 }
 
@@ -250,23 +262,49 @@ fn spawn_stub(stub: &Path) -> Result<Started, RunError> {
 }
 
 fn harness(current: &str, pubkey_file: &str, how: Launch) -> Harness {
-    harness_with_service(current, pubkey_file, how, None)
+    harness_on(current, pubkey_file, how, UpdateChannel::Stable)
+}
+
+/// A harness whose tray reads the given channel: the prefs file says so before the tray starts.
+fn harness_on(current: &str, pubkey_file: &str, how: Launch, channel: UpdateChannel) -> Harness {
+    harness_full(current, pubkey_file, how, None, channel)
 }
 
 fn harness_with_service(current: &str, pubkey_file: &str, how: Launch, service: Option<ServiceAsker>) -> Harness {
+    harness_full(current, pubkey_file, how, service, UpdateChannel::Stable)
+}
+
+fn harness_full(
+    current: &str,
+    pubkey_file: &str,
+    how: Launch,
+    service: Option<ServiceAsker>,
+    channel: UpdateChannel,
+) -> Harness {
     isolate_log();
     let server = FakeServer::start();
     let dir = TempDir::new();
     let settings = Settings {
         endpoint: server.url("/latest.json").parse().unwrap(),
+        experimental_endpoint: server.url("/experimental.json").parse().unwrap(),
         pubkey: fixture_text(pubkey_file),
         policy: DownloadPolicy { https_only: false, hosts: vec!["127.0.0.1".into()] },
         updates_dir: dir.path().join("updates"),
         state_path: dir.path().join("update.json"),
+        prefs_path: dir.path().join("prefs.json"),
         result_path: dir.path().join("update-result.json"),
         guard_root: dir.path().to_path_buf(),
         progress_every: Duration::ZERO,
     };
+    // The channel the person chose, as the prefs file would hold it. A stable tray has no prefs
+    // file at all: the defaults are the stable channel.
+    if channel != UpdateChannel::Stable {
+        crate::prefs::save(
+            &settings.prefs_path,
+            &TrayPrefs { editor: EditorChoice::React, channel },
+        )
+        .unwrap();
+    }
 
     let mut ctx = mock_context(noop_assets());
     ctx.package_info_mut().version = v(current);
@@ -337,8 +375,16 @@ impl Harness {
     fn stored(&self) -> Stored {
         state::load(&self.dir.path().join("update.json"))
     }
+    /// The prefs file the tray reads and writes.
+    fn prefs_path(&self) -> PathBuf {
+        self.dir.path().join("prefs.json")
+    }
     fn installer(&self) -> PathBuf {
         self.dir.path().join("updates").join("canvas-rgb-setup-0.1.1.exe")
+    }
+    /// The downloaded installer under its own name (a dev build has its own).
+    fn installer_named(&self, name: &str) -> PathBuf {
+        self.dir.path().join("updates").join(name)
     }
     fn phases(&self) -> Vec<UpdatePhase> {
         self.states.lock().unwrap().iter().map(|s| s.phase.clone()).collect()
@@ -611,10 +657,12 @@ fn a_dead_server_is_offline() {
     let ctl = Controller::new(
         Settings {
             endpoint: format!("http://127.0.0.1:{port}/latest.json").parse().unwrap(),
+            experimental_endpoint: h.server.url("/experimental.json").parse().unwrap(),
             pubkey: fixture_text("test.key.pub"),
             policy: DownloadPolicy { https_only: false, hosts: vec!["127.0.0.1".into()] },
             updates_dir: h.dir.path().join("u2"),
             state_path: h.dir.path().join("s2.json"),
+            prefs_path: h.dir.path().join("p2.json"),
             result_path: h.dir.path().join("r2.json"),
             guard_root: h.dir.path().to_path_buf(),
             progress_every: Duration::ZERO,
@@ -648,10 +696,12 @@ fn a_redirect_to_a_foreign_host_is_refused_and_one_to_an_allowed_host_is_followe
     let ctl = Controller::new(
         Settings {
             endpoint: moved.parse().unwrap(),
+            experimental_endpoint: h.server.url("/experimental.json").parse().unwrap(),
             pubkey: fixture_text("test.key.pub"),
             policy: DownloadPolicy { https_only: false, hosts: vec!["127.0.0.1".into()] },
             updates_dir: h.dir.path().join("u3"),
             state_path: h.dir.path().join("s3.json"),
+            prefs_path: h.dir.path().join("p3.json"),
             result_path: h.dir.path().join("r3.json"),
             guard_root: h.dir.path().to_path_buf(),
             progress_every: Duration::ZERO,
@@ -754,10 +804,12 @@ fn the_host_list_stops_a_download_before_any_request() {
     let strict = Controller::new(
         Settings {
             endpoint: h.server.url("/latest.json").parse().unwrap(),
+            experimental_endpoint: h.server.url("/experimental.json").parse().unwrap(),
             pubkey: fixture_text("test.key.pub"),
             policy: DownloadPolicy { https_only: false, hosts: vec!["127.0.0.1".into()] },
             updates_dir: h.dir.path().join("u4"),
             state_path: h.dir.path().join("s4.json"),
+            prefs_path: h.dir.path().join("p4.json"),
             result_path: h.dir.path().join("r4.json"),
             guard_root: h.dir.path().to_path_buf(),
             progress_every: Duration::ZERO,
@@ -1148,6 +1200,7 @@ impl Settings {
     fn with_dir(mut self, dir: &Path) -> Self {
         self.updates_dir = dir.join("updates");
         self.state_path = dir.join("update.json");
+        self.prefs_path = dir.join("prefs.json");
         self.result_path = dir.join("update-result.json");
         self.guard_root = dir.to_path_buf();
         self.progress_every = Duration::ZERO;
@@ -1421,10 +1474,12 @@ fn an_http_download_address_is_refused_before_any_request() {
     good_release(&h);
     let settings = Settings {
         endpoint: h.server.url("/latest.json").parse().unwrap(),
+        experimental_endpoint: h.server.url("/experimental.json").parse().unwrap(),
         pubkey: fixture_text("test.key.pub"),
         policy: DownloadPolicy { https_only: false, hosts: vec!["127.0.0.1".into()] },
         updates_dir: h.dir.path().join("u5"),
         state_path: h.dir.path().join("s5.json"),
+        prefs_path: h.dir.path().join("p5.json"),
         result_path: h.dir.path().join("r5.json"),
         guard_root: h.dir.path().to_path_buf(),
         progress_every: Duration::ZERO,
@@ -1861,4 +1916,219 @@ fn after_a_restart_a_result_older_than_the_start_is_ignored() {
         ctl.reconcile_pending();
         assert_eq!(ctl.state().phase, UpdatePhase::InstallFailed { message: want.into() }, "age {age:?}");
     }
+}
+
+// ---- the experimental update channel (#203) ----
+
+/// The dev build the tests offer: `payload.dev.sig` signs `payload.bin` for this version.
+const DEV: &str = "0.1.2-dev.3";
+/// The installer name a dev build is written under: only the three numbers are used.
+const DEV_INSTALLER: &str = "canvas-rgb-setup-0.1.2.exe";
+
+#[test]
+fn the_experimental_feed_is_the_one_the_spine_names() {
+    assert_eq!(rules::EXPERIMENTAL_ENDPOINT, canvas_proto::consts::EXPERIMENTAL_FEED_URL);
+    assert_ne!(rules::EXPERIMENTAL_ENDPOINT, rules::ENDPOINT, "two feeds, not one");
+}
+
+#[test]
+fn the_version_rules_order_a_dev_build_against_the_release_it_follows() {
+    let cur = v("0.8.3");
+    assert!(rules::is_update_experimental(&cur, &v("0.8.4-dev.12")), "a dev build is newer than the release before it");
+    assert!(rules::is_newer(&v("0.8.4"), &v("0.8.4-dev.12")), "the release is newer than its own dev build");
+    assert!(!rules::is_update(&cur, &v("0.8.4-dev.12")), "the stable rule still refuses a pre-release");
+    assert!(rules::is_update(&v("0.8.4-dev.12"), &v("0.8.4")), "the stable release is newer than the dev build running");
+    assert!(!rules::is_update(&v("0.8.4"), &v("0.8.4-dev.12")), "a dev build of the running release is not newer");
+    assert!(!rules::is_update_experimental(&v("0.8.4"), &v("0.8.4-dev.12")), "not strictly newer either");
+}
+
+#[test]
+fn the_stable_channel_never_reads_the_experimental_feed() {
+    let h = harness_on("0.1.0", "test.key.pub", Launch::Starts, UpdateChannel::Stable);
+    good_release(&h);
+    h.server.experimental_release(DEV, &fixture_text("payload.dev.sig"), fixture("payload.bin"));
+    let s = h.check(true);
+    assert_eq!(s.phase, UpdatePhase::Available);
+    assert_eq!(s.available.unwrap().version, "0.1.1", "the stable feed's release");
+    assert_eq!(h.server.hits("/experimental.json"), 0, "the experimental feed was never read");
+}
+
+#[test]
+fn no_channel_offers_a_pre_release_from_the_stable_feed() {
+    for channel in [UpdateChannel::Stable, UpdateChannel::Experimental] {
+        let h = harness_on("0.1.0", "test.key.pub", Launch::Starts, channel);
+        h.server.release("0.2.0-beta.1", &fixture_text("payload.dev.sig"), fixture("payload.bin"));
+        let s = h.check(true);
+        assert_eq!(s.phase, UpdatePhase::UpToDate, "{channel:?}: the stable feed never offers a pre-release");
+        assert!(s.available.is_none(), "{channel:?}");
+    }
+}
+
+#[test]
+fn the_experimental_channel_offers_a_newer_dev_build() {
+    let h = harness_on("0.1.1", "test.key.pub", Launch::Starts, UpdateChannel::Experimental);
+    // The stable feed is read too, and has nothing newer than the running build.
+    h.server.release("0.1.1", &fixture_text("payload.bin.sig"), fixture("payload.bin"));
+    h.server.experimental_release(DEV, &fixture_text("payload.dev.sig"), fixture("payload.bin"));
+    let s = h.check(true);
+    assert_eq!(s.phase, UpdatePhase::Available);
+    assert_eq!(s.available.unwrap().version, DEV);
+    assert_eq!(h.server.hits("/experimental.json"), 1, "the experimental feed was read");
+    assert_eq!(h.server.hits("/latest.json"), 1, "the stable feed was read too");
+}
+
+#[test]
+fn the_experimental_channel_prefers_a_stable_release_newer_than_the_dev_build() {
+    let h = harness_on("0.1.1", "test.key.pub", Launch::Starts, UpdateChannel::Experimental);
+    h.server.release("0.1.2", &fixture_text("payload.dev.sig"), fixture("payload.bin"));
+    h.server.experimental_release(DEV, &fixture_text("payload.dev.sig"), fixture("payload.bin"));
+    let s = h.check(true);
+    assert_eq!(s.phase, UpdatePhase::Available);
+    assert_eq!(s.available.unwrap().version, "0.1.2", "0.1.2 is newer than 0.1.2-dev.3");
+}
+
+#[test]
+fn the_experimental_channel_refuses_a_dev_build_that_is_not_newer() {
+    for announced in [DEV, "0.1.2-dev.2", "0.1.1-dev.9", "0.1.1"] {
+        let h = harness_on(DEV, "test.key.pub", Launch::Starts, UpdateChannel::Experimental);
+        h.server.experimental_release(announced, &fixture_text("payload.dev.sig"), fixture("payload.bin"));
+        let s = h.check(true);
+        assert_eq!(s.phase, UpdatePhase::UpToDate, "{announced} is not newer than {DEV}");
+        assert!(s.available.is_none(), "{announced}");
+    }
+}
+
+#[test]
+fn the_experimental_channel_refuses_a_signature_made_for_another_version() {
+    let h = harness_on("0.1.1", "test.key.pub", Launch::Starts, UpdateChannel::Experimental);
+    // The manifest announces the dev build, but the signature was made for 0.1.1.
+    h.server.experimental_release(DEV, &fixture_text("payload.bin.sig"), fixture("payload.bin"));
+    assert_eq!(h.check(true).phase, UpdatePhase::Available, "the offer is made on the version alone");
+    let s = h.install();
+    assert_eq!(s.phase, UpdatePhase::VerifyFailed, "the signature is checked after the download");
+    assert!(!h.installer_named(DEV_INSTALLER).exists(), "the download was deleted");
+    assert!(h.seen.calls.lock().unwrap().is_empty(), "nothing was started");
+    assert_eq!(h.stored().pending, None);
+}
+
+#[test]
+fn the_experimental_channel_refuses_a_tampered_download() {
+    let h = harness_on("0.1.1", "test.key.pub", Launch::Starts, UpdateChannel::Experimental);
+    let mut bytes = fixture("payload.bin");
+    bytes[3] ^= 0x01;
+    h.server.experimental_release(DEV, &fixture_text("payload.dev.sig"), bytes);
+    h.check(true);
+    assert_eq!(h.install().phase, UpdatePhase::VerifyFailed);
+    assert!(!h.installer_named(DEV_INSTALLER).exists());
+    assert!(h.seen.calls.lock().unwrap().is_empty(), "nothing was started");
+}
+
+#[test]
+fn the_experimental_channel_refuses_a_download_on_a_foreign_host() {
+    let h = harness_on("0.1.1", "test.key.pub", Launch::Starts, UpdateChannel::Experimental);
+    let manifest = serde_json::json!({
+        "version": DEV, "notes": "", "pub_date": "2026-10-29T12:00:00Z",
+        "platforms": { rules::TARGET: { "signature": fixture_text("payload.dev.sig"), "url": "http://evil.example/setup.exe" } },
+    });
+    h.server.set("/experimental.json", Resp::ok(manifest.to_string()));
+    let s = h.check(true);
+    assert_eq!(s.phase, UpdatePhase::CheckFailed { reason: CheckFailReason::Other });
+    assert!(s.available.is_none());
+}
+
+#[test]
+fn the_experimental_channel_refuses_a_redirect_to_another_host() {
+    let h = harness_on("0.1.1", "test.key.pub", Launch::Starts, UpdateChannel::Experimental);
+    h.server.experimental_release(DEV, &fixture_text("payload.dev.sig"), fixture("payload.bin"));
+    h.server.set("/experimental-setup.exe", Resp::status(302).header("Location", "http://evil.example/setup.exe"));
+    assert_eq!(h.check(true).phase, UpdatePhase::Available);
+    let s = h.install();
+    assert!(matches!(s.phase, UpdatePhase::InstallFailed { .. }), "{:?}", s.phase);
+    assert!(h.seen.calls.lock().unwrap().is_empty(), "nothing was started");
+    assert!(!h.installer_named(DEV_INSTALLER).exists());
+}
+
+#[test]
+fn a_dev_build_from_the_experimental_feed_installs_through_the_service() {
+    // The whole path, the same one the stable feed uses: download, signature check, the service
+    // ask, and no second setup beside it.
+    let (asker, asked) = fake_service(ServiceAnswer::Started);
+    let h = harness_full("0.1.1", "test.key.pub", Launch::Fails, Some(asker), UpdateChannel::Experimental);
+    h.server.experimental_release(DEV, &fixture_text("payload.dev.sig"), fixture("payload.bin"));
+    h.check(true);
+    let s = h.install();
+    assert_eq!(s.phase, UpdatePhase::Installing);
+    let asked = asked.lock().unwrap();
+    assert_eq!(asked.len(), 1, "the service was asked once");
+    assert_eq!(asked[0].signature, fixture_text("payload.dev.sig"), "the release's own signature text");
+    assert!(asked[0].file_held, "the file stays held while the service reads it");
+    assert_eq!(asked[0].pending_in_state_file.as_deref(), Some(DEV), "pending is saved before the ask");
+    assert!(h.seen.calls.lock().unwrap().is_empty(), "the tray did not start the installer itself");
+    assert_eq!(
+        std::fs::read(h.installer_named(DEV_INSTALLER)).unwrap(),
+        fixture("payload.bin"),
+        "the dev build was written out and held"
+    );
+}
+
+#[test]
+fn turning_the_experimental_channel_off_offers_nothing_older() {
+    let h = harness_on(DEV, "test.key.pub", Launch::Starts, UpdateChannel::Experimental);
+    // The stable feed has an older release; the experimental feed a newer dev build.
+    h.server.release("0.1.1", &fixture_text("payload.bin.sig"), fixture("payload.bin"));
+    h.server.experimental_release("0.1.3-dev.1", &fixture_text("payload.dev.sig"), fixture("payload.bin"));
+    assert_eq!(
+        h.check(true).available.map(|a| a.version).as_deref(),
+        Some("0.1.3-dev.1"),
+        "the dev build is on offer"
+    );
+    // The person turns the experimental channel off.
+    h.ctl.set_channel(UpdateChannel::Stable);
+    let s = h.check(true);
+    assert_eq!(s.phase, UpdatePhase::UpToDate, "the older stable release is not offered: no downgrade");
+    assert!(s.available.is_none());
+    assert_eq!(h.server.hits("/experimental.json"), 1, "the experimental feed is not read again");
+}
+
+#[test]
+fn a_stable_release_newer_than_the_dev_build_running_is_offered() {
+    let h = harness_on(DEV, "test.key.pub", Launch::Starts, UpdateChannel::Stable);
+    h.server.release("0.1.2", &fixture_text("payload.dev.sig"), fixture("payload.bin"));
+    let s = h.check(true);
+    assert_eq!(s.phase, UpdatePhase::Available);
+    assert_eq!(s.available.unwrap().version, "0.1.2", "0.1.2 is newer than 0.1.2-dev.3");
+}
+
+#[test]
+fn a_missing_prefs_file_reads_as_the_stable_channel() {
+    let h = harness("0.1.0", "test.key.pub", Launch::Starts);
+    assert!(!h.prefs_path().exists(), "no prefs file at all");
+    assert_eq!(h.ctl.channel(), UpdateChannel::Stable);
+    assert_eq!(h.ctl.prefs().editor, EditorChoice::React);
+}
+
+#[test]
+fn a_damaged_prefs_file_reads_as_the_defaults_and_never_crashes() {
+    let h = harness("0.1.0", "test.key.pub", Launch::Starts);
+    std::fs::write(h.prefs_path(), "{ not json").unwrap();
+    let ctl = Controller::new(h.ctl.settings.clone(), v("0.1.0"), Arc::new(|_: &Path| Ok(None)), Box::new(|_| {}));
+    assert_eq!(ctl.channel(), UpdateChannel::Stable, "the defaults");
+    assert_eq!(ctl.prefs().editor, EditorChoice::React);
+    assert!(h.prefs_path().with_extension("json.bad").exists(), "the damaged file is kept aside");
+}
+
+#[test]
+fn setting_the_channel_keeps_it_for_the_next_start() {
+    let h = harness("0.1.0", "test.key.pub", Launch::Starts);
+    let prefs = h.ctl.set_channel(UpdateChannel::Experimental);
+    assert_eq!(prefs.channel, UpdateChannel::Experimental);
+    assert_eq!(prefs.editor, EditorChoice::React, "the editor choice is kept");
+    assert_eq!(h.ctl.channel(), UpdateChannel::Experimental);
+    let text = std::fs::read_to_string(h.prefs_path()).unwrap();
+    assert!(text.contains("experimental"), "{text}");
+    assert!(!h.prefs_path().with_extension("json.tmp").exists(), "no temp file left behind");
+    // The next start reads it.
+    let ctl = Controller::new(h.ctl.settings.clone(), v("0.1.0"), Arc::new(|_: &Path| Ok(None)), Box::new(|_| {}));
+    assert_eq!(ctl.channel(), UpdateChannel::Experimental);
+    assert_eq!(ctl.prefs().editor, EditorChoice::React);
 }
