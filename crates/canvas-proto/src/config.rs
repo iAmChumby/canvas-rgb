@@ -84,6 +84,11 @@ pub struct ConfigFile {
     #[serde(default)]
     pub onboarding_complete: bool,
     pub settings: Settings,
+    /// Issue #166: the audio source the audio-reactive effects read. Outside `Settings` on
+    /// purpose: `PUT /settings` replaces the whole `Settings` from the editor's snapshot, and
+    /// must never undo a pick. Configs saved before it load as `FollowDefault`.
+    #[serde(default)]
+    pub audio_source: crate::audio::AudioSource,
 }
 
 impl Default for ConfigFile {
@@ -96,6 +101,7 @@ impl Default for ConfigFile {
             zone_panel_dismissed: false,
             onboarding_complete: false,
             settings: Settings::default(),
+            audio_source: crate::audio::AudioSource::FollowDefault,
         }
     }
 }
