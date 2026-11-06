@@ -2,6 +2,7 @@
 //! Areas build against this crate and never edit it; changes go through the spine owner.
 
 pub mod api;
+pub mod audio;
 pub mod cli;
 pub mod color;
 pub mod config;

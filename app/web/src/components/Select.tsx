@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
+import { Fragment, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import { CaretDown, Check } from "@phosphor-icons/react";
 import { panelOriginSide } from "@/components/Popover";
@@ -9,6 +9,11 @@ import { motionOffNow, readCssMs } from "@/lib/motion";
 export interface SelectOption {
   value: string;
   label: string;
+}
+
+export interface SelectGroup {
+  label: string;
+  options: SelectOption[];
 }
 
 /** The space between the trigger and the list, and the space kept to the window's edge. */
@@ -25,16 +30,34 @@ export function Select({
   value,
   label,
   options,
+  groups,
   onChange,
   disabled,
 }: {
   value: string;
   label: string;
   options: SelectOption[];
+  /** Grouped options (#166): when given, the list shows group headings and
+   *  `options` is the same rows flattened. Headings are not selectable. */
+  groups?: SelectGroup[];
   onChange: (v: string) => void;
   disabled?: boolean;
 }) {
+  const flat: SelectOption[] = groups ? groups.flatMap((g) => g.options) : options;
   const id = useId();
+  // Index of each option in the flat list, for the group headings.
+  const groupStarts = new Map<number, string>();
+  const describedBy = new Map<number, string>();
+  if (groups) {
+    let at = 0;
+    for (const [groupIndex, g] of groups.entries()) {
+      if (g.label) {
+        groupStarts.set(at, g.label);
+        for (let i = 0; i < g.options.length; i++) describedBy.set(at + i, `${id}-group-${groupIndex}`);
+      }
+      at += g.options.length;
+    }
+  }
   const triggerRef = useRef<HTMLButtonElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const [open, setOpen] = useState(false);
@@ -66,7 +89,7 @@ export function Select({
   }, [closing]);
   const typed = useRef({ text: "", at: 0 });
 
-  const chosen = Math.max(0, options.findIndex((o) => o.value === value));
+  const chosen = Math.max(0, flat.findIndex((o) => o.value === value));
 
   const show = (at = chosen) => {
     if (disabled) return;
@@ -77,7 +100,7 @@ export function Select({
     // A list that is closing cannot act: a click on a row mid-exit changes
     // nothing (the value only changes from an open, fully interactive list).
     if (!open) return;
-    const o = options[at];
+    const o = flat[at];
     setOpen(false);
     if (o && o.value !== value) onChange(o.value);
   };
@@ -137,7 +160,7 @@ export function Select({
   }, [open, active]);
 
   const onKey = (e: KeyboardEvent<HTMLButtonElement>) => {
-    const last = options.length - 1;
+    const last = flat.length - 1;
     if (!open) {
       if (["ArrowDown", "ArrowUp", "Enter", " "].includes(e.key)) {
         e.preventDefault();
@@ -165,7 +188,7 @@ export function Select({
       const now = Date.now();
       const text = (now - typed.current.at < 500 ? typed.current.text : "") + e.key.toLowerCase();
       typed.current = { text, at: now };
-      const hit = options.findIndex((o) => o.label.toLowerCase().startsWith(text));
+      const hit = flat.findIndex((o) => o.label.toLowerCase().startsWith(text));
       if (hit >= 0) setActive(hit);
     }
   };
@@ -187,7 +210,7 @@ export function Select({
         onKeyDown={onKey}
       >
         <span className="select-value">
-          {options.map((o, i) => (
+          {flat.map((o, i) => (
             <span key={o.value} className="one-line" data-on={i === chosen ? "true" : "false"} aria-hidden={i === chosen ? undefined : true}>
               {o.label}
             </span>
@@ -213,22 +236,29 @@ export function Select({
             data-closing={closing ? "true" : undefined}
             style={style}
           >
-            {options.map((o, i) => (
-              <li
-                key={o.value}
-                id={`${id}-${i}`}
-                data-i={i}
-                role="option"
-                aria-selected={i === chosen}
-                data-active={i === active ? "true" : undefined}
-                className="listbox-opt"
-                onPointerMove={() => setActive(i)}
-                onPointerDown={(e) => e.preventDefault()}
-                onClick={() => pick(i)}
-              >
-                <span className="one-line">{o.label}</span>
-                <Check className="listbox-check" size={14} weight="bold" aria-hidden="true" />
-              </li>
+            {flat.map((o, i) => (
+              <Fragment key={o.value}>
+                {groupStarts.has(i) && (
+                  <li className="listbox-group" role="group" aria-label={groupStarts.get(i)}>
+                    <span id={`${describedBy.get(i)}`}>{groupStarts.get(i)}</span>
+                  </li>
+                )}
+                <li
+                  id={`${id}-${i}`}
+                  data-i={i}
+                  role="option"
+                  aria-selected={i === chosen}
+                  aria-describedby={describedBy.get(i)}
+                  data-active={i === active ? "true" : undefined}
+                  className="listbox-opt"
+                  onPointerMove={() => setActive(i)}
+                  onPointerDown={(e) => e.preventDefault()}
+                  onClick={() => pick(i)}
+                >
+                  <span className="one-line">{o.label}</span>
+                  <Check className="listbox-check" size={14} weight="bold" aria-hidden="true" />
+                </li>
+              </Fragment>
             ))}
           </ul>,
           document.body,

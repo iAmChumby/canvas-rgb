@@ -303,6 +303,10 @@ pub async fn config_import(
         // The stacks are read again from the file the import wrote, so the library shows them at
         // once and the next frame resolves them against the new layout.
         app.stacks.reload_with(&known);
+        // The import keeps this machine's audio-source pick (B1): the daemon
+        // matches the kept-on-disk pick, like a restart does.
+        let audio_source = app.store.read().await.config.audio_source.clone();
+        app.inputs.set_requested(audio_source);
         // The display task reads the saved configs on its next pass; wake it so it does not wait.
         app.displays.changed();
         let settings = app.store.read().await.config.settings.clone();
