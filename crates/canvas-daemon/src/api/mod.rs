@@ -111,7 +111,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route(routes::SETTINGS, get(settings::get_settings).put(settings::put_settings))
         .route(routes::AUDIO_SOURCES, get(audio::get_sources))
         .route(routes::AUDIO_SOURCE, put(audio::put_source))
-        .route(routes::AUDIO_TEST, put(audio::put_test).get(audio::get_test))
+        .route(routes::AUDIO_TEST, put(audio::put_test).get(audio::get_test).delete(audio::delete_test))
         .route(routes::DISMISS_ZONE_PANEL, post(settings::dismiss_zone_panel))
         .route(routes::ONBOARDING_COMPLETE, post(settings::complete_onboarding))
         .route(routes::ONBOARDING_SESSION, post(devices::onboarding_session))

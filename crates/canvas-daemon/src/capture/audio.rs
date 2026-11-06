@@ -195,8 +195,12 @@ pub struct MixFormat {
     pub sample_rate: u32,
     /// Channels in the mix.
     pub channels: u16,
-    /// Bits a sample.
+    /// Bits a sample occupies in the buffer (the container width).
     pub bits_per_sample: u16,
+    /// Valid bits within the container (S6): 24 valid bits in a 32-bit
+    /// container for 24-in-32 extensible feeds. Equals `bits_per_sample`
+    /// for packed formats.
+    pub valid_bits_per_sample: u16,
     /// The format tag (`1` is PCM, `3` is IEEE float, `0xFFFE` is extensible).
     pub format_tag: u16,
     /// What the samples are.
@@ -209,12 +213,13 @@ pub struct MixFormat {
 /// which device the audio comes from and how its samples are shaped (#1).
 pub fn mix_format_line(endpoint: &EndpointInfo, format: &MixFormat) -> String {
     format!(
-        "the audio capture opened {name} ({id}): {rate} Hz, {channels} channels, {bits} bits, {kind} (format tag {tag})",
+        "the audio capture opened {name} ({id}): {rate} Hz, {channels} channels, {bits} bits ({valid} valid), {kind} (format tag {tag})",
         name = endpoint.name,
         id = endpoint.id,
         rate = format.sample_rate,
         channels = format.channels,
         bits = format.bits_per_sample,
+        valid = format.valid_bits_per_sample,
         kind = format.sample_format.name(),
         tag = format.format_tag,
     )
@@ -304,6 +309,8 @@ pub struct Shared {
 pub struct Inner {
     pub spectrum: std::sync::Mutex<Option<Arc<AudioSpectrum>>>,
     pub running: std::sync::atomic::AtomicBool,
+    /// Whether the capture thread died after `open` returned `Ok` (B3).
+    pub failed: std::sync::atomic::AtomicBool,
     /// Whether the first packet of this capture has been logged.
     pub first_packet: std::sync::atomic::AtomicBool,
 }
@@ -314,6 +321,7 @@ impl Shared {
             inner: Arc::new(Inner {
                 spectrum: std::sync::Mutex::new(None),
                 running: std::sync::atomic::AtomicBool::new(false),
+                failed: std::sync::atomic::AtomicBool::new(false),
                 first_packet: std::sync::atomic::AtomicBool::new(false),
             }),
         }
@@ -324,8 +332,20 @@ impl Shared {
         self.inner.running.load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// Whether the capture thread died after `open` returned `Ok` (B3: the
+    /// daemon must not believe a dead capture is running).
+    pub fn mark_failed(&self) {
+        self.inner.failed.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether the capture thread died after `open` returned `Ok`.
+    pub fn failed(&self) -> bool {
+        self.inner.failed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     pub fn stop(&self) {
         self.inner.running.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.inner.failed.store(false, std::sync::atomic::Ordering::SeqCst);
         // The next capture is a new run, so it says again that its first packet arrived.
         self.inner.first_packet.store(false, std::sync::atomic::Ordering::SeqCst);
         if let Ok(mut s) = self.inner.spectrum.lock() {
@@ -369,17 +389,34 @@ pub fn pcm32_to_f32(sample: i32) -> f32 {
 
 /// Decodes one interleaved block of integer-PCM bytes into mono `f32` samples.
 ///
-/// `bits` is the sample width (16, 24 or 32). Anything else is not decoded: the
-/// caller reports `UnsupportedFormat` for it. This is the #193 fix: a PCM mix
-/// used to be read as float32, so a 16-bit endpoint's samples were garbage.
+/// `bits` is the container width (16, 24 or 32) and `valid_bits` the valid bits
+/// within it (S6): WASAPI delivers valid bits left-justified in the container,
+/// so a 24-in-32 feed is decoded by reading the 32-bit container and shifting
+/// back. Anything else is not decoded: the caller reports `UnsupportedFormat`
+/// for it. This is the #193 fix: a PCM mix used to be read as float32, so a
+/// 16-bit endpoint's samples were garbage.
 pub fn decode_pcm_mono(data: &[u8], bits: u16, channels: u16) -> Option<Vec<f32>> {
+    decode_pcm_mono_valid(data, bits, bits, channels)
+}
+
+/// Decodes one interleaved block of integer-PCM bytes with `valid_bits` valid
+/// bits left-justified in a `container_bits`-wide container (S6).
+pub fn decode_pcm_mono_valid(
+    data: &[u8],
+    container_bits: u16,
+    valid_bits: u16,
+    channels: u16,
+) -> Option<Vec<f32>> {
     let channels = channels.max(1) as usize;
-    let bytes_per_sample = match bits {
+    let bytes_per_sample = match container_bits {
         16 => 2,
         24 => 3,
         32 => 4,
         _ => return None,
     };
+    if !(8..=32).contains(&valid_bits) || valid_bits > container_bits {
+        return None;
+    }
     let frame_bytes = bytes_per_sample * channels;
     if frame_bytes == 0 {
         return None;
@@ -391,20 +428,54 @@ pub fn decode_pcm_mono(data: &[u8], bits: u16, channels: u16) -> Option<Vec<f32>
         let mut sum = 0.0f32;
         for ch in 0..channels {
             let off = base + ch * bytes_per_sample;
-            let value = match bits {
+            let value = match container_bits {
                 16 => pcm16_to_f32(i16::from_le_bytes([data[off], data[off + 1]])),
                 24 => {
                     let raw = data[off] as i32 | ((data[off + 1] as i32) << 8) | ((data[off + 2] as i32) << 16);
                     let signed = if raw & 0x0080_0000 != 0 { raw | !0x00FF_FFFF } else { raw };
                     pcm24_to_f32(signed)
                 }
-                _ => pcm32_to_f32(i32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])),
+                _ => {
+                    let raw = i32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
+                    if valid_bits < 32 {
+                        // Left-justified valid bits: shift the container back
+                        // down to the valid width, then scale by that width.
+                        let shift = 32 - valid_bits as u32;
+                        let adjusted = raw >> shift;
+                        adjusted as f32 / (1i64 << (valid_bits - 1)) as f32
+                    } else {
+                        pcm32_to_f32(raw)
+                    }
+                }
             };
             sum += value;
         }
         mono.push(sum / channels as f32);
     }
     Some(mono)
+}
+
+/// Decodes one interleaved block of bytes by the mix format: the one decode
+/// path the capture loop uses (S7), so a test through here guards the wiring.
+pub fn decode_bytes_mono(data: &[u8], format: &MixFormat) -> Option<Vec<f32>> {
+    match format.sample_format {
+        SampleFormat::Float => Some(decode_float_mono(data, format.channels)),
+        SampleFormat::Pcm => decode_pcm_mono_valid(
+            data,
+            format.bits_per_sample,
+            format.valid_bits_per_sample,
+            format.channels,
+        ),
+        SampleFormat::Other => None,
+    }
+}
+
+/// Bytes per sample the endpoint publishes for `format` (the container width).
+pub fn container_bytes(format: &MixFormat) -> usize {
+    match format.sample_format {
+        SampleFormat::Float => 4,
+        _ => (format.bits_per_sample as usize).div_ceil(8),
+    }
 }
 
 /// Decodes one interleaved block of float32 bytes into mono `f32` samples (#166).
@@ -528,6 +599,34 @@ pub trait AudioBackend: Send + Sync {
     fn peak(&self, resolved: &canvas_proto::audio::ResolvedAudioSource) -> Option<f32>;
 }
 
+/// Resolves the owner's choice to the endpoint the capture will open: one
+/// implementation for the fake and for WASAPI (S4), so a pinned endpoint that
+/// is enumerated but not `Active` falls back the same way on both.
+pub fn resolve_from(
+    endpoints: &[canvas_proto::audio::AudioEndpoint],
+    requested: &canvas_proto::audio::AudioSource,
+) -> canvas_proto::audio::ResolvedAudioSource {
+    use canvas_proto::audio::{AudioFallback, AudioFlow, AudioSource, ResolvedAudioSource};
+    let default_render = endpoints
+        .iter()
+        .find(|e| e.flow == AudioFlow::Render && e.is_default && e.state == canvas_proto::audio::AudioEndpointState::Active);
+    match requested {
+        AudioSource::FollowDefault => match default_render {
+            Some(ep) => ResolvedAudioSource { requested: requested.clone(), endpoint_id: Some(ep.id.clone()), name: Some(ep.name.clone()), flow: Some(ep.flow), fallback: None },
+            None => ResolvedAudioSource { requested: requested.clone(), endpoint_id: None, name: None, flow: None, fallback: None },
+        },
+        AudioSource::Endpoint { id, flow, .. } => {
+            if let Some(ep) = endpoints.iter().find(|e| &e.id == id && e.state == canvas_proto::audio::AudioEndpointState::Active) {
+                ResolvedAudioSource { requested: requested.clone(), endpoint_id: Some(ep.id.clone()), name: Some(ep.name.clone()), flow: Some(ep.flow), fallback: None }
+            } else if let Some(ep) = default_render {
+                ResolvedAudioSource { requested: requested.clone(), endpoint_id: Some(ep.id.clone()), name: Some(ep.name.clone()), flow: Some(ep.flow), fallback: Some(AudioFallback::PickedMissing) }
+            } else {
+                ResolvedAudioSource { requested: requested.clone(), endpoint_id: None, name: None, flow: Some(*flow), fallback: Some(AudioFallback::PickedMissing) }
+            }
+        }
+    }
+}
+
 /// The fake backend: every `AudioTestStatus` is reachable through it, with no
 /// audio device ever opened.
 pub struct FakeBackend {
@@ -546,6 +645,8 @@ struct FakeScript {
     samples: Vec<f32>,
     /// When true, `open` leaves `Waiting` and produces nothing.
     pending: bool,
+    /// When true, `open` returns `Ok` and the capture is already dead (B3).
+    die_after_open: bool,
     /// The event sink the capture posts notifications to.
     events: Vec<BackendEvent>,
 }
@@ -566,12 +667,13 @@ impl FakeBackend {
             script: std::sync::Mutex::new(FakeScript {
                 endpoints: Vec::new(),
                 open: FakeOpen::Ok,
-                format: MixFormat { sample_rate: 48000, channels: 2, bits_per_sample: 32, format_tag: 3, sample_format: SampleFormat::Float },
+                format: MixFormat { sample_rate: 48000, channels: 2, bits_per_sample: 32, valid_bits_per_sample: 32, format_tag: 3, sample_format: SampleFormat::Float },
                 peak: Some(0.5),
                 packets: 10,
                 silent_packets: 0,
                 samples: Vec::new(),
                 pending: false,
+                die_after_open: false,
                 events: Vec::new(),
             }),
         }
@@ -599,6 +701,8 @@ impl FakeBackend {
         s.silent_packets = silent_packets;
     }
     pub fn set_pending(&self, pending: bool) { self.script.lock().unwrap_or_else(|e| e.into_inner()).pending = pending; }
+    /// Simulates a capture thread that dies right after `open` returned `Ok` (B3).
+    pub fn set_die_after_open(&self, die: bool) { self.script.lock().unwrap_or_else(|e| e.into_inner()).die_after_open = die; }
     pub fn set_samples(&self, samples: Vec<f32>) { self.script.lock().unwrap_or_else(|e| e.into_inner()).samples = samples; }
     pub fn events(&self) -> Vec<BackendEvent> { self.script.lock().unwrap_or_else(|e| e.into_inner()).events.clone() }
     pub fn post_event(&self, event: BackendEvent) { self.script.lock().unwrap_or_else(|e| e.into_inner()).events.push(event); }
@@ -610,24 +714,7 @@ impl AudioBackend for FakeBackend {
     }
 
     fn resolve(&self, requested: &canvas_proto::audio::AudioSource) -> canvas_proto::audio::ResolvedAudioSource {
-        use canvas_proto::audio::{AudioFallback, AudioFlow, AudioSource, ResolvedAudioSource};
-        let endpoints = self.enumerate();
-        let default_render = endpoints.iter().find(|e| e.flow == AudioFlow::Render && e.is_default).cloned();
-        match requested {
-            AudioSource::FollowDefault => match default_render {
-                Some(ep) => ResolvedAudioSource { requested: requested.clone(), endpoint_id: Some(ep.id.clone()), name: Some(ep.name.clone()), flow: Some(ep.flow), fallback: None },
-                None => ResolvedAudioSource { requested: requested.clone(), endpoint_id: None, name: None, flow: None, fallback: None },
-            },
-            AudioSource::Endpoint { id, flow, .. } => {
-                if let Some(ep) = endpoints.iter().find(|e| &e.id == id && e.state == canvas_proto::audio::AudioEndpointState::Active) {
-                    ResolvedAudioSource { requested: requested.clone(), endpoint_id: Some(ep.id.clone()), name: Some(ep.name.clone()), flow: Some(ep.flow), fallback: None }
-                } else if let Some(ep) = default_render {
-                    ResolvedAudioSource { requested: requested.clone(), endpoint_id: Some(ep.id.clone()), name: Some(ep.name.clone()), flow: Some(ep.flow), fallback: Some(AudioFallback::PickedMissing) }
-                } else {
-                    ResolvedAudioSource { requested: requested.clone(), endpoint_id: None, name: None, flow: Some(*flow), fallback: Some(AudioFallback::PickedMissing) }
-                }
-            }
-        }
+        resolve_from(&self.enumerate(), requested)
     }
 
     fn open(
@@ -651,6 +738,17 @@ impl AudioBackend for FakeBackend {
         if script.pending {
             snap.status = AudioTestStatus::Waiting;
             snap.bands = Vec::new();
+            return Ok(());
+        }
+        if script.die_after_open {
+            // The capture thread died after `open` returned `Ok`: the daemon
+            // must stop believing the capture runs (B3). The thread leaves an
+            // honest terminal status and marks the shared state failed.
+            snap.status = AudioTestStatus::NoDevice;
+            snap.peak = None;
+            drop(snap);
+            shared.inner.running.store(false, std::sync::atomic::Ordering::SeqCst);
+            shared.mark_failed();
             return Ok(());
         }
         match &script.open {
@@ -720,9 +818,6 @@ pub mod wasapi {
     /// `KSDATAFORMAT_SUBTYPE_IEEE_FLOAT`.
     const KSDATAFORMAT_SUBTYPE_IEEE_FLOAT: windows::core::GUID =
         windows::core::GUID::from_u128(0x0000_0003_0000_0010_8000_00aa_0038_9b71);
-    /// The name the log uses when the endpoint has no friendly name.
-    const DEFAULT_ENDPOINT: &str = "the default render endpoint";
-
     /// The endpoint's friendly name, as Windows shows it ("Speakers (Realtek Audio)").
     ///
     /// The name comes from the device's property store. An endpoint without one has no
@@ -779,10 +874,17 @@ pub mod wasapi {
             },
             _ => SampleFormat::Other,
         };
+        // S6: an extensible 24-in-32 feed publishes its valid bits in the
+        // extension; fall back to the container width when it says none.
+        let valid_bits = extensible
+            .map(|e| unsafe { e.Samples.wValidBitsPerSample })
+            .filter(|bits| *bits != 0 && *bits <= format.wBitsPerSample)
+            .unwrap_or(format.wBitsPerSample);
         MixFormat {
             sample_rate: format.nSamplesPerSec,
             channels: format.nChannels,
             bits_per_sample: format.wBitsPerSample,
+            valid_bits_per_sample: valid_bits,
             format_tag: format.wFormatTag,
             sample_format,
         }
@@ -804,6 +906,9 @@ pub mod wasapi {
         events: std::sync::Mutex<Vec<BackendEvent>>,
         /// The pinned endpoint id the callbacks watch for.
         pinned: std::sync::Mutex<Option<String>>,
+        /// The last successful enumeration (S5): resolve reads this, so the
+        /// lease/effect path does no COM work. `GET /audio/sources` refreshes it.
+        cached: std::sync::Mutex<Vec<canvas_proto::audio::AudioEndpoint>>,
     }
 
     impl WasapiInner {
@@ -828,6 +933,7 @@ pub mod wasapi {
                 inner: std::sync::Arc::new(WasapiInner {
                     events: std::sync::Mutex::new(Vec::new()),
                     pinned: std::sync::Mutex::new(None),
+                    cached: std::sync::Mutex::new(Vec::new()),
                 }),
             }
         }
@@ -881,27 +987,20 @@ pub mod wasapi {
                     endpoints.push(AudioEndpoint { id: id.clone(), flow, name: Self::endpoint_name(&device), is_default: default_id.as_deref() == Some(id.as_str()), state: AudioEndpointState::Active });
                 }
             }
+            *self.inner.cached.lock().unwrap_or_else(|e| e.into_inner()) = endpoints.clone();
             endpoints
         }
 
         fn resolve(&self, requested: &canvas_proto::audio::AudioSource) -> canvas_proto::audio::ResolvedAudioSource {
-            use canvas_proto::audio::{AudioFallback, AudioFlow, AudioSource, ResolvedAudioSource};
-            let endpoints = self.enumerate();
-            let default_render = endpoints.iter().find(|e| e.flow == AudioFlow::Render && e.is_default);
-            match requested {
-                AudioSource::FollowDefault => match default_render {
-                    Some(ep) => ResolvedAudioSource { requested: requested.clone(), endpoint_id: Some(ep.id.clone()), name: Some(ep.name.clone()), flow: Some(ep.flow), fallback: None },
-                    None => ResolvedAudioSource { requested: requested.clone(), endpoint_id: None, name: None, flow: None, fallback: None },
-                },
-                AudioSource::Endpoint { id, flow, .. } => {
-                    if let Some(ep) = endpoints.iter().find(|e| &e.id == id) {
-                        ResolvedAudioSource { requested: requested.clone(), endpoint_id: Some(ep.id.clone()), name: Some(ep.name.clone()), flow: Some(ep.flow), fallback: None }
-                    } else if let Some(ep) = default_render {
-                        ResolvedAudioSource { requested: requested.clone(), endpoint_id: Some(ep.id.clone()), name: Some(ep.name.clone()), flow: Some(ep.flow), fallback: Some(AudioFallback::PickedMissing) }
-                    } else {
-                        ResolvedAudioSource { requested: requested.clone(), endpoint_id: None, name: None, flow: Some(*flow), fallback: Some(AudioFallback::PickedMissing) }
-                    }
-                }
+            // S5: resolve from the last successful enumeration, so the
+            // lease/effect path does no COM work. Only the first resolve
+            // before any enumeration touches COM.
+            let cached = self.inner.cached.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            if cached.is_empty() {
+                let endpoints = self.enumerate();
+                resolve_from(&endpoints, requested)
+            } else {
+                resolve_from(&cached, requested)
             }
         }
 
@@ -917,6 +1016,7 @@ pub mod wasapi {
             // The capture runs on its own thread; COM is initialised there.
             // The inner state is Arc-shared, so it outlives the thread.
             let inner = std::sync::Arc::clone(&self.inner);
+            let backend = self.clone();
             let shared = shared.clone();
             let snapshot = std::sync::Arc::clone(snapshot);
             let stop = std::sync::Arc::clone(stop);
@@ -924,7 +1024,22 @@ pub mod wasapi {
             std::thread::Builder::new()
                 .name("canvas-rgb-audio".into())
                 .spawn(move || {
-                    let _ = WasapiBackend::run_capture(&inner, &resolved, &id, flow, &shared, &snapshot, &stop);
+                    // B3: a capture thread that dies clears the daemon's
+                    // "running" state, so the next need reopens the capture
+                    // instead of believing a dead thread is live.
+                    if let Err(error) = backend.run_capture(&inner, &resolved, &id, flow, &shared, &snapshot, &stop) {
+                        shared.mark_failed();
+                        let mut snap = snapshot.lock().unwrap_or_else(|e| e.into_inner());
+                        snap.status = match &error {
+                            OpenError::HeldExclusive => canvas_proto::audio::AudioTestStatus::HeldExclusive,
+                            OpenError::UnsupportedFormat { .. } => canvas_proto::audio::AudioTestStatus::UnsupportedFormat,
+                            OpenError::NoDevice | OpenError::OpenFailed { .. } => canvas_proto::audio::AudioTestStatus::NoDevice,
+                        };
+                        if snap.status == canvas_proto::audio::AudioTestStatus::HeldExclusive {
+                            snap.peak = None;
+                        }
+                        tracing::warn!(error = %error, "the audio capture thread died");
+                    }
                 })
                 .map_err(|e| OpenError::OpenFailed { message: e.to_string() })?;
             Ok(())
@@ -934,9 +1049,12 @@ pub mod wasapi {
     }
 
     impl WasapiBackend {
-        /// Runs one capture until `stop` is set, reopening once when the device
-        /// is invalidated or the default changes (#166).
+        /// Runs one capture until `stop` is set, looping — never recursing —
+        /// when the device is invalidated or the default changes (B2): one
+        /// notification registration, one client at a time, re-resolved.
+        #[allow(clippy::too_many_arguments)]
         fn run_capture(
+            &self,
             inner: &std::sync::Arc<WasapiInner>,
             resolved: &canvas_proto::audio::ResolvedAudioSource,
             id: &str,
@@ -950,8 +1068,8 @@ pub mod wasapi {
             let _hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
             let enumerator = WasapiBackend::enumerator().map_err(|m| OpenError::OpenFailed { message: m })?;
             // Register the notification client once for this capture's life:
-            // never re-registered inside a callback, and the client object
-            // (held in `_client`) lives as long as the enumerator is in use.
+            // never re-registered inside a callback or a reopen, and the client
+            // object (held in `_client`) lives as long as the capture thread.
             let _client: windows::Win32::Media::Audio::IMMNotificationClient = NotifyClient {
                 shared: std::sync::Arc::clone(inner),
             }
@@ -963,135 +1081,156 @@ pub mod wasapi {
                 canvas_proto::audio::AudioSource::Endpoint { id, .. } => Some(id.clone()),
                 _ => None,
             };
-            let id_hstring = windows::core::HSTRING::from(id);
-            let device: IMMDevice = unsafe {
-                enumerator
-                    .GetDevice(&id_hstring)
-                    .map_err(|e| OpenError::OpenFailed { message: format!("could not open the endpoint: {e}") })?
-            };
-            let audio_client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None).map_err(|e| OpenError::OpenFailed { message: e.to_string() })? };
-            let meter: Option<IAudioMeterInformation> = unsafe { device.Activate(CLSCTX_ALL, None).ok() };
-            let mix_format_ptr = unsafe { audio_client.GetMixFormat().map_err(|e| OpenError::OpenFailed { message: e.to_string() })? };
-            if mix_format_ptr.is_null() { return Err(OpenError::NoDevice); }
-            let mix_format: WAVEFORMATEX = unsafe { *mix_format_ptr };
-            let extensible = if mix_format.wFormatTag == WAVE_FORMAT_EXTENSIBLE && extensible_has_extension(mix_format.cbSize) {
-                Some(unsafe { &*(mix_format_ptr as *const WAVEFORMATEXTENSIBLE) })
-            } else { None };
-            let mix = mix_format_of(&mix_format, extensible);
-            let channels = mix.channels.max(1) as usize;
-            match mix.sample_format {
-                SampleFormat::Float => {}
-                SampleFormat::Pcm if matches!(mix.bits_per_sample, 16 | 24 | 32) => {}
-                _ => {
-                    let mut snap = snapshot.lock().unwrap_or_else(|e| e.into_inner());
-                    snap.status = canvas_proto::audio::AudioTestStatus::UnsupportedFormat;
-                    snap.format_tag = Some(mix.format_tag);
-                    return Err(OpenError::UnsupportedFormat { tag: mix.format_tag });
+            let mut current_id = id.to_string();
+            let mut current_resolved = resolved.clone();
+            let mut current_flow = flow;
+            'open: loop {
+                if stop.load(Ordering::SeqCst) {
+                    break;
                 }
-            }
-            let flags = if flow == AudioFlow::Render { AUDCLNT_STREAMFLAGS_LOOPBACK } else { AUDCLNT_STREAMFLAGS_LOOPBACK & !AUDCLNT_STREAMFLAGS_LOOPBACK };
-            let init = unsafe {
-                audio_client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 0, 0, mix_format_ptr, None)
-            };
-            if let Err(e) = init {
-                // AUDCLNT_E_DEVICE_IN_USE is 0x8888000A: another app holds it exclusively.
-                if e.code().0 as u32 == 0x8888_000A {
-                    let mut snap = snapshot.lock().unwrap_or_else(|e| e.into_inner());
-                    snap.status = canvas_proto::audio::AudioTestStatus::HeldExclusive;
-                    snap.peak = None;
-                    return Err(OpenError::HeldExclusive);
-                }
-                return Err(OpenError::OpenFailed { message: format!("could not initialize the audio client: {e}") });
-            }
-            if let Err(e) = unsafe { audio_client.Start() } {
-                if e.code().0 as u32 == 0x8888_000A {
-                    let mut snap = snapshot.lock().unwrap_or_else(|e| e.into_inner());
-                    snap.status = canvas_proto::audio::AudioTestStatus::HeldExclusive;
-                    snap.peak = None;
-                    return Err(OpenError::HeldExclusive);
-                }
-                return Err(OpenError::OpenFailed { message: format!("could not start the audio client: {e}") });
-            }
-            shared.inner.running.store(true, Ordering::SeqCst);
-            {
-                let mut snap = snapshot.lock().unwrap_or_else(|e| e.into_inner());
-                snap.sample_rate = Some(mix.sample_rate);
-                snap.channels = Some(mix.channels);
-                snap.bits_per_sample = Some(mix.bits_per_sample);
-                snap.format_tag = Some(mix.format_tag);
-                snap.status = canvas_proto::audio::AudioTestStatus::Waiting;
-            }
-            tracing::info!("{}", mix_format_line(&EndpointInfo { name: resolved.name.clone().unwrap_or_default(), id: id.to_string() }, &mix));
-            let capture: IAudioCaptureClient = unsafe { audio_client.GetService().map_err(|e| OpenError::OpenFailed { message: e.to_string() })? };
-            let mut samples: Vec<f32> = Vec::with_capacity(FFT_SIZE);
-            let mut last_publish = std::time::Instant::now();
-            let mut watch = SilenceWatch::new(std::time::Instant::now());
-            while !stop.load(Ordering::SeqCst) && shared.inner.running.load(Ordering::SeqCst) {
-                if let Some(event) = inner.drain_events().into_iter().next() {
-                    match event {
-                        BackendEvent::DefaultChanged => {
-                            let mut snap = snapshot.lock().unwrap_or_else(|e| e.into_inner());
-                            snap.status = canvas_proto::audio::AudioTestStatus::DefaultChanged;
-                            tracing::info!("the Windows default output changed; reopening the audio capture");
-                            return Self::run_capture(inner, resolved, id, flow, shared, snapshot, stop);
-                        }
-                        BackendEvent::DeviceInvalidated { .. } | BackendEvent::PinnedDeviceChanged { .. } => {
-                            let mut snap = snapshot.lock().unwrap_or_else(|e| e.into_inner());
-                            snap.status = canvas_proto::audio::AudioTestStatus::Reopening;
-                            tracing::info!("the audio endpoint was invalidated; reopening the audio capture");
-                            return Self::run_capture(inner, resolved, id, flow, shared, snapshot, stop);
-                        }
+                let id_hstring = windows::core::HSTRING::from(current_id.as_str());
+                let device: IMMDevice = unsafe {
+                    enumerator
+                        .GetDevice(&id_hstring)
+                        .map_err(|e| OpenError::OpenFailed { message: format!("could not open the endpoint: {e}") })?
+                };
+                let audio_client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None).map_err(|e| OpenError::OpenFailed { message: e.to_string() })? };
+                let meter: Option<IAudioMeterInformation> = unsafe { device.Activate(CLSCTX_ALL, None).ok() };
+                let mix_format_ptr = unsafe { audio_client.GetMixFormat().map_err(|e| OpenError::OpenFailed { message: e.to_string() })? };
+                if mix_format_ptr.is_null() { return Err(OpenError::NoDevice); }
+                let mix_format: WAVEFORMATEX = unsafe { *mix_format_ptr };
+                let extensible = if mix_format.wFormatTag == WAVE_FORMAT_EXTENSIBLE && extensible_has_extension(mix_format.cbSize) {
+                    Some(unsafe { &*(mix_format_ptr as *const WAVEFORMATEXTENSIBLE) })
+                } else { None };
+                let mix = mix_format_of(&mix_format, extensible);
+                let channels = mix.channels.max(1) as usize;
+                match mix.sample_format {
+                    SampleFormat::Float => {}
+                    SampleFormat::Pcm if matches!(mix.bits_per_sample, 16 | 24 | 32) => {}
+                    _ => {
+                        let mut snap = snapshot.lock().unwrap_or_else(|e| e.into_inner());
+                        snap.status = canvas_proto::audio::AudioTestStatus::UnsupportedFormat;
+                        snap.format_tag = Some(mix.format_tag);
+                        return Err(OpenError::UnsupportedFormat { tag: mix.format_tag });
                     }
                 }
-                let available = match unsafe { capture.GetNextPacketSize() } {
-                    Ok(n) => n,
-                    Err(_) => { std::thread::sleep(std::time::Duration::from_millis(10)); continue; }
+                // Render captures loopback; input captures use no flags (nit: a
+                // plain 0, not a convoluted flag expression).
+                let flags = if current_flow == AudioFlow::Render { AUDCLNT_STREAMFLAGS_LOOPBACK } else { 0 };
+                let init = unsafe {
+                    audio_client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 0, 0, mix_format_ptr, None)
                 };
-                if available == 0 {
-                    if let Some(warning) = watch.warning(std::time::Instant::now()) { tracing::warn!("{warning}"); }
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                    continue;
+                if let Err(e) = init {
+                    // AUDCLNT_E_DEVICE_IN_USE is 0x8888000A: another app holds it exclusively.
+                    if e.code().0 as u32 == 0x8888_000A {
+                        let mut snap = snapshot.lock().unwrap_or_else(|e| e.into_inner());
+                        snap.status = canvas_proto::audio::AudioTestStatus::HeldExclusive;
+                        snap.peak = None;
+                        return Err(OpenError::HeldExclusive);
+                    }
+                    return Err(OpenError::OpenFailed { message: format!("could not initialize the audio client: {e}") });
                 }
-                let mut data: *mut u8 = std::ptr::null_mut();
-                let mut frames: u32 = 0;
-                let mut flags: u32 = 0;
-                if unsafe { capture.GetBuffer(&mut data, &mut frames, &mut flags, None, None) }.is_err() { continue; }
-                let mut peak = 0.0f32;
-                if flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 || data.is_null() {
-                    samples.clear();
-                } else {
-                    let bytes_per_sample = match mix.sample_format { SampleFormat::Float => 4usize, SampleFormat::Pcm => (mix.bits_per_sample as usize).div_ceil(8), SampleFormat::Other => 0 };
-                    let byte_count = (frames as usize) * channels * bytes_per_sample;
-                    let bytes = unsafe { std::slice::from_raw_parts(data, byte_count.min(1 << 24)) };
-                    let mono = match mix.sample_format {
-                        SampleFormat::Float => decode_float_mono(bytes, channels as u16),
-                        _ => decode_pcm_mono(bytes, mix.bits_per_sample, channels as u16).unwrap_or_default(),
-                    };
-                    for value in &mono { peak = peak.max(value.abs()); }
-                    samples.clear();
-                    samples.extend_from_slice(&mono);
+                if let Err(e) = unsafe { audio_client.Start() } {
+                    if e.code().0 as u32 == 0x8888_000A {
+                        let mut snap = snapshot.lock().unwrap_or_else(|e| e.into_inner());
+                        snap.status = canvas_proto::audio::AudioTestStatus::HeldExclusive;
+                        snap.peak = None;
+                        return Err(OpenError::HeldExclusive);
+                    }
+                    return Err(OpenError::OpenFailed { message: format!("could not start the audio client: {e}") });
                 }
-                let _ = unsafe { capture.ReleaseBuffer(frames) };
-                watch.packet(std::time::Instant::now(), peak);
+                shared.inner.running.store(true, Ordering::SeqCst);
                 {
                     let mut snap = snapshot.lock().unwrap_or_else(|e| e.into_inner());
-                    snap.packets += 1;
-                    if peak <= SILENCE_FLOOR { snap.silent_packets += 1; }
-                    if let Some(m) = &meter {
-                        if let Ok(p) = unsafe { m.GetPeakValue() } { snap.peak = Some(p); }
-                    } else { snap.peak = Some(peak); }
-                    snap.status = if snap.packets == 0 { canvas_proto::audio::AudioTestStatus::NoPackets } else if peak <= SILENCE_FLOOR { canvas_proto::audio::AudioTestStatus::Silent } else { canvas_proto::audio::AudioTestStatus::Live };
+                    snap.sample_rate = Some(mix.sample_rate);
+                    snap.channels = Some(mix.channels);
+                    snap.bits_per_sample = Some(mix.bits_per_sample);
+                    snap.format_tag = Some(mix.format_tag);
+                    snap.status = canvas_proto::audio::AudioTestStatus::Waiting;
                 }
-                if last_publish.elapsed() >= std::time::Duration::from_millis(33) && !samples.is_empty() {
-                    last_publish = std::time::Instant::now();
-                    let window: Vec<f32> = samples.iter().rev().take(FFT_SIZE).rev().copied().collect();
-                    let spectrum = std::sync::Arc::new(super::spectrum_from_samples_at(&window, mix.sample_rate));
-                    if let Ok(mut s) = shared.inner.spectrum.lock() { *s = Some(spectrum.clone()); }
-                    let mut snap = snapshot.lock().unwrap_or_else(|e| e.into_inner());
-                    snap.bands = spectrum.magnitudes.clone();
+                tracing::info!("{}", mix_format_line(&EndpointInfo { name: current_resolved.name.clone().unwrap_or_default(), id: current_id.clone() }, &mix));
+                let capture: IAudioCaptureClient = unsafe { audio_client.GetService().map_err(|e| OpenError::OpenFailed { message: e.to_string() })? };
+                let mut samples: Vec<f32> = Vec::with_capacity(FFT_SIZE);
+                let mut last_publish = std::time::Instant::now();
+                let mut watch = SilenceWatch::new(std::time::Instant::now());
+                loop {
+                    if stop.load(Ordering::SeqCst) || !shared.inner.running.load(Ordering::SeqCst) {
+                        break 'open;
+                    }
+                    if let Some(event) = inner.drain_events().into_iter().next() {
+                        // Stop the current client before re-opening (B2): the
+                        // old capture is finished before the new one starts.
+                        let _ = unsafe { audio_client.Stop() };
+                        let next = self.resolve(&resolved.requested);
+                        let (status, message) = match event {
+                            BackendEvent::DefaultChanged => (canvas_proto::audio::AudioTestStatus::DefaultChanged, "the Windows default output changed; reopening the audio capture"),
+                            BackendEvent::DeviceInvalidated { .. } | BackendEvent::PinnedDeviceChanged { .. } => (canvas_proto::audio::AudioTestStatus::Reopening, "the audio endpoint was invalidated; reopening the audio capture"),
+                        };
+                        {
+                            let mut snap = snapshot.lock().unwrap_or_else(|e| e.into_inner());
+                            snap.status = status;
+                        }
+                        tracing::info!("{message}");
+                        // B2-C: a re-resolve with no endpoint is an honest
+                        // terminal failure, never a stuck `Reopening`.
+                        let Some(next_id) = next.endpoint_id.clone() else {
+                            return Err(match next.fallback {
+                                Some(canvas_proto::audio::AudioFallback::PickedMissing) => OpenError::NoDevice,
+                                _ => OpenError::NoDevice,
+                            });
+                        };
+                        current_resolved = next;
+                        current_id = next_id;
+                        current_flow = current_resolved.flow.unwrap_or(current_flow);
+                        continue 'open;
+                    }
+                    let available = match unsafe { capture.GetNextPacketSize() } {
+                        Ok(n) => n,
+                        Err(_) => { std::thread::sleep(std::time::Duration::from_millis(10)); continue; }
+                    };
+                    if available == 0 {
+                        if let Some(warning) = watch.warning(std::time::Instant::now()) { tracing::warn!("{warning}"); }
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        continue;
+                    }
+                    let mut data: *mut u8 = std::ptr::null_mut();
+                    let mut frames: u32 = 0;
+                    let mut flags: u32 = 0;
+                    if unsafe { capture.GetBuffer(&mut data, &mut frames, &mut flags, None, None) }.is_err() { continue; }
+                    let mut peak = 0.0f32;
+                    if flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 || data.is_null() {
+                        samples.clear();
+                    } else {
+                        // Decode through the one shared path (S7) the tests guard.
+                        let bytes_per_sample = container_bytes(&mix);
+                        let byte_count = (frames as usize) * channels * bytes_per_sample;
+                        let bytes = unsafe { std::slice::from_raw_parts(data, byte_count.min(1 << 24)) };
+                        let mono = decode_bytes_mono(bytes, &mix).unwrap_or_default();
+                        for value in &mono { peak = peak.max(value.abs()); }
+                        samples.clear();
+                        samples.extend_from_slice(&mono);
+                    }
+                    let _ = unsafe { capture.ReleaseBuffer(frames) };
+                    watch.packet(std::time::Instant::now(), peak);
+                    {
+                        let mut snap = snapshot.lock().unwrap_or_else(|e| e.into_inner());
+                        snap.packets += 1;
+                        if peak <= SILENCE_FLOOR { snap.silent_packets += 1; }
+                        if let Some(m) = &meter {
+                            if let Ok(p) = unsafe { m.GetPeakValue() } { snap.peak = Some(p); }
+                        } else { snap.peak = Some(peak); }
+                        snap.status = if snap.packets == 0 { canvas_proto::audio::AudioTestStatus::NoPackets } else if peak <= SILENCE_FLOOR { canvas_proto::audio::AudioTestStatus::Silent } else { canvas_proto::audio::AudioTestStatus::Live };
+                    }
+                    if last_publish.elapsed() >= std::time::Duration::from_millis(33) && !samples.is_empty() {
+                        last_publish = std::time::Instant::now();
+                        let window: Vec<f32> = samples.iter().rev().take(FFT_SIZE).rev().copied().collect();
+                        let spectrum = std::sync::Arc::new(super::spectrum_from_samples_at(&window, mix.sample_rate));
+                        if let Ok(mut s) = shared.inner.spectrum.lock() { *s = Some(spectrum.clone()); }
+                        let mut snap = snapshot.lock().unwrap_or_else(|e| e.into_inner());
+                        snap.bands = spectrum.magnitudes.clone();
+                    }
                 }
             }
-            let _ = unsafe { audio_client.Stop() };
             unsafe { CoUninitialize() };
             Ok(())
         }
@@ -1148,189 +1287,6 @@ pub mod wasapi {
         }
     }
 
-    /// Starts a loopback capture on the default render endpoint.
-    ///
-    /// Returns the shared state; the capture runs until `stop` is called.
-    pub fn start_default_render() -> Result<Shared, String> {
-        // COM must be initialised on this thread.
-        unsafe {
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        }
-
-        let shared = Shared::new();
-        shared.inner.running.store(true, Ordering::SeqCst);
-
-        let capture_shared = shared.clone();
-        std::thread::Builder::new()
-            .name("canvas-rgb-audio".into())
-            .spawn(move || {
-                if let Err(e) = capture_loop(&capture_shared) {
-                    tracing::warn!(error = %e, "the WASAPI loopback capture stopped");
-                }
-                capture_shared.stop();
-            })
-            .map_err(|e| e.to_string())?;
-
-        Ok(shared)
-    }
-
-    /// The capture loop: read the render endpoint, FFT it, publish the spectrum.
-    fn capture_loop(shared: &Shared) -> Result<(), String> {
-        unsafe {
-            let enumerator: IMMDeviceEnumerator = CoCreateInstance(
-                &windows::Win32::Media::Audio::MMDeviceEnumerator,
-                None,
-                CLSCTX_ALL,
-            )
-            .map_err(|e| format!("could not open the audio device enumerator: {e}"))?;
-            let device: IMMDevice = enumerator
-                .GetDefaultAudioEndpoint(eRender, eConsole)
-                .map_err(|e| format!("no default render endpoint: {e}"))?;
-
-            // Which device this is, read before the client is opened: the log has to name
-            // the endpoint the audio comes from, or a reader cannot tell a silent mix
-            // from the wrong device (#1).
-            let name = friendly_name(&device);
-            let endpoint = EndpointInfo {
-                name: name.unwrap_or_else(|| DEFAULT_ENDPOINT.into()),
-                id: device_id(&device),
-            };
-
-            let audio_client: IAudioClient = device
-                .Activate(CLSCTX_ALL, None)
-                .map_err(|e| format!("could not open the audio client: {e}"))?;
-
-            // The shared-mode loopback client takes the mix format from the endpoint.
-            let mix_format_ptr = audio_client.GetMixFormat().map_err(|e| e.to_string())?;
-            if mix_format_ptr.is_null() {
-                return Err("the audio endpoint has no mix format".into());
-            }
-            let mix_format: WAVEFORMATEX = *mix_format_ptr;
-            let channels = mix_format.nChannels.max(1) as usize;
-
-            // The mix format, as the endpoint published it. The extension is only there
-            // when the format is extensible, and it is read from the endpoint's own
-            // pointer: the copy above drops it.
-            let extensible = if mix_format.wFormatTag == WAVE_FORMAT_EXTENSIBLE
-                && extensible_has_extension(mix_format.cbSize)
-            {
-                // The endpoint published an extensible format, so the pointer is a
-                // WAVEFORMATEXTENSIBLE.
-                Some(&*(mix_format_ptr as *const WAVEFORMATEXTENSIBLE))
-            } else {
-                None
-            };
-            let mix = mix_format_of(&mix_format, extensible);
-            tracing::info!("{}", mix_format_line(&endpoint, &mix));
-
-            audio_client
-                .Initialize(
-                    AUDCLNT_SHAREMODE_SHARED,
-                    AUDCLNT_STREAMFLAGS_LOOPBACK,
-                    0,
-                    0,
-                    // The pointer GetMixFormat returned, not the copy: the endpoint's format is usually
-                    // WAVEFORMATEXTENSIBLE, and the 18-byte copy drops its extension, so Initialize
-                    // refuses it (E_INVALIDARG).
-                    mix_format_ptr,
-                    None,
-                )
-                .map_err(|e| format!("could not initialize the audio client: {e}"))?;
-
-            audio_client.Start().map_err(|e| format!("could not start the audio client: {e}"))?;
-
-            let capture: IAudioCaptureClient =
-                audio_client.GetService().map_err(|e| e.to_string())?;
-
-            let mut samples: Vec<f32> = Vec::with_capacity(FFT_SIZE);
-            let mut last_publish = std::time::Instant::now();
-            // What the capture has heard. It warns when the effect that needs the audio
-            // gets nothing from it (#1).
-            let mut watch = SilenceWatch::new(std::time::Instant::now());
-
-            while shared.inner.running.load(Ordering::SeqCst) {
-                let available = match capture.GetNextPacketSize() {
-                    Ok(n) => n,
-                    Err(_) => {
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                        continue;
-                    }
-                };
-                if available == 0 {
-                    // No packet at all. The capture may be hearing nothing, and the
-                    // effect that needs the audio is drawing black because of it.
-                    if let Some(warning) = watch.warning(std::time::Instant::now()) {
-                        tracing::warn!("{warning}");
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                    continue;
-                }
-
-                let mut data: *mut u8 = std::ptr::null_mut();
-                let mut frames: u32 = 0;
-                let mut flags: u32 = 0;
-                capture
-                    .GetBuffer(&mut data, &mut frames, &mut flags, None, None)
-                    .map_err(|e| e.to_string())?;
-
-                let mut peak = 0.0f32;
-                if flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 || data.is_null() {
-                    samples.clear();
-                } else {
-                    // Decode by the mix format (#193): integer PCM is not float32.
-                    let bytes_per_sample = match mix.sample_format {
-                        SampleFormat::Float => 4usize,
-                        SampleFormat::Pcm => (mix.bits_per_sample as usize).div_ceil(8),
-                        SampleFormat::Other => 0,
-                    };
-                    if bytes_per_sample == 0 {
-                        return Err(format!("format not supported (tag {})", mix.format_tag));
-                    }
-                    let byte_count = (frames as usize) * channels * bytes_per_sample;
-                    let bytes = std::slice::from_raw_parts(data, byte_count.min(1 << 24));
-                    let mono = match mix.sample_format {
-                        SampleFormat::Float => decode_float_mono(bytes, channels as u16),
-                        SampleFormat::Pcm => match decode_pcm_mono(bytes, mix.bits_per_sample, channels as u16) {
-                            Some(mono) => mono,
-                            None => return Err(format!("format not supported (tag {})", mix.format_tag)),
-                        },
-                        SampleFormat::Other => return Err(format!("format not supported (tag {})", mix.format_tag)),
-                    };
-                    for value in &mono {
-                        peak = peak.max(value.abs());
-                    }
-                    samples.clear();
-                    samples.extend_from_slice(&mono);
-                }
-                let _ = capture.ReleaseBuffer(frames);
-
-                // A packet arrived: say so once, so the log shows that the capture is
-                // not just running but hearing something (#1).
-                watch.packet(std::time::Instant::now(), peak);
-                if !shared.inner.first_packet.swap(true, Ordering::SeqCst) {
-                    tracing::info!("the first audio packet arrived");
-                }
-                if let Some(warning) = watch.warning(std::time::Instant::now()) {
-                    tracing::warn!("{warning}");
-                }
-
-                // Publish at most 30 times a second.
-                if last_publish.elapsed() >= std::time::Duration::from_millis(33) && !samples.is_empty() {
-                    last_publish = std::time::Instant::now();
-                    let window: Vec<f32> =
-                        samples.iter().rev().take(FFT_SIZE).rev().copied().collect();
-                    let spectrum = Arc::new(super::spectrum_from_samples_at(&window, mix.sample_rate));
-                    if let Ok(mut s) = shared.inner.spectrum.lock() {
-                        *s = Some(spectrum);
-                    }
-                }
-            }
-
-            let _ = audio_client.Stop();
-            CoUninitialize();
-            Ok(())
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1458,13 +1414,14 @@ mod tests {
             sample_rate: 48000,
             channels: 2,
             bits_per_sample: 32,
+            valid_bits_per_sample: 32,
             format_tag: 3,
             sample_format: SampleFormat::Float,
         };
         assert_eq!(
             mix_format_line(&endpoint, &format),
             "the audio capture opened Speakers (Realtek Audio) ({0.0.0.00000000}.{4d1e55b2}): \
-             48000 Hz, 2 channels, 32 bits, IEEE float (format tag 3)"
+             48000 Hz, 2 channels, 32 bits (32 valid), IEEE float (format tag 3)"
         );
     }
 
@@ -1496,13 +1453,14 @@ mod tests {
             sample_rate: 48000,
             channels: 2,
             bits_per_sample: 32,
+            valid_bits_per_sample: 32,
             format_tag: 65534,
             sample_format: SampleFormat::Float,
         };
         assert_eq!(
             mix_format_line(&endpoint, &format),
             "the audio capture opened the default render endpoint (): 48000 Hz, \
-             2 channels, 32 bits, IEEE float (format tag 65534)"
+             2 channels, 32 bits (32 valid), IEEE float (format tag 65534)"
         );
     }
 
@@ -1555,6 +1513,71 @@ mod tests {
         // An unsupported width decodes to nothing (UnsupportedFormat upstream).
         assert!(decode_pcm_mono(&[0u8; 8], 8, 1).is_none());
         assert!(decode_pcm_mono(&[0u8; 8], 64, 1).is_none());
+    }
+
+    /// S7 (#193): the decode path the capture loop uses — bytes plus mix format
+    /// into mono samples — decodes PCM16/24/32 and float to the right level.
+    /// A wiring regression back to reading PCM as float fails here, because
+    /// the fixtures are integer bytes, not floats.
+    #[test]
+    fn the_shared_decode_path_reads_pcm_as_pcm_not_as_float() {
+        let format = |bits: u16, valid: u16, channels: u16, sample_format: SampleFormat| MixFormat {
+            sample_rate: 48000,
+            channels,
+            bits_per_sample: bits,
+            valid_bits_per_sample: valid,
+            format_tag: 1,
+            sample_format,
+        };
+        // PCM16 stereo: left full-scale, right silent -> mono ~1/2.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&32767i16.to_le_bytes());
+        bytes.extend_from_slice(&0i16.to_le_bytes());
+        let mono = decode_bytes_mono(&bytes, &format(16, 16, 2, SampleFormat::Pcm)).unwrap();
+        assert!((mono[0] - 0.5).abs() < 0.01, "PCM16 got {}", mono[0]);
+        // PCM24 mono at half scale.
+        let raw: i32 = 4194304;
+        let mono = decode_bytes_mono(&raw.to_le_bytes()[..3], &format(24, 24, 1, SampleFormat::Pcm)).unwrap();
+        assert!((mono[0] - 0.5).abs() < 0.001, "PCM24 got {}", mono[0]);
+        // PCM32 mono at half scale.
+        let mono = decode_bytes_mono(&1073741824i32.to_le_bytes(), &format(32, 32, 1, SampleFormat::Pcm)).unwrap();
+        assert!((mono[0] - 0.5).abs() < 0.001, "PCM32 got {}", mono[0]);
+        // Float stereo at half scale either way.
+        let mono = decode_bytes_mono(&[0.5f32.to_le_bytes(), 0.5f32.to_le_bytes()].concat(), &format(32, 32, 2, SampleFormat::Float)).unwrap();
+        assert!((mono[0] - 0.5).abs() < 0.001, "float got {}", mono[0]);
+        // Unknown format decodes to nothing (UnsupportedFormat upstream).
+        assert!(decode_bytes_mono(&[0u8; 8], &format(32, 32, 1, SampleFormat::Other)).is_none());
+    }
+
+    /// S6: a 24-in-32 container delivers its valid bits left-justified; the
+    /// decode reads exactly that level, without the padding noise.
+    #[test]
+    fn valid_bits_inside_the_container_are_read_at_their_alignment() {
+        // 24 valid bits, value at +0.5 of full scale, left-justified in a
+        // 32-bit container, low padding byte set: exact decode, not the
+        // container read as a plain 32-bit sample.
+        let container: i32 = (4194304i32 << 8) | 0xFF;
+        let format = MixFormat { sample_rate: 48000, channels: 1, bits_per_sample: 32, valid_bits_per_sample: 24, format_tag: 65534, sample_format: SampleFormat::Pcm };
+        let mono = decode_bytes_mono(&container.to_le_bytes(), &format).unwrap();
+        assert!((mono[0] - 0.5).abs() < 1e-9, "24-in-32 got {}", mono[0]);
+        // A zero valid-bits field reads as the container width.
+        let packed = decode_pcm_mono_valid(&container.to_le_bytes(), 32, 32, 1).unwrap();
+        assert!((packed[0] - 0.5).abs() < 0.001, "packed 32 got {}", packed[0]);
+    }
+
+    /// S4: resolve_from treats a non-Active pinned endpoint as missing, the
+    /// same way the fake and WASAPI resolve now.
+    #[test]
+    fn a_pinned_endpoint_that_is_not_active_falls_back_to_the_default() {
+        use canvas_proto::audio::{AudioEndpoint, AudioEndpointState, AudioFlow, AudioSource};
+        let endpoints = vec![
+            AudioEndpoint { id: "speakers-id".into(), flow: AudioFlow::Render, name: "Speakers".into(), is_default: true, state: AudioEndpointState::Active },
+            AudioEndpoint { id: "mic-id".into(), flow: AudioFlow::Capture, name: "Microphone".into(), is_default: false, state: AudioEndpointState::NotConnected },
+        ];
+        let requested = AudioSource::Endpoint { id: "mic-id".into(), flow: AudioFlow::Capture, name_hint: "Microphone".into() };
+        let resolved = resolve_from(&endpoints, &requested);
+        assert_eq!(resolved.fallback, Some(canvas_proto::audio::AudioFallback::PickedMissing));
+        assert_eq!(resolved.endpoint_id.as_deref(), Some("speakers-id"));
     }
 
     /// The sample rate from the mix format moves the band edges.

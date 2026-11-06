@@ -186,6 +186,9 @@ impl DaemonInputs {
 
     /// Starts the audio capture on the resolved source.
     pub fn start_audio(&self) {
+        // B3: a capture whose thread died clears the slot so this need
+        // reopens it, instead of believing the dead thread is live.
+        self.reap_if_dead();
         {
             let slot = self.audio.lock().unwrap_or_else(|e| e.into_inner());
             if slot.is_some() {
@@ -194,13 +197,13 @@ impl DaemonInputs {
         }
         let requested = self.requested();
         let resolved = self.backend.resolve(&requested);
-        self.record_resolved(&resolved);
-        // An input is never opened just by visiting Settings: a lease without
-        // Listen for an input reports NotListening and opens nothing.
+        // An input is never opened just by visiting Settings: with no effect
+        // needing it, only a live Listen lease opens an input (S1) — an empty
+        // lease map opens nothing.
         let is_input = matches!(&requested, AudioSource::Endpoint { flow: canvas_proto::audio::AudioFlow::Capture, .. });
         let leases = self.leases.lock().unwrap_or_else(|e| e.into_inner());
         let effect = *self.effect_audio.lock().unwrap_or_else(|e| e.into_inner());
-        if is_input && !effect && !leases.is_empty() && !leases.values().any(|l| l.listen) {
+        if is_input && !effect && !leases.values().any(|l| l.listen) {
             let mut snap = self.snapshot.lock().unwrap_or_else(|e| e.into_inner());
             *snap = audio::CaptureSnapshot { status: AudioTestStatus::NotListening, ..snap.clone() };
             return;
@@ -213,13 +216,28 @@ impl DaemonInputs {
                 // `open` on the fake fills the snapshot synchronously; the real
                 // WASAPI `open` spawns its thread and the thread fills it.
                 tracing::info!("the audio capture is running");
+                // Record the resolved value only once the capture opened
+                // (nit): a failed open leaves no false "opened" log line.
+                self.record_resolved(&resolved);
                 *self.audio.lock().unwrap_or_else(|e| e.into_inner()) = Some(shared);
             }
             Err(e) => {
+                self.record_resolved(&resolved);
                 tracing::warn!(error = %e, "the audio capture could not start");
                 // The snapshot already carries the honest status (HeldExclusive,
                 // NoDevice, UnsupportedFormat); keep it so GET /audio/test says so.
             }
+        }
+    }
+
+    /// Clears the slot of a capture whose thread died (B3); true when cleared.
+    fn reap_if_dead(&self) -> bool {
+        let mut slot = self.audio.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.as_ref().is_some_and(|shared| shared.failed()) {
+            slot.take();
+            true
+        } else {
+            false
         }
     }
 
@@ -313,13 +331,35 @@ impl DaemonInputs {
 
     /// `take_lease` at `now`, for tests that move the clock by hand.
     pub fn take_lease_at(&self, now: Instant, listen: bool) -> String {
-        let id = format!("lease-{}", self.lease_counter.fetch_add(1, Ordering::SeqCst) + 1);
+        // Unguessable ids (nit, defense-in-depth): the counter mixed with the
+        // clock, in hex — a guesser still needs the bearer token regardless.
+        let counter = self.lease_counter.fetch_add(1, Ordering::SeqCst) + 1;
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let id = format!("lease-{:016x}", nanos ^ counter.wrapping_mul(0x9E37_79B9_7F4A_7C15));
         self.leases.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), Lease {
             listen,
             expires_at: now + canvas_proto::consts::AUDIO_TEST_LEASE,
         });
         self.refresh_audio();
         id
+    }
+
+    /// Releases a lease now (S2): turning Listen off closes the microphone at
+    /// once, rather than after the lease expires. True when the lease existed.
+    pub fn release_lease(&self, id: &str) -> bool {
+        let removed = self
+            .leases
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(id)
+            .is_some();
+        if removed {
+            self.refresh_audio();
+        }
+        removed
     }
 
     /// Renews a lease. False when it is unknown or already expired.
@@ -487,6 +527,45 @@ mod tests {
         assert_eq!(inputs.lease_count(), 1, "the lease without Listen is still live");
         assert!(inputs.idle(), "the input is closed once nothing listens to it");
         assert_eq!(inputs.test_state().status, AudioTestStatus::NotListening);
+    }
+
+    /// S1: starting the capture on a picked input with no lease and no effect
+    /// opens nothing — the empty lease map is not an authorization.
+    #[test]
+    fn an_input_does_not_open_without_a_listen_lease_or_an_effect() {
+        let (inputs, _fake) = fake_with(vec![speakers(), mic()]);
+        inputs.set_requested(AudioSource::Endpoint { id: "mic-id".into(), flow: AudioFlow::Capture, name_hint: "Microphone".into() });
+        inputs.start_audio();
+        assert!(inputs.idle(), "no lease and no effect: the microphone stays closed");
+        assert_eq!(inputs.test_state().status, AudioTestStatus::NotListening);
+    }
+
+    /// S2: releasing the last Listen lease closes the microphone at once.
+    #[test]
+    fn releasing_a_listen_lease_closes_the_input_at_once() {
+        let (inputs, _fake) = fake_with(vec![speakers(), mic()]);
+        inputs.set_requested(AudioSource::Endpoint { id: "mic-id".into(), flow: AudioFlow::Capture, name_hint: "Microphone".into() });
+        let id = inputs.take_lease(true);
+        assert!(!inputs.idle(), "Listen opens the input");
+        assert!(inputs.release_lease(&id), "the lease existed");
+        assert!(inputs.idle(), "releasing the Listen lease closes the microphone at once");
+        assert!(!inputs.release_lease(&id), "a released lease is gone");
+    }
+
+    /// B3: a capture thread that dies clears the daemon's running state, so
+    /// the next need reopens it.
+    #[test]
+    fn a_dead_capture_thread_clears_the_running_state() {
+        let (inputs, fake) = fake_with(vec![speakers()]);
+        fake.set_die_after_open(true);
+        inputs.take_lease(false);
+        assert_eq!(inputs.test_state().status, AudioTestStatus::NoDevice, "the dead thread leaves an honest status");
+        // The thread marked the shared state failed; the next refcount re-runs
+        // and reopens instead of believing the dead capture is live.
+        fake.set_die_after_open(false);
+        inputs.refresh_audio();
+        assert_eq!(inputs.test_state().status, AudioTestStatus::Live, "the next need reopens the capture");
+        assert!(!inputs.idle());
     }
 
     /// Every honest state is reachable on the fake.

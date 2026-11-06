@@ -3304,3 +3304,115 @@ async fn deleting_a_user_effect_removes_its_presets_unless_they_are_kept() {
     let (_, detail) = send(&router, "GET", "/api/v1/effects/html:fancy", serde_json::json!({})).await;
     assert_eq!(preset_names(&detail), ["Fast"], "the kept preset is back");
 }
+
+/// The audio test lease, through the routes: take, read (200), expire, read
+/// again (410) (S9). No socket, no device.
+#[tokio::test]
+async fn an_audio_test_lease_answers_200_then_410_after_it_ends() {
+    let (router, app, _home) = build();
+    let response = router
+        .clone()
+        .oneshot(request_with_body("PUT", routes::AUDIO_TEST, r#"{"listen":false}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let lease = json(response).await;
+    let lease_id = lease.get("lease_id").and_then(|v| v.as_str()).expect("a lease id").to_string();
+
+    let response = router
+        .clone()
+        .oneshot(request("GET", &format!("{}?lease={lease_id}", routes::AUDIO_TEST)))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK, "a live lease reads");
+    let body = json(response).await;
+    assert!(body.get("status").is_some());
+
+    // An unknown lease is already 410.
+    let response = router
+        .clone()
+        .oneshot(request("GET", &format!("{}?lease=nope", routes::AUDIO_TEST)))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::GONE);
+
+    // The lease ends: sweep it, and the read answers 410 again.
+    let later = std::time::Instant::now() + canvas_proto::consts::AUDIO_TEST_LEASE + std::time::Duration::from_secs(1);
+    assert!(app.inputs.expire_leases_at(later));
+    app.inputs.sweep_leases().await;
+    let response = router
+        .oneshot(request("GET", &format!("{}?lease={lease_id}", routes::AUDIO_TEST)))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::GONE, "an expired lease answers 410");
+}
+
+/// S2 through the routes: releasing a lease ends it at once (the next read is
+/// 410 without waiting for expiry).
+#[tokio::test]
+async fn releasing_an_audio_test_lease_ends_it_at_once() {
+    let (router, _app, _home) = build();
+    let response = router
+        .clone()
+        .oneshot(request_with_body("PUT", routes::AUDIO_TEST, r#"{"listen":false}"#))
+        .await
+        .expect("the router answers");
+    let lease_id = json(response).await.get("lease_id").and_then(|v| v.as_str()).expect("a lease id").to_string();
+    let response = router
+        .clone()
+        .oneshot(request("DELETE", &format!("{}?lease={lease_id}", routes::AUDIO_TEST)))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = router
+        .oneshot(request("GET", &format!("{}?lease={lease_id}", routes::AUDIO_TEST)))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::GONE);
+}
+
+/// `PUT /settings` never moves the audio-source pick (S9).
+#[tokio::test]
+async fn put_settings_leaves_the_audio_source_pick_alone() {
+    let (router, app, _home) = build();
+    let before = app.inputs.requested();
+    let response = router
+        .clone()
+        .oneshot(request_with_body(
+            "PUT",
+            routes::SETTINGS,
+            r#"{"fps":30,"black_on_lock":false,"on_quit":"black","boot_color":null,"brightness":80,"power":"running"}"#,
+        ))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(app.inputs.requested(), before, "the pick is unchanged");
+    assert_eq!(app.store.read().await.config.audio_source, before);
+}
+
+/// B1: the persisted pick is applied when the app is built.
+#[tokio::test]
+async fn the_persisted_audio_source_pick_is_applied_at_startup() {
+    let home = TempHome::new();
+    let mut store = canvas_daemon::storage::Store::at(&home.path);
+    store.config.audio_source = canvas_proto::audio::AudioSource::Endpoint {
+        id: "mic-id".to_string(),
+        flow: canvas_proto::audio::AudioFlow::Capture,
+        name_hint: "Microphone".to_string(),
+    };
+    let engine = Arc::new(FakeEngine::default());
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let app = App::new(
+        store,
+        engine,
+        Box::new(FakeAdapter::default()),
+        TOKEN.to_string(),
+        "0.1.0-test".to_string(),
+        tx,
+    );
+    assert_eq!(app.inputs.requested(), canvas_proto::audio::AudioSource::Endpoint {
+        id: "mic-id".to_string(),
+        flow: canvas_proto::audio::AudioFlow::Capture,
+        name_hint: "Microphone".to_string(),
+    });
+}

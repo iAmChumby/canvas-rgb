@@ -44,14 +44,14 @@ pub async fn put_source(
             .save_config()
             .map_err(|e| ApiFailure::internal(format!("could not save the config: {e}")))?;
     }
-    app.inputs.set_requested(source);
+    // Resolve the new pick first (nit), then apply it, so the answer and the
+    // just-opened capture cannot disagree across two different enumerations.
     let inputs = Arc::clone(&app.inputs);
-    let resolved = tokio::task::spawn_blocking(move || {
-        let requested = inputs.requested();
-        inputs.backend().resolve(&requested)
-    })
-    .await
-    .map_err(|e| ApiFailure::internal(format!("the audio resolve did not finish: {e}")))?;
+    let pick = source.clone();
+    let resolved = tokio::task::spawn_blocking(move || inputs.backend().resolve(&pick))
+        .await
+        .map_err(|e| ApiFailure::internal(format!("the audio resolve did not finish: {e}")))?;
+    app.inputs.set_requested(source);
     app.inputs.record_resolved_public(&resolved);
     Ok(Json(resolved))
 }
@@ -85,6 +85,16 @@ pub async fn get_test(
         ));
     }
     Ok(Json(app.inputs.test_state()))
+}
+
+/// `DELETE /api/v1/audio/test?lease=<id>`: releases a lease now (S2), so
+/// turning Listen off closes the microphone at once. Idempotent.
+pub async fn delete_test(
+    State(app): State<Arc<App>>,
+    Query(query): Query<TestQuery>,
+) -> Json<serde_json::Value> {
+    app.inputs.release_lease(&query.lease);
+    Json(serde_json::json!({ "ok": true }))
 }
 
 /// How often the daemon checks the audio leases. One second, like the draft
