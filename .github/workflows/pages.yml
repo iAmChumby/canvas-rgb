@@ -92,7 +92,9 @@ jobs:
             site/package-lock.json
 
       # The site imports the editor's components from app/web/src, so the editor's packages
-      # are installed too: the TypeScript in the editor's files resolves React from there.
+      # are installed too: the editor's files resolve their other packages from there. React
+      # alone comes from the site's copy (site/tsconfig.json `paths`, as webpack's
+      # resolve.modules does), so one React's types check every JSX `ref`.
       - name: Install the editor's packages
         run: npm ci
         working-directory: app/web
