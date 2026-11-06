@@ -116,6 +116,7 @@ describe("a refresh that fails after the content is on screen", () => {
             on_bios: true,
             override_reason: null,
             available: true,
+            override_available: null,
           },
         ],
         temps: [],

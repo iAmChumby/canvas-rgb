@@ -37,6 +37,7 @@ import type { SetActiveLayout } from "@/proto/SetActiveLayout";
 import type { FansStatus } from "@/proto/FansStatus";
 import type { HotLimits } from "@/proto/HotLimits";
 import type { FanMode } from "@/proto/FanMode";
+import type { PutFanHeaderAvailability } from "@/proto/PutFanHeaderAvailability";
 import type { FanProfile } from "@/proto/FanProfile";
 import type { FanProfileName } from "@/proto/FanProfileName";
 import type { Settings } from "@/proto/Settings";
@@ -158,6 +159,10 @@ export const api = {
   putFanHot: (body: HotLimits) => request<FansStatus>("PUT", routes.fanHot, body),
   patchFanHeader: (header: string, mode: FanMode) =>
     request<unknown>("PATCH", routes.fanHeader(header), mode),
+  /** The owner's word on whether a header is on this board (#146): `false` "Not on my board",
+   *  `true` "Show anyway", `null` back to the board table. The answer is the new fan status. */
+  putFanHeaderAvailability: (header: string, body: PutFanHeaderAvailability) =>
+    request<FansStatus>("PUT", routes.fanHeaderAvailability(header), body),
   fanProfile: () => request<FanProfileName>("GET", routes.fanProfile),
   switchFanProfile: (name: string) =>
     request<FanProfileName>("PATCH", routes.fanProfile, { name }),

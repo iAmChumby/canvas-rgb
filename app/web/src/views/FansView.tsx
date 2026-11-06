@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
-import { ArrowClockwise, Check, CopySimple, DotsThreeOutline, Fan, FloppyDisk, ListChecks, Minus, Plus, Trash, X } from "@phosphor-icons/react";
+import { ArrowClockwise, Check, CopySimple, DotsThreeOutline, Eye, EyeSlash, Fan, FloppyDisk, ListChecks, Minus, Plus, Trash, X } from "@phosphor-icons/react";
 import { Button, IconButton } from "@/components/Button";
 import { Checkbox } from "@/components/Checkbox";
 import { Chip } from "@/components/Chip";
@@ -822,6 +822,77 @@ function MoreKey({ open, onToggle, fallback }: { open: boolean; onToggle: () => 
   );
 }
 
+/**
+ * Issue #146: the owner's word on whether a header is on this board. A header the board does
+ * not route can be shown anyway; a header on the board can be taken off it. While the word is
+ * there, the way back to the board list stands beside it.
+ *
+ * The key is a ghost button, so it reads as an aside of the header and not as a second mode
+ * control. A refusal is said next to the key, in the panel's own error colour.
+ */
+function HeaderAvailability({ header }: { header: FanHeaderStatus }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const unavailable = isUnavailable(header);
+  // The owner's word, when there is one: `false` "not on my board", `true` "show anyway".
+  const override = header.override_available ?? null;
+
+  const send = async (available: boolean | null) => {
+    setErr(null);
+    setBusy(true);
+    try {
+      await api.putFanHeaderAvailability(header.id, { available });
+      await refreshFans();
+    } catch (e) {
+      setErr(messageOf(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <span className="fan-hdr-availability" data-slot="fan-header-availability">
+      {unavailable ? (
+        <Button
+          size="sm"
+          variant="ghost"
+          icon={<Eye size={14} />}
+          disabled={busy}
+          onClick={() => void send(true)}
+        >
+          Show anyway
+        </Button>
+      ) : (
+        <Button
+          size="sm"
+          variant="ghost"
+          icon={<EyeSlash size={14} />}
+          disabled={busy}
+          onClick={() => void send(false)}
+        >
+          Not on my board
+        </Button>
+      )}
+      {override !== null && (
+        <Button
+          size="sm"
+          variant="ghost"
+          icon={<ListChecks size={14} />}
+          disabled={busy}
+          onClick={() => void send(null)}
+        >
+          Use the board list
+        </Button>
+      )}
+      {err && (
+        <span className="error-line fan-hdr-availability-error" role="alert" title={err}>
+          {err}
+        </span>
+      )}
+    </span>
+  );
+}
+
 function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansStatus }) {
   const base = baseFloor(header.id, fans.floor_percent);
   const [err, setErr] = useState<string | null>(null);
@@ -1002,14 +1073,26 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
       title={header.label}
       className={isUnavailable(header) ? "fan-unavailable" : undefined}
       actions={
-        <span className="rpm-readout">
-          <AnimatedNumber value={header.rpm ?? 0} />
-          <span className="unit">RPM</span>
+        <span className="fan-hdr-actions">
+          {/* Issue #146: the key that takes a header off this board. A header the board does not
+              route says its own thing in the panel's body instead, so it is not here twice. */}
+          {!isUnavailable(header) && <HeaderAvailability header={header} />}
+          <span className="rpm-readout">
+            <AnimatedNumber value={header.rpm ?? 0} />
+            <span className="unit">RPM</span>
+          </span>
         </span>
       }
     >
       {isUnavailable(header) ? (
-        <p className="mute">Not on this board: this header is not fitted on your board, so there is no mode to set.</p>
+        <div className="stack" style={{ gap: 8 }}>
+          <p className="mute">
+            {header.override_available === false
+              ? "You marked this header as not on your board, so there is no mode to set."
+              : "Not on this board: this header is not fitted on your board, so there is no mode to set."}
+          </p>
+          <HeaderAvailability header={header} />
+        </div>
       ) : (
       <div className="stack" style={{ gap: 8 }}>
         <Segmented<"bios" | "fixed" | "curve">

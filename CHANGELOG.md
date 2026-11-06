@@ -9,6 +9,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Added
 
 - Fans: set how hot is too hot for your CPU, GPU and board sensors. The curve chart draws a "Don't exceed" line (74 °C for a 7800X3D, worked out from the part's rated maximum), which you can drag or type; "Reset to automatic" puts it back. Past the fixed safety ceiling (84 °C on the 7800X3D) every manual header on that sensor runs at full speed, whatever the curve says. (#130)
+- Fans: mark a header Not on my board, or Show anyway one the board list hides. The word is kept per header, so "Use the board list" gives the decision back to the board. (#146)
 - Settings gains an Experimental builds switch: the tray then also offers the unstable test builds. Turning it off keeps the build you have until a newer stable release comes out. (#203)
 
 ### Changed

@@ -121,6 +121,9 @@ interface DemoState {
   fanHotLimits: HotLimits;
   fanProfiles: FanProfile[];
   activeProfile: string;
+  /** Issue #146: the owner's word per header: `true` "show anyway", `false` "not on my board".
+   *  A header with no word is the board table's business. */
+  fanOverrides: Record<string, boolean>;
   zonePanel: boolean;
   /** The owner reached the end of the onboarding. */
   onboardingComplete: boolean;
@@ -273,6 +276,7 @@ function initialState(): DemoState {
     fanHotLimits: { cpu_c: null, gpu_c: null, board_c: null },
     fanProfiles: FAN_PROFILES.map((p) => ({ ...p, headers: { ...p.headers } })),
     activeProfile: profile?.name ?? "Default",
+    fanOverrides: {},
     zonePanel: s.has("first-run"),
     serviceUp: !s.has("service-down"),
     conflicts: s.has("conflict") || s.has("conflict-clears") ? [{ kind: "signal_rgb", process: true, service: false }] : [],
@@ -553,6 +557,9 @@ function fansStatus(): FansStatus {
   const s = st();
   const r = temps();
   const jitter = (i: number) => Math.sin(r.t * 1.7 + i * 2.1) * 9;
+  // Issue #146: the owner's word on a header wins over the board table. With no word the
+  // table decides, and the demo's table is the `unavailable:<id>` scenario.
+  const table = unavailableHeaders();
   const headers: FanHeaderStatus[] = FAN_HEADERS.map((h, i) => {
     const mode = s.fanModes[h.id] ?? { mode: "bios" as const };
     let percent: number;
@@ -560,15 +567,18 @@ function fansStatus(): FansStatus {
     else if (mode.mode === "curve") percent = interpolate(mode.points, tempFor(mode.source));
     else percent = 34 + (i % 3) * 4;
     const rpm = mode.mode === "bios" ? 980 + i * 60 + Math.round(jitter(i) * 4) : Math.round(percent * 17.5 + jitter(i));
+    const override = s.fanOverrides[h.id];
+    const available = override ?? !table.includes(h.id);
     return {
       id: h.id,
       label: h.label,
-      rpm,
-      pwm_percent: Math.round(percent),
+      rpm: available ? rpm : 0,
+      pwm_percent: available ? Math.round(percent) : 0,
       mode,
-      on_bios: mode.mode === "bios",
+      on_bios: available ? mode.mode === "bios" : true,
       override_reason: null,
-      available: true,
+      available,
+      override_available: override ?? null,
     };
   }).map((h) => (TACH_ONLY.includes(h.id) ? { ...h, pwm_percent: null } : h));
   const temperatures: TempReading[] = [
@@ -1461,6 +1471,15 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       if (!s.serviceUp) fail(503, "service_unavailable", "the fan service is not reachable");
       return applyFanScenarios(fansStatus());
     }
+    if (seg[1] === "headers" && seg[3] === "availability" && method === "PUT") {
+      if (!s.serviceUp) fail(503, "service_unavailable", "the fan service is not reachable");
+      const header = seg[2] ?? "";
+      if (!FAN_HEADERS.some((h) => h.id === header)) fail(404, "not_found", `no header ${header}`);
+      const available = (body as { available: boolean | null }).available;
+      if (available === null || available === undefined) delete s.fanOverrides[header];
+      else s.fanOverrides[header] = available;
+      return applyFanScenarios(fansStatus());
+    }
     if (seg[1] === "headers" && method === "PATCH") {
       if (!s.serviceUp) fail(503, "service_unavailable", "the fan service is not reachable");
       const header = seg[2] ?? "";
@@ -1468,7 +1487,10 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       const mode = body as FanMode;
       if (TACH_ONLY.includes(header) && mode.mode !== "bios") fail(422, "validation", `${header} is tach-only and cannot take a mode`);
       // Issue #128: a header the board does not route answers 503, like the service's Unavailable.
-      if (unavailableHeaders().includes(header) && mode.mode !== "bios") {
+      // Issue #146: the owner's word wins over the board table, so a header the owner showed
+      // anyway takes a mode like any other.
+      const onBoard = s.fanOverrides[header] ?? !unavailableHeaders().includes(header);
+      if (!onBoard && mode.mode !== "bios") {
         fail(503, "service_unavailable", `${header} is not on this board: the chip has the channel, the board has no connector`);
       }
       validateMode(header, mode, s.fanFloor);

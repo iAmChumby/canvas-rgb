@@ -4347,6 +4347,32 @@ button.chip:hover {
   white-space: nowrap;
 }
 
+/* Issue #146: the owner's word on a header. The key sits in the panel's own head beside the
+   speed, or in the message that says the header is not on this board. */
+.fan-hdr-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s3);
+  min-width: 0;
+}
+
+.fan-hdr-availability {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+/* A refusal is said next to the key. It is cut short like the panel's own error line, and
+   the whole of it is in the tooltip. */
+.fan-hdr-availability-error {
+  min-width: 0;
+  max-width: 24ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .fan-status-busy {
   flex: none;
   min-width: 8ch;
