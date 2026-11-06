@@ -20,8 +20,8 @@
   differ; 4-adjacent hot cells merge into one cluster whose bounding
   rectangle is drawn and reported.
 
-  -Region x,y,w,h (with -Pair <pair>) prints the difference for just that
-  rectangle. -Column x / -Row y (with -Pair) print, along that line, the
+  -Region x,y,w,h (with -OnlyPair <pair>) prints the difference for just that
+  rectangle. -Column x / -Row y (with -OnlyPair) print, along that line, the
   positions where the React and GPUI pixels change from background to
   foreground (edges), so an element's left/right/top/bottom edge can be
   measured in both images. Only .NET System.Drawing is used.
@@ -29,22 +29,22 @@
 .EXAMPLE
   powershell -NoProfile -File tools/ui-capture/diff-pairs.ps1
 .EXAMPLE
-  powershell -NoProfile -File tools/ui-capture/diff-pairs.ps1 -Pair displays-1440x900-dark
+  powershell -NoProfile -File tools/ui-capture/diff-pairs.ps1 -OnlyPair displays-1440x900-dark
 .EXAMPLE
-  powershell -NoProfile -File tools/ui-capture/diff-pairs.ps1 -Pair displays-1440x900-dark -Region 760,240,340,60
+  powershell -NoProfile -File tools/ui-capture/diff-pairs.ps1 -OnlyPair displays-1440x900-dark -Region 760,240,340,60
 .EXAMPLE
-  powershell -NoProfile -File tools/ui-capture/diff-pairs.ps1 -Pair displays-390x844-dark -Column 30
+  powershell -NoProfile -File tools/ui-capture/diff-pairs.ps1 -OnlyPair displays-390x844-dark -Column 30
 .EXAMPLE
-  powershell -NoProfile -File tools/ui-capture/diff-pairs.ps1 -Pair displays-1440x900-dark -Row 263
+  powershell -NoProfile -File tools/ui-capture/diff-pairs.ps1 -OnlyPair displays-1440x900-dark -Row 263
 #>
 param(
     # Process only this pair ("<view>-<w>x<h>-<theme>"); default: every pair.
-    [string]$Pair = '',
-    # Only diff the rectangle "x,y,w,h" of -Pair.
+    [string]$OnlyPair = '',
+    # Only diff the rectangle "x,y,w,h" of -OnlyPair.
     [string]$Region = '',
-    # Print edge positions along this column of -Pair.
+    # Print edge positions along this column of -OnlyPair.
     [int]$Column = -1,
-    # Print edge positions along this row of -Pair.
+    # Print edge positions along this row of -OnlyPair.
     [int]$Row = -1
 )
 
@@ -56,7 +56,7 @@ if (-not (Test-Path $capDir)) { throw "no captures in $capDir" }
 New-Item -ItemType Directory -Force -Path $diffDir | Out-Null
 
 Add-Type -AssemblyName System.Drawing
-Add-Type @"
+Add-Type -ReferencedAssemblies System.Drawing @"
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -218,12 +218,7 @@ public static class PairDiff {
 
 $pattern = '^(?<view>.+)-react-(?<w>\d+)x(?<h>\d+)-(?<theme>.+)\.png$'
 $reactFiles = Get-ChildItem -Path $capDir -Filter '*-react-*.png' | Sort-Object Name
-if ($Pair) { $reactFiles = $reactFiles | Where-Object { $_.BaseName -eq "$Pair-react".Replace($Pair, "$Pair") -or $_.BaseName.StartsWith($Pair + '-react-') } }
-# The -Pair form is "<view>-<w>x<h>-<theme>"; build the expected react name.
-if ($Pair) {
-    $reactFiles = Get-ChildItem -Path $capDir -Filter "$Pair-react-*.png" | Sort-Object Name
-    if (-not $reactFiles) { throw "-Pair $Pair matches no *-react-*.png in $capDir" }
-}
+if ($OnlyPair -and -not ($reactFiles | Where-Object { $_.Name -match '^(?<v>.+)-react-(?<w>\d+)x(?<h>\d+)-(?<t>.+)\.png$' -and "$($Matches.v)-$($Matches.w)x$($Matches.h)-$($Matches.t)" -eq $OnlyPair })) { throw "-OnlyPair $OnlyPair matches no *-react-*.png in $capDir" }
 
 $summaryPath = Join-Path $diffDir 'summary.txt'
 $lines = New-Object System.Collections.Generic.List[string]
@@ -232,19 +227,19 @@ $failed = $false
 foreach ($rf in $reactFiles) {
     if ($rf.Name -notmatch $pattern) { continue }
     $view = $Matches.view; $w = [int]$Matches.w; $h = [int]$Matches.h; $theme = $Matches.theme
-    $pair = "$view-${w}x${h}-$theme"
+    $pairName = "$view-${w}x${h}-$theme"
+    if ($OnlyPair -and $pairName -ne $OnlyPair) { continue }
     $gpuiFile = Join-Path $capDir "$view-gpui-${w}x${h}-$theme.png"
-    if (-not (Test-Path $gpuiFile)) {
-        $line = "$pair MISSING gpui counterpart"
-        $lines.Add($line); Write-Output $line; $failed = $true; continue
-    }
+    # Only pairs with both sides are diffed (React has views GPUI has not
+    # ported yet; those are skipped, not failures).
+    if (-not (Test-Path $gpuiFile)) { continue }
     # Exact-size check before diffing.
     $rImg = [System.Drawing.Bitmap]::new($rf.FullName)
     $gImg = [System.Drawing.Bitmap]::new($gpuiFile)
     $rSize = "$($rImg.Width)x$($rImg.Height)"; $gSize = "$($gImg.Width)x$($gImg.Height)"
     $rImg.Dispose(); $gImg.Dispose()
     if ($rSize -ne "${w}x${h}" -or $gSize -ne "${w}x${h}") {
-        $line = "$pair FAIL react=$rSize gpui=$gSize (want ${w}x${h})"
+        $line = "$pairName FAIL react=$rSize gpui=$gSize (want ${w}x${h})"
         $lines.Add($line); Write-Output $line; $failed = $true; continue
     }
 
@@ -259,15 +254,15 @@ foreach ($rf in $reactFiles) {
         continue
     }
 
-    $outFile = Join-Path $diffDir "$pair.png"
+    $outFile = Join-Path $diffDir "$pairName.png"
     $differing = 0; $total = 0; $boxes = $null; $err = $null
     [PairDiff]::DiffPair($rf.FullName, $gpuiFile, $outFile, [ref]$differing, [ref]$total, [ref]$boxes, [ref]$err)
     if ($err) {
-        $line = "$pair FAIL $err"
+        $line = "$pairName FAIL $err"
         $lines.Add($line); Write-Output $line; $failed = $true; continue
     }
     $pct = if ($total -eq 0) { 0 } else { [math]::Round(100.0 * $differing / $total, 2) }
-    $line = "$pair differing=$differing/$total ($pct%) boxes=$($boxes.Count)"
+    $line = "$pairName differing=$differing/$total ($pct%) boxes=$($boxes.Count)"
     $lines.Add($line); Write-Output $line
     foreach ($b in $boxes) {
         $bl = "  $($b[0]),$($b[1]),$($b[2]),$($b[3])"
@@ -275,7 +270,7 @@ foreach ($rf in $reactFiles) {
     }
 }
 
-if (-not $Pair) {
-    $lines | Set-Content -Path $summaryPath -Encoding UTF8
+if (-not $OnlyPair) {
+    [System.IO.File]::WriteAllLines($summaryPath, [string[]]$lines)
 }
 if ($failed) { exit 1 }
