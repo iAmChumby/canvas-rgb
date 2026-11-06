@@ -1088,7 +1088,6 @@ fn fans_with_hot() -> canvas_proto::fans::FansStatus {
 struct LogPipe {
     sent: Arc<std::sync::Mutex<Vec<canvas_proto::pipe::PipeRequest>>>,
     status: Option<canvas_proto::fans::FansStatus>,
-    delay: std::time::Duration,
 }
 
 #[async_trait::async_trait]
@@ -1128,7 +1127,7 @@ fn build_with_recording_pipe(
         tx,
     );
     let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
-    app.pipe = Arc::new(LogPipe { sent: Arc::clone(&sent), status: Some(status.clone()), delay: std::time::Duration::ZERO });
+    app.pipe = Arc::new(LogPipe { sent: Arc::clone(&sent), status: Some(status.clone()) });
     let app = Arc::new(app);
     (api::router(app.clone()), app, home, sent)
 }
