@@ -9,13 +9,11 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Added
 
 - Settings has an Audio source panel: pick which output or input the audio-reactive effects read (Follow the Windows default, a loopback output, or an input — audio effects read the picked input whenever an audio effect is active, and Listen tests it live), and see a live test of what the device is delivering — a level meter, a dB figure and the spectrum bands — so you can tell at a glance whether sound is reaching the lights. (#166)
+- Settings gains an Experimental builds switch: the tray then also offers the unstable test builds. Turning it off keeps the build you have until a newer stable release comes out. (#203)
 
 ### Changed
 
 - Menus, popovers and drags now move the way the finger expects: panels grow out of the button that opened them and fold back into it, a part dragged past the edge of the desk stretches with growing resistance and settles back on release, and picking a new item in a list or a tab slides one marker across instead of blinking it off and on. Saved and applied controls pulse once to say it went through, word and icon swaps cross-fade instead of jumping, and a new colour wipes in over the old one. All of it stops when your system asks for less motion. (#187)
-### Added
-
-- Settings gains an Experimental builds switch: the tray then also offers the unstable test builds. Turning it off keeps the build you have until a newer stable release comes out. (#203)
 
 ### Fixed
 
