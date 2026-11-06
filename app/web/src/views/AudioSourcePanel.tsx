@@ -20,6 +20,9 @@ const BAND_CELLS = 32;
 /** S3: the disclosure the reviewer asked for — an input feeds the audio
  *  effects whenever one runs, not only while this panel is open. */
 const EFFECT_NOTE = "Audio effects read this input whenever an audio effect is active (not only while this panel is open).";
+/** The same disclosure for the compact panel's state slot (a short window has no room for
+ *  another line); the full sentence is its title and is in the readings popover. */
+const EFFECT_NOTE_SHORT = "Audio effects use this input";
 
 /** The words for one honest state: never a blank bar (#166). */
 export function audioStatusWords(state: AudioTestState | null): string {
@@ -313,9 +316,14 @@ export function AudioSourcePanel() {
   );
 
   const words = audioStatusWords(state);
-  // S3 in the compact form: the disclosure is its own line under the compact
-  // row (see `.audio-effect-note`), never a suffix of the ellipsised state
-  // line; the state line itself keeps the full text in `title`.
+  // S3 in the compact form: with an input picked and Listen off, nothing is live
+  // yet, so the state slot carries the disclosure (short, one line, the full
+  // sentence in `title`); with Listen on it carries the live state. The readings
+  // popover always states the full sentence. There is no room for another line
+  // at 1024x768, where Settings fits the window exactly.
+  const compactNote = inputSelected && !listen;
+  const compactWords = compactNote ? EFFECT_NOTE_SHORT : words;
+  const compactTitle = compactNote ? EFFECT_NOTE : words;
 
   return (
     <Panel
@@ -336,8 +344,13 @@ export function AudioSourcePanel() {
       {usePopover ? (
         <>
           <span className="audio-compact-row">
-            <span className="audio-state audio-state-compact" role="status" title={words}>
-              {words}
+            <span
+              className="audio-state audio-state-compact"
+              role="status"
+              title={compactTitle}
+              data-note={compactNote ? "true" : undefined}
+            >
+              {compactWords}
             </span>
             {inputSelected && (
               <Toggle label="Listen to this input" checked={listen} onChange={setListen} />
@@ -352,7 +365,6 @@ export function AudioSourcePanel() {
               {popoverOpen ? "Hide readings" : "Show readings"}
             </Button>
           </span>
-          {inputSelected && <p className="audio-effect-note">{EFFECT_NOTE}</p>}
           {err && <p className="error-line">{err}</p>}
           <Popover
             anchor={triggerRef as unknown as RefObject<HTMLElement | null>}

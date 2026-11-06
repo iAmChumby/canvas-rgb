@@ -295,20 +295,21 @@ describe("AudioSourcePanel (#166)", () => {
     );
     const { container } = render(<AudioSourcePanel />);
     await screen.findByRole("combobox", { name: "Audio source" });
-    const note = container.querySelector(".audio-effect-note");
-    expect(note, "the disclosure is a separate element in the compact form").toBeTruthy();
-    expect(note?.textContent).toContain("Audio effects read this input whenever an audio effect is active");
-    // It is not a suffix of the state line, and the state line carries its
-    // full text in `title` for the ellipsised case.
+    // An input picked and Listen off: the state slot is the disclosure, the
+    // whole of it (never a suffix after the state words), the full sentence in
+    // its title.
     const stateLine = container.querySelector(".audio-state-compact");
-    expect(stateLine?.textContent).not.toContain("audio effects read this input");
-    expect(stateLine?.getAttribute("title")).toBeTruthy();
-    // For an output pick there is no disclosure line at all.
+    expect(stateLine?.textContent).toBe("Audio effects use this input");
+    expect(stateLine?.getAttribute("data-note")).toBe("true");
+    expect(stateLine?.getAttribute("title")).toContain("Audio effects read this input whenever an audio effect is active");
+    // For an output pick the slot carries the state words, with no disclosure.
     cleanup();
     mocks.audioSources.mockResolvedValue(sources());
     const out = render(<AudioSourcePanel />);
     await screen.findByRole("combobox", { name: "Audio source" });
-    expect(out.container.querySelector(".audio-effect-note")).toBeNull();
+    const outLine = out.container.querySelector(".audio-state-compact");
+    expect(outLine?.getAttribute("data-note")).toBeNull();
+    expect(outLine?.textContent).not.toContain("Audio effects");
   });
 
   it("group headings reach assistive tech as groups (S10)", async () => {
