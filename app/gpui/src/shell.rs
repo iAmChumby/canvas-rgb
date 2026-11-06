@@ -21,6 +21,7 @@ use crate::components::button::{Variant, button};
 use crate::components::daemon_down::daemon_down;
 use crate::theme::Theme;
 use crate::views::displays::DisplaysView;
+use crate::views::fans::FansView;
 
 /// The pages the rail names, in order (React `Rail.tsx` PAGES, then Settings).
 pub const NAV: &[(&str, &str)] = &[
@@ -76,6 +77,8 @@ pub struct Shell {
     pub status_error: Option<String>,
     pub status_failures: u32,
     pub displays: gpui::Entity<DisplaysView>,
+    /// The Fans page (#204). The shell builds it, so `main.rs` stays as it is.
+    pub fans: gpui::Entity<FansView>,
     pub width: f32,
 }
 
@@ -89,6 +92,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Self {
         let failures = if status_error.is_some() { 2 } else { 0 };
+        let fans = cx.new(|cx| FansView::new(theme, cx));
         let mut shell = Shell {
             theme,
             page,
@@ -96,6 +100,7 @@ impl Shell {
             status_error,
             status_failures: failures,
             displays,
+            fans,
             width: 1280.0,
         };
         shell.poll_status(cx);
@@ -445,6 +450,9 @@ impl Shell {
         }
         if self.page == "displays" {
             return self.displays.clone().into_any_element();
+        }
+        if self.page == "fans" {
+            return self.fans.clone().into_any_element();
         }
         // Every other page shows the placeholder until it is ported.
         div()

@@ -77,8 +77,7 @@ fn token_for(base: &str) -> Result<String, ClientError> {
             "CANVAS_RGB_HOME points at a test home but the API base is {base}, the real daemon:              set CANVAS_RGB_TEST_API_PORT to the fake daemon's port"
         )));
     }
-    peer::check_base(base)
-        .map_err(|refusal| ClientError::NotTrusted(refusal.message()))?;
+    peer::check_base(base).map_err(|refusal| ClientError::NotTrusted(refusal.message()))?;
     // `canvas_client::token::read_token` checks the fixed port 9430 and reads the real
     // path, so it cannot serve a debug run on the test port. The owner check above is
     // the same one it runs; the token is read only after it passes.
@@ -118,6 +117,7 @@ fn token_path() -> std::path::PathBuf {
 pub enum Method {
     Get,
     Put,
+    Patch,
     Delete,
 }
 
@@ -152,11 +152,21 @@ impl DaemonClient {
         self.request(Method::Put, path, Some(body))
     }
 
+    /// `PATCH` with a JSON body: the fan header's mode, the fan profile switch.
+    pub fn patch_json(&self, path: &str, body: &str) -> Result<String, ClientError> {
+        self.request(Method::Patch, path, Some(body))
+    }
+
     pub fn delete(&self, path: &str) -> Result<String, ClientError> {
         self.request(Method::Delete, path, None)
     }
 
-    fn request(&self, method: Method, path: &str, body: Option<&str>) -> Result<String, ClientError> {
+    fn request(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&str>,
+    ) -> Result<String, ClientError> {
         // The owner check runs before the token is read, and therefore before
         // anything is sent: a port held by another process never sees it.
         let jwt = self.token()?;
@@ -167,6 +177,12 @@ impl DaemonClient {
             Method::Put => self
                 .agent
                 .put(&url)
+                .header("Authorization", auth)
+                .content_type("application/json")
+                .send(body.unwrap_or_default().as_bytes()),
+            Method::Patch => self
+                .agent
+                .patch(&url)
                 .header("Authorization", auth)
                 .content_type("application/json")
                 .send(body.unwrap_or_default().as_bytes()),
@@ -216,7 +232,10 @@ mod tests {
     #[test]
     fn daemon_message_prefers_the_daemon_text() {
         assert_eq!(
-            daemon_message(r#"{"error":"bad","message":"decimals must be 0 or 1, got 2"}"#, 422),
+            daemon_message(
+                r#"{"error":"bad","message":"decimals must be 0 or 1, got 2"}"#,
+                422
+            ),
             "decimals must be 0 or 1, got 2"
         );
         assert_eq!(daemon_message("not json", 500), "HTTP 500");

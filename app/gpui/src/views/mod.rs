@@ -2,3 +2,4 @@
 //! "Not ported yet" placeholder from the shell.
 
 pub mod displays;
+pub mod fans;
