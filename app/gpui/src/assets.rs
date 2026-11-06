@@ -37,6 +37,17 @@ pub const ICONS: &[&str] = &[
     "EaselLight",
     "EaselLegs",
     "EaselCanvas",
+    // The Fans page (#204).
+    "DotsThreeOutline",
+    "CopySimple",
+    "Trash",
+    "Eye",
+    "EyeSlash",
+    "ListChecks",
+    "X",
+    "Plus",
+    "Check-bold",
+    "Minus-bold",
 ];
 
 fn icon_svg(name: &str) -> Option<&'static str> {
@@ -66,6 +77,16 @@ fn icon_svg(name: &str) -> Option<&'static str> {
         "EaselLight" => include_str!("../assets/icons/EaselLight.svg"),
         "EaselLegs" => include_str!("../assets/icons/EaselLegs.svg"),
         "EaselCanvas" => include_str!("../assets/icons/EaselCanvas.svg"),
+        "DotsThreeOutline" => include_str!("../assets/icons/DotsThreeOutline.svg"),
+        "CopySimple" => include_str!("../assets/icons/CopySimple.svg"),
+        "Trash" => include_str!("../assets/icons/Trash.svg"),
+        "Eye" => include_str!("../assets/icons/Eye.svg"),
+        "EyeSlash" => include_str!("../assets/icons/EyeSlash.svg"),
+        "ListChecks" => include_str!("../assets/icons/ListChecks.svg"),
+        "X" => include_str!("../assets/icons/X.svg"),
+        "Plus" => include_str!("../assets/icons/Plus.svg"),
+        "Check-bold" => include_str!("../assets/icons/Check-bold.svg"),
+        "Minus-bold" => include_str!("../assets/icons/Minus-bold.svg"),
         _ => return None,
     })
 }
@@ -74,7 +95,9 @@ pub struct IconAssets;
 
 impl AssetSource for IconAssets {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
-        let name = path.strip_prefix("icons/").and_then(|p| p.strip_suffix(".svg"));
+        let name = path
+            .strip_prefix("icons/")
+            .and_then(|p| p.strip_suffix(".svg"));
         let Some(name) = name else {
             return Ok(None);
         };
@@ -101,7 +124,9 @@ impl AssetSource for IconAssets {
                         "ArrowClockwise" => include_str!("../assets/icons/ArrowClockwise-fill.svg"),
                         "CheckCircle" => include_str!("../assets/icons/CheckCircle-fill.svg"),
                         "CircleDashed" => include_str!("../assets/icons/CircleDashed-fill.svg"),
-                        "MagnifyingGlass" => include_str!("../assets/icons/MagnifyingGlass-fill.svg"),
+                        "MagnifyingGlass" => {
+                            include_str!("../assets/icons/MagnifyingGlass-fill.svg")
+                        }
                         "Pause" => include_str!("../assets/icons/Pause-fill.svg"),
                         "Play" => include_str!("../assets/icons/Play-fill.svg"),
                         "Warning" => include_str!("../assets/icons/Warning-fill.svg"),
@@ -133,7 +158,9 @@ impl AssetSource for IconAssets {
                         "ArrowClockwise" => include_str!("../assets/icons/ArrowClockwise-bold.svg"),
                         "CheckCircle" => include_str!("../assets/icons/CheckCircle-bold.svg"),
                         "CircleDashed" => include_str!("../assets/icons/CircleDashed-bold.svg"),
-                        "MagnifyingGlass" => include_str!("../assets/icons/MagnifyingGlass-bold.svg"),
+                        "MagnifyingGlass" => {
+                            include_str!("../assets/icons/MagnifyingGlass-bold.svg")
+                        }
                         "Pause" => include_str!("../assets/icons/Pause-bold.svg"),
                         "Play" => include_str!("../assets/icons/Play-bold.svg"),
                         "Warning" => include_str!("../assets/icons/Warning-bold.svg"),

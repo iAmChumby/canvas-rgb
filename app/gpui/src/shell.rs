@@ -33,6 +33,7 @@ use crate::components::daemon_down::daemon_down;
 use crate::components::slider::slider;
 use crate::theme::{Theme, TokenRadius};
 use crate::views::displays::DisplaysView;
+use crate::views::fans::FansView;
 
 /// Measure a single line of text in the UI/mono face at `size` px, using
 /// GPUI's own text layout so the truncation below matches what is drawn.
@@ -226,6 +227,8 @@ pub struct Shell {
     pub status_error: Option<String>,
     pub status_failures: u32,
     pub displays: gpui::Entity<DisplaysView>,
+    /// The Fans page (#204). The shell builds it, so `main.rs` stays as it is.
+    pub fans_view: gpui::Entity<FansView>,
     pub width: f32,
     // Rail data, polled with the status (React store slow tick + rail poll).
     pub devices: Option<DevicesResponse>,
@@ -249,6 +252,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Self {
         let failures = if status_error.is_some() { 2 } else { 0 };
+        let fans_view = cx.new(|cx| FansView::new(theme, cx));
         let mut shell = Shell {
             theme,
             page,
@@ -256,6 +260,7 @@ impl Shell {
             status_error,
             status_failures: failures,
             displays,
+            fans_view,
             width: 1280.0,
             devices: None,
             displays_count: None,
@@ -1330,6 +1335,9 @@ impl Shell {
         }
         if self.page == "displays" {
             return self.displays.clone().into_any_element();
+        }
+        if self.page == "fans" {
+            return self.fans_view.clone().into_any_element();
         }
         // Every other page shows the placeholder until it is ported.
         div()
