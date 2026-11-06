@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { usePrefersReducedMotion } from "@/lib/motion";
 
 /**
@@ -124,4 +124,41 @@ export function useCounter(
 /** The counting value alone, for a caller that formats it itself (the display's digits). */
 export function useTweenNumber(value: number, duration?: number, decimals = 0): number {
   return useCounter(value, decimals, duration).shown;
+}
+
+/**
+ * One short pulse on the control that succeeded (issue #187, rule 6): applying
+ * to the lights, saving a layout, saving an effect. Call `fire` only on the
+ * success path — a failure never calls it, so it never pulses. The pulse is
+ * one run of the `.success-pulse` animation (on --dur-slow), and the mark
+ * clears when it is over: one pulse, no loop. With motion off the stylesheet
+ * zeroes the animation, so the ring never shows.
+ */
+export function useSuccessPulse(): { ref: (el: HTMLElement | null) => void; fire: () => void } {
+  const [count, setCount] = useState(0);
+  const elRef = useRef<HTMLElement | null>(null);
+
+  const ref = useCallback((el: HTMLElement | null) => {
+    elRef.current = el;
+  }, []);
+
+  const fire = useCallback(() => {
+    setCount((c) => c + 1);
+  }, []);
+
+  useEffect(() => {
+    if (count === 0) return;
+    const el = elRef.current;
+    if (!el) return;
+    el.classList.add("success-pulse");
+    el.dataset.pulse = String(count);
+    // The token duration the animation runs for (--dur-slow, 240 ms).
+    const t = setTimeout(() => {
+      el.classList.remove("success-pulse");
+      delete el.dataset.pulse;
+    }, 240);
+    return () => clearTimeout(t);
+  }, [count]);
+
+  return { ref, fire };
 }

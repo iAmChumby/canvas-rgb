@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { CheckCircle, CircleDashed, MagnifyingGlass, Pause, Play, Warning, WarningOctagon } from "@phosphor-icons/react";
 import { Button, IconButton, Swap } from "@/components/Button";
+import { IconSwap } from "@/components/IconSwap";
 import { Crossfade } from "@/components/Crossfade";
 import { useMediaQuery } from "@/components/MediaQuery";
 import { BrandMark, Wordmark } from "@/components/BrandMark";
@@ -174,7 +175,15 @@ export function StatusStrip({
               disabled={busy}
               onClick={togglePower}
               aria-label={paused ? "Resume lights" : "Pause lights"}
-              icon={paused ? <Play size={14} weight="fill" /> : <Pause size={14} weight="fill" />}
+              // The Play/Pause swap cross-fades with scale and blur (issue #187, rule 8).
+              icon={
+                <IconSwap
+                  a={<Pause size={14} weight="fill" aria-hidden="true" />}
+                  b={<Play size={14} weight="fill" aria-hidden="true" />}
+                  at={paused ? 1 : 0}
+                  label={paused ? "Resume lights" : "Pause lights"}
+                />
+              }
             >
               {/* On a phone the row has no room for the words: the button's own label says
                   what it does. */}

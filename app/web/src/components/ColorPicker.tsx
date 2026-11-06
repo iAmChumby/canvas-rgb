@@ -274,7 +274,7 @@ export function ColorPicker({
             }
           }}
         />
-        <span className="picker-preview" style={{ "--c": hex } as CSSProperties} aria-hidden="true" />
+        <span key={hex} className="picker-preview" style={{ "--c": hex } as CSSProperties} aria-hidden="true" />
       </div>
 
       {swatches && swatches.length > 0 && (

@@ -70,7 +70,12 @@ export function ColorField({
         aria-expanded={open}
         disabled={disabled}
         onClick={() => (open ? close() : setOpen(true))}
-      />
+      >
+        {/* The new colour wipes in over the old one (issue #187, rule 9): the
+            overlay is keyed by the colour, so every change replays the mask
+            reveal from the swatch's centre. */}
+        <span key={hex} className="color-wipe" data-hex={hex} aria-hidden="true" />
+      </button>
       <span className="color-hex">{hex}</span>
       <Popover anchor={swatchRef} open={open} onClose={close} label={label} className="picker-pop">
         <ColorPicker label={label} value={hex} swatches={swatches} onChange={onChange} />

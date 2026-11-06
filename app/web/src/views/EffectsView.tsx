@@ -791,6 +791,8 @@ export function EffectsView() {
                 </div>
                 <Button
                   variant={running ? "default" : "primary"}
+                  // One pulse once the effect is on the lights (issue #187, rule 6).
+                  className={running ? "success-pulse" : undefined}
                   disabled={running || stale}
                   onClick={() => void activate(null)}
                   icon={<Play size={14} weight="fill" />}
@@ -918,6 +920,8 @@ export function EffectsView() {
                   <Button
                     variant="default"
                     size="sm"
+                    // One pulse once the effect is on the lights (issue #187, rule 6).
+                    className={running ? "success-pulse" : undefined}
                     disabled={running || stale}
                     onClick={() => void activate(null)}
                     icon={<Play size={14} weight="fill" />}

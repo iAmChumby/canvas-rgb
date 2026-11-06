@@ -39,25 +39,25 @@ export function Select({
   const [active, setActive] = useState(0);
   const [style, setStyle] = useState<CSSProperties | undefined>(undefined);
   // The exit (issue #187, rule 2): the list stays for --dur-exit under its
-  // exit animation, closing back into the trigger, then goes.
+  // exit animation, closing back into the trigger, then goes. Render-phase
+  // adjustment (the Crossfade pattern), so the list is placed as it mounts.
   const [rendered, setRendered] = useState(false);
   const [closing, setClosing] = useState(false);
-  const typed = useRef({ text: "", at: 0 });
-
-  useEffect(() => {
-    if (open) {
-      setRendered(true);
-      setClosing(false);
-      return;
-    }
-    if (!rendered) return;
+  if (open && !rendered) {
+    setRendered(true);
+    setClosing(false);
+  } else if (!open && rendered && !closing) {
     setClosing(true);
+  }
+  useEffect(() => {
+    if (!closing) return;
     const t = setTimeout(() => {
       setRendered(false);
       setClosing(false);
     }, 90);
     return () => clearTimeout(t);
-  }, [open, rendered]);
+  }, [closing]);
+  const typed = useRef({ text: "", at: 0 });
 
   const chosen = Math.max(0, options.findIndex((o) => o.value === value));
 

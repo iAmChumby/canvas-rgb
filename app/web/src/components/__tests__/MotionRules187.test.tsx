@@ -3,6 +3,7 @@
 // success pulse, reduced motion) are checked against the stylesheets in
 // styles/__tests__/motion187.test.ts, where jsdom can read them.
 import { cleanup, fireEvent, render } from "@testing-library/react";
+import { act } from "react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { useRef, useState, type ReactNode } from "react";
 import { Popover } from "@/components/Popover";
@@ -89,7 +90,9 @@ describe("rule 2: a listbox closes back into its trigger (#187)", () => {
       expect(closing, "the listbox should stay for its exit, marked as closing").toBeTruthy();
       fireEvent.click(closing as HTMLElement);
       // The exit runs on --dur-exit (90 ms); once it is over the listbox is gone.
-      vi.advanceTimersByTime(120);
+      act(() => {
+        vi.advanceTimersByTime(120);
+      });
       expect(document.body.querySelector(".listbox")).toBeNull();
     } finally {
       vi.useRealTimers();
@@ -122,7 +125,9 @@ describe("rule 2: a listbox closes back into its trigger (#187)", () => {
       expect(panel.style.transformOrigin).toBeTruthy();
       fireEvent.click(btn);
       expect(document.body.querySelector(".popover[data-closing='true']")).toBeTruthy();
-      vi.advanceTimersByTime(120);
+      act(() => {
+        vi.advanceTimersByTime(120);
+      });
       expect(document.body.querySelector(".popover")).toBeNull();
     } finally {
       vi.useRealTimers();

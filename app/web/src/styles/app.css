@@ -1068,6 +1068,22 @@ html[data-motion="reduced"] *::after {
   color: var(--ink);
 }
 
+/* The success pulse (issue #187, rule 6): one short ring on the control that
+   succeeded — applying to the lights, saving a layout, saving an effect.
+   One run, no loop; with motion off the ring is already gone. */
+@keyframes success-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 38%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 10px transparent;
+  }
+}
+
+.success-pulse {
+  animation: success-pulse var(--dur-slow) var(--ease) both;
+}
+
 .ibtn {
   display: inline-grid;
   place-items: center;
@@ -1517,6 +1533,8 @@ button.chip:hover {
 }
 
 .color-swatch {
+  position: relative;
+  overflow: hidden;
   width: 32px;
   height: 32px;
   flex: none;
@@ -1528,6 +1546,27 @@ button.chip:hover {
   transition:
     border-color var(--dur-fast) var(--ease),
     background-color var(--dur-fast) var(--ease);
+}
+
+/* The colour wipe (issue #187, rule 9): the new colour reveals over the old
+   one behind a circular mask opening from the swatch's centre, instead of a
+   flat cross-fade. Remounted (keyed by the colour) on every change, so the
+   reveal replays; with motion off the mask opens at once. */
+@keyframes swatch-wipe {
+  from {
+    clip-path: circle(0% at 50% 50%);
+  }
+  to {
+    clip-path: circle(75% at 50% 50%);
+  }
+}
+
+.color-wipe {
+  position: absolute;
+  inset: 0;
+  background: var(--c);
+  animation: swatch-wipe var(--dur) var(--ease) both;
+  pointer-events: none;
 }
 
 .color-swatch:hover {
@@ -1628,6 +1667,9 @@ button.chip:hover {
   border: 1px solid var(--line-2);
   border-radius: var(--r-sm);
   background: var(--c);
+  /* The same mask reveal as the swatch (issue #187, rule 9): the preview is
+     keyed by the colour in ColorPicker, so each change wipes in. */
+  animation: swatch-wipe var(--dur) var(--ease) both;
 }
 
 /* The other colours of the same effect, one click away. */

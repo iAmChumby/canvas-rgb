@@ -42,24 +42,25 @@ export function Popover({
   const [style, setStyle] = useState<CSSProperties | undefined>(undefined);
   // The exit (issue #187, rule 2): when `open` drops, the panel stays for
   // --dur-exit under its exit animation, then goes. It closes back into the
-  // trigger, toward the same origin it grew from.
+  // trigger, toward the same origin it grew from. The state adjustment runs
+  // while rendering (the Crossfade pattern), so the panel is in the tree
+  // before the placement effect measures it.
   const [rendered, setRendered] = useState(open);
   const [closing, setClosing] = useState(false);
-
-  useEffect(() => {
-    if (open) {
-      setRendered(true);
-      setClosing(false);
-      return;
-    }
-    if (!rendered) return;
+  if (open && !rendered) {
+    setRendered(true);
+    setClosing(false);
+  } else if (!open && rendered && !closing) {
     setClosing(true);
+  }
+  useEffect(() => {
+    if (!closing) return;
     const t = setTimeout(() => {
       setRendered(false);
       setClosing(false);
     }, 90);
     return () => clearTimeout(t);
-  }, [open, rendered]);
+  }, [closing]);
 
   useLayoutEffect(() => {
     if (!open) return;

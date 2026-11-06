@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, type ButtonHTMLAttributes, type ChangeEvent, type ReactNode } from "react";
+import { useRef, type ButtonHTMLAttributes, type ChangeEvent, type ReactNode, type Ref } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Tooltip } from "@/components/Tooltip";
@@ -31,10 +31,11 @@ export function Button({
   icon,
   children,
   className,
+  ref,
   ...rest
-}: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: Variant; size?: "sm" | "md"; icon?: ReactNode }) {
+}: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: Variant; size?: "sm" | "md"; icon?: ReactNode; ref?: Ref<HTMLButtonElement> }) {
   return (
-    <button type="button" className={buttonClass(variant, size, className)} {...rest}>
+    <button type="button" ref={ref} className={buttonClass(variant, size, className)} {...rest}>
       {icon}
       {children}
     </button>
