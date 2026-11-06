@@ -1215,14 +1215,20 @@ impl Shell {
             title_row = title_row.mr_2();
         }
         if !context_text.is_empty() && !phone {
-            title_row = title_row.child(
-                div()
-                    .text_sm()
-                    .line_height(gpui::relative(1.0))
-                    .font_family(crate::fonts::MONO_FAMILY)
-                    .text_color(Theme::color(t.mute))
-                    .child(context_text),
-            );
+            // React's strip gives the room to a page that brings actions of
+            // its own: below 1100 px the page's context line goes too
+            // (`.strip-inner:has(.rd-actions) .rd-context`).
+            let room_for_context = page_actions.is_none() || self.width >= 1100.0;
+            if room_for_context {
+                title_row = title_row.child(
+                    div()
+                        .text_sm()
+                        .line_height(gpui::relative(1.0))
+                        .font_family(crate::fonts::MONO_FAMILY)
+                        .text_color(Theme::color(t.mute))
+                        .child(context_text),
+                );
+            }
         }
         inner = inner.child(title_row);
         // Now playing: hidden at 1280 px and up (the deck carries it there).
@@ -1232,34 +1238,35 @@ impl Shell {
                 .r_sm()
                 .bg(t.live());
             let swatch = if paused { swatch.opacity(0.4) } else { swatch };
-            inner = inner.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(swatch)
-                    .child(
-                        div()
-                            .flex()
-                            .items_baseline()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .font_family(crate::fonts::UI_FAMILY)
-                                    .text_color(Theme::color(t.ink))
-                                    .child(now_name.clone()),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_family(crate::fonts::UI_FAMILY)
-                                    .text_color(Theme::color(t.mute))
-                                    .child(now_detail.clone()),
-                            ),
-                    ),
-            );
+            // React's strip gives the room to a page that brings actions of
+            // its own: the effect's name goes, and only its colour stays
+            // (`.strip-inner:has(.rd-actions) .strip-now-text`). A phone's
+            // strip keeps the name.
+            let mut now_row = div().flex().items_center().gap_2().child(swatch);
+            if page_actions.is_none() || phone {
+                now_row = now_row.child(
+                    div()
+                        .flex()
+                        .items_baseline()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .font_family(crate::fonts::UI_FAMILY)
+                                .text_color(Theme::color(t.ink))
+                                .child(now_name.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_family(crate::fonts::UI_FAMILY)
+                                .text_color(Theme::color(t.mute))
+                                .child(now_detail.clone()),
+                        ),
+                );
+            }
+            inner = inner.child(now_row);
         }
         // The mark: icon always, words at 1280 px and up. React `.strip-mark`
         // has no gap between the icon and the words (`font: inherit`, 14 px).
