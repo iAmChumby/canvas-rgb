@@ -218,7 +218,10 @@ fn a_curve_drives_the_header_and_reads_back() {
 #[test]
 fn the_hot_floor_overrides_a_lower_fixed_value_and_says_why() {
     let t0 = Instant::now();
-    let mut r = rig(FansFile::default(), t0);
+    // Issue #130: the latch mechanics run here at a user-set 50 °C CPU line; the
+    // automatic line is covered by the issue130 tests below.
+    let config = FansFile { hot_limits: HotLimits { cpu_c: Some(50.0), gpu_c: None, board_c: None }, ..Default::default() };
+    let mut r = rig(config, t0);
     r.cpu.set(Some(55.0));
     r.fans.tick(t0);
     r.fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 20 }, t0).unwrap();
@@ -1031,7 +1034,9 @@ fn a_spike_train_on_cpu_fan_does_not_staircase() {
 #[test]
 fn a_step_from_40_to_51_raises_cpu_fan_to_the_hot_floor_on_the_same_tick() {
     let t0 = Instant::now();
-    let mut r = rig(FansFile::default(), t0);
+    // Issue #130: at a user-set 50 °C CPU line (see the note above).
+    let config = FansFile { hot_limits: HotLimits { cpu_c: Some(50.0), gpu_c: None, board_c: None }, ..Default::default() };
+    let mut r = rig(config, t0);
     r.cpu.set(Some(40.0));
     r.fans.set_header_mode("cpu_fan", cpu_curve(), t0).unwrap();
     for s in 1..=3 {
@@ -1046,7 +1051,9 @@ fn a_step_from_40_to_51_raises_cpu_fan_to_the_hot_floor_on_the_same_tick() {
 #[test]
 fn the_hot_floor_releases_after_a_hold_continuously_below_50() {
     let t0 = Instant::now();
-    let mut r = rig(FansFile::default(), t0);
+    // Issue #130: at a user-set 50 °C CPU line (see the note above).
+    let config = FansFile { hot_limits: HotLimits { cpu_c: Some(50.0), gpu_c: None, board_c: None }, ..Default::default() };
+    let mut r = rig(config, t0);
     r.cpu.set(Some(51.0));
     r.fans.set_header_mode("cpu_fan", cpu_curve(), t0).unwrap();
     for s in 1..=3 {
@@ -1066,10 +1073,12 @@ fn the_hot_floor_releases_after_a_hold_continuously_below_50() {
 
 #[test]
 fn a_latched_hot_floor_never_caps_a_rising_curve() {
-    // Review of PR #142: the latch must be a floor, not a cap. Latch at 51 C, then heat to 90 C:
-    // the curve's 100 % must be written on that same tick.
+    // Review of PR #142: the latch must be a floor, not a cap. Latch at 51 C, then heat to 80 C:
+    // the curve's 86 % must be written on that same tick. (Issue #130: at a user-set
+    // 50 °C CPU line; 80 C stays below the 84 °C ceiling so only the curve answers.)
     let t0 = Instant::now();
-    let mut r = rig(FansFile::default(), t0);
+    let config = FansFile { hot_limits: HotLimits { cpu_c: Some(50.0), gpu_c: None, board_c: None }, ..Default::default() };
+    let mut r = rig(config, t0);
     let curve = FanMode::Curve {
         source: TempSource::Cpu,
         points: vec![point(30.0, 30), point(50.0, 44), point(90.0, 100)],
@@ -1080,8 +1089,8 @@ fn a_latched_hot_floor_never_caps_a_rising_curve() {
         tick_cpu_at_temp(&mut r, t0, s, 51.0);
     }
     assert_eq!(r.chip.duty_raw(CPU_FAN), 128, "latched at the 50 % hot floor at 51 C");
-    let duty = tick_cpu_at_temp(&mut r, t0, 4, 90.0);
-    assert_eq!(duty, 255, "90 C takes the curve's 100 % on the same tick: {duty}");
+    let duty = tick_cpu_at_temp(&mut r, t0, 4, 80.0);
+    assert_eq!(duty, 219, "80 C takes the curve's 86 % on the same tick: {duty}");
 }
 
 #[test]
@@ -1268,8 +1277,7 @@ fn issue130_cpu_at_60_with_the_automatic_74_has_no_hot_floor() {
 #[test]
 fn issue130_a_user_limit_of_55_engages_at_55_and_not_at_52() {
     let t0 = Instant::now();
-    let mut config = FansFile::default();
-    config.hot_limits = HotLimits { cpu_c: Some(55.0), gpu_c: None, board_c: None };
+    let config = FansFile { hot_limits: HotLimits { cpu_c: Some(55.0), gpu_c: None, board_c: None }, ..Default::default() };
     let mut r = rig(config, t0);
     r.cpu.set(Some(52.0));
     r.fans.tick(t0);
@@ -1316,8 +1324,7 @@ fn issue130_the_safety_ceiling_takes_100_and_releases_after_the_hold() {
 fn issue130_a_board_curve_still_reads_its_own_board_line() {
     let t0 = Instant::now();
     // Board at 55 C with a user board line of 60 C: no floor, where the old 50 C would have engaged one.
-    let mut config = FansFile::default();
-    config.hot_limits = HotLimits { cpu_c: None, gpu_c: None, board_c: Some(60.0) };
+    let config = FansFile { hot_limits: HotLimits { cpu_c: None, gpu_c: None, board_c: Some(60.0) }, ..Default::default() };
     let mut r = rig(config, t0);
     r.chip.set_board_temp(0, 55.0);
     r.fans.tick(t0);
@@ -1353,8 +1360,7 @@ fn issue130_board_sensors_keep_the_50_degree_line_by_default() {
 fn issue130_an_invalid_limit_in_a_received_config_is_refused() {
     let t0 = Instant::now();
     let mut r = rig(FansFile::default(), t0);
-    let mut bad = FansFile::default();
-    bad.hot_limits = HotLimits { cpu_c: Some(99.0), gpu_c: None, board_c: None };
+    let bad = FansFile { hot_limits: HotLimits { cpu_c: Some(99.0), gpu_c: None, board_c: None }, ..Default::default() };
     let err = r.fans.put_config(bad, t0).err().unwrap();
     assert!(matches!(err, FanError::Validation(_)), "a limit past the ceiling gap is refused: {err}");
     // The running config is unchanged.
@@ -1375,6 +1381,24 @@ fn issue130_an_unknown_cpu_brand_gets_the_74_degree_automatic_line() {
     assert_eq!(cpu.max_settable_c, 82.0);
     assert_eq!(cpu.rated_max_c, None, "an unknown CPU reports no rated maximum");
     assert!(!cpu.user_set);
+}
+
+#[test]
+fn issue130_the_gpu_slowdown_threshold_from_the_fake_nvml_sets_the_gpu_line() {
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    // The fake NVML reports a 91 C slowdown threshold: that becomes the GPU's rated
+    // maximum, so the automatic line is 76 C and the ceiling 86 C.
+    let gpu_fake = crate::fakes::FakeGpuFans::new(1);
+    gpu_fake.set_slowdown_threshold_c(Some(91.0));
+    r.fans.set_gpu_rated_max_c(gpu_fake.slowdown_threshold_c());
+    let gpu = hot_of(&mut r, HotKind::Gpu);
+    assert_eq!(gpu.limit_c, 76.0, "91 rated minus the 15 C margin");
+    assert_eq!(gpu.auto_c, 76.0);
+    assert_eq!(gpu.ceiling_c, 86.0, "91 minus the 5 C ceiling margin");
+    assert_eq!(gpu.max_settable_c, 84.0);
+    assert_eq!(gpu.rated_max_c, Some(91.0));
+    assert!(!gpu.user_set);
 }
 
 #[test]

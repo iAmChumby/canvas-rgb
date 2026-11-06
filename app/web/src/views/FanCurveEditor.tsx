@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import type { CurvePoint } from "@/proto/CurvePoint";
+import type { HotLimitStatus } from "@/proto/HotLimitStatus";
 import { HOT_FLOOR, HOT_CPU_FAN_FLOOR, HOT_TEMP_C, CPU_FAN } from "@/lib/fan-rules";
 import { clamp } from "@/lib/format";
 import { dragThresholdPx } from "@/lib/hitTest";
@@ -14,8 +15,11 @@ const ASPECT = 0.62;
 
 /**
  * A 2 to 8 point curve on a temperature × percent grid. The shaded band at the bottom is the
- * floor. Above 50 °C a manual header is raised to its hot floor, so that band is drawn too.
- * Points drag, or take the arrow keys. The coordinates are read from the points list beside it.
+ * floor. From the source's hot limit (issue #130: the user's "don't exceed" line, drawn here
+ * and draggable) a manual header is raised to its hot floor, so that band is drawn from the
+ * line. Past the fixed safety ceiling a hatched band says every manual header runs at full
+ * speed. Points drag, or take the arrow keys. The coordinates are read from the points list
+ * beside it.
  */
 export function FanCurveEditor({
   header,
@@ -23,20 +27,30 @@ export function FanCurveEditor({
   floor,
   currentTemp,
   currentDuty,
+  hot,
   onChange,
   onCommit,
+  onHotCommit,
 }: {
   header: string;
   points: CurvePoint[];
   floor: number;
   currentTemp: number | null;
   currentDuty: number | null;
+  /** The hot line in force for this curve's source kind, or null when it is not known. */
+  hot?: HotLimitStatus | null;
   onChange: (points: CurvePoint[]) => void;
   onCommit: (points: CurvePoint[]) => void;
+  /** The hot line moved: drag end, arrow key, or the typed control beside the chart. */
+  onHotCommit?: (value: number) => void;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(360);
   const drag = useRef<number | null>(null);
+  /** The hot line while it is being dragged; null means the line in force from the status. */
+  const [hotDrag, setHotDrag] = useState<number | null>(null);
+  const hotDragRef = useRef(false);
+  const hotPress = useRef<{ x: number; y: number; moved: boolean; touch: boolean; id: number } | null>(null);
   /** Where the press landed, and whether it has travelled far enough to be a drag. */
   const press = useRef<{ x: number; y: number; moved: boolean; touch: boolean; start: CurvePoint[]; id: number } | null>(null);
 
@@ -158,9 +172,80 @@ export function FanCurveEditor({
     update(i, next, true);
   };
 
-  const hot = header === CPU_FAN ? HOT_CPU_FAN_FLOOR : HOT_FLOOR;
-  const hotTop = yOf(hot);
-  const hotLeft = xOf(HOT_TEMP_C);
+  // Issue #130: the "don't exceed" line. It moves by dragging or by the arrow keys,
+  // clamped to what the user may set (40 °C up to the ceiling minus the gap).
+  const HOT_MIN = 40;
+  const hotMax = hot?.max_settable_c ?? TEMP_MAX;
+  const hotValue = hotDrag ?? hot?.limit_c ?? HOT_TEMP_C;
+  const commitHot = (v: number) => {
+    const c = clamp(Math.round(v), HOT_MIN, hotMax);
+    setHotDrag(c);
+    onHotCommit?.(c);
+  };
+
+  const onHotDown = (e: PointerEvent<SVGRectElement>) => {
+    cancelPress(e);
+    if (hotDragRef.current) return;
+    hotDragRef.current = true;
+    hotPress.current = { x: e.clientX, y: e.clientY, moved: false, touch: e.pointerType === "touch", id: e.pointerId };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+
+  const onHotMove = (e: PointerEvent<SVGRectElement>) => {
+    if (!hotDragRef.current) return;
+    if (hotPress.current && e.pointerId !== hotPress.current.id) return;
+    const pr = hotPress.current;
+    if (pr && !pr.moved) {
+      if (Math.hypot(e.clientX - pr.x, e.clientY - pr.y) < dragThresholdPx(pr.touch ? "touch" : "mouse")) return;
+      pr.moved = true;
+    }
+    const d = toData(e);
+    if (!d) return;
+    setHotDrag(clamp(Math.round(d.t), HOT_MIN, hotMax));
+  };
+
+  const onHotUp = (e: PointerEvent<SVGRectElement>) => {
+    if (!hotDragRef.current) return;
+    if (hotPress.current && e.pointerId !== hotPress.current.id) return;
+    hotDragRef.current = false;
+    const moved = hotPress.current?.moved ?? true;
+    hotPress.current = null;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+    if (!moved) {
+      setHotDrag(null);
+      return;
+    }
+    const d = toData(e);
+    if (!d) {
+      setHotDrag(null);
+      return;
+    }
+    commitHot(d.t);
+  };
+
+  const onHotCancel = (e: PointerEvent<SVGRectElement>) => {
+    if (!hotDragRef.current) return;
+    if (hotPress.current && e.pointerId !== hotPress.current.id) return;
+    hotDragRef.current = false;
+    hotPress.current = null;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+    setHotDrag(null);
+  };
+
+  const onHotKey = (e: KeyboardEvent<SVGRectElement>) => {
+    const big = e.shiftKey ? 5 : 1;
+    let next: number | null = null;
+    if (e.key === "ArrowRight" || e.key === "ArrowUp") next = hotValue + big;
+    if (e.key === "ArrowLeft" || e.key === "ArrowDown") next = hotValue - big;
+    if (next === null) return;
+    e.preventDefault();
+    commitHot(next);
+  };
+
+  const hotFloor = header === CPU_FAN ? HOT_CPU_FAN_FLOOR : HOT_FLOOR;
+  const hotTop = yOf(hotFloor);
+  const hotLeft = xOf(hotValue);
+  const hotLabel = `Don't exceed ${hotValue} °C${hot ? (hot.user_set ? " · set by you" : " · automatic") : ""}`;
   const floorTop = yOf(floor);
   const grid = [20, 40, 60, 80, 100];
   const pctGrid = [0, 20, 40, 60, 80, 100];
@@ -168,6 +253,11 @@ export function FanCurveEditor({
   return (
     <div ref={wrapRef} className="curve" style={{ height }}>
       <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} role="group" aria-label="Fan curve">
+        <defs>
+          <pattern id="ceiling-hatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+            <line x1="0" y1="0" x2="0" y2="8" stroke="var(--down)" strokeWidth="1.5" opacity="0.45" />
+          </pattern>
+        </defs>
         {pctGrid.map((p) => (
           <g key={`p${p}`}>
             <line x1={MARGIN.left} x2={width - MARGIN.right} y1={yOf(p)} y2={yOf(p)} stroke="var(--line)" />
@@ -196,7 +286,37 @@ export function FanCurveEditor({
           height={MARGIN.top + plotH - floorTop}
           fill="color-mix(in srgb, var(--down) 18%, transparent)"
         />
-        {/* Hot floor: from 50 °C to the right, shaded up to the hot floor (G4). */}
+        {/* Safety ceiling (issue #130): fixed, never draggable. From the ceiling to the
+            right edge every manual header on this source runs at full speed. */}
+        {hot && (
+          <>
+            <rect
+              x={xOf(clamp(hot.ceiling_c, TEMP_MIN, TEMP_MAX))}
+              y={MARGIN.top}
+              width={MARGIN.left + plotW - xOf(clamp(hot.ceiling_c, TEMP_MIN, TEMP_MAX))}
+              height={plotH}
+              fill="url(#ceiling-hatch)"
+            />
+            <line
+              x1={xOf(clamp(hot.ceiling_c, TEMP_MIN, TEMP_MAX))}
+              x2={xOf(clamp(hot.ceiling_c, TEMP_MIN, TEMP_MAX))}
+              y1={MARGIN.top}
+              y2={MARGIN.top + plotH}
+              stroke="var(--down)"
+              strokeDasharray="2 3"
+            />
+            <text
+              x={xOf(clamp(hot.ceiling_c, TEMP_MIN, TEMP_MAX)) + 6}
+              y={MARGIN.top + plotH - 8}
+              fill="var(--down)"
+              fontSize={14}
+              fontFamily="var(--fm)"
+            >
+              Safety: full speed
+            </text>
+          </>
+        )}
+        {/* Hot floor: from the hot line to the right, shaded up to the hot floor (G4). */}
         <rect
           x={hotLeft}
           y={hotTop}
@@ -206,8 +326,30 @@ export function FanCurveEditor({
         />
         <line x1={hotLeft} x2={hotLeft} y1={MARGIN.top} y2={MARGIN.top + plotH} stroke="var(--warn)" strokeDasharray="4 4" />
         <text x={hotLeft + 6} y={MARGIN.top + 16} fill="var(--warn)" fontSize={14} fontFamily="var(--fm)">
-          {HOT_TEMP_C} °C hot
+          {hotLabel}
         </text>
+        {/* The hot line's handle: drag it, or use the arrow keys. */}
+        <rect
+          x={hotLeft - 7}
+          y={MARGIN.top}
+          width={14}
+          height={plotH}
+          fill="transparent"
+          className="curve-hot-handle"
+          tabIndex={0}
+          role="slider"
+          aria-label="Don't exceed temperature line"
+          aria-valuemin={HOT_MIN}
+          aria-valuemax={hotMax}
+          aria-valuenow={hotValue}
+          aria-valuetext={`${hotLabel}`}
+          onPointerDown={onHotDown}
+          onPointerMove={onHotMove}
+          onPointerUp={onHotUp}
+          onPointerCancel={onHotCancel}
+          onLostPointerCapture={onHotUp}
+          onKeyDown={onHotKey}
+        />
 
         {currentTemp !== null && (
           <line

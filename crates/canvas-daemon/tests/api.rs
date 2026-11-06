@@ -1173,7 +1173,7 @@ async fn issue130_put_fans_hot_out_of_range_is_422_and_sends_nothing() {
     let body = json(response).await;
     assert_eq!(body.get("error").and_then(|v| v.as_str()), Some("validation"));
     assert!(
-        body.get("message").and_then(|v| v.as_str()).unwrap_or_default().contains("cpu"),
+        body.get("message").and_then(|v| v.as_str()).unwrap_or_default().contains("Cpu"),
         "the error names the kind: {body}"
     );
     assert!(sent.lock().unwrap().is_empty(), "nothing is sent for a refused value");

@@ -51,6 +51,8 @@ import type { FanMode } from "@/proto/FanMode";
 import type { FanProfile } from "@/proto/FanProfile";
 import type { FanHeaderStatus } from "@/proto/FanHeaderStatus";
 import type { FansStatus } from "@/proto/FansStatus";
+import type { HotLimitStatus } from "@/proto/HotLimitStatus";
+import type { HotLimits } from "@/proto/HotLimits";
 import type { TempReading } from "@/proto/TempReading";
 import type { Settings } from "@/proto/Settings";
 import type { ExportBundle } from "@/proto/ExportBundle";
@@ -116,6 +118,7 @@ interface DemoState {
   activeLayout: string;
   fanModes: Record<string, FanMode>;
   fanFloor: number;
+  fanHotLimits: HotLimits;
   fanProfiles: FanProfile[];
   activeProfile: string;
   zonePanel: boolean;
@@ -267,6 +270,7 @@ function initialState(): DemoState {
     activeLayout: layouts.active,
     fanModes,
     fanFloor: 20,
+    fanHotLimits: { cpu_c: null, gpu_c: null, board_c: null },
     fanProfiles: FAN_PROFILES.map((p) => ({ ...p, headers: { ...p.headers } })),
     activeProfile: profile?.name ?? "Default",
     zonePanel: s.has("first-run"),
@@ -572,6 +576,23 @@ function fansStatus(): FansStatus {
     { source: { type: "gpu" }, label: "GPU", celsius: Math.round(r.gpu * 10) / 10 },
     { source: { type: "board", name: "SYSTIN" }, label: "Board SYSTIN", celsius: Math.round(r.board * 10) / 10 },
   ];
+  // Issue #130: the demo answers with the spine's defaults (7800X3D rated 89 °C,
+  // GPU on the 88 °C fallback, board at 50 °C) and whatever the user set.
+  const hotRow = (
+    kind: HotLimitStatus["kind"],
+    auto: number,
+    rated: number | null,
+    ceiling: number,
+    user: number | null,
+  ): HotLimitStatus => ({
+    kind,
+    limit_c: user ?? auto,
+    user_set: user !== null,
+    auto_c: auto,
+    rated_max_c: rated,
+    ceiling_c: ceiling,
+    max_settable_c: ceiling - 2,
+  });
   return {
     chip: "NCT6687D-R @ 0xA20",
     hardware_watchdog: null,
@@ -580,6 +601,11 @@ function fansStatus(): FansStatus {
     active_profile: s.activeProfile,
     profiles: s.fanProfiles.map((p) => p.name),
     floor_percent: s.fanFloor,
+    hot: [
+      hotRow("cpu", 74, 89, 84, s.fanHotLimits.cpu_c),
+      hotRow("gpu", 73, null, 83, s.fanHotLimits.gpu_c),
+      hotRow("board", 50, null, 90, s.fanHotLimits.board_c),
+    ],
   };
 }
 
@@ -1449,6 +1475,23 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       s.fanModes[header] = mode;
       return { ok: true, header, mode };
     }
+    if (seg[1] === "hot" && method === "PUT") {
+      if (!s.serviceUp) fail(503, "service_unavailable", "the fan service is not reachable");
+      const limits = body as HotLimits;
+      // The spine's ranges for the demo's rated maxima, in the spine's words.
+      const maxes: Array<[string, number | null, number]> = [
+        ["cpu", limits.cpu_c, 82],
+        ["gpu", limits.gpu_c, 81],
+        ["board", limits.board_c, 88],
+      ];
+      for (const [kind, v, max] of maxes) {
+        if (v !== null && (Number.isNaN(v) || v < 40 || v > max)) {
+          fail(422, "validation", `the ${kind} hot limit of ${v} °C is outside 40 to ${max} °C`);
+        }
+      }
+      s.fanHotLimits = { cpu_c: limits.cpu_c, gpu_c: limits.gpu_c, board_c: limits.board_c };
+      return fansStatus();
+    }
     if (seg[1] === "profile" && method === "GET") {
       return { name: s.activeProfile };
     }
@@ -1576,6 +1619,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
           active_profile: s.activeProfile,
           profiles: s.fanProfiles,
           boot_color: s.settings.boot_color,
+          hot_limits: s.fanHotLimits,
         },
         displays: s.displayConfig ? [{ ...s.displayConfig }] : [],
         stacks: [],

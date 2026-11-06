@@ -6,8 +6,11 @@
 
 use axum::extract::{Path, State};
 use axum::Json;
-use canvas_proto::api::FanProfileName;
-use canvas_proto::fans::{validate_mode, validate_profile, FanMode, FanProfile, FansStatus};
+use canvas_proto::api::{FanProfileName, PutFanHot};
+use canvas_proto::fans::{
+    hot_limit_status, validate_hot_limits, validate_mode, validate_profile, FanMode, FanProfile, FansStatus,
+    HotKind,
+};
 use std::sync::Arc;
 
 use crate::api::{ApiFailure, ApiResult};
@@ -204,4 +207,68 @@ pub async fn put_profile(
 
     tracing::info!(profile = %profile.name, "the fan profile was saved");
     Ok(Json(profile))
+}
+
+/// `PUT /api/v1/fans/hot` (issue #130).
+///
+/// The user's "don't exceed" temperatures, one per kind of source. Validated first
+/// against the rated maxima in the last status the service reported, so a value past
+/// the ceiling gap is refused with 422 before anything reaches the service. The
+/// service validates again on receipt.
+pub async fn put_fan_hot(
+    State(app): State<Arc<App>>,
+    Json(limits): Json<PutFanHot>,
+) -> ApiResult<Json<FansStatus>> {
+    let status = app.fans.read().await.clone();
+    let rated_of = |s: &FansStatus, kind: HotKind| {
+        s.hot.iter().find(|h| h.kind == kind).and_then(|h| h.rated_max_c)
+    };
+    let (rated_cpu, rated_gpu) = match &status {
+        Some(s) => (rated_of(s, HotKind::Cpu), rated_of(s, HotKind::Gpu)),
+        None => (None, None),
+    };
+    validate_hot_limits(&limits, rated_cpu, rated_gpu)
+        .map_err(|e| ApiFailure::validation(e.to_string()))?;
+
+    // Mirror the limits into the daemon's copy of the fans file and push the whole
+    // config, so the service and the daemon agree (as `put_profile` does).
+    let (home, fans) = {
+        let home = app.store.read().await.home.clone();
+        let mut guard = app.fans_last.write().await;
+        let mut fans = guard.clone().unwrap_or_default();
+        fans.hot_limits = limits;
+        crate::logging::warn_if_err("could not save the daemon's copy of the fans file", crate::storage::save_fans_last(&home, &fans));
+        *guard = Some(fans.clone());
+        (home, fans)
+    };
+    let _ = home;
+    crate::pipe_client::send(&app, &canvas_proto::pipe::PipeRequest::PutFanConfig { config: fans })
+        .await
+        .map_err(|e| {
+            ApiFailure::service_unavailable(format!("the fan service is not reachable: {e}"))
+        })?;
+
+    tracing::info!(?limits, "the fan hot limits changed");
+
+    // Answer the new status: the last one the service reported, with its hot rows
+    // recomputed for the limits just saved. With no status cached, ask the service.
+    let mut new_status = match status {
+        Some(status) => status,
+        None => match crate::pipe_client::send(&app, &canvas_proto::pipe::PipeRequest::FanStatus).await {
+            Ok(canvas_proto::pipe::PipeResponse::FanStatus { status }) => status,
+            _ => return Err(ApiFailure::service_unavailable("the fan service is not reachable")),
+        },
+    };
+    new_status.hot = [HotKind::Cpu, HotKind::Gpu, HotKind::Board]
+        .iter()
+        .map(|kind| {
+            let rated = match kind {
+                HotKind::Cpu => rated_cpu,
+                HotKind::Gpu => rated_gpu,
+                HotKind::Board => None,
+            };
+            hot_limit_status(*kind, &limits, rated)
+        })
+        .collect();
+    Ok(Json(new_status))
 }

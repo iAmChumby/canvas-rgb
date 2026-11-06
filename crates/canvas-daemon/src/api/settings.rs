@@ -4,7 +4,7 @@ use axum::extract::State;
 use axum::Json;
 use canvas_proto::api::OutputState;
 use canvas_proto::config::{ConfigFile, ExportBundle, Settings};
-use canvas_proto::fans::{FanProfile, FansStatus};
+use canvas_proto::fans::{FanProfile, FansStatus, HotKind, HotLimits};
 use std::sync::Arc;
 
 use crate::api::{ApiFailure, ApiResult};
@@ -152,13 +152,24 @@ async fn last_fans(app: &Arc<App>) -> canvas_proto::config::FansFile {
 
 /// Turns a fan status into the config file shape.
 fn fans_file_from_status(status: &FansStatus) -> canvas_proto::config::FansFile {
+    // Issue #130: the user's hot limits travel with the export. A row the user set
+    // carries its value; an automatic row carries nothing.
+    let mut hot_limits = HotLimits::default();
+    for row in &status.hot {
+        let value = row.user_set.then_some(row.limit_c);
+        match row.kind {
+            HotKind::Cpu => hot_limits.cpu_c = value,
+            HotKind::Gpu => hot_limits.gpu_c = value,
+            HotKind::Board => hot_limits.board_c = value,
+        }
+    }
     let mut fans = canvas_proto::config::FansFile {
         schema_version: canvas_proto::config::FANS_SCHEMA,
         floor_percent: status.floor_percent,
         active_profile: status.active_profile.clone(),
         profiles: Vec::new(),
         boot_color: None,
-        hot_limits: Default::default(),
+        hot_limits,
     };
     for name in &status.profiles {
         let headers = status

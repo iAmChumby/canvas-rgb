@@ -10,7 +10,7 @@ use canvas_proto::config::{
     EFFECTS_FILE, EFFECTS_SCHEMA, EXPORT_SCHEMA, LAYOUTS_FILE, LAYOUTS_SCHEMA, ZONES_FILE,
     ZONES_SCHEMA, CONFIG_SCHEMA,
 };
-use canvas_proto::fans::{validate_profile, FanValidationError};
+use canvas_proto::fans::{validate_hot_limits, validate_profile, FanValidationError, HotLimitError};
 use canvas_proto::layout::Layout;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -446,6 +446,8 @@ pub enum ImportError {
     Schema { found: u32, expected: u32 },
     #[error("fan values are not allowed: {0}")]
     Fans(#[from] FanValidationError),
+    #[error("hot limits are not allowed: {0}")]
+    HotLimits(#[from] HotLimitError),
     #[error("display config refused: {0}")]
     Displays(String),
     #[error("io: {0}")]
@@ -460,6 +462,10 @@ pub fn validate_bundle(bundle: &ExportBundle) -> Result<(), ImportError> {
     for profile in &bundle.fans.profiles {
         validate_profile(profile, bundle.fans.floor_percent).map_err(ImportError::Fans)?;
     }
+    // Issue #130: the user's hot limits are validated on import too. The rated
+    // maxima are not known here, so the check runs against the spine's fallbacks;
+    // the service validates again with the real ones on receipt.
+    validate_hot_limits(&bundle.fans.hot_limits, None, None).map_err(ImportError::HotLimits)?;
     // The same checks as a PUT to the display route, and one config per device.
     for (i, display) in bundle.displays.iter().enumerate() {
         crate::displays::validate(&display.device.0, display).map_err(ImportError::Displays)?;

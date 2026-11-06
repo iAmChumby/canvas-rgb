@@ -20,6 +20,9 @@ pub const NVML_MIN_FAN_PERCENT: u8 = canvas_proto::fans::GPU_FAN_MIN_PERCENT;
 pub const MAX_GPU_FANS: usize = 4;
 /// `NVML_FAN_POLICY_MANUAL` in nvml.h (`NVML_FAN_POLICY_TEMPERATURE_CONTINOUS_SW` is 0).
 const NVML_FAN_POLICY_MANUAL: u32 = 1;
+/// `NVML_TEMPERATURE_THRESHOLD_SLOWDOWN` in nvml.h (`_SHUTDOWN` is 1). Issue #130: this is
+/// the GPU's rated maximum for the hot-limit maths.
+const NVML_TEMPERATURE_THRESHOLD_SLOWDOWN: c_int = 0;
 const NVML_SUCCESS: c_int = 0;
 
 /// What the service needs from the GPU's fans, by NVML fan index (0-based).
@@ -36,6 +39,11 @@ pub trait GpuFanApi: Send {
     fn set_speed(&mut self, fan: u32, percent: u32) -> io::Result<()>;
     /// Returns the fan to the driver's automatic control.
     fn set_default(&mut self, fan: u32) -> io::Result<()>;
+    /// The driver's slowdown temperature threshold, in °C (issue #130: the GPU's rated
+    /// maximum for the hot-limit maths). `None` when the driver reports none.
+    fn slowdown_threshold_c(&mut self) -> io::Result<Option<f32>> {
+        Ok(None)
+    }
 }
 
 type NvmlInit = unsafe extern "C" fn() -> c_int;
@@ -49,6 +57,8 @@ type NvmlFanOut = unsafe extern "C" fn(*mut c_void, u32, *mut u32) -> c_int;
 type NvmlFanSet = unsafe extern "C" fn(*mut c_void, u32, u32) -> c_int;
 /// `(device, fan)` calls: `SetDefaultFanSpeed_v2`.
 type NvmlFanDefault = unsafe extern "C" fn(*mut c_void, u32) -> c_int;
+/// `(device, threshold, *out)` calls: `nvmlDeviceGetTemperatureThreshold`.
+type NvmlThreshold = unsafe extern "C" fn(*mut c_void, c_int, *mut u32) -> c_int;
 
 /// The NVML fan entry points of GPU 0. `nvml.dll` is loaded at runtime.
 pub struct NvmlFans {
@@ -60,6 +70,9 @@ pub struct NvmlFans {
     get_policy: NvmlFanOut,
     set_speed: NvmlFanSet,
     set_default: NvmlFanDefault,
+    /// Optional: an older driver without the symbol still drives fans; only the hot
+    /// limit falls back. `None` means the threshold reads as unknown.
+    get_threshold: Option<NvmlThreshold>,
     shutdown: NvmlShutdown,
 }
 
@@ -92,7 +105,7 @@ impl NvmlFans {
         .into();
         // SAFETY: each symbol is looked up under its documented name and the signature from
         // nvml.h; the copied function pointers are used only while `library` is alive.
-        let (init, handle, num_fans, get_speed, get_target, get_policy, set_speed, set_default, shutdown) = unsafe {
+        let (init, handle, num_fans, get_speed, get_target, get_policy, set_speed, set_default, get_threshold, shutdown) = unsafe {
             let init: libloading::Symbol<NvmlInit> =
                 library.get(b"nvmlInit_v2\0").map_err(|e| unavailable("symbol nvmlInit_v2", e))?;
             let handle: libloading::Symbol<NvmlHandleByIndex> = library
@@ -118,7 +131,11 @@ impl NvmlFans {
                 .map_err(|e| unavailable("symbol nvmlDeviceSetDefaultFanSpeed_v2", e))?;
             let shutdown: libloading::Symbol<NvmlShutdown> =
                 library.get(b"nvmlShutdown\0").map_err(|e| unavailable("symbol nvmlShutdown", e))?;
-            (*init, *handle, *num_fans, *get_speed, *get_target, *get_policy, *set_speed, *set_default, *shutdown)
+            // Optional on purpose: a driver without this symbol still drives fans, and
+            // only the hot limit falls back (issue #130).
+            let get_threshold: Option<NvmlThreshold> =
+                library.get(b"nvmlDeviceGetTemperatureThreshold\0").ok().map(|s| *s);
+            (*init, *handle, *num_fans, *get_speed, *get_target, *get_policy, *set_speed, *set_default, get_threshold, *shutdown)
         };
         // SAFETY: `init` is the NVML entry point above; no arguments.
         if unsafe { init() } != NVML_SUCCESS {
@@ -140,7 +157,7 @@ impl NvmlFans {
             unsafe { shutdown() };
             return Err(unavailable("fans", format!("GPU 0 reports no controllable fans (status {status}, count {fans})")));
         }
-        Ok(Self { _library: library, device, num_fans, get_speed, get_target, get_policy, set_speed, set_default, shutdown })
+        Ok(Self { _library: library, device, num_fans, get_speed, get_target, get_policy, set_speed, set_default, get_threshold, shutdown })
     }
 
     fn read(&self, name: &str, call: NvmlFanOut, fan: u32) -> io::Result<u32> {
@@ -193,6 +210,17 @@ impl GpuFanApi for NvmlFans {
             return Err(call_failed("nvmlDeviceSetDefaultFanSpeed_v2", status));
         }
         Ok(())
+    }
+
+    fn slowdown_threshold_c(&mut self) -> io::Result<Option<f32>> {
+        let Some(call) = self.get_threshold else { return Ok(None) };
+        let mut value = 0u32;
+        // SAFETY: `device` came from nvmlDeviceGetHandleByIndex_v2 and `value` is a valid out pointer.
+        let status = unsafe { call(self.device, NVML_TEMPERATURE_THRESHOLD_SLOWDOWN, &mut value) };
+        if status != NVML_SUCCESS {
+            return Err(call_failed("nvmlDeviceGetTemperatureThreshold", status));
+        }
+        Ok(Some(value as f32))
     }
 }
 
@@ -274,6 +302,21 @@ impl CompositeChip {
 
     fn gpu(&mut self) -> io::Result<&mut Box<dyn GpuFanApi>> {
         self.gpu.as_mut().ok_or_else(|| io::Error::other("no GPU fans"))
+    }
+
+    /// The GPU's slowdown threshold in °C (issue #130), for the hot-limit maths.
+    /// `None` with no GPU or when the driver reports none.
+    pub fn slowdown_threshold_c(&mut self) -> Option<f32> {
+        match self.gpu.as_mut() {
+            Some(gpu) => match gpu.slowdown_threshold_c() {
+                Ok(value) => value,
+                Err(e) => {
+                    tracing::warn!(error = %e, "the GPU slowdown threshold is unknown; the hot limit falls back");
+                    None
+                }
+            },
+            None => None,
+        }
     }
 }
 

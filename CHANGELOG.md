@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Added
+
+- Fans: set how hot is too hot for your CPU, GPU and board sensors. The curve chart draws a "Don't exceed" line (74 °C for a 7800X3D, worked out from the part's rated maximum), which you can drag or type; "Reset to automatic" puts it back. Past the fixed safety ceiling (84 °C on the 7800X3D) every manual header on that sensor runs at full speed, whatever the curve says. (#130)
+
 ## [0.8.3] - 2026-11-05
 
 ### Changed

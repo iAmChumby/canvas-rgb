@@ -18,9 +18,9 @@ use crate::store::{self, BiosState, SavedHeader, StoreError};
 use crate::temps::TempReader;
 use canvas_proto::config::{FansFile, FANS_SCHEMA};
 use canvas_proto::fans::{
-    floor_for, hot_limit_status, rated_cpu_max_c, runtime_floor, runtime_floor_at, validate_hot_limits,
-    validate_mode, validate_profile, CurvePoint, FanHeaderStatus, FanMode, FanProfile, FanValidationError,
-    FansStatus, HotKind, HotLimitStatus, TempReading, TempSource, HOT_TEMP_C, SENSOR_LOSS_TIMEOUT_MS,
+    floor_for, hot_limit_status, rated_cpu_max_c, runtime_floor_at, validate_hot_limits, validate_mode,
+    validate_profile, CurvePoint, FanHeaderStatus, FanMode, FanProfile, FanValidationError, FansStatus, HotKind,
+    HotLimitStatus, TempReading, TempSource, SENSOR_LOSS_TIMEOUT_MS,
 };
 use canvas_proto::Rgb8;
 use std::collections::{BTreeMap, BTreeSet};
@@ -417,9 +417,12 @@ impl FanController {
             let cpu = hot_limit_status(HotKind::Cpu, &self.config.hot_limits, self.rated_for(HotKind::Cpu));
             let gpu = hot_limit_status(HotKind::Gpu, &self.config.hot_limits, self.rated_for(HotKind::Gpu));
             let board = hot_limit_status(HotKind::Board, &self.config.hot_limits, None);
-            let rated = |s: &HotLimitStatus| match s.rated_max_c {
-                Some(r) => format!("automatic, rated {r:.0} °C"),
-                None => "automatic".to_string(),
+            let rated = |s: &HotLimitStatus| {
+                let origin = if s.user_set { "set by you" } else { "automatic" };
+                match s.rated_max_c {
+                    Some(r) => format!("{origin}, rated {r:.0} °C"),
+                    None => origin.to_string(),
+                }
             };
             tracing::info!(
                 "the hot limits are CPU {} °C ({}), GPU {} °C ({}), board {} °C",
@@ -1187,13 +1190,13 @@ fn ceiling_name(label: &str) -> &str {
 /// table in the spine. `None` on any other architecture or when the leaf reports nothing.
 #[cfg(target_arch = "x86_64")]
 pub fn cpu_brand_string() -> Option<String> {
-    // SAFETY: __cpuid with the extended leaves below only returns for values; the reads are
-    // plain register reads, and the string is NUL-padded by the CPU.
-    let leaf = |id: u32| unsafe {
+    // __cpuid is a safe function; the extended leaves are only read after the max-leaf
+    // check below, and the string is NUL-padded by the CPU.
+    let leaf = |id: u32| {
         let r = std::arch::x86_64::__cpuid(id);
         [r.ebx, r.ecx, r.edx, r.eax]
     };
-    let max = unsafe { std::arch::x86_64::__cpuid(0x8000_0000).eax };
+    let max = std::arch::x86_64::__cpuid(0x8000_0000).eax;
     if max < 0x8000_0004 {
         return None;
     }

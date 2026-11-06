@@ -32,6 +32,8 @@ import type { CurvePoint } from "@/proto/CurvePoint";
 import type { FanHeaderStatus } from "@/proto/FanHeaderStatus";
 import type { FanMode } from "@/proto/FanMode";
 import type { FansStatus } from "@/proto/FansStatus";
+import type { HotKind } from "@/proto/HotKind";
+import type { HotLimits } from "@/proto/HotLimits";
 import type { TempSource } from "@/proto/TempSource";
 import type { TempReading } from "@/proto/TempReading";
 import { PageTitle } from "@/shell/PageHeader";
@@ -890,6 +892,37 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
   const currentTemp = tempFor({ mode: "curve", source, points }, fans.temps);
   const currentDuty = dutyFor(points, currentTemp);
 
+  // Issue #130: the hot line for this curve's source kind. A Fixed header has no curve
+  // source: its reference temperature is the CPU reading, as the service treats it.
+  const [hotErr, setHotErr] = useState<string | null>(null);
+  const [hotBusy, setHotBusy] = useState(false);
+  const hotKind: HotKind = mode.mode === "curve" ? source.type : "cpu";
+  const hotRow = (fans.hot ?? []).find((h) => h.kind === hotKind) ?? null;
+
+  /** Sends the whole set of hot limits with one kind changed (`null` = automatic). */
+  const commitHot = async (value: number | null) => {
+    setHotBusy(true);
+    setHotErr(null);
+    const limits: HotLimits = { cpu_c: null, gpu_c: null, board_c: null };
+    for (const row of fans.hot ?? []) {
+      const v = row.user_set ? row.limit_c : null;
+      if (row.kind === "cpu") limits.cpu_c = v;
+      if (row.kind === "gpu") limits.gpu_c = v;
+      if (row.kind === "board") limits.board_c = v;
+    }
+    if (hotKind === "cpu") limits.cpu_c = value;
+    if (hotKind === "gpu") limits.gpu_c = value;
+    if (hotKind === "board") limits.board_c = value;
+    try {
+      await api.putFanHot(limits);
+      await refreshFans();
+    } catch (e) {
+      setHotErr(messageOf(e));
+    } finally {
+      setHotBusy(false);
+    }
+  };
+
   const manual = mode.mode !== "bios";
   const current = mode.mode;
   // The chip is doing something else than what was asked for: the daemon handed it back.
@@ -956,7 +989,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
 
         {manual && (
           <div className="rule">
-            Floor <span className="fig" style={{ color: "var(--ink)" }}><AnimatedNumber value={base} />%</span>. {hotRuleText()}.
+            Floor <span className="fig" style={{ color: "var(--ink)" }}><AnimatedNumber value={base} />%</span>. {hotRuleText(hotRow?.limit_c)}.
           </div>
         )}
 
@@ -1007,9 +1040,41 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
               floor={base}
               currentTemp={currentTemp}
               currentDuty={currentDuty}
+              hot={hotRow}
               onChange={setPoints}
               onCommit={commitCurve}
+              onHotCommit={(v) => void commitHot(v)}
             />
+            {hotRow && (
+              <Field label="Don't exceed">
+                <div className="row-wrap">
+                  <NumberField
+                    label="Don't exceed temperature"
+                    min={40}
+                    max={hotRow.max_settable_c}
+                    value={hotRow.limit_c}
+                    unit="°C"
+                    disabled={hotBusy}
+                    onCommit={(v) => void commitHot(v)}
+                  />
+                  <span className="mute">{hotRow.user_set ? "set by you" : "automatic"}</span>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    icon={<ArrowClockwise size={14} />}
+                    disabled={hotBusy}
+                    onClick={() => void commitHot(null)}
+                  >
+                    Reset to automatic
+                  </Button>
+                  {hotErr && (
+                    <span className="error-line" role="alert">
+                      {hotErr}
+                    </span>
+                  )}
+                </div>
+              </Field>
+            )}
             {status}
             <div className="curve-rows">
               {points.map((p, i) => (

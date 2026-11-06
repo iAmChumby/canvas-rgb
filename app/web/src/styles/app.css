@@ -4108,6 +4108,15 @@ button.chip:hover {
   outline: none;
 }
 
+/* The hot line's drag handle (issue #130): an invisible strip over the dashed line. */
+.curve-hot-handle {
+  cursor: ew-resize;
+}
+
+.curve-hot-handle:focus-visible {
+  outline: none;
+}
+
 .curve-point-ring {
   transition: r var(--dur-fast) var(--ease);
 }

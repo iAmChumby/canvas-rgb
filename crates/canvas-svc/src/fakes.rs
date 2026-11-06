@@ -473,6 +473,8 @@ struct GpuSim {
     fans: Vec<GpuFan>,
     fail_set_speed: bool,
     fail_count: bool,
+    /// The slowdown threshold NVML reports, in °C (issue #130: the GPU's rated maximum).
+    slowdown_threshold_c: Option<f32>,
     /// Every `set_speed` call as (fan, percent), including failed ones.
     speed_calls: Vec<(u32, u32)>,
     /// Every `set_default` call, by fan.
@@ -495,7 +497,7 @@ impl FakeGpuFans {
     /// `count` fans, all on auto with the 30% idle target.
     pub fn new(count: usize) -> Self {
         let fans = (0..count).map(|_| GpuFan { target: 30, manual: false }).collect();
-        let sim = GpuSim { fans, fail_set_speed: false, fail_count: false, speed_calls: Vec::new(), default_calls: Vec::new() };
+        let sim = GpuSim { fans, fail_set_speed: false, fail_count: false, slowdown_threshold_c: None, speed_calls: Vec::new(), default_calls: Vec::new() };
         Self { sim: Arc::new(Mutex::new(sim)) }
     }
 
@@ -507,6 +509,16 @@ impl FakeGpuFans {
     /// Makes `count` fail.
     pub fn set_fail_count(&self, fail: bool) {
         gpu_lock(&self.sim).fail_count = fail;
+    }
+
+    /// Sets the slowdown threshold NVML reports, in °C (issue #130: the GPU's rated maximum).
+    pub fn set_slowdown_threshold_c(&self, value: Option<f32>) {
+        gpu_lock(&self.sim).slowdown_threshold_c = value;
+    }
+
+    /// The slowdown threshold NVML reports, in °C.
+    pub fn slowdown_threshold_c(&self) -> Option<f32> {
+        gpu_lock(&self.sim).slowdown_threshold_c
     }
 
     pub fn speed_calls(&self) -> Vec<(u32, u32)> {
@@ -580,6 +592,10 @@ impl GpuFanApi for FakeGpuFans {
         f.target = 30;
         f.manual = false;
         Ok(())
+    }
+
+    fn slowdown_threshold_c(&mut self) -> io::Result<Option<f32>> {
+        Ok(gpu_lock(&self.sim).slowdown_threshold_c)
     }
 }
 
