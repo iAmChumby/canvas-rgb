@@ -899,8 +899,9 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
   const hotKind: HotKind = mode.mode === "curve" ? source.type : "cpu";
   const hotRow = (fans.hot ?? []).find((h) => h.kind === hotKind) ?? null;
 
-  /** Sends the whole set of hot limits with one kind changed (`null` = automatic). */
-  const commitHot = async (value: number | null) => {
+  /** Sends the whole set of hot limits with one kind changed (`null` = automatic).
+   * Resolves true when the service accepted it, false when the PUT failed (422). */
+  const commitHot = async (value: number | null): Promise<boolean> => {
     setHotBusy(true);
     setHotErr(null);
     const limits: HotLimits = { cpu_c: null, gpu_c: null, board_c: null };
@@ -916,8 +917,10 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
     try {
       await api.putFanHot(limits);
       await refreshFans();
+      return true;
     } catch (e) {
       setHotErr(messageOf(e));
+      return false;
     } finally {
       setHotBusy(false);
     }
@@ -956,6 +959,38 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
     </div>
   );
 
+  // The compact "don't exceed" control, shared by Fixed (the CPU kind, as the
+  // service treats it) and Curve. It lives inside an existing row, never in a new
+  // Field, so it adds no height to the panel.
+  const hotControls = hotRow && (
+    <span className="row-wrap" style={{ gap: 8 }}>
+      <NumberField
+        label="Don't exceed temperature"
+        min={40}
+        max={hotRow.max_settable_c}
+        value={hotRow.limit_c}
+        unit="°C"
+        disabled={hotBusy}
+        onCommit={(v) => void commitHot(v)}
+      />
+      <span className="mute">{hotRow.user_set ? "set by you" : "automatic"}</span>
+      <Button
+        size="sm"
+        variant="ghost"
+        icon={<ArrowClockwise size={14} />}
+        disabled={hotBusy}
+        onClick={() => void commitHot(null)}
+      >
+        Reset to automatic
+      </Button>
+      {hotErr && (
+        <span className="error-line" role="alert">
+          {hotErr}
+        </span>
+      )}
+    </span>
+  );
+
   return (
     <Panel
       title={header.label}
@@ -970,7 +1005,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
       {isUnavailable(header) ? (
         <p className="mute">Not on this board: this header is not fitted on your board, so there is no mode to set.</p>
       ) : (
-      <div className="stack" style={{ gap: 14 }}>
+      <div className="stack" style={{ gap: 8 }}>
         <Segmented<"bios" | "fixed" | "curve">
           label={`${header.label} mode`}
           value={current}
@@ -989,7 +1024,10 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
 
         {manual && (
           <div className="rule">
-            Floor <span className="fig" style={{ color: "var(--ink)" }}><AnimatedNumber value={base} />%</span>. {hotRuleText(hotRow?.limit_c)}.
+            <span>
+              Floor <span className="fig" style={{ color: "var(--ink)" }}><AnimatedNumber value={base} />%</span>. {hotRuleText(hotRow?.limit_c)}.
+            </span>
+            {mode.mode === "fixed" && (hotControls ? <span className="hot-inline"> Don't exceed {hotControls}</span> : null)}
           </div>
         )}
 
@@ -1022,17 +1060,21 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
         {mode.mode === "curve" && (
           <>
             <Field label="Temperature source">
-              <Select
-                label={`${header.label} temperature source`}
-                value={sourceKey(source)}
-                options={sourceOptions}
-                onChange={(k) => {
-                  const s = sourceFromKey(k);
-                  cancelCurve();
-                  setSource(s);
-                  void apply({ mode: "curve", source: s, points });
-                }}
-              />
+              <div className="row-wrap">
+                <Select
+                  label={`${header.label} temperature source`}
+                  value={sourceKey(source)}
+                  options={sourceOptions}
+                  onChange={(k) => {
+                    const s = sourceFromKey(k);
+                    cancelCurve();
+                    setSource(s);
+                    void apply({ mode: "curve", source: s, points });
+                  }}
+                />
+                <span className="mute">Don't exceed</span>
+                {hotControls}
+              </div>
             </Field>
             <FanCurveEditor
               header={header.id}
@@ -1043,38 +1085,8 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
               hot={hotRow}
               onChange={setPoints}
               onCommit={commitCurve}
-              onHotCommit={(v) => void commitHot(v)}
+              onHotCommit={(v) => commitHot(v)}
             />
-            {hotRow && (
-              <Field label="Don't exceed">
-                <div className="row-wrap">
-                  <NumberField
-                    label="Don't exceed temperature"
-                    min={40}
-                    max={hotRow.max_settable_c}
-                    value={hotRow.limit_c}
-                    unit="°C"
-                    disabled={hotBusy}
-                    onCommit={(v) => void commitHot(v)}
-                  />
-                  <span className="mute">{hotRow.user_set ? "set by you" : "automatic"}</span>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    icon={<ArrowClockwise size={14} />}
-                    disabled={hotBusy}
-                    onClick={() => void commitHot(null)}
-                  >
-                    Reset to automatic
-                  </Button>
-                  {hotErr && (
-                    <span className="error-line" role="alert">
-                      {hotErr}
-                    </span>
-                  )}
-                </div>
-              </Field>
-            )}
             {status}
             <div className="curve-rows">
               {points.map((p, i) => (

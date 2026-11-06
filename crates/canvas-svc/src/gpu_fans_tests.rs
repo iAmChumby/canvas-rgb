@@ -213,6 +213,25 @@ fn the_composite_reports_the_fake_nvml_slowdown_threshold() {
 }
 
 #[test]
+fn a_nonsense_slowdown_threshold_is_refused_and_falls_back() {
+    let nct = FakeChip::new(MSI_ALT1_MAP);
+    let gpu = FakeGpuFans::new(2);
+    let mut chip = composite(&nct, &gpu);
+    for nonsense in [0.0f32, 200.0, -20.0, f32::NAN, f32::INFINITY] {
+        gpu.set_slowdown_threshold_c(Some(nonsense));
+        assert_eq!(
+            chip.slowdown_threshold_c(),
+            None,
+            "a slowdown threshold of {nonsense} °C is outside 60..=115 °C and must fall back"
+        );
+    }
+    gpu.set_slowdown_threshold_c(Some(60.0));
+    assert_eq!(chip.slowdown_threshold_c(), Some(60.0), "60 °C is the lowest sane rated maximum");
+    gpu.set_slowdown_threshold_c(Some(115.0));
+    assert_eq!(chip.slowdown_threshold_c(), Some(115.0), "115 °C is the highest sane rated maximum");
+}
+
+#[test]
 fn a_gpu_that_cannot_count_its_fans_adds_no_headers() {
     let nct = FakeChip::new(MSI_ALT1_MAP);
     let gpu = FakeGpuFans::new(2);

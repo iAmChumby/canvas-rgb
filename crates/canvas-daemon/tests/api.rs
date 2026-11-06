@@ -1084,10 +1084,12 @@ fn fans_with_hot() -> canvas_proto::fans::FansStatus {
     status
 }
 
-/// Logs every pipe request the daemon makes.
+/// Logs every pipe request the daemon makes. `delay` holds each exchange long
+/// enough that two PUTs overlap without the lock, for the concurrency proof.
 struct LogPipe {
     sent: Arc<std::sync::Mutex<Vec<canvas_proto::pipe::PipeRequest>>>,
     status: Option<canvas_proto::fans::FansStatus>,
+    delay: std::time::Duration,
 }
 
 #[async_trait::async_trait]
@@ -1096,6 +1098,9 @@ impl canvas_daemon::pipe_client::PipeLink for LogPipe {
         &self,
         request: &canvas_proto::pipe::PipeRequest,
     ) -> Result<canvas_proto::pipe::PipeResponse, canvas_daemon::pipe_client::PipeError> {
+        if !self.delay.is_zero() {
+            tokio::time::sleep(self.delay).await;
+        }
         self.sent.lock().unwrap().push(request.clone());
         match request {
             canvas_proto::pipe::PipeRequest::FanStatus => match &self.status {
@@ -1127,7 +1132,7 @@ fn build_with_recording_pipe(
         tx,
     );
     let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
-    app.pipe = Arc::new(LogPipe { sent: Arc::clone(&sent), status: Some(status.clone()) });
+    app.pipe = Arc::new(LogPipe { sent: Arc::clone(&sent), status: Some(status.clone()), delay: std::time::Duration::ZERO });
     let app = Arc::new(app);
     (api::router(app.clone()), app, home, sent)
 }
@@ -1209,6 +1214,76 @@ async fn issue130_export_keeps_the_user_hot_limits() {
     assert_eq!(fans.get("hot_limits").and_then(|v| v.get("board_c")).and_then(|v| v.as_f64()), Some(60.0));
     assert!(fans.get("hot_limits").and_then(|v| v.get("gpu_c")).and_then(|v| v.as_f64()).is_none());
     let _ = sent;
+}
+
+#[tokio::test]
+async fn put_fans_hot_with_the_service_down_is_a_503_and_saves_nothing() {
+    let (router, app, _home) = build_with_pipe(FakeReply::Down);
+    *app.fans_last.write().await = Some(canvas_proto::config::FansFile::default());
+    let response = router
+        .oneshot(request_with_body("PUT", routes::FAN_HOT, r#"{"cpu_c":70.0,"gpu_c":null,"board_c":null}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let saved = app.fans_last.read().await.clone().expect("the fans_last entry stays");
+    assert_eq!(saved.hot_limits.cpu_c, None, "a refused PUT leaves fans_last unchanged");
+}
+
+#[tokio::test]
+async fn put_fans_hot_the_service_refuses_is_mapped_and_saves_nothing() {
+    let (router, app, _home) = build_with_pipe(FakeReply::Error("validation"));
+    *app.fans_last.write().await = Some(canvas_proto::config::FansFile::default());
+    let response = router
+        .oneshot(request_with_body("PUT", routes::FAN_HOT, r#"{"cpu_c":70.0,"gpu_c":null,"board_c":null}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let saved = app.fans_last.read().await.clone().expect("the fans_last entry stays");
+    assert_eq!(saved.hot_limits.cpu_c, None, "a service refusal leaves fans_last unchanged: {saved:?}");
+}
+
+#[tokio::test]
+async fn two_concurrent_puts_keep_both_changes() {
+    let home = TempHome::new();
+    let store = canvas_daemon::storage::Store::at(&home.path);
+    let engine = Arc::new(FakeEngine::default());
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(
+        store,
+        engine,
+        Box::new(FakeAdapter::default()),
+        TOKEN.to_string(),
+        "0.1.0-test".to_string(),
+        tx,
+    );
+    let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+    app.pipe = Arc::new(LogPipe {
+        sent: Arc::clone(&sent),
+        status: Some(fans_with_hot()),
+        delay: std::time::Duration::from_millis(80),
+    });
+    let app = Arc::new(app);
+    *app.fans.write().await = Some(fans_with_hot());
+    *app.fans_last.write().await = Some(canvas_proto::config::FansFile::default());
+    let router = api::router(app.clone());
+    let hot_req = request_with_body("PUT", routes::FAN_HOT, r#"{"cpu_c":70.0,"gpu_c":null,"board_c":null}"#);
+    let profile_body = serde_json::json!({
+        "name": "quiet",
+        "headers": {"cpu_fan": {"mode": "fixed", "percent": 40}}
+    })
+    .to_string();
+    let router_hot = router.clone();
+    let router_profile = router.clone();
+    let hot_future = async move { router_hot.oneshot(hot_req).await.expect("the hot router answers") };
+    let profile_future = async move { router_profile.oneshot(
+        request_with_body("PUT", "/api/v1/fans/profiles/quiet", &profile_body),
+    ).await.expect("the profile router answers") };
+    let (hot_resp, profile_resp) = tokio::join!(hot_future, profile_future);
+    assert_eq!(hot_resp.status(), StatusCode::OK);
+    assert_eq!(profile_resp.status(), StatusCode::OK);
+    let saved = app.fans_last.read().await.clone().expect("fans_last is saved");
+    assert_eq!(saved.hot_limits.cpu_c, Some(70.0), "the hot change survived: {saved:?}");
+    assert!(saved.profiles.iter().any(|p| p.name == "quiet"), "the profile change survived: {saved:?}");
 }
 
 #[tokio::test]

@@ -41,8 +41,9 @@ export function FanCurveEditor({
   hot?: HotLimitStatus | null;
   onChange: (points: CurvePoint[]) => void;
   onCommit: (points: CurvePoint[]) => void;
-  /** The hot line moved: drag end, arrow key, or the typed control beside the chart. */
-  onHotCommit?: (value: number) => void;
+  /** The hot line moved: drag end, arrow key, or the typed control beside the chart.
+   * Resolves true when the service accepted it, false when the PUT failed (422). */
+  onHotCommit?: (value: number) => Promise<boolean>;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(360);
@@ -173,17 +174,22 @@ export function FanCurveEditor({
   };
 
   // Issue #130: the "don't exceed" line. It moves by dragging or by the arrow keys,
-  // clamped to what the user may set (40 °C up to the ceiling minus the gap).
+  // clamped to what the user may set (40 °C up to the ceiling minus the gap). With no
+  // hot line in force the handle is disabled instead of allowing up to 100 °C.
   const HOT_MIN = 40;
-  const hotMax = hot?.max_settable_c ?? TEMP_MAX;
+  const hotDisabled = !hot;
+  const hotMax = hot ? hot.max_settable_c : HOT_MIN;
   const hotValue = hotDrag ?? hot?.limit_c ?? HOT_TEMP_C;
-  const commitHot = (v: number) => {
+  const commitHot = async (v: number) => {
     const c = clamp(Math.round(v), HOT_MIN, hotMax);
     setHotDrag(c);
-    onHotCommit?.(c);
+    // A failed PUT (a 422) clears the drag so the line snaps back to the status.
+    const ok = (await onHotCommit?.(c)) ?? true;
+    if (!ok) setHotDrag(null);
   };
 
   const onHotDown = (e: PointerEvent<SVGRectElement>) => {
+    if (hotDisabled) return;
     cancelPress(e);
     if (hotDragRef.current) return;
     hotDragRef.current = true;
@@ -233,6 +239,7 @@ export function FanCurveEditor({
   };
 
   const onHotKey = (e: KeyboardEvent<SVGRectElement>) => {
+    if (hotDisabled) return;
     const big = e.shiftKey ? 5 : 1;
     let next: number | null = null;
     if (e.key === "ArrowRight" || e.key === "ArrowUp") next = hotValue + big;
@@ -246,6 +253,10 @@ export function FanCurveEditor({
   const hotTop = yOf(hotFloor);
   const hotLeft = xOf(hotValue);
   const hotLabel = `Don't exceed ${hotValue} °C${hot ? (hot.user_set ? " · set by you" : " · automatic") : ""}`;
+  // A label near the right edge sits left of its line, right-aligned, inside the plot:
+  // the plot edge is at MARGIN.left + plotW, never beyond it.
+  const plotRight = MARGIN.left + plotW;
+  const nearRight = (x: number) => x > plotRight - 170;
   const floorTop = yOf(floor);
   const grid = [20, 40, 60, 80, 100];
   const pctGrid = [0, 20, 40, 60, 80, 100];
@@ -306,8 +317,9 @@ export function FanCurveEditor({
               strokeDasharray="2 3"
             />
             <text
-              x={xOf(clamp(hot.ceiling_c, TEMP_MIN, TEMP_MAX)) + 6}
+              x={nearRight(xOf(clamp(hot.ceiling_c, TEMP_MIN, TEMP_MAX))) ? xOf(clamp(hot.ceiling_c, TEMP_MIN, TEMP_MAX)) - 6 : xOf(clamp(hot.ceiling_c, TEMP_MIN, TEMP_MAX)) + 6}
               y={MARGIN.top + plotH - 8}
+              textAnchor={nearRight(xOf(clamp(hot.ceiling_c, TEMP_MIN, TEMP_MAX))) ? "end" : "start"}
               fill="var(--down)"
               fontSize={14}
               fontFamily="var(--fm)"
@@ -325,7 +337,14 @@ export function FanCurveEditor({
           fill="color-mix(in srgb, var(--warn) 16%, transparent)"
         />
         <line x1={hotLeft} x2={hotLeft} y1={MARGIN.top} y2={MARGIN.top + plotH} stroke="var(--warn)" strokeDasharray="4 4" />
-        <text x={hotLeft + 6} y={MARGIN.top + 16} fill="var(--warn)" fontSize={14} fontFamily="var(--fm)">
+        <text
+          x={nearRight(hotLeft) ? hotLeft - 6 : hotLeft + 6}
+          y={MARGIN.top + 16}
+          textAnchor={nearRight(hotLeft) ? "end" : "start"}
+          fill="var(--warn)"
+          fontSize={14}
+          fontFamily="var(--fm)"
+        >
           {hotLabel}
         </text>
         {/* The hot line's handle: drag it, or use the arrow keys. */}
@@ -336,9 +355,10 @@ export function FanCurveEditor({
           height={plotH}
           fill="transparent"
           className="curve-hot-handle"
-          tabIndex={0}
+          tabIndex={hotDisabled ? -1 : 0}
           role="slider"
           aria-label="Don't exceed temperature line"
+          aria-disabled={hotDisabled || undefined}
           aria-valuemin={HOT_MIN}
           aria-valuemax={hotMax}
           aria-valuenow={hotValue}

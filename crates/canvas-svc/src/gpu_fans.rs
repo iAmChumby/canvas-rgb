@@ -171,6 +171,21 @@ impl NvmlFans {
     }
 }
 
+/// A slowdown threshold the NVML driver reports that is not a plausible rated maximum
+/// (a driver reporting 0 or 200 °C, or a non-finite value) is not believed: `None` is
+/// returned and one WARN names the value, so the hot limit falls back to the cautious
+/// default instead of moving the safety ceiling past a real part's limit.
+pub(crate) fn sane_slowdown_threshold_c(value: f32) -> Option<f32> {
+    if value.is_finite()
+        && (canvas_proto::fans::RATED_MAX_SANE_MIN_C..=canvas_proto::fans::RATED_MAX_SANE_MAX_C).contains(&value)
+    {
+        Some(value)
+    } else {
+        tracing::warn!(value, "the GPU slowdown threshold is not a sane rated maximum; the hot limit falls back");
+        None
+    }
+}
+
 impl GpuFanApi for NvmlFans {
     fn count(&mut self) -> io::Result<u32> {
         let mut value = 0u32;
@@ -220,7 +235,7 @@ impl GpuFanApi for NvmlFans {
         if status != NVML_SUCCESS {
             return Err(call_failed("nvmlDeviceGetTemperatureThreshold", status));
         }
-        Ok(Some(value as f32))
+        Ok(sane_slowdown_threshold_c(value as f32))
     }
 }
 
@@ -305,11 +320,14 @@ impl CompositeChip {
     }
 
     /// The GPU's slowdown threshold in °C (issue #130), for the hot-limit maths.
-    /// `None` with no GPU or when the driver reports none.
+    /// `None` with no GPU or when the driver reports none. A threshold outside the sane
+    /// rated-maximum band (60..=115 °C, or not finite) is refused with a WARN and falls
+    /// back, so a nonsense driver value never moves the safety ceiling.
     pub fn slowdown_threshold_c(&mut self) -> Option<f32> {
         match self.gpu.as_mut() {
             Some(gpu) => match gpu.slowdown_threshold_c() {
-                Ok(value) => value,
+                Ok(Some(value)) => sane_slowdown_threshold_c(value),
+                Ok(None) => None,
                 Err(e) => {
                     tracing::warn!(error = %e, "the GPU slowdown threshold is unknown; the hot limit falls back");
                     None

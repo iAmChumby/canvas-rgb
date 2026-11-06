@@ -1073,15 +1073,17 @@ fn the_hot_floor_releases_after_a_hold_continuously_below_50() {
 
 #[test]
 fn a_latched_hot_floor_never_caps_a_rising_curve() {
-    // Review of PR #142: the latch must be a floor, not a cap. Latch at 51 C, then heat to 80 C:
-    // the curve's 86 % must be written on that same tick. (Issue #130: at a user-set
-    // 50 °C CPU line; 80 C stays below the 84 °C ceiling so only the curve answers.)
+    // Review of PR #142: the latch must be a floor, not a cap. Latch at 51 C, then heat to
+    // 85 C: the curve's 100 % must be written on that same tick. (Issue #130: at a user-set
+    // 50 °C CPU line with a 9800X3D's 95 °C rated maximum, so the 90 °C ceiling stays above
+    // the 85 °C top temperature and only the curve answers.)
     let t0 = Instant::now();
     let config = FansFile { hot_limits: HotLimits { cpu_c: Some(50.0), gpu_c: None, board_c: None }, ..Default::default() };
     let mut r = rig(config, t0);
+    r.fans.set_cpu_brand(Some("AMD Ryzen 9 9800X3D 8-Core Processor"));
     let curve = FanMode::Curve {
         source: TempSource::Cpu,
-        points: vec![point(30.0, 30), point(50.0, 44), point(90.0, 100)],
+        points: vec![point(30.0, 30), point(50.0, 44), point(85.0, 100)],
     };
     r.cpu.set(Some(51.0));
     r.fans.set_header_mode("cpu_fan", curve, t0).unwrap();
@@ -1089,8 +1091,8 @@ fn a_latched_hot_floor_never_caps_a_rising_curve() {
         tick_cpu_at_temp(&mut r, t0, s, 51.0);
     }
     assert_eq!(r.chip.duty_raw(CPU_FAN), 128, "latched at the 50 % hot floor at 51 C");
-    let duty = tick_cpu_at_temp(&mut r, t0, 4, 80.0);
-    assert_eq!(duty, 219, "80 C takes the curve's 86 % on the same tick: {duty}");
+    let duty = tick_cpu_at_temp(&mut r, t0, 4, 85.0);
+    assert_eq!(duty, 255, "85 C takes the curve's 100 % on the same tick: {duty}");
 }
 
 #[test]
@@ -1410,4 +1412,101 @@ fn issue130_the_gpu_defaults_to_the_88_fallback_when_no_slowdown_is_reported() {
     assert_eq!(gpu.ceiling_c, 83.0);
     assert_eq!(gpu.rated_max_c, None);
     assert_eq!(r.fans.status().hot.len(), 3, "one status row per kind");
+}
+
+#[test]
+fn the_brand_string_assembles_eax_ebx_ecx_edx_per_leaf() {
+    use canvas_proto::fans::rated_cpu_max_c;
+    use crate::fans::brand_string_from_leaves;
+    // The registers of a known brand string: the string's bytes, NUL-padded to 48,
+    // split into twelve little-endian u32s and grouped into three leaves as
+    // (EAX, EBX, ECX, EDX) — the order the CPU documents for leaves 0x80000002..4.
+    let mut bytes = [0u8; 48];
+    let brand = "AMD Ryzen 7 7800X3D 8-Core Processor";
+    bytes[..brand.len()].copy_from_slice(brand.as_bytes());
+    let mut words = [0u32; 12];
+    for (i, word) in words.iter_mut().enumerate() {
+        *word = u32::from_le_bytes([bytes[i * 4], bytes[i * 4 + 1], bytes[i * 4 + 2], bytes[i * 4 + 3]]);
+    }
+    let leaves = [
+        (words[0], words[1], words[2], words[3]),
+        (words[4], words[5], words[6], words[7]),
+        (words[8], words[9], words[10], words[11]),
+    ];
+    let assembled = brand_string_from_leaves(leaves).expect("the brand string assembles");
+    assert_eq!(assembled, brand, "the round trip through EAX EBX ECX EDX returns the brand");
+    assert_eq!(rated_cpu_max_c(&assembled), Some(89.0), "the 7800X3D's rated maximum is 89 °C");
+    assert_eq!(brand_string_from_leaves([(0, 0, 0, 0); 3]), None, "no string is None");
+}
+
+#[test]
+fn the_startup_hot_limits_log_names_the_cpu_brand() {
+    // The brand is set through the same path the service uses at startup.
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    r.fans.set_cpu_brand(Some("AMD Ryzen 7 7800X3D 8-Core Processor"));
+    let cpu = hot_of(&mut r, HotKind::Cpu);
+    assert_eq!(cpu.rated_max_c, Some(89.0), "the brand from the setter rates the CPU at 89 °C");
+}
+
+#[test]
+fn a_fixed_header_holds_the_ceiling_duty_through_a_missing_reading_then_hands_back() {
+    // Fixed 20 % with the CPU at 90 °C (above the 84 °C ceiling) writes 100 %. The
+    // next tick has no CPU reading: while the ceiling is latched the service must hold
+    // 100 % and never write the 20 % Fixed duty. After the 3 s sensor-loss timeout it
+    // hands the header back to BIOS.
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    r.cpu.set(Some(90.0));
+    r.fans.tick(t0);
+    r.fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 20 }, t0).unwrap();
+    assert_eq!(r.chip.duty_raw(SYS_FAN1), 255, "90 °C takes the ceiling's 100 %");
+    r.cpu.set(None);
+    r.fans.tick(t0 + Duration::from_secs(1));
+    assert_eq!(r.chip.duty_raw(SYS_FAN1), 255, "no reading while latched: 100 % is held, not the 20 % Fixed duty");
+    assert!(r.chip.manual(SYS_FAN1), "inside the sensor-loss window the header stays manual");
+    r.fans.tick(t0 + Duration::from_secs(3));
+    assert!(!r.chip.manual(SYS_FAN1), "after the sensor-loss timeout the header hands back to BIOS");
+}
+
+#[test]
+fn an_edited_curve_keeps_the_ceiling_latch_until_the_hold_ends() {
+    // Latched at 90 °C (ceiling 84 °C), cooled to 80 °C, then the points are edited:
+    // the latch must survive the edit and the header stays at 100 % for the hold,
+    // instead of dropping to the edited curve's lower duty.
+    let t0 = Instant::now();
+    let mut r = rig(FansFile::default(), t0);
+    let curve = FanMode::Curve {
+        source: TempSource::Cpu,
+        points: vec![point(30.0, 20), point(70.0, 40)],
+    };
+    r.cpu.set(Some(90.0));
+    r.fans.tick(t0);
+    r.fans.set_header_mode("sys_fan1", curve, t0).unwrap();
+    assert_eq!(r.chip.duty_raw(SYS_FAN1), 255, "90 °C latches the ceiling at 100 %");
+    for s in 1..=3 {
+        r.cpu.set(Some(90.0));
+        r.fans.tick(t0 + Duration::from_secs(s));
+    }
+    r.cpu.set(Some(80.0));
+    r.fans.tick(t0 + Duration::from_secs(4));
+    assert_eq!(r.chip.duty_raw(SYS_FAN1), 255, "80 °C inside the hold still holds 100 %");
+    // Edit the points for the same header and source.
+    let edited = FanMode::Curve {
+        source: TempSource::Cpu,
+        points: vec![point(30.0, 20), point(80.0, 30)],
+    };
+    r.fans.set_header_mode("sys_fan1", edited, t0 + Duration::from_secs(4)).unwrap();
+    r.cpu.set(Some(80.0));
+    r.fans.tick(t0 + Duration::from_secs(5));
+    let duty = r.chip.duty_raw(SYS_FAN1);
+    assert_eq!(duty, 255, "the points edit kept the ceiling latch: {duty}");
+    // After the hold below the ceiling the latch releases.
+    let mut last = duty;
+    for s in 6..=70 {
+        r.cpu.set(Some(80.0));
+        r.fans.tick(t0 + Duration::from_secs(s));
+        last = r.chip.duty_raw(SYS_FAN1);
+    }
+    assert_ne!(last, 255, "after 60 s below the ceiling the latch released: {last}");
 }

@@ -223,6 +223,19 @@ fn note_latch(latched: &mut bool, below_since: &mut Option<Instant>, temp_c: Opt
     }
 }
 
+/// The hot-limit kind a mode reads, for latch preservation across an edit: Fixed reads
+/// the CPU reference (as `drive` treats it), a curve reads its source's kind, BIOS none.
+fn same_hot_kind(a: &FanMode, b: &FanMode) -> bool {
+    fn kind_of(mode: &FanMode) -> Option<HotKind> {
+        match mode {
+            FanMode::Bios => None,
+            FanMode::Fixed { .. } => Some(HotKind::Cpu),
+            FanMode::Curve { source, .. } => Some(source.hot_kind()),
+        }
+    }
+    kind_of(a) == kind_of(b)
+}
+
 #[derive(Default)]
 struct Slot {
     curve: CurveState,
@@ -231,6 +244,9 @@ struct Slot {
     /// Set by a safety or failure handback. Sticky until the user applies the header again.
     handed_back: bool,
     override_reason: Option<String>,
+    /// The last duty this service wrote to the header, so a latched header with a
+    /// missing reference temperature can hold it instead of writing a lower duty.
+    last_written: Option<u8>,
 }
 
 /// Sleep and resume bookkeeping. Rust's `Instant` on Windows reads QueryPerformanceCounter, and the
@@ -319,6 +335,8 @@ pub struct FanController {
     /// means unknown: the spine's fallback takes over.
     cpu_rated_max_c: Option<f32>,
     gpu_rated_max_c: Option<f32>,
+    /// The CPU brand string the rated maximum came from, for the startup hot-limits log.
+    cpu_brand: Option<String>,
     /// Whether the one-time hot-limit line has been logged yet.
     hot_logged: bool,
 }
@@ -360,6 +378,7 @@ impl FanController {
             header_overrides: BTreeMap::new(),
             cpu_rated_max_c: None,
             gpu_rated_max_c: None,
+            cpu_brand: None,
             hot_logged: false,
         }
     }
@@ -384,6 +403,7 @@ impl FanController {
     /// either through the same setters with fake values.
     pub fn set_rated(&mut self, cpu_brand: Option<&str>, gpu_max_c: Option<f32>) {
         self.cpu_rated_max_c = cpu_brand.and_then(rated_cpu_max_c);
+        self.cpu_brand = cpu_brand.map(str::to_string);
         self.gpu_rated_max_c = gpu_max_c;
         self.hot_logged = false;
     }
@@ -398,6 +418,7 @@ impl FanController {
     /// Sets the CPU rated maximum from a brand string (tests can set the brand directly).
     pub fn set_cpu_brand(&mut self, cpu_brand: Option<&str>) {
         self.cpu_rated_max_c = cpu_brand.and_then(rated_cpu_max_c);
+        self.cpu_brand = cpu_brand.map(str::to_string);
         self.hot_logged = false;
     }
 
@@ -425,8 +446,9 @@ impl FanController {
                 }
             };
             tracing::info!(
-                "the hot limits are CPU {} °C ({}), GPU {} °C ({}), board {} °C",
-                cpu.limit_c, rated(&cpu), gpu.limit_c, rated(&gpu), board.limit_c,
+                "the hot limits are CPU {} °C ({}) [{}], GPU {} °C ({}), board {} °C",
+                cpu.limit_c, rated(&cpu), self.cpu_brand.as_deref().unwrap_or("unknown CPU"),
+                gpu.limit_c, rated(&gpu), board.limit_c,
             );
             self.hot_logged = true;
         }
@@ -854,7 +876,26 @@ impl FanController {
                 if let Some(temp) = self.temp_cache.get(source).copied() {
                     let curve = &mut self.slots[ch].curve;
                     if curve.mode.as_ref() != Some(&mode) {
+                        // A mode or points change restarts the curve's smoothing, but the
+                        // safety latches (hot floor and ceiling) survive it for the same
+                        // source kind: clearing them on an edit would drop a latched 100 %
+                        // to the edited curve's lower duty. Only a kind change resets them.
+                        let kept = match curve.mode.as_ref() {
+                            Some(previous) if same_hot_kind(previous, &mode) => Some((
+                                curve.hot_latched,
+                                curve.hot_below_since,
+                                curve.ceiling_latched,
+                                curve.ceiling_below_since,
+                            )),
+                            _ => None,
+                        };
                         *curve = CurveState { mode: Some(mode.clone()), ..CurveState::default() };
+                        if let Some((hot, hot_since, ceiling, ceiling_since)) = kept {
+                            curve.hot_latched = hot;
+                            curve.hot_below_since = hot_since;
+                            curve.ceiling_latched = ceiling;
+                            curve.ceiling_below_since = ceiling_since;
+                        }
                     }
                     // The curve keeps stepping while the hot floor is latched: the latch is a
                     // floor under it (`target.max(floor)` below), never a cap, so a CPU that
@@ -889,6 +930,21 @@ impl FanController {
         self.slots[ch].curve.note_ceiling(reference, ceiling_c, now);
         let latched = self.slots[ch].curve.hot_latched;
         let ceiling_latched = self.slots[ch].curve.ceiling_latched;
+        // A Fixed header with no reference reading while a safety latch is set must not
+        // write its lower Fixed duty over the latched 100 %. Hold the last written duty
+        // (write nothing) and hand back after the sensor-loss timeout, exactly as the
+        // Curve path above does for a missing source.
+        if reference.is_none() && (latched || ceiling_latched) {
+            let since = self.slots[ch].manual_since.unwrap_or(now);
+            let last = self.last_good.get(&TempSource::Cpu).copied().unwrap_or(since);
+            if now.saturating_duration_since(last) >= Duration::from_millis(SENSOR_LOSS_TIMEOUT_MS) {
+                self.hand_back(
+                    ch,
+                    format!("CPU unavailable for over {} ms", SENSOR_LOSS_TIMEOUT_MS),
+                );
+            }
+            return;
+        }
         let floor = if latched && reference.is_some() {
             hot
         } else {
@@ -923,6 +979,7 @@ impl FanController {
             Ok(()) => {
                 if let Some(slot) = self.slots.get_mut(ch) {
                     slot.override_reason = reason;
+                    slot.last_written = Some(percent);
                 }
             }
             Err(e) => self.hand_back(ch, format!("write failed: {e}")),
@@ -1186,6 +1243,27 @@ fn ceiling_name(label: &str) -> &str {
     hot_name(label)
 }
 
+/// Assembles the CPU brand string from the three extended CPUID leaves
+/// 0x80000002..4, each given as (EAX, EBX, ECX, EDX) in that order — the register
+/// order Intel and AMD document for the brand string (EAX, EBX, ECX, EDX per leaf).
+/// Pure, so tests can drive it with the registers of a known brand string.
+/// `None` when the leaves carry no string.
+pub fn brand_string_from_leaves(leaves: [(u32, u32, u32, u32); 3]) -> Option<String> {
+    let mut bytes = [0u8; 48];
+    for (i, (eax, ebx, ecx, edx)) in leaves.iter().enumerate() {
+        for (j, reg) in [eax, ebx, ecx, edx].iter().enumerate() {
+            bytes[i * 16 + j * 4..i * 16 + j * 4 + 4].copy_from_slice(&reg.to_le_bytes());
+        }
+    }
+    let end = bytes.iter().position(|b| *b == 0).unwrap_or(48);
+    let brand = String::from_utf8_lossy(&bytes[..end]).trim().to_string();
+    if brand.is_empty() {
+        None
+    } else {
+        Some(brand)
+    }
+}
+
 /// The CPU brand string from CPUID leaves 0x80000002..4 (x86_64), for the rated-maximum
 /// table in the spine. `None` on any other architecture or when the leaf reports nothing.
 #[cfg(target_arch = "x86_64")]
@@ -1194,21 +1272,13 @@ pub fn cpu_brand_string() -> Option<String> {
     // check below, and the string is NUL-padded by the CPU.
     let leaf = |id: u32| {
         let r = std::arch::x86_64::__cpuid(id);
-        [r.ebx, r.ecx, r.edx, r.eax]
+        (r.eax, r.ebx, r.ecx, r.edx)
     };
     let max = std::arch::x86_64::__cpuid(0x8000_0000).eax;
     if max < 0x8000_0004 {
         return None;
     }
-    let mut bytes = [0u8; 48];
-    for (i, id) in [0x8000_0002u32, 0x8000_0003, 0x8000_0004].iter().enumerate() {
-        let regs = leaf(*id);
-        for (j, reg) in regs.iter().enumerate() {
-            bytes[i * 16 + j * 4..i * 16 + j * 4 + 4].copy_from_slice(&reg.to_le_bytes());
-        }
-    }
-    let end = bytes.iter().position(|b| *b == 0).unwrap_or(48);
-    Some(String::from_utf8_lossy(&bytes[..end]).trim().to_string())
+    brand_string_from_leaves([leaf(0x8000_0002), leaf(0x8000_0003), leaf(0x8000_0004)])
 }
 
 #[cfg(not(target_arch = "x86_64"))]

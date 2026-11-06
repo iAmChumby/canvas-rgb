@@ -4242,6 +4242,17 @@ button.chip:hover {
   font-size: var(--t14);
 }
 
+/* The Fixed header's compact "don't exceed" control inside the floor note, on its
+   own line under the note inside the same box, so it adds no new row. */
+.hot-inline {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+  margin-top: var(--s1);
+  vertical-align: middle;
+}
+
 .rule-warn {
   border-color: color-mix(in srgb, var(--warn) 40%, transparent);
   background: color-mix(in srgb, var(--warn) 8%, var(--sunk));

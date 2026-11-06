@@ -4,6 +4,7 @@ import { api } from "@/lib/endpoints";
 import { ApiFailure } from "@/lib/errors";
 import { patchSnap, refreshFans } from "@/lib/store";
 import { FansView } from "@/views/FansView";
+import { FanCurveEditor } from "@/views/FanCurveEditor";
 import { StripSlotsProvider } from "@/shell/PageHeader";
 
 // Issue #130: the curve chart draws the source's "don't exceed" line and the fixed
@@ -111,5 +112,55 @@ describe("the hot line on the fan curve chart", () => {
     await waitFor(() =>
       expect(screen.getByText("the cpu hot limit of 70 °C is outside 40 to 82 °C")).toBeTruthy(),
     );
+  });
+
+  it("a fixed header shows the same don't exceed control on the cpu kind", async () => {
+    await page();
+    fireEvent.click(await screen.findByRole("radio", { name: "Fixed %" }));
+    const input = await screen.findByLabelText("Don't exceed temperature");
+    expect(input).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Reset to automatic" })).toBeTruthy();
+  });
+});
+
+describe("the hot line handle", () => {
+  it("clears the drag when the PUT fails", async () => {
+    const onHotCommit = vi.fn(async () => false);
+    render(
+      <FanCurveEditor
+        header="CPU"
+        points={[{ temp_c: 30, percent: 30 }, { temp_c: 70, percent: 70 }]}
+        floor={20}
+        currentTemp={null}
+        currentDuty={null}
+        hot={{ kind: "cpu", limit_c: 74, user_set: false, auto_c: 74, rated_max_c: 89, ceiling_c: 84, max_settable_c: 82 }}
+        onChange={vi.fn()}
+        onCommit={vi.fn()}
+        onHotCommit={onHotCommit}
+      />,
+    );
+    const line = await screen.findByRole("slider", { name: "Don't exceed temperature line" });
+    expect(line.getAttribute("aria-valuenow")).toBe("74");
+    fireEvent.keyDown(line, { key: "ArrowRight" });
+    await waitFor(() => expect(onHotCommit).toHaveBeenCalledWith(75));
+    await waitFor(() => expect(line.getAttribute("aria-valuenow")).toBe("74"));
+  });
+
+  it("is disabled when the hot line is unknown", async () => {
+    render(
+      <FanCurveEditor
+        header="CPU"
+        points={[{ temp_c: 30, percent: 30 }, { temp_c: 70, percent: 70 }]}
+        floor={20}
+        currentTemp={null}
+        currentDuty={null}
+        hot={null}
+        onChange={vi.fn()}
+        onCommit={vi.fn()}
+        onHotCommit={vi.fn(async () => true)}
+      />,
+    );
+    const line = await screen.findByRole("slider", { name: "Don't exceed temperature line" });
+    expect(line.getAttribute("aria-disabled")).toBe("true");
   });
 });
