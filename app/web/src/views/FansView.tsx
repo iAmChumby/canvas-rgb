@@ -1027,7 +1027,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
             <span>
               Floor <span className="fig" style={{ color: "var(--ink)" }}><AnimatedNumber value={base} />%</span>. {hotRuleText(hotRow?.limit_c)}.
             </span>
-            {mode.mode === "fixed" && (hotControls ? <span className="hot-inline"> Don't exceed {hotControls}</span> : null)}
+            {mode.mode === "fixed" && (hotControls ? <span className="hot-inline"> Don&apos;t exceed {hotControls}</span> : null)}
           </div>
         )}
 
@@ -1072,7 +1072,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
                     void apply({ mode: "curve", source: s, points });
                   }}
                 />
-                <span className="mute">Don't exceed</span>
+                <span className="mute">Don&apos;t exceed</span>
                 {hotControls}
               </div>
             </Field>
