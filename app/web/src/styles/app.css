@@ -4348,17 +4348,21 @@ button.chip:hover {
 }
 
 /* Issue #146: the owner's word on a header. The key sits in the panel's own head beside the
-   speed, or in the message that says the header is not on this board. */
+   speed, or in the message that says the header is not on this board. The head is narrow on
+   a phone, so the keys wrap onto their own line rather than over the speed. */
 .fan-hdr-actions {
   display: inline-flex;
   align-items: center;
-  gap: var(--s3);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--s2) var(--s3);
   min-width: 0;
 }
 
 .fan-hdr-availability {
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--s2);
   min-width: 0;
 }
