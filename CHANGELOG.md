@@ -8,7 +8,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Added
 
-- Settings has an Audio source panel: pick which output or input the audio-reactive effects read (Follow the Windows default, a loopback output, or an input with Listen), and see a live test of what the device is delivering — a level meter, a dB figure and the spectrum bands — so you can tell at a glance whether sound is reaching the lights. (#166)
+- Settings has an Audio source panel: pick which output or input the audio-reactive effects read (Follow the Windows default, a loopback output, or an input — audio effects read the picked input whenever an audio effect is active, and Listen tests it live), and see a live test of what the device is delivering — a level meter, a dB figure and the spectrum bands — so you can tell at a glance whether sound is reaching the lights. (#166)
 
 ### Changed
 
