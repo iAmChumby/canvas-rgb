@@ -82,6 +82,7 @@ started, `approved (YYYY-MM-DD)` for a dependency Luke approved later, and
 | base64 | rust, prod | 0.22.1 | MIT OR Apache-2.0 | approved (baseline 2026-11-05) |
 | bytes | rust, prod | 1.12.1 | MIT | approved (baseline 2026-11-05) |
 | canvas-adapters | rust, prod | 0.8.2 | Apache-2.0 | approved (baseline 2026-11-05) |
+| canvas-client | rust, prod | 0.8.4 | Apache-2.0 | approved (2026-11-06) |
 | canvas-core | rust, prod | 0.8.2 | Apache-2.0 | approved (baseline 2026-11-05) |
 | canvas-effects | rust, prod | 0.8.2 | Apache-2.0 | approved (baseline 2026-11-05) |
 | canvas-html | rust, prod | 0.8.2 | Apache-2.0 | approved (baseline 2026-11-05) |

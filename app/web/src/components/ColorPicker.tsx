@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
 import { hexToHsv, hsvToHex, parseHex, type Hsv } from "@/lib/color";
+import { readCssMs } from "@/lib/motion";
 import { cancelPress, refuseDragStart } from "@/lib/pressDrag";
 
 /** A colour the effect already uses, offered as a one-click choice. */
@@ -40,6 +41,15 @@ export function ColorPicker({
   const queuedRef = useRef<string | null>(null);
   const sentRef = useRef<string | null>(null);
   const liveRef = useRef<Hsv>(hsv);
+  // The wipe (issue #187, rule 9): the preview's reveal replays at most once
+  // per --dur while a handle is dragged (draggingRef is set by the pointer
+  // down/up handlers below); a committed change (a swatch, the hex field, a
+  // key press) is not a drag and replays at once.
+  const [prevKey, setPrevKey] = useState(() => hsvToHex(hsv));
+  // The preview wipes only after a real change, never on the picker's first render.
+  const [wiped, setWiped] = useState(false);
+  const draggingRef = useRef(false);
+  const lastReplayRef = useRef(0);
 
   // A value that arrives from outside (the field was reset, an import changed it) is taken
   // over; the value this picker sent is left alone.
@@ -113,6 +123,7 @@ export function ColorPicker({
   const onSvDown = (e: PointerEvent<HTMLDivElement>) => {
     cancelPress(e, { focus: true });
     e.currentTarget.setPointerCapture(e.pointerId);
+    draggingRef.current = true;
     const next = svAt(e.clientX, e.clientY);
     if (next) now(next);
   };
@@ -124,6 +135,7 @@ export function ColorPicker({
   };
 
   const onSvUp = (e: PointerEvent<HTMLDivElement>) => {
+    draggingRef.current = false;
     if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
   };
 
@@ -153,6 +165,7 @@ export function ColorPicker({
   const onHueDown = (e: PointerEvent<HTMLDivElement>) => {
     cancelPress(e, { focus: true });
     e.currentTarget.setPointerCapture(e.pointerId);
+    draggingRef.current = true;
     const h = hueAt(e.clientX);
     if (h !== null) now({ ...liveRef.current, h });
   };
@@ -164,6 +177,7 @@ export function ColorPicker({
   };
 
   const onHueUp = (e: PointerEvent<HTMLDivElement>) => {
+    draggingRef.current = false;
     if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
   };
 
@@ -186,6 +200,26 @@ export function ColorPicker({
   const typed = draft ?? hex;
   // A short text is still being typed, so it is not called wrong yet.
   const valid = draft === null || draft.trim().length < 4 || parseHex(draft) !== null;
+
+  // The wipe throttle: a committed colour change replays the preview's reveal
+  // at once; while dragging, the reveal replays at most once per --dur, so
+  // rapid intermediate hexes do not restart the mask on every frame. The clock
+  // starts at the first change while dragging, so a change mid-drag does not
+  // replay merely because the page has been open a while.
+  useEffect(() => {
+    if (prevKey === hex) return;
+    if (draggingRef.current) {
+      const nowMs = performance.now();
+      if (lastReplayRef.current === 0) {
+        lastReplayRef.current = nowMs;
+        return;
+      }
+      if (nowMs - lastReplayRef.current < readCssMs("--dur", 180)) return;
+      lastReplayRef.current = nowMs;
+    }
+    setPrevKey(hex);
+    setWiped(true);
+  }, [hex, prevKey]);
 
   /**
    * Takes the typed text and makes it the colour. The text is read from the field itself, so
@@ -274,7 +308,7 @@ export function ColorPicker({
             }
           }}
         />
-        <span className="picker-preview" style={{ "--c": hex } as CSSProperties} aria-hidden="true" />
+        <span key={prevKey} className={wiped ? "picker-preview wipe" : "picker-preview"} style={{ "--c": hex } as CSSProperties} aria-hidden="true" />
       </div>
 
       {swatches && swatches.length > 0 && (

@@ -206,7 +206,7 @@ fn auto_open_for_onboarding<R: Runtime>(app: &AppHandle<R>, snap: &Snapshot) {
 fn poll() -> Snapshot {
     // The status route needs no token, but its answer drives the menu and tooltip: only a
     // listener that passes the peer check (canvas-rgbd.exe, same user) may supply it.
-    if crate::peer::check(consts::API_PORT).is_err() {
+    if canvas_client::peer::check(consts::API_PORT).is_err() {
         return Snapshot::offline();
     }
     let client = api::client();

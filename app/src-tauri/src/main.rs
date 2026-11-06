@@ -12,7 +12,6 @@ mod editor;
 mod elevation;
 mod log;
 mod onboard;
-mod peer;
 mod tray;
 mod update;
 

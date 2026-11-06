@@ -571,6 +571,26 @@ html[data-motion="reduced"] *::after {
   overscroll-behavior: contain;
 }
 
+/* The exit (issue #187, rule 2): the entrance in reverse, toward the trigger
+   origin, on --ease-exit and shorter than the entrance (--dur-exit). */
+@keyframes popover-out {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translate3d(0, var(--rise), 0);
+  }
+}
+
+.popover[data-closing="true"] {
+  animation: popover-out var(--dur-exit) var(--ease-exit) both;
+  /* While closing the panel cannot act (it is inert as well): no pointer
+     reaches anything inside it mid-exit. */
+  pointer-events: none;
+}
+
 .strip-details-head {
   margin-bottom: var(--s2);
   font-weight: 600;
@@ -1032,10 +1052,13 @@ html[data-motion="reduced"] *::after {
 .swap > * {
   grid-area: 1 / 1;
   text-align: center;
+  /* The swap (issue #187, rule 7): old and new overlap in the same cell and
+     cross-fade on opacity, so there is no blank beat between them. */
+  transition: opacity var(--dur) var(--ease);
 }
 
 .swap > [data-on="false"] {
-  visibility: hidden;
+  opacity: 0;
 }
 
 .btn-sm {
@@ -1046,6 +1069,22 @@ html[data-motion="reduced"] *::after {
 .btn-live {
   border-color: var(--live);
   color: var(--ink);
+}
+
+/* The success pulse (issue #187, rule 6): one short ring on the control that
+   succeeded — applying to the lights, saving a layout, saving an effect.
+   One run, no loop; with motion off the ring is already gone. */
+@keyframes success-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 38%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 10px transparent;
+  }
+}
+
+.success-pulse {
+  animation: success-pulse var(--dur-slow) var(--ease) both;
 }
 
 .ibtn {
@@ -1426,6 +1465,10 @@ button.chip:hover {
   color: var(--ink);
   font-family: var(--fu);
   animation: listbox-in var(--dur-fast) var(--ease) both;
+  /* The origin (issue #187, rule 1): the list grows out of the trigger's side.
+     The component sets it from the trigger; this is the default before that
+     lands, and the side the trigger usually sits on. */
+  transform-origin: top left;
 }
 
 @keyframes listbox-in {
@@ -1433,6 +1476,26 @@ button.chip:hover {
     opacity: 0;
     transform: translateY(-4px) scale(0.98);
   }
+}
+
+/* The exit (issue #187, rule 2): the entrance in reverse, back into the
+   trigger origin, on --ease-exit and shorter than the entrance. */
+@keyframes listbox-out {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+}
+
+.listbox[data-closing="true"] {
+  animation: listbox-out var(--dur-exit) var(--ease-exit) both;
+  /* While closing the list cannot act (its rows carry no action mid-exit,
+     and it is inert as well): no pointer reaches a row mid-exit. */
+  pointer-events: none;
 }
 
 .listbox-opt {
@@ -1476,6 +1539,8 @@ button.chip:hover {
 }
 
 .color-swatch {
+  position: relative;
+  overflow: hidden;
   width: 32px;
   height: 32px;
   flex: none;
@@ -1484,9 +1549,30 @@ button.chip:hover {
   border-radius: var(--r-sm);
   background: var(--c);
   cursor: pointer;
-  transition:
-    border-color var(--dur-fast) var(--ease),
-    background-color var(--dur-fast) var(--ease);
+  /* No background transition: a colour change is the wipe below. A tween of the
+     base colour after the wipe ended showed the old colour again (#187). */
+  transition: border-color var(--dur-fast) var(--ease);
+}
+
+/* The colour wipe (issue #187, rule 9): the new colour reveals over the old
+   one behind a circular mask opening from the swatch's centre, instead of a
+   flat cross-fade. The overlay is keyed by the wipe, not the colour; the base
+   takes the new colour when the wipe ends. With motion off it opens at once. */
+@keyframes swatch-wipe {
+  from {
+    clip-path: circle(0% at 50% 50%);
+  }
+  to {
+    clip-path: circle(75% at 50% 50%);
+  }
+}
+
+.color-wipe {
+  position: absolute;
+  inset: 0;
+  background: var(--c);
+  animation: swatch-wipe var(--dur) var(--ease) both;
+  pointer-events: none;
 }
 
 .color-swatch:hover {
@@ -1587,6 +1673,13 @@ button.chip:hover {
   border: 1px solid var(--line-2);
   border-radius: var(--r-sm);
   background: var(--c);
+  /* The same mask reveal as the swatch (issue #187, rule 9): the preview is
+     keyed by the colour in ColorPicker, so each change wipes in. */
+}
+
+/* The picker's preview wipes only on a change, never when the picker opens. */
+.picker-preview.wipe {
+  animation: swatch-wipe var(--dur) var(--ease) both;
 }
 
 /* The other colours of the same effect, one click away. */

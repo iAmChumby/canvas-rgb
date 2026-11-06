@@ -52,6 +52,7 @@ import {
   type Point,
 } from "@/lib/zones";
 import { clamp } from "@/lib/format";
+import { rubberBand, settleRect } from "@/lib/rubberBand";
 import {
   EDGE_HANDLE_MIN_PX,
   HANDLES,
@@ -64,7 +65,7 @@ import {
   type HitTarget,
   type PointerKind,
 } from "@/lib/hitTest";
-import { usePrefersReducedMotion } from "@/lib/motion";
+import { motionOffNow, readCssMs, usePrefersReducedMotion } from "@/lib/motion";
 import { cancelPress, focusForKeys } from "@/lib/pressDrag";
 import { FIT_VIEW, forgetView, readView, writeView } from "@/lib/viewPrefs";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
@@ -443,8 +444,12 @@ function equalSpacing(
  *   - Alt resizes from the centre.
  *
  * `p` is the pointer on the canvas, already snapped by the caller.
+ *
+ * With Shift the ratio-locked pair is banded together: the scale is what is
+ * clamped, never one dimension against the other's band, so the pair can
+ * neither exceed the canvas nor fall under the minimum in only one axis.
  */
-function resizeBy(o: Rect & { rotation_deg: number }, handle: HandleDef, p: Point, shift: boolean, alt: boolean): Rect {
+export function resizeBy(o: Rect & { rotation_deg: number }, handle: HandleDef, p: Point, shift: boolean, alt: boolean): Rect {
   const rad = (o.rotation_deg * Math.PI) / 180;
   const cos = Math.cos(rad);
   const sin = Math.sin(rad);
@@ -459,22 +464,27 @@ function resizeBy(o: Rect & { rotation_deg: number }, handle: HandleDef, p: Poin
   let h = o.height;
   if (handle.sx !== 0) w = alt ? 2 * handle.sx * qx : handle.sx * qx + o.width / 2;
   if (handle.sy !== 0) h = alt ? 2 * handle.sy * qy : handle.sy * qy + o.height / 2;
-  w = clamp(w, MIN_SIZE, CANVAS_W);
-  h = clamp(h, MIN_SIZE, CANVAS_H);
+  // Rubber-band past the size bounds (issue #187, rule 3): a resize that runs
+  // past the canvas or under the minimum drags with diminishing resistance
+  // instead of stopping dead; on release the size settles back to the bound.
+  w = rubberBand(w, MIN_SIZE, CANVAS_W);
+  h = rubberBand(h, MIN_SIZE, CANVAS_H);
   if (shift) {
-    const ratio = o.width / o.height;
-    if (handle.sx !== 0 && handle.sy !== 0) {
-      const s = Math.max(w / o.width, h / o.height);
-      w = clamp(o.width * s, MIN_SIZE, CANVAS_W);
-      h = clamp(w / ratio, MIN_SIZE, CANVAS_H);
-      w = h * ratio;
-    } else if (handle.sx !== 0) {
-      h = clamp(w / ratio, MIN_SIZE, CANVAS_H);
-      w = h * ratio;
-    } else {
-      w = clamp(h * ratio, MIN_SIZE, CANVAS_W);
-      h = w / ratio;
-    }
+    // The ratio-locked pair (issue #187, F3): scale the pair together and
+    // clamp the scale, so both dimensions stay inside [MIN_SIZE, CANVAS]
+    // while held — deriving one dimension from the other un-banded let the
+    // pair leave the canvas in the axis the handle does not pull.
+    const wantS =
+      handle.sx !== 0 && handle.sy !== 0
+        ? Math.max(w / o.width, h / o.height)
+        : handle.sx !== 0
+          ? w / o.width
+          : h / o.height;
+    const sMin = Math.max(MIN_SIZE / o.width, MIN_SIZE / o.height);
+    const sMax = Math.min(CANVAS_W / o.width, CANVAS_H / o.height);
+    const s = Math.min(sMax, Math.max(sMin, wantS));
+    w = o.width * s;
+    h = o.height * s;
   }
   // The centre moves by half the growth on each axis the handle pulls, so the far side stays put.
   let lx = 0;
@@ -815,6 +825,8 @@ export function PreviewStage({
   /** The part the pointer is over, so the hover only re-renders when it changes. */
   const hoverRef = useRef<Sel | null>(null);
   const marqueeRef = useRef<Box | null>(null);
+  /** Pending `[data-settling]` clears, keyed `${kind}:${index}`: a new drag cancels them. */
+  const settleTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const panRef = useRef<{ start: Point; orig: View } | null>(null);
   const liveRef = useRef<PlacedZone[]>(zones.map((z) => ({ ...z })));
   const liveLmRef = useRef<Landmark[]>(landmarks.map((l) => ({ ...l })));
@@ -1536,6 +1548,18 @@ export function PreviewStage({
     };
     const el = sel.kind === "zone" ? zoneEls.current[sel.index] : lmEls.current[sel.index];
     if (el) el.dataset.dragging = "true";
+    // A new drag clears any settle still running from a previous release:
+    // the part is held again, so the settle easing and its mark go at once.
+    for (const o of [...origs, ...riders]) {
+      const key = `${o.sel.kind}:${o.sel.index}`;
+      const t = settleTimers.current.get(key);
+      if (t !== undefined) {
+        clearTimeout(t);
+        settleTimers.current.delete(key);
+      }
+      const part = o.sel.kind === "zone" ? zoneEls.current[o.sel.index] : lmEls.current[o.sel.index];
+      if (part) delete part.dataset.settling;
+    }
     if (stageRef.current && kind !== "resize") stageRef.current.style.cursor = "grabbing";
     onDraggingChange?.(true);
     // A move leaves focus on the part pressed (set by the press); a handle drag has no element.
@@ -1740,9 +1764,14 @@ export function PreviewStage({
     if (d.kind === "move") {
       const src = o.zone ?? o.landmark;
       if (!src) return;
+      // Rubber-band past the canvas bounds (issue #187, rule 3): the part is
+      // dragged past the limit with diminishing resistance (lib/rubberBand.ts),
+      // and settles back to the limit on release (endPress). While held it
+      // follows the pointer exactly (rule 4): `[data-dragging]` carries no
+      // transition, in desk.module.css.
       const want = {
-        x: clamp(src.x + dx, -src.width / 2, CANVAS_W - src.width / 2),
-        y: clamp(src.y + dy, -src.height / 2, CANVAS_H - src.height / 2),
+        x: rubberBand(src.x + dx, -src.width / 2, CANVAS_W - src.width / 2),
+        y: rubberBand(src.y + dy, -src.height / 2, CANVAS_H - src.height / 2),
         width: src.width,
         height: src.height,
       };
@@ -1789,7 +1818,10 @@ export function PreviewStage({
     if (d.kind === "resize" && d.handle) {
       const src = o.zone ?? o.landmark;
       if (!src) return;
-      let q = { x: clamp(p.x, 0, CANVAS_W), y: clamp(p.y, 0, CANVAS_H) };
+      // Rubber-band past the canvas edges (issue #187, rule 3): the pointer
+      // past the desk resists instead of stopping dead; resizeBy resists the
+      // size past its bounds the same way, and release settles to the bound.
+      let q = { x: rubberBand(p.x, 0, CANVAS_W), y: rubberBand(p.y, 0, CANVAS_H) };
       let guideX: number | null = null;
       let guideY: number | null = null;
       const square = Math.abs(Math.sin((src.rotation_deg * Math.PI) / 180)) < 1e-6 && Math.cos((src.rotation_deg * Math.PI) / 180) > 0;
@@ -1904,6 +1936,42 @@ export function PreviewStage({
     dragRef.current = null;
     const el = d.sel.kind === "zone" ? zoneEls.current[d.sel.index] : lmEls.current[d.sel.index];
     if (el) delete el.dataset.dragging;
+    // The settle (issue #187, rules 3 + 4): a part released past its bound is
+    // eased back into the canvas, under `[data-settling]`'s transition — the
+    // only easing in the drag, and it runs only after release. The settle
+    // sizes first, then positions against the settled size (lib/rubberBand's
+    // settleRect), so the saved rect is always fully inside the canvas — size
+    // and position of every part, riders included. The wait is the
+    // transition's own token (--dur), read at runtime, and 0 under reduced
+    // motion; a new drag clears the mark (beginDrag).
+    const settleMs = motionOffNow() ? 0 : readCssMs("--dur", 180);
+    for (const orig of [...d.origs, ...d.riders]) {
+      const now = orig.sel.kind === "zone" ? liveRef.current[orig.sel.index] : liveLmRef.current[orig.sel.index];
+      if (!now) continue;
+      const settled = settleRect(now, CANVAS_W, CANVAS_H, MIN_SIZE);
+      if (settled.x === now.x && settled.y === now.y && settled.width === now.width && settled.height === now.height) continue;
+      now.x = settled.x;
+      now.y = settled.y;
+      now.width = settled.width;
+      now.height = settled.height;
+      const part = orig.sel.kind === "zone" ? zoneEls.current[orig.sel.index] : lmEls.current[orig.sel.index];
+      if (part) {
+        part.dataset.settling = "true";
+        applyGeom(orig.sel, viewRef.current);
+        const key = `${orig.sel.kind}:${orig.sel.index}`;
+        const prev = settleTimers.current.get(key);
+        if (prev !== undefined) clearTimeout(prev);
+        settleTimers.current.set(
+          key,
+          setTimeout(() => {
+            settleTimers.current.delete(key);
+            delete part.dataset.settling;
+          }, settleMs),
+        );
+      } else {
+        applyGeom(orig.sel, viewRef.current);
+      }
+    }
     onDraggingChange?.(false);
     applyGuides({ guideX: null, guideY: null, guideX2: null });
     if (readoutRef.current) {

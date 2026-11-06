@@ -1,8 +1,9 @@
 //! Who is listening on the daemon's port?
 //!
-//! This is a copy of `crates/canvas-daemon/src/peer.rs`. It is duplicated on purpose: the
-//! tray is a small app and should not pull in the whole daemon crate (tokio, axum, the
-//! effect library) for one check. Keep the two files in step.
+//! This is the shared client copy of the owner check. The daemon has its own copy at
+//! `crates/canvas-daemon/src/peer.rs`; clients (the tray, a future GPUI editor) use this
+//! crate instead of pulling in the whole daemon crate (tokio, axum, the effect library)
+//! for one check. Keep the decision logic in step with the daemon's copy.
 //!
 //! The API token is a bearer secret: whoever holds it can drive the lights and the fans.
 //! The clients send it to whatever answers on the daemon's port, so a local process that
@@ -27,11 +28,6 @@
 //!
 //! Dev runs are fine: the daemon may run from `target\debug\` or `target\release\`, so any
 //! path whose file name is `canvas-rgbd.exe` is accepted.
-
-// The tray is a binary crate, so the parts it does not use (`check_base`, `as_bytes`)
-// would be dead code. The file is kept in step with the daemon's copy, so they are
-// allowed here instead of being deleted from one side only.
-#![allow(dead_code)]
 
 use std::ffi::c_void;
 use std::net::{Ipv4Addr, Ipv6Addr};

@@ -13,6 +13,7 @@ import {
 } from "@phosphor-icons/react";
 import { Button, IconButton } from "@/components/Button";
 import { Chip } from "@/components/Chip";
+import { useSuccessPulse } from "@/components/Motion";
 import { useMediaQuery } from "@/components/MediaQuery";
 import { NameField } from "@/components/NameField";
 import { Panel } from "@/components/Panel";
@@ -111,6 +112,8 @@ export function PresetStrip({
   const [saving, setSaving] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ name: string; confirm: boolean } | null>(null);
   const menuAnchor = useRef<HTMLElement | null>(null);
+  // One pulse on the Save chip when a preset lands (issue #187, rule 6).
+  const { el: savePulseEl, fire: pulseSave } = useSuccessPulse();
   const scroller = useRef<HTMLDivElement>(null);
   const busy = working !== null;
 
@@ -188,6 +191,10 @@ export function PresetStrip({
       naming.kind === "rename"
         ? await attempt("rename", () => onRename(naming.name, name))
         : await attempt("save", () => onSave(name), name);
+    // One pulse on the Save chip when a preset lands (issue #187, rule 6):
+    // a rename is not a save, so it never pulses.
+    // A save or a save-as pulses the Save chip; a rename does not.
+    if (ok && naming.kind !== "rename") pulseSave();
     if (ok) close();
   };
 
@@ -364,6 +371,7 @@ export function PresetStrip({
             </Chip>
           )}
           <Chip
+            ref={savePulseEl}
             className="chip-add"
             icon={<Plus size={14} weight="bold" />}
             pressed={naming?.kind === "save"}

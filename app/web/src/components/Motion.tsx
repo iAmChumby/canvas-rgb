@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import { usePrefersReducedMotion } from "@/lib/motion";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { motionOffNow, readCssMs, usePrefersReducedMotion } from "@/lib/motion";
 
 /**
  * The editor's motion gate. The OS setting wins; the in-app switch (Settings >
@@ -124,4 +124,71 @@ export function useCounter(
 /** The counting value alone, for a caller that formats it itself (the display's digits). */
 export function useTweenNumber(value: number, duration?: number, decimals = 0): number {
   return useCounter(value, decimals, duration).shown;
+}
+
+/**
+ * One short pulse on the control that succeeded (issue #187, rule 6): applying
+ * to the lights, saving a layout, saving an effect. Call `fire` only on the
+ * success path — a failure never calls it, so it never pulses. Each `fire`
+ * restarts the animation (the class is removed, the style is forced, then
+ * re-added: a second fire inside the window replays the pulse instead of being
+ * swallowed by the still-present class), and the mark clears when the run is
+ * over: one pulse, no loop — and never after unmounts. The wait is the
+ * `.success-pulse` animation's own token (--dur-slow), read at runtime; with
+ * motion off the wait is 0.
+ */
+export function useSuccessPulse(): { el: (el: HTMLElement | null) => void; fire: () => void } {
+  const elRef = useRef<HTMLElement | null>(null);
+  const countRef = useRef(0);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Detach clears the pending mark: React detaches refs before passive-effect
+  // cleanup on unmount, so the node is cleaned here, not in that cleanup.
+  const el = useCallback((node: HTMLElement | null) => {
+    if (node === null) {
+      if (timerRef.current !== null) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+      const prev = elRef.current;
+      if (prev) {
+        prev.classList.remove("success-pulse");
+        delete prev.dataset.pulse;
+      }
+      elRef.current = null;
+      return;
+    }
+    elRef.current = node;
+  }, []);
+
+  const fire = useCallback(() => {
+    const node = elRef.current;
+    if (!node) return;
+    if (timerRef.current !== null) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    // Restart: drop the class, force a reflow so re-adding replays the
+    // animation instead of continuing the run already on screen.
+    node.classList.remove("success-pulse");
+    void node.offsetWidth;
+    node.classList.add("success-pulse");
+    countRef.current += 1;
+    node.dataset.pulse = String(countRef.current);
+    const ms = motionOffNow() ? 0 : readCssMs("--dur-slow", 240);
+    timerRef.current = setTimeout(() => {
+      timerRef.current = null;
+      node.classList.remove("success-pulse");
+      delete node.dataset.pulse;
+    }, ms);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (timerRef.current !== null) clearTimeout(timerRef.current);
+    },
+    [],
+  );
+
+  return { el, fire };
 }
