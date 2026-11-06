@@ -21,6 +21,7 @@ import {
   X,
 } from "@phosphor-icons/react";
 import { Button, IconButton, Swap } from "@/components/Button";
+import { useSuccessPulse } from "@/components/Motion";
 import { Panel, Field } from "@/components/Panel";
 import { EmptyState } from "@/components/EmptyState";
 import { Details, ErrorPanel, LoadFrame } from "@/components/Loading";
@@ -194,6 +195,8 @@ export function LayoutView() {
   const [base, setBase] = useState<Layout | null>(null);
   const [selection, setSelection] = useState<Sel[]>([]);
   const [saving, setSaving] = useState(false);
+  // One pulse on the Save button when a save lands (issue #187, rule 6).
+  const { el: savePulseEl, fire: pulseSave } = useSuccessPulse();
   const [saveError, setSaveError] = useState<string | null>(null);
   /** The pane below the desk on a phone: one of them at a time. */
   const [phonePane, setPhonePane] = useState<PhonePane>("parts");
@@ -677,6 +680,7 @@ export function LayoutView() {
       setBase(body);
       setEdit((e) => ({ ...e, draft: body }));
       await refreshLayouts();
+      pulseSave();
     } catch (e) {
       setSaveError(messageOf(e));
     } finally {
@@ -1033,6 +1037,7 @@ export function LayoutView() {
             <span className="rd-lay-text">Revert</span>
           </Button>
           <Button
+            ref={savePulseEl}
             variant="primary"
             size="sm"
             icon={<FloppyDisk size={16} weight="bold" />}
