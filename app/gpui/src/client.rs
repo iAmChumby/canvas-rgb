@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use canvas_client::{peer, token};
+use canvas_client::peer;
 use canvas_proto::consts;
 
 /// The API base URL the client talks to: `canvas_proto::consts::api_base_url()`,
@@ -73,23 +73,28 @@ fn daemon_message(body: &str, status: u16) -> String {
 fn token_for(base: &str) -> Result<String, ClientError> {
     peer::check_base(base)
         .map_err(|refusal| ClientError::NotTrusted(refusal.message()))?;
-    // In a debug run against the fakes the daemon's home is `CANVAS_RGB_HOME`
-    // (see `tools/run-fake-daemon.ps1`); otherwise the token lives with the
-    // real user config. `canvas_client::token::read_token` always reads the
-    // real path, so read the file here after the shared owner check passes.
-    let path = std::env::var_os("CANVAS_RGB_HOME")
-        .map(|h| std::path::PathBuf::from(h).join(canvas_proto::consts::TOKEN_FILE))
-        .unwrap_or_else(consts::token_path);
+    // `canvas_client::token::read_token` checks the fixed port 9430 and reads the real
+    // path, so it cannot serve a debug run on the test port. The owner check above is
+    // the same one it runs; the token is read only after it passes.
+    let path = token_path();
     let text = std::fs::read_to_string(&path)
         .map_err(|e| ClientError::Token(format!("{}: {e}", path.display())))?;
     let jwt = text.trim().to_string();
     if jwt.is_empty() {
         return Err(ClientError::Token(format!("{} is empty", path.display())));
     }
-    // Keep the shared reader's import live for the real-path case; the check
-    // above already ran `peer::check_base`, which is the same check it does.
-    let _ = token::TokenError::Token(String::new());
     Ok(jwt)
+}
+
+/// The token file. In debug builds a fakes daemon's home (`CANVAS_RGB_HOME`, see
+/// `tools/run-fake-daemon.ps1`) overrides it, matching the daemon's fakes mode, which
+/// exists only in debug builds. Release builds always read the real path.
+fn token_path() -> std::path::PathBuf {
+    #[cfg(debug_assertions)]
+    if let Some(home) = std::env::var_os("CANVAS_RGB_HOME") {
+        return std::path::PathBuf::from(home).join(consts::TOKEN_FILE);
+    }
+    consts::token_path()
 }
 
 pub enum Method {
