@@ -61,8 +61,19 @@ fn add_cors(response: &mut Response, origin: &str) {
 }
 
 /// True when the request's `Origin` is one the editor may use.
+/// In fakes mode (#200) on the debug test port the capture server's origin
+/// is also allowed (see [`crate::fakes::capture_origin_allowed`]); release
+/// builds and non-fakes debug runs are unchanged and only the spine list
+/// applies.
 fn origin_allowed(origin: &str) -> bool {
     consts::API_ALLOWED_ORIGINS.iter().any(|allowed| allowed.eq_ignore_ascii_case(origin))
+}
+
+/// [`origin_allowed`] plus the capture origin in fakes mode. The guard uses
+/// this so the spine check stays pure while the daemon-only allowance is
+/// gated on the run's fakes flag.
+fn origin_allowed_with_fakes(fakes: bool, origin: &str) -> bool {
+    origin_allowed(origin) || crate::fakes::capture_origin_allowed(fakes, origin)
 }
 
 /// True when the request's `Host` is one of ours. The spine's guard: the real
@@ -84,8 +95,8 @@ pub async fn guard(State(app): State<Arc<App>>, request: Request, next: Next) ->
         .get(header::ORIGIN)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    let origin_allowed_here = origin.as_deref().is_some_and(origin_allowed);
-    let cors_origin = if origin_allowed_here { origin.as_deref() } else { None };
+    let origin_allowed_here_val = origin.as_deref().is_some_and(|o| origin_allowed_with_fakes(app.fakes, o));
+    let cors_origin = if origin_allowed_here_val { origin.as_deref() } else { None };
 
     // Host check first: a rebinding attack gets no further than this.
     let host = request
@@ -104,7 +115,7 @@ pub async fn guard(State(app): State<Arc<App>>, request: Request, next: Next) ->
 
     // Origin check: browsers send `Origin`; the CLI and the Tauri shell do not.
     if let Some(origin) = &origin {
-        if !origin_allowed_here {
+        if !origin_allowed_here_val {
             return error_response(
                 StatusCode::FORBIDDEN,
                 error_codes::FORBIDDEN_ORIGIN,
@@ -116,7 +127,7 @@ pub async fn guard(State(app): State<Arc<App>>, request: Request, next: Next) ->
 
     // Preflight for the allowed origins only.
     if method == Method::OPTIONS {
-        if !origin_allowed_here {
+        if !origin_allowed_here_val {
             return error_response(
                 StatusCode::FORBIDDEN,
                 error_codes::FORBIDDEN_ORIGIN,
@@ -162,7 +173,7 @@ pub async fn guard(State(app): State<Arc<App>>, request: Request, next: Next) ->
     }
 
     let mut response = next.run(request).await;
-    if origin_allowed_here {
+    if origin_allowed_here_val {
         let origin = origin.unwrap_or_default();
         add_cors(&mut response, &origin);
     }
@@ -215,6 +226,21 @@ mod tests {
         assert!(origin_allowed("tauri://localhost"));
         assert!(!origin_allowed("https://evil.example"));
         assert!(!origin_allowed(""));
+        // The capture origin is never in the spine list.
+        assert!(!origin_allowed("http://127.0.0.1:4310"));
+    }
+
+    #[test]
+    fn the_capture_origin_is_allowed_only_with_fakes() {
+        // The spine origins stay allowed with or without fakes.
+        assert!(origin_allowed_with_fakes(false, "http://tauri.localhost"));
+        assert!(origin_allowed_with_fakes(true, "http://tauri.localhost"));
+        assert!(!origin_allowed_with_fakes(true, "https://evil.example"));
+        // The capture origin follows the fakes gate: the process-level
+        // `capture_origin_allowed` also needs the debug test port and a debug
+        // build, so with no test port set it stays refused even with fakes.
+        assert!(!origin_allowed_with_fakes(false, "http://127.0.0.1:4310"));
+        assert!(!origin_allowed_with_fakes(true, "http://127.0.0.1:4310"));
     }
 
     #[test]

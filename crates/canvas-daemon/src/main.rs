@@ -215,6 +215,7 @@ async fn daemon_main(fakes: bool) -> Exit {
         // real pipe, screen and audio are never touched.
         app_inner.pipe = Arc::new(canvas_daemon::fakes::FakePipeLink);
         app_inner.inputs = Arc::new(canvas_daemon::capture::DaemonInputs::disabled());
+        app_inner.fakes = true;
     }
     let app = Arc::new(app_inner);
     if fakes {

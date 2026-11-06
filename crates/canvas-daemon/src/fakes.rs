@@ -68,6 +68,82 @@ pub fn fakes_supported() -> bool {
     cfg!(debug_assertions)
 }
 
+/// The environment variable that names the UI-capture server port (#200). The
+/// capture tool serves `app/web/out` on 127.0.0.1 and the daemon accepts that
+/// origin only in fakes mode on the debug test port (see
+/// [`capture_origin_allowed`]).
+pub const CAPTURE_PORT_ENV: &str = "CANVAS_RGB_CAPTURE_PORT";
+
+/// The default capture port: the static server the Playwright capture runs on.
+/// The real API port (9430), the test API port (19430), the real OpenRGB port
+/// (6742) and the fake OpenRGB port (16742) are never accepted.
+pub const CAPTURE_PORT_DEFAULT: u16 = 4310;
+
+/// The default capture origin.
+pub fn capture_origin_from(port: u16) -> String {
+    format!("http://127.0.0.1:{port}")
+}
+
+/// The capture origin for this process.
+pub fn capture_origin() -> String {
+    capture_origin_from(capture_port())
+}
+
+/// The capture port from an environment value, or [`CAPTURE_PORT_DEFAULT`]
+/// when it is missing/invalid. Pure, so both build kinds are testable. The
+/// real ports are never accepted: a capture must never sit on a real port.
+pub fn capture_port_from(value: Option<&str>) -> u16 {
+    value
+        .and_then(|v| v.trim().parse::<u16>().ok())
+        .filter(|p| {
+            *p != 0
+                && *p != canvas_proto::consts::OPENRGB_PORT
+                && *p != canvas_proto::consts::API_PORT
+                && *p != 19430
+                && *p != FAKE_OPENRGB_PORT
+        })
+        .unwrap_or(CAPTURE_PORT_DEFAULT)
+}
+
+/// The capture port for this process.
+pub fn capture_port() -> u16 {
+    capture_port_from(std::env::var(CAPTURE_PORT_ENV).ok().as_deref())
+}
+
+/// Whether `origin` is the capture server's origin, for the capture tool
+/// (#200). True only when all of these hold:
+///
+/// - the build is debug (release builds never),
+/// - the daemon runs in fakes mode,
+/// - the daemon binds the debug test port, and
+/// - `origin` is exactly the capture origin.
+///
+/// Pure over its inputs (`on_debug_test_port` and `is_debug_build` are
+/// computed by [`capture_origin_allowed`]), so all three cases are unit
+/// testable in both build kinds. Release builds and non-fakes debug runs are
+/// unchanged: the spine's `API_ALLOWED_ORIGINS` list still applies and this
+/// adds nothing for them.
+pub fn capture_origin_allowed_with(
+    fakes: bool,
+    on_debug_test_port: bool,
+    is_debug_build: bool,
+    capture_port: u16,
+    origin: &str,
+) -> bool {
+    if !(is_debug_build && fakes && on_debug_test_port) {
+        return false;
+    }
+    capture_origin_from(capture_port).eq_ignore_ascii_case(origin)
+}
+
+/// [`capture_origin_allowed_with`] for this process: the test port and the
+/// capture port come from the spine and the environment.
+pub fn capture_origin_allowed(fakes: bool, origin: &str) -> bool {
+    let on_debug_test_port = canvas_proto::consts::debug_test_port()
+        == Some(canvas_proto::consts::api_port());
+    capture_origin_allowed_with(fakes, on_debug_test_port, cfg!(debug_assertions), capture_port(), origin)
+}
+
 /// The fake OpenRGB port from an environment value, or [`FAKE_OPENRGB_PORT`]
 /// when it is missing/invalid. Pure, so both build kinds are testable. The
 /// real OpenRGB port (6742), the real API port (9430) and the test API port
@@ -396,6 +472,44 @@ mod tests {
         assert_eq!(fake_openrgb_port_from(Some("0")), FAKE_OPENRGB_PORT);
         assert_eq!(fake_openrgb_port_from(Some("abc")), FAKE_OPENRGB_PORT);
         assert_ne!(FAKE_OPENRGB_PORT, canvas_proto::consts::OPENRGB_PORT);
+    }
+
+    #[test]
+    fn a_capture_port_is_never_a_real_port() {
+        assert_eq!(capture_port_from(None), CAPTURE_PORT_DEFAULT);
+        assert_eq!(capture_port_from(Some("4310")), 4310);
+        assert_eq!(capture_port_from(Some("6742")), CAPTURE_PORT_DEFAULT, "never the real OpenRGB port");
+        assert_eq!(capture_port_from(Some("9430")), CAPTURE_PORT_DEFAULT, "never the real API port");
+        assert_eq!(capture_port_from(Some("19430")), CAPTURE_PORT_DEFAULT, "never the test API port");
+        assert_eq!(capture_port_from(Some("16742")), CAPTURE_PORT_DEFAULT, "never the fake OpenRGB port");
+        assert_eq!(capture_port_from(Some("0")), CAPTURE_PORT_DEFAULT);
+        assert_eq!(capture_port_from(Some("abc")), CAPTURE_PORT_DEFAULT);
+        assert_ne!(CAPTURE_PORT_DEFAULT, canvas_proto::consts::API_PORT);
+        assert_ne!(CAPTURE_PORT_DEFAULT, canvas_proto::consts::OPENRGB_PORT);
+    }
+
+    #[test]
+    fn the_capture_origin_is_the_loopback_capture_port() {
+        assert_eq!(capture_origin_from(4310), "http://127.0.0.1:4310");
+    }
+
+    #[test]
+    fn the_capture_origin_is_accepted_only_in_fakes_on_the_test_port_in_debug() {
+        let origin = capture_origin_from(CAPTURE_PORT_DEFAULT);
+        // The allowed case: fakes mode, debug build, on the debug test port.
+        assert!(capture_origin_allowed_with(true, true, true, CAPTURE_PORT_DEFAULT, &origin));
+        assert!(capture_origin_allowed_with(true, true, true, CAPTURE_PORT_DEFAULT, "HTTP://127.0.0.1:4310"));
+        // Release builds: never (first of the three cases).
+        assert!(!capture_origin_allowed_with(true, true, false, CAPTURE_PORT_DEFAULT, &origin), "a release build never accepts the capture origin");
+        // Non-fakes debug runs: never (second case).
+        assert!(!capture_origin_allowed_with(false, true, true, CAPTURE_PORT_DEFAULT, &origin), "a non-fakes debug run never accepts the capture origin");
+        // Fakes mode off the test port: never (third case).
+        assert!(!capture_origin_allowed_with(true, false, true, CAPTURE_PORT_DEFAULT, &origin), "off the debug test port the capture origin is refused");
+        // A different origin or port: never.
+        assert!(!capture_origin_allowed_with(true, true, true, CAPTURE_PORT_DEFAULT, "https://evil.example"));
+        assert!(!capture_origin_allowed_with(true, true, true, CAPTURE_PORT_DEFAULT, "http://127.0.0.1:9999"));
+        assert!(!capture_origin_allowed_with(true, true, true, CAPTURE_PORT_DEFAULT, "http://localhost:4310"));
+        assert!(!capture_origin_allowed_with(true, true, true, CAPTURE_PORT_DEFAULT, ""));
     }
 
     #[test]
