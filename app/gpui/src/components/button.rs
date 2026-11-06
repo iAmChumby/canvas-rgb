@@ -130,15 +130,20 @@ fn base(
     // A skirted key carries no bg/border of its own: the face layer in
     // `skirt_layers` draws both, so the parent stays transparent over the
     // skirt's bottom 2 px.
-    let el = if disabled || variant == Variant::Ghost {
+    let bordered = disabled || variant == Variant::Ghost;
+    let el = if bordered {
         el.r_md().border_1().border_color(border).bg(bg)
     } else {
         el.child(skirt_layers(skirt_color, 10.0, key_h, bg, border))
     };
+    // React's `.btn` always has a 1 px border inside its box. A skirted key draws its
+    // border on the face layer, not on this box, so it gets the border's 1 px back as
+    // padding; without it every skirted key measured 2 px narrow (Save 79 vs 81 at 1440).
+    let side = if bordered { 0.0 } else { 1.0 };
     if small {
-        el.h(px(28.0)).px(px(10.0))
+        el.h(px(28.0)).px(px(10.0 + side))
     } else {
-        el.h(px(32.0)).px_3()
+        el.h(px(32.0)).px(px(12.0 + side))
     }
 }
 

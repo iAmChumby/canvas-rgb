@@ -596,7 +596,19 @@ impl Shell {
             row
         };
         let row = match value {
-            Some(v) => row.child(div().flex_1()).child(v),
+            // React `.rail-value`: `flex: 1 1 auto; min-width: 0; overflow: hidden;
+            // text-align: right`. The value box takes the rest of the row and shrinks,
+            // so a value never pushes past the row's padding (the Layout row's
+            // "Default" sat 4 px right of the Fans row's).
+            Some(v) => row.child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .justify_end()
+                    .child(v),
+            ),
             None => row,
         };
         let entity = cx.entity();
@@ -661,10 +673,15 @@ impl Shell {
                 .font_family(crate::fonts::UI_FAMILY)
                 .child(div().size(px(5.0)).rounded_full().bg(if selected { t.live() } else { Theme::color(t.dot) }))
                 .child(label.to_string());
+            // React `.seg-thumb`: `box-shadow: inset 0 0 0 1px var(--line-2)`. Both cells carry
+            // the 1 px border (transparent when unselected) so they stay the same size.
+            let cell = cell.border_1();
             let cell = if selected {
-                cell.bg(Theme::color(t.raised)).text_color(Theme::color(t.ink))
+                cell.border_color(Theme::color(t.line_2))
+                    .bg(Theme::color(t.raised))
+                    .text_color(Theme::color(t.ink))
             } else {
-                cell.text_color(Theme::color(t.dim))
+                cell.border_color(gpui::transparent_black()).text_color(Theme::color(t.dim))
             };
             cell.cursor_pointer().on_click(move |_, _, cx| {
                 entity.update(cx, |this, cx| {
