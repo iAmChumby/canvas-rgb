@@ -1576,10 +1576,21 @@ button.chip:hover {
   margin-bottom: var(--s2);
 }
 
+/* The head stays one line: the select gives up width (down to 160 px) before
+   it wraps under the title, which would cost the panel a row at 1024. */
+.audio-compact .panel-head {
+  flex-wrap: nowrap;
+}
+
+.audio-compact .panel-title {
+  flex: none;
+  white-space: nowrap;
+}
+
 .audio-picker-head {
   display: block;
-  width: min(100%, 300px);
-  min-width: 0;
+  flex: 0 1 300px;
+  min-width: 160px;
 }
 
 .audio-compact-row {
@@ -4773,6 +4784,11 @@ button.chip:hover {
   margin: 0 0 var(--s4);
 }
 
+/* The last panel ends the pane: no gap under it to scroll for. */
+.rd-settings .rd-settings-grid > .panel:last-child {
+  margin-bottom: 0;
+}
+
 /* The version figure sits in the panel's title row. */
 .rd-settings .rd-version {
   margin-left: auto;
@@ -4782,6 +4798,15 @@ button.chip:hover {
 .rd-settings .rd-settings-grid .panel-head {
   display: flex;
   align-items: baseline;
+}
+
+/* A two-column Settings at 1024 gives a panel about 415 px: the slider row
+   keeps its label beside it at 240 px instead of stacking under it, so the
+   panels fit the window (#166 fit). */
+@media (min-width: 721px) {
+  .rd-settings .field-slider {
+    min-width: 240px;
+  }
 }
 
 /* R1 on a desktop window: what is taller than the window scrolls inside its own pane, so
