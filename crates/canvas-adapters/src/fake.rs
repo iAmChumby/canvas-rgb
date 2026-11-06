@@ -75,7 +75,7 @@ impl FakeOpenRgbServer {
     }
 
     /// Like [`start`](Self::start), but binds `port` on 127.0.0.1 instead of an
-    /// ephemeral port. For the standalone fake server (`fake_server` example)
+    /// ephemeral port. For the standalone fake server (`fake_openrgb` example)
     /// that a fakes-mode daemon connects to on a known, non-real port.
     pub async fn start_on_port(devices: Vec<DeviceInfo>, port: u16) -> std::io::Result<Self> {
         Self::start_inner_on(devices, None, Some(port)).await

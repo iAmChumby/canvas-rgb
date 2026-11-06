@@ -46,5 +46,5 @@ name = "pad_probe"
 test = true
 
 [[example]]
-name = "fake_server"
+name = "fake_openrgb"
 test = false

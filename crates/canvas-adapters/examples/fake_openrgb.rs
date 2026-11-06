@@ -1,7 +1,7 @@
 //! A standalone fake OpenRGB server for a fakes-mode daemon (#199).
 //!
 //! Run it as:
-//! `cargo run -p canvas-adapters --example fake_server`
+//! `cargo run -p canvas-adapters --example fake_openrgb`
 //!
 //! It speaks the OpenRGB SDK protocol on 127.0.0.1 on the fake port
 //! (`CANVAS_RGB_FAKE_OPENRGB_PORT`, default 16742 — never the real 6742) with
