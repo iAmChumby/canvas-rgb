@@ -6,7 +6,7 @@
 
 use axum::extract::{Path, State};
 use axum::Json;
-use canvas_proto::api::{FanProfileName, PutFanHot};
+use canvas_proto::api::{FanProfileName, PutFanHeaderAvailability, PutFanHot};
 use canvas_proto::fans::{
     hot_limit_status, validate_hot_limits, validate_mode, validate_profile, FanMode, FanProfile, FansStatus,
     HotKind,
@@ -63,6 +63,51 @@ pub async fn patch_header(
 
     tracing::info!(header = %header, mode = ?mode, "the fan header mode changed");
     Ok(Json(serde_json::json!({ "ok": true, "header": header, "mode": mode })))
+}
+
+/// `PUT /api/v1/fans/headers/{h}/availability` (issue #146).
+///
+/// The owner's word on whether a header is on this board: `false` is "Not on my board",
+/// `true` is "Show anyway" and `null` takes the word off, so the board table decides again.
+/// The service knows the headers, so it refuses an unknown one; that refusal is a 422 here,
+/// mapped through the same `service_failure` the other fan routes use.
+///
+/// The answer is the new fan status: the word changes which headers the page shows, and the
+/// daemon's cached status is refreshed so the next read says the same.
+pub async fn put_header_availability(
+    State(app): State<Arc<App>>,
+    Path(header): Path<String>,
+    Json(body): Json<PutFanHeaderAvailability>,
+) -> ApiResult<Json<FansStatus>> {
+    let response = crate::pipe_client::send(
+        &app,
+        &canvas_proto::pipe::PipeRequest::SetHeaderAvailability {
+            header: header.clone(),
+            available: body.available,
+        },
+    )
+    .await
+    .map_err(|e| ApiFailure::service_unavailable(format!("the fan service is not reachable: {e}")))?;
+
+    match response {
+        canvas_proto::pipe::PipeResponse::Ok => {}
+        canvas_proto::pipe::PipeResponse::Error { code, message } => {
+            return Err(service_failure(&code, message));
+        }
+        _ => {
+            return Err(ApiFailure::internal("the fan service gave an unexpected answer"));
+        }
+    }
+
+    // The word changed what the service reports, so ask it again and keep that copy.
+    let status = match crate::pipe_client::send(&app, &canvas_proto::pipe::PipeRequest::FanStatus).await {
+        Ok(canvas_proto::pipe::PipeResponse::FanStatus { status }) => status,
+        _ => return Err(ApiFailure::service_unavailable("the fan service is not reachable")),
+    };
+    *app.fans.write().await = Some(status.clone());
+
+    tracing::info!(header = %header, available = ?body.available, "the header availability changed");
+    Ok(Json(status))
 }
 
 /// `GET /api/v1/fans/profile`.

@@ -3591,3 +3591,103 @@ async fn deleting_a_user_effect_removes_its_presets_unless_they_are_kept() {
     let (_, detail) = send(&router, "GET", "/api/v1/effects/html:fancy", serde_json::json!({})).await;
     assert_eq!(preset_names(&detail), ["Fast"], "the kept preset is back");
 }
+
+// ---- Issue #146: PUT /api/v1/fans/headers/{h}/availability ----
+
+/// The route for one header's availability.
+fn availability_path(header: &str) -> String {
+    routes::FAN_HEADER_AVAILABILITY.replace("{h}", header)
+}
+
+/// A status with one header on it.
+fn status_with_header() -> FansStatus {
+    fans(vec![(TempSource::Cpu, 40.0)], vec![("sys_fan1", 900)])
+}
+
+/// The owner's word goes to the service as one pipe request, and the answer is the new status.
+#[tokio::test]
+async fn issue146_put_header_availability_sends_the_word_to_the_service() {
+    let status = status_with_header();
+    let (router, app, _home, sent) = build_with_recording_pipe(status.clone());
+    *app.fans.write().await = Some(status);
+    let response = router
+        .oneshot(request_with_body("PUT", &availability_path("sys_fan1"), r#"{"available":false}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json(response).await;
+    assert!(
+        body.get("headers").and_then(|v| v.as_array()).is_some(),
+        "the answer carries the new status: {body}"
+    );
+
+    let sent = sent.lock().unwrap();
+    let request = sent
+        .iter()
+        .find(|r| matches!(r, canvas_proto::pipe::PipeRequest::SetHeaderAvailability { .. }))
+        .expect("the word went to the service");
+    match request {
+        canvas_proto::pipe::PipeRequest::SetHeaderAvailability { header, available } => {
+            assert_eq!(header, "sys_fan1");
+            assert_eq!(*available, Some(false), "the word is 'not on my board'");
+        }
+        other => panic!("expected SetHeaderAvailability, got {other:?}"),
+    }
+}
+
+/// Clearing the word sends null: the board table decides again.
+#[tokio::test]
+async fn issue146_clearing_the_word_sends_null() {
+    let status = status_with_header();
+    let (router, app, _home, sent) = build_with_recording_pipe(status.clone());
+    *app.fans.write().await = Some(status);
+    let response = router
+        .oneshot(request_with_body("PUT", &availability_path("sys_fan1"), r#"{"available":null}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let sent = sent.lock().unwrap();
+    let request = sent
+        .iter()
+        .find(|r| matches!(r, canvas_proto::pipe::PipeRequest::SetHeaderAvailability { .. }))
+        .expect("the word went to the service");
+    match request {
+        canvas_proto::pipe::PipeRequest::SetHeaderAvailability { available, .. } => {
+            assert_eq!(*available, None, "the word is off");
+        }
+        other => panic!("expected SetHeaderAvailability, got {other:?}"),
+    }
+}
+
+/// The service refuses an unknown header, and that refusal is a 422.
+#[tokio::test]
+async fn issue146_a_validation_refusal_from_the_service_is_a_422() {
+    let (router, _app, _home) = build_with_pipe(FakeReply::Error("validation"));
+    let response = router
+        .oneshot(request_with_body("PUT", &availability_path("sys_fan9"), r#"{"available":false}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = json(response).await;
+    assert_eq!(body.get("error").and_then(|v| v.as_str()), Some("validation"));
+}
+
+/// The route is behind the same guard as the other fan routes.
+#[tokio::test]
+async fn issue146_the_route_needs_the_token() {
+    let (router, _app, _home) = build();
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(availability_path("sys_fan1"))
+                .header("host", "127.0.0.1:9430")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"available":false}"#.to_string()))
+                .expect("the request builds"),
+        )
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}

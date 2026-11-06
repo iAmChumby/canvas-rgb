@@ -106,6 +106,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route(routes::FANS, get(fans::get_fans))
         .route(routes::FAN_HOT, put(fans::put_fan_hot))
         .route(routes::FAN_HEADER, patch(fans::patch_header))
+        .route(routes::FAN_HEADER_AVAILABILITY, put(fans::put_header_availability))
         .route(routes::FAN_PROFILE, get(fans::get_profile).patch(fans::patch_profile))
         .route(routes::FAN_PROFILES, put(fans::put_profile).delete(fans::delete_profile))
         .route(routes::SETTINGS, get(settings::get_settings).put(settings::put_settings))
