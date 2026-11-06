@@ -95,6 +95,11 @@ pub fn select(
         .flex()
         .flex_col()
         .child(trigger);
+    // The trigger's full width is relative to this column, so the column fills too
+    // (phone: React's trigger spans the card).
+    if full_width {
+        col = col.w_full();
+    }
     if open {
         let mut list = div()
             .id(gpui::SharedString::from(format!("{id}-list")))
