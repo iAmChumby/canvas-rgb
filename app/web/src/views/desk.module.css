@@ -100,6 +100,19 @@
   transition: none;
 }
 
+/* The settle after release (issue #187, rule 4): the only easing in a drag,
+   and it runs only once the pointer is up. It eases the part's box back to
+   the limit it was rubber-banded past; while held, no transition at all. */
+.desk .zone[data-settling="true"] {
+  transition:
+    left var(--dur) var(--ease),
+    top var(--dur) var(--ease),
+    width var(--dur) var(--ease),
+    height var(--dur) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    opacity var(--dur-fast) var(--ease);
+}
+
 .desk .zone[data-selected="true"] {
   border-color: var(--live);
   z-index: 4;

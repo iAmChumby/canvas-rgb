@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import type { ReactNode, Ref } from "react";
 
 /** A small label that is also a toggle when `onClick` is given. */
 export function Chip({
@@ -14,6 +14,7 @@ export function Chip({
   onClick,
   label,
   title,
+  ref,
 }: {
   children: ReactNode;
   icon?: ReactNode;
@@ -28,6 +29,7 @@ export function Chip({
   label?: string;
   /** The native tooltip. It explains the chip without changing its name. */
   title?: string;
+  ref?: Ref<HTMLButtonElement>;
 }) {
   const cls = ["chip", html && "chip-html", pressed && "chip-on", marked && "chip-marked", pending && "chip-pending", className]
     .filter(Boolean)
@@ -36,6 +38,7 @@ export function Chip({
     return (
       <button
         type="button"
+        ref={ref}
         className={cls}
         aria-pressed={pressed ?? false}
         aria-busy={pending || undefined}

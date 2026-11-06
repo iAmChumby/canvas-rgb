@@ -9,7 +9,12 @@ use canvas_proto::consts;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use crate::peer;
+use canvas_client::token::TokenError;
+
+/// The token read lives in `canvas-client`, shared by every client. It is re-exported
+/// here so existing call sites keep working; its error converts into [`ApiError`] with
+/// the same messages.
+pub use canvas_client::token::read_token;
 
 /// Connect and read budget. The daemon is on localhost: anything slower is down.
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -30,6 +35,15 @@ pub enum ApiError {
     /// The request may have reached the daemon, but no usable answer came back (a timeout, a reset,
     /// a reply cut off). Whether the daemon acted is UNKNOWN.
     Lost(String),
+}
+
+impl From<TokenError> for ApiError {
+    fn from(e: TokenError) -> Self {
+        match e {
+            TokenError::Token(message) => ApiError::Token(message),
+            TokenError::NotTrusted(message) => ApiError::NotTrusted(message),
+        }
+    }
 }
 
 impl std::fmt::Display for ApiError {
@@ -70,22 +84,6 @@ fn build_client(base: String) -> Client {
         .timeout_global(Some(TIMEOUT))
         .build();
     Client { base, agent: config.into() }
-}
-
-/// Reads the token file at call time (G9). Never cached: the daemon may rotate it.
-///
-/// The token is only handed out when the daemon really holds the port: it is a bearer
-/// secret and must not reach another process.
-pub fn read_token() -> Result<String, ApiError> {
-    peer::check(consts::API_PORT).map_err(|refusal| ApiError::NotTrusted(refusal.message()))?;
-    let path = consts::token_path();
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| ApiError::Token(format!("{}: {e}", path.display())))?;
-    let token = text.trim().to_string();
-    if token.is_empty() {
-        return Err(ApiError::Token(format!("{} is empty", path.display())));
-    }
-    Ok(token)
 }
 
 impl Client {

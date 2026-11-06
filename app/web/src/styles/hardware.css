@@ -477,9 +477,10 @@ button.chip::before,
   background-color: var(--c);
   background-image: none;
   box-shadow: 0 var(--skirt-h) 0 var(--skirt);
+  /* No background-color: a colour change is the wipe (app.css .color-wipe). A tween of the
+     base colour after the wipe ended showed the old colour again (#187). */
   transition:
     border-color var(--release) var(--ease),
-    background-color var(--release) var(--ease),
     box-shadow var(--release) var(--ease);
 }
 

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/canvas-proto",
+    "crates/canvas-client",
     "crates/canvas-core",
     "crates/canvas-effects",
     "crates/canvas-html",
@@ -13,13 +14,14 @@ members = [
 ]
 
 [workspace.package]
-version = "0.8.3"
+version = "0.8.4"
 edition = "2021"
 license = "Apache-2.0"
 rust-version = "1.85"
 
 [workspace.dependencies]
 canvas-proto = { path = "crates/canvas-proto" }
+canvas-client = { path = "crates/canvas-client" }
 canvas-core = { path = "crates/canvas-core" }
 canvas-effects = { path = "crates/canvas-effects" }
 canvas-html = { path = "crates/canvas-html" }
