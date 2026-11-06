@@ -45,6 +45,10 @@ fn main() -> std::process::ExitCode {
             eprintln!("error: {e}");
             return std::process::ExitCode::from(1);
         }
+        if let Err(e) = canvas_daemon::fakes::validate_test_port(canvas_proto::consts::debug_test_port()) {
+            eprintln!("error: {e}");
+            return std::process::ExitCode::from(1);
+        }
     }
 
     // The logs go to a rolling daily file (G8). They start before anything else can fail, so

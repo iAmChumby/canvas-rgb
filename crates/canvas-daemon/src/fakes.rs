@@ -112,23 +112,54 @@ pub fn normalize(path: &Path) -> PathBuf {
     out
 }
 
-/// True when `home` names the real user data folder (or sits inside it is not
-/// relevant: equality after normalisation is the refusal, plus the machine
-/// folder). Compared case-insensitively on Windows paths, as the filesystem
-/// is case-insensitive there.
-pub fn is_real_home(home: &Path, real_home: &Path, machine_home: &Path) -> bool {
-    let home = normalize(home);
-    let same = |a: &Path, b: &Path| {
-        let (a, b) = (normalize(a), normalize(b));
-        a == b
-            || a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy())
-    };
-    same(&home, real_home) || same(&home, machine_home)
+/// The path as the filesystem sees it: junctions, symlinks and 8.3 short names resolved when it
+/// exists, else [`normalize`]d text (a folder that does not exist cannot be a link).
+fn resolve(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| normalize(path))
 }
 
-/// Validates the home a fakes daemon runs with: `CANVAS_RGB_HOME` must be set
-/// to a non-empty folder that is not the real user or machine data folder.
-/// Returns the home to use. Pure over its inputs, so it is unit-testable.
+/// Comparable components: the drive as `c:` whether written `C:` or `\?\C:`, then each name
+/// lower-cased (Windows paths are case-insensitive).
+fn key(path: &Path) -> Vec<String> {
+    use std::path::{Component, Prefix};
+    path.components()
+        .filter_map(|c| match c {
+            Component::Prefix(p) => Some(match p.kind() {
+                Prefix::Disk(d) | Prefix::VerbatimDisk(d) => format!("{}:", (d as char).to_ascii_lowercase()),
+                _ => p.as_os_str().to_string_lossy().to_lowercase(),
+            }),
+            Component::RootDir | Component::CurDir => None,
+            other => Some(other.as_os_str().to_string_lossy().to_lowercase()),
+        })
+        .collect()
+}
+
+/// True when one path is the other or sits inside it, after both are resolved.
+fn overlaps(a: &Path, b: &Path) -> bool {
+    let (a, b) = (key(&resolve(a)), key(&resolve(b)));
+    a.starts_with(&b) || b.starts_with(&a)
+}
+
+/// True when the resolved path is on a local drive (`C:\...` or `\\?\C:\...`), not a UNC
+/// share such as `\\localhost\C$`, which could name the real folder in another spelling.
+fn on_local_drive(path: &Path) -> bool {
+    use std::path::{Component, Prefix};
+    match resolve(path).components().next() {
+        Some(Component::Prefix(p)) => matches!(p.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)),
+        _ => !cfg!(windows),
+    }
+}
+
+/// True when `home` is, contains, or sits inside the real user data folder or the machine data
+/// folder. Both sides are resolved on disk first, so a junction, a symlink, a `\\?\` prefix,
+/// a different case or a short name cannot hide the real folder.
+pub fn is_real_home(home: &Path, real_home: &Path, machine_home: &Path) -> bool {
+    overlaps(home, real_home) || overlaps(home, machine_home)
+}
+
+/// Validates the home a fakes daemon runs with: `CANVAS_RGB_HOME` must be set to a folder on a
+/// local drive that neither is, contains, nor sits inside the real user or machine data folder.
+/// Returns the home to use.
 pub fn validate_fakes_home(
     home_env: Option<&Path>,
     real_home: &Path,
@@ -142,13 +173,37 @@ pub fn validate_fakes_home(
     if home.as_os_str().is_empty() {
         return Err("fakes mode requires CANVAS_RGB_HOME to be set to a test folder".into());
     }
+    if !on_local_drive(home) {
+        return Err(format!(
+            "fakes mode needs CANVAS_RGB_HOME on a local drive, not {}",
+            home.display()
+        ));
+    }
     if is_real_home(home, real_home, machine_home) {
         return Err(format!(
-            "fakes mode refuses to run with the real data folder {}: set CANVAS_RGB_HOME to a test folder",
+            "fakes mode refuses to run with {} (it is, holds, or sits inside a real data folder): set CANVAS_RGB_HOME to a separate test folder",
             home.display()
         ));
     }
     Ok(home.to_path_buf())
+}
+
+/// Validates the API port a fakes daemon binds: an explicit test port from
+/// `CANVAS_RGB_TEST_API_PORT`, never the real API port, the real OpenRGB port or the fake
+/// OpenRGB port. Without it a fakes daemon would take 9430 and lock the real daemon out.
+pub fn validate_test_port(port: Option<u16>) -> Result<u16, String> {
+    let env = canvas_proto::consts::TEST_API_PORT_ENV;
+    match port {
+        None => Err(format!("fakes mode requires {env} to be set to a test port (e.g. 19430)")),
+        Some(p)
+            if p == canvas_proto::consts::API_PORT
+                || p == canvas_proto::consts::OPENRGB_PORT
+                || p == fake_openrgb_port() =>
+        {
+            Err(format!("fakes mode refuses test port {p}: it is a real or fake service port"))
+        }
+        Some(p) => Ok(p),
+    }
 }
 
 /// Validates this process's home for fakes mode, reading the real folders
@@ -358,6 +413,62 @@ mod tests {
         assert!(validate_fakes_home(Some(&machine), &real, &machine).is_err(), "the real machine dir: refuse");
         let test = PathBuf::from(r"C:\work\canvas-rgb\.build\fake-home");
         assert_eq!(validate_fakes_home(Some(&test), &real, &machine), Ok(test));
+    }
+
+    #[test]
+    fn every_spelling_of_the_real_home_is_refused() {
+        let real = PathBuf::from(r"C:\test-user\AppData\Roaming\canvas-rgb");
+        let machine = PathBuf::from(r"C:\ProgramData\canvas-rgb");
+        for (spelling, why) in [
+            (r"c:\TEST-USER\appdata\roaming\CANVAS-RGB", "another case"),
+            (r"\\?\C:\test-user\AppData\Roaming\canvas-rgb", "the verbatim prefix"),
+            (r"C:\test-user\AppData\Roaming\canvas-rgb\effects", "a folder inside it"),
+            (r"C:\test-user\AppData\Roaming", "a folder holding it"),
+            (r"C:\ProgramData\canvas-rgb\logs", "a folder inside the machine folder"),
+            (r"C:/test-user/AppData/Roaming/canvas-rgb", "forward slashes"),
+        ] {
+            assert!(
+                validate_fakes_home(Some(Path::new(spelling)), &real, &machine).is_err(),
+                "{why}: {spelling} must be refused"
+            );
+        }
+        #[cfg(windows)]
+        assert!(
+            validate_fakes_home(Some(Path::new(r"\\localhost\C$\work\fake-home")), &real, &machine).is_err(),
+            "a UNC share is refused"
+        );
+    }
+
+    /// A junction pointing at the real folder is resolved and refused.
+    #[cfg(windows)]
+    #[test]
+    fn a_junction_to_the_real_home_is_refused() {
+        let base = std::env::temp_dir().join(format!("canvas-fakes-junction-{}", std::process::id()));
+        let real = base.join("real-canvas-rgb");
+        let link = base.join("looks-like-a-test-home");
+        let machine = base.join("machine");
+        std::fs::create_dir_all(&real).expect("make the stand-in real folder");
+        // token: the test runner's own, non-elevated; mklink /J needs no elevation.
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&real)
+            .output()
+            .expect("run mklink");
+        assert!(made.status.success(), "mklink /J failed: {}", String::from_utf8_lossy(&made.stderr));
+        let refused = validate_fakes_home(Some(&link), &real, &machine);
+        let _ = std::fs::remove_dir(&link);
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(refused.is_err(), "a junction to the real home must be refused");
+    }
+
+    #[test]
+    fn the_test_port_must_be_set_and_never_a_service_port() {
+        assert!(validate_test_port(None).is_err(), "no test port: refuse, or 9430 would be taken");
+        assert!(validate_test_port(Some(canvas_proto::consts::API_PORT)).is_err());
+        assert!(validate_test_port(Some(canvas_proto::consts::OPENRGB_PORT)).is_err());
+        assert!(validate_test_port(Some(fake_openrgb_port())).is_err());
+        assert_eq!(validate_test_port(Some(19430)), Ok(19430));
     }
 
     #[test]

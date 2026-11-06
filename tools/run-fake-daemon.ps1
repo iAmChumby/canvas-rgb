@@ -41,16 +41,34 @@ function Get-OwnedProcesses {
     return @($data.daemon, $data.fakeOpenRgb) | Where-Object { $_ }
 }
 
+# The only executables this script may stop: its own debug builds in this checkout. A recorded PID
+# that now belongs to anything else (a reused PID, the real daemon) is never touched.
+$ownExes = @(
+    (Join-Path $root 'target\debug\canvas-rgbd.exe'),
+    (Join-Path $root 'target\debug\examples\fake_openrgb.exe')
+) | ForEach-Object { [IO.Path]::GetFullPath($_).ToLowerInvariant() }
+
+function Test-OwnProcess([int]$procId) {
+    $p = Get-CimInstance Win32_Process -Filter "ProcessId=$procId" -ErrorAction SilentlyContinue
+    if (-not $p -or -not $p.ExecutablePath) { return $false }
+    return $ownExes -contains ([IO.Path]::GetFullPath($p.ExecutablePath).ToLowerInvariant())
+}
+
 if ($Stop) {
     $pids = Get-OwnedProcesses
     if ($pids.Count -eq 0) { Write-Host 'run-fake-daemon: nothing to stop (no pids recorded).'; exit 0 }
     foreach ($procId in $pids) {
         $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
-        if ($proc) { Stop-Process -Id $procId -Force; Write-Host "run-fake-daemon: stopped pid $procId ($($proc.ProcessName))" }
-        else { Write-Host "run-fake-daemon: pid $procId is already gone" }
+        if (-not $proc) { Write-Host "run-fake-daemon: pid $procId is already gone"; continue }
+        if (-not (Test-OwnProcess $procId)) {
+            Write-Host "run-fake-daemon: pid $procId is now $($proc.ProcessName), not this checkout's test build; left running"
+            continue
+        }
+        Stop-Process -Id $procId -Force
+        Write-Host "run-fake-daemon: stopped pid $procId ($($proc.ProcessName))"
     }
     Start-Sleep -Milliseconds 500
-    $still = Get-OwnedProcesses | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue }
+    $still = Get-OwnedProcesses | Where-Object { (Get-Process -Id $_ -ErrorAction SilentlyContinue) -and (Test-OwnProcess $_) }
     if ($still) { Write-Error "run-fake-daemon: these processes did not exit: $($still -join ', ')"; exit 1 }
     Remove-Item $pidFile -ErrorAction SilentlyContinue
     Write-Host 'run-fake-daemon: test daemon and fake OpenRGB server stopped.'
@@ -93,12 +111,14 @@ if ($Rebuild -or -not (Test-Path $daemonExe) -or -not (Test-Path $fakeExe)) {
 # --- start the fake OpenRGB server ------------------------------------------
 $env:CANVAS_RGB_FAKE_OPENRGB_PORT = "$fakeOpenRgbPort"
 $fakeLog = Join-Path $homeDir 'fake-openrgb.log'
+# token: the developer's own, non-elevated (the shell running this script).
 $fake = Start-Process -FilePath $fakeExe -PassThru -RedirectStandardOutput $fakeLog -RedirectStandardError (Join-Path $homeDir 'fake-openrgb.err.log')
 Write-Host "run-fake-daemon: fake OpenRGB server on 127.0.0.1:$fakeOpenRgbPort (pid $($fake.Id))"
 
 # --- start the daemon in fakes mode ------------------------------------------
 $env:CANVAS_RGB_HOME = $homeDir
 $env:CANVAS_RGB_TEST_API_PORT = "$testApiPort"
+# token: the developer's own, non-elevated; a debug build in fakes mode, never the installed daemon.
 $daemon = Start-Process -FilePath $daemonExe -ArgumentList '--fakes' -PassThru -RedirectStandardOutput (Join-Path $homeDir 'canvas-rgbd.stdout.log') -RedirectStandardError (Join-Path $homeDir 'canvas-rgbd.stderr.log')
 Write-Host "run-fake-daemon: test daemon pid $($daemon.Id) in fakes mode"
 
