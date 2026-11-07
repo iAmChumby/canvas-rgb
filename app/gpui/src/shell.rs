@@ -35,6 +35,7 @@ use crate::theme::{Theme, TokenRadius};
 use crate::views::command_palette::{
     CommandPaletteView, PaletteAction, build_commands, build_short, is_palette_toggle_key,
 };
+use crate::views::devices::DevicesView;
 use crate::views::displays::DisplaysView;
 use crate::views::effects::EffectsView;
 use crate::views::fans::FansView;
@@ -234,6 +235,8 @@ pub struct Shell {
     pub status_error: Option<String>,
     pub status_failures: u32,
     pub displays: gpui::Entity<DisplaysView>,
+    /// The Devices page (#209).
+    pub devices_view: gpui::Entity<DevicesView>,
     /// The Fans page (#204). The shell builds it, so `main.rs` stays as it is.
     pub fans_view: gpui::Entity<FansView>,
     /// The Settings page (#205).
@@ -278,6 +281,7 @@ impl Shell {
         status: Option<Status>,
         status_error: Option<String>,
         displays: gpui::Entity<DisplaysView>,
+        devices_view: gpui::Entity<DevicesView>,
         cx: &mut Context<Self>,
         tray_present: bool,
         tray_rx: Option<std::sync::mpsc::Receiver<canvas_proto::tauri::TrayToEditor>>,
@@ -339,6 +343,7 @@ impl Shell {
             status_error,
             status_failures: failures,
             displays,
+            devices_view,
             fans_view,
             updates_view,
             peripherals_view,
@@ -1400,6 +1405,9 @@ impl Shell {
         } else if self.page == "updates" {
             self.updates_view
                 .update(cx, |u, _| u.strip_context_text())
+        } else if self.page == "devices" {
+            self.devices_view
+                .update(cx, |d, _| d.strip_title().1.unwrap_or_default())
         } else if self.page == "peripherals" {
             self.peripherals_view
                 .update(cx, |u, _| u.strip_context_text())
@@ -1741,6 +1749,9 @@ impl Shell {
         if self.page == "displays" {
             return self.displays.clone().into_any_element();
         }
+        if self.page == "devices" {
+            return self.devices_view.clone().into_any_element();
+        }
         if self.page == "fans" {
             return self.fans_view.clone().into_any_element();
         }
@@ -1884,6 +1895,8 @@ impl Render for Shell {
             let fans_view = self.fans_view.clone();
             displays.update(cx, |d, _| d.theme = shared);
             fans_view.update(cx, |f, _| f.theme = shared);
+            let devices_view = self.devices_view.clone();
+            devices_view.update(cx, |d, _| d.theme = shared);
             self.updates_view.update(cx, |u, _| u.theme = shared);
             self.peripherals_view.update(cx, |v, _| v.theme = shared);
             self.effects_view.update(cx, |v, _| v.theme = shared);

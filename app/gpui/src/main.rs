@@ -39,6 +39,7 @@ mod views;
 
 use shell::Shell;
 use theme::Theme;
+use views::devices::DevicesView;
 use views::displays::DisplaysView;
 
 struct ParsedArgs {
@@ -171,12 +172,14 @@ fn main() {
                 move |_, cx| {
                     cx.new(|cx| {
                         let displays = cx.new(|cx| DisplaysView::new(theme, cx));
+                        let devices_view = cx.new(|cx| DevicesView::new(theme, cx));
                         let mut shell = Shell::new(
                             theme,
                             page.clone(),
                             None,
                             None,
                             displays,
+                            devices_view,
                             cx,
                             tray_present,
                             ipc_rx,

@@ -2,6 +2,7 @@
 //! "Not ported yet" placeholder from the shell.
 
 pub mod command_palette;
+pub mod devices;
 pub mod displays;
 pub mod effects;
 pub mod fans;
