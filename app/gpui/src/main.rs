@@ -1,3 +1,7 @@
+// A GUI program in every build: as a console program each launch (the tray's, a capture
+// run's) opened a terminal window. The tray protocol runs over stdio pipes, which a
+// windows-subsystem program still has when its parent redirects them.
+#![windows_subsystem = "windows"]
 //! `canvas-rgb-editor.exe` — the GPUI editor beside the React editor.
 //!
 //! It reads the same daemon API as the React editor (through `client.rs`),
@@ -40,6 +44,10 @@ struct ParsedArgs {
     theme: Option<Theme>,
     min_size: Option<(u32, u32)>,
     window_size: Option<(u32, u32)>,
+    /// `--capture` (debug builds only): open the window hidden and frameless, with no
+    /// taskbar button, so `tools/ui-capture/capture-gpui.ps1` can show it behind every
+    /// other window without it ever covering the screen or taking focus.
+    capture: bool,
 }
 
 fn parse_args() -> ParsedArgs {
@@ -47,6 +55,7 @@ fn parse_args() -> ParsedArgs {
     let mut theme = None;
     let mut min_size = None;
     let mut window_size = None;
+    let mut capture = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -74,6 +83,7 @@ fn parse_args() -> ParsedArgs {
                     Some((w.parse().ok()?, h.parse().ok()?))
                 });
             }
+            "--capture" if cfg!(debug_assertions) => capture = true,
             _ => {}
         }
     }
@@ -82,6 +92,7 @@ fn parse_args() -> ParsedArgs {
         theme,
         min_size,
         window_size,
+        capture,
     }
 }
 
@@ -98,6 +109,7 @@ fn main() {
         theme: forced_theme,
         min_size,
         window_size,
+        capture,
     } = parse_args();
     if !shell::is_valid_page(&page) {
         eprintln!(
@@ -131,6 +143,11 @@ fn main() {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: min,
                     focus: false,
+                    // gpui shows a visible window with SetWindowPlacement (normal show),
+                    // which raises it over everything; a capture window is never shown by
+                    // gpui. A pop-up kind is a tool window: no frame, no taskbar button.
+                    show: !capture,
+                    kind: if capture { gpui::WindowKind::PopUp } else { gpui::WindowKind::Normal },
                     ..Default::default()
                 },
                 move |_, cx| {
