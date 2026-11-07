@@ -3,5 +3,6 @@
 
 pub mod displays;
 pub mod fans;
+pub mod peripherals;
 pub mod settings;
 pub mod updates;

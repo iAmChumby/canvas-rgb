@@ -28,12 +28,13 @@ use gpui::{Context, IntoElement, Window, canvas, div, prelude::*, px};
 use gpui::{Bounds, point, size};
 
 use crate::client::DaemonClient;
-use crate::components::button::{Variant, button_icon, button_icon_wide, icon_button};
+use crate::components::button::{Variant, button, button_icon, button_icon_wide, icon_button};
 use crate::components::daemon_down::daemon_down;
 use crate::components::slider::slider;
 use crate::theme::{Theme, TokenRadius};
 use crate::views::displays::DisplaysView;
 use crate::views::fans::FansView;
+use crate::views::peripherals::PeripheralsView;
 use crate::views::settings::{SettingsView, ThemeCell};
 use crate::views::updates::UpdatesView;
 
@@ -235,6 +236,8 @@ pub struct Shell {
     pub settings_view: gpui::Entity<SettingsView>,
     /// The Updates page (#206).
     pub updates_view: gpui::Entity<UpdatesView>,
+    /// The Peripherals page (#208).
+    pub peripherals_view: gpui::Entity<PeripheralsView>,
     /// The theme the shell and the settings view share (the Appearance
     /// radio writes it; every render reads it).
     pub theme_cell: ThemeCell,
@@ -284,6 +287,7 @@ impl Shell {
         let updates_view = cx.new(|cx| {
             UpdatesView::new(theme, cx, tray_present, updates_entity)
         });
+        let peripherals_view = cx.new(|cx| PeripheralsView::new(theme, cx));
         let mut shell = Shell {
             theme,
             page,
@@ -293,6 +297,7 @@ impl Shell {
             displays,
             fans_view,
             updates_view,
+            peripherals_view,
             settings_view,
             theme_cell,
             width: 1280.0,
@@ -1256,6 +1261,9 @@ impl Shell {
         } else if self.page == "updates" {
             self.updates_view
                 .update(cx, |u, _| u.strip_context_text())
+        } else if self.page == "peripherals" {
+            self.peripherals_view
+                .update(cx, |u, _| u.strip_context_text())
         } else {
             String::new()
         };
@@ -1370,6 +1378,56 @@ impl Shell {
             mark_row
         };
         inner = inner.child(mark_row).child(div().flex_1());
+        // The peripherals page's actions (React `PageActions`): the pending
+        // count, Revert and Apply, before Pause and Search. Empty unless
+        // there are pending edits.
+        if self.page == "peripherals" {
+            let (pending, saving) = self
+                .peripherals_view
+                .update(cx, |v, _| (v.pending_count(), v.saving));
+            if pending > 0 {
+                let peripherals_entity = self.peripherals_view.clone();
+                let revert_entity = peripherals_entity.clone();
+                let apply_entity = peripherals_entity.clone();
+                let word = if pending == 1 { "change" } else { "changes" };
+                let pending_label = format!("{pending} {word} not sent");
+                let mut actions = div().flex().items_center().gap_2();
+                if !phone {
+                    actions = actions.child(
+                        div()
+                            .text_sm()
+                            .font_family(crate::fonts::MONO_FAMILY)
+                            .text_color(Theme::color(t.warn))
+                            .child(pending_label),
+                    );
+                }
+                actions = actions.child(button_icon(
+                    t,
+                    "peri-revert",
+                    if phone { "" } else { "Revert" },
+                    Variant::Ghost,
+                    saving,
+                    true,
+                    "ArrowCounterClockwise",
+                    "",
+                    16.0,
+                    move |_, _, cx| {
+                        revert_entity.update(cx, |v, cx| v.revert(cx));
+                    },
+                ));
+                actions = actions.child(button(
+                    t,
+                    "peri-apply",
+                    if saving { "Sending" } else { "Apply" },
+                    Variant::Primary,
+                    saving,
+                    move |_, _, cx| {
+                        apply_entity.update(cx, |v, cx| v.apply(cx));
+                    },
+                ));
+                inner = inner.child(actions);
+            }
+        }
         // Controls at the right (React `.strip-controls`: an inline-flex
         // group with `margin-left: auto` and an 8 px (`--s2`) gap between
         // Pause lights and search, not the strip row's 16 px gap).
@@ -1478,6 +1536,9 @@ impl Shell {
         }
         if self.page == "updates" {
             return self.updates_view.clone().into_any_element();
+        }
+        if self.page == "peripherals" {
+            return self.peripherals_view.clone().into_any_element();
         }
         // Every other page shows the placeholder until it is ported.
         div()
@@ -1608,6 +1669,7 @@ impl Render for Shell {
             displays.update(cx, |d, _| d.theme = shared);
             fans_view.update(cx, |f, _| f.theme = shared);
             self.updates_view.update(cx, |u, _| u.theme = shared);
+            self.peripherals_view.update(cx, |v, _| v.theme = shared);
         }
         // The Updates page's tray state comes from the settings view (the
         // single reader of the stdio receiver). Copy it here when the
