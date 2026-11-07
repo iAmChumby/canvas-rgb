@@ -32,6 +32,7 @@ use crate::components::button::{Variant, button_icon, button_icon_wide, icon_but
 use crate::components::daemon_down::daemon_down;
 use crate::components::slider::slider;
 use crate::theme::{Theme, TokenRadius};
+use crate::views::devices::DevicesView;
 use crate::views::displays::DisplaysView;
 use crate::views::fans::FansView;
 use crate::views::settings::{SettingsView, ThemeCell};
@@ -229,6 +230,8 @@ pub struct Shell {
     pub status_error: Option<String>,
     pub status_failures: u32,
     pub displays: gpui::Entity<DisplaysView>,
+    /// The Devices page (#209).
+    pub devices_view: gpui::Entity<DevicesView>,
     /// The Fans page (#204). The shell builds it, so `main.rs` stays as it is.
     pub fans_view: gpui::Entity<FansView>,
     /// The Settings page (#205).
@@ -259,6 +262,7 @@ impl Shell {
         status: Option<Status>,
         status_error: Option<String>,
         displays: gpui::Entity<DisplaysView>,
+        devices_view: gpui::Entity<DevicesView>,
         cx: &mut Context<Self>,
         tray_present: bool,
         tray_rx: Option<std::sync::mpsc::Receiver<canvas_proto::tauri::TrayToEditor>>,
@@ -291,6 +295,7 @@ impl Shell {
             status_error,
             status_failures: failures,
             displays,
+            devices_view,
             fans_view,
             updates_view,
             settings_view,
@@ -1265,6 +1270,9 @@ impl Shell {
         } else if self.page == "updates" {
             self.updates_view
                 .update(cx, |u, _| u.strip_context_text())
+        } else if self.page == "devices" {
+            self.devices_view
+                .update(cx, |d, _| d.strip_title().1.unwrap_or_default())
         } else {
             String::new()
         };
@@ -1519,6 +1527,9 @@ impl Shell {
         if self.page == "displays" {
             return self.displays.clone().into_any_element();
         }
+        if self.page == "devices" {
+            return self.devices_view.clone().into_any_element();
+        }
         if self.page == "fans" {
             return self.fans_view.clone().into_any_element();
         }
@@ -1656,6 +1667,8 @@ impl Render for Shell {
             let fans_view = self.fans_view.clone();
             displays.update(cx, |d, _| d.theme = shared);
             fans_view.update(cx, |f, _| f.theme = shared);
+            let devices_view = self.devices_view.clone();
+            devices_view.update(cx, |d, _| d.theme = shared);
             self.updates_view.update(cx, |u, _| u.theme = shared);
         }
         // The Updates page's tray state comes from the settings view (the

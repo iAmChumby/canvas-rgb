@@ -54,6 +54,17 @@ pub const ICONS: &[&str] = &[
     "UploadSimple",
     "FolderOpen",
     "SpeakerHigh",
+    // The Devices page (#209).
+    "Cpu",
+    "Memory",
+    "Keyboard",
+    "Mouse",
+    "Microphone",
+    "Lightbulb",
+    "GraphicsCard",
+    "Plugs",
+    "ArrowLeft",
+    "ArrowRight",
 ];
 
 fn icon_svg(name: &str) -> Option<&'static str> {
@@ -98,6 +109,16 @@ fn icon_svg(name: &str) -> Option<&'static str> {
         "UploadSimple" => include_str!("../assets/icons/UploadSimple.svg"),
         "FolderOpen" => include_str!("../assets/icons/FolderOpen.svg"),
         "SpeakerHigh" => include_str!("../assets/icons/SpeakerHigh.svg"),
+        "Cpu" => include_str!("../assets/icons/Cpu.svg"),
+        "Memory" => include_str!("../assets/icons/Memory.svg"),
+        "Keyboard" => include_str!("../assets/icons/Keyboard.svg"),
+        "Mouse" => include_str!("../assets/icons/Mouse.svg"),
+        "Microphone" => include_str!("../assets/icons/Microphone.svg"),
+        "Lightbulb" => include_str!("../assets/icons/Lightbulb.svg"),
+        "GraphicsCard" => include_str!("../assets/icons/GraphicsCard.svg"),
+        "Plugs" => include_str!("../assets/icons/Plugs.svg"),
+        "ArrowLeft" => include_str!("../assets/icons/ArrowLeft.svg"),
+        "ArrowRight" => include_str!("../assets/icons/ArrowRight.svg"),
         _ => return None,
     })
 }
