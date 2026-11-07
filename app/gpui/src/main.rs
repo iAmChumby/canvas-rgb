@@ -166,6 +166,11 @@ fn main() {
                             eprintln!("canvas-rgb-editor: tray asked to close");
                             std::process::exit(0);
                         }
+                        // The tray's update state and prefs (#205): not wired into the
+                        // Settings view yet; until they are, they are logged and ignored.
+                        TrayToEditor::UpdateState { .. } | TrayToEditor::Prefs { .. } => {
+                            eprintln!("canvas-rgb-editor: tray state line ignored (not wired yet)");
+                        }
                     }
                 }
             }

@@ -168,6 +168,9 @@ pub fn read_line(line: &str) -> Result<EditorEvent, Dropped> {
     match serde_json::from_str::<EditorToTray>(line) {
         Ok(EditorToTray::Ready) => Ok(EditorEvent::Ready),
         Ok(EditorToTray::SwitchEditor { to }) => Ok(EditorEvent::SwitchEditor(to)),
+        // The update and prefs commands (#205) are not wired on the tray side yet: until
+        // they are, they are dropped like an unknown line, never acted on.
+        Ok(_) => Err(Dropped::Unknown),
         Err(_) => Err(Dropped::Unknown),
     }
 }
