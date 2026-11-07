@@ -1143,6 +1143,24 @@ impl SettingsView {
         cx.notify();
     }
 
+    /// The command palette's "Switch the theme" (`Shell.tsx:172-181`):
+    /// cycles dark, light, system, dark (`prefs.ts` `nextTheme`).
+    pub fn palette_next_theme(&mut self, cx: &mut Context<Self>) {
+        let next = match self.theme_pref.as_str() {
+            "dark" => "light",
+            "light" => "system",
+            _ => "dark",
+        };
+        self.apply_theme(next.to_string(), cx);
+    }
+
+    /// The command palette's "Toggle interface motion"
+    /// (`Shell.tsx:182-192`): flips full/reduced.
+    pub fn palette_toggle_motion(&mut self, cx: &mut Context<Self>) {
+        let next = if self.motion_pref == "reduced" { "full" } else { "reduced" };
+        self.apply_motion(next.to_string(), cx);
+    }
+
     /// Export: GET the bundle, ask where to save it, write the file.
     fn do_export(&mut self, cx: &mut Context<Self>) {
         self.err = None;

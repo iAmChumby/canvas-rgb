@@ -18,6 +18,8 @@
 //! - `--theme dark|light|system` — force a theme for captures.
 //! - `--min-size WxH` — drop the 900x600 minimum so narrow captures work.
 //! - `--size WxH` — the window size to open at.
+//! - `--palette` (debug only) — open the command palette at start, for captures.
+//! - `--palette-query <text>` (debug only) — open it with that query typed.
 
 use std::io::{BufRead, BufReader, Write};
 
@@ -49,6 +51,10 @@ struct ParsedArgs {
     /// taskbar button, so `tools/ui-capture/capture-gpui.ps1` can show it behind every
     /// other window without it ever covering the screen or taking focus.
     capture: bool,
+    /// `--palette` (debug builds only): open the command palette at start.
+    palette: bool,
+    /// `--palette-query <text>` (debug builds only): the query the palette opens with.
+    palette_query: String,
 }
 
 fn parse_args() -> ParsedArgs {
@@ -57,6 +63,8 @@ fn parse_args() -> ParsedArgs {
     let mut min_size = None;
     let mut window_size = None;
     let mut capture = false;
+    let mut palette = false;
+    let mut palette_query = String::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -85,6 +93,12 @@ fn parse_args() -> ParsedArgs {
                 });
             }
             "--capture" if cfg!(debug_assertions) => capture = true,
+            "--palette" if cfg!(debug_assertions) => palette = true,
+            "--palette-query" if cfg!(debug_assertions) => {
+                if let Some(v) = args.next() {
+                    palette_query = v;
+                }
+            }
             _ => {}
         }
     }
@@ -94,6 +108,8 @@ fn parse_args() -> ParsedArgs {
         min_size,
         window_size,
         capture,
+        palette,
+        palette_query,
     }
 }
 
@@ -111,6 +127,8 @@ fn main() {
         min_size,
         window_size,
         capture,
+        palette,
+        palette_query,
     } = parse_args();
     if !shell::is_valid_page(&page) {
         eprintln!(
@@ -155,7 +173,7 @@ fn main() {
                     cx.new(|cx| {
                         let displays = cx.new(|cx| DisplaysView::new(theme, cx));
                         let devices_view = cx.new(|cx| DevicesView::new(theme, cx));
-                        Shell::new(
+                        let mut shell = Shell::new(
                             theme,
                             page.clone(),
                             None,
@@ -165,7 +183,13 @@ fn main() {
                             cx,
                             tray_present,
                             ipc_rx,
-                        )
+                        );
+                        // Debug only: `--palette` opens the palette at start
+                        // for captures (`--palette-query` types the query).
+                        if palette {
+                            shell.open_palette_initial(&palette_query, cx);
+                        }
+                        shell
                     })
                 },
             )

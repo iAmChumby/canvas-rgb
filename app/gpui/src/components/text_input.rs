@@ -17,9 +17,9 @@ use std::rc::Rc;
 use gpui::{
     App, Bounds, Context, CursorStyle, Element, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, FocusHandle, Focusable, GlobalElementId, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, SharedString,
-    Style, Subscription, UTF16Selection, Window, div, fill, point, px, prelude::*, relative,
-    rgba, size,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Rgba, ShapedLine,
+    SharedString, Style, Subscription, UTF16Selection, Window, div, fill, point, px, prelude::*,
+    relative, rgba, size,
 };
 
 use crate::theme::{Theme, TokenRadius};
@@ -109,6 +109,20 @@ pub struct TextInput {
     /// Left-aligned in the UI face (the search box); number fields keep the
     /// mono, right-aligned form React's `.num` draws.
     ui_left: bool,
+    /// Bare (the command palette's search field): transparent, no border, no
+    /// fixed height, like React's `.cmdk-input input`.
+    bare: bool,
+    /// The text size in px (15 for number fields; 16 for the palette).
+    font_px: f32,
+    /// The field's own line height (CSS `line-height`, a number), when it is
+    /// set. `None` leaves GPUI's default (1.618); React's body is 1.45 and
+    /// the palette's search field asks for it, so its text sits in a 23.2 px
+    /// line box instead of a 25.9 px one.
+    line_height: Option<f32>,
+    /// The field's vertical padding (CSS `padding-top`/`padding-bottom`).
+    /// React's native input keeps the browser's own 1 px, so the palette's
+    /// field is 2 px taller than its line box.
+    v_pad: f32,
     /// The search box wears React's small radius (`.effect-search input`
     /// `r-sm`); a number field wears the input's `r-md`.
     radius_sm: bool,
@@ -117,6 +131,8 @@ pub struct TextInput {
     left_pad: f32,
     /// Shown dimmed while nothing is typed (the search placeholder).
     placeholder: Option<SharedString>,
+    /// The placeholder's colour. `None` uses the theme's mute.
+    placeholder_color: Option<Rgba>,
     /// Keeps the blur listener alive.
     blur: Option<Subscription>,
 }
@@ -155,9 +171,14 @@ impl TextInput {
             on_submit: None,
             on_escape: None,
             ui_left: false,
+            bare: false,
+            font_px: 15.0,
+            line_height: None,
+            v_pad: 0.0,
             radius_sm: false,
             left_pad: 8.0,
             placeholder: None,
+            placeholder_color: None,
             blur: None,
         }
     }
@@ -175,6 +196,41 @@ impl TextInput {
     /// 8 px, so its text starts 30 px in, as React's `padding-left` does).
     pub fn set_left_pad(&mut self, pad: f32, cx: &mut Context<Self>) {
         self.left_pad = pad;
+        cx.notify();
+    }
+
+    /// Bare (the command palette's search field): transparent, no border, no
+    /// fixed height, like React's `.cmdk-input input`.
+    pub fn set_bare(&mut self, cx: &mut Context<Self>) {
+        self.bare = true;
+        cx.notify();
+    }
+
+    /// The text size in px (the palette's field is `--t16`, 16 px).
+    pub fn set_font_size_px(&mut self, px_value: f32, cx: &mut Context<Self>) {
+        self.font_px = px_value;
+        cx.notify();
+    }
+
+    /// The field's own line height (CSS `line-height`, a number). React's
+    /// body is 1.45; GPUI lays text out at 1.618 unless it is told.
+    pub fn set_line_height(&mut self, line_height: f32, cx: &mut Context<Self>) {
+        self.line_height = Some(line_height);
+        cx.notify();
+    }
+
+    /// The field's vertical padding (CSS `padding-top`/`padding-bottom`).
+    /// React's native input keeps the browser's own 1 px.
+    pub fn set_vertical_pad(&mut self, pad: f32, cx: &mut Context<Self>) {
+        self.v_pad = pad;
+        cx.notify();
+    }
+
+    /// The placeholder's colour. React's app CSS has no `::placeholder`
+    /// rule, so every placeholder in the React editor wears the browser's
+    /// own default grey (`darkgray`, `#757575`).
+    pub fn set_placeholder_color(&mut self, color: Rgba, cx: &mut Context<Self>) {
+        self.placeholder_color = Some(color);
         cx.notify();
     }
 
@@ -589,7 +645,10 @@ impl Element for TextElement {
         run.underline = None;
         run.strikethrough = None;
         if shown_empty {
-            run.color = Theme::color(input.theme.mute).into();
+            let color = input
+                .placeholder_color
+                .unwrap_or_else(|| Theme::color(input.theme.mute));
+            run.color = color.into();
         }
         let font_size = style.font_size.to_pixels(window.rem_size());
         let line = window
@@ -666,7 +725,12 @@ impl Element for TextElement {
         line.paint(origin, window.line_height(), window, cx)
             .unwrap();
 
-        if focus_handle.is_focused(window) {
+        if focus_handle.is_focused(window) && window.is_window_active() {
+            // The caret belongs to a window that has the focus: a browser
+            // hides it when its window is not the active one, and React's
+            // capture never shows one (measured: the input was focused and
+            // `document.hasFocus()` was true, yet 14 frames over 1.4 s of the
+            // search field were pixel-identical).
             if let Some(cursor) = prepaint.cursor.take() {
                 window.paint_quad(cursor);
             }
@@ -691,6 +755,7 @@ impl Render for TextInput {
         let disabled = self.disabled;
         // The field commits when it loses the focus, so it listens for it.
         self.watch_blur(window, cx);
+        let bare = self.bare;
         let mut field = div()
             .id(gpui::SharedString::from("text-input"))
             .relative()
@@ -698,21 +763,33 @@ impl Render for TextInput {
             .items_center()
             .justify_end()
             .w_full()
-            .h(px(32.0))
             .pl(px(self.left_pad))
-            .pr(px(8.0));
+            .pr(if bare { px(0.0) } else { px(8.0) });
+        if !bare {
+            field = field.h(px(32.0));
+        }
+        if let Some(line_height) = self.line_height {
+            field = field.line_height(gpui::relative(line_height));
+        }
+        if self.v_pad > 0.0 {
+            field = field.py(px(self.v_pad));
+        }
         field = if self.radius_sm { field.r_sm() } else { field.r_md() };
-        field = field
-            .border_1()
-            .border_color(Theme::color(t.line))
-            .bg(Theme::color(t.sunk))
-            .text_color(if disabled {
-                Theme::color(t.mute)
-            } else {
-                Theme::color(t.ink)
-            })
-            .text_size(px(15.0))
-            .font_family(if self.ui_left { crate::fonts::UI_FAMILY } else { crate::fonts::MONO_FAMILY });
+        field = field.text_color(if disabled {
+            Theme::color(t.mute)
+        } else {
+            Theme::color(t.ink)
+        })
+        .text_size(px(self.font_px))
+        .font_family(if self.ui_left { crate::fonts::UI_FAMILY } else { crate::fonts::MONO_FAMILY });
+        field = if bare {
+            field.bg(gpui::transparent_black())
+        } else {
+            field
+                .border_1()
+                .border_color(Theme::color(t.line))
+                .bg(Theme::color(t.sunk))
+        };
         if disabled {
             return field.child(TextElement { input: cx.entity() });
         }
