@@ -65,6 +65,13 @@ pub fn format_value(value: f32, decimals: usize) -> String {
 /// Told the committed number.
 pub type OnCommit = Rc<dyn Fn(f32, &mut Window, &mut App)>;
 
+/// Told the field's text whenever it changes (the search box filters as the
+/// reader types; a number field leaves this out).
+pub type OnTextChange = Rc<dyn Fn(&str, &mut Window, &mut App)>;
+
+/// Told on Enter in text mode (the preset name field submits).
+pub type OnSubmit = Rc<dyn Fn(&mut Window, &mut App)>;
+
 /// A text input: the field's own entity.
 ///
 /// The field owns the draft (what is typed) and the value (what the model
@@ -93,6 +100,20 @@ pub struct TextInput {
     theme: Theme,
     /// Told the committed number.
     on_commit: OnCommit,
+    /// Told the text on every change (the search box); None for number fields.
+    on_text_change: Option<OnTextChange>,
+    /// Told on Enter in text mode (the preset name submits); None for numbers.
+    on_submit: Option<OnSubmit>,
+    /// Told on Escape in text mode (the preset name cancels).
+    on_escape: Option<OnSubmit>,
+    /// Left-aligned in the UI face (the search box); number fields keep the
+    /// mono, right-aligned form React's `.num` draws.
+    ui_left: bool,
+    /// The search box wears React's small radius (`.effect-search input`
+    /// `r-sm`); a number field wears the input's `r-md`.
+    radius_sm: bool,
+    /// Shown dimmed while nothing is typed (the search placeholder).
+    placeholder: Option<SharedString>,
     /// Keeps the blur listener alive.
     blur: Option<Subscription>,
 }
@@ -127,8 +148,34 @@ impl TextInput {
             decimals,
             theme,
             on_commit,
+            on_text_change: None,
+            on_submit: None,
+            on_escape: None,
+            ui_left: false,
+            radius_sm: false,
+            placeholder: None,
             blur: None,
         }
+    }
+
+    /// The field is a plain text field (the search box, the preset's name):
+    /// left-aligned in the UI face, with a dimmed placeholder while empty.
+    pub fn set_text_mode(&mut self, placeholder: Option<&'static str>, cx: &mut Context<Self>) {
+        self.ui_left = true;
+        self.radius_sm = true;
+        self.placeholder = placeholder.map(SharedString::from);
+        cx.notify();
+    }
+
+    /// Told the text whenever it changes.
+    pub fn set_on_text_change(&mut self, on: OnTextChange) {
+        self.on_text_change = Some(on);
+    }
+
+    /// Told on Enter (the preset's name submits) and on Escape (cancels).
+    pub fn set_on_submit_escape(&mut self, submit: OnSubmit, escape: OnSubmit) {
+        self.on_submit = Some(submit);
+        self.on_escape = Some(escape);
     }
 
     /// The field is disabled (React's `disabled`): it shows its value and
@@ -166,8 +213,16 @@ impl TextInput {
         }));
     }
 
-    /// Commit the draft: the number in it, clamped to the field's range.
+    /// Commit the draft: the number in it, clamped to the field's range. In
+    /// text mode Enter hands the draft to the submit callback (the name
+    /// field) instead of parsing a number.
     pub fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.numeric {
+            if let Some(submit) = self.on_submit.clone() {
+                submit(window, cx);
+            }
+            return;
+        }
         let draft = self.content.to_string();
         let parsed = draft.trim().parse::<f32>().ok();
         let Some(parsed) = parsed else {
@@ -278,6 +333,11 @@ impl TextInput {
         let key = event.keystroke.key.as_str();
         match key {
             "enter" => self.commit(window, cx),
+            "escape" => {
+                if let Some(escape) = self.on_escape.clone() {
+                    escape(window, cx);
+                }
+            }
             "backspace" => {
                 if self.selected_range.is_empty() {
                     let at = self.previous_boundary(self.cursor_offset());
@@ -334,7 +394,10 @@ impl TextInput {
         self.selected_range = range.start..range.start + text.len();
         self.marked_range = None;
         cx.notify();
-        let _ = window;
+        if let Some(change) = self.on_text_change.clone() {
+            let typed = self.content.to_string();
+            change(&typed, window, cx);
+        }
     }
 }
 
@@ -496,7 +559,12 @@ impl Element for TextElement {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let input = self.input.read(cx);
-        let content = input.content.clone();
+        let shown_empty = input.content.is_empty() && input.placeholder.is_some();
+        let content = if shown_empty {
+            input.placeholder.clone().unwrap()
+        } else {
+            input.content.clone()
+        };
         let selected_range = input.selected_range.clone();
         let cursor = input.cursor_offset();
         let focused = input.focus_handle.is_focused(window);
@@ -509,15 +577,19 @@ impl Element for TextElement {
         run.background_color = None;
         run.underline = None;
         run.strikethrough = None;
+        if shown_empty {
+            run.color = Theme::color(input.theme.mute).into();
+        }
         let font_size = style.font_size.to_pixels(window.rem_size());
         let line = window
             .text_system()
             .shape_line(content.clone(), font_size, &[run], None);
 
-        // The field's text is right-aligned, as React's `.num` is.
+        // The field's text is right-aligned, as React's `.num` is; a text
+        // field (the search box) is left-aligned.
         let text_width = line.x_for_index(content.len());
         let slack = bounds.size.width - text_width;
-        let origin = point(bounds.left() + if slack < px(0.0) { px(0.0) } else { slack }, bounds.top());
+        let origin = point(bounds.left() + if input.ui_left || slack < px(0.0) { px(0.0) } else { slack }, bounds.top());
 
         let (selection, cursor) = if selected_range.is_empty() {
             (
@@ -616,8 +688,9 @@ impl Render for TextInput {
             .justify_end()
             .w_full()
             .h(px(32.0))
-            .px(px(8.0))
-            .r_md()
+            .px(px(8.0));
+        field = if self.radius_sm { field.r_sm() } else { field.r_md() };
+        field = field
             .border_1()
             .border_color(Theme::color(t.line))
             .bg(Theme::color(t.sunk))
@@ -627,7 +700,7 @@ impl Render for TextInput {
                 Theme::color(t.ink)
             })
             .text_size(px(15.0))
-            .font_family(crate::fonts::MONO_FAMILY);
+            .font_family(if self.ui_left { crate::fonts::UI_FAMILY } else { crate::fonts::MONO_FAMILY });
         if disabled {
             return field.child(TextElement { input: cx.entity() });
         }

@@ -154,6 +154,12 @@ impl DaemonClient {
         self.request(Method::Get, path, None)
     }
 
+    /// `GET` with the raw response body (the thumbnail route is binary: u16
+    /// LE width/height/frames, then RGB frames; `get` would not survive it).
+    pub fn get_bytes(&self, path: &str) -> Result<Vec<u8>, ClientError> {
+        self.request_bytes(Method::Get, path, None)
+    }
+
     pub fn put_json(&self, path: &str, body: &str) -> Result<String, ClientError> {
         self.request(Method::Put, path, Some(body))
     }
@@ -172,6 +178,10 @@ impl DaemonClient {
     }
 
     fn request(&self, method: Method, path: &str, body: Option<&str>) -> Result<String, ClientError> {
+        Ok(String::from_utf8_lossy(&self.request_bytes(method, path, body)?).into_owned())
+    }
+
+    fn request_bytes(&self, method: Method, path: &str, body: Option<&str>) -> Result<Vec<u8>, ClientError> {
         // The owner check runs before the token is read, and therefore before
         // anything is sent: a port held by another process never sees it.
         let jwt = self.token()?;
@@ -209,13 +219,13 @@ impl DaemonClient {
             other => ClientError::Other(other.to_string()),
         })?;
         let status = response.status().as_u16();
-        let text = response.body_mut().read_to_string().unwrap_or_default();
+        let bytes = response.body_mut().read_to_vec().unwrap_or_default();
         if (200..300).contains(&status) {
-            Ok(text)
+            Ok(bytes)
         } else {
             Err(ClientError::Daemon {
                 status,
-                message: daemon_message(&text, status),
+                message: daemon_message(&String::from_utf8_lossy(&bytes), status),
             })
         }
     }

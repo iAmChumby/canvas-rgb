@@ -1,0 +1,1533 @@
+//! The Effects page's rendering: the toolbar, the gallery, the inspector
+//! (head, preset strip, properties), the editor placeholder (#214) and the
+//! new-effect chooser.
+
+use gpui::{Context, IntoElement, StatefulInteractiveElement, Window, div, prelude::*, px};
+
+use crate::components::button::{Variant, button, button_icon, button_icon_wide, icon_button};
+use crate::components::chip::{ChipTone, chip, chip_button, chip_icon, chip_icon_button};
+use crate::components::empty_state::empty_state;
+use crate::components::panel::{panel_with_padding, state_dot};
+use crate::components::prop_controls::{OnChange, control};
+use crate::components::segmented::segmented;
+use crate::components::thumb::{cached, fetch as fetch_thumb, thumb};
+use crate::shell::text_width;
+use crate::theme::{Theme, TokenRadius};
+use crate::views::effects::preset_strip::{self};
+use crate::views::effects::{Category, EditorState, EffectsView, Row, gallery_list, stack_layer_names};
+
+type Entity = gpui::Entity<EffectsView>;
+
+/// The strip's page actions (React `PageActions`): New effect, More, Import.
+pub fn strip_actions(view: &EffectsView, cx: &mut Context<EffectsView>) -> gpui::AnyElement {
+    view.actions_row(cx).into_any_element()
+}
+
+impl EffectsView {
+    /// The page actions, entity-bound (called from [`strip_actions`]).
+    pub fn actions_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = &self.theme;
+        let entity = cx.entity();
+        let editing = self.editing();
+        let phone = self.width <= 640.0;
+        let mut row = div().flex().items_center().gap_2();
+        let entity_new = entity.clone();
+        row = row.child(button_icon(
+            t,
+            "eff-new-effect",
+            if phone { "" } else { "New effect" },
+            Variant::Primary,
+            editing,
+            true,
+            "Plus",
+            "",
+            15.0,
+            move |_, _, cx| {
+                entity_new.update(cx, |this, _cx| this.open_stack_placeholder("new"));
+            },
+        ));
+        let entity_more = entity.clone();
+        let more = div()
+            .relative()
+            .child(icon_button(
+                t,
+                "eff-more",
+                "DotsThreeOutline",
+                "",
+                false,
+                false,
+                false,
+                move |_, _, cx| {
+                    entity_more.update(cx, |this, cx| {
+                        this.more_open = !this.more_open;
+                        cx.notify();
+                    });
+                },
+            ));
+        let more = if self.more_open {
+            let entity_code = entity.clone();
+            more.child(
+                div()
+                    .id(gpui::SharedString::from("eff-more-menu"))
+                    .absolute()
+                    .top(px(38.0))
+                    .right(px(0.0))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .w(px(260.0))
+                    .p_3()
+                    .r_lg()
+                    .border_1()
+                    .border_color(Theme::color(t.line_2))
+                    .bg(Theme::color(t.panel))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .font_family(crate::fonts::UI_FAMILY)
+                            .text_color(Theme::color(t.ink))
+                            .child("Advanced".to_string()),
+                    )
+                    .child(button_icon(
+                        t,
+                        "eff-new-from-code",
+                        "New from code",
+                        Variant::Default,
+                        true,
+                        editing,
+                        "Code",
+                        "",
+                        15.0,
+                        move |_, _, cx| {
+                            entity_code.update(cx, |this, _cx| {
+                                this.more_open = false;
+                                this.new_open = true;
+                                this.new_error = None;
+                                if this.width <= 720.0 {
+                                    this.pushed = true;
+                                }
+                            });
+                        },
+                    ))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_family(crate::fonts::UI_FAMILY)
+                            .text_color(Theme::color(t.mute))
+                            .child("An HTML effect you write here: copy one of the library's, or start blank.".to_string()),
+                    ),
+            )
+        } else {
+            more
+        };
+        row = row.child(more);
+        // Import: no file picker exists in GPUI 0.2.2; the button is drawn
+        // disabled until one lands (spine need, reported in .build).
+        row = row.child(button_icon(
+            t,
+            "eff-import",
+            if phone { "" } else { "Import" },
+            Variant::Default,
+            true,
+            true,
+            "UploadSimple",
+            "",
+            16.0,
+            |_, _, _| {},
+        ));
+        row
+    }
+
+    /// The stack builder's route target, shown as "Not ported yet" (#214).
+    pub fn open_stack_placeholder(&mut self, _name: &str) {
+        self.more_open = false;
+    }
+
+    fn thumbs_needed(&mut self, rows: &[Row], cx: &mut Context<Self>) {
+        for row in rows {
+            let id = row.entry.id.clone();
+            if cached(&id).is_none() && self.thumbs_pending.insert(id.clone()) {
+                fetch_thumb(id, cx.entity(), cx, |_this, cx, _id| {
+                    cx.notify();
+                });
+            }
+        }
+    }
+
+    fn skeletons(&self, count: usize) -> impl IntoElement {
+        let t = &self.theme;
+        let mut grid = div().flex().flex_wrap().gap_2();
+        for _ in 0..count {
+            grid = grid.child(
+                div()
+                    .w(px(168.0))
+                    .flex_none()
+                    .r_lg()
+                    .border_1()
+                    .border_color(Theme::color(t.line))
+                    .bg(Theme::color(t.panel))
+                    .overflow_hidden()
+                    .child(div().w_full().h(px(105.0)).bg(Theme::color(t.raised)))
+                    .child(
+                        div()
+                            .p_2()
+                            .child(div().w(px(80.0)).h(px(12.0)).r_sm().bg(Theme::color(t.raised))),
+                    ),
+            );
+        }
+        grid
+    }
+
+    fn card(&self, _window: &Window, _cx: &mut Context<Self>, row: &Row, card_w: f32, entity: Entity) -> impl IntoElement {
+        let t = &self.theme;
+        let e = &row.entry;
+        let html = e.id.starts_with("html:");
+        let stack = e.id.starts_with("stack:");
+        let selected = Some(&e.id) == self.selected_id().as_ref();
+        let running = self.effects.as_ref().and_then(|x| x.active.as_ref()) == Some(&e.id);
+        let editing = self.editing();
+        let preview_h = card_w * 10.0 / 16.0;
+        let mut card = div()
+            .id(gpui::SharedString::from(format!("eff-card-{}", e.id)))
+            .relative()
+            .flex_none()
+            .w(px(card_w))
+            .r_lg()
+            .border_1()
+            .border_color(if selected { t.live() } else { Theme::color(t.line) })
+            .bg(Theme::color(t.panel))
+            .overflow_hidden()
+            .child(
+                div()
+                    .relative()
+                    .w_full()
+                    .h(px(preview_h))
+                    .bg(Theme::color(t.sunk))
+                    .child(thumb(t, &e.id, card_w, preview_h, cached(&e.id), false)),
+            );
+        if !editing {
+            let mut name_box = div().flex().flex_col().gap(px(2.0)).flex_1().min_w(px(0.0));
+            name_box = name_box.child(marked_name(t, &e.name, &row.ranges));
+            if let Some((excerpt, _)) = &row.excerpt {
+                name_box = name_box.child(
+                    div()
+                        .text_sm()
+                        .font_family(crate::fonts::UI_FAMILY)
+                        .text_color(Theme::color(t.mute))
+                        .child(excerpt.clone()),
+                );
+            }
+            let mut meta = div().flex().items_center().gap_2().p_2().child(name_box);
+            if html {
+                meta = meta.child(chip(t, "eff-chip-html", "HTML", ChipTone::Html, false, false, false));
+            }
+            if stack {
+                meta = meta.child(chip(t, "eff-chip-stack", "Stack", ChipTone::Stack, false, false, false));
+            }
+            if running {
+                meta = meta.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.0))
+                        .flex_none()
+                        .text_sm()
+                        .font_family(crate::fonts::UI_FAMILY)
+                        .text_color(Theme::color(t.ok))
+                        .child(div().size(px(7.0)).rounded_full().bg(Theme::color(t.ok)))
+                        .child("running".to_string()),
+                );
+            }
+            card = card.child(meta);
+            let entity_fav = entity.clone();
+            let fav_id = e.id.clone();
+            let favorite = e.favorite;
+            let is_fav_editing = editing;
+            let star = icon_button(
+                t,
+                &format!("eff-fav-{}", e.id),
+                "Star",
+                if favorite { "fill" } else { "" },
+                false,
+                true,
+                is_fav_editing,
+                move |_, _, cx| {
+                    entity_fav.update(cx, |this, cx| this.toggle_favorite(&fav_id, !favorite, cx));
+                },
+            );
+            card = card.child(div().absolute().top(px(8.0)).right(px(8.0)).child(star));
+        }
+        let entity_open = entity.clone();
+        let open_id = e.id.clone();
+        let is_stack = stack;
+        card.cursor_pointer().on_click(move |_, _, cx| {
+            entity_open.update(cx, |this, cx| {
+                if this.editing() {
+                    return;
+                }
+                if is_stack {
+                    this.open_stack_placeholder(&open_id);
+                } else {
+                    this.pick(&open_id, cx);
+                }
+            });
+        })
+    }
+
+    /// The gallery: loading skeleton, error, empty, or the cards.
+    fn gallery(&mut self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let entity = cx.entity();
+        match (&self.effects, &self.list_error, self.list_busy) {
+            (None, Some(_), false) => {
+                let err = self.list_error.clone().unwrap_or_default();
+                let entity_retry = entity.clone();
+                div()
+                    .flex()
+                    .flex_col()
+                    .min_w(px(0.0))
+                    .p_4()
+                    .r_lg()
+                    .border_1()
+                    .border_color(Theme::color(self.theme.line))
+                    .bg(Theme::color(self.theme.panel))
+                    .child(div().mb_3().child("The effects could not be read".to_string()))
+                    .child(div().child("canvas-rgb could not read the effect list. Nothing was changed.".to_string()))
+                    .child(div().child(err))
+                    .child(div().flex().mt_3().child(button(&self.theme, "eff-try-again", "Try again", Variant::Default, self.list_busy, move |_, _, cx| {
+                        entity_retry.update(cx, |this, cx| this.retry_list(cx));
+                    })))
+                    .into_any_element()
+            }
+            (None, _, _) => {
+                if self.list_loading_shown {
+                    self.skeletons(12).into_any_element()
+                } else {
+                    div().into_any_element()
+                }
+            }
+            (Some(effects), _, _) => {
+                let rows = gallery_list(&effects.effects, &self.query, self.favorites_only, self.category);
+                if rows.is_empty() {
+                    let library_empty = effects.effects.is_empty();
+                    let (icon, title, body) = if library_empty {
+                        ("Waveform", "No effects yet", "This machine has no effect to run. Import an HTML effect to add one.")
+                    } else {
+                        ("MagnifyingGlass", "No effect matches that", "Try fewer words, or clear the filter and the category.")
+                    };
+                    return empty_state(&self.theme, "eff-empty", icon, title, body, None::<gpui::Div>).into_any_element();
+                }
+                let win_w = f32::from(window.window_bounds().get_bounds().size.width);
+                let phone = win_w <= 720.0;
+                let content_w = win_w
+                    - if phone { 0.0 } else if win_w < 1280.0 { 64.0 } else { 200.0 }
+                    - if phone { 32.0 } else { 48.0 };
+                let inspector_w = if content_w < 640.0 {
+                    content_w
+                } else if content_w >= 1500.0 {
+                    400.0
+                } else {
+                    360.0
+                };
+                let gap = 8.0;
+                let gallery_w = if phone { content_w } else { content_w - inspector_w - 16.0 };
+                let min_tile = if content_w <= 999.0 { 140.0 } else { 168.0 };
+                let mut cols = ((gallery_w + gap) / (min_tile + gap)).floor() as usize;
+                if phone {
+                    cols = 2;
+                } else if win_w <= 960.0 && content_w > 999.0 {
+                    cols = 4;
+                } else if win_w <= 860.0 && content_w > 999.0 {
+                    cols = 3;
+                }
+                cols = cols.max(1);
+                let editing = self.editing();
+                let card_w = if editing {
+                    96.0
+                } else {
+                    ((gallery_w - gap * (cols as f32 - 1.0)) / cols as f32).max(96.0)
+                };
+                self.thumbs_needed(&rows, cx);
+                let mut grid = div()
+                    .id(gpui::SharedString::from("eff-gallery"))
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .min_w(px(0.0));
+                for row in &rows {
+                    grid = grid.child(self.card(window, cx, row, card_w, entity.clone()));
+                }
+                grid.into_any_element()
+            }
+        }
+    }
+
+    /// The toolbar: filter, categories, search, the failed-files key.
+    fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = &self.theme;
+        let entity = cx.entity();
+        let filter = if self.favorites_only { "favorites" } else { "all" };
+        let seg = segmented(
+            t,
+            "eff-filter",
+            &[("all", "All"), ("favorites", "Favorites")],
+            filter,
+            {
+                let entity = entity.clone();
+                move |v: String, _, cx| {
+                    entity.update(cx, |this, cx| {
+                        this.favorites_only = v == "favorites";
+                        cx.notify();
+                    });
+                }
+            },
+        );
+        let mut cats = div().flex().flex_wrap().items_center().gap(px(4.0));
+        if self.width <= 720.0 {
+            // Below 640 px the container rule gives the categories their own
+            // full row (`flex: 1 1 100%`): they wrap inside it.
+            cats = cats.w_full();
+        } else {
+            cats = cats.flex_none();
+        }
+        for (category, label, hint) in Category::ALL {
+            let _ = hint;
+            let pressed = self.category == Some(category);
+            let entity = entity.clone();
+            cats = cats.child(chip_button(
+                t,
+                &format!("eff-cat-{label}"),
+                label,
+                ChipTone::Plain,
+                pressed,
+                false,
+                false,
+                move |_, _, cx| {
+                    entity.update(cx, |this, cx| {
+                        this.category = if this.category == Some(category) { None } else { Some(category) };
+                        cx.notify();
+                    });
+                },
+            ));
+        }
+        let search: gpui::AnyElement = div()
+            .relative()
+            .flex()
+            .items_center()
+            .flex_1()
+            .min_w(px(160.0))
+            .child(
+                gpui::svg()
+                    .path("icons/MagnifyingGlass.svg")
+                    .size(px(14.0))
+                    .flex_none()
+                    .text_color(Theme::color(t.mute)),
+            )
+            .child(div().w(px(8.0)).flex_none())
+            .child(self.search_input.clone())
+            .into_any_element();
+        let mut row = div().flex().flex_wrap().items_center().gap(px(8.0)).flex_none().min_w(px(0.0)).child(seg).child(cats).child(search);
+        if let Some(effects) = &self.effects {
+            if !effects.failed.is_empty() {
+                let entity = entity.clone();
+                let label = format!("{} file{} did not load", effects.failed.len(), if effects.failed.len() == 1 { "" } else { "s" });
+                row = row.child(chip_icon_button(
+                    t,
+                    "eff-failed",
+                    &label,
+                    Some(("Warning", "", 14.0)),
+                    ChipTone::Plain,
+                    false,
+                    false,
+                    false,
+                    move |_, _, cx| {
+                        entity.update(cx, |this, cx| {
+                            this.show_failed = !this.show_failed;
+                            cx.notify();
+                        });
+                    },
+                ));
+            }
+        }
+        row
+    }
+
+    fn stale_note(&self) -> impl IntoElement {
+        let t = &self.theme;
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .p_2()
+            .r_md()
+            .border_1()
+            .border_color(Theme::color(t.warn))
+            .bg(Theme::color(t.warn_wash))
+            .text_sm()
+            .font_family(crate::fonts::UI_FAMILY)
+            .text_color(Theme::color(t.warn))
+            .child("The effect list may be out of date.".to_string())
+            .child(
+                div()
+                    .text_sm()
+                    .font_family(crate::fonts::MONO_FAMILY)
+                    .text_color(Theme::color(t.mute))
+                    .child(self.list_error.clone().unwrap_or_default()),
+            )
+    }
+
+    fn import_note(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = &self.theme;
+        let entity = cx.entity();
+        if let Some((file_name, html)) = &self.replace_with {
+            let entity_replace = entity.clone();
+            let entity_cancel = entity.clone();
+            let replace_file = file_name.clone();
+            let replace_html = html.clone();
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .p_2()
+                .r_md()
+                .border_1()
+                .border_color(Theme::color(t.warn))
+                .bg(Theme::color(t.warn_wash))
+                .child(format!("Replace {file_name}?"))
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(button(t, "eff-replace", "Replace", Variant::Primary, self.importing, move |_, _, cx| {
+                            let file = replace_file.clone();
+                            let html = replace_html.clone();
+                            entity_replace.update(cx, |this, cx| this.send_import(&file, &html, true, cx));
+                        }))
+                        .child(button(t, "eff-replace-cancel", "Cancel", Variant::Ghost, false, move |_, _, cx| {
+                            entity_cancel.update(cx, |this, cx| {
+                                this.replace_with = None;
+                                cx.notify();
+                            });
+                        })),
+                )
+        } else if let Some(err) = &self.import_error {
+            div()
+                .p_2()
+                .r_md()
+                .border_1()
+                .border_color(Theme::color(t.down))
+                .text_sm()
+                .font_family(crate::fonts::UI_FAMILY)
+                .text_color(Theme::color(t.down))
+                .child(err.clone())
+        } else {
+            div()
+        }
+    }
+
+    fn detail_pane(&self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        // The detail pane: head, presets, properties (or layers).
+        if self.editing() {
+            return self.editor_pane(cx);
+        }
+        if self.no_layout() && self.loaded_detail.is_none() {
+            return empty_state(
+                &self.theme,
+                "eff-no-layout",
+                "SquaresFour",
+                "No layout to run on yet",
+                "The effects are still here, ready for one.",
+                Some(
+                    div()
+                        .id(gpui::SharedString::from("eff-open-layout"))
+                        .flex()
+                        .items_center()
+                        .h(px(28.0))
+                        .px(px(10.0))
+                        .r_md()
+                        .bg(Theme::color(self.theme.live))
+                        .text_color(Theme::color(self.theme.on_accent))
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .font_family(crate::fonts::UI_FAMILY)
+                        .child("Open the Layout".to_string()),
+                ),
+            )
+            .into_any_element();
+        }
+        let Some(detail) = self.detail() else {
+            if let Some(err) = self.read_error.clone() {
+                let entity = cx.entity();
+                return div()
+                    .flex()
+                    .flex_col()
+                    .min_w(px(0.0))
+                    .p_4()
+                    .r_lg()
+                    .border_1()
+                    .border_color(Theme::color(self.theme.line))
+                    .bg(Theme::color(self.theme.panel))
+                    .child(div().mb_3().child("The effect could not be read".to_string()))
+                    .child(div().child("canvas-rgb could not read that effect. The others are still here.".to_string()))
+                    .child(div().child(err))
+                    .child(div().flex().mt_3().child(button(&self.theme, "eff-detail-retry", "Try again", Variant::Default, false, move |_, _, cx| {
+                        entity.update(cx, |this, cx| this.retry_detail(cx));
+                    })))
+                    .into_any_element();
+            }
+            if self.detail_loading_shown {
+                return div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .min_w(px(0.0))
+                    .child(div().w_full().h(px(220.0)).r_lg().bg(Theme::color(self.theme.raised)))
+                    .child(div().w_full().h(px(120.0)).r_lg().bg(Theme::color(self.theme.raised)))
+                    .into_any_element();
+            }
+            return div().into_any_element();
+        };
+        let t = &self.theme;
+        let selected_id = self.selected_id().unwrap_or_default();
+        let is_stack = selected_id.starts_with("stack:");
+        let needs_input = detail.schema.needs.screen || detail.schema.needs.audio;
+        let running = self.running();
+        let stale = self.stale();
+        let head = self.head_panel(window, cx, &detail, needs_input, running, stale);
+        let running_preset = self.running_preset();
+        let undo = self.undo.as_ref().filter(|u| u.effect_id == detail.schema.id);
+        let entity = cx.entity();
+        let strip = preset_strip::render(
+            t,
+            entity.clone(),
+            &self.preset,
+            self.name_input.clone(),
+            &detail.schema.presets,
+            &detail.user_presets,
+            &detail.schema.properties,
+            &self.live_values(),
+            running_preset.as_ref(),
+            stale,
+            undo,
+            self.width <= 720.0,
+        );
+        let body: gpui::AnyElement = if is_stack {
+            let mut col = div().flex().flex_col().gap_3();
+            col = col.child(
+                div()
+                    .text_sm()
+                    .font_family(crate::fonts::UI_FAMILY)
+                    .text_color(Theme::color(t.dim))
+                    .child(detail.schema.description.clone()),
+            );
+            let mut layers = div().flex().flex_wrap().gap_2();
+            for name in stack_layer_names(&detail.schema) {
+                layers = layers.child(chip(t, "eff-layer-chip", &name, ChipTone::Plain, false, false, false));
+            }
+            col = col.child(layers);
+            col = col.child(
+                div()
+                    .text_sm()
+                    .font_family(crate::fonts::UI_FAMILY)
+                    .text_color(Theme::color(t.dim))
+                    .child("A stack keeps its layers, blends and areas in its own builder; the values have no controls here.".to_string()),
+            );
+            let entity_stack = entity.clone();
+            let stack_id = detail.schema.id.clone();
+            let entity_activate = entity.clone();
+            col = col.child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(button_icon(
+                        t,
+                        "eff-edit-stack",
+                        "Edit stack",
+                        Variant::Primary,
+                        true,
+                        stale,
+                        "PencilSimple",
+                        "",
+                        14.0,
+                        move |_, _, cx| {
+                            entity_stack.update(cx, |this, _cx| this.open_stack_placeholder(&stack_id));
+                        },
+                    ))
+                    .child(button_icon(
+                        t,
+                        "eff-layers-activate",
+                        if running { "Running" } else { "Activate" },
+                        if running { Variant::Default } else { Variant::Primary },
+                        true,
+                        running || stale,
+                        "Play",
+                        "fill",
+                        14.0,
+                        move |_, _, cx| entity_activate.update(cx, |this, cx| this.activate(cx)),
+                    )),
+            );
+            col.into_any_element()
+        } else {
+            let mut col = div().flex().flex_col().min_w(px(0.0));
+            let schema = detail.schema.properties.clone();
+            let vals = self.values.clone();
+            for def in &schema {
+                let value = vals.get(&def.key).cloned().unwrap_or_else(|| def.kind.default_value());
+                col = col.child(self.prop_row(def, &value, entity.clone()));
+            }
+            col.into_any_element()
+        };
+        let error_line = self.write_error.as_ref().and_then(|(id, msg)| {
+            if id.is_none() || id.as_deref() == Some(selected_id.as_str()) {
+                Some(msg.clone())
+            } else {
+                None
+            }
+        });
+        let mut props_panel = panel_with_padding(
+            t,
+            "eff-properties",
+            if is_stack { "Layers" } else { "Properties" },
+            div(),
+            body,
+            Some(12.0),
+        );
+        if let Some(err) = error_line {
+            props_panel = props_panel.child(
+                div()
+                    .mt_2()
+                    .text_sm()
+                    .font_family(crate::fonts::UI_FAMILY)
+                    .text_color(Theme::color(t.down))
+                    .child(err),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .min_w(px(0.0))
+            .child(head)
+            .child(strip)
+            .child(props_panel)
+            .into_any_element()
+    }
+
+    fn head_panel(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+        detail: &canvas_proto::api::EffectDetail,
+        needs_input: bool,
+        running: bool,
+        stale: bool,
+    ) -> impl IntoElement {
+        let t = &self.theme;
+        let entity = cx.entity();
+        let selected_id = self.selected_id().unwrap_or_default();
+        let is_stack = selected_id.starts_with("stack:");
+        let html = selected_id.starts_with("html:");
+        let note_word = if needs_input { "Live frame" } else { "Preview" };
+        let preview = thumb(t, &detail.schema.id, 128.0, 80.0, cached(&detail.schema.id), needs_input);
+        let mut name_row = div().flex().flex_wrap().items_center().gap_2().min_w(px(0.0));
+        name_row = name_row.child(
+            div()
+                .text_size(px(28.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .font_family(crate::fonts::UI_FAMILY)
+                .text_color(Theme::color(t.ink))
+                .child(detail.schema.name.clone()),
+        );
+        if detail.schema.needs.screen {
+            name_row = name_row.child(chip_icon(
+                t,
+                "eff-need-screen",
+                "Screen capture",
+                Some(("MonitorPlay", "", 14.0)),
+                ChipTone::Plain,
+                false,
+                false,
+                false,
+            ));
+        }
+        if detail.schema.needs.audio {
+            name_row = name_row.child(chip_icon(
+                t,
+                "eff-need-audio",
+                "Audio input",
+                Some(("Waveform", "", 14.0)),
+                ChipTone::Plain,
+                false,
+                false,
+                false,
+            ));
+        }
+        if html {
+            name_row = name_row.child(chip(t, "eff-head-html", "HTML effect", ChipTone::Html, false, false, false));
+        }
+        if is_stack {
+            name_row = name_row.child(chip(t, "eff-head-stack", "Stack", ChipTone::Stack, false, false, false));
+        }
+        name_row = name_row.child(state_dot(t, if running { "ok" } else { "mute" }, if running { "Running" } else { "Idle" }));
+        let widest = text_width(window, "Activate", 14.0, gpui::FontWeight::MEDIUM, crate::fonts::UI_FAMILY);
+        let entity_activate = entity.clone();
+        let activate = button_icon_wide(
+            t,
+            "eff-activate",
+            if running { "Running" } else { "Activate" },
+            widest.max(0.0),
+            if running { Variant::Default } else { Variant::Primary },
+            false,
+            running || stale,
+            "Play",
+            "fill",
+            14.0,
+            move |_, _, cx| entity_activate.update(cx, |this, cx| this.activate(cx)),
+        );
+        let head_text = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .flex_1()
+            .min_w(px(0.0))
+            .child(name_row)
+            .child(div().flex().child(activate));
+        // The head favourite is React's `Chip` with the star as its only
+        // child (the name lives in its aria-label, which GPUI does not draw).
+        let entity_fav = entity.clone();
+        let fav_id = detail.schema.id.clone();
+        let favorite = detail.favorite;
+        let fav = chip_icon_button(
+            t,
+            "eff-head-fav",
+            "",
+            Some(("Star", if favorite { "fill" } else { "" }, 16.0)),
+            ChipTone::Plain,
+            favorite,
+            false,
+            false,
+            move |_, _, cx| entity_fav.update(cx, |this, cx| this.toggle_favorite(&fav_id, !favorite, cx)),
+        );
+        let head_row = div().flex().items_start().gap_3().child(preview).child(head_text).child(fav);
+        let mut panel = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_3()
+            .r_lg()
+            .border_1()
+            .border_color(Theme::color(t.line))
+            .bg(Theme::color(t.panel))
+            .child(head_row)
+            .child(
+                div()
+                    .flex()
+                    .items_baseline()
+                    .gap_3()
+                    .min_w(px(0.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_sm()
+                            .font_family(crate::fonts::UI_FAMILY)
+                            .text_color(Theme::color(t.dim))
+                            .child(detail.schema.description.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_sm()
+                            .font_family(crate::fonts::UI_FAMILY)
+                            .text_color(Theme::color(t.mute))
+                            .child(note_word.to_string()),
+                    ),
+            );
+        // The delete block (html: effects only).
+        if html {
+            let deleting = self.deleting.as_deref() == Some(selected_id.as_str());
+            if deleting {
+                let presets = detail.user_presets.len();
+                let text = {
+                    let mut s = String::new();
+                    if running {
+                        s.push_str(&format!("{} is playing. ", detail.schema.name));
+                    }
+                    if presets > 0 {
+                        s.push_str(&format!("Delete it? It has {presets} preset{} of yours.", if presets == 1 { "" } else { "s" }));
+                    } else {
+                        s.push_str("Delete it anyway?");
+                    }
+                    s
+                };
+                let entity_delete = entity.clone();
+                let entity_keep = entity.clone();
+                let entity_cancel = entity.clone();
+                let delete_id = selected_id.clone();
+                let cancel_id = selected_id.clone();
+                let mut row = div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .pt_2()
+                    .border_t_1()
+                    .border_color(Theme::color(t.line))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_family(crate::fonts::UI_FAMILY)
+                            .text_color(Theme::color(t.dim))
+                            .child(text),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(button(
+                                t,
+                                "eff-delete-confirm",
+                                if presets > 0 { "Delete with presets" } else { "Delete" },
+                                Variant::Primary,
+                                false,
+                                move |_, _, cx| {
+                                    entity_delete.update(cx, |this, cx| this.delete_effect(&delete_id, false, cx));
+                                },
+                            )),
+                    );
+                if presets > 0 {
+                    row = row.child(button(t, "eff-keep-presets", "Keep presets", Variant::Default, false, move |_, _, cx| {
+                        entity_keep.update(cx, |this, cx| this.delete_effect(&cancel_id, true, cx));
+                    }));
+                }
+                row = row.child(button(t, "eff-delete-cancel", "Cancel", Variant::Ghost, false, move |_, _, cx| {
+                    entity_cancel.update(cx, |this, cx| {
+                        this.deleting = None;
+                        cx.notify();
+                    });
+                }));
+                panel = panel.child(row);
+            } else {
+                let entity_edit = entity.clone();
+                let entity_delete = entity.clone();
+                let edit_id = selected_id.clone();
+                let delete_id = selected_id.clone();
+                panel = panel.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .pt_2()
+                        .border_t_1()
+                        .border_color(Theme::color(t.line))
+                        .child(button_icon(
+                            t,
+                            "eff-edit-code",
+                            "Edit code",
+                            Variant::Ghost,
+                            true,
+                            stale,
+                            "PencilSimple",
+                            "",
+                            16.0,
+                            move |_, _, cx| {
+                                entity_edit.update(cx, |this, cx| this.start_edit(&edit_id, cx));
+                            },
+                        ))
+                        .child(button_icon(
+                            t,
+                            "eff-delete",
+                            "Delete effect",
+                            Variant::Ghost,
+                            true,
+                            false,
+                            "Trash",
+                            "",
+                            16.0,
+                            move |_, _, cx| {
+                                entity_delete.update(cx, |this, cx| {
+                                    this.deleting = Some(delete_id.clone());
+                                    cx.notify();
+                                });
+                            },
+                        )),
+                );
+            }
+        }
+        panel
+    }
+
+    fn prop_row(&self, def: &canvas_proto::props::PropertyDef, value: &canvas_proto::props::PropValue, entity: Entity) -> impl IntoElement {
+        let t = &self.theme;
+        let narrow = self.width <= 720.0;
+        let kind_name = match &def.kind {
+            canvas_proto::props::PropKind::Number { .. } => "number",
+            canvas_proto::props::PropKind::Color { .. } => "color",
+            canvas_proto::props::PropKind::Bool { .. } => "bool",
+            canvas_proto::props::PropKind::Choice { .. } => "choice",
+            canvas_proto::props::PropKind::Hue { .. } => "hue",
+            canvas_proto::props::PropKind::Angle { .. } => "angle",
+        };
+        let label_el = div()
+            .flex_1()
+            .min_w(px(0.0))
+            .text_size(px(15.0))
+            .line_height(gpui::relative(1.45))
+            .font_family(crate::fonts::UI_FAMILY)
+            .text_color(Theme::color(t.ink))
+            .child(def.label.clone());
+        let change_cb: OnChange = self.change_callback(&def.key, entity.clone());
+        let toggle_color = {
+            let entity = entity.clone();
+            let key = def.key.clone();
+            std::rc::Rc::new(move |_w: &mut Window, cx: &mut gpui::App| {
+                entity.update(cx, |this, cx| {
+                    this.color_open = if this.color_open_for(&key) { None } else { Some(key.clone()) };
+                    cx.notify();
+                });
+            }) as crate::components::prop_controls::OnToggle
+        };
+        let toggle_select = {
+            let entity = entity.clone();
+            let key = def.key.clone();
+            std::rc::Rc::new(move |_w: &mut Window, cx: &mut gpui::App| {
+                entity.update(cx, |this, cx| {
+                    let entry = this.select_open.entry(key.clone()).or_insert(false);
+                    *entry = !*entry;
+                    cx.notify();
+                });
+            }) as crate::components::prop_controls::OnToggle
+        };
+        let schema: Vec<canvas_proto::props::PropertyDef> = self.loaded_detail.as_ref().map(|d| d.schema.properties.clone()).unwrap_or_default();
+        let values = self.values.clone();
+        let control_el = control(
+            t,
+            &def.key,
+            &def.label,
+            &def.kind,
+            value,
+            &schema,
+            &values,
+            false,
+            self.color_open_for(&def.key),
+            self.select_open.get(&def.key).copied().unwrap_or(false),
+            change_cb,
+            toggle_color,
+            toggle_select,
+        );
+        if narrow && kind_name != "number" {
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .min_h(px(44.0))
+                .py_1()
+                .border_b_1()
+                .border_color(Theme::color(t.line))
+                .child(label_el)
+                .child(control_el)
+        } else if kind_name == "number" || kind_name == "hue" || kind_name == "angle" {
+            div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .min_h(px(52.0))
+                .py_1()
+                .border_b_1()
+                .border_color(Theme::color(t.line))
+                .child(div().w(px(96.0)).flex_none().child(label_el))
+                .child(div().flex().items_center().gap_3().flex_1().min_w(px(0.0)).child(control_el))
+        } else {
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .min_h(px(52.0))
+                .py_1()
+                .border_b_1()
+                .border_color(Theme::color(t.line))
+                .child(div().w(px(140.0)).flex_none().child(label_el))
+                .child(div().flex().items_center().gap_2().justify_end().flex_1().min_w(px(0.0)).child(control_el))
+        }
+    }
+
+    fn color_open_for(&self, key: &str) -> bool {
+        self.color_open.as_deref() == Some(key)
+    }
+
+    fn editor_pane(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = &self.theme;
+        let entity = cx.entity();
+        let narrow = self.width <= 720.0;
+        match &self.editor {
+            EditorState::Open(target) => {
+                let mut col = div().flex().flex_col().gap_3().min_w(px(0.0));
+                col = col.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .min_h(px(36.0))
+                        .child(
+                            div()
+                                .text_size(px(22.0))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .font_family(crate::fonts::UI_FAMILY)
+                                .text_color(Theme::color(t.ink))
+                                .child("New from code".to_string()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_sm()
+                                .font_family(crate::fonts::UI_FAMILY)
+                                .text_color(Theme::color(t.mute))
+                                .child(format!("{} · {}", target.name, target.file_name)),
+                        ),
+                );
+                if !narrow {
+                    let entity_cancel = entity.clone();
+                    col = col.child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .child(button(t, "eff-editor-cancel", "Cancel", Variant::Ghost, false, move |_, _, cx| {
+                                entity_cancel.update(cx, |this, _cx| this.close_editor());
+                            })),
+                    );
+                }
+                col.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap_3()
+                        .p_8()
+                        .r_lg()
+                        .border_1()
+                        .border_color(Theme::color(t.line))
+                        .bg(Theme::color(t.panel))
+                        .child(
+                            div()
+                                .text_base()
+                                .font_family(crate::fonts::UI_FAMILY)
+                                .text_color(Theme::color(t.dim))
+                                .child("Not ported yet"),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_family(crate::fonts::UI_FAMILY)
+                                .text_color(Theme::color(t.mute))
+                                .child("The effect editor is issue #214; this pane is its route target.".to_string()),
+                        ),
+                )
+                .into_any_element()
+            }
+            EditorState::Error { message, .. } => {
+                let entity_retry = entity.clone();
+                div()
+                    .flex()
+                    .flex_col()
+                    .min_w(px(0.0))
+                    .p_4()
+                    .r_lg()
+                    .border_1()
+                    .border_color(Theme::color(t.line))
+                    .bg(Theme::color(t.panel))
+                    .child(div().mb_3().child("The code could not be read".to_string()))
+                    .child(div().child("canvas-rgb could not read that effect's file. Nothing was changed.".to_string()))
+                    .child(div().child(message.clone()))
+                    .child(div().flex().mt_3().child(button(t, "eff-code-retry", "Try again", Variant::Default, false, move |_, _, cx| {
+                        entity_retry.update(cx, |this, cx| this.retry_edit(cx));
+                    })))
+                    .into_any_element()
+            }
+            EditorState::Loading => div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .min_w(px(0.0))
+                .child(div().w_full().h(px(220.0)).r_lg().bg(Theme::color(t.raised)))
+                .child(div().w_full().h(px(120.0)).r_lg().bg(Theme::color(t.raised)))
+                .into_any_element(),
+            EditorState::Closed => {
+                if self.new_open {
+                    self.chooser(entity)
+                } else {
+                    div().into_any_element()
+                }
+            }
+        }
+    }
+
+    fn chooser(&self, entity: Entity) -> gpui::AnyElement {
+        let t = &self.theme;
+        let narrow = self.width <= 720.0;
+        let list: Vec<canvas_proto::api::EffectSummary> = self
+            .effects
+            .as_ref()
+            .map(|e| e.effects.iter().filter(|x| x.id.starts_with("html:")).cloned().collect())
+            .unwrap_or_default();
+        let mut col = div().flex().flex_col().gap_3().min_w(px(0.0));
+        let entity_cancel = entity.clone();
+        let mut head = div().flex().items_center().gap_2().min_h(px(36.0));
+        if narrow {
+            let entity_back = entity.clone();
+            head = head.child(icon_button(
+                t,
+                "eff-choose-back",
+                "CaretLeft",
+                "",
+                false,
+                false,
+                false,
+                move |_, _, cx| {
+                    entity_back.update(cx, |this, _cx| {
+                        this.new_open = false;
+                        if this.width <= 720.0 {
+                            this.pushed = false;
+                        }
+                    });
+                },
+            ));
+        }
+        head = head
+            .child(
+                div()
+                    .text_size(px(22.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .font_family(crate::fonts::UI_FAMILY)
+                    .text_color(Theme::color(t.ink))
+                    .child("New from code".to_string()),
+            )
+            .child(div().flex_1());
+        if !narrow {
+            head = head.child(button(t, "eff-choose-cancel", "Cancel", Variant::Ghost, false, move |_, _, cx| {
+                entity_cancel.update(cx, |this, _cx| {
+                    this.new_open = false;
+                });
+            }));
+        }
+        col = col.child(head);
+        // Copy an effect.
+        let mut copy_body = div().flex().flex_col().gap_2();
+        copy_body = copy_body.child(
+            div()
+                .text_sm()
+                .font_family(crate::fonts::UI_FAMILY)
+                .text_color(Theme::color(t.dim))
+                .child("A user or stock HTML effect. Its author and licence line stay at the top of the file.".to_string()),
+        );
+        if list.is_empty() {
+            copy_body = copy_body.child(
+                div()
+                    .text_sm()
+                    .font_family(crate::fonts::UI_FAMILY)
+                    .text_color(Theme::color(t.dim))
+                    .child("There is no HTML effect to copy yet. Start blank instead.".to_string()),
+            );
+        } else {
+            for effect in &list {
+                let entity_copy = entity.clone();
+                let copy_id = effect.id.clone();
+                let busy = self.new_busy.is_some();
+                copy_body = copy_body.child(
+                    div()
+                        .id(gpui::SharedString::from(format!("eff-choose-{}", effect.id)))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .w_full()
+                        .p(px(4.0))
+                        .r_sm()
+                        .bg(Theme::color(t.raised))
+                        .child(thumb(t, &effect.id, 64.0, 40.0, cached(&effect.id), false))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_sm()
+                                .font_family(crate::fonts::UI_FAMILY)
+                                .text_color(Theme::color(t.ink))
+                                .child(effect.name.clone()),
+                        )
+                        .child(chip(t, "eff-choose-html", "HTML", ChipTone::Html, false, false, false))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .text_sm()
+                                .font_family(crate::fonts::UI_FAMILY)
+                                .text_color(Theme::color(t.dim))
+                                .child(if self.new_busy.as_deref() == Some(effect.id.as_str()) {
+                                    "Reading…".to_string()
+                                } else {
+                                    "Copy".to_string()
+                                }),
+                        )
+                        .cursor_pointer()
+                        .on_click(move |_, _, cx| {
+                            if busy {
+                                return;
+                            }
+                            entity_copy.update(cx, |this, cx| this.start_copy(&copy_id, cx));
+                        }),
+                );
+            }
+        }
+        if let Some(err) = &self.new_error {
+            copy_body = copy_body.child(
+                div()
+                    .text_sm()
+                    .font_family(crate::fonts::UI_FAMILY)
+                    .text_color(Theme::color(t.down))
+                    .child(err.clone()),
+            );
+        }
+        col = col.child(panel_with_padding(t, "eff-choose-copy", "Copy an effect", div(), copy_body, Some(12.0)));
+        // Start blank.
+        let entity_blank = entity.clone();
+        let blank_body = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .text_sm()
+                    .font_family(crate::fonts::UI_FAMILY)
+                    .text_color(Theme::color(t.dim))
+                    .child("The minimal file from the docs: a canvas, a colour and a draw loop that moves.".to_string()),
+            )
+            .child(div().flex().child(button_icon(
+                t,
+                "eff-blank",
+                "Blank effect",
+                Variant::Primary,
+                true,
+                self.new_busy.is_some(),
+                "FilePlus",
+                "",
+                15.0,
+                move |_, _, cx| {
+                    entity_blank.update(cx, |this, _cx| this.start_blank());
+                },
+            )));
+        col = col.child(panel_with_padding(t, "eff-choose-blank", "Start blank", div(), blank_body, Some(12.0)));
+        col.into_any_element()
+    }
+}
+
+/// A card name with the matched letters marked (React `Highlighted`): the
+/// mark is the live accent at 20%, so `live_soft` (16%) is the nearest
+/// token value the theme parser serves.
+fn marked_name(t: &Theme, name: &str, ranges: &[(usize, usize)]) -> impl IntoElement {
+    let mut row = div()
+        .flex()
+        .items_center()
+        .whitespace_nowrap()
+        .overflow_hidden()
+        .text_sm()
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .font_family(crate::fonts::UI_FAMILY)
+        .text_color(Theme::color(t.ink));
+    if ranges.is_empty() {
+        return row.child(name.to_string()).into_any_element();
+    }
+    let mut at = 0usize;
+    for (start, end) in ranges {
+        if *start > at {
+            row = row.child(div().flex_none().child(name[at..*start].to_string()));
+        }
+        row = row.child(
+            div()
+                .flex_none()
+                .r_sm()
+                .bg(t.live_soft())
+                .text_color(Theme::color(t.ink))
+                .child(name[*start..*end].to_string()),
+        );
+        at = *end;
+    }
+    if at < name.len() {
+        row = row.child(div().flex_none().child(name[at..].to_string()));
+    }
+    row.into_any_element()
+}
+
+impl Render for EffectsView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.width = f32::from(window.window_bounds().get_bounds().size.width);
+        let t = self.theme;
+        let phone = self.width <= 720.0;
+        let content_w = self.width
+            - if phone { 0.0 } else if self.width < 1280.0 { 64.0 } else { 200.0 }
+            - if phone { 32.0 } else { 48.0 };
+        let inspector_w = if content_w < 640.0 {
+            content_w
+        } else if content_w >= 1500.0 {
+            400.0
+        } else {
+            360.0
+        };
+        let entity = cx.entity();
+        let gallery = self.gallery(window, cx);
+        let detail = self.detail_pane(window, cx);
+        let toolbar = self.toolbar(cx);
+        let stale_note = if self.list_stale() {
+            self.stale_note().into_any_element()
+        } else {
+            div().into_any_element()
+        };
+        let import_note = self.import_note(cx).into_any_element();
+        let body: gpui::AnyElement = if phone {
+            if self.pushed {
+                let entity_back = entity.clone();
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .min_w(px(0.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .flex_none()
+                            .child(icon_button(
+                                &t,
+                                "eff-back",
+                                "CaretLeft",
+                                "",
+                                false,
+                                false,
+                                false,
+                                move |_, _, cx| {
+                                    entity_back.update(cx, |this, _cx| this.close_sheet());
+                                },
+                            ))
+                            .child(
+                                div()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .font_family(crate::fonts::UI_FAMILY)
+                                    .text_color(Theme::color(t.ink))
+                                    .child("Effects".to_string()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id(gpui::SharedString::from("eff-sheet-scroll"))
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_h(px(0.0))
+                            .overflow_y_scroll()
+                            .child(detail),
+                    )
+                    .into_any_element()
+            } else {
+                div()
+                    .id(gpui::SharedString::from("eff-gallery-scroll"))
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .overflow_y_scroll()
+                    .child(gallery)
+                    .into_any_element()
+            }
+        } else {
+            let gallery_col = div()
+                .id(gpui::SharedString::from("eff-gallery-scroll"))
+                .flex()
+                .flex_1()
+                .min_w(px(0.0))
+                .min_h(px(0.0))
+                .overflow_y_scroll()
+                .child(gallery);
+            let inspector_col = div()
+                .id(gpui::SharedString::from("eff-inspector-scroll"))
+                .w(px(inspector_w))
+                .flex_none()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .min_w(px(0.0))
+                .min_h(px(0.0))
+                .overflow_y_scroll()
+                .child(detail);
+            div()
+                .flex()
+                .gap_4()
+                .flex_1()
+                .min_h(px(0.0))
+                .min_w(px(0.0))
+                .child(gallery_col)
+                .child(inspector_col)
+                .into_any_element()
+        };
+        let mut page = div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .flex_1()
+            .min_h(px(0.0))
+            .min_w(px(0.0))
+            .child(toolbar);
+        if self.replace_with.is_some() || self.import_error.is_some() {
+            page = page.child(import_note);
+        }
+        if self.list_stale() {
+            page = page.child(stale_note);
+        }
+        page = page.child(body);
+        if let Some(toast) = self.toast.clone() {
+            let entity_undo = entity.clone();
+            page = page.child(
+                div()
+                    .absolute()
+                    .bottom(px(16.0))
+                    .left(px(16.0))
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .p_2()
+                    .r_md()
+                    .border_1()
+                    .border_color(Theme::color(t.line_2))
+                    .bg(Theme::color(t.panel))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_family(crate::fonts::UI_FAMILY)
+                            .text_color(Theme::color(t.ink))
+                            .child(toast),
+                    )
+                    .child(button(&t, "eff-toast-undo", "Undo", Variant::Default, false, move |_, _, cx| {
+                        entity_undo.update(cx, |this, cx| {
+                            this.toast = None;
+                            this.do_undo(cx);
+                        });
+                    })),
+            );
+        }
+        page
+    }
+}

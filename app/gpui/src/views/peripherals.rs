@@ -22,18 +22,16 @@
 
 use std::collections::HashMap;
 
-use canvas_proto::color::Rgb8;
 use canvas_proto::peripheral::{PeripheralDetail, PeripheralInfo, PeripheralKind, ReadProgress, ReadStage};
 use canvas_proto::props::{PropKind, PropValue, Props, PropertyDef};
-use gpui::{Bounds, Context, IntoElement, Window, canvas, div, point, prelude::*, px, size};
+use gpui::{Context, IntoElement, Window, canvas, div, point, prelude::*, px};
 use serde::Deserialize;
 
 use crate::client::DaemonClient;
 use crate::components::button::{Variant, button, button_icon};
-use crate::components::number_field::number_field;
 use crate::components::panel::{state_dot, tracked_title};
-use crate::components::segmented::{segmented, segmented_disabled};
-use crate::components::slider::{Origin, slider_range};
+use crate::components::prop_controls::{control, control_words};
+use crate::components::slider::Origin;
 use crate::components::toggle::{toggle, toggle_disabled};
 use crate::theme::{Theme, TokenRadius};
 
@@ -203,19 +201,13 @@ pub fn keep_live<T: Clone>(prev: &HashMap<String, T>, live: &std::collections::H
     prev.iter().filter(|(id, _)| live.contains(*id)).map(|(k, v)| (k.clone(), v.clone())).collect()
 }
 
-/// Decimal places a step needs (`decimalsOf`).
-pub fn decimals_of(step: f64) -> usize {
-    let s = step.to_string();
-    match s.find('.') {
-        None => 0,
-        Some(dot) => (s.len() - dot - 1).min(2),
-    }
-}
-
-/// The default value for a missing key (`defaultFor`).
-pub fn default_for(kind: &PropKind) -> PropValue {
-    kind.default_value()
-}
+/// The property-control rules this view shares with the Effects page
+/// (moved into `components/prop_controls`).
+#[allow(unused_imports)]
+pub use crate::components::prop_controls::{
+    angle_now, angle_step, colour_swatches, decimals_of, default_for, format_number, hex_to_hsv,
+    hsv_to_hex, hue_step, is_hex, parse_hex, quantise_step, wrap_deg,
+};
 
 /// The value a key holds, plain (`readStage`/`DpiPanel` `plain`): the number
 /// or choice text, or None when absent.
@@ -441,117 +433,6 @@ pub fn hit_rect(spot: &Spot) -> (f32, f32, f32, f32) {
     let hw = spot.w.max(MIN_HIT);
     let hh = spot.h.max(MIN_HIT);
     (spot.cx - hw / 2.0, spot.cy - hh / 2.0, hw, hh)
-}
-
-/// Wrap degrees into 0..360 (`HueRing`/`AngleDial`).
-pub fn wrap_deg(deg: f64) -> f64 {
-    ((deg % 360.0) + 360.0) % 360.0
-}
-
-/// A hue step (`HueRing` arrows: 3 degrees, shift 15).
-#[allow(dead_code)]
-pub fn hue_step(current: f64, delta: f64) -> f64 {
-    wrap_deg(current + delta)
-}
-
-/// An angle step (`AngleDial` arrows: 1 degree, shift 15, Home 0, End 359).
-#[allow(dead_code)]
-pub fn angle_step(current: f64, delta: f64) -> f64 {
-    wrap_deg(current + delta)
-}
-
-/// The angle read-out (`AngleDial` `now`): rounded and wrapped to 0..=359.
-pub fn angle_now(deg: f64) -> i32 {
-    ((wrap_deg(deg).round() as i64) % 360) as i32
-}
-
-/// The HSV conversions `ColorPicker` works in (copied from Settings).
-pub fn hex_to_hsv(hex: &str, keep_hue: f32) -> (f32, f32, f32) {
-    let raw = hex.strip_prefix('#').unwrap_or(hex);
-    if raw.len() != 6 {
-        return (keep_hue, 0.0, 0.0);
-    }
-    let p = |i: usize| u8::from_str_radix(&raw[i..i + 2], 16).unwrap_or(0) as f32 / 255.0;
-    let (r, g, b) = (p(0), p(2), p(4));
-    let max = r.max(g).max(b);
-    let min = r.min(g).min(b);
-    let d = max - min;
-    let mut h = keep_hue;
-    if d > 0.0 {
-        if max == r {
-            h = (g - b) / d;
-        } else if max == g {
-            h = (b - r) / d + 2.0;
-        } else {
-            h = (r - g) / d + 4.0;
-        }
-        h = (h * 60.0).rem_euclid(360.0);
-    }
-    (h, if max == 0.0 { 0.0 } else { d / max }, max)
-}
-
-/// HSV to `#rrggbb` (copied from Settings).
-pub fn hsv_to_hex(h: f32, s: f32, v: f32) -> String {
-    let hue = h.rem_euclid(360.0);
-    let c = v * s;
-    let x = c * (1.0 - ((hue / 60.0) % 2.0 - 1.0).abs());
-    let m = v - c;
-    let seg = ((hue / 60.0).floor() as usize) % 6;
-    let (r, g, b) = match seg {
-        0 => (c, x, 0.0),
-        1 => (x, c, 0.0),
-        2 => (0.0, c, x),
-        3 => (0.0, x, c),
-        4 => (x, 0.0, c),
-        _ => (c, 0.0, x),
-    };
-    let byte = |n: f32| ((n + m).clamp(0.0, 1.0) * 255.0).round() as u8;
-    format!("#{:02x}{:02x}{:02x}", byte(r), byte(g), byte(b))
-}
-
-/// Parse `#rrggbb` (or a bare `rrggbb`) to `Rgb8`; None when it does not parse.
-pub fn parse_hex(hex: &str) -> Option<Rgb8> {
-    hex.parse::<Rgb8>().ok()
-}
-
-/// Whether a value is a valid `#rrggbb` (`isHex`).
-#[allow(dead_code)]
-pub fn is_hex(value: &str) -> bool {
-    parse_hex(value).is_some()
-}
-
-/// The swatch list for a colour field (`PropertyControls.tsx:130-138`): the
-/// other colours of the same schema, excluding the field's own colour and
-/// any that do not parse.
-pub fn colour_swatches(
-    properties: &[PropertyDef],
-    values: &Props,
-    own_key: &str,
-    own_hex: &str,
-) -> Vec<(String, String)> {
-    let own = own_hex.to_lowercase();
-    let mut out = Vec::new();
-    for other in properties {
-        if other.key == own_key {
-            continue;
-        }
-        let PropKind::Color { default } = other.kind else {
-            continue;
-        };
-        let held = values.get(&other.key);
-        let other_hex = match held {
-            Some(PropValue::Color(c)) => c.to_hex(),
-            _ => default.to_hex(),
-        };
-        let Some(parsed) = parse_hex(&other_hex) else {
-            continue;
-        };
-        if parsed.to_hex() == own {
-            continue;
-        }
-        out.push((parsed.to_hex(), other.label.clone()));
-    }
-    out
 }
 
 /// The page title context (`PageTitle` context): `"{n} found"`, with 0 while
@@ -1165,6 +1046,7 @@ impl PeripheralsView {
 
     /// The slider's measured box for `key`: fresh every render, shared by the
     /// fader's canvas and its drag handlers for that render.
+    #[allow(dead_code)]
     fn slider_origin(&self, key: &str) -> Origin {
         let _ = key;
         Origin::new()
@@ -1559,7 +1441,9 @@ impl PeripheralsView {
         }
     }
 
-    /// The control for one property (`control()` in PropertyControls).
+    /// The control for one property (`control()` in PropertyControls):
+    /// delegated to the shared `components::prop_controls::control`, with
+    /// this view's choice words remapped through `control_words`.
     #[allow(clippy::too_many_arguments)]
     fn prop_control(
         &self,
@@ -1573,115 +1457,79 @@ impl PeripheralsView {
         view_entity: gpui::Entity<Self>,
     ) -> gpui::AnyElement {
         let t = &self.theme;
-        match kind {
-            PropKind::Number { min, max, step, default } => {
-                let n = match value {
-                    PropValue::Number(n) => *n as f32,
-                    _ => *default as f32,
-                };
-                let min_f = *min as f32;
-                let max_f = *max as f32;
-                let step_f = *step as f32;
-                let key_owned = key.to_string();
-                let entity_a = view_entity.clone();
-                let key_a = key_owned.clone();
-                let on_change = move |v: f32, _: &mut Window, cx: &mut gpui::App| {
-                    let stepped = quantise_step(v, min_f, max_f, step_f);
-                    entity_a.update(cx, |this, cx| this.on_change(&key_a, PropValue::Number(stepped as f64), cx));
-                };
-                let entity_b = view_entity.clone();
-                let key_b = key_owned.clone();
-                let on_commit = move |v: f32, _: &mut Window, cx: &mut gpui::App| {
-                    let stepped = quantise_step(v, min_f, max_f, step_f);
-                    entity_b.update(cx, |this, cx| this.on_change(&key_b, PropValue::Number(stepped as f64), cx));
-                };
-                let decimals = decimals_of(*step);
-                let key_c = key_owned.clone();
-                let entity_c = view_entity.clone();
-                let on_field = move |v: f32, _: &mut Window, cx: &mut gpui::App| {
-                    let stepped = quantise_step(v, min_f, max_f, step_f);
-                    entity_c.update(cx, |this, cx| this.on_change(&key_c, PropValue::Number(stepped as f64), cx));
-                };
-                let _ = decimals;
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .child(slider_range(t, &format!("{key}-slider"), n, min_f, max_f, disabled, self.slider_origin(key), on_change, on_commit))
-                    .child(number_field(t, &format!("{key}-field"), n, min_f, max_f, step_f, None, on_field))
-                    .into_any_element()
-            }
-            PropKind::Bool { default } => {
-                let on = match value {
-                    PropValue::Bool(b) => *b,
-                    _ => *default,
-                };
-                let key_owned = key.to_string();
-                let entity = view_entity.clone();
-                let inner = move |v: bool, _: &mut Window, cx: &mut gpui::App| {
-                    entity.update(cx, |this, cx| this.on_change(&key_owned, PropValue::Bool(v), cx));
-                };
-                if disabled {
-                    toggle_disabled(t, &format!("{key}-toggle"), on, inner).into_any_element()
-                } else {
-                    toggle(t, &format!("{key}-toggle"), on, inner).into_any_element()
-                }
-            }
-            PropKind::Choice { options, default } => {
-                let current = match value {
-                    PropValue::Choice(s) => s.clone(),
-                    _ => default.clone(),
-                };
-                if options.len() <= 4 {
-                    let words: Vec<String> = options.iter().map(|o| choice_word(o)).collect();
-                    let opts: Vec<(&str, &str)> = options
-                        .iter()
-                        .zip(words.iter())
-                        .map(|(o, w)| (o.as_str(), w.as_str()))
-                        .collect();
-                    let _ = label;
-                    if disabled {
-                        segmented_disabled(t, &format!("{key}-seg"), &opts, &current, |_, _, _| {}).into_any_element()
-                    } else {
-                        let key_owned = key.to_string();
-                        let entity = view_entity.clone();
-                        segmented(t, &format!("{key}-seg"), &opts, &current, move |v: String, _: &mut Window, cx: &mut gpui::App| {
-                            entity.update(cx, |this, cx| this.on_change(&key_owned, PropValue::Choice(v), cx));
-                        }).into_any_element()
-                    }
-                } else {
-                    self.choice_select(key, label, options, &current, disabled, view_entity).into_any_element()
-                }
-            }
-            PropKind::Color { default } => {
-                let hex = match value {
-                    PropValue::Color(c) => c.to_hex(),
-                    _ => default.to_hex(),
-                };
-                self.color_field(key, label, &hex, schema_properties, values, disabled, view_entity).into_any_element()
-            }
-            PropKind::Hue { default } => {
-                let deg = match value {
-                    PropValue::Hue(n) => *n as f32,
-                    _ => *default as f32,
-                };
-                self.hue_control(key, label, deg, disabled, view_entity).into_any_element()
-            }
-            PropKind::Angle { default } => {
-                let deg = match value {
-                    PropValue::Angle(n) => *n as f32,
-                    PropValue::Hue(n) => *n as f32,
-                    PropValue::Number(n) => (*n).clamp(0.0, 360.0) as f32,
-                    _ => *default as f32,
-                };
-                self.angle_control(key, label, deg, disabled, view_entity).into_any_element()
-            }
+        if let PropKind::Choice { options, .. } = kind {
+            let pairs: Vec<(String, String)> = options
+                .iter()
+                .map(|o| (o.clone(), choice_word(o)))
+                .collect();
+            let open = self.select_open.get(key).copied().unwrap_or(false);
+            let entity = view_entity.clone();
+            let key_owned = key.to_string();
+            let on = std::rc::Rc::new(move |v: PropValue, window: &mut Window, cx: &mut gpui::App| {
+                entity.update(cx, |this, cx| this.on_change(&key_owned, v, cx));
+                let _ = window;
+            }) as crate::components::prop_controls::OnChange;
+            let entity_toggle = view_entity.clone();
+            let key_toggle = key.to_string();
+            let toggle = std::rc::Rc::new(move |window: &mut Window, cx: &mut gpui::App| {
+                entity_toggle.update(cx, |this, cx| {
+                    let entry = this.select_open.entry(key_toggle.clone()).or_insert(false);
+                    *entry = !*entry;
+                    cx.notify();
+                });
+                let _ = window;
+            }) as crate::components::prop_controls::OnToggle;
+            return control_words(t, key, label, value, &pairs, disabled, open, on, toggle);
         }
+        let color_open = self.color_open.as_deref() == Some(key);
+        let select_open = self.select_open.get(key).copied().unwrap_or(false);
+        let entity = view_entity.clone();
+        let key_owned = key.to_string();
+        let on = std::rc::Rc::new(move |v: PropValue, window: &mut Window, cx: &mut gpui::App| {
+            entity.update(cx, |this, cx| this.on_change(&key_owned, v, cx));
+            let _ = window;
+        }) as crate::components::prop_controls::OnChange;
+        let entity_color = view_entity.clone();
+        let key_color = key.to_string();
+        let toggle_color = std::rc::Rc::new(move |window: &mut Window, cx: &mut gpui::App| {
+            entity_color.update(cx, |this, cx| {
+                this.color_open = if this.color_open.as_deref() == Some(key_color.as_str()) {
+                    None
+                } else {
+                    Some(key_color.clone())
+                };
+                cx.notify();
+            });
+            let _ = window;
+        }) as crate::components::prop_controls::OnToggle;
+        let entity_select = view_entity.clone();
+        let key_select = key.to_string();
+        let toggle_select = std::rc::Rc::new(move |window: &mut Window, cx: &mut gpui::App| {
+            entity_select.update(cx, |this, cx| {
+                let entry = this.select_open.entry(key_select.clone()).or_insert(false);
+                *entry = !*entry;
+                cx.notify();
+            });
+            let _ = window;
+        }) as crate::components::prop_controls::OnToggle;
+        control(
+            t,
+            key,
+            label,
+            kind,
+            value,
+            schema_properties,
+            values,
+            disabled,
+            color_open,
+            select_open,
+            on,
+            toggle_color,
+            toggle_select,
+        )
     }
 
-    /// A choice with more than 4 options (`Select`).
+    /// A choice with more than 4 options (`Select`), with this view's words.
     fn choice_select(
         &self,
         key: &str,
@@ -1693,445 +1541,28 @@ impl PeripheralsView {
     ) -> impl IntoElement {
         let t = &self.theme;
         let open = self.select_open.get(key).copied().unwrap_or(false);
-        let opts: Vec<(String, String)> = options.iter().map(|o| (o.clone(), choice_word(o))).collect();
-        let refs: Vec<(&str, &str)> = opts.iter().map(|(v, l)| (v.as_str(), l.as_str())).collect();
-        let id = format!("{key}-select");
-        let entity_toggle = view_entity.clone();
-        let key_toggle = key.to_string();
-        let entity_pick = view_entity.clone();
-        let key_pick = key.to_string();
-        let _ = label;
-        let select = crate::components::select::select_field(
-            t,
-            &id,
-            label,
-            &refs,
-            current,
-            open,
-            disabled,
-            false,
-            move |_, cx| {
-                entity_toggle.update(cx, |this, cx| {
-                    let entry = this.select_open.entry(key_toggle.clone()).or_insert(false);
-                    *entry = !*entry;
-                    cx.notify();
-                });
-            },
-            move |v: String, _, cx| {
-                entity_pick.update(cx, |this, cx| {
-                    this.select_open.insert(key_pick.clone(), false);
-                    this.on_change(&key_pick, PropValue::Choice(v), cx);
-                });
-            },
-        );
-        select
-    }
-
-    /// A colour field (`ColorField`): the swatch, the hex, and the picker
-    /// popover with the other colours of the schema as swatches.
-    #[allow(clippy::too_many_arguments)]
-    fn color_field(
-        &self,
-        key: &str,
-        label: &str,
-        hex: &str,
-        schema_properties: &[PropertyDef],
-        values: &Props,
-        disabled: bool,
-        view_entity: gpui::Entity<Self>,
-    ) -> impl IntoElement {
-        let t = &self.theme;
-        let hex_owned = hex.to_string();
-        let open = self.color_open.as_deref() == Some(key);
-        let swatches = colour_swatches(schema_properties, values, key, hex);
-        let entity_toggle = view_entity.clone();
-        let key_toggle = key.to_string();
-        let mut row = div()
-            .flex()
-            .items_center()
-            .gap_2();
-        let swatch = div()
-            .id(gpui::SharedString::from(format!("{key}-swatch")))
-            .relative()
-            .flex_none()
-            .size(px(32.0))
-            .r_sm()
-            .border_1()
-            .border_color(Theme::color(t.line_2))
-            .bg(Theme::color(hex));
-        let swatch = if disabled {
-            swatch
-        } else {
-            let entity = entity_toggle;
-            let key_clone = key_toggle.clone();
-            swatch.cursor_pointer().on_click(move |_, _, cx| {
-                entity.update(cx, |this, cx| {
-                    this.color_open = if this.color_open.as_deref() == Some(key_clone.as_str()) {
-                        None
-                    } else {
-                        Some(key_clone.clone())
-                    };
-                    cx.notify();
-                });
-            })
-        };
-        row = row
-            .child(swatch)
-            .child(
-                div()
-                    .text_sm()
-                    .font_family(crate::fonts::MONO_FAMILY)
-                    .text_color(Theme::color(t.dim))
-                    .child(hex_owned.clone()),
-            );
-        if open && !disabled {
-            row = row.child(self.color_picker(key, label, hex, &swatches, view_entity));
-        }
-        row
-    }
-
-    /// The picker popover (`ColorPicker`): SV square, hue strip, hex row and
-    /// the other colours of the schema.
-    fn color_picker(
-        &self,
-        key: &str,
-        label: &str,
-        hex: &str,
-        swatches: &[(String, String)],
-        view_entity: gpui::Entity<Self>,
-    ) -> impl IntoElement {
-        let t = &self.theme;
-        let (hue, sat, val) = hex_to_hsv(hex, 0.0);
-        let hue_hex = hsv_to_hex(hue, 1.0, 1.0);
+        let pairs: Vec<(String, String)> = options
+            .iter()
+            .map(|o| (o.clone(), choice_word(o)))
+            .collect();
         let entity = view_entity.clone();
         let key_owned = key.to_string();
-        let _ = label;
-        let mut picker = div()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .w(px(212.0))
-            .p_3()
-            .r_md()
-            .border_1()
-            .border_color(Theme::color(t.line_2))
-            .bg(Theme::color(t.panel));
-        // SV square: hue at full strength, washed to white across and black down.
-        let entity_sv = entity.clone();
-        let key_sv = key_owned.clone();
-        let hex_owned = hex.to_string();
-        let sv = div()
-            .id(gpui::SharedString::from(format!("{key}-sv")))
-            .relative()
-            .w_full()
-            .h(px(160.0))
-            .r_sm()
-            .border_1()
-            .border_color(Theme::color(t.line_2))
-            .bg(Theme::color(&hue_hex))
-            .child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .child(
-                        canvas(
-                            move |_, _, _| {},
-                            move |bounds, _, window, _| {
-                                let w = bounds.size.width;
-                                let h = bounds.size.height;
-                                let steps = 24;
-                                for i in 0..steps {
-                                    for j in 0..steps {
-                                        let s = i as f32 / steps as f32;
-                                        let v = 1.0 - j as f32 / steps as f32;
-                                        let c = {
-                                            let (hr, hg, hb) = {
-                                                let raw = hue_hex.strip_prefix('#').unwrap_or(&hue_hex);
-                                                let p = |k: usize| u8::from_str_radix(&raw[k..k + 2], 16).unwrap_or(0) as f32 / 255.0;
-                                                (p(0), p(2), p(4))
-                                            };
-                                            let r = hr + (1.0 - hr) * (1.0 - s);
-                                            let g = hg + (1.0 - hg) * (1.0 - s);
-                                            let b = hb + (1.0 - hb) * (1.0 - s);
-                                            gpui::Rgba { r: r * v, g: g * v, b: b * v, a: 1.0 }
-                                        };
-                                        let cell_w = w / steps as f32;
-                                        let cell_h = h / steps as f32;
-                                        window.paint_quad(gpui::fill(
-                                            Bounds {
-                                                origin: point(bounds.origin.x + cell_w * i as f32, bounds.origin.y + cell_h * j as f32),
-                                                size: size(cell_w, cell_h),
-                                            },
-                                            c,
-                                        ));
-                                    }
-                                }
-                                // Handle.
-                                let hx = bounds.origin.x + w * sat;
-                                let hy = bounds.origin.y + h * (1.0 - val);
-                                window.paint_quad(gpui::outline(
-                                    Bounds {
-                                        origin: point(hx - px(7.0), hy - px(7.0)),
-                                        size: size(px(14.0), px(14.0)),
-                                    },
-                                    Theme::color(Theme::dark().ink),
-                                    gpui::BorderStyle::default(),
-                                ));
-                            },
-                        )
-                        .absolute()
-                        .inset_0(),
-                ),
-            )
-            .cursor_pointer()
-            .on_click(move |_, _, cx| {
-                // A click commits the current hex (the popover's sv/hue drags
-                // stream into the draft; a GPUI click commits at once).
-                entity_sv.update(cx, |this, cx| {
-                    if let Some(parsed) = parse_hex(&hex_owned) {
-                        this.on_change(&key_sv, PropValue::Color(parsed), cx);
-                    }
-                    cx.notify();
-                });
-            });
-        picker = picker.child(sv);
-        // Hue strip.
-        let entity_hue = entity.clone();
-        let hue_strip = div()
-            .id(gpui::SharedString::from(format!("{key}-hue")))
-            .relative()
-            .w_full()
-            .h(px(14.0))
-            .r_sm()
-            .border_1()
-            .border_color(Theme::color(t.line_2))
-            .child(
-                canvas(
-                    move |_, _, _| {},
-                    move |bounds, _, window, _| {
-                        let w = bounds.size.width;
-                        let steps = 36;
-                        for i in 0..steps {
-                            let h = i as f32 / steps as f32 * 360.0;
-                            let (r, g, b) = {
-                                let raw = hsv_to_hex(h, 0.8, 0.62);
-                                let s = raw.strip_prefix('#').unwrap_or(&raw);
-                                let p = |k: usize| u8::from_str_radix(&s[k..k + 2], 16).unwrap_or(0) as f32 / 255.0;
-                                (p(0), p(2), p(4))
-                            };
-                            let cell_w = w / steps as f32;
-                            window.paint_quad(gpui::fill(
-                                Bounds {
-                                    origin: point(bounds.origin.x + cell_w * i as f32, bounds.origin.y),
-                                    size: size(cell_w, bounds.size.height),
-                                },
-                                gpui::Rgba { r, g, b, a: 1.0 },
-                            ));
-                        }
-                    },
-                )
-                .absolute()
-                .inset_0(),
-            )
-            .cursor_pointer()
-            .on_click(move |_, _, cx| {
-                entity_hue.update(cx, |_this, cx| {
-                    cx.notify();
-                });
-            });
-        picker = picker.child(hue_strip);
-        // Hex row.
-        picker = picker.child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .text_sm()
-                        .font_family(crate::fonts::MONO_FAMILY)
-                        .text_color(Theme::color(t.ink))
-                        .child(hex.to_string()),
-                )
-                .child(
-                    div()
-                        .size(px(24.0))
-                        .r_sm()
-                        .border_1()
-                        .border_color(Theme::color(t.line_2))
-                        .bg(Theme::color(hex)),
-                ),
-        );
-        // The other colours of the schema.
-        if !swatches.is_empty() {
-            let mut row = div().flex().flex_wrap().gap(px(6.0));
-            for (sw, sw_label) in swatches {
-                let entity_sw = entity.clone();
-                let key_sw = key_owned.clone();
-                let sw_owned = sw.clone();
-                let _ = sw_label;
-                row = row.child(
-                    div()
-                        .id(gpui::SharedString::from(format!("{key}-swatch")))
-                        .size(px(22.0))
-                        .r_sm()
-                        .border_1()
-                        .border_color(Theme::color(t.line_2))
-                        .bg(Theme::color(sw))
-                        .cursor_pointer()
-                        .on_click(move |_, _, cx| {
-                            entity_sw.update(cx, |this, cx| {
-                                if let Some(c) = parse_hex(&sw_owned) {
-                                    this.on_change(&key_sw, PropValue::Color(c), cx);
-                                }
-                                this.color_open = None;
-                                cx.notify();
-                            });
-                        }),
-                );
-            }
-            picker = picker.child(row);
-        }
-        picker
-    }
-
-    /// A hue control (`HueRing` plus degrees field).
-    fn hue_control(&self, key: &str, _label: &str, deg: f32, disabled: bool, view_entity: gpui::Entity<Self>) -> impl IntoElement {
-        let t = &self.theme;
-        let hue = wrap_deg(deg as f64) as f32;
-        let ink = Theme::color(t.ink);
-        let ring = div()
-            .id(gpui::SharedString::from(format!("{key}-hue")))
-            .relative()
-            .flex_none()
-            .size(px(88.0))
-            .rounded_full()
-            .child(
-                canvas(
-                    move |_, _, _| {},
-                    move |bounds, _, window, _| {
-                        let cx = f32::from(bounds.origin.x) + f32::from(bounds.size.width) / 2.0;
-                        let cy = f32::from(bounds.origin.y) + f32::from(bounds.size.height) / 2.0;
-                        let w = f32::from(bounds.size.width);
-                        let r_outer = 48.0 * (w / 100.0);
-                        let r_inner = 36.0 * (w / 100.0);
-                        for i in 0..36 {
-                            let a0 = i as f32 * 10.0;
-                            let a1 = a0 + 10.6;
-                            let (x0, y0) = polar(cx, cy, r_outer, a0);
-                            let (x1, y1) = polar(cx, cy, r_outer, a1);
-                            let (x2, y2) = polar(cx, cy, r_inner, a1);
-                            let (x3, y3) = polar(cx, cy, r_inner, a0);
-                            let mut b = gpui::PathBuilder::fill();
-                            b.move_to(point(px(x0), px(y0)));
-                            b.line_to(point(px(x1), px(y1)));
-                            b.line_to(point(px(x2), px(y2)));
-                            b.line_to(point(px(x3), px(y3)));
-                            b.close();
-                            if let Ok(path) = b.build() {
-                                let hex = hsv_to_hex(i as f32 * 10.0, 0.8, 0.62);
-                                window.paint_path(path, Theme::color(&hex));
-                            }
-                        }
-                        let (hx, hy) = polar(cx, cy, 42.0 * (w / 100.0), hue);
-                        let mut dot = gpui::PathBuilder::fill();
-                        dot.add_polygon(&circle_points(point(px(hx), px(hy)), 5.5 * (w / 100.0), 16), true);
-                        if let Ok(path) = dot.build() {
-                            window.paint_path(path, ink);
-                        }
-                    },
-                )
-                .absolute()
-                .inset_0(),
-            );
-        let ring = if disabled {
-            ring.opacity(0.5)
-        } else {
-            ring.cursor_pointer()
-        };
-        let key_field = key.to_string();
-        let entity_field = view_entity.clone();
-        let field = number_field(t, &format!("{key}-degrees"), deg.round(), 0.0, 360.0, 1.0, Some("°"), move |v: f32, _: &mut Window, cx: &mut gpui::App| {
-            entity_field.update(cx, |this, cx| this.on_change(&key_field, PropValue::Hue(v as f64), cx));
+        let on: crate::components::prop_controls::OnChange = std::rc::Rc::new(move |v: PropValue, window: &mut Window, cx: &mut gpui::App| {
+            entity.update(cx, |this, cx| this.on_change(&key_owned, v, cx));
+            let _ = window;
         });
-        div()
-            .flex()
-            .items_center()
-            .gap_3()
-            .child(ring)
-            .child(field)
-    }
-
-    /// An angle control (`AngleDial` plus degrees field).
-    fn angle_control(&self, key: &str, _label: &str, deg: f32, disabled: bool, view_entity: gpui::Entity<Self>) -> impl IntoElement {
-        let t = &self.theme;
-        let deg_wrapped = wrap_deg(deg as f64) as f32;
-        let mute = Theme::color(t.mute);
-        let dial_ring = Theme::color(t.dial_ring);
-        let ink = Theme::color(t.ink);
-        let key_owned = key.to_string();
-        let dial = div()
-            .id(gpui::SharedString::from(format!("{key}-dial")))
-            .relative()
-            .flex_none()
-            .size(px(88.0))
-            .rounded_full()
-            .child(
-                canvas(
-                    move |_, _, _| {},
-                    move |bounds, _, window, _| {
-                        let s = f32::from(bounds.size.width) / 100.0;
-                        let cx = f32::from(bounds.origin.x) + f32::from(bounds.size.width) / 2.0;
-                        let cy = f32::from(bounds.origin.y) + f32::from(bounds.size.height) / 2.0;
-                        // Cardinal ticks.
-                        for (x1, y1, x2, y2) in [(95.0, 50.0, 99.0, 50.0), (50.0, 95.0, 50.0, 99.0), (5.0, 50.0, 1.0, 50.0), (50.0, 1.0, 50.0, 5.0)] {
-                            let mut b = gpui::PathBuilder::stroke(px(2.0 * s));
-                            b.move_to(point(px(cx + (x1 - 50.0) * s), px(cy + (y1 - 50.0) * s)));
-                            b.line_to(point(px(cx + (x2 - 50.0) * s), px(cy + (y2 - 50.0) * s)));
-                            if let Ok(path) = b.build() {
-                                window.paint_path(path, mute);
-                            }
-                        }
-                        // The neutral ring.
-                        let mut ring = gpui::PathBuilder::stroke(px(7.0 * s));
-                        ring.add_polygon(&circle_points(point(px(cx), px(cy)), 40.0 * s, 48), true);
-                        if let Ok(path) = ring.build() {
-                            window.paint_path(path, dial_ring);
-                        }
-                        // The needle, turned to the value.
-                        let rad = deg_wrapped * std::f32::consts::PI / 180.0;
-                        let (dx, dy) = (rad.cos(), rad.sin());
-                        let mut needle = gpui::PathBuilder::stroke(px(3.0 * s));
-                        needle.move_to(point(px(cx + 4.0 * s), px(cy)));
-                        needle.line_to(point(px(cx + 26.0 * s * dx), px(cy + 26.0 * s * dy)));
-                        if let Ok(path) = needle.build() {
-                            window.paint_path(path, ink);
-                        }
-                        let mut hub = gpui::PathBuilder::fill();
-                        hub.add_polygon(&circle_points(point(px(cx), px(cy)), 3.5 * s, 16), true);
-                        if let Ok(path) = hub.build() {
-                            window.paint_path(path, ink);
-                        }
-                    },
-                )
-                .absolute()
-                .inset_0(),
-            );
-        let dial = if disabled { dial.opacity(0.5) } else { dial.cursor_pointer() };
-        let key_field = key_owned.clone();
-        let entity_field = view_entity.clone();
-        let now = angle_now(deg as f64);
-        let field = number_field(t, &format!("{key}-degrees"), now as f32, 0.0, 359.0, 1.0, Some("°"), move |v: f32, _: &mut Window, cx: &mut gpui::App| {
-            entity_field.update(cx, |this, cx| this.on_change(&key_field, PropValue::Angle(v as f64), cx));
+        let entity_toggle = view_entity.clone();
+        let key_toggle = key.to_string();
+        let toggle: crate::components::prop_controls::OnToggle = std::rc::Rc::new(move |window: &mut Window, cx: &mut gpui::App| {
+            entity_toggle.update(cx, |this, cx| {
+                let entry = this.select_open.entry(key_toggle.clone()).or_insert(false);
+                *entry = !*entry;
+                cx.notify();
+            });
+            let _ = window;
         });
-        div()
-            .flex()
-            .items_center()
-            .gap_3()
-            .child(dial)
-            .child(field)
+        let value = PropValue::Choice(current.to_string());
+        control_words(t, key, label, &value, &pairs, disabled, open, on, toggle)
     }
 
     /// The DPI panel (`DpiPanel`).
@@ -2882,43 +2313,6 @@ impl PeripheralsView {
                 .bg(if row.info.connected { Theme::color(t.ok) } else { Theme::color(t.mute) }),
         )
     }
-}
-
-/// Format a number like React prints it (no trailing `.0` for whole numbers).
-pub fn format_number(n: f64, decimals: usize) -> String {
-    if n.fract() == 0.0 && n.abs() < 1e15 {
-        format!("{}", n as i64)
-    } else if decimals == 0 {
-        format!("{n:.0}")
-    } else {
-        format!("{n:.decimals$}")
-    }
-}
-
-/// Put a raw value on the step grid and inside the range (Slider `quantise`).
-pub fn quantise_step(raw: f32, min: f32, max: f32, step: f32) -> f32 {
-    let step = if step.abs() < f32::EPSILON { 1.0 } else { step };
-    let decimals = decimals_of(step as f64);
-    let stepped = min + ((raw - min) / step).round() * step;
-    let clamped = stepped.clamp(min, max);
-    let factor = 10f32.powi(decimals as i32);
-    (clamped * factor).round() / factor
-}
-
-/// A point on the (50, 50) circle at `deg` (0 = up), in drawing units.
-fn polar(cx: f32, cy: f32, r: f32, deg: f32) -> (f32, f32) {
-    let rad = (deg - 90.0) * std::f32::consts::PI / 180.0;
-    (cx + r * rad.cos(), cy + r * rad.sin())
-}
-
-/// The polygon of a circle at `centre` with `radius`.
-fn circle_points(centre: gpui::Point<gpui::Pixels>, radius: f32, steps: usize) -> Vec<gpui::Point<gpui::Pixels>> {
-    (0..=steps)
-        .map(|i| {
-            let a = i as f32 / steps as f32 * std::f32::consts::TAU;
-            point(centre.x + px(radius * a.cos()), centre.y + px(radius * a.sin()))
-        })
-        .collect()
 }
 
 /// Sample an SVG path (`M`, `L`, `C`, `Z`) into polyline points, expanding

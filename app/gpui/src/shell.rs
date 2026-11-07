@@ -33,6 +33,7 @@ use crate::components::daemon_down::daemon_down;
 use crate::components::slider::slider;
 use crate::theme::{Theme, TokenRadius};
 use crate::views::displays::DisplaysView;
+use crate::views::effects::EffectsView;
 use crate::views::fans::FansView;
 use crate::views::peripherals::PeripheralsView;
 use crate::views::settings::{SettingsView, ThemeCell};
@@ -238,6 +239,8 @@ pub struct Shell {
     pub updates_view: gpui::Entity<UpdatesView>,
     /// The Peripherals page (#208).
     pub peripherals_view: gpui::Entity<PeripheralsView>,
+    /// The Effects page (#210).
+    pub effects_view: gpui::Entity<EffectsView>,
     /// The theme the shell and the settings view share (the Appearance
     /// radio writes it; every render reads it).
     pub theme_cell: ThemeCell,
@@ -288,6 +291,13 @@ impl Shell {
             UpdatesView::new(theme, cx, tray_present, updates_entity)
         });
         let peripherals_view = cx.new(|cx| PeripheralsView::new(theme, cx));
+        let effects_view = cx.new(|cx| EffectsView::new(theme, cx));
+        effects_view.update(cx, |view, cx| {
+            view.connect_search(cx);
+            // The search box's chrome (placeholder, text mode).
+            let search = view.search_input.clone();
+            search.update(cx, |input, cx| input.set_text_mode(Some("Search effects"), cx));
+        });
         let mut shell = Shell {
             theme,
             page,
@@ -298,6 +308,7 @@ impl Shell {
             fans_view,
             updates_view,
             peripherals_view,
+            effects_view,
             settings_view,
             theme_cell,
             width: 1280.0,
@@ -1273,6 +1284,9 @@ impl Shell {
         } else if self.page == "peripherals" {
             self.peripherals_view
                 .update(cx, |u, _| u.strip_context_text())
+        } else if self.page == "effects" {
+            self.effects_view
+                .update(cx, |u, _| u.strip_title().1.unwrap_or_default())
         } else {
             String::new()
         };
@@ -1283,6 +1297,17 @@ impl Shell {
             let (title, context, actions) = fans_view.update(cx, |view, cx| {
                 let (title, context) = view.strip_title();
                 let actions = view.strip_actions(cx);
+                (title, context, actions)
+            });
+            title_text = title;
+            context_text = context.unwrap_or_default();
+            page_actions = Some(actions);
+        }
+        if self.page == "effects" {
+            let effects_view = self.effects_view.clone();
+            let (title, context, actions) = effects_view.update(cx, |view, cx| {
+                let (title, context) = view.strip_title();
+                let actions = crate::views::effects::render::strip_actions(view, cx);
                 (title, context, actions)
             });
             title_text = title;
@@ -1409,27 +1434,42 @@ impl Shell {
             // strip keeps the name.
             let mut now_row = div().flex().items_center().gap_2().child(swatch);
             if page_actions.is_none() || phone {
-                now_row = now_row.child(
-                    div()
-                        .flex()
-                        .items_baseline()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .font_family(crate::fonts::UI_FAMILY)
-                                .text_color(Theme::color(t.ink))
-                                .child(now_name.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_family(crate::fonts::UI_FAMILY)
-                                .text_color(Theme::color(t.mute))
-                                .child(now_detail.clone()),
-                        ),
-                );
+                let now_name = if phone {
+                    // React's phone strip truncates the now-playing name
+                    // (`.strip-now` overflow): "Nothing…".
+                    ellipsize(window, &now_name, 76.0, 14.0, gpui::FontWeight::SEMIBOLD, crate::fonts::UI_FAMILY)
+                } else {
+                    now_name.clone()
+                };
+                let mut detail_text = div()
+                    .flex()
+                    .items_baseline()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .font_family(crate::fonts::UI_FAMILY)
+                            .text_color(Theme::color(t.ink))
+                            .child(now_name),
+                    );
+                if !phone {
+                    detail_text = detail_text.child(
+                        div()
+                            .text_sm()
+                            .font_family(crate::fonts::UI_FAMILY)
+                            .text_color(Theme::color(t.mute))
+                            .child(now_detail.clone()),
+                    );
+                }
+                now_row = now_row
+                    .min_w(px(0.0))
+                    .child(
+                        div()
+                            .flex()
+                            .min_w(px(0.0))
+                            .child(detail_text),
+                    );
             }
             inner = inner.child(now_row);
         }
@@ -1589,6 +1629,9 @@ impl Shell {
         if self.page == "peripherals" {
             return self.peripherals_view.clone().into_any_element();
         }
+        if self.page == "effects" {
+            return self.effects_view.clone().into_any_element();
+        }
         // Every other page shows the placeholder until it is ported.
         div()
             .flex()
@@ -1719,6 +1762,7 @@ impl Render for Shell {
             fans_view.update(cx, |f, _| f.theme = shared);
             self.updates_view.update(cx, |u, _| u.theme = shared);
             self.peripherals_view.update(cx, |v, _| v.theme = shared);
+            self.effects_view.update(cx, |v, _| v.theme = shared);
         }
         // The Updates page's tray state comes from the settings view (the
         // single reader of the stdio receiver). Copy it here when the

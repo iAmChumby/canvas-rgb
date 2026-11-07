@@ -62,6 +62,17 @@ pub const ICONS: &[&str] = &[
     "ArrowsClockwise",
     "ArrowCounterClockwise",
     "CaretRight",
+    // The Effects page (#210).
+    "CaretLeft",
+    "Code",
+    "DotsThree",
+    "FileHtml",
+    "FilePlus",
+    "MonitorPlay",
+    "PencilSimple",
+    "Star",
+    "Waveform",
+    "Check",
 ];
 
 fn icon_svg(name: &str) -> Option<&'static str> {
@@ -113,6 +124,16 @@ fn icon_svg(name: &str) -> Option<&'static str> {
         "ArrowsClockwise" => include_str!("../assets/icons/ArrowsClockwise.svg"),
         "ArrowCounterClockwise" => include_str!("../assets/icons/ArrowCounterClockwise.svg"),
         "CaretRight" => include_str!("../assets/icons/CaretRight.svg"),
+        "CaretLeft" => include_str!("../assets/icons/CaretLeft.svg"),
+        "Code" => include_str!("../assets/icons/Code.svg"),
+        "DotsThree" => include_str!("../assets/icons/DotsThree.svg"),
+        "FileHtml" => include_str!("../assets/icons/FileHtml.svg"),
+        "FilePlus" => include_str!("../assets/icons/FilePlus.svg"),
+        "MonitorPlay" => include_str!("../assets/icons/MonitorPlay.svg"),
+        "PencilSimple" => include_str!("../assets/icons/PencilSimple.svg"),
+        "Star" => include_str!("../assets/icons/Star.svg"),
+        "Waveform" => include_str!("../assets/icons/Waveform.svg"),
+        "Check" => include_str!("../assets/icons/Check.svg"),
         _ => return None,
     })
 }
@@ -157,6 +178,16 @@ impl AssetSource for IconAssets {
                         "Play" => include_str!("../assets/icons/Play-fill.svg"),
                         "Warning" => include_str!("../assets/icons/Warning-fill.svg"),
                         "CaretDown" => include_str!("../assets/icons/CaretDown-fill.svg"),
+                        "CaretLeft" => include_str!("../assets/icons/CaretLeft-fill.svg"),
+                        "Code" => include_str!("../assets/icons/Code-fill.svg"),
+                        "DotsThree" => include_str!("../assets/icons/DotsThree-fill.svg"),
+                        "FileHtml" => include_str!("../assets/icons/FileHtml-fill.svg"),
+                        "FilePlus" => include_str!("../assets/icons/FilePlus-fill.svg"),
+                        "MonitorPlay" => include_str!("../assets/icons/MonitorPlay-fill.svg"),
+                        "PencilSimple" => include_str!("../assets/icons/PencilSimple-fill.svg"),
+                        "Star" => include_str!("../assets/icons/Star-fill.svg"),
+                        "Waveform" => include_str!("../assets/icons/Waveform-fill.svg"),
+                        "Check" => include_str!("../assets/icons/Check-fill.svg"),
                         _ => icon_svg(base).unwrap_or(""),
                     };
                     Some(Cow::Borrowed(svg.as_bytes()))
@@ -195,6 +226,16 @@ impl AssetSource for IconAssets {
                         // source trigger drew the regular caret instead of
                         // the bold one React uses (`Select.tsx:219`).
                         "CaretDown" => include_str!("../assets/icons/CaretDown-bold.svg"),
+                        "CaretLeft" => include_str!("../assets/icons/CaretLeft-bold.svg"),
+                        "Code" => include_str!("../assets/icons/Code-bold.svg"),
+                        "DotsThree" => include_str!("../assets/icons/DotsThree-bold.svg"),
+                        "FileHtml" => include_str!("../assets/icons/FileHtml-bold.svg"),
+                        "FilePlus" => include_str!("../assets/icons/FilePlus-bold.svg"),
+                        "MonitorPlay" => include_str!("../assets/icons/MonitorPlay-bold.svg"),
+                        "PencilSimple" => include_str!("../assets/icons/PencilSimple-bold.svg"),
+                        "Star" => include_str!("../assets/icons/Star-bold.svg"),
+                        "Waveform" => include_str!("../assets/icons/Waveform-bold.svg"),
+                        "Check" => include_str!("../assets/icons/Check-bold.svg"),
                         _ => icon_svg(base).unwrap_or(""),
                     };
                     Some(Cow::Borrowed(svg.as_bytes()))
