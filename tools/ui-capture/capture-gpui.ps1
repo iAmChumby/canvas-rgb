@@ -67,6 +67,7 @@ public static class Win32Capture {
 "@
 
 $SWP_NOACTIVATE = 0x0010
+$HWND_BOTTOM = [IntPtr]::new(1)
 $PW_RENDERFULLCONTENT = 0x00000002
 # The editor reads the token from CANVAS_RGB_HOME in debug (the fakes' home) and talks to
 # CANVAS_RGB_TEST_API_PORT. Both are set here, always: without the port the editor reached
@@ -169,7 +170,10 @@ foreach ($theme in $Themes) {
         [void][Win32Capture]::AdjustWindowRect([ref]$want, 0x00CF0000, $false)
         $outerW = $want.Right - $want.Left
         $outerH = $want.Bottom - $want.Top
-        [void][Win32Capture]::SetWindowPos($handle, [IntPtr]::Zero, 0, 0, $outerW, $outerH, $SWP_NOACTIVATE)
+        # HWND_BOTTOM: the capture window sits behind every other window, so a run never
+        # covers what Luke is using (a game, a video). PrintWindow with
+        # PW_RENDERFULLCONTENT still reads an occluded window's frame.
+        [void][Win32Capture]::SetWindowPos($handle, $HWND_BOTTOM, 0, 0, $outerW, $outerH, $SWP_NOACTIVATE)
         # Settle, measured: probe the frame every 500 ms until two probes in
         # a row are identical (painted and stable) AND at least 3 s have
         # passed since the window appeared. The minimum matters: the
