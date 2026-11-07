@@ -1082,19 +1082,21 @@ impl DevicesView {
         );
         // The desktop row's room, split the way React's flex splits it
         // (measured against the captures: see `device_split`). The
-        // single-zone count is mono 14 semibold min 96 at desktop
-        // (React `.zone-strip-count` at `@media (min-width: 721px)`:
-        // `--fm` 14 tabular; the `.rd-devices` rules keep it
-        // `flex: none` with `min-width: 96px` from that media rule
-        // winning over the base 56 for the box, and the text is
-        // right-aligned, so the split counts 96).
+        // single-zone count is mono 14 at desktop (React
+        // `.zone-strip-count` at `@media (min-width: 721px)`: `--fm` 14
+        // tabular; no font-weight, so the body's 400). The count box's
+        // min-width is 56, not the media
+        // rule's 96: the `.rd-devices` rules (three classes) out-specify
+        // the media rule's one class, so 56 wins (measured at 1024: with
+        // 96 the "3 LEDs" strip sat 20px left of React's, 418-618 vs
+        // 438-638; with 56 it lands on React's pixels).
         let count_for_split = one
             .as_ref()
             .map(|z| {
                 let s = format!("{} {}", z.led_count, led_word(z.led_count));
-                crate::shell::text_width(window, &s, 14.0, gpui::FontWeight::SEMIBOLD, crate::fonts::MONO_FAMILY).max(96.0)
+                crate::shell::text_width(window, &s, 14.0, gpui::FontWeight::NORMAL, crate::fonts::MONO_FAMILY).max(56.0)
             })
-            .unwrap_or(96.0);
+            .unwrap_or(56.0);
         let state_word = if device.connected { "connected" } else { "disconnected" };
         let state_w = 16.0
             + crate::shell::text_width(window, state_word, 14.0, gpui::FontWeight::NORMAL, crate::fonts::UI_FAMILY);
@@ -1145,7 +1147,7 @@ impl DevicesView {
                     .w(px(count_for_split))
                     .text_size(px(14.0))
                     .line_height(gpui::relative(1.45))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .font_weight(gpui::FontWeight::NORMAL)
                     .font_family(crate::fonts::MONO_FAMILY)
                     .text_color(Theme::color(t.ink))
                     .whitespace_nowrap()
@@ -1200,15 +1202,19 @@ impl DevicesView {
         };
         // The count face follows React's breakpoint: at
         // `@media (min-width: 721px)` `.zone-strip-count` is mono 14
-        // tabular min 96 right-aligned; under it (a phone viewport,
-        // the grid) it inherits the body face, UI 15, in an auto
-        // column of the same box. Measured at desktop in mono 14
-        // semibold (the desktop counts read "0 LEDs" etc. in the
-        // mono face, semibold, 14px), on the phone in UI 15 normal.
+        // tabular right-aligned (no font-weight, so the body's 400);
+        // under it (a phone viewport, the grid) it inherits the body
+        // face, UI 15, in an auto column of the same box. Measured at
+        // desktop in mono 14 normal, on the phone in UI 15 normal
+        // (count regions at 1024/1440 read 27/7/7/7 px closer with
+        // normal than with semibold). The box min is 56 at
+        // desktop: the `.rd-devices` rules' three classes out-specify
+        // the media rule's one, so the media rule's 96 never wins
+        // (measured at 1024: 96 pulled the "3 LEDs" strip 20px left).
         let (m_size, m_family, m_weight, m_min) = if phone {
             (15.0, crate::fonts::UI_FAMILY, gpui::FontWeight::NORMAL, 0.0)
         } else {
-            (14.0, crate::fonts::MONO_FAMILY, gpui::FontWeight::SEMIBOLD, 96.0)
+            (14.0, crate::fonts::MONO_FAMILY, gpui::FontWeight::NORMAL, 56.0)
         };
         let count_w = {
             let mut w = crate::shell::text_width(window, &count_main, m_size, m_weight, m_family);
@@ -1227,7 +1233,7 @@ impl DevicesView {
         let (c_size, c_family, c_weight) = if phone {
             (15.0, crate::fonts::UI_FAMILY, gpui::FontWeight::NORMAL)
         } else {
-            (14.0, crate::fonts::MONO_FAMILY, gpui::FontWeight::SEMIBOLD)
+            (14.0, crate::fonts::MONO_FAMILY, gpui::FontWeight::NORMAL)
         };
         let count = {
             let mut c = div()
