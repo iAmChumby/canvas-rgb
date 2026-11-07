@@ -559,6 +559,20 @@ impl Shell {
         cx.notify();
     }
 
+    /// Debug only (#214): opens the code editor on an effect, for the
+    /// captures.
+    pub fn open_effect_editor(&mut self, id: &str, cx: &mut Context<Self>) {
+        let view = self.effects_view.clone();
+        view.update(cx, |v, cx| v.open_editor(id, cx));
+    }
+
+    /// Debug only (#214): opens the stack builder on a stack, for the
+    /// captures.
+    pub fn open_stack_builder(&mut self, name: &str, cx: &mut Context<Self>) {
+        let view = self.effects_view.clone();
+        view.update(cx, |v, cx| v.open_stack(name, cx));
+    }
+
     pub fn close_palette(&mut self, cx: &mut Context<Self>) {
         self.palette_open = false;
         cx.notify();
@@ -1413,12 +1427,15 @@ impl Shell {
                 .update(cx, |u, _| u.strip_context_text())
         } else if self.page == "effects" {
             self.effects_view
-                .update(cx, |u, _| u.strip_title().1.unwrap_or_default())
+                .update(cx, |u, cx2| u.strip_title(cx2).1.unwrap_or_default())
         } else {
             String::new()
         };
         // The page's own actions (React PageActions), on the strip's right.
         let mut page_actions: Option<gpui::AnyElement> = None;
+        // The page's leading key (React PageTitle's `leading`): the stack
+        // builder's Back to the effects.
+        let mut page_leading: Option<gpui::AnyElement> = None;
         if self.page == "fans" {
             let fans_view = self.fans_view.clone();
             let (title, context, actions) = fans_view.update(cx, |view, cx| {
@@ -1432,16 +1449,17 @@ impl Shell {
         }
         if self.page == "effects" {
             let effects_view = self.effects_view.clone();
-            let (title, context, actions) = effects_view.update(cx, |view, cx| {
-                let (title, context) = view.strip_title();
+            let (title, context, actions, leading) = effects_view.update(cx, |view, cx| {
+                let (title, context) = view.strip_title(cx);
                 let actions = crate::views::effects::render::strip_actions(view, cx);
-                (title, context, actions)
+                let leading = crate::views::effects::render::strip_leading(view, cx);
+                (title, context, actions, leading)
             });
             title_text = title;
             context_text = context.unwrap_or_default();
             page_actions = Some(actions);
-        }
-        // The peripherals page's actions (React `PageActions`): the pending
+            page_leading = leading;
+        }        // The peripherals page's actions (React `PageActions`): the pending
         // count, Revert and Apply, before Pause and Search. Empty unless
         // there are pending edits.
         if self.page == "peripherals" {
@@ -1547,8 +1565,11 @@ impl Shell {
                 );
             }
         }
-        inner = inner.child(title_row);
-        // Now playing: hidden at 1280 px and up (the deck carries it there).
+        // The page's leading key, before the title.
+        if let Some(leading) = page_leading {
+            inner = inner.child(leading);
+        }
+        inner = inner.child(title_row);        // Now playing: hidden at 1280 px and up (the deck carries it there).
         if self.width < 1280.0 {
             let swatch = div()
                 .size(px(12.0))

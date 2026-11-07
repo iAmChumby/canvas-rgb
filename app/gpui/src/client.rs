@@ -19,6 +19,24 @@ pub fn base_url() -> String {
 /// The request deadline, matching the React client's `REQUEST_TIMEOUT_MS`.
 pub const TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The API token, read after the owner check has passed.
+///
+/// The preview's WebSocket handshake cannot carry a header (a browser cannot
+/// set one either), so the token rides in the query string.
+pub fn api_token() -> Result<String, ClientError> {
+    token_for(&base_url())
+}
+
+/// The port the client talks to.
+pub fn api_port() -> u16 {
+    base_url()
+        .trim_end_matches('/')
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(canvas_proto::consts::API_PORT)
+}
+
 #[derive(Debug, Clone)]
 pub enum ClientError {
     /// Nothing is listening, or the port is held by another process.

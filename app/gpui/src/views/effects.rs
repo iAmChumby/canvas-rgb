@@ -16,6 +16,13 @@ pub mod preset_strip;
 pub mod preset_match;
 pub mod search;
 
+pub mod code_editor;
+pub mod editor;
+pub mod stack_area_picker;
+pub mod stack_builder;
+pub mod stack_draft;
+pub mod stack_preview;
+
 mod preset_ops;
 pub mod render;
 
@@ -28,6 +35,7 @@ use gpui::{AppContext, Context, Window};
 use crate::client::DaemonClient;
 use crate::components::prop_controls::OnChange;
 use crate::components::text_input::TextInput;
+use crate::reactlib::stack_route::StackRoute;
 use crate::theme::Theme;
 use crate::views::effects::preset_match::RunningPreset;
 
@@ -240,6 +248,12 @@ pub struct EffectsView {
     pub more_open: bool,
     // The editor pane (#214 territory, shown as "Not ported yet").
     pub editor: EditorState,
+    /// The editor itself, when one is open.
+    pub editor_view: Option<gpui::Entity<editor::EffectEditor>>,
+    /// The builder's route: the stack that is open, if any.
+    pub stack_route: StackRoute,
+    /// The builder, when one is open.
+    pub builder: Option<gpui::Entity<stack_builder::StackBuilder>>,
     pub new_open: bool,
     pub new_busy: Option<String>,
     pub new_error: Option<String>,
@@ -303,6 +317,9 @@ impl EffectsView {
             show_failed: false,
             more_open: false,
             editor: EditorState::Closed,
+            editor_view: None,
+            stack_route: StackRoute::new(),
+            builder: None,
             new_open: false,
             new_busy: None,
             new_error: None,
@@ -858,9 +875,10 @@ impl EffectsView {
 
     // -- editor entry ------------------------------------------------------
 
-    /// Drops a waiting batch and opens the code editor for one effect
-    /// (#214: the pane itself is not ported, so this fetches the source and
-    /// then shows the placeholder).
+    /// Opens the code editor for one effect (#214).
+    ///
+    /// The effect's own detail and source are read first, as React does, and
+    /// the editor opens on them.
     fn start_edit(&mut self, id: &str, cx: &mut Context<Self>) {
         self.pending_generation += 1;
         self.pending.clear();
@@ -875,20 +893,54 @@ impl EffectsView {
         let id_out = id_bg.clone();
         let bg = cx.background_executor().spawn(async move {
             let client = Self::client();
-            client.get(&format!("/api/v1/effects/{id_bg}/source"))
+            let source = client.get(&format!("/api/v1/effects/{id_bg}/source"));
+            let detail = client.get(&format!("/api/v1/effects/{id_bg}"));
+            (source, detail)
         });
-        let name_bg = self.detail().map(|d| d.schema.name.clone()).unwrap_or_else(|| id.to_string());
         cx.spawn(async move |view, cx| {
-            let result = bg.await;
+            let (source, detail) = bg.await;
             let _ = view.update(cx, |this, cx| {
-                match result {
-                    Ok(body) => {
-                        let file_name = serde_json::from_str::<canvas_proto::api::EffectSource>(&body)
-                            .map(|s| s.file_name)
-                            .unwrap_or_default();
-                        this.editor = EditorState::Open(EditorTarget { name: name_bg.clone(), file_name });
+                match (source, detail) {
+                    (Ok(source_body), Ok(detail_body)) => {
+                        let source =
+                            serde_json::from_str::<canvas_proto::api::EffectSource>(&source_body)
+                                .unwrap_or(canvas_proto::api::EffectSource {
+                                    source: String::new(),
+                                    file_name: String::new(),
+                                });
+                        let detail =
+                            serde_json::from_str::<canvas_proto::api::EffectDetail>(&detail_body).ok();
+                        let target = editor::EditorTarget {
+                            id: Some(id_out.clone()),
+                            name: detail
+                                .as_ref()
+                                .map(|d| d.schema.name.clone())
+                                .unwrap_or_else(|| id_out.clone()),
+                            file_name: source.file_name.clone(),
+                            source: source.source.clone(),
+                            props: detail.as_ref().map(|d| d.props.clone()).unwrap_or_default(),
+                            schema: detail.as_ref().map(|d| d.schema.clone()),
+                            presets: detail
+                                .as_ref()
+                                .map(|d| d.schema.presets.clone())
+                                .unwrap_or_default(),
+                            user_presets: detail
+                                .as_ref()
+                                .map(|d| d.user_presets.clone())
+                                .unwrap_or_default(),
+                        };
+                        this.editor = EditorState::Open(EditorTarget {
+                            name: target.name.clone(),
+                            file_name: target.file_name.clone(),
+                        });
+                        let entity = cx.entity();
+                        let page = entity.clone();
+                        let editor = cx.new(|cx| {
+                            editor::EffectEditor::new(this.theme, target, Some(page), cx)
+                        });
+                        this.editor_view = Some(editor);
                     }
-                    Err(e) => {
+                    (Err(e), _) | (_, Err(e)) => {
                         this.editor = EditorState::Error { id: id_out.clone(), message: e.to_string() };
                     }
                 }
@@ -905,12 +957,38 @@ impl EffectsView {
         }
     }
 
-    fn close_editor(&mut self) {
+    /// The editor is done: the page shows the saved effect.
+    pub fn close_editor(&mut self) {
         self.editor = EditorState::Closed;
+        self.editor_view = None;
         self.new_open = false;
         if self.width <= 720.0 {
             self.pushed = false;
         }
+    }
+
+    /// Opens the code editor on an effect (the capture entry, and the
+    /// library's own Edit code key).
+    pub fn open_editor(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.start_edit(id, cx);
+    }
+
+    /// Opens the builder on a stack (`?stack=<name>`).
+    pub fn open_stack(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.stack_route.go(name);
+        let entity = cx.entity();
+        let page = entity.clone();
+        self.builder = Some(cx.new(|cx| {
+            stack_builder::StackBuilder::new(self.theme, name, Some(page), cx)
+        }));
+        cx.notify();
+    }
+
+    /// The builder is done: the page shows the library again.
+    pub fn close_stack(&mut self, cx: &mut Context<Self>) {
+        self.stack_route.close();
+        self.builder = None;
+        cx.notify();
     }
 
     /// New from code > Blank.
@@ -964,7 +1042,11 @@ impl EffectsView {
 
     // -- strip --------------------------------------------------------------
 
-    pub fn strip_title(&self) -> (String, Option<String>) {
+    pub fn strip_title(&self, cx: &mut Context<Self>) -> (String, Option<String>) {
+        // Build mode: the builder's own title and context.
+        if let Some(builder) = &self.builder {
+            return stack_builder::strip_title(builder.read(cx));
+        }
         let count = match (&self.effects, self.list_stale()) {
             (Some(e), false) => {
                 let rows = gallery_list(&e.effects, &self.query, self.favorites_only, self.category);
@@ -973,6 +1055,15 @@ impl EffectsView {
             _ => Some("– effects".to_string()),
         };
         ("Effects".to_string(), count)
+    }
+
+    /// The content box's width: the page's width less the rail and the
+    /// content's own padding (React's `.content`).
+    pub fn content_width(&self) -> f32 {
+        let phone = self.width <= 720.0;
+        self.width
+            - if phone { 0.0 } else if self.width < 1280.0 { 64.0 } else { 200.0 }
+            - if phone { 32.0 } else { 48.0 }
     }
 
     /// The search box runs its own text now that its entity exists: the

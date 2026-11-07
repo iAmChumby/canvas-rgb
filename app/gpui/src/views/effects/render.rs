@@ -20,7 +20,25 @@ type Entity = gpui::Entity<EffectsView>;
 
 /// The strip's page actions (React `PageActions`): New effect, More, Import.
 pub fn strip_actions(view: &EffectsView, cx: &mut Context<EffectsView>) -> gpui::AnyElement {
+    // Build mode: the builder's own keys (Revert, Save).
+    if let Some(builder) = view.builder.clone() {
+        let narrow = view.width <= 720.0;
+        let for_actions = builder.clone();
+        return builder.update(cx, move |b, _cx| {
+            crate::views::effects::stack_builder::strip_actions(b, for_actions.clone(), narrow)
+        });
+    }
     view.actions_row(cx).into_any_element()
+}
+
+/// The strip's leading key (React `PageTitle`'s `leading`): the builder's
+/// Back to the effects.
+pub fn strip_leading(view: &EffectsView, cx: &mut Context<EffectsView>) -> Option<gpui::AnyElement> {
+    let builder = view.builder.clone()?;
+    let for_leading = builder.clone();
+    Some(builder.update(cx, move |b, _cx| {
+        crate::views::effects::stack_builder::strip_leading(b, for_leading.clone())
+    }))
 }
 
 impl EffectsView {
@@ -43,7 +61,7 @@ impl EffectsView {
             "",
             15.0,
             move |_, _, cx| {
-                entity_new.update(cx, |this, _cx| this.open_stack_placeholder("new"));
+                entity_new.update(cx, |this, cx| this.open_stack_placeholder("new", cx));
             },
         ));
         let entity_more = entity.clone();
@@ -144,9 +162,10 @@ impl EffectsView {
         row
     }
 
-    /// The stack builder's route target, shown as "Not ported yet" (#214).
-    pub fn open_stack_placeholder(&mut self, _name: &str) {
+    /// The stack builder's route target (#214).
+    pub fn open_stack_placeholder(&mut self, name: &str, cx: &mut Context<Self>) {
         self.more_open = false;
+        self.open_stack(name, cx);
     }
 
     fn thumbs_needed(&mut self, rows: &[Row], cx: &mut Context<Self>) {
@@ -279,7 +298,7 @@ impl EffectsView {
                     return;
                 }
                 if is_stack {
-                    this.open_stack_placeholder(&open_id);
+                    this.open_stack_placeholder(&open_id, cx);
                 } else {
                     this.pick(&open_id, cx);
                 }
@@ -554,7 +573,8 @@ impl EffectsView {
     fn detail_pane(&self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         // The detail pane: head, presets, properties (or layers).
         if self.editing() {
-            return self.editor_pane(cx);
+            let win_h = f32::from(window.window_bounds().get_bounds().size.height);
+            return self.editor_pane(win_h, cx);
         }
         if self.no_layout() && self.loaded_detail.is_none() {
             return empty_state(
@@ -677,7 +697,7 @@ impl EffectsView {
                         "",
                         14.0,
                         move |_, _, cx| {
-                            entity_stack.update(cx, |this, _cx| this.open_stack_placeholder(&stack_id));
+                            entity_stack.update(cx, |this, cx| this.open_stack_placeholder(&stack_id, cx));
                         },
                     ))
                     .child(button_icon(
@@ -1135,12 +1155,29 @@ impl EffectsView {
         self.color_open.as_deref() == Some(key)
     }
 
-    fn editor_pane(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn editor_pane(&self, win_h: f32, cx: &mut Context<Self>) -> gpui::AnyElement {
         let t = &self.theme;
         let entity = cx.entity();
         let narrow = self.width <= 720.0;
         match &self.editor {
             EditorState::Open(target) => {
+                // The editor itself (#214).
+                if let Some(editor) = self.editor_view.clone() {
+                    // The editor's own box: the content box's width (React's
+                    // `@container page` reads it) and the height the side
+                    // column centres its content in.
+                    let editor_w = self.content_width();
+                    let editor_h = if narrow {
+                        win_h - 95.0
+                    } else {
+                        win_h - 143.0
+                    };
+                    return editor.update(cx, |e, cx| {
+                        e.width = editor_w;
+                        e.height = editor_h;
+                        e.render(cx)
+                    });
+                }
                 let mut col = div().flex().flex_col().gap_3().min_w(px(0.0));
                 col = col.child(
                     div()
@@ -1483,6 +1520,18 @@ impl Render for EffectsView {
             360.0
         };
         let entity = cx.entity();
+        // Build mode: the builder takes the whole page.
+        if let Some(builder) = self.builder.clone() {
+            return builder.update(cx, |b, cx| b.render(cx));
+        }
+        let editing = self.editing();
+        // Edit mode: the gallery becomes a strip of tiles and the inspector
+        // grows over it (React `.rd-eff-body[data-editing="true"]`).
+        let (gallery_w, inspector_w) = if editing {
+            (96.0, content_w - 96.0 - 16.0)
+        } else {
+            (content_w - inspector_w - 16.0, inspector_w)
+        };
         let gallery = self.gallery(window, cx);
         let detail = self.detail_pane(window, cx);
         let toolbar = self.toolbar(cx);
@@ -1552,8 +1601,10 @@ impl Render for EffectsView {
         } else {
             let gallery_col = div()
                 .id(gpui::SharedString::from("eff-gallery-scroll"))
+                .w(px(gallery_w))
+                .flex_none()
                 .flex()
-                .flex_1()
+                .flex_col()
                 .min_w(px(0.0))
                 .min_h(px(0.0))
                 .overflow_y_scroll()
@@ -1624,6 +1675,6 @@ impl Render for EffectsView {
                     })),
             );
         }
-        page
+        page.into_any_element()
     }
 }

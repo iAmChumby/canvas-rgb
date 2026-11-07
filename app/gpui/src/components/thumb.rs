@@ -50,6 +50,34 @@ pub fn parse_thumbnail(buf: &[u8]) -> Option<Thumb> {
     Some(Thumb { w, h, frames, data: buf[6..6 + need].to_vec() })
 }
 
+/// Reads a base64 payload (the daemon sends the preview's loop as base64).
+pub fn decode_base64(text: &str) -> Option<Vec<u8>> {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut lookup = [255u8; 256];
+    for (i, c) in ALPHABET.iter().enumerate() {
+        lookup[*c as usize] = i as u8;
+    }
+    let mut out = Vec::with_capacity(text.len() / 4 * 3);
+    let mut acc: u32 = 0;
+    let mut bits = 0u32;
+    for byte in text.bytes() {
+        if byte == b'=' || byte.is_ascii_whitespace() {
+            continue;
+        }
+        let value = lookup[byte as usize];
+        if value == 255 {
+            return None;
+        }
+        acc = (acc << 6) | value as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((acc >> bits) & 0xff) as u8);
+        }
+    }
+    Some(out)
+}
+
 static CACHE: Mutex<Option<HashMap<String, Option<Arc<Thumb>>>>> = Mutex::new(None);
 
 /// The picture for `id` once it has arrived: the outer `None` means it has
@@ -161,7 +189,7 @@ pub fn thumb(
 /// way the browser scales the 64x40 bitmap (React's thumb canvas is scaled
 /// with smoothing: a flat block's colour sits between two source pixels).
 /// Consecutive equal pixels paint as one rect.
-fn paint_frame(data: &Thumb, bounds: Bounds<gpui::Pixels>, window: &mut gpui::Window, frame: usize) {
+pub fn paint_frame(data: &Thumb, bounds: Bounds<gpui::Pixels>, window: &mut gpui::Window, frame: usize) {
     let bw = f32::from(bounds.size.width);
     let bh = f32::from(bounds.size.height);
     if data.w == 0 || data.h == 0 || bw <= 0.0 || bh <= 0.0 {
@@ -231,8 +259,16 @@ mod tests {
     }
 
     #[test]
-    fn frame_zero_sits_at_the_front_of_the_data() {
-        // The loop's first pixel is the first three bytes (React `blit`
+    fn a_base64_payload_reads_back() {
+        assert_eq!(decode_base64("").unwrap(), Vec::<u8>::new());
+        assert_eq!(decode_base64("aGVsbG8=").unwrap(), b"hello".to_vec());
+        assert_eq!(decode_base64("aGVsbG8").unwrap(), b"hello".to_vec());
+        assert_eq!(decode_base64("AAECAw==").unwrap(), vec![0, 1, 2, 3]);
+        assert!(decode_base64("!!!").is_none());
+    }
+
+    #[test]
+    fn frame_zero_sits_at_the_front_of_the_data() {        // The loop's first pixel is the first three bytes (React `blit`
         // offsets the frame by `frame * w * h * 3`).
         let mut buf = Vec::new();
         buf.extend_from_slice(&2u16.to_le_bytes());
