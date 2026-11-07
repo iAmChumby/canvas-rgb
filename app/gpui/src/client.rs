@@ -19,6 +19,24 @@ pub fn base_url() -> String {
 /// The request deadline, matching the React client's `REQUEST_TIMEOUT_MS`.
 pub const TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The API token, for the calls that cannot carry a header: the preview
+/// WebSocket takes it as `?token=`, because a WebSocket handshake has no
+/// header to put it in. The owner check runs first, exactly as it does for
+/// every other call.
+pub fn api_token() -> Option<String> {
+    token_for(&base_url()).ok()
+}
+
+/// The daemon's API port, which is where the preview socket lives.
+pub fn api_port() -> u16 {
+    base_url()
+        .trim_end_matches('/')
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(consts::API_PORT)
+}
+
 #[derive(Debug, Clone)]
 pub enum ClientError {
     /// Nothing is listening, or the port is held by another process.
