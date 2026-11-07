@@ -231,6 +231,20 @@ pub fn loading_cards(total: Option<u32>, listed: Option<usize>, counted: Option<
     }
 }
 
+/// Which frame the page draws: error when no list was ever read and no
+/// retry is pending; loading while the first read is in flight or a Try
+/// again is running; empty for an empty list; ready otherwise (React
+/// `LoadFrame` `state` in `DevicesView`).
+pub fn frame_state(has_list: bool, list_empty: bool, error_set: bool, retrying: bool) -> &'static str {
+    if !has_list {
+        if error_set && !retrying { "error" } else { "loading" }
+    } else if list_empty {
+        "empty"
+    } else {
+        "ready"
+    }
+}
+
 /// How many zone rows placeholder card `i` draws: `ZONE_RHYTHM[i % 12]` with
 /// the rhythm `[1,1,1,4,1,1,1,1,1,1,1,1]` (card 3 has four zone rows).
 pub fn placeholder_zones(card: usize) -> usize {
@@ -1693,13 +1707,12 @@ impl Render for DevicesView {
                     .child("OpenRGB is not connected."),
             );
         }
-        let state = if self.devices.is_none() {
-            if self.devices_error.is_some() && !self.retrying { "error" } else { "loading" }
-        } else if self.devices.as_ref().is_some_and(|d| d.is_empty()) {
-            "empty"
-        } else {
-            "ready"
-        };
+        let state = frame_state(
+            self.devices.is_some(),
+            self.devices.as_ref().is_some_and(|d| d.is_empty()),
+            self.devices_error.is_some(),
+            self.retrying,
+        );
         match state {
             "loading" => {
                 page = page.child(self.loading_shape(phone));
@@ -2133,6 +2146,20 @@ mod tests {
     #[test]
     fn resend_interval_is_two_seconds() {
         assert_eq!(RESEND_MS, 2000);
+    }
+
+    #[test]
+    fn frame_state_follows_the_loadframe_rules() {
+        // No list read, error set, no retry: the error panel.
+        assert_eq!(frame_state(false, false, true, false), "error");
+        // A Try again in flight puts the frame back to loading.
+        assert_eq!(frame_state(false, false, true, true), "loading");
+        // First read still in flight.
+        assert_eq!(frame_state(false, false, false, false), "loading");
+        // Empty list, then ready.
+        assert_eq!(frame_state(true, true, false, false), "empty");
+        assert_eq!(frame_state(true, false, true, false), "ready");
+        assert_eq!(frame_state(true, false, false, false), "ready");
     }
 
     #[test]
