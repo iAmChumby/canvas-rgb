@@ -32,6 +32,9 @@ use crate::components::button::{Variant, button, button_icon, button_icon_wide, 
 use crate::components::daemon_down::daemon_down;
 use crate::components::slider::slider;
 use crate::theme::{Theme, TokenRadius};
+use crate::views::command_palette::{
+    CommandPaletteView, PaletteAction, build_commands, build_short, is_palette_toggle_key,
+};
 use crate::views::displays::DisplaysView;
 use crate::views::effects::EffectsView;
 use crate::views::fans::FansView;
@@ -255,6 +258,16 @@ pub struct Shell {
     pub peripherals: Option<usize>,
     pub render: Option<RenderState>,
     pub deck_lights: bool,
+    /// The command palette (#211). The shell owns whether it is open; the
+    /// palette's rows run through `run_palette_action` and then close.
+    pub palette: gpui::Entity<CommandPaletteView>,
+    pub palette_open: bool,
+    /// The query `--palette-query` opens with (capture flag only).
+    pub palette_query: String,
+    /// The status details popover anchor (`Shell.tsx` `detailsOpen`); the
+    /// popover itself lives with the strip slice, so this flag only records
+    /// the palette action for now.
+    pub details_open: bool,
 }
 
 impl Shell {
@@ -280,7 +293,7 @@ impl Shell {
             SettingsView::new(
                 theme,
                 settings_cell,
-                Some(shell_entity),
+                Some(shell_entity.clone()),
                 settings_visible,
                 cx,
                 tray_present,
@@ -292,6 +305,27 @@ impl Shell {
         });
         let peripherals_view = cx.new(|cx| PeripheralsView::new(theme, cx));
         let effects_view = cx.new(|cx| EffectsView::new(theme, cx));
+        let palette = cx.new(|cx| CommandPaletteView::new(theme, cx));
+        // The palette's callbacks run through the shell: rows execute an
+        // action and then close it (`Shell.tsx` `togglePower`/`runEffect`).
+        let palette_shell = shell_entity.clone();
+        let palette_close_shell = shell_entity.clone();
+        palette.update(cx, |p, cx| {
+            p.connect(cx);
+            p.set_on_run(std::rc::Rc::new(
+                move |action: &PaletteAction, _window, cx| {
+                    let action = action.clone();
+                    palette_shell.update(cx, |this, cx| {
+                        this.run_palette_action(&action, cx);
+                    });
+                },
+            ));
+            p.set_on_close(std::rc::Rc::new(move |_window, cx| {
+                palette_close_shell.update(cx, |this, cx| {
+                    this.close_palette(cx);
+                });
+            }));
+        });
         effects_view.update(cx, |view, cx| {
             view.connect_search(cx);
             // The search box's chrome (placeholder, text mode).
@@ -321,6 +355,10 @@ impl Shell {
             peripherals: None,
             render: None,
             deck_lights: true,
+            palette,
+            palette_open: false,
+            palette_query: String::new(),
+            details_open: false,
         };
         shell.poll_all(cx);
         shell
@@ -472,10 +510,20 @@ impl Shell {
             .unwrap_or(0);
         let len = list.len() as i32;
         let next = list[((at as i32 + dir + len) % len) as usize].clone();
+        self.activate_effect(&next.id, cx);
+    }
+
+    /// Run the effect `id` (`Shell.tsx` `runEffect`): POST
+    /// `/api/v1/effects/{id}/activate` with `{"props":{},"preset":null}`, then
+    /// refresh everything. The palette closes at once, before the request
+    /// finishes (React's quirk); a failure has no toast in the GPUI shell
+    /// yet (there is no NotifyHost in this slice), like the power PATCH.
+    fn activate_effect(&mut self, id: &str, cx: &mut Context<Self>) {
+        let id = id.to_string();
         let bg = cx.background_executor().spawn(async move {
             let client = DaemonClient::new();
             client.post_json(
-                &format!("/api/v1/effects/{}/activate", next.id),
+                &format!("/api/v1/effects/{id}/activate"),
                 r#"{"props":{},"preset":null}"#,
             )
         });
@@ -484,6 +532,77 @@ impl Shell {
             let _ = view.update(cx, |this, cx| this.poll_all(cx));
         })
         .detach();
+    }
+
+    /// Open the palette (Ctrl+K, the strip's search button): the search field
+    /// is focused 20 ms later, as in React, starting with an empty query.
+    pub fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette_open = true;
+        self.palette
+            .update(cx, |p, cx| p.open("", window, cx));
+        cx.notify();
+    }
+
+    /// Open at start with `query` typed (the capture flag `--palette-query`):
+    /// the input is focused on the first frame.
+    pub fn open_palette_initial(&mut self, query: &str, cx: &mut Context<Self>) {
+        self.palette_open = true;
+        self.palette_query = query.to_string();
+        self.palette.update(cx, |p, cx| {
+            p.open_initial(query, cx);
+        });
+        cx.notify();
+    }
+
+    pub fn close_palette(&mut self, cx: &mut Context<Self>) {
+        self.palette_open = false;
+        cx.notify();
+    }
+
+    /// Run one palette row (`Shell.tsx` commands). The palette closes after
+    /// this returns (React runs the row, then closes).
+    pub fn run_palette_action(&mut self, action: &PaletteAction, cx: &mut Context<Self>) {
+        match action {
+            PaletteAction::None => {}
+            PaletteAction::OpenDetails => {
+                self.details_open = true;
+            }
+            PaletteAction::Navigate(page) => {
+                self.navigate(page);
+                self.sync_settings_visible(cx);
+            }
+            PaletteAction::Theme => {
+                self.settings_view
+                    .update(cx, |s, cx| s.palette_next_theme(cx));
+            }
+            PaletteAction::Motion => {
+                self.settings_view
+                    .update(cx, |s, cx| s.palette_toggle_motion(cx));
+            }
+            PaletteAction::Power => {
+                // React's `togglePower` returns early when status is null:
+                // no request, and the palette still closes.
+                if self.status.is_some() {
+                    self.toggle_power(cx);
+                }
+            }
+            PaletteAction::RunEffect(id) => {
+                self.activate_effect(id, cx);
+            }
+        }
+    }
+
+    /// Ctrl+K / Meta+K (`Shell.tsx:97-107`): toggles the palette.
+    fn on_shell_key(&mut self, event: &gpui::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let key = event.keystroke.key.as_str();
+        let mods = &event.keystroke.modifiers;
+        if is_palette_toggle_key(key, mods.control, mods.platform) {
+            if self.palette_open {
+                self.close_palette(cx);
+            } else {
+                self.open_palette(window, cx);
+            }
+        }
     }
 
     /// The two consecutive failures that take the status away (the
@@ -1570,6 +1689,9 @@ impl Shell {
                 ));
             }
         }
+        // The search button opens the command palette
+        // (`StatusStrip.tsx:196-203`, `onOpenPalette`).
+        let entity = cx.entity();
         controls = controls.child(icon_button(
             t,
             "strip-search",
@@ -1578,7 +1700,9 @@ impl Shell {
             true,
             false,
             false,
-            |_, _, _| {},
+            move |_, window, cx| {
+                entity.update(cx, |this, cx| this.open_palette(window, cx));
+            },
         ));
         inner = inner.child(controls);
         inner
@@ -1774,6 +1898,27 @@ impl Render for Shell {
                 .update(cx, |s, _| s.tray_update.clone());
             self.updates_view.update(cx, |u, cx| u.set_update(st, cx));
         }
+        // The theme follows the settings Appearance radio in the palette too.
+        self.palette
+            .update(cx, |p, _| p.theme = self.theme);
+        // The palette's lists are derived from the shell's answers every
+        // render, so Run rows appear as the effects answer lands.
+        if self.palette_open {
+            let (theme_hint, motion_hint) = self
+                .settings_view
+                .update(cx, |s, _| (s.theme_pref.clone(), s.motion_pref.clone()));
+            let offline = self.status.is_none() && self.status_error.is_some();
+            let commands = build_commands(
+                self.status.as_ref(),
+                offline,
+                self.effects.as_ref(),
+                &theme_hint,
+                &motion_hint,
+            );
+            let short = build_short(&commands, self.effects.as_ref(), self.status.as_ref());
+            self.palette
+                .update(cx, |p, _| p.set_data(commands, short));
+        }
         let t = &self.theme;
         let phone = self.width <= 720.0;
         let phone_pad_top = px(16.0);
@@ -1851,14 +1996,22 @@ impl Render for Shell {
                 )
                 .child(main_col)
         };
-        div()
+        let mut root = div()
             .relative()
             .size_full()
             .bg(Theme::color(t.g1))
             .line_height(gpui::relative(crate::theme::LINE_HEIGHT))
+            .on_key_down(cx.listener(Self::on_shell_key))
             .child(self.background())
             .child(body)
-            .child(self.spectrum_line())
+            .child(self.spectrum_line());
+        // The palette is rendered outside the page area it covers, so it
+        // still opens over the daemon-down page and before the first answer
+        // (`Shell.tsx:269-285`).
+        if self.palette_open {
+            root = root.child(self.palette.clone());
+        }
+        root
     }
 }
 

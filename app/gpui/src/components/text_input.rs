@@ -109,6 +109,11 @@ pub struct TextInput {
     /// Left-aligned in the UI face (the search box); number fields keep the
     /// mono, right-aligned form React's `.num` draws.
     ui_left: bool,
+    /// Bare (the command palette's search field): transparent, no border, no
+    /// fixed height, like React's `.cmdk-input input`.
+    bare: bool,
+    /// The text size in px (15 for number fields; 16 for the palette).
+    font_px: f32,
     /// The search box wears React's small radius (`.effect-search input`
     /// `r-sm`); a number field wears the input's `r-md`.
     radius_sm: bool,
@@ -155,6 +160,8 @@ impl TextInput {
             on_submit: None,
             on_escape: None,
             ui_left: false,
+            bare: false,
+            font_px: 15.0,
             radius_sm: false,
             left_pad: 8.0,
             placeholder: None,
@@ -175,6 +182,19 @@ impl TextInput {
     /// 8 px, so its text starts 30 px in, as React's `padding-left` does).
     pub fn set_left_pad(&mut self, pad: f32, cx: &mut Context<Self>) {
         self.left_pad = pad;
+        cx.notify();
+    }
+
+    /// Bare (the command palette's search field): transparent, no border, no
+    /// fixed height, like React's `.cmdk-input input`.
+    pub fn set_bare(&mut self, cx: &mut Context<Self>) {
+        self.bare = true;
+        cx.notify();
+    }
+
+    /// The text size in px (the palette's field is `--t16`, 16 px).
+    pub fn set_font_size_px(&mut self, px_value: f32, cx: &mut Context<Self>) {
+        self.font_px = px_value;
         cx.notify();
     }
 
@@ -691,6 +711,7 @@ impl Render for TextInput {
         let disabled = self.disabled;
         // The field commits when it loses the focus, so it listens for it.
         self.watch_blur(window, cx);
+        let bare = self.bare;
         let mut field = div()
             .id(gpui::SharedString::from("text-input"))
             .relative()
@@ -698,21 +719,27 @@ impl Render for TextInput {
             .items_center()
             .justify_end()
             .w_full()
-            .h(px(32.0))
             .pl(px(self.left_pad))
-            .pr(px(8.0));
+            .pr(if bare { px(0.0) } else { px(8.0) });
+        if !bare {
+            field = field.h(px(32.0));
+        }
         field = if self.radius_sm { field.r_sm() } else { field.r_md() };
-        field = field
-            .border_1()
-            .border_color(Theme::color(t.line))
-            .bg(Theme::color(t.sunk))
-            .text_color(if disabled {
-                Theme::color(t.mute)
-            } else {
-                Theme::color(t.ink)
-            })
-            .text_size(px(15.0))
-            .font_family(if self.ui_left { crate::fonts::UI_FAMILY } else { crate::fonts::MONO_FAMILY });
+        field = field.text_color(if disabled {
+            Theme::color(t.mute)
+        } else {
+            Theme::color(t.ink)
+        })
+        .text_size(px(self.font_px))
+        .font_family(if self.ui_left { crate::fonts::UI_FAMILY } else { crate::fonts::MONO_FAMILY });
+        field = if bare {
+            field.bg(gpui::transparent_black())
+        } else {
+            field
+                .border_1()
+                .border_color(Theme::color(t.line))
+                .bg(Theme::color(t.sunk))
+        };
         if disabled {
             return field.child(TextElement { input: cx.entity() });
         }

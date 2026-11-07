@@ -29,9 +29,21 @@ param(
     # Start the editor with redirected stdin and write the capture-react.mjs
     # __TAURI__ stub's update state and prefs lines to it (Settings pairs show
     # the same tray state in both editors).
-    [switch]$TrayStub
+    [switch]$TrayStub,
+    # Open the command palette at start (--palette; #211). Files are named
+    # palette-gpui-<size>-<theme>.png, or palette-q-<slug>-gpui-... with
+    # -PaletteQuery, so diff-pairs.ps1 pairs them with the React shots.
+    [switch]$Palette,
+    [string]$PaletteQuery = ''
 )
 if ($ApiPort -eq 9430) { throw "-ApiPort 9430 is the real daemon's port; captures run only against the fakes" }
+if ($PaletteQuery -ne '') { $Palette = $true }
+$paletteSuffix = ''
+if ($Palette) {
+  $slug = ($PaletteQuery.ToLower() -replace '[^a-z0-9]+', '-').Trim('-')
+  if ($slug) { $paletteSuffix = "-q-$slug" }
+  Write-Host "capture-gpui: palette open at start (query '$PaletteQuery')"
+}
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -166,7 +178,12 @@ foreach ($theme in $Themes) {
       # even by an old console build (a capture run opened terminal windows over Luke's game).
       $psi = New-Object System.Diagnostics.ProcessStartInfo
       $psi.FileName = $EditorExe
-      $psi.Arguments = "--page $page --theme $theme --min-size 390x600 --size $size --capture"
+      $paletteArgs = ''
+      if ($Palette) {
+        $paletteArgs = ' --palette'
+        if ($PaletteQuery -ne '') { $paletteArgs += " --palette-query `"$PaletteQuery`"" }
+      }
+      $psi.Arguments = "--page $page --theme $theme --min-size 390x600 --size $size --capture$paletteArgs"
       $psi.UseShellExecute = $false
       $psi.CreateNoWindow = $true
       $psi.RedirectStandardInput = [bool]$TrayStub
@@ -265,7 +282,8 @@ foreach ($theme in $Themes) {
         # viewport shot.
         $shot = $bmp.Clone((New-Object System.Drawing.Rectangle($ox, $oy, $clientW, $clientH)), $bmp.PixelFormat)
         $bmp.Dispose()
-        $file = Join-Path $outDir "$page-gpui-${size}-$theme.png"
+        $viewName = if ($Palette) { "palette$paletteSuffix" } else { $page }
+        $file = Join-Path $outDir "$viewName-gpui-${size}-$theme.png"
         $shot.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
         $shot.Dispose()
         Write-Host "capture-gpui: $file ($ok)"

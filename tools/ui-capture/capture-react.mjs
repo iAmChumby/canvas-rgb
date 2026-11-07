@@ -22,6 +22,11 @@
 //   UI_CAPTURE_API_BASE  daemon base URL (default http://127.0.0.1:19430)
 //   UI_CAPTURE_TOKEN_FILE / FAKE_TOKEN_FILE  test token path
 //       (default .build/fake-home/api-token)
+//   UI_CAPTURE_PALETTE   comma-separated queries for the command palette
+//       (#211): "empty" shoots the empty query at every size, any other
+//       entry shoots that query at 1440x900 and 390x844. When set, only the
+//       palette shots are taken (Layout page, Ctrl+K, query typed), as
+//       palette[-q-<slug>]-react-<w>x<h>-<theme>.png.
 //   UI_CAPTURE_FREEZE=1  freeze every thumbnail loop on frame 0, the frame
 //       the GPUI editor always draws (its settle probe needs still frames).
 //       Implemented as the browser's reduced-motion setting, which
@@ -96,6 +101,17 @@ const ACTIVE_THEMES = THEME_FILTER.length ? THEMES.filter((t) => THEME_FILTER.in
 if (!ACTIVE_VIEWS.length || !ACTIVE_VIEWPORTS.length || !ACTIVE_THEMES.length) {
   throw new Error("a UI_CAPTURE_* filter matched nothing (check the names)");
 }
+
+// The command palette (#211): when UI_CAPTURE_PALETTE is set (a comma list of
+// queries, "empty" for the empty query), only the palette shots are taken:
+// the Layout page with Ctrl+K open, the query typed where one is given. The
+// empty query shoots at every size; a typed query at 1440x900 and 390x844.
+const PALETTE_ENTRIES = (process.env.UI_CAPTURE_PALETTE ?? "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+const PALETTE_SIZES = (entries) =>
+  entries === "empty" ? ACTIVE_VIEWPORTS : ACTIVE_VIEWPORTS.filter((v) => ["1440x900", "390x844"].includes(`${v.w}x${v.h}`));
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -293,7 +309,7 @@ function tauriInit({ daemonBase, token, theme }) {
   window.__TAURI__ = { core: { invoke }, event: { listen } };
 }
 
-async function shootPage(page, base, view, viewport, theme, daemonBase, token) {
+async function shootPage(page, base, view, viewport, theme, daemonBase, token, paletteQuery = null) {
   const pageErrors = [];
   const consoleErrors = [];
   const apiFailures = [];
@@ -341,7 +357,26 @@ async function shootPage(page, base, view, viewport, theme, daemonBase, token) {
   }
   // Let the view settle (fonts, thumbnails, one preview frame).
   await page.waitForTimeout(400);
-  const fileName = `${view.name}-react-${viewport.w}x${viewport.h}-${theme}.png`;
+  let fileName = `${view.name}-react-${viewport.w}x${viewport.h}-${theme}.png`;
+  if (paletteQuery !== null) {
+    // The command palette (#211): Ctrl+K opens it, the query is typed, then
+    // the shot. The slug names the file so the GPUI shot pairs with it.
+    const slug = paletteQuery.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    fileName = `palette${slug ? `-q-${slug}` : ""}-react-${viewport.w}x${viewport.h}-${theme}.png`;
+    await page.keyboard.press("Control+k");
+    try {
+      await page.waitForSelector(".cmdk", { timeout: 5000 });
+    } catch {
+      notLoaded.push("command palette did not open after Ctrl+K");
+    }
+    // The input is focused 20 ms after mount: typing at once loses its
+    // first character to the page.
+    await page.waitForTimeout(200);
+    if (paletteQuery) {
+      await page.keyboard.type(paletteQuery, { delay: 10 });
+    }
+    await page.waitForTimeout(400);
+  }
   const filePath = path.join(OUT_DIR, fileName);
   await page.screenshot({ path: filePath });
   page.off("pageerror", onPageError);
@@ -377,20 +412,39 @@ async function main() {
   const browser = await chromium.launch({ headless: true });
   const shots = [];
   try {
-    for (const viewport of ACTIVE_VIEWPORTS) {
-      for (const theme of ACTIVE_THEMES) {
-        const context = await browser.newContext({
-          viewport: { width: viewport.w, height: viewport.h },
-          deviceScaleFactor: 1,
-          // UI_CAPTURE_FREEZE=1: hold every thumbnail loop on frame 0.
-          ...(FREEZE ? { reducedMotion: "reduce" } : {}),
-        });
-        const page = await context.newPage();
-        for (const view of ACTIVE_VIEWS) {
-          process.stderr.write(`shoot ${view.name} ${viewport.w}x${viewport.h} ${theme} ...\n`);
-          shots.push(await shootPage(page, base, view, viewport, theme, DAEMON_BASE, token));
+    if (PALETTE_ENTRIES.length) {
+      const layout = VIEWS.find((v) => v.name === "layout");
+      for (const entry of PALETTE_ENTRIES) {
+        const query = entry === "empty" ? "" : entry;
+        for (const viewport of PALETTE_SIZES(entry)) {
+          for (const theme of ACTIVE_THEMES) {
+            const context = await browser.newContext({
+              viewport: { width: viewport.w, height: viewport.h },
+              deviceScaleFactor: 1,
+            });
+            const page = await context.newPage();
+            process.stderr.write(`shoot palette ${query ? JSON.stringify(query) : "(empty)"} ${viewport.w}x${viewport.h} ${theme} ...\n`);
+            shots.push(await shootPage(page, base, layout, viewport, theme, DAEMON_BASE, token, query));
+            await context.close();
+          }
         }
-        await context.close();
+      }
+    } else {
+      for (const viewport of ACTIVE_VIEWPORTS) {
+        for (const theme of ACTIVE_THEMES) {
+          const context = await browser.newContext({
+            viewport: { width: viewport.w, height: viewport.h },
+            deviceScaleFactor: 1,
+            // UI_CAPTURE_FREEZE=1: hold every thumbnail loop on frame 0.
+            ...(FREEZE ? { reducedMotion: "reduce" } : {}),
+          });
+          const page = await context.newPage();
+          for (const view of ACTIVE_VIEWS) {
+            process.stderr.write(`shoot ${view.name} ${viewport.w}x${viewport.h} ${theme} ...\n`);
+            shots.push(await shootPage(page, base, view, viewport, theme, DAEMON_BASE, token));
+          }
+          await context.close();
+        }
       }
     }
   } finally {

@@ -8,6 +8,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Added
 
+- Command palette (Ctrl+K, or the strip's search button) in the GPUI editor: the short list (status, pages, lights, running/favourite effects), the full searchable list with group headings, arrow-key highlight that skips status rows, Enter/click to run, backdrop click and Escape to close. "Switch the theme" and "Toggle interface motion" cycle the Appearance prefs; "Pause/Resume the lights" and "Run <effect>" go through the existing output PATCH and effect activate POST. (#211)
+
 - Effects: the Effects library in the GPUI editor (gallery with thumbnails, categories and search, the preset keys, every property control, the new-from-code chooser). Opening an effect for editing still says "Not ported yet" — that is issue #214. (#210)
 
 - Experimental builds can switch the editor: the tray menu and Settings then offer the React editor or the GPUI editor, and the tray opens the one you picked. A stable build always opens the React editor. (#202)
