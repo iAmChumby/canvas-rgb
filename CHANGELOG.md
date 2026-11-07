@@ -8,6 +8,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Added
 
+- Effects: the Effects library in the GPUI editor (gallery with thumbnails, categories and search, the preset keys, every property control, the new-from-code chooser). Opening an effect for editing still says "Not ported yet" — that is issue #214. (#210)
+
 - Experimental builds can switch the editor: the tray menu and Settings then offer the React editor or the GPUI editor, and the tray opens the one you picked. A stable build always opens the React editor. (#202)
 - Fans: mark a header Not on my board, or Show anyway on a header the board list hides. The word is kept per header, so "Use the board list" gives the decision back to the board. (#146)
 

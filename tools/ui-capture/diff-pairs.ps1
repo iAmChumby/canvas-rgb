@@ -14,8 +14,13 @@
     dimmed, with differing pixels painted magenta and the bounding boxes of
     differing clusters outlined,
   - prints (and appends to .build/ui-capture/diff/summary.txt) one line per
-    pair: "<pair> differing=<n>/<total> (<pct>%) boxes=<count>" followed by
-    each box as "x,y,w,h".
+    pair: "<pair> differing=<n>/<total> (<pct>%) masked=<m> boxes=<count>"
+    followed by each box as "x,y,w,h".
+
+  -Mask x,y,w,h[;x,y,w,h...] excludes the given rectangles from the count
+    and the total (animated thumbnail content neither side can freeze
+    identically), and reports how many pixels were masked. A masked pixel
+    is painted dimmed in the diff image, never magenta.
 
   Clusters: a 12 px grid cell is "hot" when more than 3% of its pixels
   differ; 4-adjacent hot cells merge into one cluster whose bounding
@@ -37,6 +42,8 @@
   powershell -NoProfile -File tools/ui-capture/diff-pairs.ps1 -OnlyPair displays-390x844-dark -Column 30
 .EXAMPLE
   powershell -NoProfile -File tools/ui-capture/diff-pairs.ps1 -OnlyPair displays-1440x900-dark -Row 263
+.EXAMPLE
+  powershell -NoProfile -File tools/ui-capture/diff-pairs.ps1 -OnlyPair effects-1440x900-dark -Mask 100,200,198,124
 #>
 param(
     # Process only this pair ("<view>-<w>x<h>-<theme>"); default: every pair.
@@ -52,7 +59,10 @@ param(
     [int]$Threshold = 6,
     # Strict: threshold 6, and a 12 px cell with any differing pixel is
     # hot (1 px hot cells allowed), so low-contrast structure still boxes.
-    [switch]$Strict
+    [switch]$Strict,
+    # Rectangles to exclude, "x,y,w,h" separated by ";". Masked pixels are
+    # counted in neither the differing count nor the total.
+    [string]$Mask = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -81,9 +91,19 @@ public static class PairDiff {
             || Math.Abs((int)a.B - (int)b.B) > Threshold;
     }
 
+    public static int[] Masks = new int[0];
+
+    static bool IsMasked(int x, int y) {
+        for (int i = 0; i + 3 < Masks.Length; i += 4) {
+            if (x >= Masks[i] && y >= Masks[i + 1] && x < Masks[i] + Masks[i + 2] && y < Masks[i + 1] + Masks[i + 3])
+                return true;
+        }
+        return false;
+    }
+
     public static void DiffPair(string reactPath, string gpuiPath, string outPath,
-        out int differing, out int total, out List<int[]> boxes, out string error) {
-        differing = 0; total = 0; boxes = new List<int[]>(); error = null;
+        out int differing, out int total, out int masked, out List<int[]> boxes, out string error) {
+        differing = 0; total = 0; masked = 0; boxes = new List<int[]>(); error = null;
         using (var react = new Bitmap(reactPath))
         using (var gpui = new Bitmap(gpuiPath)) {
             if (react.Width != gpui.Width || react.Height != gpui.Height) {
@@ -92,7 +112,8 @@ public static class PairDiff {
                 return;
             }
             int w = react.Width, h = react.Height;
-            total = w * h;
+            // The total counts unmasked pixels only (incremented in the
+            // pixel loop); masked pixels are reported separately.
             var rRect = new Rectangle(0, 0, w, h);
             var rData = react.LockBits(rRect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
             var gData = gpui.LockBits(rRect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
@@ -114,8 +135,19 @@ public static class PairDiff {
                 int cellRow = (y / Grid) * cols;
                 for (int x = 0; x < w; x++) {
                     int ri = ro + x * 4, gi = go + x * 4, oi = oo + x * 4;
+                    if (IsMasked(x, y)) {
+                        // Excluded from the count and the total; painted
+                        // dimmed like a matching pixel, never magenta.
+                        masked++;
+                        oBuf[oi] = (byte)(rBuf[ri] / 2);
+                        oBuf[oi + 1] = (byte)(rBuf[ri + 1] / 2);
+                        oBuf[oi + 2] = (byte)(rBuf[ri + 2] / 2);
+                        oBuf[oi + 3] = 255;
+                        continue;
+                    }
                     int cell = cellRow + (x / Grid);
                     cellTotal[cell]++;
+                    total++;
                     bool d = Math.Abs((int)rBuf[ri + 2] - (int)gBuf[gi + 2]) > Threshold
                         || Math.Abs((int)rBuf[ri + 1] - (int)gBuf[gi + 1]) > Threshold
                         || Math.Abs((int)rBuf[ri] - (int)gBuf[gi]) > Threshold;
@@ -233,6 +265,17 @@ $summaryPath = Join-Path $diffDir 'summary.txt'
 $lines = New-Object System.Collections.Generic.List[string]
 $failed = $false
 
+$maskList = New-Object System.Collections.Generic.List[int]
+if ($Mask) {
+    foreach ($rect in ($Mask -split ';')) {
+        $p = $rect -split ','
+        if ($p.Count -ne 4) { throw "-Mask must be x,y,w,h[;x,y,w,h...]" }
+        foreach ($v in $p) { $maskList.Add([int]$v) }
+    }
+}
+[PairDiff]::Masks = [int[]]$maskList
+if ($maskList.Count -gt 0) { Write-Output "mask: $($maskList.Count / 4) rect(s)" }
+
 foreach ($rf in $reactFiles) {
     if ($rf.Name -notmatch $pattern) { continue }
     $view = $Matches.view; $w = [int]$Matches.w; $h = [int]$Matches.h; $theme = $Matches.theme
@@ -265,15 +308,15 @@ foreach ($rf in $reactFiles) {
     }
 
     $outFile = Join-Path $diffDir "$pairName.png"
-    $differing = 0; $total = 0; $boxes = $null; $err = $null
+    $differing = 0; $total = 0; $masked = 0; $boxes = $null; $err = $null
     [PairDiff]::Threshold = $Threshold; [PairDiff]::Strict = [bool]$Strict
-    [PairDiff]::DiffPair($rf.FullName, $gpuiFile, $outFile, [ref]$differing, [ref]$total, [ref]$boxes, [ref]$err)
+    [PairDiff]::DiffPair($rf.FullName, $gpuiFile, $outFile, [ref]$differing, [ref]$total, [ref]$masked, [ref]$boxes, [ref]$err)
     if ($err) {
         $line = "$pairName FAIL $err"
         $lines.Add($line); Write-Output $line; $failed = $true; continue
     }
     $pct = if ($total -eq 0) { 0 } else { [math]::Round(100.0 * $differing / $total, 2) }
-    $line = "$pairName differing=$differing/$total ($pct%) boxes=$($boxes.Count)"
+    $line = "$pairName differing=$differing/$total ($pct%) masked=$masked boxes=$($boxes.Count)"
     $lines.Add($line); Write-Output $line
     foreach ($b in $boxes) {
         $bl = "  $($b[0]),$($b[1]),$($b[2]),$($b[3])"

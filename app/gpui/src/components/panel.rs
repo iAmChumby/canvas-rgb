@@ -519,6 +519,7 @@ pub fn field_stack(
 pub fn state_dot(t: &Theme, tone: &str, words: &str) -> impl IntoElement {
     let color = match tone {
         "ok" => Theme::color(t.ok),
+        "mute" => Theme::color(t.mute),
         "warn" => Theme::color(t.warn),
         "work" => Theme::color(t.work),
         _ => Theme::color(t.down),

@@ -3,6 +3,7 @@
 
 pub mod devices;
 pub mod displays;
+pub mod effects;
 pub mod fans;
 pub mod peripherals;
 pub mod settings;
