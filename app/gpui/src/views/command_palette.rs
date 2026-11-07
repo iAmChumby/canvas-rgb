@@ -74,6 +74,30 @@ pub const PALETTE_PAGES: &[(&str, &str)] = &[
     ("Settings", "/settings/"),
 ];
 
+/// The group heading's font size (React's `.cmdk-group`). React asks for
+/// `var(--t12)`, and `tokens.css` defines no `--t12`: the declaration is
+/// invalid at computed-value time, so the heading inherits the body's
+/// 15 px (`app.css:23`). Measured in the browser:
+/// `getComputedStyle(.cmdk-group)` reads font-size 15px, line-height
+/// 21.75px, letter-spacing 0.9px, weight 600, colour 133,139,149.
+pub const GROUP_HEADING_FONT_PX: f32 = 15.0;
+
+/// The search field's line height: React's `font: inherit` gives the native
+/// input the body's 1.45, so its line box is 23.2 px at `--t16`.
+pub const FIELD_LINE_HEIGHT: f32 = 1.45;
+
+/// The field's vertical padding: the browser's own `padding: 1px 2px`
+/// (`getComputedStyle(input).padding` = "1px 2px").
+pub const FIELD_V_PAD_PX: f32 = 1.0;
+
+/// The field's left padding: the same browser padding, 2 px, so the text
+/// starts 2 px into the input (x 479 at 1440x900).
+pub const FIELD_LEFT_PAD_PX: f32 = 2.0;
+
+/// The placeholder's colour: the browser's default `darkgray`, #757575,
+/// the same in both themes (React's app CSS has no `::placeholder` rule).
+pub const PLACEHOLDER_GREY: u32 = 0x757575;
+
 fn link_state_word(state: LinkState) -> &'static str {
     match state {
         LinkState::Connected => "connected",
@@ -406,9 +430,23 @@ impl CommandPaletteView {
             // `--t16`, no outline (the panel carries the focus state).
             input.set_text_mode(Some("Search pages, effects and actions"), cx);
             input.set_bare(cx);
-            // No inner padding: the panel's input row carries the 12 px inset.
-            input.set_left_pad(0.0, cx);
+            // The field's text is `--t16` (React's `font-size: var(--t16)`).
             input.set_font_size_px(16.0, cx);
+            // React's field is a native input: `font: inherit` gives it the
+            // body's 1.45 line height (a 23.2 px line box at `--t16`), and
+            // the browser's own `padding: 1px 2px` adds 2 px, so the input
+            // box is 25.1875 px and the row 50.1875 px (measured on the
+            // React shot). Without the 2 px the row is 2 px short and every
+            // row under it sits 2 px high.
+            input.set_line_height(FIELD_LINE_HEIGHT, cx);
+            input.set_vertical_pad(FIELD_V_PAD_PX, cx);
+            // The same 2 px on the sides: React's text starts 2 px into the
+            // input (x 479 on the 1440 shot), not at its edge.
+            input.set_left_pad(FIELD_LEFT_PAD_PX, cx);
+            // React's app CSS has no `::placeholder` rule, so the browser's
+            // own default grey paints the placeholder: `darkgray`, #757575,
+            // the same in both themes (measured on the React shots).
+            input.set_placeholder_color(gpui::rgb(PLACEHOLDER_GREY), cx);
             input
         });
         CommandPaletteView {
@@ -553,11 +591,11 @@ impl CommandPaletteView {
             Some(hint) => text_width(window, hint, 14.0, gpui::FontWeight::NORMAL, crate::fonts::MONO_FAMILY),
             None => 0.0,
         };
-        // The label's budget: the panel minus the list padding (s1, 4 each
-        // side), the row padding (s3, 12 each side), the gap (s3) and the
-        // hint. React truncates with an ellipsis on one line
-        // (`.cmdk-item-label`, `motion.css:991-997`).
-        let budget = panel_w - 8.0 - 24.0 - if cmd.hint.is_some() { 12.0 } else { 0.0 } - hint_w;
+        // The label's budget: the panel minus its 1 px border (2), the list
+        // padding (s1, 4 each side), the row padding (s3, 12 each side), the
+        // gap (s3) and the hint. React truncates with an ellipsis on one
+        // line (`.cmdk-item-label`, `motion.css:991-997`).
+        let budget = panel_w - 2.0 - 8.0 - 24.0 - if cmd.hint.is_some() { 12.0 } else { 0.0 } - hint_w;
         let label = ellipsize(
             window,
             &cmd.label,
@@ -653,7 +691,9 @@ impl Render for CommandPaletteView {
                     .path("icons/MagnifyingGlass.svg")
                     .size(px(16.0))
                     .flex_none()
-                    .text_color(Theme::color(t.dim)),
+                    // React's Phosphor icon inherits the body's colour: the
+                    // `.cmdk-input` row sets none, so the icon is `--ink`.
+                    .text_color(Theme::color(t.ink)),
             )
             .child(self.input.clone());
 
@@ -709,9 +749,17 @@ impl Render for CommandPaletteView {
                         .pt(px(12.0))
                         .px(px(12.0))
                         .pb(px(4.0))
+                        // React's `.cmdk-group` asks for `var(--t12)`, and
+                        // `tokens.css` has no `--t12`: the declaration is
+                        // invalid at computed-value time, so the heading
+                        // inherits the body's 15 px (`app.css:23`). Measured
+                        // on the React shot: the heading's line box is
+                        // 21.75 px (15 x 1.45), not the 17.4 px a 12 px font
+                        // would give, which put every row under it 4.35 px
+                        // high.
                         .child(tracked_text(
                             &name.to_uppercase(),
-                            12.0,
+                            GROUP_HEADING_FONT_PX,
                             0.06,
                             gpui::FontWeight::SEMIBOLD,
                             crate::fonts::UI_FAMILY,
@@ -747,13 +795,14 @@ impl Render for CommandPaletteView {
             .child(list);
         if phone {
             // The phone sheet: width 100%, max height 86vh, top radius only
-            // (`motion.css:1014-1025`).
+            // (`motion.css:1014-1025`): the bottom corners are square.
             panel = panel.max_h(px(win_h * 0.86));
-            let corner = gpui::AbsoluteLength::Pixels(px(16.0));
-            panel.style().corner_radii.bottom_left = Some(corner);
-            panel.style().corner_radii.bottom_right = Some(corner);
-            panel.style().corner_radii.top_left = Some(corner);
-            panel.style().corner_radii.top_right = Some(corner);
+            let top = gpui::AbsoluteLength::Pixels(px(16.0));
+            let none = gpui::AbsoluteLength::Pixels(px(0.0));
+            panel.style().corner_radii.top_left = Some(top);
+            panel.style().corner_radii.top_right = Some(top);
+            panel.style().corner_radii.bottom_left = Some(none);
+            panel.style().corner_radii.bottom_right = Some(none);
         }
 
         let mut backdrop = div()
@@ -1028,5 +1077,25 @@ mod tests {
         assert!(is_palette_toggle_key("k", true, false));
         assert!(!is_palette_toggle_key("k", false, false));
         assert!(!is_palette_toggle_key("j", true, false));
+    }
+
+    /// The palette's own metrics are the ones the browser reports for React's
+    /// (measured with `.build/probe-palette.mjs`, `getComputedStyle`):
+    /// the heading inherits the body's 15 px (React asks for `var(--t12)`,
+    /// which `tokens.css` does not define), the native input keeps the
+    /// browser's 1 px vertical and 2 px horizontal padding, and the
+    /// placeholder wears the browser's default grey.
+    #[test]
+    fn the_palette_metrics_are_the_ones_the_browser_reports_for_react() {
+        // The heading: 15 px at the body's 1.45 is a 21.75 px line box.
+        assert_eq!(GROUP_HEADING_FONT_PX, 15.0);
+        assert!((GROUP_HEADING_FONT_PX * 1.45 - 21.75).abs() < 0.001);
+        // The field: 16 px at 1.45 is a 23.2 px line box; the browser's own
+        // 1 px above and below make the input 25.1875 px tall.
+        assert_eq!(FIELD_LINE_HEIGHT, 1.45);
+        let field_h = 16.0 * FIELD_LINE_HEIGHT + 2.0 * FIELD_V_PAD_PX;
+        assert!((field_h - 25.1875).abs() < 0.05, "the field is {field_h} px");
+        assert_eq!(FIELD_LEFT_PAD_PX, 2.0);
+        assert_eq!(PLACEHOLDER_GREY, 0x757575);
     }
 }
