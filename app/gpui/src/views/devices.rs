@@ -279,6 +279,42 @@ pub fn device_split(row_w: f32, count_w: f32, state_w: f32) -> (f32, f32) {
     }
 }
 
+/// A card's height in the two-column split: its header row, one row per
+/// zone (multi-zone devices), the zone-empty panel or the walker when open.
+/// The CSS `columns` rule breaks between cards to balance the columns, so
+/// the GPUI list uses the same heights for its split.
+pub fn card_height(device: &DeviceInfo, row_h: f32, walker_here: bool) -> f32 {
+    let mut h = row_h;
+    if device.zones.is_empty() {
+        h += 220.0;
+    } else if device.zones.len() > 1 {
+        h += device.zones.len() as f32 * row_h;
+    }
+    if walker_here {
+        h += 140.0;
+    }
+    h
+}
+
+/// Where the two columns split this list: the break that leaves the most
+/// balanced columns (React's `columns: 2` balancing), breaking between
+/// cards only.
+pub fn balanced_split(heights: &[f32]) -> usize {
+    let total: f32 = heights.iter().sum();
+    let mut best = heights.len().saturating_sub(1).max(1);
+    let mut best_diff = f32::INFINITY;
+    let mut acc = 0.0f32;
+    for (i, h) in heights.iter().enumerate() {
+        acc += h;
+        let diff = (total - 2.0 * acc).abs();
+        if diff < best_diff {
+            best_diff = diff;
+            best = i + 1;
+        }
+    }
+    best.min(heights.len().saturating_sub(1)).max(1).min(heights.len())
+}
+
 /// The zone row's strip width (React `.rd-zone`: only the strip is flexible,
 /// basis 200 with a 64 floor): everything the row's room leaves it.
 pub fn zone_strip_width(row_w: f32, count_w: f32) -> f32 {
@@ -1850,10 +1886,33 @@ impl Render for DevicesView {
                     .flex_1()
                     .min_h(px(0.0));
                 if wide_two {
-                    list = list.flex_wrap().gap_x(px(16.0));
-                    for card in cards {
-                        list = list.child(div().w(gpui::relative(0.5)).flex_none().child(card));
+                    // The wide rule: the list becomes two columns (`columns: 2
+                    // 560px`), a device never splitting across them. The
+                    // columns are balanced on card heights, filled in card
+                    // order (measured at 1920: the MSI card alone in the left
+                    // column, the four single-row cards stacked on the right).
+                    let heights: Vec<f32> = sorted
+                        .iter()
+                        .map(|d| {
+                            let walk = self
+                                .walker_device_zone()
+                                .is_some_and(|(wdev, _)| wdev.id.0 == d.id.0);
+                            card_height(d, row_h, walk)
+                        })
+                        .collect();
+                    let split = balanced_split(&heights);
+                    let col_w = (content_w - 16.0) / 2.0;
+                    let cols = div().flex().gap_x(px(16.0));
+                    let mut col1 = div().flex().flex_col().w(px(col_w)).flex_none();
+                    let mut col2 = div().flex().flex_col().w(px(col_w)).flex_none();
+                    for (i, card) in cards.into_iter().enumerate() {
+                        if i < split {
+                            col1 = col1.child(card);
+                        } else {
+                            col2 = col2.child(card);
+                        }
                     }
+                    list = list.child(cols.child(col1).child(col2));
                 } else {
                     list = list.flex_col();
                     if !phone {
@@ -2146,6 +2205,33 @@ mod tests {
     #[test]
     fn resend_interval_is_two_seconds() {
         assert_eq!(RESEND_MS, 2000);
+    }
+
+    #[test]
+    fn balanced_split_puts_the_tall_card_alone() {
+        // The 1920 capture: 264 + 4×44 = 440; [264][176] beats [308][132].
+        let heights = [264.0, 44.0, 44.0, 44.0, 44.0];
+        assert_eq!(balanced_split(&heights), 1);
+    }
+
+    #[test]
+    fn card_height_counts_header_and_zones() {
+        let multi = device(
+            "id",
+            "MSI",
+            DeviceKind::Motherboard,
+            true,
+            "loc",
+            vec![
+                zone(0, "A", ZoneKind::Linear, 0, 0, 240, true),
+                zone(1, "B", ZoneKind::Linear, 0, 0, 240, true),
+            ],
+        );
+        // Two zones: header + 2 rows (44 + 88), no walker.
+        assert_eq!(card_height(&multi, 44.0, false), 132.0);
+        let single = device("id", "S", DeviceKind::Dram, true, "loc", vec![linear(1)]);
+        assert_eq!(card_height(&single, 44.0, false), 44.0);
+        assert_eq!(card_height(&single, 44.0, true), 184.0);
     }
 
     #[test]

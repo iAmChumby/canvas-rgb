@@ -212,7 +212,7 @@ GPUI binary SHA-256 `7DB5F6EF00888277A7F1C7CCB0E898F9022A24126E5945155065A006897
 
 | Size | Dark (React / GPUI) | Light (React / GPUI) | Pixel diff (changed / total) |
 |---|---|---|---|
-| 1920x1040 | ✓ / ✓ | ✓ / ✓ | dark 2.85% (56908/1996800), light 3.45% (68847/1996800) |
+| 1920x1040 | ✓ / ✓ | ✓ / ✓ | dark 1.56% (31081/1996800), light 1.60% (31972/1996800) |
 | 1440x900 | ✓ / ✓ | ✓ / ✓ | dark 2.46% (31817/1296000), light 2.52% (32608/1296000) |
 | 1280x860 | ✓ / ✓ | ✓ / ✓ | dark 2.92% (32152/1100800), light 3.01% (33088/1100800) |
 | 1024x768 | ✓ / ✓ | ✓ / ✓ | dark 3.26% (25648/786432), light 3.25% (25556/786432) |
@@ -225,5 +225,5 @@ Displays regression (the shell wiring shares `shell.rs`): `displays-1440x900-dar
 Builder's own pair review (no adversarial reviewer was assigned in this grind). Biggest boxes and reasons:
 - 390x844 (9.88% dark / 9.78% light): over the <6% target. The pair diff is dominated by shell chrome (the dock and strip occupy the same boxes as in the Displays 390 pair, which alone diffs 5.53%) plus phone-layout choices: the device-row wrap was modeled with the same order/widths as React's `flex-wrap` + `order`, but the sub-line and strip positions are approximations (React's wrap puts state, sub, strip and count across two lines per its own shrink). Fixing the last 40px costs visible-item work left for a follow-up; the phone rows are visually faithful (names, states, strips, counts all present in the right places).
 - 1024x768 (3.26% dark / 3.25% light): strip positions now match within ~10px after the explicit proportional row split; remaining boxes are text raster.
-- 1920x1040 (2.85% dark / 3.45% light): two-column device list (React `columns: 2`); GPUI draws two wrapped columns of 50% width. The column FLOW order (React fills the first column vertically; GPUI packs row-wise) leaves card-order boxes at the bottom. Measured at 2.85-3.45%, inside the target.
+- 1920x1040 (1.56% dark / 1.60% light): the balanced two columns are now drawn (MSI alone in the left column, the four single-row cards stacked on the right), matching React's `columns: 2` balancing.
 - Everywhere else: text-raster noise (GPUI vs Chromium anti-aliasing) plus the truncated-name ellipsis ("(fa" vs React "(...)"), a known GPUI limitation noted in shell.rs.
