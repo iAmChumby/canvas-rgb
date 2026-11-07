@@ -1823,7 +1823,12 @@ impl Render for DevicesView {
                     .map(|(i, device)| {
                         let same_name = names.iter().filter(|n| *n == &device.name).count() > 1;
                         let accent = accent_for(t, i);
-                        self.card(window, device, accent, same_name, phone, row_h, content_w, cx)
+                        // In the two-column rule each card lays out against
+                        // half the content width (the columns' `560px` minimum
+                        // is wider in practice), so the row split below uses
+                        // the column's width, not the page's.
+                        let col_w = if wide_two { (content_w - 16.0) / 2.0 } else { content_w };
+                        self.card(window, device, accent, same_name, phone, row_h, col_w, cx)
                     })
                     .collect();
                 let mut list = div()
