@@ -14,7 +14,7 @@ use gpui::{div, prelude::*, px};
 
 use crate::components::fan_bits::{fans_button, fans_number_field, live, live_soft, BtnVariant};
 use crate::components::fan_curve::base_floor;
-use crate::theme::Theme;
+use crate::theme::{Theme, TokenRadius};
 
 /// Why a tach-only header cannot be ticked.
 pub const TACH_ONLY_WHY: &str = "Tach only: canvas-rgb reads its speed and cannot set it.";
@@ -245,7 +245,7 @@ pub fn fan_bulk_bar(
         .gap_2()
         .py(px(8.0))
         .px(px(12.0))
-        .rounded_md()
+        .r_md()
         .bg(Theme::color(t.raised))
         .text_color(Theme::color(t.mute))
         .text_sm()
@@ -389,7 +389,7 @@ pub fn fan_bulk_bar(
                 .justify_between()
                 .h(px(32.0))
                 .px(px(12.0))
-                .rounded_md()
+                .r_md()
                 .border_1()
                 .border_color(Theme::color(t.line_2))
                 .bg(Theme::color(t.raised))
@@ -397,13 +397,20 @@ pub fn fan_bulk_bar(
                 .font_family(crate::fonts::UI_FAMILY)
                 .text_color(Theme::color(t.ink))
                 .child(from.label.clone())
-                .child("\u{25BE}");
+                .child(
+                    gpui::svg()
+                        .path("icons/CaretDown-bold.svg")
+                        .w(px(14.0))
+                        .h(px(14.0))
+                        .flex_none()
+                        .text_color(Theme::color(t.ink)),
+                );
             if details_open {
                 let mut list = div()
                     .absolute()
                     .mt(px(36.0))
                     .w(px(220.0))
-                    .rounded_md()
+                    .r_md()
                     .border_1()
                     .border_color(Theme::color(t.line_2))
                     .bg(Theme::color(t.panel));
@@ -461,7 +468,7 @@ pub fn fan_bulk_bar(
         .gap_2()
         .py(px(8.0))
         .px(px(12.0))
-        .rounded_md()
+        .r_md()
         .border_1()
         .border_color(live(t))
         .bg(live_soft(t))
@@ -474,14 +481,13 @@ pub fn fan_bulk_bar(
         .relative()
         .flex()
         .flex_col()
-        .gap_2()
         .mb_2()
         // The idle line and the live bar share one cell, so the cell is as
         // tall as the taller of the two and the list under it does not move
-        // when the first header is ticked.
-        .min_h(px(76.0))
-        .child(idle)
-        .child(live.absolute().top_0().left_0().right_0())
+        // when the first header is ticked. The live bar is in the flow (it
+        // sets the cell's height) and the idle line lies over it.
+        .child(live)
+        .child(idle.absolute().top_0().left_0().right_0().bottom_0())
 }
 
 #[cfg(test)]

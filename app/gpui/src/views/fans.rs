@@ -41,9 +41,9 @@ use crate::components::fan_curve::{
     base_floor, bounds_for, curve_geometry, default_curve, hot_row, pct_of_y, sorted_points,
     temp_of_x, ChartBox, HOT_MIN,
 };
-use crate::components::panel::panel;
 use crate::components::segmented::segmented;
-use crate::theme::Theme;
+use crate::components::text_input::{format_value, TextInput};
+use crate::theme::{Theme, TokenRadius};
 
 mod editor;
 
@@ -284,6 +284,102 @@ struct BulkRun {
     outcomes: Vec<BulkOutcome>,
 }
 
+/// How wide a text field is (React's `.num`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FieldWidth {
+    /// The field takes the room its row has left, but never less than the
+    /// three digits of "100" and never more than 92 px.
+    Fill,
+    /// The field is a fixed width.
+    Fixed(f32),
+}
+
+/// The table's columns, as React's auto table layout sizes them.
+///
+/// React's auto table shares the spare width in proportion to each column's
+/// max-content width: column max-content + 2 x padding, then spare x (own /
+/// sum). The tick column takes no share; the history column is dropped at
+/// page <= 999. The Mode column's minimum is its header text ("Mode", about
+/// 37 px), not a bare dot.
+#[derive(Debug, Clone, Copy)]
+pub struct TableColumns {
+    pub tick: f32,
+    pub name: f32,
+    pub rpm: f32,
+    pub duty: f32,
+    pub mode: f32,
+    pub history: f32,
+    pub padding_x: f32,
+    /// The duty meter's own width.
+    pub duty_meter: f32,
+}
+
+/// The figures face's advance at 14 px and at 20 px (0.6 em).
+const MONO_14: f32 = 8.4;
+const MONO_20: f32 = 12.0;
+
+/// The table's columns for the given page width.
+pub fn table_columns(fans: &FansStatus, page: f32, width: f32) -> TableColumns {
+    let wide = page >= 1000.0;
+    let narrow_table = page <= 999.0;
+    let with_word = page > 1499.0;
+    // React `app.css:4094-4106` uses `s1 s2` (cell padding 8) in both blocks.
+    let padding_x = 8.0;
+    let duty_meter = if wide { 52.0 } else { 44.0 };
+
+    // The widest cell in each column (max-content).
+    let name = fans
+        .headers
+        .iter()
+        .map(|h| plain_label(&h.label).chars().count() as f32 * MONO_14)
+        .fold(0.0, f32::max);
+    let rpm = fans
+        .headers
+        .iter()
+        .map(|h| h.rpm.unwrap_or(0).to_string().len() as f32 * MONO_20)
+        .fold(0.0, f32::max)
+        .max(MONO_20 * 4.0);
+    let duty = duty_meter + 8.0 + 4.0 * MONO_14;
+    // Mode minimum is the header text "Mode" (4 chars at 14 px mono ≈ 33.6 px
+    // of content, 37 px with its line box; use 37 as the floor).
+    let mode: f32 = if with_word { 50.0 + 15.0 } else { 37.0 - 2.0 * padding_x };
+    let mode_content = mode;
+    let history = if narrow_table { 0.0 } else { 56.0 };
+    let tick = 36.0;
+
+    // Auto-layout proportional shares: spare x (own / sum), own includes
+    // 2 x padding, tick takes no share.
+    let mut contents = vec![name, rpm, duty, mode_content];
+    if !narrow_table {
+        contents.push(history);
+    }
+    let sum: f32 = contents.iter().sum();
+    let n_cols = contents.len() as f32;
+    let used = tick + sum + 2.0 * padding_x * n_cols;
+    let spare = (width - used).max(0.0);
+    let share = |own: f32| spare * own / sum.max(1.0);
+    TableColumns {
+        tick,
+        name: name + 2.0 * padding_x + share(name),
+        rpm: rpm + 2.0 * padding_x + share(rpm),
+        duty: duty + 2.0 * padding_x + share(duty),
+        mode: mode + 2.0 * padding_x + share(mode_content),
+        history: if narrow_table {
+            0.0
+        } else {
+            history + 2.0 * padding_x + share(history)
+        },
+        padding_x,
+        duty_meter,
+    }
+}
+
+/// Whether the table is the narrow one (no history column) — from the page
+/// width, not from the computed columns.
+pub fn narrow_table(page: f32) -> bool {
+    page <= 999.0
+}
+
 pub struct FansView {
     pub theme: Theme,
     pub fans: Option<FansStatus>,
@@ -334,8 +430,13 @@ pub struct FansView {
     pub source_select_open: bool,
     /// The reason box is open.
     pub reason_open: bool,
+    /// The text fields (the point fields, the "don't exceed" field), one
+    /// entity each.
+    text_inputs: HashMap<String, gpui::Entity<TextInput>>,
     /// The window width, for the page's breakpoints.
     pub window_width: f32,
+    /// The window height, for the page's height.
+    window_height: f32,
 }
 
 impl FansView {
@@ -377,7 +478,9 @@ impl FansView {
             drag_start: Vec::new(),
             source_select_open: false,
             reason_open: false,
+            text_inputs: HashMap::new(),
             window_width: 1280.0,
+            window_height: 800.0,
         };
         view.load(cx);
         view
@@ -491,6 +594,98 @@ impl FansView {
 
     fn page_width(&self) -> f32 {
         page_width(self.window_width)
+    }
+
+    /// The page's height: the window less the status strip and the content
+    /// box's own padding.
+    ///
+    /// React's `.rd-page { flex: 1 1 auto; min-height: 0; }` fills the
+    /// content box, and the two columns fill it with it. GPUI 0.2.2 does not
+    /// resolve a percentage height against a flex parent's height, so the
+    /// page's height is worked out from the window instead.
+    fn page_height(&self) -> f32 {
+        let phone = self.window_width <= 720.0;
+        let strip = if phone { 48.0 } else { 54.0 };
+        let padding = if phone { 16.0 + 120.0 } else { 16.0 + 24.0 };
+        (self.window_height - strip - padding).max(0.0)
+    }
+
+    /// One text field (React's `NumberField`): a plain typed number, with
+    /// the field's unit beside it.
+    ///
+    /// The field is an entity of its own, so it keeps its own draft, its
+    /// caret and its focus. It is made once and kept; the model only tells
+    /// it what to show.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn text_field(
+        &mut self,
+        id: &str,
+        value: f32,
+        min: f32,
+        max: f32,
+        decimals: usize,
+        unit: Option<&str>,
+        width: FieldWidth,
+        disabled: bool,
+        on_commit: impl Fn(f32, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let shown = format_value(value, decimals);
+        let entity = cx.entity();
+        let handler = std::rc::Rc::new(move |v: f32, _window: &mut Window, app: &mut gpui::App| {
+            entity.update(app, |_view, cx| on_commit(v, cx));
+        });
+        let input = match self.text_inputs.get(id) {
+            Some(existing) => {
+                let existing = existing.clone();
+                existing.update(cx, |input, cx| {
+                    input.set_value(&shown, cx);
+                    input.set_disabled(disabled, cx);
+                });
+                existing
+            }
+            None => {
+                let input = cx.new(|cx| {
+                    TextInput::new(
+                        &shown,
+                        true,
+                        min,
+                        max,
+                        decimals,
+                        self.theme,
+                        handler.clone(),
+                        cx,
+                    )
+                });
+                input.update(cx, |input, cx| input.set_disabled(disabled, cx));
+                self.text_inputs.insert(id.to_string(), input.clone());
+                input
+            }
+        };
+        let t = self.theme;
+        let well = match width {
+            FieldWidth::Fill => div().flex_1().min_w(px(52.0)).max_w(px(92.0)),
+            FieldWidth::Fixed(px_wide) => div().w(px(px_wide)).flex_shrink_0(),
+        };
+        let mut field = div().flex().items_center().gap(px(6.0)).min_w_0();
+        if matches!(width, FieldWidth::Fill) {
+            // A field that takes the room its row has left (React's `.num` in
+            // the curve rows); a fixed one keeps its own width.
+            field = field.flex_1();
+        }
+        field = field.child(well.child(input));
+        if let Some(unit) = unit {
+            field.child(
+                div()
+                    .text_size(px(14.0))
+                    .font_family(crate::fonts::MONO_FAMILY)
+                    .text_color(Theme::color(t.mute))
+                    .child(unit.to_string()),
+            )
+        } else {
+            field
+        }
+        .into_any_element()
     }
 
     // -- writes ------------------------------------------------------------
@@ -1283,6 +1478,31 @@ fn encode(name: &str) -> String {
 /// The mode state: a dot and a word, no border, so it never reads as a
 /// button.
 impl FansView {
+    /// The strip's title slot: the page's name and its one-line context.
+    ///
+    /// React draws the page's title in the status strip (`PageTitle`), with the
+    /// page's context beside it. The context is hidden while the read has
+    /// failed or has no data yet.
+    pub fn strip_title(&self) -> (String, Option<String>) {
+        let mut context = None;
+        if let Some(fans) = &self.fans {
+            if self.fans_error.is_none() {
+                let chip = fans.chip.clone().unwrap_or_else(|| "No chip".to_string());
+                context = Some(format!(
+                    "{chip} \u{00B7} floor {}%",
+                    fans.floor_percent
+                ));
+            }
+        }
+        ("Fans".to_string(), context)
+    }
+
+    /// The strip's actions slot: the profile picker, the save key and the menu
+    /// that holds the rest (React `PageActions`).
+    pub fn strip_actions(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        self.profile_strip(cx).into_any_element()
+    }
+
     fn mode_state(&self, mode: &FanMode, with_word: bool) -> impl IntoElement {
         let t = &self.theme;
         let (dot, word_color) = match mode {
@@ -1298,44 +1518,11 @@ impl FansView {
         if with_word {
             row = row.child(
                 div()
-                    .text_sm()
+                    .text_size(px(14.0))
                     .font_family(crate::fonts::UI_FAMILY)
                     .text_color(word_color)
                     .child(mode_label(mode)),
             );
-        }
-        row
-    }
-
-    fn title_row(&self) -> impl IntoElement {
-        let t = &self.theme;
-        let mut row = div().flex().items_baseline().gap_3().child(
-            div()
-                .text_size(px(20.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .font_family(crate::fonts::UI_FAMILY)
-                .text_color(Theme::color(t.ink))
-                .child("Fans"),
-        );
-        if let Some(fans) = &self.fans {
-            if self.fans_error.is_none() {
-                let chip = fans.chip.clone().unwrap_or_else(|| "No chip".to_string());
-                row = row.child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .text_sm()
-                        .font_family(crate::fonts::MONO_FAMILY)
-                        .text_color(Theme::color(t.mute))
-                        .child(format!(
-                            "{chip} {} floor {}%",
-                            "\u{00B7}", fans.floor_percent
-                        )),
-                );
-            }
         }
         row
     }
@@ -1364,10 +1551,14 @@ impl FansView {
             },
         );
         let entity = cx.entity();
+        // React `.rd-btn-text{ display: none }` at <=640: the save key keeps
+        // its icon and drops its label on a phone.
+        let phone = self.window_width <= 640.0;
+        let save_label = if phone { String::new() } else { format!("Save {}", fans.active_profile) };
         let save_btn = fans_button(
             t,
             "fans-profile-save",
-            &format!("Save {}", fans.active_profile),
+            &save_label,
             BtnVariant::Primary,
             true,
             false,
@@ -1383,6 +1574,7 @@ impl FansView {
             "The fan profiles",
             "DotsThreeOutline",
             28.0,
+            16.0,
             false,
             move |_, _, cx| {
                 entity.update(cx, |view, cx| {
@@ -1391,17 +1583,19 @@ impl FansView {
                 });
             },
         );
-        let mut row = div()
+        // The menu hangs under its own key (React's `Popover` anchors it to
+        // the key).
+        let mut menu = div().relative().child(more_btn);
+        if self.more_open {
+            menu = menu.child(self.profile_menu(cx));
+        }
+        div()
             .flex()
             .items_center()
             .gap_2()
             .child(seg)
             .child(save_btn)
-            .child(more_btn);
-        if self.more_open {
-            row = row.child(self.profile_menu(cx));
-        }
-        row
+            .child(menu)
     }
 
     /// The popover: duplicate, rename and the delete rows.
@@ -1446,7 +1640,7 @@ impl FansView {
                 .gap_2()
                 .child(
                     div()
-                        .text_sm()
+                        .text_size(px(15.0))
                         .font_family(crate::fonts::UI_FAMILY)
                         .text_color(Theme::color(t.mute))
                         .child("Rename"),
@@ -1491,13 +1685,13 @@ impl FansView {
                         .flex()
                         .flex_col()
                         .gap_2()
-                        .rounded_md()
+                        .r_md()
                         .border_1()
                         .border_color(Theme::color(t.down))
                         .p_2()
                         .child(
                             div()
-                                .text_sm()
+                                .text_size(px(15.0))
                                 .font_family(crate::fonts::UI_FAMILY)
                                 .text_color(Theme::color(t.dim))
                                 .child(format!("Delete {name}? Its saved headers are removed.")),
@@ -1532,7 +1726,7 @@ impl FansView {
                             .justify_between()
                             .child(
                                 div()
-                                    .text_sm()
+                                    .text_size(px(15.0))
                                     .font_family(crate::fonts::UI_FAMILY)
                                     .text_color(Theme::color(t.ink))
                                     .child(name.clone()),
@@ -1545,7 +1739,7 @@ impl FansView {
         if let Some(error) = &self.profile_error {
             body = body.child(
                 div()
-                    .text_sm()
+                    .text_size(px(15.0))
                     .font_family(crate::fonts::UI_FAMILY)
                     .text_color(Theme::color(t.down))
                     .child(error.clone()),
@@ -1554,11 +1748,11 @@ impl FansView {
         div()
             .id(gpui::SharedString::from("fans-profile-menu-body"))
             .absolute()
-            .top(px(36.0))
-            .left(px(320.0))
+            .top(px(30.0))
+            .right_0()
             .w(px(260.0))
             .p_3()
-            .rounded_md()
+            .r_md()
             .border_1()
             .border_color(Theme::color(t.line_2))
             .bg(Theme::color(t.panel))
@@ -1586,7 +1780,7 @@ impl FansView {
         if fans.temps.is_empty() {
             body = body.child(
                 div()
-                    .text_sm()
+                    .text_size(px(15.0))
                     .font_family(crate::fonts::UI_FAMILY)
                     .text_color(Theme::color(t.mute))
                     .child("No temperature sources reported."),
@@ -1598,7 +1792,7 @@ impl FansView {
             }
             body = body.child(row);
         }
-        panel(t, "fans-temps", "Temperatures", div(), body).into_any_element()
+        crate::components::panel::panel_with_padding(t, "fans-temps", "Temperatures", div(), body, if page <= 640.0 { Some(12.0) } else { None }).into_any_element()
     }
 
     /// One temperature: its label, its meter and its reading.
@@ -1612,17 +1806,17 @@ impl FansView {
             .flex_1()
             .min_w_0()
             .overflow_hidden()
-            .text_sm()
+            .text_size(px(14.0))
             .font_family(crate::fonts::UI_FAMILY)
             .text_color(Theme::color(t.dim))
             .child(temp.label.clone());
         let value = div()
-            .text_sm()
+            .text_size(px(14.0))
             .font_family(crate::fonts::MONO_FAMILY)
             .text_color(Theme::color(t.ink))
             .child(format!("{celsius:.1} {}", "\u{00B0}C"));
         let bar = meter(t, &format!("fans-temp-{}", temp.label), fill, tone, None);
-        let mut cell = div().flex_1().flex_col().gap_1().min_w_0();
+        let mut cell = div().flex().flex_1().flex_col().gap_1().min_w_0();
         if phone {
             // The phone cell: the label, the value and the bar, one over the
             // other.
@@ -1660,20 +1854,30 @@ impl FansView {
 impl FansView {
     /// The Headers panel: the bulk bar over the list, then the table (or the
     /// phone cards).
-    fn headers_panel(&self, page: f32, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn headers_panel(&self, page: f32, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
         let t = &self.theme;
         let narrow = page <= 640.0;
         let Some(fans) = self.fans.as_ref() else {
-            return div()
-                .id(gpui::SharedString::from("fans-headers"))
-                .into_any_element();
+            return div().id(gpui::SharedString::from("fans-headers"));
         };
         let checked = checked_headers(fans, &self.ticked);
+        // On a desktop the list scrolls inside the panel (React
+        // `.table-scroll`); on a phone the page scrolls and the panel is as
+        // tall as its rows.
         let mut body = div().flex().flex_col();
+        if !narrow {
+            body = body.flex_1().min_h_0();
+        }
         // The Select/Done key, on a phone only.
         let actions = if narrow {
             let entity = cx.entity();
-            div().child(fans_button(
+            // React `.rd-fans .fan-select-key { min-height: 44px; min-width:
+            // 88px }` (motion.css:1867).
+            div()
+                .min_w(px(88.0))
+                .min_h(px(44.0))
+                .flex()
+                .child(fans_button(
                 t,
                 "fans-select-key",
                 if self.select_mode { "Done" } else { "Select" },
@@ -1704,9 +1908,25 @@ impl FansView {
         if narrow {
             body = body.child(self.phone_cards(fans, page, cx));
         } else {
-            body = body.child(self.headers_table(fans, page, cx));
+            let width = self.page_width() * 1.1 / 2.1 - 32.0;
+            body = body.child(self.headers_table(fans, page, width, cx));
         }
-        panel(t, "fans-headers", "Headers", actions, body).into_any_element()
+        let panel = crate::components::panel::panel_with_padding(
+            t,
+            "fans-headers",
+            "Headers",
+            actions,
+            body,
+            if narrow { Some(12.0) } else { None },
+        );
+        if narrow {
+            panel
+        } else {
+            // React `.rd-headers { flex: 1 1 auto; display: flex;
+            // flex-direction: column; min-height: 0; }`: the panel takes the
+            // room the column has left and the list scrolls inside it.
+            panel.flex_1().min_h_0()
+        }
     }
 
     /// The bulk bar over the list.
@@ -1779,25 +1999,23 @@ impl FansView {
         &self,
         fans: &FansStatus,
         page: f32,
+        width: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = &self.theme;
-        let wide = page >= 1000.0;
         let narrow_table = page <= 999.0;
         let with_word = page > 1499.0;
-        let duty_meter_width = if wide { 52.0 } else { 44.0 };
-        let padding_x = if wide || narrow_table { 8.0 } else { 12.0 };
+        let cols = table_columns(fans, page, width);
+        let padding_x = cols.padding_x;
 
         // The head.
         let mut head = div()
             .flex()
             .items_center()
-            .gap_2()
             .py(px(4.0))
-            .px(px(padding_x))
             .border_b_1()
             .border_color(Theme::color(t.line))
-            .text_sm()
+            .text_size(px(14.0))
             .font_weight(gpui::FontWeight::MEDIUM)
             .font_family(crate::fonts::UI_FAMILY)
             .text_color(Theme::color(t.mute));
@@ -1829,60 +2047,88 @@ impl FansView {
             },
         );
         head = head
-            .child(div().w(px(36.0)).child(select_all))
-            .child(div().flex_1().min_w_0().child("Header"))
             .child(
                 div()
-                    .w(px(60.0))
+                    .w(px(cols.tick))
+                    .px(px(padding_x))
+                    .pr_0()
+                    // React's `.tick` is a 24 px target around the 18 px box.
+                    .child(
+                        div()
+                            .size(px(24.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(select_all),
+                    ),
+            )
+            .child(
+                div()
+                    .w(px(cols.name))
+                    .px(px(padding_x))
+                    .min_w_0()
+                    .child("Header"),
+            )
+            .child(
+                div()
+                    .w(px(cols.rpm))
+                    .px(px(padding_x))
                     .text_right()
                     .whitespace_nowrap()
                     .font_family(crate::fonts::MONO_FAMILY)
                     .child("RPM"),
             )
-            .child(div().w(px(duty_meter_width + 48.0)).child("Duty"))
             .child(
                 div()
-                    .w(px(if with_word { 80.0 } else { 56.0 }))
+                    .w(px(cols.duty))
+                    .px(px(padding_x))
+                    .child("Duty"),
+            )
+            .child(
+                div()
+                    .w(px(cols.mode))
+                    .px(px(padding_x))
                     .child("Mode"),
             );
         if !narrow_table {
-            head = head.child(div().w(px(72.0)).whitespace_nowrap().child("Last 60 s"));
+            head = head.child(
+                div()
+                    .w(px(cols.history))
+                    .px(px(padding_x))
+                    .whitespace_nowrap()
+                    .child("Last 60 s"),
+            );
         }
 
         // The rows.
         let mut body = div().flex().flex_col();
         for header in &fans.headers {
-            body = body.child(self.header_row(
-                header,
-                page,
-                with_word,
-                duty_meter_width,
-                padding_x,
-                narrow_table,
-                cx,
-            ));
+            body = body.child(self.header_row(header, page, with_word, &cols, cx));
         }
         div()
             .id(gpui::SharedString::from("fans-table"))
             .flex()
             .flex_col()
+            // React `.table-scroll { flex: 1 1 auto; min-height: 0;
+            // overflow: auto; }`: the list scrolls inside the panel.
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
             .child(head)
             .child(body)
     }
 
     /// One row of the table.
-    #[allow(clippy::too_many_arguments)]
     fn header_row(
         &self,
         header: &FanHeaderStatus,
         page: f32,
         with_word: bool,
-        duty_meter_width: f32,
-        padding_x: f32,
-        narrow_table: bool,
+        cols: &TableColumns,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = &self.theme;
+        let narrow_table = narrow_table(page);
         let unavailable = is_unavailable(header);
         let tach = !unavailable && !can_drive(header);
         let blocked = !can_drive(header);
@@ -1925,7 +2171,7 @@ impl FansView {
             .max_w(px(34.0 * 8.0))
             .child(
                 div()
-                    .text_sm()
+                    .text_size(px(14.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .font_family(crate::fonts::MONO_FAMILY)
                     .text_color(name_color)
@@ -1939,7 +2185,7 @@ impl FansView {
         if let Some(handoff) = handoff_text(header, checked) {
             name = name.child(
                 div()
-                    .text_sm()
+                    .text_size(px(14.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .font_family(crate::fonts::UI_FAMILY)
                     .text_color(Theme::color(t.warn))
@@ -1951,7 +2197,7 @@ impl FansView {
                 div()
                     .flex_1()
                     .w_full()
-                    .text_sm()
+                    .text_size(px(14.0))
                     .font_family(crate::fonts::UI_FAMILY)
                     .text_color(Theme::color(t.mute))
                     .child(reason.clone()),
@@ -1959,7 +2205,8 @@ impl FansView {
         }
 
         let rpm_cell = div()
-            .w(px(60.0))
+            .w(px(cols.rpm))
+            .px(px(cols.padding_x))
             .text_right()
             .text_size(px(20.0))
             .font_weight(gpui::FontWeight::MEDIUM)
@@ -1971,7 +2218,8 @@ impl FansView {
             })
             .child(format!("{}", header.rpm.unwrap_or(0)));
         let duty_cell = div()
-            .w(px(duty_meter_width + 48.0))
+            .w(px(cols.duty))
+            .px(px(cols.padding_x))
             .flex()
             .items_center()
             .justify_end()
@@ -1981,11 +2229,11 @@ impl FansView {
                 &format!("fans-duty-meter-{id}"),
                 duty / 100.0,
                 Theme::color(t.a3),
-                Some(duty_meter_width),
+                Some(cols.duty_meter),
             ))
             .child(
                 div()
-                    .text_sm()
+                    .text_size(px(14.0))
                     .font_family(crate::fonts::MONO_FAMILY)
                     .text_color(if unavailable {
                         Theme::color(t.mute)
@@ -1998,7 +2246,8 @@ impl FansView {
                     }),
             );
         let mode_cell = div()
-            .w(px(if with_word { 80.0 } else { 56.0 }))
+            .w(px(cols.mode))
+            .px(px(cols.padding_x))
             .child(self.mode_state(&header.mode, with_word));
 
         let mut row = div()
@@ -2006,27 +2255,44 @@ impl FansView {
             .relative()
             .flex()
             .items_center()
-            .gap_2()
             .min_h(px(40.0))
             .py(px(4.0))
-            .px(px(padding_x))
             .border_b_1()
             .border_color(Theme::color(t.line))
             .cursor_pointer()
-            .child(div().w(px(36.0)).child(tick))
-            .child(div().flex_1().min_w_0().child(name))
+            .child(
+                div()
+                    .w(px(cols.tick))
+                    .px(px(cols.padding_x))
+                    .pr_0()
+                    // React's `.tick` is a 24 px target around the 18 px box.
+                    .child(
+                        div()
+                            .size(px(24.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(tick),
+                    ),
+            )
+            .child(div().w(px(cols.name)).px(px(cols.padding_x)).min_w_0().child(name))
             .child(rpm_cell)
             .child(duty_cell)
             .child(mode_cell);
         if !narrow_table {
-            row = row.child(div().w(px(56.0)).child(sparkline(
-                t,
-                &format!("fans-spark-{id}"),
-                &history,
-                peak,
-                56.0,
-                16.0,
-            )));
+            row = row.child(
+                div()
+                    .w(px(cols.history))
+                    .px(px(cols.padding_x))
+                    .child(sparkline(
+                        t,
+                        &format!("fans-spark-{id}"),
+                        &history,
+                        peak,
+                        56.0,
+                        16.0,
+                    )),
+            );
         }
         if selected {
             row = row.bg(live_soft(t)).child(
@@ -2080,7 +2346,7 @@ impl FansView {
                 .min_w_0()
                 .child(
                     div()
-                        .text_sm()
+                        .text_size(px(15.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .font_family(crate::fonts::MONO_FAMILY)
                         .text_color(if unavailable {
@@ -2094,7 +2360,7 @@ impl FansView {
             if selected && !self.select_mode {
                 head = head.child(
                     div()
-                        .text_sm()
+                        .text_size(px(14.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .font_family(crate::fonts::UI_FAMILY)
                         .text_color(live(t))
@@ -2104,7 +2370,7 @@ impl FansView {
             if unavailable {
                 head = head.child(
                     div()
-                        .text_sm()
+                        .text_size(px(14.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .font_family(crate::fonts::UI_FAMILY)
                         .text_color(live(t))
@@ -2118,7 +2384,7 @@ impl FansView {
             if self.select_mode && tach {
                 head = head.child(
                     div()
-                        .text_sm()
+                        .text_size(px(14.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .font_family(crate::fonts::UI_FAMILY)
                         .text_color(live(t))
@@ -2128,7 +2394,7 @@ impl FansView {
             if let Some(handoff) = handoff_text(header, self.select_mode && checked) {
                 head = head.child(
                     div()
-                        .text_sm()
+                        .text_size(px(14.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .font_family(crate::fonts::UI_FAMILY)
                         .text_color(Theme::color(t.warn))
@@ -2138,7 +2404,7 @@ impl FansView {
             let rpm_readout = div()
                 .flex()
                 .items_baseline()
-                .gap_1()
+                .gap(px(3.0))
                 .text_size(px(20.0))
                 .font_family(crate::fonts::MONO_FAMILY)
                 .text_color(if unavailable {
@@ -2149,8 +2415,8 @@ impl FansView {
                 .child(format!("{}", header.rpm.unwrap_or(0)))
                 .child(
                     div()
-                        .text_sm()
-                        .font_family(crate::fonts::UI_FAMILY)
+                        .text_size(px(14.0))
+                        .font_family(crate::fonts::MONO_FAMILY)
                         .text_color(Theme::color(t.mute))
                         .child("RPM"),
                 );
@@ -2173,7 +2439,7 @@ impl FansView {
                     ))
                     .child(
                         div()
-                            .text_sm()
+                            .text_size(px(14.0))
                             .font_family(crate::fonts::MONO_FAMILY)
                             .text_color(Theme::color(t.ink))
                             .child(match header.pwm_percent {
@@ -2284,44 +2550,42 @@ impl FansView {
 impl Render for FansView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.window_width = f32::from(window.window_bounds().get_bounds().size.width);
+        self.window_height = f32::from(window.window_bounds().get_bounds().size.height);
         let page = self.page_width();
         let narrow = page <= 640.0;
         let t = self.theme;
+        // React `.rd-page`: a column that fills the content box, with its own
+        // gap. The shell's content box already carries the page's padding, so
+        // the page adds none of its own, and it must be allowed to be shorter
+        // than its content (React `min-height: 0`), or the strip above it
+        // shrinks.
         let mut root = div()
             .id(gpui::SharedString::from("fans-page"))
             .relative()
             .flex()
             .flex_col()
             .gap_4()
-            .size_full()
-            // The page never grows past the shell's column: the two columns
-            // inside it share the room that is left.
-            .min_w_0()
-            .overflow_hidden()
-            .bg(Theme::color(t.g1))
-            .px_6()
-            .pt_4()
-            .pb_6();
-        root = root.child(self.title_row());
+            .flex_1()
+            .min_h_0()
+            .min_w_0();
         if let Some(notice) = &self.notice {
             root = root.child(
                 div()
                     .flex()
                     .gap_2()
                     .p_2()
-                    .rounded_md()
+                    .r_md()
                     .border_1()
                     .border_color(Theme::color(t.ok))
                     .bg(mix_srgb(Theme::color(t.ok), Theme::color(t.panel), 0.10))
-                    .text_sm()
+                    .text_size(px(15.0))
                     .font_family(crate::fonts::UI_FAMILY)
                     .text_color(Theme::color(t.ink))
                     .child(notice.clone()),
             );
         }
-        if self.fans.is_some() && self.fans_error.is_none() {
-            root = root.child(self.profile_strip(cx));
-        }
+        // The profile picker, the save key and the menu are in the strip
+        // (React `PageActions`); the page keeps only its own body.
         // A read that failed after the readings came keeps the page and says
         // the readings may be old.
         if self.fans.is_some() {
@@ -2333,17 +2597,17 @@ impl Render for FansView {
                         .gap_1()
                         .p_2()
                         .px_3()
-                        .rounded_md()
+                        .r_md()
                         .border_1()
                         .border_color(tint(Theme::color(t.warn), 0.40))
                         .bg(mix_srgb(Theme::color(t.warn), Theme::color(t.sunk), 0.08))
-                        .text_sm()
+                        .text_size(px(14.0))
                         .font_family(crate::fonts::UI_FAMILY)
                         .text_color(Theme::color(t.dim))
                         .child("The fan readings may be out of date.")
                         .child(
                             div()
-                                .text_sm()
+                                .text_size(px(14.0))
                                 .font_family(crate::fonts::MONO_FAMILY)
                                 .text_color(Theme::color(t.mute))
                                 .child(error.clone()),
@@ -2368,7 +2632,7 @@ impl Render for FansView {
                         .bg(Theme::color(t.panel))
                         .child(
                             div()
-                                .text_sm()
+                                .text_size(px(15.0))
                                 .font_family(crate::fonts::UI_FAMILY)
                                 .text_color(Theme::color(t.mute))
                                 .child("Reading the fans"),
@@ -2376,17 +2640,26 @@ impl Render for FansView {
                 );
             }
             (true, _) => {
-                let left = div()
-                    .flex()
-                    .flex_col()
-                    .gap_4()
-                    .flex_1()
-                    .min_w_0()
-                    .w(px(self.page_width()))
-                    .child(div().min_w_0().child(self.temperatures(page)))
-                    .child(div().min_w_0().child(self.headers_panel(page, cx)));
                 if narrow {
-                    // The editor is a sheet over the list on a phone.
+                    // One column on a phone: the readings over the list, and
+                    // the editor is a sheet over them.
+                    let left = div()
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .child(div().min_w_0().child(self.temperatures(page)))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .min_w_0()
+                                .min_h_0()
+                                .flex_1()
+                                .child(self.headers_panel(page, cx)),
+                        );
                     root = root.child(left);
                     if let Some(header) = self.selected(narrow) {
                         let editor = self.editor(&header, page, cx);
@@ -2394,7 +2667,7 @@ impl Render for FansView {
                             div()
                                 .id(gpui::SharedString::from("fans-editor-sheet"))
                                 .absolute()
-                                .top_0()
+                                .top(px(-16.0))
                                 .left_0()
                                 .right_0()
                                 .bottom_0()
@@ -2405,15 +2678,37 @@ impl Render for FansView {
                         );
                     }
                 } else {
+                    // React `.rd-fans-grid`: two columns, `minmax(0, 1.1fr)`
+                    // and `minmax(0, 1fr)`, with a 16 px gap between them.
+                    let gap = 16.0;
+                    let avail = (page - gap).max(0.0);
+                    let left_w = avail * 1.1 / 2.1;
+                    let right_w = avail / 2.1;
+                    let page_h = self.page_height();
+                    let left = div()
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        .w(px(left_w))
+                        .min_w_0()
+                        .min_h_0()
+                        .h(px(page_h))
+                        .child(div().min_w_0().child(self.temperatures(page)))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .min_w_0()
+                                .min_h_0()
+                                .flex_1()
+                                .child(self.headers_panel(page, cx)),
+                        );
                     let mut grid = div()
                         .flex()
                         .gap_4()
                         .flex_1()
                         .min_h_0()
                         .min_w_0()
-                        // The grid takes the page's width and no more: the two
-                        // columns inside it share it.
-                        .w(px(self.page_width()))
                         .overflow_hidden();
                     grid = grid.child(left);
                     if let Some(header) = self.selected(narrow) {
@@ -2423,8 +2718,10 @@ impl Render for FansView {
                                 .flex()
                                 .flex_col()
                                 .gap_4()
-                                .flex_1()
+                                .w(px(right_w))
                                 .min_w_0()
+                                .min_h_0()
+                                .h(px(page_h))
                                 .child(editor),
                         );
                     }
@@ -2480,7 +2777,7 @@ impl FansView {
             )
             .child(
                 div()
-                    .text_sm()
+                    .text_size(px(15.0))
                     .font_family(crate::fonts::UI_FAMILY)
                     .text_color(Theme::color(t.dim))
                     .child(
@@ -2490,7 +2787,7 @@ impl FansView {
             .child(retry)
             .child(
                 div()
-                    .text_sm()
+                    .text_size(px(15.0))
                     .font_family(crate::fonts::MONO_FAMILY)
                     .text_color(Theme::color(t.mute))
                     .child(error.to_string()),
@@ -2862,5 +3159,52 @@ mod tests {
         let mixed = mix_srgb(Theme::color(dark.a2), Theme::color(dark.sunk), 0.08);
         assert!(mixed.a > 0.99);
         assert_eq!(tint(Theme::color(dark.down), 0.18).a, 0.18);
+    }
+
+    #[test]
+    fn the_table_columns_share_the_spare_proportionally() {
+        let f = fans(vec![
+            header("cpu_fan", "CPU fan", Some(40), FanMode::Curve { source: TempSource::Cpu, points: vec![] }),
+            header("pump", "Pump", Some(100), FanMode::Fixed { percent: 100 }),
+        ]);
+        let cols = table_columns(&f, 1440.0, 600.0);
+        // Proportional, not equal: the name gets spare x (name / sum).
+        assert!(cols.name > cols.rpm, "name {} rpm {}", cols.name, cols.rpm);
+        assert!(cols.mode >= 37.0 - 0.5, "mode {}", cols.mode);
+        assert!(cols.padding_x == 8.0);
+        let sum = cols.tick + cols.name + cols.rpm + cols.duty + cols.mode + cols.history;
+        assert!((sum - 600.0).abs() < 1.5, "sum {sum}");
+        // Narrow drops the history column, and the Mode header still fits.
+        assert!(narrow_table(999.0));
+        assert!(!narrow_table(1000.0));
+        let narrow = table_columns(&f, 900.0, 600.0);
+        assert!(narrow.history == 0.0);
+    }
+
+    #[test]
+    fn the_remove_key_dims_at_minimum_points() {
+        let len = 2usize;
+        assert_eq!(editor::MIN_POINTS, len);
+        assert!(len <= editor::MIN_POINTS);
+        let len = 3usize;
+        assert!(len > editor::MIN_POINTS);
+    }
+
+    #[test]
+    fn the_hatch_peaks_at_reacts_colour() {
+        use crate::components::fan_curve::HATCH_ALPHA;
+        let down = Theme::color(Theme::dark().down);
+        let panel = Theme::color(Theme::dark().panel);
+        let peak = |c: gpui::Rgba| {
+            (
+                (c.r * HATCH_ALPHA + panel.r * (1.0 - HATCH_ALPHA)) * 255.0,
+                (c.g * HATCH_ALPHA + panel.g * (1.0 - HATCH_ALPHA)) * 255.0,
+                (c.b * HATCH_ALPHA + panel.b * (1.0 - HATCH_ALPHA)) * 255.0,
+            )
+        };
+        let (r, g, b) = peak(down);
+        for (got, want) in [(r, 82.0), (g, 36.0), (b, 39.0)] {
+            assert!((got - want).abs() <= 2.0, "peak ({r:.0},{g:.0},{b:.0}) vs (82,36,39)");
+        }
     }
 }

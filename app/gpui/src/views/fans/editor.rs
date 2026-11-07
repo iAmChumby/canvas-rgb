@@ -16,7 +16,7 @@ use crate::components::fan_bits::{
 use crate::components::fan_bulk::is_unavailable;
 use crate::components::fan_curve::{base_floor, duty_for, fan_curve_chart, hot_rule_text, HOT_MIN};
 use crate::components::panel::panel;
-use crate::theme::Theme;
+use crate::theme::{Theme, TokenRadius};
 
 use super::FansView;
 
@@ -56,13 +56,14 @@ impl FansView {
                 .flex()
                 .items_baseline()
                 .gap_1()
-                .text_size(px(16.0))
+                // React's `.rpm-readout` takes the body's size (15 px).
+                .text_size(px(15.0))
                 .font_family(crate::fonts::MONO_FAMILY)
                 .text_color(Theme::color(t.ink))
                 .child(format!("{}", header.rpm.unwrap_or(0)))
                 .child(
                     div()
-                        .text_sm()
+                        .text_size(px(14.0))
                         .font_family(crate::fonts::UI_FAMILY)
                         .text_color(Theme::color(t.mute))
                         .child("RPM"),
@@ -76,7 +77,7 @@ impl FansView {
                 .gap_2()
                 .child(
                     div()
-                        .text_sm()
+                        .text_size(px(15.0))
                         .font_family(crate::fonts::UI_FAMILY)
                         .text_color(Theme::color(t.mute))
                         .child(super::unavailable_body(header)),
@@ -90,12 +91,14 @@ impl FansView {
 
         // The one live sentence for the editor: it names the kind of reason,
         // never the live temperature. It is one pixel wide, as the React
-        // `.sr-only` node is.
+        // `.sr-only` node is, and it stands out of the flow so it takes no
+        // room in the panel.
         let announce = div()
             .id(gpui::SharedString::from(format!(
                 "fans-announce-{}",
                 header.id
             )))
+            .absolute()
             .w(px(1.0))
             .h(px(1.0))
             .overflow_hidden()
@@ -110,6 +113,15 @@ impl FansView {
             actions,
             div().flex().flex_col().gap_2().child(announce).child(body),
         )
+        // React `.rd-fans .rd-fans-right > .panel { flex: 1 1 auto; display:
+        // flex; flex-direction: column; min-height: 0; overflow-y: auto; }`:
+        // the editor takes the room the column has left and scrolls inside it.
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        // React `scrollbar-gutter: stable` (16 px) plus the panel's 16 px
+        // right padding: 26 px of the editor's width is spoken for.
+        .pr(px(26.0))
     }
 
     /// The availability keys (issue #146).
@@ -118,7 +130,7 @@ impl FansView {
         header: &FanHeaderStatus,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let t = &self.theme;
+        let t = self.theme;
         let unavailable = is_unavailable(header);
         let mut row = div().flex().items_center().gap_2();
         let entity = cx.entity();
@@ -129,7 +141,7 @@ impl FansView {
             ("Not on my board", "EyeSlash")
         };
         row = row.child(fans_button(
-            t,
+            &t,
             &format!("fans-availability-{id}"),
             label,
             BtnVariant::Ghost,
@@ -147,7 +159,7 @@ impl FansView {
             let entity = cx.entity();
             let id = header.id.clone();
             row = row.child(fans_button(
-                t,
+                &t,
                 &format!("fans-availability-board-{id}"),
                 "Use the board list",
                 BtnVariant::Ghost,
@@ -173,11 +185,11 @@ impl FansView {
         page: f32,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let t = &self.theme;
+        let t = self.theme;
         let mode = header.mode.clone();
         let entity = cx.entity();
         let seg = crate::components::segmented::segmented(
-            t,
+            &t,
             &format!("fans-mode-{}", header.id),
             &[("bios", "BIOS"), ("fixed", "Fixed %"), ("curve", "Curve")],
             super::mode_word(&mode),
@@ -190,13 +202,17 @@ impl FansView {
             },
         );
 
-        let mut body = div().flex().flex_col().gap_2().child(seg);
+        let mut body = div().flex().flex_col().gap_2().child(
+            // React `.stack > .seg { align-self: flex-start; }`: the
+            // segmented control takes the width it needs, not the column's.
+            div().flex().items_start().child(seg),
+        );
         let manual = !matches!(mode, FanMode::Bios);
 
         if !manual {
             body = body.child(
                 div()
-                    .text_sm()
+                    .text_size(px(15.0))
                     .font_family(crate::fonts::UI_FAMILY)
                     .text_color(Theme::color(t.mute))
                     .child("Chip auto control. Floors off."),
@@ -212,12 +228,24 @@ impl FansView {
             };
             let hot_row = crate::components::fan_curve::hot_row(&fans.hot, hot_kind).copied();
             let rule_text = hot_rule_text(hot_row.map(|h| h.limit_c));
-            let mut rule = div().flex().flex_col().gap_2().child(
+            // React's `.rule`: the floor percent is a mono ink `.fig` span
+            // inside the dim sentence.
+            let mut rule = div().flex().flex_col().child(
                 div()
+                    .flex()
+                    .items_baseline()
+                    .gap(px(4.0))
                     .text_sm()
                     .font_family(crate::fonts::UI_FAMILY)
                     .text_color(Theme::color(t.dim))
-                    .child(format!("Floor {base}%. {rule_text}.")),
+                    .child("Floor")
+                    .child(
+                        div()
+                            .font_family(crate::fonts::MONO_FAMILY)
+                            .text_color(Theme::color(t.ink))
+                            .child(format!("{base}%")),
+                    )
+                    .child(format!(". {rule_text}.")),
             );
             if let Some(hot_row) = hot_row {
                 rule = rule.child(self.hot_controls(hot_row, cx));
@@ -232,7 +260,7 @@ impl FansView {
                 );
             }
             body = body.child(rule_box(
-                t,
+                &t,
                 &format!("fans-floor-{}", header.id),
                 false,
                 rule,
@@ -248,7 +276,7 @@ impl FansView {
                 let slider_entity = entity.clone();
                 let slider_id = header_id.clone();
                 let fader = slider(
-                    t,
+                    &t,
                     &format!("fans-duty-{}", header.id),
                     duty,
                     f32::from(base),
@@ -277,7 +305,7 @@ impl FansView {
                 let entity = cx.entity();
                 let header_id = header.id.clone();
                 let number = fans_number_field(
-                    t,
+                    &t,
                     &format!("fans-duty-value-{}", header.id),
                     duty,
                     f32::from(base),
@@ -298,7 +326,7 @@ impl FansView {
                         .gap_2()
                         .child(
                             div()
-                                .text_sm()
+                                .text_size(px(15.0))
                                 .font_family(crate::fonts::UI_FAMILY)
                                 .text_color(Theme::color(t.mute))
                                 .child("Duty"),
@@ -342,7 +370,7 @@ impl FansView {
                 let toggle_entity = entity.clone();
                 let header_id = header.id.clone();
                 let source_select = crate::components::fan_bits::fans_select(
-                    t,
+                    &t,
                     &format!("fans-source-{}", header.id),
                     &format!("{} temperature source", header.label),
                     &options,
@@ -364,20 +392,13 @@ impl FansView {
                         }
                     },
                 );
-                body = body.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_family(crate::fonts::UI_FAMILY)
-                                .text_color(Theme::color(t.mute))
-                                .child("Temperature source"),
-                        )
-                        .child(source_select),
-                );
+                body = body.child(crate::components::panel::field(
+                    &t,
+                    &format!("fans-source-field-{}", header.id),
+                    "Temperature source",
+                    div().flex().items_center().gap_2().child(source_select),
+                    false,
+                ));
                 // The chart.
                 let points = self.editor_points.clone();
                 let current_temp = super::temp_for(
@@ -394,7 +415,7 @@ impl FansView {
                 let hot_value = self.hot_drag.or_else(|| hot_row.map(|h| h.limit_c));
                 let entity = cx.entity();
                 let chart = fan_curve_chart(
-                    t,
+                    &t,
                     &format!("fans-curve-{}", header.id),
                     &points,
                     base,
@@ -458,16 +479,13 @@ impl FansView {
                 );
                 body = body.child(chart);
                 body = body.child(self.status(header, fans, &mode, cx));
-                // The point rows.
-                let mut rows = div().flex().flex_col().gap_2();
+                // The point rows: React `.curve-rows` is a grid of two
+                // columns, so two points stand on one line.
                 let editor_col = (page - 16.0) / 2.1;
                 let two_up = editor_col > 559.0;
-                for (index, point) in points.iter().enumerate() {
-                    rows = rows.child(self.point_row(index, point, base, cx));
-                }
                 let entity = cx.entity();
                 let add = fans_button(
-                    t,
+                    &t,
                     &format!("fans-add-point-{}", header.id),
                     "Add point",
                     BtnVariant::Default,
@@ -485,14 +503,20 @@ impl FansView {
                     .child(format!("{} of {MAX_POINTS} points", points.len()));
                 let add_row = div().flex().items_center().gap_2().child(add).child(count);
                 let rows = if two_up {
-                    // Two points to a row.
-                    let mut grouped = div().flex().flex_wrap().gap_2().gap_x_3();
+                    // Two points to a row, with a 12 px gap between them.
+                    let mut grid = div().flex().flex_wrap().gap_2().gap_x_3();
                     for (index, point) in points.iter().enumerate() {
-                        grouped = grouped.child(self.point_row(index, point, base, cx));
+                        let row = self.point_row(index, point, base, cx);
+                        grid = grid.child(div().flex_1().min_w_0().child(row));
                     }
-                    grouped.child(div().w_full().child(add_row))
+                    grid.child(div().w_full().child(add_row))
                 } else {
-                    rows.child(add_row)
+                    let mut column = div().flex().flex_col().gap_2();
+                    for (index, point) in points.iter().enumerate() {
+                        let row = self.point_row(index, point, base, cx);
+                        column = column.child(row);
+                    }
+                    column.child(add_row)
                 };
                 body = body.child(rows);
             }
@@ -504,55 +528,57 @@ impl FansView {
     /// One point's row: its index, its temperature, its percent and the key
     /// that removes it.
     fn point_row(
-        &self,
+        &mut self,
         index: usize,
         point: &CurvePoint,
         base: u8,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let t = &self.theme;
-        let entity = cx.entity();
-        let temp_field = fans_number_field(
-            t,
+        let t = self.theme;
+        let temp_field = self.text_field(
             &format!("fans-point-{index}-temp"),
             point.temp_c,
             20.0,
             100.0,
-            1.0,
+            0,
             Some("\u{00B0}C"),
+            super::FieldWidth::Fill,
             false,
             {
-                let entity = entity.clone();
-                move |v, _, cx| {
+                let entity = cx.entity();
+                move |v, cx| {
                     entity.update(cx, |view, cx| view.commit_point_temp(index, v, cx));
                 }
             },
+            cx,
         );
-        let entity = cx.entity();
-        let percent_field = fans_number_field(
-            t,
+        let percent_field = self.text_field(
             &format!("fans-point-{index}-percent"),
             f32::from(point.percent),
             f32::from(base),
             100.0,
-            1.0,
+            0,
             Some("%"),
+            super::FieldWidth::Fill,
             false,
             {
-                let entity = entity.clone();
-                move |v, _, cx| {
+                let entity = cx.entity();
+                move |v, cx| {
                     entity.update(cx, |view, cx| view.commit_point_percent(index, v, cx));
                 }
             },
+            cx,
         );
         let entity = cx.entity();
+        let remove_disabled = self.editor_points.len() <= MIN_POINTS;
         let remove = fans_icon_button(
-            t,
+            &t,
             &format!("fans-point-{index}-remove"),
             &format!("Remove point {}", index + 1),
             "X",
             28.0,
-            false,
+            14.0,
+            remove_disabled,
             move |_, _, cx| {
                 entity.update(cx, |view, cx| view.remove_point(index, cx));
             },
@@ -561,44 +587,49 @@ impl FansView {
             .flex()
             .items_center()
             .gap_2()
+            .min_w_0()
             .child(
                 div()
                     .w(px(20.0))
+                    .flex_shrink_0()
                     .text_sm()
                     .font_family(crate::fonts::MONO_FAMILY)
                     .text_color(Theme::color(t.mute))
                     .child(format!("{}", index + 1)),
             )
-            .child(div().flex_1().min_w_0().child(temp_field))
-            .child(div().flex_1().min_w_0().child(percent_field))
+            .child(temp_field)
+            .child(percent_field)
             .child(remove)
     }
 
     /// The "don't exceed" control, inside the floor note.
     fn hot_controls(
-        &self,
+        &mut self,
         hot: canvas_proto::fans::HotLimitStatus,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let t = &self.theme;
-        let entity = cx.entity();
-        let field = fans_number_field(
-            t,
+        let t = self.theme;
+        let field = self.text_field(
             "fans-hot-value",
             hot.limit_c,
             HOT_MIN,
             hot.max_settable_c,
-            1.0,
+            0,
             Some("\u{00B0}C"),
+            super::FieldWidth::Fixed(92.0),
             self.hot_busy,
-            move |v, _, cx| {
-                entity.update(cx, |view, cx| view.commit_hot(Some(v), cx));
+            {
+                let entity = cx.entity();
+                move |v, cx| {
+                    entity.update(cx, |view, cx| view.commit_hot(Some(v), cx));
+                }
             },
+            cx,
         );
         let mut row = div()
             .flex()
             .items_center()
-            .gap_2()
+            .gap(px(8.0))
             .child(
                 div()
                     .text_sm()
@@ -610,7 +641,7 @@ impl FansView {
         if hot.user_set {
             let entity = cx.entity();
             row = row.child(fans_button(
-                t,
+                &t,
                 "fans-hot-reset",
                 "Reset to automatic",
                 BtnVariant::Ghost,
@@ -641,10 +672,13 @@ impl FansView {
         mode: &FanMode,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let t = &self.theme;
+        let t = self.theme;
         let reason = super::reason_text(header);
         let handed_back = crate::components::fan_bulk::is_handed_back(header);
         let mut block = div().flex().flex_col().gap_1();
+        // React's `.fan-status-reason` keeps the room of two lines, so the
+        // panel does not move when a reason appears.
+        let mut region = div().flex().flex_col().min_h(px(58.6));
         match reason {
             Some(text) => {
                 // The reason box: two lines, with a More key when the text is
@@ -666,7 +700,7 @@ impl FansView {
                             .child({
                                 let entity = cx.entity();
                                 fans_button(
-                                    t,
+                                    &t,
                                     "fans-reason-toggle",
                                     if self.reason_open { "Less" } else { "More" },
                                     BtnVariant::Ghost,
@@ -683,32 +717,36 @@ impl FansView {
                             }),
                     );
                 }
-                block = block.child(
+                region = region.child(
                     div()
                         .id(gpui::SharedString::from("fans-reason"))
                         .flex()
                         .flex_col()
+                        .flex_1()
+                        .justify_center()
                         .gap_2()
                         .py(px(8.0))
                         .px(px(12.0))
-                        .rounded_md()
+                        .r_md()
                         .border_1()
                         .border_color(crate::components::fan_bits::tint(
                             Theme::color(t.warn),
                             0.45,
                         ))
-                        .bg(warn_wash(t))
+                        .bg(warn_wash(&t))
                         .child(box_body),
                 );
             }
             None => {
-                block = block.child(
+                region = region.child(
                     div()
                         .flex()
+                        .flex_1()
                         .items_center()
+                        .justify_center()
                         .py(px(8.0))
                         .px(px(12.0))
-                        .rounded_md()
+                        .r_md()
                         .border_1()
                         .border_color(Theme::color(t.line))
                         .text_sm()
@@ -718,6 +756,7 @@ impl FansView {
                 );
             }
         }
+        block = block.child(region);
         let _ = handed_back;
         let _ = fans;
         block = block.child(
