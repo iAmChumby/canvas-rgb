@@ -2821,7 +2821,11 @@ impl Render for SettingsView {
         let distribution = distribute(&heights, cols);
         let mut grid = div().flex().gap_4();
         for column in distribution {
-            let mut col = div().flex().flex_col().gap_4().flex_1();
+            // `min_w(0)`: a flex item's minimum is its content's width by default, so the
+            // audio row ("Follow Windows default output" plus its label) pushed the phone
+            // column about 30 px past the window. React's multicol columns never grow past
+            // their share.
+            let mut col = div().flex().flex_col().gap_4().flex_1().min_w(px(0.0));
             for idx in column {
                 col = match idx {
                     0 => {
