@@ -342,7 +342,9 @@ pub fn table_columns(fans: &FansStatus, page: f32, width: f32) -> TableColumns {
     let duty = duty_meter + 8.0 + 4.0 * MONO_14;
     // Mode minimum is the header text "Mode" (4 chars at 14 px mono ≈ 33.6 px
     // of content, 37 px with its line box; use 37 as the floor).
-    let mode: f32 = if with_word { 50.0 + 15.0 } else { 37.0 - 2.0 * padding_x };
+    // Content width, before padding: subtracting the padding left 13 px at 1440 and
+    // the header wrapped to "Mod/e" (#204 review).
+    let mode: f32 = if with_word { 50.0 + 15.0 } else { 37.0 };
     let mode_content = mode;
     let history = if narrow_table { 0.0 } else { 56.0 };
     let tick = 36.0;

@@ -65,6 +65,12 @@ pub const ICONS: &[&str] = &[
     "Plugs",
     "ArrowLeft",
     "ArrowRight",
+    // The Peripherals page (#208).
+    "BatteryFull",
+    "BatteryCharging",
+    "ArrowsClockwise",
+    "ArrowCounterClockwise",
+    "CaretRight",
 ];
 
 fn icon_svg(name: &str) -> Option<&'static str> {
@@ -119,6 +125,11 @@ fn icon_svg(name: &str) -> Option<&'static str> {
         "Plugs" => include_str!("../assets/icons/Plugs.svg"),
         "ArrowLeft" => include_str!("../assets/icons/ArrowLeft.svg"),
         "ArrowRight" => include_str!("../assets/icons/ArrowRight.svg"),
+        "BatteryFull" => include_str!("../assets/icons/BatteryFull.svg"),
+        "BatteryCharging" => include_str!("../assets/icons/BatteryCharging.svg"),
+        "ArrowsClockwise" => include_str!("../assets/icons/ArrowsClockwise.svg"),
+        "ArrowCounterClockwise" => include_str!("../assets/icons/ArrowCounterClockwise.svg"),
+        "CaretRight" => include_str!("../assets/icons/CaretRight.svg"),
         _ => return None,
     })
 }

@@ -150,6 +150,29 @@ pub fn select(
     col
 }
 
+/// A select whose trigger can be disabled (`Select` with `disabled`): the
+/// trigger draws at half strength with no list and no click, exactly as
+/// React's disabled `.select-trigger`. `open` is ignored while disabled.
+#[allow(clippy::too_many_arguments)]
+pub fn select_field(
+    t: &Theme,
+    id: &str,
+    label: &str,
+    options: &[(&str, &str)],
+    value: &str,
+    open: bool,
+    disabled: bool,
+    full_width: bool,
+    on_toggle: impl Fn(&mut gpui::Window, &mut gpui::App) + Clone + 'static,
+    on_pick: impl Fn(String, &mut gpui::Window, &mut gpui::App) + Clone + 'static,
+) -> gpui::AnyElement {
+    if disabled {
+        let flat: Vec<(&str, &str)> = options.to_vec();
+        return select_grouped(t, id, &[("", &flat)], value, false, true, full_width, on_toggle, on_pick).into_any_element();
+    }
+    select(t, id, label, options, value, open, full_width, on_toggle, on_pick).into_any_element()
+}
+
 /// A grouped select (the audio source picker): `groups` are
 /// (heading, options) pairs; an empty heading draws no heading row.
 /// `disabled` draws the trigger at half strength with no list.

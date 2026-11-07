@@ -230,22 +230,29 @@ impl FansView {
             let rule_text = hot_rule_text(hot_row.map(|h| h.limit_c));
             // React's `.rule`: the floor percent is a mono ink `.fig` span
             // inside the dim sentence.
-            let mut rule = div().flex().flex_col().child(
-                div()
-                    .flex()
-                    .items_baseline()
-                    .gap(px(4.0))
-                    .text_sm()
-                    .font_family(crate::fonts::UI_FAMILY)
-                    .text_color(Theme::color(t.dim))
-                    .child("Floor")
-                    .child(
-                        div()
-                            .font_family(crate::fonts::MONO_FAMILY)
-                            .text_color(Theme::color(t.ink))
-                            .child(format!("{base}%")),
-                    )
-                    .child(format!(". {rule_text}.")),
+            // One wrapping text run, like React's inline sentence: a flex row of three
+            // pieces never wrapped and ran past the box (#204 review).
+            let head = "Floor ".to_string();
+            let fig = format!("{base}%");
+            let tail = format!(". {rule_text}.");
+            let dim: gpui::Hsla = Theme::color(t.dim).into();
+            let ink: gpui::Hsla = Theme::color(t.ink).into();
+            let run = |len: usize, family: &'static str, color: gpui::Hsla| gpui::TextRun {
+                len,
+                font: gpui::font(family),
+                color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let runs = vec![
+                run(head.len(), crate::fonts::UI_FAMILY, dim),
+                run(fig.len(), crate::fonts::MONO_FAMILY, ink),
+                run(tail.len(), crate::fonts::UI_FAMILY, dim),
+            ];
+            let sentence = gpui::StyledText::new(format!("{head}{fig}{tail}")).with_runs(runs);
+            let mut rule = div().flex().flex_col().min_w(px(0.0)).child(
+                div().min_w(px(0.0)).text_sm().child(sentence),
             );
             if let Some(hot_row) = hot_row {
                 rule = rule.child(self.hot_controls(hot_row, cx));
@@ -742,8 +749,9 @@ impl FansView {
                     div()
                         .flex()
                         .flex_1()
+                        // React `.fan-status-quiet { align-items: center }`: centred
+                        // vertically, left-aligned (the text was centred both ways).
                         .items_center()
-                        .justify_center()
                         .py(px(8.0))
                         .px(px(12.0))
                         .r_md()
