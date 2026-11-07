@@ -35,6 +35,7 @@ use crate::theme::{Theme, TokenRadius};
 use crate::views::displays::DisplaysView;
 use crate::views::fans::FansView;
 use crate::views::settings::{SettingsView, ThemeCell};
+use crate::views::updates::UpdatesView;
 
 /// Measure a single line of text in the UI/mono face at `size` px, using
 /// GPUI's own text layout so the truncation below matches what is drawn.
@@ -232,6 +233,8 @@ pub struct Shell {
     pub fans_view: gpui::Entity<FansView>,
     /// The Settings page (#205).
     pub settings_view: gpui::Entity<SettingsView>,
+    /// The Updates page (#206).
+    pub updates_view: gpui::Entity<UpdatesView>,
     /// The theme the shell and the settings view share (the Appearance
     /// radio writes it; every render reads it).
     pub theme_cell: ThemeCell,
@@ -264,6 +267,7 @@ impl Shell {
         let fans_view = cx.new(|cx| FansView::new(theme, cx));
         let theme_cell: ThemeCell = std::sync::Arc::new(std::sync::Mutex::new(theme));
         let shell_entity = cx.entity();
+        let updates_entity = Some(shell_entity.clone());
         let settings_visible = page == "settings";
         let settings_cell = theme_cell.clone();
         let settings_view = cx.new(|cx| {
@@ -277,6 +281,9 @@ impl Shell {
                 tray_rx,
             )
         });
+        let updates_view = cx.new(|cx| {
+            UpdatesView::new(theme, cx, tray_present, updates_entity)
+        });
         let mut shell = Shell {
             theme,
             page,
@@ -285,6 +292,7 @@ impl Shell {
             status_failures: failures,
             displays,
             fans_view,
+            updates_view,
             settings_view,
             theme_cell,
             width: 1280.0,
@@ -1245,6 +1253,9 @@ impl Shell {
         };
         let context_text = if self.page == "displays" {
             format!("{} connected", self.displays_connected)
+        } else if self.page == "updates" {
+            self.updates_view
+                .update(cx, |u, _| u.strip_context_text())
         } else {
             String::new()
         };
@@ -1465,6 +1476,9 @@ impl Shell {
         if self.page == "settings" {
             return self.settings_view.clone().into_any_element();
         }
+        if self.page == "updates" {
+            return self.updates_view.clone().into_any_element();
+        }
         // Every other page shows the placeholder until it is ported.
         div()
             .flex()
@@ -1593,6 +1607,17 @@ impl Render for Shell {
             let fans_view = self.fans_view.clone();
             displays.update(cx, |d, _| d.theme = shared);
             fans_view.update(cx, |f, _| f.theme = shared);
+            self.updates_view.update(cx, |u, _| u.theme = shared);
+        }
+        // The Updates page's tray state comes from the settings view (the
+        // single reader of the stdio receiver). Copy it here when the
+        // Updates page is open so progress ticks and the strip context
+        // follow without a second reader.
+        if self.page == "updates" {
+            let st = self
+                .settings_view
+                .update(cx, |s, _| s.tray_update.clone());
+            self.updates_view.update(cx, |u, cx| u.set_update(st, cx));
         }
         let t = &self.theme;
         let phone = self.width <= 720.0;

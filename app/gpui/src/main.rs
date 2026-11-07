@@ -349,7 +349,10 @@ pub fn send_open_logs_folder() {
     send_line(&EditorToTray::OpenLogsFolder);
 }
 
-fn send_ready() {
+/// `ready` to the tray over stdio: the tray answers with its current update
+/// state and prefs. The Updates view sends a fresh one on Try again, the
+/// GPUI form of React's `refreshUpdate()` (`update_state`).
+pub fn send_ready() {
     let mut out = std::io::stdout();
     let line = serde_json::to_string(&EditorToTray::Ready).unwrap_or_default();
     let _ = writeln!(out, "{line}");
