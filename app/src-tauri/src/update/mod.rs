@@ -202,6 +202,17 @@ pub struct Controller {
     /// Set while a `request_check` thread is running: a repeated
     /// `UpdateCheckNow` / `SetChannel` from the editor does not spawn another.
     check_spawned: AtomicBool,
+    /// Counts `request_check` calls. A check thread notes it when a run starts and
+    /// runs once more if it moved, so a request during a check (a channel switch) is
+    /// never lost, and any number of repeats fold into one more run.
+    check_wanted: AtomicU32,
+    /// How many checks the `request_check` threads ran (a recheck counts).
+    #[allow(dead_code)]
+    check_runs: AtomicU32,
+    /// Test seam: run instead of the real check on a `request_check` thread (the test
+    /// app has no updater plugin, so a real check panics at once).
+    #[cfg(test)]
+    pub(crate) test_check: std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// How many check threads were actually spawned (the throttle's proof).
     #[allow(dead_code)]
     check_spawns: AtomicU32,
@@ -232,6 +243,10 @@ impl Controller {
             clock: Box::new(|| SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)),
             on_change,
             check_spawned: AtomicBool::new(false),
+            check_wanted: AtomicU32::new(0),
+            check_runs: AtomicU32::new(0),
+            #[cfg(test)]
+            test_check: std::sync::Mutex::new(None),
             check_spawns: AtomicU32::new(0),
         }
     }
@@ -294,6 +309,12 @@ impl Controller {
     #[cfg(test)]
     pub(crate) fn check_in_flight(&self) -> bool {
         self.check_spawned.load(Ordering::SeqCst)
+    }
+
+    /// How many checks the check threads ran (a recheck counts).
+    #[cfg(test)]
+    pub fn check_runs(&self) -> u32 {
+        self.check_runs.load(Ordering::SeqCst)
     }
 
     /// How many check threads were actually spawned.
@@ -1245,14 +1266,51 @@ pub fn try_controller<R: Runtime>(app: &AppHandle<R>) -> Option<Arc<Controller>>
 /// already refuses to run while another operation is in flight.
 pub fn request_check<R: Runtime>(app: &AppHandle<R>) {
     let Some(ctl) = try_controller(app) else { return };
+    // Count the request before claiming the slot: a running thread that is about to
+    // finish then sees it and checks once more instead of losing it.
+    ctl.check_wanted.fetch_add(1, Ordering::SeqCst);
     if ctl.check_spawned.swap(true, Ordering::SeqCst) {
         return;
     }
     ctl.check_spawns.fetch_add(1, Ordering::SeqCst);
     let app = app.clone();
     std::thread::spawn(move || {
-        let _ = tauri::async_runtime::block_on(check_now(&app));
-        ctl.check_spawned.store(false, Ordering::SeqCst);
+        // Frees the slot if the check panics, so later checks still run.
+        struct Slot(Arc<Controller>, bool);
+        impl Drop for Slot {
+            fn drop(&mut self) {
+                if self.1 {
+                    self.0.check_spawned.store(false, Ordering::SeqCst);
+                }
+            }
+        }
+        let mut slot = Slot(ctl.clone(), true);
+        loop {
+            let served = ctl.check_wanted.load(Ordering::SeqCst);
+            ctl.check_runs.fetch_add(1, Ordering::SeqCst);
+            #[cfg(test)]
+            let hook = ctl.test_check.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            #[cfg(not(test))]
+            let hook: Option<Arc<dyn Fn() + Send + Sync>> = None;
+            match hook {
+                Some(f) => f(),
+                None => {
+                    let _ = tauri::async_runtime::block_on(check_now(&app));
+                }
+            }
+            if ctl.check_wanted.load(Ordering::SeqCst) != served {
+                continue;
+            }
+            ctl.check_spawned.store(false, Ordering::SeqCst);
+            slot.1 = false;
+            // A request that landed between the load and the store above counted itself
+            // first; take the slot back for it.
+            if ctl.check_wanted.load(Ordering::SeqCst) != served && !ctl.check_spawned.swap(true, Ordering::SeqCst) {
+                slot.1 = true;
+                continue;
+            }
+            break;
+        }
     });
 }
 

@@ -28,8 +28,6 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(test)]
-use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -139,10 +137,6 @@ pub enum EditorEvent {
         reason: String,
     },
 }
-
-/// Test seam: how many times the stdio `OpenLogsFolder` arm ran.
-#[cfg(test)]
-pub static OPEN_LOGS_CALLS: AtomicU32 = AtomicU32::new(0);
 
 /// What the tray does with what the editor said.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1318,8 +1312,6 @@ pub fn on_event<R: Runtime>(app: &AppHandle<R>, event: EditorEvent) {
             return;
         }
         EditorEvent::OpenLogsFolder => {
-            #[cfg(test)]
-            OPEN_LOGS_CALLS.fetch_add(1, Ordering::SeqCst);
             if let Err(e) = crate::commands::open_logs_folder(app.clone()) {
                 log::append(&format!("editor: the logs folder was not opened: {e}"));
             }
@@ -1771,41 +1763,102 @@ mod tests {
         assert_eq!(ctl.state().updated_to, None, "DismissUpdated through on_event");
     }
 
+    /// A check hook that reports each run's start and then blocks until the test
+    /// releases it, one release per run.
+    fn gated_check(ctl: &update::Controller) -> (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>) {
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        let started_tx = Arc::new(Mutex::new(started_tx));
+        *ctl.test_check.lock().unwrap() = Some(Arc::new(move || {
+            let _ = started_tx.lock().unwrap().send(());
+            let _ = release_rx.lock().unwrap().recv_timeout(Duration::from_secs(10));
+        }));
+        (release_tx, started_rx)
+    }
+
+    /// Waits until a check run has started (so later requests land during it).
+    fn started(rx: &std::sync::mpsc::Receiver<()>) {
+        rx.recv_timeout(Duration::from_secs(10)).expect("a check run started");
+    }
+
+    fn settle(ctl: &update::Controller) {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while ctl.check_in_flight() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!ctl.check_in_flight(), "the check thread finished");
+    }
+
     #[test]
     fn on_event_check_now_starts_a_check_and_a_repeat_does_not_spawn_another() {
         let (app, _dir) = app_with("0.8.5-dev.12", EditorChoice::React);
         let handle = app.handle().clone();
         let ctl = update::try_controller(&handle).unwrap();
+        let (release, start) = gated_check(&ctl);
         on_event(&handle, EditorEvent::UpdateCheckNow);
-        assert!(ctl.check_in_flight(), "the check thread is running");
-        // A repeat while the check is in flight spawns no second thread.
+        started(&start);
+        // Repeats while the check is held spawn no second thread.
         on_event(&handle, EditorEvent::UpdateCheckNow);
-        on_event(&handle, EditorEvent::SetChannel(UpdateChannel::Experimental));
+        on_event(&handle, EditorEvent::UpdateCheckNow);
         assert_eq!(ctl.check_spawns(), 1, "a repeat check does not spawn another thread");
-        // The check itself runs against the dead localhost feed and settles.
-        let deadline = Instant::now() + Duration::from_secs(15);
-        while ctl.state().phase == canvas_proto::tauri::UpdatePhase::Idle && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        assert_ne!(ctl.state().phase, canvas_proto::tauri::UpdatePhase::Idle, "CheckNow moved the phase");
+        release.send(()).unwrap();
+        started(&start);
+        release.send(()).unwrap();
+        settle(&ctl);
+        assert_eq!(ctl.check_spawns(), 1);
+        // The repeats fold into one more check, not one each.
+        assert_eq!(ctl.check_runs(), 2, "repeats during a check become one recheck");
+    }
+
+    /// A channel switch while a check is running is not lost: the running thread checks
+    /// once more, so the new channel's feed is read (#205 review). Before the fix the
+    /// throttle dropped the request and only one check ran.
+    #[test]
+    fn a_channel_switch_during_a_check_checks_again() {
+        let (app, _dir) = app_with("0.8.5-dev.12", EditorChoice::React);
+        let handle = app.handle().clone();
+        let ctl = update::try_controller(&handle).unwrap();
+        let (release, start) = gated_check(&ctl);
+        on_event(&handle, EditorEvent::UpdateCheckNow);
+        started(&start);
+        on_event(&handle, EditorEvent::SetChannel(UpdateChannel::Experimental));
+        release.send(()).unwrap();
+        started(&start);
+        release.send(()).unwrap();
+        settle(&ctl);
+        assert_eq!(ctl.check_runs(), 2, "the switch got its own check");
+        assert_eq!(ctl.check_spawns(), 1, "on the same thread");
+    }
+
+    /// A check that panics frees the slot, so the next request still checks (#205
+    /// review: before the guard the flag stayed set and every later check was dropped).
+    #[test]
+    fn a_panicking_check_does_not_block_later_checks() {
+        let (app, _dir) = app_with("0.8.5-dev.12", EditorChoice::React);
+        let handle = app.handle().clone();
+        let ctl = update::try_controller(&handle).unwrap();
+        *ctl.test_check.lock().unwrap() = Some(Arc::new(|| panic!("a check that panics")));
+        on_event(&handle, EditorEvent::UpdateCheckNow);
+        settle(&ctl);
+        *ctl.test_check.lock().unwrap() = Some(Arc::new(|| {}));
+        on_event(&handle, EditorEvent::UpdateCheckNow);
+        settle(&ctl);
+        assert_eq!(ctl.check_spawns(), 2, "the second request got a thread");
+        assert_eq!(ctl.check_runs(), 2);
     }
 
     #[test]
     fn on_event_open_logs_folder_runs_the_command() {
         let (app, _dir) = app_with("0.8.5-dev.12", EditorChoice::React);
         let handle = app.handle().clone();
-        let before = OPEN_LOGS_CALLS.load(Ordering::SeqCst);
-        // The mock app has no opener plugin, so the real command panics at
-        // `app.opener()` (after the arm has run); the seam counter, bumped
-        // first in the arm, is what this test asserts.
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // The mock app has no opener plugin, so `commands::open_logs_folder` panics at
+        // `app.opener()` when it is reached. The panic is the proof that the arm called
+        // the real command: an arm that skipped it would return normally.
+        let reached = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             on_event(&handle, EditorEvent::OpenLogsFolder);
         }));
-        assert_eq!(
-            OPEN_LOGS_CALLS.load(Ordering::SeqCst),
-            before + 1,
-            "OpenLogsFolder through on_event records the call"
-        );
+        assert!(reached.is_err(), "OpenLogsFolder through on_event runs commands::open_logs_folder");
     }
 
     #[test]
