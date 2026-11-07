@@ -238,6 +238,40 @@ pub fn placeholder_zones(card: usize) -> usize {
     ZONE_RHYTHM[card % ZONE_RHYTHM.len()]
 }
 
+/// How the desktop device row splits its room between the sub-line (`flex:
+/// 0 1 300px`) and the strip (`flex: 1 1 200px`): proportional shrink
+/// (shrink × basis), and the strip grows into free space past the sub's 300.
+/// The fixed items are the kind box (32), six 12 px gaps, the name (220),
+/// the count, the state and the Size slot (104). Returns (sub_w, strip_w).
+/// Measured against the React captures: at 1024 the sub is 187 and the strip
+/// box 125 (the dots and the count land on React's pixels); at 1440, 300
+/// and 292.
+pub fn device_split(row_w: f32, count_w: f32, state_w: f32) -> (f32, f32) {
+    let fixed = 32.0 + 72.0 + 220.0 + 104.0 + count_w + state_w;
+    let free = (row_w - fixed).max(0.0);
+    if free >= 500.0 {
+        (300.0, free - 300.0)
+    } else {
+        let shrink = 500.0 - free;
+        let sub = (300.0 - shrink * 0.6).clamp(96.0, 300.0);
+        let strip = (200.0 - shrink * 0.4).clamp(64.0, 200.0);
+        // If one item floors out, the other takes what is left.
+        if sub + strip > free {
+            let sub = (free - strip).clamp(96.0, 300.0);
+            (sub, (free - sub).clamp(64.0, 200.0))
+        } else {
+            (sub, strip)
+        }
+    }
+}
+
+/// The zone row's strip width (React `.rd-zone`: only the strip is flexible,
+/// basis 200 with a 64 floor): everything the row's room leaves it.
+pub fn zone_strip_width(row_w: f32, count_w: f32) -> f32 {
+    let fixed = 60.0 + 116.0 + 36.0 + 104.0 + 16.0 + count_w;
+    (row_w - fixed).max(64.0)
+}
+
 /// The most dots or bar the strip draws: `Math.min(led_count, 240)`, while
 /// the count text reads the real `led_count`.
 pub fn drawn_count(led_count: u32) -> u32 {
@@ -683,8 +717,12 @@ impl DevicesView {
     // -- elements ---------------------------------------------------------
 
     /// A zone's LED strip (React `ZoneStrip`): a canvas in the device's
-    /// accent, 200 × 22 in SVG units.
-    fn zone_strip(&self, zone: &ZoneInfo, tone: gpui::Rgba, h: f32, wide: bool) -> gpui::AnyElement {
+    /// accent, painted from the SVG viewBox with `preserveAspectRatio=
+    /// xMidYMid meet` (uniform scale, centred). `box_h` is the element's
+    /// height (22 on a desktop row; the aspect height on a phone device row;
+    /// 16 on a phone zone row); the element's width is `box_w` when set, else
+    /// it takes the row's width.
+    fn zone_strip(&self, zone: &ZoneInfo, tone: gpui::Rgba, box_w: Option<f32>, box_h: f32, grow: bool) -> gpui::AnyElement {
         let zone = zone.clone();
         let mode = strip_mode(&zone);
         if let StripMode::Single = mode {
@@ -700,6 +738,18 @@ impl DevicesView {
                     return;
                 }
                 let palette = tone;
+                // The viewBox and its meet scale: a linear strip is 200 × 22,
+                // a matrix is its grid. Above the viewBox's 1:1 the painting
+                // stays put (React's dots are 8 px); below it scales down.
+                let (vbw, vbh) = match &mode {
+                    StripMode::Matrix { cols, rows } => (*cols as f32, *rows as f32),
+                    _ => (200.0, 22.0),
+                };
+                let s = (w / vbw).min(h / vbh);
+                let ox = (w - vbw * s) / 2.0;
+                let oy = (h - vbh * s) / 2.0;
+                let x = |units: f32| ox + units * s;
+                let y = |units: f32| oy + units * s;
                 let dot = |window: &mut Window, cx: f32, cy: f32, r: f32, alpha: f32| {
                     let c = gpui::Rgba { a: alpha, ..palette };
                     let mut quad = gpui::fill(
@@ -715,78 +765,69 @@ impl DevicesView {
                     quad.corner_radii.bottom_left = gpui::px(r);
                     window.paint_quad(quad);
                 };
-                let bar = |window: &mut Window, y: f32, bh: f32, radius: f32, alpha: f32| {
+                let bar = |window: &mut Window, units_y: f32, units_bh: f32, radius: f32, alpha: f32| {
                     let c = gpui::Rgba { a: alpha, ..palette };
                     let mut quad = gpui::fill(
                         gpui::Bounds {
-                            origin: gpui::point(bounds.origin.x, bounds.origin.y + gpui::px(y)),
-                            size: gpui::size(gpui::px(w), gpui::px(bh)),
+                            origin: gpui::point(
+                                bounds.origin.x + gpui::px(x(0.0)),
+                                bounds.origin.y + gpui::px(y(units_y)),
+                            ),
+                            size: gpui::size(gpui::px(200.0 * s), gpui::px(units_bh * s)),
                         },
                         c,
                     );
-                    quad.corner_radii.top_left = gpui::px(radius);
-                    quad.corner_radii.top_right = gpui::px(radius);
-                    quad.corner_radii.bottom_right = gpui::px(radius);
-                    quad.corner_radii.bottom_left = gpui::px(radius);
+                    quad.corner_radii.top_left = gpui::px(radius * s);
+                    quad.corner_radii.top_right = gpui::px(radius * s);
+                    quad.corner_radii.bottom_right = gpui::px(radius * s);
+                    quad.corner_radii.bottom_left = gpui::px(radius * s);
                     window.paint_quad(quad);
                 };
                 match mode {
                     StripMode::Dashed => {
                         // The "no LEDs yet" line: dashes 40..160 at y 11.
-                        let sx = w / 200.0;
-                        let sy = h / 22.0;
-                        let mut x = 40.0 * sx;
-                        let end = 160.0 * sx;
-                        while x < end {
-                            let dash_w = (4.0 * sx).min(end - x);
+                        let mut units = 40.0f32;
+                        while units < 160.0 {
+                            let dash_units = (4.0f32).min(160.0 - units);
                             window.paint_quad(gpui::fill(
                                 gpui::Bounds {
                                     origin: gpui::point(
-                                        bounds.origin.x + gpui::px(x),
-                                        bounds.origin.y + gpui::px(11.0 * sy - 0.75 * sy),
+                                        bounds.origin.x + gpui::px(x(units)),
+                                        bounds.origin.y + gpui::px(y(11.0) - 0.75 * s),
                                     ),
-                                    size: gpui::size(gpui::px(dash_w), gpui::px(1.5 * sy)),
+                                    size: gpui::size(gpui::px(dash_units * s), gpui::px(1.5 * s)),
                                 },
                                 gpui::Rgba { a: 0.45, ..palette },
                             ));
-                            x += 8.0 * sx;
+                            units += 8.0;
                         }
                     }
                     StripMode::Bar => {
-                        let sy = h / 22.0;
-                        bar(window, 4.0 * sy, 14.0 * sy, 5.0 * sy, 0.16);
-                        bar(window, 6.5 * sy, 9.0 * sy, 4.5 * sy, 0.5);
-                        bar(window, 9.5 * sy, 3.0 * sy, 1.5 * sy, 1.0);
+                        bar(window, 4.0, 14.0, 5.0, 0.16);
+                        bar(window, 6.5, 9.0, 4.5, 0.5);
+                        bar(window, 9.5, 3.0, 1.5, 1.0);
                     }
                     StripMode::Dots { step, radius } => {
-                        let sx = w / 200.0;
-                        let sy = h / 22.0;
-                        let r = radius * sx;
-                        bar(window, 4.0 * sy, 14.0 * sy, 5.0 * sy, 0.16);
+                        let r = radius * s;
+                        bar(window, 4.0, 14.0, 5.0, 0.16);
                         let n = drawn_count(zone.led_count);
                         for i in 0..n {
-                            let cx = (i as f32 + 0.5) * step * sx;
-                            let cy = 11.0 * sy;
-                            dot(window, cx, cy, r, 1.0);
+                            let cx = x((i as f32 + 0.5) * step);
+                            dot(window, cx, y(11.0), r, 1.0);
                         }
                     }
                     StripMode::Matrix { cols, rows } => {
                         if let ZoneKind::Matrix { map, .. } = &zone.kind {
-                            let cols_f = cols as f32;
-                            let rows_f = rows as f32;
-                            let scale = (w / cols_f).min(h / rows_f);
-                            let ox = (w - cols_f * scale) / 2.0;
-                            let oy = (h - rows_f * scale) / 2.0;
                             for row in 0..rows {
                                 for col in 0..cols {
                                     let idx = (row * cols + col) as usize;
                                     let lit = map.get(idx).is_some_and(|cell| cell.is_some());
-                                    let cx = ox + (col as f32 + 0.5) * scale;
-                                    let cy = oy + (row as f32 + 0.5) * scale;
+                                    let cx = x(col as f32 + 0.5);
+                                    let cy = y(row as f32 + 0.5);
                                     if lit {
-                                        dot(window, cx, cy, 0.36 * scale, 1.0);
+                                        dot(window, cx, cy, 0.36 * s, 1.0);
                                     } else {
-                                        dot(window, cx, cy, 0.12 * scale, 0.35);
+                                        dot(window, cx, cy, 0.12 * s, 0.35);
                                     }
                                 }
                             }
@@ -795,16 +836,27 @@ impl DevicesView {
                     StripMode::Single => {}
                 }
             },
-        );
-        if wide {
+        )
+        .w_full()
+        .h_full();
+        if let Some(width) = box_w {
+            div().w(px(width)).h(px(box_h)).child(canvas).into_any_element()
+        } else if grow {
+            // The strip takes the row's leftover room (React
+            // `flex: 1 1 200px` — basis 200 with grow and shrink 1). GPUI's
+            // `flex_1` (basis 0) let Yoga pin the strip at its 64 minimum and
+            // shrink the sub instead (measured at 1024: the strip landed
+            // 64 wide at +40 px, React's is ~134).
             div()
-                .flex_1()
+                .flex_grow()
+                .flex_shrink()
+                .flex_basis(px(200.0))
                 .min_w(px(64.0))
-                .h(px(h))
+                .h(px(box_h))
                 .child(canvas)
                 .into_any_element()
         } else {
-            div().w_full().h(px(h)).child(canvas).into_any_element()
+            div().w_full().h(px(box_h)).child(canvas).into_any_element()
         }
     }
 
@@ -835,13 +887,16 @@ impl DevicesView {
     }
 
     /// One device's header row (React `.rd-dev-row`).
+    #[allow(clippy::too_many_arguments)]
     fn device_row(
         &self,
+        window: &Window,
         device: &DeviceInfo,
         accent: gpui::Rgba,
         same_name: bool,
         phone: bool,
         row_h: f32,
+        content_w: f32,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let t = &self.theme;
@@ -849,24 +904,116 @@ impl DevicesView {
         let sub = sub_line(device, tag.as_deref());
         let name = display_name(device, same_name, tag.as_deref());
         let one = if device.zones.len() == 1 { Some(device.zones[0].clone()) } else { None };
-        let kind_box = if phone { 24.0 } else { 32.0 };
+        let state_color = if device.connected { Theme::color(t.ok) } else { Theme::color(t.down) };
+        let state_text = if device.connected { Theme::color(t.dim) } else { Theme::color(t.down) };
+        let state = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .flex_none()
+            .text_size(px(14.0))
+            .line_height(gpui::relative(1.45))
+            .font_family(crate::fonts::UI_FAMILY)
+            .text_color(state_text)
+            .child(div().size(px(8.0)).rounded_full().flex_none().bg(state_color))
+            .child(if device.connected { "connected" } else { "disconnected" }.to_string());
+        if phone {
+            // The phone device row wraps to two lines (React `flex-wrap`
+            // with `order`): kind, name and state on the first; sub, strip,
+            // count and Size on the second. GPUI has no flex order, so the
+            // items are laid out in the same visual order with the names
+            // shrunk by the flex, and the strip is 64 wide with the aspect
+            // height of its viewBox (React `height: auto`).
+            let mut row = div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(4.0))
+                .px(px(16.0))
+                .py(px(4.0));
+            row = row.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(24.0))
+                    .h(px(24.0))
+                    .r_md()
+                    .bg(Theme::color(t.raised))
+                    .child(
+                        gpui::svg()
+                            .path(format!("icons/{}.svg", kind_icon(device.kind)))
+                            .size(px(18.0))
+                            .flex_none()
+                            .text_color(accent),
+                    ),
+            );
+            row = row.child(
+                div()
+                    .flex_initial()
+                    .min_w(px(0.0))
+                    .truncate()
+                    .text_size(px(15.0))
+                    .line_height(gpui::relative(1.45))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .font_family(crate::fonts::UI_FAMILY)
+                    .text_color(Theme::color(t.ink))
+                    .child(name.clone()),
+            );
+            row = row.child(div().w(px(100.0)).flex_none().child(state));
+            row = row.child(
+                div()
+                    .flex_initial()
+                    .w(px(150.0))
+                    .min_w(px(0.0))
+                    .truncate()
+                    .text_size(px(14.0))
+                    .line_height(gpui::relative(1.45))
+                    .font_family(crate::fonts::MONO_FAMILY)
+                    .text_color(Theme::color(t.mute))
+                    .child(sub.clone()),
+            );
+            if let Some(zone) = &one {
+                // The phone strip is 64 wide with the height its viewBox
+                // gives it (a linear strip: 64 × 22/200; a matrix: 64 ×
+                // rows/cols).
+                let box_h = match &zone.kind {
+                    ZoneKind::Matrix { width, height, .. } => 64.0 * (*height as f32) / (*width as f32),
+                    _ => 64.0 * 22.0 / 200.0,
+                };
+                row = row
+                    .child(self.zone_strip(zone, accent, Some(64.0), box_h, false))
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(59.0))
+                            .text_size(px(14.0))
+                            .line_height(gpui::relative(1.45))
+                            .font_family(crate::fonts::MONO_FAMILY)
+                            .text_color(Theme::color(t.ink))
+                            .child(format!("{} {}", zone.led_count, led_word(zone.led_count))),
+                    );
+            }
+            let size_slot = div().flex_none().flex().justify_end().ml_auto();
+            row = row.child(match &one {
+                Some(zone) if zone.resizable => size_slot.child(self.size_key(&device.id.0, zone.index, cx)),
+                _ => size_slot,
+            });
+            return row.into_any_element();
+        }
         let mut row = div()
             .flex()
             .items_center()
-            .gap(if phone { px(4.0) } else { px(12.0) })
+            .gap(px(12.0))
+            .h(px(row_h))
             .px(px(16.0));
-        if phone {
-            row = row.flex_wrap().py(px(4.0));
-        } else {
-            row = row.h(px(row_h));
-        }
         row = row.child(
             div()
                 .flex()
                 .items_center()
                 .justify_center()
-                .w(px(kind_box))
-                .h(px(kind_box))
+                .w(px(32.0))
+                .h(px(32.0))
                 .r_md()
                 .bg(Theme::color(t.raised))
                 .child(
@@ -875,14 +1022,27 @@ impl DevicesView {
                         .size(px(18.0))
                         .flex_none()
                         .text_color(accent),
-                ),
+               ),
         );
+        // The desktop row's room, split the way React's flex splits it
+        // (measured against the captures: see `device_split`).
+        let count_for_split = one
+            .as_ref()
+            .map(|z| {
+                let s = format!("{} {}", z.led_count, led_word(z.led_count));
+                crate::shell::text_width(window, &s, 14.0, gpui::FontWeight::NORMAL, crate::fonts::MONO_FAMILY).max(56.0)
+            })
+            .unwrap_or(56.0);
+        let state_word = if device.connected { "connected" } else { "disconnected" };
+        let state_w = 16.0
+            + crate::shell::text_width(window, state_word, 14.0, gpui::FontWeight::NORMAL, crate::fonts::UI_FAMILY);
+        let (sub_w, strip_w) = device_split(content_w - 32.0, count_for_split, state_w);
         row = row.child(
             div()
-                .flex_1()
+                .flex_none()
+                .w(px(220.0))
                 .min_w(px(0.0))
-                .overflow_hidden()
-                .whitespace_nowrap()
+                .truncate()
                 .text_size(px(15.0))
                 .line_height(gpui::relative(1.45))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -892,8 +1052,10 @@ impl DevicesView {
         );
         row = row.child(
             div()
-                .overflow_hidden()
-                .whitespace_nowrap()
+                .flex_none()
+                .w(px(sub_w))
+                .min_w(px(0.0))
+                .truncate()
                 .text_size(px(14.0))
                 .line_height(gpui::relative(1.45))
                 .font_family(crate::fonts::MONO_FAMILY)
@@ -901,94 +1063,106 @@ impl DevicesView {
                 .child(sub.clone()),
         );
         if let Some(zone) = &one {
-            row = row.child(self.zone_strip(zone, accent, 22.0, !phone));
+            row = row.child(self.zone_strip(zone, accent, Some(strip_w), 22.0, false));
             row = row.child(
                 div()
                     .flex_none()
-                    .min_w(px(56.0))
+                    .w(px(count_for_split))
                     .text_size(px(14.0))
                     .line_height(gpui::relative(1.45))
                     .font_family(crate::fonts::MONO_FAMILY)
                     .text_color(Theme::color(t.ink))
+                    .whitespace_nowrap()
                     .child(format!("{} {}", zone.led_count, led_word(zone.led_count))),
             );
         }
-        let state_color = if device.connected { Theme::color(t.ok) } else { Theme::color(t.down) };
-        let state_text = if device.connected { Theme::color(t.dim) } else { Theme::color(t.down) };
         row = row.child(
             div()
+                .flex_none()
+                .w(px(state_w))
                 .flex()
                 .items_center()
                 .gap_2()
-                .flex_none()
                 .text_size(px(14.0))
                 .line_height(gpui::relative(1.45))
                 .font_family(crate::fonts::UI_FAMILY)
                 .text_color(state_text)
                 .child(div().size(px(8.0)).rounded_full().flex_none().bg(state_color))
-                .child(if device.connected { "connected" } else { "disconnected" }.to_string()),
+                .child(state_word.to_string()),
         );
         let size_slot = div()
             .flex_none()
-            .min_w(if phone { px(0.0) } else { px(104.0) })
+            .min_w(px(104.0))
             .flex()
             .justify_end();
-        row = row.child(match (&one, phone) {
-            (Some(zone), _) if zone.resizable => size_slot.child(self.size_key(&device.id.0, zone.index, cx)),
+        row = row.child(match &one {
+            Some(zone) if zone.resizable => size_slot.child(self.size_key(&device.id.0, zone.index, cx)),
             _ => size_slot,
         });
         row.into_any_element()
     }
 
     /// One zone row of a multi-zone device (React `.rd-zone`).
+    #[allow(clippy::too_many_arguments)]
     fn zone_row(
         &self,
+        window: &Window,
         device: &DeviceInfo,
         zone: &ZoneInfo,
         accent: gpui::Rgba,
         phone: bool,
         row_h: f32,
+        content_w: f32,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let t = &self.theme;
-        let name_block = div()
-            .flex()
-            .flex_col()
-            .justify_center()
-            .min_w(px(0.0))
-            .line_height(gpui::relative(1.25))
-            .child(
-                div()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_size(px(15.0))
-                    .font_family(crate::fonts::UI_FAMILY)
-                    .text_color(Theme::color(t.ink))
-                    .child(zone.name.clone()),
-            )
-            .child(
-                div()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_size(px(14.0))
-                    .font_family(crate::fonts::UI_FAMILY)
-                    .text_color(Theme::color(t.mute))
-                    .child(zone_shape(zone)),
-            );
-        let count_text = if zone.resizable {
-            format!("{} {} · {}–{}", zone.led_count, led_word(zone.led_count), zone.min_leds, zone.max_leds)
+        let count_main = format!("{} {}", zone.led_count, led_word(zone.led_count));
+        let count_range = if zone.resizable {
+            Some(format!(" · {}–{}", zone.min_leds, zone.max_leds))
         } else {
-            format!("{} {}", zone.led_count, led_word(zone.led_count))
+            None
         };
-        let count = div()
-            .flex_none()
-            .min_w(px(56.0))
-            .text_size(px(14.0))
-            .line_height(gpui::relative(1.45))
-            .font_family(crate::fonts::MONO_FAMILY)
-            .text_color(Theme::color(t.ink))
-            .whitespace_nowrap()
-            .child(count_text);
+        let count_w = {
+            let mut w = crate::shell::text_width(
+                window,
+                &count_main,
+                14.0,
+                gpui::FontWeight::NORMAL,
+                crate::fonts::MONO_FAMILY,
+            );
+            if let Some(range) = &count_range {
+                w += crate::shell::text_width(window, range, 14.0, gpui::FontWeight::NORMAL, crate::fonts::MONO_FAMILY);
+            }
+            let min = if phone { 0.0 } else { 56.0 };
+            w.max(min)
+        };
+        let strip_w = zone_strip_width(content_w - 32.0, count_w);
+        let count = {
+            let mut c = div()
+                .flex()
+                .items_baseline()
+                .flex_none()
+                .w(px(count_w))
+                .text_size(px(14.0))
+                .line_height(gpui::relative(1.45))
+                .font_family(crate::fonts::MONO_FAMILY)
+                .whitespace_nowrap()
+                .child(
+                    div()
+                        .font_family(crate::fonts::MONO_FAMILY)
+                        .text_color(Theme::color(t.ink))
+                        .child(count_main),
+                );
+            if let Some(range) = count_range {
+                c = c.child(
+                    div()
+                        .font_family(crate::fonts::MONO_FAMILY)
+                        .text_color(Theme::color(t.mute))
+                        .child(range),
+                );
+            }
+            c
+        };
         let size_slot = div()
             .flex_none()
             .min_w(if phone { px(0.0) } else { px(104.0) })
@@ -1024,8 +1198,7 @@ impl DevicesView {
                                 .gap_2()
                                 .child(
                                     div()
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
+                                        .truncate()
                                         .text_size(px(15.0))
                                         .font_family(crate::fonts::UI_FAMILY)
                                         .text_color(Theme::color(t.ink))
@@ -1035,7 +1208,7 @@ impl DevicesView {
                         .child(count)
                         .child(size),
                 )
-                .child(self.zone_strip(zone, accent, 16.0, false))
+                .child(self.zone_strip(zone, accent, None, 16.0, false))
                 .into_any_element()
         } else {
             div()
@@ -1047,8 +1220,33 @@ impl DevicesView {
                 .pr_4()
                 .border_t_1()
                 .border_color(Theme::color(t.line))
-                .child(div().flex().flex_col().w(px(116.0)).flex_none().child(name_block))
-                .child(self.zone_strip(zone, accent, 22.0, true))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .justify_center()
+                        .flex_1()
+                        .w(px(116.0))
+                        .min_w(px(116.0))
+                        .line_height(gpui::relative(1.25))
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(15.0))
+                                .font_family(crate::fonts::UI_FAMILY)
+                                .text_color(Theme::color(t.ink))
+                                .child(zone.name.clone()),
+                        )
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(14.0))
+                                .font_family(crate::fonts::UI_FAMILY)
+                                .text_color(Theme::color(t.mute))
+                                .child(zone_shape(zone)),
+                        ),
+                )
+                .child(self.zone_strip(zone, accent, Some(strip_w), 22.0, false))
                 .child(count)
                 .child(size)
                 .into_any_element()
@@ -1316,13 +1514,17 @@ impl DevicesView {
     }
 
     /// One device card (React `section.rd-dev`).
+    /// One device card (React `section.rd-dev`).
+    #[allow(clippy::too_many_arguments)]
     fn card(
         &self,
+        window: &Window,
         device: &DeviceInfo,
         accent: gpui::Rgba,
         same_name: bool,
         phone: bool,
         row_h: f32,
+        content_w: f32,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let t = &self.theme;
@@ -1332,13 +1534,13 @@ impl DevicesView {
             .flex_col()
             .border_b_1()
             .border_color(Theme::color(t.line));
-        card = card.child(self.device_row(device, accent, same_name, phone, row_h, cx));
+        card = card.child(self.device_row(window, device, accent, same_name, phone, row_h, content_w, cx));
         if device.zones.is_empty() {
             card = card.child(self.zone_empty(device, cx));
         }
         if device.zones.len() > 1 {
             for zone in &device.zones {
-                card = card.child(self.zone_row(device, zone, accent, phone, row_h, cx));
+                card = card.child(self.zone_row(window, device, zone, accent, phone, row_h, content_w, cx));
             }
         }
         if let Some((wdev, wzone)) = self.walker_device_zone() {
@@ -1416,7 +1618,12 @@ impl Render for DevicesView {
         };
         let content_w = win_w - rail_w - if win_w <= 720.0 { 32.0 } else { 48.0 };
         let phone = content_w <= 640.0;
-        let row_h = if win_h - 55.0 <= 700.0 { 36.0 } else { 44.0 };
+        // The short-window rule (`@container page (max-height: 700px)`):
+        // the container is `.content`, measured on its content box, which is
+        // the window minus the strip (55) and the content padding (16 + 24).
+        // Measured: at 1024×768 React's rows are 36 px (the page is 673);
+        // at 1280+ they are 44.
+        let row_h = if win_h - 95.0 <= 700.0 { 36.0 } else { 44.0 };
         let mut page = div().flex().flex_col().gap_4().flex_1().min_h(px(0.0));
         // The stale notice over the rows (React `rule rule-warn` with Details).
         if let (Some(_devices), Some(err)) = (&self.devices, &self.devices_error) {
@@ -1616,7 +1823,7 @@ impl Render for DevicesView {
                     .map(|(i, device)| {
                         let same_name = names.iter().filter(|n| *n == &device.name).count() > 1;
                         let accent = accent_for(t, i);
-                        self.card(device, accent, same_name, phone, row_h, cx)
+                        self.card(window, device, accent, same_name, phone, row_h, content_w, cx)
                     })
                     .collect();
                 let mut list = div()
@@ -1921,6 +2128,30 @@ mod tests {
     #[test]
     fn resend_interval_is_two_seconds() {
         assert_eq!(RESEND_MS, 2000);
+    }
+
+    #[test]
+    fn device_split_grows_the_strip_past_the_sub() {
+        // 1440: the sub is unshrunk at 300, the strip takes the rest.
+        let (sub, strip) = device_split(1160.0, 50.0, 84.0);
+        assert_eq!(sub, 300.0);
+        assert!((strip - (1160.0 - (32.0 + 72.0 + 220.0 + 104.0 + 50.0 + 84.0) - 300.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn device_split_shrinks_proportionally_at_1024() {
+        // 1024: sub 190.8, strip 127.2, count lands on React's 716.
+        let (sub, strip) = device_split(880.0, 50.0, 84.0);
+        assert!((sub - 190.8).abs() < 0.5, "sub {sub}");
+        assert!((strip - 127.2).abs() < 0.5, "strip {strip}");
+    }
+
+    #[test]
+    fn zone_strip_takes_the_row_leftover_above_its_floor() {
+        // 1440 zone row: everything the room leaves the strip.
+        let w = zone_strip_width(1180.0, 105.0);
+        assert!((w - (1180.0 - (60.0 + 116.0 + 36.0 + 104.0 + 16.0) - 105.0)).abs() < 0.01);
+        assert_eq!(zone_strip_width(300.0, 100.0), 64.0);
     }
 
     #[test]
