@@ -1081,18 +1081,34 @@ impl DevicesView {
                ),
         );
         // The desktop row's room, split the way React's flex splits it
-        // (measured against the captures: see `device_split`).
+        // (measured against the captures: see `device_split`). The
+        // single-zone count is mono 14 semibold min 96 at desktop
+        // (React `.zone-strip-count` at `@media (min-width: 721px)`:
+        // `--fm` 14 tabular; the `.rd-devices` rules keep it
+        // `flex: none` with `min-width: 96px` from that media rule
+        // winning over the base 56 for the box, and the text is
+        // right-aligned, so the split counts 96).
         let count_for_split = one
             .as_ref()
             .map(|z| {
                 let s = format!("{} {}", z.led_count, led_word(z.led_count));
-                crate::shell::text_width(window, &s, 14.0, gpui::FontWeight::NORMAL, crate::fonts::MONO_FAMILY).max(56.0)
+                crate::shell::text_width(window, &s, 14.0, gpui::FontWeight::SEMIBOLD, crate::fonts::MONO_FAMILY).max(96.0)
             })
-            .unwrap_or(56.0);
+            .unwrap_or(96.0);
         let state_word = if device.connected { "connected" } else { "disconnected" };
         let state_w = 16.0
             + crate::shell::text_width(window, state_word, 14.0, gpui::FontWeight::NORMAL, crate::fonts::UI_FAMILY);
-        let (sub_w, strip_w) = device_split(content_w - 32.0, count_for_split, state_w);
+        // A header row (no strip, no count) gives its sub-line the
+        // space React's flex gives it: kind 32, four 12px gaps (48),
+        // name 220, state, Size slot 104, inside the row's
+        // `content_w - 32` (16px row padding each side); the sub is
+        // `flex: 0 1 300px` min 96, so 300 unless the room shrinks it.
+        let (sub_w, strip_w) = if one.is_none() {
+            let available = (content_w - 32.0) - (32.0 + 48.0 + 220.0 + 104.0 + state_w);
+            (available.clamp(96.0, 300.0), 0.0)
+        } else {
+            device_split(content_w - 32.0, count_for_split, state_w)
+        };
         row = row.child(
             div()
                 .flex_none()
@@ -1122,11 +1138,15 @@ impl DevicesView {
             row = row.child(self.zone_strip(zone, accent, Some(strip_w), 22.0, false));
             row = row.child(
                 div()
+                    .flex()
+                    .items_baseline()
+                    .justify_end()
                     .flex_none()
                     .w(px(count_for_split))
-                    .text_size(px(15.0))
+                    .text_size(px(14.0))
                     .line_height(gpui::relative(1.45))
-                    .font_family(crate::fonts::UI_FAMILY)
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .font_family(crate::fonts::MONO_FAMILY)
                     .text_color(Theme::color(t.ink))
                     .whitespace_nowrap()
                     .child(format!("{} {}", zone.led_count, led_word(zone.led_count))),
@@ -1178,24 +1198,37 @@ impl DevicesView {
         } else {
             None
         };
-        let (m_size, m_family) = if phone { (15.0, crate::fonts::UI_FAMILY) } else { (14.0, crate::fonts::MONO_FAMILY) };
-        let count_w = {
-            // Under the phone grid the count box is exactly the text (UI
-            // 15, React's inherited body size; measured at 390: count ink
-            // 143–246 in both). On the desktop rows the split/strip
-            // arithmetic keeps the mono 14 px measurement: that is the
-            // calibration the React captures pinned (React's count is UI
-            // 15 with the `AnimatedNumber` tabular digits, whose exact
-            // width the mono measurement approximates closely enough that
-            // the strip lands on React's pixels at 1440/1024).
-            let mut w = crate::shell::text_width(window, &count_main, m_size, gpui::FontWeight::NORMAL, m_family);
-            if let Some(range) = &count_range {
-                w += crate::shell::text_width(window, range, m_size, gpui::FontWeight::NORMAL, m_family);
-            }
-            let min = if phone { 0.0 } else { 56.0 };
-            w.max(min)
+        // The count face follows React's breakpoint: at
+        // `@media (min-width: 721px)` `.zone-strip-count` is mono 14
+        // tabular min 96 right-aligned; under it (a phone viewport,
+        // the grid) it inherits the body face, UI 15, in an auto
+        // column of the same box. Measured at desktop in mono 14
+        // semibold (the desktop counts read "0 LEDs" etc. in the
+        // mono face, semibold, 14px), on the phone in UI 15 normal.
+        let (m_size, m_family, m_weight, m_min) = if phone {
+            (15.0, crate::fonts::UI_FAMILY, gpui::FontWeight::NORMAL, 0.0)
+        } else {
+            (14.0, crate::fonts::MONO_FAMILY, gpui::FontWeight::SEMIBOLD, 96.0)
         };
-        let strip_w = zone_strip_width(content_w - 32.0, count_w);
+        let count_w = {
+            let mut w = crate::shell::text_width(window, &count_main, m_size, m_weight, m_family);
+            if let Some(range) = &count_range {
+                w += crate::shell::text_width(window, range, m_size, m_weight, m_family);
+            }
+            w.max(m_min)
+        };
+        // `zone_strip_width` already carries the row's 60/16 padding
+        // and the fixed columns, so it takes the row's full width:
+        // passing `content_w - 32` made the strip 32px too narrow and
+        // pulled the count and Size keys 32px left (measured at
+        // 1024: Size 904-952 vs React's 936-984, count end 835 vs
+        // 868, JRGB dashes at 431 vs 447).
+        let strip_w = zone_strip_width(content_w, count_w);
+        let (c_size, c_family, c_weight) = if phone {
+            (15.0, crate::fonts::UI_FAMILY, gpui::FontWeight::NORMAL)
+        } else {
+            (14.0, crate::fonts::MONO_FAMILY, gpui::FontWeight::SEMIBOLD)
+        };
         let count = {
             let mut c = div()
                 .flex()
@@ -1203,20 +1236,23 @@ impl DevicesView {
                 .flex_none()
                 .w(px(count_w))
                 .justify_end()
-                .text_size(px(15.0))
+                .text_size(px(c_size))
                 .line_height(gpui::relative(1.45))
-                .font_family(crate::fonts::UI_FAMILY)
+                .font_weight(c_weight)
+                .font_family(c_family)
                 .whitespace_nowrap()
                 .child(
                     div()
-                        .font_family(crate::fonts::UI_FAMILY)
+                        .font_weight(c_weight)
+                        .font_family(c_family)
                         .text_color(Theme::color(t.ink))
                         .child(count_main),
                 );
             if let Some(range) = count_range {
                 c = c.child(
                     div()
-                        .font_family(crate::fonts::UI_FAMILY)
+                        .font_weight(c_weight)
+                        .font_family(c_family)
                         .text_color(Theme::color(t.mute))
                         .child(range),
                 );
