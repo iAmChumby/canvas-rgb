@@ -15,7 +15,7 @@
 //! - `--min-size WxH` — drop the 900x600 minimum so narrow captures work.
 //! - `--size WxH` — the window size to open at.
 
-use std::io::{BufRead, Write};
+use std::io::{BufRead, BufReader, Write};
 
 use canvas_proto::tauri::{
     EDITOR_PAGES, EditorChoice, EditorToTray, TRAY_TO_EDITOR_LINE_MAX, TrayToEditor,
@@ -167,38 +167,105 @@ fn spawn_ipc_reader() -> std::sync::mpsc::Receiver<TrayToEditor> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let stdin = std::io::stdin();
-        let mut reader = std::io::BufReader::new(stdin);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) => break,
-                Ok(_) => {
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    if trimmed.len() > TRAY_TO_EDITOR_LINE_MAX {
-                        eprintln!("canvas-rgb-editor: stdin line over {TRAY_TO_EDITOR_LINE_MAX} bytes, dropped");
-                        continue;
-                    }
-                    match serde_json::from_str::<TrayToEditor>(trimmed) {
-                        Ok(msg) => {
-                            if tx.send(msg).is_err() {
-                                break;
-                            }
-                        }
-                        Err(e) => eprintln!("canvas-rgb-editor: stdin line dropped: {e}"),
-                    }
-                }
-                Err(e) => {
-                    eprintln!("canvas-rgb-editor: stdin read failed: {e}");
-                    break;
-                }
-            }
-        }
+        run_ipc_reader(BufReader::new(stdin), tx);
     });
     rx
+}
+
+/// Why one line from the tray was dropped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CappedError {
+    TooLong,
+    NotUtf8,
+    Io,
+}
+
+/// Reads one line from `reader`, never holding more than `max` bytes.
+///
+/// A longer line is dropped (the rest is thrown away) and a non-UTF-8 line
+/// is dropped too; `Ok(None)` is EOF. Mirrors the tray's `read_capped_line`
+/// (`app/src-tauri/src/gpui_editor.rs`): the old `read_line` buffered a whole
+/// line before the cap check and `break`ed on invalid UTF-8, after which the
+/// editor never heard `close` or state again.
+fn read_capped_line<R: BufRead>(reader: &mut R, max: usize) -> Result<Option<String>, CappedError> {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut over = false;
+    loop {
+        let available = match reader.fill_buf() {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return Err(CappedError::Io),
+        };
+        if available.is_empty() {
+            if buf.is_empty() && !over {
+                return Ok(None);
+            }
+            break;
+        }
+        let newline = available.iter().position(|b| *b == b'\n');
+        let take = newline.unwrap_or(available.len());
+        if !over {
+            if buf.len() + take > max {
+                over = true;
+                buf.clear();
+            } else {
+                buf.extend_from_slice(&available[..take]);
+            }
+        }
+        let consumed = match newline {
+            Some(at) => at + 1,
+            None => available.len(),
+        };
+        reader.consume(consumed);
+        if newline.is_some() {
+            break;
+        }
+    }
+    if over {
+        return Err(CappedError::TooLong);
+    }
+    let buf = match buf.last() {
+        Some(b'\r') => &buf[..buf.len() - 1],
+        _ => &buf[..],
+    };
+    match String::from_utf8(buf.to_vec()) {
+        Ok(line) => Ok(Some(line)),
+        Err(_) => Err(CappedError::NotUtf8),
+    }
+}
+
+/// Reads tray lines until EOF or an I/O error, forwarding each known message.
+/// Over-long and non-UTF-8 lines are dropped and logged, and reading goes on.
+fn run_ipc_reader<R: BufRead>(mut reader: R, tx: std::sync::mpsc::Sender<TrayToEditor>) {
+    loop {
+        match read_capped_line(&mut reader, TRAY_TO_EDITOR_LINE_MAX) {
+            Ok(None) => break,
+            Ok(Some(line)) => {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<TrayToEditor>(trimmed) {
+                    Ok(msg) => {
+                        if tx.send(msg).is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => eprintln!("canvas-rgb-editor: stdin line dropped: {e}"),
+                }
+            }
+            Err(CappedError::TooLong) => {
+                eprintln!("canvas-rgb-editor: stdin line over {TRAY_TO_EDITOR_LINE_MAX} bytes, dropped")
+            }
+            Err(CappedError::NotUtf8) => {
+                eprintln!("canvas-rgb-editor: stdin line was not valid UTF-8, dropped")
+            }
+            Err(CappedError::Io) => {
+                eprintln!("canvas-rgb-editor: stdin read failed");
+                break;
+            }
+        }
+    }
 }
 
 /// One line to the tray over stdio. Only when the tray launched us with a
@@ -320,6 +387,29 @@ mod ipc_tests {
         let mut dev_null = std::io::sink();
         let _ = writeln!(dev_null, "{}", serde_json::to_string(&EditorToTray::Ready).unwrap());
         let _ = dev_null.flush();
+    }
+
+    #[test]
+    fn a_300kib_line_is_dropped_and_the_next_line_arrives() {
+        use std::io::Cursor;
+        let over = "x".repeat(300 * 1024);
+        let data = format!("{over}\n{{\"type\":\"close\"}}\n");
+        let (tx, rx) = std::sync::mpsc::channel();
+        run_ipc_reader(Cursor::new(data.into_bytes()), tx);
+        // The over-long line acted on nothing; the close after it still arrives.
+        assert_eq!(rx.recv().unwrap(), TrayToEditor::Close);
+        assert!(rx.recv().is_err(), "only the close arrived");
+    }
+
+    #[test]
+    fn a_non_utf8_line_is_dropped_and_the_close_after_it_arrives() {
+        use std::io::Cursor;
+        let mut data = vec![0xff, 0xfe, b'\n'];
+        data.extend_from_slice(b"{\"type\":\"close\"}\n");
+        let (tx, rx) = std::sync::mpsc::channel();
+        run_ipc_reader(Cursor::new(data), tx);
+        assert_eq!(rx.recv().unwrap(), TrayToEditor::Close);
+        assert!(rx.recv().is_err(), "only the close arrived");
     }
 
     #[test]

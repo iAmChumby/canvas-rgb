@@ -254,11 +254,14 @@ pub fn field_hint(
         .min_h(px(48.0))
         .py_2();
     let el = if last { el } else { el.border_b_1().border_color(Theme::color(t.line)) };
-    // React `.field-label`: a flex column, flex 1 1 140px.
+    // React `.field-label`: a flex column, flex 1 1 140px. The basis is
+    // 140 px, not the content width: a content basis let the Setup hint
+    // stay on one line at 1920 (React wraps it onto two).
     let mut label_col = div()
         .flex()
         .flex_col()
         .flex_1()
+        .w(px(140.0))
         .min_w(px(140.0))
         .child(
             div()
@@ -312,6 +315,7 @@ pub fn field_hint_fig(
         .flex()
         .flex_col()
         .flex_1()
+        .w(px(140.0))
         .min_w(px(140.0))
         .child(
             div()

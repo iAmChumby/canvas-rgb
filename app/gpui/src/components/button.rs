@@ -35,6 +35,12 @@ fn colors(t: &Theme, variant: Variant, disabled: bool) -> (Rgba, Rgba, Rgba) {
         // border stays the variant's own (ghost stays transparent, so a
         // disabled ghost is still just text: React's `.btn-ghost:disabled`
         // keeps `border-color: transparent`).
+        if variant == Variant::Ghost {
+            // A disabled ghost is bare text (React `.btn-ghost:disabled`:
+            // background and border transparent, mute words): half-strength
+            // black made it a bordered chip (Boot colour's Clear).
+            return (bg, Theme::color(t.mute), border);
+        }
         let bg = if variant == Variant::Primary {
             Theme::color(t.raised)
         } else {

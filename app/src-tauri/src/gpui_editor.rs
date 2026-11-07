@@ -26,14 +26,16 @@
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+#[cfg(test)]
+use std::sync::atomic::AtomicU32;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use canvas_proto::tauri::{
-    EditorChoice, EditorToTray, TrayPrefs, TrayToEditor, UpdateChannel, UpdateState,
-    EDITOR_IPC_LINE_MAX, EDITOR_PAGES, GPUI_EDITOR_EXE,
+    EditorChoice, EditorToTray, TrayPrefs, TrayToEditor, UpdateChannel, UpdatePhase, UpdateState,
+    EDITOR_IPC_LINE_MAX, EDITOR_PAGES, GPUI_EDITOR_EXE, TRAY_TO_EDITOR_LINE_MAX,
 };
 use tauri::{AppHandle, Manager, Runtime};
 
@@ -63,6 +65,10 @@ const LOGGED_LINE: usize = 120;
 pub const LOG_LINE_CAP: u32 = 5;
 /// How long the counted lines wait before they come as one summary line.
 pub const LOG_SUMMARY_WINDOW: Duration = Duration::from_secs(30);
+/// The most download-progress state lines the writer sends per second, about
+/// 4: progress ticks every 100 ms, so ticks in between are coalesced and the
+/// final state always goes.
+pub const PROGRESS_PUSH_MIN_INTERVAL: Duration = Duration::from_millis(250);
 /// The line the log takes for a line that is over the cap.
 fn too_long_line() -> String {
     format!(
@@ -133,6 +139,10 @@ pub enum EditorEvent {
         reason: String,
     },
 }
+
+/// Test seam: how many times the stdio `OpenLogsFolder` arm ran.
+#[cfg(test)]
+pub static OPEN_LOGS_CALLS: AtomicU32 = AtomicU32::new(0);
 
 /// What the tray does with what the editor said.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -298,6 +308,197 @@ struct Inner {
     /// Where the tray's log lines go. The production tray writes them to its log file; the
     /// tests collect them, so a test can see what a chatty editor did to the log.
     log_sink: Arc<dyn Fn(&str) + Send + Sync>,
+    /// The prefs last sent to the running editor: prefs travel only when
+    /// they changed. Reset when a new child starts.
+    last_prefs: Option<TrayPrefs>,
+}
+
+/// One writer thread per child, fed by latest-wins slots. The controller
+/// thread only deposits: a slow editor never blocks it, and the editor ends
+/// on the newest state because each slot holds one value, replaced in place.
+struct WriterInner {
+    /// Control lines (navigate, close), in order.
+    queue: VecDeque<TrayToEditor>,
+    /// The newest state, waiting to be written.
+    state: Option<UpdateState>,
+    /// A progress state held back by the throttle.
+    throttled: Option<UpdateState>,
+    /// The newest prefs, waiting to be written.
+    prefs: Option<TrayPrefs>,
+    /// When the last progress state was written.
+    last_progress: Option<Instant>,
+    /// Set when the child ended: the writer drains what is left and stops.
+    shutdown: bool,
+}
+
+#[derive(Clone)]
+struct Writer {
+    shared: Arc<(Mutex<WriterInner>, Condvar)>,
+}
+
+impl Writer {
+    fn new() -> Self {
+        Writer {
+            shared: Arc::new((
+                Mutex::new(WriterInner {
+                    queue: VecDeque::new(),
+                    state: None,
+                    throttled: None,
+                    prefs: None,
+                    last_progress: None,
+                    shutdown: false,
+                }),
+                Condvar::new(),
+            )),
+        }
+    }
+
+    fn push_control(&self, message: TrayToEditor) {
+        let (lock, cvar) = &*self.shared;
+        let mut g = lock.lock().unwrap_or_else(|p| p.into_inner());
+        g.queue.push_back(message);
+        cvar.notify_one();
+    }
+
+    fn push_state(&self, state: UpdateState) {
+        let (lock, cvar) = &*self.shared;
+        let mut g = lock.lock().unwrap_or_else(|p| p.into_inner());
+        // Latest wins: an older waiting state (or a held-back progress tick)
+        // is replaced, never queued.
+        g.state = Some(state);
+        g.throttled = None;
+        cvar.notify_one();
+    }
+
+    fn push_prefs(&self, prefs: TrayPrefs) {
+        let (lock, cvar) = &*self.shared;
+        let mut g = lock.lock().unwrap_or_else(|p| p.into_inner());
+        g.prefs = Some(prefs);
+        cvar.notify_one();
+    }
+
+    fn shutdown(&self) {
+        let (lock, cvar) = &*self.shared;
+        let mut g = lock.lock().unwrap_or_else(|p| p.into_inner());
+        g.shutdown = true;
+        cvar.notify_all();
+    }
+}
+
+/// True for download-progress states, the ones the throttle caps.
+fn is_progress(state: &UpdateState) -> bool {
+    matches!(state.phase, UpdatePhase::Downloading { .. })
+}
+
+/// The state line for `state`, with release notes cut down until it fits
+/// `TRAY_TO_EDITOR_LINE_MAX`. Logged when cut: the editor never silently
+/// drops the state.
+fn state_line(state: &UpdateState) -> String {
+    let mut candidate = state.clone();
+    let mut line = serde_json::to_string(&TrayToEditor::UpdateState { state: Box::new(candidate.clone()) })
+        .unwrap_or_default();
+    if line.len() <= TRAY_TO_EDITOR_LINE_MAX {
+        return line;
+    }
+    log::append(&format!(
+        "editor: an update state line was longer than {TRAY_TO_EDITOR_LINE_MAX} bytes; the release notes were cut down to fit"
+    ));
+    // Cut the notes (both copies) until the line fits.
+    for _ in 0..16 {
+        if line.len() <= TRAY_TO_EDITOR_LINE_MAX {
+            break;
+        }
+        let excess = line.len() - TRAY_TO_EDITOR_LINE_MAX;
+        for info in [&mut candidate.available, &mut candidate.updated_to].into_iter().flatten() {
+            if !info.notes.is_empty() {
+                let keep = info.notes.len().saturating_sub(excess);
+                let mut end = keep.min(info.notes.len());
+                while end > 0 && !info.notes.is_char_boundary(end) {
+                    end -= 1;
+                }
+                info.notes.truncate(end);
+            }
+        }
+        line = serde_json::to_string(&TrayToEditor::UpdateState { state: Box::new(candidate.clone()) })
+            .unwrap_or_default();
+    }
+    line
+}
+
+/// One line for any other message.
+fn message_line(message: &TrayToEditor) -> String {
+    match message {
+        TrayToEditor::UpdateState { state } => state_line(state),
+        other => serde_json::to_string(other).unwrap_or_default(),
+    }
+}
+
+/// The writer thread: writes control lines and the slot values, one at a
+/// time, to `out`. Progress states go at most every
+/// [`PROGRESS_PUSH_MIN_INTERVAL`]; a held-back tick is dropped when a newer
+/// state arrives, and the final state always goes.
+fn writer_loop<W: Write>(shared: &Arc<(Mutex<WriterInner>, Condvar)>, mut out: W) {
+    let (lock, cvar) = &**shared;
+    loop {
+        let message: Option<TrayToEditor> = {
+            let mut g = lock.lock().unwrap_or_else(|p| p.into_inner());
+            loop {
+                if g.shutdown
+                    && g.queue.is_empty()
+                    && g.state.is_none()
+                    && g.prefs.is_none()
+                    && g.throttled.is_none()
+                {
+                    return;
+                }
+                if let Some(message) = g.queue.pop_front() {
+                    break Some(message);
+                }
+                if let Some(state) = g.state.take() {
+                    if is_progress(&state) {
+                        if let Some(at) = g.last_progress {
+                            let elapsed = at.elapsed();
+                            if elapsed < PROGRESS_PUSH_MIN_INTERVAL {
+                                g.throttled = Some(state);
+                                g = cvar
+                                    .wait_timeout(g, PROGRESS_PUSH_MIN_INTERVAL - elapsed)
+                                    .unwrap_or_else(|p| p.into_inner())
+                                    .0;
+                                continue;
+                            }
+                        }
+                        g.last_progress = Some(Instant::now());
+                    }
+                    break Some(TrayToEditor::UpdateState { state: Box::new(state) });
+                }
+                if let Some(prefs) = g.prefs.take() {
+                    break Some(TrayToEditor::Prefs { prefs });
+                }
+                if let Some(state) = g.throttled.take() {
+                    if let Some(at) = g.last_progress {
+                        let elapsed = at.elapsed();
+                        if elapsed < PROGRESS_PUSH_MIN_INTERVAL {
+                            g.throttled = Some(state);
+                            g = cvar
+                                .wait_timeout(g, PROGRESS_PUSH_MIN_INTERVAL - elapsed)
+                                .unwrap_or_else(|p| p.into_inner())
+                                .0;
+                            continue;
+                        }
+                    }
+                    g.last_progress = Some(Instant::now());
+                    break Some(TrayToEditor::UpdateState { state: Box::new(state) });
+                }
+                g = cvar.wait(g).unwrap_or_else(|p| p.into_inner());
+            }
+        };
+        let Some(message) = message else { return };
+        let line = message_line(&message);
+        if out.write_all(line.as_bytes()).and_then(|_| out.write_all(b"\n")).and_then(|_| out.flush()).is_err() {
+            log::append("editor: could not write to the GPUI editor");
+            return;
+        }
+    }
 }
 
 /// The running child. Cloned into the reader thread, so it can end the child and say how it
@@ -305,7 +506,7 @@ struct Inner {
 #[derive(Clone)]
 struct Running {
     child: Arc<Mutex<Child>>,
-    stdin: Arc<Mutex<ChildStdin>>,
+    writer: Writer,
     /// Set when the tray asked the editor to close: its end is not a failure.
     closing: Arc<AtomicBool>,
     /// Set when the child's end has been handled. Only one of the threads that watch the child
@@ -349,6 +550,7 @@ impl GpuiEditor {
                 clock,
                 env: Vec::new(),
                 log_sink: Arc::new(log::append),
+                last_prefs: None,
             })),
             on_event: Arc::from(on_event),
         }
@@ -437,7 +639,7 @@ impl GpuiEditor {
                 self.end_closing(&running);
             } else {
                 if let Some(page) = page {
-                    send(&running, &TrayToEditor::Navigate { page: page.to_string() });
+                    running.writer.push_control(TrayToEditor::Navigate { page: page.to_string() });
                 }
                 // The tray has no handle to another process's window, so it cannot focus it.
                 log::append("editor: the GPUI editor is already open; focusing its window is UNKNOWN");
@@ -480,27 +682,33 @@ impl GpuiEditor {
     pub fn close(&self) {
         if let Some(running) = self.running() {
             running.closing.store(true, Ordering::SeqCst);
-            send(&running, &TrayToEditor::Close);
+            running.writer.push_control(TrayToEditor::Close);
         }
     }
 
-    /// Sends the update state to the running editor, as `update-state` (the stdio form of
-    /// `update_state` and `canvas://update-state`). No running editor, nothing is sent.
+    /// Deposits the update state for the running editor, as `update-state`
+    /// (the stdio form of `update_state` and `canvas://update-state`). The
+    /// writer thread writes it; this never blocks on the editor. No running
+    /// editor, nothing is sent.
     pub fn send_update_state(&self, state: &UpdateState) {
         if let Some(running) = self.running() {
-            send(
-                &running,
-                &TrayToEditor::UpdateState { state: Box::new(state.clone()) },
-            );
+            running.writer.push_state(state.clone());
         }
     }
 
-    /// Sends the tray's prefs to the running editor, as `prefs` (the stdio form of
-    /// `tray_prefs`). No running editor, nothing is sent.
+    /// Deposits the tray's prefs for the running editor, as `prefs` (the
+    /// stdio form of `tray_prefs`), but only when they changed. No running
+    /// editor, nothing is sent.
     pub fn send_prefs(&self, prefs: &TrayPrefs) {
-        if let Some(running) = self.running() {
-            send(&running, &TrayToEditor::Prefs { prefs: prefs.clone() });
+        let Some(running) = self.running() else { return };
+        {
+            let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+            if inner.last_prefs.as_ref() == Some(prefs) {
+                return;
+            }
+            inner.last_prefs = Some(prefs.clone());
         }
+        running.writer.push_prefs(prefs.clone());
     }
 
     fn running(&self) -> Option<Running> {
@@ -526,9 +734,14 @@ impl GpuiEditor {
         let stdin = child.stdin.take().ok_or("the GPUI editor has no stdin")?;
         let stdout = child.stdout.take().ok_or("the GPUI editor has no stdout")?;
         let stderr = child.stderr.take().ok_or("the GPUI editor has no stderr")?;
+        let writer = Writer::new();
+        {
+            let shared = writer.shared.clone();
+            std::thread::spawn(move || writer_loop(&shared, stdin));
+        }
         let running = Running {
             child: Arc::new(Mutex::new(child)),
-            stdin: Arc::new(Mutex::new(stdin)),
+            writer,
             closing: Arc::new(AtomicBool::new(false)),
             ended: Arc::new(AtomicBool::new(false)),
             switched: Arc::new(AtomicBool::new(false)),
@@ -536,6 +749,7 @@ impl GpuiEditor {
         {
             let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
             inner.running = Some(running.clone());
+            inner.last_prefs = None;
         }
         log::append(&format!("editor: the GPUI editor was started ({})", exe.display()));
         self.watch(running, stdout, stderr);
@@ -651,7 +865,15 @@ impl GpuiEditor {
                         Err(Dropped::TooLong) => {
                             log_line_to(&mut limiter, &inner, &too_long_line())
                         }
-                        Err(Dropped::Unknown) | Err(Dropped::NotUtf8) | Err(Dropped::Io) => break,
+                        // A non-UTF-8 line is dropped and reading goes on, like
+                        // an over-long one: it must not end the reader, or the
+                        // editor's later lines are never heard.
+                        Err(Dropped::NotUtf8) => log_line_to(
+                            &mut limiter,
+                            &inner,
+                            "editor: a line from the GPUI editor was not valid UTF-8 and was dropped",
+                        ),
+                        Err(Dropped::Unknown) | Err(Dropped::Io) => break,
                     }
                 }
                 // The pipe ended: the code the child ended with, and its last words on stderr.
@@ -741,6 +963,7 @@ fn end_child(
     if running.ended.swap(true, Ordering::SeqCst) {
         return;
     }
+    running.writer.shutdown();
     // The stderr reader gets a bounded time to finish: a grandchild of the editor can hold the
     // stderr pipe open too, and the exit path must not wait for it.
     {
@@ -922,29 +1145,6 @@ fn wait_for_exit(child: &Arc<Mutex<Child>>) -> Option<i32> {
     }
 }
 
-/// Writes one message to the editor, as one line.
-fn send(running: &Running, message: &TrayToEditor) -> bool {
-    let text = match serde_json::to_string(message) {
-        Ok(text) => text,
-        Err(e) => {
-            log::append(&format!("editor: could not write to the GPUI editor: {e}"));
-            return false;
-        }
-    };
-    let mut stdin = running.stdin.lock().unwrap_or_else(|p| p.into_inner());
-    let written = stdin
-        .write_all(text.as_bytes())
-        .and_then(|_| stdin.write_all(b"\n"))
-        .and_then(|_| stdin.flush());
-    match written {
-        Ok(()) => true,
-        Err(e) => {
-            log::append(&format!("editor: could not write to the GPUI editor: {e}"));
-            false
-        }
-    }
-}
-
 /// The line as it goes into the log, shortened.
 fn logged(line: &str) -> String {
     let line = line.trim();
@@ -1051,25 +1251,22 @@ pub fn on_event<R: Runtime>(app: &AppHandle<R>, event: EditorEvent) {
             }
         }
         EditorEvent::SetChannel(channel) => {
-            // The stdio form of `set_channel`: the tray keeps the channel and checks again.
-            let Some(ctl) = update::try_controller(app) else {
+            // The stdio form of `set_channel`: the same body the command runs.
+            if update::try_controller(app).is_none() {
                 log::append("editor: the channel was not kept: the tray is not ready");
                 return;
-            };
-            // The same calls the `set_channel` Tauri command makes.
-            let prefs = ctl.set_channel(*channel);
+            }
+            let prefs = update::apply_set_channel(app, *channel);
             push_prefs(app, &prefs);
-            update::check_in_background(app);
             return;
         }
         EditorEvent::UpdateCheckNow => {
-            let Some(_ctl) = update::try_controller(app) else {
+            if update::try_controller(app).is_none() {
                 log::append("editor: the check was not started: the tray is not ready");
                 return;
-            };
-            // The way the tray's own "Check for updates" item does it, and the same check
-            // `update_check_now` runs.
-            update::check_in_background(app);
+            }
+            // The throttled Check now that runs the same check `update_check_now` runs.
+            update::request_check(app);
             return;
         }
         EditorEvent::UpdateInstall => {
@@ -1121,6 +1318,8 @@ pub fn on_event<R: Runtime>(app: &AppHandle<R>, event: EditorEvent) {
             return;
         }
         EditorEvent::OpenLogsFolder => {
+            #[cfg(test)]
+            OPEN_LOGS_CALLS.fetch_add(1, Ordering::SeqCst);
             if let Err(e) = crate::commands::open_logs_folder(app.clone()) {
                 log::append(&format!("editor: the logs folder was not opened: {e}"));
             }
@@ -1179,6 +1378,10 @@ mod tests {
         )
         .unwrap();
         let mut settings = update::Settings::production();
+        // No test reaches a real feed: the feeds are a dead localhost port
+        // (connection refused, fast), never the production URLs.
+        settings.endpoint = "https://127.0.0.1:9/latest.json".parse().unwrap();
+        settings.experimental_endpoint = "https://127.0.0.1:9/experimental.json".parse().unwrap();
         settings.state_path = dir.path().join("update.json");
         settings.prefs_path = prefs_path;
         settings.updates_dir = dir.path().join("updates");
@@ -1527,8 +1730,192 @@ mod tests {
         on_event(&handle, EditorEvent::UpdateDismissUpdated);
         assert_eq!(ctl.state().updated_to, None);
         on_event(&handle, EditorEvent::UpdateInstall);
-        // Nothing to install: the state is untouched.
-        assert_eq!(ctl.state().phase, canvas_proto::tauri::UpdatePhase::Idle);
+        // Nothing to install: the check-first path starts a check against the
+        // dead localhost feed, so the phase leaves Idle (Checking/CheckFailed).
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while ctl.state().phase == canvas_proto::tauri::UpdatePhase::Idle && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_ne!(
+            ctl.state().phase,
+            canvas_proto::tauri::UpdatePhase::Idle,
+            "UpdateInstall with nothing to install starts the check-first path"
+        );
+    }
+
+    #[test]
+    fn on_event_skip_unskip_and_dismiss_change_a_non_empty_state() {
+        // Skip, with an offer on the table: the skipped version is kept.
+        let (app, _dir) = app_with("0.8.5-dev.12", EditorChoice::React);
+        let handle = app.handle().clone();
+        let ctl = update::try_controller(&handle).unwrap();
+        ctl.seed_available("0.10.0");
+        on_event(&handle, EditorEvent::UpdateSkip);
+        assert_eq!(ctl.state().skipped_version.as_deref(), Some("0.10.0"), "Skip through on_event");
+
+        // Unskip, with a skipped version: it is cleared.
+        let (app, _dir) = app_with("0.8.5-dev.12", EditorChoice::React);
+        let handle = app.handle().clone();
+        let ctl = update::try_controller(&handle).unwrap();
+        ctl.seed_skipped("0.10.0");
+        on_event(&handle, EditorEvent::UpdateUnskip);
+        assert_eq!(ctl.state().skipped_version, None, "Unskip through on_event");
+
+        // DismissUpdated, with the banner state set: it is cleared.
+        let (app, _dir) = app_with("0.8.5-dev.12", EditorChoice::React);
+        let handle = app.handle().clone();
+        let ctl = update::try_controller(&handle).unwrap();
+        ctl.seed_updated_to("0.10.0");
+        assert!(ctl.state().updated_to.is_some());
+        on_event(&handle, EditorEvent::UpdateDismissUpdated);
+        assert_eq!(ctl.state().updated_to, None, "DismissUpdated through on_event");
+    }
+
+    #[test]
+    fn on_event_check_now_starts_a_check_and_a_repeat_does_not_spawn_another() {
+        let (app, _dir) = app_with("0.8.5-dev.12", EditorChoice::React);
+        let handle = app.handle().clone();
+        let ctl = update::try_controller(&handle).unwrap();
+        on_event(&handle, EditorEvent::UpdateCheckNow);
+        assert!(ctl.check_in_flight(), "the check thread is running");
+        // A repeat while the check is in flight spawns no second thread.
+        on_event(&handle, EditorEvent::UpdateCheckNow);
+        on_event(&handle, EditorEvent::SetChannel(UpdateChannel::Experimental));
+        assert_eq!(ctl.check_spawns(), 1, "a repeat check does not spawn another thread");
+        // The check itself runs against the dead localhost feed and settles.
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while ctl.state().phase == canvas_proto::tauri::UpdatePhase::Idle && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_ne!(ctl.state().phase, canvas_proto::tauri::UpdatePhase::Idle, "CheckNow moved the phase");
+    }
+
+    #[test]
+    fn on_event_open_logs_folder_runs_the_command() {
+        let (app, _dir) = app_with("0.8.5-dev.12", EditorChoice::React);
+        let handle = app.handle().clone();
+        let before = OPEN_LOGS_CALLS.load(Ordering::SeqCst);
+        // The mock app has no opener plugin, so the real command panics at
+        // `app.opener()` (after the arm has run); the seam counter, bumped
+        // first in the arm, is what this test asserts.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            on_event(&handle, EditorEvent::OpenLogsFolder);
+        }));
+        assert_eq!(
+            OPEN_LOGS_CALLS.load(Ordering::SeqCst),
+            before + 1,
+            "OpenLogsFolder through on_event records the call"
+        );
+    }
+
+    #[test]
+    fn on_event_switch_editor_keeps_the_choice() {
+        let (app, _dir) = app_with("0.8.5-dev.12", EditorChoice::React);
+        let handle = app.handle().clone();
+        let ctl = update::try_controller(&handle).unwrap();
+        assert_eq!(ctl.prefs().editor, EditorChoice::React);
+        on_event(&handle, EditorEvent::SwitchEditor(EditorChoice::Gpui));
+        assert_eq!(ctl.prefs().editor, EditorChoice::Gpui, "SwitchEditor through on_event");
+    }
+
+    #[test]
+    fn writer_latest_state_wins_and_progress_is_capped() {
+        // A shared sink the writer writes to.
+        #[derive(Clone)]
+        struct Sink(Arc<Mutex<Vec<u8>>>);
+        impl Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap_or_else(|p| p.into_inner()).extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        let state = |version: &str| UpdateState {
+            current_version: version.to_string(),
+            auto_check: true,
+            last_check: None,
+            phase: canvas_proto::tauri::UpdatePhase::Idle,
+            available: None,
+            skipped_version: None,
+            snoozed: false,
+            updated_to: None,
+        };
+        let progress = |downloaded: u64| UpdateState {
+            phase: canvas_proto::tauri::UpdatePhase::Downloading { downloaded, total: None },
+            ..state("0.9.0")
+        };
+        // Latest wins: three states deposited before the writer starts, only
+        // the newest is written.
+        let writer = Writer::new();
+        writer.push_state(state("0.9.1"));
+        writer.push_state(state("0.9.2"));
+        writer.push_state(state("0.9.3"));
+        let sink = Sink(Arc::default());
+        let shared = writer.shared.clone();
+        let out = sink.clone();
+        std::thread::spawn(move || writer_loop(&shared, out));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let bytes = sink.0.lock().unwrap_or_else(|p| p.into_inner()).clone();
+            if String::from_utf8_lossy(&bytes).contains("0.9.3") || Instant::now() > deadline { break; }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let bytes = sink.0.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains("0.9.3"), "the newest state was written: {text}");
+        assert!(!text.contains("0.9.1") && !text.contains("0.9.2"), "older states were replaced: {text}");
+        writer.shutdown();
+
+        // Progress cap: a burst of progress ticks writes about 4 a second,
+        // and the final (non-progress) state always goes.
+        let writer = Writer::new();
+        let sink = Sink(Arc::default());
+        let shared = writer.shared.clone();
+        let out = sink.clone();
+        std::thread::spawn(move || writer_loop(&shared, out));
+        for i in 0..10u64 {
+            writer.push_state(progress(i * 100));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        writer.push_state(state("final"));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let bytes = sink.0.lock().unwrap_or_else(|p| p.into_inner()).clone();
+            if String::from_utf8_lossy(&bytes).contains("final") || Instant::now() > deadline { break; }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let bytes = sink.0.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let text = String::from_utf8(bytes).unwrap();
+        let lines = text.lines().count();
+        assert!(text.contains("final"), "the final state was written: {text}");
+        assert!(lines <= 4, "progress ticks were capped, wrote {lines} lines in the burst: {text}");
+        writer.shutdown();
+    }
+
+    #[test]
+    fn a_state_line_over_the_cap_has_its_notes_cut_down_to_fit() {
+        let big = "n".repeat(400 * 1024);
+        let info = canvas_proto::tauri::UpdateInfo { version: "0.10.0".into(), notes: big, pub_date: None };
+        let state = UpdateState {
+            current_version: "0.9.0".into(),
+            auto_check: true,
+            last_check: None,
+            phase: canvas_proto::tauri::UpdatePhase::Available,
+            available: Some(info.clone()),
+            skipped_version: None,
+            snoozed: false,
+            updated_to: Some(info),
+        };
+        let line = state_line(&state);
+        assert!(line.len() <= TRAY_TO_EDITOR_LINE_MAX, "the line fits: {}", line.len());
+        let parsed: TrayToEditor = serde_json::from_str(&line).unwrap();
+        match parsed {
+            TrayToEditor::UpdateState { state } => {
+                assert_eq!(state.current_version, "0.9.0", "the version survives the cut");
+                assert_eq!(state.available.as_ref().unwrap().version, "0.10.0");
+            }
+            other => panic!("expected update-state, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1744,6 +2131,75 @@ mod tests {
             "the 5000-byte line acted on nothing"
         );
         gpui.close();
+    }
+
+    #[test]
+    fn a_controller_change_pushes_a_state_line_and_prefs_only_when_prefs_changed() {
+        let dir = TempDir::new("change-push");
+        let stdin_file = dir.path().join("stdin.txt");
+        let (app, _dir) = app_with("0.8.5-dev.12", EditorChoice::React);
+        let handle = app.handle().clone();
+        let events = handle.clone();
+        let gpui = GpuiEditor::new(
+            fake_editor(),
+            Box::new(now_ms),
+            Box::new(move |event| on_event(&events, event)),
+        )
+        .with_env(vec![
+            ("FAKE_GPUI_EDITOR_STDIN_FILE".to_string(), stdin_file.display().to_string()),
+        ]);
+        app.manage(gpui);
+        assert_eq!(crate::gpui_editor::open(&handle, None), EditorChoice::Gpui);
+        let ctl = update::try_controller(&handle).unwrap();
+        let last_prefs = std::sync::Mutex::new(None);
+        // The ready push arrives first (state + prefs). Count it, then prove
+        // each controller change adds a NEW state line through the same push
+        // path `init`'s on_change uses.
+        let read_counts = |seen: &str| (seen.matches("update-state").count(), seen.matches("\"type\":\"prefs\"").count());
+        let deadline = Instant::now() + PATIENCE;
+        let mut seen = String::new();
+        while Instant::now() < deadline {
+            seen = std::fs::read_to_string(&stdin_file).unwrap_or_default();
+            if read_counts(&seen).0 >= 1 && read_counts(&seen).1 >= 1 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let (states0, prefs0) = read_counts(&seen);
+        assert!(states0 >= 1 && prefs0 >= 1, "the ready push arrived: {seen}");
+        ctl.later();
+        update::push_change_to_editor(&handle, &ctl.state(), &last_prefs);
+        let deadline = Instant::now() + PATIENCE;
+        while Instant::now() < deadline {
+            seen = std::fs::read_to_string(&stdin_file).unwrap_or_default();
+            if read_counts(&seen).0 > states0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let (states1, prefs1) = read_counts(&seen);
+        assert!(states1 > states0, "the change pushed a new state line: {seen}");
+        assert_eq!(prefs1, prefs0, "the first change carried no prefs change: {seen}");
+        // A second change with unchanged prefs pushes state again, not prefs.
+        ctl.set_auto(false);
+        update::push_change_to_editor(&handle, &ctl.state(), &last_prefs);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            seen = std::fs::read_to_string(&stdin_file).unwrap_or_default();
+            if read_counts(&seen).0 > states1 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        seen = std::fs::read_to_string(&stdin_file).unwrap_or_default();
+        let (states2, prefs2) = read_counts(&seen);
+        assert!(states2 > states1, "the second change pushed a new state line: {seen}");
+        assert_eq!(
+            prefs2, prefs1,
+            "prefs were not re-sent when prefs did not change: {seen}"
+        );
+        crate::gpui_editor::close(&handle);
     }
 
     #[test]

@@ -1356,9 +1356,13 @@ impl SettingsView {
         _cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = &self.theme;
+        // React `.field-slider .row-wrap`: the 72 px `.num` plus the unit's
+        // advance, so the row is 72 + 6 + unit wide (103 for "fps", 86 for
+        // "%"). A fixed 103 put Brightness 17 px left at every size.
+        let unit_w = unit.chars().count() as f32 * 14.0 * 0.6;
         div()
             .flex()
-            .w(px(103.0))
+            .w(px(72.0 + 6.0 + unit_w))
             .items_center()
             .gap(px(6.0))
             .child(
@@ -2160,18 +2164,22 @@ impl SettingsView {
         "Audio effects read this input whenever an audio effect is active (not only while this panel is open).";
     const EFFECT_NOTE_SHORT: &'static str = "Audio effects use this input";
 
-    fn audio_panel(&self, pad: f32, compact: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    fn audio_panel(&self, pad: f32, compact: bool, inner_w: f32, cx: &mut Context<Self>) -> impl IntoElement {
         let t = &self.theme;
         let input_selected = is_input_selection(self.audio_sources.as_ref());
         let words = audio_status_words(self.audio_test.as_ref());
         let view_entity = cx.entity();
         if compact {
-            // The select sits in the head's action slot.
-            let select = self.audio_select("settings-audio-select", false, cx);
+            // The select sits in the head's action slot (React
+            // `.audio-picker-head`: flex 0 1 300 px, min 160). The title
+            // ("AUDIO SOURCE" tracked, about 105 px) keeps its width and
+            // the select takes the rest, clamped [160, 300]: a content-sized
+            // flex_1 let the select overlap the title at 390.
+            let select_w = (inner_w - 105.0 - 12.0).clamp(160.0, 300.0);
+            let select = self.audio_select("settings-audio-select", true, cx);
             let head_actions = div()
-                .flex()
-                .flex_1()
-                .min_w(px(160.0))
+                .flex_none()
+                .w(px(select_w))
                 .justify_end()
                 .child(select);
             let listen_entity = view_entity.clone();
@@ -2269,7 +2277,7 @@ impl SettingsView {
                         .flex()
                         .items_center()
                         .justify_between()
-                        .gap_2()
+                        .gap_3()
                         .mb_2()
                         .child(
                             div()
@@ -2305,9 +2313,13 @@ impl SettingsView {
                 r
             };
             let hint = if input_selected { Some(Self::EFFECT_NOTE) } else { None };
+            // The audio content sits 4 px high against React at every
+            // non-compact size (1440 column 800: select top 407 vs 411,
+            // panel bottom 600 vs 604): the body carries 4 px more.
             let mut body = div()
                 .flex()
                 .flex_col()
+                .mt_1()
                 .child(field_hint(t, "settings-audio-field", "Source", hint, picker_row, false))
                 .child(
                     div()
@@ -2404,8 +2416,11 @@ impl SettingsView {
     fn version_panel(&self, pad: f32, _phone: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let t = &self.theme;
         let version = self.status.as_ref().map(|s| s.version.clone()).unwrap_or_else(|| "—".to_string());
+        // React `.fig` inherits the body 15 px (`--t15`): "0.9.0" is 46 px
+        // wide there, 41 at GPUI's old 14 px.
         let version_fig = div()
-            .text_sm()
+            .text_size(px(15.0))
+            .line_height(gpui::relative(1.45))
             .font_family(crate::fonts::MONO_FAMILY)
             .text_color(Theme::color(t.ink))
             .child(version);
@@ -2435,7 +2450,8 @@ impl SettingsView {
             }).into_any_element()
         };
         let last_checked = div()
-            .text_sm()
+            .text_size(px(15.0))
+            .line_height(gpui::relative(1.45))
             .font_family(crate::fonts::MONO_FAMILY)
             .text_color(Theme::color(t.ink))
             .child(last_word);
@@ -2839,7 +2855,11 @@ impl Render for SettingsView {
                     }
                     1 => col.child(self.appearance_panel(pad, phone, cx).into_any_element()),
                     2 => col.child(self.lock_panel(pad, phone, cx).into_any_element()),
-                    3 => col.child(self.audio_panel(pad, compact, cx).into_any_element()),
+                    3 => {
+                        let col_w = (content_w - (cols - 1) as f32 * 16.0) / cols as f32;
+                        let inner = col_w - pad * 2.0;
+                        col.child(self.audio_panel(pad, compact, inner, cx).into_any_element())
+                    }
                     4 => col.child(self.setup_panel(pad, phone, cx).into_any_element()),
                     _ => col.child(self.version_panel(pad, phone, cx).into_any_element()),
                 };

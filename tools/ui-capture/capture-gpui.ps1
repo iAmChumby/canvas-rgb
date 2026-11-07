@@ -77,6 +77,45 @@ if (-not (Get-NetTCPConnection -State Listen -LocalPort $ApiPort -ErrorAction Si
   throw "no fake daemon is listening on ${ApiPort}: start it with tools/run-fake-daemon.ps1"
 }
 
+# Wait until the fake daemon answers GET /api/v1/settings with 200 (the test
+# token from the fake home), up to 30 s. Shooting before the daemon answers
+# produced whole pairs of "Daemon connecting" (46-68% diffs): the editor had
+# not loaded by the first shot.
+$tokenFile = Join-Path $env:CANVAS_RGB_HOME 'api-token'
+$token = if (Test-Path $tokenFile) { (Get-Content $tokenFile -Raw).Trim() } else { '' }
+$settingsUrl = "http://127.0.0.1:${ApiPort}/api/v1/settings"
+$deadline = (Get-Date).AddSeconds(30)
+$ready = $false
+while ((Get-Date) -lt $deadline) {
+  try {
+    $resp = Invoke-WebRequest -Uri $settingsUrl -Headers @{ Authorization = "Bearer $token" } -UseBasicParsing -TimeoutSec 5
+    if ($resp.StatusCode -eq 200) { $ready = $true; break }
+  } catch { }
+  Start-Sleep -Milliseconds 500
+}
+if (-not $ready) { throw "capture-gpui: the fake daemon did not answer $settingsUrl with 200 within 30 s" }
+Write-Host "capture-gpui: fake daemon answers $settingsUrl (200)"
+
+# A probe shot's checksum: sampled pixels of the PrintWindow frame. Two
+# identical probes in a row mean the window has painted and settled (past
+# the connecting state), measured rather than guessed.
+function Get-ShotChecksum([IntPtr]$hWnd, [int]$cw, [int]$ch) {
+  $bmp = New-Object System.Drawing.Bitmap($cw, $ch)
+  $gfx = [System.Drawing.Graphics]::FromImage($bmp)
+  $hdc = $gfx.GetHdc()
+  try { [void][Win32Capture]::PrintWindow($hWnd, $hdc, $PW_RENDERFULLCONTENT) } finally { $gfx.ReleaseHdc($hdc) }
+  $gfx.Dispose()
+  $sum = 0L
+  for ($y = 0; $y -lt $ch; $y += 7) {
+    for ($x = 0; $x -lt $cw; $x += 7) {
+      $c = $bmp.GetPixel($x, $y)
+      $sum = ($sum * 31 + $c.ToArgb()) -band 0x7fffffff
+    }
+  }
+  $bmp.Dispose()
+  return $sum
+}
+
 $saved = 0
 # The __TAURI__ stub capture-react.mjs injects: update_state answers
 # { current_version: "0.1.0", auto_check: true, last_check: null,
@@ -131,7 +170,28 @@ foreach ($theme in $Themes) {
         $outerW = $want.Right - $want.Left
         $outerH = $want.Bottom - $want.Top
         [void][Win32Capture]::SetWindowPos($handle, [IntPtr]::Zero, 0, 0, $outerW, $outerH, $SWP_NOACTIVATE)
-        Start-Sleep -Milliseconds 1500
+        # Settle, measured: probe the frame every 500 ms until two probes in
+        # a row are identical (painted and stable) AND at least 3 s have
+        # passed since the window appeared. The minimum matters: the
+        # "Daemon connecting" frame is itself stable, so stability alone
+        # shot it. 3 s covers the editor's first daemon fetch with margin
+        # (measured well under 1 s when the daemon answers).
+        $settleDeadline = (Get-Date).AddSeconds(15)
+        $appearedAt = Get-Date
+        $prevSum = $null
+        while ((Get-Date) -lt $settleDeadline) {
+          Start-Sleep -Milliseconds 500
+          $proc.Refresh()
+          if ($proc.HasExited) { break }
+          $rect = New-Object Win32Capture+RECT
+          [void][Win32Capture]::GetWindowRect($handle, [ref]$rect)
+          $cw = $rect.Right - $rect.Left
+          $ch = $rect.Bottom - $rect.Top
+          if ($cw -le 0 -or $ch -le 0) { continue }
+          $sum = Get-ShotChecksum $handle $cw $ch
+          if ($null -ne $prevSum -and $sum -eq $prevSum -and ((Get-Date) - $appearedAt).TotalSeconds -ge 3) { break }
+          $prevSum = $sum
+        }
         $rect = New-Object Win32Capture+RECT
         [void][Win32Capture]::GetWindowRect($handle, [ref]$rect)
         $cw = $rect.Right - $rect.Left

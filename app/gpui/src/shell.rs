@@ -1268,21 +1268,26 @@ impl Shell {
         // with a 12 px gap (the context sits inside the title slot).
         // `.rd-title` carries `margin-right: var(--s2)` (8 px) so the title
         // never touches the mark (#204 G8-r3: without it the check icon sat
-        // 10 px left at 1440).
-        let mut title_row = div()
+        // 10 px left at 1440). On a phone it is `flex: none` with no right
+        // margin, so the title never shrinks under the row.
+        let title_row = div()
             .flex()
             .items_baseline()
-            .gap_3()
-            .mr_2()
-            .child(
-                div()
-                    .text_xl()
-                    .line_height(gpui::relative(1.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .font_family(crate::fonts::UI_FAMILY)
-                    .text_color(Theme::color(t.ink))
-                    .child(title_text.to_string()),
-            );
+            .gap_3();
+        let mut title_row = if phone {
+            title_row.flex_none()
+        } else {
+            title_row.mr_2()
+        };
+        title_row = title_row.child(
+            div()
+                .text_xl()
+                .line_height(gpui::relative(1.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .font_family(crate::fonts::UI_FAMILY)
+                .text_color(Theme::color(t.ink))
+                .child(title_text.to_string()),
+        );
         if !context_text.is_empty() && !phone {
             title_row = title_row.child(
                 div()
@@ -1331,14 +1336,17 @@ impl Shell {
             );
         }
         // The mark: icon always, words at 1280 px and up. React `.strip-mark`
-        // has no flex gap (`font: inherit`, 14 px); the measured glyph-to-word
-        // gap is 6 px in React against 2 in GPUI (#204 G8-r3), so the row
-        // carries the 4 px difference.
-        let mark_row = div()
+        // has no flex gap between icon and words; GPUI's title advance runs
+        // 4 px short of the browser's at 1440, so at 1280 and up the row
+        // carries 4 px of left margin and no gap (dot and words both land on
+        // React's 333/342 at 1440).
+        let mut mark_row = div()
             .flex()
             .items_center()
-            .gap(px(4.0))
             .child(gpui::svg().path(mark_icon).size(px(14.0)).text_color(tone_color));
+        if self.width >= 1280.0 {
+            mark_row = mark_row.ml(px(4.0));
+        }
         let mark_row = if self.width >= 1280.0 {
             mark_row.child(
                 div()

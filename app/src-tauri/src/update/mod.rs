@@ -20,6 +20,7 @@ mod state;
 mod tests;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -198,6 +199,12 @@ pub struct Controller {
     /// Milliseconds since the Unix epoch. The tests move it.
     clock: Box<dyn Fn() -> u64 + Send + Sync>,
     on_change: Box<dyn Fn(&UpdateState) + Send + Sync>,
+    /// Set while a `request_check` thread is running: a repeated
+    /// `UpdateCheckNow` / `SetChannel` from the editor does not spawn another.
+    check_spawned: AtomicBool,
+    /// How many check threads were actually spawned (the throttle's proof).
+    #[allow(dead_code)]
+    check_spawns: AtomicU32,
 }
 
 impl Controller {
@@ -224,6 +231,8 @@ impl Controller {
             service: Arc::new(|_: &Path, _: &str| ServiceAnswer::Unavailable),
             clock: Box::new(|| SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)),
             on_change,
+            check_spawned: AtomicBool::new(false),
+            check_spawns: AtomicU32::new(0),
         }
     }
 
@@ -279,6 +288,42 @@ impl Controller {
     /// What the tray remembers between runs.
     pub fn prefs(&self) -> TrayPrefs {
         self.lock().prefs.clone()
+    }
+
+    /// True while a throttled check thread is running.
+    #[cfg(test)]
+    pub(crate) fn check_in_flight(&self) -> bool {
+        self.check_spawned.load(Ordering::SeqCst)
+    }
+
+    /// How many check threads were actually spawned.
+    #[cfg(test)]
+    pub fn check_spawns(&self) -> u32 {
+        self.check_spawns.load(Ordering::SeqCst)
+    }
+
+    /// Test seam: an available offer, without a check (the release object
+    /// stays absent, so install takes the check-first path).
+    #[cfg(test)]
+    pub fn seed_available(&self, version: &str) {
+        let info = UpdateInfo { version: version.to_string(), notes: "notes".to_string(), pub_date: None };
+        self.change(|i| {
+            i.available = Some(info);
+            i.phase = UpdatePhase::Available;
+        });
+    }
+
+    /// Test seam: the "updated to" banner state.
+    #[cfg(test)]
+    pub fn seed_updated_to(&self, version: &str) {
+        let info = UpdateInfo { version: version.to_string(), notes: "notes".to_string(), pub_date: None };
+        self.change(|i| i.stored.updated_to = Some(info));
+    }
+
+    /// Test seam: a skipped version.
+    #[cfg(test)]
+    pub fn seed_skipped(&self, version: &str) {
+        self.change(|i| i.stored.skipped_version = Some(version.to_string()));
     }
 
     /// The feed the tray reads: stable, or experimental with the dev feed beside it.
@@ -1104,21 +1149,39 @@ fn probe(endpoint: &Url, timeout: Duration) -> CheckFailReason {
 
 // ---- wiring ----
 
+/// What one controller change does to the editors: the webview event and the
+/// GPUI editor's stdio lines. Prefs travel only when prefs changed (the
+/// editor gets both after `ready` regardless).
+pub(crate) fn push_change_to_editor<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &UpdateState,
+    last_prefs: &Mutex<Option<TrayPrefs>>,
+) {
+    let _ = app.emit(EVT_UPDATE_STATE, state.clone());
+    // The GPUI editor gets the same state over stdio, at the same moments (#205).
+    crate::gpui_editor::push_update_state(app, state);
+    if let Some(ctl) = try_controller(app) {
+        let prefs = ctl.prefs();
+        let changed = {
+            let mut last = last_prefs.lock().unwrap_or_else(|p| p.into_inner());
+            let changed = *last != Some(prefs.clone());
+            *last = Some(prefs.clone());
+            changed
+        };
+        if changed {
+            crate::gpui_editor::push_prefs(app, &prefs);
+        }
+    }
+}
+
 /// Creates the controller (managed state) and settles a pending update. `args` are the tray's own.
 pub fn init<R: Runtime>(app: &AppHandle<R>, args: &[String]) {
     let current = app.package_info().version.clone();
     let emitter = app.clone();
     let last_tray: Mutex<Option<String>> = Mutex::new(None);
+    let last_prefs: Mutex<Option<TrayPrefs>> = Mutex::new(None);
     let on_change = Box::new(move |state: &UpdateState| {
-        let _ = emitter.emit(EVT_UPDATE_STATE, state.clone());
-        // The GPUI editor gets the same state over stdio, at the same moments (#205),
-        // together with the prefs (the two travel together after `ready` and after every
-        // prefs change, which also lands here through `change`).
-        crate::gpui_editor::push_update_state(&emitter, state);
-        if let Some(ctl) = try_controller(&emitter) {
-            let prefs = ctl.prefs();
-            crate::gpui_editor::push_prefs(&emitter, &prefs);
-        }
+        push_change_to_editor(&emitter, state, &last_prefs);
         let now = tray_version(state);
         let changed = {
             let mut last = last_tray.lock().unwrap_or_else(|p| p.into_inner());
@@ -1176,13 +1239,41 @@ pub fn try_controller<R: Runtime>(app: &AppHandle<R>) -> Option<Arc<Controller>>
     app.try_state::<Arc<Controller>>().map(|c| c.inner().clone())
 }
 
+/// Starts a Check now on a worker thread, unless one is already running: a
+/// repeated editor `UpdateCheckNow` / `SetChannel` while a check is in flight
+/// does not spawn another thread. The check itself (`Controller::check`)
+/// already refuses to run while another operation is in flight.
+pub fn request_check<R: Runtime>(app: &AppHandle<R>) {
+    let Some(ctl) = try_controller(app) else { return };
+    if ctl.check_spawned.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    ctl.check_spawns.fetch_add(1, Ordering::SeqCst);
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let _ = tauri::async_runtime::block_on(check_now(&app));
+        ctl.check_spawned.store(false, Ordering::SeqCst);
+    });
+}
+
 /// The tray's "Check for updates": a Check now on a worker thread. No window opens; the result
 /// reaches the tooltip and the "Update to" row through the usual refresh.
 pub fn check_in_background<R: Runtime>(app: &AppHandle<R>) {
-    let app = app.clone();
-    std::thread::spawn(move || {
-        tauri::async_runtime::block_on(controller(&app).check(&app, true));
-    });
+    request_check(app);
+}
+
+/// The body of `update_check_now`, shared with the stdio path.
+pub async fn check_now<R: Runtime>(app: &AppHandle<R>) -> UpdateState {
+    controller(app).check(app, true).await
+}
+
+/// The body of `set_channel`, shared with the stdio path: keeps the channel
+/// and checks the feeds again (the offer on screen is stale after a switch).
+pub fn apply_set_channel<R: Runtime>(app: &AppHandle<R>, channel: UpdateChannel) -> TrayPrefs {
+    let ctl = controller(app);
+    let prefs = ctl.set_channel(channel);
+    request_check(app);
+    prefs
 }
 
 /// The version whose install did not finish, for the tray tooltip.
@@ -1204,7 +1295,7 @@ pub fn update_state<R: Runtime>(app: AppHandle<R>) -> UpdateState {
 
 #[tauri::command]
 pub async fn update_check_now<R: Runtime>(app: AppHandle<R>) -> UpdateState {
-    controller(&app).check(&app, true).await
+    check_now(&app).await
 }
 
 /// Starts the install and returns at once; progress arrives as `canvas://update-state`. Refused
@@ -1268,11 +1359,5 @@ pub fn tray_prefs<R: Runtime>(app: AppHandle<R>) -> TrayPrefs {
 /// `set_channel`: chooses the feed, keeps it, and checks the feeds again.
 #[tauri::command]
 pub fn set_channel<R: Runtime>(app: AppHandle<R>, channel: UpdateChannel) -> TrayPrefs {
-    let ctl = controller(&app);
-    let prefs = ctl.set_channel(channel);
-    // The channel decides which feed is read, so the offer on screen is stale: check again.
-    tauri::async_runtime::spawn(async move {
-        ctl.check(&app, true).await;
-    });
-    prefs
+    apply_set_channel(&app, channel)
 }
