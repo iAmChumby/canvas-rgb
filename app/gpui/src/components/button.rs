@@ -31,17 +31,20 @@ fn colors(t: &Theme, variant: Variant, disabled: bool) -> (Rgba, Rgba, Rgba) {
         Variant::Ghost => (transparent, Theme::color(t.dim), transparent),
     };
     if disabled {
-        // Hardware `.btn:disabled`: raised face, line border, mute text, at
-        // half strength (opacity 0.5 in hardware.css).
+        // Hardware `.btn:disabled`: at half strength (opacity 0.5). The
+        // border stays the variant's own (ghost stays transparent, so a
+        // disabled ghost is still just text: React's `.btn-ghost:disabled`
+        // keeps `border-color: transparent`).
+        if variant == Variant::Ghost {
+            // A disabled ghost is bare text (React `.btn-ghost:disabled`:
+            // background and border transparent, mute words): half-strength
+            // black made it a bordered chip (Boot colour's Clear).
+            return (bg, Theme::color(t.mute), border);
+        }
         let bg = if variant == Variant::Primary {
             Theme::color(t.raised)
         } else {
             bg
-        };
-        let border = if variant == Variant::Primary || variant == Variant::Ghost {
-            Theme::color(t.line)
-        } else {
-            border
         };
         (
             Rgba { a: 0.5, ..bg },
@@ -53,20 +56,52 @@ fn colors(t: &Theme, variant: Variant, disabled: bool) -> (Rgba, Rgba, Rgba) {
     }
 }
 
-/// The hardware skirt as a solid 2 px strip below a key: GPUI 0.2.2's
-/// box-shadow paints nothing on this build (measured in #204: the strip under
-/// Pause lights is panel colour in GPUI, ink-at-0.22 in React), so the band
-/// is drawn instead. `bottom: -2` hangs it below the face exactly like the
-/// shadow did; it is clipped to the face's bottom corners' curve by the
-/// radius clamp.
-pub fn skirt_strip(color: Rgba) -> impl IntoElement {
-    div()
+/// A key drawn as two stacked rounded rectangles (#204 G8-r3): an outer
+/// skirt-coloured rect with the full radius, 2 px taller than the key, and
+/// the key's face on top, 2 px shorter at the bottom. The skirt then follows
+/// the curve exactly. A 2 px tall strip cannot: GPUI clamps a radius to
+/// half the rect's height, so the corners came out square and the band
+/// measured wider than the key body (Save skirt 1189-1267 against the body
+/// 1192-1264, 1 px high, at 1440).
+pub fn skirt_layers(
+    skirt_color: Rgba,
+    radius: f32,
+    height: f32,
+    face_bg: Rgba,
+    face_border: Rgba,
+) -> impl IntoElement {
+    let corner = gpui::AbsoluteLength::Pixels(px(radius));
+    let skirt = div()
+        .w_full()
+        .h(px(height + 2.0))
+        .bg(skirt_color);
+    let mut skirt = skirt;
+    skirt.style().corner_radii.top_left = Some(corner);
+    skirt.style().corner_radii.top_right = Some(corner);
+    skirt.style().corner_radii.bottom_right = Some(corner);
+    skirt.style().corner_radii.bottom_left = Some(corner);
+    let face = div()
         .absolute()
+        .top_0()
         .left_0()
         .right_0()
-        .bottom(px(-2.0))
-        .h(px(3.0))
-        .bg(color)
+        .h(px(height))
+        .border_1()
+        .border_color(face_border)
+        .bg(face_bg);
+    let mut face = face;
+    face.style().corner_radii.top_left = Some(corner);
+    face.style().corner_radii.top_right = Some(corner);
+    face.style().corner_radii.bottom_right = Some(corner);
+    face.style().corner_radii.bottom_left = Some(corner);
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .right_0()
+        .h(px(height + 2.0))
+        .child(skirt)
+        .child(face)
 }
 
 fn base(
@@ -81,6 +116,7 @@ fn base(
         Variant::Primary => t.live_skirt(),
         _ => t.skirt(),
     };
+    let key_h = if small { 28.0 } else { 32.0 };
     let el = div()
         .id(gpui::SharedString::from(id.to_string()))
         .relative()
@@ -88,19 +124,29 @@ fn base(
         .items_center()
         .justify_center()
         .gap(px(6.0))
-        .r_md()
-        .border_1()
-        .border_color(border)
-        .bg(bg)
         .text_color(fg)
         .text_sm()
         .font_weight(gpui::FontWeight::MEDIUM)
         .font_family(crate::fonts::UI_FAMILY);
-    let el = if disabled { el } else { el.child(skirt_strip(skirt_color)) };
-    if small {
-        el.h(px(28.0)).px(px(10.0))
+    // React `hardware.css`: `.btn-ghost{box-shadow:none}` — a ghost key has no
+    // skirt; a disabled key loses it too (`.btn:disabled{box-shadow:none}`).
+    // A skirted key carries no bg/border of its own: the face layer in
+    // `skirt_layers` draws both, so the parent stays transparent over the
+    // skirt's bottom 2 px.
+    let bordered = disabled || variant == Variant::Ghost;
+    let el = if bordered {
+        el.r_md().border_1().border_color(border).bg(bg)
     } else {
-        el.h(px(32.0)).px_3()
+        el.child(skirt_layers(skirt_color, 10.0, key_h, bg, border))
+    };
+    // React's `.btn` always has a 1 px border inside its box. A skirted key draws its
+    // border on the face layer, not on this box, so it gets the border's 1 px back as
+    // padding; without it every skirted key measured 2 px narrow (Save 79 vs 81 at 1440).
+    let side = if bordered { 0.0 } else { 1.0 };
+    if small {
+        el.h(px(28.0)).px(px(10.0 + side))
+    } else {
+        el.h(px(32.0)).px(px(12.0 + side))
     }
 }
 
@@ -160,7 +206,9 @@ pub fn button_icon(
         format!("icons/{icon}-{weight}.svg")
     };
     let (_, fg, _) = colors(t, variant, disabled);
-    let glyph = gpui::svg().path(path).size(px(icon_px)).text_color(fg);
+    // The glyph keeps its px size inside a flex row (React's svg has an
+    // intrinsic size and never shrinks under flex overflow).
+    let glyph = gpui::svg().path(path).size(px(icon_px)).flex_none().text_color(fg);
     let base_el = base(t, id, variant, disabled, small);
     // An empty label draws no gap after the icon (the phone strip pause is
     // the row's button with its words hidden).
@@ -171,6 +219,43 @@ pub fn button_icon(
     };
     // The icon takes the button's text colour, except primary where it is
     // on-accent; both are the same token here, so set it after building.
+    if disabled {
+        el
+    } else {
+        el.cursor_pointer().on_click(on_click)
+    }
+}
+
+/// A button with an icon and a label whose cell reserves `text_w` px for
+/// the text: React's `Swap` lays every label variant in one grid cell, so
+/// the key keeps the widest label's width and the visible label is centred
+/// in it (the strip's Pause lights / Resume lights). `text_w` is the widest
+/// label's measured width, so the key never resizes under the pointer.
+#[allow(clippy::too_many_arguments)]
+pub fn button_icon_wide(
+    t: &Theme,
+    id: &str,
+    label: &str,
+    text_w: f32,
+    variant: Variant,
+    disabled: bool,
+    small: bool,
+    icon: &str,
+    weight: &str,
+    icon_px: f32,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    let path = if weight.is_empty() {
+        format!("icons/{icon}.svg")
+    } else {
+        format!("icons/{icon}-{weight}.svg")
+    };
+    let (_, fg, _) = colors(t, variant, disabled);
+    let glyph = gpui::svg().path(path).size(px(icon_px)).flex_none().text_color(fg);
+    let base_el = base(t, id, variant, disabled, small);
+    let el = base_el
+        .child(glyph)
+        .child(div().w(px(text_w)).text_center().child(label.to_string()));
     if disabled {
         el
     } else {
@@ -204,22 +289,24 @@ pub fn icon_button(
         .items_center()
         .justify_center()
         .size(px(size))
-        .r_md()
-        .text_color(Theme::color(t.dim))
-        .child(
-            gpui::svg()
-                .path(path)
-                .size(px(16.0))
-                .text_color(Theme::color(t.dim)),
-        );
+        .text_color(Theme::color(t.dim));
     let el = if bordered {
-        el.border_1()
-            .border_color(Theme::color(t.line_2))
-            .bg(Theme::color(t.raised))
-            .child(skirt_strip(t.skirt()))
+        el.child(skirt_layers(
+            t.skirt(),
+            10.0,
+            size,
+            Theme::color(t.raised),
+            Theme::color(t.line_2),
+        ))
     } else {
-        el
+        el.r_md()
     };
+    let el = el.child(
+        gpui::svg()
+            .path(path)
+            .size(px(16.0))
+            .text_color(Theme::color(t.dim)),
+    );
     if disabled {
         el.opacity(0.4)
     } else {

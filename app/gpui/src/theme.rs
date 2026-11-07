@@ -21,6 +21,10 @@ pub const LINE_HEIGHT: f32 = 1.45;
 /// corner goes through these names — the same names as the CSS tokens — and
 /// nowhere uses a generated suffix.
 pub trait TokenRadius: Styled {
+    /// The rail meter segment's 1 px radius (`app.css .rail-meter-seg`).
+    fn r_xs(self) -> Self {
+        token_radius(self, 1.0)
+    }
     fn r_sm(self) -> Self {
         token_radius(self, 8.0)
     }
@@ -300,16 +304,12 @@ impl Theme {
     }
 
     /// A primary key's skirt: `--live` mixed 55% with black (`hardware.css`
-    /// `.btn-primary`). The mix is computed in RGB; the CSS computes it in
-    /// oklab, which is close enough at this size.
+    /// `.btn-primary`). The CSS mixes in oklab; mixing in sRGB gave
+    /// (70,96,132) against the measured (53,75,106) at 1440 dark (#204 G8-r3).
     pub fn live_skirt(&self) -> Rgba {
         let live = self.live();
-        Rgba {
-            r: live.r * 0.55,
-            g: live.g * 0.55,
-            b: live.b * 0.55,
-            a: live.a,
-        }
+        let (l, a, b) = srgb_to_oklab(live.r, live.g, live.b);
+        oklab_to_srgb(l * 0.55, a * 0.55, b * 0.55, live.a)
     }
 
     /// The well's top line (`hardware.css` `--well`, `inset 0 1px 0 …`).
@@ -330,6 +330,41 @@ impl Theme {
             }
         }
     }
+}
+
+/// sRGB (linearised) to oklab, for the `color-mix(in oklab, …)` the CSS
+/// computes (the primary skirt). Standard oklab transform (Björn Ottosson).
+#[allow(clippy::excessive_precision)]
+fn srgb_to_oklab(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+    let lin = |c: f32| {
+        if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    };
+    let (r, g, b) = (lin(r), lin(g), lin(b));
+    let l = 0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b;
+    let m = 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b;
+    let s = 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b;
+    let (l, m, s) = (l.cbrt(), m.cbrt(), s.cbrt());
+    (
+        0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+        1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+        0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
+    )
+}
+
+#[allow(clippy::excessive_precision)]
+fn oklab_to_srgb(l: f32, a: f32, b: f32, alpha: f32) -> Rgba {
+    let l_ = l + 0.3963377774 * a + 0.2158037573 * b;
+    let m_ = l - 0.1055613458 * a - 0.0638541728 * b;
+    let s_ = l - 0.0894841775 * a - 1.2914855480 * b;
+    let (l, m, s) = (l_ * l_ * l_, m_ * m_ * m_, s_ * s_ * s_);
+    let r = 4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s;
+    let g = -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s;
+    let b = -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s;
+    let enc = |c: f32| {
+        let c = c.clamp(0.0, 1.0);
+        if c <= 0.0031308 { 12.92 * c } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
+    };
+    Rgba { r: enc(r), g: enc(g), b: enc(b), a: alpha }
 }
 
 fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
@@ -639,6 +674,17 @@ mod tests {
         // match found nothing (the file indents it).
         if !saw_any {
             assert!(TOKENS_CSS.contains("prefers-color-scheme: light"));
+        }
+    }
+
+    #[test]
+    fn primary_skirt_is_the_oklab_mix() {
+        // color-mix(in oklab, hsl(215 78% 72%) 55%, black) at 1440 dark
+        // measures (53,75,106) in the React shot (#204 G8-r3).
+        let s = Theme::dark().live_skirt();
+        let got = ((s.r * 255.0).round() as i32, (s.g * 255.0).round() as i32, (s.b * 255.0).round() as i32);
+        for (g, want) in [got.0, got.1, got.2].iter().zip([53, 75, 106]) {
+            assert!((g - want).abs() <= 1, "skirt {got:?} vs (53,75,106)");
         }
     }
 

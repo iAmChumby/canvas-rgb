@@ -23,8 +23,73 @@ pub fn toggle(
     } else {
         Theme::color(t.dim)
     };
-    // hardware.css `.switch::after`: `0 1px 0 var(--skirt)` under the knob.
+    // hardware.css `.switch::after`: `0 1px 0 var(--skirt)` under the knob,
+    // at left 2 / top 2 (16 px in a 40x22 slot); checked it travels 18 px,
+    // so it spans 20..36. The knob is positioned absolutely at React's
+    // offsets instead of centred by flex padding.
     let knob = div()
+        .absolute()
+        .top(px(2.0))
+        .left(if checked { px(20.0) } else { px(2.0) })
+        .size(px(16.0))
+        .rounded_full()
+        .bg(knob_color)
+        .shadow(vec![BoxShadow {
+            color: gpui::Hsla::from(t.skirt()),
+            offset: point(px(0.0), px(1.0)),
+            blur_radius: px(0.0),
+            spread_radius: px(0.0),
+        }]);
+    div()
+        .id(gpui::SharedString::from(id.to_string()))
+        .relative()
+        .flex()
+        .items_center()
+        .w(px(40.0))
+        .h(px(22.0))
+        .rounded_full()
+        .border_1()
+        .border_color(if checked {
+            gpui::Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }
+        } else {
+            Theme::color(t.line)
+        })
+        .bg(track)
+        .cursor_pointer()
+        .on_click(move |_, window, cx| on_change(!checked, window, cx))
+        // hardware.css `--well` on the slot: the recess's top line inside it
+        // (the checked pill's ring). GPUI has no inset shadow, so the line
+        // is drawn inside the top edge, as in `segmented`.
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .right_0()
+                .h(px(1.0))
+                .bg(t.well()),
+        )
+        .child(knob)
+}
+
+/// A switch that cannot be pressed (`disabled`): the track and knob draw
+/// at half strength, as React's disabled `.switch`.
+pub fn toggle_disabled(
+    t: &Theme,
+    id: &str,
+    checked: bool,
+    on_change: impl Fn(bool, &mut Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    let track = if checked { t.live() } else { Theme::color(t.sunk) };
+    let knob_color = if checked {
+        Theme::color(t.on_accent)
+    } else {
+        Theme::color(t.dim)
+    };
+    let knob = div()
+        .absolute()
+        .top(px(2.0))
+        .left(if checked { px(20.0) } else { px(2.0) })
         .size(px(16.0))
         .rounded_full()
         .bg(knob_color)
@@ -36,26 +101,28 @@ pub fn toggle(
         }]);
     let row = div()
         .id(gpui::SharedString::from(id.to_string()))
+        .relative()
         .flex()
         .items_center()
         .w(px(40.0))
         .h(px(22.0))
-        .px(px(2.0))
         .rounded_full()
         .border_1()
-        .border_color(if checked {
-            Theme::color(t.sunk)
-        } else {
-            Theme::color(t.line)
-        })
+        .border_color(if checked { gpui::Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 } } else { Theme::color(t.line) })
         .bg(track)
-        .cursor_pointer()
-        .on_click(move |_, window, cx| on_change(!checked, window, cx));
-    if checked {
-        row.justify_end().child(knob)
-    } else {
-        row.child(knob)
-    }
+        .opacity(0.5)
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .right_0()
+                .h(px(1.0))
+                .bg(t.well()),
+        )
+        .child(knob);
+    let _ = on_change;
+    row
 }
 
 #[cfg(test)]

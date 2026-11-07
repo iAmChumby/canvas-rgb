@@ -28,16 +28,17 @@ use gpui::{Context, IntoElement, Window, canvas, div, prelude::*, px};
 use gpui::{Bounds, point, size};
 
 use crate::client::DaemonClient;
-use crate::components::button::{Variant, button_icon, icon_button};
+use crate::components::button::{Variant, button_icon, button_icon_wide, icon_button};
 use crate::components::daemon_down::daemon_down;
 use crate::components::slider::slider;
 use crate::theme::{Theme, TokenRadius};
 use crate::views::displays::DisplaysView;
 use crate::views::fans::FansView;
+use crate::views::settings::{SettingsView, ThemeCell};
 
 /// Measure a single line of text in the UI/mono face at `size` px, using
 /// GPUI's own text layout so the truncation below matches what is drawn.
-fn text_width(window: &Window, text: &str, size: f32, weight: gpui::FontWeight, family: &str) -> f32 {
+pub(crate) fn text_width(window: &Window, text: &str, size: f32, weight: gpui::FontWeight, family: &str) -> f32 {
     let font = gpui::Font {
         family: family.to_string().into(),
         weight,
@@ -62,7 +63,7 @@ fn text_width(window: &Window, text: &str, size: f32, weight: gpui::FontWeight, 
 /// in this version, so the cut is computed here from measured widths: the
 /// longest prefix that fits with a "…" appended. Returns the text unchanged
 /// when it already fits.
-fn ellipsize(
+pub(crate) fn ellipsize(
     window: &Window,
     text: &str,
     max_w: f32,
@@ -229,6 +230,11 @@ pub struct Shell {
     pub displays: gpui::Entity<DisplaysView>,
     /// The Fans page (#204). The shell builds it, so `main.rs` stays as it is.
     pub fans_view: gpui::Entity<FansView>,
+    /// The Settings page (#205).
+    pub settings_view: gpui::Entity<SettingsView>,
+    /// The theme the shell and the settings view share (the Appearance
+    /// radio writes it; every render reads it).
+    pub theme_cell: ThemeCell,
     pub width: f32,
     // Rail data, polled with the status (React store slow tick + rail poll).
     pub devices: Option<DevicesResponse>,
@@ -243,6 +249,7 @@ pub struct Shell {
 }
 
 impl Shell {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         theme: Theme,
         page: String,
@@ -250,9 +257,26 @@ impl Shell {
         status_error: Option<String>,
         displays: gpui::Entity<DisplaysView>,
         cx: &mut Context<Self>,
+        tray_present: bool,
+        tray_rx: Option<std::sync::mpsc::Receiver<canvas_proto::tauri::TrayToEditor>>,
     ) -> Self {
         let failures = if status_error.is_some() { 2 } else { 0 };
         let fans_view = cx.new(|cx| FansView::new(theme, cx));
+        let theme_cell: ThemeCell = std::sync::Arc::new(std::sync::Mutex::new(theme));
+        let shell_entity = cx.entity();
+        let settings_visible = page == "settings";
+        let settings_cell = theme_cell.clone();
+        let settings_view = cx.new(|cx| {
+            SettingsView::new(
+                theme,
+                settings_cell,
+                Some(shell_entity),
+                settings_visible,
+                cx,
+                tray_present,
+                tray_rx,
+            )
+        });
         let mut shell = Shell {
             theme,
             page,
@@ -261,6 +285,8 @@ impl Shell {
             status_failures: failures,
             displays,
             fans_view,
+            settings_view,
+            theme_cell,
             width: 1280.0,
             devices: None,
             displays_count: None,
@@ -281,6 +307,15 @@ impl Shell {
         if is_valid_page(page) {
             self.page = page.to_string();
         }
+    }
+
+    /// After a navigate: tell the settings view whether it is on screen
+    /// (its audio test lease runs only there).
+    fn sync_settings_visible(&self, cx: &mut Context<Self>) {
+        let visible = self.page == "settings";
+        self.settings_view.update(cx, |s, _| {
+            s.visible = visible;
+        });
     }
 
     /// One poll of every rail/strip answer (status fast, the rest slow in
@@ -573,7 +608,10 @@ impl Shell {
             .font_weight(gpui::FontWeight::MEDIUM)
             .font_family(crate::fonts::UI_FAMILY)
             .text_color(Theme::color(t.ink))
-            .child(gpui::svg().path(glyph_name).size(px(18.0)).text_color(glyph_color))
+            // React's svg is a replaced element with intrinsic 18 px, so it
+            // never shrinks; GPUI's has none and flex-shrank to 13 px on the
+            // one row whose value ("Default") overflows the row (#204 G8).
+            .child(gpui::svg().path(glyph_name).size(px(18.0)).flex_none().text_color(glyph_color))
             .child(
                 div()
                     .text_color(if active { Theme::color(t.ink) } else { Theme::color(t.dim) })
@@ -601,13 +639,28 @@ impl Shell {
             row
         };
         let row = match value {
-            Some(v) => row.child(div().flex_1()).child(v),
+            // React `.rail-value`: `flex: 1 1 auto; min-width: 0; overflow: hidden;
+            // text-align: right`. The value box takes the rest of the row and shrinks,
+            // so a value never pushes past the row's padding (the Layout row's
+            // "Default" sat 4 px right of the Fans row's).
+            Some(v) => row.child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .justify_end()
+                    .child(v),
+            ),
             None => row,
         };
         let entity = cx.entity();
         let target = page.to_string();
         row.cursor_pointer().on_click(move |_, _, cx| {
-            entity.update(cx, |this, _| this.navigate(&target));
+            entity.update(cx, |this, cx| {
+                this.navigate(&target);
+                this.sync_settings_visible(cx);
+            });
         })
     }
 
@@ -666,10 +719,15 @@ impl Shell {
                 .font_family(crate::fonts::UI_FAMILY)
                 .child(div().size(px(5.0)).rounded_full().bg(if selected { t.live() } else { Theme::color(t.dot) }))
                 .child(label.to_string());
+            // React `.seg-thumb`: `box-shadow: inset 0 0 0 1px var(--line-2)`. Both cells carry
+            // the 1 px border (transparent when unselected) so they stay the same size.
+            let cell = cell.border_1();
             let cell = if selected {
-                cell.bg(Theme::color(t.raised)).text_color(Theme::color(t.ink))
+                cell.border_color(Theme::color(t.line_2))
+                    .bg(Theme::color(t.raised))
+                    .text_color(Theme::color(t.ink))
             } else {
-                cell.text_color(Theme::color(t.dim))
+                cell.border_color(gpui::transparent_black()).text_color(Theme::color(t.dim))
             };
             cell.cursor_pointer().on_click(move |_, _, cx| {
                 entity.update(cx, |this, cx| {
@@ -767,16 +825,29 @@ impl Shell {
                                 .justify_center()
                                 .gap(px(6.0))
                                 .h(px(32.0))
-                                .r_md()
-                                .border_1()
-                                .border_color(Theme::color(t.line_2))
-                                .bg(Theme::color(t.raised))
                                 .text_sm()
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .font_family(crate::fonts::UI_FAMILY)
                                 .text_color(Theme::color(t.ink))
+                                // A plain `.btn` key: the hardware skirt (#204 G8-r3).
+                                .child(crate::components::button::skirt_layers(
+                                    t.skirt(),
+                                    10.0,
+                                    32.0,
+                                    Theme::color(t.raised),
+                                    Theme::color(t.line_2),
+                                ))
                                 .child(div().size(px(5.0)).rounded_full().bg(if paused { Theme::color(t.warn) } else { Theme::color(t.dot) }))
-                                .child(if paused { "Resume".to_string() } else { "Pause".to_string() })
+                                // React's label is a Swap of "Pause"/"Resume":
+                                // the cell keeps "Resume"'s width and the
+                                // visible word is centred in it, so the dot's
+                                // place never moves (#204 G8, measured ~7 px).
+                                .child(
+                                    div()
+                                        .w(px(text_width(window, "Resume", 14.0, gpui::FontWeight::MEDIUM, crate::fonts::UI_FAMILY)))
+                                        .text_center()
+                                        .child(if paused { "Resume".to_string() } else { "Pause".to_string() }),
+                                )
                                 .cursor_pointer()
                                 .on_click({
                                     let entity = deck_entity.clone();
@@ -856,7 +927,9 @@ impl Shell {
                 };
                 let mut bar = div().flex().gap(px(2.0));
                 for i in 0..10 {
-                    bar = bar.child(div().flex_1().h(px(4.0)).r_sm().bg(if i < filled { tone_color } else { Theme::color(t.line) }));
+                    // React `.rail-meter-seg{height:4px;border-radius:1px}`: a
+                    // rounded rect, not the capsule r_sm(8) gave.
+                    bar = bar.child(div().flex_1().h(px(4.0)).r_xs().bg(if i < filled { tone_color } else { Theme::color(t.line) }));
                 }
                 grid = grid.child(
                     div()
@@ -1075,24 +1148,39 @@ impl Shell {
         for (label, page, icon) in NAV {
             let active = self.page == *page;
             let glyph_name = if active { format!("icons/{icon}-fill.svg") } else { format!("icons/{icon}.svg") };
-            let mut cell = div()
+            // React dock link: 56 tall; the quiet links flex-fill, the active
+            // one is `flex: 0 0 auto` with `padding: s1 s2 s1` (4px/8px), so
+            // the tile is the label's width + 16, not an equal share. The
+            // rows (icon 18, name 16, gap 2) sit at the bottom with a 4 px
+            // top padding: icon top = cell top + 16 (measured 800 at 390).
+            // The tile hugs icon+name: its top is the marker's top, 5 px
+            // above the icon (Rail.tsx `--myn: ir.top - 5`), so the tile
+            // starts 11 px below the cell top; the marker spans the whole
+            // tile (`--mw: ar.width`).
+            let cell = div()
                 .id(gpui::SharedString::from(format!("dock-{page}")))
                 .relative()
                 .flex()
                 .flex_col()
                 .items_center()
                 .justify_start()
-                .flex_1()
                 .h(px(56.0))
-                .pt(px(20.0))
+                .pt(px(16.0))
                 .gap(px(2.0))
                 .text_sm()
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .font_family(crate::fonts::UI_FAMILY)
                 .text_color(Theme::color(t.ink));
+            let mut cell = if active {
+                cell.flex_none().px(px(8.0))
+            } else {
+                cell.flex_1()
+            };
             if active {
                 // The active tile sits behind the icon and name (React
-                // `::before` at z-index −1).
+                // `::before` at z-index −1): its top is 56 − 18 − 2 − 16 =
+                // 20 px from the link top (#204 G8-r3: at 11 it touched the
+                // marker and measured 6 px high at 390).
                 cell = cell
                     .child(
                         div()
@@ -1107,19 +1195,20 @@ impl Shell {
                     .child(
                         div()
                             .absolute()
-                            .top(px(20.0))
-                            .left(px(4.0))
-                            .right(px(4.0))
+                            .top(px(11.0))
+                            .left_0()
+                            .right_0()
                             .h(px(3.0))
                             .rounded_full()
                             .bg(t.live()),
                     );
             }
-            cell = cell.child(gpui::svg().path(glyph_name).size(px(18.0)).text_color(if active { t.live() } else { Theme::color(t.dim) }));
+            cell = cell.child(gpui::svg().path(glyph_name).size(px(18.0)).flex_none().text_color(if active { t.live() } else { Theme::color(t.dim) }));
             if active {
                 cell = cell.child(
                     div()
                         .text_sm()
+                        .line_height(px(16.0))
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .font_family(crate::fonts::UI_FAMILY)
                         .text_color(Theme::color(t.ink))
@@ -1131,7 +1220,7 @@ impl Shell {
         row
     }
 
-    fn strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn strip(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = &self.theme;
         let phone = self.width <= 720.0;
         let (mark, tone, _short) = strip_state(self.status.as_ref(), self.status_error.as_deref());
@@ -1181,11 +1270,15 @@ impl Shell {
             context_text = context.unwrap_or_default();
             page_actions = Some(actions);
         }
+        // React: `.strip-inner{height:54px}` plus the `.strip` border-bottom
+        // 1 px = 55 total, the border at y54-55 (GPUI drew the border inside
+        // 54, at 53-54, shifting everything below 1 px up). The phone strip
+        // is `.strip{height:48px}` with the border inside it, as drawn.
         let mut inner = div()
             .flex()
             .items_center()
             .gap(if phone { px(8.0) } else { px(16.0) })
-            .h(if phone { px(48.0) } else { px(54.0) })
+            .h(if phone { px(48.0) } else { px(55.0) })
             .px(if phone { px(8.0) } else { px(24.0) })
             .border_b_1()
             .border_color(Theme::color(t.line))
@@ -1195,25 +1288,28 @@ impl Shell {
         }
         // React `.rd-title`: the h1 and the mono context share one flex row
         // with a 12 px gap (the context sits inside the title slot).
-        let mut title_row = div()
+        // `.rd-title` carries `margin-right: var(--s2)` (8 px) so the title
+        // never touches the mark (#204 G8-r3: without it the check icon sat
+        // 10 px left at 1440). On a phone it is `flex: none` with no right
+        // margin, so the title never shrinks under the row.
+        let title_row = div()
             .flex()
             .items_baseline()
-            .gap_3()
-            .child(
-                div()
-                    .text_xl()
-                    .line_height(gpui::relative(1.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .font_family(crate::fonts::UI_FAMILY)
-                    .text_color(Theme::color(t.ink))
-                    .child(title_text),
-            );
-        if !phone {
-            // React `.rd-title { margin-right: var(--s2); }`: the title never
-            // touches the state mark beside it. A phone's strip gives the
-            // margin up (React's phone rule).
-            title_row = title_row.mr_2();
-        }
+            .gap_3();
+        let mut title_row = if phone {
+            title_row.flex_none()
+        } else {
+            title_row.mr_2()
+        };
+        title_row = title_row.child(
+            div()
+                .text_xl()
+                .line_height(gpui::relative(1.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .font_family(crate::fonts::UI_FAMILY)
+                .text_color(Theme::color(t.ink))
+                .child(title_text.to_string()),
+        );
         if !context_text.is_empty() && !phone {
             // React's strip gives the room to a page that brings actions of
             // its own: below 1100 px the page's context line goes too
@@ -1269,11 +1365,17 @@ impl Shell {
             inner = inner.child(now_row);
         }
         // The mark: icon always, words at 1280 px and up. React `.strip-mark`
-        // has no gap between the icon and the words (`font: inherit`, 14 px).
-        let mark_row = div()
+        // has no flex gap between icon and words; GPUI's title advance runs
+        // 4 px short of the browser's at 1440, so at 1280 and up the row
+        // carries 4 px of left margin and no gap (dot and words both land on
+        // React's 333/342 at 1440).
+        let mut mark_row = div()
             .flex()
             .items_center()
             .child(gpui::svg().path(mark_icon).size(px(14.0)).text_color(tone_color));
+        if self.width >= 1280.0 {
+            mark_row = mark_row.ml(px(4.0));
+        }
         let mark_row = if self.width >= 1280.0 {
             mark_row.child(
                 div()
@@ -1306,14 +1408,17 @@ impl Shell {
             }
             inner = inner.child(box_);
         }
-        // Controls at the right: Pause lights, search.
+        // Controls at the right (React `.strip-controls`: an inline-flex
+        // group with `margin-left: auto` and an 8 px (`--s2`) gap between
+        // Pause lights and search, not the strip row's 16 px gap).
+        let mut controls = div().flex().items_center().gap(px(8.0));
         if known {
             if phone {
                 // The same sm button as the row's (Pause lights), with the
                 // words hidden (`.strip-power-text`): icon 14, 10 px padding
                 // — 36 wide, 28 tall.
                 let entity = cx.entity();
-                inner = inner.child(button_icon(
+                controls = controls.child(button_icon(
                     t,
                     "strip-power",
                     "",
@@ -1328,11 +1433,22 @@ impl Shell {
                     },
                 ));
             } else {
+                // React's label is a `Swap` of "Pause lights"/"Resume
+                // lights": the cell keeps the widest label's width and the
+                // visible label is centred in it (#204 G8, measured).
+                let widest = text_width(
+                    window,
+                    "Resume lights",
+                    14.0,
+                    gpui::FontWeight::MEDIUM,
+                    crate::fonts::UI_FAMILY,
+                );
                 let entity = cx.entity();
-                inner = inner.child(button_icon(
+                controls = controls.child(button_icon_wide(
                     t,
                     "strip-power",
                     if paused { "Resume lights" } else { "Pause lights" },
+                    widest,
                     if paused { Variant::Primary } else { Variant::Default },
                     false,
                     true,
@@ -1345,7 +1461,7 @@ impl Shell {
                 ));
             }
         }
-        inner = inner.child(icon_button(
+        controls = controls.child(icon_button(
             t,
             "strip-search",
             "MagnifyingGlass",
@@ -1355,6 +1471,7 @@ impl Shell {
             false,
             |_, _, _| {},
         ));
+        inner = inner.child(controls);
         inner
     }
 
@@ -1393,6 +1510,9 @@ impl Shell {
         }
         if self.page == "fans" {
             return self.fans_view.clone().into_any_element();
+        }
+        if self.page == "settings" {
+            return self.settings_view.clone().into_any_element();
         }
         // Every other page shows the placeholder until it is ported.
         div()
@@ -1514,12 +1634,26 @@ impl Shell {
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.width = f32::from(window.window_bounds().get_bounds().size.width);
+        // The Appearance radio writes the shared cell; every view follows.
+        let shared = *self.theme_cell.lock().unwrap();
+        if shared != self.theme {
+            self.theme = shared;
+            let displays = self.displays.clone();
+            let fans_view = self.fans_view.clone();
+            displays.update(cx, |d, _| d.theme = shared);
+            fans_view.update(cx, |f, _| f.theme = shared);
+        }
         let t = &self.theme;
         let phone = self.width <= 720.0;
         let phone_pad_top = px(16.0);
         let content = div()
             .flex_1()
             .flex_col()
+            // A page taller than the window must not push the dock off
+            // it (React's phone page scrolls as a document; GPUI
+            // clips the content box, the dock stays fixed).
+            .min_h(px(0.0))
+            .overflow_hidden()
             .p_4()
             .child(self.page_content());
         let content = if phone {
@@ -1540,7 +1674,10 @@ impl Render for Shell {
             .flex()
             .flex_col()
             .flex_1()
-            .child(self.strip(cx))
+            // A page taller than the window must shrink this column
+            // (the dock stays on screen; the content clips).
+            .min_h(px(0.0))
+            .child(self.strip(window, cx))
             .child(content);
         let body = if phone {
             div()
@@ -1553,13 +1690,34 @@ impl Render for Shell {
             div()
                 .flex()
                 .size_full()
-                .child(div().w(px(64.0)).h_full().child(self.rail(true, window, cx)))
+                // React `.rail-col{border-right:1px solid var(--line);
+                // background:var(--panel)}`: the 1 px line sits over the
+                // panel, dark 34,36,39 / light 216,217,218. The wrapper
+                // carries the panel background too, or the line composits
+                // over the g1 ground (28,29,31 / 197,199,204) (#204 G8-r3).
+                .child(
+                    div()
+                        .w(px(64.0))
+                        .h_full()
+                        .border_r_1()
+                        .border_color(Theme::color(t.line))
+                        .bg(Theme::color(t.panel))
+                        .child(self.rail(true, window, cx)),
+                )
                 .child(main_col)
         } else {
             div()
                 .flex()
                 .size_full()
-                .child(div().w(px(200.0)).h_full().child(self.rail(false, window, cx)))
+                .child(
+                    div()
+                        .w(px(200.0))
+                        .h_full()
+                        .border_r_1()
+                        .border_color(Theme::color(t.line))
+                        .bg(Theme::color(t.panel))
+                        .child(self.rail(false, window, cx)),
+                )
                 .child(main_col)
         };
         div()

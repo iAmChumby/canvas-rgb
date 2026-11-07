@@ -3,3 +3,4 @@
 
 pub mod displays;
 pub mod fans;
+pub mod settings;

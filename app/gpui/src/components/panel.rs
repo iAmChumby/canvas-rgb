@@ -25,6 +25,88 @@ pub fn tracked_text(
     family: &'static str,
     color: Rgba,
 ) -> gpui::AnyElement {
+    tracked_text_lh(text, font_size, tracking_em, weight, family, color, 1.45)
+}
+
+/// A tracked title in the `h2.panel-title` metrics: React's `Panel.tsx`
+/// renders the title as an `h2`, whose `line-height: 1.25` overrides the
+/// body 1.45 that `.panel-title` (hardware.css) inherits — 13 px font in a
+/// 16.25 px box, not 18.85. A title that wraps therefore grows the head by
+/// 2.6 px less per wrapped line in React, which put the 390 head 6 px high
+/// in GPUI at 1.45 (#204).
+pub fn tracked_title(
+    text: &str,
+    font_size: f32,
+    tracking_em: f32,
+    weight: FontWeight,
+    family: &'static str,
+    color: Rgba,
+) -> gpui::AnyElement {
+    tracked_text_lh(text, font_size, tracking_em, weight, family, color, 1.25)
+}
+
+/// A tracked title that stays one line (React `.audio-compact
+/// .panel-title`: `flex: none; white-space: nowrap`).
+pub fn tracked_title_nowrap(
+    text: &str,
+    font_size: f32,
+    tracking_em: f32,
+    weight: FontWeight,
+    family: &'static str,
+    color: Rgba,
+) -> gpui::AnyElement {
+    tracked_text_lh_nowrap(text, font_size, tracking_em, weight, family, color, 1.25)
+}
+
+fn tracked_text_lh_nowrap(
+    text: &str,
+    font_size: f32,
+    tracking_em: f32,
+    weight: FontWeight,
+    family: &'static str,
+    color: Rgba,
+    line_height: f32,
+) -> gpui::AnyElement {
+    let tracking = px(font_size * tracking_em);
+    let space_w = px(font_size * 0.6) + tracking;
+    let mut row = div()
+        .flex()
+        .items_center()
+        .whitespace_nowrap()
+        .text_size(px(font_size))
+        .line_height(gpui::relative(line_height))
+        .font_weight(weight)
+        .font_family(family)
+        .text_color(color);
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let n = words.len();
+    for (wi, word) in words.iter().enumerate() {
+        let mut cell = div()
+            .flex()
+            .items_center()
+            .gap(tracking)
+            .whitespace_nowrap()
+            .flex_none();
+        for ch in word.chars() {
+            cell = cell.child(ch.to_string());
+        }
+        row = row.child(cell);
+        if wi + 1 < n {
+            row = row.child(div().w(space_w).h(px(1.0)).flex_none());
+        }
+    }
+    row.into_any_element()
+}
+
+fn tracked_text_lh(
+    text: &str,
+    font_size: f32,
+    tracking_em: f32,
+    weight: FontWeight,
+    family: &'static str,
+    color: Rgba,
+    line_height: f32,
+) -> gpui::AnyElement {
     let tracking = px(font_size * tracking_em);
     // A mono space advances a full 0.6em, like the browser's (plus the
     // tracking after it); a quarter-em made spaced titles fall short.
@@ -34,6 +116,10 @@ pub fn tracked_text(
         .flex_wrap()
         .items_center()
         .text_size(px(font_size))
+        // React captions inherit the body 1.45; titles take the h2 1.25
+        // (see `tracked_title`); without this GPUI lays the tracked lines
+        // out at its 1.618 default.
+        .line_height(gpui::relative(line_height))
         .font_weight(weight)
         .font_family(family)
         .text_color(color);
@@ -68,15 +154,33 @@ pub fn panel(
     actions: impl IntoElement,
     body: impl IntoElement,
 ) -> gpui::Stateful<gpui::Div> {
-    div()
+    panel_with_padding(t, id, title, actions, body, None)
+}
+
+/// A panel with an optional padding override (React `.rd-fans .panel {
+/// padding: var(--s3) }` on a phone: 12 px instead of 16).
+#[allow(dead_code)]
+pub fn panel_with_padding(
+    t: &Theme,
+    id: &str,
+    title: &str,
+    actions: impl IntoElement,
+    body: impl IntoElement,
+    padding: Option<f32>,
+) -> gpui::Stateful<gpui::Div> {
+    let mut el = div()
         .id(gpui::SharedString::from(id.to_string()))
         .flex()
         .flex_col()
-        .p_4()
         .r_lg()
         .border_1()
         .border_color(Theme::color(t.line))
-        .bg(Theme::color(t.panel))
+        .bg(Theme::color(t.panel));
+    el = match padding {
+        Some(p) => el.p(px(p)),
+        None => el.p_4(),
+    };
+    el
         .child(
             div()
                 .flex()
@@ -89,7 +193,7 @@ pub fn panel(
                 // React `.panel-head { flex: 0 0 auto; }`: the head keeps its
                 // height when the panel's body scrolls.
                 .flex_shrink_0()
-                .child(tracked_text(
+                .child(tracked_title(
                     &title.to_uppercase(),
                     13.0,
                     0.08,
@@ -129,12 +233,20 @@ pub fn field(
     };
     el
         .child(
+            // React `.field-label` sets no colour: it inherits the body ink
+            // (`--ink`), not dim (#204 G8, measured in both themes).
             div()
                 .flex_1()
-                // React's `.field-label` takes the body's size (15 px).
+                // React `.field-label` inherits the body 15 px (`--t15`,
+                // `app.css:23`); `text_sm()` (14 px) drew Source 46 against
+                // 50 and Decimals 58 against 65 (#204 G8-r3).
                 .text_size(px(15.0))
                 .font_family(crate::fonts::UI_FAMILY)
-                .text_color(Theme::color(t.dim))
+                .text_color(Theme::color(t.ink))
+                // The 15 px body at line-height 1.45 is a 21.75 px box, the
+                // same box React's label takes (the G8 1.6 at 14 px was
+                // 22.4 and grew every wide field by 0.65 px).
+                .line_height(gpui::relative(1.45))
                 .child(label.to_string()),
         )
         .child(
@@ -145,6 +257,216 @@ pub fn field(
                 .justify_end()
                 .child(control),
         )
+}
+
+/// A row field with a hint under the label (React `Field` with `hint`):
+/// the label column holds the 15 px label over the 14 px mute hint.
+pub fn field_hint(
+    t: &Theme,
+    id: &str,
+    label: &str,
+    hint: Option<&str>,
+    control: impl IntoElement,
+    last: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let el = div()
+        .id(gpui::SharedString::from(id.to_string()))
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .min_h(px(48.0))
+        .py_2();
+    let el = if last { el } else { el.border_b_1().border_color(Theme::color(t.line)) };
+    // React `.field-label`: a flex column, flex 1 1 140px. The basis is
+    // 140 px, not the content width: a content basis let the Setup hint
+    // stay on one line at 1920 (React wraps it onto two).
+    let mut label_col = div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .w(px(140.0))
+        .min_w(px(140.0))
+        .child(
+            div()
+                .text_size(px(15.0))
+                .font_family(crate::fonts::UI_FAMILY)
+                .text_color(Theme::color(t.ink))
+                .line_height(gpui::relative(1.45))
+                .child(label.to_string()),
+        );
+    if let Some(h) = hint {
+        label_col = label_col.child(
+            div()
+                .text_sm()
+                .font_family(crate::fonts::UI_FAMILY)
+                .text_color(Theme::color(t.mute))
+                .line_height(gpui::relative(1.45))
+                .child(h.to_string()),
+        );
+    }
+    el.child(label_col).child(
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .justify_end()
+            .child(control),
+    )
+}
+
+/// A row field whose hint is a figure (React `Field` with a `.fig` hint,
+/// e.g. Frame rate's "<n> fps measured"): the hint is in the mono face.
+pub fn field_hint_fig(
+    t: &Theme,
+    id: &str,
+    label: &str,
+    hint: Option<&str>,
+    control: impl IntoElement,
+    last: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let el = div()
+        .id(gpui::SharedString::from(id.to_string()))
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .min_h(px(48.0))
+        .py_2();
+    let el = if last { el } else { el.border_b_1().border_color(Theme::color(t.line)) };
+    let mut label_col = div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .w(px(140.0))
+        .min_w(px(140.0))
+        .child(
+            div()
+                .text_size(px(15.0))
+                .font_family(crate::fonts::UI_FAMILY)
+                .text_color(Theme::color(t.ink))
+                .line_height(gpui::relative(1.45))
+                .child(label.to_string()),
+        );
+    if let Some(h) = hint {
+        label_col = label_col.child(
+            div()
+                .text_sm()
+                .font_family(crate::fonts::MONO_FAMILY)
+                .text_color(Theme::color(t.mute))
+                .line_height(gpui::relative(1.45))
+                .child(h.to_string()),
+        );
+    }
+    el.child(label_col).child(
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .justify_end()
+            .child(control),
+    )
+}
+
+/// A stacked field with a figure hint (the phone form of `field_hint_fig`).
+pub fn field_stack_hint_fig(
+    t: &Theme,
+    id: &str,
+    label: &str,
+    hint: Option<&str>,
+    control: impl IntoElement,
+    last: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let el = div()
+        .id(gpui::SharedString::from(id.to_string()))
+        .flex()
+        .flex_col()
+        .gap_2()
+        .min_h(px(48.0))
+        .py_2();
+    let el = if last { el } else { el.border_b_1().border_color(Theme::color(t.line)) };
+    let mut label_col = div()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .text_size(px(15.0))
+                .font_family(crate::fonts::UI_FAMILY)
+                .text_color(Theme::color(t.ink))
+                .line_height(gpui::relative(1.45))
+                .child(label.to_string()),
+        );
+    if let Some(h) = hint {
+        label_col = label_col.child(
+            div()
+                .text_sm()
+                .font_family(crate::fonts::MONO_FAMILY)
+                .text_color(Theme::color(t.mute))
+                .line_height(gpui::relative(1.45))
+                .child(h.to_string()),
+        );
+    }
+    el.child(label_col).child(
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .w_full()
+            .child(control),
+    )
+}
+
+/// A stacked field with a hint (the phone form of `field_hint`): label
+/// over control, control at the start and full width.
+pub fn field_stack_hint(
+    t: &Theme,
+    id: &str,
+    label: &str,
+    hint: Option<&str>,
+    control: impl IntoElement,
+    last: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let el = div()
+        .id(gpui::SharedString::from(id.to_string()))
+        .flex()
+        .flex_col()
+        // React `.field` wraps with `gap: var(--s2) var(--s4)`: the
+        // stacked rows sit 8 px apart.
+        .gap_2()
+        .min_h(px(48.0))
+        .py_2();
+    let el = if last { el } else { el.border_b_1().border_color(Theme::color(t.line)) };
+    let mut label_col = div()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .text_size(px(15.0))
+                .font_family(crate::fonts::UI_FAMILY)
+                .text_color(Theme::color(t.ink))
+                .line_height(gpui::relative(1.45))
+                .child(label.to_string()),
+        );
+    if let Some(h) = hint {
+        label_col = label_col.child(
+            div()
+                .text_sm()
+                .font_family(crate::fonts::UI_FAMILY)
+                .text_color(Theme::color(t.mute))
+                .line_height(gpui::relative(1.45))
+                .child(h.to_string()),
+        );
+    }
+    el.child(label_col).child(
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .w_full()
+            .child(control),
+    )
 }
 
 /// A labelled field in stacked form (wide two-column controls and the
@@ -172,14 +494,16 @@ pub fn field_stack(
     } else {
         el.border_b_1().border_color(Theme::color(t.line))
     };
-    el
-        .child(
-            div()
-                .text_sm()
-                .font_family(crate::fonts::UI_FAMILY)
-                .text_color(Theme::color(t.dim))
-                .child(label.to_string()),
-        )
+    // The stacked label is the same `.field-label`: ink, not dim, 15 px at
+    // the body line-height 1.45 (a 21.75 px box in both the wide grid and
+    // the phone).
+    let _ = wide;
+    let label_el = div()
+        .text_size(px(15.0))
+        .font_family(crate::fonts::UI_FAMILY)
+        .text_color(Theme::color(t.ink))
+        .line_height(gpui::relative(1.45));
+    el.child(label_el.child(label.to_string()))
         .child(
             div()
                 .flex()

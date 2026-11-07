@@ -16,7 +16,7 @@ use crate::components::fan_bits::{
 use crate::components::fan_bulk::is_unavailable;
 use crate::components::fan_curve::{base_floor, duty_for, fan_curve_chart, hot_rule_text, HOT_MIN};
 use crate::components::panel::panel;
-use crate::theme::Theme;
+use crate::theme::{Theme, TokenRadius};
 
 use super::FansView;
 
@@ -119,10 +119,9 @@ impl FansView {
         .flex_1()
         .min_h_0()
         .overflow_y_scroll()
-        // React `scrollbar-gutter: stable`: the editor's panel always keeps
-        // the room a scrollbar would take, so its width does not change when
-        // the panel starts to scroll.
-        .pr_6()
+        // React `scrollbar-gutter: stable` (16 px) plus the panel's 16 px
+        // right padding: 26 px of the editor's width is spoken for.
+        .pr(px(26.0))
     }
 
     /// The availability keys (issue #146).
@@ -229,14 +228,24 @@ impl FansView {
             };
             let hot_row = crate::components::fan_curve::hot_row(&fans.hot, hot_kind).copied();
             let rule_text = hot_rule_text(hot_row.map(|h| h.limit_c));
-            // React's `.rule` is a block: the "don't exceed" control flows
-            // under the sentence, with no gap of its own.
+            // React's `.rule`: the floor percent is a mono ink `.fig` span
+            // inside the dim sentence.
             let mut rule = div().flex().flex_col().child(
                 div()
+                    .flex()
+                    .items_baseline()
+                    .gap(px(4.0))
                     .text_sm()
                     .font_family(crate::fonts::UI_FAMILY)
                     .text_color(Theme::color(t.dim))
-                    .child(format!("Floor {base}%. {rule_text}.")),
+                    .child("Floor")
+                    .child(
+                        div()
+                            .font_family(crate::fonts::MONO_FAMILY)
+                            .text_color(Theme::color(t.ink))
+                            .child(format!("{base}%")),
+                    )
+                    .child(format!(". {rule_text}.")),
             );
             if let Some(hot_row) = hot_row {
                 rule = rule.child(self.hot_controls(hot_row, cx));
@@ -561,6 +570,7 @@ impl FansView {
             cx,
         );
         let entity = cx.entity();
+        let remove_disabled = self.editor_points.len() <= MIN_POINTS;
         let remove = fans_icon_button(
             &t,
             &format!("fans-point-{index}-remove"),
@@ -568,7 +578,7 @@ impl FansView {
             "X",
             28.0,
             14.0,
-            false,
+            remove_disabled,
             move |_, _, cx| {
                 entity.update(cx, |view, cx| view.remove_point(index, cx));
             },
@@ -619,7 +629,7 @@ impl FansView {
         let mut row = div()
             .flex()
             .items_center()
-            .gap_2()
+            .gap(px(8.0))
             .child(
                 div()
                     .text_sm()
@@ -712,10 +722,12 @@ impl FansView {
                         .id(gpui::SharedString::from("fans-reason"))
                         .flex()
                         .flex_col()
+                        .flex_1()
+                        .justify_center()
                         .gap_2()
                         .py(px(8.0))
                         .px(px(12.0))
-                        .rounded_md()
+                        .r_md()
                         .border_1()
                         .border_color(crate::components::fan_bits::tint(
                             Theme::color(t.warn),
@@ -729,10 +741,12 @@ impl FansView {
                 region = region.child(
                     div()
                         .flex()
+                        .flex_1()
                         .items_center()
+                        .justify_center()
                         .py(px(8.0))
                         .px(px(12.0))
-                        .rounded_md()
+                        .r_md()
                         .border_1()
                         .border_color(Theme::color(t.line))
                         .text_sm()

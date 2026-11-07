@@ -134,10 +134,15 @@ impl DaemonClient {
     }
 
     pub fn with_base(base: String) -> Self {
+        Self::with_base_timeout(base, TIMEOUT)
+    }
+
+    /// A client with a custom deadline (config export/import: 60 s).
+    pub fn with_base_timeout(base: String, timeout: Duration) -> Self {
         let config = ureq::Agent::config_builder()
             // Answer 4xx and 5xx with the response, so the API's own message can be shown.
             .http_status_as_error(false)
-            .timeout_global(Some(TIMEOUT))
+            .timeout_global(Some(timeout))
             .build();
         DaemonClient {
             base,

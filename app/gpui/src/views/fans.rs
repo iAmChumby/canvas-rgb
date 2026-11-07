@@ -41,10 +41,9 @@ use crate::components::fan_curve::{
     base_floor, bounds_for, curve_geometry, default_curve, hot_row, pct_of_y, sorted_points,
     temp_of_x, ChartBox, HOT_MIN,
 };
-use crate::components::panel::panel;
 use crate::components::segmented::segmented;
 use crate::components::text_input::{format_value, TextInput};
-use crate::theme::Theme;
+use crate::theme::{Theme, TokenRadius};
 
 mod editor;
 
@@ -297,9 +296,11 @@ pub enum FieldWidth {
 
 /// The table's columns, as React's auto table layout sizes them.
 ///
-/// Every column takes the width its widest cell asks for, and the room that
-/// is left over is shared out equally between the columns that can grow.
-/// The tick column has a width of its own, so it takes no share.
+/// React's auto table shares the spare width in proportion to each column's
+/// max-content width: column max-content + 2 x padding, then spare x (own /
+/// sum). The tick column takes no share; the history column is dropped at
+/// page <= 999. The Mode column's minimum is its header text ("Mode", about
+/// 37 px), not a bare dot.
 #[derive(Debug, Clone, Copy)]
 pub struct TableColumns {
     pub tick: f32,
@@ -308,7 +309,6 @@ pub struct TableColumns {
     pub duty: f32,
     pub mode: f32,
     pub history: f32,
-    /// The cell's own padding (`--s2` at 1000 px and up, `--s3` below).
     pub padding_x: f32,
     /// The duty meter's own width.
     pub duty_meter: f32,
@@ -323,10 +323,11 @@ pub fn table_columns(fans: &FansStatus, page: f32, width: f32) -> TableColumns {
     let wide = page >= 1000.0;
     let narrow_table = page <= 999.0;
     let with_word = page > 1499.0;
-    let padding_x = if wide { 8.0 } else { 12.0 };
+    // React `app.css:4094-4106` uses `s1 s2` (cell padding 8) in both blocks.
+    let padding_x = 8.0;
     let duty_meter = if wide { 52.0 } else { 44.0 };
 
-    // The widest cell in each column.
+    // The widest cell in each column (max-content).
     let name = fans
         .headers
         .iter()
@@ -339,24 +340,44 @@ pub fn table_columns(fans: &FansStatus, page: f32, width: f32) -> TableColumns {
         .fold(0.0, f32::max)
         .max(MONO_20 * 4.0);
     let duty = duty_meter + 8.0 + 4.0 * MONO_14;
-    // The mode's dot, and its word where the word fits.
-    let mode = if with_word { 50.0 + 15.0 } else { 15.0 };
+    // Mode minimum is the header text "Mode" (4 chars at 14 px mono ≈ 33.6 px
+    // of content, 37 px with its line box; use 37 as the floor).
+    let mode: f32 = if with_word { 50.0 + 15.0 } else { 37.0 - 2.0 * padding_x };
+    let mode_content = mode;
     let history = if narrow_table { 0.0 } else { 56.0 };
     let tick = 36.0;
 
-    let auto = if narrow_table { 4.0 } else { 5.0 };
-    let used = tick + name + rpm + duty + mode + history;
-    let extra = (width - used).max(0.0) / auto;
+    // Auto-layout proportional shares: spare x (own / sum), own includes
+    // 2 x padding, tick takes no share.
+    let mut contents = vec![name, rpm, duty, mode_content];
+    if !narrow_table {
+        contents.push(history);
+    }
+    let sum: f32 = contents.iter().sum();
+    let n_cols = contents.len() as f32;
+    let used = tick + sum + 2.0 * padding_x * n_cols;
+    let spare = (width - used).max(0.0);
+    let share = |own: f32| spare * own / sum.max(1.0);
     TableColumns {
         tick,
-        name: name + extra,
-        rpm: rpm + extra,
-        duty: duty + extra,
-        mode: mode + extra,
-        history: history + extra,
+        name: name + 2.0 * padding_x + share(name),
+        rpm: rpm + 2.0 * padding_x + share(rpm),
+        duty: duty + 2.0 * padding_x + share(duty),
+        mode: mode + 2.0 * padding_x + share(mode_content),
+        history: if narrow_table {
+            0.0
+        } else {
+            history + 2.0 * padding_x + share(history)
+        },
         padding_x,
         duty_meter,
     }
+}
+
+/// Whether the table is the narrow one (no history column) — from the page
+/// width, not from the computed columns.
+pub fn narrow_table(page: f32) -> bool {
+    page <= 999.0
 }
 
 pub struct FansView {
@@ -1530,10 +1551,14 @@ impl FansView {
             },
         );
         let entity = cx.entity();
+        // React `.rd-btn-text{ display: none }` at <=640: the save key keeps
+        // its icon and drops its label on a phone.
+        let phone = self.window_width <= 640.0;
+        let save_label = if phone { String::new() } else { format!("Save {}", fans.active_profile) };
         let save_btn = fans_button(
             t,
             "fans-profile-save",
-            &format!("Save {}", fans.active_profile),
+            &save_label,
             BtnVariant::Primary,
             true,
             false,
@@ -1660,7 +1685,7 @@ impl FansView {
                         .flex()
                         .flex_col()
                         .gap_2()
-                        .rounded_md()
+                        .r_md()
                         .border_1()
                         .border_color(Theme::color(t.down))
                         .p_2()
@@ -1727,7 +1752,7 @@ impl FansView {
             .right_0()
             .w(px(260.0))
             .p_3()
-            .rounded_md()
+            .r_md()
             .border_1()
             .border_color(Theme::color(t.line_2))
             .bg(Theme::color(t.panel))
@@ -1767,7 +1792,7 @@ impl FansView {
             }
             body = body.child(row);
         }
-        panel(t, "fans-temps", "Temperatures", div(), body).into_any_element()
+        crate::components::panel::panel_with_padding(t, "fans-temps", "Temperatures", div(), body, if page <= 640.0 { Some(12.0) } else { None }).into_any_element()
     }
 
     /// One temperature: its label, its meter and its reading.
@@ -1791,7 +1816,7 @@ impl FansView {
             .text_color(Theme::color(t.ink))
             .child(format!("{celsius:.1} {}", "\u{00B0}C"));
         let bar = meter(t, &format!("fans-temp-{}", temp.label), fill, tone, None);
-        let mut cell = div().flex_1().flex_col().gap_1().min_w_0();
+        let mut cell = div().flex().flex_1().flex_col().gap_1().min_w_0();
         if phone {
             // The phone cell: the label, the value and the bar, one over the
             // other.
@@ -1846,7 +1871,13 @@ impl FansView {
         // The Select/Done key, on a phone only.
         let actions = if narrow {
             let entity = cx.entity();
-            div().child(fans_button(
+            // React `.rd-fans .fan-select-key { min-height: 44px; min-width:
+            // 88px }` (motion.css:1867).
+            div()
+                .min_w(px(88.0))
+                .min_h(px(44.0))
+                .flex()
+                .child(fans_button(
                 t,
                 "fans-select-key",
                 if self.select_mode { "Done" } else { "Select" },
@@ -1880,7 +1911,14 @@ impl FansView {
             let width = self.page_width() * 1.1 / 2.1 - 32.0;
             body = body.child(self.headers_table(fans, page, width, cx));
         }
-        let panel = panel(t, "fans-headers", "Headers", actions, body);
+        let panel = crate::components::panel::panel_with_padding(
+            t,
+            "fans-headers",
+            "Headers",
+            actions,
+            body,
+            if narrow { Some(12.0) } else { None },
+        );
         if narrow {
             panel
         } else {
@@ -2090,7 +2128,7 @@ impl FansView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = &self.theme;
-        let narrow_table = cols.history == 0.0;
+        let narrow_table = narrow_table(page);
         let unavailable = is_unavailable(header);
         let tach = !unavailable && !can_drive(header);
         let blocked = !can_drive(header);
@@ -2366,7 +2404,7 @@ impl FansView {
             let rpm_readout = div()
                 .flex()
                 .items_baseline()
-                .gap_1()
+                .gap(px(3.0))
                 .text_size(px(20.0))
                 .font_family(crate::fonts::MONO_FAMILY)
                 .text_color(if unavailable {
@@ -2378,7 +2416,7 @@ impl FansView {
                 .child(
                     div()
                         .text_size(px(14.0))
-                        .font_family(crate::fonts::UI_FAMILY)
+                        .font_family(crate::fonts::MONO_FAMILY)
                         .text_color(Theme::color(t.mute))
                         .child("RPM"),
                 );
@@ -2536,7 +2574,7 @@ impl Render for FansView {
                     .flex()
                     .gap_2()
                     .p_2()
-                    .rounded_md()
+                    .r_md()
                     .border_1()
                     .border_color(Theme::color(t.ok))
                     .bg(mix_srgb(Theme::color(t.ok), Theme::color(t.panel), 0.10))
@@ -2559,7 +2597,7 @@ impl Render for FansView {
                         .gap_1()
                         .p_2()
                         .px_3()
-                        .rounded_md()
+                        .r_md()
                         .border_1()
                         .border_color(tint(Theme::color(t.warn), 0.40))
                         .bg(mix_srgb(Theme::color(t.warn), Theme::color(t.sunk), 0.08))
@@ -3121,5 +3159,52 @@ mod tests {
         let mixed = mix_srgb(Theme::color(dark.a2), Theme::color(dark.sunk), 0.08);
         assert!(mixed.a > 0.99);
         assert_eq!(tint(Theme::color(dark.down), 0.18).a, 0.18);
+    }
+
+    #[test]
+    fn the_table_columns_share_the_spare_proportionally() {
+        let f = fans(vec![
+            header("cpu_fan", "CPU fan", Some(40), FanMode::Curve { source: TempSource::Cpu, points: vec![] }),
+            header("pump", "Pump", Some(100), FanMode::Fixed { percent: 100 }),
+        ]);
+        let cols = table_columns(&f, 1440.0, 600.0);
+        // Proportional, not equal: the name gets spare x (name / sum).
+        assert!(cols.name > cols.rpm, "name {} rpm {}", cols.name, cols.rpm);
+        assert!(cols.mode >= 37.0 - 0.5, "mode {}", cols.mode);
+        assert!(cols.padding_x == 8.0);
+        let sum = cols.tick + cols.name + cols.rpm + cols.duty + cols.mode + cols.history;
+        assert!((sum - 600.0).abs() < 1.5, "sum {sum}");
+        // Narrow drops the history column, and the Mode header still fits.
+        assert!(narrow_table(999.0));
+        assert!(!narrow_table(1000.0));
+        let narrow = table_columns(&f, 900.0, 600.0);
+        assert!(narrow.history == 0.0);
+    }
+
+    #[test]
+    fn the_remove_key_dims_at_minimum_points() {
+        let len = 2usize;
+        assert_eq!(editor::MIN_POINTS, len);
+        assert!(len <= editor::MIN_POINTS);
+        let len = 3usize;
+        assert!(len > editor::MIN_POINTS);
+    }
+
+    #[test]
+    fn the_hatch_peaks_at_reacts_colour() {
+        use crate::components::fan_curve::HATCH_ALPHA;
+        let down = Theme::color(Theme::dark().down);
+        let panel = Theme::color(Theme::dark().panel);
+        let peak = |c: gpui::Rgba| {
+            (
+                (c.r * HATCH_ALPHA + panel.r * (1.0 - HATCH_ALPHA)) * 255.0,
+                (c.g * HATCH_ALPHA + panel.g * (1.0 - HATCH_ALPHA)) * 255.0,
+                (c.b * HATCH_ALPHA + panel.b * (1.0 - HATCH_ALPHA)) * 255.0,
+            )
+        };
+        let (r, g, b) = peak(down);
+        for (got, want) in [(r, 82.0), (g, 36.0), (b, 39.0)] {
+            assert!((got - want).abs() <= 2.0, "peak ({r:.0},{g:.0},{b:.0}) vs (82,36,39)");
+        }
     }
 }

@@ -34,6 +34,13 @@ pub const MARGIN_BOTTOM: f32 = 46.0;
 pub const ASPECT: f32 = 0.62;
 /// The hot line may not be set below this.
 pub const HOT_MIN: f32 = 40.0;
+/// The hatch strokes put down at full coverage: React's SVG line is 1.5 px
+/// wide with opacity 0.45, but a stroked 1.5 px line on a rotating 45° pattern
+/// never covers one output pixel fully; measured at y400 over the panel
+/// (18,20,23) the line peaks at (82,36,39), which over --down (229,72,77)
+/// solves to an effective alpha of about 0.30. `tint` paints past that here so
+/// the GPUI line peaks at React's.
+pub const HATCH_ALPHA: f32 = 0.302;
 
 /// The plot's box inside the chart.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -441,7 +448,7 @@ pub fn fan_curve_chart(
                         k += step;
                     }
                     if let Ok(path) = c.build() {
-                        window.paint_path(path, tint(p.down, 0.45));
+                        window.paint_path(path, tint(p.down, HATCH_ALPHA));
                     }
                     let mut dashed =
                         gpui::PathBuilder::stroke(px(1.0)).dash_array(&[px(2.0), px(3.0)]);
@@ -536,21 +543,33 @@ pub fn fan_curve_chart(
                     };
                     let anchor_y = plot_bottom - 8.0;
                     let outlines = caption_outlines("Full speed", 14.0);
-                    let mut halo = gpui::PathBuilder::stroke(px(4.0));
+                    // GPUI 0.2.2 strokes with no join control: a 4 px mitered
+                    // halo spikes on sharp glyph corners (SVG's default miter
+                    // limit 4 clips them). An offset-copy halo — a 2 px path
+                    // painted at the five 1 px offsets — gives the same 4 px
+                    // halo without the spikes.
                     let mut fill = gpui::PathBuilder::fill();
                     for contour in &outlines {
                         let first = contour[0];
-                        halo.move_to(at(label_x + first.0, anchor_y + first.1));
                         fill.move_to(at(label_x + first.0, anchor_y + first.1));
                         for point in &contour[1..] {
-                            halo.line_to(at(label_x + point.0, anchor_y + point.1));
                             fill.line_to(at(label_x + point.0, anchor_y + point.1));
                         }
-                        halo.close();
                         fill.close();
                     }
-                    if let Ok(path) = halo.build() {
-                        window.paint_path(path, p.panel);
+                    for (ox, oy) in [(0.0, 0.0), (1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+                        let mut halo = gpui::PathBuilder::stroke(px(2.0));
+                        for contour in &outlines {
+                            let first = contour[0];
+                            halo.move_to(at(label_x + first.0 + ox, anchor_y + first.1 + oy));
+                            for point in &contour[1..] {
+                                halo.line_to(at(label_x + point.0 + ox, anchor_y + point.1 + oy));
+                            }
+                            halo.close();
+                        }
+                        if let Ok(path) = halo.build() {
+                            window.paint_path(path, p.panel);
+                        }
                     }
                     if let Ok(path) = fill.build() {
                         window.paint_path(path, p.down);
@@ -583,12 +602,15 @@ pub fn fan_curve_chart(
                 .child(format!("{pct}%")),
         );
     }
+    // The axis labels: border-box at plot_bottom+5 puts the text baseline
+    // level with React's `y=MARGIN.top+plotH+20` (4 px above plot_bottom+9);
+    // the caption moves up with them (`y=height-6`).
     for temp in [20.0_f32, 40.0, 60.0, 80.0, 100.0] {
         let x = x_of(&geom, temp);
         chart = chart.child(
             div()
                 .absolute()
-                .top(px(plot_bottom + 9.0))
+                .top(px(plot_bottom + 5.0))
                 .left(px(x - 20.0))
                 .w(px(40.0))
                 .text_sm()
@@ -602,7 +624,7 @@ pub fn fan_curve_chart(
     chart = chart.child(
         div()
             .absolute()
-            .top(px(plot_bottom + 29.0))
+            .top(px(plot_bottom + 25.0))
             .left(px(plot_right - 140.0))
             .w(px(140.0))
             .text_sm()

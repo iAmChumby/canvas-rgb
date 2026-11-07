@@ -22,7 +22,7 @@ use gpui::{
     rgba, size,
 };
 
-use crate::theme::Theme;
+use crate::theme::{Theme, TokenRadius};
 
 /// Keep only the characters a number may hold: the digits, one dot, and a
 /// minus at the front. Everything else is dropped, as a number field that
@@ -617,7 +617,7 @@ impl Render for TextInput {
             .w_full()
             .h(px(32.0))
             .px(px(8.0))
-            .rounded_md()
+            .r_md()
             .border_1()
             .border_color(Theme::color(t.line))
             .bg(Theme::color(t.sunk))
