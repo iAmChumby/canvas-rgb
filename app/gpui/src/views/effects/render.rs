@@ -122,19 +122,24 @@ impl EffectsView {
             more
         };
         row = row.child(more);
-        // Import: no file picker exists in GPUI 0.2.2; the button is drawn
-        // disabled until one lands (spine need, reported in .build).
+        // Import: React's FileButton is a hidden <input type=file>, which
+        // needs no tray; GPUI's native path prompt is the same door
+        // (Settings' config import uses it). Disabled while importing or
+        // editing, as React's is.
+        let entity_import = entity.clone();
         row = row.child(button_icon(
             t,
             "eff-import",
             if phone { "" } else { "Import" },
             Variant::Default,
-            true,
+            self.importing || editing,
             true,
             "UploadSimple",
             "",
             16.0,
-            |_, _, _| {},
+            move |_, _, cx| {
+                entity_import.update(cx, |this, cx| this.pick_import_file(cx));
+            },
         ));
         row
     }
@@ -187,7 +192,11 @@ impl EffectsView {
         let selected = Some(&e.id) == self.selected_id().as_ref();
         let running = self.effects.as_ref().and_then(|x| x.active.as_ref()) == Some(&e.id);
         let editing = self.editing();
-        let preview_h = card_w * 10.0 / 16.0;
+        // React `.effect-card-preview` is aspect 16/10 of the card's
+        // content width (inside the 1 px border): (card_w - 2) * 10/16,
+        // not the outer width. Off the outer width the card ran 1 px
+        // taller and every row drifted 2 px further from React's.
+        let preview_h = (card_w - 2.0) * 10.0 / 16.0;
         let mut card = div()
             .id(gpui::SharedString::from(format!("eff-card-{}", e.id)))
             .relative()
@@ -204,7 +213,7 @@ impl EffectsView {
                     .w_full()
                     .h(px(preview_h))
                     .bg(Theme::color(t.sunk))
-                    .child(thumb(t, &e.id, card_w, preview_h, cached(&e.id), false)),
+                    .child(thumb(t, &e.id, card_w - 2.0, preview_h, cached(&e.id), false)),
             );
         if !editing {
             let mut name_box = div().flex().flex_col().gap(px(2.0)).flex_1().min_w(px(0.0));
@@ -213,11 +222,14 @@ impl EffectsView {
                 name_box = name_box.child(
                     div()
                         .text_sm()
+                        .line_height(gpui::relative(1.45))
                         .font_family(crate::fonts::UI_FAMILY)
                         .text_color(Theme::color(t.mute))
                         .child(excerpt.clone()),
                 );
             }
+            // React `.rd-effects .effect-card-meta` padding s2 (8 px all
+            // sides): the scoped rule outranks motion.css's s2 s3.
             let mut meta = div().flex().items_center().gap_2().p_2().child(name_box);
             if html {
                 meta = meta.child(chip(t, "eff-chip-html", "HTML", ChipTone::Html, false, false, false));
@@ -329,6 +341,9 @@ impl EffectsView {
                 } else {
                     360.0
                 };
+                // React `.rd-effects .effect-gallery` gap s2 (8 px): the
+                // scoped rule outranks motion.css's s3. The column count
+                // below divides by the same gap, as the CSS grid does.
                 let gap = 8.0;
                 let gallery_w = if phone { content_w } else { content_w - inspector_w - 16.0 };
                 let min_tile = if content_w <= 999.0 { 140.0 } else { 168.0 };
@@ -352,6 +367,11 @@ impl EffectsView {
                     .id(gpui::SharedString::from("eff-gallery"))
                     .flex()
                     .flex_wrap()
+                    // React `.effect-gallery` has `align-content: start`:
+                    // without it GPUI's default stretch fills the scroll
+                    // pane's height with the lines, and the cards (also
+                    // stretched) grew 55 px of empty meta at 1920.
+                    .content_start()
                     .gap_2()
                     .min_w(px(0.0));
                 for row in &rows {
@@ -410,21 +430,24 @@ impl EffectsView {
                 },
             ));
         }
+        // React `.effect-search`: the icon is absolute inside the field
+        // (left 8, centred on the 32 px height) and the input's text
+        // starts 30 px in. The icon used to sit outside the input box,
+        // pushing the whole field 22 px right.
         let search: gpui::AnyElement = div()
             .relative()
-            .flex()
-            .items_center()
             .flex_1()
             .min_w(px(160.0))
+            .child(self.search_input.clone())
             .child(
                 gpui::svg()
                     .path("icons/MagnifyingGlass.svg")
                     .size(px(14.0))
-                    .flex_none()
+                    .absolute()
+                    .left(px(8.0))
+                    .top(px(9.0))
                     .text_color(Theme::color(t.mute)),
             )
-            .child(div().w(px(8.0)).flex_none())
-            .child(self.search_input.clone())
             .into_any_element();
         let mut row = div().flex().flex_wrap().items_center().gap(px(8.0)).flex_none().min_w(px(0.0)).child(seg).child(cats).child(search);
         if let Some(effects) = &self.effects {
@@ -675,9 +698,10 @@ impl EffectsView {
             let mut col = div().flex().flex_col().min_w(px(0.0));
             let schema = detail.schema.properties.clone();
             let vals = self.values.clone();
-            for def in &schema {
+            let last_at = schema.len().saturating_sub(1);
+            for (at, def) in schema.iter().enumerate() {
                 let value = vals.get(&def.key).cloned().unwrap_or_else(|| def.kind.default_value());
-                col = col.child(self.prop_row(def, &value, entity.clone()));
+                col = col.child(self.prop_row(def, &value, entity.clone(), at == last_at));
             }
             col.into_any_element()
         };
@@ -709,7 +733,9 @@ impl EffectsView {
         div()
             .flex()
             .flex_col()
-            .gap_3()
+            // React the detail is a `.stack`: gap s4 (16 px), not the
+            // inspector column's s3. At 12 the presets sat 8 px high.
+            .gap_4()
             .min_w(px(0.0))
             .child(head)
             .child(strip)
@@ -732,11 +758,16 @@ impl EffectsView {
         let is_stack = selected_id.starts_with("stack:");
         let html = selected_id.starts_with("html:");
         let note_word = if needs_input { "Live frame" } else { "Preview" };
-        let preview = thumb(t, &detail.schema.id, 128.0, 80.0, cached(&detail.schema.id), needs_input);
+        // React `.effect-live` is always the bordered well (border line-2,
+        // radius r-md), whichever picture sits in it.
+        let preview = thumb(t, &detail.schema.id, 128.0, 80.0, cached(&detail.schema.id), true);
         let mut name_row = div().flex().flex_wrap().items_center().gap_2().min_w(px(0.0));
         name_row = name_row.child(
             div()
                 .text_size(px(28.0))
+                // React `h2` line-height 1.25 (a 35 px box at 28 px); the
+                // GPUI default 1.618 grew the head by 10 px.
+                .line_height(gpui::relative(1.25))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .font_family(crate::fonts::UI_FAMILY)
                 .text_color(Theme::color(t.ink))
@@ -795,7 +826,12 @@ impl EffectsView {
             .flex_1()
             .min_w(px(0.0))
             .child(name_row)
-            .child(div().flex().child(activate));
+            .child(div().flex().child(activate))
+            // React's head grid has a second ("key") row with nothing in
+            // it, so the row-gap (s2, 8 px) still lands under the Activate
+            // key and the pane is 3 px taller (83 px, not 80). The spacer
+            // is that empty row: zero height, the flex gap is the row-gap.
+            .child(div().h(px(0.0)));
         // The head favourite is React's `Chip` with the star as its only
         // child (the name lives in its aria-label, which GPUI does not draw).
         let entity_fav = entity.clone();
@@ -835,15 +871,23 @@ impl EffectsView {
                             .min_w(px(0.0))
                             .whitespace_nowrap()
                             .overflow_hidden()
-                            .text_sm()
+                            // React `.rd-eff-desc` inherits the body 15 px
+                            // at 1.45 and ellipsizes ("One flat color across
+                            // the whole canv…"); at 14 px the whole sentence
+                            // fitted and "Preview" sat at the edge. The cut
+                            // is measured (`ellipsize`), since GPUI's
+                            // truncate() hard-cuts without the ellipsis.
+                            .text_size(px(15.0))
+                            .line_height(gpui::relative(1.45))
                             .font_family(crate::fonts::UI_FAMILY)
                             .text_color(Theme::color(t.dim))
-                            .child(detail.schema.description.clone()),
+                            .child(ellipsized_desc(window, self, &detail.schema.description, note_word)),
                     )
                     .child(
                         div()
                             .flex_none()
                             .text_sm()
+                            .line_height(gpui::relative(1.45))
                             .font_family(crate::fonts::UI_FAMILY)
                             .text_color(Theme::color(t.mute))
                             .child(note_word.to_string()),
@@ -965,7 +1009,7 @@ impl EffectsView {
         panel
     }
 
-    fn prop_row(&self, def: &canvas_proto::props::PropertyDef, value: &canvas_proto::props::PropValue, entity: Entity) -> impl IntoElement {
+    fn prop_row(&self, def: &canvas_proto::props::PropertyDef, value: &canvas_proto::props::PropValue, entity: Entity, last: bool) -> impl IntoElement {
         let t = &self.theme;
         let narrow = self.width <= 720.0;
         let kind_name = match &def.kind {
@@ -1023,40 +1067,67 @@ impl EffectsView {
             toggle_color,
             toggle_select,
         );
-        if narrow && kind_name != "number" {
+        // React `.rd-eff-inspector .prop-item`: min-height 40, padding s1
+        // (4 px) 0, and no divider under the last row (`.prop-item:last-child`).
+        let border = if last {
             div()
+        } else {
+            div().border_b_1().border_color(Theme::color(t.line))
+        };
+        let _ = border;
+        if narrow && kind_name != "number" {
+            let mut row = div()
                 .flex()
                 .flex_col()
                 .gap_2()
                 .min_h(px(44.0))
-                .py_1()
-                .border_b_1()
-                .border_color(Theme::color(t.line))
-                .child(label_el)
-                .child(control_el)
-        } else if kind_name == "number" || kind_name == "hue" || kind_name == "angle" {
-            div()
+                .py_1();
+            if !last {
+                row = row.border_b_1().border_color(Theme::color(t.line));
+            }
+            row.child(label_el).child(control_el)
+        } else if kind_name == "number" {
+            // React number: minmax(64,96) label, 1fr slider, 64 num, gap 12.
+            let mut row = div()
                 .flex()
                 .items_center()
                 .gap_3()
-                .min_h(px(52.0))
-                .py_1()
-                .border_b_1()
-                .border_color(Theme::color(t.line))
-                .child(div().w(px(96.0)).flex_none().child(label_el))
+                .min_h(px(40.0))
+                .py_1();
+            if !last {
+                row = row.border_b_1().border_color(Theme::color(t.line));
+            }
+            row.child(div().w(px(96.0)).flex_none().child(label_el))
                 .child(div().flex().items_center().gap_3().flex_1().min_w(px(0.0)).child(control_el))
-        } else {
-            div()
+        } else if kind_name == "hue" || kind_name == "angle" {
+            // React hue/angle: minmax(64,96) label, 1fr control, gap 16.
+            let mut row = div()
                 .flex()
                 .items_center()
-                .justify_between()
-                .gap_2()
-                .min_h(px(52.0))
-                .py_1()
-                .border_b_1()
-                .border_color(Theme::color(t.line))
-                .child(div().w(px(140.0)).flex_none().child(label_el))
-                .child(div().flex().items_center().gap_2().justify_end().flex_1().min_w(px(0.0)).child(control_el))
+                .gap(px(16.0))
+                .min_h(px(40.0))
+                .py_1();
+            if !last {
+                row = row.border_b_1().border_color(Theme::color(t.line));
+            }
+            row.child(div().w(px(96.0)).flex_none().child(label_el))
+                .child(div().flex().items_center().gap_3().flex_1().min_w(px(0.0)).child(control_el))
+        } else {
+            // React `.prop-item`: minmax(120,170) label column, 16 px column
+            // gap, and the control at the start of its column (`.prop-control`
+            // has no justify-end: the colour swatch sat at the panel's right
+            // edge here, 49 px right of React's).
+            let mut row = div()
+                .flex()
+                .items_center()
+                .gap(px(16.0))
+                .min_h(px(40.0))
+                .py_1();
+            if !last {
+                row = row.border_b_1().border_color(Theme::color(t.line));
+            }
+            row.child(div().w(px(170.0)).flex_none().child(label_el))
+                .child(div().flex().items_center().gap_2().flex_1().min_w(px(0.0)).child(control_el))
         }
     }
 
@@ -1334,6 +1405,28 @@ impl EffectsView {
     }
 }
 
+/// The detail description cut to the width React's one-line ellipsis
+/// leaves it: the inspector's inner width less the note ("Preview" /
+/// "Live frame", 14 px) and the 12 px gap. The inspector width follows
+/// `render`'s own formula (360 px, 400 px from a 1500 px container up,
+/// full width on a phone).
+fn ellipsized_desc(window: &Window, view: &EffectsView, description: &str, note_word: &str) -> String {
+    let width = view.width;
+    let phone = width <= 720.0;
+    let content_w = width - if phone { 0.0 } else if width < 1280.0 { 64.0 } else { 200.0 } - if phone { 32.0 } else { 48.0 };
+    let inspector_w = if content_w < 640.0 {
+        content_w
+    } else if content_w >= 1500.0 {
+        400.0
+    } else {
+        360.0
+    };
+    let inner_w = inspector_w - 26.0;
+    let note_w = text_width(window, note_word, 14.0, gpui::FontWeight::NORMAL, crate::fonts::UI_FAMILY);
+    let max_w = (inner_w - note_w - 12.0).max(0.0);
+    crate::shell::ellipsize(window, description, max_w, 15.0, gpui::FontWeight::NORMAL, crate::fonts::UI_FAMILY)
+}
+
 /// A card name with the matched letters marked (React `Highlighted`): the
 /// mark is the live accent at 20%, so `live_soft` (16%) is the nearest
 /// token value the theme parser serves.
@@ -1343,7 +1436,10 @@ fn marked_name(t: &Theme, name: &str, ranges: &[(usize, usize)]) -> impl IntoEle
         .items_center()
         .whitespace_nowrap()
         .overflow_hidden()
-        .text_sm()
+        // React `.effect-card-name` inherits the body 15 px at 1.45,
+        // semibold; 14 px at the GPUI default 1.618 sat 1-4 px off.
+        .text_size(px(15.0))
+        .line_height(gpui::relative(1.45))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .font_family(crate::fonts::UI_FAMILY)
         .text_color(Theme::color(t.ink));

@@ -112,6 +112,9 @@ pub struct TextInput {
     /// The search box wears React's small radius (`.effect-search input`
     /// `r-sm`); a number field wears the input's `r-md`.
     radius_sm: bool,
+    /// The field's left inset: 8 px everywhere except the effects search,
+    /// whose icon sits inside it (React's `padding-left: 30px`).
+    left_pad: f32,
     /// Shown dimmed while nothing is typed (the search placeholder).
     placeholder: Option<SharedString>,
     /// Keeps the blur listener alive.
@@ -153,6 +156,7 @@ impl TextInput {
             on_escape: None,
             ui_left: false,
             radius_sm: false,
+            left_pad: 8.0,
             placeholder: None,
             blur: None,
         }
@@ -164,6 +168,13 @@ impl TextInput {
         self.ui_left = true;
         self.radius_sm = true;
         self.placeholder = placeholder.map(SharedString::from);
+        cx.notify();
+    }
+
+    /// The left inset (the effects search's icon sits inside the field at
+    /// 8 px, so its text starts 30 px in, as React's `padding-left` does).
+    pub fn set_left_pad(&mut self, pad: f32, cx: &mut Context<Self>) {
+        self.left_pad = pad;
         cx.notify();
     }
 
@@ -688,7 +699,8 @@ impl Render for TextInput {
             .justify_end()
             .w_full()
             .h(px(32.0))
-            .px(px(8.0));
+            .pl(px(self.left_pad))
+            .pr(px(8.0));
         field = if self.radius_sm { field.r_sm() } else { field.r_md() };
         field = field
             .border_1()

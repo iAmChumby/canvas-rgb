@@ -1,7 +1,8 @@
 //! `Chip`, after `app/web/src/components/Chip.tsx` and the `.chip` rules in
 //! `app.css` (28 px tall, 10 px side padding, line border, small radius,
 //! dim text in 14 px medium; pressed wears the live accent and a live-soft
-//! fill; HTML wears `--a2`, Stack wears `--a3`).
+//! fill; the HTML/Stack words wear `--a2`/`--a3` while hardware.css's later
+//! `.chip` keeps the border line-2 and the raised face).
 //!
 //! The LED `.chip::before` (5 px dot) draws only as a state: lit means the
 //! chip is pressed, amber means the values on the lights differ from the
@@ -162,8 +163,12 @@ fn chip_inner(
     // the underlying rule the skin overrides.
     let transparent = gpui::Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
     let (fg, border, bg) = match tone {
-        ChipTone::Html => (Theme::color(t.a2), Theme::color(t.a2), transparent),
-        ChipTone::Stack => (Theme::color(t.a3), Theme::color(t.a3), transparent),
+        // React `.chip-html`/`.chip-stack` colour the words `--a2`/`--a3`,
+        // but hardware.css's later `.chip` (border line-2, raised face)
+        // outranks their border colour, so the badge reads as a neutral
+        // grey chip with accent words, not an accent-outlined one.
+        ChipTone::Html => (Theme::color(t.a2), Theme::color(t.line_2), Theme::color(t.raised)),
+        ChipTone::Stack => (Theme::color(t.a3), Theme::color(t.line_2), Theme::color(t.raised)),
         ChipTone::Plain if pressed => (Theme::color(t.ink), Theme::color(t.line_2), raised_press(t)),
         _ => (Theme::color(t.dim), Theme::color(t.line), transparent),
     };

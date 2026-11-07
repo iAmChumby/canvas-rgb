@@ -22,6 +22,13 @@
 //   UI_CAPTURE_API_BASE  daemon base URL (default http://127.0.0.1:19430)
 //   UI_CAPTURE_TOKEN_FILE / FAKE_TOKEN_FILE  test token path
 //       (default .build/fake-home/api-token)
+//   UI_CAPTURE_FREEZE=1  freeze every thumbnail loop on frame 0, the frame
+//       the GPUI editor always draws (its settle probe needs still frames).
+//       Implemented as the browser's reduced-motion setting, which
+//       `useMotionOff` already honours: `Thumb` and `EffectPreview` then
+//       paint frame 0 and never advance, so layout can be diffed against
+//       the GPUI frame without animated content in the way. Off by default:
+//       the animated capture stays the record of how the page looks.
 
 import { createRequire } from "node:module";
 import http from "node:http";
@@ -40,6 +47,7 @@ const CAPTURE_PORT = Number(process.env.UI_CAPTURE_PORT ?? process.env.CANVAS_RG
 const OUT_DIR = path.resolve(root, process.env.UI_CAPTURE_OUT ?? ".build/ui-capture");
 const WEB_OUT = path.resolve(root, "app/web/out");
 const DAEMON_BASE = process.env.UI_CAPTURE_API_BASE ?? "http://127.0.0.1:19430";
+const FREEZE = process.env.UI_CAPTURE_FREEZE === "1";
 if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(DAEMON_BASE)) {
   throw new Error(`UI_CAPTURE_API_BASE must be http://127.0.0.1:<port> (the token is sent there), not ${DAEMON_BASE}`);
 }
@@ -65,6 +73,29 @@ const VIEWPORTS = [
 ];
 
 const THEMES = ["dark", "light"];
+
+// Optional subsets for a focused run (comma lists); unset means the full
+// matrix, exactly as before.
+const VIEW_FILTER = (process.env.UI_CAPTURE_VIEWS ?? "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+const VIEWPORT_FILTER = (process.env.UI_CAPTURE_VIEWPORTS ?? "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+const THEME_FILTER = (process.env.UI_CAPTURE_THEMES ?? "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+const ACTIVE_VIEWS = VIEW_FILTER.length ? VIEWS.filter((v) => VIEW_FILTER.includes(v.name)) : VIEWS;
+const ACTIVE_VIEWPORTS = VIEWPORT_FILTER.length
+  ? VIEWPORTS.filter((v) => VIEWPORT_FILTER.includes(`${v.w}x${v.h}`))
+  : VIEWPORTS;
+const ACTIVE_THEMES = THEME_FILTER.length ? THEMES.filter((t) => THEME_FILTER.includes(t)) : THEMES;
+if (!ACTIVE_VIEWS.length || !ACTIVE_VIEWPORTS.length || !ACTIVE_THEMES.length) {
+  throw new Error("a UI_CAPTURE_* filter matched nothing (check the names)");
+}
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -342,18 +373,20 @@ async function main() {
   const server = await serveStatic(CAPTURE_PORT, WEB_OUT);
   const base = `http://127.0.0.1:${CAPTURE_PORT}`;
   console.log(`ui-capture: serving ${WEB_OUT} on ${base}`);
-  console.log(`ui-capture: daemon ${DAEMON_BASE} (${VIEWS.length} views x ${VIEWPORTS.length} viewports x ${THEMES.length} themes)`);
+  console.log(`ui-capture: daemon ${DAEMON_BASE} (${ACTIVE_VIEWS.length} views x ${ACTIVE_VIEWPORTS.length} viewports x ${ACTIVE_THEMES.length} themes)`);
   const browser = await chromium.launch({ headless: true });
   const shots = [];
   try {
-    for (const viewport of VIEWPORTS) {
-      for (const theme of THEMES) {
+    for (const viewport of ACTIVE_VIEWPORTS) {
+      for (const theme of ACTIVE_THEMES) {
         const context = await browser.newContext({
           viewport: { width: viewport.w, height: viewport.h },
           deviceScaleFactor: 1,
+          // UI_CAPTURE_FREEZE=1: hold every thumbnail loop on frame 0.
+          ...(FREEZE ? { reducedMotion: "reduce" } : {}),
         });
         const page = await context.newPage();
-        for (const view of VIEWS) {
+        for (const view of ACTIVE_VIEWS) {
           process.stderr.write(`shoot ${view.name} ${viewport.w}x${viewport.h} ${theme} ...\n`);
           shots.push(await shootPage(page, base, view, viewport, theme, DAEMON_BASE, token));
         }
@@ -381,9 +414,9 @@ async function main() {
     base,
     daemonBase: DAEMON_BASE,
     capturePort: CAPTURE_PORT,
-    views: VIEWS.map((v) => v.name),
-    viewports: VIEWPORTS,
-    themes: THEMES,
+    views: ACTIVE_VIEWS.map((v) => v.name),
+    viewports: ACTIVE_VIEWPORTS,
+    themes: ACTIVE_THEMES,
     shotCount: shots.length,
     failedShots: failed.length,
     pageErrors: shots.reduce((n, s) => n + s.pageErrors.length, 0),

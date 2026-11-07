@@ -267,7 +267,11 @@ pub struct EffectsView {
 impl EffectsView {
     pub fn new(theme: Theme, cx: &mut Context<Self>) -> Self {
         let search_input = cx.new(|cx| {
-            TextInput::new("", false, 0.0, 0.0, 0, theme, std::rc::Rc::new(|_, _, _| {}), cx)
+            let mut input = TextInput::new("", false, 0.0, 0.0, 0, theme, std::rc::Rc::new(|_, _, _| {}), cx);
+            // The icon sits inside the field (React `.effect-search`), so
+            // the text starts 30 px in.
+            input.set_left_pad(30.0, cx);
+            input
         });
         let mut view = EffectsView {
             theme,
@@ -709,10 +713,53 @@ impl EffectsView {
         .detach();
     }
 
-    /// Sends an HTML effect to the daemon (`sendImport`). Without a file
-    /// picker there is no way to reach this from the page; the import note
-    /// and the replace flow are kept, the button stays disabled, and the
-    /// divergence is reported.
+    /// Picks an HTML effect file with the native path prompt (React's
+    /// hidden `<input type=file>` needs no tray; GPUI 0.2.2's
+    /// `prompt_for_paths` carries no extension filter, so the pick is
+    /// unfiltered, unlike the browser's `accept=".html,text/html"`) and
+    /// sends it (`sendImport`).
+    fn pick_import_file(&mut self, cx: &mut Context<Self>) {
+        if self.importing || self.editing() {
+            return;
+        }
+        cx.spawn(async move |view, cx| {
+            let rx = match cx.update(|cx| {
+                cx.prompt_for_paths(gpui::PathPromptOptions {
+                    files: true,
+                    directories: false,
+                    multiple: false,
+                    prompt: Some("Import an .html effect".into()),
+                })
+            }) {
+                Ok(rx) => rx,
+                Err(_) => return,
+            };
+            let paths = match rx.await {
+                Ok(Ok(Some(paths))) if !paths.is_empty() => paths,
+                _ => return,
+            };
+            let path = paths[0].clone();
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let html = match std::fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(e) => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.import_error = Some(e.to_string());
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let _ = view.update(cx, |this, cx| this.send_import(&name, &html, false, cx));
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Sends an HTML effect to the daemon (`sendImport`).
     #[allow(dead_code)]
     fn send_import(&mut self, file_name: &str, html: &str, replace: bool, cx: &mut Context<Self>) {
         self.importing = true;

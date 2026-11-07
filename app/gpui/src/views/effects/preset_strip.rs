@@ -169,7 +169,17 @@ pub fn render(
         chips = chips.child(preset_key(t, entity.clone(), p, false, running, built_in));
     }
     if !built_in.is_empty() && (!user.is_empty() || state.saving.is_some()) {
-        chips = chips.child(div().w(px(1.0)).h(px(20.0)).flex_none().bg(Theme::color(t.line_2)));
+        // React `.preset-rule`: 1 px, margin 4 px on every side (20 px of
+        // rule in a 28 px row, 8 px of space each side beyond the gap).
+        chips = chips.child(
+            div()
+                .w(px(1.0))
+                .h(px(20.0))
+                .flex_none()
+                .mx(px(4.0))
+                .my(px(4.0))
+                .bg(Theme::color(t.line_2)),
+        );
     }
     for p in user {
         chips = chips.child(preset_key(t, entity.clone(), p, true, running, built_in));
