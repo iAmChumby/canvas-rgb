@@ -149,6 +149,132 @@ pub fn select(
     col
 }
 
+/// A grouped select (the audio source picker): `groups` are
+/// (heading, options) pairs; an empty heading draws no heading row.
+/// `disabled` draws the trigger at half strength with no list.
+#[allow(clippy::too_many_arguments)]
+pub fn select_grouped(
+    t: &Theme,
+    id: &str,
+    groups: &[(&str, &[(&str, &str)])],
+    value: &str,
+    open: bool,
+    disabled: bool,
+    full_width: bool,
+    on_toggle: impl Fn(&mut gpui::Window, &mut gpui::App) + Clone + 'static,
+    on_pick: impl Fn(String, &mut gpui::Window, &mut gpui::App) + Clone + 'static,
+) -> impl IntoElement {
+    let flat: Vec<(&str, &str)> = groups.iter().flat_map(|(_, opts)| opts.iter().copied()).collect();
+    let mut value_grid = div().grid().flex_1().min_w(px(0.0)).text_left();
+    for (v, l) in &flat {
+        let label = div()
+            .col_start(1)
+            .row_start(1)
+            .whitespace_nowrap()
+            .child(l.to_string());
+        let label = if *v == value { label } else { label.invisible() };
+        value_grid = value_grid.child(label);
+    }
+    let trigger = div()
+        .id(gpui::SharedString::from(id.to_string()))
+        .relative()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .min_w(px(160.0))
+        .h(px(32.0))
+        .pl_3()
+        .pr(px(10.0))
+        .text_color(Theme::color(t.ink))
+        .text_sm()
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .font_family(crate::fonts::UI_FAMILY)
+        .child(crate::components::button::skirt_layers(
+            t.skirt(),
+            10.0,
+            32.0,
+            Theme::color(t.raised),
+            if open { t.live() } else { Theme::color(t.line_2) },
+        ))
+        .child(value_grid)
+        .child(
+            gpui::svg()
+                .path("icons/CaretDown-bold.svg")
+                .size(px(14.0))
+                .flex_none()
+                .text_color(Theme::color(t.mute)),
+        );
+    let trigger = if disabled {
+        trigger.opacity(0.5)
+    } else {
+        let toggle = on_toggle.clone();
+        trigger.cursor_pointer().on_click(move |_, window, cx| toggle(window, cx))
+    };
+    let trigger = if full_width { trigger.w_full() } else { trigger };
+    let mut col = div()
+        .id(gpui::SharedString::from(format!("{id}-col")))
+        .flex()
+        .flex_col()
+        .child(trigger);
+    if full_width {
+        col = col.w_full();
+    }
+    if open && !disabled {
+        let mut list = div()
+            .id(gpui::SharedString::from(format!("{id}-list")))
+            .flex()
+            .flex_col()
+            .absolute()
+            .mt(px(38.0))
+            .min_w(px(160.0))
+            .p(px(4.0))
+            .r_lg()
+            .border_1()
+            .border_color(Theme::color(t.line_2))
+            .bg(Theme::color(t.panel));
+        for (heading, opts) in groups {
+            if !heading.is_empty() {
+                let heading_el = div()
+                    .px(px(10.0))
+                    .pt(px(6.0))
+                    .pb(px(2.0))
+                    .text_sm()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .font_family(crate::fonts::UI_FAMILY)
+                    .text_color(Theme::color(t.mute))
+                    .child(heading.to_string());
+                list = list.child(heading_el);
+            }
+            for (v, l) in *opts {
+                let pick = on_pick.clone();
+                let v_owned = v.to_string();
+                let is_chosen = *v == value;
+                let row = div()
+                    .id(gpui::SharedString::from(format!("{id}-option-{v}")))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .h(px(32.0))
+                    .px(px(10.0))
+                    .r_sm()
+                    .text_sm()
+                    .font_family(crate::fonts::UI_FAMILY)
+                    .text_color(Theme::color(t.ink))
+                    .cursor_pointer()
+                    .child(l.to_string())
+                    .child(if is_chosen { "✓" } else { "" });
+                let row = if is_chosen { row.bg(Theme::color(t.raised)) } else { row };
+                list = list.child(row.on_click(move |_, window, cx| {
+                    pick(v_owned.clone(), window, cx)
+                }));
+            }
+        }
+        col = col.child(list);
+    }
+    col
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

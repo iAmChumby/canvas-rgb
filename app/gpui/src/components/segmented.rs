@@ -98,6 +98,75 @@ pub fn segmented(
     row
 }
 
+/// A segmented control that cannot be pressed (`disabled`): the well and
+/// the checked thumb draw at half strength, as React's disabled `.seg`.
+#[allow(dead_code)]
+pub fn segmented_disabled(
+    t: &Theme,
+    id: &str,
+    options: &[(&str, &str)],
+    selected: &str,
+    on_change: impl Fn(String, &mut Window, &mut gpui::App) + Clone + 'static,
+) -> impl IntoElement {
+    let mut row = div()
+        .id(gpui::SharedString::from(id.to_string()))
+        .relative()
+        .flex()
+        .gap(px(2.0))
+        .p(px(2.0))
+        .r_md()
+        .border_1()
+        .border_color(Theme::color(t.line))
+        .bg(Theme::color(t.sunk))
+        .opacity(0.5)
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .right_0()
+                .h(px(1.0))
+                .bg(t.well()),
+        );
+    for (value, label) in options {
+        let is_selected = *value == selected;
+        let family = if label.chars().any(|c| c.is_ascii_digit()) {
+            crate::fonts::MONO_FAMILY
+        } else {
+            crate::fonts::UI_FAMILY
+        };
+        let dot_color = if is_selected { t.live() } else { Theme::color(t.dot) };
+        let dot = div().size(px(5.0)).rounded_full().bg(dot_color);
+        let cell = div()
+            .id(gpui::SharedString::from(format!("{id}-{value}")))
+            .relative()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .h(px(26.0))
+            .px(px(10.0))
+            .text_sm()
+            .font_family(family)
+            .font_weight(gpui::FontWeight::MEDIUM);
+        let cell = if is_selected {
+            cell.text_color(Theme::color(t.ink)).child(
+                crate::components::button::skirt_layers(
+                    t.skirt(),
+                    7.0,
+                    26.0,
+                    Theme::color(t.raised),
+                    Theme::color(t.line_2),
+                ),
+            )
+        } else {
+            cell.r_sm().text_color(Theme::color(t.dim))
+        };
+        row = row.child(cell.child(dot).child(label.to_string()));
+    }
+    let _ = on_change;
+    row
+}
+
 /// One option's index, for the roving-tab discussion in the parity checklist.
 #[allow(dead_code)]
 pub fn index_of(options: &[&str], value: &str) -> Option<usize> {

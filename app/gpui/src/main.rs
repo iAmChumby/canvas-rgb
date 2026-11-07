@@ -213,6 +213,19 @@ fn spawn_ipc_reader() -> std::sync::mpsc::Receiver<TrayToEditor> {
     rx
 }
 
+/// `switch-editor` to the tray over stdio (the Editor radio in Settings).
+/// Only when the tray launched us with a piped stdin; standalone runs
+/// have no tray to swap with.
+pub fn send_switch_editor(to: canvas_proto::tauri::EditorChoice) {
+    if !stdin_is_a_pipe() {
+        return;
+    }
+    let mut out = std::io::stdout();
+    let line = serde_json::to_string(&EditorToTray::SwitchEditor { to }).unwrap_or_default();
+    let _ = writeln!(out, "{line}");
+    let _ = out.flush();
+}
+
 fn send_ready() {
     let mut out = std::io::stdout();
     let line = serde_json::to_string(&EditorToTray::Ready).unwrap_or_default();

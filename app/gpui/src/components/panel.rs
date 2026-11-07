@@ -45,6 +45,59 @@ pub fn tracked_title(
     tracked_text_lh(text, font_size, tracking_em, weight, family, color, 1.25)
 }
 
+/// A tracked title that stays one line (React `.audio-compact
+/// .panel-title`: `flex: none; white-space: nowrap`).
+pub fn tracked_title_nowrap(
+    text: &str,
+    font_size: f32,
+    tracking_em: f32,
+    weight: FontWeight,
+    family: &'static str,
+    color: Rgba,
+) -> gpui::AnyElement {
+    tracked_text_lh_nowrap(text, font_size, tracking_em, weight, family, color, 1.25)
+}
+
+fn tracked_text_lh_nowrap(
+    text: &str,
+    font_size: f32,
+    tracking_em: f32,
+    weight: FontWeight,
+    family: &'static str,
+    color: Rgba,
+    line_height: f32,
+) -> gpui::AnyElement {
+    let tracking = px(font_size * tracking_em);
+    let space_w = px(font_size * 0.6) + tracking;
+    let mut row = div()
+        .flex()
+        .items_center()
+        .whitespace_nowrap()
+        .text_size(px(font_size))
+        .line_height(gpui::relative(line_height))
+        .font_weight(weight)
+        .font_family(family)
+        .text_color(color);
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let n = words.len();
+    for (wi, word) in words.iter().enumerate() {
+        let mut cell = div()
+            .flex()
+            .items_center()
+            .gap(tracking)
+            .whitespace_nowrap()
+            .flex_none();
+        for ch in word.chars() {
+            cell = cell.child(ch.to_string());
+        }
+        row = row.child(cell);
+        if wi + 1 < n {
+            row = row.child(div().w(space_w).h(px(1.0)).flex_none());
+        }
+    }
+    row.into_any_element()
+}
+
 fn tracked_text_lh(
     text: &str,
     font_size: f32,
@@ -179,6 +232,111 @@ pub fn field(
                 .justify_end()
                 .child(control),
         )
+}
+
+/// A row field with a hint under the label (React `Field` with `hint`):
+/// the label column holds the 15 px label over the 14 px mute hint.
+pub fn field_hint(
+    t: &Theme,
+    id: &str,
+    label: &str,
+    hint: Option<&str>,
+    control: impl IntoElement,
+    last: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let el = div()
+        .id(gpui::SharedString::from(id.to_string()))
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .min_h(px(48.0))
+        .py_2();
+    let el = if last { el } else { el.border_b_1().border_color(Theme::color(t.line)) };
+    // React `.field-label`: a flex column, flex 1 1 140px.
+    let mut label_col = div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w(px(140.0))
+        .child(
+            div()
+                .text_size(px(15.0))
+                .font_family(crate::fonts::UI_FAMILY)
+                .text_color(Theme::color(t.ink))
+                .line_height(gpui::relative(1.45))
+                .child(label.to_string()),
+        );
+    if let Some(h) = hint {
+        label_col = label_col.child(
+            div()
+                .text_sm()
+                .font_family(crate::fonts::UI_FAMILY)
+                .text_color(Theme::color(t.mute))
+                .line_height(gpui::relative(1.45))
+                .child(h.to_string()),
+        );
+    }
+    el.child(label_col).child(
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .justify_end()
+            .child(control),
+    )
+}
+
+/// A stacked field with a hint (the phone form of `field_hint`): label
+/// over control, control at the start and full width.
+pub fn field_stack_hint(
+    t: &Theme,
+    id: &str,
+    label: &str,
+    hint: Option<&str>,
+    control: impl IntoElement,
+    last: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let el = div()
+        .id(gpui::SharedString::from(id.to_string()))
+        .flex()
+        .flex_col()
+        // React `.field` wraps with `gap: var(--s2) var(--s4)`: the
+        // stacked rows sit 8 px apart.
+        .gap_2()
+        .min_h(px(48.0))
+        .py_2();
+    let el = if last { el } else { el.border_b_1().border_color(Theme::color(t.line)) };
+    let mut label_col = div()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .text_size(px(15.0))
+                .font_family(crate::fonts::UI_FAMILY)
+                .text_color(Theme::color(t.ink))
+                .line_height(gpui::relative(1.45))
+                .child(label.to_string()),
+        );
+    if let Some(h) = hint {
+        label_col = label_col.child(
+            div()
+                .text_sm()
+                .font_family(crate::fonts::UI_FAMILY)
+                .text_color(Theme::color(t.mute))
+                .line_height(gpui::relative(1.45))
+                .child(h.to_string()),
+        );
+    }
+    el.child(label_col).child(
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .w_full()
+            .child(control),
+    )
 }
 
 /// A labelled field in stacked form (wide two-column controls and the

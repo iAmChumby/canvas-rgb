@@ -48,6 +48,12 @@ pub const ICONS: &[&str] = &[
     "Plus",
     "Check-bold",
     "Minus-bold",
+    // The Settings page (#205).
+    "CompassTool",
+    "DownloadSimple",
+    "UploadSimple",
+    "FolderOpen",
+    "SpeakerHigh",
 ];
 
 fn icon_svg(name: &str) -> Option<&'static str> {
@@ -87,6 +93,11 @@ fn icon_svg(name: &str) -> Option<&'static str> {
         "Plus" => include_str!("../assets/icons/Plus.svg"),
         "Check-bold" => include_str!("../assets/icons/Check-bold.svg"),
         "Minus-bold" => include_str!("../assets/icons/Minus-bold.svg"),
+        "CompassTool" => include_str!("../assets/icons/CompassTool.svg"),
+        "DownloadSimple" => include_str!("../assets/icons/DownloadSimple.svg"),
+        "UploadSimple" => include_str!("../assets/icons/UploadSimple.svg"),
+        "FolderOpen" => include_str!("../assets/icons/FolderOpen.svg"),
+        "SpeakerHigh" => include_str!("../assets/icons/SpeakerHigh.svg"),
         _ => return None,
     })
 }

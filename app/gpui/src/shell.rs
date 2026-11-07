@@ -34,10 +34,11 @@ use crate::components::slider::slider;
 use crate::theme::{Theme, TokenRadius};
 use crate::views::displays::DisplaysView;
 use crate::views::fans::FansView;
+use crate::views::settings::{SettingsView, ThemeCell};
 
 /// Measure a single line of text in the UI/mono face at `size` px, using
 /// GPUI's own text layout so the truncation below matches what is drawn.
-fn text_width(window: &Window, text: &str, size: f32, weight: gpui::FontWeight, family: &str) -> f32 {
+pub(crate) fn text_width(window: &Window, text: &str, size: f32, weight: gpui::FontWeight, family: &str) -> f32 {
     let font = gpui::Font {
         family: family.to_string().into(),
         weight,
@@ -62,7 +63,7 @@ fn text_width(window: &Window, text: &str, size: f32, weight: gpui::FontWeight, 
 /// in this version, so the cut is computed here from measured widths: the
 /// longest prefix that fits with a "…" appended. Returns the text unchanged
 /// when it already fits.
-fn ellipsize(
+pub(crate) fn ellipsize(
     window: &Window,
     text: &str,
     max_w: f32,
@@ -229,6 +230,11 @@ pub struct Shell {
     pub displays: gpui::Entity<DisplaysView>,
     /// The Fans page (#204). The shell builds it, so `main.rs` stays as it is.
     pub fans_view: gpui::Entity<FansView>,
+    /// The Settings page (#205).
+    pub settings_view: gpui::Entity<SettingsView>,
+    /// The theme the shell and the settings view share (the Appearance
+    /// radio writes it; every render reads it).
+    pub theme_cell: ThemeCell,
     pub width: f32,
     // Rail data, polled with the status (React store slow tick + rail poll).
     pub devices: Option<DevicesResponse>,
@@ -253,6 +259,13 @@ impl Shell {
     ) -> Self {
         let failures = if status_error.is_some() { 2 } else { 0 };
         let fans_view = cx.new(|cx| FansView::new(theme, cx));
+        let theme_cell: ThemeCell = std::sync::Arc::new(std::sync::Mutex::new(theme));
+        let shell_entity = cx.entity();
+        let settings_visible = page == "settings";
+        let settings_cell = theme_cell.clone();
+        let settings_view = cx.new(|cx| {
+            SettingsView::new(theme, settings_cell, Some(shell_entity), settings_visible, cx)
+        });
         let mut shell = Shell {
             theme,
             page,
@@ -261,6 +274,8 @@ impl Shell {
             status_failures: failures,
             displays,
             fans_view,
+            settings_view,
+            theme_cell,
             width: 1280.0,
             devices: None,
             displays_count: None,
@@ -281,6 +296,15 @@ impl Shell {
         if is_valid_page(page) {
             self.page = page.to_string();
         }
+    }
+
+    /// After a navigate: tell the settings view whether it is on screen
+    /// (its audio test lease runs only there).
+    fn sync_settings_visible(&self, cx: &mut Context<Self>) {
+        let visible = self.page == "settings";
+        self.settings_view.update(cx, |s, _| {
+            s.visible = visible;
+        });
     }
 
     /// One poll of every rail/strip answer (status fast, the rest slow in
@@ -614,7 +638,10 @@ impl Shell {
         let entity = cx.entity();
         let target = page.to_string();
         row.cursor_pointer().on_click(move |_, _, cx| {
-            entity.update(cx, |this, _| this.navigate(&target));
+            entity.update(cx, |this, cx| {
+                this.navigate(&target);
+                this.sync_settings_visible(cx);
+            });
         })
     }
 
@@ -1416,6 +1443,9 @@ impl Shell {
         if self.page == "fans" {
             return self.fans_view.clone().into_any_element();
         }
+        if self.page == "settings" {
+            return self.settings_view.clone().into_any_element();
+        }
         // Every other page shows the placeholder until it is ported.
         div()
             .flex()
@@ -1536,12 +1566,26 @@ impl Shell {
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.width = f32::from(window.window_bounds().get_bounds().size.width);
+        // The Appearance radio writes the shared cell; every view follows.
+        let shared = *self.theme_cell.lock().unwrap();
+        if shared != self.theme {
+            self.theme = shared;
+            let displays = self.displays.clone();
+            let fans_view = self.fans_view.clone();
+            displays.update(cx, |d, _| d.theme = shared);
+            fans_view.update(cx, |f, _| f.theme = shared);
+        }
         let t = &self.theme;
         let phone = self.width <= 720.0;
         let phone_pad_top = px(16.0);
         let content = div()
             .flex_1()
             .flex_col()
+            // A page taller than the window must not push the dock off
+            // it (React's phone page scrolls as a document; GPUI
+            // clips the content box, the dock stays fixed).
+            .min_h(px(0.0))
+            .overflow_hidden()
             .p_4()
             .child(self.page_content());
         let content = if phone {
@@ -1554,6 +1598,9 @@ impl Render for Shell {
             .flex()
             .flex_col()
             .flex_1()
+            // A page taller than the window must shrink this column
+            // (the dock stays on screen; the content clips).
+            .min_h(px(0.0))
             .child(self.strip(window, cx))
             .child(content);
         let body = if phone {

@@ -58,6 +58,47 @@ pub fn toggle(
     }
 }
 
+/// A switch that cannot be pressed (`disabled`): the track and knob draw
+/// at half strength, as React's disabled `.switch`.
+pub fn toggle_disabled(
+    t: &Theme,
+    id: &str,
+    checked: bool,
+    on_change: impl Fn(bool, &mut Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    let track = if checked { t.live() } else { Theme::color(t.sunk) };
+    let knob_color = if checked {
+        Theme::color(t.on_accent)
+    } else {
+        Theme::color(t.dim)
+    };
+    let knob = div()
+        .size(px(16.0))
+        .rounded_full()
+        .bg(knob_color)
+        .shadow(vec![BoxShadow {
+            color: gpui::Hsla::from(t.skirt()),
+            offset: point(px(0.0), px(1.0)),
+            blur_radius: px(0.0),
+            spread_radius: px(0.0),
+        }]);
+    let row = div()
+        .id(gpui::SharedString::from(id.to_string()))
+        .flex()
+        .items_center()
+        .w(px(40.0))
+        .h(px(22.0))
+        .px(px(2.0))
+        .rounded_full()
+        .border_1()
+        .border_color(if checked { Theme::color(t.sunk) } else { Theme::color(t.line) })
+        .bg(track)
+        .opacity(0.5);
+    let row = if checked { row.justify_end().child(knob) } else { row.child(knob) };
+    let _ = on_change;
+    row
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
