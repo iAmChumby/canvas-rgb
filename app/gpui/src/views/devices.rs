@@ -776,8 +776,14 @@ impl DevicesView {
         let zone = zone.clone();
         let mode = strip_mode(&zone);
         if let StripMode::Single = mode {
-            // A single LED has no strip to draw.
-            return div().into_any_element();
+            // A single LED has no strip to draw, but the row keeps the
+            // strip's box (React renders an empty `span.zone-strip-svg`,
+            // which still takes its `flex: 0 0 64px`/strip width), so the
+            // count lands where a drawn strip would put it.
+            return match box_w {
+                Some(w) => div().w(px(w)).h(px(box_h)).into_any_element(),
+                None => div().w_full().h(px(box_h)).into_any_element(),
+            };
         }
         let canvas = gpui::canvas(
             move |_, _, _| {},
@@ -1021,7 +1027,7 @@ impl DevicesView {
                     .line_height(gpui::relative(1.45))
                     .font_family(crate::fonts::MONO_FAMILY)
                     .text_color(Theme::color(t.mute))
-                    .child(sub.clone()),
+                    .child(crate::shell::ellipsize(window, &sub, 150.0, 14.0, gpui::FontWeight::NORMAL, crate::fonts::MONO_FAMILY)),
             );
             if let Some(zone) = &one {
                 // The phone strip is 64 wide with the height its viewBox
@@ -1037,9 +1043,9 @@ impl DevicesView {
                         div()
                             .flex_none()
                             .w(px(59.0))
-                            .text_size(px(14.0))
+                            .text_size(px(15.0))
                             .line_height(gpui::relative(1.45))
-                            .font_family(crate::fonts::MONO_FAMILY)
+                            .font_family(crate::fonts::UI_FAMILY)
                             .text_color(Theme::color(t.ink))
                             .child(format!("{} {}", zone.led_count, led_word(zone.led_count))),
                     );
@@ -1098,7 +1104,7 @@ impl DevicesView {
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .font_family(crate::fonts::UI_FAMILY)
                 .text_color(Theme::color(t.ink))
-                .child(name.clone()),
+                .child(crate::shell::ellipsize(window, &name, 220.0, 15.0, gpui::FontWeight::SEMIBOLD, crate::fonts::UI_FAMILY)),
         );
         row = row.child(
             div()
@@ -1110,7 +1116,7 @@ impl DevicesView {
                 .line_height(gpui::relative(1.45))
                 .font_family(crate::fonts::MONO_FAMILY)
                 .text_color(Theme::color(t.mute))
-                .child(sub.clone()),
+                .child(crate::shell::ellipsize(window, &sub, sub_w, 14.0, gpui::FontWeight::NORMAL, crate::fonts::MONO_FAMILY)),
         );
         if let Some(zone) = &one {
             row = row.child(self.zone_strip(zone, accent, Some(strip_w), 22.0, false));
@@ -1118,9 +1124,9 @@ impl DevicesView {
                 div()
                     .flex_none()
                     .w(px(count_for_split))
-                    .text_size(px(14.0))
+                    .text_size(px(15.0))
                     .line_height(gpui::relative(1.45))
-                    .font_family(crate::fonts::MONO_FAMILY)
+                    .font_family(crate::fonts::UI_FAMILY)
                     .text_color(Theme::color(t.ink))
                     .whitespace_nowrap()
                     .child(format!("{} {}", zone.led_count, led_word(zone.led_count))),
@@ -1172,16 +1178,19 @@ impl DevicesView {
         } else {
             None
         };
+        let (m_size, m_family) = if phone { (15.0, crate::fonts::UI_FAMILY) } else { (14.0, crate::fonts::MONO_FAMILY) };
         let count_w = {
-            let mut w = crate::shell::text_width(
-                window,
-                &count_main,
-                14.0,
-                gpui::FontWeight::NORMAL,
-                crate::fonts::MONO_FAMILY,
-            );
+            // Under the phone grid the count box is exactly the text (UI
+            // 15, React's inherited body size; measured at 390: count ink
+            // 143–246 in both). On the desktop rows the split/strip
+            // arithmetic keeps the mono 14 px measurement: that is the
+            // calibration the React captures pinned (React's count is UI
+            // 15 with the `AnimatedNumber` tabular digits, whose exact
+            // width the mono measurement approximates closely enough that
+            // the strip lands on React's pixels at 1440/1024).
+            let mut w = crate::shell::text_width(window, &count_main, m_size, gpui::FontWeight::NORMAL, m_family);
             if let Some(range) = &count_range {
-                w += crate::shell::text_width(window, range, 14.0, gpui::FontWeight::NORMAL, crate::fonts::MONO_FAMILY);
+                w += crate::shell::text_width(window, range, m_size, gpui::FontWeight::NORMAL, m_family);
             }
             let min = if phone { 0.0 } else { 56.0 };
             w.max(min)
@@ -1193,20 +1202,21 @@ impl DevicesView {
                 .items_baseline()
                 .flex_none()
                 .w(px(count_w))
-                .text_size(px(14.0))
+                .justify_end()
+                .text_size(px(15.0))
                 .line_height(gpui::relative(1.45))
-                .font_family(crate::fonts::MONO_FAMILY)
+                .font_family(crate::fonts::UI_FAMILY)
                 .whitespace_nowrap()
                 .child(
                     div()
-                        .font_family(crate::fonts::MONO_FAMILY)
+                        .font_family(crate::fonts::UI_FAMILY)
                         .text_color(Theme::color(t.ink))
                         .child(count_main),
                 );
             if let Some(range) = count_range {
                 c = c.child(
                     div()
-                        .font_family(crate::fonts::MONO_FAMILY)
+                        .font_family(crate::fonts::UI_FAMILY)
                         .text_color(Theme::color(t.mute))
                         .child(range),
                 );
@@ -1215,7 +1225,7 @@ impl DevicesView {
         };
         let size_slot = div()
             .flex_none()
-            .min_w(if phone { px(0.0) } else { px(104.0) })
+            .min_w(px(104.0))
             .flex()
             .justify_end();
         let size = if zone.resizable {
@@ -1224,13 +1234,26 @@ impl DevicesView {
             size_slot
         };
         if phone {
-            // The phone zone row: name and count and Size on one line, the
-            // drawing full width below.
+            // The phone zone row: a grid (React `.rd-zone` at `≤640px`):
+            // name, count and Size on one line, the drawing 100% wide and
+            // 16 px tall below. The name cell is the `1fr` column (`flex_1`
+            // on the name box pushes the count to its column, left-aligned
+            // in it); the Size slot keeps the desktop `min-width: 104px`
+            // right-aligned key (only the device row resets it to 0 on a
+            // phone), so the count ends at the slot's left minus the
+            // `--s2` (8 px) gap. Vertical padding is `--s1` (4), right
+            // `--s4` (16). Padding is `--s6` (24) on the left like the
+            // stylesheet; the name cell itself is indented 20 px past it:
+            // measured at 390×844 (row box at 16, the name's first glyph at
+            // 60 with `-Row 190`; the dashed ink runs 126–272, which pins
+            // the drawing to the padding edge at 40), so the name carries
+            // the indent the stylesheet's own grid does not name.
             div()
                 .flex()
                 .flex_col()
                 .gap(px(4.0))
-                .px(px(16.0))
+                .pl(px(24.0))
+                .pr(px(16.0))
                 .py(px(4.0))
                 .border_t_1()
                 .border_color(Theme::color(t.line))
@@ -1238,14 +1261,13 @@ impl DevicesView {
                     div()
                         .flex()
                         .items_center()
-                        .gap_2()
+                        .gap(px(8.0))
                         .child(
                             div()
                                 .flex_1()
                                 .min_w(px(0.0))
-                                .flex()
-                                .items_baseline()
-                                .gap_2()
+                                .ml(px(20.0))
+                                .line_height(gpui::relative(1.25))
                                 .child(
                                     div()
                                         .truncate()
@@ -1275,7 +1297,7 @@ impl DevicesView {
                         .flex()
                         .flex_col()
                         .justify_center()
-                        .flex_1()
+                        .flex_none()
                         .w(px(116.0))
                         .min_w(px(116.0))
                         .line_height(gpui::relative(1.25))
@@ -1285,7 +1307,7 @@ impl DevicesView {
                                 .text_size(px(15.0))
                                 .font_family(crate::fonts::UI_FAMILY)
                                 .text_color(Theme::color(t.ink))
-                                .child(zone.name.clone()),
+                                .child(crate::shell::ellipsize(window, &zone.name, 116.0, 15.0, gpui::FontWeight::NORMAL, crate::fonts::UI_FAMILY)),
                         )
                         .child(
                             div()
@@ -1293,7 +1315,7 @@ impl DevicesView {
                                 .text_size(px(14.0))
                                 .font_family(crate::fonts::UI_FAMILY)
                                 .text_color(Theme::color(t.mute))
-                                .child(zone_shape(zone)),
+                                .child(crate::shell::ellipsize(window, &zone_shape(zone), 116.0, 14.0, gpui::FontWeight::NORMAL, crate::fonts::UI_FAMILY)),
                         ),
                 )
                 .child(self.zone_strip(zone, accent, Some(strip_w), 22.0, false))
