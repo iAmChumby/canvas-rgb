@@ -44,7 +44,7 @@ pub fn toggle(
         .rounded_full()
         .border_1()
         .border_color(if checked {
-            Theme::color(t.sunk)
+            gpui::Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }
         } else {
             Theme::color(t.line)
         })
@@ -91,7 +91,7 @@ pub fn toggle_disabled(
         .px(px(2.0))
         .rounded_full()
         .border_1()
-        .border_color(if checked { Theme::color(t.sunk) } else { Theme::color(t.line) })
+        .border_color(if checked { gpui::Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 } } else { Theme::color(t.line) })
         .bg(track)
         .opacity(0.5);
     let row = if checked { row.justify_end().child(knob) } else { row.child(knob) };

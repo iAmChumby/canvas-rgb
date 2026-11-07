@@ -46,6 +46,7 @@ pub fn select(
             .col_start(1)
             .row_start(1)
             .whitespace_nowrap()
+            .font_weight(gpui::FontWeight::MEDIUM)
             .child(l.to_string());
         let label = if *v == value {
             label
@@ -171,6 +172,7 @@ pub fn select_grouped(
             .col_start(1)
             .row_start(1)
             .whitespace_nowrap()
+            .font_weight(gpui::FontWeight::MEDIUM)
             .child(l.to_string());
         let label = if *v == value { label } else { label.invisible() };
         value_grid = value_grid.child(label);

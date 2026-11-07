@@ -288,6 +288,107 @@ pub fn field_hint(
     )
 }
 
+/// A row field whose hint is a figure (React `Field` with a `.fig` hint,
+/// e.g. Frame rate's "<n> fps measured"): the hint is in the mono face.
+pub fn field_hint_fig(
+    t: &Theme,
+    id: &str,
+    label: &str,
+    hint: Option<&str>,
+    control: impl IntoElement,
+    last: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let el = div()
+        .id(gpui::SharedString::from(id.to_string()))
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .min_h(px(48.0))
+        .py_2();
+    let el = if last { el } else { el.border_b_1().border_color(Theme::color(t.line)) };
+    let mut label_col = div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w(px(140.0))
+        .child(
+            div()
+                .text_size(px(15.0))
+                .font_family(crate::fonts::UI_FAMILY)
+                .text_color(Theme::color(t.ink))
+                .line_height(gpui::relative(1.45))
+                .child(label.to_string()),
+        );
+    if let Some(h) = hint {
+        label_col = label_col.child(
+            div()
+                .text_sm()
+                .font_family(crate::fonts::MONO_FAMILY)
+                .text_color(Theme::color(t.mute))
+                .line_height(gpui::relative(1.45))
+                .child(h.to_string()),
+        );
+    }
+    el.child(label_col).child(
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .justify_end()
+            .child(control),
+    )
+}
+
+/// A stacked field with a figure hint (the phone form of `field_hint_fig`).
+pub fn field_stack_hint_fig(
+    t: &Theme,
+    id: &str,
+    label: &str,
+    hint: Option<&str>,
+    control: impl IntoElement,
+    last: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let el = div()
+        .id(gpui::SharedString::from(id.to_string()))
+        .flex()
+        .flex_col()
+        .gap_2()
+        .min_h(px(48.0))
+        .py_2();
+    let el = if last { el } else { el.border_b_1().border_color(Theme::color(t.line)) };
+    let mut label_col = div()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .text_size(px(15.0))
+                .font_family(crate::fonts::UI_FAMILY)
+                .text_color(Theme::color(t.ink))
+                .line_height(gpui::relative(1.45))
+                .child(label.to_string()),
+        );
+    if let Some(h) = hint {
+        label_col = label_col.child(
+            div()
+                .text_sm()
+                .font_family(crate::fonts::MONO_FAMILY)
+                .text_color(Theme::color(t.mute))
+                .line_height(gpui::relative(1.45))
+                .child(h.to_string()),
+        );
+    }
+    el.child(label_col).child(
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .w_full()
+            .child(control),
+    )
+}
+
 /// A stacked field with a hint (the phone form of `field_hint`): label
 /// over control, control at the start and full width.
 pub fn field_stack_hint(

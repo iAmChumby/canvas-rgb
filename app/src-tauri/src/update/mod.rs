@@ -1111,6 +1111,14 @@ pub fn init<R: Runtime>(app: &AppHandle<R>, args: &[String]) {
     let last_tray: Mutex<Option<String>> = Mutex::new(None);
     let on_change = Box::new(move |state: &UpdateState| {
         let _ = emitter.emit(EVT_UPDATE_STATE, state.clone());
+        // The GPUI editor gets the same state over stdio, at the same moments (#205),
+        // together with the prefs (the two travel together after `ready` and after every
+        // prefs change, which also lands here through `change`).
+        crate::gpui_editor::push_update_state(&emitter, state);
+        if let Some(ctl) = try_controller(&emitter) {
+            let prefs = ctl.prefs();
+            crate::gpui_editor::push_prefs(&emitter, &prefs);
+        }
         let now = tray_version(state);
         let changed = {
             let mut last = last_tray.lock().unwrap_or_else(|p| p.into_inner());

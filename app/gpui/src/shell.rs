@@ -249,6 +249,7 @@ pub struct Shell {
 }
 
 impl Shell {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         theme: Theme,
         page: String,
@@ -256,6 +257,8 @@ impl Shell {
         status_error: Option<String>,
         displays: gpui::Entity<DisplaysView>,
         cx: &mut Context<Self>,
+        tray_present: bool,
+        tray_rx: Option<std::sync::mpsc::Receiver<canvas_proto::tauri::TrayToEditor>>,
     ) -> Self {
         let failures = if status_error.is_some() { 2 } else { 0 };
         let fans_view = cx.new(|cx| FansView::new(theme, cx));
@@ -264,7 +267,15 @@ impl Shell {
         let settings_visible = page == "settings";
         let settings_cell = theme_cell.clone();
         let settings_view = cx.new(|cx| {
-            SettingsView::new(theme, settings_cell, Some(shell_entity), settings_visible, cx)
+            SettingsView::new(
+                theme,
+                settings_cell,
+                Some(shell_entity),
+                settings_visible,
+                cx,
+                tray_present,
+                tray_rx,
+            )
         });
         let mut shell = Shell {
             theme,

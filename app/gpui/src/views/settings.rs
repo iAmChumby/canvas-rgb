@@ -15,7 +15,8 @@
 //! - Setup: map again, export/import through the native file dialogs, the
 //!   note and the shared error line;
 //! - Version: the daemon version, and the tray-only update controls in
-//!   React's own no-tray state (disabled; "Tray app only").
+//!   React's tray state when a tray is attached (stdin is a pipe) and in
+//!   React's no-tray state otherwise (disabled; "Tray app only").
 //!
 //! The React demo-mode states (`?state=...`, `?update=...`) are
 //! demo-backend behavior and have no GPUI counterpart: the GPUI editor
@@ -32,6 +33,10 @@ use canvas_proto::audio::{
 };
 use canvas_proto::color::Rgb8;
 use canvas_proto::config::Settings;
+use canvas_proto::tauri::{
+    CheckFailReason, EditorChoice, TrayPrefs, TrayToEditor, UpdateChannel, UpdatePhase,
+    UpdateState,
+};
 use gpui::{Context, IntoElement, Window, div, prelude::*, px};
 
 use crate::client::DaemonClient;
@@ -372,10 +377,154 @@ pub fn is_json(text: &str) -> bool {
 /// The tray-only controls' shared state in a standalone GPUI run: no
 /// tray, so `canUpdate()` is false and the update state is missing.
 pub struct TrayAbsence;
+#[allow(dead_code)]
 impl TrayAbsence {
     pub const CHECKS_AUTOMATICALLY: bool = true;
     pub const LAST_CHECKED: &str = "—";
     pub const STATUS: &str = "—";
+}
+
+/// `canUpdate()` (`host.ts:95-97`): the tray is attached (stdin is a pipe).
+pub fn tray_acts(tray_present: bool) -> bool {
+    tray_present
+}
+
+/// Whether the Editor row is there: only an experimental version earns it
+/// (`UpdatesPanel.tsx:63`).
+#[allow(dead_code)]
+pub fn editor_row_visible(u: Option<&UpdateState>) -> bool {
+    u.is_some_and(|u| is_experimental_version(&u.current_version))
+}
+
+/// Check automatically's checked state (`UpdatesPanel.tsx:79`).
+#[allow(dead_code)]
+pub fn auto_checked(u: Option<&UpdateState>) -> bool {
+    u.map(|u| u.auto_check).unwrap_or(true)
+}
+
+/// Experimental builds' checked state (`UpdatesPanel.tsx:98`).
+#[allow(dead_code)]
+pub fn experimental_checked(prefs: Option<&TrayPrefs>) -> bool {
+    prefs.is_some_and(|p| p.channel == UpdateChannel::Experimental)
+}
+
+/// The Editor radio's value (`UpdatesPanel.tsx:108`).
+#[allow(dead_code)]
+pub fn editor_value(prefs: Option<&TrayPrefs>) -> EditorChoice {
+    prefs.map(|p| p.editor).unwrap_or(EditorChoice::React)
+}
+
+/// Whether the tray is checking now (`UpdatesPanel.tsx:72`).
+#[allow(dead_code)]
+pub fn is_checking(u: Option<&UpdateState>) -> bool {
+    u.is_some_and(|u| matches!(u.phase, UpdatePhase::Checking))
+}
+
+/// Whether the tray says an install is running (`updateWords.ts:41-44`).
+#[allow(dead_code)]
+pub fn is_installing(u: Option<&UpdateState>) -> bool {
+    u.is_some_and(|u| {
+        matches!(
+            u.phase,
+            UpdatePhase::Downloading { .. }
+                | UpdatePhase::Verifying
+                | UpdatePhase::WaitingForUac
+                | UpdatePhase::Installing
+        )
+    })
+}
+
+/// Check now's disabled state (`UpdatesPanel.tsx:89`).
+#[allow(dead_code)]
+pub fn check_now_disabled(acts: bool, u: Option<&UpdateState>) -> bool {
+    !acts || u.is_none() || is_checking(u) || is_installing(u)
+}
+
+/// Check automatically's disabled state (`UpdatesPanel.tsx:80`).
+#[allow(dead_code)]
+pub fn auto_disabled(acts: bool, u: Option<&UpdateState>) -> bool {
+    !acts || u.is_none()
+}
+
+/// Last checked's words (`UpdatesPanel.tsx:85`).
+#[allow(dead_code)]
+pub fn last_checked_word(acts: bool, u: Option<&UpdateState>, today_day: i64) -> String {
+    if acts {
+        if let Some(u) = u {
+            return fmt_checked(u.last_check.as_deref(), today_day);
+        }
+    }
+    "—".to_string()
+}
+
+/// The `kind` string and check-failure reason the Rails status words take.
+/// Maps the spine's `UpdatePhase` onto `settings_status`'s strings.
+#[allow(dead_code)]
+pub fn phase_kind_and_reason(phase: &UpdatePhase) -> (&'static str, Option<&'static str>) {
+    match phase {
+        UpdatePhase::Idle => ("idle", None),
+        UpdatePhase::Checking => ("checking", None),
+        UpdatePhase::UpToDate => ("up_to_date", None),
+        UpdatePhase::Available => ("available", None),
+        UpdatePhase::Downloading { .. } => ("downloading", None),
+        UpdatePhase::Verifying => ("verifying", None),
+        UpdatePhase::VerifyFailed => ("verify_failed", None),
+        UpdatePhase::WaitingForUac => ("waiting_for_uac", None),
+        UpdatePhase::Declined => ("declined", None),
+        UpdatePhase::Installing => ("installing", None),
+        UpdatePhase::CheckFailed { reason } => (
+            "check_failed",
+            match reason {
+                CheckFailReason::Offline => Some("offline"),
+                CheckFailReason::RateLimited => Some("rate_limited"),
+                CheckFailReason::Other => None,
+            },
+        ),
+        UpdatePhase::InstallFailed { .. } => ("install_failed", None),
+    }
+}
+
+/// The status row's (tone, words) when the state is there
+/// (`UpdatesPanel.tsx:71`).
+#[allow(dead_code)]
+pub fn tray_status(u: Option<&UpdateState>) -> Option<(String, String)> {
+    let u = u?;
+    let (kind, reason) = phase_kind_and_reason(&u.phase);
+    let available = u.available.as_ref().map(|a| a.version.as_str());
+    let skipped = u.skipped_version.as_deref();
+    Some(settings_status(kind, reason, available, skipped))
+}
+
+/// Whether Undo is there (`UpdatesPanel.tsx:119`).
+#[allow(dead_code)]
+pub fn undo_visible(u: Option<&UpdateState>) -> bool {
+    u.is_some_and(|u| {
+        is_skipped(
+            u.available.as_ref().map(|a| a.version.as_str()),
+            u.skipped_version.as_deref(),
+        ) && !matches!(u.phase, UpdatePhase::Checking)
+    })
+}
+
+/// Whether What's new is there (`UpdatesPanel.tsx:124`).
+#[allow(dead_code)]
+pub fn whats_new_visible(u: Option<&UpdateState>) -> bool {
+    u.is_some_and(|u| {
+        u.available.is_some()
+            && !is_skipped(
+                u.available.as_ref().map(|a| a.version.as_str()),
+                u.skipped_version.as_deref(),
+            )
+    })
+}
+
+/// Today's UTC day count (the same count `fmt_checked` compares against).
+#[allow(dead_code)]
+pub fn today_day_utc() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() / 86_400)
+        .unwrap_or(0) as i64
 }
 
 // ---------------------------------------------------------------------------
@@ -420,6 +569,17 @@ pub struct SettingsView {
     pub bri_origin: Origin,
     pub sv_origin: Origin,
     pub hue_origin: Origin,
+    /// A tray is attached when stdin is a pipe (`canUpdate()`).
+    pub tray_present: bool,
+    /// The tray's update state, pushed over stdio after `ready` and on every change.
+    pub tray_update: Option<UpdateState>,
+    /// The tray's prefs, pushed over stdio after `ready` and after every change.
+    pub tray_prefs: Option<TrayPrefs>,
+    /// A failed tray command's words (Settings > Version error line).
+    pub tray_err: Option<String>,
+    /// Stdin lines in, at `TRAY_TO_EDITOR_LINE_MAX` a line.
+    pub tray_rx: Option<std::sync::mpsc::Receiver<TrayToEditor>>,
+    pub tray_polling: bool,
 }
 
 impl SettingsView {
@@ -429,6 +589,8 @@ impl SettingsView {
         shell: Option<gpui::Entity<crate::shell::Shell>>,
         visible: bool,
         cx: &mut Context<Self>,
+        tray_present: bool,
+        tray_rx: Option<std::sync::mpsc::Receiver<TrayToEditor>>,
     ) -> Self {
         let (theme_pref, motion_pref) = read_prefs();
         // Without a stored pref the radio names the theme the shell
@@ -475,6 +637,12 @@ impl SettingsView {
             bri_origin: Origin::new(),
             sv_origin: Origin::new(),
             hue_origin: Origin::new(),
+            tray_present,
+            tray_update: None,
+            tray_prefs: None,
+            tray_err: None,
+            tray_rx,
+            tray_polling: false,
         };
         // The constructor theme is the capture flag's answer; the stored
         // pref only names the radio choice. Apply it when it differs from
@@ -491,6 +659,7 @@ impl SettingsView {
         view.load_all(cx);
         view.load_audio_sources(cx);
         view.start_settings_poll(cx);
+        view.start_tray_poll(cx);
         view
     }
 
@@ -580,6 +749,68 @@ impl SettingsView {
                     }
                     cx.notify();
                 });
+            }
+        })
+        .detach();
+    }
+
+    /// Drains the tray's stdio lines that are ready. Returns true when anything
+    /// changed (a new update state, new prefs, or a navigate/close).
+    fn drain_tray(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut changed = false;
+        if let Some(rx) = &self.tray_rx {
+            loop {
+                match rx.try_recv() {
+                    Ok(TrayToEditor::UpdateState { state }) => {
+                        self.tray_update = Some(*state);
+                        changed = true;
+                    }
+                    Ok(TrayToEditor::Prefs { prefs }) => {
+                        self.tray_prefs = Some(prefs);
+                        changed = true;
+                    }
+                    Ok(TrayToEditor::Navigate { page }) => {
+                        if crate::shell::is_valid_page(&page) {
+                            if let Some(shell) = self.shell.clone() {
+                                shell.update(cx, |s, cx| {
+                                    s.navigate(&page);
+                                    cx.notify();
+                                });
+                            }
+                        }
+                        changed = true;
+                    }
+                    Ok(TrayToEditor::Close) => {
+                        std::process::exit(0);
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                }
+            }
+        }
+        changed
+    }
+
+    /// The tray poll: drain stdin lines as they arrive (the tray pushes the
+    /// update state and the prefs after `ready` and on every change).
+    fn start_tray_poll(&mut self, cx: &mut Context<Self>) {
+        if self.tray_polling || !self.tray_present {
+            return;
+        }
+        self.tray_polling = true;
+        cx.spawn(async move |view, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(200))
+                    .await;
+                let changed = view
+                    .update(cx, |this, cx| this.drain_tray(cx))
+                    .unwrap_or(false);
+                if changed {
+                    let _ = view.update(cx, |_this, cx| {
+                        cx.notify();
+                    });
+                }
             }
         })
         .detach();
@@ -1240,15 +1471,25 @@ impl SettingsView {
         slot_w: Option<f32>,
     ) -> impl IntoElement {
         let t = &self.theme;
+        // React `.fig` hint (Frame rate's "<n> fps measured") is mono.
+        let hint_is_fig = id == "settings-fps-field";
         if slot_w.is_some() {
             // Wrapped (phone and narrow columns): the pair takes the
             // full row under the label.
-            field_stack_hint(t, id, label, hint.as_deref(), control, last).into_any_element()
+            if hint_is_fig {
+                crate::components::panel::field_stack_hint_fig(t, id, label, hint.as_deref(), control, last).into_any_element()
+            } else {
+                field_stack_hint(t, id, label, hint.as_deref(), control, last).into_any_element()
+            }
         } else {
             // The control takes the room (React `.field-slider` flex
             // 1 1 240, min 240); the label keeps the rest.
             let control = div().flex_1().min_w(px(240.0)).child(control);
-            field_hint(t, id, label, hint.as_deref(), control, last).into_any_element()
+            if hint_is_fig {
+                crate::components::panel::field_hint_fig(t, id, label, hint.as_deref(), control, last).into_any_element()
+            } else {
+                field_hint(t, id, label, hint.as_deref(), control, last).into_any_element()
+            }
         }
     }
 
@@ -1278,6 +1519,7 @@ impl SettingsView {
         } else {
             None
         };
+        let bri_slot_w = slot_w;
         let mut body = div()
             .flex()
             .flex_col()
@@ -1317,11 +1559,11 @@ impl SettingsView {
                     "%",
                     self.bri_origin.clone(),
                     false,
-                    slot_w,
+                    bri_slot_w,
                     cx,
                 ),
                 true,
-                slot_w,
+                bri_slot_w,
             ));
         if let Some(msg) = &self.render_err {
             body = body.child(self.error_line(msg, true));
@@ -1872,7 +2114,7 @@ impl SettingsView {
             meter = meter.child(div().flex_1().r_sm().bg(bg));
         }
         let db = div()
-            .min_w(px(40.0))
+            .min_w(px(48.0))
             .text_right()
             .text_size(px(16.0))
             .font_family(crate::fonts::MONO_FAMILY)
@@ -2167,53 +2409,195 @@ impl SettingsView {
             .font_family(crate::fonts::MONO_FAMILY)
             .text_color(Theme::color(t.ink))
             .child(version);
-        // Tray-only controls, in React's no-tray state (`TrayAbsence`):
-        // Check automatically on but disabled, Last checked "—", Check
-        // now disabled, Experimental builds off and disabled, status
-        // "—", and the "Tray app only" note. The Editor row needs the
-        // tray's update state, which no stdio message carries.
-        let auto_control = toggle_disabled(
-            t,
-            "settings-update-auto",
-            TrayAbsence::CHECKS_AUTOMATICALLY,
-            |_, _, _| {},
-        );
+        // Tray-only controls, in React's tray or no-tray state (`UpdatesPanel.tsx`):
+        // `acts` is `canUpdate()` (a tray is attached when stdin is a pipe).
+        let acts = tray_acts(self.tray_present);
+        let u = self.tray_update.as_ref();
+        let prefs = self.tray_prefs.as_ref();
+        let checking = is_checking(u);
+        let today = today_day_utc();
+        let last_word = last_checked_word(acts, u, today);
+        let view_entity = cx.entity();
+
+        // Check automatically (`UpdatesPanel.tsx:76-83`).
+        let auto_entity = view_entity.clone();
+        let auto_checked_state = auto_checked(u);
+        let auto_disabled_state = auto_disabled(acts, u);
+        let auto_control = if auto_disabled_state {
+            toggle_disabled(t, "settings-update-auto", auto_checked_state, |_, _, _| {}).into_any_element()
+        } else {
+            toggle(t, "settings-update-auto", auto_checked_state, move |v, _, cx| {
+                auto_entity.update(cx, |this, cx| {
+                    this.tray_err = None;
+                    cx.notify();
+                });
+                crate::send_update_set_auto(v);
+            }).into_any_element()
+        };
         let last_checked = div()
             .text_sm()
             .font_family(crate::fonts::MONO_FAMILY)
             .text_color(Theme::color(t.ink))
-            .child(TrayAbsence::LAST_CHECKED.to_string());
+            .child(last_word);
+
+        // Check now (`UpdatesPanel.tsx:87-94`): the `Swap` keeps the widest
+        // label's width, so the key never resizes; here the visible label is
+        // centred in that cell.
+        let check_entity = view_entity.clone();
+        let check_label = if checking { "Checking" } else { "Check now" };
         let check_control = button(
             t,
             "settings-update-check",
-            "Check now",
+            check_label,
             Variant::Default,
-            true,
-            |_, _, _| {},
+            check_now_disabled(acts, u),
+            move |_, _, cx| {
+                check_entity.update(cx, |this, cx| {
+                    this.tray_err = None;
+                    cx.notify();
+                });
+                crate::send_update_check_now();
+            },
         );
-        let experimental_control = toggle_disabled(t, "settings-update-experimental", false, |_, _, _| {});
-        let status_row = div()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .justify_between()
-            .gap_2()
-            .min_h(px(48.0))
-            .pt_2()
-            .child(
+
+        // Experimental builds (`UpdatesPanel.tsx:95-102`).
+        let experimental_entity = view_entity.clone();
+        let experimental_checked_state = experimental_checked(prefs);
+        let experimental_disabled = prefs.is_none();
+        let experimental_control = if experimental_disabled {
+            toggle_disabled(
+                t,
+                "settings-update-experimental",
+                experimental_checked_state,
+                |_, _, _| {},
+            ).into_any_element()
+        } else {
+            toggle(t, "settings-update-experimental", experimental_checked_state, move |v, _, cx| {
+                experimental_entity.update(cx, |this, cx| {
+                    this.tray_err = None;
+                    cx.notify();
+                });
+                crate::send_set_channel(if v {
+                    UpdateChannel::Experimental
+                } else {
+                    UpdateChannel::Stable
+                });
+            }).into_any_element()
+        };
+
+        // Editor (`UpdatesPanel.tsx:103-113`), only on an experimental version.
+        let editor_field = if editor_row_visible(u) {
+            let editor_entity = view_entity.clone();
+            let editor_selected = match editor_value(prefs) {
+                EditorChoice::React => "react",
+                EditorChoice::Gpui => "gpui",
+            };
+            let opts: &[(&str, &str)] = &[("react", "React"), ("gpui", "GPUI")];
+            let editor_control = if prefs.is_none() {
+                crate::components::segmented::segmented_disabled(
+                    t,
+                    "settings-update-editor",
+                    opts,
+                    editor_selected,
+                    |_, _, _| {},
+                ).into_any_element()
+            } else {
+                segmented(t, "settings-update-editor", opts, editor_selected, move |v, _, cx| {
+                    editor_entity.update(cx, |this, cx| {
+                        this.tray_err = None;
+                        cx.notify();
+                    });
+                    crate::send_switch_editor(if v == "gpui" {
+                        EditorChoice::Gpui
+                    } else {
+                        EditorChoice::React
+                    });
+                }).into_any_element()
+            };
+            Some(field_hint(t, "settings-editor-field", "Editor", Some("GPUI is experimental"), editor_control, false))
+        } else {
+            None
+        };
+
+        // Status row (`UpdatesPanel.tsx:114-134`).
+        let status_row = match tray_status(u) {
+            Some((tone, words)) => {
+                let mut acts_row = div().flex().items_center().gap_2();
+                if undo_visible(u) {
+                    let undo_entity = view_entity.clone();
+                    acts_row = acts_row.child(button_sm(
+                        t,
+                        "settings-update-undo",
+                        "Undo",
+                        Variant::Ghost,
+                        !acts,
+                        move |_, _, cx| {
+                            undo_entity.update(cx, |this, cx| {
+                                this.tray_err = None;
+                                cx.notify();
+                            });
+                            crate::send_update_unskip();
+                        },
+                    ));
+                }
+                if whats_new_visible(u) {
+                    let nav_entity = view_entity.clone();
+                    acts_row = acts_row.child(button_sm(
+                        t,
+                        "settings-update-whatsnew",
+                        "What’s new",
+                        Variant::Ghost,
+                        false,
+                        move |_, _, cx| {
+                            nav_entity.update(cx, |this, cx| {
+                                if let Some(shell) = this.shell.clone() {
+                                    shell.update(cx, |s, cx| {
+                                        s.navigate("updates");
+                                        cx.notify();
+                                    });
+                                }
+                            });
+                        },
+                    ));
+                }
                 div()
-                    .text_sm()
-                    .font_family(crate::fonts::UI_FAMILY)
-                    .text_color(Theme::color(t.mute))
-                    .child(TrayAbsence::STATUS.to_string()),
-            );
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .min_h(px(48.0))
+                    .pt_2()
+                    .child(state_dot(t, &tone, &words))
+                    .child(acts_row)
+            }
+            None => {
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .min_h(px(48.0))
+                    .pt_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_family(crate::fonts::UI_FAMILY)
+                            .text_color(Theme::color(t.mute))
+                            .child(TrayAbsence::STATUS.to_string()),
+                    )
+            }
+        };
+
+        // Open logs folder (`SettingsView.tsx:299-309`).
         let logs_entity = cx.entity();
         let logs_control = button_icon(
             t,
             "settings-logs",
             "Open logs folder",
             Variant::Default,
-            true,
+            !acts,
             false,
             "FolderOpen",
             "",
@@ -2223,39 +2607,53 @@ impl SettingsView {
                     this.err = None;
                     cx.notify();
                 });
+                crate::send_open_logs_folder();
             },
         );
-        let logs_row = div()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap_2()
-            .mt_3()
-            .child(logs_control)
-            .child(
-                div()
-                    .text_sm()
-                    .font_family(crate::fonts::UI_FAMILY)
-                    .text_color(Theme::color(t.mute))
-                    .child("Tray app only"),
-            );
-        let body = div()
+        let logs_row = if acts {
+            div().flex().flex_wrap().items_center().gap_2().mt_3().child(logs_control)
+        } else {
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .mt_3()
+                .child(logs_control)
+                .child(
+                    div()
+                        .text_sm()
+                        .font_family(crate::fonts::UI_FAMILY)
+                        .text_color(Theme::color(t.mute))
+                        .child("Tray app only"),
+                )
+        };
+
+        let mut body = div()
             .flex()
             .flex_col()
             .child(field_hint(t, "settings-auto-field", "Check automatically", Some("At start, then once a day"), auto_control, false))
             .child(field_hint(t, "settings-last-field", "Last checked", None, last_checked, false))
             .child(field_hint(t, "settings-check-field", "Check now", None, check_control, false))
-            .child(field_hint(t, "settings-experimental-field", "Experimental builds", Some("Unstable test builds, offered early"), experimental_control, true))
-            .child(status_row)
-            .child(
+            .child(field_hint(t, "settings-experimental-field", "Experimental builds", Some("Unstable test builds, offered early"), experimental_control, editor_field.is_some()));
+        if let Some(editor) = editor_field {
+            body = body.child(editor);
+        }
+        body = body.child(status_row);
+        if !acts {
+            body = body.child(
                 div()
                     .mt_2()
                     .text_sm()
                     .font_family(crate::fonts::UI_FAMILY)
                     .text_color(Theme::color(t.mute))
                     .child("Tray app only"),
-            )
-            .child(logs_row);
+            );
+        }
+        if let Some(msg) = &self.tray_err {
+            body = body.child(self.error_line(msg, true));
+        }
+        body = body.child(logs_row);
         self.panel("settings-version", "Version", pad, version_fig, body)
             .into_any_element()
     }
@@ -2311,6 +2709,9 @@ impl SettingsView {
 
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The tray's lines that are already waiting (a `ready` push): take them
+        // before this draw, so the first frame with a tray is already tray state.
+        self.drain_tray(cx);
         let win_w = f32::from(window.window_bounds().get_bounds().size.width);
         let win_h = f32::from(window.window_bounds().get_bounds().size.height);
         let rail_w = if win_w <= 720.0 {
@@ -2708,5 +3109,70 @@ mod tests {
         // Follow-default resolves through the current flow.
         assert!(is_input_selection(Some(&mk(AudioSource::FollowDefault, Some(AudioFlow::Capture)))));
         assert!(!is_input_selection(Some(&mk(AudioSource::FollowDefault, Some(AudioFlow::Render)))));
+    }
+
+    #[test]
+    fn tray_state_maps_like_react_updates_panel() {
+        use canvas_proto::tauri::{TrayPrefs, UpdateInfo};
+        let mk_state = |version: &str, phase: UpdatePhase, available: Option<UpdateInfo>, skipped: Option<&str>| UpdateState {
+            current_version: version.to_string(),
+            auto_check: true,
+            last_check: Some("2026-10-29T09:14:00Z".to_string()),
+            phase,
+            available,
+            skipped_version: skipped.map(|s| s.to_string()),
+            snoozed: false,
+            updated_to: None,
+        };
+        let today = parse_rfc3339_day("2026-10-29T00:00:00Z").unwrap().0;
+        // No tray: `canUpdate()` false, nothing acts.
+        assert!(!tray_acts(false));
+        assert!(tray_acts(true));
+        // Stable version: no Editor row; dev version: Editor row.
+        assert!(!editor_row_visible(Some(&mk_state("0.1.0", UpdatePhase::UpToDate, None, None))));
+        assert!(editor_row_visible(Some(&mk_state("0.8.5-dev.12", UpdatePhase::UpToDate, None, None))));
+        assert!(!editor_row_visible(None));
+        // Check automatically reads on when the state is missing.
+        assert!(auto_checked(None));
+        assert!(auto_disabled(false, None));
+        assert!(auto_disabled(true, None));
+        // Last checked: dash without the tray or the state, the words with both.
+        assert_eq!(last_checked_word(false, Some(&mk_state("0.1.0", UpdatePhase::UpToDate, None, None)), today), "—");
+        assert_eq!(last_checked_word(true, None, today), "—");
+        assert_eq!(last_checked_word(true, Some(&mk_state("0.1.0", UpdatePhase::UpToDate, None, None)), today), "09:14");
+        // Check now disables while checking or installing.
+        assert!(check_now_disabled(true, Some(&mk_state("0.1.0", UpdatePhase::Checking, None, None))));
+        assert!(!check_now_disabled(true, Some(&mk_state("0.1.0", UpdatePhase::UpToDate, None, None))));
+        // Status: the three tones and the offline words ride the spine phase.
+        assert_eq!(
+            tray_status(Some(&mk_state("0.1.0", UpdatePhase::Checking, None, None))),
+            Some(("work".to_string(), "Checking for updates…".to_string()))
+        );
+        assert_eq!(
+            tray_status(Some(&mk_state(
+                "0.1.0",
+                UpdatePhase::CheckFailed { reason: CheckFailReason::Offline },
+                None,
+                None
+            ))),
+            Some(("down".to_string(), "Check failed: offline".to_string()))
+        );
+        assert_eq!(tray_status(None), None);
+        // Undo and What's new.
+        let available = UpdateInfo { version: "0.1.1".into(), notes: "notes".into(), pub_date: None };
+        let skipped = mk_state("0.1.0", UpdatePhase::Available, Some(available.clone()), Some("0.1.1"));
+        assert!(undo_visible(Some(&skipped)));
+        assert!(!whats_new_visible(Some(&skipped)));
+        let fresh = mk_state("0.1.0", UpdatePhase::Available, Some(available), None);
+        assert!(!undo_visible(Some(&fresh)));
+        assert!(whats_new_visible(Some(&fresh)));
+        // The Editor radio and the Experimental switch read the prefs.
+        assert_eq!(editor_value(None), EditorChoice::React);
+        assert_eq!(
+            editor_value(Some(&TrayPrefs { editor: EditorChoice::Gpui, channel: UpdateChannel::Experimental })),
+            EditorChoice::Gpui
+        );
+        assert!(experimental_checked(Some(&TrayPrefs { editor: EditorChoice::React, channel: UpdateChannel::Experimental })));
+        assert!(!experimental_checked(None));
     }
 }

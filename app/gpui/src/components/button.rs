@@ -31,17 +31,14 @@ fn colors(t: &Theme, variant: Variant, disabled: bool) -> (Rgba, Rgba, Rgba) {
         Variant::Ghost => (transparent, Theme::color(t.dim), transparent),
     };
     if disabled {
-        // Hardware `.btn:disabled`: raised face, line border, mute text, at
-        // half strength (opacity 0.5 in hardware.css).
+        // Hardware `.btn:disabled`: at half strength (opacity 0.5). The
+        // border stays the variant's own (ghost stays transparent, so a
+        // disabled ghost is still just text: React's `.btn-ghost:disabled`
+        // keeps `border-color: transparent`).
         let bg = if variant == Variant::Primary {
             Theme::color(t.raised)
         } else {
             bg
-        };
-        let border = if variant == Variant::Primary || variant == Variant::Ghost {
-            Theme::color(t.line)
-        } else {
-            border
         };
         (
             Rgba { a: 0.5, ..bg },

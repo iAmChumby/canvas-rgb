@@ -16,6 +16,7 @@
 
 .EXAMPLE
   powershell -NoProfile -File tools/ui-capture/capture-gpui.ps1
+  powershell -NoProfile -File tools/ui-capture/capture-gpui.ps1 -ApiPort 19730 -Pages settings -TrayStub
   # after: powershell -NoProfile -File tools/run-fake-daemon.ps1 -Stop
 #>
 param(
@@ -24,7 +25,11 @@ param(
     [string[]]$Sizes = @('1920x1040', '1440x900', '1280x860', '1024x768', '960x1032', '390x844'),
     [string]$EditorExe = '',
     # The fake daemon's API port (tools/run-fake-daemon.ps1 -ApiPort; default 19430).
-    [ValidateRange(1, 65535)][int]$ApiPort = 19430
+    [ValidateRange(1, 65535)][int]$ApiPort = 19430,
+    # Start the editor with redirected stdin and write the capture-react.mjs
+    # __TAURI__ stub's update state and prefs lines to it (Settings pairs show
+    # the same tray state in both editors).
+    [switch]$TrayStub
 )
 if ($ApiPort -eq 9430) { throw "-ApiPort 9430 is the real daemon's port; captures run only against the fakes" }
 
@@ -73,13 +78,33 @@ if (-not (Get-NetTCPConnection -State Listen -LocalPort $ApiPort -ErrorAction Si
 }
 
 $saved = 0
+# The __TAURI__ stub capture-react.mjs injects: update_state answers
+# { current_version: "0.1.0", auto_check: true, last_check: null,
+#   phase: { kind: "up_to_date" }, available: null, skipped_version: null,
+#   snoozed: false, updated_to: null } and tray_prefs answers
+# { editor: "react", channel: "stable" } (tools/ui-capture/capture-react.mjs
+# tauriInit). The lines below are the spine's stdio forms of those answers.
+$stubFile = $null
+if ($TrayStub) {
+  $stateLine = '{"type":"update-state","state":{"current_version":"0.1.0","auto_check":true,"last_check":null,"phase":{"kind":"up_to_date"},"available":null,"skipped_version":null,"snoozed":false,"updated_to":null}}'
+  $prefsLine = '{"type":"prefs","prefs":{"editor":"react","channel":"stable"}}'
+  $stubFile = Join-Path $outDir 'tray-stub-stdin.txt'
+  $stubText = $stateLine + "`n" + $prefsLine + "`n"
+  [System.IO.File]::WriteAllText($stubFile, $stubText, (New-Object System.Text.UTF8Encoding $false))
+  Write-Host "capture-gpui: tray stub $($stubFile) (2 lines)"
+}
 foreach ($theme in $Themes) {
   foreach ($page in $Pages) {
     foreach ($size in $Sizes) {
       $w, $h = $size -split 'x'
       $w = [int]$w; $h = [int]$h
-      # token: the developer's own, non-elevated (the shell running this script).
-      $proc = Start-Process -FilePath $EditorExe -ArgumentList "--page", $page, "--theme", $theme, "--min-size", "390x600", "--size", $size -PassThru
+      if ($TrayStub) {
+        # token: the developer's own, non-elevated (the shell running this script).
+        $proc = Start-Process -FilePath $EditorExe -ArgumentList "--page", $page, "--theme", $theme, "--min-size", "390x600", "--size", $size -RedirectStandardInput $stubFile -PassThru
+      } else {
+        # token: the developer's own, non-elevated (the shell running this script).
+        $proc = Start-Process -FilePath $EditorExe -ArgumentList "--page", $page, "--theme", $theme, "--min-size", "390x600", "--size", $size -PassThru
+      }
       try {
         # Wait for the window (bounded: 20 s).
         $handle = [IntPtr]::Zero

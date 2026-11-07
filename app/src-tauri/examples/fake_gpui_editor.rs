@@ -19,6 +19,8 @@
 //! - `--sleep <seconds>` is what that child runs: it holds the pipes open and does nothing else.
 //! - otherwise it says `{"type":"ready"}` and then reads the tray's messages: a `navigate` is
 //!   answered with a `ready`, a `close` ends it with code 0.
+//! - `FAKE_GPUI_EDITOR_STDIN_FILE` records every line the tray sends (one per line), so a test
+//!   can see what the tray pushed (the `update-state` and `prefs` lines after `ready`).
 
 use std::io::{BufRead, Write};
 use std::time::Duration;
@@ -101,6 +103,16 @@ fn main() {
         match stdin.lock().read_line(&mut line) {
             Ok(0) | Err(_) => break,
             Ok(_) => {}
+        }
+        if let Some(file) = std::env::var_os("FAKE_GPUI_EDITOR_STDIN_FILE") {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                let _ = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&file)
+                    .and_then(|mut f| writeln!(f, "{trimmed}"));
+            }
         }
         let message: Value = serde_json::from_str(line.trim()).unwrap_or(Value::Null);
         match message.get("type").and_then(|t| t.as_str()) {
