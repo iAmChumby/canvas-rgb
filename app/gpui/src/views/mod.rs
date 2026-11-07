@@ -4,3 +4,4 @@
 pub mod displays;
 pub mod fans;
 pub mod settings;
+pub mod updates;
