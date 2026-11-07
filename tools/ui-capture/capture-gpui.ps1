@@ -62,11 +62,35 @@ public static class Win32Capture {
     public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
     [StructLayout(LayoutKind.Sequential)]
     public struct POINT { public int X; public int Y; }
-    public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+    [DllImport("user32.dll")]
+    public static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+    public delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);
+    [DllImport("user32.dll")]
+    public static extern bool EnumWindows(EnumProc cb, IntPtr lParam);
+    // The editor's top-level window, visible or not (a --capture window starts hidden,
+    // so Process.MainWindowHandle never sees it).
+    public static IntPtr TopWindowOf(uint pid) {
+        IntPtr found = IntPtr.Zero;
+        EnumWindows((h, l) => {
+            uint p; GetWindowThreadProcessId(h, out p);
+            if (p != pid) return true;
+            RECT r; GetWindowRect(h, out r);
+            if (r.Right - r.Left <= 0 || r.Bottom - r.Top <= 0) return true;
+            found = h; return false;
+        }, IntPtr.Zero);
+        return found;
+    }
 }
 "@
 
 $SWP_NOACTIVATE = 0x0010
+$SWP_NOMOVE = 0x0002
+$SWP_NOSIZE = 0x0001
+$SWP_SHOWWINDOW = 0x0040
 $HWND_BOTTOM = [IntPtr]::new(1)
 $PW_RENDERFULLCONTENT = 0x00000002
 # The editor reads the token from CANVAS_RGB_HOME in debug (the fakes' home) and talks to
@@ -138,12 +162,19 @@ foreach ($theme in $Themes) {
     foreach ($size in $Sizes) {
       $w, $h = $size -split 'x'
       $w = [int]$w; $h = [int]$h
+      # CreateNoWindow + no shell execute: no console window is ever made for the editor,
+      # even by an old console build (a capture run opened terminal windows over Luke's game).
+      $psi = New-Object System.Diagnostics.ProcessStartInfo
+      $psi.FileName = $EditorExe
+      $psi.Arguments = "--page $page --theme $theme --min-size 390x600 --size $size --capture"
+      $psi.UseShellExecute = $false
+      $psi.CreateNoWindow = $true
+      $psi.RedirectStandardInput = [bool]$TrayStub
+      # token: the developer's own, non-elevated (the shell running this script).
+      $proc = [System.Diagnostics.Process]::Start($psi)
       if ($TrayStub) {
-        # token: the developer's own, non-elevated (the shell running this script).
-        $proc = Start-Process -FilePath $EditorExe -ArgumentList "--page", $page, "--theme", $theme, "--min-size", "390x600", "--size", $size -RedirectStandardInput $stubFile -PassThru
-      } else {
-        # token: the developer's own, non-elevated (the shell running this script).
-        $proc = Start-Process -FilePath $EditorExe -ArgumentList "--page", $page, "--theme", $theme, "--min-size", "390x600", "--size", $size -PassThru
+        $proc.StandardInput.Write([System.IO.File]::ReadAllText($stubFile))
+        $proc.StandardInput.Close()
       }
       try {
         # Wait for the window (bounded: 20 s).
@@ -152,28 +183,40 @@ foreach ($theme in $Themes) {
           Start-Sleep -Milliseconds 500
           $proc.Refresh()
           if ($proc.HasExited) { break }
-          $handle = $proc.MainWindowHandle
+          $handle = [Win32Capture]::TopWindowOf([uint32]$proc.Id)
           if ($handle -ne [IntPtr]::Zero) { break }
         }
         if ($handle -eq [IntPtr]::Zero) {
           Write-Host "capture-gpui: no window for $page ${size} $theme (exited: $($proc.HasExited))"
           continue
         }
-        # Resize so the CLIENT area is exactly WxH: SetWindowPos sizes the
-        # outer window (frame included), and the shell's breakpoints
-        # (1280/720) measure the client/viewport like the browser does.
-        # Sizing the outer window to WxH made the client ~16 px narrower
-        # (1280 showed the icon rail) and the 390 shot came out 406 wide.
-        # AdjustWindowRect grows the outer rect by the frame; WS_OVERLAPPEDWINDOW.
-        $want = New-Object Win32Capture+RECT
-        $want.Left = 0; $want.Top = 0; $want.Right = $w; $want.Bottom = $h
-        [void][Win32Capture]::AdjustWindowRect([ref]$want, 0x00CF0000, $false)
-        $outerW = $want.Right - $want.Left
-        $outerH = $want.Bottom - $want.Top
-        # HWND_BOTTOM: the capture window sits behind every other window, so a run never
-        # covers what Luke is using (a game, a video). PrintWindow with
-        # PW_RENDERFULLCONTENT still reads an occluded window's frame.
-        [void][Win32Capture]::SetWindowPos($handle, $HWND_BOTTOM, 0, 0, $outerW, $outerH, $SWP_NOACTIVATE)
+        # The editor runs with --capture: hidden, frameless (window = client) and a tool
+        # window with no taskbar button. Size and place it while it is still hidden, at the
+        # bottom of the z-order, then show it without activating it or moving it up. It
+        # never covers another window and never takes focus (gpui's own show raised it to
+        # the top; that covered a show Luke was watching).
+        if ([Win32Capture]::IsWindowVisible($handle)) {
+          Write-Host "capture-gpui: the editor window is already visible; refusing to go on (was it built without --capture support?)"
+          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          exit 3
+        }
+        $fgBefore = [Win32Capture]::GetForegroundWindow()
+        [void][Win32Capture]::SetWindowPos($handle, $HWND_BOTTOM, 0, 0, $w, $h, $SWP_NOACTIVATE)
+        # gpui's pop-up style still has a frame (WS_OVERLAPPED carries a caption), so grow the
+        # outer window by the measured frame until the CLIENT area is exactly WxH.
+        $client0 = New-Object Win32Capture+RECT
+        [void][Win32Capture]::GetClientRect($handle, [ref]$client0)
+        $padW = $w - ($client0.Right - $client0.Left)
+        $padH = $h - ($client0.Bottom - $client0.Top)
+        if ($padW -ne 0 -or $padH -ne 0) {
+          [void][Win32Capture]::SetWindowPos($handle, $HWND_BOTTOM, 0, 0, $w + $padW, $h + $padH, $SWP_NOACTIVATE)
+        }
+        [void][Win32Capture]::SetWindowPos($handle, $HWND_BOTTOM, 0, 0, 0, 0, ($SWP_NOACTIVATE -bor $SWP_NOMOVE -bor $SWP_NOSIZE -bor $SWP_SHOWWINDOW))
+        if ([Win32Capture]::GetForegroundWindow() -eq $handle) {
+          Write-Host "capture-gpui: the editor took the foreground; stopping"
+          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          exit 3
+        }
         # Settle, measured: probe the frame every 500 ms until two probes in
         # a row are identical (painted and stable) AND at least 3 s have
         # passed since the window appeared. The minimum matters: the

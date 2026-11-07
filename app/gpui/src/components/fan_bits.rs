@@ -20,7 +20,7 @@ use gpui::{
     MouseMoveEvent, MouseUpEvent, Rgba, Window,
 };
 
-use crate::theme::Theme;
+use crate::theme::{Theme, TokenRadius};
 
 /// The `color-mix(in srgb, a p%, b)` the CSS writes: a straight sRGB mix of two
 /// opaque colours. `p` is the share `a` keeps.
@@ -48,16 +48,20 @@ pub fn tint(c: Rgba, p: f32) -> Rgba {
 /// `hsl(var(--live-h) 55% 55% / 0.16)`: the hue is the theme's `live_h` and
 /// the rest is in the token's own text.
 pub fn hsl_token(token: &str, hue: u16) -> Rgba {
-    let numbers: Vec<f32> = token
-        .split(|c: char| !c.is_ascii_digit() && c != '.')
-        .filter(|s| !s.is_empty())
-        .filter_map(|s| s.parse::<f32>().ok())
-        .collect();
-    // The numbers are the saturation, the lightness and the alpha; the hue is
-    // the theme's own.
-    let saturation = numbers.first().copied().unwrap_or(0.0) / 100.0;
-    let lightness = numbers.get(1).copied().unwrap_or(0.0) / 100.0;
-    let alpha = numbers.get(2).copied().unwrap_or(100.0) / 100.0;
+    // Parse "hsl(h s% l% / a)" on tokens: the alpha is 0.16, not 16, so a
+    // plain digit sweep divides it twice.
+    let inner = token
+        .strip_prefix("hsl(")
+        .and_then(|s| s.strip_suffix(')'))
+        .unwrap_or(token);
+    let (main, alpha) = match inner.split_once('/') {
+        Some((m, a)) => (m, a.trim().parse::<f32>().unwrap_or(1.0)),
+        None => (inner, 1.0),
+    };
+    let replaced = main.replace("var(--live-h)", "215");
+    let parts: Vec<&str> = replaced.split_whitespace().collect();
+    let saturation = parts.get(1).and_then(|s| s.trim_end_matches('%').parse::<f32>().ok()).unwrap_or(0.0) / 100.0;
+    let lightness = parts.get(2).and_then(|s| s.trim_end_matches('%').parse::<f32>().ok()).unwrap_or(0.0) / 100.0;
     hsl_to_rgba(hue as f32, saturation, lightness, alpha)
 }
 
@@ -91,8 +95,7 @@ pub fn live(t: &Theme) -> Rgba {
 
 /// `--live-soft`: the accent at a low alpha.
 pub fn live_soft(t: &Theme) -> Rgba {
-    let hue = t.live_h.parse::<u16>().unwrap_or(215);
-    hsl_token(t.live_soft, hue)
+    t.live_soft()
 }
 
 /// `--warn-wash`: `color-mix(in srgb, var(--warn) 8%, var(--sunk))` in the dark
@@ -232,7 +235,7 @@ pub fn fans_button(
         .gap(px(6.0))
         .h(if small { px(28.0) } else { px(32.0) })
         .px(if small { px(10.0) } else { px(12.0) })
-        .rounded_md()
+        .r_md()
         .border_1()
         .border_color(border)
         .bg(bg)
@@ -257,23 +260,24 @@ pub fn fans_button(
 
 /// An icon-only button, after `IconButton`: a square key whose label is its
 /// accessible name.
+///
+/// React `.ibtn`: a transparent face and a transparent edge, so the glyph
+/// stands on its own; the box is only there to be a target.
+#[allow(clippy::too_many_arguments)]
 pub fn fans_icon_button(
     t: &Theme,
     id: &str,
     label: &str,
     icon: &str,
     size_px: f32,
+    icon_px: f32,
     disabled: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
     let _ = label;
-    let face = if disabled {
-        Rgba {
-            a: 0.5,
-            ..Theme::color(t.raised)
-        }
-    } else {
-        Theme::color(t.raised)
+    let face = Rgba {
+        a: 0.0,
+        ..Theme::color(t.ink)
     };
     let row = div()
         .id(gpui::SharedString::from(id.to_string()))
@@ -281,16 +285,22 @@ pub fn fans_icon_button(
         .items_center()
         .justify_center()
         .size(px(size_px))
-        .rounded_md()
+        .r_md()
         .border_1()
-        .border_color(Theme::color(t.line_2))
+        .border_color(face)
         .bg(face)
-        .shadow(skirt_shadow(t))
         .child(
             gpui::svg()
                 .path(format!("icons/{icon}.svg"))
-                .size_5()
-                .text_color(Theme::color(t.ink)),
+                .size(px(icon_px))
+                .text_color(if disabled {
+                    Rgba {
+                        a: 0.4,
+                        ..Theme::color(t.dim)
+                    }
+                } else {
+                    Theme::color(t.dim)
+                }),
         );
     if disabled {
         row
@@ -469,7 +479,7 @@ pub fn sparkline(
                         .iter()
                         .enumerate()
                         .map(|(i, v)| {
-                            let x = if values.len() > 1 { i as f32 * step } else { w };
+                            let x = if values.len() > 1 { i as f32 * step } else { 0.0 };
                             let y = h
                                 - 3.0
                                 - ((*v).min(scale_max as u32) as f32 / scale_max) * (h - 6.0);
@@ -477,12 +487,18 @@ pub fn sparkline(
                         })
                         .collect();
                     if raw.len() == 1 {
+                        // One sample is a flat line at its level, drawn from
+                        // x=0 to x=w (React's sparkline), not a dot.
                         let only = raw[0];
-                        raw = vec![(0.0, only.1), only];
+                        raw = vec![(0.0, only.1), (w, only.1)];
                     }
                     let flat = !values.is_empty() && values.iter().all(|v| *v == values[0]);
-                    // The rule the trace sits on.
-                    let mut builder = gpui::PathBuilder::stroke(px(1.0));
+                    // The trace never drops below 1 px, or a flat line at a
+                    // small scale rasterises to nothing but its head dot.
+                    let stroke_w = (1.75 * scale).max(1.0);
+                    // The rule the trace sits on. Its width is the SVG's,
+                    // scaled into the box with the rest of the drawing.
+                    let mut builder = gpui::PathBuilder::stroke(px(1.0 * scale));
                     builder.move_to(at(0.0, h - 0.5));
                     builder.line_to(at(w, h - 0.5));
                     if let Ok(path) = builder.build() {
@@ -503,7 +519,7 @@ pub fn sparkline(
                                 window.paint_path(path, tint(tone, 0.12));
                             }
                         }
-                        let mut line = gpui::PathBuilder::stroke(px(1.75));
+                        let mut line = gpui::PathBuilder::stroke(px(stroke_w));
                         line.move_to(at(raw[0].0, raw[0].1));
                         for (x, y) in raw.iter().skip(1) {
                             line.line_to(at(*x, *y));
@@ -577,7 +593,9 @@ pub fn fans_select(
         .gap_2()
         .h(px(32.0))
         .px_3()
-        .rounded_md()
+        // React `.select-trigger { min-width: 160px; }`.
+        .min_w(px(160.0))
+        .r_md()
         .border_1()
         .border_color(Theme::color(t.line_2))
         .bg(Theme::color(t.raised))
@@ -586,7 +604,14 @@ pub fn fans_select(
         .font_family(crate::fonts::UI_FAMILY)
         .cursor_pointer()
         .child(chosen)
-        .child("\u{25BE}")
+        .child(
+            gpui::svg()
+                .path("icons/CaretDown-bold.svg")
+                .w(px(14.0))
+                .h(px(14.0))
+                .flex_none()
+                .text_color(Theme::color(t.ink)),
+        )
         .on_click(move |_, window, cx| toggle(window, cx));
     let mut col = div()
         .id(gpui::SharedString::from(format!("{id}-col")))
@@ -602,7 +627,7 @@ pub fn fans_select(
             .top(px(36.0))
             .left_0()
             .right_0()
-            .rounded_md()
+            .r_md()
             .border_1()
             .border_color(Theme::color(t.line_2))
             .bg(Theme::color(t.panel))
@@ -649,7 +674,7 @@ pub fn rule_box(t: &Theme, id: &str, warn: bool, body: impl IntoElement) -> impl
         .gap_2()
         .py(px(8.0))
         .px(px(12.0))
-        .rounded_md()
+        .r_md()
         .border_1()
         .border_color(border)
         .bg(bg)
@@ -702,7 +727,7 @@ pub fn fans_number_field(
         .flex_shrink()
         .min_w_0()
         .px(px(8.0))
-        .rounded_md()
+        .r_md()
         .border_1()
         .border_color(border)
         .bg(bg)
@@ -965,5 +990,33 @@ mod tests {
         assert_eq!(origin.get(), (0.0, 0.0, 0.0, 0.0));
         origin.set(12.0, 34.0, 56.0, 78.0);
         assert_eq!(origin.get(), (12.0, 34.0, 56.0, 78.0));
+    }
+
+    #[test]
+    fn the_live_soft_alpha_is_the_tokens() {
+        let dark = Theme::dark();
+        let soft = live_soft(&dark);
+        // `hsl(215 55% 55% / 0.16)`: the alpha is 0.16, not 0.16/100.
+        assert!((soft.a - 0.16).abs() < 0.001, "alpha {:?}", soft.a);
+        let light = Theme::light();
+        assert!((live_soft(&light).a - 0.14).abs() < 0.001);
+    }
+
+    #[test]
+    fn a_single_sample_draws_a_flat_line() {
+        // The `raw.len()==1` branch: one sample becomes a two-point line at
+        // its level, not a dot.
+        let values = [1200u32];
+        let max = 2000u32;
+        let scale_max = max as f32;
+        let h = 44.0_f32;
+        let y = h - 3.0 - (values[0].min(scale_max as u32) as f32 / scale_max) * (h - 6.0);
+        let raw = [(0.0, (y * 10.0).round() / 10.0), (180.0, (y * 10.0).round() / 10.0)];
+        assert_eq!(raw.len(), 2);
+        assert!(raw[0].1 == raw[1].1);
+        assert!(raw[0].0 < raw[1].0);
+        // The trace stroke is never below 1 px.
+        assert!(((1.75 * 0.31_f32).max(1.0)) >= 1.0);
+        assert!(((1.75 * 1.0_f32).max(1.0)) > 1.0);
     }
 }

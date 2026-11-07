@@ -143,6 +143,9 @@ fn tracked_text_lh(
 }
 
 /// A panel with a title. `actions` render beside the title, on the right.
+///
+/// The panel is returned as a styled div, so a caller that needs it to fill
+/// its cell (React's `.rd-headers`, `.rd-fans-right > .panel`) can say so.
 #[allow(dead_code)]
 pub fn panel(
     t: &Theme,
@@ -150,16 +153,34 @@ pub fn panel(
     title: &str,
     actions: impl IntoElement,
     body: impl IntoElement,
-) -> impl IntoElement {
-    div()
+) -> gpui::Stateful<gpui::Div> {
+    panel_with_padding(t, id, title, actions, body, None)
+}
+
+/// A panel with an optional padding override (React `.rd-fans .panel {
+/// padding: var(--s3) }` on a phone: 12 px instead of 16).
+#[allow(dead_code)]
+pub fn panel_with_padding(
+    t: &Theme,
+    id: &str,
+    title: &str,
+    actions: impl IntoElement,
+    body: impl IntoElement,
+    padding: Option<f32>,
+) -> gpui::Stateful<gpui::Div> {
+    let mut el = div()
         .id(gpui::SharedString::from(id.to_string()))
         .flex()
         .flex_col()
-        .p_4()
         .r_lg()
         .border_1()
         .border_color(Theme::color(t.line))
-        .bg(Theme::color(t.panel))
+        .bg(Theme::color(t.panel));
+    el = match padding {
+        Some(p) => el.p(px(p)),
+        None => el.p_4(),
+    };
+    el
         .child(
             div()
                 .flex()
@@ -167,7 +188,11 @@ pub fn panel(
                 .items_center()
                 .justify_between()
                 .gap_2()
-                .mb_2()
+                // React `.panel-head { margin-bottom: var(--s3); }`.
+                .mb_3()
+                // React `.panel-head { flex: 0 0 auto; }`: the head keeps its
+                // height when the panel's body scrolls.
+                .flex_shrink_0()
                 .child(tracked_title(
                     &title.to_uppercase(),
                     13.0,

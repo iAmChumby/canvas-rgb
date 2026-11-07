@@ -34,6 +34,13 @@ pub const MARGIN_BOTTOM: f32 = 46.0;
 pub const ASPECT: f32 = 0.62;
 /// The hot line may not be set below this.
 pub const HOT_MIN: f32 = 40.0;
+/// The hatch strokes put down at full coverage: React's SVG line is 1.5 px
+/// wide with opacity 0.45, but a stroked 1.5 px line on a rotating 45° pattern
+/// never covers one output pixel fully; measured at y400 over the panel
+/// (18,20,23) the line peaks at (82,36,39), which over --down (229,72,77)
+/// solves to an effective alpha of about 0.30. `tint` paints past that here so
+/// the GPUI line peaks at React's.
+pub const HATCH_ALPHA: f32 = 0.302;
 
 /// The plot's box inside the chart.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -245,6 +252,7 @@ struct ChartPaint {
     hot: Option<HotLimitStatus>,
     hot_value: f32,
     line: gpui::Rgba,
+    panel: gpui::Rgba,
     down: gpui::Rgba,
     warn: gpui::Rgba,
     ink: gpui::Rgba,
@@ -252,23 +260,26 @@ struct ChartPaint {
     a2: gpui::Rgba,
 }
 
-/// One hatch line of the ceiling band: the segment of `y = x + c` inside the
+/// One hatch line of the ceiling band: the segment of `x + y = c` inside the
 /// band.
+///
+/// React's hatch is a pattern of vertical lines turned 45 degrees, so its
+/// lines run down-left across the band.
 fn hatch_segment(x0: f32, y0: f32, x1: f32, y1: f32, c: f32) -> Option<(f32, f32, f32, f32)> {
     let mut pts: Vec<(f32, f32)> = Vec::new();
-    let yl = x0 + c;
+    let yl = c - x0;
     if yl >= y0 && yl <= y1 {
         pts.push((x0, yl));
     }
-    let yr = x1 + c;
+    let yr = c - x1;
     if yr >= y0 && yr <= y1 {
         pts.push((x1, yr));
     }
-    let xt = y0 - c;
+    let xt = c - y0;
     if xt >= x0 && xt <= x1 {
         pts.push((xt, y0));
     }
-    let xb = y1 - c;
+    let xb = c - y1;
     if xb >= x0 && xb <= x1 {
         pts.push((xb, y1));
     }
@@ -276,6 +287,38 @@ fn hatch_segment(x0: f32, y0: f32, x1: f32, y1: f32, c: f32) -> Option<(f32, f32
         return None;
     }
     Some((pts[0].0, pts[0].1, pts[1].0, pts[1].1))
+}
+
+/// The caption's glyphs, drawn as outlines: gpui 0.2.2 cannot turn text, so
+/// the one caption that stands on its side is drawn from the face's own
+/// outlines (the editor's own figures face, the one React's SVG uses).
+///
+/// The points are relative to the caption's anchor, already turned the way
+/// React turns it: the text reads up its line.
+pub fn caption_outlines(text: &str, size: f32) -> Vec<Vec<(f32, f32)>> {
+    use crate::components::outlines::{ADVANCE, OUTLINES, UNITS_PER_EM};
+    let scale = size / UNITS_PER_EM;
+    let mut out = Vec::new();
+    for (i, ch) in text.chars().enumerate() {
+        let Some((_, outline)) = OUTLINES.iter().find(|(c, _)| *c == ch) else {
+            continue;
+        };
+        let x_off = i as f32 * ADVANCE;
+        for contour in outline.contours {
+            let points: Vec<(f32, f32)> = contour
+                .iter()
+                .map(|(gx, gy)| {
+                    // The glyph as the text is written: to the right and up.
+                    let dx = (x_off + gx) * scale;
+                    let dy = -gy * scale;
+                    // Turned 90 degrees anticlockwise, as React's `rotate(-90)`.
+                    (dy, -dx)
+                })
+                .collect();
+            out.push(points);
+        }
+    }
+    out
 }
 
 /// The chart itself.
@@ -315,6 +358,7 @@ pub fn fan_curve_chart(
         hot,
         hot_value,
         line: Theme::color(t.line),
+        panel: Theme::color(t.panel),
         down: Theme::color(t.down),
         warn: Theme::color(t.warn),
         ink: Theme::color(t.ink),
@@ -389,18 +433,22 @@ pub fn fan_curve_chart(
                     let ceil = hot.ceiling_c.clamp(TEMP_MIN, TEMP_MAX);
                     let cx = x_of(&g, ceil);
                     let mut c = gpui::PathBuilder::stroke(px(1.5));
-                    let mut k = cx - plot_bottom;
-                    while k <= plot_right - MARGIN_TOP {
+                    // React's hatch is a pattern of vertical lines turned 45
+                    // degrees: the lines are `x + y = c`, one every 8 px of the
+                    // pattern, and the pattern starts at the chart's corner.
+                    let step = 8.0 * 2.0f32.sqrt();
+                    let mut k = ((cx + MARGIN_TOP) / step).ceil() * step;
+                    while k <= plot_right + plot_bottom {
                         if let Some((x1, y1, x2, y2)) =
                             hatch_segment(cx, MARGIN_TOP, plot_right, plot_bottom, k)
                         {
                             c.move_to(at(x1, y1));
                             c.line_to(at(x2, y2));
                         }
-                        k += 8.0;
+                        k += step;
                     }
                     if let Ok(path) = c.build() {
-                        window.paint_path(path, tint(p.down, 0.45));
+                        window.paint_path(path, tint(p.down, HATCH_ALPHA));
                     }
                     let mut dashed =
                         gpui::PathBuilder::stroke(px(1.0)).dash_array(&[px(2.0), px(3.0)]);
@@ -482,6 +530,51 @@ pub fn fan_curve_chart(
                         window.paint_path(path, p.a2);
                     }
                 }
+                // The ceiling's caption, standing up in the hatch: the glyphs
+                // are drawn from the face's own outlines, turned the way React
+                // turns them, with the panel's halo under the red.
+                if let Some(hot) = p.hot {
+                    let ceil = hot.ceiling_c.clamp(TEMP_MIN, TEMP_MAX);
+                    let cx = x_of(&g, ceil);
+                    let label_x = if cx + 16.0 <= plot_right {
+                        cx + 16.0
+                    } else {
+                        cx - 6.0
+                    };
+                    let anchor_y = plot_bottom - 8.0;
+                    let outlines = caption_outlines("Full speed", 14.0);
+                    // GPUI 0.2.2 strokes with no join control: a 4 px mitered
+                    // halo spikes on sharp glyph corners (SVG's default miter
+                    // limit 4 clips them). An offset-copy halo — a 2 px path
+                    // painted at the five 1 px offsets — gives the same 4 px
+                    // halo without the spikes.
+                    let mut fill = gpui::PathBuilder::fill();
+                    for contour in &outlines {
+                        let first = contour[0];
+                        fill.move_to(at(label_x + first.0, anchor_y + first.1));
+                        for point in &contour[1..] {
+                            fill.line_to(at(label_x + point.0, anchor_y + point.1));
+                        }
+                        fill.close();
+                    }
+                    for (ox, oy) in [(0.0, 0.0), (1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+                        let mut halo = gpui::PathBuilder::stroke(px(2.0));
+                        for contour in &outlines {
+                            let first = contour[0];
+                            halo.move_to(at(label_x + first.0 + ox, anchor_y + first.1 + oy));
+                            for point in &contour[1..] {
+                                halo.line_to(at(label_x + point.0 + ox, anchor_y + point.1 + oy));
+                            }
+                            halo.close();
+                        }
+                        if let Ok(path) = halo.build() {
+                            window.paint_path(path, p.panel);
+                        }
+                    }
+                    if let Ok(path) = fill.build() {
+                        window.paint_path(path, p.down);
+                    }
+                }
             },
         )
         .absolute()
@@ -509,12 +602,15 @@ pub fn fan_curve_chart(
                 .child(format!("{pct}%")),
         );
     }
+    // The axis labels: border-box at plot_bottom+5 puts the text baseline
+    // level with React's `y=MARGIN.top+plotH+20` (4 px above plot_bottom+9);
+    // the caption moves up with them (`y=height-6`).
     for temp in [20.0_f32, 40.0, 60.0, 80.0, 100.0] {
         let x = x_of(&geom, temp);
         chart = chart.child(
             div()
                 .absolute()
-                .top(px(plot_bottom + 9.0))
+                .top(px(plot_bottom + 5.0))
                 .left(px(x - 20.0))
                 .w(px(40.0))
                 .text_sm()
@@ -528,7 +624,7 @@ pub fn fan_curve_chart(
     chart = chart.child(
         div()
             .absolute()
-            .top(px(plot_bottom + 29.0))
+            .top(px(plot_bottom + 25.0))
             .left(px(plot_right - 140.0))
             .w(px(140.0))
             .text_sm()
@@ -560,31 +656,8 @@ pub fn fan_curve_chart(
             .text_color(Theme::color(t.warn))
             .child(short),
     );
-    // The ceiling's caption, standing up in the hatch.
-    if let Some(hot) = hot {
-        let ceil = hot.ceiling_c.clamp(TEMP_MIN, TEMP_MAX);
-        let cx = x_of(&geom, ceil);
-        let label_x = if cx + 16.0 <= plot_right {
-            cx + 16.0
-        } else {
-            cx - 6.0
-        };
-        let mut stack = div()
-            .absolute()
-            .top(px(plot_bottom - 98.0))
-            .left(px(label_x))
-            .flex()
-            .flex_col_reverse()
-            .items_center()
-            .text_size(px(13.0))
-            .line_height(px(9.0))
-            .font_family(crate::fonts::MONO_FAMILY)
-            .text_color(Theme::color(t.down));
-        for ch in "Full speed".chars() {
-            stack = stack.child(ch.to_string());
-        }
-        chart = chart.child(stack);
-    }
+    // The ceiling's caption, standing up in the hatch, is drawn in the canvas
+    // above (gpui 0.2.2 cannot turn text).
 
     // The hot line's handle: a strip over the dashed line.
     if hot.is_some() {
@@ -761,10 +834,25 @@ mod tests {
 
     #[test]
     fn the_hatch_line_is_clipped_to_the_band() {
-        // The line y = x crosses a square band from corner to corner.
-        let seg = hatch_segment(0.0, 0.0, 20.0, 20.0, 0.0).expect("a segment");
-        assert_eq!(seg, (0.0, 0.0, 20.0, 20.0));
+        // The line x + y = c crosses a square band from corner to corner.
+        let seg = hatch_segment(0.0, 0.0, 20.0, 20.0, 20.0).expect("a segment");
+        assert_eq!(seg, (0.0, 20.0, 20.0, 0.0));
         // A line far below the band has no segment in it.
         assert!(hatch_segment(10.0, 0.0, 20.0, 10.0, 100.0).is_none());
+    }
+
+    #[test]
+    fn the_caption_is_turned_the_way_react_turns_it() {
+        // The caption reads up its line: the first glyph's baseline starts at
+        // the anchor and the text runs up from it.
+        let outlines = caption_outlines("Fu", 14.0);
+        // "F" and "u" each have one contour.
+        assert_eq!(outlines.len(), 2);
+        // The first glyph starts at the anchor's left edge.
+        let first = outlines[0][0];
+        assert!(first.0.abs() < 0.01, "the text runs up: {first:?}");
+        // The second glyph sits one advance up the line.
+        let second = outlines[1][0];
+        assert!(second.1 < -1.0, "the text runs up: {second:?}");
     }
 }

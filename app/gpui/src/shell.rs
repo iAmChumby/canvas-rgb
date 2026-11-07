@@ -335,20 +335,14 @@ impl Shell {
     /// React; one fetch here keeps the capture honest — the value shown is
     /// the daemon's, not a constant).
     fn poll_all(&mut self, cx: &mut Context<Self>) {
+        // Every answer is asked for on its own, so the strip and the rail do
+        // not wait for the slowest of them.
         let bg = cx.background_executor().spawn(async move {
             let client = DaemonClient::new();
-            let status = client.get("/api/v1/status");
-            let devices = client.get("/api/v1/devices");
-            let displays = client.get("/api/v1/displays");
-            let layouts = client.get("/api/v1/layouts");
-            let effects = client.get("/api/v1/effects");
-            let fans = client.get("/api/v1/fans");
-            let peripherals = client.get("/api/v1/peripherals");
-            let render = client.get("/api/v1/render");
-            (status, devices, displays, layouts, effects, fans, peripherals, render)
+            client.get("/api/v1/status")
         });
         cx.spawn(async move |view, cx| {
-            let (status, devices, displays, layouts, effects, fans, peripherals, render) = bg.await;
+            let status = bg.await;
             let _ = view.update(cx, |this, cx| {
                 match status {
                     Ok(body) => {
@@ -366,40 +360,54 @@ impl Shell {
                         }
                     }
                 }
-                if let Ok(body) = devices {
-                    if let Ok(parsed) = serde_json::from_str::<DevicesResponse>(&body) {
-                        this.devices = Some(parsed);
-                    }
-                }
-                if let Ok(body) = displays {
-                    if let Ok(rows) = serde_json::from_str::<Vec<canvas_proto::api::DisplayStatus>>(&body) {
-                        this.displays_connected = rows.iter().filter(|r| r.info.connected).count();
-                        this.displays_count = Some(rows.len());
-                    }
-                }
-                if let Ok(body) = layouts {
-                    if let Ok(parsed) = serde_json::from_str::<LayoutsResponse>(&body) {
-                        this.layouts = Some(parsed);
-                    }
-                }
-                if let Ok(body) = effects {
-                    if let Ok(parsed) = serde_json::from_str::<EffectsResponse>(&body) {
-                        this.effects = Some(parsed);
-                    }
-                }
-                if let Ok(body) = fans {
-                    if let Ok(parsed) = serde_json::from_str::<FansStatus>(&body) {
-                        this.fans = Some(parsed);
-                    }
-                }
-                if let Ok(body) = peripherals {
-                    if let Ok(parsed) = serde_json::from_str::<PeripheralsResponse>(&body) {
-                        this.peripherals = Some(parsed.peripherals.len());
-                    }
-                }
-                if let Ok(body) = render {
-                    if let Ok(parsed) = serde_json::from_str::<RenderState>(&body) {
-                        this.render = Some(parsed);
+                cx.notify();
+            });
+        })
+        .detach();
+        Self::poll_json::<DevicesResponse>(cx, "/api/v1/devices", |this, parsed| {
+            this.devices = Some(parsed);
+        });
+        Self::poll_json::<Vec<canvas_proto::api::DisplayStatus>>(
+            cx,
+            "/api/v1/displays",
+            |this, rows| {
+                this.displays_connected = rows.iter().filter(|r| r.info.connected).count();
+                this.displays_count = Some(rows.len());
+            },
+        );
+        Self::poll_json::<LayoutsResponse>(cx, "/api/v1/layouts", |this, parsed| {
+            this.layouts = Some(parsed);
+        });
+        Self::poll_json::<EffectsResponse>(cx, "/api/v1/effects", |this, parsed| {
+            this.effects = Some(parsed);
+        });
+        Self::poll_json::<FansStatus>(cx, "/api/v1/fans", |this, parsed| {
+            this.fans = Some(parsed);
+        });
+        Self::poll_json::<PeripheralsResponse>(cx, "/api/v1/peripherals", |this, parsed| {
+            this.peripherals = Some(parsed.peripherals.len());
+        });
+        Self::poll_json::<RenderState>(cx, "/api/v1/render", |this, parsed| {
+            this.render = Some(parsed);
+        });
+    }
+
+    /// One answer, asked for on its own and put in the shell when it lands.
+    fn poll_json<T: serde::de::DeserializeOwned + 'static>(
+        cx: &mut Context<Self>,
+        path: &'static str,
+        apply: impl Fn(&mut Self, T) + 'static,
+    ) {
+        let bg = cx.background_executor().spawn(async move {
+            let client = DaemonClient::new();
+            client.get(path).ok()
+        });
+        cx.spawn(async move |view, cx| {
+            let body = bg.await;
+            let _ = view.update(cx, |this, cx| {
+                if let Some(body) = body {
+                    if let Ok(value) = serde_json::from_str::<T>(&body) {
+                        apply(this, value);
                     }
                 }
                 cx.notify();
@@ -1245,7 +1253,7 @@ impl Shell {
         };
         let (now_name, now_detail, _now_count) = playing(self.status.as_ref(), self.effects.as_ref());
         // Page title and context (React PageTitle in the strip).
-        let title_text = match self.page.as_str() {
+        let mut title_text = match self.page.as_str() {
             "layout" => "Layout",
             "effects" => "Effects",
             "devices" => "Devices",
@@ -1255,8 +1263,9 @@ impl Shell {
             "settings" => "Settings",
             "updates" => "Updates",
             _ => "Layout",
-        };
-        let context_text = if self.page == "displays" {
+        }
+        .to_string();
+        let mut context_text = if self.page == "displays" {
             format!("{} connected", self.displays_connected)
         } else if self.page == "updates" {
             self.updates_view
@@ -1267,117 +1276,19 @@ impl Shell {
         } else {
             String::new()
         };
-        // React: `.strip-inner{height:54px}` plus the `.strip` border-bottom
-        // 1 px = 55 total, the border at y54-55 (GPUI drew the border inside
-        // 54, at 53-54, shifting everything below 1 px up). The phone strip
-        // is `.strip{height:48px}` with the border inside it, as drawn.
-        let mut inner = div()
-            .flex()
-            .items_center()
-            .gap(if phone { px(8.0) } else { px(16.0) })
-            .h(if phone { px(48.0) } else { px(55.0) })
-            .px(if phone { px(8.0) } else { px(24.0) })
-            .border_b_1()
-            .border_color(Theme::color(t.line))
-            .bg(Theme::color(t.panel));
-        if phone {
-            inner = inner.child(self.easel(16.0));
+        // The page's own actions (React PageActions), on the strip's right.
+        let mut page_actions: Option<gpui::AnyElement> = None;
+        if self.page == "fans" {
+            let fans_view = self.fans_view.clone();
+            let (title, context, actions) = fans_view.update(cx, |view, cx| {
+                let (title, context) = view.strip_title();
+                let actions = view.strip_actions(cx);
+                (title, context, actions)
+            });
+            title_text = title;
+            context_text = context.unwrap_or_default();
+            page_actions = Some(actions);
         }
-        // React `.rd-title`: the h1 and the mono context share one flex row
-        // with a 12 px gap (the context sits inside the title slot).
-        // `.rd-title` carries `margin-right: var(--s2)` (8 px) so the title
-        // never touches the mark (#204 G8-r3: without it the check icon sat
-        // 10 px left at 1440). On a phone it is `flex: none` with no right
-        // margin, so the title never shrinks under the row.
-        let title_row = div()
-            .flex()
-            .items_baseline()
-            .gap_3();
-        let mut title_row = if phone {
-            title_row.flex_none()
-        } else {
-            title_row.mr_2()
-        };
-        title_row = title_row.child(
-            div()
-                .text_xl()
-                .line_height(gpui::relative(1.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .font_family(crate::fonts::UI_FAMILY)
-                .text_color(Theme::color(t.ink))
-                .child(title_text.to_string()),
-        );
-        if !context_text.is_empty() && !phone {
-            title_row = title_row.child(
-                div()
-                    .text_sm()
-                    .line_height(gpui::relative(1.0))
-                    .font_family(crate::fonts::MONO_FAMILY)
-                    .text_color(Theme::color(t.mute))
-                    .child(context_text),
-            );
-        }
-        inner = inner.child(title_row);
-        // Now playing: hidden at 1280 px and up (the deck carries it there).
-        if self.width < 1280.0 {
-            let swatch = div()
-                .size(px(12.0))
-                .r_sm()
-                .bg(t.live());
-            let swatch = if paused { swatch.opacity(0.4) } else { swatch };
-            inner = inner.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(swatch)
-                    .child(
-                        div()
-                            .flex()
-                            .items_baseline()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .font_family(crate::fonts::UI_FAMILY)
-                                    .text_color(Theme::color(t.ink))
-                                    .child(now_name.clone()),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_family(crate::fonts::UI_FAMILY)
-                                    .text_color(Theme::color(t.mute))
-                                    .child(now_detail.clone()),
-                            ),
-                    ),
-            );
-        }
-        // The mark: icon always, words at 1280 px and up. React `.strip-mark`
-        // has no flex gap between icon and words; GPUI's title advance runs
-        // 4 px short of the browser's at 1440, so at 1280 and up the row
-        // carries 4 px of left margin and no gap (dot and words both land on
-        // React's 333/342 at 1440).
-        let mut mark_row = div()
-            .flex()
-            .items_center()
-            .child(gpui::svg().path(mark_icon).size(px(14.0)).text_color(tone_color));
-        if self.width >= 1280.0 {
-            mark_row = mark_row.ml(px(4.0));
-        }
-        let mark_row = if self.width >= 1280.0 {
-            mark_row.child(
-                div()
-                    .text_sm()
-                    .font_family(crate::fonts::UI_FAMILY)
-                    .text_color(Theme::color(t.mute))
-                    .child(mark),
-            )
-        } else {
-            mark_row
-        };
-        inner = inner.child(mark_row).child(div().flex_1());
         // The peripherals page's actions (React `PageActions`): the pending
         // count, Revert and Apply, before Pause and Search. Empty unless
         // there are pending edits.
@@ -1425,8 +1336,146 @@ impl Shell {
                         apply_entity.update(cx, |v, cx| v.apply(cx));
                     },
                 ));
-                inner = inner.child(actions);
+                page_actions = Some(actions.into_any_element());
             }
+        }
+        // React: `.strip-inner{height:54px}` plus the `.strip` border-bottom
+        // 1 px = 55 total, the border at y54-55 (GPUI drew the border inside
+        // 54, at 53-54, shifting everything below 1 px up). The phone strip
+        // is `.strip{height:48px}` with the border inside it, as drawn.
+        let mut inner = div()
+            .flex()
+            .items_center()
+            .gap(if phone { px(8.0) } else { px(16.0) })
+            .h(if phone { px(48.0) } else { px(55.0) })
+            .px(if phone { px(8.0) } else { px(24.0) })
+            .border_b_1()
+            .border_color(Theme::color(t.line))
+            .bg(Theme::color(t.panel));
+        if phone {
+            inner = inner.child(self.easel(16.0));
+        }
+        // React `.rd-title`: the h1 and the mono context share one flex row
+        // with a 12 px gap (the context sits inside the title slot).
+        // `.rd-title` carries `margin-right: var(--s2)` (8 px) so the title
+        // never touches the mark (#204 G8-r3: without it the check icon sat
+        // 10 px left at 1440). On a phone it is `flex: none` with no right
+        // margin, so the title never shrinks under the row.
+        let title_row = div()
+            .flex()
+            .items_baseline()
+            .gap_3();
+        let mut title_row = if phone {
+            title_row.flex_none()
+        } else {
+            title_row.mr_2()
+        };
+        title_row = title_row.child(
+            div()
+                .text_xl()
+                .line_height(gpui::relative(1.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .font_family(crate::fonts::UI_FAMILY)
+                .text_color(Theme::color(t.ink))
+                .child(title_text.to_string()),
+        );
+        if !context_text.is_empty() && !phone {
+            // React's strip gives the room to a page that brings actions of
+            // its own: below 1100 px the page's context line goes too
+            // (`.strip-inner:has(.rd-actions) .rd-context`).
+            let room_for_context = page_actions.is_none() || self.width >= 1100.0;
+            if room_for_context {
+                title_row = title_row.child(
+                    div()
+                        .text_sm()
+                        .line_height(gpui::relative(1.0))
+                        .font_family(crate::fonts::MONO_FAMILY)
+                        .text_color(Theme::color(t.mute))
+                        .child(context_text),
+                );
+            }
+        }
+        inner = inner.child(title_row);
+        // Now playing: hidden at 1280 px and up (the deck carries it there).
+        if self.width < 1280.0 {
+            let swatch = div()
+                .size(px(12.0))
+                .r_sm()
+                .bg(t.live());
+            let swatch = if paused { swatch.opacity(0.4) } else { swatch };
+            // React's strip gives the room to a page that brings actions of
+            // its own: the effect's name goes, and only its colour stays
+            // (`.strip-inner:has(.rd-actions) .strip-now-text`). A phone's
+            // strip keeps the name.
+            let mut now_row = div().flex().items_center().gap_2().child(swatch);
+            if page_actions.is_none() || phone {
+                now_row = now_row.child(
+                    div()
+                        .flex()
+                        .items_baseline()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .font_family(crate::fonts::UI_FAMILY)
+                                .text_color(Theme::color(t.ink))
+                                .child(now_name.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_family(crate::fonts::UI_FAMILY)
+                                .text_color(Theme::color(t.mute))
+                                .child(now_detail.clone()),
+                        ),
+                );
+            }
+            inner = inner.child(now_row);
+        }
+        // The mark: icon always, words at 1280 px and up. React `.strip-mark`
+        // has no flex gap between icon and words; GPUI's title advance runs
+        // 4 px short of the browser's at 1440, so at 1280 and up the row
+        // carries 4 px of left margin and no gap (dot and words both land on
+        // React's 333/342 at 1440).
+        let mut mark_row = div()
+            .flex()
+            .items_center()
+            .child(gpui::svg().path(mark_icon).size(px(14.0)).text_color(tone_color));
+        if self.width >= 1280.0 {
+            mark_row = mark_row.ml(px(4.0));
+        }
+        let mark_row = if self.width >= 1280.0 {
+            mark_row.child(
+                div()
+                    .text_sm()
+                    .font_family(crate::fonts::UI_FAMILY)
+                    .text_color(Theme::color(t.mute))
+                    .child(mark),
+            )
+        } else {
+            mark_row
+        };
+        inner = inner.child(mark_row).child(div().flex_1());
+        // The page's own actions, on the strip's right, before Pause and
+        // Search (React `.rd-actions`).
+        if let Some(actions) = page_actions {
+            let mut box_ = div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .pr_3()
+                .mr_1()
+                .border_r_1()
+                .border_color(Theme::color(t.line))
+                .child(actions);
+            if phone {
+                // React's phone strip: the actions lose their edge and their
+                // room (`.rd-actions { border-right: 0; padding-right: 0;
+                // margin-right: 0; gap: var(--s1); }`).
+                box_ = box_.pr_0().mr_0().gap_1().border_r_0();
+            }
+            inner = inner.child(box_);
         }
         // Controls at the right (React `.strip-controls`: an inline-flex
         // group with `margin-left: auto` and an 8 px (`--s2`) gap between
@@ -1698,7 +1747,15 @@ impl Render for Shell {
             // React phone `.content`: padding s4 (16) on the sides.
             content.px(px(16.0)).pb(px(120.0)).pt(phone_pad_top)
         } else {
-            content.px(px(24.0)).pb(px(24.0)).pt(px(16.0))
+            // React `.content { flex: 1 1 auto; min-height: 0; overflow:
+            // hidden; }`: the content box holds the page's own height, so a
+            // long list scrolls inside its own pane.
+            content
+                .px(px(24.0))
+                .pb(px(24.0))
+                .pt(px(16.0))
+                .min_h_0()
+                .overflow_hidden()
         };
         let main_col = div()
             .flex()
