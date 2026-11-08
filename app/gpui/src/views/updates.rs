@@ -977,22 +977,20 @@ impl UpdatesView {
             )
             .into_any_element()
         };
-        let slot_w = 0.0f32; // relative fill below
-        let _ = slot_w;
+        // `.upd-slot-fill` (`update.css:27-34`) is `inset: 0` in the 4 px slot, so it
+        // covers the slot's 1 px ring too: the lit part is 4 px tall. The ring
+        // (`inset 0 0 0 1px --line`) and the well line are drawn under it.
         let fill_el = match fill {
             None => div()
                 .absolute()
                 .inset_0()
                 .rounded(px(2.0))
                 .bg(t.live_soft()),
-            Some(p) => div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .h_full()
-                .rounded(px(2.0))
-                .bg(t.live())
-                .w(gpui::relative(p)),
+            Some(p) => {
+                let lit = div().absolute().top_0().left_0().h_full().bg(t.live()).w(gpui::relative(p));
+                // The scaled bar keeps the slot's rounded left end; a full bar both.
+                if p >= 1.0 { lit.rounded(px(2.0)) } else { lit.rounded_tl(px(2.0)).rounded_bl(px(2.0)) }
+            }
         };
         // `.upd-key` is inline-flex: the key and its slot are one unit as wide
         // as the key, not the card (a flex row around it shrink-wraps the unit).
@@ -1009,10 +1007,20 @@ impl UpdatesView {
                 .h(px(4.0))
                 .rounded(px(2.0))
                 .bg(Theme::color(t.sunk))
-                .border_1()
-                .border_color(Theme::color(t.line))
+                // `overflow: hidden` clips to the padding box in GPUI, so the slot has no
+                // border: the ring is a child (`inset 0 0 0 1px --line`), the well's top
+                // line (`--well`) lies over its top row, and the fill covers both.
                 .overflow_hidden()
-                .child(fill_el),
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .rounded(px(2.0))
+                        .border_1()
+                        .border_color(Theme::color(t.line)),
+                )
+                .child(div().absolute().top_0().left_0().right_0().h(px(1.0)).bg(t.well()))
+                .child(div().absolute().inset_0().child(fill_el)),
         );
         // The inline-flex unit sits in a line box: its strut leaves about 1 px
         // under the slot (measured against the React shots).
