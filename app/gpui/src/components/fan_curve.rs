@@ -1,4 +1,4 @@
-//! `FanCurveEditor`, after `app/web/src/views/FanCurveEditor.tsx`.
+﻿//! `FanCurveEditor`, after `app/web/src/views/FanCurveEditor.tsx`.
 //!
 //! A 2 to 8 point curve on a temperature by percent grid. The shaded band at
 //! the bottom is the floor. From the source's hot limit (issue #130: the
@@ -35,7 +35,7 @@ pub const ASPECT: f32 = 0.62;
 /// The hot line may not be set below this.
 pub const HOT_MIN: f32 = 40.0;
 /// The hatch strokes put down at full coverage: React's SVG line is 1.5 px
-/// wide with opacity 0.45, but a stroked 1.5 px line on a rotating 45° pattern
+/// wide with opacity 0.45, but a stroked 1.5 px line on a rotating 45Â° pattern
 /// never covers one output pixel fully; measured at y400 over the panel
 /// (18,20,23) the line peaks at (82,36,39), which over --down (229,72,77)
 /// solves to an effective alpha of about 0.30. `tint` paints past that here so
@@ -482,7 +482,11 @@ pub fn fan_curve_chart(
                     // degrees: the lines are `x + y = c`, one every 8 px of the
                     // pattern, and the pattern starts at the chart's corner.
                     let step = 8.0 * 2.0f32.sqrt();
-                    let mut k = ((cx + MARGIN_TOP) / step).ceil() * step;
+                    // React's pattern is anchored at the SVG's own origin, so
+                    // its lines are `x + y = m * step`; measured at 1440x900
+                    // they peak one pixel right of this family (1286 against
+                    // 1285), so the family starts 1 px over.
+                    let mut k = ((cx + MARGIN_TOP) / step).ceil() * step + 1.0;
                     while k <= plot_right + plot_bottom {
                         if let Some((x1, y1, x2, y2)) =
                             hatch_segment(cx, MARGIN_TOP, plot_right, plot_bottom, k)
@@ -590,8 +594,8 @@ pub fn fan_curve_chart(
                     let outlines = caption_outlines("Full speed", 14.0);
                     // GPUI 0.2.2 strokes with no join control: a 4 px mitered
                     // halo spikes on sharp glyph corners (SVG's default miter
-                    // limit 4 clips them). An offset-copy halo — a 2 px path
-                    // painted at the five 1 px offsets — gives the same 4 px
+                    // limit 4 clips them). An offset-copy halo â€” a 2 px path
+                    // painted at the five 1 px offsets â€” gives the same 4 px
                     // halo without the spikes.
                     let mut fill = gpui::PathBuilder::fill();
                     for contour in &outlines {
