@@ -671,6 +671,7 @@ impl StackBuilder {
                                 // React clears the reason when the name
                                 // changes (StackBuilder.tsx:2113-2116).
                                 this.naming_error = None;
+                                this.set_name_invalid(false, cx);
                                 cx.notify();
                             });
                         },
@@ -711,14 +712,25 @@ impl StackBuilder {
             // the field (React's `setNamingError`).
             Err(problem) => {
                 self.naming_error = Some(problem);
+                self.set_name_invalid(true, cx);
                 cx.notify();
             }
             Ok(name) => {
                 self.naming_error = None;
+                self.set_name_invalid(false, cx);
                 self.name_draft = name;
                 self.naming = false;
                 self.save(None, cx);
             }
+        }
+    }
+
+    /// The name field's refused mark (React's `aria-invalid` on the
+    /// `NameField`: the border turns to the down colour while the reason is
+    /// under the field).
+    fn set_name_invalid(&mut self, invalid: bool, cx: &mut Context<Self>) {
+        if let Some(input) = self.name_input.clone() {
+            input.update(cx, |input, cx| input.set_invalid(invalid, cx));
         }
     }
 

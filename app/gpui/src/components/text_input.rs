@@ -126,6 +126,9 @@ pub struct TextInput {
     /// The search box wears React's small radius (`.effect-search input`
     /// `r-sm`); a number field wears the input's `r-md`.
     radius_sm: bool,
+    /// A field that is refused wears the down colour on its border (React's
+    /// `aria-invalid` on a name field).
+    invalid: bool,
     /// The effects search's border is `--line-2` (motion.css
     /// `.effect-search input`); a number or name field's is `--line`
     /// (hardware.css's wells rule for `.num`/`.text-in`).
@@ -183,6 +186,7 @@ impl TextInput {
             line_height: None,
             v_pad: 0.0,
             radius_sm: false,
+            invalid: false,
             border_2: false,
             left_pad: 8.0,
             right_pad: 8.0,
@@ -224,6 +228,16 @@ impl TextInput {
     /// box wears the small one).
     pub fn set_radius_md(&mut self, cx: &mut Context<Self>) {
         self.radius_sm = false;
+        cx.notify();
+    }
+
+    /// The field is refused (React's `aria-invalid`): its border wears the
+    /// down colour, as a name field with a reason under it does.
+    pub fn set_invalid(&mut self, invalid: bool, cx: &mut Context<Self>) {
+        if self.invalid == invalid {
+            return;
+        }
+        self.invalid = invalid;
         cx.notify();
     }
 
@@ -815,7 +829,13 @@ impl Render for TextInput {
         } else {
             field
                 .border_1()
-                .border_color(if self.border_2 { Theme::color(t.line_2) } else { Theme::color(t.line) })
+                .border_color(if self.invalid {
+                    Theme::color(t.down)
+                } else if self.border_2 {
+                    Theme::color(t.line_2)
+                } else {
+                    Theme::color(t.line)
+                })
                 .bg(Theme::color(t.sunk))
         };
         if disabled {

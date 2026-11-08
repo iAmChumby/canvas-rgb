@@ -42,6 +42,11 @@ param(
     # stack that has never been saved). The shot is named
     # stack-<slug>-gpui-<size>-<theme>.png.
     [string]$Stack = '',
+    # #246: reach the builder's save error or its naming error, the way the
+    # builder's own flow reaches it (CANVAS_RGB_CAPTURE_STACK_ERROR=save|naming).
+    # The shot is named stack-<which>-error-gpui-<size>-<theme>.png, and it
+    # pairs with the React shot of the same name.
+    [string]$StackError = '',
     # How long the window must have been up before a settled frame is taken.
     # The editor's live preview is a render of the effect's own source, which
     # takes a few seconds; a short settle would shoot the pane before the
@@ -231,6 +236,12 @@ foreach ($theme in $Themes) {
       $psi.Arguments = "--page $page --theme $theme --min-size 390x600 --size $size --capture$paletteArgs$onboardArgs"
       if ($Editor -ne '') { $psi.Arguments += " --editor $Editor" }
       if ($Stack -ne '') { $psi.Arguments += " --stack `"$Stack`"" }
+      if ($StackError -ne '') {
+        # The editor reads the state from the environment (the editor's own
+        # flags are another builder's area, #246).
+        $env:CANVAS_RGB_CAPTURE_STACK_ERROR = $StackError
+        Write-Host "capture-gpui: the builder's $StackError error"
+      }
       if ($Device -ne '') { $psi.Arguments += " --peri-device $Device"; Write-Host "capture-gpui: peripherals with $Device selected" }
       if ($Probe) {
         # One file per shot: the editor appends `<name> x,y WxH` lines to it (settings.rs `pr`).
@@ -348,7 +359,7 @@ foreach ($theme in $Themes) {
         # viewport shot.
         $shot = $bmp.Clone((New-Object System.Drawing.Rectangle($ox, $oy, $clientW, $clientH)), $bmp.PixelFormat)
         $bmp.Dispose()
-        $viewName = if ($Palette) { "palette$paletteSuffix" } elseif ($Onboarding) { "onboarding-$OnboardingStep" } elseif ($Editor -ne '') { "editor" } elseif ($Stack -ne '') { "stack-$((($Stack.ToLower() -replace '[^a-z0-9]+', '-')).Trim('-'))" } elseif ($Device -ne '') { "$page-$Device" } else { $page }
+        $viewName = if ($Palette) { "palette$paletteSuffix" } elseif ($Onboarding) { "onboarding-$OnboardingStep" } elseif ($StackError -ne '') { "stack-$StackError-error" } elseif ($Editor -ne '') { "editor" } elseif ($Stack -ne '') { "stack-$((($Stack.ToLower() -replace '[^a-z0-9]+', '-')).Trim('-'))" } elseif ($Device -ne '') { "$page-$Device" } else { $page }
         if ($UpdateState -ne '' -and $page -eq 'updates') { $viewName = "updates-$UpdateState" }
         if ($Scroll -gt 0) { $viewName = "$viewName-scroll$Scroll" }
         $file = Join-Path $outDir "$viewName-gpui-${size}-$theme.png"
