@@ -555,11 +555,12 @@ async function shootPage(page, base, view, viewport, theme, daemonBase, token, p
     await page.waitForTimeout(800);
   }
   if (PERI_TOAST && view.name === "peripherals" && PERI_DEVICE_REF === "mouse") {
-    // #246: one change (Polling rate 1000 -> 500), then Apply. React's
-    // `notify` says "The settings are on the device" (`PeripheralsView.tsx:371`)
-    // and this shot catches it before its 3 s clock runs out.
+    // #246: one change (any Polling rate the page is not showing), then
+    // Apply. React's `notify` says "The settings are on the device"
+    // (`PeripheralsView.tsx:371`) and this shot catches it before its 3 s
+    // clock runs out.
     fileName = `peripherals-toast-react-${viewport.w}x${viewport.h}-${theme}.png`;
-    const seg = page.locator('.seg[aria-label="Polling rate (Hz)"] .seg-item', { hasText: "500" }).first();
+    const seg = page.locator('.seg[aria-label="Polling rate (Hz)"] .seg-item[aria-checked="false"]').first();
     try {
       await seg.click({ timeout: 8000 });
     } catch {
