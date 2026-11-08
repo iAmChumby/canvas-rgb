@@ -35,6 +35,13 @@ const WORDS: &[&str] = &[
     "Peripherals",
     "All connected",
     "Pause lights",
+    // The empty stack builder's bullets (#214): the lines the browser breaks
+    // there, so the GPUI's own width can be compared with the browser's.
+    "The bottom layer is painted first, then each",
+    "The bottom layer is painted first, then each layer",
+    "A layer paints on its canvas, a device, a zone or",
+    "A layer paints on its canvas, a device, a zone or a",
+    "Blend and opacity mix it over what is under it.",
 ];
 
 /// Write the probe's measurements, if `CANVAS_RGB_TEXT_PROBE` names a file.
@@ -62,6 +69,7 @@ fn write_to(window: &Window, path: &PathBuf) {
         (20.0, gpui::FontWeight::SEMIBOLD, UI_FAMILY, "ui"),
         (14.0, gpui::FontWeight::NORMAL, MONO_FAMILY, "mono"),
         (15.0, gpui::FontWeight::NORMAL, UI_FAMILY, "ui"),
+        (14.0, gpui::FontWeight::NORMAL, UI_FAMILY, "ui"),
     ];
     for (size, weight, family, kind) in styles {
         for word in WORDS {

@@ -1320,10 +1320,21 @@ impl StackBuilder {
         let icon_only = self.width <= 640.0;
         let head = div()
             .flex()
+            .flex_1()
             .items_center()
+            .justify_between()
             .gap_3()
+            // React's panel head is `justify-content: space-between` with the
+            // title, the count and the key as three items (the count is a
+            // fragment beside the key, so the head spreads them), and the
+            // count lands in the middle: 585 at 1440, 182 at 390. The count
+            // takes the room between the title and the key and centres itself
+            // in it.
             .child(
                 div()
+                    .flex()
+                    .flex_1()
+                    .justify_center()
                     .text_size(px(14.0))
                     .line_height(gpui::relative(1.45))
                     .font_family(crate::fonts::MONO_FAMILY)
@@ -1350,6 +1361,38 @@ impl StackBuilder {
                 },
             ));
 
+        // One bullet of the empty layers list (React `.rd-how-list li`): a
+        // block with 16 px of padding-left and the dash absolutely placed at
+        // its left edge, so the text's box is the list's content box less
+        // those 16 px and the line breaks where React's do.
+        let bullet = |text: &str| {
+            div()
+                .min_w(px(0.0))
+                // The text's box is four pixels wider than React's: gpui's
+                // text layout breaks a line a little before the string's
+                // advance width says it should (the browser fits "…then each
+                // layer", 313.01 px at 14 px, in React's 316 px box; gpui
+                // needs 320). The room is on the right, so the words still
+                // start where React's do (x 45) and still end where React's
+                // do (x 357).
+                .mr(px(-4.0))
+                .relative()
+                .child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top(px(9.0))
+                        .w(px(8.0))
+                        .h(px(2.0))
+                        .bg(Theme::color(t.line_2)),
+                )
+                // The 16 px of room the dash takes is a margin, not a padding:
+                // gpui's text layout counts the parent's padding twice, so a
+                // padded row gave the text a 300 px box and it broke the line
+                // where React's 316 px box does not.
+                .child(div().ml(px(16.0)).child(text.to_string()))
+        };
+
         let body: gpui::AnyElement = if count == 0 {
             div()
                 .flex()
@@ -1372,6 +1415,14 @@ impl StackBuilder {
                 )
                 // The dashes are drawn bars (`.rd-how-list li::before` is
                 // an 8 x 2 px run of the divider colour, not a bullet).
+                //
+                // React's `li` is a block with 16 px of padding-left and the
+                // dash absolutely placed at its left edge, so the text's box
+                // is the list's content box less those 16 px and the line
+                // breaks where React's do. A flex row with the dash in the
+                // flow gave the text a `flex: 1 1 0%` box, and it broke
+                // 10 px early: "…then each" against React's "…then each
+                // layer".
                 .child(
                     div()
                         .flex()
@@ -1383,27 +1434,9 @@ impl StackBuilder {
                         .line_height(gpui::relative(1.5))
                         .font_family(crate::fonts::UI_FAMILY)
                         .text_color(Theme::color(t.mute))
-                        .child(
-                            div().flex().items_start().gap_2().min_w(px(0.0)).child(
-                                div().flex_none().mt(px(9.0)).w(px(8.0)).h(px(2.0)).bg(Theme::color(t.line_2)),
-                            ).child(
-                                div().flex_1().min_w(px(0.0)).child("The bottom layer is painted first, then each layer over it."),
-                            ),
-                        )
-                        .child(
-                            div().flex().items_start().gap_2().min_w(px(0.0)).child(
-                                div().flex_none().mt(px(9.0)).w(px(8.0)).h(px(2.0)).bg(Theme::color(t.line_2)),
-                            ).child(
-                                div().flex_1().min_w(px(0.0)).child("A layer paints on its canvas, a device, a zone or a rectangle."),
-                            ),
-                        )
-                        .child(
-                            div().flex().items_start().gap_2().min_w(px(0.0)).child(
-                                div().flex_none().mt(px(9.0)).w(px(8.0)).h(px(2.0)).bg(Theme::color(t.line_2)),
-                            ).child(
-                                div().flex_1().min_w(px(0.0)).child("Blend and opacity mix it over what is under it."),
-                            ),
-                        ),
+                        .child(bullet("The bottom layer is painted first, then each layer over it."))
+                        .child(bullet("A layer paints on its canvas, a device, a zone or a rectangle."))
+                        .child(bullet("Blend and opacity mix it over what is under it.")),
                 )
                 .child(button_icon(
                     &t,

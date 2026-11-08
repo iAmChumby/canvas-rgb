@@ -1,11 +1,17 @@
 # The kerning the font has, and what it is worth (#240).
 #
 #   python tools/ui-capture/kern-advance.py
+#   python tools/ui-capture/kern-advance.py .build/ui-capture/240-gpui-text.tsv
 #
 # GPUI's text_width comes out wider than the browser's for the same word. The
 # font's own advances are the same in both (see font-advance.py), so the
 # difference is the kerning: Chromium applies the GPOS `kern` feature, and
 # this script measures how much that is worth per word.
+#
+# The GPUI's own measurement (the text probe, written by the editor when
+# CANVAS_RGB_TEXT_PROBE names a file) is read when its path is given, so the
+# three numbers can be compared: the font's raw advance, the font's kerned
+# advance and what GPUI's own text layout gives.
 import json
 import os
 import sys
@@ -35,6 +41,24 @@ BROWSER = {
 }
 
 SIZE = 14.0
+
+
+def read_gpu_probe(path):
+    """The GPUI editor's own text_width measurements: {text: width} for the
+    14 px semibold UI face (the strip's name)."""
+    out = {}
+    if not path or not os.path.exists(path):
+        return out
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) != 5 or parts[0].startswith("#"):
+                continue
+            kind, size, weight, text, width = parts
+            if kind == "ui" and float(size) == 14.0 and int(weight) == 600:
+                out[text] = float(width)
+    return out
+
 
 
 def cmap_map(font):
@@ -77,6 +101,7 @@ def kern_pairs(font):
 
 
 def main():
+    probe = read_gpu_probe(sys.argv[1] if len(sys.argv) > 1 else "")
     path = os.path.join(FONT_DIR, "schibsted-grotesk-600.ttf")
     font = TTFont(path, fontNumber=0, lazy=False)
     cmap = cmap_map(font)
@@ -85,7 +110,8 @@ def main():
     pairs = kern_pairs(font)
     report = {"size_px": SIZE, "words": {}}
     print(f"{FONT_DIR}  upem {upem}  kern pairs {len(pairs)}")
-    print(f"{'word':22} {'raw px':>9} {'kern px':>9} {'raw-kern':>9} {'browser':>9} {'delta':>8}")
+    print(f"{'word':22} {'raw px':>9} {'kern px':>9} {'kerned':>9} {'browser':>9} "
+          f"{'delta':>8} {'gpui':>9} {'gpui-br':>8}")
     for w in WORDS:
         names = [cmap.get(ord(c)) for c in w]
         raw = sum(hmtx[n][0] for n in names if n)
@@ -98,22 +124,34 @@ def main():
                 detail.append(f"{a}|{b}={v}")
         raw_px = raw * SIZE / upem
         kern_px = kern * SIZE / upem
-        shaped_px = raw_px - kern_px
+        # A GPOS pair adjustment is added to the advance: a negative one
+        # pulls the pair together, so the kerned advance is raw + kern.
+        shaped_px = raw_px + kern_px
         browser = BROWSER.get(w)
         delta = (shaped_px - browser) if browser is not None else None
+        gpui = probe.get(w)
+        gpui_delta = (gpui - browser) if (gpui is not None and browser is not None) else None
         report["words"][w] = {
             "raw_units": raw, "kern_units": kern, "raw_px": raw_px,
             "shaped_px": shaped_px, "browser_px": browser, "delta_px": delta,
+            "gpui_px": gpui, "gpui_delta_px": gpui_delta,
             "pairs": detail,
         }
+        def fmt(v, spec="9.4f"):
+            return format(v, spec) if v is not None else format(float("nan"), spec)
         print(f"{w!r:22} {raw_px:9.4f} {kern_px:9.4f} {shaped_px:9.4f} "
-              f"{(browser if browser is not None else float('nan')):9.4f} "
-              f"{(delta if delta is not None else float('nan')):8.4f}")
+              f"{fmt(browser):>9} {fmt(delta, '8.4f'):>8} {fmt(gpui):>9} {fmt(gpui_delta, '8.4f'):>8}")
     out = os.path.join(ROOT, ".build", "ui-capture", "240-kern-advance.json")
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, "w", encoding="utf-8") as fh:
         json.dump(report, fh, indent=2)
     print("wrote", out)
+    if probe:
+        worst = 0.0
+        for w, data in report["words"].items():
+            if data["gpui_delta_px"] is not None:
+                worst = max(worst, abs(data["gpui_delta_px"]))
+        print(f"GPUI's text_width against the browser's measureText: worst |delta| {worst:.4f} px")
     return 0
 
 
