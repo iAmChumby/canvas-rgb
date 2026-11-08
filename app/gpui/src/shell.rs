@@ -464,9 +464,13 @@ impl Shell {
 
     /// React's notification lane (`Notify.tsx` `NotifyHost`, `notify.css`):
     /// bottom right, 24 px in on a wide window and clear of the 65 px phone
-    /// dock by 12. The card is the app's own panel: 380 px wide (the window
-    /// less 32 on a phone), the line-2 border, `--r-md`, `--pop`, and the
-    /// message's mark and words at 14 px with 8/12 padding.
+    /// dock by 12. On a phone `sonner` spans the window's 12 px gutters and
+    /// the card stands at the lane's left edge (`max-width: 600px`: `left:
+    /// var(--mobile-offset-left)`, card `100vw - 32`), so the card is 12 px
+    /// from the left and 20 from the right. The card is the app's own panel:
+    /// 380 px wide (the window less 32 on a phone), the line-2 border,
+    /// `--r-md`, `--pop`, and the message's mark and words at 14 px with
+    /// 8/12 padding.
     fn toast_lane(&self) -> Option<impl IntoElement> {
         let toast = self.toast.clone()?;
         let t = &self.theme;
@@ -480,9 +484,13 @@ impl Shell {
         Some(
             div()
                 .absolute()
-                .right(px(if phone { 12.0 } else { 24.0 }))
+                .right(px(if phone { 20.0 } else { 24.0 }))
                 .bottom(px(if phone { 77.0 } else { 24.0 }))
-                .w(px((self.width - 32.0).min(380.0)))
+                .w(px(if phone {
+                    self.width - 32.0
+                } else {
+                    (self.width - 32.0).min(380.0)
+                }))
                 .flex()
                 .items_center()
                 .gap(px(8.0))
