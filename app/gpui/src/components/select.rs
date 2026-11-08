@@ -155,14 +155,21 @@ impl NavState {
 /// handle, the row the arrows are on, and the callbacks the owning view
 /// answers. `trigger` is where the trigger was painted, so a click on it is
 /// not also a click "outside" the list.
+/// A key press the owning view answers.
+pub type KeyHandler = Rc<dyn Fn(&gpui::KeyDownEvent, &mut Window, &mut gpui::App)>;
+/// The pointer moved over row `usize`.
+pub type HoverHandler = Rc<dyn Fn(usize, &mut Window, &mut gpui::App)>;
+/// The list was dismissed (Escape, a press outside).
+pub type DismissHandler = Rc<dyn Fn(&mut Window, &mut gpui::App)>;
+
 #[derive(Clone)]
 pub struct SelectKb {
     pub focus: FocusHandle,
     pub active: usize,
     pub trigger: Origin,
-    pub on_key: Rc<dyn Fn(&gpui::KeyDownEvent, &mut Window, &mut gpui::App)>,
-    pub on_hover: Rc<dyn Fn(usize, &mut Window, &mut gpui::App)>,
-    pub on_dismiss: Rc<dyn Fn(&mut Window, &mut gpui::App)>,
+    pub on_key: KeyHandler,
+    pub on_hover: HoverHandler,
+    pub on_dismiss: DismissHandler,
 }
 
 /// The flat row of the current value: `max(0, findIndex)` (`Select.tsx:92`).

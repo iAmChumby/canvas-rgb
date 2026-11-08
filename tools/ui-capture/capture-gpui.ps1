@@ -67,6 +67,13 @@ param(
     # with notes; capture-react.mjs UI_CAPTURE_UPDATE=available). The Updates
     # shot is named updates-<name>-gpui-... so diff-pairs.ps1 pairs it.
     [string]$UpdateState = '',
+    # #205: input to post to the window after it settles, before the shot: steps
+    # separated by ';' -- click:x,y (client pixels), key:<tab|enter|space|escape|
+    # left|right|up|down|home|end|pageup|pagedown|letter>, type:<text>, wait:<ms>.
+    # The messages go to the window's own queue (PostMessage), so nothing moves the
+    # real pointer or takes the foreground. Files get -Tag in their name.
+    [string]$Steps = '',
+    [string]$Tag = '',
     # #205: print the layout bounds of the probed elements to the console
     # (debug builds read CANVAS_RGB_CAPTURE_PROBE); settings.rs `pr(..)` names them.
     [switch]$Probe
@@ -109,6 +116,10 @@ public static class Win32Capture {
     public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
     [StructLayout(LayoutKind.Sequential)]
     public struct POINT { public int X; public int Y; }
+    [DllImport("user32.dll")]
+    public static extern uint MapVirtualKeyW(uint code, uint mapType);
+    [DllImport("user32.dll")]
+    public static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")]
     public static extern bool IsWindowVisible(IntPtr hWnd);
     [DllImport("user32.dll")]
@@ -188,6 +199,44 @@ function Get-ShotChecksum([IntPtr]$hWnd, [int]$cw, [int]$ch) {
   }
   $bmp.Dispose()
   return $sum
+}
+
+# Posts the -Steps to the editor's window queue (no real input device is touched).
+function Invoke-Steps([IntPtr]$hWnd, [string]$steps) {
+  $vk = @{ tab = 9; enter = 13; escape = 27; space = 32; pageup = 33; pagedown = 34; end = 35; home = 36; left = 37; up = 38; right = 39; down = 40 }
+  foreach ($step in ($steps -split ';')) {
+    if ($step.Trim() -eq '') { continue }
+    $kind, $arg = $step.Trim().Split(':', 2)
+    switch ($kind) {
+      'click' {
+        $xy = $arg.Split(',')
+        $l = [IntPtr](([int]$xy[1] -shl 16) -bor ([int]$xy[0] -band 0xffff))
+        [void][Win32Capture]::PostMessage($hWnd, 0x200, [IntPtr]0, $l)
+        Start-Sleep -Milliseconds 80
+        [void][Win32Capture]::PostMessage($hWnd, 0x201, [IntPtr]1, $l)
+        Start-Sleep -Milliseconds 80
+        [void][Win32Capture]::PostMessage($hWnd, 0x202, [IntPtr]0, $l)
+      }
+      'key' {
+        $code = if ($vk.ContainsKey($arg)) { [int]$vk[$arg] } else { [int][char]$arg.ToUpper() }
+        $scan = [int]([Win32Capture]::MapVirtualKeyW([uint32]$code, 0))
+        $down = [IntPtr](1 -bor ($scan -shl 16))
+        $up = [IntPtr](1 -bor ($scan -shl 16) -bor 0xC0000000)
+        [void][Win32Capture]::PostMessage($hWnd, 0x100, [IntPtr]$code, $down)
+        if ($arg -eq 'space') { [void][Win32Capture]::PostMessage($hWnd, 0x102, [IntPtr]32, $down) }
+        Start-Sleep -Milliseconds 60
+        [void][Win32Capture]::PostMessage($hWnd, 0x101, [IntPtr]$code, $up)
+      }
+      'type' {
+        foreach ($ch in $arg.ToCharArray()) {
+          [void][Win32Capture]::PostMessage($hWnd, 0x102, [IntPtr][int]$ch, [IntPtr]1)
+          Start-Sleep -Milliseconds 40
+        }
+      }
+      'wait' { Start-Sleep -Milliseconds ([int]$arg) }
+    }
+    Start-Sleep -Milliseconds 150
+  }
 }
 
 $saved = 0
@@ -338,6 +387,10 @@ foreach ($theme in $Themes) {
           if ($sameCount -ge 2 -and ((Get-Date) - $appearedAt).TotalSeconds -ge $settleNeed) { break }
           $prevSum = $sum
         }
+        if ($Steps -ne '') {
+          Invoke-Steps $handle $Steps
+          Start-Sleep -Milliseconds 800
+        }
         $rect = New-Object Win32Capture+RECT
         [void][Win32Capture]::GetWindowRect($handle, [ref]$rect)
         $cw = $rect.Right - $rect.Left
@@ -367,6 +420,7 @@ foreach ($theme in $Themes) {
         $viewName = if ($Palette) { "palette$paletteSuffix" } elseif ($Onboarding) { "onboarding-$OnboardingStep" } elseif ($Editor -ne '') { "editor" } elseif ($Stack -ne '') { "stack-$((($Stack.ToLower() -replace '[^a-z0-9]+', '-')).Trim('-'))" } elseif ($Device -ne '') { "$page-$Device" } else { $page }
         if ($UpdateState -ne '' -and $page -eq 'updates') { $viewName = "updates-$UpdateState" }
         if ($Scroll -gt 0) { $viewName = "$viewName-scroll$Scroll" }
+        if ($Tag -ne '') { $viewName = "$viewName-$Tag" }
         $file = Join-Path $outDir "$viewName-gpui-${size}-$theme.png"
         $shot.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
         $shot.Dispose()

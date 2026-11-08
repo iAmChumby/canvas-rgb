@@ -120,6 +120,13 @@ pub fn step_value(value: f32, key: &str, step: f32, min: f32, max: f32, decimals
 /// Told the committed number.
 pub type OnCommit = Rc<dyn Fn(f32, &mut Window, &mut App)>;
 
+/// Where the caret sits after `typed` bytes went in at `start`: just after them, and no
+/// further than the end of the text (the numeric filter may have dropped some). A browser
+/// input collapses the selection there, so the next key goes after what was typed.
+pub fn caret_after(start: usize, typed: usize, len: usize) -> usize {
+    (start + typed).min(len)
+}
+
 /// Told the field's text whenever it changes (the search box filters as the
 /// reader types; a number field leaves this out).
 pub type OnTextChange = Rc<dyn Fn(&str, &mut Window, &mut App)>;
@@ -205,9 +212,6 @@ pub struct TextInput {
     /// nothing (`inputMode="decimal"` is a keyboard hint), so Settings turns
     /// this off; older callers keep it.
     filter: bool,
-    /// The focus arrived with this press: the press must not move the caret
-    /// off the select-all the focus made (`onFocus` calls `select()`).
-    focus_by_press: bool,
 }
 
 impl TextInput {
@@ -259,7 +263,6 @@ impl TextInput {
             step: 1.0,
             dirty: false,
             filter: true,
-            focus_by_press: false,
         }
     }
 
@@ -398,8 +401,7 @@ impl TextInput {
             input.commit(window, cx);
         }));
         if self.numeric {
-            self.focus_sub = Some(cx.on_focus(&handle, window, |input, _window, cx| {
-                input.focus_by_press = true;
+            self.focus_sub = Some(cx.on_focus_in(&handle, window, |input, _window, cx| {
                 input.select_all(cx);
             }));
         }
@@ -518,12 +520,15 @@ impl TextInput {
     fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // The press that gave the field the focus keeps the select-all the focus
-        // made, as the browser's `onFocus` select does.
-        if std::mem::take(&mut self.focus_by_press) {
+        // A press that gives a numeric field the focus selects the whole entry,
+        // as the browser's `onFocus` select does (`NumberField.tsx:81`). Listeners run last-registered first on the bubble, so the element's
+        // own focus-on-press has not run yet: a field that is not focused is
+        // being given the focus by this press.
+        if self.numeric && !self.focus_handle.is_focused(window) {
+            self.select_all(cx);
             return;
         }
         self.is_selecting = true;
@@ -618,7 +623,8 @@ impl TextInput {
         }
         self.content = content.into();
         self.dirty = true;
-        self.selected_range = range.start..range.start + text.len();
+        let caret = caret_after(range.start, text.len(), self.content.len());
+        self.selected_range = caret..caret;
         self.marked_range = None;
         cx.notify();
         if let Some(change) = self.on_text_change.clone() {
@@ -976,6 +982,16 @@ impl Render for TextInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typing_leaves_a_caret_after_the_text_not_a_selection_of_it() {
+        // `45` typed over a selected `30`: the caret follows the typed byte, so the 5 does not
+        // replace the 4 (the selection used to cover what was just typed).
+        assert_eq!(caret_after(0, 1, 1), 1);
+        assert_eq!(caret_after(1, 1, 2), 2);
+        // The filter dropped a character: the caret stays inside the text.
+        assert_eq!(caret_after(2, 1, 2), 2);
+    }
 
     #[test]
     fn a_number_field_keeps_only_the_characters_a_number_may_hold() {

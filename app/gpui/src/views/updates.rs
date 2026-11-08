@@ -716,6 +716,8 @@ pub struct UpdatesView {
     generation: u64,
     /// The window width, for the page's breakpoints.
     pub width: f32,
+    /// The page itself: it holds the focus while no control does, so Tab works from the start.
+    page_focus: gpui::FocusHandle,
     /// The shell, for the notices that navigate away (unused today).
     #[allow(dead_code)]
     pub shell: Option<gpui::Entity<crate::shell::Shell>>,
@@ -741,6 +743,7 @@ impl UpdatesView {
             loading_shown: false,
             generation: 0,
             width: 1280.0,
+            page_focus: cx.focus_handle(),
             shell,
         };
         view.start_silent_timer(cx);
@@ -1350,8 +1353,32 @@ impl UpdatesView {
     }
 }
 
+/// The page's keyboard: Tab and Shift+Tab walk the buttons in document order
+/// (the browser does this for React), and the focus ring shows after a key and
+/// hides after a pointer press (`:focus-visible`).
+fn page_keys(root: gpui::Div, page_focus: &gpui::FocusHandle, cx: &mut Context<UpdatesView>) -> gpui::Div {
+    root.track_focus(page_focus).capture_key_down(cx.listener(|_, _: &gpui::KeyDownEvent, _, cx| {
+        if crate::components::focus::note_modality(true) {
+            cx.notify();
+        }
+    }))
+    .capture_any_mouse_down(cx.listener(|_, _: &gpui::MouseDownEvent, _, cx| {
+        if crate::components::focus::note_modality(false) {
+            cx.notify();
+        }
+    }))
+    .on_key_down(cx.listener(|_, ev: &gpui::KeyDownEvent, window, cx| {
+        if crate::components::focus::handle_tab(ev, window) {
+            cx.stop_propagation();
+        }
+    }))
+}
+
 impl Render for UpdatesView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The page's buttons are native buttons: in the tab order, fired by Enter and Space.
+        let _keys = crate::components::focus::ButtonKeys::on();
+        crate::components::focus::claim_when_idle(&self.page_focus, _window, cx);
         self.width = f32::from(_window.window_bounds().get_bounds().size.width);
         let phone = self.width <= 720.0;
         let narrow = self.width <= 960.0;
@@ -1362,7 +1389,7 @@ impl Render for UpdatesView {
             if self.silent {
                 // The tray stayed quiet for 5 s: the error panel with Try
                 // again. The shape stays behind it, as the frame's own.
-                return div()
+                return page_keys(div(), &self.page_focus.clone(), cx)
                     .flex()
                     .flex_col()
                     .gap_4()
@@ -1387,7 +1414,7 @@ impl Render for UpdatesView {
         }
         let u = self.update.clone().unwrap();
         let avail = u.available.clone();
-        let notes_of = avail.clone().or_else(|| u.updated_to.clone()).or_else(|| self.seen_notes.clone());
+        let notes_of = notes_of(&u, self.seen_notes.as_ref()).cloned();
         let blocks = match &notes_of {
             Some(info) => parse_notes(&info.notes),
             None => Vec::new(),
@@ -1472,7 +1499,7 @@ impl Render for UpdatesView {
                 )
                 .into_any_element()
         };
-        div()
+        page_keys(div(), &self.page_focus.clone(), cx)
             .flex()
             .flex_col()
             .flex_1()
@@ -1827,7 +1854,8 @@ mod tests {
     fn page_model_for_every_state() {
         use CheckFailReason as R;
         let dl = UpdatePhase::Downloading { downloaded: 4_404_019, total: Some(12_373_197) };
-        let rows: Vec<(&str, UpdateState, bool, &str, bool, bool, bool, bool)> = vec![
+        type Row = (&'static str, UpdateState, bool, &'static str, bool, bool, bool, bool);
+        let rows: Vec<Row> = vec![
             ("up to date", state(UpdatePhase::UpToDate, None), false, "Update now", true, false, false, true),
             ("idle", state(UpdatePhase::Idle, None), false, "Update now", true, false, false, true),
             ("checking", state(UpdatePhase::Checking, None), false, "Update now", true, false, false, true),

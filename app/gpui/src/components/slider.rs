@@ -178,7 +178,8 @@ pub fn slider_range_kb(
                     );
                 },
                 move |bounds, _, window, _| {
-                    let focused = ring_focus.as_ref().is_some_and(|h| h.is_focused(window));
+                    let focused = ring_focus.as_ref().is_some_and(|h| h.is_focused(window))
+                        && crate::components::focus::keyboard_focus();
                     let w = bounds.size.width;
                     let track = Bounds {
                         origin: point(bounds.origin.x, bounds.origin.y + px(14.0)),

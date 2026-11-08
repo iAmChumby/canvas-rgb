@@ -701,6 +701,8 @@ pub struct SettingsView {
     pub focus: SettingsFocus,
     /// The readings popover's own focus (`tabIndex={-1}`: focusable, not in the tab order).
     pub popover_focus: gpui::FocusHandle,
+    /// The page itself: it holds the focus while no control does, so Tab works from the start.
+    pub page_focus: gpui::FocusHandle,
     /// The Frame rate and Brightness number entries (`NumberField`).
     pub fps_input: gpui::Entity<TextInput>,
     pub bri_input: gpui::Entity<TextInput>,
@@ -780,6 +782,7 @@ impl SettingsView {
             bri_input,
             focus: SettingsFocus::new(cx),
             popover_focus: cx.focus_handle(),
+            page_focus: cx.focus_handle(),
             audio_nav: NavState::default(),
             audio_trigger: Origin::new(),
             started: std::time::Instant::now(),
@@ -2302,7 +2305,7 @@ impl SettingsView {
         let key_entity = view_entity.clone();
         let key_values = flat_values.clone();
         let key_value = value.clone();
-        let on_key: std::rc::Rc<dyn Fn(&gpui::KeyDownEvent, &mut Window, &mut gpui::App)> =
+        let on_key: crate::components::select::KeyHandler =
             std::rc::Rc::new(move |ev, _window, cx| {
                 let key = ev.keystroke.key.clone();
                 // A chord (Ctrl, Alt, the Windows key) is not typing.
@@ -3045,6 +3048,9 @@ impl SettingsView {
 
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The page's buttons are native buttons: in the tab order, fired by Enter and Space.
+        let _keys = crate::components::focus::ButtonKeys::on();
+        crate::components::focus::claim_when_idle(&self.page_focus, window, cx);
         // The tray's lines that are already waiting (a `ready` push): take them
         // before this draw, so the first frame with a tray is already tray state.
         self.drain_tray(cx);
@@ -3220,6 +3226,19 @@ impl Render for SettingsView {
         // Tab and Shift+Tab walk the controls in document order (the browser
         // does this for React); Escape closes the readings popover from any
         // control (`Popover.tsx` listens on the document).
+        let page = page
+            .track_focus(&self.page_focus)
+            .capture_key_down(cx.listener(|_, _: &gpui::KeyDownEvent, _, cx| {
+                // `:focus-visible`: the ring shows after a key, not after a pointer press.
+                if crate::components::focus::note_modality(true) {
+                    cx.notify();
+                }
+            }))
+            .capture_any_mouse_down(cx.listener(|_, _: &gpui::MouseDownEvent, _, cx| {
+                if crate::components::focus::note_modality(false) {
+                    cx.notify();
+                }
+            }));
         let page = page.on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
             if crate::components::focus::handle_tab(ev, window) {
                 cx.stop_propagation();

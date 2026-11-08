@@ -165,6 +165,13 @@ fn base_at(
     } else {
         el.child(skirt_layers(skirt_color, 10.0, key_h, bg, border))
     };
+    // A page that opted in (`focus::ButtonKeys`) gets a native `<button>`: in the
+    // tab order, focused by a press, fired by Enter or Space, ringed by the keyboard.
+    let el = if !disabled && crate::components::focus::buttons_take_focus() {
+        el.focusable().tab_stop(true).focus(crate::components::focus::ring(t))
+    } else {
+        el
+    };
     // React's `.btn` always has a 1 px border inside its box. A skirted key draws its
     // border on the face layer, not on this box, so it gets the border's 1 px back as
     // padding; without it every skirted key measured 2 px narrow (Save 79 vs 81 at 1440).
