@@ -1421,6 +1421,14 @@ impl Shell {
             if active {
                 cell = cell.child(
                     div()
+                        // React `.rail-link .rail-label { white-space: nowrap }`:
+                        // the name is one line. The cell is React's width, and
+                        // the name is a shade wider than it (the shaping drops
+                        // the font's kerning), so the name keeps its own width
+                        // and stands a fraction over the cell rather than
+                        // wrapping and losing its last letter.
+                        .flex_none()
+                        .whitespace_nowrap()
                         .text_sm()
                         .line_height(px(16.0))
                         .font_weight(gpui::FontWeight::MEDIUM)
