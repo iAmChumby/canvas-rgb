@@ -1775,7 +1775,16 @@ impl Shell {
         };
         inner = inner.child(mark_row).child(div().flex_1());
         // The page's own actions, on the strip's right, before Pause and
-        // Search (React `.rd-actions`).
+        // Search (React `.rd-actions`). React puts both in ONE
+        // `.strip-controls` group with an 8 px gap (4 on a phone); GPUI drew
+        // them as two children of the strip row, whose gap is 16 on a
+        // desktop, so a page with actions (Fans at 1440) had its profile keys
+        // 8 px left of React's (measured, #204).
+        let mut tail = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(if phone { px(4.0) } else { px(8.0) });
         if let Some(actions) = page_actions {
             let mut box_ = div()
                 .flex()
@@ -1793,7 +1802,7 @@ impl Shell {
                 // margin-right: 0; gap: var(--s1); }`).
                 box_ = box_.pr_0().mr_0().gap_1().border_r_0();
             }
-            inner = inner.child(box_);
+            tail = tail.child(box_);
         }
         // Controls at the right (React `.strip-controls`: an inline-flex
         // group with `margin-left: auto` and an 8 px (`--s2`) gap between
@@ -1870,7 +1879,8 @@ impl Shell {
                 entity.update(cx, |this, cx| this.open_palette(window, cx));
             },
         ));
-        inner = inner.child(controls);
+        tail = tail.child(controls);
+        inner = inner.child(tail);
         inner
     }
 

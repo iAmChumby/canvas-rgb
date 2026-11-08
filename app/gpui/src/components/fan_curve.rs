@@ -645,7 +645,11 @@ pub fn fan_curve_chart(
     } else {
         (plot_right, true)
     };
-    chart = chart.child(
+    // Deferred: the curve's canvas painted over the figure's glyphs (measured
+    // at 1440x900: the 2.5 px line crossed the "4" in React's gap, the glyph
+    // won there and lost here), so the figure is drawn at the end of the
+    // frame, over the drawing as React's SVG text is over its paths.
+    chart = chart.child(gpui::deferred(
         div()
             .absolute()
             .top(px(MARGIN_TOP + 1.0))
@@ -655,7 +659,7 @@ pub fn fan_curve_chart(
             .font_family(crate::fonts::MONO_FAMILY)
             .text_color(Theme::color(t.warn))
             .child(short),
-    );
+    ));
     // The ceiling's caption, standing up in the hatch, is drawn in the canvas
     // above (gpui 0.2.2 cannot turn text).
 

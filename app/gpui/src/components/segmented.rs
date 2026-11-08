@@ -20,6 +20,22 @@ pub fn segmented(
     selected: &str,
     on_change: impl Fn(String, &mut Window, &mut gpui::App) + Clone + 'static,
 ) -> impl IntoElement {
+    segmented_padded(t, id, options, selected, 10.0, on_change)
+}
+
+/// The same control with the option's own horizontal padding: React's
+/// `.rd-actions .seg-item` is `--s2` (8 px) on a phone and 6 px below 431 px,
+/// where the strip's profile picker has to fit beside Pause and Search
+/// (`app.css:5174,6971,6986`). The well, the dot, the gap and the height are
+/// unchanged.
+pub fn segmented_padded(
+    t: &Theme,
+    id: &str,
+    options: &[(&str, &str)],
+    selected: &str,
+    pad_x: f32,
+    on_change: impl Fn(String, &mut Window, &mut gpui::App) + Clone + 'static,
+) -> impl IntoElement {
     let mut row = div()
         .id(gpui::SharedString::from(id.to_string()))
         .relative()
@@ -89,7 +105,7 @@ pub fn segmented(
             .items_center()
             .gap(px(6.0))
             .h(px(26.0))
-            .px(px(10.0))
+            .px(px(pad_x))
             .text_sm()
             .font_family(family)
             .font_weight(gpui::FontWeight::MEDIUM);
@@ -150,6 +166,7 @@ pub fn segmented_disabled(
                 .h(px(1.0))
                 .bg(t.well()),
         );
+    let pad_x = 10.0;
     for (value, label) in options {
         let is_selected = *value == selected;
         let family = if label.chars().any(|c| c.is_ascii_digit()) {
@@ -188,7 +205,7 @@ pub fn segmented_disabled(
             .items_center()
             .gap(px(6.0))
             .h(px(26.0))
-            .px(px(10.0))
+            .px(px(pad_x))
             .text_sm()
             .font_family(family)
             .font_weight(gpui::FontWeight::MEDIUM);
