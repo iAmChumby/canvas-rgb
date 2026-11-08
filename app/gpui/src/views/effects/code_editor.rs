@@ -1292,7 +1292,12 @@ impl Render for CodeEditor {
                 .child(
                     div()
                         .flex_none()
-                        .w(px(LINT_GUTTER_W))
+                        // The widths are border-box: 18 of lint then the 1 px
+                        // `.cm-gutters` right border past it, so the code
+                        // starts 36 + 18 + 1 px from the pane edge like
+                        // React's (measured: the pane at 769, the code at
+                        // 824).
+                        .w(px(LINT_GUTTER_W + 1.0))
                         .border_r_1()
                         .border_color(Theme::color(t.line))
                         .child(

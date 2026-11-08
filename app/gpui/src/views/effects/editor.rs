@@ -15,7 +15,7 @@ use canvas_proto::api::{
     DraftRequest, DraftStatus, EffectPreviewRequest, EffectPreviewResponse, ImportEffect,
     ImportEffectResponse,
 };
-use canvas_proto::props::{Preset, PropValue, PropertySchema, Props};
+use canvas_proto::props::{Preset, PropKind, PropValue, PropertySchema, Props};
 
 use gpui::{Context, Entity, IntoElement, Window, div, prelude::*, px};
 
@@ -1003,9 +1003,10 @@ impl EffectEditor {
                 schema.map(|s| s.properties.clone()).unwrap_or_default();
             let values = self.values.clone();
             let mut col = div().flex().flex_col().min_w(px(0.0));
-            for def in &defs {
+            let last_at = defs.len().saturating_sub(1);
+            for (i, def) in defs.iter().enumerate() {
                 let value = values.get(&def.key).cloned().unwrap_or_else(|| def.kind.default_value());
-                col = col.child(self.prop_row(def, &value, entity.clone(), &schema_properties, &values));
+                col = col.child(self.prop_row(def, &value, entity.clone(), &schema_properties, &values, i == last_at));
             }
             col.into_any_element()
         };
@@ -1077,7 +1078,11 @@ impl EffectEditor {
             .child(content)
     }
 
-    /// One property row (React's `PropertyControls`).
+    /// One property row (React's `PropertyControls`, under
+    /// `.rd-effects .rd-eff-inspector .prop-item`: 40 px tall, 4 px vertical
+    /// padding, a 1 px divider under every row but the last; number, hue and
+    /// angle rows take the narrow 96 px label column and a 12 px gap, the
+    /// rest 170 px and 16 px).
     fn prop_row(
         &self,
         def: &canvas_proto::props::PropertyDef,
@@ -1085,6 +1090,7 @@ impl EffectEditor {
         entity: Entity<Self>,
         schema_properties: &[canvas_proto::props::PropertyDef],
         values: &Props,
+        last: bool,
     ) -> impl IntoElement {
         let t = self.theme;
         let label = div()
@@ -1136,14 +1142,22 @@ impl EffectEditor {
             toggle_color,
             toggle_select,
         );
-        div()
+        // Number, hue and angle rows take the narrow 96 px label column
+        // and a 12 px gap; the rest (colours, toggles, selects) take 170 px
+        // and 16 px (`.prop-item`, `.prop-item[data-kind="number"]`).
+        let narrow_label = matches!(def.kind, PropKind::Number { .. } | PropKind::Hue { .. } | PropKind::Angle { .. });
+        let mut row = div()
             .flex()
             .items_center()
-            .gap_4()
             .min_h(px(40.0))
-            .py_1()
-            .child(div().w(px(170.0)).flex_none().child(label))
-            .child(div().flex().items_center().gap_2().flex_1().min_w(px(0.0)).child(control))
+            .py(px(4.0))
+            .child(div().w(px(if narrow_label { 96.0 } else { 170.0 })).flex_none().child(label))
+            .child(div().flex().items_center().gap_2().flex_1().min_w(px(0.0)).child(control));
+        row = if narrow_label { row.gap_3() } else { row.gap_4() };
+        if !last {
+            row = row.border_b_1().border_color(Theme::color(t.line));
+        }
+        row
     }
 
     /// The live picture (React's `LoopPreview`): the last good loop, frame 0.
