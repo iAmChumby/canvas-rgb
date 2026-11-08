@@ -1305,17 +1305,21 @@ impl StackBuilder {
                 })),
         );
         // The scrim.
-        div()
+        let mut scrim = div()
             .id(gpui::SharedString::from("rd-naming-scrim"))
             .absolute()
             .inset_0()
             .flex()
-            .items_center()
             .justify_center()
-            .p_6()
-            .bg(Theme::color(t.scrim))
-            .child(dialog)
-            .into_any_element()
+            .bg(Theme::color(t.scrim));
+        if narrow {
+            // React's phone scrim (app.css:8044-8048): the sheet sits at the
+            // bottom of the screen, with 12 px on the sides and the top.
+            scrim = scrim.items_end().px_3().pt_3();
+        } else {
+            scrim = scrim.items_center().p_6();
+        }
+        scrim.child(dialog).into_any_element()
     }
 
     /// Debug only (#246): reaches the state the builder's own flow reaches,
