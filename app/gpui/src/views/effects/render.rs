@@ -1643,8 +1643,12 @@ impl Render for EffectsView {
             .gap_4()
             .flex_1()
             .min_h(px(0.0))
-            .min_w(px(0.0))
-            .child(toolbar);
+            .min_w(px(0.0));
+        // The phone editor takes the whole page (React routes to the
+        // editor): the library toolbar and gallery leave with it.
+        if !(phone && editing) {
+            page = page.child(toolbar);
+        }
         if self.replace_with.is_some() || self.import_error.is_some() {
             page = page.child(import_note);
         }
