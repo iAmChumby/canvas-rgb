@@ -114,6 +114,23 @@ pub struct DragOverlay {
     pub readout: Option<(String, f32, f32)>,
 }
 
+/// A reference outline behind the case, in canvas units: the tower sizes the
+/// Case screen draws the case against (`CaseGuide` in `PreviewStage.tsx`).
+#[derive(Debug, Clone)]
+pub struct CaseGuide {
+    /// The tower's name ("Full tower").
+    pub name: String,
+    /// Its size, in the reader's unit ("22.83 in × 22.83 in").
+    pub size: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    /// The canvas x the names line up to, left of every outline: three names,
+    /// one column.
+    pub label_x: f64,
+}
+
 /// Everything the desk draws.
 pub struct DeskInput {
     pub zones: Vec<PlacedZone>,
@@ -134,6 +151,8 @@ pub struct DeskInput {
     /// A locked case shows the little lock that unlocks it (the
     /// onboarding). React passes it as `unlockBadge` (`PreviewStage.tsx:664`).
     pub unlock_badge: bool,
+    /// The tower sizes the Case screen draws behind the case.
+    pub guides: Vec<CaseGuide>,
 }
 
 /// The desk: a canvas that draws the whole picture.
@@ -157,6 +176,7 @@ pub fn desk_with_origin(
     let stored_view = input.view;
     let overlay = input.overlay;
     let unlock_badge = input.unlock_badge;
+    let guides = input.guides;
 
     let measure = origin.clone();
     let element = canvas(
@@ -211,6 +231,9 @@ pub fn desk_with_origin(
                 k,
                 view,
             );
+
+            // The tower sizes the Case screen draws behind the case.
+            paint_guides(window, &t, &guides, k, view, ox, oy);
 
             // The parts.
             for (i, z) in zones.iter().enumerate() {
@@ -883,6 +906,155 @@ fn paint_cells(
                     },
                 );
             }
+        }
+    }
+}
+
+/// The tower sizes behind the case (React's `.guides`, `PreviewStage.tsx`:
+/// 2492-2522): a dashed outline for each, and its name and size in one
+/// column to the left of them all.
+///
+/// The names are level with the top of their outline and joined to it by a
+/// thin dashed lead, so three outlines and three names never meet.
+fn paint_guides(
+    window: &mut Window,
+    t: &Theme,
+    guides: &[CaseGuide],
+    k: f32,
+    view: View,
+    ox: f32,
+    oy: f32,
+) {
+    if guides.is_empty() {
+        return;
+    }
+    let mute = Theme::color(t.mute);
+    let line = gpui::Rgba {
+        a: mute.a * 0.55,
+        ..mute
+    };
+    for g in guides {
+        let x = ox + (g.x + view.pan_x) as f32 * k;
+        let y = oy + (g.y + view.pan_y) as f32 * k;
+        let w = g.width as f32 * k;
+        let h = g.height as f32 * k;
+        // The outline: a dashed 1 px line round the box.
+        paint_dashed_h(window, x, x + w, y, 1.0, line);
+        paint_dashed_v(window, y, y + h, x + w, 1.0, line);
+        paint_dashed_h(window, x + w, x, y + h, 1.0, line);
+        paint_dashed_v(window, y + h, y, x, 1.0, line);
+        // The name and its size, right-aligned in the column left of the
+        // outlines, level with the outline's top.
+        let right = ox + (g.label_x + view.pan_x) as f32 * k - 6.0;
+        let top = y - 2.0;
+        paint_text_right(
+            window,
+            &g.name,
+            right,
+            top + 9.5,
+            11.0,
+            mute,
+            label_font(false, gpui::FontWeight::MEDIUM),
+        );
+        paint_text_right(
+            window,
+            &g.size,
+            right,
+            top + 9.5 + 13.65,
+            11.0,
+            gpui::Rgba {
+                a: mute.a * 0.8,
+                ..mute
+            },
+            label_font(true, gpui::FontWeight::NORMAL),
+        );
+        // The thin dashed lead from the name to the outline.
+        paint_dashed_h(window, right + 2.0, x - 2.0, top + 7.0, 1.0, line);
+    }
+}
+
+/// A dashed line across: a dash of three pixels, a gap of three (the
+/// browser's own dashed border), on the pixel row the line falls on.
+fn paint_dashed_h(
+    window: &mut Window,
+    x1: f32,
+    x2: f32,
+    y: f32,
+    width: f32,
+    colour: gpui::Rgba,
+) {
+    let y = y.floor() + 0.5;
+    let mut at = x1.floor();
+    let end_at = x2.ceil();
+    while at < end_at {
+        let to = (at + 3.0).min(end_at);
+        paint_line(window, at, y, to, y, width, colour);
+        at = to + 3.0;
+    }
+}
+
+/// A dashed line down: the same dashes, on the pixel column.
+fn paint_dashed_v(
+    window: &mut Window,
+    y1: f32,
+    y2: f32,
+    x: f32,
+    width: f32,
+    colour: gpui::Rgba,
+) {
+    let x = x.floor() + 0.5;
+    let mut at = y1.floor();
+    let end_at = y2.ceil();
+    while at < end_at {
+        let to = (at + 3.0).min(end_at);
+        paint_line(window, x, at, x, to, width, colour);
+        at = to + 3.0;
+    }
+}
+
+/// A label's face: the UI font (`--fu`) or the figures font (`--fm`).
+fn label_font(mono: bool, weight: gpui::FontWeight) -> gpui::Font {
+    gpui::Font {
+        family: if mono {
+            crate::fonts::MONO_FAMILY.into()
+        } else {
+            crate::fonts::UI_FAMILY.into()
+        },
+        features: gpui::FontFeatures::default(),
+        fallbacks: None,
+        weight,
+        style: gpui::FontStyle::default(),
+    }
+}
+
+/// A line of text with its right edge on `right` and its baseline on `y`.
+fn paint_text_right(
+    window: &mut Window,
+    text: &str,
+    right: f32,
+    y: f32,
+    size: f32,
+    colour: gpui::Rgba,
+    font: gpui::Font,
+) {
+    let hsla = gpui::Hsla::from(colour);
+    let runs = [gpui::TextRun {
+        len: text.len(),
+        font,
+        color: hsla,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    }];
+    let layout = window.text_system().layout_line(text, px(size), &runs, None);
+    let width = f32::from(layout.width);
+    for run in &layout.runs {
+        for glyph in &run.glyphs {
+            let at = point(
+                px(right - width + f32::from(glyph.position.x)),
+                px(y + f32::from(glyph.position.y)),
+            );
+            let _ = window.paint_glyph(at, run.font_id, glyph.id, px(size), hsla);
         }
     }
 }

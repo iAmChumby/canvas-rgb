@@ -601,34 +601,29 @@ pub fn onboarding_stage(
         view: view.view,
         overlay: view.overlay.clone(),
         unlock_badge: true,
+        guides: Vec::new(),
     };
     let desk_origin = view.desk_origin.clone();
     desk_with_hint(&t, &colours, desk_input, desk_origin, true)
 }
 
 /// A case guide drawn on the canvas (Onboarding.tsx `guides`).
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub struct CaseGuide {
-    pub id: String,
-    pub name: String,
-    pub size: String,
-    pub x: f64,
-    pub y: f64,
-    pub width: f64,
-    pub height: f64,
-    pub label_x: f64,
-}
+pub use crate::views::layout::stage::CaseGuide;
 
-/// The Case screen's guides, in canvas units.
-#[allow(dead_code)]
+/// The Case screen's guides, in canvas units (Onboarding.tsx:236-254).
+///
+/// The names stand in one column left of the widest outline, so the three
+/// outlines and the three names never meet (`labelX`).
 pub fn case_guides_for(unit: LengthUnit, label_x: f64) -> Vec<CaseGuide> {
     case_guides()
         .iter()
-        .map(|(id, name, cm_w, cm_h)| CaseGuide {
-            id: id.to_string(),
+        .map(|(_, name, cm_w, cm_h)| CaseGuide {
             name: name.to_string(),
-            size: format!("{} × {}", trim_cm(&format_length(cm_w * 10.0, unit)), trim_cm(&format_length(cm_h * 10.0, unit))),
+            size: format!(
+                "{} × {}",
+                trim_cm(&format_length(cm_w * 10.0, unit)),
+                trim_cm(&format_length(cm_h * 10.0, unit))
+            ),
             x: CASE_ANCHOR_X - (cm_w * 2.5) / 2.0,
             y: CASE_ANCHOR_Y - cm_h * 2.5,
             width: cm_w * 2.5,
@@ -636,6 +631,16 @@ pub fn case_guides_for(unit: LengthUnit, label_x: f64) -> Vec<CaseGuide> {
             label_x,
         })
         .collect()
+}
+
+/// The x the guides' names line up to (Onboarding.tsx `labelX`): left of the
+/// widest outline by a quarter of its width.
+pub fn guide_label_x() -> f64 {
+    let widest = case_guides()
+        .iter()
+        .map(|(_, _, cm_w, _)| *cm_w)
+        .fold(f64::MIN, f64::max);
+    CASE_ANCHOR_X - widest * 1.25
 }
 
 // ---------------------------------------------------------------------------
@@ -843,6 +848,9 @@ pub fn render_onboarding(view: &mut LayoutView, window: &mut Window, cx: &mut Co
     let save_error = view.save_error.clone();
 
     // Session heartbeat (Onboarding.tsx:127-137): black from after hello until finish.
+    // The capture does not send it: React's capture shows the hello wave's
+    // own light on the desk's cells, and the wave is the light the capture
+    // compares against.
     let session_on = step != StepKind::Hello && step != StepKind::Finish;
     if session_on && !view.capture_frozen {
         session(true);
@@ -1134,6 +1142,13 @@ fn onboarding_stage_for(view: &mut LayoutView, window: &mut Window, cx: &mut Con
         return div().flex_1().into_any_element();
     };
     let _ = window;
+    // The Case screen draws the tower sizes behind the case (Onboarding.tsx:
+    // 236-254): three faint outlines to hold the case against.
+    let guides = if step == StepKind::Case {
+        case_guides_for(view.unit, guide_label_x())
+    } else {
+        Vec::new()
+    };
     let desk_input = DeskInput {
         zones: layout.zones.clone(),
         landmarks: layout.landmarks.clone(),
@@ -1147,6 +1162,7 @@ fn onboarding_stage_for(view: &mut LayoutView, window: &mut Window, cx: &mut Con
         view: view.view,
         overlay: view.overlay.clone(),
         unlock_badge: true,
+        guides,
     };
     let desk_origin = view.desk_origin.clone();
     let desk = desk_with_hint(&t, &colours, desk_input, desk_origin, true);
