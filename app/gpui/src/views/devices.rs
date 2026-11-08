@@ -821,41 +821,68 @@ impl DevicesView {
                     quad.corner_radii.bottom_left = gpui::px(r);
                     window.paint_quad(quad);
                 };
+                // The pill is a filled path, not a quad: a quad snaps to whole
+                // pixels, so a pill 4.5 px tall painted its edge rows at full
+                // opacity where the browser's are partial coverage.
                 let bar = |window: &mut Window, units_y: f32, units_bh: f32, radius: f32, alpha: f32| {
-                    let c = gpui::Rgba { a: alpha, ..palette };
-                    let mut quad = gpui::fill(
-                        gpui::Bounds {
-                            origin: gpui::point(
-                                bounds.origin.x + gpui::px(x(0.0)),
-                                bounds.origin.y + gpui::px(y(units_y)),
-                            ),
-                            size: gpui::size(gpui::px(200.0 * s), gpui::px(units_bh * s)),
-                        },
-                        c,
-                    );
-                    quad.corner_radii.top_left = gpui::px(radius * s);
-                    quad.corner_radii.top_right = gpui::px(radius * s);
-                    quad.corner_radii.bottom_right = gpui::px(radius * s);
-                    quad.corner_radii.bottom_left = gpui::px(radius * s);
-                    window.paint_quad(quad);
+                    let (x0, y0) = (x(0.0), y(units_y));
+                    let (w, h, r) = (200.0 * s, units_bh * s, radius * s);
+                    let r = r.min(h / 2.0).min(w / 2.0);
+                    let mut builder = gpui::PathBuilder::fill();
+                    let at = |px_x: f32, px_y: f32| {
+                        gpui::point(bounds.origin.x + gpui::px(px_x), bounds.origin.y + gpui::px(px_y))
+                    };
+                    // Corners as 8-segment arcs: (centre, start angle).
+                    let corners = [
+                        (x0 + w - r, y0 + r, -std::f32::consts::FRAC_PI_2),
+                        (x0 + w - r, y0 + h - r, 0.0),
+                        (x0 + r, y0 + h - r, std::f32::consts::FRAC_PI_2),
+                        (x0 + r, y0 + r, std::f32::consts::PI),
+                    ];
+                    let mut first = true;
+                    for (cx, cy, a0) in corners {
+                        for i in 0..=8 {
+                            let a = a0 + std::f32::consts::FRAC_PI_2 * (i as f32 / 8.0);
+                            let p = at(cx + r * a.cos(), cy + r * a.sin());
+                            if first {
+                                builder.move_to(p);
+                                first = false;
+                            } else {
+                                builder.line_to(p);
+                            }
+                        }
+                    }
+                    builder.close();
+                    if let Ok(path) = builder.build() {
+                        window.paint_path(path, gpui::Rgba { a: alpha, ..palette });
+                    }
                 };
                 match mode {
                     StripMode::Dashed => {
-                        // The "no LEDs yet" line: dashes 40..160 at y 11.
+                        // The "no LEDs yet" line: dashes 40..160 at y 11, 1.5
+                        // units thick, opacity 0.45. A quad snaps to whole
+                        // pixels, so a line a pixel thick that straddles two
+                        // rows drew both at full opacity (390 px: 71,88,112
+                        // where React's rows read 40,50,63); a filled path
+                        // takes the fractional coverage the browser's does.
+                        let mut builder = gpui::PathBuilder::fill();
+                        let top = y(11.0) - 0.75 * s;
+                        let bottom = y(11.0) + 0.75 * s;
                         let mut units = 40.0f32;
                         while units < 160.0 {
                             let dash_units = (4.0f32).min(160.0 - units);
-                            window.paint_quad(gpui::fill(
-                                gpui::Bounds {
-                                    origin: gpui::point(
-                                        bounds.origin.x + gpui::px(x(units)),
-                                        bounds.origin.y + gpui::px(y(11.0) - 0.75 * s),
-                                    ),
-                                    size: gpui::size(gpui::px(dash_units * s), gpui::px(1.5 * s)),
-                                },
-                                gpui::Rgba { a: 0.45, ..palette },
-                            ));
+                            let left = bounds.origin.x + gpui::px(x(units));
+                            let right = bounds.origin.x + gpui::px(x(units) + dash_units * s);
+                            let (t, b) = (bounds.origin.y + gpui::px(top), bounds.origin.y + gpui::px(bottom));
+                            builder.move_to(gpui::point(left, t));
+                            builder.line_to(gpui::point(right, t));
+                            builder.line_to(gpui::point(right, b));
+                            builder.line_to(gpui::point(left, b));
+                            builder.close();
                             units += 8.0;
+                        }
+                        if let Ok(path) = builder.build() {
+                            window.paint_path(path, gpui::Rgba { a: 0.45, ..palette });
                         }
                     }
                     StripMode::Bar => {
@@ -1040,7 +1067,7 @@ impl DevicesView {
                 row = row
                     .child(self.zone_strip(zone, accent, Some(64.0), box_h, false))
                     .child(
-                        div()
+                        crate::fonts::with_tabular_figures(div())
                             .flex_none()
                             .w(px(59.0))
                             .text_size(px(15.0))
@@ -1050,11 +1077,12 @@ impl DevicesView {
                             .child(format!("{} {}", zone.led_count, led_word(zone.led_count))),
                     );
             }
-            let size_slot = div().flex_none().flex().justify_end().ml_auto();
-            row = row.child(match &one {
-                Some(zone) if zone.resizable => size_slot.child(self.size_key(&device.id.0, zone.index, cx)),
-                _ => size_slot,
-            });
+            // React draws the phone's Size slot only for a resizable zone. An empty
+            // `ml_auto` slot on the wrapped row swallowed the row's 4 px gaps
+            // (the strip and the count sat 4 and 8 px left of React's).
+            if let Some(zone) = one.as_ref().filter(|z| z.resizable) {
+                row = row.child(div().flex_none().flex().justify_end().ml_auto().child(self.size_key(&device.id.0, zone.index, cx)));
+            }
             return row.into_any_element();
         }
         let mut row = div()
@@ -1248,7 +1276,7 @@ impl DevicesView {
                 .font_family(c_family)
                 .whitespace_nowrap()
                 .child(
-                    div()
+                    crate::fonts::with_tabular_figures(div())
                         .font_weight(c_weight)
                         .font_family(c_family)
                         .text_color(Theme::color(t.ink))

@@ -188,6 +188,23 @@ async function probe(browser, base, viewport, theme, token) {
       for (const c of kids) walk(c, depth + 1);
     };
     walk(root, 0);
+    // The whole document's text and icon boxes (strip and dock included), so a
+    // pair's difference can be split into text rasterisation, icon
+    // rasterisation and everything else (tools/ui-capture/masked-diff.py).
+    const rr = (r) => [+r.x.toFixed(2), +r.y.toFixed(2), +r.width.toFixed(2), +r.height.toFixed(2)];
+    out.textRects = [];
+    const tw = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    for (let n = tw.nextNode(); n; n = tw.nextNode()) {
+      if (!n.nodeValue || !n.nodeValue.trim()) continue;
+      const range = document.createRange();
+      range.selectNodeContents(n);
+      for (const r of range.getClientRects()) if (r.width > 0 && r.height > 0) out.textRects.push(rr(r));
+    }
+    out.iconRects = [];
+    for (const el of document.querySelectorAll("svg")) {
+      const r = el.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) out.iconRects.push(rr(r));
+    }
     return out;
   });
   await context.close();
