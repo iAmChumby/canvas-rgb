@@ -40,10 +40,10 @@ use canvas_proto::tauri::{
 use gpui::{Context, IntoElement, Window, div, prelude::*, px};
 
 use crate::client::DaemonClient;
-use crate::components::button::{Variant, button, button_icon, button_sm};
-use crate::components::panel::{field_hint, field_stack_hint, state_dot, tracked_title};
+use crate::components::button::{Variant, button, button_icon, button_icon_wide, button_sm};
+use crate::components::panel::{field_hint, field_stack_hint, state_dot, tracked_title_nowrap};
 use crate::components::segmented::segmented;
-use crate::components::select::select_grouped;
+use crate::components::select::select_grouped_trunc;
 use crate::components::slider::{Origin, slider_range};
 use crate::components::toggle::{toggle, toggle_disabled};
 use crate::theme::{Theme, TokenRadius};
@@ -529,6 +529,89 @@ pub fn today_day_utc() -> i64 {
 
 // ---------------------------------------------------------------------------
 // The view.
+
+/// The "Map my PC again" key's width in its row (React's 161.11 px) and React's `.field` column gap.
+const SETUP_MAP_KEY_W: f32 = 161.11;
+const FIELD_GAP_X: f32 = 16.0;
+/// "Walk through every light again" at 14 px on one line (measured in GPUI).
+const MAP_HINT_ONE_LINE_W: f32 = 196.0;
+
+/// "AUDIO SOURCE" in the 13 px tracked mono title: 106.09 px in React (probed;
+/// the head's picker takes the row less this and the 12 px gap).
+const AUDIO_TITLE_W: f32 = 106.1;
+
+/// The wrapped Brightness slider's slot: the panel's inner width less the
+/// number well and its unit (98.4 px: React's `.unit` "%" is 8.4 px, "fps" 15).
+fn brightness_slot_w(inner_w: f32) -> f32 {
+    (inner_w - 98.4).max(80.0)
+}
+
+/// The compact Audio head's select: React `.audio-picker-head` is `flex: 0 1
+/// 300px; min-width: 160px`, so it takes the head (the panel's inner width
+/// less its 2 px border) minus the title and the 12 px gap, clamped.
+fn compact_audio_select_w(inner_w: f32) -> f32 {
+    (inner_w - 2.0 - AUDIO_TITLE_W - 12.0).clamp(160.0, 300.0)
+}
+
+/// Whether the Setup panel's "Walk through every light again" hint wraps to two
+/// lines: the label column is what is left of the panel's inner width after the
+/// "Map my PC again" key and the field's column gap.
+fn map_hint_wraps(col_w: f32, pad: f32) -> bool {
+    col_w - pad * 2.0 - SETUP_MAP_KEY_W - FIELD_GAP_X < MAP_HINT_ONE_LINE_W
+}
+
+/// Debug only (#205): `CANVAS_RGB_CAPTURE_PROBE=1` prints the layout bounds of
+/// the elements wrapped with [`pr`] to stderr, once per change, so a capture
+/// run reports where GPUI really put a box (React's are probed in headless
+/// Chromium). Release builds never wrap anything.
+fn probe_on() -> bool {
+    cfg!(debug_assertions) && std::env::var_os("CANVAS_RGB_CAPTURE_PROBE").is_some()
+}
+
+fn probe_report(name: &str, b: gpui::Bounds<gpui::Pixels>) {
+    use std::collections::HashMap;
+    use std::sync::OnceLock;
+    static SEEN: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    let line = format!(
+        "{:.2},{:.2} {:.2}x{:.2}",
+        f32::from(b.origin.x),
+        f32::from(b.origin.y),
+        f32::from(b.size.width),
+        f32::from(b.size.height)
+    );
+    let mut seen = SEEN.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+    if seen.get(name) != Some(&line) {
+        // The probe's value is the file the lines are appended to (the
+        // capture script names one per shot); a bare "1" prints to stderr.
+        let target = std::env::var("CANVAS_RGB_CAPTURE_PROBE").unwrap_or_default();
+        if target.len() > 1 {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&target) {
+                let _ = writeln!(f, "{name} {line}");
+            }
+        } else {
+            eprintln!("probe {name} {line}");
+        }
+        seen.insert(name.to_string(), line);
+    }
+}
+
+/// Wraps `el` so its bounds are reported when the probe is on.
+fn pr(name: impl Into<String>, el: impl IntoElement) -> gpui::AnyElement {
+    if !probe_on() {
+        return el.into_any_element();
+    }
+    let name: String = name.into();
+    div()
+        .relative()
+        .child(el)
+        .child(
+            gpui::canvas(move |bounds, _window, _cx| probe_report(&name, bounds), |_, _, _, _| {})
+                .absolute()
+                .inset_0(),
+        )
+        .into_any_element()
+}
 
 /// The theme the shell and this view share (see `shell.rs`).
 pub type ThemeCell = Arc<Mutex<Theme>>;
@@ -1314,11 +1397,32 @@ impl SettingsView {
 
     // -- rendering pieces -------------------------------------------------
 
+    /// A Settings panel. `title_off` is how far React's baseline alignment
+    /// (`.rd-settings .rd-settings-grid .panel-head { align-items: baseline }`,
+    /// app.css:4854) puts the title below the head's top: the version figure
+    /// (15 px mono in a 21.75 px line) sits 3 px above the 13 px title's
+    /// line, the speaker icon's bottom edge 4 px (GPUI has no baselines).
     fn panel(
         &self,
         id: &str,
         title: &str,
         pad: f32,
+        title_off: f32,
+        actions: impl IntoElement,
+        body: impl IntoElement,
+    ) -> impl IntoElement {
+        self.panel_mb(id, title, pad, title_off, 12.0, actions, body)
+    }
+
+    /// [`Self::panel`] with the head's bottom margin given (React's 12 px).
+    #[allow(clippy::too_many_arguments)]
+    fn panel_mb(
+        &self,
+        id: &str,
+        title: &str,
+        pad: f32,
+        title_off: f32,
+        head_mb: f32,
         actions: impl IntoElement,
         body: impl IntoElement,
     ) -> impl IntoElement {
@@ -1336,18 +1440,18 @@ impl SettingsView {
                 div()
                     .flex()
                     .flex_wrap()
-                    .items_center()
+                    .items_start()
                     .justify_between()
                     .gap_2()
-                    .mb_3()
-                    .child(tracked_title(
+                    .mb(px(head_mb))
+                    .child(div().flex_none().mt(px(title_off)).child(tracked_title_nowrap(
                         &title.to_uppercase(),
                         13.0,
                         0.08,
                         gpui::FontWeight::MEDIUM,
                         crate::fonts::MONO_FAMILY,
                         Theme::color(t.mute),
-                    ))
+                    )))
                     .child(actions),
             )
             .child(body)
@@ -1545,7 +1649,11 @@ impl SettingsView {
         } else {
             None
         };
-        let bri_slot_w = slot_w;
+        // Brightness' unit is "%" (8.4 px, not "fps"' 25.2), so its slider takes
+        // 16.8 px more of the row: 72 + 6 + 8.4 + the 12 px gap = 98.4 to
+        // the right of it. The same 115 for both rows left the "%" well 14 px
+        // short of the row's right edge at 390.
+        let bri_slot_w = if wrapped { Some(brightness_slot_w(inner_w)) } else { None };
         let mut body = div()
             .flex()
             .flex_col()
@@ -1594,7 +1702,7 @@ impl SettingsView {
         if let Some(msg) = &self.render_err {
             body = body.child(self.error_line(msg, true));
         }
-        self.panel("settings-rendering", "Rendering", pad, div(), body)
+        self.panel("settings-rendering", "Rendering", pad, 0.0, div(), body)
             .into_any_element()
     }
 
@@ -1624,9 +1732,9 @@ impl SettingsView {
         let body = div()
             .flex()
             .flex_col()
-            .child(field_hint(t, "settings-theme-field", "Theme", None, theme_control, false))
-            .child(field_hint(t, "settings-motion-field", "Motion", None, motion_control, true));
-        self.panel("settings-appearance", "Appearance", pad, div(), body)
+            .child(pr("a-theme", field_hint(t, "settings-theme-field", "Theme", None, theme_control, false)))
+            .child(pr("a-motion", field_hint(t, "settings-motion-field", "Motion", None, motion_control, true)));
+        self.panel("settings-appearance", "Appearance", pad, 0.0, div(), body)
             .into_any_element()
     }
 
@@ -2020,10 +2128,10 @@ impl SettingsView {
         let body = div()
             .flex()
             .flex_col()
-            .child(field_hint(t, "settings-black-field", "Black on lock", None, black_control, false))
-            .child(field_hint(t, "settings-quit-field", "On quit", None, quit_control, false))
-            .child(self.boot_field(pad, false, cx));
-        self.panel("settings-lock", "Lock and quit", pad, div(), body)
+            .child(pr("l-black", field_hint(t, "settings-black-field", "Black on lock", None, black_control, false)))
+            .child(pr("l-quit", field_hint(t, "settings-quit-field", "On quit", None, quit_control, false)))
+            .child(pr("l-boot", self.boot_field(pad, false, cx)));
+        self.panel("settings-lock", "Lock and quit", pad, 0.0, div(), body)
             .into_any_element()
     }
 
@@ -2075,6 +2183,7 @@ impl SettingsView {
         &self,
         id: &str,
         full_width: bool,
+        truncate: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let groups_owned = self.audio_groups();
@@ -2097,7 +2206,7 @@ impl SettingsView {
         let value = self.audio_value();
         let open = self.audio_select_open;
         let disabled = self.audio_sources.is_none();
-        select_grouped(
+        select_grouped_trunc(
             &self.theme,
             id,
             &refs,
@@ -2105,6 +2214,9 @@ impl SettingsView {
             open,
             disabled,
             full_width,
+            // The compact head fixes the trigger's width; the inline field
+            // shrink-wraps the widest label.
+            truncate,
             move |_, cx| {
                 toggle_entity.update(cx, |this, cx| {
                     this.audio_select_open = !this.audio_select_open;
@@ -2197,8 +2309,8 @@ impl SettingsView {
             // ("AUDIO SOURCE" tracked, about 105 px) keeps its width and
             // the select takes the rest, clamped [160, 300]: a content-sized
             // flex_1 let the select overlap the title at 390.
-            let select_w = (inner_w - 105.0 - 12.0).clamp(160.0, 300.0);
-            let select = self.audio_select("settings-audio-select", true, cx);
+            let select_w = compact_audio_select_w(inner_w);
+            let select = self.audio_select("settings-audio-select", true, true, cx);
             let head_actions = div()
                 .flex_none()
                 .w(px(select_w))
@@ -2289,7 +2401,9 @@ impl SettingsView {
                 .flex()
                 .flex_col()
                 .px(px(pad))
-                .py_2()
+                // React: `.audio-compact` padding-block 8 loses to the
+                // phone `.panel` padding (12) declared later in app.css.
+                .py(px(if pad <= 12.0 { 12.0 } else { 8.0 }))
                 .r_lg()
                 .border_1()
                 .border_color(Theme::color(t.line))
@@ -2318,7 +2432,7 @@ impl SettingsView {
                 .child(body);
             panel.into_any_element()
         } else {
-            let select = self.audio_select("settings-audio-select", true, cx);
+            let select = self.audio_select("settings-audio-select", true, false, cx);
             let listen_entity = view_entity.clone();
             let picker_row = {
                 let mut r = div().flex().items_center().gap_3().flex_1().min_w(px(0.0)).child(select);
@@ -2335,14 +2449,12 @@ impl SettingsView {
                 r
             };
             let hint = if input_selected { Some(Self::EFFECT_NOTE) } else { None };
-            // The audio content sits 4 px high against React at every
-            // non-compact size (1440 column 800: select top 407 vs 411,
-            // panel bottom 600 vs 604): the body carries 4 px more.
+            // The head is 20.25 px here (the speaker icon's line), as in
+            // React, so the body needs no nudge of its own.
             let mut body = div()
                 .flex()
                 .flex_col()
-                .mt_1()
-                .child(field_hint(t, "settings-audio-field", "Source", hint, picker_row, false))
+                .child(pr("au-source", field_hint(t, "settings-audio-field", "Source", hint, picker_row, false)))
                 .child(
                     div()
                         .mt_2()
@@ -2359,7 +2471,7 @@ impl SettingsView {
                 .path("icons/SpeakerHigh.svg")
                 .size(px(16.0))
                 .text_color(Theme::color(t.ink));
-            self.panel("settings-audio", "Audio source", pad, speaker, body)
+            self.panel("settings-audio", "Audio source", pad, 4.0, speaker, body)
                 .into_any_element()
         }
     }
@@ -2375,10 +2487,14 @@ impl SettingsView {
         let t = &self.theme;
         let view_entity = cx.entity();
         let map_entity = view_entity.clone();
-        let map_control = button_icon(
+        // GPUI rounds a label's width up, so "Map my PC again" (161.11 px in
+        // React) and "Import" (93.41) came out 1 px wide and their left edge
+        // 1 px left; the wide form takes React's measured label width.
+        let map_control = button_icon_wide(
             t,
             "settings-map",
             "Map my PC again",
+            113.11,
             Variant::Default,
             false,
             false,
@@ -2405,10 +2521,11 @@ impl SettingsView {
             },
         );
         let import_entity = view_entity.clone();
-        let import_control = button_icon(
+        let import_control = button_icon_wide(
             t,
             "settings-import",
             "Import",
+            45.41,
             Variant::Default,
             false,
             false,
@@ -2422,20 +2539,20 @@ impl SettingsView {
         let mut body = div()
             .flex()
             .flex_col()
-            .child(field_hint(t, "settings-map-field", "Map my PC", Some("Walk through every light again"), map_control, false))
-            .child(field_hint(t, "settings-export-field", "Export", None, export_control, false))
-            .child(field_hint(t, "settings-import-field", "Import", None, import_control, true));
+            .child(pr("s-map", field_hint(t, "settings-map-field", "Map my PC", Some("Walk through every light again"), map_control, false)))
+            .child(pr("s-export", field_hint(t, "settings-export-field", "Export", None, export_control, false)))
+            .child(pr("s-import", field_hint(t, "settings-import-field", "Import", None, import_control, true)));
         if let Some(note) = &self.note {
             body = body.child(state_dot(t, "ok", note));
         }
         if let Some(msg) = &self.err {
             body = body.child(self.error_line(msg, true));
         }
-        self.panel("settings-setup", "Setup", pad, div(), body)
+        self.panel("settings-setup", "Setup", pad, 0.0, div(), body)
             .into_any_element()
     }
 
-    fn version_panel(&self, pad: f32, _phone: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    fn version_panel(&self, pad: f32, _phone: bool, under_wrapped_hint: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let t = &self.theme;
         let version = self.status.as_ref().map(|s| s.version.clone()).unwrap_or_else(|| "—".to_string());
         // React `.fig` inherits the body 15 px (`--t15`): "0.9.0" is 46 px
@@ -2670,14 +2787,14 @@ impl SettingsView {
         let mut body = div()
             .flex()
             .flex_col()
-            .child(field_hint(t, "settings-auto-field", "Check automatically", Some("At start, then once a day"), auto_control, false))
-            .child(field_hint(t, "settings-last-field", "Last checked", None, last_checked, false))
-            .child(field_hint(t, "settings-check-field", "Check now", None, check_control, false))
+            .child(pr("v-auto", field_hint(t, "settings-auto-field", "Check automatically", Some("At start, then once a day"), auto_control, false)))
+            .child(pr("v-last", field_hint(t, "settings-last-field", "Last checked", None, last_checked, false)))
+            .child(pr("v-check", field_hint(t, "settings-check-field", "Check now", None, check_control, false)))
             .child(field_hint(t, "settings-experimental-field", "Experimental builds", Some("Unstable test builds, offered early"), experimental_control, editor_field.is_some()));
         if let Some(editor) = editor_field {
             body = body.child(editor);
         }
-        body = body.child(status_row);
+        body = body.child(pr("v-status", status_row));
         if !acts {
             body = body.child(
                 div()
@@ -2691,8 +2808,8 @@ impl SettingsView {
         if let Some(msg) = &self.tray_err {
             body = body.child(self.error_line(msg, true));
         }
-        body = body.child(logs_row);
-        self.panel("settings-version", "Version", pad, version_fig, body)
+        body = body.child(pr("v-logs", logs_row));
+        self.panel_mb("settings-version", "Version", pad, 3.0, if under_wrapped_hint { 11.5 } else { 12.0 }, version_fig, body)
             .into_any_element()
     }
 
@@ -2859,6 +2976,7 @@ impl Render for SettingsView {
         let distribution = distribute(&heights, cols);
         let mut grid = div().flex().gap_4();
         for column in distribution {
+            let under_setup = column.windows(2).any(|w| w == [4, 5]);
             // `min_w(0)`: a flex item's minimum is its content's width by default, so the
             // audio row ("Follow Windows default output" plus its label) pushed the phone
             // column about 30 px past the window. React's multicol columns never grow past
@@ -2873,22 +2991,55 @@ impl Render for SettingsView {
                         // desktop the flex row already lands where React
                         // puts it (measured at 1440).
                         let wrapped = phone;
-                        col.child(self.rendering_panel(pad, phone, inner, wrapped, cx).into_any_element())
+                        col.child(pr("p-rendering", self.rendering_panel(pad, phone, inner, wrapped, cx)))
                     }
-                    1 => col.child(self.appearance_panel(pad, phone, cx).into_any_element()),
-                    2 => col.child(self.lock_panel(pad, phone, cx).into_any_element()),
+                    1 => col.child(pr("p-appearance", self.appearance_panel(pad, phone, cx))),
+                    2 => col.child(pr("p-lock", self.lock_panel(pad, phone, cx))),
                     3 => {
                         let col_w = (content_w - (cols - 1) as f32 * 16.0) / cols as f32;
                         let inner = col_w - pad * 2.0;
-                        col.child(self.audio_panel(pad, compact, inner, cx).into_any_element())
+                        col.child(pr("p-audio", self.audio_panel(pad, compact, inner, cx)))
                     }
-                    4 => col.child(self.setup_panel(pad, phone, cx).into_any_element()),
-                    _ => col.child(self.version_panel(pad, phone, cx).into_any_element()),
+                    4 => col.child(pr("p-setup", self.setup_panel(pad, phone, cx))),
+                    _ => {
+                        // GPUI rounds the height of the two-line "Map my PC"
+                        // hint up to a whole pixel (2 x 20.3 = 40.6 becomes
+                        // 41), which moves the panel under Setup, and
+                        // everything in it, 0.4 px low: Version's rows sat 1 px
+                        // below React's at 1440x900 (separators 435, 483,
+                        // 532, 591 against 434, 482, 531, 590). The head's
+                        // margin takes the 0.5 px back, only when Setup's
+                        // hint wraps and Version stacks under it.
+                        let col_w = (content_w - (cols - 1) as f32 * 16.0) / cols as f32;
+                        let under_wrapped = under_setup && map_hint_wraps(col_w, pad);
+                        col.child(pr("p-version", self.version_panel(pad, phone, under_wrapped, cx)))
+                    }
                 };
             }
             grid = grid.child(col);
         }
-        page.child(grid)
+        let mut page = page.child(grid);
+        if probe_on() {
+            // Text-width calibration: each hint in a shrink-to-fit row, so the
+            // probe reports its single-line width.
+            let width_of = |name: &'static str, text: &'static str| {
+                pr(name, div().flex().child(div().whitespace_nowrap().text_sm().font_family(crate::fonts::UI_FAMILY).child(text)))
+            };
+            for (i, (name, text)) in [
+                ("w-map", "Walk through every light again"),
+                ("w-auto", "At start, then once a day"),
+                ("w-exp", "Unstable test builds, offered early"),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                page = page.child(div().absolute().top(px(i as f32 * 30.0)).left(px(0.0)).child(width_of(name, text)));
+            }
+        }
+        match super::capture_scroll() {
+            s if s > 0.0 => page.relative().top(px(-s)),
+            _ => page,
+        }
     }
 }
 
@@ -3220,5 +3371,30 @@ mod tests {
         );
         assert!(experimental_checked(Some(&TrayPrefs { editor: EditorChoice::React, channel: UpdateChannel::Experimental })));
         assert!(!experimental_checked(None));
+    }
+
+    #[test]
+    fn compact_audio_select_takes_the_head_less_the_title() {
+        // 390 px phone: panel 358, padding 12: inner 334, head 332 in React.
+        let w = compact_audio_select_w(334.0);
+        assert!((w - 213.9).abs() < 0.01, "{w}");
+        // Roomy heads cap at React's 300 px basis, tight ones keep 160.
+        assert_eq!(compact_audio_select_w(900.0), 300.0);
+        assert_eq!(compact_audio_select_w(200.0), 160.0);
+    }
+
+    #[test]
+    fn brightness_slot_leaves_room_for_the_well_and_percent_unit() {
+        assert!((brightness_slot_w(334.0) - 235.6).abs() < 0.01);
+        assert_eq!(brightness_slot_w(100.0), 80.0);
+    }
+
+    #[test]
+    fn setup_hint_wraps_below_the_one_line_width() {
+        // 1440x900: content 1192, three columns, (1192 - 32) / 3 = 386.7 wide
+        // with padding 16: label column 386.7 - 32 - 161.11 - 16 = 177.6 < 196.
+        assert!(map_hint_wraps(386.67, 16.0));
+        // 1920x1040: a column of 546.7 leaves 337 px and the hint fits one line.
+        assert!(!map_hint_wraps(546.67, 16.0));
     }
 }

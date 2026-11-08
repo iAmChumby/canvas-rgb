@@ -63,9 +63,40 @@ pub const KEY_LABELS: [&str; 6] = [
     "Try again",
 ];
 
+/// The key's label width: the widest of [`KEY_LABELS`] at 14 px / 500 (React's
+/// `Swap` stacks them all; the key measures 162.9 px at 1440, padding and
+/// border 26 px of it).
+const KEY_TEXT_W: f32 = 136.9;
+
 /// The longest state line; the state line reserves room for it.
 pub const LONGEST_STATE: &str =
     "The download failed its check and was deleted. Nothing was installed.";
+
+/// `.upd-state .state`: the dot top-aligned (`margin-top: 0.45em`) and the
+/// words free to wrap (`white-space: normal`), unlike the one-line `.state`.
+fn state_row(t: &Theme, tone: &str, words: &str) -> impl IntoElement {
+    let color = match tone {
+        "ok" => Theme::color(t.ok),
+        "mute" => Theme::color(t.mute),
+        "warn" => Theme::color(t.warn),
+        "work" => Theme::color(t.work),
+        _ => Theme::color(t.down),
+    };
+    div()
+        .flex()
+        .items_start()
+        .gap_2()
+        .child(div().flex_none().mt(px(6.3)).size(px(8.0)).rounded_full().bg(color))
+        .child(
+            div()
+                .min_w(px(0.0))
+                .text_size(px(14.0))
+                .line_height(gpui::relative(1.45))
+                .font_family(crate::fonts::UI_FAMILY)
+                .text_color(Theme::color(t.dim))
+                .child(words.to_string()),
+        )
+}
 
 fn mb(bytes: u64) -> String {
     format!("{:.1}", bytes as f64 / (1024.0 * 1024.0))
@@ -526,8 +557,8 @@ pub fn parse_inline(text: &str) -> Vec<Inline> {
 
 use gpui::{Context, IntoElement, Window, div, prelude::*, px};
 
-use crate::components::button::{Variant, button, button_sm, skirt_layers};
-use crate::components::panel::{state_dot, tracked_title};
+use crate::components::button::{Variant, button, button_sm, button_swap, skirt_layers};
+use crate::components::panel::tracked_title;
 use crate::theme::{Theme, TokenRadius};
 
 // ---------------------------------------------------------------------------
@@ -721,6 +752,19 @@ impl UpdatesView {
         title: &str,
         body: impl IntoElement,
     ) -> impl IntoElement {
+        self.panel_mb(id, title, 12.0, body)
+    }
+
+    /// `head_mb` is the head's bottom margin: 12 px (`.panel-head`), or 0 when
+    /// the body opens with the state line, whose 16 px top margin collapses
+    /// with it in CSS (block margins): the gap is 16, not 28.
+    fn panel_mb(
+        &self,
+        id: &str,
+        title: &str,
+        head_mb: f32,
+        body: impl IntoElement,
+    ) -> impl IntoElement {
         let t = &self.theme;
         div()
             .id(gpui::SharedString::from(id.to_string()))
@@ -739,7 +783,7 @@ impl UpdatesView {
                     .items_center()
                     .justify_between()
                     .gap_2()
-                    .mb_3()
+                    .mb(px(head_mb))
                     .child(tracked_title(
                         &title.to_uppercase(),
                         13.0,
@@ -813,13 +857,14 @@ impl UpdatesView {
                         a: 0.0,
                     },
                 ))
-                .child(label)
+                .child(div().w(px(KEY_TEXT_W)).flex_none().text_center().child(label))
                 .into_any_element()
         } else {
-            button(
+            button_swap(
                 t,
                 "updates-key",
                 &label,
+                KEY_TEXT_W,
                 Variant::Primary,
                 !acts,
                 move |_, _, cx| {
@@ -845,12 +890,15 @@ impl UpdatesView {
                 .bg(t.live())
                 .w(gpui::relative(p)),
         };
-        let mut col = div()
+        // `.upd-key` is inline-flex: the key and its slot are one unit as wide
+        // as the key, not the card (a flex row around it shrink-wraps the unit).
+        let unit = div()
             .flex()
             .flex_col()
+            .min_w(px(0.0))
             .gap(px(8.0))
             .child(key);
-        col = col.child(
+        let unit = unit.child(
             div()
                 .id(gpui::SharedString::from("updates-slot"))
                 .relative()
@@ -862,6 +910,9 @@ impl UpdatesView {
                 .overflow_hidden()
                 .child(fill_el),
         );
+        // The inline-flex unit sits in a line box: its strut leaves about 1 px
+        // under the slot (measured against the React shots).
+        let mut col = div().flex().flex_col().child(div().flex().mb(px(1.0)).child(unit));
         if let Some(err) = &self.key_err {
             col = col.child(self.error_line(err, false));
         }
@@ -882,14 +933,15 @@ impl UpdatesView {
             .relative()
             .mt_4()
             .child(
-                // The hidden sizing copy: same dot and words, tone mute.
-                state_dot(t, "mute", &size),
+                // The hidden sizing copy (`.upd-state-size`, visibility:
+                // hidden): same dot and words, so the line keeps its room.
+                div().invisible().child(state_row(t, "mute", &size)),
             )
             .child(
                 div()
                     .absolute()
                     .inset_0()
-                    .child(state_dot(t, state_tone(u), &line)),
+                    .child(state_row(t, state_tone(u), &line)),
             )
     }
 
@@ -1013,7 +1065,7 @@ impl UpdatesView {
         if let Some(err) = &self.err {
             body = body.child(self.error_line(err, true));
         }
-        self.panel("updates-up-to-date", "Up to date", body)
+        self.panel_mb("updates-up-to-date", "Up to date", 0.0, body)
     }
 
     /// One notes panel per `###` heading: the title, then a list whose

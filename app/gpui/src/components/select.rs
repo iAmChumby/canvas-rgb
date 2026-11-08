@@ -188,6 +188,26 @@ pub fn select_grouped(
     on_toggle: impl Fn(&mut gpui::Window, &mut gpui::App) + Clone + 'static,
     on_pick: impl Fn(String, &mut gpui::Window, &mut gpui::App) + Clone + 'static,
 ) -> impl IntoElement {
+    select_grouped_trunc(t, id, groups, value, open, disabled, full_width, false, on_toggle, on_pick)
+}
+
+/// [`select_grouped`] whose trigger can truncate its value with an ellipsis
+/// (`truncate`, with `full_width`): React's `.select-value` + `.one-line` in a
+/// trigger whose width the parent sets (the Audio panel's compact head). A
+/// shrink-wrapped trigger keeps the widest label's width.
+#[allow(clippy::too_many_arguments)]
+pub fn select_grouped_trunc(
+    t: &Theme,
+    id: &str,
+    groups: &[(&str, &[(&str, &str)])],
+    value: &str,
+    open: bool,
+    disabled: bool,
+    full_width: bool,
+    truncate: bool,
+    on_toggle: impl Fn(&mut gpui::Window, &mut gpui::App) + Clone + 'static,
+    on_pick: impl Fn(String, &mut gpui::Window, &mut gpui::App) + Clone + 'static,
+) -> impl IntoElement {
     let flat: Vec<(&str, &str)> = groups.iter().flat_map(|(_, opts)| opts.iter().copied()).collect();
     let mut value_grid = div().grid().flex_1().min_w(px(0.0)).text_left();
     for (v, l) in &flat {
@@ -200,6 +220,26 @@ pub fn select_grouped(
         let label = if *v == value { label } else { label.invisible() };
         value_grid = value_grid.child(label);
     }
+    // React `.select-value` + `.one-line`: in a trigger of known width a value
+    // wider than the room truncates with an ellipsis. The stacked grid above
+    // only exists to give a shrink-wrapped trigger the widest label's width, so
+    // a trigger of known width shows just the picked label. No `whitespace_nowrap`:
+    // gpui only measures a truncation width for wrapping text and caches the
+    // first (untruncated) measure of a nowrap one.
+    let value_el = if full_width && truncate {
+        let picked = flat.iter().find(|(v, _)| *v == value).map(|(_, l)| l.to_string()).unwrap_or_default();
+        div()
+            .flex_1()
+            .min_w(px(0.0))
+            .overflow_hidden()
+            .text_ellipsis()
+            .text_left()
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .child(picked)
+            .into_any_element()
+    } else {
+        value_grid.into_any_element()
+    };
     let trigger = div()
         .id(gpui::SharedString::from(id.to_string()))
         .relative()
@@ -209,8 +249,12 @@ pub fn select_grouped(
         .gap_2()
         .min_w(px(160.0))
         .h(px(32.0))
-        .pl_3()
-        .pr(px(10.0))
+        // React `.select-trigger`: `padding: 0 10px 0 12px` inside a 1 px
+        // border; the skirt layers draw the border here, so the border's
+        // pixel is added to each side (the text sat 1 px left and the
+        // trigger 2 px narrow against React, #205).
+        .pl(px(13.0))
+        .pr(px(11.0))
         .text_color(Theme::color(t.ink))
         .text_sm()
         .font_weight(gpui::FontWeight::MEDIUM)
@@ -222,7 +266,7 @@ pub fn select_grouped(
             Theme::color(t.raised),
             if open { t.live() } else { Theme::color(t.line_2) },
         ))
-        .child(value_grid)
+        .child(value_el)
         .child(
             gpui::svg()
                 .path("icons/CaretDown-bold.svg")

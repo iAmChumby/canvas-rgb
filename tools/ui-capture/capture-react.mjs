@@ -37,6 +37,10 @@
 //   UI_CAPTURE_EDITOR=<effect name>  (#214) open the code editor on that
 //       effect: the library's card is clicked and then "Edit code". The shot
 //       is named editor-react-<w>x<h>-<theme>.png.
+//   UI_CAPTURE_SCROLL=<px>  (#205) scroll the page down that far first; files
+//       are <view>-scroll<px>-react-<w>x<h>-<theme>.png.
+//   UI_CAPTURE_UPDATE=<preset>  (#206) the tray stub's update state: "available"
+//       (0.2.0 with notes). The Updates shot is named updates-<preset>-react-...
 //   UI_CAPTURE_STACK=<stack name>  (#214) open the stack builder on that
 //       stack ("new" for a stack that has never been saved). The shot is
 //       named stack-<slug>-react-<w>x<h>-<theme>.png.
@@ -137,6 +141,24 @@ const STACK_NAME = (process.env.UI_CAPTURE_STACK ?? "").trim();
 // ("mouse" | "controller"). The shot is named
 // peripherals-<device>-react-<w>x<h>-<theme>.png.
 const PERI_DEVICE = (process.env.UI_CAPTURE_DEVICE ?? "").trim();
+// #205: UI_CAPTURE_SCROLL=<px> scrolls the page that far down before the shot
+// (Settings has panels below the fold at every size but the largest). The shot
+// is named <view>-scroll<px>-react-<w>x<h>-<theme>.png.
+const SCROLL_PX = Math.max(0, Number(process.env.UI_CAPTURE_SCROLL ?? 0) || 0);
+// #206: UI_CAPTURE_UPDATE=<preset> sets the tray stub's update state (tools/
+// ui-capture/capture-gpui.ps1 -UpdateState writes the same state on stdin).
+const UPDATE_PRESET = (process.env.UI_CAPTURE_UPDATE ?? "").trim();
+const UPDATE_PRESETS = {
+  available: {
+    phase: { kind: "available" },
+    available: {
+      version: "0.2.0",
+      notes:
+        "### Added\n- A new thing you can do with your lights.\n- Another change that is long enough to wrap onto a second line on a phone screen.\n\n### Fixed\n- A bug that kept a fan on its last speed.",
+      pub_date: "2026-11-01T00:00:00Z",
+    },
+  },
+};
 
 function slugOf(text) {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
@@ -284,7 +306,7 @@ function serveStatic(port, dir) {
 // The __TAURI__ stand-in: shaped exactly like app/web/src/lib/host.ts
 // (TauriGlobal { core.invoke, event.listen }). Commands from
 // app/web/src/proto/tauri.ts that host.ts invokes.
-function tauriInit({ daemonBase, token, theme }) {
+function tauriInit({ daemonBase, token, theme, updatePreset }) {
   window.__uiCaptureTheme = theme;
   try {
     localStorage.setItem("canvas-rgb.theme", theme);
@@ -300,6 +322,7 @@ function tauriInit({ daemonBase, token, theme }) {
     skipped_version: null,
     snoozed: false,
     updated_to: null,
+    ...(updatePreset ?? {}),
   };
   const invoke = async (cmd, args) => {
     switch (cmd) {
@@ -473,7 +496,7 @@ async function shootPage(page, base, view, viewport, theme, daemonBase, token, p
   page.on("requestfailed", onRequestFailed);
   // The theme lives in localStorage before load (like the existing scripts)
   // and the __TAURI__ stand-in is injected on every navigation.
-  await page.addInitScript(tauriInit, { daemonBase, token, theme });
+  await page.addInitScript(tauriInit, { daemonBase, token, theme, updatePreset: UPDATE_PRESETS[UPDATE_PRESET] ?? null });
   const url = base + view.path;
   const loaded = await page.goto(url, { waitUntil: "load", timeout: 30000 });
   if (!loaded || !loaded.ok()) notLoaded.push(`page ${url} answered ${loaded ? loaded.status() : "nothing"}`);
@@ -490,7 +513,8 @@ async function shootPage(page, base, view, viewport, theme, daemonBase, token, p
   }
   // Let the view settle (fonts, thumbnails, one preview frame).
   await page.waitForTimeout(400);
-  let fileName = `${view.name}-react-${viewport.w}x${viewport.h}-${theme}.png`;
+  const viewFile = view.name === "updates" && UPDATE_PRESETS[UPDATE_PRESET] ? `updates-${UPDATE_PRESET}` : view.name;
+  let fileName = `${viewFile}-react-${viewport.w}x${viewport.h}-${theme}.png`;
   if (PERI_DEVICE && view.name === "peripherals") {
     // The peripherals page (#208): select the device before the shot, so the
     // pair shows the same device on both sides. The mouse is the first key
@@ -561,6 +585,25 @@ async function shootPage(page, base, view, viewport, theme, daemonBase, token, p
       await page.keyboard.type(paletteQuery, { delay: 10 });
     }
     await page.waitForTimeout(400);
+  }
+  if (SCROLL_PX > 0) {
+    // #205: scroll the page by this many pixels before the shot, so the
+    // panels below the fold can be compared. The Settings and Updates pages
+    // scroll in their own pane from 721 px up and as a document below that;
+    // the pane is used when it really scrolls, else the document. The file is
+    // named <view>-scroll<px>-react-... and the GPUI shot pairs with it.
+    fileName = `${viewFile}-scroll${SCROLL_PX}-react-${viewport.w}x${viewport.h}-${theme}.png`;
+    const how = await page.evaluate((y) => {
+      const pane = document.querySelector(".rd-settings-scroll, .rd-updates-grid, .rd-updates-notes");
+      if (pane && pane.scrollHeight > pane.clientHeight + 1 && getComputedStyle(pane).overflowY !== "visible") {
+        pane.scrollTop = y;
+        return `pane ${pane.className}: scrollTop ${pane.scrollTop} of ${pane.scrollHeight - pane.clientHeight}`;
+      }
+      window.scrollTo(0, y);
+      return `document: scrollY ${window.scrollY} of ${document.documentElement.scrollHeight - window.innerHeight}`;
+    }, SCROLL_PX);
+    process.stderr.write(`  scroll ${SCROLL_PX}: ${how}\n`);
+    await page.waitForTimeout(300);
   }
   const filePath = path.join(OUT_DIR, fileName);
   // Park the pointer off any key, so a shot is the resting state and not a
