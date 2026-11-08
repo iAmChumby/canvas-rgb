@@ -521,3 +521,56 @@ then reads as if it shipped in an old release, or lands in a section whose tag i
   release renames `## [Unreleased]` to `## [<new>]` and adds a fresh `## [Unreleased]` above it, so the
   released content stays as context and the shape passes.
   The check's own tests build throwaway git repos (`tools/tests/`).
+
+### `cause:wiring`: a computed status is never drawn
+
+A view computes a status message into a field, React draws it, and the GPUI editor drops it. The
+message exists in memory and never reaches the screen, so the two editors disagree in exactly the
+state the message is about.
+
+- [#213](https://github.com/iAmChumby/canvas-rgb/pull/213) (8096c54): the Layout page's "No effect is
+  running on this layout." line. `views/layout/interact.rs` `preview_line` had a pure function and
+  tests but no caller; React draws the line above the desk (`LayoutView.tsx:1106-1110`). The
+  1440x900 dark pair in that state went from 16.45% differing to 4.85%.
+- [#246](https://github.com/iAmChumby/canvas-rgb/issues/246), the Layout stale-layouts notice:
+  `views/layout.rs` wrote `layouts_error` when a refresh failed and nothing read it. React keeps the
+  desk and says "The layout may be out of date." with the raw answer behind Details
+  (`LayoutView.tsx:1065-1072`). Drawn now, as a `rule_box` warning above the preview line.
+- [#246](https://github.com/iAmChumby/canvas-rgb/issues/246), the Layout load failure: with no
+  layout and a failed read the page stayed on "Reading the layout" for good. React draws its
+  `ErrorPanel` ("The layout could not be read", the one-line summary, the raw answer behind
+  Details, Try again; `LayoutView.tsx:845-851`). Drawn now, with `layouts_retrying` for React's
+  loading state while the retry runs.
+- [#246](https://github.com/iAmChumby/canvas-rgb/issues/246), the Fans hot-line error: the issue
+  reported `views/fans.rs` `hot_error` as never read. That is FALSE for the code on
+  `feat/204-gpui-int`: `views/fans/editor.rs:260-267` already drew it inside the floor rule, in the
+  down tone React's `error-line` uses (`FansView.tsx:1065-1069`, `:1120`). The search that found it
+  looked at `views/fans.rs` only, and the editor's helpers live in `views/fans/editor.rs`. A test
+  now pins the drawing.
+- **Class fix:** done (#246). One guard, `app/gpui/tests/status_drawn.rs` (part of
+  `cargo test -p canvas-rgb-editor`), scans every view file for `pub` fields whose names end in
+  `_error`, `_err`, `_notice`, `_warning`, `_problem` or `_message` (or are `notice`, `note`,
+  `toast`) and fails with `file field` when the field has no read in its module. A module is the
+  declaring file plus, for `views/<area>.rs`, its `views/<area>/` render helpers; a name declared by
+  two structs in one module is checked in its own file, so two `save_error`s cannot pass on each
+  other's reads. `#[cfg(test)]` code does not count (a test that names a field is not a place the
+  app draws it). Each deliberately undrawn field needs an `ALLOWED` entry with its reason, and an
+  entry that matches nothing fails, so fixing one forces its removal.
+- **Sibling search (#246), every view:** the only other status messages computed and not drawn are
+  in `views/effects`, another builder's area, and are named in the guard's `ALLOWED` list:
+  `views/effects/stack_builder.rs:58 save_error` (React `StackBuilder.tsx:1501-1508` draws an
+  ErrorPanel) and `:61 naming_error` (React `:2120-2124` draws an error-line). Two more fields are
+  set and never read but are not messages: `views/effects/stack_builder.rs:96 preset_name` (form
+  state; React draws a NameField) and `views/peripherals.rs:630 progress_id` (an id). The
+  Peripherals toast is computed into `views/peripherals.rs:634 toast` and `take_toast` has no
+  caller, so React's "The settings are on the device" toast never shows; that is `views/peripherals`,
+  also another builder's area. Every other `*_error`/`notice`/`note`/`toast` field found is read in
+  the code that draws it.
+- **How to check a new status field:** if a field names an error, notice or other message, draw it in
+  the path that renders that state (a plain line, a `rule_box`, or an error panel with Details), and
+  run `cargo test -p canvas-rgb-editor --test status_drawn`.
+- **What the guard cannot catch:** a field that is read for a condition (a colour, a branch) but
+  whose words are never drawn (the original bug in #246 was one read short of that: the stale notice
+  was unread, but a field read only by the error panel would still pass the guard); a message built
+  inline with no field; a field outside `views/`; and a status drawn in a different page's module
+  (the guard would call it unread, so name it in `ALLOWED` with that reason).
