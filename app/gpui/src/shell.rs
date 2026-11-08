@@ -2004,6 +2004,12 @@ impl Render for Shell {
         let t = &self.theme;
         let phone = self.width <= 720.0;
         let phone_pad_top = px(16.0);
+        // React's phone detail/editor is `.effect-sheet`: position fixed,
+        // z-index 40, opaque, full bleed to the window bottom, so it covers
+        // the bottom dock while it is open. GPUI hides the dock in that
+        // state instead of drawing it over the sheet (390x844: was a
+        // 390x65 box over the Speed row).
+        let sheet_open = phone && self.effects_view.read(cx).pushed;
         let content = div()
             .flex_1()
             .flex_col()
@@ -2015,8 +2021,13 @@ impl Render for Shell {
             .p_4()
             .child(self.page_content());
         let content = if phone {
-            // React phone `.content`: padding s4 (16) on the sides.
-            content.px(px(16.0)).pb(px(120.0)).pt(phone_pad_top)
+            // React phone `.content`: padding s4 (16) on the sides. With the
+            // sheet open the dock is gone, so the 120 px bottom clearance
+            // for it goes too (the sheet's own bottom padding is 104 px of
+            // scroll room; GPUI clips instead of scrolling, so zero keeps
+            // the Speed row in view as React's viewport shows it).
+            let pb = if sheet_open { px(0.0) } else { px(120.0) };
+            content.px(px(16.0)).pb(pb).pt(phone_pad_top)
         } else {
             // React `.content { flex: 1 1 auto; min-height: 0; overflow:
             // hidden; }`: the content box holds the page's own height, so a
@@ -2038,12 +2049,15 @@ impl Render for Shell {
             .child(self.strip(window, cx))
             .child(content);
         let body = if phone {
-            div()
+            let mut body = div()
                 .flex()
                 .flex_col()
                 .size_full()
-                .child(main_col)
-                .child(self.dock())
+                .child(main_col);
+            if !sheet_open {
+                body = body.child(self.dock());
+            }
+            body
         } else if self.width < 1280.0 {
             div()
                 .flex()

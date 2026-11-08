@@ -225,15 +225,17 @@ impl EffectsView {
             .border_1()
             .border_color(if selected { t.live() } else { Theme::color(t.line) })
             .bg(Theme::color(t.panel))
+            .overflow_hidden();
+        // React's card clips the preview at its r-lg top corners
+        // (`.effect-card{overflow:hidden}`); the thumb keeps its own r-sm.
+        let preview_wrap = div()
+            .relative()
+            .w_full()
+            .h(px(preview_h))
+            .bg(Theme::color(t.sunk))
             .overflow_hidden()
-            .child(
-                div()
-                    .relative()
-                    .w_full()
-                    .h(px(preview_h))
-                    .bg(Theme::color(t.sunk))
-                    .child(thumb(t, &e.id, card_w - 2.0, preview_h, cached(&e.id), false)),
-            );
+            .child(thumb(t, &e.id, card_w - 2.0, preview_h, cached(&e.id), false));
+        card = card.child(preview_wrap);
         if !editing {
             let mut name_box = div().flex().flex_col().gap(px(2.0)).flex_1().min_w(px(0.0));
             name_box = name_box.child(marked_name(t, &e.name, &row.ranges));

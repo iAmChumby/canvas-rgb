@@ -1483,7 +1483,7 @@ impl StackBuilder {
                 .child(gpui::svg().path("icons/GripDots.svg").size(px(16.0))),
         );
         // The thumbnail.
-        row = row.child(thumb(&t, &effect, 44.0, 28.0, cached(&effect), false));
+        row = row.child(thumb(&t, &effect, 44.0, 28.0, cached(&effect), true));
         // The name and the meta.
         row = row.child(
             div()
@@ -1560,7 +1560,7 @@ impl StackBuilder {
             .flex()
             .items_center()
             .gap_3()
-            .child(thumb(&t, &picked.effect, 48.0, 30.0, cached(&picked.effect), false))
+            .child(thumb(&t, &picked.effect, 48.0, 30.0, cached(&picked.effect), true))
             .child(
                 div()
                     .flex_1()
@@ -1653,7 +1653,7 @@ impl StackBuilder {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(thumb(&t, &picked.effect, 48.0, 30.0, cached(&picked.effect), false))
+                    .child(thumb(&t, &picked.effect, 48.0, 30.0, cached(&picked.effect), true))
                     .child(
                         div()
                             .flex_1()

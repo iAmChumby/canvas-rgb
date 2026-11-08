@@ -806,7 +806,12 @@ impl EffectEditor {
             title = title.child(self.file_field(cx));
         } else {
             title = title.child(
+                // React `fig.eff-file` is 22 px tall (15 px at 1.45 = 21.75,
+                // rounded up); at 21.75 the actions and the props panel sat
+                // 1 px high (measured at 1440x900: GPUI actions 470/props
+                // 538 against React 471/539).
                 div()
+                    .min_h(px(22.0))
                     .text_size(px(15.0))
                     .line_height(gpui::relative(1.45))
                     .font_family(crate::fonts::MONO_FAMILY)
@@ -1077,6 +1082,14 @@ impl EffectEditor {
             .child(live)
             .child(title)
             .child(panels);
+        // On the phone the inner block takes the column's width (.eff-edit-side
+        // is 358 px at 390): flex_none + FlexStart sized it to its natural
+        // content (350 px), so the picture ran 8 px narrow and rescaled the
+        // whole loop (measured at 390x844: was 16,108,350,219 against
+        // React's 16,108,358,224).
+        if self.width <= 720.0 {
+            inner = inner.w_full();
+        }
         inner.style().align_self = Some(gpui::AlignItems::FlexStart);
         // The probe: the content's own height, measured as it is painted.
         let probe_cell = self.probe.clone();
