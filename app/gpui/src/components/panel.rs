@@ -8,15 +8,186 @@
 //! field is label-left / control-right with a divider, or (in the wide and
 //! phone layouts, via [`field_stack`]) label over control.
 
-use gpui::{FontWeight, IntoElement, Rgba, div, prelude::*, px};
+use gpui::{
+    App, Bounds, Element, ElementId, FontWeight, GlobalElementId, IntoElement, LayoutId, Pixels,
+    Point, Rgba, ShapedLine, SharedString, Style, TextRun, Window, div, point, prelude::*, px,
+};
 
 use crate::theme::{Theme, TokenRadius};
 
-/// A text with CSS `letter-spacing` (GPUI text has no tracking), drawn as
-/// words of per-character cells: each word is a row of characters separated
-/// by `tracking_em` of the font size, and words wrap at word boundaries as
-/// in CSS. Used for the panel title (0.08em) and the readout captions
-/// (0.07em).
+/// A `letter-spacing` element (#240): the run is shaped once with
+/// `shape_line`, and painting walks the shaped glyphs with a per-character
+/// tracking offset, so the font's kerning returns. `tracking` is in px and
+/// may be negative (the strip title's -0.01em). `extra_w` is an unshaped
+/// trailing allowance: the space cell carries the tracking that follows it,
+/// as CSS places it after the space character.
+#[derive(Clone)]
+struct TrackedText {
+    text: SharedString,
+    font_size: f32,
+    tracking: f32,
+    extra_w: f32,
+    line_height: f32,
+    font: gpui::Font,
+    color: Rgba,
+}
+
+struct TrackedPrepaint {
+    line: ShapedLine,
+    origin: Point<Pixels>,
+    baseline_y: f32,
+}
+
+impl TrackedText {
+    fn run(&self) -> TextRun {
+        TextRun {
+            len: self.text.len(),
+            font: self.font.clone(),
+            color: gpui::Hsla::from(self.color),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }
+    }
+
+    fn char_ordinal(text: &str, byte_index: usize) -> f32 {
+        // Glyph indices are byte offsets; CSS letter-spacing advances per
+        // character, not per byte.
+        text[..byte_index.min(text.len())].chars().count() as f32
+    }
+}
+
+impl IntoElement for TrackedText {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for TrackedText {
+    type RequestLayoutState = ();
+    type PrepaintState = TrackedPrepaint;
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let run = self.run();
+        let layout = window
+            .text_system()
+            .layout_line(&self.text, px(self.font_size), std::slice::from_ref(&run), None);
+        let gaps = self.text.chars().count().saturating_sub(1) as f32;
+        let width = f32::from(layout.width) + self.tracking * gaps + self.extra_w;
+        let height = self.font_size * self.line_height;
+        let mut style = Style::default();
+        style.size.width = px(width).into();
+        style.size.height = px(height).into();
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        _cx: &mut App,
+    ) -> Self::PrepaintState {
+        let run = self.run();
+        let line = window
+            .text_system()
+            .shape_line(self.text.clone(), px(self.font_size), std::slice::from_ref(&run), None);
+        let line_height_px = self.font_size * self.line_height;
+        let ascent = f32::from(line.ascent);
+        let descent = f32::from(line.descent);
+        // gpui's text painter pads the ascent/descent into the line height
+        // and paints the baseline below the top of the box.
+        let padding_top = (line_height_px - ascent - descent) / 2.0;
+        TrackedPrepaint {
+            line,
+            origin: bounds.origin,
+            baseline_y: f32::from(bounds.origin.y) + padding_top + ascent,
+        }
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        _cx: &mut App,
+    ) {
+        let hsla = gpui::Hsla::from(self.color);
+        for run in prepaint.line.runs.iter() {
+            for glyph in run.glyphs.iter() {
+                let ordinal = Self::char_ordinal(&self.text, glyph.index);
+                let x = f32::from(glyph.position.x) + self.tracking * ordinal;
+                let at = point(
+                    px(f32::from(prepaint.origin.x) + x),
+                    px(prepaint.baseline_y + f32::from(glyph.position.y)),
+                );
+                let _ = window.paint_glyph(at, run.font_id, glyph.id, px(self.font_size), hsla);
+            }
+        }
+    }
+}
+
+/// One word of a tracked line: shaped once by [`TrackedText`], keeping the
+/// font's kerning inside the word. The row lays the words out in a wrapping
+/// flex, so a long title still wraps and the head keeps its height (#240:
+/// one-element-per-title drew the whole line wide and pushed the rows below
+/// up 16 px at 390).
+fn tracked_word(
+    word: &str,
+    font_size: f32,
+    tracking: f32,
+    weight: FontWeight,
+    family: &'static str,
+    color: Rgba,
+    line_height: f32,
+) -> gpui::AnyElement {
+    let font = gpui::Font {
+        family: family.to_string().into(),
+        weight,
+        style: gpui::FontStyle::Normal,
+        features: gpui::FontFeatures::default(),
+        fallbacks: None,
+    };
+    TrackedText {
+        text: word.to_string().into(),
+        font_size,
+        tracking,
+        extra_w: 0.0,
+        line_height,
+        font,
+        color,
+    }
+    .into_any()
+}
+
+/// A text with CSS `letter-spacing` (GPUI text has no tracking).
+///
+/// Drawn by [`TrackedText`]: the run is shaped once with
+/// `window.text_system().shape_line` and every glyph is painted at its shaped
+/// position plus `tracking` times its character index, so the font's own
+/// kerning returns. The old per-character cells dropped kerning and ran about
+/// 2 px wide on "Displays" and 4 px wide on PREVIEW (#240).
 pub fn tracked_text(
     text: &str,
     font_size: f32,
@@ -67,38 +238,56 @@ fn tracked_text_lh_nowrap(
     color: Rgba,
     line_height: f32,
 ) -> gpui::AnyElement {
-    let tracking = px(font_size * tracking_em);
-    let space_w = px(font_size * 0.6) + tracking;
+    // One shaped run per word (no wrapping): kerning inside each word, and
+    // the space cells take the tracking that follows the space character.
+    let tracking = font_size * tracking_em;
     let mut row = div()
         .flex()
         .items_center()
         .whitespace_nowrap()
-        .text_size(px(font_size))
-        .line_height(gpui::relative(line_height))
-        .font_weight(weight)
-        .font_family(family)
-        .text_color(color);
+        .flex_none();
     let words: Vec<&str> = text.split_whitespace().collect();
-    let n = words.len();
     for (wi, word) in words.iter().enumerate() {
-        let mut cell = div()
-            .flex()
-            .items_center()
-            .gap(tracking)
-            .whitespace_nowrap()
-            .flex_none();
-        for ch in word.chars() {
-            cell = cell.child(ch.to_string());
-        }
-        row = row.child(cell);
-        if wi + 1 < n {
-            row = row.child(div().w(space_w).h(px(1.0)).flex_none());
+        row = row.child(tracked_word(word, font_size, tracking, weight, family, color, line_height));
+        if wi + 1 < words.len() {
+            row = row.child(tracked_space(font_size, tracking, weight, family, color, line_height));
         }
     }
     row.into_any_element()
 }
 
-fn tracked_text_lh(
+fn tracked_space(
+    font_size: f32,
+    tracking: f32,
+    _weight: FontWeight,
+    family: &'static str,
+    color: Rgba,
+    line_height: f32,
+) -> gpui::AnyElement {
+    // A space character (no ink, just the mono/UI advance) plus the tracking
+    // that follows it. `TrackedText` paints the space glyph without ink.
+    let font = gpui::Font {
+        family: family.to_string().into(),
+        weight: _weight,
+        style: gpui::FontStyle::Normal,
+        features: gpui::FontFeatures::default(),
+        fallbacks: None,
+    };
+    TrackedText {
+        text: " ".to_string().into(),
+        font_size,
+        tracking: 0.0,
+        extra_w: tracking * 2.0,
+        line_height,
+        font,
+        color,
+    }
+    .into_any()
+}
+
+/// The line-height-aware tracked element (`tracked_text` at a caller-chosen
+/// line-height; the strip title uses 1.0, `.rd-title h1`).
+pub fn tracked_text_lh(
     text: &str,
     font_size: f32,
     tracking_em: f32,
@@ -107,36 +296,24 @@ fn tracked_text_lh(
     color: Rgba,
     line_height: f32,
 ) -> gpui::AnyElement {
-    let tracking = px(font_size * tracking_em);
-    // A mono space advances a full 0.6em, like the browser's (plus the
-    // tracking after it); a quarter-em made spaced titles fall short.
-    let space_w = px(font_size * 0.6) + tracking;
+    // React captions inherit the body 1.45; titles take the h2 1.25 (see
+    // `tracked_title`); without this GPUI lays the tracked lines out at its
+    // 1.618 default. Words are shaped once each and wrap at spaces, as CSS.
+    let tracking = font_size * tracking_em;
     let mut row = div()
         .flex()
         .flex_wrap()
         .items_center()
         .text_size(px(font_size))
-        // React captions inherit the body 1.45; titles take the h2 1.25
-        // (see `tracked_title`); without this GPUI lays the tracked lines
-        // out at its 1.618 default.
         .line_height(gpui::relative(line_height))
         .font_weight(weight)
         .font_family(family)
         .text_color(color);
     let words: Vec<&str> = text.split_whitespace().collect();
-    let n = words.len();
     for (wi, word) in words.iter().enumerate() {
-        let mut cell = div()
-            .flex()
-            .items_center()
-            .gap(tracking)
-            .whitespace_nowrap();
-        for ch in word.chars() {
-            cell = cell.child(ch.to_string());
-        }
-        row = row.child(cell);
-        if wi + 1 < n {
-            row = row.child(div().w(space_w).h(px(1.0)));
+        row = row.child(tracked_word(word, font_size, tracking, weight, family, color, line_height));
+        if wi + 1 < words.len() {
+            row = row.child(tracked_space(font_size, tracking, weight, family, color, line_height));
         }
     }
     row.into_any_element()

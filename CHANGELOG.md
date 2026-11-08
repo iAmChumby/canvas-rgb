@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- The GPUI editor's phone header now matches the React editor: no easel beside the page title on pages that bring their own actions, the running-effect name truncates to the row's room so the green check clears it, and the Import key is the full-height key. Segmented controls have their lit dot's halo back, and tracked captions keep the font's kerning. (#244, #240)
+
 ### Added
 
 - The Layout page in the GPUI editor (round 1, static): the desk at parity with the React editor — the stage with its grid, rulers and desk rule, every placed part's outline and drawing, the LEDs' cells in the colours they read from the daemon's preview, the derived case drawn from its form, the "To place" and "Parts" panels with the cm/in unit switch, and the desk's bottom bar (mode, render scale, sampling, zoom). Every React breakpoint applies, including the phone layout. Dragging, resizing and keyboard nudges are round 2. (#213)
