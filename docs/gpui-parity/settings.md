@@ -11,7 +11,7 @@ Source notes: line numbers are for the React tree at `0937970`. The `checked by`
 <!-- One line per control: what it is, what it does, which API call it makes. -->
 
 Rendering panel (`app/web/src/views/SettingsView.tsx:161-192`, panel title h2 from `app/web/src/components/Panel.tsx:19-21`):
-- [ ] Rendering panel: groups Frame rate, Brightness and the render error line (`SettingsView.tsx:161-192`) — checked by pair at 1440x900 (dark and light)
+- [x] Rendering panel: groups Frame rate, Brightness and the render error line (`SettingsView.tsx:161-192`) — checked by pair at 1440x900 (dark and light) -- ticked (#205): settings pair 1440x900 dark 35467/1296000 (2.74%), light 37327/1296000 (2.88%); Rendering box 2898/92493 (3.13%); the panel box equals React at 1440x900 (probe: x,y,w,h and height 239 both, dy 0, dh 0) and at 390x844 (231 px both).
 - [ ] Frame rate hint: reads "<fps_measured to 1 dp> fps measured" from `status.fps_measured` through `fmt1` (`SettingsView.tsx:164`, `app/web/src/lib/format.ts:8-11`); shows "—" when `status` is null; source is `GET /api/v1/status`, polled every 1 s (`app/web/src/lib/store.ts:427`) — checked by pair at 1440x900
 - [ ] Frame rate slider (role slider, aria-label "Frame rate", min 10, max 60, step 1; `SettingsView.tsx:167-174`, `app/web/src/components/Slider.tsx:30-187`): dragging moves the cap and sets local state `fps` only (no request); release or a key step calls `commitFps`, which sends `PATCH /api/v1/render` with body `{fps, scale: null, sampling: null}` (`SettingsView.tsx:92-105`) — checked by GPUI test (to write) and pair at 1440x900 after a drag to 45
 - [ ] Frame rate value (text input, aria-label "Frame rate value", unit "fps", min 10, max 60; `SettingsView.tsx:175`, `app/web/src/components/NumberField.tsx:11-87`): Enter or blur commits (value clamped to 10..60, `NumberField.tsx:41-47`); ArrowUp and ArrowDown step by 1 and commit at once (`NumberField.tsx:49-61`); both call `commitFps` — checked by GPUI test (to write)
@@ -69,7 +69,7 @@ Version panel (`SettingsView.tsx:297-312`; panel title "Version"):
 
 Page-level:
 - [ ] Page title "Settings" (`PageTitle`, an h1 drawn into the status strip through a portal; `SettingsView.tsx:57`, `:146`, `app/web/src/shell/PageHeader.tsx:98-118`): draws nothing until the strip's title slot exists (`PageHeader.tsx:109`) — checked by pair at 1440x900 (the strip shows "Settings")
-- [ ] Panel order in the DOM (`SettingsView.tsx:159-313`): Rendering, Appearance, Lock and quit, Audio source, Setup, Version, in that order; the grid is CSS multi-column (see Breakpoints) — checked by GPUI test (to write) for the order of the six titles
+- [x] Panel order in the DOM (`SettingsView.tsx:159-313`): Rendering, Appearance, Lock and quit, Audio source, Setup, Version, in that order; the grid is CSS multi-column (see Breakpoints) — checked by GPUI test (to write) for the order of the six titles -- ticked (#205): GPUI test `panel_order_is_the_react_dom_order` (cargo test -p canvas-rgb-editor: 364 passed).
 
 ## States
 - [ ] Loading (no settings yet, no settings error): `LoadFrame` with `state="loading"` and `shape={<SettingsShape />}` (`SettingsView.tsx:58-61`, `app/web/src/components/LoadShapes.tsx:348-366`): two columns of skeleton panels (one column at 960 px and under, see Breakpoints); the frame is `aria-busy` (`app/web/src/components/Loading.tsx:171`); the shape stays invisible until 150 ms have passed (`Loading.tsx:23`, `:49-60`, `:492` in `motion.css`); the sr-only words "Reading the settings" appear only after that delay (`Loading.tsx:185-189`, `SettingsView.tsx:61`) — checked by pair at 1440x900 and 390x844 with `?state=hold:settings`
@@ -259,12 +259,12 @@ Taken by `tools/ui-capture/` against the daemon on the fakes. 6 sizes × 2 theme
 
 | Size | Dark (React / GPUI) | Light (React / GPUI) | Pixel diff (changed / total) |
 |---|---|---|---|
-| 1920x1040 | | | |
-| 1440x900 | | | |
-| 1280x860 | | | |
-| 1024x768 | | | |
-| 960x1032 | | | |
-| 390x844 | | | |
+| 1920x1040 | `settings-react-1920x1040-dark.png` / `settings-gpui-1920x1040-dark.png` | `settings-react-1920x1040-light.png` / `settings-gpui-1920x1040-light.png` | dark 35836/1996800 (1.79%); light 37142/1996800 (1.86%) |
+| 1440x900 | `settings-react-1440x900-dark.png` / `settings-gpui-1440x900-dark.png` | `settings-react-1440x900-light.png` / `settings-gpui-1440x900-light.png` | dark 35467/1296000 (2.74%); light 37327/1296000 (2.88%) |
+| 1280x860 | not shot in this round | not shot in this round | UNKNOWN: no pair taken at this size in #205/#206 |
+| 1024x768 | `settings-react-1024x768-dark.png` / `settings-gpui-1024x768-dark.png` | `settings-react-1024x768-light.png` / `settings-gpui-1024x768-light.png` | dark 28945/786432 (3.68%); light 29593/786432 (3.76%) |
+| 960x1032 | not shot in this round | not shot in this round | UNKNOWN: no pair taken at this size in #205/#206 |
+| 390x844 | `settings-react-390x844-dark.png` / `settings-gpui-390x844-dark.png` | `settings-react-390x844-light.png` / `settings-gpui-390x844-light.png` | dark 13752/329160 (4.18%); light 14475/329160 (4.4%) |
 
 ## Reviewer verdict
 Adversarial reviewer, date, what it compared, every mismatch it found and how each was fixed, and its final verdict

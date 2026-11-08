@@ -8,6 +8,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
+- The GPUI editor's Settings and Updates pages now match the React editor's layout: panel titles sit on React's baseline, the Audio panel's source picker truncates a long name with an ellipsis and keeps React's width, the Map my PC again and Import keys take React's widths, the update key is as wide as its longest label with its progress slot under it, and the Updates state line no longer draws its hidden sizing copy over the visible one. (#205, #206)
+
 - The GPUI editor now kerns every piece of text like the React editor does (headings such as STATUS were 3 px too wide), the command palette's panel shadow falls off like React's instead of spreading twice as far, and the palette's right-hand hints sit on the same pixel as React's. (#211)
 
 - The GPUI editor's Layout page now matches the React editor: the phone's pane switcher takes the width it needs instead of the whole column, a phone part row's icon and name start 8 px in like React's, every part's drawing is stroked in React's quieter own line instead of the outline's colour, the microphone's stand has the straight arms React draws, and the takeover no longer flashes one frame of the Layout chrome over it. (#213)
