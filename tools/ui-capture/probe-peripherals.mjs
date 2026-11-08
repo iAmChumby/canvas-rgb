@@ -59,6 +59,10 @@ async function measure(w, h, theme, device) {
   await page.locator(".rd-devkey", { hasText: keyText }).first().click({ timeout: 8000 });
   await page.waitForFunction((want) => (document.querySelector(".peripheral-head-name")?.textContent ?? "").includes(want), keyText, { timeout: 10000 });
   await page.waitForTimeout(800);
+  // Clicking a device key may scroll it into view; a shot starts at the top,
+  // so measure from the top too (the strip is not sticky).
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.waitForTimeout(200);
   await page.screenshot({ path: path.resolve(root, `.build/probe-${w}x${h}-${device}.png`) });
   const out = await page.evaluate(() => {
     const box = (el) => {
@@ -75,6 +79,10 @@ async function measure(w, h, theme, device) {
     };
     const res = {};
     res.viewport = { innerWidth: window.innerWidth, innerHeight: window.innerHeight, devicePixelRatio: window.devicePixelRatio };
+    res.scrollY = window.scrollY;
+    res.strip = box(document.querySelector(".strip"));
+    res.keys = box(document.querySelector(".rd-peri-keys"));
+    res.keyBoxes = [...document.querySelectorAll(".rd-peri-keys .rd-devkey")].map(box);
     res.head = box(document.querySelector(".peripheral-head"));
     res.headText = box(document.querySelector(".peripheral-head-text"));
     res.headName = box(document.querySelector(".peripheral-head-name"));
@@ -99,6 +107,29 @@ async function measure(w, h, theme, device) {
     res.chipStyle = cs(document.querySelector(".dpi-chip"), ["height", "fontSize", "padding"]);
     res.headTextStyle = cs(document.querySelector(".peripheral-head-text"), ["flex"]);
     res.labelStyle = cs(document.querySelector(".field-label"), ["fontSize", "lineHeight"]);
+    res.chain = (sel) => {
+      const out = [];
+      let el = document.querySelector(sel);
+      while (el && out.length < 7) {
+        const r = el.getBoundingClientRect();
+        const c = getComputedStyle(el);
+        out.push({
+          cls: typeof el.className === "string" ? el.className : el.tagName,
+          x: +r.x.toFixed(2), y: +r.y.toFixed(2), w: +r.width.toFixed(2), h: +r.height.toFixed(2),
+          pad: c.padding, mar: c.margin, gap: c.gap, bw: c.borderWidth, lh: c.lineHeight, fs: c.fontSize,
+          display: c.display, minH: c.minHeight,
+        });
+        el = el.parentElement;
+      }
+      return out;
+    };
+    res.keyChain = res.chain(".rd-peri-keys .rd-devkey");
+    res.keyNames = [...document.querySelectorAll(".rd-devkey .peripheral-name")].map((el) => {
+      const r = el.getBoundingClientRect();
+      return { text: el.textContent, w: +r.width.toFixed(2), scrollW: el.scrollWidth, h: +r.height.toFixed(2) };
+    });
+    res.rowChain = res.chain(".prop-item[data-kind='number']");
+    res.lblChain = res.chain(".prop-item[data-kind='number'] .field-label");
     return res;
   });
   await context.close();

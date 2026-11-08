@@ -21,6 +21,7 @@
 //! so the battery badge is drawn only when one arrives.
 
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 use canvas_proto::peripheral::{PeripheralDetail, PeripheralInfo, PeripheralKind, ReadProgress, ReadStage};
 use canvas_proto::props::{PropKind, PropValue, Props, PropertyDef};
@@ -45,6 +46,57 @@ pub const LOAD_DELAY_MS: u64 = 150;
 pub const STAGE_POLL_MS: u64 = 300;
 /// The first stage poll after the read starts (100 ms in React).
 pub const STAGE_FIRST_MS: u64 = 100;
+
+/// Debug only (#208): `CANVAS_RGB_CAPTURE_PROBE=1` prints the layout bounds of
+/// the elements wrapped with [`pr`] to stderr, once per change, so a capture
+/// run reports where GPUI really put a box (React's are probed in headless
+/// Chromium by `tools/ui-capture/probe-peripherals.mjs`). The same mechanism
+/// as `views::settings`; release builds never wrap anything.
+fn probe_on() -> bool {
+    cfg!(debug_assertions) && std::env::var_os("CANVAS_RGB_CAPTURE_PROBE").is_some()
+}
+
+fn probe_report(name: &str, b: gpui::Bounds<gpui::Pixels>) {
+    use std::sync::OnceLock;
+    static SEEN: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    let line = format!(
+        "{:.2},{:.2} {:.2}x{:.2}",
+        f32::from(b.origin.x),
+        f32::from(b.origin.y),
+        f32::from(b.size.width),
+        f32::from(b.size.height)
+    );
+    let mut seen = SEEN.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+    if seen.get(name) != Some(&line) {
+        let target = std::env::var("CANVAS_RGB_CAPTURE_PROBE").unwrap_or_default();
+        if target.len() > 1 {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&target) {
+                let _ = writeln!(f, "{name} {line}");
+            }
+        } else {
+            eprintln!("probe {name} {line}");
+        }
+        seen.insert(name.to_string(), line);
+    }
+}
+
+/// Wraps `el` so its bounds are reported when the probe is on.
+fn pr(name: impl Into<String>, el: impl IntoElement) -> gpui::AnyElement {
+    if !probe_on() {
+        return el.into_any_element();
+    }
+    let name: String = name.into();
+    div()
+        .relative()
+        .child(el)
+        .child(
+            gpui::canvas(move |bounds, _window, _cx| probe_report(&name, bounds), |_, _, _, _| {})
+                .absolute()
+                .inset_0(),
+        )
+        .into_any_element()
+}
 
 /// A peripheral as the list shows it. The spine's `PeripheralInfo` has no
 /// battery field; the React row carries it as an extra the daemon may add.
@@ -715,6 +767,30 @@ impl PeripheralsView {
     /// The selected id (`selectedId`).
     pub fn sel_id(&self) -> Option<String> {
         selected_id(self.picked_id.as_deref(), self.list.as_ref())
+    }
+
+    /// How far the keys row is scrolled sideways so the picked key is in
+    /// view. React's keys row is a scroller (`.rd-peri-keys`
+    /// `overflow-x: auto`), and clicking a key focuses it, so the browser
+    /// scrolls it into view: at 390 the controller key shows with its left
+    /// edge at 78 px, i.e. the row sits 122 px along. The scrollport is the
+    /// row's padding box (4 px of padding each side against the -4 px
+    /// margin), so a key counts as in view while 8 px of it hang past the
+    /// content edge. GPUI has no focus scrolling, so the offset is computed
+    /// from the keys' widths (the same 78 px of frame around the measured
+    /// name).
+    pub fn keys_scroll(&self, window: &Window, content_w: f32) -> f32 {
+        let Some(sel) = self.sel_id() else { return 0.0 };
+        let Some(rows) = self.list.as_ref() else { return 0.0 };
+        let mut x = 0.0f32;
+        for row in rows {
+            let w = Self::key_width(window, row);
+            if row.info.id.0 == sel {
+                return (x + w - (content_w + 8.0)).max(0.0);
+            }
+            x += w + 8.0;
+        }
+        0.0
     }
 
     /// The device whose detail is on screen (`fresh` or the last read).
@@ -1527,6 +1603,7 @@ impl PeripheralsView {
 
     /// One property row (`div.prop-item`).
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn prop_row(
         &self,
         def: &PropertyDef,
@@ -1537,6 +1614,7 @@ impl PeripheralsView {
         values: &Props,
         view_entity: gpui::Entity<Self>,
         narrow: bool,
+        last: bool,
     ) -> impl IntoElement {
         let t = &self.theme;
         let fixed = read_only.iter().any(|k| k == &def.key);
@@ -1575,6 +1653,14 @@ impl PeripheralsView {
         // (`.prop-item:has(.seg)`): the control sizes to its content and
         // spans the row.
         let narrow = is_seg || (narrow && is_number);
+        // React's rows carry `border-bottom: 1px solid` and the last row of a
+        // list drops it (`.prop-item:last-child { border-bottom: 0 }`). A
+        // GPUI border adds to the box (React's is inside `border-box`), so
+        // drawing it on the last row both painted a line React has not got
+        // and made that row 1 px taller, which every panel below inherited
+        // (measured at 390: the mouse's Performance panel 216 px against
+        // React's 214.75, and the page 4 px out of step by the Buttons panel).
+        let rule = !last;
         if is_seg {
             // The segmented control sizes to its content
             // (`.rd-peri-sections .seg { width: max-content }`), so the
@@ -1586,8 +1672,7 @@ impl PeripheralsView {
                 .gap_2()
                 .min_h(px(44.0))
                 .py_2()
-                .border_b_1()
-                .border_color(Theme::color(t.line))
+                .when(rule, |d| d.border_b_1().border_color(Theme::color(t.line)))
                 .child(label_el)
                 .child(control)
         } else if narrow {
@@ -1606,10 +1691,9 @@ impl PeripheralsView {
                 .gap(px(12.0))
                 .min_h(px(44.0))
                 .py_2()
-                .border_b_1()
-                .border_color(Theme::color(t.line))
-                .child(label_el)
-                .child(control)
+                .when(rule, |d| d.border_b_1().border_color(Theme::color(t.line)))
+                .child(pr(format!("lbl-{key}"), label_el))
+                .child(pr(format!("ctl-{key}"), control))
         } else if is_number {
             div()
                 .flex()
@@ -1617,8 +1701,7 @@ impl PeripheralsView {
                 .gap_3()
                 .min_h(px(52.0))
                 .py_2()
-                .border_b_1()
-                .border_color(Theme::color(t.line))
+                .when(rule, |d| d.border_b_1().border_color(Theme::color(t.line)))
                 .child(div().w(px(116.0)).flex_none().child(label_el))
                 .child(
                     div()
@@ -1640,8 +1723,7 @@ impl PeripheralsView {
                 .gap_4()
                 .min_h(px(if phone { 44.0 } else { 52.0 }))
                 .py_2()
-                .border_b_1()
-                .border_color(Theme::color(t.line))
+                .when(rule, |d| d.border_b_1().border_color(Theme::color(t.line)))
                 .child(div().w(px(116.0)).flex_none().child(label_el))
                 .child(
                     div()
@@ -1888,9 +1970,10 @@ impl PeripheralsView {
         if !others_defs.is_empty() {
             let mut list = div().flex().flex_col();
             let schema: Vec<PropertyDef> = others_defs.clone();
-            for def in &schema {
+            for (i, def) in schema.iter().enumerate() {
                 let value = values.get(&def.key).cloned().unwrap_or_else(|| default_for(&def.kind));
-                list = list.child(self.prop_row(def, &value, read_only, disabled, &schema, values, view_entity.clone(), narrow));
+                let row = self.prop_row(def, &value, read_only, disabled, &schema, values, view_entity.clone(), narrow, i + 1 == schema.len());
+                list = list.child(pr(format!("row-{}", def.key), row));
             }
             body = body.child(list);
         }
@@ -1957,16 +2040,17 @@ impl PeripheralsView {
                 chip
             };
             let _ = full_label;
-            chips = chips.child(chip);
+            chips = chips.child(pr(format!("chip-{section_id}-{n}"), chip));
         }
         body = body.child(chips);
         // The picked stage editor.
         if picked.is_some() && !picked_defs.is_empty() {
             let schema: Vec<PropertyDef> = picked_defs.iter().map(|p| (*p).clone()).collect();
             let mut list = div().flex().flex_col().mt_3().pt_3().border_t_1().border_color(Theme::color(t.line));
-            for def in &schema {
+            for (i, def) in schema.iter().enumerate() {
                 let value = values.get(&def.key).cloned().unwrap_or_else(|| default_for(&def.kind));
-                list = list.child(self.prop_row(def, &value, read_only, disabled, &schema, values, view_entity.clone(), narrow));
+                let row = self.prop_row(def, &value, read_only, disabled, &schema, values, view_entity.clone(), narrow, i + 1 == schema.len());
+                list = list.child(pr(format!("row-{}", def.key), row));
             }
             body = body.child(list);
         }
@@ -2067,6 +2151,7 @@ impl PeripheralsView {
         } else {
             map
         };
+        let map_grid = pr("pad-map", map_grid);
         let grid = if narrow_grid {
             div()
                 .flex()
@@ -2082,7 +2167,7 @@ impl PeripheralsView {
                 .child(div().w(px(420.0)).flex_none().min_w(px(280.0)).child(plan))
                 .child(map_grid)
         };
-        self.panel("controller-panel", &detail.info.name, grid, content_w < 640.0)
+        pr("panel-controller", self.panel("controller-panel", &detail.info.name, grid, content_w < 640.0))
     }
 
     /// The plan of the pad (`ControllerOutline`): front and rear views.
@@ -2215,7 +2300,7 @@ impl PeripheralsView {
             .items_center()
             .gap_3()
             .w_full()
-            .child(front_wrap)
+            .child(pr("pad-front", front_wrap))
             .child(
                 div()
                     .flex()
@@ -2223,7 +2308,7 @@ impl PeripheralsView {
                     .items_center()
                     .gap_1()
                     .w(px(200.0))
-                    .child(rear_wrap)
+                    .child(pr("pad-rear", rear_wrap))
                     .child(
                         div()
                             .text_sm()
@@ -2322,7 +2407,8 @@ impl PeripheralsView {
                     .min_w(px(0.0))
                     .flex()
                     .flex_col()
-                    .child(
+                    .child(pr(
+                        "head-name",
                         div()
                             .text_size(px(20.0))
                             .line_height(gpui::relative(1.25))
@@ -2330,14 +2416,15 @@ impl PeripheralsView {
                             .font_family(crate::fonts::UI_FAMILY)
                             .text_color(Theme::color(t.ink))
                             .child(info.name.clone()),
-                    )
-                    .child(
-                        // The subline wraps across the name block's width:
-                        // at 390 the mono location drops to a second line
-                        // beside the `Connected` state dot (`.peripheral-head
-                        // -text { flex: 1 1 0 }`, `.peripheral-head { flex-
-                        // wrap: wrap }`), not under the dot.
+                    ))
+                    .child(pr(
+                        "head-sub",
                         div()
+                            // The subline wraps across the name block's width:
+                            // at 390 the mono location drops to a second line
+                            // beside the `Connected` state dot (`.peripheral-head
+                            // -text { flex: 1 1 0 }`, `.peripheral-head { flex-
+                            // wrap: wrap }`), not under the dot.
                             .text_sm()
                             .line_height(gpui::relative(1.45))
                             .font_family(crate::fonts::UI_FAMILY)
@@ -2360,7 +2447,7 @@ impl PeripheralsView {
                                     .flex_none()
                                     .child(info.location.clone()),
                             ),
-                    ),
+                    )),
             )
             .child(state_dot(t, if info.connected { "ok" } else { "mute" }, if info.connected { "Connected" } else { "Not connected" }));
         // The access switches.
@@ -2473,25 +2560,26 @@ impl PeripheralsView {
             .border_color(Theme::color(t.line))
             .bg(Theme::color(t.panel))
             .child(head_panel_body);
+        let head_panel = pr("panel-head", head_panel);
         // The sections.
         let narrow = content_w < 640.0;
         let mut column_panels: Vec<(f32, gpui::AnyElement)> = Vec::new();
         let mut wide_panels: Vec<gpui::AnyElement> = Vec::new();
         for section in &detail.schema.sections {
             if is_mouse && section.id == "dpi" {
+                let panel = self.dpi_panel(
+                    &section.id,
+                    &section.title,
+                    &section.properties,
+                    values,
+                    read_only,
+                    !writes,
+                    view_entity.clone(),
+                    narrow,
+                );
                 column_panels.push((
                     dpi_panel_height(&section.properties, narrow),
-                    self.dpi_panel(
-                        &section.id,
-                        &section.title,
-                        &section.properties,
-                        values,
-                        read_only,
-                        !writes,
-                        view_entity.clone(),
-                        narrow,
-                    )
-                    .into_any_element(),
+                    pr(format!("panel-{}", section.id), panel),
                 ));
                 continue;
             }
@@ -2511,9 +2599,10 @@ impl PeripheralsView {
             };
             let mut list = div().flex().flex_col();
             let schema = properties.clone();
-            for def in &schema {
+            for (i, def) in schema.iter().enumerate() {
                 let value = values.get(&def.key).cloned().unwrap_or_else(|| default_for(&def.kind));
-                list = list.child(self.prop_row(def, &value, read_only, !writes, &schema, values, view_entity.clone(), narrow));
+                let row = self.prop_row(def, &value, read_only, !writes, &schema, values, view_entity.clone(), narrow, i + 1 == schema.len());
+                list = list.child(pr(format!("row-{}", def.key), row));
             }
             // The mouse Buttons panel is a two-column grid of read-only rows,
             // filled down the first column (`grid-auto-flow: column`): rows
@@ -2549,7 +2638,10 @@ impl PeripheralsView {
             };
             column_panels.push((
                 section_panel_height(&properties, section.id == "buttons" && is_mouse, narrow),
-                self.panel(&format!("section-{}", section.id), &section.title, panel_body, narrow).into_any_element(),
+                pr(
+                    format!("panel-{}", section.id),
+                    self.panel(&format!("section-{}", section.id), &section.title, panel_body, narrow),
+                ),
             ));
         }
         // The sections are CSS multicol columns of 280 px (`columns: 280px
@@ -2600,6 +2692,25 @@ impl PeripheralsView {
             ));
         }
         stack
+    }
+
+    /// The width of one device key: a 1 px border each side, `px_3` (12 px)
+    /// either side, the 28 px icon, two 8 px gaps and the 8 px state dot
+    /// (`.rd-peri-keys .rd-devkey`, `.peripheral-icon`, `.state-dot`). The
+    /// name is measured the way GPUI draws it, so the keys row can be
+    /// scrolled to the picked key (see `keys_scroll`).
+    fn key_width(window: &Window, row: &PeripheralRow) -> f32 {
+        let name = crate::shell::text_width(
+            window,
+            &row.info.name,
+            13.333,
+            gpui::FontWeight::SEMIBOLD,
+            crate::fonts::UI_FAMILY,
+        );
+        // A battery badge (never sent by the daemon today) adds its icon,
+        // its gap and the word after it.
+        let battery = if row.battery.is_some() { 4.0 + 14.0 + 4.0 } else { 0.0 };
+        78.0 + name + battery
     }
 
     /// One device key (`button.peripheral-row.rd-devkey`).
@@ -2967,6 +3078,10 @@ impl Render for PeripheralsView {
                 for r in &rows {
                     row = row.child(self.device_key(r, view_entity.clone()));
                 }
+                // The keys' boxes, so `keys_scroll` can bring the picked key
+                // into view. Relative to the first key, which is the same
+                // whether the row is scrolled or not.
+                row = row.ml(px(-self.keys_scroll(window, content_w)));
                 row.into_any_element()
             }
         };
@@ -3041,6 +3156,7 @@ impl Render for PeripheralsView {
             }
         };
 
+        let keys = pr("keys", keys);
         let mut page = div()
             .flex()
             .flex_col()

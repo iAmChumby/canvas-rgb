@@ -203,8 +203,9 @@ Breakpoints that touch peripheral selectors (all in `app/web/src/styles/app.css`
 - [ ] 639px and below, container: `.rd-peri-sections` section rows, no separate scroll (the page scrolls) — `app.css:5720-5724` — checked by pair at 390x844
 - [ ] 700px and below, page height (`@container page (max-height: 700px)`, `app.css:5712-5717`): each section row is at least 44 px tall — checked by pair at 1024x768 (short window, 768 px is taller than 700, so the desktop rule is UNKNOWN until a window under 700 px tall is shot; check with a 1280x680 capture added to the pairs)
 - [ ] 640px boundary: the 639 container rule and the 640 `@container page (max-width: 640px)` rules in shared CSS (`app.css:2720`, `:3348`, `:3651`) are not peripheral; no peripheral change at 640 — checked by grep of the selectors (see the 1280 item)
-- [ ] Keys row (`.rd-peri-keys`) scrolls sideways and never shrinks, at every width (`app.css:5577-5597`); the scrollbar is hidden (`:5588-5590`) — checked by pair at 390x844 (the second key is cut at the edge) and at 1440x900 (all keys fit)
-- [ ] Keys row at 720 and below stays a row (`flex-direction: row`) with `gap: var(--s2)` — `app.css:5593-5597` — checked by pair at 390x844
+- [x] Keys row (`.rd-peri-keys`) scrolls sideways and never shrinks, at every width (`app.css:5577-5597`); the scrollbar is hidden (`:5588-5590`) — checked by pair at 390x844 (the controller key is scrolled into view: its live border at 78 in React and 79 in GPUI, the row 122 px along in React against 123 in `keys_scroll`, its right edge 5 px past React's content box) and at 1440x900 (all keys fit) — r4 (#208)
+- [x] Keys row at 720 and below stays a row (`flex-direction: row`) with `gap: var(--s2)` — `app.css:5593-5597` — checked by pair at 390x844 (both keys on one line, 8 px apart, measured by `probe-peripherals.mjs`) — r4 (#208)
+- [x] Every section row drops its bottom rule when it is the last of a list (`.prop-item:last-child { border-bottom: 0 }`, `app.css:3404-3406`) — checked by the probe's row boxes at 390: the last row of Performance measures 81.75 in React and 82 in GPUI with no rule drawn — r4 (#208)
 
 ## Keyboard
 - [ ] Tab order: keys row (in DOM order), then the save-error line (if any), then the detail head's Read switch, Read again, Change switch, then the sections, then the pad targets and map rows (DOM order, `app/web/src/views/PeripheralsView.tsx:483-553`) — checked by GPUI test (to write) (focus order list)
@@ -265,11 +266,25 @@ Taken by `tools/ui-capture/` against the daemon on the fakes. 6 sizes × 2 theme
 | Size | Dark (React / GPUI) | Light (React / GPUI) | Pixel diff (changed / total) |
 |---|---|---|---|
 | 1920x1040 | | | |
-| 1440x900 | | | |
+| 1440x900 | shot, mouse and controller | | mouse 52810/1296000 (4.07%), controller 47667/1296000 (3.68%) |
 | 1280x860 | | | |
 | 1024x768 | | | |
 | 960x1032 | | | |
-| 390x844 | | | |
+| 390x844 | shot, mouse and controller | shot, mouse and controller | mouse dark 23562/329160 (7.16%), light 24040/329160 (7.30%); controller dark 21893/329160 (6.65%), light 22672/329160 (6.89%) |
+
+Round 4 (#208, `fix/phone-peripherals`): every section row drops the border React
+drops on the last row (`.prop-item:last-child`), and the keys row scrolls the
+picked key into view as a clicked key's focus does in the browser (the controller
+key sits 122 px along at 390, its left edge at 78 against GPUI's 79). Boxes checked
+with `probe-peripherals.mjs` against the view's own `CANVAS_RGB_CAPTURE_PROBE`
+report: head panel, name, subline, icon, DPI panel, chips, Polling row and keys
+row agree to the pixel; panels further down agree to 1 px (the browser's 81.75 px
+rows against GPUI's 82). The residue is glyph interiors at matching ink boxes
+(Chromium's subpixel fringes against GPUI's greyscale): page-only 6.21% mouse /
+6.02% controller at threshold 6, 3.62% / 4.19% at threshold 40, with 15 px body
+text on identical ink rows and 13.33/14/20 px runs 1 px higher. The strip and the
+dock (14.12% and 11.78% of their bands) are #244's lane and unchanged. Numbers and
+the full proof: `.build/reports/phone-peripherals.md`.
 
 ## Reviewer verdict
 Adversarial reviewer, date, what it compared, every mismatch it found and how each was fixed, and its final verdict
