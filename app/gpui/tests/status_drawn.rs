@@ -28,20 +28,7 @@ const SUFFIXES: &[&str] = &["_error", "_err", "_notice", "_warning", "_problem",
 const EXACT: &[&str] = &["notice", "note", "toast"];
 
 /// (declaring file relative to the crate, field, why it is not drawn)
-const ALLOWED: &[(&str, &str, &str)] = &[
-    (
-        "src/views/effects/stack_builder.rs",
-        "save_error",
-        "#246 sibling in views/effects (another builder's area): React draws it as an ErrorPanel \
-         (StackBuilder.tsx:1501-1508) and GPUI only computes it",
-    ),
-    (
-        "src/views/effects/stack_builder.rs",
-        "naming_error",
-        "#246 sibling in views/effects (another builder's area): React draws it as an error-line \
-         (StackBuilder.tsx:2120-2124) and GPUI only computes it",
-    ),
-];
+const ALLOWED: &[(&str, &str, &str)] = &[];
 
 fn is_status(name: &str) -> bool {
     EXACT.contains(&name) || SUFFIXES.iter().any(|s| name.ends_with(s))

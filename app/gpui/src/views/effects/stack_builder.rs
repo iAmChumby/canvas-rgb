@@ -542,7 +542,8 @@ impl StackBuilder {
             return;
         }
         if self.count() == 0 {
-            self.save_error = Some("Add a layer before saving.".to_string());
+            // React's `save` (StackBuilder.tsx:945-948).
+            self.save_error = save_error_for_layers(self.count());
             return;
         }
         let wanted = if self.is_new() {
@@ -705,15 +706,20 @@ impl StackBuilder {
     /// stack's name and the save goes on.
     pub fn name_the_stack(&mut self, cx: &mut Context<Self>) {
         let wanted = self.name_draft.trim().to_string();
-        if let Some(problem) = stack_draft::stack_name_problem(&wanted, &self.other_names) {
-            self.naming_error = Some(problem);
-            cx.notify();
-            return;
+        match name_the_stack_result(&wanted, &self.other_names) {
+            // A refused name keeps the dialog open with the reason under
+            // the field (React's `setNamingError`).
+            Err(problem) => {
+                self.naming_error = Some(problem);
+                cx.notify();
+            }
+            Ok(name) => {
+                self.naming_error = None;
+                self.name_draft = name;
+                self.naming = false;
+                self.save(None, cx);
+            }
         }
-        self.naming_error = None;
-        self.name_draft = wanted;
-        self.naming = false;
-        self.save(None, cx);
     }
 
     // -- the draft on the lights -------------------------------------------------
@@ -2755,6 +2761,27 @@ fn r_top_lg<T: Styled>(mut el: T) -> T {
     el
 }
 
+/// The save error a stack with no layer gets (React's `save`,
+/// StackBuilder.tsx:945-948): the words are React's.
+pub fn save_error_for_layers(count: usize) -> Option<String> {
+    if count == 0 {
+        Some("Add a layer before saving.".to_string())
+    } else {
+        None
+    }
+}
+
+/// The naming dialog's Save (`nameTheStack` in React,
+/// StackBuilder.tsx:1042-1056): the name the stack takes, or the reason
+/// the name is refused (the reason is what the dialog draws under the
+/// field).
+pub fn name_the_stack_result(name: &str, others: &[String]) -> Result<String, String> {
+    match stack_draft::stack_name_problem(name, others) {
+        Some(problem) => Err(problem),
+        None => Ok(name.trim().to_string()),
+    }
+}
+
 /// The strip's title and context for the builder: the stack's name and
 /// "Stack · N layers".
 pub fn strip_title(builder: &StackBuilder) -> (String, Option<String>) {
@@ -2893,9 +2920,11 @@ mod tests {
             sheet_open: false,
             saving: false,
             save_error: None,
+            save_details_open: false,
             clash: None,
             naming: false,
             naming_error: None,
+            name_input: None,
             leaving: false,
             preview_error: None,
             feed_problem: None,
@@ -2921,5 +2950,130 @@ mod tests {
         assert!(!builder.dirty());
         builder.draft.layers[0].opacity = 50;
         assert!(builder.dirty());
+    }
+
+    /// The builder's own source, for the tests that check what it draws.
+    fn builder_source() -> String {
+        std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/views/effects/stack_builder.rs"
+        ))
+        .expect("read stack_builder.rs")
+    }
+
+    /// React's `saveError` (`StackBuilder.tsx:1501-1508`): the `ErrorPanel`
+    /// above the stage, with the title, the one-line summary, the raw answer
+    /// behind Details and a Try again key. The GPUI computed `save_error` and
+    /// never drew it (#246).
+    #[test]
+    fn the_save_error_is_drawn_as_the_error_panel() {
+        let source = builder_source();
+        let read = source
+            .find("if self.save_error.is_some()")
+            .expect("the render reads save_error");
+        let drawn = source
+            .find("main = main.child(self.save_error_panel(cx));")
+            .expect("the save error is drawn above the stage");
+        assert!(read < drawn, "the field is read after the panel is drawn");
+        let panel = source.find("fn save_error_panel").expect("the error panel");
+        let end = source
+            .find("/// React's naming dialog")
+            .expect("the next item");
+        let body = &source[panel..end];
+        assert!(
+            body.contains("\"The stack could not be saved\""),
+            "the panel's title is missing"
+        );
+        assert!(
+            body.contains("canvas-rgb could not save that stack. Nothing on the lights changed."),
+            "the panel's summary is missing"
+        );
+        assert!(
+            body.contains("\"rd-save-details\""),
+            "the raw answer's Details row is missing"
+        );
+        assert!(
+            body.contains("\"rd-save-try-again\""),
+            "the Try again key is missing"
+        );
+        // The raw answer is only there when the disclosure is open, as
+        // React's `<details>` is.
+        assert!(
+            body.contains("if open {"),
+            "the raw answer is not behind the disclosure"
+        );
+    }
+
+    /// React's `namingError` (`StackBuilder.tsx:2120-2124`): the error line
+    /// under the name field in the naming dialog. The GPUI computed
+    /// `naming_error` and never drew it (#246).
+    #[test]
+    fn the_naming_error_is_drawn_under_the_name_field() {
+        let source = builder_source();
+        let read = source
+            .find("if let Some(reason) = self.naming_error.clone()")
+            .expect("the dialog reads naming_error");
+        let panel = source.find("fn naming_dialog").expect("the naming dialog");
+        assert!(panel < read, "the reason is read before the dialog is drawn");
+        let end = source
+            .find("/// Debug only (#246): reaches the state")
+            .expect("the next item");
+        let body = &source[panel..end];
+        let field = body.find("child(input)").expect("the name field");
+        let reason = body
+            .find("self.naming_error.clone()")
+            .expect("the reason under the field");
+        assert!(field < reason, "the reason is drawn before the name field");
+        assert!(
+            body.contains("Theme::color(t.down)"),
+            "the reason is not in the down colour (React's .error-line)"
+        );
+        assert!(
+            body.contains("\"rd-naming-save\""),
+            "the dialog's Save key is missing"
+        );
+        assert!(
+            body.contains("\"rd-naming-scrim\""),
+            "the dialog's scrim is missing"
+        );
+        // The dialog is drawn when the builder asks for a name.
+        assert!(
+            source.contains("if self.naming {"),
+            "the naming dialog is never drawn"
+        );
+    }
+
+    /// The reason the naming dialog draws is React's reason: a name that is
+    /// taken, a name the route keeps, a name the rules refuse
+    /// (`StackBuilder.tsx:1042-1048`).
+    #[test]
+    fn a_refused_name_keeps_the_dialog_open_with_the_reason() {
+        assert_eq!(
+            name_the_stack_result("preview", &[]),
+            Err("\"preview\" is reserved for the stack preview route".to_string())
+        );
+        assert_eq!(
+            name_the_stack_result("Sunset glow", &["sunset glow".to_string()]),
+            Err("\"Sunset glow\" is already another stack's name".to_string())
+        );
+        assert_eq!(
+            name_the_stack_result("bad/name", &[]),
+            Err("\"bad/name\" may only hold letters, digits, spaces, '-', '_' and '.'".to_string())
+        );
+        assert_eq!(
+            name_the_stack_result("Sunset glow", &[]),
+            Ok("Sunset glow".to_string())
+        );
+    }
+
+    /// React's own sentence for a stack with no layer
+    /// (`StackBuilder.tsx:945-948`).
+    #[test]
+    fn a_stack_with_no_layer_is_not_saved() {
+        assert_eq!(
+            save_error_for_layers(0).as_deref(),
+            Some("Add a layer before saving.")
+        );
+        assert_eq!(save_error_for_layers(1), None);
     }
 }
