@@ -1635,7 +1635,13 @@ impl Shell {
                     let budget = self.width - 16.0 - brand_w - title_w - 12.0 - 22.0 - 68.0
                         - actions_w
                         - gaps
-                        - 8.0;
+                        - 8.0
+                        // With actions the room is tight and the longest
+                        // fitting prefix lands a few px short of React's
+                        // "Nothing…" box (browser subpixel placement): the
+                        // measured check sat 7 px left before this (Effects,
+                        // #244); Fans stays at zero either way.
+                        + if has_actions { 4.0 } else { 0.0 };
                     if budget <= 1.0 {
                         String::new()
                     } else {
