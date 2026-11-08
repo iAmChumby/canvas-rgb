@@ -519,15 +519,18 @@ run).
 | Step | 1440x900 r4 | 1440x900 r5 | 390x844 r4 | 390x844 r5 |
 |---|---|---|---|---|
 | hello | 5.97% | 2.57% | 11.74% | 5.22% |
-| case | 6.70% | 3.75% | 17.96% | 10.45% |
+| case | 6.70% | 3.75-3.90% | 17.96% | 10.45% |
 | parts | 5.64% | 3.89% | 18.32% | 9.65% |
-| match | 7.12% | 2.93% | 13.60% | 7.06% |
+| match | 7.12% | 2.93-2.94% | 13.60% | 7.06% |
 | finish | 6.66% | 5.64% | 21.40% | 9.16% |
+
+(The r5 column is every reading taken on this build: the pairs move by up
+to 0.15 pp between two captures of the same build.)
 
 Every step is under the targets now (the desktop under 6 %, the phone under
 15 %). The layout, displays and devices pairs, the default daemon
 (`onboarding_complete = true`, the same daemon both editors saw):
-`layout-1440x900-dark` 4.44%, `displays-1440x900-dark` 1.51%,
+`layout-1440x900-dark` 4.42-4.44%, `displays-1440x900-dark` 1.51%,
 `devices-1440x900-dark` 2.33% (the baseline's ranges are 4.01-4.5 %,
 1.51-1.58 % and 2.33-2.51 %: no pair moved out of its range).
 
