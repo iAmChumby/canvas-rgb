@@ -136,7 +136,9 @@ pub fn slider_range(
             .h(px(32.0)),
         );
     if disabled {
-        return slot;
+        // React `.slider[data-disabled="true"] { opacity: 0.5 }`: the whole
+        // slot (track, fill, cap) draws at half strength; the press is inert.
+        return slot.opacity(0.5);
     }
     let change = on_change.clone();
     let commit = on_commit.clone();

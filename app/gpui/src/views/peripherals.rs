@@ -1566,11 +1566,13 @@ impl PeripheralsView {
             // "number"] { grid-template-columns: minmax(0, 1fr) 48px }`
             // with `.field-label { grid-column: 1 / -1 }`). The control
             // stretches, so the slider flexes to the space left of the
-            // field instead of collapsing to its cap.
+            // field instead of collapsing to its cap. The label-to-control
+            // gap is 12 px (measured on `.prop-item` at 390: `gap: 12px`),
+            // not the 8 px `gap_2` the seg rows use.
             div()
                 .flex()
                 .flex_col()
-                .gap_2()
+                .gap(px(12.0))
                 .min_h(px(44.0))
                 .py_2()
                 .border_b_1()
@@ -2312,8 +2314,15 @@ impl PeripheralsView {
                             .flex()
                             .flex_wrap()
                             .items_center()
-                            .gap(px(2.0))
-                            .child(format!("{} · {} ·", kind_word(info.kind), info.vendor))
+                            // No gap: React's `<p>` is inline text, so a wrap
+                            // lands line 2 directly under line 1. GPUI's
+                            // `gap(2)` set BOTH axes and added a 2 px row-gap
+                            // between the wrapped lines (measured: the sub
+                            // box was 43 px vs React's 40.6), shifting
+                            // everything below by 2 px. The space React has
+                            // between `·` and the mono span is the text
+                            // child's trailing space.
+                            .child(format!("{} · {} · ", kind_word(info.kind), info.vendor))
                             .child(
                                 div()
                                     .font_family(crate::fonts::MONO_FAMILY)

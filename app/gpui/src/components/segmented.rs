@@ -136,8 +136,11 @@ pub fn segmented_padded(
     row
 }
 
-/// A segmented control that cannot be pressed (`disabled`): the well and
-/// the checked thumb draw at half strength, as React's disabled `.seg`.
+/// A segmented control that cannot be pressed (`disabled`): React's
+/// `.seg-item` buttons carry the native `disabled` attribute and no stylesheet
+/// dims them (no `.seg-item:disabled` rule anywhere in `app.css` or
+/// `hardware.css`), so the control draws at full brightness — only the click
+/// is inert. The `on_change` is deliberately unused.
 #[allow(dead_code)]
 pub fn segmented_disabled(
     t: &Theme,
@@ -156,7 +159,6 @@ pub fn segmented_disabled(
         .border_1()
         .border_color(Theme::color(t.line))
         .bg(Theme::color(t.sunk))
-        .opacity(0.5)
         .child(
             div()
                 .absolute()
