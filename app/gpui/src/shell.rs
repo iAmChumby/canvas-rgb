@@ -1607,8 +1607,11 @@ impl Shell {
             if page_actions.is_none() || phone {
                 let now_name = if phone {
                     // React's phone strip truncates the now-playing name
-                    // (`.strip-now` overflow): "Nothing…".
-                    ellipsize(window, &now_name, 76.0, 14.0, gpui::FontWeight::SEMIBOLD, crate::fonts::UI_FAMILY)
+                    // (`.strip-now` overflow): the box is 84 px wide
+                    // including the 12 px swatch and its 8 px gap, so the
+                    // name itself is cut at ~64 px ("Nothing…" in React,
+                    // matching GPUI cutting at the same measure).
+                    ellipsize(window, &now_name, 64.0, 14.0, gpui::FontWeight::SEMIBOLD, crate::fonts::UI_FAMILY)
                 } else {
                     now_name.clone()
                 };

@@ -531,9 +531,12 @@ impl EffectEditor {
         let side = self.side_column(cx).w(px(side_w)).flex_none();
         main = main.child(side);
         if self.show_code && !narrow {
+            // The pane is the editor's height (React `.eff-code` fills the
+            // editor's box: 757 px at 1440x900).
             main = main.child(
                 div()
                     .flex_1()
+                    .h(px(self.height))
                     .min_w(px(0.0))
                     .child(code_pane(
                         &t,
@@ -749,8 +752,13 @@ impl EffectEditor {
             );
         }
 
-        // The action row.
+        // The action row. On the phone the three keys stay on one row
+        // (React `.row-wrap` does not wrap at 390: Try + Show code + Save =
+        // 347 px of the 358 available), so the row does not wrap there.
         let mut actions = div().flex().flex_wrap().items_center().gap_1();
+        if narrow {
+            actions = actions.flex_nowrap();
+        }
         if matches!(self.draft_state, DraftState::Off | DraftState::Starting) {
             let entity = entity.clone();
             actions = actions.child(button_icon(

@@ -141,6 +141,16 @@ pub fn stack_preview(
     stage_el.on_mouse_move(move |event, window, cx| on_drag(event.position, window, cx))
 }
 
+/// One destination pixel of the picture: the source pixel the nearest-
+/// texel sampling lands on, as an RGB triple (what `paint_picture` paints).
+/// The destination pixel's centre maps into the frame at `pic_w` x `pic_h`.
+pub fn frame_pixel(data: &[u8], w: u16, h: u16, pic_w: f32, pic_h: f32, dx: usize, dy: usize) -> (u8, u8, u8) {
+    let sx = (((dx as f32 + 0.5) / pic_w * w as f32).floor() as usize).min(w as usize - 1);
+    let sy = (((dy as f32 + 0.5) / pic_h * h as f32).floor() as usize).min(h as usize - 1);
+    let i = (sy * w as usize + sx) * 3;
+    (data[i], data[i + 1], data[i + 2])
+}
+
 /// Paints the frame into the picture's box, one source pixel at a time.
 fn paint_picture(window: &mut Window, pic: PictureBox, w: u16, h: u16, data: &[u8]) {
     if w == 0 || h == 0 || pic.width <= 0.0 || pic.height <= 0.0 {
@@ -149,20 +159,13 @@ fn paint_picture(window: &mut Window, pic: PictureBox, w: u16, h: u16, data: &[u
     let dst_w = pic.width.ceil() as usize;
     let dst_h = pic.height.ceil() as usize;
     for dy in 0..dst_h {
-        let sy = ((dy as f32 + 0.5) / pic.height * h as f32).floor() as usize;
-        let sy = sy.min(h as usize - 1);
         let mut dx = 0;
         while dx < dst_w {
-            let sx = ((dx as f32 + 0.5) / pic.width * w as f32).floor() as usize;
-            let sx = sx.min(w as usize - 1);
-            let i = (sy * w as usize + sx) * 3;
-            let rgb = (data[i], data[i + 1], data[i + 2]);
+            let rgb = frame_pixel(data, w, h, pic.width, pic.height, dx, dy);
             let mut end = dx + 1;
             while end < dst_w {
-                let ex = ((end as f32 + 0.5) / pic.width * w as f32).floor() as usize;
-                let ex = ex.min(w as usize - 1);
-                let j = (sy * w as usize + ex) * 3;
-                if (data[j], data[j + 1], data[j + 2]) != rgb {
+                let ergb = frame_pixel(data, w, h, pic.width, pic.height, end, dy);
+                if ergb != rgb {
                     break;
                 }
                 end += 1;
@@ -303,5 +306,21 @@ mod tests {
         assert_eq!(pic.canvas_point(at), (0.0, 0.0));
         let at = point(px(650.0), px(420.0));
         assert_eq!(pic.canvas_point(at), (320.0, 200.0));
+    }
+
+    #[test]
+    fn a_known_frame_paints_its_corners_into_the_picture_box() {
+        // 2x2 frame: red, green / blue, white. Painted 1:1 at the box size,
+        // every destination pixel must be the source pixel it samples.
+        let data = [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255];
+        assert_eq!(frame_pixel(&data, 2, 2, 2.0, 2.0, 0, 0), (255, 0, 0));
+        assert_eq!(frame_pixel(&data, 2, 2, 2.0, 2.0, 1, 0), (0, 255, 0));
+        assert_eq!(frame_pixel(&data, 2, 2, 2.0, 2.0, 0, 1), (0, 0, 255));
+        assert_eq!(frame_pixel(&data, 2, 2, 2.0, 2.0, 1, 1), (255, 255, 255));
+        // Scaled up 2x: the top-left destination quadrant stays red.
+        assert_eq!(frame_pixel(&data, 2, 2, 4.0, 4.0, 0, 0), (255, 0, 0));
+        assert_eq!(frame_pixel(&data, 2, 2, 4.0, 4.0, 3, 0), (0, 255, 0));
+        assert_eq!(frame_pixel(&data, 2, 2, 4.0, 4.0, 0, 3), (0, 0, 255));
+        assert_eq!(frame_pixel(&data, 2, 2, 4.0, 4.0, 3, 3), (255, 255, 255));
     }
 }

@@ -1529,7 +1529,18 @@ impl Render for EffectsView {
         let entity = cx.entity();
         // Build mode: the builder takes the whole page.
         if let Some(builder) = self.builder.clone() {
-            return builder.update(cx, |b, cx| b.render(cx));
+            // The builder's own box: the window minus the strip and the
+            // content padding (React's `rd-page` is 805 px at 1440x900).
+            let win_h = f32::from(window.window_bounds().get_bounds().size.height);
+            return builder.update(cx, |b, cx| {
+                b.width = self.width;
+                b.height = if phone {
+                    win_h - 184.0
+                } else {
+                    win_h - 95.0
+                };
+                b.render(cx)
+            });
         }
         let editing = self.editing();
         // Edit mode: the gallery becomes a strip of tiles and the inspector

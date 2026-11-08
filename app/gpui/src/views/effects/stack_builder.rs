@@ -33,6 +33,9 @@ use super::stack_preview::stack_preview;
 pub struct StackBuilder {
     pub theme: Theme,
     pub width: f32,
+    /// The builder's own height: the page content box's height (window
+    /// minus the strip and the content padding, as the editor's height is).
+    pub height: f32,
     /// The `?stack=` value: a saved stack's name, or `new`.
     pub initial_name: String,
     /// The stack as it was saved.
@@ -120,6 +123,7 @@ impl StackBuilder {
         let mut builder = StackBuilder {
             theme,
             width: 1280.0,
+            height: 805.0,
             initial_name: initial_name.to_string(),
             base: None,
             draft: Stack { id: "stack:".to_string(), layers: vec![] },
@@ -369,7 +373,7 @@ impl StackBuilder {
     }
 
     /// Takes the frames the feed has sent.
-    fn drain_feed(&mut self, _cx: &mut Context<Self>) {
+    fn drain_feed(&mut self, cx: &mut Context<Self>) {
         let Some(rx) = &self.feed_rx else {
             return;
         };
@@ -390,7 +394,7 @@ impl StackBuilder {
             }
         }
         if changed {
-            self.notify();
+            cx.notify();
         }
     }
 
@@ -795,6 +799,12 @@ impl StackBuilder {
             .child(side);
 
         let mut page = div().flex().flex_col().gap_4().flex_1().min_h(px(0.0)).min_w(px(0.0));
+        if !narrow && self.height > 0.0 {
+            // The content box's height, as the editor's render.rs sets it:
+            // without it the page is its content's height and the stage
+            // comes up ~90 px short of React's.
+            page = page.h(px(self.height));
+        }
         if let Some(note) = self.draft_note.clone() {
             page = page.child(
                 div()
@@ -1102,7 +1112,10 @@ impl StackBuilder {
             "rd-stack-stage",
             "Preview",
             head,
-            div().flex().flex_col().gap_3().min_h(px(0.0)).child(picture).child(foot),
+            // The body takes the panel's remaining height (React
+            // `.rd-canvas-wrap` is 461 px inside a 561 px panel), or the
+            // picture below collapses to zero and the stage paints black.
+            div().flex().flex_col().gap_3().flex_1().min_h(px(0.0)).child(picture).child(foot),
             Some(12.0),
         );
         panel = panel.flex_1();
@@ -1197,7 +1210,15 @@ impl StackBuilder {
                 ))
                 .into_any_element()
         } else {
-            let mut list = div().flex().flex_col().gap(px(2.0));
+            // React `.layer-list { margin: 0 calc(var(--s2) * -1) }`: the
+            // list runs 8 px wider than the panel's content box on each
+            // side, so its rows sit 8 px left of the head's text.
+            let mut list = div()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .ml(px(-8.0))
+                .mr(px(-8.0));
             for layer in self.draft.layers.iter().rev() {
                 list = list.child(self.layer_row(layer, cx));
             }
@@ -1238,9 +1259,12 @@ impl StackBuilder {
             .min_h(px(54.0))
             .px_2()
             .py_1()
-            .r_sm();
+            .r_sm()
+            .border_1();
         if picked {
-            row = row.bg(Theme::color(t.raised)).border_1().border_color(Theme::color(t.line_2));
+            row = row.bg(Theme::color(t.raised)).border_color(Theme::color(t.line_2));
+        } else {
+            row = row.border_color(gpui::transparent_black());
         }
         // The grip.
         row = row.child(
@@ -1251,7 +1275,7 @@ impl StackBuilder {
                 .items_center()
                 .justify_center()
                 .text_color(Theme::color(t.mute))
-                .child("⠿"),
+                .child(gpui::svg().path("icons/GripDots.svg").size(px(16.0))),
         );
         // The thumbnail.
         row = row.child(thumb(&t, &effect, 44.0, 28.0, cached(&effect), false));
@@ -1547,7 +1571,7 @@ impl StackBuilder {
                                         },
                                     )),
                             )
-                            .child(crate::components::number_field::number_field(
+                            .child(crate::components::number_field::number_field_width(
                                 &t,
                                 "rd-opacity-value",
                                 opacity,
@@ -1555,6 +1579,7 @@ impl StackBuilder {
                                 100.0,
                                 1.0,
                                 None,
+                                64.0,
                                 {
                                     let entity = entity.clone();
                                     move |value, _window, cx| {
@@ -1639,33 +1664,39 @@ impl StackBuilder {
             .map(|s| s.properties.clone())
             .unwrap_or_default();
         let mut props = div().flex().flex_col().min_w(px(0.0));
-        for def in &schema_properties {
+        let last = schema_properties.len().saturating_sub(1);
+        for (i, def) in schema_properties.iter().enumerate() {
             let value = values.get(&def.key).cloned().unwrap_or_else(|| def.kind.default_value());
-            props = props.child(
+            // React `.prop-item`: 52 px tall, 8 px vertical padding, the
+            // label and the control 16 px apart, a divider under every row
+            // but the last.
+            let mut row = div()
+                .flex()
+                .items_center()
+                .gap_4()
+                .min_h(px(52.0))
+                .py_2();
+            if i != last {
+                row = row.border_b_1().border_color(Theme::color(t.line));
+            }
+            row = row.child(
+                div()
+                    .w(px(170.0))
+                    .flex_none()
+                    .text_size(px(15.0))
+                    .line_height(gpui::relative(1.45))
+                    .font_family(crate::fonts::UI_FAMILY)
+                    .text_color(Theme::color(t.ink))
+                    .child(def.label.clone()),
+            );
+            row = row.child(
                 div()
                     .flex()
                     .items_center()
-                    .gap_4()
-                    .min_h(px(40.0))
-                    .py_1()
-                    .child(
-                        div()
-                            .w(px(170.0))
-                            .flex_none()
-                            .text_size(px(15.0))
-                            .line_height(gpui::relative(1.45))
-                            .font_family(crate::fonts::UI_FAMILY)
-                            .text_color(Theme::color(t.ink))
-                            .child(def.label.clone()),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .child(crate::components::prop_controls::control(
+                    .gap_2()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .child(crate::components::prop_controls::control(
                                 &t,
                                 &def.key,
                                 &def.label,
@@ -1698,14 +1729,16 @@ impl StackBuilder {
                                     })
                                 },
                             )),
-                    ),
             );
+            props = props.child(row);
         }
 
+        // The column's spacing is the children's own margins (the head's
+        // 12, the fields' 4, the note's 8, the area's 12); React's layer
+        // edit column has no flex gap of its own.
         let body = div()
             .flex()
             .flex_col()
-            .gap_2()
             .child(head)
             .child(fields)
             .child(
@@ -2130,6 +2163,7 @@ mod tests {
         let mut builder = StackBuilder {
             theme: Theme::dark(),
             width: 1440.0,
+            height: 805.0,
             initial_name: "S".into(),
             base: Some(base),
             draft: Stack { id: "stack:S".into(), layers: vec![layer] },

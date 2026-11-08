@@ -133,20 +133,45 @@ pub fn code_pane(
 }
 
 /// The source as plain monospace text: round 1's stand-in for CodeMirror.
+/// The line-number gutter matches CodeMirror's: a 36 px right-aligned
+/// column with 8 px right padding, then the lint gutter's 18 px.
 fn source_view(t: &Theme, source: &str) -> impl IntoElement {
+    let lines: Vec<&str> = source.split('\n').collect();
+    let mut gutter = div()
+        .flex()
+        .flex_col()
+        .flex_none()
+        .border_r_1()
+        .border_color(Theme::color(t.line));
+    for (i, _) in lines.iter().enumerate() {
+        gutter = gutter.child(
+            div()
+                .h(px(CODE_LINE))
+                .whitespace_nowrap()
+                .text_size(px(CODE_FONT))
+                .line_height(px(CODE_LINE))
+                .font_family(crate::fonts::MONO_FAMILY)
+                .text_color(Theme::color(t.mute))
+                .w(px(36.0))
+                .pr(px(8.0))
+                .text_right()
+                .child((i + 1).to_string()),
+        );
+    }
     let mut col = div()
         .flex()
         .flex_col()
+        .flex_1()
+        .min_w(px(0.0))
         .text_size(px(CODE_FONT))
         .line_height(px(CODE_LINE))
         .font_family(crate::fonts::MONO_FAMILY)
         .text_color(Theme::color(t.dim))
-        .px_2()
-        .py_1();
-    for line in source.split('\n') {
+        .pl_2();
+    for line in lines {
         col = col.child(div().h(px(CODE_LINE)).whitespace_nowrap().child(line.to_string()));
     }
-    col
+    div().flex().flex_1().min_h(px(0.0)).child(gutter).child(col)
 }
 
 #[cfg(test)]

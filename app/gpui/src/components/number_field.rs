@@ -1,17 +1,21 @@
 //! `NumberField`, after `app/web/src/components/NumberField.tsx`.
 //!
-//! The React field is a text input that commits on Enter, blur or an arrow
-//! key, clamped to `min..=max`. GPUI 0.2.2's text input is a custom element;
-//! for this slice the field is a value display with −/+ steppers that commit
-//! the stepped value at once (the same `min..=max` clamp). The keyboard and
-//! type-ahead items in the Displays checklist are therefore NOT ported yet
-//! (see `docs/gpui-parity/displays.md`, Keyboard) — they stay unticked.
+//! React's field is a plain mono text input (`.num`): 92 px wide, one
+//! control height tall, 8 px side padding, a 1 px `line-2` border, the sunk
+//! well behind it, right-aligned 15 px mono text with tabular numbers.
+//! GPUI 0.2.2 draws the input's box here; keyboard entry and arrow-key
+//! stepping are not ported yet (the same gap the Displays checklist notes),
+//! and there are no −/+ steppers: React draws none in this field.
+//!
+//! (The opacity row's 64 px override, `.layer-field .num`, has its own
+//! entry point because the width is part of the pixel contract.)
 
 use gpui::{IntoElement, div, prelude::*, px};
 
 use crate::theme::{Theme, TokenRadius};
 
 /// Clamp a draft value to the field's range, matching `NumberField`'s commit.
+#[allow(dead_code)]
 pub fn clamp(value: f32, min: f32, max: f32) -> f32 {
     if value.is_nan() {
         return min;
@@ -19,7 +23,7 @@ pub fn clamp(value: f32, min: f32, max: f32) -> f32 {
     value.clamp(min, max)
 }
 
-/// The field: current value, optional unit suffix, and steppers.
+/// The field: the value in a plain mono input box (React `.num`).
 #[allow(clippy::too_many_arguments)]
 pub fn number_field(
     t: &Theme,
@@ -31,55 +35,45 @@ pub fn number_field(
     unit: Option<&str>,
     on_commit: impl Fn(f32, &mut gpui::Window, &mut gpui::App) + Clone + 'static,
 ) -> impl IntoElement {
-    let commit = on_commit.clone();
-    let down = commit.clone();
-    let up = commit;
-    let row = div()
-        .id(gpui::SharedString::from(id.to_string()))
-        .flex()
-        .items_center()
-        .gap_2()
-        .h(px(32.0))
-        .px_2()
-        .r_md()
-        .border_1()
-        .border_color(Theme::color(t.line_2))
-        // The sunk well the preview frame and input tracks use.
-        .bg(Theme::color(t.sunk))
-        .text_color(Theme::color(t.ink))
-        .text_sm()
-        .font_family(crate::fonts::MONO_FAMILY);
+    number_field_width(t, id, value, min, max, step, unit, 92.0, on_commit)
+}
+
+/// The field at a given width (the opacity row draws 64 px: `.layer-field .num`).
+#[allow(clippy::too_many_arguments)]
+pub fn number_field_width(
+    t: &Theme,
+    id: &str,
+    value: f32,
+    min: f32,
+    max: f32,
+    step: f32,
+    unit: Option<&str>,
+    width: f32,
+    on_commit: impl Fn(f32, &mut gpui::Window, &mut gpui::App) + Clone + 'static,
+) -> impl IntoElement {
+    let _ = (min, max, step, on_commit);
     let text = match unit {
         Some(u) => format!("{value} {u}"),
         None => format!("{value}"),
     };
-    let minus = div()
-        .id(gpui::SharedString::from(format!("{id}-minus")))
+    div()
+        .id(gpui::SharedString::from(id.to_string()))
         .flex()
         .items_center()
-        .justify_center()
-        .w(px(22.0))
-        .h(px(22.0))
-        .r_sm()
-        .bg(Theme::color(t.raised))
+        .justify_end()
+        .w(px(width))
+        .h(px(32.0))
+        .px(px(8.0))
+        .r_md()
+        .border_1()
+        .border_color(Theme::color(t.line_2))
+        .bg(Theme::color(t.sunk))
         .text_color(Theme::color(t.ink))
-        .cursor_pointer()
-        .child("−")
-        .on_click(move |_, window, cx| down(clamp(value - step, min, max), window, cx));
-    let plus = div()
-        .id(gpui::SharedString::from(format!("{id}-plus")))
-        .flex()
-        .items_center()
-        .justify_center()
-        .w(px(22.0))
-        .h(px(22.0))
-        .r_sm()
-        .bg(Theme::color(t.raised))
-        .text_color(Theme::color(t.ink))
-        .cursor_pointer()
-        .child("+")
-        .on_click(move |_, window, cx| up(clamp(value + step, min, max), window, cx));
-    row.child(minus).child(text).child(plus)
+        .text_size(px(15.0))
+        .line_height(gpui::relative(1.45))
+        .font_family(crate::fonts::MONO_FAMILY)
+        .whitespace_nowrap()
+        .child(text)
 }
 
 #[cfg(test)]
