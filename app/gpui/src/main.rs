@@ -438,6 +438,11 @@ pub fn send_set_channel(channel: UpdateChannel) {
     send_line(&EditorToTray::SetChannel { channel });
 }
 
+/// Any tray command over stdio (the Updates page sends the one its press chose).
+pub fn send_update_command(msg: &EditorToTray) {
+    send_line(msg);
+}
+
 /// `update-check-now` to the tray over stdio (Settings > Check now).
 pub fn send_update_check_now() {
     send_line(&EditorToTray::UpdateCheckNow);

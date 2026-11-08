@@ -39,7 +39,7 @@
 //       is named editor-react-<w>x<h>-<theme>.png.
 //   UI_CAPTURE_SCROLL=<px>  (#205) scroll the page down that far first; files
 //       are <view>-scroll<px>-react-<w>x<h>-<theme>.png.
-//   UI_CAPTURE_UPDATE=<preset>  (#206) the tray stub's update state: "available"
+//   UI_CAPTURE_UPDATE=<preset>  (#206) the tray stub update state, a name from tools/ui-capture/update-presets.json
 //       (0.2.0 with notes). The Updates shot is named updates-<preset>-react-...
 //   UI_CAPTURE_STACK=<stack name>  (#214) open the stack builder on that
 //       stack ("new" for a stack that has never been saved). The shot is
@@ -148,17 +148,21 @@ const SCROLL_PX = Math.max(0, Number(process.env.UI_CAPTURE_SCROLL ?? 0) || 0);
 // #206: UI_CAPTURE_UPDATE=<preset> sets the tray stub's update state (tools/
 // ui-capture/capture-gpui.ps1 -UpdateState writes the same state on stdin).
 const UPDATE_PRESET = (process.env.UI_CAPTURE_UPDATE ?? "").trim();
-const UPDATE_PRESETS = {
-  available: {
-    phase: { kind: "available" },
-    available: {
-      version: "0.2.0",
-      notes:
-        "### Added\n- A new thing you can do with your lights.\n- Another change that is long enough to wrap onto a second line on a phone screen.\n\n### Fixed\n- A bug that kept a fan on its last speed.",
-      pub_date: "2026-11-01T00:00:00Z",
-    },
-  },
-};
+// The presets live in tools/ui-capture/update-presets.json, shared with
+// capture-gpui.ps1 so both editors get the same state (#206).
+const UPDATE_PRESETS = (() => {
+  const file = JSON.parse(fs.readFileSync(path.resolve(__dirname, "update-presets.json"), "utf8"));
+  const out = {};
+  for (const [name, preset] of Object.entries(file.presets)) {
+    const { withRelease, updatedWithRelease, ...fields } = preset;
+    out[name] = {
+      ...fields,
+      ...(withRelease ? { available: file.release } : {}),
+      ...(updatedWithRelease ? { updated_to: file.release } : {}),
+    };
+  }
+  return out;
+})();
 
 function slugOf(text) {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");

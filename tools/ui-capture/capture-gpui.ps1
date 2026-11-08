@@ -63,7 +63,7 @@ param(
     # read CANVAS_RGB_CAPTURE_SCROLL). Files are <page>-scroll<px>-gpui-...,
     # pairing with capture-react.mjs UI_CAPTURE_SCROLL.
     [int]$Scroll = 0,
-    # #206: the tray stub's update state: '' (up to date) or 'available' (0.2.0
+    # #206: the tray stub's update state: '' (up to date) or a name from update-presets.json (available = 0.2.0
     # with notes; capture-react.mjs UI_CAPTURE_UPDATE=available). The Updates
     # shot is named updates-<name>-gpui-... so diff-pairs.ps1 pairs it.
     [string]$UpdateState = '',
@@ -200,8 +200,24 @@ $saved = 0
 $stubFile = $null
 if ($TrayStub) {
   $stateLine = '{"type":"update-state","state":{"current_version":"0.1.0","auto_check":true,"last_check":null,"phase":{"kind":"up_to_date"},"available":null,"skipped_version":null,"snoozed":false,"updated_to":null}}'
-  if ($UpdateState -eq 'available') {
-    $stateLine = '{"type":"update-state","state":{"current_version":"0.1.0","auto_check":true,"last_check":null,"phase":{"kind":"available"},"available":{"version":"0.2.0","notes":"### Added\n- A new thing you can do with your lights.\n- Another change that is long enough to wrap onto a second line on a phone screen.\n\n### Fixed\n- A bug that kept a fan on its last speed.","pub_date":"2026-11-01T00:00:00Z"},"skipped_version":null,"snoozed":false,"updated_to":null}}'
+  if ($UpdateState -ne '') {
+    # The presets are shared with capture-react.mjs (UI_CAPTURE_UPDATE): one file,
+    # tools/ui-capture/update-presets.json, so both editors show the same state (#206).
+    $presetFile = Join-Path $PSScriptRoot 'update-presets.json'
+    $presets = Get-Content -Raw -Encoding UTF8 $presetFile | ConvertFrom-Json
+    $preset = $presets.presets.PSObject.Properties[$UpdateState]
+    if (-not $preset) {
+      Write-Error "capture-gpui: -UpdateState '$UpdateState' is not in update-presets.json ($((($presets.presets.PSObject.Properties | ForEach-Object { $_.Name }) -join ', ')))"
+      exit 2
+    }
+    $state = [ordered]@{}
+    foreach ($p in $presets.base.PSObject.Properties) { $state[$p.Name] = $p.Value }
+    foreach ($p in $preset.Value.PSObject.Properties) {
+      if ($p.Name -eq 'withRelease') { $state['available'] = $presets.release }
+      elseif ($p.Name -eq 'updatedWithRelease') { $state['updated_to'] = $presets.release }
+      else { $state[$p.Name] = $p.Value }
+    }
+    $stateLine = '{"type":"update-state","state":' + ($state | ConvertTo-Json -Compress -Depth 8) + '}'
   }
   $prefsLine = '{"type":"prefs","prefs":{"editor":"react","channel":"stable"}}'
   $stubFile = Join-Path $outDir 'tray-stub-stdin.txt'

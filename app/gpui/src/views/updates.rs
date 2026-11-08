@@ -207,6 +207,132 @@ pub fn check_now_busy(u: &UpdateState) -> bool {
     u.phase == UpdatePhase::Checking
 }
 
+/// A control on the page that sends a tray command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Press {
+    /// The Update now key (also "Try again" after a failed install).
+    UpdateNow,
+    SkipThisVersion,
+    CheckNow,
+    OpenLogsFolder,
+}
+
+/// What the page draws and allows for a tray state (`UpdatesView.tsx:177-261`):
+/// which panel, which controls show, which of them are enabled. Every rule is
+/// React's: the key is disabled while an update runs (`busy`) or with no tray
+/// (`!acts`); Skip hides once the version is skipped; Open logs folder shows
+/// only after a failed install and is disabled with no tray host; Check now
+/// lives only in the "Up to date" panel.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PageModel {
+    /// An available release is present: the release panel, not "Up to date".
+    pub release_panel: bool,
+    pub key_label: String,
+    pub key_busy: bool,
+    pub key_enabled: bool,
+    pub slot: Option<f32>,
+    pub skip_visible: bool,
+    pub skip_enabled: bool,
+    pub skipped_note: bool,
+    pub logs_visible: bool,
+    pub logs_enabled: bool,
+    pub tray_only_note: bool,
+    pub check_visible: bool,
+    pub check_label: &'static str,
+    pub check_enabled: bool,
+}
+
+/// The page for a tray state; `acts` is `canUpdate()` (a tray is attached).
+pub fn page_model(u: &UpdateState, acts: bool) -> PageModel {
+    let busy = is_installing(&u.phase);
+    let release_panel = u.available.is_some();
+    let failed = matches!(u.phase, UpdatePhase::InstallFailed { .. });
+    PageModel {
+        release_panel,
+        key_label: key_label(&u.phase),
+        key_busy: busy,
+        key_enabled: !busy && acts,
+        slot: slot_fill(&u.phase),
+        skip_visible: release_panel && !is_skipped(u),
+        skip_enabled: !busy && acts,
+        skipped_note: release_panel && is_skipped(u),
+        logs_visible: release_panel && failed,
+        logs_enabled: acts,
+        // `!acts || (install_failed && tauriHost() === null)`: with no tray host
+        // the second is the first.
+        tray_only_note: release_panel && !acts,
+        check_visible: !release_panel,
+        check_label: if check_now_busy(u) { "Checking" } else { "Check now" },
+        check_enabled: check_now_enabled(u, acts),
+    }
+}
+
+/// The page's two error lines (`UpdatesView.tsx:65`, `:121`): the Update now
+/// key's own, and the page's under Skip / Check now / Open logs folder.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Errors {
+    pub key: Option<String>,
+    pub page: Option<String>,
+}
+
+/// A press (`UpdatesView.tsx:77-80`, `:214-217`, `:228-231`, `:248-251`): a
+/// disabled control sends nothing; an enabled one clears its own error line
+/// first and returns the tray command to send.
+pub fn press(model: &PageModel, which: Press, errs: &mut Errors) -> Option<canvas_proto::tauri::EditorToTray> {
+    use canvas_proto::tauri::EditorToTray as C;
+    match which {
+        Press::UpdateNow if model.key_enabled => {
+            errs.key = None;
+            Some(C::UpdateInstall)
+        }
+        Press::SkipThisVersion if model.skip_visible && model.skip_enabled => {
+            errs.page = None;
+            Some(C::UpdateSkip)
+        }
+        Press::CheckNow if model.check_visible && model.check_enabled => {
+            errs.page = None;
+            Some(C::UpdateCheckNow)
+        }
+        Press::OpenLogsFolder if model.logs_visible && model.logs_enabled => {
+            errs.page = None;
+            Some(C::OpenLogsFolder)
+        }
+        _ => None,
+    }
+}
+
+/// The page opens on a state whose `updated_to` is set (`UpdatesView.tsx:130-143`):
+/// the dismiss is sent once per release (`dismissedFor`), and the notes of that
+/// release stay on screen afterwards (`seenNotes`) although the dismiss clears
+/// `updated_to`. Returns true when the dismiss must be sent now.
+pub fn note_arrival(
+    dismissed_for: &mut Option<String>,
+    seen_notes: &mut Option<UpdateInfo>,
+    state: &UpdateState,
+) -> bool {
+    let Some(updated) = &state.updated_to else { return false };
+    if dismissed_for.as_deref() == Some(updated.version.as_str()) {
+        return false;
+    }
+    *dismissed_for = Some(updated.version.clone());
+    *seen_notes = Some(updated.clone());
+    true
+}
+
+/// Whose notes the right column shows (`UpdatesView.tsx:178`): the available
+/// release's, else the installed release's, else the visit's `seenNotes`.
+pub fn notes_of<'a>(state: &'a UpdateState, seen: Option<&'a UpdateInfo>) -> Option<&'a UpdateInfo> {
+    state.available.as_ref().or(state.updated_to.as_ref()).or(seen)
+}
+
+/// The tray has not answered for `TRAY_TIMEOUT_MS`: a timer started for
+/// `timer_generation` makes the silent error only when no newer ask has been
+/// made since and there is still no state (`UpdatesView.tsx:145-149`: the
+/// effect's cleanup clears the timer of an earlier ask).
+pub fn goes_silent(timer_generation: u64, current_generation: u64, has_state: bool) -> bool {
+    timer_generation == current_generation && !has_state
+}
+
 /// What the installer said, when it said a sentence a person can read. An
 /// exit code, a hex code or a bare word is not one, and gets the plain
 /// line instead (`installerSentence`: the regex
@@ -557,7 +683,7 @@ pub fn parse_inline(text: &str) -> Vec<Inline> {
 
 use gpui::{Context, IntoElement, Window, div, prelude::*, px};
 
-use crate::components::button::{Variant, button, button_sm, button_swap, skirt_layers};
+use crate::components::button::{Variant, button, button_sm, button_swap, button_swap_busy};
 use crate::components::panel::tracked_title;
 use crate::theme::{Theme, TokenRadius};
 
@@ -632,16 +758,29 @@ impl UpdatesView {
         }
         self.update = state.clone();
         if let Some(state) = state {
-            if let Some(updated) = &state.updated_to {
-                if self.dismissed_for.as_deref() != Some(updated.version.as_str()) {
-                    self.dismissed_for = Some(updated.version.clone());
-                    // The tray never replies to a command, so a failure is
-                    // shown nowhere, as React does (the effect ignores it).
-                    crate::send_update_dismiss_updated();
-                    self.seen_notes = Some(updated.clone());
-                }
+            if note_arrival(&mut self.dismissed_for, &mut self.seen_notes, &state) {
+                // The tray never replies to a command, so a failure is
+                // shown nowhere, as React does (the effect ignores it).
+                crate::send_update_dismiss_updated();
             }
         }
+        cx.notify();
+    }
+
+    /// The page for the current state.
+    fn model(&self) -> Option<PageModel> {
+        self.update.as_ref().map(|u| page_model(u, tray_acts(self.tray_present)))
+    }
+
+    /// A press on a control: gated and cleared by [`press`], then sent.
+    fn pressed(&mut self, which: Press, cx: &mut Context<Self>) {
+        let Some(model) = self.model() else { return };
+        let mut errs = Errors { key: self.key_err.take(), page: self.err.take() };
+        if let Some(command) = press(&model, which, &mut errs) {
+            crate::send_update_command(&command);
+        }
+        self.key_err = errs.key;
+        self.err = errs.page;
         cx.notify();
     }
 
@@ -686,7 +825,7 @@ impl UpdatesView {
                 .timer(std::time::Duration::from_millis(TRAY_TIMEOUT_MS))
                 .await;
             let _ = view.update(cx, |this, cx| {
-                if this.generation == generation && this.update.is_none() {
+                if goes_silent(generation, this.generation, this.update.is_some()) {
                     this.silent = true;
                     cx.notify();
                 }
@@ -710,35 +849,24 @@ impl UpdatesView {
         .detach();
     }
 
-    /// Update now (also Try again after an install failure): clears the
-    /// key's error and sends `update_install`.
+    /// Update now (also Try again after an install failure).
     fn install(&mut self, cx: &mut Context<Self>) {
-        self.key_err = None;
-        crate::send_update_install();
-        cx.notify();
+        self.pressed(Press::UpdateNow, cx);
     }
 
-    /// Check now: clears the page error and sends `update_check_now`.
+    /// Check now.
     fn check_now(&mut self, cx: &mut Context<Self>) {
-        self.err = None;
-        crate::send_update_check_now();
-        cx.notify();
+        self.pressed(Press::CheckNow, cx);
     }
 
-    /// Skip this version: clears the page error and sends `update_skip`.
+    /// Skip this version.
     fn skip(&mut self, cx: &mut Context<Self>) {
-        self.err = None;
-        crate::send_update_skip();
-        cx.notify();
+        self.pressed(Press::SkipThisVersion, cx);
     }
 
-    /// Open logs folder: clears the page error and sends
-    /// `open_logs_folder`. The tray logs a failure; there is no reply to
-    /// show, as with every command here.
+    /// Open logs folder. The tray logs a failure; there is no reply to show.
     fn open_logs(&mut self, cx: &mut Context<Self>) {
-        self.err = None;
-        crate::send_open_logs_folder();
-        cx.notify();
+        self.pressed(Press::OpenLogsFolder, cx);
     }
 }
 
@@ -824,41 +952,14 @@ impl UpdatesView {
     /// that fills from real bytes. No spinner.
     fn update_key(&self, u: &UpdateState, cx: &mut Context<Self>) -> impl IntoElement {
         let t = &self.theme;
-        let label = key_label(&u.phase);
-        let fill = slot_fill(&u.phase);
-        let busy = is_installing(&u.phase);
-        let acts = tray_acts(self.tray_present);
+        let m = page_model(u, tray_acts(self.tray_present));
+        let (label, fill, busy) = (m.key_label.clone(), m.slot, m.key_busy);
         let entity = cx.entity();
         let key: gpui::AnyElement = if busy {
-            // Fully lit and still: the progress reads as the key's own
-            // state, not as a dead control. No click, no dimming.
-            div()
-                .id(gpui::SharedString::from("updates-key"))
-                .relative()
-                .flex()
-                .items_center()
-                .justify_center()
-                .gap(px(6.0))
-                .h(px(32.0))
-                .px(px(12.0 + 1.0))
-                .text_sm()
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .font_family(crate::fonts::UI_FAMILY)
-                .text_color(Theme::color(t.on_accent))
-                .child(skirt_layers(
-                    t.live_skirt(),
-                    10.0,
-                    32.0,
-                    t.live(),
-                    gpui::Rgba {
-                        r: 0.0,
-                        g: 0.0,
-                        b: 0.0,
-                        a: 0.0,
-                    },
-                ))
-                .child(div().w(px(KEY_TEXT_W)).flex_none().text_center().child(label))
-                .into_any_element()
+            // The key is a disabled key at full strength while the update
+            // runs (update.css:152): React draws it plain, not lit, and the
+            // slot under it carries the progress.
+            button_swap_busy(t, "updates-key", &label, KEY_TEXT_W).into_any_element()
         } else {
             button_swap(
                 t,
@@ -866,7 +967,7 @@ impl UpdatesView {
                 &label,
                 KEY_TEXT_W,
                 Variant::Primary,
-                !acts,
+                !m.key_enabled,
                 move |_, _, cx| {
                     entity.update(cx, |this, cx| this.install(cx));
                 },
@@ -949,8 +1050,7 @@ impl UpdatesView {
     /// (or the skipped note), Open logs folder after an install failure,
     /// and the "Tray app only" note when there is no tray.
     fn available_panel(&self, u: &UpdateState, cx: &mut Context<Self>) -> impl IntoElement {
-        let acts = tray_acts(self.tray_present);
-        let busy = is_installing(&u.phase);
+        let m = page_model(u, tray_acts(self.tray_present));
         let version = u
             .available
             .as_ref()
@@ -978,14 +1078,14 @@ impl UpdatesView {
             .gap(px(8.0))
             .mt_4()
             .min_h(px(28.0));
-        if !is_skipped(u) {
+        if m.skip_visible {
             let entity = cx.entity();
             more = more.child(button_sm(
                 &self.theme,
                 "updates-skip",
                 "Skip this version",
                 Variant::Ghost,
-                busy || !acts,
+                !m.skip_enabled,
                 move |_, _, cx| {
                     entity.update(cx, |this, cx| this.skip(cx));
                 },
@@ -995,7 +1095,7 @@ impl UpdatesView {
                 "{version} is skipped. Update now still works."
             )));
         }
-        if matches!(u.phase, UpdatePhase::InstallFailed { .. }) {
+        if m.logs_visible {
             // The button is disabled exactly when there is no tray host.
             let entity = cx.entity();
             more = more.child(button_sm(
@@ -1003,7 +1103,7 @@ impl UpdatesView {
                 "updates-logs",
                 "Open logs folder",
                 Variant::Ghost,
-                !acts,
+                !m.logs_enabled,
                 move |_, _, cx| {
                     entity.update(cx, |this, cx| this.open_logs(cx));
                 },
@@ -1013,7 +1113,7 @@ impl UpdatesView {
         // install failed with no tray host. In GPUI the second is the same
         // state as the first (no tray host means no `acts`), so one note
         // stands for both.
-        if !acts {
+        if m.tray_only_note {
             more = more.child(self.note("Tray app only"));
         }
         body = body.child(more);
@@ -1027,15 +1127,14 @@ impl UpdatesView {
     /// checked line. The only place Check now appears.
     fn up_to_date_panel(&self, u: &UpdateState, cx: &mut Context<Self>) -> impl IntoElement {
         let acts = tray_acts(self.tray_present);
-        let checking = check_now_busy(u);
+        let m = page_model(u, acts);
         let entity = cx.entity();
-        let label = if checking { "Checking" } else { "Check now" };
         let check = button(
             &self.theme,
             "updates-check",
-            label,
+            m.check_label,
             Variant::Default,
-            !check_now_enabled(u, acts),
+            !m.check_enabled,
             move |_, _, cx| {
                 entity.update(cx, |this, cx| this.check_now(cx));
             },
@@ -1691,6 +1790,312 @@ mod tests {
         assert_eq!(note_tone("Security"), "down");
         assert_eq!(note_tone("Changed"), "work");
         assert_eq!(note_tone("Notes"), "work");
+    }
+
+    // -- the flows (#206) -------------------------------------------------------
+
+    use canvas_proto::tauri::EditorToTray as Cmd;
+
+    fn release() -> UpdateInfo {
+        info("0.2.0", "### Added\n- One.")
+    }
+
+    fn with_release(phase: UpdatePhase) -> UpdateState {
+        state(phase, Some(release()))
+    }
+
+    /// The tray as the editor sees it: a command goes in, the next state comes
+    /// out (the tray never replies on stdio; it pushes the state, which is the
+    /// same thing). Only what the tray does for each command (`app/src-tauri`'s
+    /// update commands) is modelled.
+    fn tray(mut s: UpdateState, command: &Cmd) -> UpdateState {
+        match command {
+            Cmd::UpdateCheckNow => s.phase = UpdatePhase::Checking,
+            Cmd::UpdateInstall => {
+                s.phase = UpdatePhase::Downloading { downloaded: 0, total: Some(100) };
+            }
+            Cmd::UpdateSkip => s.skipped_version = s.available.as_ref().map(|a| a.version.clone()),
+            Cmd::UpdateUnskip => s.skipped_version = None,
+            _ => {}
+        }
+        s
+    }
+
+    /// Every state the Updates page can be in, as the page draws it. Each row is
+    /// (state, release panel, key label, key enabled, skip shown, logs shown, check shown).
+    #[test]
+    fn page_model_for_every_state() {
+        use CheckFailReason as R;
+        let dl = UpdatePhase::Downloading { downloaded: 4_404_019, total: Some(12_373_197) };
+        let rows: Vec<(&str, UpdateState, bool, &str, bool, bool, bool, bool)> = vec![
+            ("up to date", state(UpdatePhase::UpToDate, None), false, "Update now", true, false, false, true),
+            ("idle", state(UpdatePhase::Idle, None), false, "Update now", true, false, false, true),
+            ("checking", state(UpdatePhase::Checking, None), false, "Update now", true, false, false, true),
+            ("available", with_release(UpdatePhase::Available), true, "Update now", true, true, false, false),
+            ("downloading", with_release(dl.clone()), true, "Downloading 35%", false, true, false, false),
+            ("verifying", with_release(UpdatePhase::Verifying), true, "Checking download", false, true, false, false),
+            ("uac", with_release(UpdatePhase::WaitingForUac), true, "Waiting for Windows", false, true, false, false),
+            ("installing", with_release(UpdatePhase::Installing), true, "Installing", false, true, false, false),
+            ("declined", with_release(UpdatePhase::Declined), true, "Update now", true, true, false, false),
+            ("verify failed", with_release(UpdatePhase::VerifyFailed), true, "Update now", true, true, false, false),
+            (
+                "install failed",
+                with_release(UpdatePhase::InstallFailed { message: "x".into() }),
+                true,
+                "Try again",
+                true,
+                true,
+                true,
+                false,
+            ),
+            ("offline", state(UpdatePhase::CheckFailed { reason: R::Offline }, None), false, "Update now", true, false, false, true),
+        ];
+        for (name, s, release_panel, label, key_enabled, skip, logs, check) in rows {
+            let m = page_model(&s, true);
+            assert_eq!(m.release_panel, release_panel, "{name}: release panel");
+            assert_eq!(m.key_label, label, "{name}: key label");
+            // The key belongs to the release panel; "Update now" with no release is never drawn.
+            if release_panel {
+                assert_eq!(m.key_enabled, key_enabled, "{name}: key enabled");
+                assert_eq!(m.skip_visible, skip, "{name}: skip shown");
+                assert_eq!(m.logs_visible, logs, "{name}: logs shown");
+            }
+            assert_eq!(m.check_visible, check, "{name}: check shown");
+        }
+    }
+
+    /// Check now: label "Checking" and disabled while checking or while an
+    /// update runs; enabled otherwise (`UpdatesView.tsx:246-254`).
+    #[test]
+    fn check_now_label_and_gate() {
+        let up = state(UpdatePhase::UpToDate, None);
+        let m = page_model(&up, true);
+        assert_eq!((m.check_label, m.check_enabled), ("Check now", true));
+        let m = page_model(&state(UpdatePhase::Checking, None), true);
+        assert_eq!((m.check_label, m.check_enabled), ("Checking", false));
+        let m = page_model(&up, false);
+        assert!(!m.check_enabled, "no tray, no Check now");
+        let m = page_model(&state(UpdatePhase::CheckFailed { reason: CheckFailReason::Offline }, None), true);
+        assert!(m.check_enabled, "a failed check can be asked again");
+    }
+
+    /// With no tray (`!acts`) nothing sends, and the page says "Tray app only".
+    #[test]
+    fn no_tray_disables_every_control() {
+        let s = with_release(UpdatePhase::InstallFailed { message: "x".into() });
+        let m = page_model(&s, false);
+        assert!(!m.key_enabled && !m.skip_enabled && !m.logs_enabled && !m.check_enabled);
+        assert!(m.tray_only_note);
+        let mut errs = Errors::default();
+        for which in [Press::UpdateNow, Press::SkipThisVersion, Press::OpenLogsFolder, Press::CheckNow] {
+            assert_eq!(press(&m, which, &mut errs), None, "{which:?}");
+        }
+        assert!(!page_model(&s, true).tray_only_note, "the note is for the no-tray page only");
+    }
+
+    /// Update now sends `update_install`, clears the key's error and leaves the
+    /// page's error alone (`UpdatesView.tsx:77-80`).
+    #[test]
+    fn update_now_sends_install_and_clears_only_its_error() {
+        let m = page_model(&with_release(UpdatePhase::Available), true);
+        let mut errs = Errors { key: Some("boom".into()), page: Some("page".into()) };
+        assert_eq!(press(&m, Press::UpdateNow, &mut errs), Some(Cmd::UpdateInstall));
+        assert_eq!(errs, Errors { key: None, page: Some("page".into()) });
+    }
+
+    /// Skip, Check now and Open logs folder clear the page's error and leave the key's.
+    #[test]
+    fn page_buttons_clear_the_page_error_only() {
+        let sends = [
+            (with_release(UpdatePhase::Available), Press::SkipThisVersion, Cmd::UpdateSkip),
+            (state(UpdatePhase::UpToDate, None), Press::CheckNow, Cmd::UpdateCheckNow),
+            (
+                with_release(UpdatePhase::InstallFailed { message: "x".into() }),
+                Press::OpenLogsFolder,
+                Cmd::OpenLogsFolder,
+            ),
+        ];
+        for (s, which, command) in sends {
+            let m = page_model(&s, true);
+            let mut errs = Errors { key: Some("key".into()), page: Some("page".into()) };
+            assert_eq!(press(&m, which, &mut errs), Some(command), "{which:?}");
+            assert_eq!(errs, Errors { key: Some("key".into()), page: None }, "{which:?}");
+        }
+    }
+
+    /// A control that is not on the page, or is busy, sends nothing and keeps its error.
+    #[test]
+    fn busy_and_absent_controls_send_nothing() {
+        let busy = page_model(&with_release(UpdatePhase::Installing), true);
+        let mut errs = Errors { key: Some("k".into()), page: Some("p".into()) };
+        assert_eq!(press(&busy, Press::UpdateNow, &mut errs), None, "no second install while one runs");
+        assert_eq!(press(&busy, Press::SkipThisVersion, &mut errs), None, "no skip while one runs");
+        assert_eq!(errs, Errors { key: Some("k".into()), page: Some("p".into()) });
+        let up = page_model(&state(UpdatePhase::UpToDate, None), true);
+        assert_eq!(press(&up, Press::SkipThisVersion, &mut errs), None, "nothing to skip");
+        assert_eq!(press(&up, Press::OpenLogsFolder, &mut errs), None, "no failed install to read about");
+        let avail = page_model(&with_release(UpdatePhase::Available), true);
+        assert_eq!(press(&avail, Press::CheckNow, &mut errs), None, "the release panel has no Check now");
+    }
+
+    /// Skip this version: the tray sets `skipped_version`; the key goes from Skip to the
+    /// skipped note, and Update now still works (`UpdatesView.tsx:209-222`).
+    #[test]
+    fn skip_flow_replaces_the_button_with_the_note() {
+        let s = with_release(UpdatePhase::Available);
+        let m = page_model(&s, true);
+        let mut errs = Errors::default();
+        let command = press(&m, Press::SkipThisVersion, &mut errs).expect("skip sends");
+        let s = tray(s, &command);
+        let m = page_model(&s, true);
+        assert!(!m.skip_visible && m.skipped_note);
+        assert!(m.key_enabled, "Update now still works on a skipped version");
+        assert_eq!(state_line(&s), "0.2.0 available.", "the state line stays");
+        let s = tray(s, &Cmd::UpdateUnskip);
+        assert!(page_model(&s, true).skip_visible);
+    }
+
+    /// Check now: Up to date -> Checking (key disabled, label "Checking") -> the tray's answer.
+    #[test]
+    fn check_now_flow() {
+        let s = state(UpdatePhase::UpToDate, None);
+        let m = page_model(&s, true);
+        let mut errs = Errors::default();
+        let command = press(&m, Press::CheckNow, &mut errs).expect("check sends");
+        let s = tray(s, &command);
+        let m = page_model(&s, true);
+        assert_eq!((m.check_label, m.check_enabled), ("Checking", false));
+        assert_eq!(state_line(&s), "Checking for updates…");
+        assert_eq!(state_tone(&s), "work");
+        // A second press while checking sends nothing.
+        assert_eq!(press(&m, Press::CheckNow, &mut errs), None);
+        // The check fails offline: the line says so, the key is back.
+        let s = UpdateState { phase: UpdatePhase::CheckFailed { reason: CheckFailReason::Offline }, ..s };
+        assert_eq!(state_line(&s), "Could not check for updates: no connection.");
+        assert_eq!(state_tone(&s), "down");
+        assert!(page_model(&s, true).check_enabled);
+        // Or it finds a release: the release panel replaces Up to date.
+        let s = UpdateState { phase: UpdatePhase::Available, available: Some(release()), ..s };
+        assert!(page_model(&s, true).release_panel);
+        assert_eq!(state_line(&s), "0.2.0 available.");
+    }
+
+    /// Install: Update now -> Downloading (35%) -> Verifying -> Waiting for Windows ->
+    /// Installing; the key is busy from the first step on (`UpdatesView.tsx:75-76`).
+    #[test]
+    fn install_flow_walks_the_key_labels() {
+        let s = with_release(UpdatePhase::Available);
+        let mut errs = Errors::default();
+        let command = press(&page_model(&s, true), Press::UpdateNow, &mut errs).expect("install sends");
+        assert_eq!(command, Cmd::UpdateInstall);
+        let s = tray(s, &command);
+        let steps = [
+            (UpdatePhase::Downloading { downloaded: 4_404_019, total: Some(12_373_197) }, "Downloading 35%", "Downloading 0.2.0: 4.2 of 11.8 MB."),
+            (UpdatePhase::Verifying, "Checking download", "Checking the download against canvas-rgb's release key."),
+            (UpdatePhase::WaitingForUac, "Waiting for Windows", "Windows will ask for permission to install 0.2.0."),
+            (UpdatePhase::Installing, "Installing", "Installing 0.2.0."),
+        ];
+        for (phase, label, line) in steps {
+            let s = UpdateState { phase, ..s.clone() };
+            let m = page_model(&s, true);
+            assert_eq!(m.key_label, label);
+            assert!(m.key_busy && !m.key_enabled && !m.skip_enabled, "{label}: busy");
+            assert_eq!(state_line(&s), line);
+            assert_eq!(state_tone(&s), "work");
+            assert_eq!(press(&m, Press::UpdateNow, &mut errs), None, "{label}: no second install");
+        }
+        // The UAC sentence stays under the key in every phase.
+        assert!(uac_line("0.2.0").starts_with("Windows will ask for permission to install 0.2.0."));
+    }
+
+    /// Declined, verify failed and install failed all return to a pressable key; only a failed
+    /// install reads "Try again" and shows Open logs folder; a second press sends `update_install` again.
+    #[test]
+    fn failed_install_flow_offers_try_again() {
+        let failed = UpdateState {
+            current_version: "0.1.0".into(),
+            ..with_release(UpdatePhase::InstallFailed { message: "the installer exited with code 5".into() })
+        };
+        let m = page_model(&failed, true);
+        assert_eq!(m.key_label, "Try again");
+        assert!(m.key_enabled && m.logs_visible && m.logs_enabled);
+        assert_eq!(
+            state_line(&failed),
+            "The installer stopped before it finished. canvas-rgb is still on 0.1.0."
+        );
+        assert_eq!(state_tone(&failed), "down");
+        let mut errs = Errors::default();
+        assert_eq!(press(&m, Press::UpdateNow, &mut errs), Some(Cmd::UpdateInstall), "Try again installs again");
+        // The tray starts over at Downloading.
+        let again = tray(failed, &Cmd::UpdateInstall);
+        assert_eq!(page_model(&again, true).key_label, "Downloading 0%");
+        for (phase, line, tone) in [
+            (UpdatePhase::Declined, "Permission declined. Nothing was changed.", "warn"),
+            (UpdatePhase::VerifyFailed, "The download failed its check and was deleted. Nothing was installed.", "down"),
+        ] {
+            let s = with_release(phase);
+            let m = page_model(&s, true);
+            assert_eq!(m.key_label, "Update now");
+            assert!(m.key_enabled && !m.logs_visible);
+            assert_eq!(state_line(&s), line);
+            assert_eq!(state_tone(&s), tone);
+        }
+    }
+
+    /// Up to date, and the updated-to line: no release, no skip, no key.
+    #[test]
+    fn up_to_date_and_updated_lines() {
+        let s = state(UpdatePhase::UpToDate, None);
+        assert_eq!(state_line(&s), "Up to date.");
+        assert_eq!(state_tone(&s), "ok");
+        let done = UpdateState { updated_to: Some(release()), current_version: "0.2.0".into(), ..s };
+        assert_eq!(state_line(&done), "Updated to 0.2.0.");
+        assert!(!page_model(&done, true).release_panel);
+    }
+
+    /// `UpdatesView.tsx:130-143`: the dismiss goes out once per release, and the
+    /// notes stay on screen after it clears `updated_to`.
+    #[test]
+    fn updated_to_dismiss_is_sent_once_and_the_notes_stay() {
+        let mut dismissed = None;
+        let mut seen = None;
+        let arrived = UpdateState { updated_to: Some(release()), ..state(UpdatePhase::UpToDate, None) };
+        assert!(note_arrival(&mut dismissed, &mut seen, &arrived), "the first push dismisses");
+        assert!(!note_arrival(&mut dismissed, &mut seen, &arrived), "the tray clones updated_to on every push");
+        assert!(!note_arrival(&mut dismissed, &mut seen, &arrived));
+        assert_eq!(dismissed.as_deref(), Some("0.2.0"));
+        // The dismiss lands: updated_to is gone, the visit keeps the notes.
+        let cleared = state(UpdatePhase::UpToDate, None);
+        assert!(!note_arrival(&mut dismissed, &mut seen, &cleared));
+        assert_eq!(notes_of(&cleared, seen.as_ref()).map(|n| n.version.as_str()), Some("0.2.0"));
+        assert_eq!(state_line(&cleared), "Up to date.", "the line changes once the marker is gone");
+        // A newer release installed later is dismissed too.
+        let newer = UpdateState { updated_to: Some(info("0.3.0", "### Fixed\n- x")), ..cleared };
+        assert!(note_arrival(&mut dismissed, &mut seen, &newer));
+        assert_eq!(seen.as_ref().map(|n| n.version.as_str()), Some("0.3.0"));
+    }
+
+    /// The right column's source: the release waiting, else the installed one, else the visit's.
+    #[test]
+    fn notes_come_from_available_then_updated_to_then_seen() {
+        let seen = info("0.1.9", "### Added\n- s");
+        let s = state(UpdatePhase::UpToDate, None);
+        assert_eq!(notes_of(&s, None), None, "no release, nothing seen: no notes column");
+        assert_eq!(notes_of(&s, Some(&seen)).map(|n| n.version.as_str()), Some("0.1.9"));
+        let s = UpdateState { updated_to: Some(info("0.2.0", "x")), ..s };
+        assert_eq!(notes_of(&s, Some(&seen)).map(|n| n.version.as_str()), Some("0.2.0"));
+        let s = UpdateState { available: Some(info("0.3.0", "y")), ..s };
+        assert_eq!(notes_of(&s, Some(&seen)).map(|n| n.version.as_str()), Some("0.3.0"));
+    }
+
+    /// `UpdatesView.tsx:145-149`: five silent seconds make the error only for the latest ask;
+    /// an answer in time cancels it, and Try again starts a new deadline.
+    #[test]
+    fn silent_tray_deadline_belongs_to_the_latest_ask() {
+        assert!(goes_silent(1, 1, false), "no answer in 5 s");
+        assert!(!goes_silent(1, 1, true), "an answer cancels it");
+        assert!(!goes_silent(1, 2, false), "Try again started a newer deadline");
+        assert!(goes_silent(2, 2, false), "and that one ends in the error again");
     }
 }
 

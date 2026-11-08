@@ -1,0 +1,36 @@
+{
+  "_comment": "Tray-stub update states for the Updates pair captures (#206). capture-react.mjs (UI_CAPTURE_UPDATE=<name>) and capture-gpui.ps1 (-UpdateState <name>) both read this file, so both editors get the same state. Each entry overrides fields of the base state: current_version 0.1.0, auto_check true, last_check null, phase up_to_date, available null, skipped_version null, snoozed false, updated_to null. Names mirror app/web/src/lib/demoUpdate.ts fixtures.",
+  "base": {
+    "current_version": "0.1.0",
+    "auto_check": true,
+    "last_check": null,
+    "phase": { "kind": "up_to_date" },
+    "available": null,
+    "skipped_version": null,
+    "snoozed": false,
+    "updated_to": null
+  },
+  "release": {
+    "version": "0.2.0",
+    "notes": "### Added\n- A new thing you can do with your lights.\n- Another change that is long enough to wrap onto a second line on a phone screen.\n\n### Fixed\n- A bug that kept a fan on its last speed.",
+    "pub_date": "2026-11-01T00:00:00Z"
+  },
+  "presets": {
+    "up-to-date": { "phase": { "kind": "up_to_date" } },
+    "checking": { "phase": { "kind": "checking" } },
+    "available": { "phase": { "kind": "available" }, "withRelease": true },
+    "skipped": { "phase": { "kind": "available" }, "withRelease": true, "skipped_version": "0.2.0" },
+    "downloading": { "phase": { "kind": "downloading", "downloaded": 4404019, "total": 12373197 }, "withRelease": true },
+    "downloading-unknown": { "phase": { "kind": "downloading", "downloaded": 4404019, "total": null }, "withRelease": true },
+    "verifying": { "phase": { "kind": "verifying" }, "withRelease": true },
+    "uac": { "phase": { "kind": "waiting_for_uac" }, "withRelease": true },
+    "installing": { "phase": { "kind": "installing" }, "withRelease": true },
+    "declined": { "phase": { "kind": "declined" }, "withRelease": true },
+    "verify-failed": { "phase": { "kind": "verify_failed" }, "withRelease": true },
+    "install-failed": { "phase": { "kind": "install_failed", "message": "the installer exited with code 5" }, "withRelease": true },
+    "offline": { "phase": { "kind": "check_failed", "reason": "offline" } },
+    "rate-limited": { "phase": { "kind": "check_failed", "reason": "rate_limited" } },
+    "check-failed": { "phase": { "kind": "check_failed", "reason": "other" } },
+    "updated": { "current_version": "0.2.0", "phase": { "kind": "up_to_date" }, "updatedWithRelease": true }
+  }
+}
