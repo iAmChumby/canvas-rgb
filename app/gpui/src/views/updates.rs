@@ -67,6 +67,32 @@ pub const KEY_LABELS: [&str; 6] = [
 pub const LONGEST_STATE: &str =
     "The download failed its check and was deleted. Nothing was installed.";
 
+/// `.upd-state .state`: the dot top-aligned (`margin-top: 0.45em`) and the
+/// words free to wrap (`white-space: normal`), unlike the one-line `.state`.
+fn state_row(t: &Theme, tone: &str, words: &str) -> impl IntoElement {
+    let color = match tone {
+        "ok" => Theme::color(t.ok),
+        "mute" => Theme::color(t.mute),
+        "warn" => Theme::color(t.warn),
+        "work" => Theme::color(t.work),
+        _ => Theme::color(t.down),
+    };
+    div()
+        .flex()
+        .items_start()
+        .gap_2()
+        .child(div().flex_none().mt(px(6.3)).size(px(8.0)).rounded_full().bg(color))
+        .child(
+            div()
+                .min_w(px(0.0))
+                .text_size(px(14.0))
+                .line_height(gpui::relative(1.45))
+                .font_family(crate::fonts::UI_FAMILY)
+                .text_color(Theme::color(t.dim))
+                .child(words.to_string()),
+        )
+}
+
 fn mb(bytes: u64) -> String {
     format!("{:.1}", bytes as f64 / (1024.0 * 1024.0))
 }
@@ -527,7 +553,7 @@ pub fn parse_inline(text: &str) -> Vec<Inline> {
 use gpui::{Context, IntoElement, Window, div, prelude::*, px};
 
 use crate::components::button::{Variant, button, button_sm, skirt_layers};
-use crate::components::panel::{state_dot, tracked_title};
+use crate::components::panel::tracked_title;
 use crate::theme::{Theme, TokenRadius};
 
 // ---------------------------------------------------------------------------
@@ -721,6 +747,19 @@ impl UpdatesView {
         title: &str,
         body: impl IntoElement,
     ) -> impl IntoElement {
+        self.panel_mb(id, title, 12.0, body)
+    }
+
+    /// `head_mb` is the head's bottom margin: 12 px (`.panel-head`), or 0 when
+    /// the body opens with the state line, whose 16 px top margin collapses
+    /// with it in CSS (block margins): the gap is 16, not 28.
+    fn panel_mb(
+        &self,
+        id: &str,
+        title: &str,
+        head_mb: f32,
+        body: impl IntoElement,
+    ) -> impl IntoElement {
         let t = &self.theme;
         div()
             .id(gpui::SharedString::from(id.to_string()))
@@ -739,7 +778,7 @@ impl UpdatesView {
                     .items_center()
                     .justify_between()
                     .gap_2()
-                    .mb_3()
+                    .mb(px(head_mb))
                     .child(tracked_title(
                         &title.to_uppercase(),
                         13.0,
@@ -882,14 +921,15 @@ impl UpdatesView {
             .relative()
             .mt_4()
             .child(
-                // The hidden sizing copy: same dot and words, tone mute.
-                state_dot(t, "mute", &size),
+                // The hidden sizing copy (`.upd-state-size`, visibility:
+                // hidden): same dot and words, so the line keeps its room.
+                div().invisible().child(state_row(t, "mute", &size)),
             )
             .child(
                 div()
                     .absolute()
                     .inset_0()
-                    .child(state_dot(t, state_tone(u), &line)),
+                    .child(state_row(t, state_tone(u), &line)),
             )
     }
 
@@ -1013,7 +1053,7 @@ impl UpdatesView {
         if let Some(err) = &self.err {
             body = body.child(self.error_line(err, true));
         }
-        self.panel("updates-up-to-date", "Up to date", body)
+        self.panel_mb("updates-up-to-date", "Up to date", 0.0, body)
     }
 
     /// One notes panel per `###` heading: the title, then a list whose
