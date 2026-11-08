@@ -717,13 +717,6 @@ impl Shell {
         view.update(cx, |v, cx| v.open_stack(name, cx));
     }
 
-    /// Debug only (#246): reaches the builder's save error or its naming
-    /// error, the way the builder's own flow reaches it, for the captures.
-    pub fn capture_stack_error(&mut self, which: &str, cx: &mut Context<Self>) {
-        let view = self.effects_view.clone();
-        view.update(cx, |v, cx| v.capture_stack_error(which, cx));
-    }
-
     pub fn close_palette(&mut self, cx: &mut Context<Self>) {
         self.palette_open = false;
         cx.notify();

@@ -67,10 +67,6 @@ struct ParsedArgs {
     editor: Option<String>,
     /// `--stack <name>` (debug only): the stack the builder opens on.
     stack: Option<String>,
-    /// `--stack-error <save|naming>` (debug only): the builder's save error
-    /// or its naming error, the way the builder's own flow reaches it (#246
-    /// captures).
-    stack_error: Option<String>,
     /// `--onboarding-step <step>` (debug builds only): open the onboarding at
     /// a step (`hello|case|parts|match|finish|finish-sweep`) for captures.
     onboarding_step: Option<String>,
@@ -100,7 +96,6 @@ fn parse_args() -> ParsedArgs {
     let mut palette_query = String::new();
     let mut editor = None;
     let mut stack = None;
-    let mut stack_error = None;
     let mut onboarding_step = None;
     let mut onboarding_state = None;
     let mut peri_device = None;
@@ -150,11 +145,6 @@ fn parse_args() -> ParsedArgs {
                     stack = Some(v);
                 }
             }
-            "--stack-error" if cfg!(debug_assertions) => {
-                if let Some(v) = args.next() {
-                    stack_error = Some(v);
-                }
-            }
             "--onboarding-step" if cfg!(debug_assertions) => {
                 if let Some(v) = args.next() {
                     onboarding_step = Some(v);
@@ -187,7 +177,6 @@ fn parse_args() -> ParsedArgs {
         palette_query,
         editor,
         stack,
-        stack_error,
         onboarding_step,
         onboarding_state,
         peri_device,
@@ -214,7 +203,6 @@ fn main() {
         palette_query,
         editor,
         stack,
-        stack_error,
         onboarding_step,
         onboarding_state,
         peri_device,
@@ -295,13 +283,6 @@ fn main() {
                         if let Some(name) = &stack {
                             let name = name.clone();
                             shell.open_stack_builder(&name, cx);
-                        }
-                        // Debug only: `--stack-error` reaches the builder's
-                        // save error or its naming error, the way the
-                        // builder's own flow reaches it (#246 captures).
-                        if let Some(which) = &stack_error {
-                            let which = which.clone();
-                            shell.capture_stack_error(&which, cx);
                         }
                         // Debug only: `--peri-device` opens the Peripherals
                         // page with that device already selected (#208 pairs
