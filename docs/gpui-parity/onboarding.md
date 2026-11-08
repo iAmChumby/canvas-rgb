@@ -33,7 +33,7 @@ Source notes: line numbers are for the React tree at `0937970`; the worktree HEA
 - [x] Case, unit switch (`Segmented`, label "The unit every size is read in", options "cm" and "in"): sets the unit for every size on the screen and in the rulers; saved to `localStorage` `canvas-rgb.units` — `app/web/src/views/editor/Onboarding.tsx:344-356`, `app/web/src/views/LayoutView.tsx` (unit state), `app/web/src/lib/zones.ts:28` — checked by pair `onboarding-case-1440x900-dark`
 - [x] Case, size readout (`aria-live="polite"`, `data-default` set when the box is at the default): shows the width, a "×" (aria-hidden), and the height; "—" when no case box exists — `app/web/src/views/editor/Onboarding.tsx:337-343`, `:230-235` — checked by pair `onboarding-case-1440x900-dark` and `case_text_cm_rounds_inches_tenth`
 - [x] Case, guide names (three buttons drawn on the canvas, "Small tower", "Mid tower", "Full tower", each with its size text): a click sets the case box to that guide's size — `app/web/src/views/editor/parts.ts:150-154`, `app/web/src/views/editor/Onboarding.tsx:237-254`, `app/web/src/views/PreviewStage.tsx:2512` — checked by `case_guides_stand_on_the_floor_line` + pair `onboarding-case-1440x900-dark`
-- [x] Parts, "Add a Fan", "Add a Strip", "Add a Pump", "Add a RAM" (`Chip`, label `Add a <name>`, visible text the name with a `Plus` icon 11): adds a placement of that kind on the first light run nothing owns, with the part's shape and `part.mapped` false; when every run is owned, the note "Every light already has a part. Drag one, or rescan." shows — `app/web/src/views/editor/PartsStep.tsx:21-26`, `:66-90`, `:134-142`, `app/web/src/views/editor/setup.ts:186-188`, `:195-228` - checked by `add_lit_part` + pair `onboarding-parts-1440x900-dark` masked 8.83% (r2; was 21.75%): the chips carry the part's icon, its name and a bold plus, two to a row, as React draws them (`app/gpui/src/components/chip.rs` `chip_add_part`)
+- [x] Parts, "Add a Fan", "Add a Strip", "Add a Pump", "Add a RAM" (`Chip`, label `Add a <name>`, visible text the name with a `Plus` icon 11): adds a placement of that kind on the first light run nothing owns, with the part's shape and `part.mapped` false; when every run is owned, the note "Every light already has a part. Drag one, or rescan." shows — `app/web/src/views/editor/PartsStep.tsx:21-26`, `:66-90`, `:134-142`, `app/web/src/views/editor/setup.ts:186-188`, `:195-228` - checked by `add_lit_part` + pair `onboarding-parts-1440x900-dark` masked 5.66-8.83% (r2; was 21.75%): the chips carry the part's icon, its name and a bold plus, two to a row, as React draws them (`app/gpui/src/components/chip.rs` `chip_add_part`)
 - [x] Parts, "Add a GPU", "Add a CPU" (`Chip`): calls `onAddPart(kind)`, which is `addLandmark` in the Layout page — `app/web/src/views/editor/PartsStep.tsx:28-31`, `:143-151`, `app/web/src/views/editor/Onboarding.tsx:90`, `:369` — checked by `add_landmark` + pair `onboarding-parts-1440x900-dark`
 - [x] Parts, "Remove part" or "Remove parts" (`Button` size sm, ghost, `Trash` 14; disabled when nothing removable is selected): removes the selected parts (zones, and landmarks other than the case), then clears the selection — `app/web/src/views/editor/PartsStep.tsx:92-101`, `:154-156` — checked by `remove_selected_parts` + pair `onboarding-parts-1440x900-dark`
 - [x] Parts, "Rescan" (shown only while lights are missing; `ArrowsClockwise` 14; disabled while the request runs): same request as the Ladder's Rescan — `app/web/src/views/editor/PartsStep.tsx:103-114`, `:157-161` — checked by `start_rescan` (`GET /api/v1/devices?rescan=1`)
@@ -86,10 +86,10 @@ Source notes: line numbers are for the React tree at `0937970`; the worktree HEA
 - [ ] Gate, hardware line: "SignalRGB is running" is hidden on the Hello because the Gate says it (`gated` true) — `app/web/src/views/editor/Onboarding.tsx:312`, `app/web/src/views/editor/HardwareLine.tsx:37` — checked by pair `?state=conflict` at 1440x900 (no hardware line on the Hello)
 - [ ] Gate, leaves by itself when the conflict clears: the Hello returns to the happy Hello or the Ladder without a press (demo `conflict-clears` clears the conflict after 6 s) — `app/web/src/views/editor/HelloStep.tsx:54`, `:107-110`, `app/web/src/lib/demoScenarios.ts:137-139` — checked by pair `?state=conflict-clears` at 1440x900 (the Gate, then the happy Hello)
 - [ ] Waking: title "Waking up your lights…" (ellipsis character), lead "This takes a moment.", primary "Map my PC" disabled, tertiary "Set up later", the five-dot pulse, count "—" — `app/web/src/views/editor/HelloStep.tsx:128-141` — checked by pair `?state=connecting` at 1440x900 and by pair `?state=waking` (the Waking screen, then the happy Hello after 4 s)
-- [x] Case screen: kicker "Case", title "Is this your case?", lead "A typical mid tower. Adjust only if yours is clearly bigger or smaller.", the size readout, the unit switch, the hint "The dashed outlines are other tower sizes, to compare."; primary "Looks right", secondary "Reset", Back when past the first screen - `app/web/src/views/editor/Onboarding.tsx:318-358` - checked by pair `onboarding-case-1440x900-dark` masked 6.15% (r2; was 9.31%) and `onboarding-case-390x844-dark` masked 49.25%
+- [x] Case screen: kicker "Case", title "Is this your case?", lead "A typical mid tower. Adjust only if yours is clearly bigger or smaller.", the size readout, the unit switch, the hint "The dashed outlines are other tower sizes, to compare."; primary "Looks right", secondary "Reset", Back when past the first screen - `app/web/src/views/editor/Onboarding.tsx:318-358` - checked by pair `onboarding-case-1440x900-dark` masked 6.05-6.15% (r2; was 9.31%) and `onboarding-case-390x844-dark` masked 46.64-49.25%
 - [ ] Case screen, on arrival: the case box is created when the layout has none (x 100, y 27, 120 x 122 units, `visible`, `locked` unset) and selected — `app/web/src/views/LayoutView.tsx:774-786`, `app/web/src/views/editor/Onboarding.tsx:148-156` — checked by GPUI test (to write) (a layout with no case gains one landmark)
 - [ ] Case screen, Back at the redo's first screen: none (a redo starts on Case, `first = 1`) — `app/web/src/views/editor/Onboarding.tsx:101`, `:110` — checked by GPUI test (to write)
-- [x] Your parts screen: kicker "Your parts", title "Put in what's in your PC.", lead "Start from this guess: drag a part where it really sits, remove what you don't have, add what's missing."; primary "Match the lights" - `app/web/src/views/editor/PartsStep.tsx:117-123` - checked by pair `onboarding-parts-1440x900-dark` masked 8.83% (r2; was 21.75%)
+- [x] Your parts screen: kicker "Your parts", title "Put in what's in your PC.", lead "Start from this guess: drag a part where it really sits, remove what you don't have, add what's missing."; primary "Match the lights" - `app/web/src/views/editor/PartsStep.tsx:117-123` - checked by pair `onboarding-parts-1440x900-dark` masked 5.66-8.83% (r2; was 21.75%)
 - [ ] Your parts screen, on arrival: the drawing is filled once with the guess from the detected lights (a long or resizable zone becomes fan-sized parts, one per 12-LED run) — `app/web/src/views/editor/Onboarding.tsx:300-310`, `app/web/src/views/editor/setup.ts:233-253`, `:309-344` — checked by GPUI test (to write) (the guess runs once per mount)
 - [x] Your parts screen, "On the drawing" count: "On the drawing", then the number of layout zones (`layout.zones.length`, every placement) plus the non-case landmarks, then "parts" (the count is not limited to placements with lights) — `app/web/src/views/editor/PartsStep.tsx:124-129` — checked by pair `onboarding-parts-1440x900-dark`
 - [ ] Your parts screen, missing lights: "1 light was not found." or "N lights were not found." (N = placements whose device is not connected) and the "Rescan" button — `app/web/src/views/editor/PartsStep.tsx:130`, `:157`, `app/web/src/views/editor/HardwareLine.tsx:9-15` — checked by pair `?state=` with one device unplugged (GPUI stub with `connected: false`) at 1440x900
@@ -102,7 +102,7 @@ Source notes: line numbers are for the React tree at `0937970`; the worktree HEA
 - [ ] Match, identify failure: the identify request's error is swallowed; the screen shows no message, and the run stays in the Match — `app/web/src/views/editor/MatchStep.tsx:68-69`, `:77` — checked by GPUI test (to write) with a 503 identify stub (expect no message text on the screen and no change of screen)
 - [ ] Match, a save failure during Match: the autosave error shows in the hardware line as "Not saved: <message>" and the autosave stops until the error clears — `app/web/src/views/editor/HardwareLine.tsx:45`, `app/web/src/views/LayoutView.tsx:698`, `:673-690` (`save` sets `saveError`) — checked by GPUI test (to write) with a 500 `PUT /api/v1/layouts/{id}` stub
 - [ ] Parts and Match, lights missing: the hardware line says "1 light is missing" or "N lights are missing" when at least one placement's device is not connected and OpenRGB is connected — `app/web/src/views/editor/HardwareLine.tsx:41-44` — checked by pair `?state=` with one device unplugged at 1440x900
-- [x] Finish screen, sweeping: kicker "Finish", title "Watch your PC.", lead "A band of light crosses it.", the sweep bar, primary "Done" disabled - `app/web/src/views/editor/FinishStep.tsx:87-100` - checked by pair `onboarding-finish-1440x900-dark` masked 6.71% (r2; was 16.97%)
+- [x] Finish screen, sweeping: kicker "Finish", title "Watch your PC.", lead "A band of light crosses it.", the sweep bar, primary "Done" disabled - `app/web/src/views/editor/FinishStep.tsx:87-100` - checked by pair `onboarding-finish-1440x900-dark` masked 6.70-6.71% (r2; was 16.97%)
 - [x] Finish screen, swept, whole PC: kicker "N parts" (plus " · N fans" when fans > 0, singular "part" and "fan" at 1), title "Your PC is mapped.", lead "Pick a look to try.", primary "Done", secondary "Sweep again", three tiles — `app/web/src/views/editor/FinishStep.tsx:102-138` — checked by pair `onboarding-finish-1440x900-dark` and `onboarding-finish-390x844-dark`
 - [ ] Finish screen, swept, one device redone (scoped): title "That part is mapped.", no lead, no tiles — `app/web/src/views/editor/FinishStep.tsx:115-116`, `:120` — checked by GPUI test (to write) (scope `Match` then `Finish`)
 - [ ] Finish screen, tile playing: `aria-pressed` true on the chosen tile; its state text "Playing on your PC" (others "Press to play") — `app/web/src/views/editor/FinishStep.tsx:127`, `:133` — checked by pair with one tile pressed at 1440x900
@@ -243,16 +243,22 @@ Masked diff of the five onboarding steps, React against GPUI, dark theme
 
 | Step | 1440x900 r1 | 1440x900 r2 | 390x844 r1 | 390x844 r2 |
 |---|---|---|---|---|
-| hello | 6.13% | 6.05% | 24.85% | 30.36% |
-| case | 9.31% | 6.15% | 38.21% | 49.25% |
-| parts | 21.75% | 8.83% | 62.01% | 48.02% |
-| match | 7.82% | 7.12% | 37.45% | 27.29% |
-| finish | 16.97% | 6.71% | 47.75% | 24.41% |
+| hello | 6.13% | 6.01-6.05% | 24.85% | 30.27-30.36% |
+| case | 9.31% | 6.05-6.15% | 38.21% | 46.64-49.25% |
+| parts | 21.75% | 5.66-8.83% | 62.01% | 48.02-51.35% |
+| match | 7.82% | 7.12% | 37.45% | 27.29-27.37% |
+| finish | 16.97% | 6.70-6.71% | 47.75% | 24.41-24.48% |
 
 The layout, displays and devices pairs, the default daemon
-(`onboarding_complete = true`): `layout-1440x900-dark` 4.49%, `displays-1440x900-dark`
-1.51%, `devices-1440x900-dark` 2.33% (the `feat/204-gpui` baseline is 4.10-4.48%,
-1.51-1.58% and 2.33-2.51%).
+(`onboarding_complete = true`): `layout-1440x900-dark` 4.49-4.50%, `displays-1440x900-dark`
+1.51%, `devices-1440x900-dark` 2.33-2.62% (the `feat/204-gpui` baseline is 4.10-4.48%,
+1.51-1.58% and 2.33-2.51%; the devices pair moves 0.29 pp between two captures of
+the same build, so it is read as the baseline's own spread and not a regression).
+
+The onboarding pairs move by up to 3 pp between two captures of the same build:
+React's accent settles on the hello wave at a moment that depends on how fast
+the daemon answers, so the first two screens are sometimes blue and sometimes
+violet. The ranges above are every reading taken on this build.
 
 What round 2 changed, each measured:
 
