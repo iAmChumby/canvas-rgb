@@ -237,7 +237,13 @@ pub fn button_cta(
     disabled: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
-    let (bg, fg, border) = colors(t, Variant::Primary, disabled);
+    // React's `.btn:disabled`: a plain raised key with mute words and a
+    // line border. It never keeps the accent colour, and it keeps no skirt.
+    let (bg, fg, border) = if disabled {
+        (Theme::color(t.raised), Theme::color(t.mute), Theme::color(t.line))
+    } else {
+        (t.live(), Theme::color(t.on_accent), Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 })
+    };
     let skirt_color = t.live_skirt();
     let el = div()
         .id(gpui::SharedString::from(id.to_string()))

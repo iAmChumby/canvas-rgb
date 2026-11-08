@@ -738,10 +738,14 @@ impl LayoutView {
             if at < data.steps.len() {
                 data.at = at;
             }
-            if step == crate::views::onboarding::StepKind::Finish && self.capture_step.as_deref() == Some("finish-sweep") {
+            // React's capture of the Finish screen is taken while the sweep is
+            // still crossing (the sweep takes three seconds and the shot is
+            // about one second after the screen arrives), so the screen it
+            // shows is "Watch your PC." with the band on the bar and the Done
+            // key disabled. The swept screen ("Your PC is mapped." with the
+            // three tiles) is what the owner sees three seconds later.
+            if step == crate::views::onboarding::StepKind::Finish {
                 data.swept = false;
-            } else if step == crate::views::onboarding::StepKind::Finish {
-                data.swept = true;
             }
             self.onboarding = Some(data);
             self.sync_onboarding_match_run();
@@ -2526,10 +2530,240 @@ fn phone_switcher(
 
 /// The bar along the frame's bottom edge: the scale, the segments and the
 /// zoom.
-pub fn stage_toolbar_pub(view: &mut LayoutView, t: &Theme, cx: &mut Context<LayoutView>) -> gpui::AnyElement {
-    let container = container_width(view.width);
-    let phone = view.width <= 720.0;
-    stage_toolbar(view, t, container, phone, cx)
+/// The desk's toolbar as the onboarding takeover draws it.
+///
+/// React's `PreviewStage` puts its toolbar straight under the desk (the
+/// `.toolbar` of `desk.module.css`): no rule above it, no frame around it,
+/// and the whole row - the mode, the undo and redo keys, the desk's own
+/// settings and the Render key - in one line. The Layout page's own toolbar
+/// lives inside the stage's frame instead, so the two are drawn apart here.
+/// The zoom is read from the onboarding's own desk, not the Layout page's.
+pub fn stage_toolbar_onboarding_pub(
+    view: &mut LayoutView,
+    t: &Theme,
+    desk: (f32, f32),
+    cx: &mut Context<LayoutView>,
+) -> gpui::AnyElement {
+    let layout = view.layout().cloned();
+    let centre = stage::content_centre(
+        &layout.as_ref().map(|l| l.zones.clone()).unwrap_or_default(),
+        &layout.as_ref().map(|l| l.landmarks.clone()).unwrap_or_default(),
+    );
+    let view_state = view.view.unwrap_or_else(|| hero_view(desk.0 as f64, desk.1 as f64, centre));
+    let scale_percent = interact::zoom_percent(view_state.scale);
+    let desk_box = (desk.0 as f64, desk.1 as f64);
+    let entity = cx.entity();
+
+    let mut row = div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap(px(12.0))
+        .flex_none()
+        .w_full()
+        // React's `.toolbar` has a margin-top of its own (`--s2`).
+        .mt(px(8.0));
+    row = row.child(scale_bar(view, t, view_state.scale, desk.0));
+
+    let mut segs = div().flex().items_center().gap(px(8.0)).min_w_0();
+    let mode = view.mode;
+    segs = segs.child(segmented(
+        t,
+        "onb-mode",
+        &[("effect", "Effect"), ("lights", "Lights")],
+        match mode {
+            StageMode::Effect => "effect",
+            StageMode::Lights => "lights",
+        },
+        {
+            let entity = entity.clone();
+            move |value, _window, cx| {
+                entity.update(cx, |this, cx| {
+                    this.mode = if value == "lights" {
+                        StageMode::Lights
+                    } else {
+                        StageMode::Effect
+                    };
+                    cx.notify();
+                });
+            }
+        },
+    ));
+    // The undo and redo keys: they undo work done on the desk, and the
+    // takeover has no strip to put them on.
+    let past_empty = view.history.past.is_empty();
+    let future_empty = view.history.future.is_empty();
+    let undo_entity = entity.clone();
+    let redo_entity = entity.clone();
+    segs = segs.child(
+        div()
+            .flex()
+            .items_center()
+            .child(icon_button(
+                t,
+                "onb-stage-undo",
+                "ArrowUUpLeft",
+                "",
+                true,
+                false,
+                past_empty,
+                move |_, _window, app| {
+                    undo_entity.update(app, |this: &mut LayoutView, cx| {
+                        this.undo();
+                        cx.notify();
+                    });
+                },
+            ))
+            .child(icon_button(
+                t,
+                "onb-stage-redo",
+                "ArrowUUpRight",
+                "",
+                true,
+                false,
+                future_empty,
+                move |_, _window, app| {
+                    redo_entity.update(app, |this: &mut LayoutView, cx| {
+                        this.redo();
+                        cx.notify();
+                    });
+                },
+            )),
+    );
+    // The desk's own settings: how much of the desk the effect is drawn at,
+    // and how each LED reads the picture.
+    let scale = layout.as_ref().map(|l| l.render_scale.percent()).unwrap_or(50);
+    let scale_entity = entity.clone();
+    let sampling = layout.as_ref().map(|l| sampling_key(l.sampling)).unwrap_or("nearest");
+    let sampling_entity = entity.clone();
+    segs = segs.child(
+        div().flex().items_center().child(segmented(
+            t,
+            "onb-scale",
+            &[("25", "¼"), ("50", "½"), ("100", "All")],
+            &scale.to_string(),
+            move |value, _window, cx| {
+                scale_entity.update(cx, |this: &mut LayoutView, cx| {
+                    let pct: u8 = value.parse().unwrap_or(50);
+                    let rs: RenderScale = pct.try_into().unwrap_or(RenderScale::P50);
+                    this.commit(|l| Layout { render_scale: rs, ..l.clone() });
+                    cx.notify();
+                });
+            },
+        ))
+        .child(segmented(
+            t,
+            "onb-sampling",
+            &[("nearest", "1"), ("bilinear", "4"), ("area_average", "All px")],
+            sampling,
+            move |value, _window, cx| {
+                sampling_entity.update(cx, |this: &mut LayoutView, cx| {
+                    let sm = match value.as_str() {
+                        "nearest" => SamplingMode::Nearest,
+                        "bilinear" => SamplingMode::Bilinear,
+                        _ => SamplingMode::AreaAverage,
+                    };
+                    this.commit(|l| Layout { sampling: sm, ..l.clone() });
+                    cx.notify();
+                });
+            },
+        )),
+    );
+    // The Render key: the desk's own settings in one key.
+    let render_entity = entity.clone();
+    segs = segs.child(button_icon(
+        t,
+        "onb-render-key",
+        "Render",
+        Variant::Default,
+        false,
+        true,
+        "SlidersHorizontal",
+        "",
+        15.0,
+        move |_, _window, app| {
+            render_entity.update(app, |this: &mut LayoutView, cx| {
+                this.render_open = !this.render_open;
+                cx.notify();
+            });
+        },
+    ));
+    row = row.child(segs);
+    row = row.child(div().flex_1());
+    // The zoom, on the right.
+    let zoom_out_entity = entity.clone();
+    let zoom_in_entity = entity.clone();
+    let fit_entity = entity.clone();
+    row = row.child(
+        div()
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .ml_auto()
+            .p(px(2.0))
+            .border_1()
+            .border_color(Theme::color(t.line_2))
+            .r_md()
+            .bg(Theme::color(t.panel))
+            .child(icon_button(
+                t,
+                "onb-zoom-out",
+                "Minus",
+                "",
+                true,
+                false,
+                false,
+                move |_, _window, app| {
+                    zoom_out_entity.update(app, |this: &mut LayoutView, cx| {
+                        this.zoom_by(1.0 / 1.3, desk_box);
+                        cx.notify();
+                    });
+                },
+            ))
+            .child(
+                div()
+                    .w(px(40.0))
+                    .text_center()
+                    .text_sm()
+                    .font_family(crate::fonts::MONO_FAMILY)
+                    .text_color(Theme::color(t.dim))
+                    .child(format!("{scale_percent}%")),
+            )
+            .child(icon_button(
+                t,
+                "onb-zoom-in",
+                "Plus",
+                "",
+                true,
+                false,
+                false,
+                move |_, _window, app| {
+                    zoom_in_entity.update(app, |this: &mut LayoutView, cx| {
+                        this.zoom_by(1.3, desk_box);
+                        cx.notify();
+                    });
+                },
+            ))
+            .child(icon_button(
+                t,
+                "onb-zoom-fit",
+                "ArrowsOut",
+                "",
+                true,
+                false,
+                false,
+                move |_, _window, app| {
+                    fit_entity.update(app, |this: &mut LayoutView, cx| {
+                        this.zoom_fit(desk_box);
+                        cx.notify();
+                    });
+                },
+            )),
+    );
+    if view.render_open {
+        row = row.child(render_popover(view, t, cx));
+    }
+    row.into_any_element()
 }
 
 fn stage_toolbar(

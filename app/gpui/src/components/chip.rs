@@ -174,7 +174,9 @@ pub fn chip_add_part(
         .items_center()
         .gap(px(4.0))
         .h(px(28.0))
-        .px(px(10.0))
+        // React's `.chip` is 10 px of padding inside its 1 px border, so the
+        // words start 11 px from the chip's edge.
+        .px(px(11.0))
         .r_sm()
         .font_weight(gpui::FontWeight::MEDIUM)
         .font_family(crate::fonts::UI_FAMILY)
@@ -184,7 +186,7 @@ pub fn chip_add_part(
         .whitespace_nowrap()
         .cursor_pointer()
         .on_click(on_click)
-        .child(div().size(px(5.0)).rounded_full().bg(Theme::color(t.dot)))
+        .child(div().size(px(5.0)).flex_none().rounded_full().bg(Theme::color(t.dot)))
         .child(crate::components::button::skirt_layers(
             t.skirt(),
             8.0,

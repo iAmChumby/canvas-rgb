@@ -15,7 +15,7 @@ use canvas_proto::layout::{Facing, Layout, LedSlice, Part, PartKind, ZoneShape};
 use gpui::{Context, IntoElement, Window, div, prelude::*, px};
 
 use crate::client::DaemonClient;
-use crate::components::button::{Variant, button, button_icon, icon_button};
+use crate::components::button::{Variant, button_icon, icon_button};
 use crate::components::segmented::segmented;
 use crate::theme::{Theme, TokenRadius};
 use crate::views::layout::geometry::{LengthUnit, format_length};
@@ -580,7 +580,7 @@ pub fn onboarding_stage(
     guides: &[CaseGuide],
     unlock_badge: bool,
 ) -> gpui::AnyElement {
-    let t = view.theme;
+    let t = onboard_theme(view, StepKind::Hello);
     let colours = DeskTokens::for_theme(&t);
     let layout = view.layout().cloned();
     let devices = view.devices().to_vec();
@@ -697,23 +697,33 @@ pub fn complete_onboarding() {
 // UI.
 // ---------------------------------------------------------------------------
 
-/// The accent of the onboarding takeover: the brand violet (#6000fc, hue
-/// 263), the colour its own hello effect runs in. React paints the root
-/// element with the running frame's dominant hue
+/// The accent of the onboarding takeover.
+///
+/// React writes the running light's dominant hue to `--live-h`
 /// (`app/web/src/lib/preview.ts`), so the chrome answers the light the owner
-/// is being shown; the onboarding's light is the brand violet.
+/// is being shown. The onboarding's own light is the brand violet (#6000fc,
+/// hue 263), and the hello wave paints it: the accent is still the app's
+/// blue on the two first screens, where the wave has not settled yet, and
+/// violet from Your parts on (measured in the React captures: the logo mark
+/// is #80aeef on the Hello and the Case, #ab80ef on the other three).
 pub const ONBOARDING_HUE: u16 = 263;
+/// The app's own accent (`--live-h: 215`), the hue the chrome has before the
+/// onboarding's wave has settled.
+pub const APP_HUE: u16 = 215;
 
-/// The theme the takeover draws with: the app's theme on the onboarding's
-/// accent.
-fn onboard_theme(view: &LayoutView) -> Theme {
-    view.theme.with_live_hue(ONBOARDING_HUE)
+/// The theme the takeover draws with: the app's theme on the accent the
+/// screen is on.
+fn onboard_theme(view: &LayoutView, step: StepKind) -> Theme {
+    let hue = match step {
+        StepKind::Hello | StepKind::Case => APP_HUE,
+        StepKind::Parts | StepKind::Match | StepKind::Finish => ONBOARDING_HUE,
+    };
+    view.theme.with_live_hue(hue)
 }
 
 /// The word space of the UI font at a given weight, in em (the `hmtx` advance
 /// of U+0020 in `assets/fonts/schibsted-grotesk-*.ttf`). CSS adds the
 /// letter-spacing after the space too, so a tracked line needs it.
-const UI_SPACE_EM_400: f32 = 0.25391;
 const UI_SPACE_EM_600: f32 = 0.22705;
 /// The mono font's space: a full 0.6 em (`hmtx`, U+0020 in
 /// `assets/fonts/jetbrains-mono-400.ttf`).
@@ -758,7 +768,7 @@ fn step_head(t: Theme, kicker: Option<String>, title: gpui::AnyElement, lead: Op
 /// panel and wraps.
 fn title_text(t: Theme, text: &str, phone: bool) -> gpui::AnyElement {
     let size = if phone { 22.0 } else { 28.0 };
-    crate::components::panel::tracked_text_space(
+    crate::components::panel::tracked_text_space_nowrap(
         text,
         size,
         -0.02,
@@ -815,13 +825,13 @@ fn foot_row_ghost(t: Theme, id: &str, label: &str, icon: Option<(&str, &str, f32
 
 /// The onboarding takeover body (Onboarding.tsx:405-445).
 pub fn render_onboarding(view: &mut LayoutView, window: &mut Window, cx: &mut Context<LayoutView>) -> gpui::AnyElement {
-    let t = view.theme;
     let phone = view.width <= 960.0;
     let data = view.onboarding.clone();
     let Some(data) = data else {
         return div().flex_1().into_any_element();
     };
     let step = data.step();
+    let t = onboard_theme(view, step);
     let status = view.status.clone();
     let devices = view.devices.clone();
     let layout = view.layout().cloned();
@@ -873,15 +883,13 @@ pub fn render_onboarding(view: &mut LayoutView, window: &mut Window, cx: &mut Co
 
     // Finish sweep on arrival (FinishStep.tsx:70-76).
     if step == StepKind::Finish && !data.swept && view.capture_frozen {
-        // Captures: seed swept from the capture step name so pairs compare settled states.
-        // The default capture shoots swept; -OnboardingStep finish-sweep shoots sweeping.
-        if view.capture_step.as_deref() != Some("finish-sweep") {
-            if let Some(d) = view.onboarding.as_mut() {
-                let was = d.swept;
-                d.swept = true;
-                let _ = was;
-            }
-        }
+        // A capture is taken while the sweep is still crossing (React's
+        // capture shoots the Finish screen about a second after it arrives,
+        // and the sweep takes three), so the capture shows the sweeping
+        // screen: "Watch your PC." with the band on the bar and the Done key
+        // disabled. The swept screen ("Your PC is mapped." with the tiles)
+        // is what the owner sees three seconds later.
+        let _ = &data.swept;
     }
 
     let bar = header_bar(view, window, cx, step, &layout, devices.as_deref(), &data);
@@ -921,7 +929,7 @@ fn restore_effect(view: &mut LayoutView) {
 
 /// The header: brand, progress (from Parts on), "Set up later".
 fn header_bar(view: &mut LayoutView, _window: &mut Window, cx: &mut Context<LayoutView>, step: StepKind, layout: &Layout, devices: Option<&[DeviceInfo]>, _data: &OnboardData) -> gpui::AnyElement {
-    let t = view.theme;
+    let t = onboard_theme(view, step);
     let phone = view.width <= 960.0;
     let show_progress = step != StepKind::Hello && step != StepKind::Case;
     // BrandMark (BrandMark.tsx) + Wordmark (shell.rs): easel 18 px.
@@ -1010,7 +1018,7 @@ fn header_bar(view: &mut LayoutView, _window: &mut Window, cx: &mut Context<Layo
 
 /// The hardware-truth line (HardwareLine.tsx).
 fn hardware_line(view: &mut LayoutView, layout: &Layout, devices: Option<&[DeviceInfo]>, step: StepKind, gated: bool, save_error: Option<&str>) -> gpui::AnyElement {
-    let t = view.theme;
+    let t = onboard_theme(view, step);
     let status = view.status.clone();
     let phone = view.width <= 960.0;
     let devices_for_line = if step == StepKind::Hello || step == StepKind::Case { None } else { devices };
@@ -1066,27 +1074,38 @@ fn progress_dots(t: Theme, layout: &Layout, devices: Option<&[DeviceInfo]>, cele
         dots = dots.child(div().size(px(9.0)).rounded_full().bg(bg));
     }
     let _ = celebrate;
+    // React's count (`ProgressDots.tsx:47-49`): the mapped number sits in
+    // its own cell, so "0" stands where a "9" would; the total is padded to
+    // two digits. The mono font's space and its "0" are both a 0.6 em wide
+    // (`hmtx`), so the cells below are exact.
+    const MONO_EM: f32 = 0.6;
+    let size = 14.0;
+    let count = div()
+        .flex()
+        .items_center()
+        .flex_none()
+        .text_size(px(size))
+        .font_family(crate::fonts::MONO_FAMILY)
+        .text_color(Theme::color(t.dim))
+        .whitespace_nowrap()
+        .child(div().flex_none().child(format!("{mapped}")))
+        .child(div().w(px(size * MONO_EM)).flex_none())
+        .child("/")
+        .child(div().w(px(size * MONO_EM)).flex_none())
+        .child(format!("{:02}", parts.len()));
     div()
         .flex()
         .items_center()
         .gap_4()
         .min_w_0()
         .child(dots)
-        .child(
-            div()
-                .flex_none()
-                .text_sm()
-                .font_family(crate::fonts::MONO_FAMILY)
-                .text_color(Theme::color(t.dim))
-                .whitespace_nowrap()
-                .child(format!("{:02} / {:02}", mapped, parts.len())),
-        )
+        .child(count)
         .into_any_element()
 }
 
-/// The stage column: the desk, and (desktop only) its toolbar.
+/// The stage column: the desk, in its frame, and (desktop only) its toolbar.
 fn onboarding_stage_for(view: &mut LayoutView, window: &mut Window, cx: &mut Context<LayoutView>, step: StepKind, _data: &OnboardData) -> gpui::AnyElement {
-    let t = view.theme;
+    let t = onboard_theme(view, step);
     let phone = view.width <= 960.0;
     let colours = DeskTokens::for_theme(&t);
     let layout = view.layout().cloned();
@@ -1095,7 +1114,6 @@ fn onboarding_stage_for(view: &mut LayoutView, window: &mut Window, cx: &mut Con
         return div().flex_1().into_any_element();
     };
     let _ = window;
-    let _ = step;
     let desk_input = DeskInput {
         zones: layout.zones.clone(),
         landmarks: layout.landmarks.clone(),
@@ -1112,13 +1130,45 @@ fn onboarding_stage_for(view: &mut LayoutView, window: &mut Window, cx: &mut Con
     let desk_origin = view.desk_origin.clone();
     let desk = desk_with_hint(&t, &colours, desk_input, desk_origin, true);
     let desk = desk_handlers(desk, cx.entity());
+    // React's desk is the stage itself (`desk.module.css` `.desk.canvas`): a
+    // bordered, rounded panel with the drawing in it. On the desktop the
+    // toolbar is its own row under it (not inside a frame, as on the Layout
+    // page); on a phone the toolbar is not drawn at all.
+    let frame = div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w_0()
+        .min_h_0()
+        .border_1()
+        .border_color(Theme::color(t.line_2))
+        .r_lg()
+        .bg(Theme::color(t.sunk))
+        .overflow_hidden()
+        .child(desk);
     if phone {
         // The drawing is centred in what the sheet leaves (onboarding.module.css
-        // :1027-1033): a bounded height so the sheet stays on screen.
-        let h = (view.height * 0.34).max(160.0);
-        div().flex().flex_col().flex_none().h(px(h)).min_h_0().pb_4().child(desk).into_any_element()
+        // :1027-1033). The desk keeps its own proportions (320 x 200), less
+        // the stage's bottom padding: 208 px at 390 (measured in the React
+        // capture, the desk runs from y 88 to y 296).
+        let h = ((view.width - 32.0) * 0.625).max(160.0);
+        div().flex().flex_col().flex_none().h(px(h)).min_h_0().pb_4().child(frame).into_any_element()
     } else {
-        div().flex().flex_col().flex_1().min_h_0().gap_3().child(desk).child(stage_toolbar(view, &t, cx)).into_any_element()
+        // The desk's own box, in css pixels: the stage column (the window
+        // less the page's padding, the gap and the 360 px panel), less the
+        // desk's border. The zoom is read from it, as React reads it from
+        // the desk's own client box.
+        let desk_box = (view.width - 434.0, view.height - 160.0);
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .gap_3()
+            .child(frame)
+            .child(stage_toolbar_onboarding(view, &t, desk_box, cx))
+            .into_any_element()
     }
 }
 
@@ -1128,8 +1178,8 @@ fn desk_handlers(el: gpui::AnyElement, entity: gpui::Entity<LayoutView>) -> gpui
     crate::views::layout::desk_handlers_pub(el, entity)
 }
 
-fn stage_toolbar(view: &mut LayoutView, t: &Theme, cx: &mut Context<LayoutView>) -> gpui::AnyElement {
-    crate::views::layout::stage_toolbar_pub(view, t, cx)
+fn stage_toolbar_onboarding(view: &mut LayoutView, t: &Theme, desk: (f32, f32), cx: &mut Context<LayoutView>) -> gpui::AnyElement {
+    crate::views::layout::stage_toolbar_onboarding_pub(view, t, desk, cx)
 }
 
 /// The panel: one step's body (Onboarding.tsx:438-441).
@@ -1146,7 +1196,7 @@ fn panel_for(
     effects: &[canvas_proto::api::EffectSummary],
     _save_error: Option<&str>,
 ) -> gpui::AnyElement {
-    let t = view.theme;
+    let t = onboard_theme(view, step);
     let phone = view.width <= 960.0;
     let body = match step {
         StepKind::Hello => hello_body(view, cx, mode, devices),
@@ -1170,16 +1220,29 @@ fn panel_for(
         .overflow_hidden()
         .child(body);
     let panel = if phone {
-        panel
+        // React's sheet (the 960 px rule): a top border and the top corners
+        // only, the full width of the window and no more than 66 vh tall.
+        let mut panel = panel
             .flex()
             .flex_col()
             .flex_none()
-            .w_full()
+            // The sheet is the width of the window: React's negative side
+            // margins widen it past the page's own padding.
+            .w(px(view.width))
             .max_h(px(view.height * 0.66))
             .min_h_0()
             .mt_auto()
             .ml(px(-16.0))
             .mr(px(-16.0))
+            .border_0()
+            .border_t_1()
+            .border_color(Theme::color(t.line_2));
+        let corner = gpui::AbsoluteLength::Pixels(gpui::px(10.0));
+        panel.style().corner_radii.top_left = Some(corner);
+        panel.style().corner_radii.top_right = Some(corner);
+        panel.style().corner_radii.bottom_right = None;
+        panel.style().corner_radii.bottom_left = None;
+        panel
     } else {
         panel.flex_none()
     };
@@ -1194,29 +1257,43 @@ fn panel_for(
 fn step_frame(_t: Theme, phone: bool, center: bool, head: gpui::AnyElement, body: Option<gpui::AnyElement>, foot: gpui::AnyElement) -> gpui::AnyElement {
     let pad_v = if phone { px(20.0) } else { px(24.0) };
     let pad_h = if phone { px(16.0) } else { px(24.0) };
-    let mut col = div().flex().flex_col().flex_1().min_h_0().gap_5().px(pad_h).py(pad_v);
-    let inner = if center {
-        div().flex().flex_col().gap_5().flex_1().min_h_0().justify_center().child(head).child(body.unwrap_or(div().into_any_element()))
+    // React's `.step` gap is `--s4` on a phone (the 960 px rule) and `--s5`
+    // on the desktop.
+    let gap = if phone { px(16.0) } else { px(20.0) };
+    let mut col = div().flex().flex_col().flex_1().min_h_0().px(pad_h).py(pad_v);
+    let mut inner = div().flex().flex_col().gap(gap);
+    inner = inner.child(head);
+    if let Some(b) = body {
+        inner = inner.child(b);
+    }
+    if center {
+        // React's `.centerBlock` has `margin-block: auto` and the foot has
+        // `margin-top: auto`: the free space of the panel is split three
+        // ways, so the block sits a third of the way down the panel and the
+        // foot a third of the way up from its own bottom.
+        col = col.gap_0();
+        col = col.child(div().flex_1());
+        col = col.child(inner);
+        col = col.child(div().flex_1());
+        col = col.child(div().flex_none().h(px(20.0)));
+        col = col.child(div().flex_1());
+        col = col.child(foot);
     } else {
-        let mut c = div().flex().flex_col().gap_5().child(head);
-        if let Some(b) = body {
-            c = c.child(b);
-        }
-        c
-    };
-    col = col.child(inner);
-    // The foot's own margin-top: auto, as a spacer: GPUI's flex does not
-    // take an auto margin, and the foot has to sit on the panel's bottom
-    // edge (React's `.foot`).
-    col = col.child(
-        div()
-            .flex()
-            .flex_1()
-            .min_h_0()
-            .flex_col()
-            .justify_end()
-            .child(div().flex().flex_col().gap_2().pt(px(16.0)).child(foot)),
-    );
+        col = col.gap_5();
+        col = col.child(inner);
+        // The foot's own margin-top: auto, as a spacer: GPUI's flex does not
+        // take an auto margin, and the foot has to sit on the panel's bottom
+        // edge (React's `.foot`).
+        col = col.child(
+            div()
+                .flex()
+                .flex_1()
+                .min_h_0()
+                .flex_col()
+                .justify_end()
+                .child(div().flex().flex_col().gap_2().pt(px(16.0)).child(foot)),
+        );
+    }
     col.into_any_element()
 }
 
@@ -1246,7 +1323,7 @@ fn count_row(t: Theme, value: Option<usize>) -> gpui::AnyElement {
 }
 
 fn hello_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, mode: HelloMode, devices: Option<&[DeviceInfo]>) -> gpui::AnyElement {
-    let t = view.theme;
+    let t = onboard_theme(view, StepKind::Hello);
     let phone = view.width <= 960.0;
     let found = devices.map(|d| d.iter().filter(|x| x.connected).count()).unwrap_or(0);
     let data = view.onboarding.clone().unwrap();
@@ -1450,7 +1527,7 @@ fn greeting_el(t: Theme, phone: bool) -> gpui::AnyElement {
 }
 
 fn case_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, layout: &Layout, phone: bool) -> gpui::AnyElement {
-    let t = view.theme;
+    let t = onboard_theme(view, StepKind::Case);
     let data = view.onboarding.clone().unwrap();
     let case_box = layout.landmarks.iter().find(|l| l.kind == PartKind::Case).cloned();
     let at_default = case_box.as_ref().is_some_and(|c| {
@@ -1460,7 +1537,7 @@ fn case_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, layout: &Layou
     let head = step_head(t, Some("Case".to_string()), title_text(t, "Is this your case?", phone), Some("A typical mid tower. Adjust only if yours is clearly bigger or smaller."));
     let size_row = div()
         .flex()
-        .items_center()
+        .items_baseline()
         .justify_between()
         .gap_3()
         .px_4()
@@ -1485,13 +1562,17 @@ fn case_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, layout: &Layou
             .items_center()
             .justify_between()
             .gap_3()
-            .child(hint(t, "The dashed outlines are other tower sizes, to compare."))
-            .child(segmented(&t, "onb-unit", &[("cm", "cm"), ("in", "in")], match unit { LengthUnit::Cm => "cm", LengthUnit::In => "in" }, move |value, _w, cx| {
+            // The hint takes what the unit switch leaves (React's `.unitRow`
+            // is a space-between row and the hint wraps in what is left).
+            .child(div().flex_1().min_w(px(0.0)).child(hint(t, "The dashed outlines are other tower sizes, to compare.")))
+            // React's `.unitSwitch` is `flex: none`: the switch keeps its
+            // width and the hint wraps in what is left.
+            .child(div().flex_none().child(segmented(&t, "onb-unit", &[("cm", "cm"), ("in", "in")], match unit { LengthUnit::Cm => "cm", LengthUnit::In => "in" }, move |value, _w, cx| {
                 entity.update(cx, |this: &mut LayoutView, cx| {
                     this.unit = if value == "in" { LengthUnit::In } else { LengthUnit::Cm };
                     cx.notify();
                 });
-            }))
+            })))
             .into_any_element()
     };
     let body = div().flex().flex_col().gap_4().child(size_row).child(unit_row).into_any_element();
@@ -1523,7 +1604,7 @@ fn case_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, layout: &Layou
 }
 
 fn parts_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, layout: &Layout, devices: Option<&[DeviceInfo]>, phone: bool) -> gpui::AnyElement {
-    let t = view.theme;
+    let t = onboard_theme(view, StepKind::Parts);
     let data = view.onboarding.clone().unwrap();
     let devs = devices.unwrap_or(&[]);
     let missing = missing_parts(layout, devices);
@@ -1532,27 +1613,40 @@ fn parts_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, layout: &Layo
     let removable = view.selection.iter().filter(|s| matches!(s, Sel::Zone(_)) || matches!(s, Sel::Landmark(i) if layout.landmarks.get(*i).map(|l| l.kind) != Some(PartKind::Case))).count();
     let head = step_head(t, Some("Your parts".to_string()), title_text(t, "Put in what's in your PC.", phone), Some("Start from this guess: drag a part where it really sits, remove what you don't have, add what's missing."));
     let showing = div()
+        .relative()
         .flex()
         .flex_col()
-        .gap_1()
+        .gap(px(2.0))
         .px_4()
         .py_3()
         .border_1()
+        // React's `.showing` has a 3 px left border in the live colour.
+        .border_l_3()
         .border_color(Theme::color(t.line_2))
         .r_sm()
         .bg(Theme::color(t.sunk))
         .child(
             div()
                 .absolute()
-                .left_0()
+                .left(px(-3.0))
                 .top_0()
                 .bottom_0()
                 .w(px(3.0))
                 .bg(t.live()),
         )
-        .relative()
         .child(div().text_sm().font_family(crate::fonts::UI_FAMILY).text_color(Theme::color(t.mute)).child("On the drawing"))
-        .child(div().text_size(px(20.0)).font_weight(gpui::FontWeight::SEMIBOLD).font_family(crate::fonts::UI_FAMILY).text_color(Theme::color(t.ink)).child(format!("{} parts", lit + dark)))
+        .child(
+            div()
+                .flex()
+                .items_baseline()
+                .text_size(px(20.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .font_family(crate::fonts::UI_FAMILY)
+                .text_color(Theme::color(t.ink))
+                // The count is in the mono font (React's `.fig`).
+                .child(div().font_family(crate::fonts::MONO_FAMILY).child(format!("{}", lit + dark)))
+                .child(" parts"),
+        )
         .into_any_element();
     let mut body = div().flex().flex_col().gap_4().child(showing);
     if missing > 0 {
@@ -1563,9 +1657,17 @@ fn parts_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, layout: &Layo
     let add_row = {
         let mut row = div().flex().flex_wrap().gap_2();
         let entity = cx.entity();
-        for (kind, label, icon) in [(PartKind::Fan, "Fan", "Fan"), (PartKind::Strip, "Strip", "Minus"), (PartKind::Pump, "Pump", "Stack"), (PartKind::Ram, "RAM", "Package")] {
+        // React's `PartsStep.tsx`: the four parts that take a run of lights,
+        // then the two that do not, each a chip of its icon, its name and a
+        // bold plus.
+        for (kind, label, icon) in [
+            (PartKind::Fan, "Fan", "Fan"),
+            (PartKind::Strip, "Strip", "Minus"),
+            (PartKind::Pump, "Pump", "Stack"),
+            (PartKind::Ram, "RAM", "Package"),
+        ] {
             let e = entity.clone();
-            row = row.child(crate::components::chip::chip_icon_button(&t, &format!("onb-add-{label}"), label, Some((icon, "", 14.0)), crate::components::chip::ChipTone::Plain, false, false, false, move |_, _, cx| {
+            row = row.child(crate::components::chip::chip_add_part(&t, &format!("onb-add-{label}"), label, (icon, "", 14.0), move |_, _, cx| {
                 e.update(cx, |this: &mut LayoutView, cx| {
                     this.add_lit_part(kind, cx);
                 });
@@ -1573,7 +1675,7 @@ fn parts_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, layout: &Layo
         }
         for (kind, label, icon) in [(PartKind::Gpu, "GPU", "Stack"), (PartKind::Cpu, "CPU", "Cpu")] {
             let e = entity.clone();
-            row = row.child(crate::components::chip::chip_icon_button(&t, &format!("onb-add-{label}"), label, Some((icon, "", 14.0)), crate::components::chip::ChipTone::Plain, false, false, false, move |_, _, cx| {
+            row = row.child(crate::components::chip::chip_add_part(&t, &format!("onb-add-{label}"), label, (icon, "", 14.0), move |_, _, cx| {
                 e.update(cx, |this: &mut LayoutView, cx| {
                     this.add_landmark(kind);
                     cx.notify();
@@ -1635,7 +1737,7 @@ fn parts_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, layout: &Layo
 }
 
 fn match_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, layout: &Layout, _devices: Option<&[DeviceInfo]>, phone: bool) -> gpui::AnyElement {
-    let t = view.theme;
+    let t = onboard_theme(view, StepKind::Match);
     let data = view.onboarding.clone().unwrap();
     let zones = view.onboarding_match_zones();
     let total = all_runs(&zones).len();
@@ -1752,7 +1854,7 @@ fn match_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, layout: &Layo
 }
 
 fn finish_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, layout: &Layout, devices: Option<&[DeviceInfo]>, effects: &[canvas_proto::api::EffectSummary], phone: bool) -> gpui::AnyElement {
-    let t = view.theme;
+    let t = onboard_theme(view, StepKind::Finish);
     let data = view.onboarding.clone().unwrap();
     let scoped = data.scope.is_some();
     if !data.swept {
