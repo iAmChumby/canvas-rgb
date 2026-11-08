@@ -1274,19 +1274,34 @@ impl StackBuilder {
         // column's leftover height and the picture sits at its top with
         // an empty well under it.
         let body_gap = if narrow { gpui::px(8.0) } else { gpui::px(12.0) };
-        let mut body = div().flex().flex_col().gap(body_gap).min_h(px(0.0)).child(picture).child(foot);
+        // With the head margin at 0, the head-to-picture distance is the
+        // panel's own gap (`.rd-stack-stage { gap: s2/s3 }`): it lives as
+        // the body's top padding (React's canvas sits 8 px under the head
+        // at phone width, 12 px on desktop).
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .gap(body_gap)
+            .pt(body_gap)
+            .min_h(px(0.0))
+            .child(picture)
+            .child(foot);
         if narrow {
             body = body.flex_none();
         } else {
             body = body.flex_1();
         }
-        let mut panel = panel_with_padding(
+        let mut panel = crate::components::panel::panel_with_head_margin(
             &t,
             "rd-stack-stage",
             "Preview",
             head,
             body,
             Some(12.0),
+            // `.rd-stack-stage .panel-head { margin-bottom: 0 }` at every
+            // width: with the base 12 px margin the stage ran 12 px tall
+            // (at 390: layers panel at 377 against React's 371).
+            0.0,
         );
         if narrow {
             panel = panel.flex_none();
@@ -1427,8 +1442,20 @@ impl StackBuilder {
         };
 
         // React `.rd-layers` padding is `s3` (12 px) on desktop and `s2`
-        // (8 px) on a phone (`.rd-stacks-phone .rd-layers`).
-        panel_with_padding(&t, "rd-layers", "Layers", head, body, Some(if narrow { 8.0 } else { 12.0 })).into_any_element()
+        // (8 px) on a phone (`.rd-stacks-phone .rd-layers`), and its head
+        // carries `s2` (8 px) under it (`.rd-layers .panel-head`), not
+        // the base panel's 12 px: at 12 the rows measured 4 px low
+        // (424 against React's 416 at 390).
+        crate::components::panel::panel_with_head_margin(
+            &t,
+            "rd-layers",
+            "Layers",
+            head,
+            body,
+            Some(if narrow { 8.0 } else { 12.0 }),
+            8.0,
+        )
+        .into_any_element()
     }
 
     /// One layer row.
@@ -1480,7 +1507,9 @@ impl StackBuilder {
                 .items_center()
                 .justify_center()
                 .text_color(Theme::color(t.mute))
-                .child(gpui::svg().path("icons/GripDots.svg").size(px(16.0))),
+                // The glyph carries its own colour (every other svg() call
+                // site does): parent-only colour left it unpainted (#214).
+                .child(gpui::svg().path("icons/GripDots.svg").size(px(16.0)).text_color(Theme::color(t.mute))),
         );
         // The thumbnail.
         row = row.child(thumb(&t, &effect, 44.0, 28.0, cached(&effect), true));
@@ -1549,10 +1578,14 @@ impl StackBuilder {
         };
         let label = self.layer_label(&picked.effect);
         // React's `.panel` without a title: the summary carries no tracked
-        // title row, just the head (`layer-edit-head`).
+        // title row, just the head (`layer-edit-head`). Phone padding is
+        // `s3` (12 px: `.rd-stacks-phone .rd-layer-summary`), not the base
+        // panel's `s4` (16 px), so the card starts 4 px higher and is 8 px
+        // shorter (measured at 390x844: React 12,592,366x64 against GPUI
+        // 602-668).
         div()
             .id(gpui::SharedString::from("rd-layer-summary"))
-            .p_4()
+            .p_3()
             .r_lg()
             .border_1()
             .border_color(Theme::color(t.line))
@@ -1924,7 +1957,11 @@ impl StackBuilder {
                             ),
                     ),
             )
-            .child(button(&t, "rd-change-area", "Change area", Variant::Ghost, false, {
+            // React's Change area is `btn btn-ghost btn-sm` (28 px), not the
+            // base key's 32 px: at 32 the area row ran 4 px taller and the
+            // property separators sat at 354/418/470 against React's
+            // 350/414/466 (measured at 1440x900).
+            .child(crate::components::button::button_sm(&t, "rd-change-area", "Change area", Variant::Ghost, false, {
                 let entity = entity.clone();
                 move |_, _, cx| {
                     entity.update(cx, |this, cx| {

@@ -1574,7 +1574,10 @@ impl Shell {
         // reads "New s…" / "Sunset…", not the full name. The builder is
         // the one page that brings a leading back key to the strip.
         let title_text = if phone && page_leading.is_some() {
-            ellipsize(window, &title_text, 68.0, 20.0, gpui::FontWeight::SEMIBOLD, crate::fonts::UI_FAMILY)
+            // React's h1 box is 81 px wide here (measured at 390x844 with
+            // "Sunset glow": h1 48,15,81x20, reading "Sunset…"); at 68 the
+            // name clipped to "Suns…".
+            ellipsize(window, &title_text, 81.0, 20.0, gpui::FontWeight::SEMIBOLD, crate::fonts::UI_FAMILY)
         } else {
             title_text
         };
