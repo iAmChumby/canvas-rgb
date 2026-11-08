@@ -167,6 +167,27 @@ pub fn button(
     }
 }
 
+/// A button whose label sits in a box of `text_w` px, centred: React's `Swap`
+/// stacks every label of the key in one cell, so the key is as wide as the
+/// widest (the Updates key); GPUI would shrink-wrap the one label shown.
+pub fn button_swap(
+    t: &Theme,
+    id: &str,
+    label: &str,
+    text_w: f32,
+    variant: Variant,
+    disabled: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    let el = base(t, id, variant, disabled, false)
+        .child(div().w(px(text_w)).flex_none().text_center().child(label.to_string()));
+    if disabled {
+        el
+    } else {
+        el.cursor_pointer().on_click(on_click)
+    }
+}
+
 /// A small (28 px) button, as the strip's Pause lights uses (`size="sm"`).
 #[allow(dead_code)]
 pub fn button_sm(

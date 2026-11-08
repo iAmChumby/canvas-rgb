@@ -63,6 +63,11 @@ pub const KEY_LABELS: [&str; 6] = [
     "Try again",
 ];
 
+/// The key's label width: the widest of [`KEY_LABELS`] at 14 px / 500 (React's
+/// `Swap` stacks them all; the key measures 162.9 px at 1440, padding and
+/// border 26 px of it).
+const KEY_TEXT_W: f32 = 136.9;
+
 /// The longest state line; the state line reserves room for it.
 pub const LONGEST_STATE: &str =
     "The download failed its check and was deleted. Nothing was installed.";
@@ -552,7 +557,7 @@ pub fn parse_inline(text: &str) -> Vec<Inline> {
 
 use gpui::{Context, IntoElement, Window, div, prelude::*, px};
 
-use crate::components::button::{Variant, button, button_sm, skirt_layers};
+use crate::components::button::{Variant, button, button_sm, button_swap, skirt_layers};
 use crate::components::panel::tracked_title;
 use crate::theme::{Theme, TokenRadius};
 
@@ -852,13 +857,14 @@ impl UpdatesView {
                         a: 0.0,
                     },
                 ))
-                .child(label)
+                .child(div().w(px(KEY_TEXT_W)).flex_none().text_center().child(label))
                 .into_any_element()
         } else {
-            button(
+            button_swap(
                 t,
                 "updates-key",
                 &label,
+                KEY_TEXT_W,
                 Variant::Primary,
                 !acts,
                 move |_, _, cx| {
@@ -884,12 +890,15 @@ impl UpdatesView {
                 .bg(t.live())
                 .w(gpui::relative(p)),
         };
-        let mut col = div()
+        // `.upd-key` is inline-flex: the key and its slot are one unit as wide
+        // as the key, not the card (a flex row around it shrink-wraps the unit).
+        let unit = div()
             .flex()
             .flex_col()
+            .min_w(px(0.0))
             .gap(px(8.0))
             .child(key);
-        col = col.child(
+        let unit = unit.child(
             div()
                 .id(gpui::SharedString::from("updates-slot"))
                 .relative()
@@ -901,6 +910,9 @@ impl UpdatesView {
                 .overflow_hidden()
                 .child(fill_el),
         );
+        // The inline-flex unit sits in a line box: its strut leaves about 1 px
+        // under the slot (measured against the React shots).
+        let mut col = div().flex().flex_col().child(div().flex().mb(px(1.0)).child(unit));
         if let Some(err) = &self.key_err {
             col = col.child(self.error_line(err, false));
         }

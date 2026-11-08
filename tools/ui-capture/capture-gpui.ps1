@@ -58,6 +58,10 @@ param(
     # read CANVAS_RGB_CAPTURE_SCROLL). Files are <page>-scroll<px>-gpui-...,
     # pairing with capture-react.mjs UI_CAPTURE_SCROLL.
     [int]$Scroll = 0,
+    # #206: the tray stub's update state: '' (up to date) or 'available' (0.2.0
+    # with notes; capture-react.mjs UI_CAPTURE_UPDATE=available). The Updates
+    # shot is named updates-<name>-gpui-... so diff-pairs.ps1 pairs it.
+    [string]$UpdateState = '',
     # #205: print the layout bounds of the probed elements to the console
     # (debug builds read CANVAS_RGB_CAPTURE_PROBE); settings.rs `pr(..)` names them.
     [switch]$Probe
@@ -191,6 +195,9 @@ $saved = 0
 $stubFile = $null
 if ($TrayStub) {
   $stateLine = '{"type":"update-state","state":{"current_version":"0.1.0","auto_check":true,"last_check":null,"phase":{"kind":"up_to_date"},"available":null,"skipped_version":null,"snoozed":false,"updated_to":null}}'
+  if ($UpdateState -eq 'available') {
+    $stateLine = '{"type":"update-state","state":{"current_version":"0.1.0","auto_check":true,"last_check":null,"phase":{"kind":"available"},"available":{"version":"0.2.0","notes":"### Added\n- A new thing you can do with your lights.\n- Another change that is long enough to wrap onto a second line on a phone screen.\n\n### Fixed\n- A bug that kept a fan on its last speed.","pub_date":"2026-11-01T00:00:00Z"},"skipped_version":null,"snoozed":false,"updated_to":null}}'
+  }
   $prefsLine = '{"type":"prefs","prefs":{"editor":"react","channel":"stable"}}'
   $stubFile = Join-Path $outDir 'tray-stub-stdin.txt'
   $stubText = $stateLine + "`n" + $prefsLine + "`n"
@@ -336,6 +343,7 @@ foreach ($theme in $Themes) {
         $shot = $bmp.Clone((New-Object System.Drawing.Rectangle($ox, $oy, $clientW, $clientH)), $bmp.PixelFormat)
         $bmp.Dispose()
         $viewName = if ($Palette) { "palette$paletteSuffix" } elseif ($Onboarding) { "onboarding-$OnboardingStep" } elseif ($Editor -ne '') { "editor" } elseif ($Stack -ne '') { "stack-$((($Stack.ToLower() -replace '[^a-z0-9]+', '-')).Trim('-'))" } else { $page }
+        if ($UpdateState -ne '' -and $page -eq 'updates') { $viewName = "updates-$UpdateState" }
         if ($Scroll -gt 0) { $viewName = "$viewName-scroll$Scroll" }
         $file = Join-Path $outDir "$viewName-gpui-${size}-$theme.png"
         $shot.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
