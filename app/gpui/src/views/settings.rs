@@ -540,6 +540,26 @@ const MAP_HINT_ONE_LINE_W: f32 = 196.0;
 /// the head's picker takes the row less this and the 12 px gap).
 const AUDIO_TITLE_W: f32 = 106.1;
 
+/// The wrapped Brightness slider's slot: the panel's inner width less the
+/// number well and its unit (98.4 px: React's `.unit` "%" is 8.4 px, "fps" 15).
+fn brightness_slot_w(inner_w: f32) -> f32 {
+    (inner_w - 98.4).max(80.0)
+}
+
+/// The compact Audio head's select: React `.audio-picker-head` is `flex: 0 1
+/// 300px; min-width: 160px`, so it takes the head (the panel's inner width
+/// less its 2 px border) minus the title and the 12 px gap, clamped.
+fn compact_audio_select_w(inner_w: f32) -> f32 {
+    (inner_w - 2.0 - AUDIO_TITLE_W - 12.0).clamp(160.0, 300.0)
+}
+
+/// Whether the Setup panel's "Walk through every light again" hint wraps to two
+/// lines: the label column is what is left of the panel's inner width after the
+/// "Map my PC again" key and the field's column gap.
+fn map_hint_wraps(col_w: f32, pad: f32) -> bool {
+    col_w - pad * 2.0 - SETUP_MAP_KEY_W - FIELD_GAP_X < MAP_HINT_ONE_LINE_W
+}
+
 /// Debug only (#205): `CANVAS_RGB_CAPTURE_PROBE=1` prints the layout bounds of
 /// the elements wrapped with [`pr`] to stderr, once per change, so a capture
 /// run reports where GPUI really put a box (React's are probed in headless
@@ -1633,7 +1653,7 @@ impl SettingsView {
         // 16.8 px more of the row: 72 + 6 + 8.4 + the 12 px gap = 98.4 to
         // the right of it. The same 115 for both rows left the "%" well 14 px
         // short of the row's right edge at 390.
-        let bri_slot_w = if wrapped { Some((inner_w - 98.4).max(80.0)) } else { None };
+        let bri_slot_w = if wrapped { Some(brightness_slot_w(inner_w)) } else { None };
         let mut body = div()
             .flex()
             .flex_col()
@@ -2289,7 +2309,7 @@ impl SettingsView {
             // ("AUDIO SOURCE" tracked, about 105 px) keeps its width and
             // the select takes the rest, clamped [160, 300]: a content-sized
             // flex_1 let the select overlap the title at 390.
-            let select_w = (inner_w - 2.0 - AUDIO_TITLE_W - 12.0).clamp(160.0, 300.0);
+            let select_w = compact_audio_select_w(inner_w);
             let select = self.audio_select("settings-audio-select", true, true, cx);
             let head_actions = div()
                 .flex_none()
@@ -2991,8 +3011,7 @@ impl Render for SettingsView {
                         // margin takes the 0.5 px back, only when Setup's
                         // hint wraps and Version stacks under it.
                         let col_w = (content_w - (cols - 1) as f32 * 16.0) / cols as f32;
-                        let label_w = col_w - pad * 2.0 - SETUP_MAP_KEY_W - FIELD_GAP_X;
-                        let under_wrapped = under_setup && label_w < MAP_HINT_ONE_LINE_W;
+                        let under_wrapped = under_setup && map_hint_wraps(col_w, pad);
                         col.child(pr("p-version", self.version_panel(pad, phone, under_wrapped, cx)))
                     }
                 };
@@ -3352,5 +3371,30 @@ mod tests {
         );
         assert!(experimental_checked(Some(&TrayPrefs { editor: EditorChoice::React, channel: UpdateChannel::Experimental })));
         assert!(!experimental_checked(None));
+    }
+
+    #[test]
+    fn compact_audio_select_takes_the_head_less_the_title() {
+        // 390 px phone: panel 358, padding 12: inner 334, head 332 in React.
+        let w = compact_audio_select_w(334.0);
+        assert!((w - 213.9).abs() < 0.01, "{w}");
+        // Roomy heads cap at React's 300 px basis, tight ones keep 160.
+        assert_eq!(compact_audio_select_w(900.0), 300.0);
+        assert_eq!(compact_audio_select_w(200.0), 160.0);
+    }
+
+    #[test]
+    fn brightness_slot_leaves_room_for_the_well_and_percent_unit() {
+        assert!((brightness_slot_w(334.0) - 235.6).abs() < 0.01);
+        assert_eq!(brightness_slot_w(100.0), 80.0);
+    }
+
+    #[test]
+    fn setup_hint_wraps_below_the_one_line_width() {
+        // 1440x900: content 1192, three columns, (1192 - 32) / 3 = 386.7 wide
+        // with padding 16: label column 386.7 - 32 - 161.11 - 16 = 177.6 < 196.
+        assert!(map_hint_wraps(386.67, 16.0));
+        // 1920x1040: a column of 546.7 leaves 337 px and the hint fits one line.
+        assert!(!map_hint_wraps(546.67, 16.0));
     }
 }
