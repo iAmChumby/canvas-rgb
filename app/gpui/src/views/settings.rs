@@ -2888,7 +2888,11 @@ impl Render for SettingsView {
             }
             grid = grid.child(col);
         }
-        page.child(grid)
+        let page = page.child(grid);
+        match super::capture_scroll() {
+            s if s > 0.0 => page.relative().top(px(-s)),
+            _ => page,
+        }
     }
 }
 

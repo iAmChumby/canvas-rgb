@@ -53,7 +53,11 @@ param(
     [switch]$Onboarding,
     [string]$OnboardingStep = 'hello',
     # Mirror a React demo ?state= token (--onboarding-state).
-    [string]$OnboardingState = ''
+    [string]$OnboardingState = '',
+    # #205: scroll the page down this many pixels before the shot (debug builds
+    # read CANVAS_RGB_CAPTURE_SCROLL). Files are <page>-scroll<px>-gpui-...,
+    # pairing with capture-react.mjs UI_CAPTURE_SCROLL.
+    [int]$Scroll = 0
 )
 if ($ApiPort -eq 9430) { throw "-ApiPort 9430 is the real daemon's port; captures run only against the fakes" }
 if ($PaletteQuery -ne '') { $Palette = $true }
@@ -129,6 +133,7 @@ $PW_RENDERFULLCONTENT = 0x00000002
 # the real daemon on 9430 (#239).
 $env:CANVAS_RGB_HOME = Join-Path $root '.build\fake-home'
 $env:CANVAS_RGB_TEST_API_PORT = "$ApiPort"
+if ($Scroll -gt 0) { $env:CANVAS_RGB_CAPTURE_SCROLL = "$Scroll" } else { Remove-Item Env:CANVAS_RGB_CAPTURE_SCROLL -ErrorAction SilentlyContinue }
 if (-not (Get-NetTCPConnection -State Listen -LocalPort $ApiPort -ErrorAction SilentlyContinue)) {
   throw "no fake daemon is listening on ${ApiPort}: start it with tools/run-fake-daemon.ps1"
 }
@@ -213,6 +218,10 @@ foreach ($theme in $Themes) {
       $psi.UseShellExecute = $false
       $psi.CreateNoWindow = $true
       $psi.RedirectStandardInput = [bool]$TrayStub
+      # Windows PowerShell's Process.StandardInput writes a UTF-8 BOM before the first
+      # line unless the console input encoding is BOM-free; the editor dropped the
+      # update-state line as invalid JSON (#205).
+      if ($TrayStub) { [Console]::InputEncoding = New-Object System.Text.UTF8Encoding $false }
       # token: the developer's own, non-elevated (the shell running this script).
       $proc = [System.Diagnostics.Process]::Start($psi)
       if ($TrayStub) {
@@ -317,6 +326,7 @@ foreach ($theme in $Themes) {
         $shot = $bmp.Clone((New-Object System.Drawing.Rectangle($ox, $oy, $clientW, $clientH)), $bmp.PixelFormat)
         $bmp.Dispose()
         $viewName = if ($Palette) { "palette$paletteSuffix" } elseif ($Onboarding) { "onboarding-$OnboardingStep" } elseif ($Editor -ne '') { "editor" } elseif ($Stack -ne '') { "stack-$((($Stack.ToLower() -replace '[^a-z0-9]+', '-')).Trim('-'))" } else { $page }
+        if ($Scroll -gt 0) { $viewName = "$viewName-scroll$Scroll" }
         $file = Join-Path $outDir "$viewName-gpui-${size}-$theme.png"
         $shot.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
         $shot.Dispose()

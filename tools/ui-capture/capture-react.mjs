@@ -37,6 +37,8 @@
 //   UI_CAPTURE_EDITOR=<effect name>  (#214) open the code editor on that
 //       effect: the library's card is clicked and then "Edit code". The shot
 //       is named editor-react-<w>x<h>-<theme>.png.
+//   UI_CAPTURE_SCROLL=<px>  (#205) scroll the page down that far first; files
+//       are <view>-scroll<px>-react-<w>x<h>-<theme>.png.
 //   UI_CAPTURE_STACK=<stack name>  (#214) open the stack builder on that
 //       stack ("new" for a stack that has never been saved). The shot is
 //       named stack-<slug>-react-<w>x<h>-<theme>.png.
@@ -126,6 +128,10 @@ const EDITOR_EFFECT = (process.env.UI_CAPTURE_EDITOR ?? "").trim();
 // stack that has never been saved). The shot is named
 // stack-<slug>-react-<w>x<h>-<theme>.png.
 const STACK_NAME = (process.env.UI_CAPTURE_STACK ?? "").trim();
+// #205: UI_CAPTURE_SCROLL=<px> scrolls the page that far down before the shot
+// (Settings has panels below the fold at every size but the largest). The shot
+// is named <view>-scroll<px>-react-<w>x<h>-<theme>.png.
+const SCROLL_PX = Math.max(0, Number(process.env.UI_CAPTURE_SCROLL ?? 0) || 0);
 
 function slugOf(text) {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
@@ -524,6 +530,25 @@ async function shootPage(page, base, view, viewport, theme, daemonBase, token, p
       await page.keyboard.type(paletteQuery, { delay: 10 });
     }
     await page.waitForTimeout(400);
+  }
+  if (SCROLL_PX > 0) {
+    // #205: scroll the page by this many pixels before the shot, so the
+    // panels below the fold can be compared. The Settings and Updates pages
+    // scroll in their own pane from 721 px up and as a document below that;
+    // the pane is used when it really scrolls, else the document. The file is
+    // named <view>-scroll<px>-react-... and the GPUI shot pairs with it.
+    fileName = `${view.name}-scroll${SCROLL_PX}-react-${viewport.w}x${viewport.h}-${theme}.png`;
+    const how = await page.evaluate((y) => {
+      const pane = document.querySelector(".rd-settings-scroll, .rd-updates-grid, .rd-updates-notes");
+      if (pane && pane.scrollHeight > pane.clientHeight + 1 && getComputedStyle(pane).overflowY !== "visible") {
+        pane.scrollTop = y;
+        return `pane ${pane.className}: scrollTop ${pane.scrollTop} of ${pane.scrollHeight - pane.clientHeight}`;
+      }
+      window.scrollTo(0, y);
+      return `document: scrollY ${window.scrollY} of ${document.documentElement.scrollHeight - window.innerHeight}`;
+    }, SCROLL_PX);
+    process.stderr.write(`  scroll ${SCROLL_PX}: ${how}\n`);
+    await page.waitForTimeout(300);
   }
   const filePath = path.join(OUT_DIR, fileName);
   // Park the pointer off any key, so a shot is the resting state and not a
