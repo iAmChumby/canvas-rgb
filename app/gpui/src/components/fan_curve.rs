@@ -594,8 +594,8 @@ pub fn fan_curve_chart(
                     let outlines = caption_outlines("Full speed", 14.0);
                     // GPUI 0.2.2 strokes with no join control: a 4 px mitered
                     // halo spikes on sharp glyph corners (SVG's default miter
-                    // limit 4 clips them). An offset-copy halo â€” a 2 px path
-                    // painted at the five 1 px offsets â€” gives the same 4 px
+                    // limit 4 clips them). An offset-copy halo — a 2 px path
+                    // painted at the five 1 px offsets — gives the same 4 px
                     // halo without the spikes.
                     let mut fill = gpui::PathBuilder::fill();
                     for contour in &outlines {

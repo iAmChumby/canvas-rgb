@@ -42,10 +42,12 @@ use gpui::{Context, IntoElement, Window, div, prelude::*, px};
 use crate::client::DaemonClient;
 use crate::components::button::{Variant, button, button_icon, button_icon_wide, button_sm};
 use crate::components::panel::{field_hint, field_stack_hint, state_dot, tracked_title_nowrap};
-use crate::components::segmented::segmented;
-use crate::components::select::select_grouped_trunc;
-use crate::components::slider::{Origin, slider_range};
-use crate::components::toggle::{toggle, toggle_disabled};
+use crate::components::focus::tab_handle;
+use crate::components::segmented::{segmented_focus};
+use crate::components::select::{NavState, Outcome, SelectKb, chosen_index, select_grouped_kb};
+use crate::components::slider::{Origin, slider_range_kb};
+use crate::components::text_input::TextInput;
+use crate::components::toggle::{toggle_disabled, toggle_focus};
 use crate::theme::{Theme, TokenRadius};
 
 // ---------------------------------------------------------------------------
@@ -616,6 +618,55 @@ fn pr(name: impl Into<String>, el: impl IntoElement) -> gpui::AnyElement {
 /// The theme the shell and this view share (see `shell.rs`).
 pub type ThemeCell = Arc<Mutex<Theme>>;
 
+/// One focus handle per control, in the order React's DOM lists them
+/// (`SettingsView.tsx:159-313`): Rendering, Appearance, Lock and quit, Audio
+/// source, Version. Tab walks them in paint order, which is this order.
+pub struct SettingsFocus {
+    pub fps_slider: gpui::FocusHandle,
+    pub bri_slider: gpui::FocusHandle,
+    pub theme: Vec<gpui::FocusHandle>,
+    pub motion: Vec<gpui::FocusHandle>,
+    pub black_lock: gpui::FocusHandle,
+    pub quit: Vec<gpui::FocusHandle>,
+    pub audio_select: gpui::FocusHandle,
+    pub listen: gpui::FocusHandle,
+    pub update_auto: gpui::FocusHandle,
+    pub update_experimental: gpui::FocusHandle,
+    pub editor: Vec<gpui::FocusHandle>,
+}
+
+impl SettingsFocus {
+    fn new(cx: &gpui::App) -> Self {
+        let many = |n: usize| (0..n).map(|_| tab_handle(cx)).collect::<Vec<_>>();
+        SettingsFocus {
+            fps_slider: tab_handle(cx),
+            bri_slider: tab_handle(cx),
+            theme: many(3),
+            motion: many(2),
+            black_lock: tab_handle(cx),
+            quit: many(2),
+            audio_select: tab_handle(cx),
+            listen: tab_handle(cx),
+            update_auto: tab_handle(cx),
+            update_experimental: tab_handle(cx),
+            editor: many(2),
+        }
+    }
+}
+
+/// `Popover.tsx:156-158`: Escape is the one key that closes the popover.
+pub fn popover_closes_on(key: &str) -> bool {
+    key == "escape"
+}
+
+/// The On quit radio's option for a setting (`SettingsView.tsx:234-244`).
+pub fn on_quit_value(on_quit: canvas_proto::config::OnQuit) -> &'static str {
+    match on_quit {
+        canvas_proto::config::OnQuit::Black => "black",
+        canvas_proto::config::OnQuit::LeaveLastFrame => "leave_last_frame",
+    }
+}
+
 pub struct SettingsView {
     pub theme: Theme,
     pub theme_cell: ThemeCell,
@@ -641,7 +692,20 @@ pub struct SettingsView {
     pub listen: bool,
     pub audio_test: Option<AudioTestState>,
     pub lease_id: Option<String>,
-    pub audio_select_open: bool,
+    /// The audio source select's open flag, active row and type-ahead.
+    pub audio_nav: NavState,
+    /// Where the audio select's trigger was painted (a press on it is not "outside").
+    pub audio_trigger: Origin,
+    /// The monotonic clock the select's type-ahead reads.
+    pub started: std::time::Instant,
+    pub focus: SettingsFocus,
+    /// The readings popover's own focus (`tabIndex={-1}`: focusable, not in the tab order).
+    pub popover_focus: gpui::FocusHandle,
+    /// The page itself: it holds the focus while no control does, so Tab works from the start.
+    pub page_focus: gpui::FocusHandle,
+    /// The Frame rate and Brightness number entries (`NumberField`).
+    pub fps_input: gpui::Entity<TextInput>,
+    pub bri_input: gpui::Entity<TextInput>,
     pub popover_open: bool,
     pub visible: bool,
     pub audio_use_popover: bool,
@@ -686,9 +750,42 @@ impl SettingsView {
         } else {
             "light".to_string()
         };
+        // `NumberField` (`SettingsView.tsx:175`, `:188`): a typed entry that
+        // commits on Enter or blur, steps on ArrowUp/ArrowDown, and takes any
+        // character (a draft that is not a number is dropped on commit).
+        let weak = cx.weak_entity();
+        let number_input = |initial: &str, min: f32, max: f32, is_fps: bool, cx: &mut Context<Self>| {
+            let weak = weak.clone();
+            cx.new(|cx| {
+                let on_commit: crate::components::text_input::OnCommit = std::rc::Rc::new(move |v, _, cx| {
+                    let _ = weak.update(cx, |this, cx| {
+                        if is_fps {
+                            this.commit_fps(v as u32, cx);
+                        } else {
+                            this.commit_brightness(v as u8, cx);
+                        }
+                    });
+                });
+                let mut input = TextInput::new(initial, true, min, max, 0, theme, on_commit, cx);
+                input.set_border_2(cx);
+                input.set_unfiltered();
+                input.set_step(1.0);
+                input
+            })
+        };
+        let fps_input = number_input("30", 10.0, 60.0, true, cx);
+        let bri_input = number_input("100", 0.0, 100.0, false, cx);
         let mut view = SettingsView {
             theme,
             theme_cell,
+            fps_input,
+            bri_input,
+            focus: SettingsFocus::new(cx),
+            popover_focus: cx.focus_handle(),
+            page_focus: cx.focus_handle(),
+            audio_nav: NavState::default(),
+            audio_trigger: Origin::new(),
+            started: std::time::Instant::now(),
             settings: None,
             settings_error: None,
             load_error: None,
@@ -709,7 +806,6 @@ impl SettingsView {
             listen: false,
             audio_test: None,
             lease_id: None,
-            audio_select_open: false,
             popover_open: false,
             visible,
             audio_use_popover: false,
@@ -1048,7 +1144,7 @@ impl SettingsView {
             )
         };
         self.audio_err = None;
-        self.audio_select_open = false;
+        self.audio_nav.open = false;
         let bg = cx.background_executor().spawn(async move {
             let client = DaemonClient::new();
             let put = client.put_json("/api/v1/audio/source", &body);
@@ -1190,6 +1286,14 @@ impl SettingsView {
             }
         })
         .detach();
+    }
+
+    /// The readings popover closes (`Popover.tsx` `onClose`): Escape or a press outside.
+    fn close_popover(&mut self, cx: &mut Context<Self>) {
+        if self.popover_open {
+            self.popover_open = false;
+            cx.notify();
+        }
     }
 
     fn set_listen(&mut self, on: bool, cx: &mut Context<Self>) {
@@ -1467,21 +1571,26 @@ impl SettingsView {
         if mt { el.mt_2() } else { el }
     }
 
-    /// The number well (`.num` + `.unit`): 72 px, mono right-aligned,
-    /// the unit beside it. GPUI has no text input, so the well is a
-    /// display; the slider drag is the way to change the value (React's
-    /// field is typed into — the checklist's NumberField keyboard items
-    /// stay unticked, as they do for Displays).
+    /// The number entry (`NumberField`, `.num` + `.unit`): 72 px, mono
+    /// right-aligned, the unit beside it. It is a typed entry
+    /// (`NumberField.tsx`): Enter or blur commits the clamped number,
+    /// ArrowUp and ArrowDown step by 1 and commit, and focus selects the
+    /// whole entry.
     fn number_well(
         &self,
         _id: &str,
         value: u32,
-        _min: u32,
-        _max: u32,
+        is_fps: bool,
         unit: &str,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = &self.theme;
+        let input = if is_fps { self.fps_input.clone() } else { self.bri_input.clone() };
+        let theme = self.theme;
+        input.update(cx, |i, cx| {
+            i.set_theme(theme);
+            i.set_value(&value.to_string(), cx);
+        });
         // React `.field-slider .row-wrap`: the 72 px `.num` plus the unit's
         // advance, so the row is 72 + 6 + unit wide (103 for "fps", 86 for
         // "%"). A fixed 103 put Brightness 17 px left at every size.
@@ -1491,23 +1600,7 @@ impl SettingsView {
             .w(px(72.0 + 6.0 + unit_w))
             .items_center()
             .gap(px(6.0))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_end()
-                    .w(px(72.0))
-                    .h(px(32.0))
-                    .px_2()
-                    .r_md()
-                    .border_1()
-                    .border_color(Theme::color(t.line_2))
-                    .bg(Theme::color(t.sunk))
-                    .text_color(Theme::color(t.ink))
-                    .text_size(px(15.0))
-                    .font_family(crate::fonts::MONO_FAMILY)
-                    .child(value.to_string()),
-            )
+            .child(div().flex_none().w(px(72.0)).child(input))
             .child(
                 // GPUI does not give a bare text div its text width in a
                 // flex row (the slider ate it at 390), so the unit cell
@@ -1532,8 +1625,6 @@ impl SettingsView {
         min: f32,
         max: f32,
         num_value: u32,
-        num_min: u32,
-        num_max: u32,
         unit: &str,
         origin: Origin,
         is_fps: bool,
@@ -1543,14 +1634,17 @@ impl SettingsView {
         let view_entity = cx.entity();
         let change_entity = view_entity.clone();
         let commit_entity = view_entity.clone();
-        let slider = slider_range(
+        let handle = if is_fps { &self.focus.fps_slider } else { &self.focus.bri_slider };
+        let slider = slider_range_kb(
             &self.theme,
             id,
             value,
             min,
             max,
+            1.0,
             false,
             origin,
+            Some(handle),
             move |v, _, cx| {
                 change_entity.update(cx, |this, cx| {
                     if is_fps {
@@ -1571,7 +1665,7 @@ impl SettingsView {
                 });
             },
         );
-        let well = self.number_well(&format!("{id}-num"), num_value, num_min, num_max, unit, cx);
+        let well = self.number_well(&format!("{id}-num"), num_value, is_fps, unit, cx);
         let slider = match slot_w {
             // Wrapped fields (phone and narrow columns): the slot takes
             // its React width (inner minus the number row) directly —
@@ -1667,8 +1761,6 @@ impl SettingsView {
                     10.0,
                     60.0,
                     shown_fps,
-                    10,
-                    60,
                     "fps",
                     self.fps_origin.clone(),
                     true,
@@ -1688,8 +1780,6 @@ impl SettingsView {
                     0.0,
                     100.0,
                     shown_bri as u32,
-                    0,
-                    100,
                     "%",
                     self.bri_origin.clone(),
                     false,
@@ -1710,21 +1800,23 @@ impl SettingsView {
         let t = &self.theme;
         let view_entity = cx.entity();
         let theme_entity = view_entity.clone();
-        let theme_control = segmented(
+        let theme_control = segmented_focus(
             t,
             "settings-theme",
             &[("dark", "Dark"), ("light", "Light"), ("system", "System")],
             &self.theme_pref.clone(),
+            &self.focus.theme,
             move |v, _, cx| {
                 theme_entity.update(cx, |this, cx| this.apply_theme(v, cx));
             },
         );
         let motion_entity = view_entity.clone();
-        let motion_control = segmented(
+        let motion_control = segmented_focus(
             t,
             "settings-motion",
             &[("full", "Full"), ("reduced", "Reduced")],
             &self.motion_pref.clone(),
+            &self.focus.motion,
             move |v, _, cx| {
                 motion_entity.update(cx, |this, cx| this.apply_motion(v, cx));
             },
@@ -2088,10 +2180,11 @@ impl SettingsView {
         };
         let view_entity = cx.entity();
         let black_entity = view_entity.clone();
-        let black_control = toggle(
+        let black_control = toggle_focus(
             t,
             "settings-black-lock",
             settings.black_on_lock,
+            &self.focus.black_lock,
             move |v, _, cx| {
                 black_entity.update(cx, |this, cx| {
                     if let Some(s) = &this.settings {
@@ -2103,14 +2196,12 @@ impl SettingsView {
             },
         );
         let quit_entity = view_entity.clone();
-        let quit_control = segmented(
+        let quit_control = segmented_focus(
             t,
             "settings-on-quit",
             &[("black", "Black"), ("leave_last_frame", "Leave last frame")],
-            match settings.on_quit {
-                canvas_proto::config::OnQuit::Black => "black",
-                canvas_proto::config::OnQuit::LeaveLastFrame => "lead",
-            },
+            on_quit_value(settings.on_quit),
+            &self.focus.quit,
             move |v, _, cx| {
                 quit_entity.update(cx, |this, cx| {
                     if let Some(s) = &this.settings {
@@ -2202,11 +2293,71 @@ impl SettingsView {
             .collect();
         let view_entity = cx.entity();
         let toggle_entity = view_entity.clone();
-        let pick_entity = view_entity;
+        let pick_entity = view_entity.clone();
         let value = self.audio_value();
-        let open = self.audio_select_open;
+        let open = self.audio_nav.open;
         let disabled = self.audio_sources.is_none();
-        select_grouped_trunc(
+        // The flat rows (`Select.tsx:46`): the type-ahead reads their labels,
+        // Enter picks by index, and the chosen row opens the list.
+        let flat_values: Vec<String> = groups_owned.iter().flat_map(|(_, o)| o.iter().map(|(v, _)| v.clone())).collect();
+        let flat_labels: Vec<String> = groups_owned.iter().flat_map(|(_, o)| o.iter().map(|(_, l)| l.clone())).collect();
+        let chosen = chosen_index(&flat_values.iter().map(String::as_str).collect::<Vec<_>>(), &value);
+        let key_entity = view_entity.clone();
+        let key_values = flat_values.clone();
+        let key_value = value.clone();
+        let on_key: crate::components::select::KeyHandler =
+            std::rc::Rc::new(move |ev, _window, cx| {
+                let key = ev.keystroke.key.clone();
+                // A chord (Ctrl, Alt, the Windows key) is not typing.
+                let m = &ev.keystroke.modifiers;
+                let typed = if m.control || m.alt || m.platform { None } else { ev.keystroke.key_char.clone() };
+                let labels = flat_labels.clone();
+                let values = key_values.clone();
+                let current = key_value.clone();
+                key_entity.update(cx, |this, cx| {
+                    let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+                    let now = this.started.elapsed().as_millis() as u64;
+                    let outcome = this.audio_nav.key(&key, typed.as_deref(), &refs, chosen, disabled, now);
+                    match outcome {
+                        Outcome::Ignored => {}
+                        Outcome::Handled => {
+                            cx.stop_propagation();
+                            cx.notify();
+                        }
+                        Outcome::Pick(i) => {
+                            cx.stop_propagation();
+                            // `Select.tsx:105`: only a different value is a change.
+                            if let Some(v) = values.get(i).filter(|v| **v != current) {
+                                this.pick_audio(v.clone(), cx);
+                            }
+                            cx.notify();
+                        }
+                    }
+                });
+            });
+        let hover_entity = view_entity.clone();
+        let dismiss_entity = view_entity;
+        let kb = SelectKb {
+            focus: self.focus.audio_select.clone(),
+            active: self.audio_nav.active,
+            trigger: self.audio_trigger.clone(),
+            on_key,
+            on_hover: std::rc::Rc::new(move |i, _, cx| {
+                hover_entity.update(cx, |this, cx| {
+                    if this.audio_nav.active != i {
+                        this.audio_nav.hover(i);
+                        cx.notify();
+                    }
+                });
+            }),
+            on_dismiss: std::rc::Rc::new(move |_, cx| {
+                dismiss_entity.update(cx, |this, cx| {
+                    this.audio_nav.dismiss();
+                    cx.notify();
+                });
+            }),
+        };
+        select_grouped_kb(
             &self.theme,
             id,
             &refs,
@@ -2217,14 +2368,22 @@ impl SettingsView {
             // The compact head fixes the trigger's width; the inline field
             // shrink-wraps the widest label.
             truncate,
+            kb,
             move |_, cx| {
                 toggle_entity.update(cx, |this, cx| {
-                    this.audio_select_open = !this.audio_select_open;
+                    this.audio_nav.click_trigger(chosen, disabled);
                     cx.notify();
                 });
             },
             move |v, _, cx| {
-                pick_entity.update(cx, |this, cx| this.pick_audio(v, cx));
+                pick_entity.update(cx, |this, cx| {
+                    // `Select.tsx:99-106`: a click on a row closes the list and
+                    // changes the value only when it differs.
+                    if this.audio_nav.click_row(0).is_some() && this.audio_value() != v {
+                        this.pick_audio(v, cx);
+                    }
+                    cx.notify();
+                });
             },
         )
         .into_any_element()
@@ -2317,7 +2476,7 @@ impl SettingsView {
                 .justify_end()
                 .child(select);
             let listen_entity = view_entity.clone();
-            let listen_control = toggle(t, "settings-audio-listen", self.listen, move |v, _, cx| {
+            let listen_control = toggle_focus(t, "settings-audio-listen", self.listen, &self.focus.listen, move |v, _, cx| {
                 listen_entity.update(cx, |this, cx| this.set_listen(v, cx));
             });
             let pop_entity = view_entity.clone();
@@ -2327,9 +2486,14 @@ impl SettingsView {
                 if self.popover_open { "Hide readings" } else { "Show readings" },
                 Variant::Ghost,
                 false,
-                move |_, _, cx| {
+                move |_, window, cx| {
                     pop_entity.update(cx, |this, cx| {
                         this.popover_open = !this.popover_open;
+                        // `AudioSourcePanel.tsx:240-245`: focus moves into the
+                        // popover when it opens.
+                        if this.popover_open {
+                            window.focus(&this.popover_focus);
+                        }
                         this.start_audio_poll(cx);
                         cx.notify();
                     });
@@ -2380,8 +2544,27 @@ impl SettingsView {
                             .child(Self::EFFECT_NOTE),
                     );
                 }
+                // `Popover.tsx:156-168`: Escape closes it, and so does a press
+                // anywhere but the panel and its anchor (the audio picker).
+                let esc_entity = view_entity.clone();
+                let out_entity = view_entity.clone();
+                let anchor = self.audio_trigger.clone();
                 body = body.child(
                     div()
+                        .id(gpui::SharedString::from("settings-audio-popover"))
+                        .track_focus(&self.popover_focus)
+                        .on_key_down(move |ev, _, cx| {
+                            if popover_closes_on(ev.keystroke.key.as_str()) {
+                                cx.stop_propagation();
+                                esc_entity.update(cx, |this, cx| this.close_popover(cx));
+                            }
+                        })
+                        .on_mouse_down_out(move |ev, _, cx| {
+                            let at = (f32::from(ev.position.x), f32::from(ev.position.y));
+                            if !crate::components::select::trigger_hit(anchor.get(), at.0, at.1) {
+                                out_entity.update(cx, |this, cx| this.close_popover(cx));
+                            }
+                        })
                         .absolute()
                         .top(px(38.0))
                         .right_0()
@@ -2437,10 +2620,11 @@ impl SettingsView {
             let picker_row = {
                 let mut r = div().flex().items_center().gap_3().flex_1().min_w(px(0.0)).child(select);
                 if input_selected {
-                    r = r.child(toggle(
+                    r = r.child(toggle_focus(
                         t,
                         "settings-audio-listen",
                         self.listen,
+                        &self.focus.listen,
                         move |v, _, cx| {
                             listen_entity.update(cx, |this, cx| this.set_listen(v, cx));
                         },
@@ -2580,7 +2764,7 @@ impl SettingsView {
         let auto_control = if auto_disabled_state {
             toggle_disabled(t, "settings-update-auto", auto_checked_state, |_, _, _| {}).into_any_element()
         } else {
-            toggle(t, "settings-update-auto", auto_checked_state, move |v, _, cx| {
+            toggle_focus(t, "settings-update-auto", auto_checked_state, &self.focus.update_auto, move |v, _, cx| {
                 auto_entity.update(cx, |this, cx| {
                     this.tray_err = None;
                     cx.notify();
@@ -2627,7 +2811,7 @@ impl SettingsView {
                 |_, _, _| {},
             ).into_any_element()
         } else {
-            toggle(t, "settings-update-experimental", experimental_checked_state, move |v, _, cx| {
+            toggle_focus(t, "settings-update-experimental", experimental_checked_state, &self.focus.update_experimental, move |v, _, cx| {
                 experimental_entity.update(cx, |this, cx| {
                     this.tray_err = None;
                     cx.notify();
@@ -2657,7 +2841,7 @@ impl SettingsView {
                     |_, _, _| {},
                 ).into_any_element()
             } else {
-                segmented(t, "settings-update-editor", opts, editor_selected, move |v, _, cx| {
+                segmented_focus(t, "settings-update-editor", opts, editor_selected, &self.focus.editor, move |v, _, cx| {
                     editor_entity.update(cx, |this, cx| {
                         this.tray_err = None;
                         cx.notify();
@@ -2864,6 +3048,9 @@ impl SettingsView {
 
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The page's buttons are native buttons: in the tab order, fired by Enter and Space.
+        let _keys = crate::components::focus::ButtonKeys::on();
+        crate::components::focus::claim_when_idle(&self.page_focus, window, cx);
         // The tray's lines that are already waiting (a `ready` push): take them
         // before this draw, so the first frame with a tray is already tray state.
         self.drain_tray(cx);
@@ -3036,6 +3223,30 @@ impl Render for SettingsView {
                 page = page.child(div().absolute().top(px(i as f32 * 30.0)).left(px(0.0)).child(width_of(name, text)));
             }
         }
+        // Tab and Shift+Tab walk the controls in document order (the browser
+        // does this for React); Escape closes the readings popover from any
+        // control (`Popover.tsx` listens on the document).
+        let page = page
+            .track_focus(&self.page_focus)
+            .capture_key_down(cx.listener(|_, _: &gpui::KeyDownEvent, _, cx| {
+                // `:focus-visible`: the ring shows after a key, not after a pointer press.
+                if crate::components::focus::note_modality(true) {
+                    cx.notify();
+                }
+            }))
+            .capture_any_mouse_down(cx.listener(|_, _: &gpui::MouseDownEvent, _, cx| {
+                if crate::components::focus::note_modality(false) {
+                    cx.notify();
+                }
+            }));
+        let page = page.on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
+            if crate::components::focus::handle_tab(ev, window) {
+                cx.stop_propagation();
+            } else if popover_closes_on(ev.keystroke.key.as_str()) && this.popover_open {
+                cx.stop_propagation();
+                this.close_popover(cx);
+            }
+        }));
         match super::capture_scroll() {
             s if s > 0.0 => page.relative().top(px(-s)),
             _ => page,

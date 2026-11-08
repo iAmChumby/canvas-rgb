@@ -20,6 +20,19 @@ pub enum Variant {
 }
 
 fn colors(t: &Theme, variant: Variant, disabled: bool) -> (Rgba, Rgba, Rgba) {
+    colors_at(t, variant, disabled, 0.5)
+}
+
+/// A token's colour at `alpha` of its own strength: CSS `opacity` multiplies
+/// the translucent tokens (`--line` is not opaque) instead of replacing them.
+fn scaled(c: Rgba, alpha: f32) -> Rgba {
+    Rgba { a: c.a * alpha, ..c }
+}
+
+/// [`colors`] with the disabled key at `alpha` of full strength: 0.5 is
+/// hardware.css `.btn:disabled{opacity:.5}`, 1.0 is update.css
+/// `.btn[aria-busy="true"]:disabled{opacity:1}` (the key while an update runs).
+fn colors_at(t: &Theme, variant: Variant, disabled: bool, alpha: f32) -> (Rgba, Rgba, Rgba) {
     let transparent = Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
     let (bg, fg, border) = match variant {
         Variant::Primary => (t.live(), Theme::color(t.on_accent), transparent),
@@ -39,17 +52,19 @@ fn colors(t: &Theme, variant: Variant, disabled: bool) -> (Rgba, Rgba, Rgba) {
             // A disabled ghost is bare text (React `.btn-ghost:disabled`:
             // background and border transparent, mute words at half strength:
             // hardware.css `.btn:disabled{opacity:.5}` applies to ghosts too).
-            return (bg, Rgba { a: 0.5, ..Theme::color(t.mute) }, border);
+            return (bg, scaled(Theme::color(t.mute), alpha), border);
         }
+        // app.css:1002 `.btn:disabled`: `--raised` ground, `--line` border and
+        // `--mute` words for every non-ghost key, the primary included.
         let bg = if variant == Variant::Primary {
             Theme::color(t.raised)
         } else {
             bg
         };
         (
-            Rgba { a: 0.5, ..bg },
-            Rgba { a: 0.5, ..Theme::color(t.mute) },
-            Rgba { a: 0.5, ..border },
+            scaled(bg, alpha),
+            scaled(Theme::color(t.mute), alpha),
+            scaled(Theme::color(t.line), alpha),
         )
     } else {
         (bg, fg, border)
@@ -111,7 +126,18 @@ fn base(
     disabled: bool,
     small: bool,
 ) -> gpui::Stateful<gpui::Div> {
-    let (bg, fg, border) = colors(t, variant, disabled);
+    base_at(t, id, variant, disabled, small, 0.5)
+}
+
+fn base_at(
+    t: &Theme,
+    id: &str,
+    variant: Variant,
+    disabled: bool,
+    small: bool,
+    alpha: f32,
+) -> gpui::Stateful<gpui::Div> {
+    let (bg, fg, border) = colors_at(t, variant, disabled, alpha);
     let skirt_color = match variant {
         Variant::Primary => t.live_skirt(),
         _ => t.skirt(),
@@ -138,6 +164,13 @@ fn base(
         el.r_md().border_1().border_color(border).bg(bg)
     } else {
         el.child(skirt_layers(skirt_color, 10.0, key_h, bg, border))
+    };
+    // A page that opted in (`focus::ButtonKeys`) gets a native `<button>`: in the
+    // tab order, focused by a press, fired by Enter or Space, ringed by the keyboard.
+    let el = if !disabled && crate::components::focus::buttons_take_focus() {
+        el.focusable().tab_stop(true).focus(crate::components::focus::ring(t))
+    } else {
+        el
     };
     // React's `.btn` always has a 1 px border inside its box. A skirted key draws its
     // border on the face layer, not on this box, so it gets the border's 1 px back as
@@ -186,6 +219,16 @@ pub fn button_swap(
     } else {
         el.cursor_pointer().on_click(on_click)
     }
+}
+
+/// The Update now key while an update runs (`UpdatesView.tsx:75-76`,
+/// `aria-busy` and `disabled`): a disabled key at full strength
+/// (update.css:152 `.btn[aria-busy="true"]:disabled{opacity:1}`), so it keeps
+/// the plain raised face with `--mute` words that every disabled key has, not
+/// the accent. It sends nothing.
+pub fn button_swap_busy(t: &Theme, id: &str, label: &str, text_w: f32) -> impl IntoElement {
+    base_at(t, id, Variant::Primary, true, false, 1.0)
+        .child(div().w(px(text_w)).flex_none().text_center().child(label.to_string()))
 }
 
 /// A small (28 px) button, as the strip's Pause lights uses (`size="sm"`).

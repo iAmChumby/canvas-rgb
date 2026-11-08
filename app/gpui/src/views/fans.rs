@@ -376,7 +376,7 @@ pub fn table_columns(fans: &FansStatus, page: f32, width: f32) -> TableColumns {
     }
 }
 
-/// Whether the table is the narrow one (no history column) â€” from the page
+/// Whether the table is the narrow one (no history column) — from the page
 /// width, not from the computed columns.
 pub fn narrow_table(page: f32) -> bool {
     page <= 999.0

@@ -2,9 +2,27 @@
 //! rules in `app.css` re-skinned by `hardware.css`: a 40x22 slot, a 16 px
 //! knob, sunk when off and live when on, the knob travelling 18 px.
 
-use gpui::{BoxShadow, IntoElement, Window, div, point, prelude::*, px};
+use std::rc::Rc;
+
+use gpui::{BoxShadow, FocusHandle, IntoElement, Window, div, point, prelude::*, px};
 
 use crate::theme::Theme;
+
+/// Which half of a key press a handler sees.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyPhase {
+    Down,
+    Up,
+}
+
+/// A native `<button>`'s keys (React `Toggle.tsx` is `<button role="switch">`):
+/// Enter clicks it on key down, Space clicks it on key up. Nothing else does.
+pub fn activates(key: &str, phase: KeyPhase) -> bool {
+    match phase {
+        KeyPhase::Down => key == "enter",
+        KeyPhase::Up => key == "space",
+    }
+}
 
 /// A switch. `checked` draws the on state; clicking reports the new state.
 pub fn toggle(
@@ -13,6 +31,30 @@ pub fn toggle(
     checked: bool,
     on_change: impl Fn(bool, &mut Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
+    toggle_with(t, id, checked, None, on_change)
+}
+
+/// A switch that takes the keyboard focus (`Toggle.tsx`'s `<button>`): it is
+/// in the tab order, Enter and Space flip it, and a focus ring draws around
+/// it (`app.css:95` `:focus-visible`, 2 px `--focus`).
+pub fn toggle_focus(
+    t: &Theme,
+    id: &str,
+    checked: bool,
+    focus: &FocusHandle,
+    on_change: impl Fn(bool, &mut Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    toggle_with(t, id, checked, Some(focus), on_change)
+}
+
+fn toggle_with(
+    t: &Theme,
+    id: &str,
+    checked: bool,
+    focus: Option<&FocusHandle>,
+    on_change: impl Fn(bool, &mut Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    let on_change = Rc::new(on_change);
     let track = if checked {
         t.live()
     } else {
@@ -40,6 +82,10 @@ pub fn toggle(
             blur_radius: px(0.0),
             spread_radius: px(0.0),
         }]);
+    let click = on_change.clone();
+    let down = on_change.clone();
+    let up = on_change;
+    let ring = crate::components::focus::ring(t);
     div()
         .id(gpui::SharedString::from(id.to_string()))
         .relative()
@@ -56,7 +102,23 @@ pub fn toggle(
         })
         .bg(track)
         .cursor_pointer()
-        .on_click(move |_, window, cx| on_change(!checked, window, cx))
+        .on_click(move |_, window, cx| click(!checked, window, cx))
+        .when_some(focus, move |d, handle| {
+            d.track_focus(&handle.clone().tab_stop(true))
+                .focus(ring)
+                .on_key_down(move |ev, window, cx| {
+                    if activates(ev.keystroke.key.as_str(), KeyPhase::Down) {
+                        cx.stop_propagation();
+                        down(!checked, window, cx);
+                    }
+                })
+                .on_key_up(move |ev, window, cx| {
+                    if activates(ev.keystroke.key.as_str(), KeyPhase::Up) {
+                        cx.stop_propagation();
+                        up(!checked, window, cx);
+                    }
+                })
+        })
         // hardware.css `--well` on the slot: the recess's top line inside it
         // (the checked pill's ring). GPUI has no inset shadow, so the line
         // is drawn inside the top edge, as in `segmented`.
@@ -127,6 +189,8 @@ pub fn toggle_disabled(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn toggle_reports_the_flipped_state() {
         let mut seen = Vec::new();
@@ -135,5 +199,19 @@ mod tests {
         change(!false);
         change(!true);
         assert_eq!(seen, vec![true, false]);
+    }
+
+    /// `Toggle.tsx` is a `<button>`: Enter clicks on key down, Space on key
+    /// up, and no other key does (a native button ignores arrows and letters).
+    #[test]
+    fn toggle_enter_and_space_activate_like_a_native_button() {
+        assert!(activates("enter", KeyPhase::Down));
+        assert!(!activates("enter", KeyPhase::Up));
+        assert!(activates("space", KeyPhase::Up));
+        assert!(!activates("space", KeyPhase::Down));
+        for other in ["left", "right", "up", "down", "tab", "escape", "a", "home"] {
+            assert!(!activates(other, KeyPhase::Down), "{other} down");
+            assert!(!activates(other, KeyPhase::Up), "{other} up");
+        }
     }
 }
