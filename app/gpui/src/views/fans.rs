@@ -1591,10 +1591,14 @@ impl FansView {
         if self.more_open {
             menu = menu.child(self.profile_menu(cx));
         }
+        // React's `.rd-actions` gap is `--s1` (4) on a phone and `--s2` (8)
+        // above it (measured at 390: the strip is 208.77 wide - the segment
+        // 136.77, the save key 36 and the menu 28, with 4 px between them).
+        let gap = if self.window_width <= 720.0 { px(4.0) } else { px(8.0) };
         div()
             .flex()
             .items_center()
-            .gap_2()
+            .gap(gap)
             .child(seg)
             .child(save_btn)
             .child(menu)

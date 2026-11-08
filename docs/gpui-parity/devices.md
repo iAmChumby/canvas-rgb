@@ -207,23 +207,38 @@ Run before marking done: `git log <pinned SHA>..HEAD --oneline -- <React files>`
 - Each folded in: [x] none — `git diff 0937970..HEAD -- app/web/src/views/DevicesView.tsx app/web/src/views/editor/IdentifyWalker.tsx` is empty (command run; nothing to fold in).
 
 ## Screenshot pairs
-Taken by `tools/ui-capture/` against the daemon on the fakes (fake OpenRGB, API port 19830, OpenRGB port 17142). 6 sizes × 2 themes = 12 pairs.
-GPUI binary SHA-256 `79909485BE54C6BEF15D949987A92E3001C01C307C0A0D73E8EE9129E7E0AC9C` (target/debug/canvas-rgb-editor.exe, built at commit b7016bf; every other pair was taken with a binary identical except for the behavior-identical frame_state/clippy refactors — verified: 1440x900-dark re-measured at 2.46% (31817/1296000) with the final binary).
+Taken by `tools/ui-capture/` against the daemon on the fakes (fake OpenRGB, API port **19840**, OpenRGB port **17152** — the ports the earlier rounds used, 19830 and 17142, were held by another process on this machine). 4 sizes × 2 themes = 8 pairs, taken on 2026-11-08.
+GPUI binary SHA-256 `15BE7C5AEF23B602D9D371EA3E36235C5E8C6EADB7565614473BD18532AED9D9` (target/debug/canvas-rgb-editor.exe, built at commit `a5270a2`; every pair below was taken with that binary, after that commit).
 
 | Size | Dark (React / GPUI) | Light (React / GPUI) | Pixel diff (changed / total) |
 |---|---|---|---|
-| 1920x1040 | ✓ / ✓ | ✓ / ✓ | dark 1.56% (31081/1996800), light 1.60% (31972/1996800) |
-| 1440x900 | ✓ / ✓ | ✓ / ✓ | dark 2.46% (31817/1296000), light 2.52% (32608/1296000) |
-| 1280x860 | ✓ / ✓ | ✓ / ✓ | dark 2.92% (32152/1100800), light 3.01% (33088/1100800) |
-| 1024x768 | ✓ / ✓ | ✓ / ✓ | dark 3.26% (25648/786432), light 3.25% (25556/786432) |
-| 960x1032 | ✓ / ✓ | ✓ / ✓ | dark 2.51% (24848/990720), light 2.50% (24726/990720) |
-| 390x844 | ✓ / ✓ | ✓ / ✓ | dark 9.88% (32529/329160), light 9.78% (32197/329160) |
+| 1920x1040 | ✓ / ✓ | ✓ / ✓ | dark 1.43% (28628/1996800), light 1.48% (29564/1996800) |
+| 1440x900 | ✓ / ✓ | ✓ / ✓ | dark 2.30% (29827/1296000), light 2.37% (30759/1296000) |
+| 1024x768 | ✓ / ✓ | ✓ / ✓ | dark 2.95% (23171/786432), light 2.94% (23121/786432) |
+| 390x844 | ✓ / ✓ | ✓ / ✓ | dark 7.28% (23952/329160), light 7.25% (23877/329160) |
 
-Displays regression (the shell wiring shares `shell.rs`): `displays-1440x900-dark differing=19604/1296000 (1.51%) boxes=59` — unchanged at the limit.
+The GPUI capture needs `-TrayStub` (React always injects a `__TAURI__` stand-in); without it the
+Updates page never leaves its loading frame.
+
+Round 4 (2026-11-08, `a5270a2`) before → after, raw, no mask:
+1920x1040 dark 28628 → 28628, light 29564 → 29564; 1440x900 dark 29827 → 29827, light 30759 → 30759;
+1024x768 dark 23171 → 23171, light 23121 → 23121; 390x844 dark 24033 → 23952, light 23954 → 23877.
+
+Displays regression (the shell wiring shares `shell.rs`): `displays-1440x900-dark differing=18633/1296000 (1.44%)` and `displays-390x844-dark differing=17163/329160 (5.21%)` — both at the limit, unchanged.
 
 ## Reviewer verdict
 Builder's own pair review (no adversarial reviewer was assigned in this grind). Biggest boxes and reasons:
-- 390x844 (9.88% dark / 9.78% light): over the <6% target. The pair diff is dominated by shell chrome (the dock and strip occupy the same boxes as in the Displays 390 pair, which alone diffs 5.53%) plus phone-layout choices: the device-row wrap was modeled with the same order/widths as React's `flex-wrap` + `order`, but the sub-line and strip positions are approximations (React's wrap puts state, sub, strip and count across two lines per its own shrink). Fixing the last 40px costs visible-item work left for a follow-up; the phone rows are visually faithful (names, states, strips, counts all present in the right places).
-- 1024x768 (3.26% dark / 3.25% light): strip positions now match within ~10px after the explicit proportional row split; remaining boxes are text raster.
-- 1920x1040 (1.56% dark / 1.60% light): the balanced two columns are now drawn (MSI alone in the left column, the four single-row cards stacked on the right), matching React's `columns: 2` balancing.
+- 390x844 (7.28% dark / 7.25% light): over the <5% target. The strip and the dock are the
+  shell's, not this view's (`displays-390x844-dark` is 5.21% with an empty page below the
+  strip). The rest of the pair is the device rows' text: the GPUI's glyph advances differ
+  from Chromium's by a fraction of a pixel per word, so every glyph of a row lands on a
+  different pixel (`-Row 80`: React's "MSI MPG B850 Mystic Light (fake)" starts at 60, the
+  GPUI's at 61; the word starts differ by 0 or 1 px). The zone name now sits in the middle
+  of its column, as React's centred `.zone-strip-name` does (`-Row 306`: React "JRGB1" at
+  94, the GPUI at 98 after the fix, 60 before it).
+- 1024x768 (2.95% dark / 2.94% light): strip positions match within ~10 px after the
+  explicit proportional row split; remaining boxes are text raster.
+- 1920x1040 (1.43% dark / 1.48% light): the balanced two columns are drawn (MSI alone in
+  the left column, the four single-row cards stacked on the right), matching React's
+  `columns: 2` balancing.
 - Everywhere else: text-raster noise (GPUI vs Chromium anti-aliasing) plus the truncated-name ellipsis ("(fa" vs React "(...)"), a known GPUI limitation noted in shell.rs.

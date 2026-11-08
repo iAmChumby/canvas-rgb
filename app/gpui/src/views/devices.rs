@@ -1285,11 +1285,14 @@ impl DevicesView {
             // phone), so the count ends at the slot's left minus the
             // `--s2` (8 px) gap. Vertical padding is `--s1` (4), right
             // `--s4` (16). Padding is `--s6` (24) on the left like the
-            // stylesheet; the name cell itself is indented 20 px past it:
-            // measured at 390×844 (row box at 16, the name's first glyph at
-            // 60 with `-Row 190`; the dashed ink runs 126–272, which pins
-            // the drawing to the padding edge at 40), so the name carries
-            // the indent the stylesheet's own grid does not name.
+            // stylesheet.
+            //
+            // React's `.zone-strip-name` keeps `justify-content: center`
+            // from the wide rule (the phone rule only turns the box into a
+            // row), so the name sits in the middle of its `1fr` cell, not
+            // at a fixed inset: "JARGB1" reads at x 60 in a 95 px cell and
+            // "JRGB1" at x 89 in a 142 px one (measured at 390 with
+            // `-Row 138` and `-Row 306`).
             div()
                 .flex()
                 .flex_col()
@@ -1308,7 +1311,9 @@ impl DevicesView {
                             div()
                                 .flex_1()
                                 .min_w(px(0.0))
-                                .ml(px(20.0))
+                                .flex()
+                                .items_baseline()
+                                .justify_center()
                                 .line_height(gpui::relative(1.25))
                                 .child(
                                     div()
