@@ -258,6 +258,9 @@ pub struct EffectsView {
     pub stack_route: StackRoute,
     /// The builder, when one is open.
     pub builder: Option<gpui::Entity<stack_builder::StackBuilder>>,
+    /// The window-level overlay host (#246): the builder's naming dialog
+    /// is drawn over the whole window, the way React's fixed scrim is.
+    pub overlay: gpui::Entity<crate::shell::WindowOverlay>,
     pub new_open: bool,
     pub new_busy: Option<String>,
     pub new_error: Option<String>,
@@ -283,7 +286,11 @@ pub struct EffectsView {
 }
 
 impl EffectsView {
-    pub fn new(theme: Theme, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        theme: Theme,
+        overlay: gpui::Entity<crate::shell::WindowOverlay>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let search_input = cx.new(|cx| {
             let mut input = TextInput::new("", false, 0.0, 0.0, 0, theme, std::rc::Rc::new(|_, _, _| {}), cx);
             // The icon sits inside the field (React `.effect-search`), so
@@ -327,6 +334,7 @@ impl EffectsView {
             editor_view: None,
             stack_route: StackRoute::new(),
             builder: None,
+            overlay,
             new_open: false,
             new_busy: None,
             new_error: None,
@@ -986,8 +994,9 @@ impl EffectsView {
         self.stack_route.go(name);
         let entity = cx.entity();
         let page = entity.clone();
+        let overlay = self.overlay.clone();
         let builder = cx.new(|cx| {
-            stack_builder::StackBuilder::new(self.theme, name, Some(page), cx)
+            stack_builder::StackBuilder::new(self.theme, name, Some(page), overlay, cx)
         });
         // Debug only (#246): the capture asks for the builder's save error or
         // its naming error, the way the builder's own flow reaches it
@@ -1005,6 +1014,10 @@ impl EffectsView {
     pub fn close_stack(&mut self, cx: &mut Context<Self>) {
         self.stack_route.close();
         self.builder = None;
+        // Nothing is over the window any more (#246): the builder's dialog
+        // went with it.
+        let overlay = self.overlay.clone();
+        overlay.update(cx, |host, cx| host.set(None, cx));
         cx.notify();
     }
 

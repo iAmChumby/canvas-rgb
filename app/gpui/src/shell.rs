@@ -44,6 +44,47 @@ use crate::views::peripherals::PeripheralsView;
 use crate::views::settings::{SettingsView, ThemeCell};
 use crate::views::updates::UpdatesView;
 
+/// The window-level overlay host (#246).
+///
+/// React's `.rd-scrim` is `position: fixed`, so the stack builder's naming
+/// dialog covers the rail, the strip and the dock too. The page hands the
+/// host the overlay to draw, and the host draws it over the whole window,
+/// above the page, the way the palette's backdrop does.
+pub struct WindowOverlay {
+    /// The overlay the page wants over the window. It is built when the
+    /// host draws it, not kept as an element, because the page's state
+    /// changes under it (the name, the reason under the field).
+    build: Option<Box<dyn Fn(&mut Window, &mut gpui::App) -> gpui::AnyElement>>,
+}
+
+impl WindowOverlay {
+    pub fn new() -> Self {
+        Self { build: None }
+    }
+
+    /// The page sets the overlay, or takes it away with `None`.
+    pub fn set(
+        &mut self,
+        build: Option<Box<dyn Fn(&mut Window, &mut gpui::App) -> gpui::AnyElement>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.build = build;
+        cx.notify();
+    }
+}
+
+impl Render for WindowOverlay {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(build) = self.build.as_ref() else {
+            // Nothing over the window: an empty box, so the page keeps the
+            // mouse.
+            return div().absolute().inset_0().into_any_element();
+        };
+        let content = build(window, cx);
+        div().absolute().inset_0().child(content).into_any_element()
+    }
+}
+
 /// Measure a single line of text in the UI/mono face at `size` px, using
 /// GPUI's own text layout so the truncation below matches what is drawn.
 pub(crate) fn text_width(window: &Window, text: &str, size: f32, weight: gpui::FontWeight, family: &str) -> f32 {
@@ -293,6 +334,9 @@ pub struct Shell {
     pub peripherals_view: gpui::Entity<PeripheralsView>,
     /// The Effects page (#210).
     pub effects_view: gpui::Entity<EffectsView>,
+    /// The window-level overlay host (#246): the page's dialogs that sit
+    /// over the whole window, the way React's fixed scrim does.
+    pub overlay: gpui::Entity<WindowOverlay>,
     /// The Layout page (#213).
     pub layout_view: gpui::Entity<LayoutView>,
     /// The theme the shell and the settings view share (the Appearance
@@ -356,7 +400,11 @@ impl Shell {
             UpdatesView::new(theme, cx, tray_present, updates_entity)
         });
         let peripherals_view = cx.new(|cx| PeripheralsView::new(theme, cx));
-        let effects_view = cx.new(|cx| EffectsView::new(theme, cx));
+        // The window-level overlay host (#246): the page hands it the
+        // overlay to draw over the whole window.
+        let overlay = cx.new(|_| WindowOverlay::new());
+        let overlay_for_effects = overlay.clone();
+        let effects_view = cx.new(|cx| EffectsView::new(theme, overlay_for_effects, cx));
         let layout_view = cx.new(|cx| LayoutView::new(theme, cx));
         let palette = cx.new(|cx| CommandPaletteView::new(theme, cx));
         // The palette's callbacks run through the shell: rows execute an
@@ -397,6 +445,7 @@ impl Shell {
             updates_view,
             peripherals_view,
             effects_view,
+            overlay,
             layout_view,
             settings_view,
             theme_cell,
@@ -2343,6 +2392,10 @@ impl Render for Shell {
         if self.palette_open {
             root = root.child(self.palette.clone());
         }
+        // The window-level overlay (#246): React's `.rd-scrim` is `position:
+        // fixed`, so the stack builder's naming dialog covers the rail, the
+        // strip and the dock too.
+        root = root.child(self.overlay.clone());
         root
     }
 }

@@ -139,6 +139,17 @@ pub struct TextInput {
     /// The field's right inset: 8 px everywhere except React's `.text-in`
     /// (a name field), whose padding is `var(--s3)` (12 px) on each side.
     right_pad: f32,
+    /// The field takes the focus the next time it draws. React's
+    /// `NameField` focuses itself (and selects its text) when it appears,
+    /// so the naming dialog's field is ready to be typed into.
+    focus_pending: bool,
+    /// The field loses the focus the next time it draws. A browser focuses
+    /// the key that was clicked, so the naming dialog's field loses its
+    /// focus (and its ring) when its Save key is pressed.
+    blur_pending: bool,
+    /// The field wears React's focus ring while it has the focus
+    /// (`:focus-visible`: a 2 px outline in `--focus`, 3 px out).
+    focus_ring: bool,
     /// Shown dimmed while nothing is typed (the search placeholder).
     placeholder: Option<SharedString>,
     /// The placeholder's colour. `None` uses the theme's mute.
@@ -190,6 +201,9 @@ impl TextInput {
             border_2: false,
             left_pad: 8.0,
             right_pad: 8.0,
+            focus_pending: false,
+            blur_pending: false,
+            focus_ring: false,
             placeholder: None,
             placeholder_color: None,
             blur: None,
@@ -245,6 +259,27 @@ impl TextInput {
     /// fixed height, like React's `.cmdk-input input`.
     pub fn set_bare(&mut self, cx: &mut Context<Self>) {
         self.bare = true;
+        cx.notify();
+    }
+
+    /// The field takes the focus the next time it draws (React's
+    /// `NameField`, which focuses itself when it appears).
+    pub fn focus_on_render(&mut self, cx: &mut Context<Self>) {
+        self.focus_pending = true;
+        cx.notify();
+    }
+
+    /// The field loses the focus the next time it draws (a browser focuses
+    /// the key that was clicked, so the field's ring goes with it).
+    pub fn blur_on_render(&mut self, cx: &mut Context<Self>) {
+        self.blur_pending = true;
+        cx.notify();
+    }
+
+    /// The field wears React's focus ring while it has the focus
+    /// (`:focus-visible`, `app.css:95-98`).
+    pub fn set_focus_ring(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.focus_ring = on;
         cx.notify();
     }
 
@@ -797,6 +832,17 @@ impl Render for TextInput {
         let disabled = self.disabled;
         // The field commits when it loses the focus, so it listens for it.
         self.watch_blur(window, cx);
+        // The field takes the focus when it appears (React's `NameField`),
+        // and loses it when the key beside it is pressed (a browser
+        // focuses the key that was clicked).
+        if self.focus_pending {
+            self.focus_pending = false;
+            self.focus_handle.focus(window);
+        }
+        if self.blur_pending {
+            self.blur_pending = false;
+            window.blur();
+        }
         let bare = self.bare;
         let mut field = div()
             .id(gpui::SharedString::from("text-input"))
@@ -839,7 +885,7 @@ impl Render for TextInput {
                 .bg(Theme::color(t.sunk))
         };
         if disabled {
-            return field.child(TextElement { input: cx.entity() });
+            return field.child(TextElement { input: cx.entity() }).into_any_element();
         }
         field = field
             .cursor(CursorStyle::IBeam)
@@ -849,8 +895,41 @@ impl Render for TextInput {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_key_down(cx.listener(Self::on_key_down));
-        field.child(TextElement { input: cx.entity() })
+        let field = field.child(TextElement { input: cx.entity() });
+        if !self.focus_ring {
+            return field.into_any_element();
+        }
+        // React's `:focus-visible` (`app.css:95-98`): a 2 px outline in
+        // `--focus`, 3 px out from the field's border box. The wrapper has
+        // no border of its own, so its padding box is the field's border
+        // box and the outline lands where React's lands.
+        let mut wrap = div().relative().w_full();
+        if self.focus_handle.is_focused(window) {
+            wrap = wrap.child(focus_ring(&t));
+        }
+        wrap.child(field).into_any_element()
     }
+}
+
+/// React's `:focus-visible` (`app.css:95-98`): a 2 px outline in
+/// `--focus` (`var(--live)`), 3 px out from the field's border box. The
+/// outline follows the field's own radius (`--r-md`, 10 px) plus the
+/// offset, so the ring's outer radius is 10 + 3 + 2 = 15 px.
+fn focus_ring(t: &Theme) -> gpui::Div {
+    let mut ring = div()
+        .absolute()
+        .top(px(-5.0))
+        .left(px(-5.0))
+        .right(px(-5.0))
+        .bottom(px(-5.0))
+        .border_2()
+        .border_color(t.live());
+    let radius = gpui::AbsoluteLength::Pixels(px(15.0));
+    ring.style().corner_radii.top_left = Some(radius);
+    ring.style().corner_radii.top_right = Some(radius);
+    ring.style().corner_radii.bottom_right = Some(radius);
+    ring.style().corner_radii.bottom_left = Some(radius);
+    ring
 }
 
 #[cfg(test)]

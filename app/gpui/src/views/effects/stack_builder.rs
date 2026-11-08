@@ -99,6 +99,9 @@ pub struct StackBuilder {
     /// The preset-save problem or the name field above the preset line.
     pub preset_problem: Option<String>,
     pub preset_name: Option<String>,
+    /// The window-level overlay host (#246): the naming dialog is drawn
+    /// over the whole window, the way React's fixed scrim is.
+    pub overlay: gpui::Entity<crate::shell::WindowOverlay>,
 }
 
 /// A drag on the picture's area frame.
@@ -122,6 +125,7 @@ impl StackBuilder {
         theme: Theme,
         initial_name: &str,
         page: Option<Entity<super::EffectsView>>,
+        overlay: gpui::Entity<crate::shell::WindowOverlay>,
         cx: &mut Context<Self>,
     ) -> Self {
         let is_new = initial_name == crate::reactlib::stack_route::NEW_STACK;
@@ -169,6 +173,7 @@ impl StackBuilder {
             effect_open: false,
             preset_problem: None,
             preset_name: None,
+            overlay,
         };
         if !is_new {
             builder.load(cx);
@@ -628,7 +633,9 @@ impl StackBuilder {
     // -- the naming dialog ---------------------------------------------------------
 
     /// The naming dialog opens (React's `setNaming(true)`): the card over
-    /// the scrim, with the name field in it.
+    /// the scrim, with the name field in it. React's `NameField` takes the
+    /// focus (and selects its text) when it appears, so the field does too,
+    /// and it wears React's focus ring while it has the focus.
     pub fn open_naming(&mut self, cx: &mut Context<Self>) {
         self.naming = true;
         self.naming_error = None;
@@ -641,7 +648,11 @@ impl StackBuilder {
         let input = match &self.name_input {
             Some(existing) => {
                 let existing = existing.clone();
-                existing.update(cx, |input, cx| input.set_value(&initial, cx));
+                existing.update(cx, |input, cx| {
+                    input.set_value(&initial, cx);
+                    input.set_focus_ring(true, cx);
+                    input.focus_on_render(cx);
+                });
                 existing
             }
             None => {
@@ -664,6 +675,9 @@ impl StackBuilder {
                     input.set_radius_md(cx);
                     input.set_left_pad(12.0, cx);
                     input.set_right_pad(12.0, cx);
+                    // React's `:focus-visible` (`app.css:95-98`): the field
+                    // wears the ring while it has the focus.
+                    input.set_focus_ring(true, cx);
                     input.set_on_text_change(std::rc::Rc::new(
                         move |text: &str, _w: &mut Window, cx: &mut gpui::App| {
                             entity_text.update(cx, |this, cx| {
@@ -672,6 +686,9 @@ impl StackBuilder {
                                 // changes (StackBuilder.tsx:2113-2116).
                                 this.naming_error = None;
                                 this.set_name_invalid(false, cx);
+                                // The reason line is gone, so the card is a
+                                // little shorter: the overlay is drawn again.
+                                this.refresh_overlay(cx);
                                 cx.notify();
                             });
                         },
@@ -684,6 +701,8 @@ impl StackBuilder {
                             entity_escape.update(cx, |this, cx| this.close_naming(cx));
                         }),
                     );
+                    // React's `NameField` focuses itself when it appears.
+                    input.focus_on_render(cx);
                     input
                 });
                 self.name_input = Some(input.clone());
@@ -691,6 +710,9 @@ impl StackBuilder {
             }
         };
         let _ = input;
+        // The dialog is over the whole window, the way React's fixed
+        // scrim is.
+        self.refresh_overlay(cx);
         cx.notify();
     }
 
@@ -698,7 +720,20 @@ impl StackBuilder {
     pub fn close_naming(&mut self, cx: &mut Context<Self>) {
         self.naming = false;
         self.naming_error = None;
+        // The dialog is gone, so nothing is over the window any more.
+        self.clear_overlay(cx);
         cx.notify();
+    }
+
+    /// The naming dialog's Save key (React's `nameTheStack`,
+    /// StackBuilder.tsx:1042-1056): a name with a problem keeps the dialog
+    /// open with the reason under the field; a name that is good is the
+    /// stack's name and the save goes on. A browser focuses the key that
+    /// was clicked, so the name field loses its focus (and its ring) the
+    /// way React's does.
+    pub fn press_naming_save(&mut self, cx: &mut Context<Self>) {
+        self.blur_name_field(cx);
+        self.name_the_stack(cx);
     }
 
     /// The naming dialog's Save (`nameTheStack` in React,
@@ -713,6 +748,9 @@ impl StackBuilder {
             Err(problem) => {
                 self.naming_error = Some(problem);
                 self.set_name_invalid(true, cx);
+                // The reason line is under the field now, so the card is a
+                // little taller: the overlay is drawn again.
+                self.refresh_overlay(cx);
                 cx.notify();
             }
             Ok(name) => {
@@ -720,6 +758,8 @@ impl StackBuilder {
                 self.set_name_invalid(false, cx);
                 self.name_draft = name;
                 self.naming = false;
+                // The dialog closed, so nothing is over the window.
+                self.clear_overlay(cx);
                 self.save(None, cx);
             }
         }
@@ -732,6 +772,41 @@ impl StackBuilder {
         if let Some(input) = self.name_input.clone() {
             input.update(cx, |input, cx| input.set_invalid(invalid, cx));
         }
+    }
+
+    /// The name field loses the focus (a browser focuses the key that was
+    /// clicked, so the field's ring goes with it).
+    fn blur_name_field(&mut self, cx: &mut Context<Self>) {
+        if let Some(input) = self.name_input.clone() {
+            input.update(cx, |input, cx| input.blur_on_render(cx));
+        }
+    }
+
+    /// The window overlay is drawn again: the naming dialog is over the
+    /// whole window, and it is built when the host draws it, so the host
+    /// has to be told that the dialog's own state changed.
+    fn refresh_overlay(&self, cx: &mut Context<Self>) {
+        let builder = cx.weak_entity();
+        let overlay = self.overlay.clone();
+        overlay.update(cx, |host, cx| {
+            host.set(
+                Some(Box::new(move |_window: &mut Window, cx: &mut gpui::App| {
+                    match builder.update(cx, |b, cx| b.naming_overlay(cx)) {
+                        Ok(element) => element,
+                        // The builder is gone: there is nothing over the
+                        // window.
+                        Err(_) => div().into_any_element(),
+                    }
+                })),
+                cx,
+            );
+        });
+    }
+
+    /// Nothing is over the window any more (the naming dialog closed).
+    fn clear_overlay(&self, cx: &mut Context<Self>) {
+        let overlay = self.overlay.clone();
+        overlay.update(cx, |host, cx| host.set(None, cx));
     }
 
     // -- the draft on the lights -------------------------------------------------
@@ -1037,8 +1112,7 @@ impl StackBuilder {
         }
         page = page.child(body);
         // The area picker, when it is open.
-        if let Some(picker) = self.picker.clone() {
-            if let Some(layer) = self.picked_layer().cloned() {
+        if let Some(picker) = self.picker.clone() {            if let Some(layer) = self.picked_layer().cloned() {
                 let entity = cx.entity();
                 page = page.child(
                     div()
@@ -1097,10 +1171,9 @@ impl StackBuilder {
                 );
             }
         }
-        // The naming dialog, when it is open.
-        if self.naming {
-            page = page.child(self.naming_dialog(cx));
-        }
+        // The naming dialog is not drawn here: React's `.rd-scrim` is
+        // `position: fixed`, so the dialog belongs over the whole window,
+        // not over the page. The shell draws it (the window overlay).
         page.into_any_element()
     }
 
@@ -1197,7 +1270,12 @@ impl StackBuilder {
     /// React's naming dialog (`StackBuilder.tsx:2089-2141`): the card over
     /// the scrim, with the name field, the reason the name was refused under
     /// it, and the foot (#246).
-    fn naming_dialog(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    ///
+    /// The scrim is `position: fixed` in React (`app.css:7596-7604`), so it
+    /// covers the whole window: the rail, the strip and the dock are under
+    /// it. The shell draws this over the window, not the page over the
+    /// content box.
+    pub fn naming_overlay(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let t = self.theme;
         let entity = cx.entity();
         let narrow = self.width <= 720.0;
@@ -1262,7 +1340,12 @@ impl StackBuilder {
                 .child(icon_button(&t, "rd-naming-close", "X", "", false, false, false, {
                     let entity = entity.clone();
                     move |_, _, cx| {
-                        entity.update(cx, |this, cx| this.close_naming(cx));
+                        entity.update(cx, |this, cx| {
+                            // A browser focuses the key that was clicked, so
+                            // the name field loses its focus (and its ring).
+                            this.blur_name_field(cx);
+                            this.close_naming(cx);
+                        });
                     }
                 })),
         );
@@ -1294,24 +1377,32 @@ impl StackBuilder {
                 .child(button(&t, "rd-naming-cancel", "Cancel", Variant::Ghost, false, {
                     let entity = entity.clone();
                     move |_, _, cx| {
-                        entity.update(cx, |this, cx| this.close_naming(cx));
+                        entity.update(cx, |this, cx| {
+                            // A browser focuses the key that was clicked, so
+                            // the name field loses its focus (and its ring).
+                            this.blur_name_field(cx);
+                            this.close_naming(cx);
+                        });
                     }
                 }))
                 .child(button(&t, "rd-naming-save", "Save", Variant::Primary, false, {
                     let entity = entity.clone();
                     move |_, _, cx| {
-                        entity.update(cx, |this, cx| this.name_the_stack(cx));
+                        entity.update(cx, |this, cx| this.press_naming_save(cx));
                     }
                 })),
         );
-        // The scrim.
+        // The scrim: React's `.rd-scrim` (`app.css:7596-7604`), `position:
+        // fixed` over the whole window. It swallows the click, as React's
+        // does, so the page under it is not reached.
         let mut scrim = div()
             .id(gpui::SharedString::from("rd-naming-scrim"))
             .absolute()
             .inset_0()
             .flex()
             .justify_center()
-            .bg(Theme::color(t.scrim));
+            .bg(Theme::color(t.scrim))
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation());
         if narrow {
             // React's phone scrim (app.css:8044-8048): the sheet sits at the
             // bottom of the screen, with 12 px on the sides and the top.
@@ -1327,6 +1418,10 @@ impl StackBuilder {
     /// ("Fire"), which the daemon refuses, so the save fails; "naming" names
     /// it "preview", which the name rule refuses, so the dialog keeps the
     /// reason under the field.
+    ///
+    /// The Save key is pressed, not Enter: React's capture presses the
+    /// key, and a browser focuses the key that was clicked, so the name
+    /// field loses its focus (and its ring) on both sides.
     pub fn capture_error(&mut self, which: &str, cx: &mut Context<Self>) {
         self.add_layer(cx);
         self.name_draft = if which == "naming" {
@@ -1335,7 +1430,7 @@ impl StackBuilder {
             "Fire".to_string()
         };
         self.open_naming(cx);
-        self.name_the_stack(cx);
+        self.press_naming_save(cx);
     }
 
     /// The stage: the picture and its foot.
@@ -3029,7 +3124,7 @@ mod tests {
         let read = source
             .find("if let Some(reason) = self.naming_error.clone()")
             .expect("the dialog reads naming_error");
-        let panel = source.find("fn naming_dialog").expect("the naming dialog");
+        let panel = source.find("fn naming_overlay").expect("the naming dialog");
         assert!(panel < read, "the reason is read before the dialog is drawn");
         let end = source
             .find("/// Debug only (#246): reaches the state")
@@ -3052,10 +3147,69 @@ mod tests {
             body.contains("\"rd-naming-scrim\""),
             "the dialog's scrim is missing"
         );
-        // The dialog is drawn when the builder asks for a name.
+        // The dialog is over the whole window, the way React's fixed scrim
+        // is, so the shell draws it and not the page.
         assert!(
-            source.contains("if self.naming {"),
-            "the naming dialog is never drawn"
+            source.contains("fn refresh_overlay"),
+            "the naming dialog is never drawn over the window"
+        );
+    }
+
+    /// React's `.rd-scrim` (`app.css:7596-7604`) is `position: fixed`, so
+    /// the naming dialog covers the rail, the strip and the dock too, and
+    /// the phone's sheet sits at the bottom of the window (#246).
+    #[test]
+    fn the_naming_dialog_is_over_the_whole_window() {
+        let source = builder_source();
+        let dialog = source.find("fn naming_overlay").expect("the naming dialog");
+        let end = source
+            .find("/// Debug only (#246): reaches the state")
+            .expect("the next item");
+        let body = &source[dialog..end];
+        // The scrim covers its box, and the box is the window: the shell
+        // draws the overlay over the whole window.
+        assert!(
+            body.contains(".absolute()") && body.contains(".inset_0()"),
+            "the scrim does not cover the window"
+        );
+        // On a phone the sheet sits at the bottom of the window, as React's
+        // scrim does (`align-items: end`, `app.css:8044-8048`).
+        assert!(
+            body.contains("items_end()"),
+            "the phone sheet is not at the bottom of the window"
+        );
+        // The page does not draw the dialog any more.
+        let page = source.find("pub fn render(&mut self, cx: &mut Context<Self>)").expect("the page");
+        let page_end = source[dialog..].find("fn naming_overlay").expect("the dialog") + dialog;
+        assert!(
+            !source[page..page_end].contains("naming_overlay"),
+            "the dialog is still drawn over the page"
+        );
+    }
+
+    /// React's `NameField` takes the focus when it appears, and wears
+    /// `:focus-visible`'s ring while it has it (#246).
+    #[test]
+    fn the_name_field_takes_the_focus_and_wears_the_ring() {
+        let source = builder_source();
+        let open = source.find("pub fn open_naming").expect("the dialog opens");
+        let end = source.find("pub fn close_naming").expect("the dialog closes");
+        let body = &source[open..end];
+        assert!(
+            body.contains("focus_on_render"),
+            "the name field does not take the focus when the dialog opens"
+        );
+        assert!(
+            body.contains("set_focus_ring(true"),
+            "the name field does not wear the focus ring"
+        );
+        // A browser focuses the key that was clicked, so the field loses the
+        // focus (and its ring) when the Save key is pressed.
+        let save = source.find("pub fn press_naming_save").expect("the Save key");
+        let save_end = source.find("pub fn name_the_stack").expect("the name is taken");
+        assert!(
+            source[save..save_end].contains("blur_name_field"),
+            "the name field keeps the focus when the Save key is pressed"
         );
     }
 

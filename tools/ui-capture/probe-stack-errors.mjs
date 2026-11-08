@@ -164,6 +164,28 @@ async function shoot(browser, base, viewport, theme, state) {
   page.on("pageerror", (e) => errors.push(String(e)));
   await drive(page, base, state, theme);
   const boxes = await page.evaluate((state) => {
+    // Who has the focus, and what the name field wears for it (#246). React's
+    // `NameField` takes the focus when it appears, so the field wears the
+    // `:focus-visible` outline until something else takes it (a click on the
+    // dialog's Save key does, the way a browser focuses a button).
+    const focus = (() => {
+      const el = document.querySelector(".rd-naming input.name-field");
+      if (!el) return null;
+      const active = document.activeElement;
+      const cs = getComputedStyle(el);
+      return {
+        activeTag: active ? active.tagName : null,
+        activeClass: active ? String(active.className ?? "") : null,
+        activeText: active ? (active.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 40) : null,
+        fieldIsActive: active === el,
+        fieldFocusVisible: el.matches(":focus-visible"),
+        outline: cs.outline,
+        outlineOffset: cs.outlineOffset,
+        outlineColor: cs.outlineColor,
+        borderTopColor: cs.borderTopColor,
+        value: el.value,
+      };
+    })();
     // The box, the words and the colour of an element, and of its box's parent.
     const probe = (selector) => {
       const el = document.querySelector(selector);
@@ -199,6 +221,7 @@ async function shoot(browser, base, viewport, theme, state) {
     };
     const out = {
       naming: {
+        focus,
         reason: probe("#stack-name-error"),
         field: probe(".rd-naming input.name-field"),
         card: probe(".rd-naming"),
