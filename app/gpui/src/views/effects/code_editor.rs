@@ -31,12 +31,13 @@ use crate::theme::{Theme, TokenRadius};
 pub const CODE_LINE: f32 = 20.8;
 /// The code's own face size (CodeMirror's theme in `CodeEditor.tsx`).
 pub const CODE_FONT: f32 = 13.0;
-/// The line-number gutter's width: `.cm-lineNumbers .cm-gutterElement`
-/// `minWidth: 28px` with `padding: 0 8px 0 4px` is 28 px wide under
-/// `border-box` (the number text sits inside that 28). Measured on the
-/// React pair: the code starts 47 px in from the pane edge, which is
-/// 28 (numbers) + 18 (lint) + 1 (the shared border).
-pub const GUTTER_W: f32 = 28.0;
+/// The line-number gutter's width. React measures 36 px at 198 lines (the
+/// widest element plus `padding: 0 8px 0 4px`), so this is a box width that
+/// covers three-digit numbers: `minWidth: 28px` in `CodeEditor.tsx` is a
+/// floor, not the width. The code starts at 36 (numbers) + 18 (lint) + 1
+/// (the shared border) after the pane edge (probed: the pane at 769, the
+/// code at 824).
+pub const GUTTER_W: f32 = 36.0;
 /// The lint gutter's width (the extra column the round-1 comment already
 /// named: 18 px beside the numbers).
 pub const LINT_GUTTER_W: f32 = 18.0;
@@ -1070,9 +1071,14 @@ impl Focusable for CodeEditor {
     }
 }
 
-fn mono_font(italic: bool) -> gpui::Font {
+/// The editor's run font. React's theme sets `fontFamily: "var(--mono)"`
+/// on `.cm-scroller`, but `--mono` is not defined, so the scroller inherits
+/// the page's Schibsted: the code draws proportional in the UI family, not
+/// in JetBrains Mono. Ported deliberately like the checklist's other React
+/// gaps; the measured computed family is "Schibsted Grotesk Variable".
+fn code_font(italic: bool) -> gpui::Font {
     gpui::Font {
-        family: crate::fonts::MONO_FAMILY.to_string().into(),
+        family: crate::fonts::UI_FAMILY.to_string().into(),
         weight: FontWeight::NORMAL,
         style: if italic { FontStyle::Italic } else { FontStyle::Normal },
         features: gpui::FontFeatures::default(),
@@ -1095,25 +1101,33 @@ fn line_runs(
     underline_ranges: &[(usize, usize)],
     focused: bool,
 ) -> (String, Vec<gpui::TextRun>) {
-    // Expand tabs: one tab is two spaces.
+    // Expand tabs: one tab is two spaces. The display is walked over the
+    // whole line, never per-token, so a tokenizer gap (the `/` in
+    // `</head>`) stays plain text instead of vanishing.
     let mut display = String::with_capacity(line.len() + 8);
-    let mut expanded_tokens: Vec<Token> = Vec::new();
-    for token in tokens {
-        let slice = &line[token.start..token.end];
-        let mut out_start = display.len();
-        for c in slice.chars() {
+    let mut tab_prefix = vec![0usize; line.len() + 1];
+    {
+        let mut seen = 0usize;
+        for (at, c) in line.char_indices() {
+            tab_prefix[at] = seen;
             if c == '\t' {
-                display.push_str("  ");
-            } else {
-                display.push(c);
+                seen += 1;
             }
         }
-        if token.kind == TokenKind::Plain && slice.contains('\n') {
-            // never happens inside one logical line
-        }
-        expanded_tokens.push(Token { kind: token.kind, start: out_start, end: display.len() });
-        let _ = &mut out_start;
+        tab_prefix[line.len()] = seen;
     }
+    let disp = |at: usize| at + tab_prefix[at.min(line.len())];
+    for c in line.chars() {
+        if c == '\t' {
+            display.push_str("  ");
+        } else {
+            display.push(c);
+        }
+    }
+    let expanded_tokens: Vec<Token> = tokens
+        .iter()
+        .map(|t| Token { kind: t.kind, start: disp(t.start), end: disp(t.end) })
+        .collect();
     // Breakpoints: token edges, selection edges, caret, underline edges.
     let mut cuts: Vec<usize> = vec![0, display.len()];
     for token in &expanded_tokens {
@@ -1168,7 +1182,7 @@ fn line_runs(
         let kind = expanded_tokens.iter().find(|tok| s >= tok.start && s < tok.end).map(|tok| tok.kind).unwrap_or(TokenKind::Plain);
         let mut run = gpui::TextRun {
             len: e - s,
-            font: mono_font(kind == TokenKind::Comment),
+            font: code_font(kind == TokenKind::Comment),
             color: hsla(colour_for(kind, t)),
             background_color: None,
             underline: None,
@@ -1198,7 +1212,7 @@ fn line_runs(
     if covered < display.len() {
         runs.push(gpui::TextRun {
             len: display.len() - covered,
-            font: mono_font(false),
+            font: code_font(false),
             color: hsla(Theme::color(t.ink)),
             background_color: None,
             underline: None,
@@ -1226,7 +1240,9 @@ impl Render for CodeEditor {
             offsets.push(at);
             at += line.len() + 1;
         }
-        let active_bg = gpui::Rgba { r: 238.0 / 255.0, g: 240.0 / 255.0, b: 243.0 / 255.0, a: 0.04 };
+        // `.cm-activeLine`: `color-mix(in srgb, var(--ink) 4%, transparent)`.
+        let mut active_bg = gpui::Hsla::from(Theme::color(t.ink));
+        active_bg.a = 0.04;
         let mut col = div().flex().flex_col().flex_1().min_w(px(0.0)).overflow_hidden();
         for (i, line) in lines.iter().enumerate() {
             let row_line = i + 1;
@@ -1254,36 +1270,43 @@ impl Render for CodeEditor {
             let row_has_error = self.diagnostics.iter().any(|d| d.line == row_line);
             // The row: the number gutter, the lint gutter, then the code.
             // `.cm-gutters` draws one shared right border over both gutters.
+            // The numbers sit at the top of a wrapped line's first visual row
+            // (`.cm-gutterElement` spans the line's height with the number in
+            // its first row), so the lint dot is top-rowed the same way.
             let gutter = div()
                 .flex()
                 .flex_none()
-                .items_center()
                 .child(
                     div()
                         .w(px(GUTTER_W))
+                        .flex_none()
                         .pr(px(8.0))
                         .pl(px(4.0))
                         .text_right()
                         .text_size(px(CODE_FONT))
                         .line_height(px(CODE_LINE))
-                        .font_family(crate::fonts::MONO_FAMILY)
+                        .font_family(crate::fonts::UI_FAMILY)
                         .text_color(Theme::color(if is_active { t.dim } else { t.mute }))
                         .child(digit),
                 )
                 .child(
                     div()
-                        .flex()
                         .flex_none()
                         .w(px(LINT_GUTTER_W))
-                        .items_center()
-                        .justify_center()
-                        .child(if row_has_error {
-                            div().size(px(7.0)).rounded_full().bg(Theme::color(t.down))
-                        } else {
-                            div().size(px(7.0))
-                        })
                         .border_r_1()
-                        .border_color(Theme::color(t.line)),
+                        .border_color(Theme::color(t.line))
+                        .child(
+                            div()
+                                .h(px(CODE_LINE))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(if row_has_error {
+                                    div().size(px(7.0)).rounded_full().bg(Theme::color(t.down))
+                                } else {
+                                    div().size(px(7.0))
+                                }),
+                        ),
                 );
             let mut code = div().flex_1().min_w(px(0.0)).pl(px(8.0)).pr(px(12.0));
             if is_active {
@@ -1296,7 +1319,7 @@ impl Render for CodeEditor {
                 div()
                     .text_size(px(CODE_FONT))
                     .line_height(px(CODE_LINE))
-                    .font_family(crate::fonts::MONO_FAMILY)
+                    .font_family(crate::fonts::UI_FAMILY)
                     .text_color(Theme::color(t.ink))
                     .child(gpui::StyledText::new(display).with_runs(runs))
             };
@@ -1315,7 +1338,10 @@ impl Render for CodeEditor {
                         move |event: &MouseDownEvent, _, cx| {
                             entity.update(cx, |this, cx| {
                                 // Approximate the column from the press.
-                                let col = ((f32::from(event.position.x) - GUTTER_W - LINT_GUTTER_W - 8.0) / 7.8).max(0.0) as usize;
+                                // The code starts after both gutters and the
+                                // line's 8 px left padding; the figure is a
+                                // proportional advance, so it stays approximate.
+                                let col = ((f32::from(event.position.x) - GUTTER_W - LINT_GUTTER_W - 8.0) / 7.0).max(0.0) as usize;
                                 this.click_line(row_line, col.min(200), event.modifiers.shift, cx);
                             });
                         }
@@ -1559,7 +1585,7 @@ mod tests {
     fn the_code_line_height_is_the_css_one() {
         assert_eq!(CODE_LINE, 20.8);
         assert_eq!(CODE_FONT, 13.0);
-        assert_eq!(GUTTER_W, 28.0);
+        assert_eq!(GUTTER_W, 36.0);
         assert_eq!(LINT_GUTTER_W, 18.0);
     }
 
@@ -1596,6 +1622,20 @@ mod tests {
     fn html_text_outside_a_script_is_plain() {
         let tokens = tokenize_line("Ink Drop");
         assert!(tokens.iter().all(|t| t.kind == TokenKind::Plain));
+    }
+
+    #[test]
+    fn a_closing_tag_keeps_its_slash_in_the_display() {
+        let tokens = tokenize_line("</head>");
+        let (display, runs) = line_runs("</head>", &tokens, &Theme::dark(), None, None, &[], false);
+        assert_eq!(display, "</head>");
+        assert_eq!(runs.iter().map(|r| r.len).sum::<usize>(), display.len());
+    }
+
+    #[test]
+    fn a_tab_expands_to_two_spaces_in_the_display() {
+        let (display, _) = line_runs("a\tb", &[], &Theme::dark(), None, None, &[], false);
+        assert_eq!(display, "a  b");
     }
 
     #[test]
