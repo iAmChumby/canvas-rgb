@@ -2145,6 +2145,7 @@ impl Render for Shell {
                         .child(self.layout_view.clone()),
                 )
                 .child(self.spectrum_line());
+            root = crate::fonts::with_kerning(root);
             if self.palette_open {
                 root = root.child(self.palette.clone());
             }
@@ -2248,6 +2249,7 @@ impl Render for Shell {
             .child(self.background())
             .child(body)
             .child(self.spectrum_line());
+        root = crate::fonts::with_kerning(root);
         // The palette is rendered outside the page area it covers, so it
         // still opens over the daemon-down page and before the first answer
         // (`Shell.tsx:269-285`).

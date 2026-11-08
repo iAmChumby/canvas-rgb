@@ -169,7 +169,7 @@ fn tracked_word(
         // DirectWrite's text layout leaves `kern` off unless a typography is
         // set, so "STATUS" came out 3 px wide (no T-A / A-T pairs, -1.57 px
         // each at 15 px); naming `kern` brings Chrome's kerning back.
-        features: gpui::FontFeatures(std::sync::Arc::new(vec![("kern".to_string(), 1)])),
+        features: crate::fonts::kerning(),
         fallbacks: None,
     };
     TrackedText {
