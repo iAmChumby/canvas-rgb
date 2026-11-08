@@ -383,42 +383,61 @@ fn fits(heights: &[f32], cols: usize, budget: f32) -> bool {
 
 /// One row height inside a section panel: number rows and plain rows are 52
 /// (`min-height: 52px`), a stacked segmented row is the label line over the
-/// control (measured 86 px at 1440), and on a phone every row is 44.
-fn row_height(kind: &PropKind, narrow: bool) -> f32 {
+/// control (measured 79 px at 1440), and on a phone every row is 44. A label
+/// that wraps to two lines in the 116 px column makes its row 60/61 (measured
+/// at 1440: `Key response time (ms)` and `Deep sleep after (min)` give 60,
+/// `Left stick range start (%)` gives 61).
+fn row_height(kind: &PropKind, narrow: bool, label: &str) -> f32 {
+    let wrapped = label.chars().count() > 18;
+    let tall = if wrapped { 61.0 } else { 52.0 };
     if narrow {
-        return 44.0;
+        return match kind {
+            PropKind::Choice { options, .. } if options.len() <= 4 => 79.0,
+            PropKind::Number { .. } => 82.0,
+            _ => 44.0,
+        };
     }
     match kind {
-        PropKind::Choice { options, .. } if options.len() <= 4 => 86.0,
-        _ => 52.0,
+        PropKind::Choice { options, .. } if options.len() <= 4 => 79.0,
+        _ => tall,
     }
 }
 
 /// Estimated panel height for the multicol balance: 32 px of panel padding
-/// (p_4) plus the tracked title (about 30 px), the rows, and the 16 px
-/// bottom margin the multicol adds between panels (counted on every panel
-/// but the last would change nothing about the fill).
+/// (p_4) plus the tracked title (19 px) and its 12 px bottom margin, the
+/// rows, and the 16 px bottom margin the multicol adds between panels
+/// (counted on every panel but the last would change nothing about the
+/// fill). Calibrated to React's measured panel heights at 1440 phone-free
+/// (DPI 211, Performance 201, Lighting 270, Power 174, Buttons 260,
+/// Profile 114).
 pub fn section_panel_height(properties: &[PropertyDef], buttons_pair: bool, narrow: bool) -> f32 {
     let pad = 32.0;
-    let head = 30.0;
+    let head = 31.0;
     let body = if buttons_pair {
         // Two columns of stacked key/value pairs, three rows tall
-        // (`grid-auto-flow: column`), each pair about 66 px.
+        // (`grid-auto-flow: column`), each pair 66 px.
         properties.len().div_ceil(2) as f32 * 66.0
     } else {
-        properties.iter().map(|def| row_height(&def.kind, narrow)).sum()
+        properties.iter().map(|def| row_height(&def.kind, narrow, &def.label)).sum()
     };
     pad + head + body + 16.0
 }
 
 /// Estimated height of the DPI panel: its remaining rows plus the stage-chip
-/// block (two rows of three chips at 248 px inner width, each 44 px with
-/// margins).
+/// block (two rows of three chips at 248 px inner width, 32 px each with an
+/// 8 px gap, plus 12 px top margin and 12 px top padding: 96 px measured).
 pub fn dpi_panel_height(properties: &[PropertyDef], narrow: bool) -> f32 {
-    let others = dpi_others(properties).len() as f32;
+    let others: Vec<PropertyDef> = dpi_others(properties).iter().map(|p| (*p).clone()).collect();
     let pad = 32.0;
-    let head = 30.0;
-    pad + head + others * row_height(&PropKind::Bool { default: false }, narrow) + 88.0 + 16.0
+    let head = 31.0;
+    let body: f32 = others.iter().map(|def| row_height(&def.kind, narrow, &def.label)).sum();
+    let chips = if narrow {
+        // Four chips a row at 332 px inner width: two rows, same 96 px block.
+        96.0
+    } else {
+        96.0
+    };
+    pad + head + body + chips + 16.0
 }
 
 /// The body path (`ControllerOutline.tsx` BODY), in the 340x244 space.
@@ -1494,7 +1513,7 @@ impl PeripheralsView {
         let control: gpui::AnyElement = if fixed {
             self.read_only_value(value).into_any_element()
         } else {
-            self.prop_control(&key, &label, &def.kind, value, schema_properties, values, disabled, view_entity).into_any_element()
+            self.prop_control(&key, &label, &def.kind, value, schema_properties, values, disabled, view_entity, narrow).into_any_element()
         };
         let label_el = div()
             .flex_1()
@@ -1504,17 +1523,22 @@ impl PeripheralsView {
             .font_family(crate::fonts::UI_FAMILY)
             .text_color(Theme::color(t.ink))
             .child(label.clone());
-        // `.prop-item`: grid label + control; number rows carry slider + field.
         // The generic path is `minmax(0, 116px) minmax(0, 1fr)` inside the
         // sections; number rows are `minmax(0, 116px) minmax(0, 1fr) 48px`.
         // Both number rows keep their parts at fixed columns: the slider
-        // measures 64 px (`flex: none` on `.slider`), the field 48 px.
+        // `flex: 1` (85 px measured at 1440 for the 1fr column, 64 px
+        // effective with the `.num` field at 48 px), the field 48 px.
         let is_number = matches!(def.kind, PropKind::Number { .. });
         // A segmented choice (4 or fewer options) drops under its label
         // (`.prop-item:has(.seg)`): the control sizes to its content and
         // spans the row.
         let is_seg = !fixed && matches!(&def.kind, PropKind::Choice { options, .. } if options.len() <= 4);
-        let narrow = is_seg || narrow;
+        // Phone: only number and segmented rows stack (`.prop-item[data-kind=
+        // "number"] .field-label` and `.prop-item:has(.seg) .field-label`
+        // span the row at 639 px); a plain row keeps the 116 px label
+        // column with the control after it (measured at 390: `Active DPI
+        // stage` label 116 + control 200).
+        let narrow = is_seg || (narrow && is_number);
         if narrow {
             div()
                 .flex()
@@ -1550,8 +1574,7 @@ impl PeripheralsView {
             div()
                 .flex()
                 .items_center()
-                .justify_between()
-                .gap_2()
+                .gap_4()
                 .min_h(px(52.0))
                 .py_2()
                 .border_b_1()
@@ -1561,8 +1584,6 @@ impl PeripheralsView {
                     div()
                         .flex()
                         .items_center()
-                        .gap_2()
-                        .justify_end()
                         .flex_1()
                         .min_w(px(0.0))
                         .child(control),
@@ -1584,6 +1605,7 @@ impl PeripheralsView {
         values: &Props,
         disabled: bool,
         view_entity: gpui::Entity<Self>,
+        narrow: bool,
     ) -> gpui::AnyElement {
         let t = &self.theme;
         if let PropKind::Number { min, max, step, default } = kind {
@@ -1616,13 +1638,13 @@ impl PeripheralsView {
                 .flex_1()
                 .min_w(px(0.0))
                 .child(
-                    // The slider is 64 px on this page (`flex: none` on
-                    // `.slider`; measured at 1440): the field takes 48 px
-                    // (`.num`), and the slider takes what is left of the
-                    // 1fr column.
+                    // The slider is `flex: 1` in the 1fr column (measured 64
+                    // px at 1440 where the 116 px label column and the 48 px
+                    // `.num` field frame it, and 272 px at 390 where the
+                    // label spans the row).
                     div()
-                        .w(px(64.0))
-                        .flex_none()
+                        .flex_1()
+                        .min_w(px(0.0))
                         .child(crate::components::slider::slider_range(
                             t,
                             &format!("{key}-slider"),
@@ -1677,11 +1699,14 @@ impl PeripheralsView {
                 let _ = window;
             }) as crate::components::prop_controls::OnToggle;
             let words = control_words(t, key, label, value, &pairs, disabled, open, on, toggle);
-            // The trigger is capped by its 1fr column (120 px used at 1440):
-            // `.select-trigger { min-width: 160px; max-width: 100% }` resolves
-            // to the column width a 124 px column can give.
+            // The trigger is `.select-trigger { min-width: 160px; max-width:
+            // 100% }`: at the 248 px panel column the 120 px control column
+            // is smaller than the min-width, so the trigger is 160 px wide
+            // and overflows its column (measured at 1440); at 390 the
+            // column is 200 px and the trigger fills it to 190 px.
             if options.len() > 4 {
-                return div().w(px(120.0)).flex_none().child(words).into_any_element();
+                let width = if narrow { 190.0 } else { 160.0 };
+                return div().w(px(width)).flex_none().child(words).into_any_element();
             }
             return words;
         }
@@ -2218,12 +2243,15 @@ impl PeripheralsView {
                     .child(gpui::svg().path(format!("icons/{icon}.svg")).size(px(22.0)).text_color(t.live())),
             )
             .child(
+                // `.peripheral-head-text { flex: 1 1 auto; min-width: 0 }`:
+                // the name block takes the free space, so the StateDot sits
+                // right before the access block (measured at 1440: the name
+                // block is 638 px wide, `Connected` starts at 947).
                 div()
-                    .flex_none()
+                    .flex_1()
                     .min_w(px(0.0))
                     .flex()
                     .flex_col()
-                    .gap_1()
                     .child(
                         div()
                             .text_size(px(20.0))
@@ -2240,7 +2268,6 @@ impl PeripheralsView {
                             .font_family(crate::fonts::UI_FAMILY)
                             .text_color(Theme::color(t.mute))
                             .flex()
-                            .flex_nowrap()
                             .items_center()
                             .gap(px(2.0))
                             .child(format!("{} · {} ·", kind_word(info.kind), info.vendor))
@@ -2419,7 +2446,7 @@ impl PeripheralsView {
                                 .flex()
                                 .flex_col()
                                 .justify_center()
-                                .gap_1()
+                                .gap_2()
                                 .min_h(px(44.0))
                                 .py_2()
                                 .text_size(px(15.0))
@@ -2942,7 +2969,6 @@ impl Render for PeripheralsView {
                     .flex_none()
                     .min_w(px(0.0))
                     .overflow_hidden()
-                    .p_1()
                     .child(keys),
             );
         if let Some(line) = save_line {
