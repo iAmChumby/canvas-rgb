@@ -2099,8 +2099,12 @@ impl Render for Shell {
         // The onboarding takeover (takeover.ts): while it is open the rail,
         // the strip, the notices and the dock are not drawn — the window is
         // the onboarding alone (`LayoutView.tsx:971`, `Shell.tsx:52`).
-        let onboarding_open = self.page == "layout"
-            && self.layout_view.update(cx, |v, _| v.is_onboarding_open() || v.onboarding.is_some());
+        //
+        // The flag is read AFTER the open attempt below: `try_open_onboarding`
+        // is what opens the takeover, so reading the flag first left one
+        // frame that drew the Layout chrome (the rail, the strip, the dock)
+        // over the takeover before the next frame took the chrome away.
+        let mut onboarding_open = false;
         // Keep the layout view's status/effects in step with the shell's
         // answers so Hello variants and finish tiles read the same truth.
         if self.page == "layout" {
@@ -2115,6 +2119,9 @@ impl Render for Shell {
                 }
             });
             self.layout_view.update(cx, |v, cx| v.try_open_onboarding(cx));
+            onboarding_open = self
+                .layout_view
+                .update(cx, |v, _| v.is_onboarding_open() || v.onboarding.is_some());
         }
         if onboarding_open {
             let mut root = div()

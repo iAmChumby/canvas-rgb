@@ -2512,27 +2512,34 @@ fn phone_switcher(
 ) -> gpui::AnyElement {
     let entity = cx.entity();
     let selected = view.phone_pane;
-    segmented(
-        t,
-        "lay-tabs",
-        &[("parts", "Parts"), ("place", "To place"), ("render", "Render")],
-        match selected {
-            PhonePane::Parts => "parts",
-            PhonePane::Place => "place",
-            PhonePane::Render => "render",
-        },
-        move |value, _window, cx| {
-            entity.update(cx, |this, cx| {
-                this.phone_pane = match value.as_str() {
-                    "place" => PhonePane::Place,
-                    "render" => PhonePane::Render,
-                    _ => PhonePane::Parts,
-                };
-                cx.notify();
-            });
-        },
-    )
-    .into_any_element()
+    // React's `.rd-lay-tabs` is `display: block` and its `.seg` inside is
+    // `display: inline-flex`: the group takes the width it needs, not the
+    // width of the column. In a flex column the child stretches, so the
+    // group is put in a row that does not stretch it.
+    div()
+        .flex()
+        .items_start()
+        .child(segmented(
+            t,
+            "lay-tabs",
+            &[("parts", "Parts"), ("place", "To place"), ("render", "Render")],
+            match selected {
+                PhonePane::Parts => "parts",
+                PhonePane::Place => "place",
+                PhonePane::Render => "render",
+            },
+            move |value, _window, cx| {
+                entity.update(cx, |this, cx| {
+                    this.phone_pane = match value.as_str() {
+                        "place" => PhonePane::Place,
+                        "render" => PhonePane::Render,
+                        _ => PhonePane::Parts,
+                    };
+                    cx.notify();
+                });
+            },
+        ))
+        .into_any_element()
 }
 
 /// The bar along the frame's bottom edge: the scale, the segments and the
@@ -3416,7 +3423,10 @@ fn parts_panel(
             .gap(px(12.0))
             .w_full()
             .min_h(px(if one_column { 32.0 } else { 52.0 }))
-            .px(px(12.0))
+            // React's `.row-button` is `padding: var(--s1) var(--s2)` (8 px
+            // by 12 px) and the phone's rows are `var(--s1) var(--s2)` too
+            // (`app.css:2449`), so a phone row's icon starts 8 px in, not 12.
+            .px(px(if one_column { 8.0 } else { 12.0 }))
             .py(px(if one_column { 4.0 } else { 8.0 }))
             .border_b_1()
             .border_color(Theme::color(t.line))
