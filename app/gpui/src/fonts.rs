@@ -75,6 +75,20 @@ pub fn with_kerning<E: gpui::Styled>(mut element: E) -> E {
     element
 }
 
+/// Kerning and tabular figures (`font-variant-numeric: tabular-nums`) for
+/// `element` and every text under it: React's `AnimatedNumber` (`.value-tween`)
+/// and `.fig` set tabular figures, so a count's digits take the face's
+/// equal-width cut (Schibsted Grotesk's `tnum`) and the text after them
+/// starts where React's does.
+pub fn with_tabular_figures<E: gpui::Styled>(mut element: E) -> E {
+    element.text_style().get_or_insert_with(Default::default).font_features =
+        Some(gpui::FontFeatures(std::sync::Arc::new(vec![
+            ("kern".to_string(), 1),
+            ("tnum".to_string(), 1),
+        ])));
+    element
+}
+
 /// FNV-1a (64-bit), for the hash test below — no extra crate.
 #[cfg(test)]
 fn fnv1a(bytes: &[u8]) -> u64 {
