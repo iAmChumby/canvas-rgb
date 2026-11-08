@@ -51,7 +51,11 @@ pub(crate) fn text_width(window: &Window, text: &str, size: f32, weight: gpui::F
         family: family.to_string().into(),
         weight,
         style: gpui::FontStyle::Normal,
-        features: gpui::FontFeatures::default(),
+        // The same features the text is drawn with (#240/#214): DirectWrite
+        // leaves `kern` off unless a typography names it, so an unkerned
+        // measurement is 0.05-0.87 px wider than the browser's `measureText`
+        // and the ellipsis cut lands a glyph early.
+        features: crate::fonts::kerning(),
         fallbacks: None,
     };
     let run = gpui::TextRun {

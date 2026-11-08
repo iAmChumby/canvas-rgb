@@ -1081,7 +1081,11 @@ fn code_font(italic: bool) -> gpui::Font {
         family: crate::fonts::UI_FAMILY.to_string().into(),
         weight: FontWeight::NORMAL,
         style: if italic { FontStyle::Italic } else { FontStyle::Normal },
-        features: gpui::FontFeatures::default(),
+        // `kern`, like the text the shell draws: Chromium's CodeMirror kerns
+        // (the browser's `font-kerning` is `auto`), and DirectWrite only
+        // kerns when a typography names the feature. Without it every word
+        // in the pane sat a fraction of a pixel right of the browser's.
+        features: crate::fonts::kerning(),
         fallbacks: None,
     }
 }
