@@ -39,6 +39,7 @@ mod components;
 mod fonts;
 mod reactlib;
 mod shell;
+mod text_probe;
 mod theme;
 mod views;
 
@@ -216,7 +217,12 @@ fn main() {
                     kind: if capture { gpui::WindowKind::PopUp } else { gpui::WindowKind::Normal },
                     ..Default::default()
                 },
-                move |_, cx| {
+                move |window, cx| {
+                    // Debug only (#240): the text-advance probe writes the
+                    // editor's own measured widths when
+                    // CANVAS_RGB_TEXT_PROBE names a file. It does nothing
+                    // without that variable.
+                    text_probe::maybe_write(window);
                     cx.new(|cx| {
                         let displays = cx.new(|cx| DisplaysView::new(theme, cx));
                         let devices_view = cx.new(|cx| DevicesView::new(theme, cx));

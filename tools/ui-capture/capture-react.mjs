@@ -59,6 +59,13 @@ const OUT_DIR = path.resolve(root, process.env.UI_CAPTURE_OUT ?? ".build/ui-capt
 const WEB_OUT = path.resolve(root, "app/web/out");
 const DAEMON_BASE = process.env.UI_CAPTURE_API_BASE ?? "http://127.0.0.1:19430";
 const FREEZE = process.env.UI_CAPTURE_FREEZE === "1";
+// #240: Chromium draws its text with ClearType (subpixel LCD) by default, while
+// the GPUI editor draws with DirectWrite's grayscale antialiasing (gpui pins
+// DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE). With UI_CAPTURE_GRAYSCALE=1 the
+// browser draws the same grayscale, so a pair measures the LAYOUT and not the
+// antialiasing. It is off by default: the committed pairs are the plain ones.
+const GRAYSCALE = process.env.UI_CAPTURE_GRAYSCALE === "1";
+const CHROMIUM_ARGS = GRAYSCALE ? ["--disable-lcd-text"] : [];
 if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(DAEMON_BASE)) {
   throw new Error(`UI_CAPTURE_API_BASE must be http://127.0.0.1:<port> (the token is sent there), not ${DAEMON_BASE}`);
 }
@@ -560,7 +567,7 @@ async function main() {
   const base = `http://127.0.0.1:${CAPTURE_PORT}`;
   console.log(`ui-capture: serving ${WEB_OUT} on ${base}`);
   console.log(`ui-capture: daemon ${DAEMON_BASE} (${ACTIVE_VIEWS.length} views x ${ACTIVE_VIEWPORTS.length} viewports x ${ACTIVE_THEMES.length} themes)`);
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({ headless: true, args: CHROMIUM_ARGS });
   const shots = [];
   try {
     if (ONBOARD_STEPS.length) {

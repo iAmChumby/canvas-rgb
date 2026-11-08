@@ -107,6 +107,47 @@ pub const NAV: &[(&str, &str, &str)] = &[
     ("Settings", "settings", "Gear"),
 ];
 
+/// React's phone dock: the width the browser lays the active link's name out
+/// at (14 px, weight 500; `tools/ui-capture/probe-chrome.mjs` at 390x844).
+///
+/// The cell is that width plus the 8 px of padding on each side, and the cell
+/// is what the active tile and every icon in the dock hang off: the GPUI's
+/// own text is a shade wider (its shaping drops the font's kerning, see
+/// `docs/gpui-parity/shell.md` and the #240 report), and a fraction of a pixel
+/// on the active name moves every icon beside it.
+fn react_dock_label_w(label: &str) -> Option<f32> {
+    Some(match label {
+        "Layout" => 44.28,
+        "Effects" => 45.50,
+        "Devices" => 52.63,
+        "Displays" => 55.39,
+        "Peripherals" => 75.09,
+        "Fans" => 30.73,
+        "Settings" => 53.59,
+        _ => return None,
+    })
+}
+
+/// React's `.rd-title h1` at the phone's 20 px, weight 600, letter-spacing
+/// −0.01em: the width the browser lays the title out at (the same probe).
+///
+/// The strip's row gives the difference to the swatch, the now-playing name
+/// and the mark, so the title's box is React's width and the text keeps its
+/// own. The same width holds at 1440: the h1 does not change size.
+fn react_title_w(title: &str) -> Option<f32> {
+    Some(match title {
+        "Layout" => 63.63,
+        "Effects" => 65.13,
+        "Devices" => 75.30,
+        "Displays" => 79.73,
+        "Peripherals" => 108.13,
+        "Fans" => 44.05,
+        "Settings" => 76.75,
+        "Updates" => 78.27,
+        _ => return None,
+    })
+}
+
 pub fn is_valid_page(page: &str) -> bool {
     canvas_proto::tauri::EDITOR_PAGES.contains(&page) || page == "displays" || page == "peripherals"
 }
@@ -655,7 +696,7 @@ impl Shell {
     /// canvas in `--live` (accent blue), red (`--down`) while the daemon is
     /// away. The SVG assets are split in two so each part takes its own
     /// colour; `size` is the width in px (React `BrandMark` default 16).
-    fn easel(&self, size: f32) -> impl IntoElement {
+    fn easel(&self, size: f32, legs: gpui::Rgba) -> impl IntoElement {
         let t = &self.theme;
         let canvas_color = if self.status.is_some() {
             t.live()
@@ -675,7 +716,7 @@ impl Shell {
                     .inset_0()
                     .w_full()
                     .h_full()
-                    .text_color(Theme::color(t.ink)),
+                    .text_color(legs),
             )
             .child(
                 gpui::svg()
@@ -701,7 +742,7 @@ impl Shell {
             .font_family(crate::fonts::UI_FAMILY)
             .text_color(Theme::color(t.ink))
             .child("c")
-            .child(self.easel(9.3))
+            .child(self.easel(9.3, Theme::color(t.ink)))
             .child("nvas")
             .child(
                 div()
@@ -1228,7 +1269,7 @@ impl Shell {
                     .w(px(40.0))
                     .h(px(40.0))
                     .mb_2()
-                    .child(self.easel(16.0)),
+                    .child(self.easel(16.0, Theme::color(t.ink))),
             );
             for (label, page, icon) in &NAV[..6] {
                 let _ = label;
@@ -1344,6 +1385,12 @@ impl Shell {
                 cell.flex_1()
             };
             if active {
+                // The active cell's width is React's: its name's width plus
+                // the 8 px of padding on each side. The quiet links share what
+                // is left, so every icon in the dock lands where React's does.
+                if let Some(w) = react_dock_label_w(label) {
+                    cell = cell.w(px(w + 16.0));
+                }
                 // The active tile sits behind the icon and name (React
                 // `::before` at z-index −1): its top is 56 − 18 − 2 − 16 =
                 // 20 px from the link top (#204 G8-r3: at 11 it touched the
@@ -1374,6 +1421,14 @@ impl Shell {
             if active {
                 cell = cell.child(
                     div()
+                        // React `.rail-link .rail-label { white-space: nowrap }`:
+                        // the name is one line. The cell is React's width, and
+                        // the name is a shade wider than it (the shaping drops
+                        // the font's kerning), so the name keeps its own width
+                        // and stands a fraction over the cell rather than
+                        // wrapping and losing its last letter.
+                        .flex_none()
+                        .whitespace_nowrap()
                         .text_sm()
                         .line_height(px(16.0))
                         .font_weight(gpui::FontWeight::MEDIUM)
@@ -1559,7 +1614,9 @@ impl Shell {
         // have strip actions at 390, so the easel only shows on pages
         // without them.
         if phone && page_actions.is_none() {
-            inner = inner.child(self.easel(16.0));
+            // React `.strip-brand { color: var(--mute) }`: the easel's legs are
+            // the quiet grey, not the ink. The canvas keeps the live hue.
+            inner = inner.child(self.easel(16.0, Theme::color(t.mute)));
         }
         // React `.rd-title`: the h1 and the mono context share one flex row
         // with a 12 px gap (the context sits inside the title slot).
@@ -1589,7 +1646,7 @@ impl Shell {
         } else {
             title_text
         };
-        title_row = title_row.child(crate::components::panel::tracked_text_lh(
+        let title_el = crate::components::panel::tracked_text_lh(
             &title_text,
             20.0,
             -0.01,
@@ -1597,7 +1654,15 @@ impl Shell {
             crate::fonts::UI_FAMILY,
             Theme::color(t.ink),
             1.0,
-        ));
+        );
+        // The title's box is React's (the h1's width at the same size and
+        // weight): the GPUI's own text is a shade wider, and the row hands
+        // that fraction to the swatch, the now-playing name and the mark.
+        let title_el = match react_title_w(&title_text) {
+            Some(w) => div().w(px(w)).flex_none().child(title_el),
+            None => div().flex_none().child(title_el),
+        };
+        title_row = title_row.child(title_el);
         if !context_text.is_empty() && !phone {
             // React's strip gives the room to a page that brings actions of
             // its own: below 1100 px the page's context line goes too
@@ -1658,14 +1723,20 @@ impl Shell {
                         // The title is drawn tracked (`letter-spacing:
                         // -0.01em`), so its box is narrower than the plain
                         // advance: React's h1 measures 63.63 px for "Layout"
-                        // where the untracked advance is 64.83.
-                        let title_w = text_width(
-                            window,
-                            &title_text,
-                            20.0,
-                            gpui::FontWeight::SEMIBOLD,
-                            crate::fonts::UI_FAMILY,
-                        ) + (-0.2 * title_text.chars().count() as f32);
+                        // where the untracked advance is 64.83. React's own
+                        // widths are used when the page's title is one of
+                        // them: the GPUI's text is a shade wider (no kerning),
+                        // and the row hands the difference to the swatch, the
+                        // name and the mark.
+                        let title_w = react_title_w(&title_text).unwrap_or_else(|| {
+                            text_width(
+                                window,
+                                &title_text,
+                                20.0,
+                                gpui::FontWeight::SEMIBOLD,
+                                crate::fonts::UI_FAMILY,
+                            ) + (-0.2 * title_text.chars().count() as f32)
+                        });
                         // React's `.rd-actions` boxes at 390 (the same probe):
                         // Layout 116.09, Effects 119, Fans 208.77.
                         let actions_w = match self.page.as_str() {
