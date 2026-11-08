@@ -40,7 +40,7 @@ use canvas_proto::tauri::{
 use gpui::{Context, IntoElement, Window, div, prelude::*, px};
 
 use crate::client::DaemonClient;
-use crate::components::button::{Variant, button, button_icon, button_sm};
+use crate::components::button::{Variant, button, button_icon, button_icon_wide, button_sm};
 use crate::components::panel::{field_hint, field_stack_hint, state_dot, tracked_title_nowrap};
 use crate::components::segmented::segmented;
 use crate::components::select::select_grouped_trunc;
@@ -530,9 +530,8 @@ pub fn today_day_utc() -> i64 {
 // ---------------------------------------------------------------------------
 // The view.
 
-/// The "Map my PC again" key's width in its row (162 px: React's 161.11 rounded
-/// up by GPUI's text measure) and React's `.field` column gap.
-const SETUP_MAP_KEY_W: f32 = 162.0;
+/// The "Map my PC again" key's width in its row (React's 161.11 px) and React's `.field` column gap.
+const SETUP_MAP_KEY_W: f32 = 161.11;
 const FIELD_GAP_X: f32 = 16.0;
 /// "Walk through every light again" at 14 px on one line (measured in GPUI).
 const MAP_HINT_ONE_LINE_W: f32 = 196.0;
@@ -2468,10 +2467,14 @@ impl SettingsView {
         let t = &self.theme;
         let view_entity = cx.entity();
         let map_entity = view_entity.clone();
-        let map_control = button_icon(
+        // GPUI rounds a label's width up, so "Map my PC again" (161.11 px in
+        // React) and "Import" (93.41) came out 1 px wide and their left edge
+        // 1 px left; the wide form takes React's measured label width.
+        let map_control = button_icon_wide(
             t,
             "settings-map",
             "Map my PC again",
+            113.11,
             Variant::Default,
             false,
             false,
@@ -2498,10 +2501,11 @@ impl SettingsView {
             },
         );
         let import_entity = view_entity.clone();
-        let import_control = button_icon(
+        let import_control = button_icon_wide(
             t,
             "settings-import",
             "Import",
+            45.41,
             Variant::Default,
             false,
             false,
