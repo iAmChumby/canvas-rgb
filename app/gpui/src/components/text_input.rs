@@ -45,6 +45,7 @@ pub fn filter_numeric(text: &str) -> String {
 
 /// The clamp a commit applies: the value may not leave the field's range.
 /// A value that is not a number at all is the range's floor.
+#[allow(dead_code)]
 pub fn clamp_value(value: f32, min: f32, max: f32) -> f32 {
     if value.is_nan() {
         return min;
@@ -60,6 +61,60 @@ pub fn format_value(value: f32, decimals: usize) -> String {
     } else {
         format!("{:.*}", decimals, value)
     }
+}
+
+/// JavaScript's `Number(text)` for what a person types into a number field
+/// (`NumberField.tsx:39`, `:42`): surrounding blanks are trimmed, an empty entry
+/// is 0, plain and exponent forms parse, and anything else is NaN (`None`).
+pub fn js_number(text: &str) -> Option<f64> {
+    let t = text.trim();
+    if t.is_empty() {
+        return Some(0.0);
+    }
+    match t {
+        "Infinity" | "+Infinity" => return Some(f64::INFINITY),
+        "-Infinity" => return Some(f64::NEG_INFINITY),
+        _ => {}
+    }
+    // Rust also reads "inf", "nan" and "infinity"; JavaScript does not.
+    if t.chars().any(|c| c.is_ascii_alphabetic() && c != 'e' && c != 'E') {
+        return None;
+    }
+    t.parse::<f64>().ok().filter(|n| n.is_finite())
+}
+
+/// `NumberField.tsx:35`: the entry is invalid while it is not a number or lies
+/// outside the range (`.num-invalid` draws the border in `--down`).
+pub fn is_invalid(draft: &str, min: f32, max: f32) -> bool {
+    match js_number(draft) {
+        None => true,
+        Some(n) => n < f64::from(min) || n > f64::from(max),
+    }
+}
+
+/// `NumberField.tsx:41-47`: what a commit hands the owner, or `None` when the
+/// entry is not a number (the draft is dropped and the value shows again). The
+/// number is clamped to the range and cut to the field's decimals
+/// (`Number(clamp(n, min, max).toFixed(decimals))`).
+pub fn commit_value(draft: &str, min: f32, max: f32, decimals: usize) -> Option<f32> {
+    let n = js_number(draft)?;
+    let clamped = n.clamp(f64::from(min), f64::from(max));
+    let scale = 10f64.powi(decimals as i32);
+    Some(((clamped * scale).round() / scale) as f32)
+}
+
+/// `NumberField.tsx:49-61`: ArrowUp and ArrowDown step the committed value
+/// (not the draft) by `step`, cut to the decimals, and clamp. Any other key
+/// is not a step.
+pub fn step_value(value: f32, key: &str, step: f32, min: f32, max: f32, decimals: usize) -> Option<f32> {
+    let dir = match key {
+        "up" => 1.0,
+        "down" => -1.0,
+        _ => return None,
+    };
+    let scale = 10f32.powi(decimals as i32);
+    let next = ((value + dir * step) * scale).round() / scale;
+    Some(next.clamp(min, max))
 }
 
 /// Told the committed number.
@@ -139,6 +194,20 @@ pub struct TextInput {
     placeholder_color: Option<Rgba>,
     /// Keeps the blur listener alive.
     blur: Option<Subscription>,
+    /// Keeps the focus listener alive.
+    focus_sub: Option<Subscription>,
+    /// The ArrowUp/ArrowDown step (`NumberField.tsx` `step`, default 1).
+    step: f32,
+    /// Something was typed since the last commit (React's `draft !== null`):
+    /// a blur or Enter with no edit commits nothing.
+    dirty: bool,
+    /// Keep only the characters a number may hold. React's field filters
+    /// nothing (`inputMode="decimal"` is a keyboard hint), so Settings turns
+    /// this off; older callers keep it.
+    filter: bool,
+    /// The focus arrived with this press: the press must not move the caret
+    /// off the select-all the focus made (`onFocus` calls `select()`).
+    focus_by_press: bool,
 }
 
 impl TextInput {
@@ -155,7 +224,8 @@ impl TextInput {
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
-            focus_handle: cx.focus_handle(),
+            // A text field is in the tab order (`<input>`).
+            focus_handle: cx.focus_handle().tab_stop(true),
             content: value.to_string().into(),
             value: value.to_string().into(),
             selected_range: 0..0,
@@ -185,7 +255,40 @@ impl TextInput {
             placeholder: None,
             placeholder_color: None,
             blur: None,
+            focus_sub: None,
+            step: 1.0,
+            dirty: false,
+            filter: true,
+            focus_by_press: false,
         }
+    }
+
+    /// The ArrowUp/ArrowDown step (`NumberField.tsx` `step`).
+    pub fn set_step(&mut self, step: f32) {
+        self.step = step;
+    }
+
+    /// Accept any typed character, as React's number field does (a draft that
+    /// is not a number is invalid, and a commit drops it).
+    pub fn set_unfiltered(&mut self) {
+        self.filter = false;
+    }
+
+    /// The page changed theme: the field draws in the new one.
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+    }
+
+    /// Is the draft invalid right now (`aria-invalid`, `.num-invalid`)?
+    pub fn invalid(&self) -> bool {
+        self.numeric && self.dirty && is_invalid(&self.content, self.min, self.max)
+    }
+
+    /// Select the whole entry (`NumberField.tsx:81`, `e.currentTarget.select()`).
+    pub fn select_all(&mut self, cx: &mut Context<Self>) {
+        self.selected_range = 0..self.content.len();
+        self.selection_reversed = false;
+        cx.notify();
     }
 
     /// The field is a plain text field (the search box, the preset's name):
@@ -273,14 +376,19 @@ impl TextInput {
             return;
         }
         self.value = value.to_string().into();
-        self.content = value.to_string().into();
-        self.selected_range = 0..0;
-        self.marked_range = None;
+        // A field being typed into keeps its draft: the model's poll must not
+        // eat half a number (React shows `draft ?? value`).
+        if !self.dirty {
+            self.content = value.to_string().into();
+            self.selected_range = 0..0;
+            self.marked_range = None;
+        }
         cx.notify();
     }
 
     /// Listen for the focus leaving the field, so the draft is committed then
-    /// too (React commits on blur).
+    /// too (React commits on blur), and for it arriving, which selects the
+    /// whole entry (`NumberField.tsx:81`).
     pub fn watch_blur(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.blur.is_some() {
             return;
@@ -289,6 +397,12 @@ impl TextInput {
         self.blur = Some(cx.on_blur(&handle, window, |input, window, cx| {
             input.commit(window, cx);
         }));
+        if self.numeric {
+            self.focus_sub = Some(cx.on_focus(&handle, window, |input, _window, cx| {
+                input.focus_by_press = true;
+                input.select_all(cx);
+            }));
+        }
     }
 
     /// Commit the draft: the number in it, clamped to the field's range. In
@@ -301,9 +415,13 @@ impl TextInput {
             }
             return;
         }
-        let draft = self.content.to_string();
-        let parsed = draft.trim().parse::<f32>().ok();
-        let Some(parsed) = parsed else {
+        // `NumberField.tsx:37-38`: with no draft there is nothing to commit,
+        // so a blur or an Enter after no edit tells the owner nothing.
+        if !self.dirty {
+            return;
+        }
+        self.dirty = false;
+        let Some(committed) = commit_value(&self.content, self.min, self.max, self.decimals) else {
             // React drops a draft that is not a number and shows the value again.
             let value = self.value.clone();
             self.content = value.clone();
@@ -311,13 +429,29 @@ impl TextInput {
             cx.notify();
             return;
         };
-        let clamped = clamp_value(parsed, self.min, self.max);
-        let shown = format_value(clamped, self.decimals);
+        let shown = format_value(committed, self.decimals);
         self.content = shown.clone().into();
         self.value = shown.into();
         self.selected_range = 0..self.content.len();
-        (self.on_commit)(clamped, window, cx);
+        (self.on_commit)(committed, window, cx);
         cx.notify();
+    }
+
+    /// ArrowUp and ArrowDown (`NumberField.tsx:49-61`): step the committed value,
+    /// drop any draft, and commit at once.
+    fn step_by_key(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let current = self.value.trim().parse::<f32>().unwrap_or(self.min);
+        let Some(next) = step_value(current, key, self.step, self.min, self.max, self.decimals) else {
+            return false;
+        };
+        self.dirty = false;
+        let shown = format_value(next, self.decimals);
+        self.content = shown.clone().into();
+        self.value = shown.into();
+        self.selected_range = 0..self.content.len();
+        (self.on_commit)(next, window, cx);
+        cx.notify();
+        true
     }
 
     /// The caret's place in the text.
@@ -387,6 +521,11 @@ impl TextInput {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The press that gave the field the focus keeps the select-all the focus
+        // made, as the browser's `onFocus` select does.
+        if std::mem::take(&mut self.focus_by_press) {
+            return;
+        }
         self.is_selecting = true;
         if event.modifiers.shift {
             self.select_to(self.index_for_mouse_position(event.position), cx);
@@ -409,7 +548,16 @@ impl TextInput {
     /// the input handler; these are the ones that move or delete.
     fn on_key_down(&mut self, event: &gpui::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let key = event.keystroke.key.as_str();
+        if self.numeric && self.step_by_key(key, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         match key {
+            // `NumberField.tsx:35-38`: Enter blurs the input, and the blur commits.
+            "enter" if self.numeric => {
+                self.commit(window, cx);
+                window.blur();
+            }
             "enter" => self.commit(window, cx),
             "escape" => {
                 if let Some(escape) = self.on_escape.clone() {
@@ -465,10 +613,11 @@ impl TextInput {
             .unwrap_or(self.selected_range.clone());
         let mut content = self.content.to_string();
         content.replace_range(range.clone(), text);
-        if self.numeric {
+        if self.numeric && self.filter {
             content = filter_numeric(&content);
         }
         self.content = content.into();
+        self.dirty = true;
         self.selected_range = range.start..range.start + text.len();
         self.marked_range = None;
         cx.notify();
@@ -796,10 +945,18 @@ impl Render for TextInput {
         field = if bare {
             field.bg(gpui::transparent_black())
         } else {
-            field
-                .border_1()
-                .border_color(if self.border_2 { Theme::color(t.line_2) } else { Theme::color(t.line) })
-                .bg(Theme::color(t.sunk))
+            // `hardware.css:253` `.num:focus-visible` takes `--live` (it beats
+            // `.num-invalid`'s `--down`, `app.css:1365`, by specificity).
+            let border = if !disabled && self.focus_handle.is_focused(window) && !self.ui_left {
+                t.live()
+            } else if self.invalid() {
+                Theme::color(t.down)
+            } else if self.border_2 {
+                Theme::color(t.line_2)
+            } else {
+                Theme::color(t.line)
+            };
+            field.border_1().border_color(border).bg(Theme::color(t.sunk))
         };
         if disabled {
             return field.child(TextElement { input: cx.entity() });
@@ -838,6 +995,70 @@ mod tests {
         assert_eq!(clamp_value(-5.0, 0.0, 100.0), 0.0);
         assert_eq!(clamp_value(150.0, 0.0, 100.0), 100.0);
         assert_eq!(clamp_value(f32::NAN, 20.0, 100.0), 20.0);
+    }
+
+    /// `Number(text)`: blanks trim, an empty entry is 0, words are NaN.
+    #[test]
+    fn number_field_reads_a_draft_like_javascript_number() {
+        assert_eq!(js_number("45"), Some(45.0));
+        assert_eq!(js_number("  45  "), Some(45.0));
+        assert_eq!(js_number(""), Some(0.0), "Number('') is 0");
+        assert_eq!(js_number("   "), Some(0.0));
+        assert_eq!(js_number("4.5e1"), Some(45.0));
+        assert_eq!(js_number(".5"), Some(0.5));
+        assert_eq!(js_number("-3"), Some(-3.0));
+        assert_eq!(js_number("abc"), None);
+        assert_eq!(js_number("12px"), None);
+        assert_eq!(js_number("nan"), None, "Rust reads nan, JavaScript does not");
+        assert_eq!(js_number("inf"), None);
+        assert_eq!(js_number("1,5"), None);
+        assert_eq!(js_number("Infinity"), Some(f64::INFINITY));
+    }
+
+    /// `NumberField.tsx:41-47`: Enter or blur commits the clamped number; a
+    /// draft that is not a number commits nothing.
+    #[test]
+    fn number_field_commit_clamps_and_drops_non_numbers() {
+        assert_eq!(commit_value("45", 10.0, 60.0, 0), Some(45.0));
+        assert_eq!(commit_value("5", 10.0, 60.0, 0), Some(10.0), "below the floor clamps up");
+        assert_eq!(commit_value("999", 10.0, 60.0, 0), Some(60.0));
+        assert_eq!(commit_value("", 10.0, 60.0, 0), Some(10.0), "an empty entry is 0, clamped to the floor");
+        assert_eq!(commit_value("", 0.0, 100.0, 0), Some(0.0));
+        assert_eq!(commit_value("abc", 10.0, 60.0, 0), None);
+    }
+
+    /// `Number(x.toFixed(decimals))`: 30.5 commits 31, and decimals cut the rest.
+    #[test]
+    fn number_field_commit_rounds_to_the_field_s_decimals() {
+        assert_eq!(commit_value("30.4", 10.0, 60.0, 0), Some(30.0));
+        assert_eq!(commit_value("30.5", 10.0, 60.0, 0), Some(31.0));
+        assert_eq!(commit_value("42.46", 0.0, 100.0, 1), Some(42.5));
+    }
+
+    /// `NumberField.tsx:35`: the entry is invalid when it is not a number or leaves the range.
+    #[test]
+    fn number_field_flags_an_invalid_draft() {
+        assert!(!is_invalid("30", 10.0, 60.0));
+        assert!(!is_invalid("10", 10.0, 60.0), "the ends are inside");
+        assert!(!is_invalid("60", 10.0, 60.0));
+        assert!(is_invalid("9", 10.0, 60.0));
+        assert!(is_invalid("61", 10.0, 60.0));
+        assert!(is_invalid("abc", 10.0, 60.0));
+        assert!(is_invalid("", 10.0, 60.0), "an empty entry reads as 0, below the floor");
+        assert!(!is_invalid("", 0.0, 100.0));
+    }
+
+    /// `NumberField.tsx:49-61`: ArrowUp adds a step and ArrowDown takes one, clamped.
+    #[test]
+    fn number_field_arrows_step_the_value_and_clamp() {
+        assert_eq!(step_value(30.0, "up", 1.0, 10.0, 60.0, 0), Some(31.0));
+        assert_eq!(step_value(30.0, "down", 1.0, 10.0, 60.0, 0), Some(29.0));
+        assert_eq!(step_value(60.0, "up", 1.0, 10.0, 60.0, 0), Some(60.0), "past the top stays on it");
+        assert_eq!(step_value(10.0, "down", 1.0, 10.0, 60.0, 0), Some(10.0));
+        assert_eq!(step_value(0.5, "up", 0.1, 0.0, 1.0, 1), Some(0.6), "decimals follow the field");
+        assert_eq!(step_value(30.0, "left", 1.0, 10.0, 60.0, 0), None);
+        assert_eq!(step_value(30.0, "enter", 1.0, 10.0, 60.0, 0), None);
+        assert_eq!(step_value(30.0, "pageup", 1.0, 10.0, 60.0, 0), None, "no page keys in the field");
     }
 
     #[test]
