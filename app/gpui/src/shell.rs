@@ -2099,8 +2099,12 @@ impl Render for Shell {
         // The onboarding takeover (takeover.ts): while it is open the rail,
         // the strip, the notices and the dock are not drawn — the window is
         // the onboarding alone (`LayoutView.tsx:971`, `Shell.tsx:52`).
-        let onboarding_open = self.page == "layout"
-            && self.layout_view.update(cx, |v, _| v.is_onboarding_open() || v.onboarding.is_some());
+        //
+        // The flag is read AFTER the open attempt below: `try_open_onboarding`
+        // is what opens the takeover, so reading the flag first left one
+        // frame that drew the Layout chrome (the rail, the strip, the dock)
+        // over the takeover before the next frame took the chrome away.
+        let mut onboarding_open = false;
         // Keep the layout view's status/effects in step with the shell's
         // answers so Hello variants and finish tiles read the same truth.
         if self.page == "layout" {
@@ -2115,6 +2119,9 @@ impl Render for Shell {
                 }
             });
             self.layout_view.update(cx, |v, cx| v.try_open_onboarding(cx));
+            onboarding_open = self
+                .layout_view
+                .update(cx, |v, _| v.is_onboarding_open() || v.onboarding.is_some());
         }
         if onboarding_open {
             let mut root = div()
@@ -2330,5 +2337,32 @@ mod tests {
         assert!(is_valid_page("displays"));
         assert!(is_valid_page("peripherals"));
         assert!(!is_valid_page("nope"));
+    }
+
+    /// The takeover flag is read AFTER the open attempt (#213).
+    ///
+    /// `try_open_onboarding` is what opens the takeover. Reading the flag
+    /// before it left one frame that drew the Layout chrome (the rail, the
+    /// strip, the dock) over the takeover: the browser's React editor
+    /// replaces the page with the onboarding in the same frame it opens.
+    ///
+    /// The order is the whole point, and it cannot be seen in a screenshot
+    /// (a settled shot never shows the flash), so the source order is what
+    /// is pinned here.
+    #[test]
+    fn the_takeover_flag_is_read_after_the_open_attempt() {
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/shell.rs"))
+            .expect("read shell.rs");
+        let open = source
+            .find("v.try_open_onboarding(cx)")
+            .expect("the open attempt");
+        let read = source
+            .find("v.is_onboarding_open() || v.onboarding.is_some()")
+            .expect("the takeover flag");
+        assert!(
+            open < read,
+            "the takeover flag is read at {read} but the takeover is opened at {open}: \
+             the frame in between draws the Layout chrome over the takeover"
+        );
     }
 }

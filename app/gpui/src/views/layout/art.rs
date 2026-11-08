@@ -308,13 +308,18 @@ fn mouse() -> Vec<Stroke> {
 }
 
 /// A microphone: the capsule, its grille and the stand.
+///
+/// React's path is `M14 30 V42 Q14 66 50 66 Q86 66 86 42 V30`: the arms
+/// stand straight from y 30 to y 42 and only then curve into the stand.
 fn microphone() -> Vec<Stroke> {
     vec![
         rect(26.0, 2.0, 48.0, 48.0, 24.0),
         line(26.0, 18.0, 74.0, 18.0),
         line(26.0, 32.0, 74.0, 32.0),
-        quad(14.0, 30.0, 14.0, 66.0, 50.0, 66.0),
-        quad(50.0, 66.0, 86.0, 66.0, 86.0, 30.0),
+        line(14.0, 30.0, 14.0, 42.0),
+        quad(14.0, 42.0, 14.0, 66.0, 50.0, 66.0),
+        quad(50.0, 66.0, 86.0, 66.0, 86.0, 42.0),
+        line(86.0, 42.0, 86.0, 30.0),
         line(50.0, 66.0, 50.0, 90.0),
         line(26.0, 94.0, 74.0, 94.0),
     ]
@@ -339,12 +344,14 @@ fn generic() -> Vec<Stroke> {
     vec![rect(6.0, 6.0, 88.0, 88.0, 4.0)]
 }
 
-/// Paints a part's drawing.
+/// The border box, in css pixels, and the drawing inside it.
 ///
 /// `box` is the part's own box in canvas units, `origin` the desk's pixel
 /// origin, `k` the pixels to a canvas unit, and `rotation` the part's turn
 /// in degrees. `inset` is how far the drawing sits inside the part's border,
-/// in css pixels: the browser draws the picture on the part's padding box.
+/// in css pixels: the browser draws the picture on the part's padding box
+/// (`PreviewStage.tsx:2624` gives the box in fractional css pixels, and the
+/// browser's own border is 1.25 px, `desk.module.css:60`).
 #[allow(clippy::too_many_arguments)]
 pub fn paint(
     window: &mut Window,
@@ -372,15 +379,21 @@ pub fn paint(
     if strokes.is_empty() {
         return;
     }
-    // The drawing's own box: the part's box without its border.
-    let inset_units = inset as f64 / k as f64;
-    let bx = box_x + inset_units;
-    let by = box_y + inset_units;
-    let bw = (box_w - 2.0 * inset_units).max(0.0);
-    let bh = (box_h - 2.0 * inset_units).max(0.0);
-    // The part's centre, the point the drawing turns about.
-    let cx = box_x + box_w / 2.0;
-    let cy = box_y + box_h / 2.0;
+    // The border box, in css pixels.
+    let kf = k as f64;
+    let x0 = origin_x as f64 + box_x * kf;
+    let y0 = origin_y as f64 + box_y * kf;
+    let x1 = origin_x as f64 + (box_x + box_w) * kf;
+    let y1 = origin_y as f64 + (box_y + box_h) * kf;
+    // The drawing's own box: the border box without its border.
+    let bx = x0 + inset as f64;
+    let by = y0 + inset as f64;
+    let bw = (x1 - inset as f64 - bx).max(0.0);
+    let bh = (y1 - inset as f64 - by).max(0.0);
+    // The part's centre, the point the drawing turns about (the browser's
+    // `transform-origin: 50% 50%` of the border box).
+    let cx = (x0 + x1) / 2.0;
+    let cy = (y0 + y1) / 2.0;
     let rad = rotation_deg.to_radians();
     let (sin, cos) = rad.sin_cos();
     let mut builder = PathBuilder::stroke(px(1.0));
@@ -394,12 +407,10 @@ pub fn paint(
             let dy = uy - cy;
             let rx = cx + dx * cos - dy * sin;
             let ry = cy + dx * sin + dy * cos;
-            let px_x = origin_x + rx as f32 * k;
-            let px_y = origin_y + ry as f32 * k;
             if i == 0 {
-                builder.move_to(point(px(px_x), px(px_y)));
+                builder.move_to(point(px(rx as f32), px(ry as f32)));
             } else {
-                builder.line_to(point(px(px_x), px(px_y)));
+                builder.line_to(point(px(rx as f32), px(ry as f32)));
             }
         }
         if s.closed {
