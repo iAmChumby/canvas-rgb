@@ -289,9 +289,9 @@ Taken by `tools/ui-capture/` against the daemon on the fakes. 6 sizes × 2 theme
 |---|---|---|---|
 | 1920x1040 | `.build/ui-capture/layout-*-1920x1040-dark.png` | `.build/ui-capture/layout-*-1920x1040-light.png` | dark 52010/1996800 (2.60%), light 56868/1996800 (2.85%) |
 | 1440x900 | `.build/ui-capture/layout-*-1440x900-dark.png` | `.build/ui-capture/layout-*-1440x900-light.png` | dark 49822/1296000 (3.84%), light 53805/1296000 (4.15%) |
-| 1280x860 | `.build/ui-capture/layout-*-1280x860-dark.png` | `.build/ui-capture/layout-*-1280x860-light.png` | dark 43692/1100800 (3.97%), light 47294/1100800 (4.30%) |
+| 1280x860 | `.build/ui-capture/layout-*-1280x860-dark.png` | `.build/ui-capture/layout-*-1280x860-light.png` | dark 43898/1100800 (3.99%), light 47078/1100800 (4.28%) |
 | 1024x768 | `.build/ui-capture/layout-*-1024x768-dark.png` | `.build/ui-capture/layout-*-1024x768-light.png` | dark 32354/786432 (4.11%), light 34071/786432 (4.33%) |
-| 960x1032 | `.build/ui-capture/layout-*-960x1032-dark.png` | `.build/ui-capture/layout-*-960x1032-light.png` | dark 32279/990720 (3.26%), light 34462/990720 (3.48%) |
+| 960x1032 | `.build/ui-capture/layout-*-960x1032-dark.png` | `.build/ui-capture/layout-*-960x1032-light.png` | dark 32073/990720 (3.24%), light 34462/990720 (3.48%) |
 | 390x844 | `.build/ui-capture/layout-*-390x844-dark.png` | `.build/ui-capture/layout-*-390x844-light.png` | dark 19607/329160 (5.96%), light 20962/329160 (6.37%) |
 
 Round 3's raw numbers (nothing masked; the mask count is 0 on every pair). The
@@ -305,9 +305,9 @@ The pairs that are not the Layout page, kept as guards (1440x900 dark):
 
 The onboarding pairs, shot against the daemon with `onboarding_complete =
 false` (1440x900 dark / 390x844 dark):
-`onboarding-hello 2.57% / 5.29%`, `onboarding-case 3.87% / 10.59%`,
-`onboarding-parts 3.87% / 9.64%`, `onboarding-match 2.91% / 7.05%`,
-`onboarding-finish 5.61% / 9.16%`.
+`onboarding-hello 2.55% / 5.22%`, `onboarding-case 3.87% / 10.42%`,
+`onboarding-parts 3.87% / 9.64%`, `onboarding-match 2.91% / 7.06%`,
+`onboarding-finish 5.63% / 9.16%`.
 
 ## Reviewer verdict
 Adversarial reviewer, date, what it compared, every mismatch it found and how each was fixed, and its final verdict
