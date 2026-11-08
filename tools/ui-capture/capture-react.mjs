@@ -34,6 +34,12 @@
 //       paint frame 0 and never advance, so layout can be diffed against
 //       the GPUI frame without animated content in the way. Off by default:
 //       the animated capture stays the record of how the page looks.
+//   UI_CAPTURE_EDITOR=<effect name>  (#214) open the code editor on that
+//       effect: the library's card is clicked and then "Edit code". The shot
+//       is named editor-react-<w>x<h>-<theme>.png.
+//   UI_CAPTURE_STACK=<stack name>  (#214) open the stack builder on that
+//       stack ("new" for a stack that has never been saved). The shot is
+//       named stack-<slug>-react-<w>x<h>-<theme>.png.
 
 import { createRequire } from "node:module";
 import http from "node:http";
@@ -112,6 +118,18 @@ const PALETTE_ENTRIES = (process.env.UI_CAPTURE_PALETTE ?? "")
   .filter(Boolean);
 const PALETTE_SIZES = (entries) =>
   entries === "empty" ? ACTIVE_VIEWPORTS : ACTIVE_VIEWPORTS.filter((v) => ["1440x900", "390x844"].includes(`${v.w}x${v.h}`));
+
+// The effect editor (#214): the effect whose code is opened, by its name in
+// the library. The shot is named editor-react-<w>x<h>-<theme>.png.
+const EDITOR_EFFECT = (process.env.UI_CAPTURE_EDITOR ?? "").trim();
+// The stack builder (#214): the stack that is opened, by name ("new" for a
+// stack that has never been saved). The shot is named
+// stack-<slug>-react-<w>x<h>-<theme>.png.
+const STACK_NAME = (process.env.UI_CAPTURE_STACK ?? "").trim();
+
+function slugOf(text) {
+  return text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+}
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -309,8 +327,7 @@ function tauriInit({ daemonBase, token, theme }) {
   window.__TAURI__ = { core: { invoke }, event: { listen } };
 }
 
-async function shootPage(page, base, view, viewport, theme, daemonBase, token, paletteQuery = null) {
-  const pageErrors = [];
+async function shootPage(page, base, view, viewport, theme, daemonBase, token, paletteQuery = null) {  const pageErrors = [];
   const consoleErrors = [];
   const apiFailures = [];
   // A thumbnail that went over the daemon's render budget (a debug build renders slowly) answers
@@ -358,6 +375,32 @@ async function shootPage(page, base, view, viewport, theme, daemonBase, token, p
   // Let the view settle (fonts, thumbnails, one preview frame).
   await page.waitForTimeout(400);
   let fileName = `${view.name}-react-${viewport.w}x${viewport.h}-${theme}.png`;
+  if (EDITOR_EFFECT) {
+    // The code editor (#214): the library's card for the effect is clicked,
+    // then "Edit code" opens its source.
+    fileName = `editor-react-${viewport.w}x${viewport.h}-${theme}.png`;
+    const card = page.locator(`.effect-card-name:text-is("${EDITOR_EFFECT}")`).first();
+    try {
+      await card.click({ timeout: 8000 });
+    } catch {
+      notLoaded.push(`the effect card ${EDITOR_EFFECT} was not found`);
+    }
+    await page.waitForTimeout(1200);
+    const edit = page.getByRole("button", { name: "Edit code" }).first();
+    try {
+      await edit.click({ timeout: 8000 });
+    } catch {
+      notLoaded.push("the Edit code key was not found");
+    }
+    // The preview is a render of the effect's own source: it can take a few
+    // seconds, and the note reads "Rendering…" until it lands.
+    await page.waitForTimeout(9000);
+  }
+  if (STACK_NAME) {
+    // The stack builder (#214): the page is already on the stack's route.
+    fileName = `stack-${slugOf(STACK_NAME)}-react-${viewport.w}x${viewport.h}-${theme}.png`;
+    await page.waitForTimeout(1500);
+  }
   if (paletteQuery !== null) {
     // The command palette (#211): Ctrl+K opens it, the query is typed, then
     // the shot. The slug names the file so the GPUI shot pairs with it.
@@ -430,6 +473,14 @@ async function main() {
         }
       }
     } else {
+      // The editor and the builder (#214) each have their own route: the
+      // editor is the library's page with the code open, the builder is the
+      // library's page with `?stack=`.
+      const views = STACK_NAME
+        ? [{ name: `stack-${slugOf(STACK_NAME)}`, path: `/effects/?stack=${encodeURIComponent(STACK_NAME)}` }]
+        : EDITOR_EFFECT
+          ? [{ name: "editor", path: "/effects/" }]
+          : ACTIVE_VIEWS;
       for (const viewport of ACTIVE_VIEWPORTS) {
         for (const theme of ACTIVE_THEMES) {
           const context = await browser.newContext({
@@ -439,7 +490,7 @@ async function main() {
             ...(FREEZE ? { reducedMotion: "reduce" } : {}),
           });
           const page = await context.newPage();
-          for (const view of ACTIVE_VIEWS) {
+          for (const view of views) {
             process.stderr.write(`shoot ${view.name} ${viewport.w}x${viewport.h} ${theme} ...\n`);
             shots.push(await shootPage(page, base, view, viewport, theme, DAEMON_BASE, token));
           }

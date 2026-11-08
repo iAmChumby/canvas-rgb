@@ -242,7 +242,8 @@ pub fn control(
                     change.clone(),
                     change,
                 ))
-                .child(number_field(
+                // `.prop-item[data-kind="number"] .num { width: 64px }`.
+                .child(crate::components::number_field::number_field_width(
                     t,
                     &format!("{key}-field"),
                     n,
@@ -250,6 +251,7 @@ pub fn control(
                     max_f,
                     step_f,
                     None,
+                    64.0,
                     field_change,
                 ))
                 .into_any_element()

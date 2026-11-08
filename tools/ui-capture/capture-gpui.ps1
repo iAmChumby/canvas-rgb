@@ -34,7 +34,19 @@ param(
     # palette-gpui-<size>-<theme>.png, or palette-q-<slug>-gpui-... with
     # -PaletteQuery, so diff-pairs.ps1 pairs them with the React shots.
     [switch]$Palette,
-    [string]$PaletteQuery = ''
+    [string]$PaletteQuery = '',
+    # #214: open the code editor on an effect (--editor <id>; debug builds
+    # only). The shot is named editor-gpui-<size>-<theme>.png.
+    [string]$Editor = '',
+    # #214: open the stack builder on a stack (--stack <name>; "new" for a
+    # stack that has never been saved). The shot is named
+    # stack-<slug>-gpui-<size>-<theme>.png.
+    [string]$Stack = '',
+    # How long the window must have been up before a settled frame is taken.
+    # The editor's live preview is a render of the effect's own source, which
+    # takes a few seconds; a short settle would shoot the pane before the
+    # picture lands.
+    [int]$SettleSeconds = 3
 )
 if ($ApiPort -eq 9430) { throw "-ApiPort 9430 is the real daemon's port; captures run only against the fakes" }
 if ($PaletteQuery -ne '') { $Palette = $true }
@@ -184,6 +196,8 @@ foreach ($theme in $Themes) {
         if ($PaletteQuery -ne '') { $paletteArgs += " --palette-query `"$PaletteQuery`"" }
       }
       $psi.Arguments = "--page $page --theme $theme --min-size 390x600 --size $size --capture$paletteArgs"
+      if ($Editor -ne '') { $psi.Arguments += " --editor $Editor" }
+      if ($Stack -ne '') { $psi.Arguments += " --stack `"$Stack`"" }
       $psi.UseShellExecute = $false
       $psi.CreateNoWindow = $true
       $psi.RedirectStandardInput = [bool]$TrayStub
@@ -253,7 +267,7 @@ foreach ($theme in $Themes) {
           $ch = $rect.Bottom - $rect.Top
           if ($cw -le 0 -or $ch -le 0) { continue }
           $sum = Get-ShotChecksum $handle $cw $ch
-          if ($null -ne $prevSum -and $sum -eq $prevSum -and ((Get-Date) - $appearedAt).TotalSeconds -ge 3) { break }
+          if ($null -ne $prevSum -and $sum -eq $prevSum -and ((Get-Date) - $appearedAt).TotalSeconds -ge $SettleSeconds) { break }
           $prevSum = $sum
         }
         $rect = New-Object Win32Capture+RECT
@@ -282,7 +296,7 @@ foreach ($theme in $Themes) {
         # viewport shot.
         $shot = $bmp.Clone((New-Object System.Drawing.Rectangle($ox, $oy, $clientW, $clientH)), $bmp.PixelFormat)
         $bmp.Dispose()
-        $viewName = if ($Palette) { "palette$paletteSuffix" } else { $page }
+        $viewName = if ($Palette) { "palette$paletteSuffix" } elseif ($Editor -ne '') { "editor" } elseif ($Stack -ne '') { "stack-$((($Stack.ToLower() -replace '[^a-z0-9]+', '-')).Trim('-'))" } else { $page }
         $file = Join-Path $outDir "$viewName-gpui-${size}-$theme.png"
         $shot.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
         $shot.Dispose()

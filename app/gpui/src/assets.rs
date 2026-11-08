@@ -89,6 +89,7 @@ pub const ICONS: &[&str] = &[
     "Headphones",
     "Minus",
     "SlidersHorizontal",
+    "GripDots",
 ];
 
 fn icon_svg(name: &str) -> Option<&'static str> {
@@ -164,6 +165,7 @@ fn icon_svg(name: &str) -> Option<&'static str> {
         "Headphones" => include_str!("../assets/icons/Headphones.svg"),
         "Minus" => include_str!("../assets/icons/Minus.svg"),
         "SlidersHorizontal" => include_str!("../assets/icons/SlidersHorizontal.svg"),
+        "GripDots" => include_str!("../assets/icons/GripDots.svg"),
         _ => return None,
     })
 }

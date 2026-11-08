@@ -168,6 +168,25 @@ pub fn panel_with_padding(
     body: impl IntoElement,
     padding: Option<f32>,
 ) -> gpui::Stateful<gpui::Div> {
+    panel_with_head_margin(t, id, title, actions, body, padding, 12.0)
+}
+
+/// A panel whose head carries `head_margin` px under it instead of the
+/// base panel's `s3` (12 px): the stack stage's head has no margin
+/// (`.rd-stack-stage .panel-head { margin-bottom: 0 }`) and the layers
+/// head has `s2` (8 px). A negative margin on the body to cancel the base
+/// margin instead collapsed the stage (measured at 390x844: a 55 px
+/// head-only panel), so the margin lives on the head.
+#[allow(dead_code)]
+pub fn panel_with_head_margin(
+    t: &Theme,
+    id: &str,
+    title: &str,
+    actions: impl IntoElement,
+    body: impl IntoElement,
+    padding: Option<f32>,
+    head_margin: f32,
+) -> gpui::Stateful<gpui::Div> {
     let mut el = div()
         .id(gpui::SharedString::from(id.to_string()))
         .flex()
@@ -180,30 +199,28 @@ pub fn panel_with_padding(
         Some(p) => el.p(px(p)),
         None => el.p_4(),
     };
-    el
-        .child(
-            div()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                // React `.panel-head { margin-bottom: var(--s3); }`.
-                .mb_3()
-                // React `.panel-head { flex: 0 0 auto; }`: the head keeps its
-                // height when the panel's body scrolls.
-                .flex_shrink_0()
-                .child(tracked_title(
-                    &title.to_uppercase(),
-                    13.0,
-                    0.08,
-                    gpui::FontWeight::MEDIUM,
-                    crate::fonts::MONO_FAMILY,
-                    Theme::color(t.mute),
-                ))
-                .child(actions),
-        )
-        .child(body)
+    el.child(
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .mb(px(head_margin))
+            // React `.panel-head { flex: 0 0 auto; }`: the head keeps its
+            // height when the panel's body scrolls.
+            .flex_shrink_0()
+            .child(tracked_title(
+                &title.to_uppercase(),
+                13.0,
+                0.08,
+                gpui::FontWeight::MEDIUM,
+                crate::fonts::MONO_FAMILY,
+                Theme::color(t.mute),
+            ))
+            .child(actions),
+    )
+    .child(body)
 }
 
 /// A labelled field in row form (the intermediate width): label left,

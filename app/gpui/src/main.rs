@@ -20,6 +20,10 @@
 //! - `--size WxH` — the window size to open at.
 //! - `--palette` (debug only) — open the command palette at start, for captures.
 //! - `--palette-query <text>` (debug only) — open it with that query typed.
+//! - `--editor <effect id>` (debug only) — open the Effects page with the code
+//!   editor on that effect, for captures.
+//! - `--stack <name>` (debug only) — open the Effects page in build mode on
+//!   that stack (`new` for a stack that has never been saved), for captures.
 
 use std::io::{BufRead, BufReader, Write};
 
@@ -33,6 +37,7 @@ mod assets;
 mod client;
 mod components;
 mod fonts;
+mod reactlib;
 mod shell;
 mod theme;
 mod views;
@@ -55,6 +60,10 @@ struct ParsedArgs {
     palette: bool,
     /// `--palette-query <text>` (debug builds only): the query the palette opens with.
     palette_query: String,
+    /// `--editor <effect id>` (debug only): the effect the code editor opens on.
+    editor: Option<String>,
+    /// `--stack <name>` (debug only): the stack the builder opens on.
+    stack: Option<String>,
 }
 
 fn parse_args() -> ParsedArgs {
@@ -65,6 +74,8 @@ fn parse_args() -> ParsedArgs {
     let mut capture = false;
     let mut palette = false;
     let mut palette_query = String::new();
+    let mut editor = None;
+    let mut stack = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -99,6 +110,16 @@ fn parse_args() -> ParsedArgs {
                     palette_query = v;
                 }
             }
+            "--editor" if cfg!(debug_assertions) => {
+                if let Some(v) = args.next() {
+                    editor = Some(v);
+                }
+            }
+            "--stack" if cfg!(debug_assertions) => {
+                if let Some(v) = args.next() {
+                    stack = Some(v);
+                }
+            }
             _ => {}
         }
     }
@@ -110,6 +131,8 @@ fn parse_args() -> ParsedArgs {
         capture,
         palette,
         palette_query,
+        editor,
+        stack,
     }
 }
 
@@ -129,6 +152,8 @@ fn main() {
         capture,
         palette,
         palette_query,
+        editor,
+        stack,
     } = parse_args();
     if !shell::is_valid_page(&page) {
         eprintln!(
@@ -188,6 +213,17 @@ fn main() {
                         // for captures (`--palette-query` types the query).
                         if palette {
                             shell.open_palette_initial(&palette_query, cx);
+                        }
+                        // Debug only: `--editor` opens the code editor on an
+                        // effect and `--stack` opens the builder on a stack,
+                        // both for captures (#214).
+                        if let Some(id) = &editor {
+                            let id = id.clone();
+                            shell.open_effect_editor(&id, cx);
+                        }
+                        if let Some(name) = &stack {
+                            let name = name.clone();
+                            shell.open_stack_builder(&name, cx);
                         }
                         shell
                     })

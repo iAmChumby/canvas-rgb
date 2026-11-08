@@ -564,6 +564,20 @@ impl Shell {
         cx.notify();
     }
 
+    /// Debug only (#214): opens the code editor on an effect, for the
+    /// captures.
+    pub fn open_effect_editor(&mut self, id: &str, cx: &mut Context<Self>) {
+        let view = self.effects_view.clone();
+        view.update(cx, |v, cx| v.open_editor(id, cx));
+    }
+
+    /// Debug only (#214): opens the stack builder on a stack, for the
+    /// captures.
+    pub fn open_stack_builder(&mut self, name: &str, cx: &mut Context<Self>) {
+        let view = self.effects_view.clone();
+        view.update(cx, |v, cx| v.open_stack(name, cx));
+    }
+
     pub fn close_palette(&mut self, cx: &mut Context<Self>) {
         self.palette_open = false;
         cx.notify();
@@ -1418,7 +1432,7 @@ impl Shell {
                 .update(cx, |u, _| u.strip_context_text())
         } else if self.page == "effects" {
             self.effects_view
-                .update(cx, |u, _| u.strip_title().1.unwrap_or_default())
+                .update(cx, |u, cx2| u.strip_title(cx2).1.unwrap_or_default())
         } else if self.page == "layout" {
             // The layout's own name stands beside the page's name.
             self.layout_view
@@ -1428,6 +1442,9 @@ impl Shell {
         };
         // The page's own actions (React PageActions), on the strip's right.
         let mut page_actions: Option<gpui::AnyElement> = None;
+        // The page's leading key (React PageTitle's `leading`): the stack
+        // builder's Back to the effects.
+        let mut page_leading: Option<gpui::AnyElement> = None;
         if self.page == "fans" {
             let fans_view = self.fans_view.clone();
             let (title, context, actions) = fans_view.update(cx, |view, cx| {
@@ -1441,14 +1458,16 @@ impl Shell {
         }
         if self.page == "effects" {
             let effects_view = self.effects_view.clone();
-            let (title, context, actions) = effects_view.update(cx, |view, cx| {
-                let (title, context) = view.strip_title();
+            let (title, context, actions, leading) = effects_view.update(cx, |view, cx| {
+                let (title, context) = view.strip_title(cx);
                 let actions = crate::views::effects::render::strip_actions(view, cx);
-                (title, context, actions)
+                let leading = crate::views::effects::render::strip_leading(view, cx);
+                (title, context, actions, leading)
             });
             title_text = title;
             context_text = context.unwrap_or_default();
             page_actions = Some(actions);
+            page_leading = leading;
         }
         if self.page == "layout" {
             // The Layout page's own actions: undo and redo, the zone count,
@@ -1526,7 +1545,12 @@ impl Shell {
             .border_b_1()
             .border_color(Theme::color(t.line))
             .bg(Theme::color(t.panel));
-        if phone {
+        // React's phone strip hides the brand when the page brings actions
+        // of its own (`.strip-inner:has(.rd-actions) .strip-brand {
+        // display: none }`): the stack builder and the effects page both
+        // have strip actions at 390, so the easel only shows on pages
+        // without them.
+        if phone && page_actions.is_none() {
             inner = inner.child(self.easel(16.0));
         }
         // React `.rd-title`: the h1 and the mono context share one flex row
@@ -1543,6 +1567,19 @@ impl Shell {
             title_row.flex_none()
         } else {
             title_row.mr_2()
+        };
+        // The stack builder's title yields to its keys on a phone
+        // (`.strip-inner:has(.rd-stack-strip-save) .rd-title { flex: 0 1
+        // auto; min-width: 0 }` with the h1 ellipsised): at 390 React
+        // reads "New s…" / "Sunset…", not the full name. The builder is
+        // the one page that brings a leading back key to the strip.
+        let title_text = if phone && page_leading.is_some() {
+            // React's h1 box is 81 px wide here (measured at 390x844 with
+            // "Sunset glow": h1 48,15,81x20, reading "Sunset…"); at 68 the
+            // name clipped to "Suns…".
+            ellipsize(window, &title_text, 81.0, 20.0, gpui::FontWeight::SEMIBOLD, crate::fonts::UI_FAMILY)
+        } else {
+            title_text
         };
         title_row = title_row.child(
             div()
@@ -1569,8 +1606,12 @@ impl Shell {
                 );
             }
         }
-        inner = inner.child(title_row);
-        // Now playing: hidden at 1280 px and up (the deck carries it there).
+        // The page's leading key, before the title.
+        let has_leading = page_leading.is_some();
+        if let Some(leading) = page_leading {
+            inner = inner.child(leading);
+        }
+        inner = inner.child(title_row);        // Now playing: hidden at 1280 px and up (the deck carries it there).
         if self.width < 1280.0 {
             let swatch = div()
                 .size(px(12.0))
@@ -1585,8 +1626,13 @@ impl Shell {
             if page_actions.is_none() || phone {
                 let now_name = if phone {
                     // React's phone strip truncates the now-playing name
-                    // (`.strip-now` overflow): "Nothing…".
-                    ellipsize(window, &now_name, 76.0, 14.0, gpui::FontWeight::SEMIBOLD, crate::fonts::UI_FAMILY)
+                    // (`.strip-now` overflow): on the stack builder the
+                    // truncated title gives the name more room, so React
+                    // reads "Nothing is ru…" there ("Nothing…" on the
+                    // other pages); the builder is the page with a leading
+                    // back key.
+                    let max_w = if has_leading { 88.0 } else { 64.0 };
+                    ellipsize(window, &now_name, max_w, 14.0, gpui::FontWeight::SEMIBOLD, crate::fonts::UI_FAMILY)
                 } else {
                     now_name.clone()
                 };
@@ -1961,6 +2007,12 @@ impl Render for Shell {
         let t = &self.theme;
         let phone = self.width <= 720.0;
         let phone_pad_top = px(16.0);
+        // React's phone detail/editor is `.effect-sheet`: position fixed,
+        // z-index 40, opaque, full bleed to the window bottom, so it covers
+        // the bottom dock while it is open. GPUI hides the dock in that
+        // state instead of drawing it over the sheet (390x844: was a
+        // 390x65 box over the Speed row).
+        let sheet_open = phone && self.effects_view.read(cx).pushed;
         let content = div()
             .flex_1()
             .flex_col()
@@ -1972,8 +2024,13 @@ impl Render for Shell {
             .p_4()
             .child(self.page_content());
         let content = if phone {
-            // React phone `.content`: padding s4 (16) on the sides.
-            content.px(px(16.0)).pb(px(120.0)).pt(phone_pad_top)
+            // React phone `.content`: padding s4 (16) on the sides. With the
+            // sheet open the dock is gone, so the 120 px bottom clearance
+            // for it goes too (the sheet's own bottom padding is 104 px of
+            // scroll room; GPUI clips instead of scrolling, so zero keeps
+            // the Speed row in view as React's viewport shows it).
+            let pb = if sheet_open { px(0.0) } else { px(120.0) };
+            content.px(px(16.0)).pb(pb).pt(phone_pad_top)
         } else {
             // React `.content { flex: 1 1 auto; min-height: 0; overflow:
             // hidden; }`: the content box holds the page's own height, so a
@@ -1995,12 +2052,15 @@ impl Render for Shell {
             .child(self.strip(window, cx))
             .child(content);
         let body = if phone {
-            div()
+            let mut body = div()
                 .flex()
                 .flex_col()
                 .size_full()
-                .child(main_col)
-                .child(self.dock())
+                .child(main_col);
+            if !sheet_open {
+                body = body.child(self.dock());
+            }
+            body
         } else if self.width < 1280.0 {
             div()
                 .flex()
