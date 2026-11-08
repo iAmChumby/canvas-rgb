@@ -332,11 +332,12 @@ pub fn desk_with_origin(
     element.flex_1().min_h_0().min_w_0().into_any_element()
 }
 
-/// The tag over a picked part: the size of the part, in the reader's unit.
+/// The tags over the picked parts: the size of each, in the reader's unit.
 ///
-/// React draws it as a chip over the part (`PreviewStage.tsx:2295`,
+/// React draws a chip over the part (`PreviewStage.tsx:2295`,
 /// `desk.module.css` `.desk .tag`): the panel's colour on a 1 px line, a
 /// 3 px accent on its left edge, and the size in the figures face.
+#[allow(clippy::too_many_arguments)]
 fn paint_tags(
     window: &mut Window,
     t: &Theme,

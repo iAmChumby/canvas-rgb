@@ -1802,6 +1802,18 @@ fn parts_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, layout: &Layo
         }
         row
     };
+    // React's `.missingRow` (`onboarding.module.css:153-166`): a border of
+    // 45% warn over the line, and a wash of 8% warn over the panel.
+    let warn = Theme::color(t.warn);
+    let line = Theme::color(t.line);
+    let mix_a = 0.45 * warn.a + 0.55 * line.a;
+    let mix = |c1: f32, c2: f32| (0.45 * c1 * warn.a + 0.55 * c2 * line.a) / mix_a;
+    let border = gpui::Rgba {
+        r: mix(warn.r, line.r),
+        g: mix(warn.g, line.g),
+        b: mix(warn.b, line.b),
+        a: mix_a,
+    };
     let miss_row = div()
         .flex()
         .items_center()
@@ -1810,9 +1822,9 @@ fn parts_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, layout: &Layo
         .px_3()
         .py_1()
         .border_1()
-        .border_color(Theme::color(t.warn))
+        .border_color(border)
         .r_sm()
-        .bg(Theme::color(t.warn_wash))
+        .bg(gpui::Rgba { a: 0.08, ..warn })
         .text_sm()
         .font_family(crate::fonts::UI_FAMILY)
         .text_color(Theme::color(t.dim))
