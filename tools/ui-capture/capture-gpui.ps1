@@ -247,12 +247,14 @@ foreach ($theme in $Themes) {
           exit 3
         }
         # Settle, measured: probe the frame every 500 ms until two probes in
-        # a row are identical (painted and stable) AND at least 3 s have
+        # a row are identical (painted and stable) AND at least 6 s have
         # passed since the window appeared. The minimum matters: the
         # "Daemon connecting" frame is itself stable, so stability alone
-        # shot it. 3 s covers the editor's first daemon fetch with margin
-        # (measured well under 1 s when the daemon answers).
-        $settleDeadline = (Get-Date).AddSeconds(15)
+        # shot it. 6 s covers the editor's first daemon fetch with margin:
+        # the onboarding only opens when the layout, the devices and the
+        # status are all in, and a shot taken before that shows the Layout
+        # page reading the layout instead of the takeover (#212).
+        $settleDeadline = (Get-Date).AddSeconds(20)
         $appearedAt = Get-Date
         $prevSum = $null
         while ((Get-Date) -lt $settleDeadline) {
@@ -265,7 +267,7 @@ foreach ($theme in $Themes) {
           $ch = $rect.Bottom - $rect.Top
           if ($cw -le 0 -or $ch -le 0) { continue }
           $sum = Get-ShotChecksum $handle $cw $ch
-          if ($null -ne $prevSum -and $sum -eq $prevSum -and ((Get-Date) - $appearedAt).TotalSeconds -ge 3) { break }
+          if ($null -ne $prevSum -and $sum -eq $prevSum -and ((Get-Date) - $appearedAt).TotalSeconds -ge 6) { break }
           $prevSum = $sum
         }
         $rect = New-Object Win32Capture+RECT

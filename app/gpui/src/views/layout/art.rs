@@ -154,6 +154,46 @@ pub fn art(kind: PartKind, facing: Facing) -> Vec<Stroke> {
     }
 }
 
+/// The shapes React marks `artFill`: the parts that are filled rather than
+/// drawn.
+///
+/// In the browser they are `fill: var(--part-fill)` with `stroke: none`,
+/// and `--part-fill` is transparent in the effect mode, so on a light (a
+/// zone) they are not on the screen at all. On a landmark the later rule
+/// (`.desk .landmark .art *`) wins the stroke, so the same shapes show as
+/// the landmark's own line: the case's glass panel is the one the owner
+/// sees on the Parts screen.
+///
+/// Only a landmark draws them, so the caller says which it is.
+pub fn art_fills(kind: PartKind, facing: Facing) -> Vec<Stroke> {
+    match kind {
+        PartKind::Fan => {
+            if is_flat(facing) {
+                Vec::new()
+            } else if matches!(facing, Facing::Left | Facing::Right) {
+                Vec::new()
+            } else {
+                vec![circle(50.0, 50.0, 9.0), poly(&[(46.0, 6.0), (54.0, 6.0), (54.0, 14.0), (46.0, 14.0)])]
+            }
+        }
+        PartKind::Gpu => vec![rect(2.0, 20.0, 7.0, 58.0, 0.0)],
+        PartKind::Cpu => Vec::new(),
+        PartKind::Pump => vec![circle(50.0, 42.0, 16.0)],
+        PartKind::Strip => {
+            let mut out = Vec::new();
+            for x in [8.0, 20.0, 32.0, 44.0, 56.0, 68.0, 80.0, 92.0] {
+                out.push(circle(x, 50.0, 4.0));
+            }
+            out
+        }
+        PartKind::Mouse => vec![rect(44.0, 14.0, 12.0, 18.0, 5.0)],
+        PartKind::Generic => vec![rect(6.0, 6.0, 22.0, 10.0, 0.0)],
+        // The panel we look through, inside the case's box.
+        PartKind::Case => vec![rect(11.0, 11.0, 78.0, 78.0, 4.0)],
+        _ => Vec::new(),
+    }
+}
+
 /// A fan pointing at the reader: the bracket, its four holes and its ring.
 fn fan() -> Vec<Stroke> {
     let mut out = vec![rect(4.0, 4.0, 92.0, 92.0, 6.0)];
@@ -200,20 +240,30 @@ fn ram() -> Vec<Stroke> {
     out
 }
 
-/// A graphics card: a long box.
+/// A graphics card: a long box with the fans it carries.
 fn gpu() -> Vec<Stroke> {
-    vec![rect(2.0, 6.0, 96.0, 86.0, 4.0)]
+    // The card's fans are panels, not lit details: the light of a card is in
+    // its LED row, so they are drawn (never filled with the card's light).
+    vec![
+        rect(2.0, 6.0, 96.0, 86.0, 4.0),
+        circle(28.0, 49.0, 19.0),
+        circle(64.0, 49.0, 19.0),
+    ]
 }
 
 /// A CPU: a square with a notch in one corner.
 fn cpu() -> Vec<Stroke> {
-    vec![poly(&[
-        (24.0, 4.0),
-        (96.0, 4.0),
-        (96.0, 96.0),
-        (4.0, 96.0),
-        (4.0, 24.0),
-    ])]
+    // The chip's face is a panel: it is not lit by the part's own LEDs.
+    vec![
+        poly(&[
+            (24.0, 4.0),
+            (96.0, 4.0),
+            (96.0, 96.0),
+            (4.0, 96.0),
+            (4.0, 24.0),
+        ]),
+        rect(26.0, 26.0, 48.0, 48.0, 2.0),
+    ]
 }
 
 /// A pump head: the cap, the motor and its mount.
@@ -302,6 +352,7 @@ pub fn paint(
     window: &mut Window,
     kind: PartKind,
     facing: Facing,
+    landmark: bool,
     box_x: f64,
     box_y: f64,
     box_w: f64,
@@ -313,7 +364,13 @@ pub fn paint(
     stroke: gpui::Rgba,
     inset: f32,
 ) {
-    let strokes = art(kind, facing);
+    let mut strokes = art(kind, facing);
+    if landmark {
+        // A landmark's filled shapes are drawn in the landmark's own line
+        // (the browser's later rule wins the stroke); on a light they are
+        // not on the screen at all.
+        strokes.extend(art_fills(kind, facing));
+    }
     if strokes.is_empty() {
         return;
     }

@@ -209,16 +209,42 @@ fn tracked_text_space_wrap(
     let words: Vec<&str> = text.split_whitespace().collect();
     let n = words.len();
     for (wi, word) in words.iter().enumerate() {
-        let mut cell = div().flex().items_center().gap(tracking).whitespace_nowrap().flex_none();
-        for ch in word.chars() {
-            cell = cell.child(ch.to_string());
-        }
+        let cell = word_cell(word, tracking);
         row = row.child(cell);
         if wi + 1 < n {
             row = row.child(div().w(space_w).h(px(1.0)).flex_none());
         }
     }
     row.into_any_element()
+}
+
+/// One word of a tracked line: its glyphs, each one a step of `tracking`
+/// apart.
+///
+/// A step that opens the line is a flex gap. A step that closes it (CSS
+/// `letter-spacing: -0.02em` on a title) is a negative margin on every
+/// glyph but the first: the layout engine ignores a negative gap (the
+/// title came out 12 px wider than the browser's), and a negative margin
+/// tightens the line the way the browser does.
+fn word_cell(word: &str, tracking: gpui::Pixels) -> gpui::Div {
+    let step = f32::from(tracking);
+    let mut cell = div().flex().items_center().whitespace_nowrap().flex_none();
+    if step < 0.0 {
+        for (i, ch) in word.chars().enumerate() {
+            let mut glyph = div().flex().items_center().whitespace_nowrap();
+            if i > 0 {
+                glyph = glyph.ml(tracking);
+            }
+            glyph = glyph.child(ch.to_string());
+            cell = cell.child(glyph);
+        }
+    } else {
+        cell = cell.gap(tracking);
+        for ch in word.chars() {
+            cell = cell.child(ch.to_string());
+        }
+    }
+    cell
 }
 
 /// A panel with a title. `actions` render beside the title, on the right.

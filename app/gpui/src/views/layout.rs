@@ -1586,6 +1586,7 @@ pub fn render_page(
         selection: view.selection.clone(),
         view: view.view,
         overlay: view.overlay.clone(),
+        unlock_badge: false,
     };
     let desk_entity = cx.entity();
     let desk_origin = view.desk_origin.clone();

@@ -186,7 +186,9 @@ pub fn chip_add_part(
         .whitespace_nowrap()
         .cursor_pointer()
         .on_click(on_click)
-        .child(div().size(px(5.0)).flex_none().rounded_full().bg(Theme::color(t.dot)))
+        // The key's face is painted first, then the LED in front of it: the
+        // face is an absolute layer, so a dot drawn before it would be
+        // hidden under the face.
         .child(crate::components::button::skirt_layers(
             t.skirt(),
             8.0,
@@ -194,6 +196,7 @@ pub fn chip_add_part(
             Theme::color(t.raised),
             Theme::color(t.line_2),
         ))
+        .child(div().size(px(5.0)).flex_none().rounded_full().bg(Theme::color(t.dot)))
         .child(body)
 }
 

@@ -131,6 +131,9 @@ pub struct DeskInput {
     /// The view the desk is zoomed/panned to: `None` is the hero view.
     pub view: Option<View>,
     pub overlay: DragOverlay,
+    /// A locked case shows the little lock that unlocks it (the
+    /// onboarding). React passes it as `unlockBadge` (`PreviewStage.tsx:664`).
+    pub unlock_badge: bool,
 }
 
 /// The desk: a canvas that draws the whole picture.
@@ -153,6 +156,7 @@ pub fn desk_with_origin(
     let selection = input.selection;
     let stored_view = input.view;
     let overlay = input.overlay;
+    let unlock_badge = input.unlock_badge;
 
     let measure = origin.clone();
     let element = canvas(
@@ -221,6 +225,7 @@ pub fn desk_with_origin(
                     window,
                     kind,
                     facing,
+                    false,
                     z.x as f64 + view.pan_x,
                     z.y as f64 + view.pan_y,
                     z.width as f64,
@@ -249,6 +254,7 @@ pub fn desk_with_origin(
                     window,
                     l.kind,
                     l.facing,
+                    true,
                     l.x as f64 + view.pan_x,
                     l.y as f64 + view.pan_y,
                     l.width as f64,
@@ -260,6 +266,21 @@ pub fn desk_with_origin(
                     line,
                     &colours,
                 );
+                // The lock on a locked case: a small key in its top corner
+                // (`PreviewStage.tsx:2562`, `.lockBadge`), one click to unlock.
+                if l.kind == PartKind::Case && l.locked && unlock_badge {
+                    paint_lock_badge(
+                        window,
+                        &t,
+                        l.x as f64 + view.pan_x,
+                        l.y as f64 + view.pan_y,
+                        l.width as f64,
+                        l.height as f64,
+                        k,
+                        ox,
+                        oy,
+                    );
+                }
             }
 
             // The drag overlay: snap guides, marquee and readout.
@@ -912,6 +933,7 @@ fn paint_part(
     window: &mut Window,
     kind: PartKind,
     facing: Facing,
+    landmark: bool,
     x: f64,
     y: f64,
     w: f64,
@@ -960,6 +982,7 @@ fn paint_part(
         window,
         kind,
         facing,
+        landmark,
         x,
         y,
         w,
@@ -971,6 +994,95 @@ fn paint_part(
         line,
         1.25,
     );
+}
+
+/// The lock on a locked case: a 22 px key in the case's top corner.
+///
+/// React draws it as a real button (`.lockBadge` in `desk.module.css`): a
+/// 22 px square with a line-2 border, the panel's face, the mute colour
+/// and a `LockSimple` lock in the middle. It sits 5 px in from the case's
+/// own border, on the padding box (the border is 1.25 px, so the badge
+/// starts 6.25 px in).
+#[allow(clippy::too_many_arguments)]
+fn paint_lock_badge(
+    window: &mut Window,
+    t: &Theme,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    k: f32,
+    ox: f32,
+    oy: f32,
+) {
+    const BADGE: f32 = 22.0;
+    const INSET: f32 = 5.0;
+    const BORDER: f32 = 1.25;
+    // The badge's box in css pixels: the case's box, less its border, less
+    // the 5 px the CSS keeps from the corner.
+    let kf = k as f64;
+    let left = ox + (x * kf) as f32 + BORDER + INSET;
+    let top = oy + (y * kf) as f32 + BORDER + INSET;
+    let right = left + (w * kf) as f32 - BORDER - INSET;
+    let bottom = top + (h * kf) as f32 - BORDER - INSET;
+    // The badge sits in the case's top RIGHT corner (CSS `top: 5px;
+    // right: 5px`), on the padding box (the border is 1.25 px, so the badge
+    // starts 6.25 px in).
+    let size = (right - left).min(bottom - top).min(BADGE);
+    if size <= 0.0 {
+        return;
+    }
+    let left = right - size;
+    // The face: a 4 px rounded square in the panel colour with a 1 px
+    // line-2 border.
+    let mut builder = PathBuilder::fill();
+    let points = rounded_box(left, top, left + size, top + size, 4.0);
+    builder.move_to(point(px(points[0].0), px(points[0].1)));
+    for p in &points[1..] {
+        builder.line_to(point(px(p.0), px(p.1)));
+    }
+    builder.close();
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, Theme::color(t.panel));
+    }
+    paint_outline(window, left - 0.5, top - 0.5, left + size - 0.5, top + size - 0.5, 4.0, 1.0, Theme::color(t.line_2));
+    // The lock itself: the Phosphor `LockSimple` at the fill weight, 12 px
+    // in the middle of the key.
+    let glyph = (size - 12.0).max(0.0) / 2.0;
+    paint_lock_glyph(window, left + glyph, top + glyph, 12.0, Theme::color(t.mute));
+}
+
+/// The Phosphor `LockSimple` (fill weight) drawn in a 12 px box.
+///
+/// The path is the one `@phosphor-icons/react` renders, in its own 256 x 256
+/// box; the arcs are the SVG arcs, so the shape is the same.
+fn paint_lock_glyph(window: &mut Window, x: f32, y: f32, size: f32, colour: gpui::Rgba) {
+    let s = size / 256.0;
+    let p = |ux: f32, uy: f32| point(px(x + ux * s), px(y + uy * s));
+    let r = |v: f32| point(px(v * s), px(v * s));
+    let mut builder = PathBuilder::fill();
+    builder.move_to(p(208.0, 80.0));
+    builder.line_to(p(176.0, 80.0));
+    builder.line_to(p(176.0, 56.0));
+    builder.arc_to(r(48.0), px(0.0), false, false, p(80.0, 56.0));
+    builder.line_to(p(80.0, 80.0));
+    builder.line_to(p(48.0, 80.0));
+    builder.arc_to(r(16.0), px(0.0), false, false, p(32.0, 96.0));
+    builder.line_to(p(32.0, 208.0));
+    builder.arc_to(r(16.0), px(0.0), false, false, p(48.0, 224.0));
+    builder.line_to(p(208.0, 224.0));
+    builder.arc_to(r(16.0), px(0.0), false, false, p(224.0, 208.0));
+    builder.line_to(p(224.0, 96.0));
+    builder.arc_to(r(16.0), px(0.0), false, false, p(208.0, 80.0));
+    builder.close();
+    builder.move_to(p(96.0, 56.0));
+    builder.arc_to(r(32.0), px(0.0), false, true, p(160.0, 56.0));
+    builder.line_to(p(160.0, 80.0));
+    builder.line_to(p(96.0, 80.0));
+    builder.close();
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, colour);
+    }
 }
 
 /// The derived case: a dashed landmark-line outline with the case's own
@@ -1009,6 +1121,7 @@ fn paint_derived_case(
         window,
         PartKind::Case,
         case.facing,
+        true,
         case.x as f64 + view.pan_x,
         case.y as f64 + view.pan_y,
         case.width as f64,
@@ -1280,7 +1393,9 @@ pub fn desk_with_hint(
                     div()
                         .flex()
                         .items_center()
-                        .gap(px(4.0))
+                        // React's hint is one line of text with the keys in
+                        // it (`<b>L</b> lights · <b>E</b> effect`): the words
+                        // carry their own spaces, so there is no gap here.
                         .px(px(8.0))
                         .py(px(3.0))
                         .r_sm()

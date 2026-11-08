@@ -600,6 +600,7 @@ pub fn onboarding_stage(
         selection: view.selection.clone(),
         view: view.view,
         overlay: view.overlay.clone(),
+        unlock_badge: true,
     };
     let desk_origin = view.desk_origin.clone();
     desk_with_hint(&t, &colours, desk_input, desk_origin, true)
@@ -899,7 +900,20 @@ pub fn render_onboarding(view: &mut LayoutView, window: &mut Window, cx: &mut Co
     let panel = panel_for(view, window, cx, step, &data, mode, &layout, devices.as_deref(), &effects, save_error.as_deref());
 
     let main = if phone {
-        div().flex().flex_col().gap_4().flex_1().min_h_0().p_4().pb_0().child(stage).child(panel)
+        // The phone takeover (`onboarding.module.css:968`): the drawing sits
+        // on its own, the panel is a bottom sheet pinned to the bottom of
+        // the window (React's `position: sticky; bottom: 0`), and the sheet
+        // covers the drawing when the screen is taller than the window.
+        // The drawing keeps its own height (its own 320:200 proportions),
+        // so the sheet is pinned over it, not under it.
+        div()
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(div().flex().flex_col().flex_none().pt_4().px_4().pb_0().child(stage))
+            .child(panel)
     } else {
         div().flex().flex_1().min_h_0().gap_6().p_6().child(stage).child(panel)
     };
@@ -968,16 +982,18 @@ fn header_bar(view: &mut LayoutView, _window: &mut Window, cx: &mut Context<Layo
         div().into_any_element()
     };
     if phone {
-        let mut col = div().flex().flex_col().min_w_0();
+        // React's phone bar (`onboarding.module.css:995`): two rows (the
+        // brand and the way out, then the progress), 8 px of padding above
+        // and below, an 8 px gap between the rows and one rule under the
+        // whole bar. The row with the "Set up later" key is as tall as the
+        // key (28 px), not the desktop's 56.
+        let mut col = div().flex().flex_col().min_w_0().bg(Theme::color(t.panel));
         let top = div()
             .flex()
             .items_center()
             .gap_3()
-            .min_h(px(56.0))
+            .pt_2()
             .px_4()
-            .border_b_1()
-            .border_color(Theme::color(t.line))
-            .bg(Theme::color(t.panel))
             .child(div().flex_1().child(brand))
             .child(later);
         col = col.child(top);
@@ -985,14 +1001,16 @@ fn header_bar(view: &mut LayoutView, _window: &mut Window, cx: &mut Context<Layo
             col = col.child(
                 div()
                     .flex()
+                    .mt_2()
                     .px_4()
                     .pb_2()
-                    .border_b_1()
-                    .border_color(Theme::color(t.line))
-                    .bg(Theme::color(t.panel))
                     .child(progress_dots(t, layout, devices, step == StepKind::Finish)),
             );
+        } else {
+            col = col.child(div().h(px(8.0)).flex_none());
         }
+        col = col.child(div().h(px(8.0)).flex_none());
+        col = col.border_b_1().border_color(Theme::color(t.line));
         col.into_any_element()
     } else {
         // Desktop: one row, progress centred (grid: brand / progress / end).
@@ -1126,6 +1144,7 @@ fn onboarding_stage_for(view: &mut LayoutView, window: &mut Window, cx: &mut Con
         selection: view.selection.clone(),
         view: view.view,
         overlay: view.overlay.clone(),
+        unlock_badge: true,
     };
     let desk_origin = view.desk_origin.clone();
     let desk = desk_with_hint(&t, &colours, desk_input, desk_origin, true);
@@ -1152,7 +1171,9 @@ fn onboarding_stage_for(view: &mut LayoutView, window: &mut Window, cx: &mut Con
         // the stage's bottom padding: 208 px at 390 (measured in the React
         // capture, the desk runs from y 88 to y 296).
         let h = ((view.width - 32.0) * 0.625).max(160.0);
-        div().flex().flex_col().flex_none().h(px(h)).min_h_0().pb_4().child(frame).into_any_element()
+        // React's desk is 358 x 223.75 at 390 (its own 320:200) and the
+        // stage adds the 16 px of padding under it.
+        div().flex().flex_col().flex_none().h(px(h + 16.0)).min_h_0().pb_4().child(frame).into_any_element()
     } else {
         // The desk's own box, in css pixels: the stage column (the window
         // less the page's padding, the gap and the 360 px panel), less the
@@ -1222,18 +1243,19 @@ fn panel_for(
     let panel = if phone {
         // React's sheet (the 960 px rule): a top border and the top corners
         // only, the full width of the window and no more than 66 vh tall.
+        // It is pinned to the bottom of the window, so it covers the
+        // drawing when the screen is taller than the window.
         let mut panel = panel
+            .absolute()
+            .bottom_0()
+            .left_0()
+            .right_0()
             .flex()
             .flex_col()
             .flex_none()
-            // The sheet is the width of the window: React's negative side
-            // margins widen it past the page's own padding.
             .w(px(view.width))
             .max_h(px(view.height * 0.66))
             .min_h_0()
-            .mt_auto()
-            .ml(px(-16.0))
-            .mr(px(-16.0))
             .border_0()
             .border_t_1()
             .border_color(Theme::color(t.line_2));
