@@ -6,9 +6,10 @@
 # advances are whole font units.
 #
 # This script measures both, from the very files the two editors use:
-#   - the variable font's advance at a weight (base hmtx + the HVAR delta),
-#   - the static instance's advance (its own hmtx),
-# and reports the per-glyph difference.
+#   - the variable font's advance at a weight: the base hmtx advance plus the
+#     HVAR delta at that weight (the browser's way), with the avar mapping
+#     applied to the normalized coordinate;
+#   - the static instance's advance: its own hmtx.
 #
 # Usage: python tools/ui-capture/font-advance.py
 import json
@@ -44,6 +45,8 @@ WEIGHTS = ((400, "schibsted-grotesk-400.ttf"), (500, "schibsted-grotesk-500.ttf"
            (600, "schibsted-grotesk-600.ttf"), (650, "schibsted-grotesk-650.ttf"),
            (700, "schibsted-grotesk-700.ttf"))
 
+SIZES = (14.0, 20.0)
+
 
 def cmap_map(font):
     best = None
@@ -52,6 +55,30 @@ def cmap_map(font):
             if best is None or table.platformID == 3:
                 best = table.cmap
     return best
+
+
+def avar_normalized(font, axis_tag, user_value):
+    """The normalized coordinate of `user_value` after the avar mapping: the
+    space the variation deltas live in."""
+    axis = next(a for a in font["fvar"].axes if a.axisTag == axis_tag)
+    norm = (user_value - axis.minValue) / (axis.maxValue - axis.minValue)
+    norm = max(0.0, min(1.0, norm))
+    if "avar" not in font:
+        return norm
+    segments = font["avar"].segments.get(axis_tag)
+    if not segments:
+        return norm
+    points = sorted(segments.items())
+    if norm <= points[0][0]:
+        return points[0][1]
+    if norm >= points[-1][0]:
+        return points[-1][1]
+    for (x0, y0), (x1, y1) in zip(points, points[1:]):
+        if x0 <= norm <= x1:
+            if x1 == x0:
+                return y0
+            return y0 + (norm - x0) / (x1 - x0) * (y1 - y0)
+    return norm
 
 
 def static_advances(path, words):
@@ -69,7 +96,7 @@ def static_advances(path, words):
             adv = hmtx[gname][0] if gname else 0
             total += adv
             per.append((ch, gname, adv))
-        out[w] = {"units": total, "px": total * 1000.0 / upem, "per_glyph": per, "upem": upem}
+        out[w] = {"units": total, "upem": upem, "per_glyph": per}
     font.close()
     return out
 
@@ -83,8 +110,7 @@ def variable_advances_at(var_path, weight, words):
     upem = font["head"].unitsPerEm
     hmtx = font["hmtx"]
     fvar_axes = font["fvar"].axes
-    axis = next(a for a in fvar_axes if a.axisTag == "wght")
-    norm = (weight - axis.minValue) / (axis.maxValue - axis.minValue)
+    norm = avar_normalized(font, "wght", weight)
     limits = NormalizedAxisLimits(
         {"wght": NormalizedAxisTripleAndDistances(norm, norm, norm)}
     )
@@ -105,7 +131,7 @@ def variable_advances_at(var_path, weight, words):
             delta = deltas.get(var_idx, 0.0) if var_idx is not None else 0.0
             total += base + delta
             per.append((ch, gname, base, delta))
-        out[w] = {"units": total, "px": total * 1000.0 / upem, "per_glyph": per, "upem": upem}
+        out[w] = {"units": total, "upem": upem, "per_glyph": per}
     font.close()
     return out
 
@@ -123,18 +149,20 @@ def main():
         report["weights"][str(weight)] = {"variable": var, "static": stat}
         print(f"=== wght {weight} ===")
         for w in WORDS:
-            vpx = var[w]["px"]
-            line = f"  {w!r:22} variable {vpx:9.4f} px"
+            vunits = var[w]["units"]
+            line = f"  {w!r:22} variable {vunits:9.3f} units"
             if stat is not None:
-                spx = stat[w]["px"]
-                line += f"   static {spx:9.4f} px   delta {vpx - spx:+8.4f} px"
+                sunits = stat[w]["units"]
+                line += f"   static {sunits:8.1f} units   delta {vunits - sunits:+7.3f} units"
+                for size in SIZES:
+                    line += f"  ({size:.0f}px: {1000.0 * (vunits - sunits) / 2048.0 * size / 1000.0:+.3f}px)"
             print(line)
         if stat is not None:
             print("  per glyph (variable: base+HVAR delta  |  static: hmtx):")
             for w in WORDS:
                 parts = []
                 for (ch, gname, base, delta), (_c2, _g2, sadv) in zip(var[w]["per_glyph"], stat[w]["per_glyph"]):
-                    parts.append(f"{ch}:{base}{delta:+.3f}/{sadv}")
+                    parts.append(f"{ch}:{base}{delta:+.2f}/{sadv}")
                 print(f"    {w!r:22} " + "  ".join(parts))
     out = os.path.join(ROOT, ".build", "ui-capture", "240-font-advance.json")
     os.makedirs(os.path.dirname(out), exist_ok=True)

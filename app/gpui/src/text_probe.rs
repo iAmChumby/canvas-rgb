@@ -82,10 +82,5 @@ fn write_to(window: &Window, path: &PathBuf) {
 
 /// The weight as a number, so the file reads like the CSS it is compared with.
 fn weight_num(weight: gpui::FontWeight) -> u16 {
-    match weight {
-        gpui::FontWeight::NORMAL => 400,
-        gpui::FontWeight::MEDIUM => 500,
-        gpui::FontWeight::SEMIBOLD => 600,
-        gpui::FontWeight::BOLD => 700,
-    }
+    weight.0.round() as u16
 }
