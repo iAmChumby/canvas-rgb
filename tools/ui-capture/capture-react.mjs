@@ -117,7 +117,7 @@ const PALETTE_ENTRIES = (process.env.UI_CAPTURE_PALETTE ?? "")
   .map((s) => s.trim())
   .filter(Boolean);
 const PALETTE_SIZES = (entries) =>
-  entries === "empty" ? ACTIVE_VIEWPORTS : ACTIVE_VIEWPORTS.filter((v) => ["1440x900", "390x844"].includes(`${v.w}x${v.h}`));
+  entries === "empty" ? ACTIVE_VIEWPORTS : ACTIVE_VIEWPORTS.filter((v) => ["1440x900", "390x844", "1024x768"].includes(`${v.w}x${v.h}`));
 
 // The effect editor (#214): the effect whose code is opened, by its name in
 // the library. The shot is named editor-react-<w>x<h>-<theme>.png.

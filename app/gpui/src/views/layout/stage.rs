@@ -195,9 +195,21 @@ pub fn desk_with_origin(
                 return;
             }
             let view = stored_view.unwrap_or_else(|| {
-                hero_view(w as f64, h as f64, content_centre(&zones, &landmarks))
+                // React measures the stage with `clientWidth`/`clientHeight`,
+                // whole css pixels (`PreviewStage.tsx:1369`).
+                hero_view(
+                    w.round() as f64,
+                    h.round() as f64,
+                    content_centre(&zones, &landmarks),
+                )
             });
-            let base = w as f64 / CANVAS_W;
+            // React's base is `stage.clientWidth / CANVAS_W`
+            // (`PreviewStage.tsx:988`), and `clientWidth` is a whole number
+            // of css pixels. The canvas's own width here is a fraction, so
+            // the scale was a fraction different: every part on the desk
+            // stood a third of a pixel from where the browser put it, and
+            // every rule of every drawing fell between two rows.
+            let base = w.round() as f64 / CANVAS_W;
             let k = (base * view.scale) as f32;
             let ox: f32 = bounds.origin.x.into();
             let oy: f32 = bounds.origin.y.into();
@@ -1307,6 +1319,17 @@ fn paint_part(
     );
     // The drawing inside it, on the part's own padding box (the browser
     // draws the picture inside the border, not on the border box).
+    //
+    // The drawing has its own colour, quieter than the outline: React's
+    // `.desk .art *` strokes with `--part-line` and a landmark's
+    // `.desk .landmark .art *` with `--landmark-line` (the later rule wins
+    // the stroke). Painting it in the outline's colour made every rule of
+    // every drawing brighter than the browser's.
+    let art_line = if landmark {
+        colours.landmark_line
+    } else {
+        colours.part_line
+    };
     art::paint(
         window,
         kind,
@@ -1320,7 +1343,7 @@ fn paint_part(
         ox,
         oy,
         k,
-        line,
+        art_line,
         1.25,
     );
 }

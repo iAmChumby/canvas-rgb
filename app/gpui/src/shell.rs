@@ -1645,51 +1645,54 @@ impl Shell {
                     } else {
                         // React's phone strip truncates the now-playing name to
                         // the row's leftover room (`.strip-now` flex 0 1 auto,
-                        // overflow hidden): measured "Nothing…" at ~64 px on
-                        // Effects, the full "Nothing is running" on Displays, and
-                        // zero width on Fans where the profile strip fills the
-                        // row. The budget below is that leftover room measured
-                        // from React's strip boxes at 390 (#244): the row's
-                        // 374 px of content less the brand (when drawn), the
-                        // title, the swatch, the 22 px mark (14 icon + 8
-                        // padding), the 68 px controls (36 + 4 + 28), the page
-                        // actions by page, and the row gaps.
+                        // overflow hidden). The budget below is that leftover
+                        // room, measured from React's own boxes at 390 (#244,
+                        // probe-strip.mjs): the row's 374 px of content (390
+                        // less the 8 px side padding) less the brand (16, drawn
+                        // only when the page brings no actions), the title, the
+                        // 22 px mark (14 icon + 4 px padding each side), the
+                        // controls group, the row's own gaps and the 12 px
+                        // swatch with its 8 px gap to the name.
                         let gap = if has_actions { 4.0 } else { 8.0 };
                         let brand_w = if page_actions.is_none() { 16.0 } else { 0.0 };
+                        // The title is drawn tracked (`letter-spacing:
+                        // -0.01em`), so its box is narrower than the plain
+                        // advance: React's h1 measures 63.63 px for "Layout"
+                        // where the untracked advance is 64.83.
                         let title_w = text_width(
                             window,
                             &title_text,
                             20.0,
                             gpui::FontWeight::SEMIBOLD,
                             crate::fonts::UI_FAMILY,
-                        );
+                        ) + (-0.2 * title_text.chars().count() as f32);
+                        // React's `.rd-actions` boxes at 390 (the same probe):
+                        // Layout 116.09, Effects 119, Fans 208.77.
                         let actions_w = match self.page.as_str() {
                             "effects" => 119.0,
-                            "fans" => 209.0,
-                            "layout" => 210.0,
+                            "fans" => 208.77,
+                            "layout" => 116.09,
                             "peripherals" => 130.0,
                             _ => 0.0,
                         };
-                        // Phone gap per adjacency of brand/title/now/mark/actions,
-                        // plus the actions-to-controls gap (Effects: 4 × 4 = 16;
-                        // Displays: 3 × 8 = 24).
-                        let left_items = (if brand_w > 0.0 { 1.0 } else { 0.0 })
-                            + 1.0
-                            + 1.0
-                            + 1.0
-                            + if actions_w > 0.0 { 1.0 } else { 0.0 };
-                        let gaps =
-                            gap * ((left_items - 1.0) + if actions_w > 0.0 { 1.0 } else { 0.0 });
-                        let budget = self.width - 16.0 - brand_w - title_w - 12.0 - 22.0 - 68.0
-                            - actions_w
-                            - gaps
-                            - 8.0
-                            // With actions the room is tight and the longest
-                            // fitting prefix lands a few px short of React's
-                            // "Nothing…" box (browser subpixel placement): the
-                            // measured check sat 7 px left before this (Effects,
-                            // #244); Fans stays at zero either way.
-                            + if has_actions { 4.0 } else { 0.0 };
+                        // The row's own items: the brand (when the page brings
+                        // no actions), the title, what is playing, the mark and
+                        // the controls group.
+                        let row_items = if brand_w > 0.0 { 5.0 } else { 4.0 };
+                        let row_gaps = gap * (row_items - 1.0);
+                        // The controls group (React `.strip-controls`): the
+                        // page's actions, then Pause (36) and Search (28), a
+                        // 4 px gap apart, and 4 px between the actions and
+                        // Pause.
+                        let controls_w = if actions_w > 0.0 {
+                            actions_w + 4.0 + 68.0
+                        } else {
+                            68.0
+                        };
+                        let budget = self.width - 16.0 - brand_w - title_w - 22.0 - controls_w
+                            - row_gaps
+                            - 12.0
+                            - 8.0;
                         if budget <= 1.0 {
                             String::new()
                         } else {
@@ -1773,9 +1776,25 @@ impl Shell {
         } else {
             mark_row
         };
-        inner = inner.child(mark_row).child(div().flex_1());
-        // The page's own actions, on the strip's right, before Pause and
-        // Search (React `.rd-actions`).
+        inner = inner.child(mark_row);
+        // The controls group at the right (React `.strip-controls`): the
+        // page's own actions (React `.rd-actions`), then Pause and Search.
+        // React draws them inside one group with `margin-left: auto`, so the
+        // group's own gap (8 px, 4 px on a phone) sits between the actions
+        // and the Pause key - not the strip row's 16 px gap. The actions are
+        // in the group for that reason: the name's budget measures the row's
+        // gaps, and the group keeps React's count.
+        //
+        // The free room goes to the group, which grows and puts its parts at
+        // its right edge: that is what React's `margin-left: auto` does, and
+        // it keeps the row's gap count the same as React's (an auto margin
+        // does not resolve in gpui, and a separate spacer would add a gap).
+        let mut controls = div()
+            .flex()
+            .flex_1()
+            .justify_end()
+            .items_center()
+            .gap(if phone { px(4.0) } else { px(8.0) });
         if let Some(actions) = page_actions {
             let mut box_ = div()
                 .flex()
@@ -1793,19 +1812,12 @@ impl Shell {
                 // margin-right: 0; gap: var(--s1); }`).
                 box_ = box_.pr_0().mr_0().gap_1().border_r_0();
             }
-            inner = inner.child(box_);
+            controls = controls.child(box_);
         }
-        // Controls at the right (React `.strip-controls`: an inline-flex
-        // group with `margin-left: auto` and an 8 px (`--s2`) gap between
-        // Pause lights and search, not the strip row's 16 px gap). On a
-        // phone the controls group drops to `--s1` (4) with the rest of the
-        // row (`.strip-inner:has(.rd-actions)`,`.strip-controls` phone
-        // rules): at 8 the Pause key sat 4 px left of React's (#240).
-        let mut controls = div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(if phone { px(4.0) } else { px(8.0) });
+        // The Pause key and the search key in that group. React's label is a
+        // `Swap` of "Pause lights"/"Resume lights": the cell keeps the widest
+        // label's width and the visible label is centred in it (#204 G8,
+        // measured).
         if known {
             if phone {
                 // The same sm button as the row's (Pause lights), with the
@@ -2099,8 +2111,12 @@ impl Render for Shell {
         // The onboarding takeover (takeover.ts): while it is open the rail,
         // the strip, the notices and the dock are not drawn — the window is
         // the onboarding alone (`LayoutView.tsx:971`, `Shell.tsx:52`).
-        let onboarding_open = self.page == "layout"
-            && self.layout_view.update(cx, |v, _| v.is_onboarding_open() || v.onboarding.is_some());
+        //
+        // The flag is read AFTER the open attempt below: `try_open_onboarding`
+        // is what opens the takeover, so reading the flag first left one
+        // frame that drew the Layout chrome (the rail, the strip, the dock)
+        // over the takeover before the next frame took the chrome away.
+        let mut onboarding_open = false;
         // Keep the layout view's status/effects in step with the shell's
         // answers so Hello variants and finish tiles read the same truth.
         if self.page == "layout" {
@@ -2115,6 +2131,9 @@ impl Render for Shell {
                 }
             });
             self.layout_view.update(cx, |v, cx| v.try_open_onboarding(cx));
+            onboarding_open = self
+                .layout_view
+                .update(cx, |v, _| v.is_onboarding_open() || v.onboarding.is_some());
         }
         if onboarding_open {
             let mut root = div()
@@ -2138,6 +2157,7 @@ impl Render for Shell {
                         .child(self.layout_view.clone()),
                 )
                 .child(self.spectrum_line());
+            root = crate::fonts::with_kerning(root);
             if self.palette_open {
                 root = root.child(self.palette.clone());
             }
@@ -2241,6 +2261,7 @@ impl Render for Shell {
             .child(self.background())
             .child(body)
             .child(self.spectrum_line());
+        root = crate::fonts::with_kerning(root);
         // The palette is rendered outside the page area it covers, so it
         // still opens over the daemon-down page and before the first answer
         // (`Shell.tsx:269-285`).
@@ -2330,5 +2351,32 @@ mod tests {
         assert!(is_valid_page("displays"));
         assert!(is_valid_page("peripherals"));
         assert!(!is_valid_page("nope"));
+    }
+
+    /// The takeover flag is read AFTER the open attempt (#213).
+    ///
+    /// `try_open_onboarding` is what opens the takeover. Reading the flag
+    /// before it left one frame that drew the Layout chrome (the rail, the
+    /// strip, the dock) over the takeover: the browser's React editor
+    /// replaces the page with the onboarding in the same frame it opens.
+    ///
+    /// The order is the whole point, and it cannot be seen in a screenshot
+    /// (a settled shot never shows the flash), so the source order is what
+    /// is pinned here.
+    #[test]
+    fn the_takeover_flag_is_read_after_the_open_attempt() {
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/shell.rs"))
+            .expect("read shell.rs");
+        let open = source
+            .find("v.try_open_onboarding(cx)")
+            .expect("the open attempt");
+        let read = source
+            .find("v.is_onboarding_open() || v.onboarding.is_some()")
+            .expect("the takeover flag");
+        assert!(
+            open < read,
+            "the takeover flag is read at {read} but the takeover is opened at {open}: \
+             the frame in between draws the Layout chrome over the takeover"
+        );
     }
 }

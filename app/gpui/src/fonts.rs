@@ -55,6 +55,26 @@ pub fn register(cx: &App) {
         .expect("embedded fonts");
 }
 
+/// The OpenType features every window's text draws with: `kern` on. gpui's
+/// DirectWrite layout applies no pair kerning until a typography names it
+/// (measured: "STATUS" and "Go to Effects" came out 3 px and 1 px wider than
+/// Chrome's, which kerns; the font's GPOS pairs T-A and A-T are -1.57 px
+/// each at 15 px).
+pub fn kerning() -> gpui::FontFeatures {
+    gpui::FontFeatures(std::sync::Arc::new(vec![("kern".to_string(), 1)]))
+}
+
+/// Turn kerning on for `element` and every text under it (the shell's root
+/// element): gpui inherits the feature list down the element tree the way CSS
+/// inherits `font-kerning`.
+pub fn with_kerning<E: gpui::Styled>(mut element: E) -> E {
+    element
+        .text_style()
+        .get_or_insert_with(Default::default)
+        .font_features = Some(kerning());
+    element
+}
+
 /// FNV-1a (64-bit), for the hash test below — no extra crate.
 #[cfg(test)]
 fn fnv1a(bytes: &[u8]) -> u64 {
@@ -69,6 +89,18 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::{Styled, div};
+
+    #[test]
+    fn the_shell_root_turns_kerning_on_for_every_text_under_it() {
+        let mut root = with_kerning(div());
+        let features = root
+            .text_style()
+            .as_ref()
+            .and_then(|s| s.font_features.clone())
+            .expect("kerning is set on the root text style");
+        assert_eq!(features.tag_value_list(), &[("kern".to_string(), 1)]);
+    }
 
     /// The embedded bytes hash the same as the copies in `node_modules`
     /// (`@fontsource-variable/schibsted-grotesk` and
