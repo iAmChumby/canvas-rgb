@@ -880,10 +880,8 @@ fn paint_furniture(
     }
     for m in &marks {
         if m.at <= EFFECT_H + 0.001 && m.major {
-            // The left-hand numbers stand on their side in React. gpui 0.2.2
-            // paints a glyph without a transform, so a turned digit is not
-            // reachable from the canvas: the digits go upright, in one line,
-            // in the same place and at the same size.
+            // The left-hand numbers stand on their side in React: filled
+            // from the face's outlines, turned (see the painter).
             paint_text_ruler_left(
                 window,
                 &m.label,
@@ -957,16 +955,16 @@ fn paint_text(
     }
 }
 
-/// The ruler's numbers on the left edge.
+/// The ruler's numbers on the left edge, standing on their side.
 ///
-/// React turns them with `rotate(-90 …)` and anchors them at their end, so
-/// the figures read up the edge from the mark. gpui 0.2.2 paints a glyph
-/// without a transform, so a turned digit is not reachable from the canvas:
-/// the figures are drawn upright, in one line, at the same size and in the
-/// same place as the turned ones - the ink of the turned figures is a band
-/// from the anchor down the edge, and the upright ones take that band's
-/// place. The residue is that the line is wider than the turned figures and
-/// reads across the edge instead of up it.
+/// React turns them with `rotate(-90 …)` about their anchor and anchors them
+/// at their end (`text-anchor: end`), so the figures read up the edge and
+/// end at the mark. gpui 0.2.2 paints a glyph without a transform, so the
+/// digits are filled as paths from the figures face's own outlines
+/// (`ruler_glyphs.rs`, generated from `jetbrains-mono-500.ttf`), turned the
+/// way React turns them: a point `(a, b)` of the line, `a` along the text
+/// and `b` up from the baseline, lands at `(x - b, y - a)` of the anchor
+/// `(x, y)`, with `a` measured from the text's end.
 fn paint_text_ruler_left(
     window: &mut Window,
     text: &str,
@@ -975,34 +973,29 @@ fn paint_text_ruler_left(
     size: f32,
     colour: gpui::Rgba,
 ) {
-    let hsla = gpui::Hsla::from(colour);
-    let font = ruler_style(window, size);
-    let runs = [gpui::TextRun {
-        len: text.len(),
-        font: font.clone(),
-        color: hsla,
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    }];
-    let layout = window.text_system().layout_line(text, px(size), &runs, None);
-    let width = f32::from(layout.width);
-    let ascent = f32::from(layout.ascent);
-    let descent = f32::from(layout.descent);
-    // The turned figures sit between the anchor and the anchor plus their
-    // own width, and they are as tall as the font's ascent. The upright line
-    // takes that band: its baseline is the band's lower edge less the
-    // descent, and its left edge is the anchor less the ascent.
-    let baseline = y + width - descent;
-    let left = x - ascent;
-    for run in &layout.runs {
-        for glyph in &run.glyphs {
-            let at = point(
-                px(left + f32::from(glyph.position.x)),
-                px(baseline + f32::from(glyph.position.y)),
-            );
-            let _ = window.paint_glyph(at, run.font_id, glyph.id, px(size), hsla);
+    use super::ruler_glyphs::{ADVANCE, GLYPHS, UNITS_PER_EM};
+    let s = size / UNITS_PER_EM;
+    let width = text.chars().count() as f32 * ADVANCE * s;
+    let mut builder = PathBuilder::fill();
+    for (i, ch) in text.chars().enumerate() {
+        let Some((_, contours)) = GLYPHS.iter().find(|(c, _)| *c == ch) else {
+            continue;
+        };
+        let along = i as f32 * ADVANCE * s;
+        for contour in contours.iter() {
+            for (n, (gx, gy)) in contour.iter().enumerate() {
+                let p = point(px(x - gy * s), px(y + width - along - gx * s));
+                if n == 0 {
+                    builder.move_to(p);
+                } else {
+                    builder.line_to(p);
+                }
+            }
+            builder.close();
         }
+    }
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, colour);
     }
 }
 

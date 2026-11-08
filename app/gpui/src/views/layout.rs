@@ -18,6 +18,7 @@ pub mod art;
 pub mod geometry;
 pub mod interact;
 pub mod preview;
+pub mod ruler_glyphs;
 pub mod stage;
 pub mod tokens;
 
@@ -3653,11 +3654,16 @@ fn parts_panel(
             gpui::FontWeight::NORMAL,
             crate::fonts::UI_FAMILY,
         );
+        // React's `.row-title` is 15 px on a 21.75 px line; without them the
+        // title inherits the panel's 23.2 px line and the row grows to 32.2
+        // px where React's is exactly 32 (separators drifted a pixel a row).
         let title = div()
             .flex()
             .items_center()
             .gap(px(8.0))
             .min_w(px(0.0))
+            .text_size(px(15.0))
+            .line_height(gpui::relative(1.45))
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .text_color(Theme::color(t.ink))
             .child(if row.icon.is_empty() {

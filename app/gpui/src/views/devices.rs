@@ -1050,11 +1050,12 @@ impl DevicesView {
                             .child(format!("{} {}", zone.led_count, led_word(zone.led_count))),
                     );
             }
-            let size_slot = div().flex_none().flex().justify_end().ml_auto();
-            row = row.child(match &one {
-                Some(zone) if zone.resizable => size_slot.child(self.size_key(&device.id.0, zone.index, cx)),
-                _ => size_slot,
-            });
+            // React draws the phone's Size slot only for a resizable zone. An empty
+            // `ml_auto` slot on the wrapped row swallowed the row's 4 px gaps
+            // (the strip and the count sat 4 and 8 px left of React's).
+            if let Some(zone) = one.as_ref().filter(|z| z.resizable) {
+                row = row.child(div().flex_none().flex().justify_end().ml_auto().child(self.size_key(&device.id.0, zone.index, cx)));
+            }
             return row.into_any_element();
         }
         let mut row = div()
