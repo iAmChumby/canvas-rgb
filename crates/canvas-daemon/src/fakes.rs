@@ -795,7 +795,8 @@ fn fake_controller_values() -> Props {
         values.insert(format!("button-{slot}"), PropValue::Choice(target.into()));
     }
     // What each profile held when the pad was read (`held` in `padValues`).
-    let held: [(u32, [f64; 8], [f64; 2], [&str; 4]); 3] = [
+    type HeldProfile<'a> = (u32, [f64; 8], [f64; 2], [&'a str; 4]);
+    let held: [HeldProfile; 3] = [
         (1, [7.0, 50.0, 7.0, 50.0, 0.0, 100.0, 0.0, 100.0], [100.0, 100.0], ["none", "none", "none", "none"]),
         (2, [100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0], [0.0, 0.0], ["other", "other", "other", "other"]),
         (3, [100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0], [0.0, 0.0], ["other", "other", "other", "other"]),
@@ -937,7 +938,7 @@ impl PeripheralAdapter for FakePeripheral {
         }
         if !self.writes_enabled {
             return Err(AdapterError::Unsupported(
-                "config writes are off: turn them on with set_writes_enabled(true) first".into(),
+                "config writes are off: turn them on with set_writes_enabled(true) first",
             ));
         }
         if props.is_empty() {
@@ -1278,7 +1279,7 @@ mod tests {
             .expect("read");
         assert_eq!(values.get("active-profile"), Some(&PropValue::Choice("1".into())));
         assert_eq!(values.get("profile-1-stick-left-start"), Some(&PropValue::Number(7.0)));
-        assert!(values.get("button-a").is_some());
+        assert!(values.contains_key("button-a"));
         // A paddle of the active profile is writable while the slots are not.
         pad.set_config_writes(true);
         let mut paddle = Props::new();

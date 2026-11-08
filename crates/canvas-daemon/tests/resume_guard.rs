@@ -28,7 +28,7 @@ use canvas_adapters::resume::{OnResume, ResumeBehavior};
 use canvas_adapters::royuan::{direct_mode_report, Opener, RoyuanAdapter, Transport, PRODUCT_ID, VENDOR_ID};
 use canvas_daemon::composite::CompositeAdapter;
 use canvas_daemon::displays::NoDisplays;
-use canvas_daemon::fakes::FakeNumericDisplay;
+use canvas_daemon::fakes::{FakeNumericDisplay, fake_mouse};
 use canvas_proto::device::{DeviceInfo, DeviceKind, ZoneInfo, ZoneKind};
 use canvas_proto::{DeviceAdapter, DeviceId, Rgb8};
 
@@ -47,6 +47,7 @@ const GUARDED: &[&str] = &[
     "CompositeAdapter",
     "NoDisplays",
     "FakeNumericDisplay",
+    "FakePeripheral",
 ];
 
 /// The traits an adapter of the daemon can implement.
@@ -177,6 +178,11 @@ async fn every_adapter_the_daemon_can_build_says_what_it_does_on_a_resume() {
         FakeNumericDisplay::default().on_resume(),
         OnResume::NothingToRestore,
         "the fakes-mode display (in memory)"
+    );
+    assert_eq!(
+        fake_mouse().on_resume(),
+        OnResume::NothingToRestore,
+        "the fakes-mode peripherals (in memory)"
     );
 }
 

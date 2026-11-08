@@ -1793,6 +1793,7 @@ impl PeripheralsView {
     /// `128` in a pad-map row): React's `.select-trigger` is capped by its
     /// column (`max-width: 100%` over a min-width that a 124 px column
     /// cannot satisfy), so it never sizes to its widest option.
+    #[allow(clippy::too_many_arguments)]
     fn choice_select(
         &self,
         key: &str,
