@@ -390,6 +390,109 @@ Still open (not ticked):
   to the bottom, but its own height is not the content's height, so the
   panel's content sits a little higher than React's on the short screens.
 
+## Round 4 (2026-11-08, `feat/212-onboarding-r4mm`)
+
+Raw diff of the five onboarding steps, React against GPUI, dark theme
+(`tools/ui-capture/diff-pairs.ps1`, no masked rectangles, no mask). The fake
+daemon runs on 19850/17162 (19830 and 17142 were taken by another run).
+
+| Step | 1440x900 r3 | 1440x900 r4 | 390x844 r3 | 390x844 r4 |
+|---|---|---|---|---|
+| hello | 5.98% | 5.97% | 24.95% | 11.76% |
+| case | 6.12% | 6.71% | 44.98% | 17.73% |
+| parts | 5.62% | 5.62% | 20.84% | 18.50% |
+| match | 7.12% | 7.12% | 19.79% | 13.61% |
+| finish | 6.67% | 6.67% | 23.82% | 21.52% |
+
+(The r3 column here is round 4's own "before" run: the same build, the same
+daemon, the same capture commands. It matches the numbers round 3 reported
+within the spread those pairs have between two runs.)
+
+The layout, displays and devices pairs, the default daemon
+(`onboarding_complete = true`, the same daemon both editors see):
+`layout-1440x900-dark` 4.44%, `displays-1440x900-dark` 1.51%,
+`devices-1440x900-dark` 2.33% (the baseline's ranges are 4.01-4.5%,
+1.51-1.58% and 2.33-2.51%: no pair moved out of its range).
+
+What round 4 changed, each measured:
+
+- [x] The phone drawing fills the window the way React's does. React's
+  `.stage` is `flex: 1 1 auto` and the desk canvas inside it is
+  `flex: 1 1 0; height: 100%` (`onboarding.module.css:945-958`, `:1027-1033`),
+  so the desk takes the whole stage and does not keep its 320:200
+  proportions when the sheet is short. The GPUI's stage had a fixed height
+  (the desk's own aspect height), so the drawing was a third smaller and the
+  sheet started 110 px too high. Measured in React's probe
+  (`212-probe.json`, `case-390x844-dark`): the desk canvas is 16,72 358x324.52
+  and the sheet's top edge is at 428.52; the GPUI's desk is now 16,72
+  358x322.52 and the sheet's top edge is at 428.52 - checked by the pairs
+  `onboarding-case-390x844-dark` (44.98% -> 17.73%),
+  `onboarding-hello-390x844-dark` (24.95% -> 11.76%),
+  `onboarding-match-390x844-dark` (19.79% -> 13.61%) and
+  `onboarding-finish-390x844-dark` (23.82% -> 21.52%).
+- [x] The phone sheet is the height of its own content. React's sheet is
+  `position: sticky` and as tall as its content; the GPUI's panel grew to
+  whatever the window had left, and the screen's centring split that extra
+  room (the "Case" label sat 65 px lower than React's). The screen's block
+  and foot now share the panel's free space with auto margins, as React's
+  `margin-block: auto` and `margin-top: auto` do - checked by the probe
+  (React's kicker at 449.52, the GPUI's at the same place in the pair
+  `onboarding-case-390x844-dark`) and by the pairs above.
+- [x] The Back key. React's capture walks the flow from the Hello screen, so
+  the run is a normal one and every screen after it has a Back
+  (`Onboarding.tsx:101-110`); the GPUI's capture opened the flow as a redo
+  (`again`), which starts on the Case screen and has no Back there. The
+  capture now opens the flow the way React's does - checked by the column
+  scan of the pair `onboarding-case-1440x900-dark` (`diff-pairs.ps1 -Column
+  1090`): React's Back arrow is at 1090,810..813 and the GPUI's at
+  1090,811..813.
+- [x] The case guides: the three dashed tower outlines and their names
+  (`Onboarding.tsx:236-254`, `PreviewStage.tsx:2492-2522`,
+  `desk.module.css` `.guides`/`.guide`/`.guideTag`/`.guideSize`). The GPUI
+  desk draws them now, with the names in one column left of the widest
+  outline and the thin dashed lead to each outline - checked by the pair
+  `onboarding-case-1440x900-dark`: React's "Full tower" is at 291,99 and its
+  size "22.83 in × 22.83 in" at 218..345,111; the GPUI's are in the same
+  places (the ink #6e737b against React's #6b7079).
+
+Still open (not ticked):
+
+- [ ] The four dashed panels inside the case box are still not drawn (the
+  glass panel, the `artFill` shape, is).
+- [ ] The title's CSS `letter-spacing: -0.02em` does not reach the GPUI: the
+  title's ink is 1082..1313 (232 px) against React's 1081..1305 (225 px), so
+  the tracked line is 7 px wider. The tracking itself is applied (the word
+  cells carry a negative margin, `panel.rs` `word_cell`); what is left is
+  the font's own advances, which DirectWrite and Chromium measure a little
+  differently at 28 px.
+- [ ] The lead's line break differs: React breaks after "yours is" (the ink
+  1081..1388) and the GPUI after "yours" (1081..1375). The GPUI counts the
+  space after the last word of a line, the browser does not, so the GPUI's
+  line breaks one word early.
+- [ ] The hint's line break on the Case screen: React's hint is 196 px wide
+  and takes two lines ("The dashed outlines are other / tower sizes, to
+  compare."), the GPUI's takes three.
+- [ ] The preview feed: React's desk shows the parts lit with the running
+  effect's colour, the GPUI desk shows them unlit in the capture. The wave
+  is the light: React's shot for the Case screen has the RAM sticks at
+  #090017 (the wave's tail crossing them), its shot for the Match screen at
+  #1f0052 (the run it is asking about) and its shot for the Parts screen at
+  #010004 (the wave has gone past); the GPUI's capture shows them #000000.
+  Playing the wave in the capture (the GPUI's `activate_effect`) lights them
+  #220058, which matches the Match shot (3.93% instead of 7.12%) and misses
+  the two shots the wave was still crossing, so it was not kept: the wave's
+  phase is a property of when each capture is taken, not of the editor.
+- [ ] The left ruler's numbers stand on their side in React (the digits are
+  turned with `rotate(-90)`), and the GPUI's stand upright one above the
+  other, so they overlap a little (the crops
+  `.build/ui-capture/crop-react-ruler.png` and
+  `.build/ui-capture/crop-gpui-ruler.png`, the left band of the 390 pair
+  `onboarding-case-390x844-dark`). gpui 0.2.2 paints a glyph without a
+  transform, so a turned digit is not reachable from the canvas.
+- [ ] The phone sheet's content is still a little off on the short screens:
+  the sheet is the height of its content now, but the GPUI's own content is
+  a little taller than React's (the hint takes three lines instead of two).
+
 ## Screenshot pairs
 Taken by `tools/ui-capture/` against the daemon on the fakes. 6 sizes × 2 themes = 12 pairs.
 
