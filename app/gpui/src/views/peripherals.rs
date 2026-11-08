@@ -320,6 +320,107 @@ pub fn section_visible(section_id: &str, kind: PeripheralKind, values: &Props) -
     true
 }
 
+/// The CSS multicol column count for a content width: `.rd-peri-sections`
+/// is `columns: 280px auto; column-gap: 16px` (`app.css:5686-5689`); on a
+/// phone the 639 container rule stacks them (`columns: auto`).
+pub fn section_columns(content_w: f32) -> usize {
+    ((content_w + 16.0) / 296.0).floor().max(1.0) as usize
+}
+
+/// Greedy multicol fill with a height budget (the balancing step of CSS
+/// `column-fill: balance`): the smallest budget that fits every panel into
+/// at most `cols` columns, then the sequential fill. Returns, per column,
+/// panel indices (the same shape as `views::settings::distribute`).
+pub fn distribute(heights: &[f32], cols: usize) -> Vec<Vec<usize>> {
+    if cols <= 1 {
+        return vec![(0..heights.len()).collect()];
+    }
+    let total: f32 = heights.iter().sum();
+    let (mut lo, mut hi) = (0.0f32, total);
+    for _ in 0..24 {
+        let mid = (lo + hi) / 2.0;
+        if fits(heights, cols, mid) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    let mut columns: Vec<Vec<usize>> = Vec::new();
+    let mut cur: Vec<usize> = Vec::new();
+    let mut cur_h = 0.0f32;
+    for (i, h) in heights.iter().enumerate() {
+        if !cur.is_empty() && cur_h + h > hi {
+            columns.push(std::mem::take(&mut cur));
+            cur_h = 0.0;
+        }
+        cur.push(i);
+        cur_h += h;
+    }
+    if !cur.is_empty() {
+        columns.push(cur);
+    }
+    while columns.len() < cols {
+        columns.push(Vec::new());
+    }
+    columns
+}
+
+fn fits(heights: &[f32], cols: usize, budget: f32) -> bool {
+    let mut used = 1usize;
+    let mut cur = 0.0f32;
+    for h in heights {
+        if cur > 0.0 && cur + h > budget {
+            used += 1;
+            if used > cols {
+                return false;
+            }
+            cur = 0.0;
+        }
+        cur += h;
+    }
+    true
+}
+
+/// One row height inside a section panel: number rows and plain rows are 52
+/// (`min-height: 52px`), a stacked segmented row is the label line over the
+/// control (measured 86 px at 1440), and on a phone every row is 44.
+fn row_height(kind: &PropKind, narrow: bool) -> f32 {
+    if narrow {
+        return 44.0;
+    }
+    match kind {
+        PropKind::Choice { options, .. } if options.len() <= 4 => 86.0,
+        _ => 52.0,
+    }
+}
+
+/// Estimated panel height for the multicol balance: 32 px of panel padding
+/// (p_4) plus the tracked title (about 30 px), the rows, and the 16 px
+/// bottom margin the multicol adds between panels (counted on every panel
+/// but the last would change nothing about the fill).
+pub fn section_panel_height(properties: &[PropertyDef], buttons_pair: bool, narrow: bool) -> f32 {
+    let pad = 32.0;
+    let head = 30.0;
+    let body = if buttons_pair {
+        // Two columns of stacked key/value pairs, three rows tall
+        // (`grid-auto-flow: column`), each pair about 66 px.
+        properties.len().div_ceil(2) as f32 * 66.0
+    } else {
+        properties.iter().map(|def| row_height(&def.kind, narrow)).sum()
+    };
+    pad + head + body + 16.0
+}
+
+/// Estimated height of the DPI panel: its remaining rows plus the stage-chip
+/// block (two rows of three chips at 248 px inner width, each 44 px with
+/// margins).
+pub fn dpi_panel_height(properties: &[PropertyDef], narrow: bool) -> f32 {
+    let others = dpi_others(properties).len() as f32;
+    let pad = 32.0;
+    let head = 30.0;
+    pad + head + others * row_height(&PropKind::Bool { default: false }, narrow) + 88.0 + 16.0
+}
+
 /// The body path (`ControllerOutline.tsx` BODY), in the 340x244 space.
 pub const BODY_PATH: &str = "M 78 58 L 262 58 C 286 58 304 70 312 96 C 322 128 334 168 334 192 C 334 214 322 236 306 236 C 290 236 282 220 276 208 C 270 200 262 196 244 196 L 96 196 C 78 196 70 200 64 208 C 58 220 50 236 34 236 C 18 236 6 214 6 192 C 6 168 18 128 28 96 C 36 70 54 58 78 58 Z";
 
@@ -691,6 +792,24 @@ impl PeripheralsView {
                             this.save_errors = keep_live(&this.save_errors, &live);
                             this.list = Some(parsed.peripherals);
                             this.list_error = None;
+                            // The `useEffect` on `selectedId` (`PeripheralsView.tsx`
+                            // `:285-318`): the first read fires as soon as the list
+                            // lands, and again when the selected device changes.
+                            // A pick that arrived before the list (a capture's
+                            // `--peri-device`) already read its device, so only
+                            // load when the selected device has no detail held.
+                            let needs_read = match this.sel_id() {
+                                Some(id) => {
+                                    this.detail().is_none() || this.loaded_id.as_deref() != Some(id.as_str())
+                                }
+                                None => false,
+                            };
+                            if needs_read {
+                                if let Some(id) = this.sel_id() {
+                                    this.load_selected(&id, cx);
+                                }
+                            }
+                            this.start_progress_poll(cx);
                         }
                         Err(e) => {
                             this.list_error = Some(e.to_string());
@@ -1368,7 +1487,9 @@ impl PeripheralsView {
     ) -> impl IntoElement {
         let t = &self.theme;
         let fixed = read_only.iter().any(|k| k == &def.key);
-        let label = def.label.clone();
+        // `schemaOf` strips the profile repeat from every label
+        // (`PeripheralsView.tsx:47-58`): the row draws the stripped label.
+        let label = plain_label(&def.label);
         let key = def.key.clone();
         let control: gpui::AnyElement = if fixed {
             self.read_only_value(value).into_any_element()
@@ -1382,15 +1503,23 @@ impl PeripheralsView {
             .line_height(gpui::relative(1.45))
             .font_family(crate::fonts::UI_FAMILY)
             .text_color(Theme::color(t.ink))
-            .child(label);
+            .child(label.clone());
         // `.prop-item`: grid label + control; number rows carry slider + field.
         // The generic path is `minmax(0, 116px) minmax(0, 1fr)` inside the
         // sections; number rows are `minmax(0, 116px) minmax(0, 1fr) 48px`.
+        // Both number rows keep their parts at fixed columns: the slider
+        // measures 64 px (`flex: none` on `.slider`), the field 48 px.
         let is_number = matches!(def.kind, PropKind::Number { .. });
+        // A segmented choice (4 or fewer options) drops under its label
+        // (`.prop-item:has(.seg)`): the control sizes to its content and
+        // spans the row.
+        let is_seg = !fixed && matches!(&def.kind, PropKind::Choice { options, .. } if options.len() <= 4);
+        let narrow = is_seg || narrow;
         if narrow {
             div()
                 .flex()
                 .flex_col()
+                .items_start()
                 .gap_2()
                 .min_h(px(44.0))
                 .py_2()
@@ -1457,6 +1586,74 @@ impl PeripheralsView {
         view_entity: gpui::Entity<Self>,
     ) -> gpui::AnyElement {
         let t = &self.theme;
+        if let PropKind::Number { min, max, step, default } = kind {
+            // Number rows on this page: the `.num` is 48 px (`.rd-peripherals
+            // .rd-peri-sections .prop-item[data-kind="number"] .num`), not the
+            // shared 64 px, so the slider takes what is left of the 116 px
+            // label column (measured 64 px at 1440).
+            let n = match value {
+                PropValue::Number(n) => *n as f32,
+                _ => *default as f32,
+            };
+            let (min_f, max_f, step_f) = (*min as f32, *max as f32, *step as f32);
+            let entity = view_entity.clone();
+            let key_owned = key.to_string();
+            let on = std::rc::Rc::new(move |v: PropValue, window: &mut Window, cx: &mut gpui::App| {
+                entity.update(cx, |this, cx| this.on_change(&key_owned, v, cx));
+                let _ = window;
+            }) as crate::components::prop_controls::OnChange;
+            let change = {
+                let on = on.clone();
+                move |v: f32, window: &mut Window, cx: &mut gpui::App| {
+                    let stepped = crate::components::prop_controls::quantise_step(v, min_f, max_f, step_f);
+                    on(PropValue::Number(stepped as f64), window, cx);
+                }
+            };
+            return div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .flex_1()
+                .min_w(px(0.0))
+                .child(
+                    // The slider is 64 px on this page (`flex: none` on
+                    // `.slider`; measured at 1440): the field takes 48 px
+                    // (`.num`), and the slider takes what is left of the
+                    // 1fr column.
+                    div()
+                        .w(px(64.0))
+                        .flex_none()
+                        .child(crate::components::slider::slider_range(
+                            t,
+                            &format!("{key}-slider"),
+                            n,
+                            min_f,
+                            max_f,
+                            disabled,
+                            Origin::new(),
+                            change.clone(),
+                            change,
+                        )),
+                )
+                .child(crate::components::number_field::number_field_width(
+                    t,
+                    &format!("{key}-field"),
+                    n,
+                    min_f,
+                    max_f,
+                    step_f,
+                    None,
+                    48.0,
+                    {
+                        let on = on.clone();
+                        move |v: f32, window: &mut Window, cx: &mut gpui::App| {
+                            let stepped = crate::components::prop_controls::quantise_step(v, min_f, max_f, step_f);
+                            on(PropValue::Number(stepped as f64), window, cx);
+                        }
+                    },
+                ))
+                .into_any_element();
+        }
         if let PropKind::Choice { options, .. } = kind {
             let pairs: Vec<(String, String)> = options
                 .iter()
@@ -1479,7 +1676,14 @@ impl PeripheralsView {
                 });
                 let _ = window;
             }) as crate::components::prop_controls::OnToggle;
-            return control_words(t, key, label, value, &pairs, disabled, open, on, toggle);
+            let words = control_words(t, key, label, value, &pairs, disabled, open, on, toggle);
+            // The trigger is capped by its 1fr column (120 px used at 1440):
+            // `.select-trigger { min-width: 160px; max-width: 100% }` resolves
+            // to the column width a 124 px column can give.
+            if options.len() > 4 {
+                return div().w(px(120.0)).flex_none().child(words).into_any_element();
+            }
+            return words;
         }
         let color_open = self.color_open.as_deref() == Some(key);
         let select_open = self.select_open.get(key).copied().unwrap_or(false);
@@ -1530,6 +1734,10 @@ impl PeripheralsView {
     }
 
     /// A choice with more than 4 options (`Select`), with this view's words.
+    /// The trigger is `width` px (`120` in a section's 1fr column,
+    /// `128` in a pad-map row): React's `.select-trigger` is capped by its
+    /// column (`max-width: 100%` over a min-width that a 124 px column
+    /// cannot satisfy), so it never sizes to its widest option.
     fn choice_select(
         &self,
         key: &str,
@@ -1537,6 +1745,7 @@ impl PeripheralsView {
         options: &[String],
         current: &str,
         disabled: bool,
+        width: f32,
         view_entity: gpui::Entity<Self>,
     ) -> impl IntoElement {
         let t = &self.theme;
@@ -1562,7 +1771,7 @@ impl PeripheralsView {
             let _ = window;
         });
         let value = PropValue::Choice(current.to_string());
-        control_words(t, key, label, &value, &pairs, disabled, open, on, toggle)
+        div().w(px(width)).flex_none().child(control_words(t, key, label, &value, &pairs, disabled, open, on, toggle))
     }
 
     /// The DPI panel (`DpiPanel`).
@@ -1641,7 +1850,7 @@ impl PeripheralsView {
                 )
                 .child(
                     div()
-                        .text_sm()
+                        .text_size(px(13.333))
                         .font_family(crate::fonts::MONO_FAMILY)
                         .child(format_number(stage.dpi, 0)),
                 );
@@ -1745,9 +1954,9 @@ impl PeripheralsView {
                             .child(choice_word(&current)),
                     );
                 } else {
-                    let select = self.choice_select(&def.key, &format!("{label} mapping"), &options, &current, disabled, view_entity.clone());
+                    let select = self.choice_select(&def.key, &format!("{label} mapping"), &options, &current, disabled, 128.0, view_entity.clone());
                     // The map Select is 128 px wide at desktop.
-                    row = row.child(div().w(px(128.0)).flex_none().child(select));
+                    row = row.child(div().flex_none().child(select));
                 }
             }
             let _ = (key_owned, entity);
@@ -2010,8 +2219,11 @@ impl PeripheralsView {
             )
             .child(
                 div()
-                    .flex_1()
+                    .flex_none()
                     .min_w(px(0.0))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
                     .child(
                         div()
                             .text_size(px(20.0))
@@ -2024,12 +2236,18 @@ impl PeripheralsView {
                     .child(
                         div()
                             .text_sm()
+                            .line_height(gpui::relative(1.45))
                             .font_family(crate::fonts::UI_FAMILY)
                             .text_color(Theme::color(t.mute))
-                            .child(format!("{} · {} · ", kind_word(info.kind), info.vendor))
+                            .flex()
+                            .flex_nowrap()
+                            .items_center()
+                            .gap(px(2.0))
+                            .child(format!("{} · {} ·", kind_word(info.kind), info.vendor))
                             .child(
                                 div()
                                     .font_family(crate::fonts::MONO_FAMILY)
+                                    .flex_none()
                                     .child(info.location.clone()),
                             ),
                     ),
@@ -2118,7 +2336,12 @@ impl PeripheralsView {
         let access = if content_w <= 720.0 {
             access.flex_1().w_full().justify_end()
         } else {
-            access.ml_4().pl_4().border_l_1().border_color(Theme::color(t.line))
+            // `.rd-peri-access { margin-left: auto; padding-left: var(--s4);
+            // border-left: 1px solid var(--line) }`: `margin-left: auto`
+            // pushes the access block against the padding, so it ends where
+            // the head ends. Measured at 1440, the access block starts at
+            // 1046.7 px (the head ends at 1399 px).
+            access.ml_auto().pl_4().border_l_1().border_color(Theme::color(t.line))
         };
         let mut head_panel_body = div().flex().flex_col().gap_3().child(head.child(access));
         if let Some(problem) = &detail.problem {
@@ -2141,11 +2364,12 @@ impl PeripheralsView {
             .child(head_panel_body);
         // The sections.
         let narrow = content_w < 640.0;
-        let mut column_panels: Vec<gpui::AnyElement> = Vec::new();
+        let mut column_panels: Vec<(f32, gpui::AnyElement)> = Vec::new();
         let mut wide_panels: Vec<gpui::AnyElement> = Vec::new();
         for section in &detail.schema.sections {
             if is_mouse && section.id == "dpi" {
-                column_panels.push(
+                column_panels.push((
+                    dpi_panel_height(&section.properties, narrow),
                     self.dpi_panel(
                         &section.id,
                         &section.title,
@@ -2157,7 +2381,7 @@ impl PeripheralsView {
                         narrow,
                     )
                     .into_any_element(),
-                );
+                ));
                 continue;
             }
             if is_controller && section.id == "buttons" {
@@ -2180,44 +2404,74 @@ impl PeripheralsView {
                 let value = values.get(&def.key).cloned().unwrap_or_else(|| default_for(&def.kind));
                 list = list.child(self.prop_row(def, &value, read_only, !writes, &schema, values, view_entity.clone(), narrow));
             }
-            // The mouse Buttons panel is a two-column grid of read-only rows.
+            // The mouse Buttons panel is a two-column grid of read-only rows,
+            // filled down the first column (`grid-auto-flow: column`): rows
+            // 1..3 in column one, 4..6 in column two.
             let panel_body: gpui::AnyElement = if section.id == "buttons" && is_mouse {
-                let mut grid = div().flex().flex_wrap().gap_4();
-                for def in &schema {
-                    let value = values.get(&def.key).cloned().unwrap_or_else(|| default_for(&def.kind));
-                    grid = grid.child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap_2()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_family(crate::fonts::UI_FAMILY)
-                                    .text_color(Theme::color(t.dim))
-                                    .child(plain_label(&def.label)),
-                            )
-                            .child(self.read_only_value(&value)),
-                    );
+                let half = schema.len().div_ceil(2);
+                let mut pair_grid = div().flex().gap_4();
+                for col in 0..2 {
+                    let mut column = div().flex().flex_col().flex_1().min_w(px(0.0));
+                    for def in schema.iter().skip(col * half).take(half) {
+                        let value = values.get(&def.key).cloned().unwrap_or_else(|| default_for(&def.kind));
+                        column = column.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .justify_center()
+                                .gap_1()
+                                .min_h(px(44.0))
+                                .py_2()
+                                .text_size(px(15.0))
+                                .line_height(gpui::relative(1.45))
+                                .font_family(crate::fonts::UI_FAMILY)
+                                .text_color(Theme::color(t.ink))
+                                .child(plain_label(&def.label))
+                                .child(self.read_only_value(&value)),
+                        );
+                    }
+                    pair_grid = pair_grid.child(column);
                 }
-                grid.into_any_element()
+                pair_grid.into_any_element()
             } else {
                 list.into_any_element()
             };
-            column_panels.push(self.panel(&format!("section-{}", section.id), &section.title, panel_body).into_any_element());
+            column_panels.push((
+                section_panel_height(&properties, section.id == "buttons" && is_mouse, narrow),
+                self.panel(&format!("section-{}", section.id), &section.title, panel_body).into_any_element(),
+            ));
         }
-        // The sections stack in one column on a phone (`columns: auto` in the
-        // 639 container rule); on desktop they are columns of 280 px. GPUI
-        // has no multicol, so both draw as one column with the same gap.
-        let _ = narrow;
-        let mut col = div().flex().flex_col().gap_4();
-        for panel in column_panels {
-            col = col.child(panel);
-        }
-        let sections = col;
+        // The sections are CSS multicol columns of 280 px (`columns: 280px
+        // auto`, `column-gap: 16px`), balanced across the columns. GPUI has
+        // no multicol, so the panels are dealt into fixed-width columns in
+        // DOM order by a greedy height budget, as Settings does.
+        let cols = section_columns(content_w);
+        let heights: Vec<f32> = column_panels.iter().map(|(h, _)| *h).collect();
+        let distribution = distribute(&heights, cols);
+        let sections = if cols <= 1 {
+            let mut col = div().flex().flex_col().gap_4();
+            for (_, panel) in column_panels {
+                col = col.child(panel);
+            }
+            col.into_any_element()
+        } else {
+            let panels: Vec<Option<gpui::AnyElement>> = column_panels
+                .into_iter()
+                .map(|(_, panel)| Some(panel))
+                .collect();
+            let mut panels = panels;
+            let mut grid = div().flex().flex_wrap().gap_4().min_w(px(0.0));
+            for column in distribution {
+                let mut col = div().flex().flex_col().gap_4().flex_1().min_w(px(0.0));
+                for idx in column {
+                    if let Some(panel) = panels[idx].take() {
+                        col = col.child(panel);
+                    }
+                }
+                grid = grid.child(col);
+            }
+            grid.into_any_element()
+        };
         let mut stack = div().flex().flex_col().gap_4().child(head_panel).child(sections);
         for panel in wide_panels {
             stack = stack.child(panel);
@@ -2282,7 +2536,7 @@ impl PeripheralsView {
                     .min_w(px(0.0))
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .text_sm()
+                    .text_size(px(13.333))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .font_family(crate::fonts::UI_FAMILY)
                     .text_color(Theme::color(t.ink))
@@ -2604,17 +2858,17 @@ impl Render for PeripheralsView {
             }
         };
 
-        // The save-error line.
-        let save_line = if let Some(err) = self.save_error() {
+        // The save-error line (drawn only when one is showing: an empty
+        // element here would still collect the page gap and push the detail
+        // pane 16 px down).
+        let save_line = self.save_error().map(|err| {
             div()
                 .text_sm()
                 .font_family(crate::fonts::UI_FAMILY)
                 .text_color(Theme::color(t.warn))
                 .child(err)
                 .into_any_element()
-        } else {
-            div().into_any_element()
-        };
+        });
 
         // The detail pane.
         let detail_pane: gpui::AnyElement = if no_det {
@@ -2690,8 +2944,10 @@ impl Render for PeripheralsView {
                     .overflow_hidden()
                     .p_1()
                     .child(keys),
-            )
-            .child(save_line);
+            );
+        if let Some(line) = save_line {
+            page = page.child(line);
+        }
         // The detail pane scrolls inside its own pane on desktop (React
         // `.rd-peripherals .peripheral-detail` `overflow-y: auto`); on a phone
         // the page scrolls instead.
@@ -3234,5 +3490,34 @@ mod tests {
         assert_eq!(found_context(None), "0 found");
         assert_eq!(found_context(Some(0)), "0 found");
         assert_eq!(found_context(Some(2)), "2 found");
+    }
+
+    #[test]
+    fn section_columns_follow_the_280px_multicol() {
+        assert_eq!(section_columns(1192.0), 4);
+        assert_eq!(section_columns(1672.0), 5);
+        assert_eq!(section_columns(912.0), 3);
+        assert_eq!(section_columns(720.0), 2);
+        assert_eq!(section_columns(358.0), 1);
+    }
+
+    #[test]
+    fn distribute_fills_columns_in_dom_order() {
+        // Six mouse panels at 1440: DPI+Performance, Lighting+Power, Buttons+Profile, empty.
+        let heights = [188.0, 168.0, 272.0, 168.0, 196.0, 116.0];
+        let cols = distribute(&heights, 4);
+        assert_eq!(cols.len(), 4);
+        let flat: Vec<usize> = cols.into_iter().flatten().collect();
+        assert_eq!(flat, vec![0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn section_heights_cover_the_panels() {
+        let number = vec![PropertyDef { key: "k".into(), label: "l".into(), kind: PropKind::Number { min: 0.0, max: 1.0, step: 1.0, default: 0.0 } }];
+        assert!(section_panel_height(&number, false, false) > 100.0);
+        let buttons: Vec<PropertyDef> = (0..6)
+            .map(|i| PropertyDef { key: format!("button-{i}"), label: "l".into(), kind: PropKind::Choice { options: vec!["a".into()], default: "a".into() } })
+            .collect();
+        assert!(section_panel_height(&buttons, true, false) > section_panel_height(&number, false, false));
     }
 }
